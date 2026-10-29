@@ -122,6 +122,63 @@ def test_second_run_does_not_overwrite_differing_run_yaml(
     assert target.read_bytes() == tampered
 
 
+def test_second_run_reports_run_inputs_conflict_without_failing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """O11 (09 §3.3): расхождение ``payload_sha256`` — видимая строка, а не падение.
+
+    Снимок входов в БД иммутабелен: повторная запись с другим дайджестом не перезаписывает
+    строку, а попадает в ``instrumentation_errors`` прогона (``snapshot: run_inputs_conflict``).
+    """
+    from core.cli.wiring import run_db_path
+    from core.store.sqlite_store import SqliteStore
+
+    runs_dir = tmp_path / "runs"
+    run_id = "sc-conflict"
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
+    capsys.readouterr()
+
+    # Эмулируем снимок другого прогона под тем же run_id: дайджест не совпадёт.
+    foreign_sha = "f" * 64
+    store = SqliteStore(run_db_path(runs_dir, run_id))
+    try:
+        with store.conn:
+            store.conn.execute(
+                "UPDATE run_inputs SET payload_sha256 = ? WHERE run_id = ?",
+                (foreign_sha, run_id),
+            )
+        stored_payload = store.read_plan_inputs(run_id)
+    finally:
+        store.close()
+
+    code = main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir))
+    payload = json_out(capsys)
+
+    # Прогон не падает: конфликт — запись в instrumentation_errors, а не исключение.
+    assert code == EXIT_BLOCKED
+    errors = payload.get("instrumentation_errors") or []
+    conflict = [e for e in errors if "run_inputs_conflict" in e]
+    assert conflict, errors
+    line = conflict[0]
+    assert line.startswith("snapshot: run_inputs_conflict:")
+    assert run_id in line
+    assert foreign_sha in line  # сохранённый дайджест назван
+    assert "нужен новый run_id" in line
+
+    # Сохранённая строка не перезаписана: дайджест и payload остались прежними.
+    store = SqliteStore(run_db_path(runs_dir, run_id))
+    try:
+        row = store.conn.execute(
+            "SELECT payload_sha256 FROM run_inputs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        after = store.read_plan_inputs(run_id)
+    finally:
+        store.close()
+    assert row is not None
+    assert row["payload_sha256"] == foreign_sha
+    assert after == stored_payload
+
+
 # ---------------------------------------------------------------------------
 # Пост-хок команды: восстановление из снимка
 # ---------------------------------------------------------------------------

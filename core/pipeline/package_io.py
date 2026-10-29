@@ -3,9 +3,12 @@
 Модуль отвечает за **детерминированное** чтение и запись артефактов раскладки пакета
 (``03`` §A.1): ``package.yaml``, ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``,
 ``golden.csv``, ``domain_profiles.yaml``, ``crawl_sources.yaml``, ``scope_attestation.yaml``,
-``run.yaml``. Дополнительно **читается** объявление состояния эталона
-(``sources/golden_status.yaml``, :mod:`core.pipeline.golden_status`) — оно не таблица, а
-авторский вход, поэтому в :data:`ARTIFACT_FILES` (CRUD-реестр) не входит.
+``run.yaml``, ``sources/seeds.yaml``. Дополнительно **читается** объявление состояния
+эталона (``sources/golden_status.yaml``, :mod:`core.pipeline.golden_status`) — оно не
+таблица, а авторский вход, поэтому в :data:`ARTIFACT_FILES` (CRUD-реестр) не входит.
+Seed-набор, наоборот, в реестре есть: у него собственный сценарный слой
+(:mod:`core.pipeline.package_seeds`), а ``artifact get --name seeds`` должен отдавать
+его как данные, не как путь.
 
 Ключевые свойства
 -----------------
@@ -53,6 +56,7 @@ from core.config.run_config import (
     load_package_manifest,
     load_run_config,
 )
+from core.config.seeds import SEEDS_RELPATH, load_seeds, render_seeds
 from core.domain.enums import AnchorRelation, Archetype, RunMode
 from core.domain.models import (
     BaselineRow,
@@ -64,6 +68,7 @@ from core.domain.models import (
     PackageManifest,
     RunConfig,
     ScopeAttestation,
+    SeedsConfig,
 )
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.lint import LintReport, lint_run_inputs
@@ -119,6 +124,7 @@ ARTIFACT_FILES: dict[str, str] = {
     "crawl_sources": "crawl_sources.yaml",
     "scope_attestation": "scope_attestation.yaml",
     "run": "run.yaml",
+    "seeds": SEEDS_RELPATH,
 }
 
 #: Относительный путь журнала авторских мутаций (append-only, собственный контур I1).
@@ -160,6 +166,8 @@ class PackageArtifacts:
     #: собраны вызывающим напрямую (``PackageArtifacts()``), объявление не читалось.
     golden_status: GoldenStatus | None = None
     run: RunConfig | None = None
+    #: Авторский seed-набор (``sources/seeds.yaml``, 09 §7); ``None`` — файла нет.
+    seeds: SeedsConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +596,10 @@ def load_artifacts(package_dir: str | Path) -> PackageArtifacts:
     if run_file.is_file():
         artifacts.run = load_run_config(run_file)
 
+    seeds_file = base / SEEDS_RELPATH
+    if seeds_file.is_file():
+        artifacts.seeds = load_seeds(seeds_file)
+
     return artifacts
 
 
@@ -603,6 +615,7 @@ def _artifact_value(artifacts: PackageArtifacts, name: str) -> Any:
         "crawl_sources": artifacts.crawl_sources,
         "scope_attestation": artifacts.scope_attestation,
         "run": artifacts.run,
+        "seeds": artifacts.seeds,
     }[name]
 
 
@@ -646,6 +659,9 @@ def _artifact_count(artifacts: PackageArtifacts, name: str) -> int | None:
         return 1 if artifacts.scope_attestation is not None else 0
     if name == "run":
         return len(artifacts.run.products) if artifacts.run is not None else None
+    if name == "seeds":
+        seeds = artifacts.seeds
+        return sum(len(product.seeds) for product in seeds.products.values()) if seeds is not None else None
     return None  # pragma: no cover — исчерпано ARTIFACT_FILES
 
 
@@ -655,7 +671,8 @@ def list_artifacts(package_dir: str | Path) -> list[dict[str, Any]]:
     Порядок совпадает с :data:`ARTIFACT_FILES` (детерминирован). ``count`` — число
     строк/записей артефакта (для ``package`` — число модулей; ``cohort`` — число записей;
     ``run`` — число продуктов; ``domain_profiles`` — число профилей; ``crawl_sources`` —
-    число явных источников (продукты + site-записи); ``scope_attestation`` — ``1``/``0``),
+    число явных источников (продукты + site-записи); ``scope_attestation`` — ``1``/``0``;
+    ``seeds`` — суммарное число seed'ов),
     либо ``None``, если файл отсутствует или пакет не разбирается. Ничего не пишет; ошибки
     разбора не поднимаются — обзор остаётся доступным по файловой системе.
     """
@@ -717,7 +734,8 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
     """Детерминированно сериализует артефакт ``name`` в каталог пакета.
 
     YAML-артефакты (``package``/``cohort``/``run``/``domain_profiles``/``crawl_sources``/
-    ``scope_attestation``) пишутся через :func:`_dump_yaml`; табличные
+    ``scope_attestation``/``seeds``) пишутся через :func:`_dump_yaml` (``seeds`` — через
+    канонический :func:`core.config.seeds.render_seeds`); табличные
     (``catalog``/``baselines``/``golden``) — CSV строго по каноническим колонкам.
 
     :param name: одно из :data:`ARTIFACT_FILES`.
@@ -773,6 +791,12 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
             "scope_attestation: ожидалась строка процедуры или словарь "
             "{procedure, attestations}"
         )
+    if name == "seeds":
+        # Канонический рендер (стабильный порядок продуктов) — тот же, что пишет
+        # ``core.config.seeds.save_seeds``: две записи одного состояния не расходятся.
+        if not isinstance(data, SeedsConfig):
+            raise ValueError("seeds: ожидался SeedsConfig")
+        return atomic_write_text(path, render_seeds(data))
 
     rows = list(data)
     if name == "catalog":

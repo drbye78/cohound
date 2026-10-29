@@ -8,7 +8,9 @@
 * детерминированный ``seed_id``;
 * привязку seed'а к самому длинному ключу ``host[+path]`` из ``domain_profiles.yaml``;
 * миграцию legacy ``sources/corpus_urls.yaml`` в ``sources/seeds.yaml``;
-* merge/дедуп по нормализованному URL.
+* merge/дедуп по нормализованному URL;
+* авторские операции над набором (``add_seed``/``set_seed_enabled``) и обратный
+  legacy-экспорт (``render_corpus_urls``) — чистые функции над ``SeedsConfig``.
 
 Нейтрален к предметной категории (§1.3): домены и продукт — данные пакета.
 Слой ``config`` зависит только от ``domain``/``config``/``util``.
@@ -34,15 +36,18 @@ __all__ = [
     "CORPUS_URLS_RELPATH",
     "SEEDS_RELPATH",
     "SEEDS_SCHEMA",
+    "add_seed",
     "ensure_seeds_file",
     "load_corpus_urls",
     "load_seeds",
     "merge_seeds",
     "normalize_seed_url",
+    "render_corpus_urls",
     "render_seeds",
     "resolve_profile_key",
     "save_seeds",
     "seed_id",
+    "set_seed_enabled",
     "validate_seed_url",
 ]
 
@@ -249,6 +254,30 @@ def load_corpus_urls(path: str | Path) -> dict[str, list[str]]:
     return result
 
 
+def render_corpus_urls(config: SeedsConfig) -> str:
+    """Legacy-экспорт ``{product_id: [url, ...]}`` — точная обратная сторона
+    :func:`load_corpus_urls`.
+
+    Формат совпадает с тем, что читает :func:`load_corpus_urls`: словарь верхнего
+    уровня, значения — списки строк. Экспортируются **только активные** seed'ы
+    (``enabled`` и ``state=enabled``), в авторском порядке внутри продукта: порядок
+    корней значим для краула и входит в ``seeds_digest``. Продукты упорядочены по
+    ``product_id`` (как в :func:`render_seeds`), продукты без активных seed'ов не
+    эмитятся — пустой список не несёт корпуса и в legacy-файле означал бы «объявлено
+    пусто» вместо «не объявлено».
+
+    Пустой набор даёт ``{}``: :func:`load_corpus_urls` читает его как ``{}``.
+    """
+    products: dict[str, list[str]] = {}
+    for product_id in sorted(config.products):
+        urls = [seed.normalized_url for seed in config.products[product_id].enabled_for()]
+        if urls:
+            products[product_id] = urls
+    return yaml.safe_dump(
+        products, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+
+
 def _profile_keys(package_dir: Path) -> dict[str, Any]:
     """Ключи ``domain_profiles.yaml`` пакета (пусто, если файла нет)."""
     path = package_dir / "domain_profiles.yaml"
@@ -364,16 +393,192 @@ def merge_seeds(
         seen.add(entry.normalized_url)
         current.append(entry)
         appended = True
-    enabled = [seed for seed in current if seed.is_enabled]
-    if enabled:
-        state = OnboardingState.READY
-    elif product is not None and not appended and product.state in (
-        OnboardingState.BLOCKED,
-        OnboardingState.RETIRED,
-    ):
-        state = product.state
-    else:
-        state = OnboardingState.PENDING_SEEDS
+    state = _product_state(product, current, appended=appended)
     products = dict(existing.products)
     products[product_id] = ProductSeeds(state=state, seeds=current)
     return SeedsConfig(schema=existing.schema_, products=products)
+
+
+# ---------------------------------------------------------------------------
+# Авторские операции над набором (чистые функции: конфиг → конфиг)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_date(at: _dt.date | _dt.datetime | str | None) -> _dt.date:
+    """Дата записи: явный ``at`` (ISO-строка/``date``) или текущая."""
+    if at is None:
+        return _dt.date.today()
+    if isinstance(at, _dt.datetime):
+        return at.date()
+    if isinstance(at, _dt.date):
+        return at
+    return _dt.date.fromisoformat(str(at))
+
+
+def _product_state(
+    product: ProductSeeds | None, seeds: list[SeedEntry], *, appended: bool
+) -> OnboardingState:
+    """Состояние продукта по инварианту O1 (``ready`` требует ≥1 активного seed'а).
+
+    ``blocked``/``retired`` — решения человека: они не понижаются до ``pending_seeds``,
+    если набор не менялся (``appended=False``) и активных seed'ов по-прежнему нет.
+    """
+    if any(seed.is_enabled for seed in seeds):
+        return OnboardingState.READY
+    if product is not None and not appended and product.state in (
+        OnboardingState.BLOCKED,
+        OnboardingState.RETIRED,
+    ):
+        return product.state
+    return OnboardingState.PENDING_SEEDS
+
+
+def _replace_product(
+    config: SeedsConfig,
+    product_id: str,
+    product: ProductSeeds | None,
+    seeds: list[SeedEntry],
+) -> SeedsConfig:
+    """Новый конфиг с пересчитанным состоянием продукта (остальные продукты не тронуты)."""
+    state = _product_state(product, seeds, appended=False)
+    products = dict(config.products)
+    products[product_id] = ProductSeeds(state=state, seeds=seeds)
+    return SeedsConfig(schema=config.schema_, products=products)
+
+
+def add_seed(
+    config: SeedsConfig,
+    product_id: str,
+    url: str,
+    *,
+    role: SeedRole = SeedRole.PRIMARY,
+    source: SeedSource = SeedSource.OPERATOR,
+    source_ref: str | None = None,
+    profile_key: str | None = None,
+    profiles: Mapping[str, Any] | None = None,
+    actor: str,
+    at: _dt.date | str | None = None,
+    warnings: list[str] | None = None,
+) -> SeedsConfig:
+    """Добавляет seed продукта (идемпотентно) и возвращает новый ``SeedsConfig``.
+
+    Поведение:
+
+    * URL нормализуется и проходит SSRF-политику (:func:`validate_seed_url`);
+    * дедуп — по ``normalized_url`` (через :func:`merge_seeds`, порядок сохраняется);
+    * уже существующий **активный** seed — no-op: конфиг возвращается как есть
+      (провенанс не перетирается, ``seeds_digest`` не меняется);
+    * существующий, но **выключенный** seed — включается на месте: позиция в списке
+      (авторский порядок, он же ``order`` в ``seeds_digest``) не меняется, а
+      ``role``/``source``/``added_*`` остаются прежними — это возврат в набор, а не
+      новая запись; ``last_verified_at`` обновляется (тот же результат, что у
+      :func:`set_seed_enabled` с ``enabled=True`);
+    * новый URL дописывается **в конец** списка продукта.
+
+    ``profile_key=None`` означает «привязать автоматически»: ключ берётся из
+    ``profiles`` (ключи ``domain_profiles.yaml``) самым длинным совпадением
+    ``host[+path]``. Явный ``profile_key`` имеет приоритет.
+
+    :raises ValueError: пустой ``product_id``/``actor``, недопустимый URL.
+    """
+    pid = str(product_id or "").strip()
+    if not pid:
+        raise ValueError("add_seed: product_id обязателен")
+    actor_name = str(actor or "").strip()
+    if not actor_name:
+        raise ValueError("add_seed: actor обязателен")
+    normalized = validate_seed_url(url, warnings=warnings)
+    product = config.products.get(pid)
+    current = list(product.seeds) if product is not None else []
+    for index, seed in enumerate(current):
+        if seed.normalized_url != normalized:
+            continue
+        if seed.is_enabled:
+            return config
+        current[index] = seed.model_copy(
+            update={
+                "enabled": True,
+                "state": SeedState.ENABLED,
+                "last_verified_at": _snapshot_date(at),
+            }
+        )
+        return _replace_product(config, pid, product, current)
+    entry = _seed_entry(
+        product_id=pid,
+        url=url,
+        role=role,
+        source=source,
+        source_ref=source_ref,
+        profile_key=(
+            profile_key
+            if profile_key is not None
+            else resolve_profile_key(normalized, profiles)
+        ),
+        added_at=_snapshot_date(at),
+        actor=actor_name,
+    )
+    if entry is None:  # pragma: no cover — URL уже провалидирован выше
+        raise ValueError(f"add_seed: недопустимый URL {url!r}")
+    return merge_seeds(config, pid, [entry])
+
+
+def set_seed_enabled(
+    config: SeedsConfig,
+    product_id: str,
+    url: str,
+    *,
+    enabled: bool,
+    actor: str,
+    at: _dt.date | str | None = None,
+    warnings: list[str] | None = None,
+) -> SeedsConfig:
+    """Включает/выключает существующий seed (soft-disable, идемпотентно).
+
+    Физического удаления в модели нет (09 §3.1): выключение — ``enabled=False`` +
+    ``state=disabled``. Состояние ``invalid`` при выключении сохраняется (это признак
+    «URL негоден», а не «выключен человеком»); при включении ``invalid`` снимается —
+    включение и есть ручная перепроверка. Включение пишет ``last_verified_at``
+    (``at``/сегодня): оператор подтвердил, что seed снова в наборе.
+
+    ``ProductSeeds.state`` пересчитывается по инварианту модели: выключение последнего
+    активного seed'а переводит продукт из ``ready`` в ``pending_seeds`` (``ready`` без
+    активного seed'а — противоречие O1, и ``ProductSeeds`` такое не примет).
+
+    :raises ValueError: пустой ``product_id``/``actor``, недопустимый URL или URL,
+        которого нет в наборе продукта (молчаливый no-op запрещён).
+    """
+    pid = str(product_id or "").strip()
+    if not pid:
+        raise ValueError("set_seed_enabled: product_id обязателен")
+    actor_name = str(actor or "").strip()
+    if not actor_name:
+        raise ValueError("set_seed_enabled: actor обязателен")
+    normalized = validate_seed_url(url, warnings=warnings)
+    product = config.products.get(pid)
+    if product is None:
+        raise ValueError(f"set_seed_enabled: продукта {pid!r} нет в seed-наборе")
+    current = list(product.seeds)
+    for index, seed in enumerate(current):
+        if seed.normalized_url != normalized:
+            continue
+        if enabled:
+            desired: dict[str, Any] = {
+                "enabled": True,
+                "state": SeedState.ENABLED,
+                "last_verified_at": _snapshot_date(at),
+            }
+        elif seed.state is SeedState.INVALID:
+            # ``invalid`` — «URL негоден», а не «выключен человеком»: выключение его не
+            # переписывает (иначе признак негодности тихо теряется).
+            desired = {"enabled": False}
+        else:
+            desired = {"enabled": False, "state": SeedState.DISABLED}
+        if all(getattr(seed, key) == value for key, value in desired.items()):
+            return config  # уже в требуемом состоянии — no-op
+        current[index] = seed.model_copy(update=desired)
+        return _replace_product(config, pid, product, current)
+    raise ValueError(
+        f"set_seed_enabled: seed {normalized} не найден у продукта {pid!r} "
+        f"(известно {len(current)} seed'ов)"
+    )
+

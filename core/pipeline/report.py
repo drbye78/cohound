@@ -6,7 +6,10 @@
   (статус + обоснование + primary citation, «+N источников»), сателлиты, модульное
   покрытие, sensitivity-приложение;
 * ``preliminary_findings.xlsx`` — кандидаты с маркером «не публикация»;
-* ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры);
+* ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры) плюс
+  строки-наблюдения оператора: ``crawl_truncation`` (усечённый краул),
+  ``corpus_incomplete`` (Ф0) и ``golden_exempt_product`` (§11.6: для продукта эталон
+  объявленно отсутствует — ``sources/golden_status.yaml: exempt_products``);
 * ``diff.md`` — изменённые статусы + evidence_id;
 * ``run_manifest.yaml`` — агрегат версий/моделей/сборки/профиля+K/бюджета (R7);
 * ``outputs/publishability.yaml`` — профиль публикуемости (A1/§6) вместе с объявленным
@@ -53,6 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from core.config.paths import resolve_paths
 from core.domain.enums import (
     BLOCKING_FAILURE_KINDS,
     CellState,
@@ -81,6 +85,7 @@ from core.pipeline.compute import (
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
+from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
 from core.pipeline.partial_docs import (
     partial_docs_summary,
@@ -116,6 +121,7 @@ __all__ = [
     "build_manifest",
     "collect_corpus_coverage_anomalies",
     "collect_crawl_truncation_anomalies",
+    "collect_golden_exempt_anomalies",
     "collect_i3_anomalies",
     "compact_search_effort",
     "crawl_control_digest",
@@ -245,6 +251,10 @@ class Artifacts:
     имени). ``crawl_truncation_anomalies`` — только подмножество последних, чтобы CLI/JSON
     мог их отличить (B3). ``corpus_coverage_anomalies`` — Ф0-аномалии неполного покрытия
     корпуса (blocked counts + ``complete``), также входят в ``i3_anomalies``.
+    ``golden_exempt_products`` — продукты когорты, для которых эталон **объявленно**
+    отсутствует (``sources/golden_status.yaml: exempt_products``), тоже входят в
+    ``i3_anomalies``: «эталона для продукта нет» — объявление о проверочном инструменте,
+    и оно обязано быть видно в артефактах прогона, а не только в файле пакета.
     """
 
     battle_card: Path | None
@@ -255,6 +265,9 @@ class Artifacts:
     i3_anomalies: list[dict[str, Any]] = field(default_factory=list)
     crawl_truncation_anomalies: list[dict[str, Any]] = field(default_factory=list)
     corpus_coverage_anomalies: list[dict[str, Any]] = field(default_factory=list)
+    #: Продукты с объявленным waiver'ом эталона (``golden_exempt_product``), по
+    #: ``product_id``; пусто — waiver'ов нет либо объявления не читали.
+    golden_exempt_products: list[dict[str, Any]] = field(default_factory=list)
     #: ``outputs/artifacts_gap.yaml`` — per-URL список недоступных артефактов и заготовка
     #: входа следующего прогона (13-manual-artifacts §4). ``None`` — файл не записан
     #: (сбой выгрузки); форма отчёта от этого не зависит.
@@ -1374,6 +1387,7 @@ def render_nda_questions(
     exhaustions: Mapping[tuple[str, str], Any] | None = None,
     crawl_truncation_anomalies: Iterable[Mapping[str, Any]] | None = None,
     corpus_coverage_anomalies: Iterable[Mapping[str, Any]] | None = None,
+    golden_exempt_anomalies: Iterable[Mapping[str, Any]] | None = None,
 ) -> Path:
     """Пишет ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры).
 
@@ -1395,6 +1409,11 @@ def render_nda_questions(
     (:func:`collect_corpus_coverage_anomalies`); строки ``anomaly_kind="corpus_incomplete"``
     несут blocked counts и флаг ``complete`` рядом с truncation-аномалией. Статус ячейки
     не меняется (I12): ``pending``-кандидат — видимый исход, CSV — аудит-след.
+
+    **§11.6.** ``golden_exempt_anomalies`` — продукты, для которых эталон **объявленно**
+    отсутствует (:func:`collect_golden_exempt_anomalies`); строки
+    ``anomaly_kind="golden_exempt_product"`` называют продукт и причину из объявления.
+    Это наблюдение об инструменте проверки, а не о ячейке: статусы не меняются.
     """
     rows: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
@@ -1436,6 +1455,18 @@ def render_nda_questions(
                 "protocol_status": "",
                 "i3_anomaly": anomaly.get("reason", ""),
                 "anomaly_kind": "corpus_incomplete",
+            }
+        )
+    for anomaly in golden_exempt_anomalies or ():
+        rows.append(
+            {
+                "product_id": anomaly.get("product_id", ""),
+                "param_id": anomaly.get("param_id", ""),
+                "status": "golden_exempt_product",
+                "exhausted_contours": "",
+                "protocol_status": "",
+                "i3_anomaly": anomaly.get("reason", ""),
+                "anomaly_kind": "golden_exempt_product",
             }
         )
     return _write_csv(
@@ -1734,6 +1765,68 @@ def collect_corpus_coverage_anomalies(
         )
     anomalies.extend(derived[key] for key in sorted(derived))
     return sorted(anomalies, key=lambda row: (row["product_id"], row["param_id"]))
+
+
+def collect_golden_exempt_anomalies(
+    golden_status: GoldenStatus | None,
+) -> list[dict[str, Any]]:
+    """§11.6: продукты, для которых эталон **объявленно** отсутствует, — по продукту.
+
+    Источник — объявление пакета ``sources/golden_status.yaml: exempt_products``
+    (:class:`~core.pipeline.golden_status.GoldenProductExemption`). Зачем аномалия, если
+    waiver уже объявлен файлом: «эталона для продукта нет» — это утверждение о том, чем
+    продукт **не** проверяли, и читать его должны артефакты прогона, а не только тот, кто
+    откроет файл пакета. ``golden.csv`` не входит в ``run_id``, поэтому waiver — не
+    измерение, а объявление; отсюда и уровень «наблюдение»: статусы ячеек не меняются
+    (I12), а ``Artifacts.golden_exempt_products``/``nda_questions.csv`` называют продукт
+    и причину.
+
+    Детерминизм: сортировка по ``product_id``. ``None`` (объявление не читали) — пустой
+    список: «не читали» не выдаётся за «waiver'ов нет».
+
+    :return: записи ``{"product_id", "param_id", "reason", "declared_by",
+        "declared_at"}``; ``param_id`` пуст — waiver относится к продукту целиком.
+    """
+    if golden_status is None or not golden_status.exempt_products:
+        return []
+    anomalies: list[dict[str, Any]] = []
+    for entry in sorted(golden_status.exempt_products, key=lambda item: item.product_id):
+        declared_at = (
+            f", declared_at={entry.declared_at}" if entry.declared_at else ""
+        )
+        anomalies.append(
+            {
+                "product_id": entry.product_id,
+                "param_id": "",
+                "reason": (
+                    f"§11.6: для продукта '{entry.product_id}' эталон объявленно "
+                    f"отсутствует (sources/golden_status.yaml: exempt_products): "
+                    f"{entry.reason} [declared_by={entry.declared_by}{declared_at}]; "
+                    "сверка для продукта не выполняется — это решение, а не пропуск"
+                ),
+                "declared_by": entry.declared_by,
+                "declared_at": entry.declared_at,
+            }
+        )
+    return anomalies
+
+
+def _package_dir_for(case_id: str) -> Path | None:
+    """Каталог пакета по ``case_id`` — через объявленную раскладку (03 §A.1).
+
+    Отчёту нужен **авторский** вход (объявление эталона), которого нет в БД прогона:
+    waiver не входит в ``run_id`` и не персистится, поэтому источник — файл пакета.
+    Каталог находится по объявленной раскладке (``paths.yaml``/``COHOUND_PACKAGES_DIR``/
+    ``COHOUND_HOME``), а не догадкой от текущего каталога. ``None`` — пакета нет по этому
+    пути (прогон перенесён/пакет удалён): тогда waiver'ов не показываем, отчёт не падает.
+    """
+    if not case_id:
+        return None
+    try:
+        base = resolve_paths().packages / case_id
+    except ValueError:  # некорректный paths.yaml — раскладка не повод ронять отчёт
+        return None
+    return base if base.is_dir() else None
 
 
 # ---------------------------------------------------------------------------
@@ -2535,6 +2628,7 @@ def write_reports(
     exhaustions: Mapping[tuple[str, str], Any] | None = None,
     coverage: Mapping[str, Any] | Iterable[Any] | None = None,
     store: Any | None = None,
+    golden_status: GoldenStatus | None = None,
 ) -> Artifacts:
     """Пишет все артефакты прогона в ``{out_dir}/{run_id}/outputs/`` (Ш9, 03 §A.2).
 
@@ -2548,6 +2642,13 @@ def write_reports(
         задано и передан ``store`` — читается из БД (``iter_corpus_coverage``). Без обоих
         факт извлекается из absence-evidence ячеек (гейт ``❌`` пишет аудит покрытия).
     :param store: опциональный ``StorePort`` — источник per-product покрытия (Ф0).
+    :param golden_status: объявленное состояние эталона пакета
+        (:func:`core.pipeline.golden_status.read_golden_status`); из него берутся waiver'ы
+        по продуктам (``exempt_products``) для аномалии ``golden_exempt_product``. Если не
+        передан, объявление читается из пакета, найденного по ``manifest.case_id`` через
+        объявленную раскладку (:func:`_package_dir_for`); нет пакета — waiver'ов не
+        показываем. Ошибка разбора объявления **не** глушится: противоречивое объявление —
+        видимая ошибка пакета, как в ``plan``/``run``.
 
     Пишет также ``outputs/measurement_uncertainty.yaml`` (P6c): полоса неопределённости
     вердиктов — объявленная (с путём замера и датой) либо измеренная в этом прогоне;
@@ -2636,6 +2737,17 @@ def write_reports(
         cell_list, coverage_source
     )
 
+    # §11.6: waiver'ы эталона по продуктам. Явный аргумент приоритетен; иначе объявление
+    # читается из пакета (``manifest.case_id`` + объявленная раскладка): waiver не входит
+    # в ``run_id`` и не персистится в БД прогона, поэтому единственный источник —
+    # авторский вход пакета. Ошибка разбора не глушится: это ошибка пакета, как в plan/run.
+    resolved_golden_status = golden_status
+    if resolved_golden_status is None:
+        package_dir = _package_dir_for(manifest.case_id)
+        if package_dir is not None:
+            resolved_golden_status = read_golden_status(package_dir)
+    golden_exempt_anomalies = collect_golden_exempt_anomalies(resolved_golden_status)
+
     # §13/K2: ячейки со ``stale_reason`` исключены из Capability/Coverage
     # (:mod:`core.pipeline.compute`), но человек обязан их видеть: это очередь
     # пере-оценки, а не тихое вычитание. Файл пишется только при непустом списке.
@@ -2682,6 +2794,7 @@ def write_reports(
         exhaustions=exhaustions,
         crawl_truncation_anomalies=truncation_anomalies,
         corpus_coverage_anomalies=coverage_anomalies,
+        golden_exempt_anomalies=golden_exempt_anomalies,
     )
     preliminary = render_preliminary_findings(
         cell_list, outputs_dir / "preliminary_findings.xlsx"
@@ -2700,6 +2813,7 @@ def write_reports(
     anomalies = collect_i3_anomalies(cell_list, exhaustions)
     anomalies.extend(truncation_anomalies)
     anomalies.extend(coverage_anomalies)
+    anomalies.extend(golden_exempt_anomalies)
 
     # 13-manual-artifacts §4: тот же генератор, что у фазы ``corpus`` (один код — две
     # точки вызова), поэтому повторная выгрузка отчёта обновляет файл, а формы двух
@@ -2726,5 +2840,6 @@ def write_reports(
         i3_anomalies=anomalies,
         crawl_truncation_anomalies=truncation_anomalies,
         corpus_coverage_anomalies=coverage_anomalies,
+        golden_exempt_products=golden_exempt_anomalies,
         artifacts_gap=artifacts_gap,
     )

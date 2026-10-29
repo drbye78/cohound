@@ -23,6 +23,7 @@ from core.config.seeds import seed_id
 from core.domain.enums import Gate, OnboardingState, SeedRole, SeedSource, SeedState
 from core.domain.models import ProfileAttestationRow, SeedEntry
 from core.ports.state import (
+    CellMeasurementRow,
     ChunkRow,
     DocumentVersionRow,
     IndexCompositionRow,
@@ -187,6 +188,24 @@ _CHUNK_COLUMNS = (
     "heading_path",
     "context_prefix",
     "lang",
+)
+
+#: Колонки ``cell_measurement`` в порядке записи (кроме составного ключа
+#: ``(run_id, product_id, param_id)``).
+_CELL_MEASUREMENT_COLUMNS = (
+    "state",
+    "status",
+    "prompt_hash",
+    "model_id",
+    "llm_scenario",
+    "index_build_id",
+    "partition_build_id",
+    "doc_set_digest",
+    "coverage_digest",
+    "catalog_row_digest",
+    "cell_reuse_key",
+    "evidence_digest",
+    "measured_at",
 )
 
 #: Колонки ``profile_attestation`` в порядке записи (кроме ``attestation_id`` — он ключ).
@@ -688,6 +707,76 @@ class SqliteStateStore:
             (doc_version_id,),
         ).fetchall()
         return [self._chunk_row(row) for row in rows]
+
+    # -- измерения ячеек (carry-forward, 09 §4.2/§10.1) -------------------- #
+    def record_cell_measurements(self, rows: Sequence[CellMeasurementRow]) -> None:
+        """Upsert измерений ячеек (ключ ``(run_id, product_id, param_id)``).
+
+        Строки с пустым ``param_id`` отбрасываются: ключ измерения не выдумывается, а
+        пустая строка сделала бы все такие измерения одним и тем же «параметром».
+        Транзакция одна на пачку — индекс carry-forward пишется пачкой продукта.
+        """
+        payload = [
+            (
+                row.run_id,
+                row.product_id,
+                row.param_id,
+                *(getattr(row, name) for name in _CELL_MEASUREMENT_COLUMNS),
+            )
+            for row in rows
+            if str(row.param_id or "").strip()
+        ]
+        if not payload:
+            return
+        with self._conn:
+            self._conn.executemany(
+                _upsert_sql(
+                    "cell_measurement",
+                    ("run_id", "product_id", "param_id"),
+                    _CELL_MEASUREMENT_COLUMNS,
+                ),
+                payload,
+            )
+
+    def iter_cell_measurements(
+        self, product_id: str, *, run_id: str | None = None
+    ) -> list[CellMeasurementRow]:
+        """Измерения продукта (все или одного прогона), порядок ``param_id``."""
+        if run_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM cell_measurement WHERE product_id = ? "
+                "ORDER BY run_id, param_id",
+                (product_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM cell_measurement WHERE product_id = ? AND run_id = ? "
+                "ORDER BY param_id",
+                (product_id, run_id),
+            ).fetchall()
+        return [self._cell_measurement_row(row) for row in rows]
+
+    @staticmethod
+    def _cell_measurement_row(row: sqlite3.Row) -> CellMeasurementRow:
+        """Строка SQLite → :class:`CellMeasurementRow`."""
+        return CellMeasurementRow(
+            run_id=row["run_id"],
+            product_id=row["product_id"],
+            param_id=row["param_id"],
+            state=row["state"],
+            measured_at=row["measured_at"],
+            status=row["status"],
+            prompt_hash=row["prompt_hash"],
+            model_id=row["model_id"],
+            llm_scenario=row["llm_scenario"],
+            index_build_id=row["index_build_id"],
+            partition_build_id=row["partition_build_id"],
+            doc_set_digest=row["doc_set_digest"],
+            coverage_digest=row["coverage_digest"],
+            catalog_row_digest=row["catalog_row_digest"],
+            cell_reuse_key=row["cell_reuse_key"],
+            evidence_digest=row["evidence_digest"],
+        )
 
     # -- индексные партиции/композиции (09 §8.1–§8.2) --------------------- #
     def register_index_partition(self, row: IndexPartitionRow) -> None:

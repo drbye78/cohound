@@ -58,7 +58,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
-from core.ports.store import RunIndexRef
+from core.ports.store import PlanInputsConflict, RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite import SchemaVersionMismatch, connect, connect_read_only
 from core.util.ids import parse_source_id
@@ -1145,20 +1145,34 @@ class SqliteStore:
 
     def save_plan_inputs(
         self, run_id: str, *, payload: Mapping[str, Any], payload_sha256: str
-    ) -> None:
-        """Персистит снимок плановых входов в ``run_inputs`` (P1; ``INSERT OR REPLACE``).
+    ) -> bool:
+        """Персистит снимок плановых входов в ``run_inputs`` — **однократно** (P1, O11).
 
         ``payload`` кладётся в ``payload_json`` канонической формой
         (``sort_keys=True``/``ensure_ascii=False``) — семантически байт-идентичной при
         повторной записи. ``snapshot_version`` выносится отдельной колонкой-контрактом.
+
+        Снимок — идентичность прогона, а не кэш входов (09 §3.3/§14.2):
+
+        * записи нет → ``INSERT``; возвращается ``True`` (снимок создан);
+        * запись есть и ``payload_sha256`` совпал → no-op; ``created_at`` и
+          ``payload_json`` **не** трогаются (resume не сдвигает время снимка);
+          возвращается ``False``;
+        * запись есть и ``payload_sha256`` другой → :class:`PlanInputsConflict`
+          (сохранённая строка остаётся нетронутой: расхождение — признак другого прогона,
+          ему нужен новый ``run_id``).
+
+        Гонки двух писателей нет: вставка и сверка идут в одной транзакции
+        (``with self.conn``), а не «проверил-потом-вставил» без неё.
         """
         snapshot_version = int(payload.get("snapshot_version") or 0)
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with self.conn:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO run_inputs"
+            cursor = self.conn.execute(
+                "INSERT INTO run_inputs"
                 " (run_id, snapshot_version, payload_json, payload_sha256, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(run_id) DO NOTHING",
                 (
                     run_id,
                     snapshot_version,
@@ -1167,6 +1181,19 @@ class SqliteStore:
                     _now_iso(),
                 ),
             )
+            if cursor.rowcount:
+                return True  # снимок создан этим вызовом
+            row = self.conn.execute(
+                "SELECT payload_sha256 FROM run_inputs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        stored_sha256 = None if row is None else str(row["payload_sha256"])
+        if stored_sha256 == payload_sha256:
+            return False  # идентичный снимок: идемпотентный resume, строка не тронута
+        raise PlanInputsConflict(
+            run_id=run_id,
+            stored_sha256=stored_sha256,
+            incoming_sha256=payload_sha256,
+        )
 
     def read_plan_inputs(self, run_id: str) -> dict[str, Any] | None:
         """Читает снимок плановых входов прогона; ``None``, если записи нет/повреждена."""

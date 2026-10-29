@@ -63,7 +63,7 @@ from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
 from core.pipeline.embed_cache import EmbedCache
-from core.pipeline.eval_cache import EvalVerdictCache
+from core.pipeline.eval_cache import EvalVerdictCache, eval_conditions_from_run
 from core.pipeline.evaluate import (
     DEFAULT_RETRIEVAL_CUTOFF_K,
     DEFAULT_RETRIEVAL_PROFILE,
@@ -1182,6 +1182,14 @@ def build_phases(
                 for product_id, attestation in scope_attestations.items()
             },
             eval_cache=eval_cache,
+            # 09 §10.5: условия, по которым посчитан вердикт, — часть ключа кэша. Строятся
+            # из **объявленных** входов прогона (run.yaml:methodology_version, версия
+            # словаря статусов — та же, что уходит в контракт/манифест, политика §6).
+            # ``eval_cache is None`` ⇒ условия не нужны, но и не вредны: они только
+            # описывают прогон.
+            eval_conditions=eval_conditions_from_run(
+                inputs.run, status_dict_version=declared_status_dict_version
+            ),
             # V7: аудит исполненных промптов — `runs/{run_id}/prompts/{prompt_hash}.json`
             # (03 §A.2, 04 §B.3, 09 §14.4). Путь — из resolved-раскладки прогона
             # (`out_dir`), а не выдуман: фаза не читает окружение.

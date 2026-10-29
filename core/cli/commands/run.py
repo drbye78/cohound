@@ -150,6 +150,41 @@ def _onboarding_in_scope(until: str | None) -> bool:
     return PHASES.index(until) >= PHASES.index("g1")
 
 
+def _state_not_adopted_notice(
+    args: argparse.Namespace, package_id: str, previous_lineage: Any
+) -> str | None:
+    """Предупреждение ``state_not_adopted``: state пуст, а завершённые прогоны есть (§4.6).
+
+    Без adoption первый ``run --update`` видит у всех продуктов ``last_corpus_run_id =
+    NULL`` и делает их ``new`` — полный краул когорты, хотя корпус уже собран. Полный краул
+    не запрещается (это валидный режим), но обязан быть виден: иначе «переиспользования
+    нет» выглядит как свойство продукта, а не как незаполненное состояние.
+
+    Сканирование ``runs/`` выполняется **только** когда durable-состояние пусто (нет ни
+    одной строки lineage): после первого прогона или adoption условие ложно и лишних
+    чтений не происходит. Сбой сканирования предупреждение не роняет (оно наблюдательное).
+    """
+    if previous_lineage is not None:
+        return None
+    try:
+        from core.pipeline.state_adopt import completed_runs
+
+        runs = completed_runs(getattr(args, "runs_dir", "runs"), package_id)
+    except Exception:  # noqa: BLE001 — предупреждение не вправе ронять прогон
+        return None
+    if not runs:
+        return None
+    names = ", ".join(item.run_id for item in runs[:3])
+    if len(runs) > 3:
+        names += ", …"
+    return (
+        "state_not_adopted: durable состояние пакета пусто, а завершённые прогоны есть "
+        f"({names}); продукты получат mode=new и полный краул. Готово к запуску: "
+        "hound package state adopt --package "
+        f"{getattr(args, 'package', package_id)} --actor <человек>"
+    )
+
+
 def _identity_payload(identity: RunIdentity) -> dict[str, Any]:
     """Поля идентичности прогона для ``--json``/``--dry-run`` (09 §2.4/§12.3)."""
     return {
@@ -466,6 +501,16 @@ def run(args: argparse.Namespace) -> int:
     previous_lineage = (
         state_store.previous_lineage(package_id) if state_store is not None else None
     )
+    # 09 §4.6: пустое состояние при наличии завершённых прогонов означает полный краул
+    # всей когорты (все продукты ``new``). Молчаливый полный краул допустим, но обязан
+    # быть виден: без adoption первый ``run --update`` не переиспользует ни один документ.
+    # Предупреждение адресовано именно ``--update`` (§4.6): у обычного прогона ожидания
+    # переиспользования нет, и шум в каждом отчёте обесценил бы сигнал.
+    state_not_adopted = (
+        _state_not_adopted_notice(args, package_id, previous_lineage)
+        if bool(getattr(args, "update", False))
+        else None
+    )
     try:
         cycle_id = resolve_cycle_id(
             cli_cycle_id=getattr(args, "cycle_id", None),
@@ -550,6 +595,8 @@ def run(args: argparse.Namespace) -> int:
             cli_rounds=getattr(args, "serp_rounds", None),
         ),
     ]
+    if state_not_adopted is not None:
+        config_notices.append(state_not_adopted)
     status_dict_version = declared_status_dict_version()
     contract_d = build_execution_contract(
         inputs,

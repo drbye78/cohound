@@ -171,6 +171,7 @@ def test_status_as_dict_is_json_ready(tmp_path: Path) -> None:
         "reason": None,
         "declined_by": None,
         "declined_at": None,
+        "exempt_products": [],
     }
 
 

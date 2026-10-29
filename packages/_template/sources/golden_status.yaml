@@ -29,3 +29,15 @@
 # golden.csv: present при файле, absent без файла. Противоречия — видимая ошибка пакета:
 # present без golden.csv, absent при существующем golden.csv, declined без reason или
 # declined_by.
+#
+# 4) ОТДЕЛЬНЫЙ ПРОДУКТ БЕЗ ЭТАЛОНА (waiver по продукту, §11.6) — при любом state:
+#    у продукта когорты нет ни одной строки golden.csv, и это решение, а не пропуск.
+#    Без waiver линтер (golden-coverage, уровень incomplete) запретит прогон, а отчёт
+#    покажет продукт аномалией golden_exempt_product. Поля product_id/reason/declared_by
+#    обязательны: waiver без причины и автора — тихий waiver, а он запрещён.
+#
+# exempt_products:
+#   - product_id: product_analog_b
+#     reason: "эталон для продукта ещё не размечали: сверка по нему не выполняется"
+#     declared_by: "владелец домена"
+#     declared_at: '2026-01-01'

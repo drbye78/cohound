@@ -100,6 +100,7 @@ __all__ = [
     "list_modules",
     "list_params",
     "list_roles",
+    "next_cohort_ref",
     "remove_baseline",
     "remove_module",
     "remove_param",
@@ -246,27 +247,90 @@ def _rebuild_manifest(manifest: PackageManifest, **updates: Any) -> PackageManif
 
 
 #: Поля ``run.yaml``, которые операция когорты меняет проекционно (без полной перезаписи).
-_RUN_PROJECTION_FIELDS = frozenset({"anchor", "products"})
+#: ``cohort_ref`` — ревизия состава когорты (§2.1 п. 4 док. 09): меняется вместе с составом.
+_RUN_PROJECTION_FIELDS = frozenset({"anchor", "products", "cohort_ref"})
+
+#: Строка ``cohort_ref:`` верхнего уровня ``run.yaml`` (значение + хвостовой комментарий).
+_COHORT_REF_LINE_RE = re.compile(
+    r"^(?P<key>cohort_ref)(?P<gap>[ \t]*:[ \t]*)(?P<value>.*?)(?P<comment>[ \t]*#.*)?$"
+)
+#: Строка ``cohort:`` (имя файла когорты) — сосед для вставки новой ревизии.
+_COHORT_LINE_RE = re.compile(
+    r"^(?P<key>cohort)(?P<gap>[ \t]*:[ \t]*)(?P<value>.*?)(?P<comment>[ \t]*#.*)?$"
+)
+#: Значение ``cohort_ref``, эмитируемое без кавычек (плейн-скаляр YAML).
+_PLAIN_SCALAR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _only_run_projection_changed(current: RunConfig, updated: RunConfig) -> bool:
-    """True, если ``current`` и ``updated`` различаются только ``anchor``/``products``.
+    """True, если ``current`` и ``updated`` различаются только проекционными полями.
 
-    Такая правка безопасна как точечный текстовый патч: остальные строки ``run.yaml``
-    (включая комментарии и операционные оси ``crawl``) остаются байт-в-байт.
+    Проекционные поля — ``anchor``/``products``/``cohort_ref``. Такая правка безопасна
+    как точечный текстовый патч: остальные строки ``run.yaml`` (включая комментарии и
+    операционные оси ``crawl``) остаются байт-в-байт.
     """
     return current.model_dump(exclude=_RUN_PROJECTION_FIELDS) == updated.model_dump(
         exclude=_RUN_PROJECTION_FIELDS
     )
 
 
-def _write_run_artifact(package_dir: str | Path, run: RunConfig) -> Path:
-    """Пишет ``run.yaml``: точечная проекция ``anchor``/``products`` или полная запись.
+def _scalar_text(value: str) -> str:
+    """Плейн-скаляр YAML для вставки в строку (кавычки — только если нужны)."""
+    if _PLAIN_SCALAR_RE.match(value):
+        return value
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-    Если файл уже есть и меняются только ``anchor``/``products`` — патчится текст
-    (:func:`patch_run_projection`), поэтому комментарии и порядок ключей сохраняются.
-    Иначе (или если текущий файл не читается) — обычная детерминированная запись
-    (``exclude_none=True``, null-поля не эмитятся).
+
+def _patch_run_cohort_ref(raw: str, cohort_ref: str | None) -> str:
+    """Точечно проставляет ``cohort_ref:`` в тексте ``run.yaml`` (ревизия когорты).
+
+    Заменяет значение на месте (пробел после двоеточия и хвостовой комментарий
+    сохраняются). Если ключа нет — строка вставляется сразу после ``cohort:`` (соседство
+    «имя файла когорты — ревизия состава»), иначе в конец файла. Функция идемпотентна:
+    повторное применение к уже пропатченному тексту не меняет байты.
+
+    ``None`` → текст не меняется: снимать ревизию операция когорты не вправе (потеря
+    провенанса не должна выглядеть как авторская правка).
+    """
+    if cohort_ref is None:
+        return raw
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    trailing = raw.endswith(("\n", "\r"))
+    lines = raw.splitlines()
+    value = _scalar_text(cohort_ref)
+    for index, line in enumerate(lines):
+        match = _COHORT_REF_LINE_RE.match(line)
+        if match is None:
+            continue
+        gap = match.group("gap") or ": "
+        if not gap.endswith((" ", "\t")):
+            # ``cohort_ref:`` с пустым значением: пробел после двоеточия не потерять.
+            gap += " "
+        comment = match.group("comment") or ""
+        lines[index] = f"{match.group('key')}{gap}{value}{comment}"
+        break
+    else:
+        entry = f"cohort_ref: {value}"
+        for index, line in enumerate(lines):
+            if _COHORT_LINE_RE.match(line):
+                lines.insert(index + 1, entry)
+                break
+        else:
+            lines.append(entry)
+    patched = newline.join(lines)
+    if trailing:
+        patched += newline
+    return patched
+
+
+def _write_run_artifact(package_dir: str | Path, run: RunConfig) -> Path:
+    """Пишет ``run.yaml``: точечная проекция когорты или полная запись.
+
+    Если файл уже есть и меняются только ``anchor``/``products``/``cohort_ref`` —
+    патчится текст (:func:`patch_run_projection` + :func:`_patch_run_cohort_ref`),
+    поэтому комментарии и порядок ключей сохраняются. Иначе (или если текущий файл не
+    читается) — обычная детерминированная запись (``exclude_none=True``, null-поля не
+    эмитятся).
     """
     raw, path = get_artifact(package_dir, "run", raw=True)
     if isinstance(raw, str):
@@ -275,7 +339,8 @@ def _write_run_artifact(package_dir: str | Path, run: RunConfig) -> Path:
         except (ValueError, OSError):
             current = None
         if current is not None and _only_run_projection_changed(current, run):
-            return atomic_write_text(path, patch_run_projection(raw, run))
+            patched = patch_run_projection(raw, run)
+            return atomic_write_text(path, _patch_run_cohort_ref(patched, run.cohort_ref))
     return save_artifact(package_dir, "run", run)
 
 
@@ -1480,7 +1545,42 @@ def list_golden(
 
 
 #: Поля cohort.yaml, которые можно менять операцией (``case_id`` иммутабелен).
+#: ``cohort_ref`` — не поле ``cohort.yaml``, а проекция ревизии в ``run.yaml``: операция
+#: выставляет его сама при смене состава, чтобы автор не мог объявить ревизию, не
+#: совпадающую с фактическим составом.
 _COHORT_MUTABLE_FIELDS = frozenset({"entries", "frozen_at"})
+
+#: Суффикс номера ревизии состава в ``run.yaml: cohort_ref`` (``...-r2``).
+_COHORT_REV_RE = re.compile(r"-r(?P<rev>\d+)$")
+
+
+def _as_date(value: _dt.date | str) -> _dt.date:
+    """Нормализует дату фиксации состава (ISO-строка → :class:`datetime.date`)."""
+    if isinstance(value, _dt.datetime):
+        return value.date()
+    if isinstance(value, _dt.date):
+        return value
+    return _dt.date.fromisoformat(str(value).strip())
+
+
+def next_cohort_ref(
+    current: str | None, *, case_id: str, frozen_at: _dt.date | str
+) -> str:
+    """Следующая ревизия состава когорты: ``cohort-{case_id}-{frozen_at}-r{n}``.
+
+    Чистая детерминированная функция (время внутри не читается — дата приходит
+    аргументом): одна и та же тройка ``(current, case_id, frozen_at)`` всегда даёт одну
+    и ту же ссылку. Нумерация: суффикс ``-r{k}`` в ``current`` → ``k+1``; суффикса нет
+    (первая, исходная когорта) → ``2`` — ревизия ``r1`` не эмитится, исходный набор
+    остаётся без суффикса.
+
+    :param current: текущее значение ``run.yaml: cohort_ref`` (``None``/пусто — нет).
+    :param case_id: ``case_id`` пакета (иммутабелен, входит в ссылку).
+    :param frozen_at: дата фиксации состава (дата онбординга), ISO-строка или дата.
+    """
+    match = _COHORT_REV_RE.search(str(current or ""))
+    revision = int(match.group("rev")) + 1 if match else 2
+    return f"cohort-{case_id}-{_as_date(frozen_at).isoformat()}-r{revision}"
 
 
 def update_cohort(
@@ -1489,48 +1589,95 @@ def update_cohort(
     *,
     actor: str | None = None,
     dry_run: bool = False,
+    frozen_at: _dt.date | str | None = None,
 ) -> OpResult:
     """Меняет поля ``cohort.yaml`` (§1.6). ``case_id`` иммутабелен.
 
     Изменение состава (``entries``) — **версионная граница §13**: операция также
-    синхронизирует проекцию ``run.yaml`` (``products``/``anchor``), чтобы S11 и «anchor ∈
-    products» оставались выполнимыми, и добавляет warning о bump/``golden-full``.
-    Валидация — повторный :class:`Cohort.model_validate` (ровно один якорь, уникальные id).
+    синхронизирует проекцию ``run.yaml`` (``products``/``anchor``/``cohort_ref``), чтобы
+    S11 и «anchor ∈ products» оставались выполнимыми, и добавляет warning о
+    bump/``golden-full``. Валидация — повторный :class:`Cohort.model_validate` (ровно один
+    якорь, уникальные id).
+
+    **Ревизия состава (§2.1 п. 4 док. 09).** Фактическая смена ``entries`` двигает
+    ревизию: ``frozen_at`` ← дата онбординга, ``run.yaml: cohort_ref`` ←
+    :func:`next_cohort_ref` от прежнего значения. Провенанс ревизии без этого неполон:
+    по ``run_id``/манифесту нельзя отличить «когорту расширили, объявив ревизию» от
+    «в ``cohort.yaml`` дописали строку» (``cohort_digest`` при этом меняется в обоих
+    случаях). Повтор с тем же составом — no-op: ревизия не растёт (иначе каждый
+    ``--apply`` давал бы новый ``run_id``); смена только ``frozen_at`` ревизию тоже не
+    двигает — это не новая когорта.
+
+    :param frozen_at: явная дата фиксации состава (дата онбординга). ``None`` →
+        ``fields["frozen_at"]``, иначе сегодня. Дефолт — аргумент, а не скрытое чтение
+        времени: тест обязан уметь зафиксировать дату.
+    :raises PackageAdminError: неизвестные/иммутабельные поля, невалидная когорта
+        (kind=usage) либо новые блокирующие нарушения линта (kind=blocked).
     """
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    if artifacts.cohort is None:
+    previous = artifacts.cohort
+    if previous is None:
         raise PackageAdminError("cohort.yaml отсутствует в пакете", kind="usage")
     unknown = set(fields) - _COHORT_MUTABLE_FIELDS
     if unknown:
         raise PackageAdminError(
             f"неизменяемые/неизвестные поля cohort: {sorted(unknown)}", kind="usage"
         )
-    data = artifacts.cohort.model_dump(mode="python")
+    data = previous.model_dump(mode="python")
     data.update(fields)
     try:
         cohort = Cohort.model_validate(data)
     except ValueError as exc:
         raise PackageAdminError(f"cohort: {exc}", kind="usage") from exc
+
+    # Смена состава определяется сравнением валидированных записей, а не наличием ключа
+    # ``entries``: повторный apply с тем же составом — no-op (ревизия не растёт).
+    entries_changed = cohort.entries != previous.entries
+    if entries_changed:
+        if frozen_at is not None:
+            fixed_at = _as_date(frozen_at)
+        elif "frozen_at" in fields:
+            fixed_at = cohort.frozen_at
+        else:
+            fixed_at = _dt.date.today()
+        if fixed_at != cohort.frozen_at:
+            data["frozen_at"] = fixed_at
+            try:
+                cohort = Cohort.model_validate(data)
+            except ValueError as exc:
+                raise PackageAdminError(f"cohort: {exc}", kind="usage") from exc
     artifacts.cohort = cohort
 
     changed = ["cohort"]
     extra: list[str] = []
-    if "entries" in fields:
+    if entries_changed:
         products = [entry.product_id for entry in cohort.entries]
         anchor = next(
             entry.product_id
             for entry in cohort.entries
             if entry.anchor_relation is AnchorRelation.ANCHOR
         )
+        revision: str | None = None
         if artifacts.run is not None:
+            revision = next_cohort_ref(
+                artifacts.run.cohort_ref,
+                case_id=cohort.case_id,
+                frozen_at=cohort.frozen_at,
+            )
             artifacts.run = artifacts.run.model_copy(
-                update={"products": products, "anchor": anchor}
+                update={"products": products, "anchor": anchor, "cohort_ref": revision}
             )
             changed.append("run")
+        else:
+            extra.append(
+                "cohort_ref не записан: run.yaml отсутствует — ревизия состава "
+                "не отражена в провенансе"
+            )
         extra.append(
             "§13: смена состава когорты — версионная граница; выполните bump-version "
             "и пересоберите golden-full"
+            + (f" (cohort_ref → {revision})" if revision else "")
         )
     return _finalize(
         package_dir,
@@ -1552,7 +1699,12 @@ def set_cohort(
     actor: str | None = None,
     dry_run: bool = False,
 ) -> OpResult:
-    """Заменяет состав когорты (``entries``) и, опционально, ``frozen_at`` (§1.6)."""
+    """Заменяет состав когорты (``entries``) и, опционально, ``frozen_at`` (§1.6).
+
+    Полная замена — тот же путь, что и :func:`update_cohort`: при фактически другом
+    составе ревизия двигается, при том же — no-op. ``frozen_at`` без изменения состава
+    ревизию не двигает.
+    """
     fields: dict[str, Any] = {"entries": list(entries)}
     if frozen_at is not None:
         fields["frozen_at"] = frozen_at

@@ -19,6 +19,29 @@ LLM-вызовов на цикл. Этот модуль переиспользу
 оценщика (:func:`build_eval_key`); конверт хранит все поля ключа (``echo``) и любой
 рассинхрон отвергается как промах — та же дисциплина, что у ``ExtractionCache``.
 
+**Пространство ключей (``EVAL_CACHE_FORMAT = 2``).** Вердикт — функция не только промпта
+и модели, но и **методологических правил**: смена политики расчёта, словаря статусов или
+строки каталога меняет вердикт, не меняя текста промпта. Формат 1 этого не учитывал и
+мог вернуть вердикт, посчитанный по старым правилам, — ложный провенанс, а не экономия.
+Полный состав ``echo`` (см. :func:`core.pipeline.evaluate.evaluate_cell`):
+
+* версия пространства ключей (``format``) и схемы выхода (``schema``);
+* шаблон промпта и его содержимое (``template``/``prompt_sha256``/``prompt_hash``);
+* конфигурация оценщика (``model_id``/``model_version``/``seed``/``temperature``/
+  ``decoder``/``endpoint_kind``) — I21;
+* политика повтора (``max_retries``): повтор переиздаёт запрос, поэтому «первый валидный
+  ответ» зависит от её величины;
+* методологические условия (:class:`EvalConditions`): ``methodology_version``,
+  ``status_dict_version``, ``capability_policy``, ``unknown_policy``, ``partial_score``;
+* строка каталога параметра (``catalog_row_digest``, :func:`catalog_row_digest`);
+* условия ретривала (``retrieval_profile``/``cutoff_K``) — I16/I20.
+
+Вне ключа осознанно: ``run_id``/``build_id`` (одна сборка — много прогонов),
+``strict``/coverage/resolver/прецедент (пере-исполняются на хите), ``product_id``
+(входит в текст промпта). Переход ``1 → 2`` — несовместимость по построению: старый
+конверт лежит под другим ключом **и** несёт другой набор полей ``echo``, поэтому
+читается как промах. Это желаемое поведение: кэш не должен переживать смену правил.
+
 **Кэшируются только успешные вердикты** (``✅``/``⚠️``/``❌``/``❓``). ``FAILED`` и
 ``PRELIMINARY`` — исходы **несостоявшейся** попытки, а не вердикты: их заморозка
 навсегда зафиксировала бы транзиентный сбой адаптера. ``N/A`` на выходе LLM запрещён
@@ -44,17 +67,23 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
 from core.domain import LLMCellOutput, Status
+from core.domain.models import CatalogRow, RunConfig
+from core.domain.scoring import scoring_policy_spec
 from core.util.hashing import short_hash
 
 __all__ = [
     "ENVELOPE_FORMAT",
     "EVAL_CACHE_FORMAT",
+    "EvalConditions",
     "EvalVerdictCache",
     "build_eval_key",
+    "catalog_row_digest",
+    "eval_conditions_from_run",
 ]
 
 #: Версия формата конверта. Несовпадение — промах: будущая ревизия схемы не будет
@@ -63,7 +92,11 @@ ENVELOPE_FORMAT = 1
 
 #: Версия пространства ключей (семантика полей ``echo``). Входит в сам ключ и в
 #: конверт; повышается при изменении набора/смысла полей ключа.
-EVAL_CACHE_FORMAT = 1
+#:
+#: 2 — в ключ вошли методологические условия оценки (``EvalConditions``), строка
+#: каталога (``catalog_row_digest``), условия ретривала и политика повтора: формат 1
+#: обслуживал вердикт, посчитанный по старым правилам, если промпт не изменился.
+EVAL_CACHE_FORMAT = 2
 
 #: Допустимые символы ключа: полный hex (``short_hash``). Заодно исключает ``/``,
 #: ``..`` и прочие пути-ловушки: ключ — имя файла, а не произвольная строка.
@@ -83,10 +116,111 @@ def build_eval_key(echo: Mapping[str, Any]) -> str:
     """Строит ключ кэша из полного набора полей ``echo`` (32 hex-символа).
 
     ``echo`` — плоский JSON-словарь с версией формата/схемы, версией шаблона, хешем
-    **отрендеренного** промпта, ``prompt_hash`` (§5, для аудита) и конфигурацией
-    оценщика. Сортировка ключей делает результат независимым от порядка вставки.
+    **отрендеренного** промпта, ``prompt_hash`` (§5, для аудита), конфигурацией
+    оценщика, политикой повтора, методологическими условиями (:class:`EvalConditions`),
+    дайджестом строки каталога и условиями ретривала. Сортировка ключей делает результат
+    независимым от порядка вставки.
+
+    Ключ — **полный** набор полей, а не выборочный: поле, забытое здесь, не инвалидирует
+    кэш при своём изменении, то есть превращает оптимизацию в ложный провенанс.
     """
     payload = json.dumps(dict(echo), ensure_ascii=False, sort_keys=True)
+    return short_hash(payload, 32)
+
+
+@dataclass(frozen=True, slots=True)
+class EvalConditions:
+    """Объявленные методологические условия, при которых получен вердикт (09 §10.5).
+
+    Промпт описывает вопрос, но не правила ответа: политика расчёта, словарь статусов и
+    версия методологии меняют вердикт, не меняя текста промпта. Поэтому они — часть
+    ключа, а не провенанс рядом с ним.
+
+    :param methodology_version: версия методологии прогона (``run.yaml`` →
+        :data:`core.domain.models.METHODOLOGY_VERSION`).
+    :param status_dict_version: версия словаря статусов
+        (``docs/status-dictionary.yaml``); ``None`` — не объявлена (файла нет), и это
+        отличимо от «объявлена вот такая».
+    :param capability_policy: политика расчёта Capability (:func:`scoring_policy_spec`).
+    :param unknown_policy: участвует ли ``❓`` в знаменателе (там же).
+    :param partial_score: вклад ``⚠️`` в числитель (там же).
+
+    Пустые строки запрещены: поле, которое всегда пустое, — ложь о том, что оно учтено.
+    """
+
+    methodology_version: str
+    status_dict_version: str | None
+    capability_policy: str
+    unknown_policy: str
+    partial_score: float
+
+    def __post_init__(self) -> None:
+        for field_info in fields(self):
+            value = getattr(self, field_info.name)
+            if field_info.name == "status_dict_version":
+                # ``None`` — честное «не объявлена»; пустая строка — уже подмена.
+                if value is not None and not str(value).strip():
+                    raise ValueError(
+                        "EvalConditions.status_dict_version: пустая строка вместо "
+                        "значения или None — версия не объявлена, а не «пустая»"
+                    )
+                continue
+            if isinstance(value, str) and not value.strip():
+                raise ValueError(
+                    f"EvalConditions.{field_info.name}: пустое значение — условие "
+                    "оценки обязано быть объявленным (None/'' не подставляются)"
+                )
+        if not 0.0 <= float(self.partial_score) <= 1.0:
+            raise ValueError(
+                f"EvalConditions.partial_score: {self.partial_score!r} вне [0, 1]"
+            )
+
+    def as_echo(self) -> dict[str, Any]:
+        """Поля условий в JSON-примитивах (часть ``echo`` ключа кэша)."""
+        return {
+            "methodology_version": self.methodology_version,
+            "status_dict_version": self.status_dict_version,
+            "capability_policy": self.capability_policy,
+            "unknown_policy": self.unknown_policy,
+            "partial_score": float(self.partial_score),
+        }
+
+
+def eval_conditions_from_run(
+    run: RunConfig, *, status_dict_version: str | None
+) -> EvalConditions:
+    """Собирает условия оценки из **объявленных** входов прогона.
+
+    Источники: ``run.yaml:methodology_version`` (поле ``RunConfig``), версия словаря
+    статусов (её резолвит composition root — тот же вызов, что даёт значение контракту и
+    манифесту) и объявленная политика расчёта §6 (:func:`scoring_policy_spec`).
+
+    Функция не читает окружение и не догадывается о значениях: единственная
+    необязательная величина — ``status_dict_version``, и ``None`` здесь означает «словарь
+    не объявлен» (например, установка без ``docs/``), а не «возьмём что-нибудь похожее».
+    """
+    policy = scoring_policy_spec()
+    return EvalConditions(
+        methodology_version=str(run.methodology_version),
+        status_dict_version=status_dict_version,
+        capability_policy=str(policy["capability_policy"]),
+        unknown_policy=str(policy["unknown_policy"]),
+        partial_score=float(policy["partial_score"]),
+    )
+
+
+def catalog_row_digest(param: CatalogRow) -> str:
+    """Дайджест строки каталога параметра (32 hex-символа).
+
+    Материал — **вся** строка в каноническом JSON (все поля, включая ``deprecated``/
+    ``replaced_by``). Полнота выбрана намеренно: перечень «влияющих» полей пришлось бы
+    поддерживать вручную, и забытое поле меняло бы вердикт, не меняя ключ. Лишняя
+    инвалидация при правке невлияющего поля — цена, которую здесь платить не жалко:
+    пере-спросить оценщика дешевле, чем опубликовать вердикт по прежнему правилу.
+    """
+    payload = json.dumps(
+        param.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+    )
     return short_hash(payload, 32)
 
 

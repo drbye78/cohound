@@ -56,6 +56,11 @@ from core.cli.package.commands import (
     cmd_package_scope_set,
     cmd_package_scope_show,
     cmd_package_scout,
+    cmd_package_seeds_add,
+    cmd_package_seeds_disable,
+    cmd_package_seeds_enable,
+    cmd_package_seeds_export,
+    cmd_package_seeds_list,
     cmd_package_set_archetype,
     cmd_package_show,
     cmd_package_suggest_cohort,
@@ -63,7 +68,9 @@ from core.cli.package.commands import (
     cmd_package_suggest_roles,
     cmd_package_validate,
 )
+from core.domain.enums import SeedRole
 from core.pipeline.package_io import ARTIFACT_FILES
+from core.pipeline.package_seeds import CORPUS_URLS_FORMAT
 
 # ---------------------------------------------------------------------------
 # Сборка парсера
@@ -471,6 +478,68 @@ def add_package_parser(subparsers: Any) -> None:
     p_golden_ls.add_argument("--param", default=None, help="точный фильтр по param_id")
     p_golden_ls.set_defaults(handler=cmd_package_golden_list)
 
+    # seeds ---------------------------------------------------------------- #
+    p_seeds = pkg.add_parser(
+        "seeds", help="авторский seed-набор sources/seeds.yaml (09 §2.3/§7)"
+    )
+    seeds = p_seeds.add_subparsers(dest="seeds_command", metavar="ДЕЙСТВИЕ")
+
+    p_seeds_ls = seeds.add_parser("list", help="seed'ы пакета/продукта (read-only)")
+    _add_read_common(p_seeds_ls)
+    p_seeds_ls.add_argument("--product", default=None, help="точный product_id")
+    p_seeds_ls.set_defaults(handler=cmd_package_seeds_list)
+
+    p_seeds_add = seeds.add_parser(
+        "add", help="добавить seed продукта (идемпотентно; --actor обязателен)"
+    )
+    _add_op_common(p_seeds_add)
+    p_seeds_add.add_argument("--product", required=True, help="product_id продукта")
+    p_seeds_add.add_argument("--url", required=True, help="seed-URL (http/https)")
+    p_seeds_add.add_argument(
+        "--role",
+        default=SeedRole.PRIMARY.value,
+        choices=[role.value for role in SeedRole],
+        help="роль seed'а в корпусе (по умолчанию primary)",
+    )
+    p_seeds_add.add_argument(
+        "--profile-key",
+        default=None,
+        help="ключ domain_profiles.yaml (по умолчанию — автопривязка host[+path])",
+    )
+    p_seeds_add.set_defaults(handler=cmd_package_seeds_add)
+
+    p_seeds_dis = seeds.add_parser(
+        "disable", help="выключить seed (soft-disable; --actor обязателен)"
+    )
+    _add_op_common(p_seeds_dis)
+    p_seeds_dis.add_argument("--product", required=True, help="product_id продукта")
+    p_seeds_dis.add_argument("--url", required=True, help="seed-URL")
+    p_seeds_dis.set_defaults(handler=cmd_package_seeds_disable)
+
+    p_seeds_en = seeds.add_parser(
+        "enable", help="включить выключенный seed (--actor обязателен)"
+    )
+    _add_op_common(p_seeds_en)
+    p_seeds_en.add_argument("--product", required=True, help="product_id продукта")
+    p_seeds_en.add_argument("--url", required=True, help="seed-URL")
+    p_seeds_en.set_defaults(handler=cmd_package_seeds_enable)
+
+    p_seeds_exp = seeds.add_parser(
+        "export", help="экспорт активных seed'ов в legacy corpus_urls.yaml (read-only)"
+    )
+    _add_read_common(p_seeds_exp)
+    p_seeds_exp.add_argument(
+        "--format",
+        dest="format",
+        default=CORPUS_URLS_FORMAT,
+        choices=[CORPUS_URLS_FORMAT],
+        help="формат экспорта (единственный — corpus-urls)",
+    )
+    p_seeds_exp.add_argument(
+        "--out", default=None, metavar="PATH", help="файл вывода (по умолчанию — stdout)"
+    )
+    p_seeds_exp.set_defaults(handler=cmd_package_seeds_export)
+
     # run ------------------------------------------------------------------ #
     p_run = pkg.add_parser("run", help="run.yaml как структура (read-only)")
     run_cmd = p_run.add_subparsers(dest="run_command", metavar="ДЕЙСТВИЕ")
@@ -791,5 +860,84 @@ def add_package_parser(subparsers: Any) -> None:
     )
     p_bgc.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
     p_bgc.set_defaults(handler=cmd_package_builds_gc)
+
+    # state (durable per-product состояние пакета, 09 §4.1/§4.6) ----------- #
+    p_state = pkg.add_parser(
+        "state",
+        help="durable состояние пакета state.db: adoption завершённых прогонов (09 §4.6)",
+    )
+    state = p_state.add_subparsers(dest="state_command", metavar="ДЕЙСТВИЕ")
+
+    p_state_adopt = state.add_parser(
+        "adopt",
+        help="принять завершённый прогон в state.db (--actor обязателен; --dry-run не пишет)",
+        description=(
+            "state.db наполняется только самим прогоном; без adoption первый run --update "
+            "видит у старых продуктов last_corpus_run_id = NULL и делает их new (полный "
+            "краул всей когорты). Команда принимает завершённый прогон (фазы "
+            "corpus/evaluate = ok и есть corpus_coverage) по продуктам: документы, чанки, "
+            "url_state, партицию индекса и — при той же methodology_version — измерения "
+            "ячеек. Выбор baseline явный: --from-run или последний завершённый прогон."
+        ),
+    )
+    p_state_adopt.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+    )
+    p_state_adopt.add_argument(
+        "--from-run",
+        dest="from_run",
+        default=None,
+        help="run_id прогона-источника (по умолчанию — последний завершённый прогон пакета)",
+    )
+    p_state_adopt.add_argument(
+        "--cycle-id",
+        dest="cycle_id",
+        default=None,
+        help="цикл записи (по умолчанию — runs.snapshot_date принятого прогона)",
+    )
+    p_state_adopt.add_argument(
+        "--runs-dir",
+        dest="runs_dir",
+        default=None,
+        help="каталог прогонов (дефолт — resolved paths.runs, иначе runs)",
+    )
+    p_state_adopt.add_argument(
+        "--index-store",
+        dest="index_store",
+        default=None,
+        help="корень index_store для сверки партиций (дефолт — resolved paths.index_store)",
+    )
+    p_state_adopt.add_argument(
+        "--actor",
+        required=True,
+        help="человек, выполняющий adoption (провенанс мутации durable-состояния; обязателен)",
+    )
+    p_state_adopt.add_argument(
+        "--dry-run", action="store_true", help="показать, что было бы принято, без записи"
+    )
+    p_state_adopt.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
+    # Ленивый импорт: регистрация ``state`` стоит последней, а хендлеры — в
+    # ``core.cli.package.commands``; импорт на месте не сдвигает строки регистрации
+    # остальных подкоманд (номера строк в регламенте — якоря документации).
+    from core.cli.package.commands import (
+        cmd_package_state_adopt,
+        cmd_package_state_show,
+    )
+
+    p_state_adopt.set_defaults(handler=cmd_package_state_adopt)
+
+    p_state_show = state.add_parser(
+        "show", help="что сейчас в state.db: продукты, рубежи, снимки (read-only)"
+    )
+    _add_read_common(p_state_show)
+    p_state_show.add_argument(
+        "--runs-dir",
+        dest="runs_dir",
+        default=None,
+        help="каталог прогонов для проверки «есть завершённые прогоны, а state пуст»",
+    )
+    p_state_show.set_defaults(handler=cmd_package_state_show)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)

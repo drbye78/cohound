@@ -31,7 +31,8 @@ from core.cli.errors import (
 from core.cli.output import concise, emit_error, print_json
 from core.cli.wiring import _llm_configured
 from core.config.deploy import load_deploy_config
-from core.domain.enums import FetchMode, OnboardingState
+from core.config.seeds import SEEDS_RELPATH, load_seeds
+from core.domain.enums import FetchMode, OnboardingState, SeedRole
 from core.pipeline.crawl_probe import (
     ProbeReason,
     ProbeSource,
@@ -115,6 +116,14 @@ from core.pipeline.package_scout import (
     scout_package,
     write_scout_artifacts,
 )
+from core.pipeline.package_seeds import (
+    SeedsOpResult,
+    product_seed_rows,
+    seeds_add,
+    seeds_disable,
+    seeds_enable,
+    seeds_export,
+)
 from core.ports.crawl_errors import CrawlNotFound
 from core.ports.types import FetchPlan
 from core.store.backup import (
@@ -184,8 +193,15 @@ __all__ = [
     "cmd_package_scope_set",
     "cmd_package_scope_show",
     "cmd_package_scout",
+    "cmd_package_seeds_add",
+    "cmd_package_seeds_disable",
+    "cmd_package_seeds_enable",
+    "cmd_package_seeds_export",
+    "cmd_package_seeds_list",
     "cmd_package_set_archetype",
     "cmd_package_show",
+    "cmd_package_state_adopt",
+    "cmd_package_state_show",
     "cmd_package_suggest_cohort",
     "cmd_package_suggest_modules",
     "cmd_package_suggest_roles",
@@ -1245,6 +1261,175 @@ def cmd_package_artifact_get(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Хендлеры: seeds (09 §2.3/§7) — авторский seed-набор
+# ---------------------------------------------------------------------------
+
+
+def _seeds_op_lines(result: SeedsOpResult) -> list[str]:
+    """Человекочитаемое представление операции над seed-набором."""
+    lines = [
+        f"op: {result.op}",
+        f"product: {result.product_id or '—'}",
+        f"url: {result.url or '—'}",
+        f"dry-run: {'yes' if result.dry_run else 'no'}",
+        f"changed: {'yes' if result.changed else 'no'}",
+        f"written: {len(result.written)} файл(ов)",
+    ]
+    if result.product_state:
+        lines.append(f"product_state: {result.product_state}")
+    if result.seeds_digest_before != result.seeds_digest:
+        lines.append(
+            f"seeds_digest: {result.seeds_digest_before} → {result.seeds_digest}"
+        )
+    for message in result.warnings:
+        lines.append(f"warning: {message}")
+    return lines
+
+
+def cmd_package_seeds_list(args: argparse.Namespace) -> int:
+    """``seeds list`` — seed'ы пакета/продукта (read-only).
+
+    Отсутствующий ``sources/seeds.yaml`` или неизвестный ``--product`` → ``not found``
+    с :data:`EXIT_NOT_FOUND`: пустой ответ означал бы «продукт без seed'ов», а это
+    другой факт.
+    """
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    path = Path(args.package) / SEEDS_RELPATH
+    if not path.is_file():
+        return _not_found(args, "seeds", str(path))
+    config = _invoke(lambda: load_seeds(path))
+    wanted = getattr(args, "product", None)
+    if wanted is not None and wanted not in config.products:
+        return _not_found(args, "product", wanted)
+    product_ids = [pid for pid in sorted(config.products) if wanted in (None, pid)]
+    rows: list[dict[str, Any]] = [
+        {
+            "product_id": pid,
+            "state": config.products[pid].state.value,
+            "enabled": len(config.products[pid].enabled_for()),
+            "total": len(config.products[pid].seeds),
+            "seeds": product_seed_rows(config, pid),
+        }
+        for pid in product_ids
+    ]
+    payload: dict[str, Any] = {
+        "ok": True,
+        "count": len(rows),
+        "products": rows,
+    }
+    lines = [f"products: {len(rows)}"]
+    for row in rows:
+        lines.append(
+            f"{row['product_id']}\tstate={row['state']}\t"
+            f"enabled={row['enabled']}/{row['total']}"
+        )
+        for seed in row["seeds"]:
+            marker = "+" if seed["enabled"] else "-"
+            lines.append(
+                f"  {marker} {seed['normalized_url']}\t{seed['role']}\t"
+                f"{seed['source']}\tprofile={seed['profile_key'] or '—'}"
+            )
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_seeds_add(args: argparse.Namespace) -> int:
+    """``seeds add`` — добавить seed продукта (идемпотентно, ``--actor`` обязателен)."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    result = _invoke(
+        lambda: seeds_add(
+            args.package,
+            args.product,
+            args.url,
+            role=SeedRole(args.role),
+            profile_key=args.profile_key,
+            actor=args.actor,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, result.as_dict(), _seeds_op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_seeds_disable(args: argparse.Namespace) -> int:
+    """``seeds disable`` — soft-disable seed'а (``--actor`` обязателен)."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    result = _invoke(
+        lambda: seeds_disable(
+            args.package,
+            args.product,
+            args.url,
+            actor=args.actor,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, result.as_dict(), _seeds_op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_seeds_enable(args: argparse.Namespace) -> int:
+    """``seeds enable`` — вернуть выключенный seed в набор (``--actor`` обязателен)."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    result = _invoke(
+        lambda: seeds_enable(
+            args.package,
+            args.product,
+            args.url,
+            actor=args.actor,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, result.as_dict(), _seeds_op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_seeds_export(args: argparse.Namespace) -> int:
+    """``seeds export`` — активные seed'ы в legacy ``{product_id: [url, ...]}``.
+
+    Без ``--out`` текст уходит в stdout (это и есть контракт «экспорт как обратная
+    сторона чтения»); с ``--out`` файл пишется только при изменении байтов.
+    """
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    if getattr(args, "out", None) is None and getattr(args, "json", False):
+        # Экспорт без ``--out`` — ровно те байты, которые прочитает ``load_corpus_urls``;
+        # JSON-обёртка сломала бы это свойство (как ``artifact get --raw --json``).
+        raise CliError(
+            "--json несовместим с экспортом в stdout: это не JSON-документ; "
+            "укажите --out PATH для файла",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    result = _invoke(
+        lambda: seeds_export(
+            args.package, fmt=args.format, out=getattr(args, "out", None)
+        )
+    )
+    if getattr(args, "out", None) is None:
+        sys.stdout.write(result.text)
+        return EXIT_OK
+    payload = result.as_dict()
+    lines = [
+        f"format: {result.format}",
+        f"products: {result.products}",
+        f"urls: {result.urls}",
+        f"out: {result.out}",
+        f"written: {'yes' if result.written else 'no'}",
+    ]
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # Хендлеры: suggest-* (read-only эвристики)
 # ---------------------------------------------------------------------------
 
@@ -2131,7 +2316,14 @@ def _resolve_runs_dir(args: argparse.Namespace) -> str:
 
 
 def _resolve_index_root(args: argparse.Namespace) -> str:
-    """Корень индексного хранилища: resolved ``paths.index_store`` либо ``index_store``."""
+    """Корень индексного хранилища: ``--index-store`` > resolved ``paths.index_store``.
+
+    Явный флаг читается первым (приоритет оператора, ``03`` §A.1); без флага — resolved
+    раскладка, а без неё (прямой вызов хендлера в тестах) — литерал ``index_store``.
+    """
+    explicit = getattr(args, "index_store", None)
+    if explicit:
+        return str(explicit)
     paths = getattr(args, "paths", None)
     return str(paths.index_store) if paths is not None else "index_store"
 
@@ -2297,6 +2489,263 @@ def cmd_package_builds_gc(args: argparse.Namespace) -> int:
     lines.append(
         "compositions: untouched (pruned only by `hound package index-gc`)"
     )
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def _state_db_path(args: argparse.Namespace) -> tuple[Path, str]:
+    """Путь ``state/{package_id}/state.db`` и ``package_id`` — как у прогона.
+
+    Идентичность берётся **по имени каталога пакета** (так делает ``run``:
+    ``package_id = Path(args.package).name``), чтобы adopted-строки легли туда же, куда
+    писала бы их фаза прогона. Каталог, переименованный относительно
+    ``run.yaml:package``, даёт видимый ``no_completed_run``, а не чужую запись.
+    """
+    from core.store.state_sqlite import state_db_path
+
+    package_id = Path(args.package).name
+    paths = getattr(args, "paths", None)
+    if paths is None:
+        from core.config.paths import resolve_paths
+
+        paths = resolve_paths()
+    return state_db_path(paths.state, package_id), package_id
+
+
+def _state_lines(plan_payload: dict[str, Any]) -> list[str]:
+    """Человекочитаемый вывод плана adoption (продукты, партиции, ячейки, снимок)."""
+    lines = [
+        f"run_id: {plan_payload.get('run_id') or '—'}",
+        f"cycle_id: {plan_payload.get('cycle_id') or '—'}",
+        f"db: {plan_payload.get('db') or '—'}",
+        f"document_level: {plan_payload.get('document_level')} "
+        f"({plan_payload.get('document_level_source')})",
+        f"methodology: {plan_payload.get('methodology_version') or '—'} "
+        f"(match={plan_payload.get('methodology_matches')})",
+    ]
+    for item in plan_payload.get("products", []):
+        marker = "accepted" if item["accepted"] else "SKIPPED"
+        lines.append(
+            f"  {item['product_id']}\t{marker}\tdocs={item['documents']} "
+            f"chunks={item['chunks']} urls={item['url_states']} "
+            f"coverage={item['coverage_complete']}"
+        )
+        for reason in item["reasons"]:
+            lines.append(f"    reason: {reason}")
+        for part in item["partitions"]:
+            state = "verified" if part["verified"] else "REJECTED"
+            lines.append(
+                f"    partition: {part['partition_build_id'] or '—'} {state} "
+                f"chunks={part['chunks']}"
+            )
+            if part["reason"]:
+                lines.append(f"      reason: {part['reason']}")
+        cells = item["cells"]
+        lines.append(
+            f"    cells: {'adopted' if cells['adopted'] else 'skipped'} "
+            f"total={cells['total']} resolved={cells['resolved']} "
+            f"pending={cells['pending']}"
+        )
+        if cells["reason"]:
+            lines.append(f"      reason: {cells['reason']}")
+        snapshot = item["snapshot"]
+        if snapshot is not None:
+            lines.append(
+                f"    snapshot: status={snapshot['status']} scope={snapshot['scope']} "
+                f"baseline_complete={snapshot['baseline_complete']} "
+                f"partition={snapshot['partition_build_id'] or '—'}"
+            )
+    for reason in plan_payload.get("reasons", []):
+        lines.append(f"reason: {reason}")
+    for warning in plan_payload.get("warnings", []):
+        lines.append(f"warning: {warning}")
+    for limitation in plan_payload.get("limitations", []):
+        lines.append(f"limitation: {limitation}")
+    return lines
+
+
+def cmd_package_state_adopt(args: argparse.Namespace) -> int:
+    """``hound package state adopt`` — принять завершённый прогон в ``state.db`` (09 §4.6).
+
+    ``state.db`` наполняется только прогоном, поэтому после его появления старые продукты
+    выглядят ``new`` и первый ``run --update`` делает полный краул всей когорты. Команда
+    строит **план** (что будет принято по каждому продукту и чего не хватает) и пишет его
+    через порт durable-состояния. ``--dry-run`` не пишет и не создаёт ``state.db``.
+
+    ``--from-run`` нужен, когда выбор не очевиден; без него берётся последний завершённый
+    прогон пакета, и план называет, какой именно: baseline не выбирается молча — имя
+    прогона в выводе и есть выбор.
+    """
+    from core.pipeline.state_adopt import (
+        apply_adoption,
+        plan_adoption,
+        read_state_summary,
+    )
+
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    package_id = Path(args.package).name
+    runs_dir = _resolve_runs_dir(args)
+    index_root = _resolve_index_root(args)
+    plan = plan_adoption(
+        runs_dir,
+        package_id,
+        from_run=getattr(args, "from_run", None),
+        index_root=index_root,
+    )
+    if plan.run_id is None:
+        payload = {
+            "ok": False,
+            "found": False,
+            "package": package_id,
+            "runs_dir": runs_dir,
+            "reasons": list(plan.reasons),
+            "candidates": [item.as_dict() for item in plan.candidates],
+        }
+        lines = [f"not found: принимаемого прогона в {runs_dir} нет"]
+        for reason in plan.reasons:
+            lines.append(f"reason: {reason}")
+        for item in plan.candidates:
+            lines.append(
+                f"  candidate: {item.run_id}\tcomplete={item.complete}\t"
+                f"reason={item.reason or '—'}"
+            )
+        _emit(args, payload, lines)
+        return EXIT_NOT_FOUND
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    warnings = list(plan.warnings)
+    if dry_run:
+        # ``--dry-run`` не открывает state.db вовсе: штатное открытие применяет схему и
+        # пишет ``schema_meta`` — это запись в файл оператора, а обещание флага «ничего
+        # не пишет» включает и её. Побочный эффект — цепочка lineage
+        # (``previous_run_id``/``change_class``) в dry-run не вычисляется; уже принятый
+        # прогон виден по read-only сводке (``already_adopted``).
+        store = None
+        db_path, _ = _state_db_path(args)
+        summary = read_state_summary(db_path, package_id=package_id)
+        if any(row.get("run_id") == plan.run_id for row in summary.lineage):
+            warnings.append(
+                f"already_adopted: {plan.run_id} уже есть в run_lineage "
+                f"{db_path} — повторный adoption идемпотентен (строки не раздвоятся)"
+            )
+    else:
+        from core.cli.context import _open_state_store
+
+        store = _open_state_store(args, create=True)
+    cycle_id = getattr(args, "cycle_id", None) or plan.cycle_id
+    result = _invoke(
+        lambda: apply_adoption(
+            plan, store, actor=args.actor, cycle_id=cycle_id, dry_run=dry_run
+        )
+    )
+    if store is not None:
+        store.close()
+    payload = result.as_dict()
+    payload["warnings"] = warnings
+    payload["plan"] = plan.as_dict()
+    lines = [f"dry-run: {'yes' if dry_run else 'no'}", *_state_lines(plan.as_dict())]
+    for warning in warnings:
+        if warning not in plan.warnings:
+            lines.append(f"warning: {warning}")
+    totals = dict(result.totals)
+    lines.append(
+        "summary: docs={documents} chunks={chunks} urls={url_states} "
+        "partitions={partitions} cells={cells} snapshots={snapshots} lineage={lineage}".format(
+            lineage="yes" if result.lineage_written else "no", **totals
+        )
+    )
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_state_show(args: argparse.Namespace) -> int:
+    """``hound package state show`` — что сейчас в ``state.db`` (read-only).
+
+    Отвечает на вопрос «принимать ли прогон»: показывает рубежи продуктов
+    (``last_corpus_run_id``/``last_evaluated_run_id``/``last_completed_run_id``), снимки и
+    цепочку lineage. Если состояние пустое, а завершённые прогоны есть — печатает
+    предупреждение ``state_not_adopted`` с готовой командой: молчаливый полный краул
+    допустим, но обязан быть виден.
+    """
+    from core.pipeline.state_adopt import completed_runs, read_state_summary
+
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    db_path, package_id = _state_db_path(args)
+    summary = read_state_summary(db_path, package_id=package_id)
+    warnings = list(summary.warnings)
+    if summary.empty:
+        runs = completed_runs(_resolve_runs_dir(args), package_id)
+        if runs:
+            # Субстрат мог быть записан границей продукта, не дойдя до рубежей
+            # (``record_run_outcome``) — тогда «пусто» относится к рубежам, а не к данным,
+            # и это надо назвать, иначе счётчик «пусто» рядом с 53k чанков читается как ложь.
+            substrate_note = ""
+            if summary.substrate:
+                docs = sum(row.get("docs", 0) for row in summary.substrate.values())
+                chunks = sum(row.get("chunks", 0) for row in summary.substrate.values())
+                substrate_note = (
+                    f" Субстрат при этом непуст: docs={docs}, chunks={chunks} — "
+                    "принятие перенесёт его в рубежи."
+                )
+            warnings.append(
+                "state_not_adopted: durable состояние пакета пусто, а завершённые прогоны "
+                f"есть ({', '.join(item.run_id for item in runs[:3])}"
+                f"{'…' if len(runs) > 3 else ''}); следующий run --update сделает продукты "
+                "new (полный краул)."
+                + substrate_note
+                + " Готово к запуску: hound package state adopt "
+                f"--package {args.package} --actor <человек>"
+            )
+    payload = summary.as_dict()
+    payload["warnings"] = warnings
+    lines = [f"db: {summary.db}", f"exists: {'yes' if summary.exists else 'no'}"]
+    if summary.exists:
+        lines.append(f"schema_version: {summary.schema_version or '—'}")
+        lines.append(f"products: {len(summary.products)}")
+        for row in summary.products:
+            lines.append(
+                "  {product_id}\t{state}\tcorpus={corpus}\tevaluated={evaluated}\t"
+                "completed={completed}".format(
+                    product_id=row["product_id"],
+                    state=row["onboarding_state"],
+                    corpus=row["last_corpus_run_id"] or "—",
+                    evaluated=row["last_evaluated_run_id"] or "—",
+                    completed=row["last_completed_run_id"] or "—",
+                )
+            )
+        if summary.substrate:
+            lines.append("substrate: docs/chunks/partitions")
+            for pid in sorted(summary.substrate):
+                counts_row = summary.substrate[pid]
+                lines.append(
+                    f"  {pid}\tdocs={counts_row.get('docs', 0)}"
+                    f"\tchunks={counts_row.get('chunks', 0)}"
+                    f"\tpartitions={counts_row.get('partitions', 0)}"
+                )
+        else:
+            lines.append("substrate: (пусто)")
+        lines.append(f"snapshots: {len(summary.snapshots)}")
+        for row in summary.snapshots[:10]:
+            lines.append(
+                f"  {row['product_id']}\t{row['run_id']}\t{row['status']}\t"
+                f"scope={row['scope']}\tdocs={row['docs_total']}"
+            )
+        lines.append(f"lineage: {len(summary.lineage)}")
+        for row in summary.lineage[:10]:
+            lines.append(
+                f"  {row['run_id']}\tcycle={row['cycle_id']}\t{row['status']}\t"
+                f"prev={row['previous_run_id'] or '—'}\tchange={row['change_class'] or '—'}"
+            )
+        lines.append(
+            "counts: "
+            + " ".join(f"{key}={value}" for key, value in summary.counts.items())
+        )
+    for warning in warnings:
+        lines.append(f"warning: {warning}")
     _emit(args, payload, lines)
     return EXIT_OK
 

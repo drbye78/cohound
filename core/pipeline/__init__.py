@@ -167,6 +167,7 @@ from core.pipeline.package_admin import (
     list_modules,
     list_params,
     list_roles,
+    next_cohort_ref,
     remove_baseline,
     remove_module,
     remove_param,
@@ -236,6 +237,17 @@ from core.pipeline.package_scout import (
     build_seed_from_hypotheses,
     scout_package,
     write_scout_artifacts,
+)
+from core.pipeline.package_seeds import (
+    CORPUS_URLS_FORMAT,
+    SeedsExport,
+    SeedsOpResult,
+    product_seed_rows,
+    seeds_add,
+    seeds_disable,
+    seeds_enable,
+    seeds_export,
+    seeds_set_enabled,
 )
 from core.pipeline.passport_scout import (
     DISCOVERY_TEMPLATE_VERSION,
@@ -591,6 +603,7 @@ __all__ = [  # noqa: RUF022
     "get_scope_attestation",
     "set_cohort",
     "update_cohort",
+    "next_cohort_ref",
     "set_scope_attestation",
     "clear_scope_attestation",
     "get_cohort",
@@ -626,4 +639,14 @@ __all__ = [  # noqa: RUF022
     "scout_package",
     "build_seed_from_hypotheses",
     "write_scout_artifacts",
+    # package-seeds (авторский seed-набор, 09 §2.3/§7)
+    "CORPUS_URLS_FORMAT",
+    "SeedsOpResult",
+    "SeedsExport",
+    "product_seed_rows",
+    "seeds_add",
+    "seeds_set_enabled",
+    "seeds_enable",
+    "seeds_disable",
+    "seeds_export",
 ]

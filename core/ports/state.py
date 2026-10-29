@@ -22,6 +22,7 @@ from core.domain.enums import Gate, OnboardingState, SeedRole, SeedSource, SeedS
 from core.domain.models import ProfileAttestationRow, SeedEntry
 
 __all__ = [
+    "CellMeasurementRow",
     "ChunkRow",
     "DocumentVersionRow",
     "IndexCompositionRow",
@@ -170,6 +171,37 @@ class DocumentVersionRow:
     extract_pages_converted: int | None = None
     #: Сколько страниц заявлено документом (``None`` — не сообщено).
     extract_page_count: int | None = None
+
+
+@dataclass(frozen=True)
+class CellMeasurementRow:
+    """Строка ``cell_measurement``: индекс измерения ячейки для carry-forward (§4.2).
+
+    Ключ — ``(run_id, product_id, param_id)``. Строка называет **чем** измерено
+    (``prompt_hash``/``model_id``/``llm_scenario``/``index_build_id``/
+    ``partition_build_id``) и **против чего** (``doc_set_digest``/``coverage_digest``), то
+    есть служит ключом переноса вердикта: совпал ключ — вердикт переносим.
+
+    Поля ``catalog_row_digest``/``cell_reuse_key``/``evidence_digest`` заполняются
+    измерителем, а не импортом: у adoption их нет (``NULL`` — «не вычислено», не «пусто»).
+    """
+
+    run_id: str
+    product_id: str
+    param_id: str
+    state: str
+    measured_at: str
+    status: str | None = None
+    prompt_hash: str | None = None
+    model_id: str | None = None
+    llm_scenario: str | None = None
+    index_build_id: str | None = None
+    partition_build_id: str | None = None
+    doc_set_digest: str | None = None
+    coverage_digest: str | None = None
+    catalog_row_digest: str | None = None
+    cell_reuse_key: str | None = None
+    evidence_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -364,6 +396,22 @@ class ProductStatePort(Protocol):
 
     def iter_doc_chunks(self, doc_version_id: str) -> Iterable[ChunkRow]:
         """Чанки документа в порядке ``chunk_no`` (детерминированно)."""
+        ...
+
+    # -- измерения ячеек (carry-forward, 09 §4.2/§10.1) ------------------ #
+    def record_cell_measurements(self, rows: Sequence[CellMeasurementRow]) -> None:
+        """Создаёт/обновляет строки ``cell_measurement`` (идемпотентно по составному ключу).
+
+        Ключ — ``(run_id, product_id, param_id)``: повторная запись того же измерения
+        обновляет строку, а не плодит дубль. Строки с пустым ``param_id`` не
+        записываются (ключ измерения не выдумывается).
+        """
+        ...
+
+    def iter_cell_measurements(
+        self, product_id: str, *, run_id: str | None = None
+    ) -> Iterable[CellMeasurementRow]:
+        """Измерения продукта (все или только указанного прогона), по ``param_id``."""
         ...
 
     # -- индексные партиции/композиции (09 §8.1–§8.2) -------------------- #

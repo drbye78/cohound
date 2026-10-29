@@ -16,6 +16,19 @@
 * ``declined`` — файл есть, но **объявлен непригодным**: сверка не выполняется, а файл
   остаётся на месте — иначе оператор потерял бы данные, которые позже переделает.
 
+**Отдельный продукт без эталона** (``exempt_products``). ``golden.csv`` — общая таблица
+когорты, и «у этого продукта строк нет» было тем же молчанием, что и отсутствие файла:
+нельзя отличить «продукт новый, эталон для него ещё не размечали» от «строки потеряли».
+Поле ``exempt_products`` объявляет waiver **по продукту**: у него нет ни одной
+golden-строки, и это решение с причиной и автором, а не пропуск. Оно осмысленно при
+любом ``state`` (продукт может быть исключён и при ``present``), а линтер
+(``check_golden_coverage``) и отчёт (аномалия ``golden_exempt_product``) делают его
+видимым вместо того, чтобы считать отсутствие строк недочётом.
+
+В ``cohort_digest`` waiver **не входит** (``core.pipeline.digests``): это объявление об
+инструменте проверки, а не о составе когорты; иначе «эталона для продукта нет» меняло бы
+``run_id`` и рвало межцикловый diff.
+
 **Носитель объявления — файл пакета**, ``packages/{case_id}/sources/golden_status.yaml``,
 а не CLI-флаг: ось, заданная флагом, теряется в следующем вызове, и ``run_id``/артефакты
 перестают описывать, чем измеряли (``docs/architecture/12-cli-architecture-review.md``
@@ -27,6 +40,11 @@
     reason: "почему эталон не используется"   # обязателен при declined
     declined_by: analyst                       # обязателен при declined
     declined_at: '2026-10-27'                  # опционален
+    exempt_products:                           # опционален, при любом state
+      - product_id: product_slug
+        reason: "почему эталона для продукта нет"
+        declared_by: analyst
+        declared_at: '2026-10-27'              # опционален
 
 **Разбор** (:func:`read_golden_status`):
 
@@ -37,7 +55,12 @@
   либо убрать, либо объявить ``declined``;
 * ``state: declined`` без ``reason`` или без ``declined_by`` → ошибка: причина
   обязательна, иначе это тихий waiver, а он запрещён;
-* неизвестное состояние/ключ, чужой ``schema`` → ошибка.
+* запись ``exempt_products`` без ``product_id``/``reason``/``declared_by`` → ошибка: у
+  waiver по продукту та же причина запрета на молчание;
+* дубликат ``product_id`` в ``exempt_products`` → ошибка: два разных решения об одном
+  продукте неразрешимы;
+* неизвестное состояние/ключ (в том числе ключ внутри записи ``exempt_products``),
+  чужой ``schema`` → ошибка.
 
 Все ошибки — :class:`ValueError` с ведущим кодом ``golden_status.yaml:``: CLI печатает
 их как видимую ошибку пакета (``extract_code`` берёт ведущий токен), а не как ``error: E``.
@@ -50,9 +73,10 @@
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -65,6 +89,7 @@ __all__ = [
     "STATE_ABSENT",
     "STATE_DECLINED",
     "STATE_PRESENT",
+    "GoldenProductExemption",
     "GoldenState",
     "GoldenStatus",
     "golden_status_path",
@@ -97,11 +122,47 @@ STATE_DECLINED: GoldenState = "declined"
 
 #: Единственные допустимые ключи объявления (``extra="forbid"``-дисциплина домена).
 _ALLOWED_KEYS: frozenset[str] = frozenset(
-    {"schema", "state", "reason", "declined_by", "declined_at"}
+    {"schema", "state", "reason", "declined_by", "declined_at", "exempt_products"}
 )
 
 #: Ключи, осмысленные только при ``state: declined``.
 _DECLINE_KEYS: tuple[str, ...] = ("reason", "declined_by", "declined_at")
+
+#: Ключ объявления waiver'ов по продуктам (при любом ``state``).
+_EXEMPT_KEY = "exempt_products"
+
+#: Единственные допустимые ключи одной записи ``exempt_products``.
+_EXEMPT_KEYS: frozenset[str] = frozenset(
+    {"product_id", "reason", "declared_by", "declared_at"}
+)
+
+#: Обязательные поля записи waiver'а: без них объявление снова было бы молчанием.
+_EXEMPT_REQUIRED: tuple[str, ...] = ("product_id", "reason", "declared_by")
+
+
+@dataclass(frozen=True)
+class GoldenProductExemption:
+    """Объявленный waiver по одному продукту: эталона для него нет — и это решение.
+
+    :param product_id: продукт когорты, для которого golden-строк нет.
+    :param reason: почему эталона для продукта нет (обязателен: иначе тихий waiver).
+    :param declared_by: кто объявил (обязателен).
+    :param declared_at: дата объявления (опциональна), ISO-8601 ``YYYY-MM-DD``.
+    """
+
+    product_id: str
+    reason: str
+    declared_by: str
+    declared_at: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-совместимое представление одной записи."""
+        return {
+            "product_id": self.product_id,
+            "reason": self.reason,
+            "declared_by": self.declared_by,
+            "declared_at": self.declared_at,
+        }
 
 
 @dataclass(frozen=True)
@@ -118,6 +179,9 @@ class GoldenStatus:
     :param reason: причина непригодности (обязательна при ``declined``).
     :param declined_by: кто объявил непригодность (обязателен при ``declined``).
     :param declined_at: дата объявления (опциональна), ISO-8601 ``YYYY-MM-DD``.
+    :param exempt_products: объявленные waiver'ы по продуктам (``exempt_products``);
+        пустой кортеж — поле не задано. Порядок — как в файле (детерминизм разбора);
+        потребители сортируют сами.
     """
 
     state: GoldenState
@@ -126,11 +190,17 @@ class GoldenStatus:
     reason: str | None = None
     declined_by: str | None = None
     declined_at: str | None = None
+    exempt_products: tuple[GoldenProductExemption, ...] = ()
 
     @property
     def comparison_available(self) -> bool:
         """Можно ли сверять прогон с эталоном (только ``present``)."""
         return self.state == STATE_PRESENT
+
+    @property
+    def exempt_ids(self) -> frozenset[str]:
+        """Продукты с объявленным waiver'ом — множество ``product_id``."""
+        return frozenset(entry.product_id for entry in self.exempt_products)
 
     def describe(self) -> str:
         """Человекочитаемое состояние — для ``plan``/линтера/``hound golden``."""
@@ -163,6 +233,7 @@ class GoldenStatus:
             "reason": self.reason,
             "declined_by": self.declined_by,
             "declined_at": self.declined_at,
+            "exempt_products": [entry.as_dict() for entry in self.exempt_products],
         }
 
 
@@ -184,7 +255,7 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
-def _declined_at(value: Any, path: Path) -> str | None:
+def _declined_at(value: Any, path: Path, *, key: str = "declined_at") -> str | None:
     """Дата объявления в ISO-8601; ``date`` (YAML-скаляр) и ``str`` равнозначны."""
     if value is None:
         return None
@@ -200,8 +271,76 @@ def _declined_at(value: Any, path: Path) -> str | None:
     except ValueError as exc:
         raise _error(
             path,
-            f"declined_at={text!r} не является датой ISO-8601 (YYYY-MM-DD)",
+            f"{key}={text!r} не является датой ISO-8601 (YYYY-MM-DD)",
         ) from exc
+
+
+def _exempt_products(value: Any, path: Path) -> tuple[GoldenProductExemption, ...]:
+    """Разбирает ``exempt_products`` — waiver'ы по продуктам (при любом ``state``).
+
+    Отсутствие поля — пустой кортеж (обратная совместимость файлов без него). Каждая
+    запись строгая: неизвестный ключ, не-словарь, пустые ``product_id``/``reason``/
+    ``declared_by`` и дубликат ``product_id`` — видимая ошибка пакета. Причина та же, что
+    у ``declined``: waiver без причины и автора был бы молчанием, а молчание здесь
+    запрещено — иначе «строки потеряли» неотличимо от «эталона для продукта нет».
+
+    :raises ValueError: ``exempt_products`` не список; элемент не словарь; неизвестный
+        ключ записи; пустое обязательное поле; дубликат ``product_id``;
+        ``declared_at`` не ISO-дата.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise _error(
+            path,
+            f"{_EXEMPT_KEY} обязан быть списком записей, получено "
+            f"{type(value).__name__}",
+        )
+    entries: list[GoldenProductExemption] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value, start=1):
+        where = f"{_EXEMPT_KEY}[{index}]"
+        if not isinstance(raw, Mapping):
+            raise _error(
+                path,
+                f"{where} обязан быть словарём, получено {type(raw).__name__}",
+            )
+        unknown = sorted(str(key) for key in raw if key not in _EXEMPT_KEYS)
+        if unknown:
+            raise _error(
+                path,
+                f"{where}: неизвестные ключи {unknown}; допустимы "
+                f"{sorted(_EXEMPT_KEYS)}",
+            )
+        fields = {name: _text(raw.get(name)) for name in _EXEMPT_REQUIRED}
+        missing = [name for name, text in fields.items() if text is None]
+        if missing:
+            raise _error(
+                path,
+                f"{where} требует {missing}: waiver без продукта, причины и автора — "
+                "тихий waiver, а он запрещён",
+            )
+        # ``cast`` — сужение типа после проверки ``missing`` (mypy не выводит его из
+        # списка имён); значения непусты, иначе ветка выше уже подняла ошибку.
+        product_id = cast(str, fields["product_id"])
+        if product_id in seen:
+            raise _error(
+                path,
+                f"{_EXEMPT_KEY}: продукт {product_id!r} объявлен дважды — два решения "
+                "об одном продукте неразрешимы",
+            )
+        seen.add(product_id)
+        entries.append(
+            GoldenProductExemption(
+                product_id=product_id,
+                reason=cast(str, fields["reason"]),
+                declared_by=cast(str, fields["declared_by"]),
+                declared_at=_declined_at(
+                    raw.get("declared_at"), path, key=f"{where}.declared_at"
+                ),
+            )
+        )
+    return tuple(entries)
 
 
 def _derived(file_present: bool) -> GoldenStatus:
@@ -224,7 +363,9 @@ def read_golden_status(package_dir: str | Path) -> GoldenStatus:
     :raises ValueError: файл не читается/не YAML-словарь; схема не та; состояние
         неизвестно; ``present`` без файла; ``absent`` при файле; ``declined`` без
         ``reason``/``declined_by``; ``reason``/``declined_by``/``declined_at`` при
-        не-``declined`` состоянии; ``declined_at`` не ISO-дата.
+        не-``declined`` состоянии; ``declined_at`` не ISO-дата; запись
+        ``exempt_products`` без ``product_id``/``reason``/``declared_by``, с неизвестным
+        ключом, не-словарём или дубликатом ``product_id``.
     """
     base = Path(package_dir)
     file_present = (base / GOLDEN_FILE).is_file()
@@ -275,6 +416,10 @@ def read_golden_status(package_dir: str | Path) -> GoldenStatus:
     reason = _text(data.get("reason"))
     declined_by = _text(data.get("declined_by"))
     declined_at = _declined_at(data.get("declined_at"), path)
+    # Waiver'ы по продуктам читаются до проверок состояния: поле осмысленно при любом
+    # ``state`` (продукт может быть исключён и при ``present``), а ошибка в записи — ошибка
+    # пакета независимо от того, годится ли набор целиком.
+    exempt_products = _exempt_products(data.get(_EXEMPT_KEY), path)
 
     if state == STATE_PRESENT and not file_present:
         raise _error(
@@ -324,4 +469,5 @@ def read_golden_status(package_dir: str | Path) -> GoldenStatus:
         reason=reason,
         declined_by=declined_by,
         declined_at=declined_at,
+        exempt_products=exempt_products,
     )

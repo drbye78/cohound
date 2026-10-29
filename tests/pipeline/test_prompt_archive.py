@@ -38,6 +38,7 @@ from tests.fakes.ports import FakeEvaluator
 from tests.pipeline.test_evaluate import (
     _chunks,
     _data,
+    _eval_conditions,
     _ok_output,
     _param,
     _ScriptedEvaluator,
@@ -225,6 +226,7 @@ def test_cache_hit_writes_no_prompt(tmp_path: Path) -> None:
         evaluator=first_evaluator,
         chunks=_chunks(data),
         eval_cache=cache,
+        eval_conditions=_eval_conditions(),
         prompt_archive=archive,
     )
     assert archive.saved == 1
@@ -238,6 +240,7 @@ def test_cache_hit_writes_no_prompt(tmp_path: Path) -> None:
         evaluator=second_evaluator,
         chunks=_chunks(data),
         eval_cache=cache,
+        eval_conditions=_eval_conditions(),
         prompt_archive=second_archive,
     )
 

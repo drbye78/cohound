@@ -56,7 +56,7 @@ from core.pipeline.crawl_probe import (
     render_profiles_with_verdicts,
 )
 from core.pipeline.crawl_probe_driver import ProbePorts, run_probe
-from core.pipeline.package_admin import bump_version
+from core.pipeline.package_admin import bump_version, get_run_config
 from core.pipeline.package_candidates import Candidate, apply_candidate
 from core.pipeline.package_io import atomic_write_text, load_artifacts
 from core.pipeline.scout_common import dedupe, url_allowed
@@ -1420,6 +1420,12 @@ def apply_add_product(
     в когорту, а ``sources/seeds.yaml`` получает ``state: pending_seeds``/``seeds: []``:
     следующий ``run`` обязан заблокироваться, а не «тихо» измерить пустой корпус.
 
+    Запись когорты двигает **ревизию состава** (§2.1 п. 4): ``cohort.yaml: frozen_at`` ←
+    дата онбординга (``snapshot``) и ``run.yaml: cohort_ref`` ← ``cohort-{case}-{дата}-r{n}``
+    (:func:`core.pipeline.package_admin.next_cohort_ref`). Ревизия видна и в review-артефакте
+    (``apply[].cohort_ref``), а не только в ``run.yaml``; повторный ``--apply`` того же
+    продукта — no-op и ревизию не двигает.
+
     :raises AddProductError: нет ``actor``/``selection_reason``, seed не привязан к
         профилю, invalid профили (запись не начинается).
     """
@@ -1522,7 +1528,8 @@ def apply_add_product(
         bump = bump_version(pkg, level="minor", actor=actor)
         written.extend(str(path) for path in bump.written)
 
-    # 4. Когорта (update_cohort также синхронизирует run.yaml products/anchor).
+    # 4. Когорта (update_cohort также синхронизирует run.yaml products/anchor и двигает
+    #    ревизию состава: frozen_at = дата онбординга, cohort_ref = ...-r{n}).
     if plan.product_id in existing_ids:
         cohort_result["noop"] = True
     else:
@@ -1536,6 +1543,7 @@ def apply_add_product(
             ),
             actor=actor,
             dry_run=False,
+            frozen_at=snapshot,
         )
         cohort_result = {
             "changed": True,
@@ -1545,6 +1553,10 @@ def apply_add_product(
             "warnings": list(result.warnings),
         }
         written.extend(str(path) for path in result.written)
+    # Ревизия состава читается с диска (после noop — прежняя): факт смены когорты обязан
+    # быть виден в review-артефакте, а не только в ``run.yaml``.
+    run_after = get_run_config(pkg)
+    cohort_ref = run_after.cohort_ref if run_after is not None else None
 
     # 5. Черновик паспорта (опционально).
     if write_passport:
@@ -1579,6 +1591,9 @@ def apply_add_product(
         {
             "actor": actor,
             "cohort": cohort_result,
+            # Ревизия состава на момент записи (``run.yaml: cohort_ref``): noop-повтор
+            # сохраняет прежнюю, фактическое добавление даёт новую ``...-r{n}``.
+            "cohort_ref": cohort_ref,
             "profiles_changed": profiles_changed,
             "new_profile_keys": new_keys,
             "passport_written": bool(write_passport),
@@ -1589,6 +1604,9 @@ def apply_add_product(
     artifact = {
         **plan.as_dict(),
         "seed_plan": [dict(seed) for seed in plan.seeds],
+        # Ревизия состава после записи (``run.yaml: cohort_ref``): провенанс виден в самом
+        # review-артефакте, а не только в конфиге прогона.
+        "cohort_ref": cohort_ref,
         "onboarding": {
             "state": onboarding_state.value,
             "missing": list(onboarding_missing),
@@ -1610,6 +1628,7 @@ def apply_add_product(
         "onboarding_missing": list(onboarding_missing),
         "needs_human": dedupe([*plan.needs_human, *onboarding_missing]),
         "cohort": cohort_result,
+        "cohort_ref": cohort_ref,
         "profiles_changed": profiles_changed,
         "new_profile_keys": new_keys,
         "seeds": [dict(seed) for seed in plan.seeds],

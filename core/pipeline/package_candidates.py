@@ -213,9 +213,14 @@ def apply_candidate(
     *,
     actor: str,
     dry_run: bool = False,
+    frozen_at: Any = None,
 ) -> OpResult:
     """Единственная точка превращения кандидата в факт (человеческий шлюз, I6/I7).
 
+    :param frozen_at: дата фиксации состава когорты (дата онбординга) для кандидатов
+        ``cohort_member``; ``None`` → сегодня. Проброс в
+        :func:`~core.pipeline.package_admin.update_cohort`, который двигает ревизию
+        состава (``run.yaml: cohort_ref``); для прочих видов кандидатов не используется.
     :raises PackageAdminError: без непустого ``actor`` (``code="actor_required"``),
         неизвестный ``kind`` или блокировка проспективным линтом (``kind="blocked"``).
     """
@@ -293,7 +298,13 @@ def apply_candidate(
                 "anchor_relation": payload.get("anchor_relation", "analog"),
             }
         )
-        return _admin.update_cohort(package_dir, {"entries": entries}, actor=actor, dry_run=dry_run)
+        return _admin.update_cohort(
+            package_dir,
+            {"entries": entries},
+            actor=actor,
+            dry_run=dry_run,
+            frozen_at=frozen_at,
+        )
 
     raise PackageAdminError(
         f"неизвестный kind кандидата: {candidate.kind!r}", code="candidate", kind="usage"

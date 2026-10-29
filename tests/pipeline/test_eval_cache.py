@@ -25,9 +25,11 @@ from core.domain import (
     Cell,
     CellState,
     Focus,
+    Importance,
     LLMCellOutput,
     LLMEvidence,
     RunConfig,
+    RunManifest,
     RunMode,
     Satellite,
     SatelliteState,
@@ -36,14 +38,19 @@ from core.domain import (
     check_unknown_exhaustion,
 )
 from core.domain.anchors import ResolvedSource
+from core.domain.scoring import scoring_policy_spec
 from core.pipeline.eval_cache import (
     ENVELOPE_FORMAT,
     EVAL_CACHE_FORMAT,
+    EvalConditions,
     EvalVerdictCache,
     build_eval_key,
+    catalog_row_digest,
+    eval_conditions_from_run,
 )
 from core.pipeline.evaluate import evaluate_cell
 from core.pipeline.prompt import compile_prompt
+from core.pipeline.retrieve import RetrievalResult
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
 from tests.pipeline.test_evaluate import (
@@ -52,6 +59,7 @@ from tests.pipeline.test_evaluate import (
     _chunks,
     _coverage,
     _data,
+    _eval_conditions,
     _ok_output,
     _param,
     _RecordingStore,
@@ -64,9 +72,33 @@ from tests.pipeline.test_evaluate import (
 
 
 def _echo(**overrides: object) -> dict:
-    """Полный ``echo`` ключа (поля совпадают с ``evaluate_cell``)."""
+    """Полный ``echo`` ключа (поля совпадают с ``evaluate_cell``, формат 2)."""
     echo: dict = {
         "format": EVAL_CACHE_FORMAT,
+        "schema": EVAL_SCHEMA_VERSION,
+        "template": "evaluator_v1",
+        "prompt_sha256": content_hash("rendered prompt"),
+        "prompt_hash": "ph",
+        "model_id": "fake-model",
+        "model_version": "1.0",
+        "seed": 0,
+        "temperature": 0.0,
+        "decoder": "none",
+        "endpoint_kind": "",
+        "max_retries": 2,
+        **_eval_conditions().as_echo(),
+        "catalog_row_digest": catalog_row_digest(_param(_data())),
+        "retrieval_profile": "R1",
+        "cutoff_K": 8,
+    }
+    echo.update(overrides)
+    return echo
+
+
+def _echo_v1(**overrides: object) -> dict:
+    """``echo`` формата 1 — набор полей **до** §10.5 (методологии в ключе не было)."""
+    echo: dict = {
+        "format": 1,
         "schema": EVAL_SCHEMA_VERSION,
         "template": "evaluator_v1",
         "prompt_sha256": content_hash("rendered prompt"),
@@ -115,6 +147,9 @@ def _evaluate(data: dict, evaluator, cache, **kwargs):  # noqa: ANN001, ANN003
     product_id = kwargs.pop("product_id", data["product_id"])
     run_id = kwargs.pop("run_id", data["run_id"])
     chunks = kwargs.pop("chunks", _chunks(data))
+    # 09 §10.5: кэш без объявленных условий запрещён — условия по умолчанию те же, что у
+    # живого прогона; тесты инвалидации переопределяют конкретное поле.
+    kwargs.setdefault("eval_conditions", _eval_conditions())
     return evaluate_cell(
         param=param,
         product_id=product_id,
@@ -564,6 +599,217 @@ def test_evaluator_config_change_busts_key(
     _evaluate(data, evaluator, cache)
 
     assert len(evaluator.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# 09 §10.5: методологические условия в ключе
+# ---------------------------------------------------------------------------
+
+
+def test_eval_cache_format_two_is_pinned() -> None:
+    """Формат пространства ключей — 2: методологические условия входят в ключ.
+
+    Формат 1 ключевал вердикт промптом и моделью; смена правил (политика расчёта,
+    словарь статусов, строка каталога) не инвалидировала его, и кэш мог вернуть вердикт,
+    посчитанный по старым правилам. Понижение версии без возврата поля в ключ — тот же
+    дефект, поэтому значение пинится.
+    """
+    assert EVAL_CACHE_FORMAT == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("methodology_version", "0.2.0"),
+        ("status_dict_version", "2.3.0"),
+        ("status_dict_version", None),
+        ("capability_policy", "resolved-only-v2"),
+        ("unknown_policy", "unknown_as_zero"),
+        ("partial_score", 0.75),
+        ("catalog_row_digest", "0" * 32),
+        ("retrieval_profile", "R2"),
+        ("cutoff_K", 16),
+        ("max_retries", 0),
+    ],
+)
+def test_every_methodological_field_changes_the_key(
+    field: str, value: object
+) -> None:
+    """Каждое новое поле ключа меняет ключ: забытое поле = ложный хит.
+
+    Параметризация по **именам полей** ``echo``, а не копии теста: набор полей ключа —
+    контракт, и новый поле-без-теста здесь обязано быть заметно.
+    """
+    assert build_eval_key(_echo(**{field: value})) != build_eval_key(_echo())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("methodology_version", "0.2.0"),
+        ("status_dict_version", "2.3.0"),
+        ("capability_policy", "resolved-only-v2"),
+        ("unknown_policy", "unknown_as_zero"),
+        ("partial_score", 0.75),
+    ],
+)
+def test_methodological_conditions_change_busts_key_on_evaluate(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """Промпт тот же, правила другие ⇒ **не** хит: вердикт посчитан по другим правилам.
+
+    Это и есть дефект §10.5 в его исходном виде: текста промпта достаточно, чтобы ключ
+    совпал, и кэш отдавал вердикт, посчитанный по прежней методологии.
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    cache = EvalVerdictCache(tmp_path / "cache")
+
+    _evaluate(data, evaluator, cache)
+    _evaluate(data, evaluator, cache, eval_conditions=_eval_conditions(**{field: value}))
+
+    assert len(evaluator.calls) == 2
+    assert cache.stats()["hits"] == 0
+
+
+def test_catalog_row_change_busts_key_with_equal_prompt(tmp_path: Path) -> None:
+    """Строка каталога в ключе: ``importance`` не входит в текст промпта, но задаёт вес.
+
+    ``prompt_hash`` при такой правке не меняется — ровно поэтому дайджест строки каталога
+    входит в ключ отдельным полем, а не выводится из текста промпта.
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    cache = EvalVerdictCache(tmp_path / "cache")
+    changed = _param(data).model_copy(update={"importance": Importance.OPTIONAL})
+
+    _evaluate(data, evaluator, cache)
+    _assert_prompt_hash_equal(data, param=changed)
+    _evaluate(data, evaluator, cache, param=changed)
+
+    assert len(evaluator.calls) == 2
+    assert catalog_row_digest(changed) != catalog_row_digest(_param(data))
+
+
+def test_retrieval_conditions_change_busts_key(tmp_path: Path) -> None:
+    """Профиль/K ретривала — условие ключа (I16/I20), а не только провенанс ячейки.
+
+    Срез мог совпасть байт-в-байт (те же чанки), но вердикт получен под другим профилем:
+    переиспользовать его как «измерение под R0» значило бы приписать вердикт условию,
+    которого не было.
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    cache = EvalVerdictCache(tmp_path / "cache")
+    under_r1 = RetrievalResult(profile="R1", cutoff_K=8, build_id="build-1")
+    under_r0 = RetrievalResult(profile="R0", cutoff_K=8, build_id="build-1")
+
+    _evaluate(data, evaluator, cache, retrievals=under_r1)
+    _evaluate(data, evaluator, cache, retrievals=under_r0)
+
+    assert len(evaluator.calls) == 2
+
+
+def test_format_1_envelope_is_miss_not_hit(tmp_path: Path) -> None:
+    """Конверт формата 1 — промах, а не хит: старый вердикт не переживает смену правил.
+
+    Совпадения ключа быть не может (``format`` входит в материал), поэтому проверяются
+    оба пути: старый ключ с новым ``echo`` и новый ключ, которого на диске нет.
+    """
+    cache = EvalVerdictCache(tmp_path / "cache")
+    old_echo = _echo_v1()
+    old_key = build_eval_key(old_echo)
+    cache.put(old_key, _unknown_output("старый вердикт"), echo=old_echo)
+
+    new_echo = _echo()
+    new_key = build_eval_key(new_echo)
+    assert new_key != old_key
+
+    assert cache.get(old_key, echo=new_echo) is None  # рассинхрон echo
+    assert cache.get(new_key, echo=new_echo) is None  # записи под новым ключом нет
+    assert cache.stats()["hits"] == 0
+    assert cache.stats()["misses"] == 2
+
+
+def test_cache_without_conditions_is_refused(tmp_path: Path) -> None:
+    """Кэш без объявленных условий — отказ, а не тихий неполный ключ.
+
+    Молчаливая работа с неполным ключом выглядела бы как работающий кэш: промах-каждый-раз
+    не отличим от корректного кэша по внешнему поведению, а хит при смене правил —
+    неотличим от верного вердикта.
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    cache = EvalVerdictCache(tmp_path / "cache")
+
+    with pytest.raises(ValueError, match="eval_conditions"):
+        _evaluate(data, evaluator, cache, eval_conditions=None)
+    assert cache.stats()["writes"] == 0
+    assert evaluator.calls == []
+
+
+def test_manifest_scoring_defaults_match_declared_policy() -> None:
+    """Дефолты манифеста совпадают с объявленной политикой §6 — иначе провенанс лжёт.
+
+    Домен не может импортировать ``scoring`` из ``models`` (направление зависимости
+    обратное), поэтому совпадение держится не комментарием, а этим тестом: смена правил в
+    одном месте без другого сделала бы манифест записью о других правилах.
+    """
+    declared = scoring_policy_spec()
+    defaults = RunManifest.model_fields
+    assert defaults["capability_policy"].default == declared["capability_policy"]
+    assert defaults["unknown_policy"].default == declared["unknown_policy"]
+    assert defaults["partial_score"].default == declared["partial_score"]
+
+
+def test_conditions_from_run_carry_declared_inputs() -> None:
+    """Условия оценки — функция объявленного входа, а не константа рядом с кэшем.
+
+    ``methodology_version`` берётся из ``RunConfig`` (``run.yaml``), версия словаря
+    статусов — из того же резолва, что уходит в контракт/манифест. Поэтому смена
+    ``methodology_version`` в ``run.yaml`` меняет ключ, а не только манифест.
+    """
+    base = eval_conditions_from_run(_run_config(), status_dict_version="2.2.0")
+    assert base.methodology_version == _run_config().methodology_version
+    assert base.status_dict_version == "2.2.0"
+
+    changed_run = _run_config().model_copy(update={"methodology_version": "9.9.9"})
+    changed = eval_conditions_from_run(changed_run, status_dict_version="2.2.0")
+    assert changed.methodology_version == "9.9.9"
+    assert changed.as_echo()["methodology_version"] != base.as_echo()[
+        "methodology_version"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("methodology_version", ""),
+        ("capability_policy", "  "),
+        ("unknown_policy", ""),
+        ("status_dict_version", ""),
+        ("partial_score", 1.5),
+    ],
+)
+def test_conditions_refuse_empty_or_out_of_range_values(
+    field: str, value: object
+) -> None:
+    """Пустое/невозможное значение — отказ, а не поле «на всякий случай».
+
+    Поле, которое всегда пустое, ложно свидетельствует, что оно учтено в ключе: ключ
+    тогда не меняется там, где условия изменились.
+    """
+    base: dict = {
+        "methodology_version": "0.1.0",
+        "status_dict_version": "2.2.0",
+        "capability_policy": "resolved-only-v1",
+        "unknown_policy": "excluded",
+        "partial_score": 0.5,
+    }
+    base[field] = value
+    with pytest.raises(ValueError):
+        EvalConditions(**base)
+
 
 
 # ---------------------------------------------------------------------------

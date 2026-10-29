@@ -78,8 +78,10 @@ from core.domain.invariants import check_absence_coverage
 from core.domain.models import absence_evidence_id
 from core.pipeline.eval_cache import (
     EVAL_CACHE_FORMAT,
+    EvalConditions,
     EvalVerdictCache,
     build_eval_key,
+    catalog_row_digest,
 )
 from core.pipeline.exhaustion import ExhaustionFacts, build_protocols
 from core.pipeline.precedence import (
@@ -539,6 +541,26 @@ def _provenance(
         sort_keys=True,
     )
     return build_id, (first.profile or None), params
+
+
+def _retrieval_key_conditions(
+    retrievals: RetrievalResult | Sequence[RetrievalResult] | None,
+) -> tuple[str | None, int | None]:
+    """``(retrieval_profile, cutoff_K)`` среза — условия ключа кэша вердиктов (I16/I20).
+
+    Берутся из **провенанса** ретривала, а не из аргументов фазы: ключ обязан описывать
+    тот профиль/K, под которым фактически получен переданный срез. ``None`` у профиля —
+    «вызывающий провенанс не передал»: это отличимо от любого объявленного профиля и
+    даёт промах при сравнении с прогоном, где провенанс есть (безопасное направление —
+    лишний промах, а не чужой вердикт).
+    """
+    if retrievals is None:
+        return None, None
+    items = [retrievals] if isinstance(retrievals, RetrievalResult) else list(retrievals)
+    if not items:
+        return None, None
+    first = items[0]
+    return (first.profile or None), int(first.cutoff_K)
 
 
 # ---------------------------------------------------------------------------
@@ -1835,6 +1857,7 @@ def evaluate_cell(
     scope_acceptance: str | None = None,
     extra_instructions: str = "",
     eval_cache: EvalVerdictCache | None = None,
+    eval_conditions: EvalConditions | None = None,
     scope_attested_by: str | None = None,
     prompt_archive: PromptArchive | None = None,
 ) -> EvaluationOutcome:
@@ -1870,6 +1893,12 @@ def evaluate_cell(
         ``None`` ⇒ кэш выключен (поведение байт-в-байт прежнее). Хит отдаёт
         ``LLMCellOutput`` и проходит **весь** существующий эшелон заново; кэшируется
         только успешно провалидированный живой ответ.
+    :param eval_conditions: объявленные методологические условия вердикта
+        (:class:`EvalConditions`: ``methodology_version``, ``status_dict_version``,
+        политика расчёта §6). **Обязательны при включённом кэше**: без них ключ описывал
+        бы промпт и модель, но не правила ответа, и кэш мог бы вернуть вердикт,
+        посчитанный по старым правилам (09 §10.5). ``None`` допустим только при
+        ``eval_cache=None``; иначе — :class:`ValueError`, а не тихий промах-каждый-раз.
     :param scope_attested_by: deprecated-алиас ``scope_acceptance`` (прежнее имя).
         Принят, чтобы вызывающие, объявляющие подпись старым именем, не ломались на
         переименовании; смысл — тот же (принятие риска, не аттестация полноты).
@@ -1928,14 +1957,27 @@ def evaluate_cell(
         temperature=getattr(evaluator, "temperature", None),
     )
 
-    # Ключ кэша вердиктов: **отрендеренный** текст промпта + конфигурация оценщика.
-    # ``prompt_hash`` (§5) входит ради аудита, но не является ключом: он не покрывает
+    # Ключ кэша вердиктов: **отрендеренный** текст промпта, конфигурация оценщика и
+    # правила, по которым вердикт считается (09 §10.5). ``prompt_hash`` (§5) входит ради
+    # аудита, но не является ключом: он не покрывает
     # product/title/satellites/extra_instructions/текст чанков. ``run_id``/``build_id``/
-    # ``retrieval_profile``/``cutoff_k``/``strict``/coverage/resolver намеренно вне ключа:
-    # они либо уже отражены в тексте (какие чанки попали), либо пере-исполняются на хите.
+    # ``strict``/coverage/resolver/прецедент намеренно вне ключа: они либо не меняют
+    # вердикт, либо пере-исполняются на хите. Методологические условия — **в** ключе:
+    # смена правил меняет вердикт, не меняя промпта.
     eval_echo: dict[str, Any] | None = None
     eval_key: str | None = None
     if eval_cache is not None:
+        if eval_conditions is None:
+            # Кэш без объявленных условий — тот самый дефект §10.5: ключ описывал бы
+            # промпт и модель, но не правила ответа. Отказ громкий: тихий промах-каждый-раз
+            # выглядел бы как «кэш работает», а кэш с неполным ключом — как «кэш работает
+            # правильно».
+            raise ValueError(
+                "eval_cache требует объявленных условий оценки (eval_conditions): "
+                "ключ без methodology_version/status_dict_version/политики расчёта "
+                "обслуживал бы вердикт, посчитанный по старым правилам (09 §10.5)"
+            )
+        retrieval_profile, retrieval_cutoff = _retrieval_key_conditions(retrievals)
         eval_echo = {
             "format": EVAL_CACHE_FORMAT,
             "schema": EVAL_SCHEMA_VERSION,
@@ -1948,6 +1990,17 @@ def evaluate_cell(
             "temperature": request.temperature,
             "decoder": getattr(evaluator, "decoder", "none"),
             "endpoint_kind": getattr(evaluator, "endpoint_kind", ""),
+            # V3: повтор переиздаёт запрос, значит «первый валидный ответ» зависит от
+            # политики повтора — она входит в условия, а не остаётся за ключом.
+            "max_retries": max_retries,
+            **eval_conditions.as_echo(),
+            # Строка каталога: rule/absence_rule/param_type/role_binding/… задают, что
+            # считается заявленным, а что отсутствием. Дайджест всей строки — чтобы не
+            # поддерживать вручную перечень «влияющих» полей.
+            "catalog_row_digest": catalog_row_digest(param),
+            # I16/I20: профиль и K среза — из провенанса ретривала, не пересчитываются.
+            "retrieval_profile": retrieval_profile,
+            "cutoff_K": retrieval_cutoff,
         }
         eval_key = build_eval_key(eval_echo)
 
@@ -2261,6 +2314,7 @@ def evaluate_batch(
     scope_acceptance: str | None = None,
     extra_instructions: str = "",
     eval_cache: EvalVerdictCache | None = None,
+    eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
     """Прогоняет :func:`evaluate_cell` по параметрам с изоляцией сбоев (§A.1).
@@ -2301,6 +2355,7 @@ def evaluate_batch(
             scope_acceptance=scope_acceptance,
             extra_instructions=extra_instructions,
             eval_cache=eval_cache,
+            eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
         )
 
@@ -2320,6 +2375,7 @@ def evaluate_phase(
     strict: bool = True,
     scope_acceptance: str | Mapping[str, str] | None = None,
     eval_cache: EvalVerdictCache | None = None,
+    eval_conditions: EvalConditions | None = None,
     exhaustion_facts: ExhaustionFacts | None = None,
     scope_attested_by: str | Mapping[str, str] | None = None,
     prompt_dir: str | Path | None = None,
@@ -2364,6 +2420,11 @@ def evaluate_phase(
     :param eval_cache: межпрогонный кэш сырых вердиктов оценщика; ``None`` ⇒ выключен
         (поведение байт-в-байт). Хит проходит все пост-шаги (валидация, класс отрицания,
         прецедент) заново — кэшируется только ``LLMCellOutput``, не ``Cell``.
+    :param eval_conditions: объявленные методологические условия вердикта
+        (:class:`~core.pipeline.eval_cache.EvalConditions`); обязательны при включённом
+        кэше. Composition root строит их из объявленных входов
+        (:func:`~core.pipeline.eval_cache.eval_conditions_from_run`), фаза не догадывается
+        о версиях: ``None`` при ``eval_cache is not None`` — отказ, а не тихий неполный ключ.
     :param scope_attested_by: deprecated-алиас ``scope_acceptance`` (прежнее имя).
     :param exhaustion_facts: наблюдённые факты других фаз (какие контуры реально
         исполнились, раунды/бюджет SERP). ``None`` ⇒ протоколы не пишутся (прежнее
@@ -2600,6 +2661,7 @@ def evaluate_phase(
             coverage=coverage,
             scope_acceptance=accepted,
             eval_cache=eval_cache,
+            eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
         )
         cells.extend(outcome.cell for outcome in outcomes)
@@ -2985,6 +3047,7 @@ def reevaluate_stale(
     resolver: SourceResolver | None = None,
     strict: bool = True,
     eval_cache: EvalVerdictCache | None = None,
+    eval_conditions: EvalConditions | None = None,
     max_retries: int = 2,
     product_ids: Sequence[str] | None = None,
     param_ids: Sequence[str] | None = None,
@@ -3021,6 +3084,9 @@ def reevaluate_stale(
         ``runs.index_build_id``. Не объявлена — пере-оценка **отказывается** работать:
         снимать пометку «описывает прошлую сборку» не на что.
     :param max_retries: повторы вызова оценщика (как в фазе, §7.1).
+    :param eval_cache: межпрогонный кэш вердиктов; ``None`` ⇒ выключен.
+    :param eval_conditions: объявленные методологические условия вердикта; обязательны
+        при включённом кэше (09 §10.5), как и в фазе Ш6.
     """
     selection = select_stale_cells(
         store, run_id, product_ids=product_ids, param_ids=param_ids
@@ -3163,6 +3229,7 @@ def reevaluate_stale(
                     coverage=coverage,
                     scope_acceptance=_accepted_risk(cell),
                     eval_cache=eval_cache,
+                    eval_conditions=eval_conditions,
                     prompt_archive=prompt_archive,
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы

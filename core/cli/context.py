@@ -100,7 +100,7 @@ from core.pipeline.profile_attestation import (
 from core.pipeline.review import ReviewItem, review_queue
 from core.pipeline.runner import GateRuntime, PhaseFn
 from core.ports.gateway import ContentGateway
-from core.ports.store import StorePort
+from core.ports.store import PlanInputsConflict, StorePort
 from core.ports.types import FetchMode
 from core.util.cache import ContentAddressedCache
 from core.util.logging import PhaseLogger
@@ -399,6 +399,11 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []
+        ),
+        # §11.6: продукты с объявленным waiver'ом эталона — видно в артефактах прогона,
+        # а не только в файле пакета.
+        "golden_exempt_products": list(
+            getattr(artifacts, "golden_exempt_products", None) or []
         ),
     }
 
@@ -701,7 +706,10 @@ def _snapshot_run_inputs(
 
     * ``run_inputs`` (БД, P1) — **источник истины** самодостаточности ``runs/{run_id}``:
       пост-хок команды восстанавливают каталог/веса/когорту без исходного пакета и без
-      side-файла (``StorePort.save_plan_inputs``; дайджест — :func:`_plan_inputs_sha256`);
+      side-файла (``StorePort.save_plan_inputs``; дайджест — :func:`_plan_inputs_sha256`).
+      Снимок **иммутабелен** (O11, 09 §3.3): идентичный повтор — no-op, расхождение
+      ``payload_sha256`` — отказ (``PlanInputsConflict``), а не перезапись: расхождение
+      означает другой прогон, и виден он в ``issues``, а не тишиной;
     * ``run.yaml`` — **иммутабельная копия** входа (байт-в-байт); существующий
       отличающийся файл **не** перезаписывается (иначе мутировал бы завершённый
       прогон), идентичный — оставляется как есть;
@@ -725,6 +733,18 @@ def _snapshot_run_inputs(
         try:
             store.save_plan_inputs(
                 run_id, payload=payload, payload_sha256=_plan_inputs_sha256(payload)
+            )
+        except PlanInputsConflict as exc:
+            # O11 (09 §3.3): снимок — идентичность прогона. Расхождение дайджеста не
+            # перезаписывается и не подменяет код возврата: строка называет оба хеша и
+            # решение (новый run_id), иначе завершённый прогон стал бы неотличим от
+            # неисполнявшегося.
+            issues.append(
+                f"snapshot: run_inputs_conflict: run_id={exc.run_id};"
+                f" сохранённый sha256={exc.stored_sha256};"
+                f" предъявленный sha256={exc.incoming_sha256};"
+                " снимок входов иммутабелен — нужен новый run_id, а не перезапись"
+                " (O11, 09 §3.3)"
             )
         except Exception as exc:  # noqa: BLE001 — самодостаточность best-effort
             issues.append(
@@ -2086,9 +2106,11 @@ def _resolve_phases(
         ),
         # Ф3: межпрогонный кэш вердиктов оценщика. Каталог — resolved ``paths.eval_cache``
         # (``COHOUND_EVAL_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``); ``paths is None``
-        # ⇒ выключен, по той же причине, что и выше. Ключ — отрендеренный промпт +
-        # конфигурация оценщика, поэтому смена сателлитов/заголовка/чанков/модели не даёт
-        # ложных хитов.
+        # ⇒ выключен, по той же причине, что и выше. Ключ (``EVAL_CACHE_FORMAT = 2``,
+        # 09 §10.5) — отрендеренный промпт + конфигурация оценщика + **правила ответа**
+        # (``methodology_version``/``status_dict_version``/политика расчёта) + дайджест
+        # строки каталога + условия ретривала, поэтому ни смена сателлитов/заголовка/
+        # чанков/модели, ни смена методологических правил не даёт ложного хита.
         "eval_cache": (
             EvalVerdictCache(str(paths.eval_cache)) if paths is not None else None
         ),
@@ -2134,6 +2156,8 @@ def _plan_payload(result: RunPlan) -> dict[str, Any]:
     законный режим (:mod:`core.pipeline.golden_status`), и оператор обязан увидеть его до
     прогона, а не догадываться по отсутствию ``golden.csv``. ``golden_count`` — строки,
     реально участвующие в сверке (0 при ``absent``/``declined``).
+    ``golden_exempt_products`` — продукты, для которых эталон объявленно отсутствует
+    (waiver): ``golden_count`` без него читался бы как «когорта покрыта целиком».
     """
     status = result.golden_status
     return {
@@ -2158,6 +2182,14 @@ def _plan_payload(result: RunPlan) -> dict[str, Any]:
         ),
         "golden_reason": status.reason if status is not None else None,
         "golden_declined_by": status.declined_by if status is not None else None,
+        # §11.6: waiver'ы по продуктам (``sources/golden_status.yaml: exempt_products``).
+        # Печатаются списком, а не счётчиком: оператору нужно, для каких продуктов сверки
+        # нет и почему, — иначе «golden_count» читается как «покрыта вся когорта».
+        "golden_exempt_products": (
+            [entry.as_dict() for entry in status.exempt_products]
+            if status is not None
+            else []
+        ),
         "warnings": list(result.warnings),
     }
 

@@ -37,6 +37,8 @@ from core.domain.models import AlignmentReport, CatalogRow, Cell, Cohort
 
 __all__ = [
     "DEFAULT_COVERAGE_FLOOR",
+    "DEFAULT_PARTIAL_SCORE",
+    "DEFAULT_UNKNOWN_POLICY",
     "DEFAULT_UNKNOWN_SHARE_THRESHOLD",
     "DEFAULT_WEAK_DENIAL_SHARE_THRESHOLD",
     "Bucket",
@@ -54,10 +56,45 @@ __all__ = [
     "module_scores",
     "publishability_profile",
     "resolved_capability",
+    "scoring_policy_spec",
     "sensitivity",
 ]
 
 _EPS = 1e-9
+
+#: Объявленная политика расчёта §6 — **единственное** место, где заданы значения,
+#: с которыми исполняется формула: ``capability_policy`` (формула Resolved Capability),
+#: ``unknown_policy`` (участвует ли ``❓`` в знаменателе) и ``partial_score`` (вклад
+#: ``⚠️``). Эти же значения попадают в ключ межпрогонного кэша вердиктов (09 §10.5):
+#: смена правил обязана инвалидировать кэш, иначе он вернул бы вердикт, посчитанный по
+#: старым правилам.
+#:
+#: :class:`~core.domain.models.RunManifest` объявляет те же значения как **схему
+#: записи** (домен не может импортировать себя через ``scoring`` — направление
+#: зависимости обратное). Совпадение не проверяется комментарием: тест
+#: ``tests/pipeline/test_eval_cache.py::test_manifest_scoring_defaults_match_declared_policy``
+#: сверяет дефолты манифеста с :func:`scoring_policy_spec`.
+DEFAULT_PARTIAL_SCORE: float = 0.5
+DEFAULT_UNKNOWN_POLICY: UnknownPolicy = UnknownPolicy.EXCLUDED
+
+
+def scoring_policy_spec() -> dict[str, Any]:
+    """Объявленная политика расчёта §6 — значения, с которыми исполняется формула.
+
+    Возвращает ``{capability_policy, unknown_policy, partial_score}`` в JSON-примитивах
+    (строки/число): это же представление попадает в манифест прогона и в ключ
+    межпрогонного кэша вердиктов (09 §10.5) — смена правил обязана менять оба, иначе
+    кэш вернул бы вердикт, посчитанный по старым правилам.
+
+    Функция — **декларация**, а не резолвер: объявленных уровней (``run.yaml``/``deploy``)
+    у этой политики сегодня нет, поэтому значения — константы кода. Если уровень
+    появится, он входит здесь, а не в вызывающих: вторая формула разошлась бы с первой.
+    """
+    return {
+        "capability_policy": CapabilityPolicy.RESOLVED_ONLY_V1.value,
+        "unknown_policy": DEFAULT_UNKNOWN_POLICY.value,
+        "partial_score": DEFAULT_PARTIAL_SCORE,
+    }
 
 #: Числовой вес важности параметра — **provisional** (в регламенте §6 значения не
 #: зафиксированы). Используется как «объявленный» вес по умолчанию, когда для
@@ -216,8 +253,8 @@ def _resolved_capability(
     params: Mapping[str, CatalogRow] | None,
     weights: Mapping[str, float] | None,
     *,
-    partial_score: float = 0.5,
-    unknown_policy: UnknownPolicy = UnknownPolicy.EXCLUDED,
+    partial_score: float = DEFAULT_PARTIAL_SCORE,
+    unknown_policy: UnknownPolicy = DEFAULT_UNKNOWN_POLICY,
     uniform: bool = False,
 ) -> Score:
     """Ядро Resolved Capability с явными partial/unknown-политиками (для sensitivity)."""

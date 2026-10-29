@@ -53,7 +53,7 @@ from typing import Any
 
 from core.domain import CatalogRow, GoldenRow, LLMCellOutput, Satellite, Status
 from core.domain.enums import CellState
-from core.pipeline.eval_cache import EvalVerdictCache
+from core.pipeline.eval_cache import EvalConditions, EvalVerdictCache
 from core.pipeline.evaluate import (
     DEFAULT_RETRIEVAL_CUTOFF_K,
     DEFAULT_RETRIEVAL_PROFILE,
@@ -931,6 +931,7 @@ def _measure_once(
     repeat: int,
     timer: Callable[[], float],
     eval_cache: EvalVerdictCache | None,
+    eval_conditions: EvalConditions | None,
 ) -> CellMeasurement:
     """Один замер ячейки моделью: ``evaluate_cell(store=None)`` + учёт расхода.
 
@@ -952,6 +953,7 @@ def _measure_once(
             store=None,
             model_id=model.model_id,
             eval_cache=eval_cache,
+            eval_conditions=eval_conditions,
         )
     except Exception as exc:  # noqa: BLE001 — сбой харнесса изолирован и назван
         elapsed_ms = (timer() - started) * 1000.0
@@ -1210,6 +1212,7 @@ def run_benchmark(
     *,
     repeats: int = 1,
     eval_cache: EvalVerdictCache | None = None,
+    eval_conditions: EvalConditions | None = None,
     clock: Callable[[], float] | None = None,
     bootstrap_resamples: int = 2000,
     bootstrap_seed: int = 0,
@@ -1228,6 +1231,10 @@ def run_benchmark(
     :param repeats: число повторов для пробы детерминизма (``<2`` — проба не измерена).
     :param eval_cache: кэш вердиктов; ключ включает ``model_id``, поэтому модели не
         смешиваются. ``None`` — выключен (дефолт измерения).
+    :param eval_conditions: объявленные методологические условия вердикта
+        (:class:`~core.pipeline.eval_cache.EvalConditions`); обязательны при включённом
+        кэше — как и в прогоне (09 §10.5). Кэш без условий отвергается здесь, а не
+        превращается в ``harness_error`` на каждой ячейке.
     :param clock: часы (``() -> секунды``); ``None`` — ``time.perf_counter``.
     :param bootstrap_resamples: число bootstrap-ресэмплов для CI.
     :param bootstrap_seed: seed bootstrap (детерминизм отчёта).
@@ -1239,6 +1246,15 @@ def run_benchmark(
     """
     if repeats < 1:
         raise ValueError("repeats обязан быть >= 1")
+    if eval_cache is not None and eval_conditions is None:
+        # 09 §10.5: тот же контракт, что у прогона. Иначе каждая ячейка стала бы
+        # ``harness_error`` — измерение сообщило бы «модель не ответила» там, где
+        # отказ был в вызове, а не в модели.
+        raise ValueError(
+            "eval_cache требует объявленных условий оценки (eval_conditions): "
+            "ключ без methodology_version/status_dict_version/политики расчёта "
+            "обслуживал бы вердикт, посчитанный по старым правилам"
+        )
     if not cases:
         raise ValueError("нет ячеек для измерения (пустой набор)")
     if not models:
@@ -1262,6 +1278,7 @@ def run_benchmark(
                     repeat=repeat,
                     timer=timer,
                     eval_cache=eval_cache,
+                    eval_conditions=eval_conditions,
                 )
                 collected.append(measurement)
                 if measurement.prompt_hash:

@@ -413,12 +413,14 @@ def test_list_artifacts_reports_presence_size_and_count() -> None:
     items = list_artifacts(TEMPLATE)
     assert [item["name"] for item in items] == list(ARTIFACT_FILES)
     by_name = {item["name"]: item for item in items}
-    # Шаблон не содержит crawl_sources.yaml — он опционален; прочие на месте.
-    assert all(
-        item["present"] for item in items if item["name"] != "crawl_sources"
-    )
+    # Шаблон не содержит crawl_sources.yaml и sources/seeds.yaml — оба опциональны;
+    # прочие артефакты на месте.
+    optional = {"crawl_sources", "seeds"}
+    assert all(item["present"] for item in items if item["name"] not in optional)
     assert by_name["crawl_sources"]["present"] is False
     assert by_name["crawl_sources"]["count"] is None
+    assert by_name["seeds"]["present"] is False
+    assert by_name["seeds"]["count"] is None
     assert by_name["package"]["count"] == 2  # два модуля шаблона
     assert by_name["catalog"]["count"] == len(template.catalog)
     assert by_name["catalog"]["size"] > 0

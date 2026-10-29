@@ -8,8 +8,9 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -53,7 +54,7 @@ from core.pipeline.evaluate import evaluate_cell
 from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite import SCHEMA_VERSION
-from core.store.sqlite_store import SqliteStore
+from core.store.sqlite_store import PlanInputsConflict, SqliteStore
 
 RUN_ID = "run-1"
 
@@ -858,6 +859,131 @@ def test_save_read_plan_inputs_roundtrip(store: SqliteStore) -> None:
     assert store.read_plan_inputs(RUN_ID) == payload
     # Чужой run_id — нет записи.
     assert store.read_plan_inputs("other") is None
+
+
+#: ``created_at``-метка-стража: если строка перезаписывается, значение изменится.
+_SENTINEL_CREATED_AT = "2020-01-01T00:00:00Z"
+
+
+def _plan_payload(**overrides: Any) -> dict[str, Any]:
+    """Канонический снимок входов плана (``run_inputs``) для тестов иммутабельности."""
+    payload: dict[str, Any] = {
+        "snapshot_version": 1,
+        "run_id": RUN_ID,
+        "params": [{"param_id": "p1"}],
+        "cohort": {"case_id": "case-1", "frozen_at": "2026-01-01", "entries": []},
+        "module_weights": {"m": 1.0},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _plan_sha(payload: Mapping[str, Any]) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _run_inputs_row(store: SqliteStore) -> Any:
+    return store.conn.execute(
+        "SELECT payload_json, payload_sha256, created_at FROM run_inputs WHERE run_id = ?",
+        (RUN_ID,),
+    ).fetchone()
+
+
+def test_save_plan_inputs_first_insert_returns_true(store: SqliteStore) -> None:
+    """Первый ``INSERT`` создаёт снимок и сообщает об этом (``True``)."""
+    payload = _plan_payload()
+    assert store.save_plan_inputs(RUN_ID, payload=payload, payload_sha256=_plan_sha(payload))
+    row = _run_inputs_row(store)
+    assert row is not None
+    assert row["payload_json"] == json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    assert store.read_plan_inputs(RUN_ID) == payload
+
+
+def test_save_plan_inputs_identical_rewrite_is_noop(store: SqliteStore) -> None:
+    """Повтор с тем же ``payload_sha256`` — no-op: ``created_at``/``payload_json`` не двигаются.
+
+    Resume не должен сдвигать время снимка: иначе снимок входов объявлял бы другую дату,
+    чем та, под которой прогон создан (O11, 09 §3.3).
+    """
+    payload = _plan_payload()
+    sha = _plan_sha(payload)
+    assert store.save_plan_inputs(RUN_ID, payload=payload, payload_sha256=sha)
+    with store.conn:
+        store.conn.execute(
+            "UPDATE run_inputs SET created_at = ? WHERE run_id = ?",
+            (_SENTINEL_CREATED_AT, RUN_ID),
+        )
+    before = _run_inputs_row(store)
+
+    assert store.save_plan_inputs(RUN_ID, payload=payload, payload_sha256=sha) is False
+
+    after = _run_inputs_row(store)
+    assert after["created_at"] == _SENTINEL_CREATED_AT  # строка не переписана
+    assert after["created_at"] == before["created_at"]
+    assert after["payload_json"] == before["payload_json"]
+    assert after["payload_sha256"] == sha
+    assert store.read_plan_inputs(RUN_ID) == payload
+
+
+def test_save_plan_inputs_conflict_raises_and_keeps_stored_row(
+    store: SqliteStore,
+) -> None:
+    """Другой ``payload_sha256`` — ``PlanInputsConflict``; сохранённая строка не меняется.
+
+    Снимок входов — идентичность прогона, поэтому расхождение означает **другой** прогон
+    (нужен новый ``run_id``), а не повод перезаписать завершённый (O11, 09 §3.3).
+    """
+    stored_payload = _plan_payload()
+    stored_sha = _plan_sha(stored_payload)
+    assert store.save_plan_inputs(RUN_ID, payload=stored_payload, payload_sha256=stored_sha)
+    with store.conn:
+        store.conn.execute(
+            "UPDATE run_inputs SET created_at = ? WHERE run_id = ?",
+            (_SENTINEL_CREATED_AT, RUN_ID),
+        )
+    before = _run_inputs_row(store)
+
+    incoming_payload = _plan_payload(module_weights={"m": 0.5})
+    incoming_sha = _plan_sha(incoming_payload)
+    assert incoming_sha != stored_sha
+
+    with pytest.raises(PlanInputsConflict) as excinfo:
+        store.save_plan_inputs(
+            RUN_ID, payload=incoming_payload, payload_sha256=incoming_sha
+        )
+
+    exc = excinfo.value
+    assert isinstance(exc, ValueError)
+    # Поля-атрибуты: вызывающий не парсит текст сообщения.
+    assert exc.run_id == RUN_ID
+    assert exc.stored_sha256 == stored_sha
+    assert exc.incoming_sha256 == incoming_sha
+    message = str(exc)
+    assert RUN_ID in message
+    assert stored_sha in message
+    assert incoming_sha in message
+    assert "run_id" in message  # называет решение, а не только факт расхождения
+
+    # Сохранённая строка нетронута (ни payload, ни время снимка).
+    after = _run_inputs_row(store)
+    assert after["payload_sha256"] == stored_sha
+    assert after["payload_json"] == before["payload_json"]
+    assert after["created_at"] == _SENTINEL_CREATED_AT
+    assert store.read_plan_inputs(RUN_ID) == stored_payload
+
+
+def test_save_plan_inputs_conflict_is_per_run(store: SqliteStore) -> None:
+    """Иммутабельность — по ``run_id``: другой прогон пишет свой снимок независимо."""
+    first = _plan_payload()
+    second = _plan_payload(run_id="run-2", module_weights={"m": 0.5})
+    assert store.save_plan_inputs(RUN_ID, payload=first, payload_sha256=_plan_sha(first))
+    assert store.save_plan_inputs("run-2", payload=second, payload_sha256=_plan_sha(second))
+    assert store.read_plan_inputs(RUN_ID) == first
+    assert store.read_plan_inputs("run-2") == second
 
 
 # --------------------------------------------------------------------------- #

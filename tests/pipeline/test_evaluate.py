@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,7 @@ from core.domain import (
     check_cell,
     check_unknown_exhaustion,
 )
+from core.pipeline.eval_cache import EvalConditions
 from core.pipeline.evaluate import (
     ABSENCE_UNATTESTED_REVIEW_REASON,
     DENIAL_QUOTE_WITHOUT_MARKERS,
@@ -74,6 +76,23 @@ def _ok_output(data: dict) -> LLMCellOutput:
 
 def _bad_output(data: dict) -> LLMCellOutput:
     return LLMCellOutput(**data["bad_quote_output"])
+
+def _eval_conditions(**overrides: Any) -> EvalConditions:
+    """Объявленные методологические условия — обязательны при включённом ``eval_cache``.
+
+    Значения — как у живого прогона (``RunConfig.methodology_version``, версия словаря
+    статусов, политика §6). Переопределения нужны тестам инвалидации ключа: смена любого
+    из этих полей обязана менять вердикт-ключ (09 §10.5).
+    """
+    base: dict[str, Any] = {
+        "methodology_version": "0.1.0",
+        "status_dict_version": "2.2.0",
+        "capability_policy": "resolved-only-v1",
+        "unknown_policy": "excluded",
+        "partial_score": 0.5,
+    }
+    base.update(overrides)
+    return EvalConditions(**base)
 
 
 class _ScriptedEvaluator:

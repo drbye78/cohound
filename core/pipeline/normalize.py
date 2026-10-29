@@ -264,24 +264,6 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
         golden_status=golden_status,
     )
 
-    profiles_path = package_path / "domain_profiles.yaml"
-    domain_profiles = load_domain_profiles(profiles_path) if profiles_path.exists() else {}
-
-    crawl_path = package_path / "crawl_sources.yaml"
-    crawl_sources = load_crawl_sources(crawl_path) if crawl_path.exists() else CrawlSourcesConfig()
-
-    return RunInputs(
-        run=run,
-        package=package,
-        catalog=catalog,
-        baselines=baselines,
-        cohort=cohort,
-        golden=golden,
-        domain_profiles=domain_profiles,
-        crawl_sources=crawl_sources,
-        scope_attestation_procedure=load_scope_attestation(package_path),
-    )
-
 
 def cross_check(inputs: RunInputs) -> list[str]:
     """Кросс-артефактные проверки входов (§4.5/§1.6).

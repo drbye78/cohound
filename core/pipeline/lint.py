@@ -20,7 +20,13 @@ pydantic-валидаторами домена (нужно сопоставле�
   ``selection_reason`` записи когорты) → **incomplete** (A3): не блокирует создание/
   правку пакета, но запрещает прогон (иначе неполный пакет молча выдал бы
   evaluated-ячейки). Обязательные непустые CSV-поля каталога (``title``/``rule``) уже
-  отклоняются загрузчиком (``_req``), поэтому отдельного уровня не требуют.
+  отклоняются загрузчиком (``_req``), поэтому отдельного уровня не требуют;
+- продукт когорты без единой golden-строки и без объявленного waiver'а → **incomplete**
+  (§11.6): «эталон есть» не значило «эталон покрывает когорту», и продукт без строк
+  раньше не проверялся вовсе — неотличимо от «строки потеряли». Лечится строками
+  ``golden.csv`` либо объявлением ``exempt_products`` в ``sources/golden_status.yaml``;
+- waiver для продукта вне когорты или для продукта, у которого строки есть → **warning**:
+  устаревшее объявление называет решение, которого больше нет (сверка при этом идёт).
 
 Каждое правило — отдельный маленький предикат из :data:`RULES`, поэтому оно
 тестируется изолированно и адресуется кодом (``code``). Нейтрален к предметной
@@ -54,6 +60,8 @@ __all__ = [  # noqa: RUF022
     "check_empty_concept_terms",
     "check_golden_full_absent_stratum",
     "check_golden_presence",
+    "check_golden_coverage",
+    "check_golden_exempt_sync",
     "check_showcase_metric",
     "check_slug_lowercase",
     "check_anchor_in_products",
@@ -242,6 +250,97 @@ def check_golden_presence(inputs: RunInputs) -> list[str]:
     return messages
 
 
+def check_golden_coverage(inputs: RunInputs) -> list[str]:
+    """§11.6: у каждого продукта когорты есть golden-строки **или** объявленный waiver.
+
+    Правило исполняет требование, которое до сих пор было надписью: «эталон есть» ничего
+    не говорило о том, покрывает ли он когорту. Продукт без единой golden-строки раньше
+    просто не проверялся — и это было неотличимо от «строки потеряли».
+
+    Применимость: только когда сверка реально идёт, то есть golden-строки есть
+    (``state: present`` либо выведенное ``present``). При ``absent``/``declined``
+    строк нет по объявлению, сверки нет — и требовать покрытие не по чему.
+
+    Уровень — **``warning``, не блокирующий** (решение владельца 29.10.2026). Причина —
+    статус самого инструмента: ``golden.csv`` не входит в ``execution_contract_digest``,
+    не влияет на вердикты и на карту (§11.3), то есть не является условием измерения.
+    Гейт, который останавливает прогон, объявлял бы проверочный инструмент условием
+    замера — и делал бы невозможным первый замер продукта: эталон аннотируют **по**
+    результату первого прогона, ответного ключа до него не существует (так и появился
+    пятый продукт когорты — прогон, затем аннотация). Поэтому неполнота здесь
+    **видима**, но не запрещает измерять: предупреждение печатают ``plan``/``run``
+    (в т.ч. в ``--json``), а объявленный waiver дополнительно виден в отчёте
+    (``golden_exempt_product``).
+
+    Рассинхронизация объявления с данными (waiver для продукта вне когорты или для
+    продукта, у которого строки есть) — отдельное правило
+    :func:`check_golden_exempt_sync`: это уже не неполнота, а устаревшее объявление.
+    """
+    sets = _golden_coverage_sets(inputs)
+    if sets is None:
+        return []
+    products, covered, exempt = sets
+    return [
+        f"§11.6: у продукта '{product_id}' когорты нет ни одной строки golden.csv; "
+        "объявите эталон для него либо waiver в sources/golden_status.yaml "
+        "(exempt_products: product_id, reason, declared_by)"
+        for product_id in products
+        if product_id not in covered and product_id not in exempt
+    ]
+
+
+def check_golden_exempt_sync(inputs: RunInputs) -> list[str]:
+    """§11.6: waiver'ы по продуктам обязаны быть согласованы с когортой и golden.csv.
+
+    Waiver — **объявление**, и устаревшее объявление хуже отсутствующего: оно называет
+    решение, которого больше нет. Два случая, оба ``warning`` (не блокируют прогон —
+    сверка идёт, просто объявление врёт):
+
+    * waiver для продукта, которого нет в когорте (продукт убрали, объявление осталось);
+    * waiver для продукта, у которого golden-строки **есть** (эталон появился, waiver
+      не сняли).
+
+    Правило не срабатывает без объявления (``golden_status is None`` — входы собраны в
+    обход :func:`~core.pipeline.normalize.load_inputs`).
+    """
+    status = inputs.golden_status
+    if status is None or not status.exempt_products:
+        return []
+    products = {entry.product_id for entry in inputs.cohort.entries}
+    covered = {row.product_id for row in inputs.golden}
+    messages = [
+        f"§11.6: waiver продукта '{product_id}' объявлен в "
+        "sources/golden_status.yaml (exempt_products), но продукта нет в когорте — "
+        "объявление рассинхронизировано с составом когорты"
+        for product_id in sorted(status.exempt_ids - products)
+    ]
+    messages.extend(
+        f"§11.6: waiver продукта '{product_id}' объявлен, но golden-строки для него "
+        "есть — уберите waiver либо строки: объявление рассинхронизировано с golden.csv"
+        for product_id in sorted(status.exempt_ids & covered)
+    )
+    return messages
+
+
+def _golden_coverage_sets(
+    inputs: RunInputs,
+) -> tuple[list[str], set[str], set[str]] | None:
+    """Материал правил покрытия: ``(продукты когорты, покрытые, waiver'ы)`` или ``None``.
+
+    ``None`` — сверка не идёт (строк эталона нет: ``absent``/``declined`` либо набор
+    пуст): тогда требовать покрытие не по чему.
+    """
+    status = inputs.golden_status
+    if status is not None and not status.comparison_available:
+        return None
+    if not inputs.golden:
+        return None
+    products = sorted({entry.product_id for entry in inputs.cohort.entries})
+    covered = {row.product_id for row in inputs.golden}
+    exempt = set(status.exempt_ids) if status is not None else set()
+    return products, covered, exempt
+
+
 def check_showcase_metric(inputs: RunInputs) -> list[str]:
     """§4.2: showcase → ``rule`` обязан упоминать публичную величину/метрику."""
     offenders = sorted(
@@ -322,8 +421,10 @@ RULES: tuple[LintRule, ...] = (
     LintRule("anchor-in-products", "blocking", check_anchor_in_products),
     LintRule("products-match-cohort", "blocking", check_products_match_cohort),
     LintRule("unfilled-authoring", "incomplete", check_unfilled_authoring),
+    LintRule("golden-coverage", "warning", check_golden_coverage),
     LintRule("empty-concept-terms", "warning", check_empty_concept_terms),
     LintRule("golden-presence", "warning", check_golden_presence),
+    LintRule("golden-exempt-sync", "warning", check_golden_exempt_sync),
 )
 
 

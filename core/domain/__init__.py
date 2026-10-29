@@ -169,6 +169,7 @@ from core.domain.scoring import (
     module_scores,
     publishability_profile,
     resolved_capability,
+    scoring_policy_spec,
     sensitivity,
 )
 
@@ -325,6 +326,7 @@ __all__ = [  # noqa: RUF022
     "Comparability",
     "SensitivityReport",
     "resolved_capability",
+    "scoring_policy_spec",
     "evidence_coverage",
     "failure_rate",
     "comparability",

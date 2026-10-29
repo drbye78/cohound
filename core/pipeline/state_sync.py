@@ -45,7 +45,7 @@ from core.ports.state import (
 from core.ports.store import StorePort
 from core.util.hashing import short_hash
 
-__all__ = ["record_run_outcome", "sync_product_state"]
+__all__ = ["record_run_outcome", "snapshot_id", "sync_product_state"]
 
 #: Статус снимка: корпус полон (coverage.complete).
 SNAPSHOT_COMPLETE = "complete"
@@ -69,6 +69,17 @@ _LINEAGE_STATUS = {
 def _today_iso(today: _dt.date | None) -> str:
     """Дата (ISO) для ``added_at``; ``None`` — сегодняшняя."""
     return (today or _dt.date.today()).isoformat()
+
+
+def snapshot_id(run_id: str, product_id: str) -> str:
+    """Идентификатор снимка продукта за прогон: ``short_hash(run_id, product_id)``.
+
+    Одна формула на оба писателя снимка — прогон (:func:`record_run_outcome`) и adoption
+    (:func:`core.pipeline.state_adopt.apply_adoption`): повторная запись того же снимка
+    обязана попадать в ту же строку, иначе ``product_snapshot`` раздвоился бы по
+    источнику записи.
+    """
+    return short_hash(f"{run_id}\x1f{product_id}", 24)
 
 
 def _blocked_reason(plan: ProductPlan, seeds: SeedsConfig | None) -> str | None:
@@ -289,7 +300,7 @@ def record_run_outcome(
         )
         state.record_snapshot(
             SnapshotRow(
-                snapshot_id=short_hash(f"{run_id}\x1f{product_id}", 24),
+                snapshot_id=snapshot_id(run_id, product_id),
                 product_id=product_id,
                 cycle_id=cycle_id,
                 run_id=run_id,
