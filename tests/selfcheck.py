@@ -1898,7 +1898,7 @@ def _pipeline_gates_resume() -> None:
             skipped = _gate_phase("g2", Gate.G2, GateRuntime(profile_gate=make_profile_gate(state, material)))(ctx)
             if skipped.status != "skipped":
                 raise AssertionError("без аттестации профиля неблокирующий гейт обязан быть skipped")
-            if not any("hound profile attest" in entry for entry in skipped.log_entries):
+            if not any("hound package profile attest" in entry for entry in skipped.log_entries):
                 raise AssertionError("пропуск обязан называть команду аттестации профиля")
             # Действующая аттестация — ok без строки gate_decisions.
             state.save_profile_attestation(

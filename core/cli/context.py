@@ -80,6 +80,7 @@ from core.domain.enums import (
 from core.domain.models import CatalogRow, Cohort, ScenarioBinding
 from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.compute import bundle_for_run
+from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.extract_cache import ExtractionCache
@@ -89,6 +90,7 @@ from core.pipeline.gate_subject import (
     review_subject,
 )
 from core.pipeline.normalize import RunInputs, load_inputs
+from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.phases import resolve_package_id
 from core.pipeline.plan import RunPlan
 from core.pipeline.plan import plan as build_plan
@@ -196,6 +198,7 @@ __all__ = [
     "_print_run_report",
     "_print_sensitivity",
     "_profile_gate_resolver",
+    "_profile_material_for_package",
     "_profile_material_for_run",
     "_read_cycle",
     "_resolve_db_path",
@@ -1240,8 +1243,8 @@ def _profile_material_for_run(
 ) -> dict[str, Any]:
     """Материал дайджеста профиля пакета-якоря для текущего прогона.
 
-    Единственная точка сборки материала в composition root: и аттестация (``hound profile
-    attest``, отдельная полоса), и проверка гейта обязаны видеть **один** набор
+    Единственная точка сборки материала в composition root: и аттестация (``hound package
+    profile attest``), и проверка гейта обязаны видеть **один** набор
     компонентов, иначе аттестованное и проверяемое разойдутся.
 
     Паспорта читаются здесь же (:func:`core.config.passports.passport_content_digest` по
@@ -1267,6 +1270,55 @@ def _profile_material_for_run(
         seeds_digest=seeds_digest,
         roles=plan.roles,
         passports=passport_content_digests(plan.products, passports_dir),
+    )
+
+
+#: Метка ``run_id`` для плана, который строится ради **профиля**, а не прогона.
+#: ``run_id`` в материал дайджеста не входит (:data:`PROFILE_MATERIAL_KEYS`), поэтому
+#: подставляется явная метка: выдуманная идентичность прогона была бы ложным следом.
+_PROFILE_PLAN_LABEL = "profile-attest"
+
+
+def _profile_material_for_package(args: argparse.Namespace) -> dict[str, Any]:
+    """Материал дайджеста профиля по каталогу пакета (путь CLI, а не прогона).
+
+    Единственная точка сборки материала **вне** прогона: ``hound package profile
+    attest`` обязан видеть тот же материал, что увидит гейт G1/G2, иначе аттестованное
+    и проверяемое разойдутся. Последовательность — как у ``plan``/``run``:
+    ``load_inputs`` → ``load_effective_seeds`` → ``cohort_digest``/``seeds_digest`` →
+    ``build_plan`` → :func:`_profile_material_for_run`. Второй формулы дайджеста нет.
+
+    :param args: аргументы команды; читаются ``package``, ``run_yaml`` (по умолчанию
+        ``{package}/run.yaml``), ``paths`` и ``passports_dir``.
+    :raises CliError: в пакете нет ``run.yaml`` — профиль (когорта, объём, паспорта) не
+        из чего собрать; пустой материал аттестовал бы несуществующий профиль.
+
+    Операторский ``--urls`` здесь не поддерживается: он меняет ``seeds_digest``, и
+    аттестация такого прогона — отдельное решение, а не тот же профиль.
+    """
+    package = str(args.package)
+    run_yaml = getattr(args, "run_yaml", None) or str(Path(package) / RUN_YAML_FILENAME)
+    if not Path(run_yaml).is_file():
+        raise CliError(
+            f"в пакете нет {RUN_YAML_FILENAME}: {run_yaml} — профиль (когорта, объём, "
+            "паспорта) не из чего собрать",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    inputs = load_inputs(run_yaml, package)
+    profiles = getattr(inputs, "domain_profiles", None) or {}
+    seed_config, _ = load_effective_seeds(
+        package, inputs.run.products, profiles=profiles
+    )
+    cohort = cohort_digest(
+        inputs.cohort,
+        case_id=inputs.run.case_id,
+        cohort_ref=getattr(inputs.run, "cohort_ref", None),
+    )
+    seeds = seeds_digest(seed_config)
+    run_plan = build_plan(inputs, run_id=_PROFILE_PLAN_LABEL)
+    return _profile_material_for_run(
+        args, inputs, run_plan, cohort_digest=cohort, seeds_digest=seeds
     )
 
 

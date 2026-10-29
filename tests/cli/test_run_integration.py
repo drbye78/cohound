@@ -437,7 +437,7 @@ def test_cmd_run_passes_gates_by_profile_attestation_without_per_run_rows(
     assert g1["skip_reason"] == "gate_not_blocking"
     message = json.dumps(payload, ensure_ascii=False)
     assert "нет аттестации профиля" in message
-    assert "hound profile attest" in message
+    assert "hound package profile attest" in message
 
 
 # ---------------------------------------------------------------------------

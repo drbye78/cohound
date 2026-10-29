@@ -24,22 +24,32 @@ scope), ``seeds_digest`` (объём seed-набора), ``roles`` (произв
 элементы). Молчаливое «нет строки» вынуждало бы человека пере-аттестовывать вслепую —
 это и есть провал, который здесь закрыт.
 
+**Запись и чтение.** Пишет аттестацию CLI-команда ``hound package profile attest`` —
+через порт :class:`~core.ports.state.ProductStatePort` (писатель ровно один). Читает
+гейт — через тот же порт; read-only список для ``hound package profile show`` живёт
+здесь же (:func:`read_profile_attestations`), потому что штатное открытие ``state.db``
+применяет схему, то есть пишет.
+
 Нейтрален к предметной категории (§1.3): ни названий продуктов, ни вендоров.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from core.domain import Gate
+from core.domain.models import ProfileAttestationRow
 from core.ports.state import ProductStatePort
 from core.util.hashing import short_hash
 
 __all__ = [
     "PROFILE_MATERIAL_KEYS",
+    "ProfileAttestationListing",
     "ProfileGateResult",
     "describe_material_diff",
     "make_profile_gate",
@@ -47,6 +57,7 @@ __all__ = [
     "profile_attestation_id",
     "profile_digest",
     "profile_material",
+    "read_profile_attestations",
 ]
 
 #: Компоненты материала дайджеста профиля (порядок — документационный; хеш канонический).
@@ -69,8 +80,9 @@ _DIGEST_LEN = 24
 #: Гейты, к которым применима аттестация профиля.
 _PROFILE_GATES: frozenset[Gate] = frozenset({Gate.G1, Gate.G2})
 
-#: Имя команды, которой аттестуется профиль (вводится отдельной полосой работ — CLI).
-_ATTEST_COMMAND = "hound profile attest"
+#: Имя команды, которой аттестуется профиль (единственная сигнатура: сообщения гейта
+#: обязаны называть работающую команду, а не её черновик).
+_ATTEST_COMMAND = "hound package profile attest --package <DIR>"
 
 
 def _canonical(payload: Any) -> str:
@@ -277,7 +289,7 @@ def _no_attestation_message(
         f"package_id={material.get('package_id')}, anchor={material.get('anchor')}, "
         f"дайджест профиля {_shorten(digest)}). Профиль якоря ещё не аттестован — "
         f"аттестуйте текущий профиль: `{_ATTEST_COMMAND} --gate {gate.value} "
-        f"--actor <вы>` (команда вводится отдельной полосой работ)."
+        f"--actor <вы>`."
     )
 
 
@@ -294,8 +306,7 @@ def _stale_attestation_message(
         f"от {previous.attested_at} (attested_by={previous.attested_by}) устарела: "
         f"профиль изменился — {changed}. Текущий дайджест {_shorten(digest)}, "
         f"аттестованный {_shorten(previous.profile_digest)}. Пере-аттестуйте профиль: "
-        f"`{_ATTEST_COMMAND} --gate {gate.value} --actor <вы>` (команда вводится "
-        f"отдельной полосой работ)."
+        f"`{_ATTEST_COMMAND} --gate {gate.value} --actor <вы>`."
     )
 
 
@@ -351,3 +362,142 @@ def make_profile_gate(
         )
 
     return _resolve
+
+
+# ---------------------------------------------------------------------------
+# Read-only чтение для CLI (без применения схемы)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProfileAttestationListing:
+    """Снимок аттестаций профиля пакета из ``state.db`` (только чтение).
+
+    ``exists=False`` — файла состояния нет: аттестаций не было. ``attestations`` —
+    строки **всех** якорей и гейтов пакета, включая отозванные (``superseded_at``):
+    аудит-след решений человека не скрывается фильтром «только действующие».
+    ``warnings`` — наблюдаемые аномалии чтения (нет таблицы в старой БД, строка не
+    разбирается): пустой список в этих случаях молча означал бы «аттестаций нет».
+    """
+
+    db: str
+    exists: bool
+    attestations: tuple[ProfileAttestationRow, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-совместимое представление (``digest_material`` не печатается)."""
+        return {
+            "db": self.db,
+            "exists": self.exists,
+            "attestations": [_attestation_payload(row) for row in self.attestations],
+            "warnings": list(self.warnings),
+        }
+
+
+def _attestation_payload(row: ProfileAttestationRow) -> dict[str, Any]:
+    """Поля строки для вывода: ``digest_material`` нужен гейту, а не читателю списка."""
+    return {
+        "attestation_id": row.attestation_id,
+        "case_id": row.case_id,
+        "package_id": row.package_id,
+        "anchor": row.anchor,
+        "gate": row.gate.value,
+        "profile_digest": row.profile_digest,
+        "attested_by": row.attested_by,
+        "attested_at": row.attested_at,
+        "superseded_at": row.superseded_at,
+        "notes": row.notes,
+    }
+
+
+def _open_state_ro(db_path: Path) -> sqlite3.Connection:
+    """Read-only соединение с ``state.db`` (``mode=ro``, без DDL и миграций).
+
+    ``busy_timeout`` ставится, потому что рядом может работать живой писатель (прогон
+    держит WAL); это ожидание чужой блокировки, а не запись.
+    """
+    conn = sqlite3.connect(f"file:{db_path.absolute().as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
+def _row_from_state(row: sqlite3.Row) -> ProfileAttestationRow:
+    """Строка ``profile_attestation`` → доменная модель (``digest_material`` — JSON).
+
+    Формат повторён, а не импортирован из хранилища: ``pipeline`` не импортирует
+    ``core.store`` (тот же приём, что у :mod:`core.pipeline.state_adopt`).
+    """
+    raw = row["digest_material"]
+    material = json.loads(raw) if raw else {}
+    return ProfileAttestationRow(
+        attestation_id=row["attestation_id"],
+        case_id=row["case_id"],
+        package_id=row["package_id"],
+        anchor=row["anchor"],
+        gate=Gate(row["gate"]),
+        profile_digest=row["profile_digest"],
+        digest_material=material,
+        attested_by=row["attested_by"],
+        attested_at=row["attested_at"],
+        superseded_at=row["superseded_at"],
+        notes=row["notes"],
+    )
+
+
+def read_profile_attestations(db_path: str | Path) -> ProfileAttestationListing:
+    """Аттестации профиля из файла состояния пакета — **только чтение** (``mode=ro``).
+
+    Почему не через порт: штатное открытие ``state.db`` применяет схему и пишет
+    ``schema_meta`` (:func:`core.store.state_sqlite.connect_state`), а read-only команда
+    не имеет права оставлять запись в файле состояния оператора. Тот же приём, что у
+    :func:`core.pipeline.state_adopt.read_state_summary`.
+
+    :param db_path: ``state/{package_id}/state.db``; отсутствующий файл — «аттестаций
+        не было», а не ошибка.
+
+    Фильтра по ``package_id``/``anchor``/``gate`` нет намеренно: файл принадлежит
+    пакету, а строка с чужой идентичностью (пакет переименован) — наблюдаемая аномалия,
+    которую нельзя тихо отфильтровать: это решение человека о другом пакете, и оно
+    обязано остаться видимым.
+    """
+    path = Path(db_path)
+    if not path.is_file():
+        return ProfileAttestationListing(db=str(path), exists=False)
+    conn = _open_state_ro(path)
+    warnings: list[str] = []
+    rows: list[ProfileAttestationRow] = []
+    try:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table'"
+            " AND name = 'profile_attestation'"
+        ).fetchone()
+        if table is None:
+            warnings.append(
+                f"{path}: таблицы profile_attestation нет (схема старше v4) — "
+                "аттестаций профиля не записывалось"
+            )
+        else:
+            for row in conn.execute(
+                "SELECT * FROM profile_attestation"
+                " ORDER BY gate, attested_at, attestation_id"
+            ):
+                try:
+                    rows.append(_row_from_state(row))
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    # Строка не разбирается — это видимая аномалия файла, а не «пусто»:
+                    # молча выкинутая аттестация выглядела бы как отсутствие решения.
+                    warnings.append(
+                        f"строка {row['attestation_id']} не разбирается: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+    finally:
+        conn.close()
+    return ProfileAttestationListing(
+        db=str(path),
+        exists=True,
+        attestations=tuple(rows),
+        warnings=tuple(warnings),
+    )
+

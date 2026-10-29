@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -32,7 +33,8 @@ from core.cli.output import concise, emit_error, print_json
 from core.cli.wiring import _llm_configured
 from core.config.deploy import load_deploy_config
 from core.config.seeds import SEEDS_RELPATH, load_seeds
-from core.domain.enums import FetchMode, OnboardingState, SeedRole
+from core.domain.enums import FetchMode, Gate, OnboardingState, SeedRole
+from core.domain.models import ProfileAttestationRow
 from core.pipeline.crawl_probe import (
     ProbeReason,
     ProbeSource,
@@ -124,6 +126,11 @@ from core.pipeline.package_seeds import (
     seeds_enable,
     seeds_export,
 )
+from core.pipeline.profile_attestation import (
+    material_digest,
+    profile_attestation_id,
+    read_profile_attestations,
+)
 from core.ports.crawl_errors import CrawlNotFound
 from core.ports.types import FetchPlan
 from core.store.backup import (
@@ -182,6 +189,8 @@ __all__ = [
     "cmd_package_param_list",
     "cmd_package_param_remove",
     "cmd_package_param_update",
+    "cmd_package_profile_attest",
+    "cmd_package_profile_show",
     "cmd_package_role_add",
     "cmd_package_role_get",
     "cmd_package_role_list",
@@ -2760,6 +2769,266 @@ def cmd_package_state_show(args: argparse.Namespace) -> int:
         lines.append(
             "counts: "
             + " ".join(f"{key}={value}" for key, value in summary.counts.items())
+        )
+    for warning in warnings:
+        lines.append(f"warning: {warning}")
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Аттестация профиля пакета-якоря (G1/G2, durable state.db)
+# ---------------------------------------------------------------------------
+
+
+def _profile_attest_gate(args: argparse.Namespace) -> Gate:
+    """Гейт аттестации профиля из аргументов: только G1/G2 (иначе ``EXIT_USAGE``).
+
+    ``argparse`` уже ограничивает ``--gate`` значениями G1/G2 (``choices``), поэтому
+    проверка здесь — defense-in-depth: хендлер вызывают и напрямую (тесты, скрипты), а
+    запись под G3/G4 была бы решением не о том предмете (там предмет — очередь ревью и
+    публикация, а не профиль).
+    """
+    raw = str(getattr(args, "gate", "") or "").strip()
+    try:
+        gate = Gate(raw)
+    except ValueError as exc:
+        raise CliError(
+            f"неизвестный гейт {raw!r}: аттестация профиля применима только к G1/G2",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    if gate not in (Gate.G1, Gate.G2):
+        raise CliError(
+            f"аттестация профиля применима только к G1/G2, получено {gate.value}: "
+            "G3/G4 решаются на прогон (hound gate), профиль там не предмет решения",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    return gate
+
+
+def _parse_attested_at(raw: str | None) -> str:
+    """ISO-метка времени аттестации; ``None``/пусто → текущая UTC (``…Z``).
+
+    Явная метка нужна детерминизму тестов и переносу подписи из журнала решений. Кривое
+    значение — ``EXIT_USAGE``, а не «тихо текущее время»: иначе аттестация утверждала бы
+    не ту дату, которую назвал человек.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return (
+            _dt.datetime.now(_dt.UTC)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    try:
+        moment = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CliError(
+            f"--attested-at: ожидалась ISO-метка времени, получено {raw!r}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=_dt.UTC)
+    return moment.astimezone(_dt.UTC).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def cmd_package_profile_attest(args: argparse.Namespace) -> int:
+    """``hound package profile attest`` — аттестовать профиль пакета-якоря (G1/G2).
+
+    Записывает durable-строку ``profile_attestation`` в ``state.db`` пакета: профиль
+    (когорта, роли, объём, паспорта) квази-константен, поэтому человек утверждает его
+    содержимое один раз, а прогоны с тем же содержимым не требуют повторного решения.
+    Материал собирает :func:`core.cli.context._profile_material_for_package` — тот же
+    путь, что у гейта прогона; второй формулы дайджеста нет.
+
+    ``--dry-run`` не пишет **ничего** (ни ``state.db``, ни журнала, ни файла лока), но
+    печатает материал, ``profile_digest`` и ``attestation_id``. Повторная подача того же
+    ``(case, package, anchor, gate, digest, actor)`` — идемпотентный no-op
+    (``created: false``): строка не переписывается и ``attested_at`` не «обновляется».
+    Прежние аттестации **не** отзываются: ``make_profile_gate`` ищет точное совпадение
+    дайджеста, а сообщение об устаревании берёт последнюю строку для диффа — append-only
+    сохраняет аудит. Файловый lock пакета (09 §4.4) берётся до открытия ``state.db``:
+    второй писатель (``run``/``crawl``) обязан получить отказ с именем держателя.
+    """
+    if bool(getattr(args, "dry_run", False)):
+        return _profile_attest_body(args)
+    from core.cli.context import _package_lock
+
+    with _package_lock(args, command="package profile attest"):
+        return _profile_attest_body(args)
+
+
+def _profile_attest_body(args: argparse.Namespace) -> int:
+    """``profile attest`` без файлового лока пакета (``--dry-run`` его не берёт)."""
+    from core.cli.context import _open_state_store, _profile_material_for_package
+
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    actor = str(getattr(args, "actor", None) or "").strip()
+    if not actor:
+        raise CliError(
+            "--actor обязателен: аттестация профиля — человеческое решение (аудит); "
+            "анонимная строка не отвечает на вопрос «кто утвердил»",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    profile_gate = _profile_attest_gate(args)
+    attested_at = _parse_attested_at(getattr(args, "attested_at", None))
+    material = _profile_material_for_package(args)
+    digest = material_digest(material)
+    attestation_id = profile_attestation_id(
+        case_id=str(material["case_id"]),
+        package_id=str(material["package_id"]),
+        anchor=str(material["anchor"]),
+        gate=profile_gate,
+        profile_digest=digest,
+        attested_by=actor,
+    )
+    row = ProfileAttestationRow(
+        attestation_id=attestation_id,
+        case_id=str(material["case_id"]),
+        package_id=str(material["package_id"]),
+        anchor=str(material["anchor"]),
+        gate=profile_gate,
+        profile_digest=digest,
+        digest_material=material,
+        attested_by=actor,
+        attested_at=attested_at,
+        notes=str(getattr(args, "notes", None) or "").strip() or None,
+    )
+    dry_run = bool(getattr(args, "dry_run", False))
+    created: bool | None = None
+    stored_at: str | None = None
+    warnings: list[str] = []
+    if dry_run:
+        # Запись не выполняется вовсе, поэтому «создано ли» неизвестно: предсказание без
+        # чтения файла состояния было бы догадкой, а не фактом.
+        warnings.append("dry-run: строка не записана — решение не действует")
+    else:
+        store = _open_state_store(args, create=True)
+        if store is None:  # pragma: no cover — _require_package уже отсеял не-каталог
+            raise CliError(
+                f"state.db пакета недоступен: {args.package}",
+                code="state",
+                exit_code=EXIT_USAGE,
+            )
+        try:
+            existing = store.find_profile_attestation(
+                row.case_id, row.package_id, row.anchor, profile_gate, digest
+            )
+            # Тот же ``attestation_id`` уже есть — решение записано этим же человеком:
+            # строка не переписывается (``attested_at`` остаётся меткой исходной подачи).
+            created = existing is None or existing.attestation_id != attestation_id
+            if created:
+                store.save_profile_attestation(row)
+            elif existing is not None:
+                # Действует **записанная** метка, а не та, что передана сейчас: иначе
+                # вывод утверждал бы дату, которой в аудит-следе нет.
+                stored_at = existing.attested_at
+                if attested_at != existing.attested_at or row.notes != existing.notes:
+                    warnings.append(
+                        f"no-op: аттестация уже записана ({existing.attested_at}, "
+                        f"notes={existing.notes or '—'}); переданные --attested-at/"
+                        "--notes не применялись"
+                    )
+                if existing.superseded_at is not None:
+                    warnings.append(
+                        f"аттестация {attestation_id} отозвана "
+                        f"({existing.superseded_at}): повторная подача того же решения её "
+                        "не воскрешает — аттестуйте другим --actor"
+                    )
+        finally:
+            store.close()
+    effective_at = stored_at or attested_at
+    payload: dict[str, Any] = {
+        "ok": True,
+        "dry_run": dry_run,
+        "created": created,
+        "gate": profile_gate.value,
+        "attestation_id": attestation_id,
+        "profile_digest": digest,
+        "case_id": row.case_id,
+        "package_id": row.package_id,
+        "anchor": row.anchor,
+        "attested_by": actor,
+        "attested_at": effective_at,
+        "notes": row.notes,
+        "material": material,
+        "warnings": warnings,
+    }
+    lines = [
+        f"dry-run: {'yes' if dry_run else 'no'}",
+        f"gate: {profile_gate.value}",
+        f"package: {row.package_id} (case_id={row.case_id}, anchor={row.anchor})",
+        f"profile_digest: {digest}",
+        f"attestation_id: {attestation_id}",
+        f"attested_by: {actor}",
+        f"attested_at: {effective_at}",
+        "created: "
+        + ("—" if created is None else ("yes" if created else "no (уже аттестовано)")),
+        "material: " + json.dumps(material, ensure_ascii=False, sort_keys=True),
+    ]
+    for warning in warnings:
+        lines.append(f"warning: {warning}")
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_profile_show(args: argparse.Namespace) -> int:
+    """``hound package profile show`` — аттестации профиля из ``state.db`` (read-only).
+
+    Список всех строк файла состояния пакета (все якоря и гейты, включая отозванные):
+    аудит-след решений человека не фильтруется. Файл читается ``mode=ro`` — открытие
+    штатным стором применило бы схему, то есть записало бы в состояние оператора. Лок
+    пакета не берётся: команда только читает.
+
+    Пустой список — валидный ответ (``found: false``) с готовой командой аттестации:
+    «профиль ещё не аттестован» — состояние, а не ошибка входа.
+    """
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    db_path, package_id = _state_db_path(args)
+    listing = read_profile_attestations(db_path)
+    warnings = list(listing.warnings)
+    foreign = sorted(
+        {row.package_id for row in listing.attestations if row.package_id != package_id}
+    )
+    if foreign:
+        # Чужая идентичность в файле пакета — видимая аномалия, а не тихий импорт:
+        # решение относится к другому пакету, и молча его «усыновлять» нельзя.
+        warnings.append(
+            "foreign_package_rows: в файле есть аттестации другого package_id "
+            f"({', '.join(foreign)}) — файл {db_path} принадлежит '{package_id}'"
+        )
+    payload: dict[str, Any] = {"ok": True, "found": bool(listing.attestations)}
+    payload["package"] = package_id
+    payload.update(listing.as_dict())
+    payload["warnings"] = warnings
+    lines = [
+        f"package: {package_id}",
+        f"db: {listing.db}",
+        f"exists: {'yes' if listing.exists else 'no'}",
+        f"attestations: {len(listing.attestations)}",
+    ]
+    if not listing.attestations:
+        lines.append(
+            "  (нет) — профиль не аттестован; аттестуйте: "
+            f"hound package profile attest --package {args.package} --gate G1 "
+            "--actor <человек>"
+        )
+    for row in listing.attestations:
+        lines.append(
+            f"  {row.gate.value}\t{row.anchor}\t{row.profile_digest}\t{row.attested_by}\t"
+            f"{row.attested_at}\tsuperseded={row.superseded_at or '—'}\t"
+            f"{row.attestation_id}"
         )
     for warning in warnings:
         lines.append(f"warning: {warning}")

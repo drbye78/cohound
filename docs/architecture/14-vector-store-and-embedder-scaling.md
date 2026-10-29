@@ -90,8 +90,8 @@ Brute-force косинус, тот же код (`_cosine_scores`), 1024 dim:
    всей партиции в fp32: **новая аллокация 46.7 MB** и 27.8 ms на каждый запрос.
 3. `for chunk_id, score in zip(...): meta = self._lookup(chunk_id)` (`:183`) — резолвер
    метаданных вызывается для **всех** 11 400 чанков, хотя нужны только `top_k=10`. В
-   composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:276`,
-   `context.py:1423`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
+   composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:332`,
+   `context.py:1658`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
    point-lookup в БД прогона: 4 мкс ⇒ 42 ms на поиск.
 
 Сумма на один поиск при масштабе: 23.3 MB чтения + 27.8 ms конверсии + 4.5 ms матмула +

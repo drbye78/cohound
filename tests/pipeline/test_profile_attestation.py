@@ -172,7 +172,7 @@ def test_digest_is_order_insensitive_for_lists_and_mappings() -> None:
 def test_digest_is_stable_across_process_boundaries() -> None:
     """Тот же материал в отдельном процессе даёт тот же дайджест (нет скрытого состояния).
 
-    Это ключевое свойство: аттестация пишется одним процессом (``hound profile attest``),
+    Это ключевое свойство: аттестация пишется одним процессом (``hound package profile attest``),
     а проверяется другим (``hound run``) — и, возможно, на другом хосте.
     """
     material = _material()
@@ -517,7 +517,7 @@ def test_gate_skips_without_row_and_without_attestation() -> None:
         message = "\n".join(result.log_entries)
         assert "нет строки в gate_decisions" in message
         assert "нет аттестации профиля" in message
-        assert "hound profile attest" in message
+        assert "hound package profile attest" in message
         assert digest[:12] in message
         # Пропуск записан: строка «решение не требуется» в аудит-следе.
         rows = [d for d in store.iter_gate_decisions(RUN_ID) if d.gate is Gate.G1]
@@ -571,7 +571,7 @@ def test_gate_skips_with_stale_digest_and_message_names_the_component() -> None:
         # Аттестованный и текущий дайджесты различимы в сообщении.
         assert attested_digest[:12] in message
         assert material_digest(current_material)[:12] in message
-        assert "hound profile attest" in message
+        assert "hound package profile attest" in message
         # Неизменившиеся компоненты не объявлены изменёнными.
         assert "seeds_digest" not in message
 

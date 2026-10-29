@@ -68,7 +68,7 @@ from core.cli.package.commands import (
     cmd_package_suggest_roles,
     cmd_package_validate,
 )
-from core.domain.enums import SeedRole
+from core.domain.enums import Gate, SeedRole
 from core.pipeline.package_io import ARTIFACT_FILES
 from core.pipeline.package_seeds import CORPUS_URLS_FORMAT
 
@@ -939,5 +939,54 @@ def add_package_parser(subparsers: Any) -> None:
         help="каталог прогонов для проверки «есть завершённые прогоны, а state пуст»",
     )
     p_state_show.set_defaults(handler=cmd_package_state_show)
+
+    # profile (аттестация профиля пакета-якоря для G1/G2, 09 §4.1) ---------- #
+    # Ленивый импорт по той же причине, что у ``state``: импорт на месте не сдвигает
+    # строки регистрации остальных подкоманд (номера строк — якоря документации).
+    from core.cli.package.commands import (
+        cmd_package_profile_attest,
+        cmd_package_profile_show,
+    )
+
+    p_profile = pkg.add_parser(
+        "profile",
+        help="аттестация профиля пакета-якоря для G1/G2 (durable state.db)",
+    )
+    profile = p_profile.add_subparsers(dest="profile_command", metavar="ДЕЙСТВИЕ")
+
+    p_prof_att = profile.add_parser(
+        "attest",
+        help="аттестовать текущий профиль (--actor обязателен; --dry-run не пишет)",
+        description=(
+            "Профиль (когорта, роли, объём, паспорта) квази-константен: человек "
+            "утверждает его содержимое один раз, и прогоны с тем же содержимым не "
+            "требуют повторного решения. Строка живёт в state.db пакета (переживает "
+            "прогоны), но на изменённый профиль не переносится: гейт сверяет дайджест и "
+            "называет изменившийся компонент. Повторная подача того же решения "
+            "идемпотентна (created: false), прежние аттестации не отзываются — "
+            "append-only сохраняет аудит."
+        ),
+    )
+    _add_op_common(p_prof_att)
+    p_prof_att.add_argument(
+        "--gate",
+        required=True,
+        choices=[Gate.G1.value, Gate.G2.value],
+        help="гейт, к которому относится аттестация (только G1/G2)",
+    )
+    p_prof_att.add_argument("--notes", default=None, help="заметка к аттестации (аудит)")
+    p_prof_att.add_argument(
+        "--attested-at",
+        dest="attested_at",
+        default=None,
+        help="явная метка времени аттестации (ISO); по умолчанию — текущая UTC",
+    )
+    p_prof_att.set_defaults(handler=cmd_package_profile_attest)
+
+    p_prof_show = profile.add_parser(
+        "show", help="аттестации профиля из state.db (read-only)"
+    )
+    _add_read_common(p_prof_show)
+    p_prof_show.set_defaults(handler=cmd_package_profile_show)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)
