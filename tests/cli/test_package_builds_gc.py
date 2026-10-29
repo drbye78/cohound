@@ -88,9 +88,16 @@ def _setup(
 
     ``pb_live`` удерживается композицией ``cb_live``, на которую ссылается прогон;
     ``ib_garbage`` не упомянут нигде и является кандидатом на удаление.
+
+    ``COHOUND_HOME`` объявляется **явно** (= ``tmp_path``): ``index_root`` команда берёт
+    из resolved-раскладки (флага ``--index-store`` у ``builds-gc`` нет), а сессионная
+    фикстура ``tests/conftest.py`` уводит дом в каталог сессии. Без объявления CLI искал
+    бы сборки в ``<дом сессии>/index_store``, тогда как тест создаёт их в
+    ``tmp_path/index_store``.
     """
     package = valid_package(tmp_path)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     index_root = tmp_path / "index_store"
     runs_dir = tmp_path / "runs"
     _make_build(index_root, "case_x", "pb_live")
@@ -201,6 +208,8 @@ def test_builds_gc_legacy_build_from_run_db_is_protected(
     """
     package = valid_package(tmp_path)
     monkeypatch.chdir(tmp_path)
+    # Дом раскладки = tmp_path: index_root резолвится без флага (см. `_setup`).
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     index_root = tmp_path / "index_store"
     runs_dir = tmp_path / "runs"
     _make_build(index_root, "case_x", "ib_legacy")
@@ -244,6 +253,9 @@ def test_builds_gc_refusal_is_state_error_when_no_run_db(
     """Недоказуемые ссылки (нет run DB) — отказ ``state``, а не молчаливый прунинг."""
     package = valid_package(tmp_path)
     monkeypatch.chdir(tmp_path)
+    # Дом = tmp_path: иначе отказ пришёл бы из «нет каталога сборок» в доме сессии, а
+    # тест обязан проверять отказ именно по недоказуемости ссылок (см. `_setup`).
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     index_root = tmp_path / "index_store"
     _make_build(index_root, "case_x", "ib_garbage")
     runs_dir = tmp_path / "runs"
@@ -333,7 +345,7 @@ def test_builds_gc_human_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package, _index_root, runs_dir = _setup(tmp_path, monkeypatch)
+    package, index_root, runs_dir = _setup(tmp_path, monkeypatch)
 
     code, out, _ = _run(
         capsys,
@@ -350,7 +362,9 @@ def test_builds_gc_human_output(
     assert code == EXIT_OK
     assert "package: case_x" in out
     assert f"runs_dir: {runs_dir}" in out
-    assert "index_root: index_store" in out
+    # Корень индексов берётся из resolved-раскладки (флага ``--index-store`` у команды
+    # нет), поэтому при объявленном доме он абсолютный — утверждаем фактический путь.
+    assert f"index_root: {index_root}" in out
     assert "applied: no" in out
     assert "pruned: ib_garbage" in out
     assert "summary: pruned=1 protected=0" in out

@@ -70,9 +70,16 @@ def _make_run_db(runs_dir: Path, run_id: str, *, package: str, index_build_id: s
 
 
 def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
-    """Пакет + ``index_store/case_x/_compositions`` + run DB; cwd = ``tmp_path``."""
+    """Пакет + ``index_store/case_x/_compositions`` + run DB; дом раскладки = ``tmp_path``.
+
+    ``COHOUND_HOME`` объявляется **явно**: ``index-gc`` резолвит ``index_root`` из
+    раскладки (флага ``--index-store`` у команды нет), а сессионная фикстура
+    ``tests/conftest.py`` уводит дом в каталог сессии — без объявления CLI читал бы
+    композиции из ``<дом сессии>/index_store``, а не из ``tmp_path/index_store``.
+    """
     package = valid_package(tmp_path)
-    monkeypatch.chdir(tmp_path)  # resolved paths по умолчанию относительны cwd
+    monkeypatch.chdir(tmp_path)  # cwd = tmp_path: относительные пути теста совпадают с домом
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     index_root = tmp_path / "index_store"
     runs_dir = tmp_path / "runs"
     _write_composition(index_root, "case_x", "cb_live")
@@ -208,6 +215,8 @@ def test_cli_index_gc_sequence_after_old_run_dir_deleted(
     """
     package = valid_package(tmp_path)
     monkeypatch.chdir(tmp_path)
+    # Дом = tmp_path: композиции ниже пишутся в tmp_path/index_store (см. `_setup`).
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     index_root = tmp_path / "index_store"
     runs_dir = tmp_path / "runs"
     for composition_id, partition in (("cb_new", "pb_new"), ("cb_old", "pb_old")):
@@ -257,6 +266,9 @@ def test_cli_index_gc_refusal_is_state_error(
     """Недоказуемые ссылки (нет run DB) — отказ ``state``, а не молчаливый прунинг."""
     package = valid_package(tmp_path)
     monkeypatch.chdir(tmp_path)
+    # Дом = tmp_path: иначе отказ пришёл бы из «нет каталога композиций» в доме сессии,
+    # а тест обязан проверять отказ именно по недоказуемости ссылок (см. `_setup`).
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     _write_composition(tmp_path / "index_store", "case_x", "cb_old")
     (tmp_path / "runs").mkdir()
 

@@ -258,7 +258,13 @@ def test_cmd_run_registers_real_phases_and_blocks_at_publication(
     """CLI строит реальные фазы (не заглушки); без решения блокирует только G4."""
     # Дефолт --passports-dir относителен cwd: переходим в tmp_path, чтобы «нет каталога
     # passports» было детерминировано и не зависело от реальных паспортов в корне репо.
+    # Сессионная фикстура (``tests/conftest.py``) закрепляет ``COHOUND_PASSPORTS_DIR``
+    # абсолютным путём ``<repo>/passports`` — здесь это закрепление снимается, иначе фаза
+    # Ш4 получила бы паспорта репозитория, хотя предмет теста — «каталога нет». Дом
+    # объявляется равным tmp_path: относительный дефолт ``passports`` приклеивается к нему.
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("COHOUND_PASSPORTS_DIR", raising=False)
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     runs_dir = tmp_path / "runs"

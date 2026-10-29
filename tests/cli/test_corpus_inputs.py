@@ -97,8 +97,18 @@ def test_default_passports_dir_absent_is_noop(
     Дефолт относителен cwd, поэтому тест обязан быть cwd-независимым: переходим в
     ``tmp_path``, где каталога ``passports`` заведомо нет. Иначе наличие реального
     ``passports/`` в корне репозитория (пакеты кейсов) даёт ложный провал.
+
+    **Дом и закрепление каталога паспортов.** Сессионная фикстура ``tests/conftest.py``
+    закрепляет ``COHOUND_PASSPORTS_DIR`` абсолютным путём ``<repo>/passports`` (иначе
+    ``home`` сдвинул бы авторские каталоги). Для этого теста закрепление — ровно то,
+    от чего он защищается: паспорта репозитория подхватились бы, хотя предмет — дефолт
+    «каталога нет». Поэтому закрепление снимается, а дом объявляется равным ``tmp_path``:
+    относительный дефолт ``passports`` приклеивается к дому и указывает на несуществующий
+    ``tmp_path/passports``. Проверяется именно дефолтная ветка, а не env-переопределение.
     """
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("COHOUND_PASSPORTS_DIR", raising=False)
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 

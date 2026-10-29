@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -547,7 +548,31 @@ def test_dictionary_mirrors_publishability_enums() -> None:
 # ---------------------------------------------------------------------------
 
 LIVE_RUN_ID = "ru-pg-dbms-3edf2b06097c"
-LIVE_RUN_DIR = ROOT / "runs" / LIVE_RUN_ID
+
+
+#: Явный указатель на каталог живых прогонов. Нужен потому, что тесты намеренно **не**
+#: читают операторское окружение (``tests/conftest.py``: ``COHOUND_NO_DOTENV=1``), а
+#: артефакты прогонов живут вне репозитория (03 §A.1). Без него проверка скипается —
+#: честно и видимо; с ним исполняется на настоящем прогоне.
+ENV_LIVE_RUNS_DIR = "COHOUND_LIVE_RUNS_DIR"
+
+
+def _live_run_dir() -> Path:
+    """Каталог живого прогона: ``COHOUND_LIVE_RUNS_DIR`` > resolved-раскладка.
+
+    Прямое ``ROOT / "runs"`` (как было) находило бы каталог только у того, кто не
+    настраивал раскладку, и у остальных тест молча скипался бы — «живой прогон проверен»
+    было бы неправдой. Но и чтение операторского ``COHOUND_HOME`` из теста недопустимо:
+    тогда прогон набора зависел бы от окружения хоста. Отсюда отдельная явная переменная.
+    """
+    from core.config.paths import resolve_paths
+
+    override = (os.environ.get(ENV_LIVE_RUNS_DIR) or "").strip()
+    base = Path(override) if override else resolve_paths().runs
+    return base / LIVE_RUN_ID
+
+
+LIVE_RUN_DIR = _live_run_dir()
 
 
 def _live_bundle():
@@ -575,7 +600,11 @@ def _live_bundle():
 
 
 @pytest.mark.skipif(
-    not (LIVE_RUN_DIR / "cohound.db").exists(), reason="живого прогона нет в этом chekout"
+    not (LIVE_RUN_DIR / "cohound.db").exists(),
+    reason=(
+        "живого прогона нет: укажите COHOUND_LIVE_RUNS_DIR (каталог, где лежат "
+        "runs/{run_id}/) — артефакты прогонов вне репозитория (03 §A.1)"
+    ),
 )
 def test_live_run_class_and_decomposition() -> None:
     """Живой прогон: класс ``ANALYTICAL_ONLY``, доминирует ``instrument_failed``.

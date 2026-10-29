@@ -12,6 +12,14 @@
 * ``wiring`` получает ``index_root`` из resolved-путей.
 
 Данные категорийно-нейтральны (§1.3); сеть не используется.
+
+**Снятие сессионной изоляции.** ``tests/conftest.py`` объявляет ``COHOUND_HOME`` на
+сессию, чтобы операционные каталоги не появлялись в дереве репозитория. Этот модуль —
+**предмет** проверки резолвера, а не потребитель: он утверждает именно CWD-относительные
+дефолты (``runs``/``corpus_raw`` от текущего каталога), и объявленный дом сделал бы их
+абсолютными от чужого каталога. Поэтому здесь дом снимается на каждый тест, а тесты,
+которым дом нужен, объявляют его сами (``test_home_shifts_*``). Авторские каталоги
+(``packages``/``passports``) не трогаются: тесты передают пакет флагом ``--package``.
 """
 
 from __future__ import annotations
@@ -27,6 +35,19 @@ from core.cli.main import main
 from core.cli.wiring import build_adapters
 from core.config.paths import PathsConfig
 from tests.helpers.packages import capturing_factory, run_argv, valid_package
+
+
+@pytest.fixture(autouse=True)
+def _resolver_defaults_are_the_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Снимает сессионный ``COHOUND_HOME``: дефолты раскладки — предмет этого модуля.
+
+    ``monkeypatch`` вернёт переменную после теста, поэтому изоляция остального набора
+    (и запись артефактов в дом сессии) не страдает — сдвигается только окно одного теста.
+    """
+    monkeypatch.delenv("COHOUND_HOME", raising=False)
+
 
 # ---------------------------------------------------------------------------
 # Обратная совместимость (без env/файла)

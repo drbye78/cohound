@@ -68,12 +68,12 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   extract_epub (stdlib OCF), container_{zip,7z,rar,any} (спуск в архивы),
                               #   lexical_{bm25,tantivy}, index_npy/index_format, vector_npy,
                               #   embed_{local,model2vec}, llm_{local,discovery}, search_*, crawl_*,
-                              #   feed_poller, remote_* (шов), gateway_validate — см. NOTICES
+                              #   feed_poller, remote_* (шов), gateway_validate
   util/                       # text_utils (RU/EN), security (SSRF/slug), sanitize, fusion (RRF),
                               #   retrieval_eval, agreement (Cohen's κ §11.5), feed (feed/channel-парсер),
                               #   document_formats/document_probe (классификация форматов),
                               #   container_policy (бюджеты и прогноз спуска), memory (malloc_trim),
-                              #   robots, sitemap, rate_limit, cache, ids/hashing/logging — см. NOTICES
+                              #   robots, sitemap, rate_limit, cache, ids/hashing/logging
 scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
 tests/selfcheck.py            # self-contained проверка фундамента (автономная, без pytest)
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
@@ -103,6 +103,20 @@ eval_cache/ · extract_cache/  # межпрогонные кэши вердик�
 config/deploy.yaml · config/paths.example.yaml  # профиль зон (edge) · пример раскладки каталогов
                               #   (COHOUND_HOME/COHOUND_*_DIR)
 ```
+
+**Артефакты вне репозитория (03 §A.1.2).** Каталоги `runs/`, `index_store/`, `corpus_raw/`,
+`cache/`, `extract_cache/`, `eval_cache/`, `embed_cache/`, `state/` — **данные, не файлы
+проекта**. В дереве они присутствуют, только если раскладка не настроена; на рабочем хосте
+унесены под `~/.cohound/data` (12 GB на 30.10.2026). Подключение — `COHOUND_HOME` +
+`COHOUND_PATHS_FILE` в `./.env`; сам `paths.yaml` живёт **вне git** (пути машинно-специфичны).
+
+Ловушка: `COHOUND_HOME` сдвигает **все 11** полей `HARNESS_FIELDS`, включая `packages` и
+`passports` — в `paths.yaml` они обязаны быть **абсолютными**, иначе CLI не найдёт пакеты.
+Проверка — `./hound.py doctor`, группа `layout` (эффективный путь **и источник**).
+Артефакты инструментов (mypy/ruff/coverage/hypothesis/pycache/pytest) адресуются env-переменными
+из `~/.cohound/env.sh`; тесты от окружения хоста не зависят (`COHOUND_NO_DOTENV=1` в
+`tests/conftest.py`), а проверка на живом прогоне берёт каталог из `COHOUND_LIVE_RUNS_DIR`
+и без него скипается.
 
 **Доверенные зоны (docs/architecture/07-deployment-topology.md).** Веб-функции (краул, поиск,
 реестры, экстракция недоверенного контента) выносятся в **DMZ** (`edge/`), не-веб — в ядро без

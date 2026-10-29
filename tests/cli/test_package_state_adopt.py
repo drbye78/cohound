@@ -312,9 +312,18 @@ def _write_run(
 
 
 def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
-    """Пакет ``case_x`` + ``runs/`` + ``index_store/``; cwd = ``tmp_path``."""
+    """Пакет ``case_x`` + ``runs/`` + ``index_store/``; дом раскладки = ``tmp_path``.
+
+    ``COHOUND_HOME`` объявляется **явно**: сессионная фикстура (``tests/conftest.py``)
+    уводит операционные каталоги во временный дом сессии, и без объявления ``state``
+    уехал бы туда — тест утверждал бы ``tmp_path/state/{package_id}/state.db``, которого
+    никто не пишет. Дом ``tmp_path`` возвращает прежнюю раскладку, но теперь намеренно.
+    ``packages``/``passports`` фикстура закрепляет абсолютными путями репозитория, так что
+    пакет здесь по-прежнему передаётся флагом ``--package``.
+    """
     package = valid_package(tmp_path).rename(tmp_path / "case_x")
-    monkeypatch.chdir(tmp_path)  # resolved paths по умолчанию относительны cwd
+    monkeypatch.chdir(tmp_path)  # cwd = tmp_path: относительные пути теста совпадают с домом
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     runs_dir = tmp_path / "runs"
     index_root = tmp_path / "index_store"
     runs_dir.mkdir()

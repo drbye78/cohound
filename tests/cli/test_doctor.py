@@ -257,7 +257,13 @@ def test_registries_check_fails_on_bad_package_spec(tmp_path: Path) -> None:
     assert _check(report, "registries").status == doctor.FAIL
 
 
-def test_dir_check_fails_on_file_in_place(tmp_path: Path) -> None:
+def test_dir_check_fails_on_file_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Дом раскладки = tmp_path: ``doctor`` проверяет **эффективные** каталоги (resolved
+    # ``paths.runs``), а сессионная фикстура ``tests/conftest.py`` уводит дом в каталог
+    # сессии. Без объявления проверялся бы ``<дом сессии>/runs``, где файла нет.
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path))
     (tmp_path / "runs").write_text("not a dir", encoding="utf-8")
     report = run_doctor(root=tmp_path)
     check = _check(report, "runs")

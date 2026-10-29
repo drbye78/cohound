@@ -473,6 +473,10 @@ def test_corpus_phase_passes_document_timeout_to_extraction(tmp_path: Path, monk
             plan=_plan(),
             ports=ports,
             urls={},
+            # ``out_dir`` по умолчанию — литерал ``runs`` от CWD, а фаза ``corpus`` пишет
+            # туда ``outputs/artifacts_gap.yaml``: без явного каталога тест оставлял бы
+            # ``runs/`` в дереве репозитория (03 §A.1.2 — артефакты прогонов там не живут).
+            out_dir=str(tmp_path),
             raw_root=str(tmp_path / "raw"),
         )["corpus"](_context(store, ports))
         return captured.get("extract_task_timeout_s")
@@ -512,6 +516,9 @@ def test_corpus_phase_builds_and_captures_index_build_id(tmp_path: Path) -> None
         plan=plan,
         ports=ports,
         urls={"p1": ["https://docs.test/p1"], "p2": ["https://docs.test/p2"]},
+        # См. комментарий выше: фаза ``corpus`` пишет ``outputs/artifacts_gap.yaml`` в
+        # ``out_dir``, и дефолт ``runs`` от CWD оставлял бы артефакт в дереве репозитория.
+        out_dir=str(tmp_path),
         raw_root=str(tmp_path / "raw"),
     )["corpus"](_context(store, ports))
     assert result.status == "ok"
@@ -885,6 +892,9 @@ def test_corpus_phase_selects_crawler_by_engine(tmp_path: Path) -> None:
             ports=ports,
             urls={"p1": [url]},
             crawl_sources=cfg,
+            # См. комментарий в ``test_corpus_phase_passes_document_timeout_to_extraction``:
+            # ``out_dir`` объявляется, чтобы артефакт не попал в дерево репозитория.
+            out_dir=str(tmp_path),
             raw_root=str(tmp_path / "raw"),
         )["corpus"](_context(store, ports))
     finally:

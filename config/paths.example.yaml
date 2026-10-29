@@ -10,11 +10,20 @@
 # и становятся абсолютными; абсолютные пути остаются как есть. Без `home` пути
 # относительны текущему рабочему каталогу (CWD).
 #
+# ВНИМАНИЕ, ЛОВУШКА: `home` (и `COHOUND_HOME`) сдвигает ВСЕ 11 полей, включая `packages` и
+# `passports`. Если задать дом, не закрепив эти два абсолютными путями, CLI будет искать
+# пакеты в `<home>/packages` и не найдёт их. Абсолютный путь сдвигу не подлежит.
+#
 # Пути — данные, не код: модуль только типизирует их и не создаёт каталоги.
+#
+# Рабочий пример «артефакты вне репозитория» (03 §A.1.2):
+#   home: /home/<user>/.cohound/data
+#   packages: /home/<user>/src/cohound/packages      # АБСОЛЮТНЫЙ — иначе сдвинется
+#   passports: /home/<user>/src/cohound/passports    # АБСОЛЮТНЫЙ — иначе сдвинется
 
 # home: /var/lib/cohound        # единый корень раскладки (иначе путь от CWD)
 
-# packages: packages            # операционные пакеты категорий (обычно versioned в git)
+# packages: packages            # пакеты категорий (versioned в git — держать в репозитории)
 # passports: passports          # паспорта продуктов passports/{product_id}/{date}.yaml
 # runs: runs                    # пакеты прогонов runs/{run_id}/ (БД, логи, outputs)
 # index_store: index_store      # иммутабельные индексные сборки индекс-контура

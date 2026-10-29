@@ -284,6 +284,11 @@ def test_status_running_prints_resume_command(
 ) -> None:
     """Незавершённый прогон — ``hound run`` с восстановленными ``run.yaml``/пакетом/URL."""
     monkeypatch.chdir(tmp_path)
+    # Каталог пакета здесь — ``tmp_path/packages/case_x``, поэтому корень пакетов
+    # объявляется явно: сессионная фикстура (``tests/conftest.py``) закрепляет
+    # ``COHOUND_PACKAGES_DIR`` абсолютным путём репозитория, и ``status`` искал бы пакет
+    # в ``<repo>/packages``, печатая заглушку вместо восстановленного пути.
+    monkeypatch.setenv("COHOUND_PACKAGES_DIR", str(tmp_path / "packages"))
     runs_dir = tmp_path / "runs"
     db = _seed_run(runs_dir, RUN_ID, phases={"normalize": "ok", "inheritance": "ok"})
     (db.parent / "run.yaml").write_text("case_id: case_x\n", encoding="utf-8")
@@ -298,9 +303,8 @@ def test_status_running_prints_resume_command(
     command = payload["next"]["command"]
     assert command.startswith("hound run ")
     assert "--run-yaml" in command and "run.yaml" in command
-    assert "--package" in command
-    assert "packages/case_x" in command
-    assert "packages/case_x/sources/corpus_urls.yaml" in command
+    assert f"--package {package_dir}" in command
+    assert f"--urls {package_dir / 'sources' / 'corpus_urls.yaml'}" in command
     assert payload["notes"] == []
 
 

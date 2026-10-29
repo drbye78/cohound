@@ -59,18 +59,16 @@ repo/
   passports/{product_id}/{YYYY-MM-DD}.yaml
   docs/status-dictionary.yaml
   docs/architecture/*.md
-  runs/{run_id}/             # пакет прогона (см. A.2)
-  index_store/{package}/{build}/{product_id}/    # иммутабельные сборки (I17)
-  corpus_raw/{product_id}/{doc_hash}.bin         # retention сырых байтов
-  cache/serp/{query_hash}.json                   # глобальный content-addressed кэш SERP (R7, ADR 0016)
-  cache/http/{url_hash}.bin                      # глобальный content-addressed кэш HTTP
-  extract_cache/             # кэш экстракции (ключ: sha256 байтов + extractor_version + level)
-  eval_cache/                # кэш оценщика (Ш6)
-  embed_cache/{model}/{h2}/{content_hash}.vec  # кэш векторов эмбеддинга (Ш5): ключ —
-                             # (content_hash ТЕКСТА чанка, embed_model_id), fp16 (2 байта/ось)
-  state/{package_id}/state.db  # durable per-product состояние (url_state/seed_set; таблица
-                               # profile_attestation для G1/G2 — design-only, писателя нет)
-  reports/{run_id}/          # (опц.) публикуемые артефакты вне runs/
+  runs/{run_id}/             # пакет прогона (см. A.2)           ┐
+  index_store/{package}/{build}/{product_id}/    # сборки (I17)  │
+  corpus_raw/{product_id}/{doc_hash}.bin         # сырые байты   │ операционные:
+  cache/serp/{query_hash}.json                   # кэш SERP (R7) │ по умолчанию живут
+  cache/http/{url_hash}.bin                      # кэш HTTP      │ в репозитории, при
+  extract_cache/             # кэш экстракции                      │ настроенной раскладке —
+  eval_cache/                # кэш оценщика (Ш6)                   │ вне его (§A.1.2)
+  embed_cache/{model}/{h2}/{content_hash}.vec  # кэш векторов (Ш5) │
+  state/{package_id}/state.db  # durable-состояние продукта (09 §4.1)│
+  reports/{run_id}/          # (опц.) публикуемые артефакты        ┘
   tests/
 ```
 
@@ -80,6 +78,39 @@ repo/
 кода: `config/paths.yaml` (операторский файл; в репозитории только образец
 `config/paths.example.yaml`), env `COHOUND_<FIELD>_DIR`/`COHOUND_HOME` (см. §D.6) или CLI-флаг;
 приоритет — CLI > env > `paths.yaml` > дефолт (`core/config/paths.py`).
+
+#### A.1.2. Артефакты вне репозитория (раскладка хоста)
+
+`runs/`, `index_store/`, `corpus_raw/`, `cache/`, `extract_cache/`, `eval_cache/`,
+`embed_cache/`, `state/` — **не файлы проекта**: это данные прогонов, кэши и durable-состояние.
+Держать их в дереве репозитория не обязательно, и на рабочем хосте они унесены под общий
+корень `~/.cohound` (12 GB на 30.10.2026, из них `corpus_raw` 5.3 и `cache` 5.2).
+
+```
+~/.cohound/
+  paths.yaml                 # раскладка ЭТОГО хоста (вне git: пути машинно-специфичны)
+  env.sh                     # артефакты инструментов (mypy/ruff/coverage/hypothesis/pycache)
+  data/                      # home: → runs/ index_store/ corpus_raw/ cache/ extract_cache/
+                             #   eval_cache/ embed_cache/ state/ reports/
+  tool/                      # .mypy_cache .ruff_cache .hypothesis .coverage .pytest_cache
+```
+
+Подключение — двумя строками в `./.env` (файл в `.gitignore`, шаблон — `.env.example`):
+`COHOUND_HOME=~/.cohound/data` и `COHOUND_PATHS_FILE=~/.cohound/paths.yaml`.
+
+**Ловушка, которую надо знать.** `COHOUND_HOME` сдвигает **все 11** полей
+`HARNESS_FIELDS` (`core/config/paths.py:with_home`), включая `packages` и `passports`. Без
+явного закрепления CLI искал бы пакеты в `~/.cohound/data/packages` и не находил бы ничего.
+Поэтому в `paths.yaml` эти два поля задаются **абсолютными** путями к репозиторию:
+абсолютный путь `with_home` не трогает. Это проверяется `hound doctor` (группа `layout`
+печатает эффективный путь **и источник** — `file`/`env`/`home`/`default`), а не глазами.
+
+**Тесты раскладку не читают.** `tests/conftest.py` ставит `COHOUND_NO_DOTENV=1`, пути в
+`tests/config/test_paths.py` резолвятся с `env={}`: прогон набора не зависит от окружения
+хоста. Единственное исключение — проверка на **живом** прогоне
+(`tests/pipeline/test_publishability.py`): она берёт каталог из явного
+`COHOUND_LIVE_RUNS_DIR` и без него скипается, а не ищет `ROOT/runs` (иначе «живой прогон
+проверен» было бы неправдой у всех, кто настроил раскладку).
 
 #### A.1.1. Seed-набор и onboarding (блокирует прогон)
 
@@ -1147,15 +1178,23 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `GLM_SEARCH_API_KEY` | ключ GLM web-search | **обязателен для адаптера** | — | `adapters.search_glm` |
 | `COHOUND_HOME` | единый корень операционной раскладки; относительные пути считаются от него | опц. | CWD | `core/config/paths.py` (все команды) |
 | `COHOUND_PATHS_FILE` | путь к `paths.yaml` | опц. | `config/paths.yaml` (отсутствие файла — дефолты) | `core/config/paths.py` |
-| `COHOUND_PACKAGES_DIR` / `COHOUND_PASSPORTS_DIR` / `COHOUND_RUNS_DIR` / `COHOUND_INDEX_STORE_DIR` / `COHOUND_CORPUS_RAW_DIR` / `COHOUND_CACHE_DIR` / `COHOUND_EXTRACT_CACHE_DIR` / `COHOUND_EVAL_CACHE_DIR` / `COHOUND_REPORTS_DIR` / `COHOUND_STATE_DIR` | переопределение отдельного каталога раскладки (§A.1) | опц. | `paths.yaml`, иначе дефолт модели | `core/config/paths.py`; приоритет CLI > env > `paths.yaml` > дефолт |
+| `COHOUND_PACKAGES_DIR` / `COHOUND_PASSPORTS_DIR` / `COHOUND_RUNS_DIR` / `COHOUND_INDEX_STORE_DIR` / `COHOUND_CORPUS_RAW_DIR` / `COHOUND_CACHE_DIR` / `COHOUND_EXTRACT_CACHE_DIR` / `COHOUND_EVAL_CACHE_DIR` / `COHOUND_EMBED_CACHE_DIR` / `COHOUND_REPORTS_DIR` / `COHOUND_STATE_DIR` | переопределение отдельного каталога раскладки (§A.1); все 11 полей `HARNESS_FIELDS` | опц. | `paths.yaml`, иначе дефолт модели | `core/config/paths.py`; приоритет CLI > env > `paths.yaml` > дефолт. **Per-field env сильнее `COHOUND_HOME`** — поэтому «увести всё» делается домом, а не одиннадцатью переменными |
+| `COHOUND_LIVE_RUNS_DIR` | каталог, где лежат `runs/{run_id}/` **живых** прогонов — только для проверки на реальном прогоне (`tests/pipeline/test_publishability.py`) | опц. | resolved-раскладка | тест, не `core/`; без значения проверка скипается. Отдельная переменная, потому что набор тестов намеренно не читает операторское окружение (`COHOUND_NO_DOTENV=1`) |
 | `COHOUND_EDGE_STATE_DIR` | каталог durable-состояния edge (DMZ) | опц. | `state_dir` из edge-конфига | `edge/config.py` (`EdgeRuntimeConfig`) |
 | `COHOUND_EMBED_LITE_MODEL` / `COHOUND_EMBED_LITE_REVISION` / `COHOUND_EMBED_LITE_PATH` | модель/пин ревизии (sha/тег)/явный локальный каталог снапшота для `embed-lite` | опц. | `minishlab/potion-multilingual-128M`; ревизия не задана ⇒ `model_id` без `@sha`; путь — HF-кэш | `wiring` (сборка `embed_model2vec`); ревизия входит в `embed_model_id` как `repo@sha` |
 | `PLAYWRIGHT_DOWNLOAD_HOST` / `PLAYWRIGHT_BROWSERS_PATH` | зеркало CDN браузеров и каталог их установки (закрытый контур) | опц. | CDN Playwright / штатный кэш | сам `playwright` (внешний механизм; код ядра их **не** читает) |
 | `HF_HOME` / `DOCLING_ARTIFACTS_PATH` / `HF_HUB_OFFLINE` | офлайн-веса docling (V4, `05` §7) | опц. | HF-кэш / — | `docling` (внешний механизм) |
 
-> **`COHOUND_REGISTRIES_DIR` — удалённая ось.** Переменная есть в `.env.example`, но **не
-> читается нигде** в `core/`: раскладка реестров — package-scoped (§D.4, `registries/` внутри
-> пакета). Настраивать её бессмысленно; шаблон `.env.example` подлежит чистке.
+> **`COHOUND_REGISTRIES_DIR` — удалённая ось.** Переменной **нет** в шаблоне `.env.example`
+> (вычищена 30.10.2026): она не читается нигде в `core/` — раскладка реестров package-scoped
+> (§D.4, `registries/` внутри пакета). В операторском `./.env` строка могла остаться от прежней
+> редакции шаблона; она безвредна, но мёртвая — удаляйте.
+>
+> **Артефакты инструментов не читаются `core/` вовсе** (поэтому их нет в этой таблице):
+> `MYPY_CACHE_DIR`, `RUFF_CACHE_DIR`, `HYPOTHESIS_STORAGE_DIRECTORY`, `COVERAGE_FILE`,
+> `PYTHONPYCACHEPREFIX`, `PYTEST_ADDOPTS` — их читают сами инструменты. `.env` загружается
+> **только на входе CLI** (`core/cli/main.py`), значит для `pytest`/`ruff`/`mypy` эти
+> переменные нужно экспортировать в оболочку — пример лежит в `~/.cohound/env.sh` (§A.1.2).
 >
 > **Не env-переменные (хотя похожи):** `PLAYWRIGHT_BROWSER_TYPE` и
 > `PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT` — это **настройки Scrapy** (`_PLAYWRIGHT_SETTINGS`
