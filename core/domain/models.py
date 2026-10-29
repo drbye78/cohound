@@ -43,6 +43,7 @@ from core.domain.enums import (
     Importance,
     InheritanceMode,
     LLMScenario,
+    MeasurementOrigin,
     OnboardingState,
     Origin,
     ParamType,
@@ -1093,6 +1094,18 @@ class Cell(BaseModel):
     review_reason: str | None = None
     #: Свидетельство о дефектах оценки (ремонт/отказ валидации/аномалии §10.4).
     validation_notes: list[str] = Field(default_factory=list)
+    #: Происхождение ячейки в прогоне (09 §3.1/§10): ``observed`` — вердикт получен
+    #: здесь, ``carried`` — перенесён из прогона-предшественника по ``cell_reuse_key``.
+    #: Дефолт ``observed``: ячейка, о переносе которой никто не заявил, измерена — обратное
+    #: утверждение было бы выдумкой, а не наблюдением.
+    measurement_origin: MeasurementOrigin = MeasurementOrigin.OBSERVED
+    #: Прогон, из которого перенесён вердикт (``carried``); ``None`` ⟺ ``observed``.
+    #: Это провенанс, а не украшение: читатель карты обязан уметь дойти до измерения,
+    #: которое действительно состоялось.
+    carried_from_run_id: str | None = None
+    #: Ключ переноса (``cell-reuse-2``), которым помечена ячейка; ``None`` — не вычислялся
+    #: (ячейка высокого источника, ``failed``, модульный вызов без условий переноса).
+    cell_reuse_key: str | None = None
 
     @model_validator(mode="after")
     def _enforce_invariants(self) -> Cell:
@@ -1176,6 +1189,19 @@ class Cell(BaseModel):
             and scope.denial_strength is not DenialStrength.INSTRUMENT_FAILED
         ):
             raise ValueError("I4: failed несёт только denial_strength=instrument_failed")
+        # 09 §10: перенос — это адрес источника вердикта. ``carried`` без прогона-источника
+        # неотличим от «измерено здесь» с ложной пометкой, а ``observed`` с источником
+        # объявляет перенос, которого не было. Обе записи отвергаются как противоречивые.
+        if self.measurement_origin is MeasurementOrigin.CARRIED:
+            if not self.carried_from_run_id:
+                raise ValueError(
+                    "09 §10: measurement_origin=carried → carried_from_run_id обязателен"
+                )
+        elif self.carried_from_run_id is not None:
+            raise ValueError(
+                "09 §10: carried_from_run_id при measurement_origin=observed — "
+                "противоречивый провенанс"
+            )
         return self
 
 

@@ -738,6 +738,48 @@ class SqliteStateStore:
                 payload,
             )
 
+    def get_cell_measurement(
+        self, run_id: str, product_id: str, param_id: str
+    ) -> CellMeasurementRow | None:
+        """Измерение одной ячейки (09 §10.2): строка или ``None``.
+
+        Читается по составному ключу (PK) — один SELECT: перенос проверяет ключ **на
+        каждой** паре «продукт × параметр», поэтому чтение всего продукта здесь было бы
+        лишней работой на каждой ячейке.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM cell_measurement"
+            " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+            (run_id, product_id, param_id),
+        ).fetchone()
+        return None if row is None else self._cell_measurement_row(row)
+
+    def save_cell_measurement(self, row: CellMeasurementRow) -> None:
+        """Upsert одного измерения ячейки (ключ ``(run_id, product_id, param_id)``).
+
+        Строка с пустым ``param_id`` отбрасывается — тот же контракт, что у батчевого
+        ``record_cell_measurements``: ключ измерения не выдумывается, иначе все такие
+        записи слились бы в один «параметр». Пишется и для ``observed``, и для
+        ``carried``: индекс переноса обязан описывать **все** ячейки прогона, иначе
+        цепочка переносов рвётся на втором цикле.
+        """
+        if not str(row.param_id or "").strip():
+            return
+        with self._conn:
+            self._conn.execute(
+                _upsert_sql(
+                    "cell_measurement",
+                    ("run_id", "product_id", "param_id"),
+                    _CELL_MEASUREMENT_COLUMNS,
+                ),
+                (
+                    row.run_id,
+                    row.product_id,
+                    row.param_id,
+                    *(getattr(row, name) for name in _CELL_MEASUREMENT_COLUMNS),
+                ),
+            )
+
     def iter_cell_measurements(
         self, product_id: str, *, run_id: str | None = None
     ) -> list[CellMeasurementRow]:

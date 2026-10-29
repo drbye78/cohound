@@ -221,6 +221,13 @@ CREATE TABLE IF NOT EXISTS cells (
     evidence_scope    TEXT,                             -- JSON силы отрицания + вектора охвата (§2.3)
     primary_evidence_id TEXT,
     reviewed_by       TEXT,
+    -- 09 §10 (схема cell-reuse-2): происхождение ячейки. ``observed`` — вердикт получен
+    -- в этом прогоне, ``carried`` — перенесён из ``carried_from_run_id`` по совпадению
+    -- ``cell_reuse_key``. Дефолт ``observed`` семантически верен и для строк, записанных
+    -- до появления колонки: они действительно были измерены, поэтому backfill не нужен.
+    measurement_origin TEXT NOT NULL DEFAULT 'observed',  -- observed|carried
+    carried_from_run_id TEXT,                           -- NULL ⟺ measurement_origin=observed
+    cell_reuse_key    TEXT,                             -- ключ переноса (cell-reuse-2); NULL = не вычислялся
     updated_at        TEXT,
     PRIMARY KEY (run_id, product_id, param_id),
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
@@ -772,6 +779,22 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # ``schema_version`` **не** поднимается — иначе гейт версии (11 §2.6) отверг бы
     # существующие прогоны, а их читаемость здесь важнее формальной метки.
     _ensure_columns(conn, "cells", {"absence_rule": "TEXT"})
+    # 09 §10 (схема cell-reuse-2): происхождение ячейки — перенос вердикта из прогона-
+    # предшественника. Аддитивно и **без** подъёма ``schema_version`` (решение владельца
+    # 29.10.2026): ``carried_from_run_id``/``cell_reuse_key`` у старых строк остаются NULL
+    # («не вычислялось»), а ``measurement_origin`` получает дефолт ``observed`` — он верен
+    # и для исторических строк, потому что они действительно были измерены. Подъём версии
+    # отверг бы гейтом (11 §2.6) все существующие прогоны ради метки, которая ничего не
+    # добавляет к читаемости.
+    _ensure_columns(
+        conn,
+        "cells",
+        {
+            "measurement_origin": "TEXT NOT NULL DEFAULT 'observed'",
+            "carried_from_run_id": "TEXT",
+            "cell_reuse_key": "TEXT",
+        },
+    )
     # V5/V6: условия генерации оценщика — хост endpoint'а и потолок токенов. Оба факта
     # обязаны быть в манифесте, иначе «куда ушёл корпус» и «обрезали ли ответ» — догадки.
     _ensure_columns(

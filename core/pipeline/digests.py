@@ -56,13 +56,17 @@ from core.util.hashing import short_hash
 
 # ВАЖНО: срез только вычисляет дайджест; границы ``hound diff``/``content_change`` не меняются.
 __all__ = [
+    "CELL_REUSE_SCHEMA",
     "EXECUTION_CONTRACT_FIELDS",
     "catalog_digest",
+    "cell_reuse_key",
     "cohort_digest",
+    "coverage_digest",
     "execution_contract_digest",
     "manual_artifacts_digest",
     "passports_digest",
     "render_modes_digest",
+    "retrieved_doc_set_digest",
     "scoring_policy_version",
     "seeds_digest",
 ]
@@ -414,3 +418,193 @@ def execution_contract_digest(values: Mapping[str, Any]) -> str:
         raise ValueError(f"execution_contract: неизвестные поля {extra}")
     payload = {field: values[field] for field in EXECUTION_CONTRACT_FIELDS}
     return short_hash(_canonical(payload), _DIGEST_LEN)
+
+
+# ---------------------------------------------------------------------------
+# Перенос ячеек (09 §10.1, схема ``cell-reuse-2``): ключ и его слагаемые
+# ---------------------------------------------------------------------------
+
+#: Версия пространства ключей переноса ячейки (09 §10.1).
+#:
+#: ``cell-reuse-2`` — ключ **per-cell**: он несёт отпечаток retrieved-набора **этой**
+#: ячейки (``retrieved_doc_set_digest``), а не doc-set продукта (решение владельца
+#: 29.10.2026). Прежняя схема ``cell-reuse-1`` была per-product: изменение любого
+#: документа продукта инвалидировало все его ячейки, и цена этого консерватизма не
+#: измерялась. Значение входит в материал ключа, поэтому смена схемы — несовместимость
+#: по построению: старые ключи не совпадут, и ячейка переоценится (безопасное
+#: направление — лишняя переоценка, а не чужой вердикт).
+CELL_REUSE_SCHEMA = "cell-reuse-2"
+
+#: Длина ключа переноса ячейки (24 hex-символа — как у прочих дайджестов §12.2).
+_CELL_REUSE_LEN = 24
+
+
+def retrieved_doc_set_digest(retrieved: Iterable[Any]) -> str:
+    """Отпечаток retrieved-набора **одной ячейки** (09 §10.1), 24 hex-символа.
+
+    Материал — множество пар ``(product_id, content_hash)`` переданных чанков, без
+    ``score``/``rank``/``chunk_id``:
+
+    * **порядок не входит** (``sorted`` на множестве): порядок выдачи может измениться от
+      пересборки партиции при неизменном наборе документов, а текст-то тот же — перенос в
+      этом случае допустим (09 §10.1). Если окажется, что порядок влияет на вердикт, в
+      ключ войдёт ``prompt_hash``, а не ранг;
+    * **``chunk_id`` не входит**: он несёт ``partition_build_id`` (16 §6), и пересборка
+      партиции с тем же содержимым инвалидировала бы ячейку без изменения доказательств;
+    * **``content_hash`` — это и есть версия текста документа** (I19): чанк адресуется
+      хешем собственного текста, поэтому правка документа меняет отпечаток даже тогда,
+      когда ``doc_version_id`` формально тот же (пере-экстракция того же URL).
+
+    ``doc_version_id`` в материал **не входит** осознанно: ``RetrievedChunk`` его не несёт
+    (версия документа есть у чанка-субстрата, а не у выдачи), и выводить её из
+    ``chunk_id`` значило бы привязать ключ к форме идентификатора сборки. Требование §10.1
+    («``sorted(doc_version_id)`` + их ``content_hash``») исполняется по существу:
+    отпечаток — функция **текстов**, из которых извлечено доказательство.
+
+    Пустой срез даёт стабильный дайджест пустого множества, а не пустую строку: «ничего
+    не нашлось» — наблюдённый факт, отличимый от «набор не считали».
+    """
+    material = sorted(
+        {
+            (str(getattr(chunk, "product_id", "") or ""), str(getattr(chunk, "content_hash", "") or ""))
+            for chunk in retrieved
+        }
+    )
+    return short_hash(
+        _canonical({"retrieved": [list(row) for row in material]}), _CELL_REUSE_LEN
+    )
+
+
+def coverage_digest(coverage: Any | None) -> str | None:
+    """Стабильный дайджест семантики покрытия корпуса (09 §10.1), 24 hex-символа.
+
+    Входят только семантические поля — ``complete``, ``expected_sources``,
+    ``observed_sources``, ``blocked``, ``unreadable_origins``, ``partial_blocks``,
+    ``truncated``, ``reason``. **Не входят** ``computed_at`` (момент вычисления),
+    ``run_id``/``product_id`` (адрес записи) и счётчики ``reused/revalidated/new``: они
+    меняются от того, ответил ли сервер 304 или 200 с тем же телом, — это не семантическое
+    изменение, а разные способы наблюдения одного и того же корпуса. Иначе ключ переноса
+    ломался бы на каждом прогоне, где краул пошёл другим путём при том же результате.
+
+    ``None`` — покрытия нет вовсе (прогон не дошёл до корпуса): это **не** «пустое
+    покрытие», и перенос в таком прогоне запрещён отдельно (§10.2).
+    """
+    if coverage is None:
+        return None
+    payload = {
+        "complete": bool(getattr(coverage, "complete", False)),
+        "expected_sources": int(getattr(coverage, "expected_sources", 0) or 0),
+        "observed_sources": int(getattr(coverage, "observed_sources", 0) or 0),
+        "blocked": {
+            str(kind): int(count)
+            for kind, count in sorted((getattr(coverage, "blocked", None) or {}).items())
+        },
+        "unreadable_origins": sorted(
+            str(origin) for origin in (getattr(coverage, "unreadable_origins", None) or ())
+        ),
+        "partial_blocks": {
+            str(origin): {
+                str(kind): int(count)
+                for kind, count in sorted((counts or {}).items())
+            }
+            for origin, counts in sorted(
+                (getattr(coverage, "partial_blocks", None) or {}).items()
+            )
+        },
+        "truncated": bool(getattr(coverage, "truncated", False)),
+        "reason": getattr(coverage, "reason", None),
+    }
+    return short_hash(_canonical(payload), _CELL_REUSE_LEN)
+
+
+def cell_reuse_key(
+    *,
+    product_id: str,
+    param_id: str,
+    catalog_row_digest: str,
+    prompt_template_digest: str,
+    model_id: str,
+    llm_scenario: str,
+    model_config_digest: str,
+    retrieval_profile: str | None,
+    cutoff_k: int | None,
+    retrieval_params_json: str | None,
+    retrieved_doc_set_digest: str,
+    coverage_digest: str | None,
+    methodology_version: str,
+    status_dict_version: str | None,
+    scoring_policy_version: str,
+    capability_policy: str,
+    unknown_policy: str,
+    partial_score: float,
+    attestation_digest: str,
+    partition_build_id: str | None,
+) -> str:
+    """Ключ переноса ячейки (09 §10.1, схема :data:`CELL_REUSE_SCHEMA`), 24 hex-символа.
+
+    Совпал ключ — вердикт прошлого прогона переносим; не совпал — ячейка измеряется
+    заново. Поэтому в материал входит **всё**, от чего вердикт зависит, и все значения —
+    **текущие**, а не взятые из строки ``prev``: иначе смена шаблона/модели/правил не
+    инвалидировала бы перенос (``prompt_template_digest`` считается от текущего шаблона и
+    правила параметра, а не от ``prev.prompt_hash``; ``model_config_digest`` — от текущей
+    конфигурации оценщика, а не от ``prev.model_id``).
+
+    Состав (порядок фиксирован — это материал ключа, а не документация):
+
+    * схема ключа (``cell-reuse-2``);
+    * адрес ячейки: ``product_id`` + ``param_id``;
+    * строка каталога (:func:`core.pipeline.eval_cache.catalog_row_digest`) — ``rule``/
+      ``absence_rule``/``param_type``/``role_binding``/… задают, что считается заявленным;
+    * ``prompt_template_digest`` — версия шаблона + текст правила (текущие);
+    * ``model_id``/``llm_scenario``/``model_config_digest`` — маршрутизация и конфигурация
+      оценщика (I21): смена слота или декодера — переоценка;
+    * ``retrieval_profile``/``cutoff_k``/``retrieval_params_json`` — условия ретривала
+      (I16/I20): смена K меняет набор доказательств, значит и вердикт;
+    * ``retrieved_doc_set_digest`` — **набор документов этой ячейки** (per-cell);
+    * ``coverage_digest`` — против какого наблюдения корпуса измерено;
+    * ``methodology_version``/``status_dict_version``/``scoring_policy_version``/
+      ``capability_policy``/``unknown_policy``/``partial_score`` — правила ответа (§10.5,
+      §13): смена семантики — переоценка **всех** ячеек;
+    * ``attestation_digest`` — действующие человеческие подписи (O13): решение человека
+      не переносится неявно;
+    * ``partition_build_id`` — продукт-партиция retrieved-набора. Именно **партиция**, а не
+      ``composition_id``: пересборка чужой партиции не должна инвалидировать ячейку.
+
+    ``None`` в значениях сериализуется как ``null`` и отличим от пустой строки: «условие не
+    объявлено» — тоже условие измерения, и выдавать его за объявленное нельзя.
+    """
+    material = "\x1f".join(
+        (
+            CELL_REUSE_SCHEMA,
+            str(product_id),
+            str(param_id),
+            str(catalog_row_digest),
+            str(prompt_template_digest),
+            str(model_id),
+            str(llm_scenario),
+            str(model_config_digest),
+            _key_part(retrieval_profile),
+            _key_part(cutoff_k),
+            _key_part(retrieval_params_json),
+            str(retrieved_doc_set_digest),
+            _key_part(coverage_digest),
+            str(methodology_version),
+            _key_part(status_dict_version),
+            str(scoring_policy_version),
+            str(capability_policy),
+            str(unknown_policy),
+            repr(float(partial_score)),
+            str(attestation_digest),
+            _key_part(partition_build_id),
+        )
+    )
+    return short_hash(material, _CELL_REUSE_LEN)
+
+
+def _key_part(value: Any) -> str:
+    """Слагаемое ключа: ``None`` отличим от пустой строки (маркер ``∅``).
+
+    Без маркера «не объявлено» и «объявлено пустым» давали бы один материал, и ключ
+    переноса молча уравнял бы два разных условия измерения.
+    """
+    return "∅" if value is None else str(value)

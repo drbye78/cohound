@@ -472,6 +472,9 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # отсутствие: оператор не знает, что смотреть.
         "stale_cells": _path(getattr(artifacts, "stale_cells", None)),
         "cell_diagnostics": _path(getattr(artifacts, "cell_diagnostics", None)),
+        # 09 §10.1: происхождение ячеек (перенос из прошлого прогона) — путь к таблице.
+        # ``None`` — перенесённых нет, файл не создавался; это отличается от «путь забыт».
+        "cell_origin": _path(getattr(artifacts, "cell_origin", None)),
         # I2/I2c: документы, прочитанные не целиком — путь к таблице (числа — в ней и в
         # строке заметки). Артефакт без объявленного пути — та же невидимость, что и его
         # отсутствие: оператор не знает, что смотреть.
@@ -2039,6 +2042,7 @@ def _resolve_phases(
     mem_budget_mb: int | None = None,
     derive_extract_workers: bool | None = None,
     previous_run_id: str | None = None,
+    previous_store: Any = None,
     change_class: str | None = None,
     cycle_id: str | None = None,
 ) -> dict[str, PhaseFn]:
@@ -2216,6 +2220,12 @@ def _resolve_phases(
         # 09 §12.3/§13: база сравнения прогона (результат ``previous_run_of`` — резолвится
         # один раз в команде ``run``) и класс изменения из той же ``RunIdentity``.
         "previous_run_id": previous_run_id,
+        # 09 §10.2: БД прогона-предшественника **только на чтение** — источник ячейки и её
+        # evidence для переноса. Открывает и закрывает её composition root
+        # (``_open_previous_store``): путь ``runs/{run_id}/cohound.db`` знает раскладка, а
+        # ``pipeline`` раскладку не читает. ``None`` ⇒ перенос выключен (нет
+        # предшественника, нет его БД или она нечитаема текущей схемой).
+        "previous_store": previous_store,
         "change_class": change_class,
         # 09 §2.4/§6.2: цикл прогона — тот же, что вошёл в ``run_id``.
         "cycle_id": cycle_id,

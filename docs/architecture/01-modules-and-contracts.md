@@ -809,7 +809,7 @@ pytest-тестами **предмета** — `_crawl_taxonomy_from_port` (`tes
 111 утверждений pytest-двойник есть, 8 дописаны, 9 — структурные по природе.
 
 **I10/I15 (K7):** SQL обеспечивает `source_id NOT NULL` **кроме** `evidence_type='absence'`
-(триггер `trg_evidence_source_id`, `core/store/sqlite.py:486`): у протокола отсутствия источника нет
+(триггер `trg_evidence_source_id`, `core/store/sqlite.py:493`): у протокола отсутствия источника нет
 по построению, и `NULL` честнее выдуманного нерезолвимого id. Детерминированный резолв
 `source_id → source_url` — **код** (`domain/anchors.py` + `SourceResolver`), не триггер.
 
@@ -891,8 +891,8 @@ pytest + `--cov` (`:78-88`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:98` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1375`; структура `ProtocolExhaustion` — `core/domain/models.py:1212`;
+`core/domain/models.py:1375`; структура `ProtocolExhaustion` — `core/domain/models.py:1238`;
 политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:1829` (`max_retries`), цикл `:2003`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
-строит вызывающий (`core/pipeline/evaluate.py:1899`).
+строит вызывающий (`core/pipeline/evaluate.py:2131`).

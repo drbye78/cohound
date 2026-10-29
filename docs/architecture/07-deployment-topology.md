@@ -330,7 +330,7 @@ LLM-endpoint корп. облака — только в Z0.
 > значение не использует. Ступень «Z2 + egress-прокси» — **roadmap** (`08`), не текущая
 > функциональность. ➖ снято как открытый вопрос — это **решение D-8**, а не недоделка:
 > алиас принят, и предупреждение `profile_notices` о нём реализовано (`core/config/deploy.py:651`,
-> вызовы `core/cli/commands/run.py:536`, `core/cli/commands/plan.py:171`).
+> вызовы `core/cli/commands/run.py:573`, `core/cli/commands/plan.py:171`).
 
 **Локальный путь исполнения (as-built).** При `local` краул идёт in-process; как устроены пулы
 (per-seed-root fetch-пул, browser-элементы вне пула) — §4. Отсюда: `workers` в `edge.yaml` и

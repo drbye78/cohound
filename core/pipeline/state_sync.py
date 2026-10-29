@@ -16,7 +16,8 @@
 
 Границы честности: счётчики и статусы выводятся только из того, что реально лежит в БД
 прогона (``corpus_coverage`` + ячейки) и в durable doc-set продукта. Чего в этом срезе
-нет — не выдумывается: carry-forward отсутствует (``cells_carried = 0``),
+нет — не выдумывается: ``cells_carried`` считается по происхождению ячеек прогона
+(``observed``/``carried``, 09 §10) и равен нулю только когда переноса не было,
 ``partition_build_id`` не заполняется, ``snapshot_digest`` продукта не трогается.
 ``docs_total``/``docs_new``/``docs_reused`` берутся из ``document_version`` (MVP-3b,
 09 §6.3); без durable-субстрата остаётся прежнее ``docs_total = observed_sources`` и
@@ -30,12 +31,17 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as _dt
-import json
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from core.domain.enums import CellState, OnboardingState, ProductScope
+from core.domain.enums import (
+    CellState,
+    MeasurementOrigin,
+    OnboardingState,
+    ProductScope,
+)
 from core.domain.models import CorpusCoverage, ProductPlan, SeedsConfig
+from core.pipeline.digests import coverage_digest
 from core.ports.state import (
     ProductStatePort,
     ProductStateRow,
@@ -154,39 +160,42 @@ def sync_product_state(
 def _coverage_digest(coverage: CorpusCoverage | None) -> str | None:
     """Стабильный дайджест семантики покрытия (без ``computed_at``).
 
+    Формула живёт в :func:`core.pipeline.digests.coverage_digest` — **одна** на два
+    потребителя: снимок продукта (здесь) и ключ переноса ячейки (09 §10.1). Вторая копия
+    разошлась бы с первой, и «то же покрытие» в ключе и в снимке означало бы разное.
+
     ``computed_at`` — момент вычисления, а не факт: два прогона с одинаковым покрытием
-    обязаны давать одинаковый дайджест, иначе carry-forward/attestation-сверка (§4.2/§10)
-    ломались бы на каждом пересчёте. Берутся только семантические поля:
-    ``complete``/``expected_sources``/``observed_sources``/``truncated``/``reason``.
+    обязаны давать одинаковый дайджест, иначе сверка §4.2/§10 ломалась бы на каждом
+    пересчёте.
     """
-    if coverage is None:
-        return None
-    payload = {
-        "complete": coverage.complete,
-        "expected_sources": coverage.expected_sources,
-        "observed_sources": coverage.observed_sources,
-        "truncated": coverage.truncated,
-        "reason": coverage.reason,
-    }
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    return short_hash(canonical, 24)
+    return coverage_digest(coverage)
 
 
-def _cell_stats(store: StorePort, run_id: str) -> dict[str, tuple[int, int]]:
-    """``product_id → (всего ячеек, разрешено)`` по durable-ячейкам прогона.
+def _cell_stats(store: StorePort, run_id: str) -> dict[str, tuple[int, int, int]]:
+    """``product_id → (всего ячеек, разрешено, перенесено)`` по durable-ячейкам прогона.
 
     Разрешённая ячейка — ``evaluated``/``reviewed`` (§5.1); ``pending``/``preliminary``/
     ``failed`` остаются неразрешёнными. ``N/A`` — статус разрешённой ячейки, поэтому
     отдельной ветки не требует.
+
+    Перенесённая (``measurement_origin == carried``) — ячейка, чей вердикт взят из
+    ``carried_from_run_id`` без вызова оценщика (09 §10.1). Она **входит** и в
+    ``cells_measured``: снимок отвечает на вопрос «сколько ячеек карты имеет измеренное
+    происхождение», а перенос — это измерение прошлого цикла, а не его отсутствие.
+    Отдельный счётчик нужен, чтобы происхождение читалось без разбора каждой строки:
+    ``cells_carried = 0`` при ``cells_measured > 0`` — честное «всё измерено сейчас».
     """
     stats: dict[str, list[int]] = {}
     for cell in store.iter_cells(run_id):
-        bucket = stats.setdefault(cell.product_id, [0, 0])
+        bucket = stats.setdefault(cell.product_id, [0, 0, 0])
         bucket[0] += 1
         if cell.state in _RESOLVED_CELL_STATES:
             bucket[1] += 1
+        if cell.measurement_origin is MeasurementOrigin.CARRIED:
+            bucket[2] += 1
     return {
-        product_id: (total, resolved) for product_id, (total, resolved) in stats.items()
+        product_id: (total, resolved, carried)
+        for product_id, (total, resolved, carried) in stats.items()
     }
 
 
@@ -262,8 +271,9 @@ def record_run_outcome(
       doc-set продукта (:func:`_doc_counters`): размер ``active``-набора и разбивка по
       ``first_seen_run_id``/``last_seen_run_id``; без субстрата — прежнее
       ``docs_total = coverage.observed_sources`` и нули (не фабрикуются). Счётчики
-      ячеек — из durable-ячеек прогона; ``cells_carried = 0`` (carry-forward не
-      реализован), ``partition_build_id`` не выдумывается;
+      ячеек — из durable-ячеек прогона: ``cells_measured`` — разрешённые, ``cells_carried``
+      — из них перенесённые (``cells.measurement_origin = carried``, 09 §10.1);
+      ``partition_build_id`` не выдумывается;
     * ``last_corpus_run_id`` — при наличии строки покрытия;
     * ``last_evaluated_run_id`` — если фаза оценки прошла (``evaluate_ok``) и покрытие есть;
     * ``last_completed_run_id``/``last_completed_cycle_id`` — только для ``scope=full``,
@@ -289,7 +299,7 @@ def record_run_outcome(
         docs_total, docs_new, docs_reused = _doc_counters(
             state, product_id, run_id=run_id, coverage=coverage
         )
-        cells_total, cells_resolved = stats.get(product_id, (0, 0))
+        cells_total, cells_resolved, cells_carried = stats.get(product_id, (0, 0, 0))
         cells_pending = cells_total - cells_resolved
         baseline_complete = bool(
             scope == ProductScope.FULL.value
@@ -313,6 +323,7 @@ def record_run_outcome(
                 docs_new=docs_new,
                 cells_total=cells_total,
                 cells_measured=cells_resolved,
+                cells_carried=cells_carried,
                 cells_pending=cells_pending,
                 baseline_complete=baseline_complete,
                 created_at=completed_at or started_at,

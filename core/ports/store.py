@@ -128,8 +128,26 @@ class StorePort(Protocol):
 
     def save_cells_batch(self, cells: list[Cell], chunk_size: int = 200) -> None: ...
 
-    def add_evidence(self, ev: CellEvidence) -> None: ...
+    def get_cell(self, run_id: str, product_id: str, param_id: str) -> Cell | None:
+        """Одна ячейка прогона (``None`` — строки нет).
 
+        Нужна переносу ячеек (09 §10.2): сама ячейка и её evidence читаются из БД
+        прогона-предшественника, и только после того, как ключ ``cell_reuse_key`` совпал.
+        Читать весь прогон ради одной ячейки значило бы декодировать сотни строк на
+        каждую пару «продукт × параметр».
+        """
+
+    def iter_cell_evidence(
+        self, run_id: str, product_id: str, param_id: str
+    ) -> list[CellEvidence]:
+        """Типизированный evidence одной ячейки, в порядке вставки (без ``absence``).
+
+        Протокол отсутствия не отдаётся: у него нет ``source_id``, и типизированная
+        модель его отвергает (I10/I15) — он переносится носителем
+        ``Cell.absence_evidence`` (см. :meth:`add_absence_evidence`).
+        """
+
+    def add_evidence(self, ev: CellEvidence) -> None: ...
     def add_evidence_batch(self, evs: list[CellEvidence]) -> None: ...
 
     def add_absence_evidence(self, entries: list[Mapping[str, Any]]) -> None:

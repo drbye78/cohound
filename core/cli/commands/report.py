@@ -155,6 +155,10 @@ def run(args: argparse.Namespace) -> int:
         # (mode/status/scope/счётчики). Носитель один: ``results[].notes`` прогона
         # остаётся операторским текстом, и отчёт его в статус не переводит.
         "run_product": list(getattr(artifacts, "run_products", None) or []),
+        # 09 §10.1/§11.4: происхождение ячеек — по продукту (всего/перенесено). В
+        # машинном выводе, а не только в CSV: вопрос «сколько вердиктов взято из прошлого
+        # цикла» задаётся к отчёту, и ответ не должен требовать открытия файла.
+        "cell_origin": list(getattr(artifacts, "cell_origins", None) or []),
         # Путь к таблице на диске: строки уже в payload, но артефакт без объявленного
         # пути — та же невидимость, что и его отсутствие. ``None`` — строк нет (файл
         # не создаётся: пустая таблица читалась бы как «продуктов нет»).
@@ -182,6 +186,13 @@ def run(args: argparse.Namespace) -> int:
         # ``--only-product`` различались без открытия ``run_manifest.yaml``.
         sys.stdout.write(f"run_scope: {manifest.run_scope or 'не записано'}\n")
         sys.stdout.write(f"embed_device: {manifest.embed_device or 'не записано'}\n")
+        for row in payload["cell_origin"]:
+            if int(row.get("cells_carried") or 0):
+                sys.stdout.write(
+                    f"carried: {row.get('product_id')} "
+                    f"{row.get('cells_carried')}/{row.get('cells_total')} ячеек "
+                    "перенесено из прошлого прогона\n"
+                )
         for row in payload["run_product"]:
             sys.stdout.write(
                 f"product: {row.get('product_id')} mode={row.get('mode')} "

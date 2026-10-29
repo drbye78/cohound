@@ -62,7 +62,7 @@
   - 6.1. Порядок фаз и onboarding-префлайт
   - 6.2. `derive_run_id` (замена, не надстройка)
   - 6.3. Corpus: new/full vs incremental
-  - 6.4. Evaluate (design-only)
+  - 6.4. Evaluate (as-built: перенос ячеек)
   - 6.5. Статус прогона и продукта
   - 6.6. Оси допуска терминальных артефактов (P6/P6b)
   - 6.7. Контракт спуска в контейнеры (B2, as-built)
@@ -87,7 +87,7 @@
   - 8.7. Операторский потолок ревалидации (`crawl.revalidate_max_documents`)
 - 9. Reuse matrix
   - 9.1. Что **нельзя** переиспользовать без пере-измерения
-- 10. Evaluation / carry-forward (design-only)
+- 10. Evaluation / carry-forward (as-built)
   - 10.1. Ключ переноса ячейки
   - 10.2. Перенос
   - 10.3. Когда обязательна переоценка
@@ -97,7 +97,7 @@
   - 11.1. Поля `corpus_coverage`
   - 11.2. `❌` и неполный корпус (as-built; `freshness` — design-only)
   - 11.3. Ноль seed'ов / ноль источников
-  - 11.4. `reused` vs `observed` в отчёте (design-only)
+  - 11.4. `reused` vs `observed` в отчёте (as-built: `cells_carried`)
   - 11.5. `scope_acceptance`
   - 11.6. `pending`/`N/A`
 - 12. Versioning §13
@@ -110,7 +110,7 @@
 - 13. Failure / partial semantics
   - 13.1. Статусы продукта в прогоне
   - 13.2. Новый продукт недоступен
-  - 13.3. Старый продукт не изменился (design-only)
+  - 13.3. Старый продукт не изменился (as-built: перенос ячеек)
   - 13.4. Старый продукт изменился частично
   - 13.5. Повтор и resume
   - 13.6. `--only-product`
@@ -132,7 +132,7 @@
   - 16.4. Альтернативы (отклонены)
 - 17. Сводка ключевых решений
 - 18. Открытые вопросы / риски для решения человека
-- 19. Приложение: псевдокод `run --update` (design-only)
+- 19. Приложение: `run --update` (as-built)
 - 20. Приложение: benchmark моделей оценщика (`experiment evaluator-benchmark`, A3)
 
 ### Реестр статусов по секциям
@@ -143,10 +143,10 @@
 | §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1466`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1586`; формула — `next_cohort_ref:1566`). Повтор с тем же составом — no-op. Остаётся колонка `runs.cohort_ref`, которая хранит другое поле (§12.2) |
 | §2.3 | ✅ сделано | подкоманды `hound package seeds list/add/disable/enable/export` (`core/cli/package/parser.py:482`, слой — `core/pipeline/package_seeds.py`); `sources/seeds.yaml` в `ARTIFACT_FILES`; ложные подсказки в `context.py`/`corpus.py` стали правдой |
 | §2.4 | ⬜ не сделано | `--only-failed` остаётся **сеансовым**; `--update`+`--only-failed` запрещены; `offline` не реализован |
-| §3.1 | ⬜ не сделано (частично) | `RunProductStatus` — ✅ есть (`core/domain/enums.py`) и сверен со словарём (`run_product_status`). `CoverageFreshness` — **➖ снято**: её роль исполняет `corpus_docs.reuse_kind`, вторая ось свежести была бы вторым носителем одной величины. `MeasurementOrigin` — ⬜ волна 2: без переноса ячеек ему нечего означать |
+| §3.1 | ✅ сделано | `RunProductStatus` — ✅ есть (`core/domain/enums.py`) и сверен со словарём (`run_product_status`). `CoverageFreshness` — **➖ снято**: её роль исполняет `corpus_docs.reuse_kind`, вторая ось свежести была бы вторым носителем одной величины. `MeasurementOrigin` — ✅ волна 2: `observed|carried`, сверен со словарём (`docs/status-dictionary.yaml:measurement_origin`, `core/domain/dictionary.py`) и несётся ячейкой (`Cell.measurement_origin`) |
 | §3.2 | ⬜ не сделано | модели живут как `*Row` в `core/ports/state.py`; `CellMeasurement`/`RunProduct`/`CompositionMember` **нет** |
-| §3.3 | ⬜ не сделано | O1/O2/O3/O12 as-built; O5/O6/O13 опираются на carry-forward (design) |
-| §4.1, §4.2 | ✅ сделано | `state.db` — `STATE_SCHEMA_VERSION = "5"` (`core/store/state_sqlite.py:41`); `cell_measurement`/`attestation`/`cycle` — **нет писателя** |
+| §3.3 | ✅ сделано (O5 — частично) | O1/O2/O3/O12 as-built; **O6 ✅** (`carry_forward_cell`), **O13 ✅** в доступной части: перенос инвалидируется сменой `scope_acceptance` через `attestation_digest`, `reviewed`/`N/A` едут только как `carried` с провенансом. O5 — **частично**: колонки `cell_evidence.doc_version_id` нет, проверка идёт по `content_hash` |
+| §4.1, §4.2 | ✅ сделано | `state.db` — `STATE_SCHEMA_VERSION = "5"` (`core/store/state_sqlite.py:41`); **`cell_measurement` — есть писатель** (Ш6, §10.1); `attestation`/`cycle` — по-прежнему **нет писателя** |
 | §4.3 | ✅ сделано | таблица `run_product` (16 §3.2) + `save_run_product`/`iter_run_products` (`core/store/sqlite_store.py`); писатель — корпус, читатель — отчёт (`outputs/run_product.csv` и `--json`) |
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
@@ -156,24 +156,24 @@
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
 | §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`core/pipeline/corpus.py:6620`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
-| §6.4 | ⬜ не сделано | `carry_forward_cells` не существует |
+| §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
 | §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus.py:7676`; зонд — `:3256,5390,7787`), семейство чанкеров — `chunker_family` |
-| §6.9 | ✅ сделано | `make_profile_gate` подключён (`core/cli/context.py:1214`), waiver-след (`core/pipeline/runner.py:467`) |
+| §6.9 | ✅ сделано | `make_profile_gate` подключён (`core/cli/context.py:1217`), waiver-след (`core/pipeline/runner.py:467`) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/cli/package/commands.py:2193`) |
-| §9 | ⬜ не сделано | строки «Cell/evidence» описывают design-only перенос |
-| §10 | ⬜ не сделано **в части переноса** | нет `carry_forward_cell`, `cell_reuse_key` (колонка есть в DDL без писателя), `measurement_origin`; **§10.5 (ключ eval cache) — ✅ сделано**. Дизайн — **per-cell** (решение 29.10.2026, схема `cell-reuse-2`): ключ после retrieval, `retrieved_doc_set_digest` вместо doc-set продукта |
-| §11 | ⬜ не сделано (частично) | ✅ колонки покрытия (включая `resolved_manually`); ✅ `scope_acceptance` — канал проложен (§11.5); ✅ **правило `❌` → только `live\|revalidated` исполняется** (`_enforce_reuse_confirmed`): признак reuse доехал до прогона через `corpus_docs.reuse_kind`, `freshness` не понадобилась (§11.2). ⬜ остаток — §11.4 (`cells_carried`/`cells_measured`): без переноса ячеек считать нечего |
+| §9 | ✅ сделано | строка «Cell/evidence» описывает as-built перенос (§10): `measurement_origin`/`carried_from_run_id`, копии evidence с per-run `evidence_id` |
+| §10 | ✅ сделано | `cell_reuse_key` (`cell-reuse-2`, 21 слагаемое), `carry_forward_cell`, `measurement_origin`, писатель `cell_measurement` (Ш6), счётчики `cells_carried` в снимке и отчёте; **§10.5 (ключ eval cache) — ✅ сделано** ранее. Per-cell (решение 29.10.2026): ключ после retrieval, `retrieved_doc_set_digest` вместо doc-set продукта. Приёмка — `tests/pipeline/test_carry_forward.py` |
+| §11 | ✅ сделано | колонки покрытия (включая `resolved_manually`); `scope_acceptance` — канал проложен (§11.5); **правило `❌` → только `live\|revalidated` исполняется** (`_enforce_reuse_confirmed`), и оно же применяется к перенесённой ячейке (`_carried_rules_hold`); **§11.4** — `cells_carried`/`cells_measured` в снимке (`state_sync._cell_stats`) и `outputs/cell_origin.csv` + `--json: cell_origin` (`report.collect_cell_origins`) |
 | §12.1–§12.2, §12.5 | ✅ сделано | `execution_contract_digest`, `content_change`; дефект `runs.cohort_ref` (хранила имя файла вместо ревизии) закрыт границей A |
 | §12.3 | ✅ сделано | lineage пишется в `state.db.run_lineage` и читается в манифест: `cycle_id`/`previous_run_id`/`change_class` (правило — один резолвер `previous_run_of`) |
-| §13 | ⬜ не сделано | §13.3 (carry-forward) — design-only |
+| §13 | ✅ сделано | §13.3 (carry-forward) исполняется; смена класса изменения по-прежнему переоценивает ячейки — перенос не переживает смену условий (§10.3) |
 | §14 | ⬜ не сделано **частично** | колонки §14.1 добавлены **аддитивно** (граница A, `SCHEMA_VERSION` не поднят); пп. 1–7, 9–11 §14.6 ✅ реализованы, п. 12 — **➖ снято** (решение 29.10.2026: `doc_id` остаётся `product:content_hash` — на нём держится дедуп, `dv` его не заменяет; версия документа едет отдельной колонкой); открыт п. 8 (межпрогонный `--only-failed`); §14.2 — ✅ сделано |
-| §15 | ⬜ не сделано | план приёмки: T1/T15–T20 — design-only, acceptance-тестов нет; T10/T7 переведены в as-built по коду (маркеры в §15.1) |
-| §16 | ⬜ не сделано | этапы 0–4 реализованы, этап 5 (carry-forward) не начат (маркеры в §16.1) |
-| §17 | ⬜ не сделано | сводка: п. 9 и 13 (межпрогонный) — design-only; п. 11 (ключ eval cache) закрыт |
+| §15 | ⬜ не сделано | план приёмки: T1/T15–T20 — design-only, acceptance-тестов нет; T10/T7 переведены в as-built по коду (маркеры в §15.1). Тесты волны 2 (`tests/pipeline/test_carry_forward.py`, 16 шт.) — **не** T15–T20: нумерация занята другими приёмками |
+| §16 | ✅ сделано | этапы 0–4 реализованы; **этап 5 (carry-forward) исполняется** (маркеры в §16.1) |
+| §17 | ⬜ не сделано (частично) | сводка: п. 9 (carry-forward) ✅ закрыт волной 2; п. 13 (межпрогонный `--only-failed`) — design-only; п. 11 (ключ eval cache) закрыт |
 | §18 | ✅ сделано | все 10 вопросов закрыты: п. 2 (`❌` только при `live\|revalidated`), п. 6 (**per-cell**), п. 10 (`run_scope` персистится, политика `--only-product` не меняется) — решениями 29.10.2026; п. 5, 7, 9 — механизмом |
-| §19 | ⬜ не сделано (design-only) | псевдокод с `state.lock()`/`run_product`: оба носителя уже существуют (`core/util/package_lock.py`, таблица `run_product`), поэтому секция переписывается в as-built вместе с волной 2, а не раньше — иначе она описывала бы перенос ячеек, которого нет |
+| §19 | ✅ сделано (переписано в as-built) | псевдокод заменён описанием фактического порядка: `package_lock` → `preflight` → фазы; перенос ячеек внутри Ш6, а не отдельным проходом (§10.2) |
 | §20 | ✅ сделано | benchmark оценщика (`core/cli/commands/experiment.py:529`) |
 
 > **Как читать маркеры** (проверка 2026-10-29, HEAD `59068f7`; предыдущая — `f6100c7`): ✅ —
@@ -182,29 +182,28 @@
 > установить не удалось. Разница редакций — 14 коммитов; самые «протухшие» места были про
 > корпус (`corpus.py` +405 строк), гейты и имя `scope_acceptance`, и они исправлены по коду,
 > а не по памяти.
-> Итог по 36 строкам: **21 ✅ / 14 ⬜ / 1 ➖ / 0 ❔** (перемер 29.10.2026 после границы A:
-> §4.3 и §6.5 перешли в ✅, §3.1 и §11 стали «частично» без смены маркера, §14.6 п. 12
-> снят решением). Прежние 19/16 не учитывали, что `run_product` и правило reuse уже
-> исполняются в прогоне. Символ, существующий и покрытый тестом, но не вызываемый
+> Итог по 36 строкам: **30 ✅ / 5 ⬜ / 1 ➖ / 0 ❔** (перемер 30.10.2026 после волны 2:
+> §3.1, §3.3, §6.4, §9, §10, §11, §13, §16, §19 перешли в ✅ — перенос ячеек исполняется).
+> Прежние 21/14 не учитывали, что перенос ячеек, `MeasurementOrigin` и счётчики уже
+> производятся прогоном. Символ, существующий и покрытый тестом, но не вызываемый
 > конвейером, здесь считается ⬜ (пример из проекта — `run_serp_round`).
 
-> **Что осталось.** Четырнадцать открытых строк сводятся к **одной границе и двум
-> пунктам**:
+> **Что осталось.** Пять открытых строк сводятся к **двум пунктам и остатку O5**:
 >
-> 1. **Волна 2 — carry-forward (§10, §13.3, §19).** `cell_reuse_key`,
->    `measurement_origin`, `carried_from_run_id`, `cell_measurement` с писателем,
->    enum `MeasurementOrigin` (§3.1), O5/O6/O13 (§3.3), §11.4 (`cells_carried`),
->    acceptance T15–T20 (§15), этап 5 (§16.1). Без неё §9 (строка Cell/evidence) и §17
->    (пп. 9, 14) остаются design-only по построению: переносить нечего.
->    **Дизайн зафиксирован per-cell** (решение владельца 29.10.2026): ключ считается
->    после retrieval и несёт `retrieved_doc_set_digest` этой ячейки, а не doc-set
->    продукта; `carry_forward` — часть ячеечного цикла, не батч-проход (§10.1/§10.2).
-> 2. **Межпрогонный `--only-failed`** (§2.4/§13.5, п. 8 §14.6) — разблокирован границей A:
+> 1. **Межпрогонный `--only-failed`** (§2.4/§13.5, п. 8 §14.6) — разблокирован границей A:
 >    носитель (`run_product`) появился.
-> 3. **`offline` refresh** (§2.4) — требует `reuse`-элемента work-set; сегодня политика
+> 2. **`offline` refresh** (§2.4) — требует `reuse`-элемента work-set; сегодня политика
 >    честно деградирует до `revalidate` (то есть **ходит в сеть**) и оставляет видимую
 >    ошибку на продукт. `freshness` для этого **не нужна**: признак происхождения уже
 >    живёт в `corpus_docs.reuse_kind` — прежняя редакция считала иначе.
+> 3. **O5 частично** (§3.3): `cell_evidence.doc_version_id` нет, перенос проверяет цепочку
+>    по `content_hash` — версия текста, но не адрес версии.
+>
+> **Волна 2 закрыта 30.10.2026.** Перенос ячеек исполняется (§10, §13.3, §19): `cell_reuse_key`
+> (`cell-reuse-2`), `carry_forward_cell`, `measurement_origin`/`carried_from_run_id`,
+> писатель `cell_measurement`, `cells_carried` в снимке и отчёте, приёмка —
+> `tests/pipeline/test_carry_forward.py`. Нумерация T15–T20 (§15.1) осталась за прежними
+> приёмками: тесты переноса названы по §10.3/§11.4, а не выданы за T15–T20.
 >
 > **Провенанс сравнения (найдено и закрыто 29.10.2026, до волны 2).** `RunManifest`
 > объявлял `cycle_id`, `previous_run_id`, `change_class`, и `build_manifest` не передавал
@@ -315,7 +314,7 @@
 > index-gc` (живое множество — `runs.index_build_id` по run DB; §8.6). Не реализовано:
 > `offline`-reuse (**не реализован**: планировщик деградирует до `revalidate` с видимой
 > ошибкой на продукт — молчаливая смена политики запрещена, §2.4), расписание
-> `next_check_at`, carry-forward (этап 5) — design-only. Операторский потолок
+> `next_check_at`; carry-forward (этап 5) **исполняется** (§10). Операторский потолок
 > ревалидации `crawl.revalidate_max_documents` **реализован** как default-off ось (§8.7).
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
 > обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
@@ -465,7 +464,7 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
    > **Уточнение к прежней редакции: прогон от этого не отказывал и не отказывает.**
    > `classify_change` (`core/pipeline/run_identity.py:324`) при росте состава даёт
    > `cohort_expansion` + `golden_required=full` + новый `run_id`; отказ живёт только в
-   > `hound diff` (`core/pipeline/report.py:2059`). Настоящий дефект был в **провенансе**: по
+   > `hound diff` (`core/pipeline/report.py:2068`). Настоящий дефект был в **провенансе**: по
    > `run_id`/манифесту нельзя было отличить «когорту расширили, объявив ревизию» от
    > «в `cohort.yaml` дописали строку».
    >
@@ -666,7 +665,9 @@ corpus-снимка, а не «отсутствует в прошлом `run.yam
 `--dry-run` **обязан** прогнать onboarding-preflight (без записи в state.db): иначе
 пользователь после `add-product` увидит «ok», а следующий run заблокируется. Dry-run
 читает `seeds.yaml` + `state.db` и показывает `mode`/`blocked`/`will` для каждого продукта.
-Ключ `carry_cells` в примере ниже — **design-only** (переноса ячеек нет, §10).
+Ключ `carry_cells` в примере ниже — **прогноз, у которого нет производителя**: сам перенос
+исполняется в Ш6 (§10.2) и его число план не предсказывает. Ключ оставлен как целевая форма
+`will`-блока, а не как текущий вывод `plan`.
 
 ```json
 {
@@ -690,11 +691,12 @@ corpus-снимка, а не «отсутствует в прошлом `run.yam
 
 ## 3. Доменная модель и инварианты
 
-> **Статус раздела: ⬜ не сделано в части `MeasurementOrigin` и моделей.** ✅ работают
+> **Статус раздела: ✅ сделано в части перечислений, ⬜ в части моделей.** ✅ работают
 > `ProductMode`, `RefreshPolicy`, `IncrementalKind`, `ReuseKind`, `ChangeClass`, `RunScope`,
-> `SeedState` и `RunProductStatus` (8 перечислений, последнее — граница A), O1/O2/O3/O12;
-> ➖ `CoverageFreshness` снято решением; ⬜ `MeasurementOrigin` и модели
-> `CellMeasurement`/`RunProduct`/`CompositionMember`; O5/O6/O13 — design-only.
+> `SeedState`, `RunProductStatus` и `MeasurementOrigin` (9 перечислений), O1/O2/O3/O12;
+> ➖ `CoverageFreshness` снято решением; ⬜ модели `CellMeasurement`/`RunProduct`/
+> `CompositionMember` (живут как `*Row` в `core/ports/state.py`). O6/O13 — as-built,
+> O5 — частично (§3.3).
 
 ### 3.1. Перечисления (`core/domain/enums.py`, `StrEnum`) — ⬜ реализовано частично
 
@@ -708,7 +710,7 @@ corpus-снимка, а не «отсутствует в прошлом `run.yam
 | `ChangeClass` | `none`, `content_change`, `cohort_expansion`, `cohort_reduction`, `execution_change`, `methodology_change` | класс изменения между прогонами | да |
 | `RefreshPolicy` | `auto`, `revalidate`, `refresh`, `offline` | политика обновления | да |
 | `CoverageFreshness` | `live`, `revalidated`, `stale` | свежесть наблюдения корпуса | **➖ снято** решением 29.10.2026 |
-| `MeasurementOrigin` | `observed`, `carried` | ячейка измерена или перенесена | **нет** — design-only (волна 2) |
+| `MeasurementOrigin` | `observed`, `carried` | ячейка измерена или перенесена | **да** (волна 2; словарь `measurement_origin`) |
 | `RunProductStatus` | `pending`, `running`, `complete`, `partial`, `failed`, `blocked` | статус продукта в прогоне | **да** (граница A) |
 
 **Почему `CoverageFreshness` не будет заведена.** Свежесть наблюдения уже выражается
@@ -719,9 +721,11 @@ corpus-снимка, а не «отсутствует в прошлом `run.yam
 нет ни производителя, ни потребителя, значило бы объявить семантику, которую некому
 исполнять, — ровно то, чего эта секция избегает.
 
-`MeasurementOrigin` появится вместе с переносом ячеек (волна 2): без переноса ему нечего
-означать. `RunProductStatus` заведён границей A вместе с таблицей `run_product` и сверен
-со словарём (`run_product_status`) — перечисление без писателя было бы объявлением.
+`MeasurementOrigin` заведён волной 2 (`observed|carried`): у него есть и производитель
+(перенос ячеек, §10), и потребители — `product_snapshot.cells_carried`,
+`outputs/cell_origin.csv`; сверен со словарём (`docs/status-dictionary.yaml:measurement_origin`).
+`RunProductStatus` заведён границей A вместе с таблицей `run_product` и сверен со словарём
+(`run_product_status`) — перечисление без писателя было бы объявлением.
 
 Источник истины — `docs/status-dictionary.yaml`; перечисления добавляются туда и в схему
 зеркала. Все — `StrEnum`, без строковых литералов в коде.
@@ -756,8 +760,10 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 **Отсутствуют вовсе:** `CellMeasurement`, `RunProduct`, `CompositionMember` (член
 композиции в коде — элемент `members_json`/`CompositionView.members`, отдельной модели нет;
 `CellMeasurement` в `core/pipeline/evaluator_benchmark.py` — другое, метрика бенчмарка).
-Имена ниже (в этой таблице) — **design-only** до появления таблиц `cell_measurement`/
-`run_product` с писателем.
+Имена ниже (в этой таблице) — **design-only** там, где таблица ещё без писателя:
+`run_product` пишется корпусом (граница A), `cell_measurement` — Ш6 (§10.1);
+`CellMeasurement` как доменная модель по-прежнему не заведена — её роль исполняет
+`CellMeasurementRow` (`core/ports/state.py`).
 
 ### 3.3. Новые инварианты (O-серия)
 
@@ -767,15 +773,15 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 | **O2** | Продукт с `mode in (new, full)` не может завершить corpus с `expected_sources = 0`; это `failed`, не пустой `ok`. Сильнее: `complete` требует `observed_sources > 0` — корпус без единого наблюдения не доказывает отсутствия (2.3.0) | `build_corpus` (`derive_corpus_coverage`) | as-built |
 | **O3** | Для каждого продукта плана в прогоне существует строка `corpus_coverage`; отсутствие — аномалия, не «неизвестно» | `corpus` (`_persist_corpus_coverage`) + `evaluate` (`_coverage_for`) | as-built |
 | **O4** | `doc_version_id` детерминирован от `(product_id, content_hash, extractor_version, level)`; durable `chunk_id` — от `(doc_version_id, chunker_version, chunk_no)`; run-level `chunk_id` — от `(product_id, doc_version_id, chunk_no)` | `corpus` | частично: `doc_version_id` — да (`incremental.doc_version_id:270`); durable-строка чанка — да (`chunk_row_id`); run-level `chunk_id` (`corpus._chunk_id:2005`) — **нет**: `f"{product_id}:{doc_hash}:{chunk_no}"` по content-hash. Пространств идентификаторов **три**, и run-level намеренно не несёт `chunker_version`: грамматика `source_id` отдаёт 4-й сегмент под `build_id` (`ids.py:57`), а в одной прогонной БД `chunker_version` — константа контракта (§14.6 п. 11) |
-| **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate` / `carry_forward` | частично: `cell_evidence` колонки `doc_version_id` **нет** (только `content_hash`); переноса нет |
-| **O6** | `carried`-ячейка допустима только при совпадении `cell_reuse_key`, полном покрытии и неизменном **retrieved-наборе этой ячейки** (per-cell, 29.10.2026; не doc-set продукта) | `carry_forward_cell` (§10.2) | **design-only** — механизма нет |
+| **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate` / `carry_forward` | **частично**: `cell_evidence` колонки `doc_version_id` **нет** (только `content_hash`), поэтому перенос проверяет цепочку по `content_hash` и требует его вхождения в retrieved-набор текущей ячейки (`_evidence_chain_valid`) |
+| **O6** | `carried`-ячейка допустима только при совпадении `cell_reuse_key`, полном покрытии и неизменном **retrieved-наборе этой ячейки** (per-cell, 29.10.2026; не doc-set продукта) | `carry_forward_cell` (§10.2) | **as-built** (`core/pipeline/carry_forward.py`) |
 | **O7** | `❌` публикуется только при `coverage.complete` (или человеческой аттестации); `freshness != stale` — design-часть | `evaluate` (`_enforce_absence_coverage` → `check_absence_coverage`); класс отрицания решает, а не одна полнота (§11.2) | частично: `coverage.complete` + классы — as-built; `freshness` **не существует** (§11.1) |
 | **O8** | `index_build_id` прогона = `composition_id`; каждая партиция иммутабельна и адресуется `partition_build_id` | `composition` / `index_npy` | as-built |
 | **O9** | Добавление/удаление продукта меняет `cohort_digest` и `change_class ∈ {cohort_expansion, cohort_reduction}` | `plan` / `report` | as-built |
 | **O10** | `last_completed_run_id` обновляется только при `baseline_complete=True` (coverage complete, eval прошёл, `cells_pending == 0`) и `scope=full`; `last_corpus_run_id`/`last_evaluated_run_id` обновляются и для scoped-прогона (корпус/оценка продукта действительно выполнены) | `state_sync.record_run_outcome` | as-built |
 | **O11** | `run_inputs` прогона иммутабельны: повторная запись с другим `payload_sha256` — ошибка, не `REPLACE` | `save_plan_inputs` (`PlanInputsConflict`) | **as-built** (§14.2): вставка один раз, идентичный повтор — no-op, расхождение — типизированный отказ; остаток — состав payload |
 | **O12** | Продукт без `last_corpus_run_id` — `new`; с `last_corpus_run_id`, но без `last_evaluated_run_id` — `full`; с `last_evaluated_run_id` и полным snapshot `coverage_complete=True` — `incremental` (pending-ячейки не мешают) | `onboarding._mode_for` | as-built |
-| **O13** | Человеческие решения (`reviewed`, `N/A`, `scope_acceptance`) не переносятся неявно: carry-forward разрешён только при совпадении `attestation_digest`, а `reviewed`/`N/A` без действующей аттестации переоцениваются | `evaluate` | **design-only** — переноса нет; таблица `attestation` без писателя (§4.2) |
+| **O13** | Человеческие решения (`reviewed`, `N/A`, `scope_acceptance`) не переносятся неявно: carry-forward разрешён только при совпадении `attestation_digest`, а `reviewed`/`N/A` без действующей аттестации переоцениваются | `evaluate` | **as-built в доступной части**: `attestation_digest` = отпечаток `(product_id, scope_acceptance)` (`carry_forward.attestation_digest`); `reviewed`/`N/A` едут только как `carried` с адресом источника. Таблица `attestation` по-прежнему без писателя (§4.2) — её в ключ не подставляем |
 
 Связь с регламентом: O1–O3 закрывают «тихий пустой продукт» (I5/I11-честность); O4–O6
 усиливают I17/I19; O7 сохраняет I2c; O8 — §13/иммутабельность; O9–O10 — §13; O11 —
@@ -968,8 +974,9 @@ CREATE TABLE product_snapshot (
 );
 
 -- 7. Индекс измерений ячеек (для carry-forward; сами cells/evidence — в run DB).
--- **Нет писателя:** таблица создана, но ни одна фаза в неё не пишет (перенос ячеек не
--- реализован, §10); в реальных state.db — 0 строк. Порт не имеет save_cell_measurement.
+-- **Писатель:** Ш6 (`evaluate_phase`) пишет строки пачкой на продукт — и для `observed`,
+-- и для `carried` (иначе цепочка переносов рвётся на втором цикле, §10.1). Порт:
+-- `save_cell_measurement`/`get_cell_measurement`/`record_cell_measurements`.
 CREATE TABLE cell_measurement (
     run_id            TEXT NOT NULL,
     product_id        TEXT NOT NULL,
@@ -1182,7 +1189,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 | `index_partition` / `index_store` | иммутабельно; GC только явным вызовом `gc_index_builds` (проверяет, что сборка не входит ни в одну композицию пакета) и `gc_index_compositions` (§8.6) |
 | `eval_cache`/`extract_cache`/`cache/http` | **as-built:** существующие бюджеты/eviction |
 
-Практическое следствие для переноса ячеек (волна 2): raw и текст чанков остаются на месте,
+Практическое следствие для переноса ячеек (as-built, §10): raw и текст чанков остаются на месте,
 поэтому вопрос «raw вытеснен, а документ нужен для переноса» **не возникает** — условие
 переноса сводится к совпадению `content_hash` и retrieved-набора **этой** ячейки
 (`retrieved_doc_set_digest`, per-cell — §10.1).
@@ -1361,9 +1368,9 @@ recovery-on-open следующего запуска.
 ## 5. Определение «новый продукт»
 
 > **Статус: ✅ реализовано.** Резолв режима — `resolve_product_modes` + `_mode_for`
-> (`core/pipeline/onboarding.py`), проверен построчно. Оговорка: слова «переносятся как
-> `carried`» в §5.1/§5.2 описывают **design**-часть (§10) — фактического переноса ячеек нет;
-> as-built здесь только классификация режима (`new`/`full`/`incremental`).
+> (`core/pipeline/onboarding.py`), проверен построчно. Слова «переносятся как `carried`» в
+> §5.1/§5.2 описывают механизм §10, и он исполняется (волна 2, 30.10.2026): режим
+> `incremental` + полное покрытие + совпавший ключ ⇒ ячейка перенесена.
 
 ### 5.1. Определение
 
@@ -1396,8 +1403,8 @@ recovery-on-open следующего запуска.
 | Продукт только добавлен | — | — | `new` | полный краул всех seed'ов |
 | Прошлый прогон упал на corpus | — | — | `new` | полный краул; state может переиспользовать уже добытые doc-версии |
 | Corpus прошёл, eval не состоялся | есть | — | `full` | **не** инкрементальный: покрытие/ячейки не завершены |
-| Eval прошёл, есть `pending`-ячейки | есть | есть | `incremental` | resolved-ячейки carry-forward; `pending` переносятся как `carried` |
-| Полный прогон завершён (все resolved) | есть | есть | `incremental` | revalidate + reuse + carry-forward |
+| Eval прошёл, есть `pending`-ячейки | есть | есть | `incremental` | resolved-ячейки переносятся по `cell_reuse_key`; `pending` тоже переносятся (как `pending` с `measurement_origin=carried`) — это место в очереди, а не вердикт |
+| Полный прогон завершён (все resolved) | есть | есть | `incremental` | revalidate + reuse документов + перенос ячеек (`carry_forward_cell`, §10.2) |
 | Прошлый прогон `partial` (coverage incomplete) | есть | есть/— | `full` | инкремент от неполного baseline запрещён |
 | `--only-product` | обновляется | обновляется | `incremental`/`new` по состоянию | `scope=product_only`; baseline (`last_completed`) не обновляется |
 | Продукт `retired`, затем re-add | есть | есть | `new` | `re_added_at` выставлен; полный краул |
@@ -1888,14 +1895,15 @@ orphan-бакетом. Операторский потолок числа усл
 дополнительно (O2) не возвращает `ok` продукту с `expected_sources = 0`. `evaluate` (O3)
 не оценивает продукт без строки `corpus_coverage`.
 
-### 6.4. Evaluate (**design-only** в части переноса ячеек) — ⬜ не сделано
+### 6.4. Evaluate (перенос ячеек — as-built) — ✅ сделано
 
-> **Статус: design-only.** `carry_forward_cells` в коде **нет**
-> (`grep -rn "carry_forward\|measurement_origin" core/` — пусто, кроме DDL-колонки
-> `cell_reuse_key` в таблице `cell_measurement`, у которой нет писателя).
-> Фактический `evaluate_phase` переоценивает **все** ячейки продукта: `cells_carried`
-> в снимках всегда 0 (измерено: 22 снимка в реальном `state.db` — у всех `cells_carried=0`).
-> As-built-часть секции — только O3 (нет строки покрытия → `failed`-ячейки, не «неизвестно»).
+> **Статус: as-built.** Перенос — `carry_forward_cell` (`core/pipeline/carry_forward.py`),
+> вызывается в `evaluate_batch._one` **между** ретривалом и оценщиком (§10.2). Писатель
+> `cell_measurement` — `evaluate_phase` (пачка на продукт, и для `observed`, и для
+> `carried`). Счётчики: `cells_measured`/`cells_carried` в `log_entries` фазы
+> (`evaluate: cells_measured=N cells_carried=M`), `product_snapshot.cells_carried` и
+> `outputs/cell_origin.csv`. Снимки реального `state.db` с `cells_carried = 0` — состояние
+> **до** волны 2, а не свойство механизма.
 
 ```python
 def evaluate_phase(ctx):
@@ -1905,13 +1913,13 @@ def evaluate_phase(ctx):
             # O3: аномалия, не «неизвестно»  (as-built: _coverage_for даёт synthetic-строку)
             emit_failed_cells(product, failure_kind="coverage_missing")
             continue
-        # design-only: carried = carry_forward_cells(...) при incremental + complete
-        evaluate_missing_cells(product)
+        # as-built: на ячейку — carry_forward_cell(...) после её ретривала (§10.2);
+        # None — мерить. Порядок: ретривал → ключ → оценщик.
+        evaluate_cells(product)          # перенос внутри, не отдельным проходом
 ```
 
-- Новый продукт: полный набор ячеек `plan.params × product`.
-- Существующий: **сейчас** — тоже полный набор (переноса нет); в дизайне — carry-forward
-  (§10), затем только оставшиеся ячейки.
+- Новый продукт: полный набор ячеек `plan.params × product` (переносить не из чего).
+- Существующий: ячейки с совпавшим `cell_reuse_key` переносятся (§10), остальные меряются.
 - `failed`-ячейки (I4) — `status = null`, не статус.
 - Продукт с `coverage is None` или `expected_sources = 0` — `failed`-ячейки с
   `failure_kind ∈ {coverage_missing, no_sources}`, **не** `❌`/`❓`.
@@ -2828,10 +2836,10 @@ crawl-потолком, сводка сообщает его причину, а 
 
 ## 9. Reuse matrix
 
-> **Статус: ⬜ не сделано в части ячеек.** Строки до `Index partition` включительно — ✅
-> as-built (проверено по коду). Строка «Cell/evidence» — ⬜ **design-only** (переноса ячеек
-> нет, §10); строка «Evaluator verdict» описывает `eval_cache` **как он есть** — ✅,
-> включая методологические поля в ключе (§10.5, `EVAL_CACHE_FORMAT = 2`).
+> **Статус: ✅ сделано.** Все строки — as-built (проверено по коду). Строка
+> «Cell/evidence» — перенос ячеек (§10, волна 2); строка «Evaluator verdict» описывает
+> `eval_cache` **как он есть**, включая методологические поля в ключе (§10.5,
+> `EVAL_CACHE_FORMAT = 2`).
 
 | Артефакт | Ключ | Условие переиспользования | Инвалидация |
 |---|---|---|---|
@@ -2844,14 +2852,14 @@ crawl-потолком, сводка сообщает его причину, а 
 | Embeddings | `(content_hash, embed_model_id)` (кэш) или партиция | точное совпадение | смена `embed_model_id`/ревизии |
 | Index partition | `partition_build_id` | content token + все версии совпали **и** физическая проверка диска/`manifest.json` (§8.5) | любой вход сборки; порча/неполнота каталога |
 | Evaluator verdict | `eval_cache` key: `format`+`schema`+template+rendered prompt+model config+`max_retries`+правила (`EvalConditions`)+`catalog_row_digest`+`retrieval_profile`/`cutoff_K` (§10.5) | байт-в-байт по всему `echo` | смена промпта/модели/правил/каталога/условий ретривала |
-| Cell/evidence — **design-only** | `cell_reuse_key` (см. §10, схема `cell-reuse-2`) | ключ совпал + coverage complete + **retrieved-набор этой ячейки** тот же | см. §10.3 |
+| Cell/evidence — **as-built** | `cell_reuse_key` (см. §10, схема `cell-reuse-2`) | ключ совпал + coverage complete + **retrieved-набор этой ячейки** тот же + прошлая ячейка не `stale` + правило ``❌`` подтверждает | см. §10.3 |
 | Coverage | не переиспользуется | всегда пересчитывается из текущих crawl-исходов | — |
 | Golden/retrieval experiments | не переиспользуется | — | — |
 
 ### 9.1. Что **нельзя** переиспользовать без пере-измерения
 
-> Список описывает **правило**; фактически переиспользования ячеек сегодня нет вообще
-> (§10 — design-only), поэтому список — будущая граница, а не действующее ограничение.
+> Список описывает **правило**, и оно исполняется: ключ переноса несёт все перечисленные
+> условия (§10.1), поэтому смена любого из них даёт другой ключ и переоценку.
 
 - Ячейки при смене `methodology_version`, `scoring_policy_version`, `status_dict_version`,
   `capability_policy`, `unknown_policy`, `partial_score`.
@@ -2859,8 +2867,8 @@ crawl-потолком, сводка сообщает его причину, а 
   `param_type`, `role_binding`, `concept_terms`, `search_langs`, `importance`.
 - Ячейки при смене модели/слота/декодера/температуры/seed (I21).
 - Ячейки при смене `retrieval_profile`, `cutoff_K`, `retrieval_params_json` (I20).
-- Ячейки при изменении doc-set продукта (даже если изменился один документ — MVP:
-  переоцениваем весь продукт; later — per-cell).
+- Ячейки при изменении **retrieved-набора этой ячейки** (per-cell, 29.10.2026: документ,
+  не попавший в её top-K, ячейку не инвалидирует).
 - `❌` при неполном покрытии (as-built: I2c через `coverage.complete`); `freshness=stale`
   без аттестации — **design-only** (поля `freshness` нет, §11.1).
 - `scope_acceptance` при изменении doc-set/coverage (аттестация привязана к корпусу).
@@ -2868,42 +2876,49 @@ crawl-потолком, сводка сообщает его причину, а 
 
 ---
 
-## 10. Evaluation / carry-forward (**design-only**) — ⬜ не сделано
+## 10. Evaluation / carry-forward (**as-built**) — ✅ сделано
 
-> **Статус: design-only. Нет производителя в прогоне.** Ни `carry_forward_cells`, ни
-> `cell_reuse_key`, ни `measurement_origin`, ни `carried_from_run_id` в коде нет
-> (`grep -rn "carry_forward\|measurement_origin" core/` — пусто, кроме DDL-колонки
-> `cell_reuse_key` в `cell_measurement`, у которой нет писателя). Счётчик `cells_carried`
-> в снимках всегда 0 (измерено: 22 снимка в реальном `state.db` — все 0), ключа `carried`
-> в отчёте нет. Вся секция — описание **будущего** механизма: правила ниже — контракт,
-> который надо будет реализовать, а не описание текущего поведения. Пользуясь документом
-> для runbook'а или SQL, эту секцию игнорировать.
+> **Статус: as-built (волна 2, 30.10.2026).** Механизм исполняется в прогоне, и у каждого
+> звена есть производитель:
+>
+> * формула ключа — `cell_reuse_key` (`core/pipeline/digests.py`, `CELL_REUSE_SCHEMA =
+>   "cell-reuse-2"`), отпечатки — там же (`retrieved_doc_set_digest`, `coverage_digest`);
+> * решение «переносить/мерить» — `carry_forward_cell` (`core/pipeline/carry_forward.py`),
+>   вызывается из `evaluate_batch._one` (`core/pipeline/evaluate.py`) **между** ретривалом
+>   и `evaluate_cell`;
+> * запись перенесённой ячейки и копий её evidence — `_persist_carried`; правило допуска
+>   ``❌`` — `_carried_rules_hold` (тот же эшелон, что у живой оценки);
+> * индекс переноса — `evaluate_phase` пишет `cell_measurement` одной пачкой на продукт
+>   (и для `observed`, и для `carried`); колонки `cells.measurement_origin`/
+>   `carried_from_run_id`/`cell_reuse_key` пишет `SqliteStore.save_cell`;
+> * счётчики — `product_snapshot.cells_carried` (`state_sync._cell_stats`),
+>   `outputs/cell_origin.csv` и `--json: cell_origin` (`report.collect_cell_origins`).
+>
+> Приёмка — `tests/pipeline/test_carry_forward.py` (16 тестов). Нумерация **T15–T20** в
+> §15.1 занята другими приёмками (retired→re-add, `canonical_name`, `cutoff_K`, документ
+> вне top-K, методология, модель, offline), поэтому тесты переноса названы по §10.3/§11.4.
+> Прежний маркер «design-only» снят: `cells_carried = 0` во всех 22 снимках реального
+> `state.db` — это состояние **до** волны 2, а не свойство механизма.
 
 ### 10.1. Ключ переноса ячейки
 
 ```python
 CELL_REUSE_SCHEMA = "cell-reuse-2"   # per-cell (решение владельца 29.10.2026); "1" был per-product
 
-def cell_reuse_key(param, product_id, plan, prev: CellMeasurement,
-                   composition: CompositionView, coverage: CoverageSnapshot,
-                   attestation_digest: str, state: ProductStatePort,
-                   prompt_template_digest: str, model_config_digest: str,
-                   retrieved: Sequence[RetrievedChunk]) -> str:
-    return short_hash("\x1f".join((
-        CELL_REUSE_SCHEMA,
-        product_id, param.param_id,
-        catalog_row_digest(param),                 # canonical JSON строки каталога
-        prompt_template_digest,                    # ТЕКУЩИЙ шаблон+rule, не prev.prompt_hash
-        plan.model_id, plan.llm_scenario,          # ТЕКУЩАЯ маршрутизация (I21)
-        model_config_digest,                       # decoder/temperature/seed/endpoint_kind
-        plan.retrieval_profile, str(plan.cutoff_k), plan.retrieval_params_json,
-        retrieved_doc_set_digest(retrieved, state),# ТЕКУЩИЙ набор ЭТОЙ ячейки, см. ниже
-        coverage.digest(),                         # complete + blocked + unreadable + truncated
-        plan.methodology_version, plan.status_dict_version, plan.scoring_policy_version,
-        plan.capability_policy, plan.unknown_policy, str(plan.partial_score),
-        attestation_digest,
-        composition.build_id_for(product_id),      # partition id
-    )), 24)
+# core/pipeline/digests.py — чистые функции, без I/O; 21 слагаемое, порядок фиксирован
+def cell_reuse_key(*, product_id, param_id,
+                   catalog_row_digest,                 # canonical JSON строки каталога
+                   prompt_template_digest,             # ТЕКУЩИЙ шаблон+rule, не prev.prompt_hash
+                   model_id, llm_scenario,             # ТЕКУЩАЯ маршрутизация (I21)
+                   model_config_digest,                # decoder/temperature/seed/endpoint_kind
+                   retrieval_profile, cutoff_k, retrieval_params_json,
+                   retrieved_doc_set_digest,           # ТЕКУЩИЙ набор ЭТОЙ ячейки, см. ниже
+                   coverage_digest,                    # complete + blocked + unreadable + ...
+                   methodology_version, status_dict_version, scoring_policy_version,
+                   capability_policy, unknown_policy, partial_score,
+                   attestation_digest,
+                   partition_build_id) -> str:         # продукт-партиция, не composition_id
+    return short_hash("\x1f".join((CELL_REUSE_SCHEMA, ...)), 24)
 ```
 
 `prompt_template_digest` — отпечаток **текущего** шаблона/правила (`compiled.template_version`
@@ -2937,89 +2952,93 @@ Retrieval при этом выполняется **всегда** — он и т
 > `computed_at`, `run_id`, `product_id`, `freshness` и счётчики `reused/revalidated/new`
 > (они меняются от того, был ли ответ 304 или 200 с тем же телом, — это не семантическое
 > изменение). Входят: `complete`, `expected`, `observed`, `blocked`, `unreadable_origins`,
-> `partial_blocks`, `truncated`, `reason`. `freshness` проверяется отдельно в
-> `carry_forward_cell` (`stale` ⇒ запрет переноса). Тест: «два прогона без изменений
-> контента, один live и один 304 → одинаковый `cell_reuse_key`».
+> `partial_blocks`, `truncated`, `reason`. Оси `freshness` нет: запрет переноса при
+> `stale` проверяется по `cells.stale_reason` прошлого прогона (`carry_forward_cell`), а
+> правило «``❌`` требует `live|revalidated`» — по `corpus_docs.reuse_kind` текущего (§11.2).
+> Тесты: `test_retrieved_doc_set_digest_is_order_independent`,
+> `test_cell_reuse_key_is_stable_for_identical_conditions`,
+> `test_cell_reuse_key_changes_with_any_condition`.
 
-### 10.2. Перенос — **per cell, внутри ячеечного цикла**
+### 10.2. Перенос — **per cell, внутри ячеечного цикла** (as-built)
 
 Per-cell (решение владельца 29.10.2026) означает, что перенос — не батч-проход по продукту,
 а решение по одной ячейке **после** её retrieval: до retrieval неизвестно, какие документы
 в неё вошли, а значит ключ ещё не вычислим.
 
 ```python
-def carry_forward_cell(param, *, product_id, coverage, plan, state, store, run_id,
-                       prev_run_id, composition, retrieved,
-                       prompt_template_digest, model_config_digest,
-                       attestation_digest) -> Cell | None:
+# core/pipeline/carry_forward.py — без I/O записи: возвращает готовую ячейку и копии
+# evidence, персистенцию и правила допуска исполняет Ш6.
+def carry_forward_cell(param, *, product_id, run_id, prev_run_id, state, prev_store,
+                       conditions, coverage, retrieved, retrieval=None,
+                       protected=None) -> CarriedCell | None:
     """Переносит ячейку из prev_run_id, если её ключ совпал. None — надо мерить."""
-    if coverage is None or not coverage.complete:
-        return None
-    if coverage.freshness == "stale":            # offline: нельзя публиковать ❌
-        return None
+    if prev_run_id is None or prev_run_id == run_id:  return None   # первый/resume
+    if state is None or prev_store is None:           return None   # механизм выключен
+    if protected is not None:                         return None   # высокий источник
+    if coverage is None or not coverage.complete:     return None   # I2c
     prev = state.get_cell_measurement(prev_run_id, product_id, param.param_id)
-    # pending переносится как pending (очередь ревью), resolved — как carried.
-    if prev is None or prev.state not in ("evaluated", "reviewed", "pending"):
-        return None
-    key = cell_reuse_key(param, product_id, plan, prev, composition, coverage,
-                         attestation_digest, state, prompt_template_digest,
-                         model_config_digest, retrieved)
-    if key != prev.cell_reuse_key:
-        return None
-    evidence = list(store.iter_evidence(prev_run_id, product_id, param.param_id))
-    if not evidence_chain_valid(evidence, product_id, composition, state, retrieved):
-        return None
-    cell = store.get_cell(prev_run_id, product_id, param.param_id)
-    new_cell = cell.model_copy(update={
+    if prev is None or not prev.cell_reuse_key:       return None   # сравнивать не с чем
+    if prev.state not in CARRYABLE_STATES:            return None   # failed/preliminary
+    key = cell_reuse_key(...)                                       # 21 слагаемое
+    if key != prev.cell_reuse_key:                    return None   # §10.3
+    cell = prev_store.get_cell(prev_run_id, product_id, param.param_id)
+    if cell is None or cell.stale_reason is not None: return None   # stale ⇒ переоценка
+    evidence = prev_store.iter_cell_evidence(prev_run_id, product_id, param.param_id)
+    if not _evidence_chain_valid(...):                return None   # I17/I19
+    if not _absence_chain_valid(...):                 return None   # протокол отсутствия
+    if prev.evidence_digest != evidence_digest(evidence): return None  # носители разошлись
+    return CarriedCell(cell=cell.model_copy(update={
         "run_id": run_id,
-        "measurement_origin": "carried",
+        "measurement_origin": MeasurementOrigin.CARRIED,
         "carried_from_run_id": prev_run_id,
         "cell_reuse_key": key,
-        "retrieved_doc_set_digest": retrieved_doc_set_digest(retrieved, state),
-        "coverage_digest": coverage.digest(),
-        "index_build_id": composition.composition_id,
-        "partition_build_id": composition.build_id_for(product_id),
-        "updated_at": now(),
-    })
-    store.save_cell(new_cell)
-    for ev in evidence:
-        store.add_evidence(ev.model_copy(update={
-            "evidence_id": derive_evidence_id(run_id, ev),   # per-run, детерминированно
-            "run_id": run_id,
-            "origin_evidence_id": ev.evidence_id,
-            "doc_version_id": ev.doc_version_id,
-            "partition_build_id": composition.build_id_for(product_id),
-        }))
-    return new_cell
+        "index_build_id": ...,        # текущая сборка: ключ подтвердил те же доказательства
+        "retrieval_profile": ..., "retrieval_params_json": ...,
+    }), evidence=..., absence_evidence=..., ...)
 ```
 
-Точка вызова — ячеечный цикл Ш6, **между** retrieval и `evaluate_cell`:
+Точка вызова — ячеечный цикл Ш6, **между** retrieval и `evaluate_cell`
+(`evaluate_batch._one` → `_carry_one`):
 
 ```python
 for param in plan.params:
     retrieved = retrieve_for_cell(param, product_id, ...)   # как сейчас, I16/I20
     carried = carry_forward_cell(param, retrieved=retrieved, ...)
     if carried is not None:
-        cells_carried += 1
-        continue                                            # LLM не вызывается
-    evaluate_cell(param, retrieved=retrieved, ...)           # прежний путь
+        _persist_carried(store, carried, ...)               # ячейка + evidence + absence
+        return EvaluationOutcome(cell=carried.cell, ...)    # LLM не вызывается
+    return evaluate_cell(param, retrieved=retrieved, ...)   # прежний путь
 ```
 
 Порядок важен и не переставляется: `retrieve_for_cell` — это ровно тот вызов, который Ш6
 делает и сегодня, поэтому per-cell не добавляет ни одного лишнего поиска; экономия — только
 пропуск LLM.
 
-`evidence_chain_valid` (теперь с `retrieved`):
+**Правило допуска ``❌`` проходит тот же эшелон.** Перенесённая ячейка не публикуется мимо
+инвариантов: `_carried_rules_hold` вызывает те же `_enforce_absence_coverage` (I2c) и
+`_enforce_reuse_confirmed` (16 §8 п.4), что и живая оценка, и при нарушении перенос
+**отменяется** — ячейка измеряется обычным путём, и причина понижения рождается там же, где
+для живого вердикта. Поэтому `reused`/`stale`-корпус в текущем цикле снимает перенесённый
+``❌`` ровно так же, как измеренный (тест
+`test_absent_verdict_is_not_carried_on_reused_corpus`).
+
+**Копии evidence.** `evidence_id` прошлого прогона содержит его `run_id`, поэтому копии
+получают свой (`evidence_id_for(run_id, …, seq)`), а протокол отсутствия —
+`absence_evidence_id(...)`. Порядок вставки сохраняется, поэтому повторный перенос в тот же
+прогон — upsert, а не дубль (S8).
+
+`_evidence_chain_valid` (as-built):
 - `ev.product_id == product_id` (I17);
-- `ev.doc_version_id` входит в `document_version` продукта со `status=active`;
-- `ev.content_hash == document_version.content_hash`;
-- **`ev.doc_version_id` входит в `retrieved` текущей ячейки** — иначе переносится
-  доказательство из документа, который в этом прогоне в top-K не попал: вердикт выглядел
-  бы подтверждённым текстом, которого ячейка не видела;
-- `ev.source_id` резолвится в URL (`store.resolve_source_url`);
-- `ev.source_scope`/`scope_acceptance` не противоречат O7;
-- `ev.index_build_id` — предыдущая композиция, но `partition_build_id` совпадает с текущей
-  (партиция не менялась).
+- `ev.content_hash` непуст и **входит в retrieved-набор текущей ячейки** — иначе
+  переносится доказательство из документа, которого ячейка в этом прогоне не видела;
+- форма проверки — `content_hash`, потому что это и есть версия текста (I19), и потому что
+  колонки `doc_version_id` в `cell_evidence` нет (O5 закрыт частично, §3.3);
+- пустой набор evidence перенос **не** запрещает: `❓` без цитат — законный исход, и его
+  защищает ключ (включая отпечаток retrieved-набора).
+
+`_absence_chain_valid`: записи протокола **с** `content_hash` проверяются так же; записи
+без него — уровень корпуса (контур, а не цитата), их законность держится на отпечатке
+покрытия и правиле ``❌``.
 
 ### 10.3. Когда обязательна переоценка
 
@@ -3036,17 +3055,22 @@ for param in plan.params:
 | Смена каталога (rule/absence_rule/…) | затронутые параметры |
 | Смена `retrieval_profile`/`cutoff_K`/`rrf_k` | все ячейки (I20) |
 | Смена `scope_acceptance`/doc-set для `❌` | absence-ячейки |
+| Прошлая ячейка `stale` / `failed` / `preliminary` | эта ячейка (не вердикт либо прошлая сборка) |
+| Текущий корпус даёт `❌` при `reused`/`stale`-документе | эта ячейка (правило допуска не подтверждает) |
+| У ячейки высокий источник (реестр/наследование) в текущем прогоне | перенос запрещён: прецедент источника сильнее |
 | Только `canonical_name`/`selection_reason` | нет |
 
-### 10.4. I17/I18/I19/I20/I21
+### 10.4. I17/I18/I19/I20/I21 (as-built)
 
-- **I17:** carry-forward копирует evidence только с `product_id` продукта; doc-set —
-  только документы продукта/сателлитов. Композиция не смешивает партиции.
-- **I18:** carry-forward не делает сетевых вызовов; оценщик по-прежнему без веб-тула.
-- **I19:** evidence несёт `doc_version_id` + `content_hash`; `doc_version` существует и
-  входит в doc-set; raw→hash→index chain сохраняется (reused-документ прошёл этот chain
-  в прошлом цикле и ревалидирован в текущем).
-- **I20:** `cutoff_K` входит в `cell_reuse_key`; смена K → переоценка.
+- **I17:** `_evidence_chain_valid` требует `ev.product_id == product_id`; копируется только
+  evidence своей ячейки своего продукта. Композиция не смешивает партиции.
+- **I18:** `carry_forward.py` не импортирует адаптеров и не делает сетевых вызовов;
+  оценщик при переносе **не вызывается вовсе** (измерено тестом: `evaluator.calls == []`).
+- **I19:** evidence проверяется по `content_hash` (это и есть версия текста) и обязан
+  входить в retrieved-набор текущей ячейки; raw→hash→index chain сохраняется.
+  **Ограничение:** `cell_evidence.doc_version_id` нет — O5 закрыт частично (§3.3).
+- **I20:** `cutoff_K` (и `retrieval_params_json`) входят в `cell_reuse_key`; смена K →
+  переоценка.
 - **I21:** `llm_scenario` входит в ключ; маршрутизация не меняется при переносе.
 
 ### 10.5. Eval cache: ключ, который знает правила (**✅ сделано**)
@@ -3086,7 +3110,7 @@ for param in plan.params:
 
 **Кэш без объявленных условий не включается.** Если `eval_cache` передан, а
 `eval_conditions` — нет, `evaluate_cell` поднимает `ValueError`
-(`core/pipeline/evaluate.py:1975`): молчаливый откат к «кэш без правил» вернул бы ровно ту
+(`core/pipeline/evaluate.py:2207`): молчаливый откат к «кэш без правил» вернул бы ровно ту
 ошибку, которую правка закрывает.
 
 **Формат 1 читается как промах**, и это **желаемое** поведение: конверт лежит под другим
@@ -3296,28 +3320,28 @@ CREATE TABLE corpus_coverage (
   `failure_kind=no_sources`, **не** `❌`.
 - В отчёте — аномалия `corpus_coverage_anomalies` с продуктом и причиной.
 
-### 11.4. `reused` vs `observed` в отчёте (**design-only**) — ⬜ не сделано
+### 11.4. `reused` vs `observed` в отчёте (**as-built в части ячеек**) — ✅ сделано
 
-> **Статус: design-only.** Счётчиков `revalidated`/`new`/`removed`/`freshness` в покрытии
-> нет (§11.1), ключа `carried` в отчёте нет (§10). Пример ниже — целевой формат.
-> Источник данных при этом есть: `url_state.reuse_kind` (§11.2) и
-> `product_snapshot.docs_new`/`docs_reused` (`core/pipeline/state_sync.py:189`), которые
-> считаются из `document_version.first_seen_run_id`/`last_seen_run_id`; в отчёт они не
-> попадают.
+> **Статус: as-built в части ячеек, design-only в части покрытия.** `cells_carried`/
+> `cells_measured` производятся: снимок `state.db.product_snapshot` (`cells_carried` из
+> `cells.measurement_origin`, `state_sync._cell_stats`), отчёт — `outputs/cell_origin.csv`
+> и `--json: cell_origin` (`report.collect_cell_origins`, пишется только при ненулевом
+> переносе), фаза Ш6 — строка лога `evaluate: cells_measured=N cells_carried=M`.
+> Счётчиков `revalidated`/`new`/`removed`/`freshness` в покрытии **по-прежнему нет**
+> (§11.1): их роль исполняет `corpus_docs.reuse_kind`, а `product_snapshot.docs_new`/
+> `docs_reused` считаются из `document_version.first_seen_run_id`/`last_seen_run_id`.
 
-`battle_card`/`run_manifest`/JSON:
+Фактическая форма (`hound report --json`):
 ```json
 {
-  "product_id": "pangolin",
-  "mode": "incremental",
-  "coverage": {"complete": true, "expected": 187, "observed": 187,
-               "revalidated": 180, "new": 7, "removed": 0, "freshness": "revalidated"},
-  "cells": {"total": 42, "carried": 38, "measured": 4}
+  "run_product": [{"product_id": "pangolin", "mode": "incremental", "cells_total": 42, ...}],
+  "cell_origin": [{"product_id": "pangolin", "cells_total": 42, "cells_carried": 38}],
+  "artifacts": {"cell_origin": "runs/<run_id>/outputs/cell_origin.csv"}
 }
 ```
-Человек видел бы, что 38 ячеек не пересчитывались, а 4 — пересчитаны; это не «тихая»
-экономия. Сегодня такого вывода нет: отчёт показывает `doc_delta.reused` (переиспользованные
-**документы**), а не ячейки.
+`cells_carried = 38` при `cells_total = 42` значит: 38 ячеек не пересчитывались, 4 —
+пересчитаны вызовом оценщика. `cells_carried` — подмножество `cells_measured`, а не
+дополнение к нему: перенесённая ячейка измерена (в прошлом цикле).
 
 ### 11.5. `scope_acceptance` (as-built; `attestation` — design-only)
 
@@ -3413,7 +3437,7 @@ CREATE TABLE corpus_coverage (
 > В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:632`) — имя файла
 > когорты из `run.yaml`, и `cohort_ref: str | None` (`:646`) — авторская ревизия, которая
 > **входит в `cohort_digest`**. `sqlite_store.py:440` кладёт в колонку `cohort_ref` значение
-> `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:494`).
+> `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:531`).
 > Следствие на живом прогоне `ru-pg-dbms-3d3dc7c3c969`: `runs.cohort_ref =
 > 'cohort-ru-pg-dbms-2026-10-28-golden00'` (имя файла), а в дайджест ушло `None` — то есть
 > манифест показывает «ревизию», которая в `run_id` **не входила**. Правка меняет состав
@@ -3630,9 +3654,9 @@ golden**.
 
 ## 13. Failure / partial semantics
 
-> **Статус раздела: ⬜ не сделано в части §13.3/§13.5.** §13.1/§13.2/§13.4/§13.6 — as-built по
-> фактическим механизмам (снимок `state.db`, покрытие, режимы продукта); §13.3 и
-> межпрогонная часть §13.5 — **design-only** (переноса ячеек нет, `--only-failed` сеансовый).
+> **Статус раздела: ⬜ не сделано в части межпрогонной §13.5.** §13.1–§13.4/§13.6 —
+> as-built по фактическим механизмам (снимок `state.db`, покрытие, режимы продукта, перенос
+> ячеек §10); design-only остаётся только межпрогонный `--only-failed` (§2.4).
 
 ### 13.1. Статусы продукта в прогоне (as-built; носитель — снимок, не `run_product`)
 
@@ -3656,13 +3680,14 @@ golden**.
 - Один из нескольких seed'ов недоступен, остальные читаемы: `partial`, `❌` demoted,
   `✅`/`⚠️` по доступным документам; продукт не становится `complete`.
 
-### 13.3. Старый продукт не изменился (**design-only**) — ⬜ не сделано
+### 13.3. Старый продукт не изменился (**as-built**) — ✅ сделано
 
-> **Статус: design-only.** Всё, что ниже, требует переноса ячеек (§10), которого нет.
-> As-built-часть: «все URL → 304/same-hash; doc-set тот же; coverage complete» —
-> действительно достижимо и даёт `complete`; но партиция в этом сценарии
-> **переиспользуется по `pb` + диску** (§6.3), а ячейки **переоцениваются полностью**,
-> `cells_carried` остаётся 0, и LLM вызывается (или отдаёт хит из `eval_cache`).
+> **Статус: as-built (волна 2, 30.10.2026).** Партиция переиспользуется по `pb` + диску
+> (§6.3), ячейки переносятся по `cell_reuse_key` (§10.2), `cells_carried` считается
+> (`state_sync._cell_stats`), LLM **не вызывается** (тест
+> `test_second_run_carries_cell_without_calling_evaluator`). Оговорка: перенос требует
+> полного покрытия и предшественника с заполненным индексом; прогон, принятый adoption'ом,
+> источником переноса не становится — `cell_reuse_key` там `NULL` (§4.6).
 
 - Все URL → 304/same-hash; doc-set тот же; coverage complete.
 - Партиция не пересобирается; ячейки carry-forward; LLM не вызывается.
@@ -3703,17 +3728,14 @@ golden**.
   полного.
 - `last_completed_run_id` **не** обновляется (O10: рубеж двигает только `scope=full` при
   `evaluate_ok` и нуле `cells_pending`). Значение `scope` видно в
-  `state.db.product_snapshot.scope` (`record_run_outcome`, `core/pipeline/state_sync.py:224`).
-- **В отчёте `scope` нет — закрывается границей A (решение владельца 29.10.2026).**
-  Прежняя редакция утверждала «в отчёте — `scope=product_only`, `partial=true`» — этого
-  не существует: `run_scope` не персистится ни в `runs`, ни в `RunManifest`, и `report.py`
-  его не выводит (`grep run_scope core/pipeline/report.py` — пусто). Читатель, которому
-  нужно «полное измерение или нет», вынужден смотреть
-  `product_snapshot.scope`/`last_completed_run_id` в `state.db`, то есть в другой БД. Это
-  дефект видимости, а не политики: `--only-product` меняет смысл среза, и он должен быть
-  виден в артефакте прогона.
-  **Решение:** `run_scope` персистится (`runs.run_scope` + `RunManifest.run_scope`),
-  политика **не меняется** — scoped-прогон обрабатывает только выбранный продукт и не
+  `state.db.product_snapshot.scope` (`record_run_outcome`, `core/pipeline/state_sync.py:244`).
+- **`scope` в отчёте — ✅ сделано границей A (решение владельца 29.10.2026).**
+  До неё срез читался только в другой БД: `run_scope` не персистился ни в `runs`, ни в
+  `RunManifest`, и `report.py` его не выводил. Это было дефектом видимости, а не политики:
+  `--only-product` меняет смысл среза, и он обязан быть виден в артефакте прогона.
+  Теперь `run_scope` персистится (`runs.run_scope`, `RunManifest.run_scope`,
+  `report.build_manifest:1146`) и виден в `run_manifest.yaml` и `hound report --json`;
+  политика **не изменилась** — scoped-прогон обрабатывает только выбранный продукт и не
   двигает `last_completed_run_id` (O10). Состав — `16-runs-schema-boundary.md` §3.1/§8.
 - Следующий полный прогон увидит `last_completed_run_id` от предыдущего полного прогона
   и сделает `incremental` (не `full`), если тот был complete. Это корректно: частичный
@@ -3723,19 +3745,24 @@ golden**.
 
 ## 14. Schema / ports / migrations (**design-only**) — ⬜ не сделано
 
-> **Статус раздела: design-only.** ALTER'ов, перечисленных в §14.1, **нет** в коде. Не
-> писать SQL против этих колонок. Фактическая схема run DB — 20 таблиц
-> (`SCHEMA_VERSION = "3.13.0"`), фактическая схема `state.db` — 15 таблиц
+> **Статус раздела: design-only, кроме отмеченного.** Большинства ALTER'ов из §14.1 в коде
+> нет; **исключение — колонки переноса ячеек** (`cells.measurement_origin`/
+> `carried_from_run_id`/`cell_reuse_key`, волна 2, аддитивно). Фактическая схема run DB — 20
+> таблиц (`SCHEMA_VERSION = "3.13.0"`), фактическая схема `state.db` — 15 таблиц
 > (`STATE_SCHEMA_VERSION = "5"`); реальные колонки — §4.2/§4.3. Порты, описанные в §14.3,
 > тоже частично разошлись с `core/ports/state.py` (см. примечания там).
 
 ### 14.1. Run DB: новые поля/таблицы (**design-only**)
 
-> **Статус: design-only. Ничего из этого блока в коде нет** — ни колонок, ни таблицы
-> `run_product`. Проверено: `grep -rn "run_product\|product_plan_json" core/` — пусто;
-> `corpus_docs`/`corpus_chunks`/`cells`/`cell_evidence` не получали этих ALTER'ов.
-> Единственные существующие `partition_build_id` — в `index_manifest` и
-> `cell_evidence` (обе уже в DDL, не ALTER).
+> **Статус: design-only, кроме отмеченного ниже.** Прежняя редакция утверждала «ничего из
+> этого блока в коде нет»; после **границы A** (29.10.2026, `16-runs-schema-boundary.md`)
+> это неверно: `run_product`, `runs.product_plan_json`/`run_scope`/`embed_device`,
+> `corpus_docs.{http_status, reuse_kind}`, `partition-2` и `corpus_doc_version` **есть**.
+> Волна 2 (30.10.2026) добавила аддитивно `cells.measurement_origin`/
+> `carried_from_run_id`/`cell_reuse_key` — тоже без подъёма `SCHEMA_VERSION`.
+> Design-only остаётся: `cell_evidence.doc_version_id`/`origin_evidence_id` и
+> `cells.retrieved_doc_set_digest`/`coverage_digest`/`catalog_row_digest`/
+> `partition_build_id`.
 >
 > **Состав границы (решение владельца 29.10.2026: одна граница, не две).** Всё, что меняет
 > схему прогонной БД или материал `run_id`, делается **одним** сдвигом — иначе прогресс
@@ -3811,11 +3838,12 @@ ALTER TABLE corpus_chunks ADD COLUMN partition_build_id TEXT;
 -- design-only: partition_build_id в index_manifest УЖЕ есть в DDL (не ALTER)
 ALTER TABLE index_manifest ADD COLUMN partition_build_id TEXT;
 
--- design-only: cells НЕ имеет measurement_origin/carried_from_run_id/cell_reuse_key/
--- retrieved_doc_set_digest/coverage_digest/catalog_row_digest/partition_build_id
-ALTER TABLE cells ADD COLUMN measurement_origin TEXT DEFAULT 'observed';
-ALTER TABLE cells ADD COLUMN carried_from_run_id TEXT;
-ALTER TABLE cells ADD COLUMN cell_reuse_key TEXT;
+-- ✅ СДЕЛАНО (волна 2, аддитивно, без подъёма SCHEMA_VERSION): в DDL `cells` и в
+-- `_ensure_columns` есть measurement_origin/carried_from_run_id/cell_reuse_key.
+-- Прочие поля ниже — по-прежнему design-only (ключа переноса хватает: он живёт в
+-- cell_measurement, а retrieved_doc_set_digest/coverage_digest в ячейку не пишутся).
+-- design-only: cells НЕ имеет retrieved_doc_set_digest/coverage_digest/
+-- catalog_row_digest/partition_build_id
 ALTER TABLE cells ADD COLUMN retrieved_doc_set_digest TEXT;  -- per-cell, не doc-set продукта
 ALTER TABLE cells ADD COLUMN coverage_digest TEXT;
 ALTER TABLE cells ADD COLUMN catalog_row_digest TEXT;
@@ -3937,17 +3965,21 @@ Design-only (объявлены в этом документе, **в коде о
 `save_index_composition`/`get_index_composition` вместо `save_composition`/`get_composition`;
 `reconcile_seed_set`/`seed_rows` вместо `iter_seeds`/`upsert_seed`/`disable_seed`;
 `iter_doc_chunks` вместо `iter_chunks`. Методы пер-ячеечного измерения
-(`save_cell_measurement`/`get_cell_measurement`) и `get_attestation` **не имеют писателя и
-читателя** в прогоне: ячейки живут в run DB (`cells`), а durable-аттестация — это
-`profile_attestation` (§6.9).
+(`save_cell_measurement`/`get_cell_measurement`/`record_cell_measurements`/
+`iter_cell_measurements`) **имеют и писателя, и читателя** с волны 2: пишет Ш6
+(`evaluate_phase`, пачка на продукт), читает перенос (`carry_forward_cell`). `get_attestation`
+по-прежнему без писателя и читателя: ячейки живут в run DB (`cells`), а durable-аттестация —
+это `profile_attestation` (§6.9).
 
 Реализация: `core/store/state_sqlite.py` (`SqliteProductState`), DDL — §4.2.
 `pipeline` зависит только от Protocol; composition root (`core/cli/wiring.py`) строит
 `SqliteProductState(paths.state / package_id / "state.db")`.
 
-`StorePort` (run DB) расширяется (**design-only**):
-- `save_run_product`, `iter_run_products`, `read_run_product`;
-- `iter_evidence(run_id, product_id, param_id)`;
+`StorePort` (run DB) расширяется (**частично as-built**):
+- `save_run_product`, `iter_run_products`, `read_run_product` — ✅ граница A;
+- `iter_evidence(run_id, product_id, param_id)` — ✅ волна 2 под именем
+  `get_cell(run_id, product_id, param_id)` + `iter_cell_evidence(...)` (типизированный
+  evidence ячейки, без протокола отсутствия);
 - `save_plan_inputs` — семантика без `REPLACE` (см. §14.2);
 - `iter_chunks(build_id, product_id=...)` — `build_id` теперь `partition_build_id`
   (для lexical/vector); добавить `iter_chunks_by_composition(composition_id, product_id)`
@@ -4050,7 +4082,7 @@ runs/{run_id}/
 5. `load_effective_seeds` (`core/pipeline/onboarding.py:146`) — ✅ **реализовано**:
    приоритет `--urls > seeds.yaml > corpus_urls.yaml` (`urls_override` заменяет набор
    целиком, `:167-198`; `seeds.yaml` — `:201-206`; legacy `corpus_urls.yaml` — `:203`).
-   Вызывается из `run`/`plan`/`crawl` (`core/cli/commands/run.py:556`,
+   Вызывается из `run`/`plan`/`crawl` (`core/cli/commands/run.py:593`,
    `core/cli/commands/plan.py:220`, `core/cli/commands/crawl.py:323`). Прежняя редакция
    называла это design-only и указывала `core/cli/context.py` — неверно по обоим пунктам.
 6. `NpyVectorIndex` (`core/adapters/vector_npy.py:213`) — ✅ **реализовано**:
@@ -4109,9 +4141,10 @@ runs/{run_id}/
 > **Статус раздела: ⬜ не сделано (acceptance-тестов нет).** Ниже — статус на каждый
 > сценарий. «as-built» = поведение есть в коде сегодня (проверено по маршруту вызова; это
 > **не** утверждение, что для сценария существует отдельный тест); «design-only» = сценарий
-> проверяет механизм, которого нет (§10 carry-forward, `run_product`, `freshness`,
-> `seeds`-UX). Тесты design-only-строк писать не против чего — они станут
-> acceptance-критерием соответствующей полосы.
+> проверяет механизм, которого нет (`run_product`-статус, `freshness`, `seeds`-UX).
+> Перенос ячеек (§10) получил свои тесты **вне** этой нумерации —
+> `tests/pipeline/test_carry_forward.py`; T15–T20 остаются design-only по своим сценариям,
+> и выдавать тесты переноса за них нельзя.
 
 ### 15.1. Функциональные сценарии
 
@@ -4123,8 +4156,8 @@ runs/{run_id}/
 | T4 | `run --update` после T3 | preflight → `blocked`, `reason=product_not_ready`, сообщение с продуктом; нет cells/report | as-built (это CLI-префлайт, **не** фаза `onboarding` — §6.1) |
 | T5 | Новый продукт с 2 seed'ами | full crawl обоих; coverage `expected>0`; все ячейки `observed`; `last_completed_run_id` обновлён | as-built (`record_run_outcome` двигает рубежи) |
 | T6 | Два новых продукта за один update | оба `new`; старые `incremental`; композиция содержит все; старые партиции не пересобраны | as-built (reuse партиции — по `partition_build_id`, §6.3) |
-| T7 | Старый продукт, все URL → 304 | `docs_reused=all`; `cells_carried=all`; LLM/embed не вызваны; partition id не изменился | as-built в части reuse документов/партиций и `embed_cache`; **design-only** в части `cells_carried` (переноса ячеек нет, §10) — ячейки переоцениваются, но при неизменном промпте и условиях отдают хит из `eval_cache` (§10.5), то есть LLM всё же не вызывается |
-| T8 | Старый продукт, один документ изменился | новый `doc_version`; новая партиция только этого продукта; ячейки продукта переоценены; остальные carried | as-built частично: новая партиция и переоценка — есть; «остальные carried» — design-only |
+| T7 | Старый продукт, все URL → 304 | `docs_reused=all`; `cells_carried=all`; LLM/embed не вызваны; partition id не изменился | as-built: reuse документов/партиций и `embed_cache`; `cells_carried` — перенос ячеек (§10.2, тест `test_second_run_carries_cell_without_calling_evaluator`). Оговорка: `❌`-ячейка переносится только при `reuse_kind ∈ {live, revalidated}`, то есть при 304 — да, при `reused` — нет |
+| T8 | Старый продукт, один документ изменился | новый `doc_version`; новая партиция только этого продукта; переоценены ячейки, у которых изменился **их** retrieved-набор; остальные carried | as-built: новая партиция есть; per-cell — ключ содержит отпечаток retrieved-набора ячейки (`test_changed_document_set_prevents_carry` + `test_second_run_carries_cell_without_calling_evaluator`) |
 | T9 | Новый продукт недоступен (robots/timeout) | `run_product=failed`; coverage `complete=False`; cells `failed`/`status=null`; нет `❌`; exit error | as-built по coverage/cells; `run_product` как таблица — **design-only** (статус продукта — в снимке, §13.1) |
 | T10 | Повторный `run` после падения | resume того же `run_id`; `ok`-фазы пропущены; добытые doc-версии переиспользованы; нет дублей | as-built: `corpus_docs` пишутся инкрементально, `corpus_chunks` — на границе **продукта** (§4.7), провенанс спуска — write-through; теряется максимум незавершённый продукт и реестр (`index_manifest`/композиция), и реестр восстанавливается без пересборки (`pb` контент-адресуем) |
 | T11 | `run --update` с расширением когорты | `change_class=cohort_expansion`; `golden_required=full`; diff запрещён с `execution_change: cohort_digest`; `previous_run_id` корректен | as-built (`run_identity` + `run_lineage`; `previous_run_id` — поле lineage, §12.3) |
@@ -4133,10 +4166,10 @@ runs/{run_id}/
 | T14 | Пустые seed'ы, preflight обойдён (unit) | coverage `expected=0, complete=False, reason=no_seeds`; cells `failed`; нет «тихого ok» | as-built |
 | T15 | Продукт retired, затем re-add | режим `new`; полный краул; старые партиции сохранены, но не в композиции | **design-only** |
 | T16 | Переименование `canonical_name` | режим `incremental`; краул не запускается; меняется только `product_state` | **design-only** |
-| T17 | Смена `cutoff_K` | `cell_reuse_key` не совпал; все ячейки переоценены (I20) | **design-only** (нет `cell_reuse_key`) |
-| T17b | Изменён документ вне top-K ячейки | ячейка **перенесена**, LLM не вызван (per-cell) | **design-only** |
-| T18 | Смена `methodology_version` | carry-forward запрещён; eval cache miss; golden-full требуется | **design-only** |
-| T19 | Смена модели/слота | carry-forward запрещён; eval cache miss (I21) | **design-only** |
+| T17 | Смена `cutoff_K` | `cell_reuse_key` не совпал; все ячейки переоценены (I20) | as-built на уровне ключа: `test_cell_reuse_key_changes_with_any_condition` (`cutoff_k`, `retrieval_profile`, `retrieval_params_json`) |
+| T17b | Изменён документ вне top-K ячейки | ячейка **перенесена**, LLM не вызван (per-cell) | as-built: `test_new_document_outside_top_k_does_not_block_carry` |
+| T18 | Смена `methodology_version` | carry-forward запрещён; eval cache miss; golden-full требуется | as-built в части переноса/кэша: версия входит в оба ключа (`test_cell_reuse_key_changes_with_any_condition`, `EVAL_CACHE_FORMAT = 2`); требование golden-full — процесс §13, тестом не покрыто |
+| T19 | Смена модели/слота | carry-forward запрещён; eval cache miss (I21) | as-built в части ключей (`model_id`/`llm_scenario` в `cell_reuse_key`, `test_cell_reuse_key_changes_with_any_condition`); сквозного прогона с двумя моделями нет |
 | T20 | `offline` refresh | `freshness=stale`; `❌` → pending; отчёт явно показывает stale | **design-only** (`freshness`-колонки нет, §11.2) |
 
 ### 15.2. Инвариантные тесты
@@ -4181,20 +4214,20 @@ runs/{run_id}/
 
 ## 16. Rollout
 
-> **Статус раздела: ⬜ не сделано (этап 5).** Этапы 0–4 реализованы (MVP-1…MVP-4 шаг 2);
-> этап 5 (carry-forward/coverage honesty) **не начат**. Таблица оставлена как запись
-> плана — «Что» в ней читается как намерение, а не как отчёт о сделанном.
+> **Статус раздела: ✅ этапы 0–5.** Этапы 0–4 реализованы (MVP-1…MVP-4 шаг 2); **этап 5
+> (carry-forward) исполняется** с 30.10.2026; `coverage freshness` снят решением (§3.1).
+> Таблица читается как отчёт о сделанном, кроме строки «Later».
 
 ### 16.1. Этапы
 
 | Этап | Что | Риск | Ценность | Статус |
 |---|---|---|---|---|
-| **0. Контракты** | `seeds.yaml` schema, `ProductStatePort`, enum'ы, `state.db` DDL, `composition` формулы | низкий | фиксирует границы | ✅ сделано; enum'ы `CoverageFreshness`/`MeasurementOrigin`/`RunProductStatus` — ⬜ **нет** (§3.1) |
+| **0. Контракты** | `seeds.yaml` schema, `ProductStatePort`, enum'ы, `state.db` DDL, `composition` формулы | низкий | фиксирует границы | ✅ сделано; enum'ы `MeasurementOrigin`/`RunProductStatus` — ✅ есть, `CoverageFreshness` — ➖ снят (§3.1) |
 | **1. Seeds + preflight (MVP-1)** | `add-product` пишет seeds; `run` читает seeds; preflight блокирует `pending_seeds`; coverage zero-source; `_coverage_for` anomaly | низкий | закрывает «тихий пустой продукт» | ✅ сделано, включая аномалию `coverage_missing` (`core/pipeline/evaluate.py:1466`) |
 | **2. Run identity + state (MVP-2)** | `derive_run_id` без products; `cycle_id`/`--update`; `state.db` (product/seed/snapshot/lineage); new/full/incremental | средний | продукт не теряется между прогонами | ✅ сделано; `run_product` — ⬜ нет (§14.1) |
 | **3. Incremental corpus (MVP-3)** | `url_state`/`document_version`; conditional GET; reuse doc/chunks; per-product doc-set | средний | экономия сети/экстракции | ✅ сделано; чанки durable в run DB на границе продукта (§4.7) |
 | **4. Partitions + composition (MVP-4)** | `partition_build_id`; `composition_id`; `CompositionView`; retrieval/lexical | высокий (индексный контур) | добавление продукта не пересобирает старые | ✅ сделано (шаг 1 и шаг 2) |
-| **5. Carry-forward + coverage honesty (MVP-5)** | `cell_reuse_key`; `measurement_origin`; coverage freshness; eval cache key; tests | высокий (методология) | экономия LLM + честный отчёт | ⬜ **не начато** в части переноса/`freshness` (design-only: §10, §11.2, §11.4); **eval cache key — ✅ сделано** (§10.5): методологические условия в ключе, `EVAL_CACHE_FORMAT = 2` |
+| **5. Carry-forward + coverage honesty (MVP-5)** | `cell_reuse_key`; `measurement_origin`; eval cache key; tests | высокий (методология) | экономия LLM + честный отчёт | ✅ **сделано**: перенос ячеек (§10, `tests/pipeline/test_carry_forward.py`), `cells_carried` в снимке/отчёте (§11.4), eval cache key (§10.5, `EVAL_CACHE_FORMAT = 2`). `coverage freshness` — ➖ снят: её роль исполняет `corpus_docs.reuse_kind` |
 | **Later** | per-cell invalidation, sitemap `lastmod`, `seeds` UX, state GC, **измерение** паритета `pb` local/split (шов `/v1/extract/*` и идентичность экстрактора в пространстве ядра — ✅ есть; паритет не измерен), embed cache — ✅ уже есть (`core/cli/context.py:2120`) | — | оптимизация | ⬜ не начато |
 
 ### 16.2. MVP (3–5 шагов)
@@ -4245,9 +4278,8 @@ runs/{run_id}/
 
 ## 17. Сводка ключевых решений
 
-> **Статус раздела: ⬜ не сделано в части 9–11 и 13.** ✅ п. 1–8, 10 (кроме `freshness`), 12;
-> ⬜ п. 9, 11, 13 (межпрогонный `--only-failed`), 14 (O5/O6/O13), 15 (остаток).
-> Маркер стоит в каждом пункте.
+> **Статус раздела: ⬜ не сделано в части 13 и остатка 14.** ✅ п. 1–12, 14 (кроме O5);
+> ⬜ п. 13 (межпрогонный `--only-failed`), п. 15 (остаток). Маркер стоит в каждом пункте.
 
 1. **Seed'ы — первоклассный пакетный артефакт** `sources/seeds.yaml` (роль, source,
    profile_key, enabled); `--url` — только hint, не единственный seed. — ✅ **реализовано**
@@ -4277,7 +4309,9 @@ runs/{run_id}/
    **retrieved-набор ячейки**, coverage, методология, аттестация, partition);
    `measurement_origin` `observed|carried`; evidence привязан к `doc_version_id` (I19).
    **Per-cell** (решение 29.10.2026): меняется документ вне top-K — ячейка переносится,
-   LLM не вызывается. — ⬜ **design-only**
+   LLM не вызывается. — ✅ **реализовано** (волна 2): `carry_forward.py`, `cell_reuse_key`
+   в `digests.py`, писатель `cell_measurement` в Ш6, `cells_carried` в снимке и отчёте.
+   Оговорка по O5: evidence проверяется по `content_hash`, колонки `doc_version_id` нет
 10. **Coverage пересчитывается всегда**; `reused` — переиспользование контента, не
     отсутствие наблюдения; `complete` требует `expected>0`; `❌` требует complete +
     non-stale (или аттестации). — ✅ **реализовано** в части `complete`/`expected>0`;
@@ -4293,7 +4327,7 @@ runs/{run_id}/
     межпрогонный (**design-only**: сейчас сессионный); `--only-product` не обновляет
     baseline. — ⬜ **сделано частично** (межпрогонный `--only-failed` — design-only)
 14. **O1–O13** — новые инварианты, закрывающие тихий пустой продукт, пустой coverage,
-    ложный carry-forward и потерю провенанса. — ⬜ **сделано частично** (§3.3)
+    ложный carry-forward и потерю провенанса. — ✅ **сделано**, кроме O5 (частично, §3.3)
 15. **Заменяем, а не надстраиваем:** `derive_run_id`, batch `index_build_id`,
     `_persist_corpus_coverage`, `_coverage_for`, `NpyVectorIndex` single-build,
     `--only-failed`, `save_plan_inputs` REPLACE, `chunk_id`. — **сделано** для
@@ -4395,60 +4429,45 @@ runs/{run_id}/
 
 ---
 
-## 19. Приложение: псевдокод `run --update` (**design-only**) — ⬜ не сделано
+## 19. Приложение: `run --update` (as-built) — ✅ сделано
 
-> **Статус: design-only.** Это эскиз целевого потока, а не описание `cmd_run`. Часть
-> сущностей в коде **есть** и названа правильно (`resolve_cycle_id`/`resolve_run_scope` —
-> `core/cli/commands/run.py`, `reconcile_seed_set`/`record_run_lineage` —
-> `core/ports/state.py`), а часть — только намерение: `state.lock()` (файловый lock пакета
-> **есть** как `core/util/package_lock.py` и берётся CLI-слоем, а не портом стора — §4.4),
-> `RunLineage`-вызов `record_run`, `finalize_products` (агрегат статусов продукта —
-> снимок в `state.db`, §13.1). Читать как намерение; фактический composition root —
-> `core/cli/commands/run.py`.
+> **Статус: as-built (переписано 30.10.2026).** Порядок ниже — фактический порядок
+> composition root (`core/cli/commands/run.py::_run_body`), а не эскиз. Отличия от прежней
+> design-редакции названы прямо:
+>
+> * `state.lock()` в порте стора **нет**: эксклюзивность пакета — файловый
+>   `core/util/package_lock.py` (`flock`, §4.4), берётся CLI-слоем и только для реального
+>   прогона (не для `--dry-run`/`--until plan`);
+> * `finalize_products` **нет**: статус продукта — снимок `state.db` (`record_run_outcome`,
+>   §13.1) плюс строка `run_product` в run DB;
+> * перенос ячеек — **внутри** Ш6 (`carry_forward_cell` между retrieval и оценщиком,
+>   §10.2), а не отдельным проходом перед фазами: ключ переноса содержит отпечаток
+>   retrieved-набора **этой** ячейки и до ретривала невычислим;
+> * БД предшественника открывается **только на чтение** (`_open_previous_store`) и
+>   закрывается в `finally` рядом с `store`: это чужое иммутабельное свидетельство, и
+>   писатель применил бы к нему DDL/миграции.
 
 ```python
-def cmd_run_update(args):
-    inputs = load_inputs(args.run_yaml, args.package)          # pure
-    state = SqliteProductState(paths.state / inputs.run.package / "state.db")
-    # эксклюзивность пакета держит CLI-лок state/{pkg}/.lock (§4.4); busy_timeout — носитель
-    prev = state.previous_run(inputs.run.package) if not args.resume else None
-    cycle_id = resolve_cycle_id(args, inputs, prev)            # без неявного today()
-    seeds = load_effective_seeds(args, inputs.package)         # --urls > seeds.yaml > corpus_urls
-    reconcile_seed_set(state, seeds, actor=args.actor)
-    cohort_digest = derive_cohort_digest(inputs.cohort)
-    seeds_digest = derive_seeds_digest(seeds)
-    contract_digest = execution_contract_digest(inputs, plan_axes=..., cohort_digest=cohort_digest,
-                                                seeds_digest=seeds_digest)
-    run_scope = resolve_run_scope(args, prev)                  # full|only_failed|product:<id>
-    change_class = classify_change(prev, cohort_digest, seeds_digest, contract_digest)
-    run_id = args.run_id or resolve_run_id(
-        args, inputs, prev, cycle_id=cycle_id, cohort_digest=cohort_digest,
-        seeds_digest=seeds_digest, execution_contract_digest=contract_digest,
-        run_scope=run_scope,
-    )
-    plan = plan(inputs, run_id=run_id)
-    product_plan = resolve_product_modes(
-        inputs.cohort, seeds, state, load_domain_profiles(inputs.package),
-        cycle_id=cycle_id,
-        previous_run_id=prev.run_id if prev else None,
-        change_class=change_class,
-        scope=run_scope,
-    )
-    store = build_store(run_db_path(args.runs_dir, run_id))
-    ensure_run(store, run_id, inputs)
-    snapshot_run_inputs(store, run_id, inputs, plan, product_plan,
-                        cycle_id, prev, change_class, run_scope, contract_digest)
-    state.record_run_lineage(RunLineageRow(run_id, ..., previous_run_id=prev.run_id if prev else None,
-                                          change_class=change_class, status="running"))
-    phases = build_phases(
-        inputs, plan, product_plan=product_plan, state=state,
-        refresh=args.refresh, urls=effective_urls(seeds),
-        composition_factory=CompositionView,
-        previous_run_store=open_run_store(prev.run_id) if prev else None,
-    )
-    report = Runner(store, phases).run(run_id)
-    finalize_products(store, state, run_id, product_plan, report)
-    return report
+# core/cli/commands/run.py::_run_body — порядок as-built
+inputs = load_inputs(args.run_yaml, args.package)              # pure
+report = lint_run_inputs(inputs)
+state_store = _open_state_store(args, create=True)             # 09 §4.1, после dry-run
+package_lock = _acquire_package_lock(...)                      # flock, §4.4 (не порт стора)
+seeds = load_effective_seeds(...)                              # --urls > seeds.yaml > corpus_urls
+state_store.reconcile_seed_set(product_id, rows)               # seeds.yaml → seed_set
+onboarding = preflight(args.package, products, state=state_store)   # режимы продуктов
+sync_product_state(state_store, ...)                           # рубежи last_*_run_id
+cycle_id = resolve_cycle_id(...)                               # без неявного today()
+contract_digest = build_execution_contract(...)                # 29 полей, §12.5
+run_id = derive_run_id(..., cycle_id, contract_digest, run_scope, refresh_policy)
+previous = previous_run_of(state_store, package_id, run_id=run_id, explicit=args.since_run)
+previous_run_id = previous.run_id if previous else None        # resume ⇒ None
+previous_store, note = _open_previous_store(args.runs_dir, previous_run_id)   # read-only
+store = build_store(db_path)                                   # run DB
+phases = _resolve_phases(..., state=state_store, previous_run_id=previous_run_id,
+                         previous_store=previous_store)        # → build_phases
+report = Runner(store, phases).run(run_id)                     # перенос — внутри Ш6 (§10.2)
+record_run_outcome(state_store, ...)                           # снимок/рубежи/lineage
 ```
 
 **`resolve_cycle_id`.** `--cycle-id` > `run.yaml:cycle_id` > `run.yaml:snapshot_date`.
@@ -4464,12 +4483,12 @@ resume'ит тот же `run_id`.
 
 ---
 
-*Документ гибридный: as-built-секции (§6.1–§6.3, §6.5–§6.9, §7, §8, §12.1–§12.2,
-§12.5, §20) описывают то, что работает в прогоне; design-only-секции (§2.3, §4.5, §4.6,
-§6.4, §10, §11 в части `freshness`, §13.3, §14, §19) — намерение без производителя.
-Статус — в маркере заголовка каждой секции и в реестре в шапке. Реализация design-части —
-отдельными атомарными коммитами по этапам §16; изменения §13/§4.4 — только после явного
-решения владельца методологии.*
+*Документ гибридный: as-built-секции (§4.6, §5, §6.1–§6.9, §7, §8, §9, §10, §11.4–§11.6,
+§12.1–§12.2, §12.5, §13.1–§13.4, §13.6, §19, §20) описывают то, что работает в прогоне;
+design-only-секции (§2.4, §4.5, §14, §17 п. 13) — намерение без производителя. Статус — в
+маркере заголовка каждой секции и в реестре в шапке. Реализация design-части — отдельными
+атомарными коммитами по этапам §16; изменения §13/§4.4 — только после явного решения
+владельца методологии.*
 
 ---
 

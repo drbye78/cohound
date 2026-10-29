@@ -799,5 +799,5 @@ flowchart LR
 (`core/util/cache.py:133`, проводка `core/cli/context.py:1355`); политика ретраев и backoff —
 ✅ сделано (общая политика `core/util/retry.py:1`, потребитель — `core/adapters/search_glm.py:66`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано (`core/store/sqlite.py:21` WAL +
-`core/store/sqlite_store.py:67` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:626` — одна
+`core/store/sqlite_store.py:69` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:626` — одна
 транзакция на пачку).

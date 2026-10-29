@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -62,6 +62,7 @@ from core.domain.enums import (
     CellState,
     ChangeClass,
     DenialStrength,
+    MeasurementOrigin,
     RankingPolicy,
     SourceScope,
     Status,
@@ -293,6 +294,14 @@ class Artifacts:
     #: входа следующего прогона (13-manual-artifacts §4). ``None`` — файл не записан
     #: (сбой выгрузки); форма отчёта от этого не зависит.
     artifacts_gap: Path | None = None
+    #: ``outputs/cell_origin.csv`` — происхождение ячеек по продукту (09 §10.1): сколько
+    #: всего и сколько перенесено из прошлого прогона. ``None`` — перенесённых нет (файл
+    #: не создаётся: нули уже видны в ``run_product``/снимке, а пустой артефакт читался бы
+    #: как «перенос работает и ничего не перенёс»).
+    cell_origin: Path | None = None
+    #: Те же строки, что в файле, — для ``--json`` payload: счётчик переноса читается без
+    #: открытия CSV и без чтения ``state.db``. Пусто — перенесённых ячеек нет.
+    cell_origins: list[dict[str, Any]] = field(default_factory=list)
     #: ``outputs/stale_cells.csv`` — ячейки, **исключённые** из расчёта как устаревшие
     #: (§13/K2: ``stale_reason`` = привязка к прошлой сборке). ``None`` — устаревших нет
     #: (файл не создаётся: пустой список — не артефакт).
@@ -2798,6 +2807,60 @@ def _write_stale_cells(cells: Iterable[Any], path: Path) -> Path | None:
     )
 
 
+def collect_cell_origins(cells: Iterable[Any]) -> list[dict[str, Any]]:
+    """Происхождение ячеек по продуктам (09 §10.1): сколько измерено сейчас, сколько перенесено.
+
+    Единственный носитель — ``cells.measurement_origin``; отчёт его **читает**, а не
+    выводит заново: перенос решается в Ш6, и второй расчёт разошёлся бы с записью при
+    первой же правке условий. Строки сортируются по ``product_id`` — детерминизм
+    артефакта (§S8).
+
+    ``cells_carried`` — подмножество ``cells_measured``, а не дополнение к нему:
+    перенесённая ячейка **измерена** (в прошлом цикле), и вычитать её из знаменателя
+    значило бы публиковать «эта ячейка не измерена», что неправда. Поэтому
+    ``cells_measured - cells_carried`` — «измерено в этом прогоне вызовом оценщика».
+    """
+    stats: dict[str, list[int]] = {}
+    for cell in _cell_list(cells):
+        bucket = stats.setdefault(str(cell.product_id), [0, 0])
+        bucket[0] += 1
+        origin = getattr(cell, "measurement_origin", None)
+        if str(getattr(origin, "value", origin) or "") == MeasurementOrigin.CARRIED.value:
+            bucket[1] += 1
+    return [
+        {
+            "product_id": product_id,
+            "cells_total": total,
+            "cells_carried": carried,
+        }
+        for product_id, (total, carried) in sorted(stats.items())
+    ]
+
+
+def _write_cell_origins(rows: Sequence[Mapping[str, Any]], path: Path) -> Path | None:
+    """Пишет ``cell_origin.csv`` — по продукту: всего ячеек и сколько перенесено.
+
+    ``None`` при отсутствии перенесённых ячеек: файл из одних нулей читался бы как
+    «перенос работает и ничего не перенёс», тогда как в первом цикле его просто не
+    применяли. Пустой перенос виден в ``run_product``/снимке (``cells_carried = 0``),
+    а артефакт появляется, когда о переносе есть что сказать.
+    """
+    if not any(int(row.get("cells_carried") or 0) for row in rows):
+        return None
+    return _write_csv(
+        path,
+        ["product_id", "cells_total", "cells_carried"],
+        [
+            {
+                "product_id": row["product_id"],
+                "cells_total": row["cells_total"],
+                "cells_carried": row["cells_carried"],
+            }
+            for row in rows
+        ],
+    )
+
+
 def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
     """Пишет ``cell_diagnostics.csv`` — ячейки, о которых человек обязан знать.
 
@@ -3052,6 +3115,13 @@ def write_reports(
     # (:mod:`core.pipeline.compute`), но человек обязан их видеть: это очередь
     # пере-оценки, а не тихое вычитание. Файл пишется только при непустом списке.
     stale_cells = _write_stale_cells(cell_list, outputs_dir / "stale_cells.csv")
+    # 09 §10.1/§11.4: происхождение ячеек — по продукту, из ``cells.measurement_origin``.
+    # Файл появляется, когда есть что сказать (перенос состоялся); нули живут в снимке
+    # ``state.db`` и в ``run_product``.
+    cell_origins = collect_cell_origins(cell_list)
+    cell_origin_path = _write_cell_origins(
+        cell_origins, outputs_dir / "cell_origin.csv"
+    )
     # P6/absence_rule/validation_notes: записи ячейки, о которых человек обязан знать.
     # Файл — очередь разбора (как ``stale_cells.csv``), а не измерение; пишется только
     # при непустом списке поводов.
@@ -3128,6 +3198,8 @@ def write_reports(
     return Artifacts(
         battle_card=battle_card,
         stale_cells=stale_cells,
+        cell_origin=cell_origin_path,
+        cell_origins=cell_origins,
         cell_diagnostics=cell_diagnostics,
         partial_docs=partial_docs_path,
         partial_docs_summary=partial_summary,

@@ -878,6 +878,7 @@ def build_phases(
     mem_budget_mb: int | None = None,
     derive_extract_workers: bool = False,
     previous_run_id: str | None = None,
+    previous_store: Any = None,
     change_class: str | None = None,
     cycle_id: str | None = None,
 ) -> dict[str, PhaseFn]:
@@ -979,6 +980,11 @@ def build_phases(
         его в ``log_entries`` (``previous=<id>`` / ``previous=—``), манифест Ш9 — полем
         ``previous_run_id``. ``None`` — предшественника нет/resume текущего прогона; в
         материал ``run_id`` он не входит (иначе идентичность зависела бы от истории).
+    :param previous_store: ``StorePort`` БД прогона-предшественника, открытый **только на
+        чтение**. Источник ячейки и её evidence для переноса (09 §10.2). Открывает и
+        закрывает его composition root: путь ``runs/{run_id}/cohound.db`` — свойство
+        раскладки, а ``pipeline`` раскладку не читает. ``None`` ⇒ перенос выключен; фаза
+        называет это строкой ``carry=—`` в логе, а не выдаёт за «ключи не совпали».
     :param change_class: класс изменения относительно предшественника (§13) из той же
         ``RunIdentity`` — для манифеста Ш9. Не пересчитывается: расчёт живёт в
         ``build_run_identity``, а его запись — в ``run_lineage``.
@@ -1269,6 +1275,11 @@ def build_phases(
             # ``previous=—``), чтобы она читалась в отчёте прогона, а не только в
             # ``state.db``. Резолв — в composition root (:func:`previous_run_of`).
             previous_run_id=previous_run_id,
+            # 09 §10.2: индекс переноса (``state.db.cell_measurement``) и БД
+            # предшественника — оба нужны, чтобы ячейка не мерилась повторно. Любой
+            # ``None`` выключает механизм, и это видно строкой ``carry=—`` в логе фазы.
+            state=state,
+            previous_store=previous_store,
         )
 
     # -- Ш7: ревью (advisory-очередь, ничего не решает за человека) ---------- #

@@ -44,6 +44,7 @@ from core.domain import (
     GateDecision,
     IndexManifestEntry,
     LLMScenario,
+    MeasurementOrigin,
     ProtocolExhaustion,
     RankingPolicy,
     RegistryFact,
@@ -54,6 +55,7 @@ from core.domain import (
     ScenarioBinding,
     SearchLogEntry,
     SourceKind,
+    SourceScope,
     StaleReason,
     Status,
     TerminationReason,
@@ -97,6 +99,13 @@ _CELL_COLUMNS = (
     #: Пишется **слиянием** с уже записанным (``_merge_validation_notes``), поэтому
     #: повторная оценка при resume не теряет прежнюю причину.
     "validation_notes",
+    #: 09 §10 (схема ``cell-reuse-2``): происхождение ячейки. ``observed`` — измерена в
+    #: этом прогоне, ``carried`` — перенесена из ``carried_from_run_id``. ``cell_reuse_key``
+    #: — ключ, которым помечена ячейка (``NULL`` — не вычислялся: ячейка высокого
+    #: источника, ``failed`` или модульный вызов без условий переноса).
+    "measurement_origin",
+    "carried_from_run_id",
+    "cell_reuse_key",
 )
 
 #: Источники, стоящие в порядке §2.2 п.7 **ниже** реестра. Guard использует это только
@@ -283,6 +292,59 @@ def _parse_absence_rule(raw: Any) -> AbsenceRuleType | None:
         return AbsenceRuleType(str(raw))
     except ValueError:
         return None
+
+
+def _row_to_typed_evidence(row: sqlite3.Row) -> CellEvidence | None:
+    """Строка ``cell_evidence`` → :class:`CellEvidence` (``None`` — запись нечитаема).
+
+    Терпимость чтения прогона: неизвестный класс источника/вида доказательства или
+    отсутствующий ``source_id`` (историческая строка) дают ``None``, а не падение чтения.
+    Перенос (09 §10.2) такую запись не копирует: доказательство без адреса не переезжает.
+    """
+    source_id = _row_optional(row, "source_id")
+    if not source_id:
+        return None
+    try:
+        return CellEvidence(
+            evidence_id=row["evidence_id"],
+            run_id=row["run_id"],
+            product_id=row["product_id"],
+            param_id=row["param_id"],
+            source_kind=SourceKind(row["source_kind"]),
+            evidence_type=EvidenceType(row["evidence_type"]),
+            source_id=str(source_id),
+            source_url=_row_optional(row, "source_url"),
+            citation_quote=_row_optional(row, "citation_quote"),
+            content_hash=_row_optional(row, "content_hash"),
+            source_scope=(
+                SourceScope(_row_optional(row, "source_scope"))
+                if _row_optional(row, "source_scope")
+                else None
+            ),
+            scope_acceptance=_row_optional(row, "scope_acceptance"),
+            index_build_id=_row_optional(row, "index_build_id"),
+            partition_build_id=_row_optional(row, "partition_build_id"),
+            retrieved_at=_row_optional(row, "retrieved_at"),
+        )
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_measurement_origin(raw: Any) -> MeasurementOrigin:
+    """Происхождение ячейки из колонки ``cells.measurement_origin`` (09 §10).
+
+    ``NULL``/отсутствующая колонка (read-only БД прошлой версии) → ``observed``: строка
+    действительно была измерена, переноса тогда не существовало. Неизвестное значение —
+    тоже ``observed`` по той же причине, по которой чтение прогона терпимо к историческим
+    строкам: ``carried`` без ``carried_from_run_id`` модель всё равно отвергнет, поэтому
+    подстановка дефолта не может выдать перенос за измерение.
+    """
+    if raw is None:
+        return MeasurementOrigin.OBSERVED
+    try:
+        return MeasurementOrigin(str(raw))
+    except ValueError:
+        return MeasurementOrigin.OBSERVED
 
 
 def _parse_evidence_scope(raw: str | None) -> EvidenceScope | None:
@@ -540,6 +602,9 @@ class SqliteStore:
             ),
             _as_text(cell.absence_rule),
             validation_notes,
+            _as_text(cell.measurement_origin),
+            cell.carried_from_run_id,
+            cell.cell_reuse_key,
         )
 
     def _validation_notes_map(
@@ -720,6 +785,55 @@ class SqliteStore:
                 cell = cell.model_copy(update={"absence_evidence": entries})
             yield cell
 
+    def get_cell(self, run_id: str, product_id: str, param_id: str) -> Cell | None:
+        """Одна ячейка прогона (``None`` — строки нет).
+
+        Нужна переносу (09 §10.2): ключ сравнивается по строке ``cell_measurement``
+        (``state.db``), а сама ячейка и её evidence читаются из БД **прогона**-
+        предшественника — только когда ключ уже совпал. Читать весь прогон
+        (``iter_cells``) ради одной ячейки значило бы декодировать 900 строк на каждую
+        пару «продукт × параметр». ``absence_evidence`` приклеивается так же, как в
+        ``iter_cells``: перенос обязан нести протокол отсутствия, иначе ``❌`` переедет
+        без своего основания.
+        """
+        sql = (
+            f"SELECT {self._readable('cells', _CELL_COLUMNS)} FROM cells"  # noqa: S608 - проекция из _CELL_COLUMNS, аргументы — bind
+            " WHERE run_id = ? AND product_id = ? AND param_id = ?"
+        )
+        row = self.conn.execute(sql, (run_id, product_id, param_id)).fetchone()
+        if row is None:
+            return None
+        cell = self._row_to_cell(row)
+        entries = self._absence_by_cell(run_id).get((product_id, param_id))
+        if entries:
+            cell = cell.model_copy(update={"absence_evidence": entries})
+        return cell
+
+    def iter_cell_evidence(
+        self, run_id: str, product_id: str, param_id: str
+    ) -> list[CellEvidence]:
+        """Типизированный evidence одной ячейки (без ``absence``-протокола).
+
+        Порядок — порядок вставки (``rowid``): перенос копирует записи в том же порядке,
+        чтобы ``evidence_id`` нового прогона были воспроизводимы (§S8). Записи
+        ``evidence_type='absence'`` не отдаются: у протокола отсутствия нет ``source_id``,
+        и типизированная модель его отвергает (I10/I15) — он переносится отдельно, тем же
+        носителем ``Cell.absence_evidence``, что и при обычной оценке.
+        """
+        sql = (
+            f"SELECT {self._readable('cell_evidence', _EVIDENCE_COLUMNS)} FROM cell_evidence"  # noqa: S608 - проекция из _EVIDENCE_COLUMNS, аргументы — bind
+            " WHERE run_id = ? AND product_id = ? AND param_id = ?"
+            " AND evidence_type IS NOT ? ORDER BY rowid"
+        )
+        result: list[CellEvidence] = []
+        for row in self.conn.execute(
+            sql, (run_id, product_id, param_id, EvidenceType.ABSENCE.value)
+        ):
+            evidence = _row_to_typed_evidence(row)
+            if evidence is not None:
+                result.append(evidence)
+        return result
+
     def iter_registry_cells(self, run_id: str) -> Iterator[Cell]:
         """Итерирует ячейки реестрового источника прогона (документированная поверхность).
 
@@ -776,6 +890,15 @@ class SqliteStore:
             validation_notes=_notes_from_text(
                 _row_optional(row, "validation_notes")
             ),
+            # 09 §10: происхождение ячейки. Отсутствующая колонка (read-only БД прошлой
+            # версии) — «не записано», и это **observed**: строка была измерена, переноса
+            # тогда не существовало. ``carried`` без источника не конструируется (модель
+            # отвергает такую пару), поэтому подстановка дефолта не создаёт ложного переноса.
+            measurement_origin=_parse_measurement_origin(
+                _row_optional(row, "measurement_origin")
+            ),
+            carried_from_run_id=_row_optional(row, "carried_from_run_id"),
+            cell_reuse_key=_row_optional(row, "cell_reuse_key"),
         )
 
     # -- evidence -------------------------------------------------------- #
@@ -2172,7 +2295,10 @@ class SqliteStore:
         ``cells_total``/``cells_pending``/``baseline_complete`` — те же величины, что
         ``product_end`` пишет в ``results[].notes`` прогона; носитель — здесь, ``notes``
         остаётся оператору, а расхождение между ними — аномалия отчёта (16 §3.2).
-        ``cells_carried``/``cells_measured`` не пишутся: переноса ячеек нет (09 §10).
+        ``cells_carried``/``cells_measured`` живут **не здесь**: их носитель —
+        ``product_snapshot`` в ``state.db`` (``state_sync._cell_stats``), потому что это
+        свойство цикла, а не одного прогона. В ``run_product`` они не дублируются:
+        две колонки одной величины разошлись бы при первой же правке записи.
         """
         with self.conn:
             self.conn.execute(

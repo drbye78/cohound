@@ -255,6 +255,43 @@ def _vector_rebuild_reason() -> str:
     return "нет манифеста/размерности сборки"
 
 
+def _open_previous_store(
+    runs_dir: str | None, previous_run_id: str | None
+) -> tuple[Any, str | None]:
+    """Открывает БД прогона-предшественника **только на чтение** (09 §10.2).
+
+    Возвращает ``(store | None, причина | None)``: причина — машинно-читаемый текст, почему
+    перенос ячеек не сможет читать предшественника. ``None`` в обоих полях — предшественника
+    нет (первый прогон/resume текущего): это **не** дефект и не требует предупреждения.
+
+    Почему это делает composition root, а не фаза: путь ``runs/{run_id}/cohound.db`` —
+    свойство раскладки, а ``core/pipeline`` раскладку не читает. И почему ``read_only``:
+    БД завершённого прогона — иммутабельное свидетельство; писатель применил бы к ней
+    DDL/миграции и изменил то, против чего считается diff.
+
+    Нечитаемая БД (схема старше текущей — гейт ``connect_read_only``) — **видимая** причина,
+    а не тихий пропуск: перенос выключится, и это попадёт в предупреждения прогона.
+    """
+    if not previous_run_id:
+        return None, None
+    from core.store.sqlite_store import SqliteStore
+
+    base = runs_dir or "runs"
+    db_path = Path(base) / previous_run_id / "cohound.db"
+    if not db_path.exists():
+        return None, (
+            f"carry: БД предшественника {previous_run_id} не найдена ({db_path}) — "
+            "ячейки будут измерены заново"
+        )
+    try:
+        return SqliteStore(db_path, read_only=True), None
+    except Exception as exc:  # noqa: BLE001 — перенос не роняет прогон, но видим
+        return None, (
+            f"carry: БД предшественника {previous_run_id} не открыта: "
+            f"{type(exc).__name__}: {_concise(exc)} — ячейки будут измерены заново"
+        )
+
+
 def _rebind_retrieval_after_corpus(
     fn: PhaseFn,
     *,
@@ -939,6 +976,11 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         # возвращают ``None``, и Ш6 падает на каждой ячейке.
         store = build_store(db_path, profile=args.profile)
         ports: Ports | None = None
+        # 09 §10.2: соединение с БД предшественника открывается внутри ``try`` (путь
+        # зависит от раскладки), но объявляется здесь: закрытие — в ``finally`` ниже, и
+        # обращение к необъявленному имени на пути исключения было бы NameError вместо
+        # исходной ошибки.
+        previous_store: Any = None
         try:
             if only_failed or only_product is not None:
                 corpus_urls, filter_notes = _filter_corpus_urls(
@@ -1033,6 +1075,15 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                             f"serp: адаптер внешнего поиска {serp_provider or 'injected'} "
                             "(провайдер из deploy.search)"
                         )
+            # 09 §10.2: БД предшественника открывается **до** сборки фаз и закрывается в
+            # ``finally`` рядом с ``store``: перенос ячеек читает из неё ячейку и evidence.
+            # Причина отказа читать — предупреждение прогона, а не тихий пропуск: иначе
+            # «переноса не было» неотличимо от «механизм выключен».
+            previous_store, previous_store_note = _open_previous_store(
+                getattr(args, "runs_dir", None), previous_run_id
+            )
+            if previous_store_note:
+                config_notices.append(previous_store_note)
             phases = _resolve_phases(
                 args,
                 inputs=inputs,
@@ -1082,6 +1133,7 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 # пойдёт в ``run_lineage``); класс — из той же ``RunIdentity``. Фаза оценки
                 # называет предшественника в логе, манифест — полем ``previous_run_id``.
                 previous_run_id=previous_run_id,
+                previous_store=previous_store,
                 change_class=identity.change_class.value,
                 # 09 §2.4/§6.2: цикл — та же величина, что вошла в ``run_id``; в манифест
                 # он попадает полем (иначе цикл читался бы только из ``run_id``/lineage).
@@ -1145,6 +1197,8 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
 
         except BaseException:
             # Сборка портов/фаз не должна утекать соединением: закрываем и пробрасываем.
+            if previous_store is not None:
+                previous_store.close()
             store.close()
             raise
 
@@ -1357,6 +1411,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 )
         finally:
             store.close()
+            if previous_store is not None:
+                # Чтение закончено: БД предшественника — чужое иммутабельное свидетельство,
+                # держать соединение после фазы оценки незачем.
+                previous_store.close()
             # Best-effort остановка краулера: только если он есть и умеет ``close`` (после
             # разделения реактора — ScrapyCrawler; у HttpCrawler/None ``close`` нет). Проверка
             # существования делает вызов безопасным для обоих краулеров.

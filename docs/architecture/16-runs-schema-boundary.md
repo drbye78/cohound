@@ -227,7 +227,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
   ось `device` — внешний backend (`backend`/`base_url`/`model_version`) не объявлен и
   остаётся решением `14` §6 п. 5.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
-  `core/domain/models.py:477`), дефолт `None` — по той же причине, что у `pdf_device`
+  `core/domain/models.py:478`), дефолт `None` — по той же причине, что у `pdf_device`
   (`:543-549`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
   что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:323-342`).
@@ -262,7 +262,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
 Строку манифеста в БД тоже надо дописать: `persist_manifest`
-(`core/store/sqlite_store.py:1228-1290`) — **явный список** из 29 колонок, а не `SELECT *`.
+(`core/store/sqlite_store.py:1351-1413`) — **явный список** из 29 колонок, а не `SELECT *`.
 Колонка, не вписанная туда, останется `NULL` навсегда при живом `ALTER TABLE`; чтение —
 `read_manifest` (`:2243-2380`), где новые поля идут через `_has_column` (`:203`), иначе
 `row["embed_device"]` на старой БД даст `IndexError`.
@@ -496,7 +496,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
   `source_id`).
 - `docs/status-dictionary.yaml`: `reuse_kind` (`:651`), `run_scope` (`:670`), `pdf_device`
   (`:437`) есть, `embed_device` **нет**, перечня статусов продукта прогона **нет**.
-  Синхронизация обязательна: `core/domain/dictionary.py:72` `assert_dictionary_integrity`,
+  Синхронизация обязательна: `core/domain/dictionary.py:73` `assert_dictionary_integrity`,
   `required`-список (`:144` `reuse_kind`), `checks`-таблица (`:162`); словарь грузится
   selfcheck'ом.
 

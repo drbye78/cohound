@@ -14,7 +14,7 @@
 # termination_reason, adapter_kind,
 # endpoint_kind, llm_scenario, gate/gate_source/gate_verdict/gate_policy, golden_tier, cap,
 # importance, param_type, archetype, anchor_relation, crawl_probe_*,
-# ranking_restriction, uncertainty_provenance.
+# ranking_restriction, uncertainty_provenance, measurement_origin.
 # Класс конкретной секции, где он неочевиден, помечен комментарием рядом с ней.
 #
 # ПРАВИЛО: операционные перечисления (напр. crawl_session_status/crawl_item_status,
@@ -670,6 +670,16 @@ reuse_kind:
   - revalidated
   - reused
   - stale
+
+# 09 §3.1/§10. Происхождение ячейки в прогоне: измерена здесь или перенесена по
+# совпадению `cell_reuse_key` (схема `cell-reuse-2`, per-cell). Операционное перечисление
+# (провенанс исполнения, не семантика правил): добавление — без бампа версии словаря (§13).
+# Смысл для читателя карты: `carried` означает, что вердикт получен в прогоне-предшественнике
+# (`carried_from_run_id`), а не пересчитан здесь, — это видимая часть карты, а не «тихая»
+# экономия LLM.
+measurement_origin:
+  - observed
+  - carried
 
 # 09 §3.1/§12.1. Идентичность прогона (MVP-2b): класс изменения между прогонами.
 # Операционное перечисление: описывает провенанс измерения, не семантику правил;

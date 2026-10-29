@@ -34,6 +34,7 @@ from core.domain.enums import (
     GateSource,
     GateVerdict,
     IncrementalKind,
+    MeasurementOrigin,
     OnboardingState,
     PdfDevice,
     PdfPipeline,
@@ -142,6 +143,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # MVP-3a (09 §6.3/§9): инкрементальный work-set и переиспользование.
         "incremental_kind",
         "reuse_kind",
+        # 09 §3.1/§10: происхождение ячейки (перенос по ``cell_reuse_key``).
+        "measurement_origin",
         # A1/§6: класс публикуемости и разложение неизвестности — обязательные секции.
         "publishability_class",
         "unknown_cause",
@@ -183,6 +186,11 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # объявлением семантики, которую некому исполнять, а секция словаря без сверки
         # разъехалась бы с enum'ом молча.
         "run_product_status": {v.value for v in RunProductStatus},
+        # 09 §3.1/§10: происхождение ячейки. Производитель есть — перенос ячеек
+        # (``carry_forward_cell``) пишет ``carried``/``observed`` в ``cells`` и в отчёт;
+        # поэтому сверка обязательна: значение, названное в коде и не названное в словаре
+        # (или наоборот), развело бы отчёт и правило молча.
+        "measurement_origin": {v.value for v in MeasurementOrigin},
         "decoder": {v.value for v in Decoder},
         "archive_descent": {v.value for v in ArchiveDescent},
         "archive_descent_status": {v.value for v in ArchiveDescentStatus},
