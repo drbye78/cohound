@@ -980,18 +980,33 @@ def test_quote_without_denial_is_not_stated_even_for_distribution_rule() -> None
     assert ABSENCE_UNATTESTED_REVIEW_REASON in (scope.reason or "")
 
 
-def test_legacy_alias_scope_attested_by_still_accepted() -> None:
-    """Прежнее имя аргумента читается как принятие риска (совместимость вызовов)."""
+def test_scope_acceptance_is_the_only_name() -> None:
+    """Принятие риска принимается **только** под именем ``scope_acceptance``.
+
+    Прежний алиас ``scope_attested_by`` удалён осознанно: имя «аттестация» описывало не
+    то, что происходит (подпись принимает риск неполноты, а не удостоверяет полноту), и
+    два имени одного поля разводили смысл в двух местах. Обратная совместимость не
+    требуется (`AGENTS.md`: формат можно менять), поэтому проверяется именно отказ.
+    """
     data = _data()
+    with pytest.raises(TypeError):
+        evaluate_cell(  # type: ignore[call-arg]
+            param=_distribution_param(data),
+            product_id=data["product_id"],
+            run_id=data["run_id"],
+            evaluator=_ScriptedEvaluator([_absent_output()]),
+            chunks=_chunks(data),
+            scope_attested_by="Roger",
+        )
+
     outcome = evaluate_cell(
         param=_distribution_param(data),
         product_id=data["product_id"],
         run_id=data["run_id"],
         evaluator=_ScriptedEvaluator([_absent_output()]),
         chunks=_chunks(data),
-        scope_attested_by="Roger",
+        scope_acceptance="Roger",
     )
-
     assert outcome.cell.status is Status.ABSENT
     assert outcome.cell.evidence_scope is not None
     assert outcome.cell.evidence_scope.scope_acceptance == "Roger"

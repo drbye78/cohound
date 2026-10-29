@@ -1177,7 +1177,7 @@ def build_phases(
             strict=strict,
             # I2b/I2c: подпись per product (покрытие per product). Продукт без подписи
             # остаётся недостижимым для ❌ — канал не «упрощает» отрицание.
-            scope_attested_by={
+            scope_acceptance={
                 product_id: attestation.attested_by
                 for product_id, attestation in scope_attestations.items()
             },

@@ -1858,7 +1858,6 @@ def evaluate_cell(
     extra_instructions: str = "",
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
-    scope_attested_by: str | None = None,
     prompt_archive: PromptArchive | None = None,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
@@ -1899,9 +1898,6 @@ def evaluate_cell(
         бы промпт и модель, но не правила ответа, и кэш мог бы вернуть вердикт,
         посчитанный по старым правилам (09 §10.5). ``None`` допустим только при
         ``eval_cache=None``; иначе — :class:`ValueError`, а не тихий промах-каждый-раз.
-    :param scope_attested_by: deprecated-алиас ``scope_acceptance`` (прежнее имя).
-        Принят, чтобы вызывающие, объявляющие подпись старым именем, не ломались на
-        переименовании; смысл — тот же (принятие риска, не аттестация полноты).
     :param prompt_archive: каталог аудита исполненных промптов (``prompts/{prompt_hash}
         .json``, V7). ``None`` ⇒ артефакт не пишется (поведение байт-в-байт прежнее).
         Сохраняется **тот же** объект :class:`CompiledPrompt`, из которого построен
@@ -1920,8 +1916,6 @@ def evaluate_cell(
     Повтор переиздаёт тот же запрос — для детерминированного оценщика это ограниченный
     no-op, полезный только для транзиентных ошибок адаптера; см. докстринг модуля.
     """
-    if scope_acceptance is None:
-        scope_acceptance = scope_attested_by
     if max_retries < 0:
         raise ValueError("max_retries не может быть отрицательным")
 
@@ -2377,7 +2371,6 @@ def evaluate_phase(
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
     exhaustion_facts: ExhaustionFacts | None = None,
-    scope_attested_by: str | Mapping[str, str] | None = None,
     prompt_dir: str | Path | None = None,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
@@ -2425,7 +2418,6 @@ def evaluate_phase(
         кэше. Composition root строит их из объявленных входов
         (:func:`~core.pipeline.eval_cache.eval_conditions_from_run`), фаза не догадывается
         о версиях: ``None`` при ``eval_cache is not None`` — отказ, а не тихий неполный ключ.
-    :param scope_attested_by: deprecated-алиас ``scope_acceptance`` (прежнее имя).
     :param exhaustion_facts: наблюдённые факты других фаз (какие контуры реально
         исполнились, раунды/бюджет SERP). ``None`` ⇒ протоколы не пишутся (прежнее
         поведение модульного вызова). Факты передаёт ``phases`` — Ш6 **не** догадывается,
@@ -2441,8 +2433,6 @@ def evaluate_phase(
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
     """
-    if scope_acceptance is None:
-        scope_acceptance = scope_attested_by
     evaluator = getattr(ports, "evaluator", None)
     if evaluator is None:
         return PhaseResult(
