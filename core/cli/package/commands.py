@@ -2565,7 +2565,24 @@ def _state_lines(plan_payload: dict[str, Any]) -> list[str]:
 
 
 def cmd_package_state_adopt(args: argparse.Namespace) -> int:
-    """``hound package state adopt`` — принять завершённый прогон в ``state.db`` (09 §4.6).
+    """``hound package state adopt`` — принять прогон в ``state.db`` под локом пакета.
+
+    Файловый lock пакета (09 §4.4) берётся до открытия ``state.db`` и держится до конца
+    команды: adoption пишет durable-состояние пакета, и второй писатель (``run``/``crawl``)
+    обязан получить ``EXIT_USAGE`` с именем держателя, а не делить файл. ``--dry-run``
+    ничего не пишет (в том числе не создаёт файл лока), поэтому лок для него не берётся.
+    Детали adoption — :func:`_state_adopt_body`.
+    """
+    if bool(getattr(args, "dry_run", False)):
+        return _state_adopt_body(args)
+    from core.cli.context import _package_lock
+
+    with _package_lock(args, command="package state adopt"):
+        return _state_adopt_body(args)
+
+
+def _state_adopt_body(args: argparse.Namespace) -> int:
+    """``state adopt`` без файлового лока пакета (09 §4.6).
 
     ``state.db`` наполняется только прогоном, поэтому после его появления старые продукты
     выглядят ``new`` и первый ``run --update`` делает полный краул всей когорты. Команда

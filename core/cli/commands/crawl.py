@@ -45,6 +45,7 @@ from core.cli.context import (
     _follow_session,
     _load_corpus_urls,
     _load_render_modes,
+    _package_lock,
     _persist_llm_scenarios,
     _phases_until,
     _print_json,
@@ -264,6 +265,23 @@ def _print_crawl_run(payload: dict[str, Any]) -> None:
 
 
 def _execute_crawl(
+    args: argparse.Namespace, *, mode: str, clear_first: bool, from_scratch: bool = False
+) -> int:
+    """``crawl run|resume|restart`` под файловым локом пакета (09 §4.4).
+
+    Лок берётся на всю операцию и до открытия БД прогона: две одновременные операции над
+    одним пакетом (два краула, краул и ``run``) делят сеть, бюджет, ``corpus_raw/`` и
+    ``index_store/``, а не отвергают друг друга. Занятый лок — ``EXIT_USAGE`` с именем
+    держателя и путём файла. ``resume``/``restart`` идут тем же путём осознанно: они
+    продолжают сеанс того же пакета и попадают под тот же ресурс.
+    """
+    with _package_lock(args, command=f"crawl {mode}"):
+        return _execute_crawl_locked(
+            args, mode=mode, clear_first=clear_first, from_scratch=from_scratch
+        )
+
+
+def _execute_crawl_locked(
     args: argparse.Namespace, *, mode: str, clear_first: bool, from_scratch: bool = False
 ) -> int:
     """Общий путь ``run``/``resume``/``restart``: резолв прогона → фаза корпуса Ш5.

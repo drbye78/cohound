@@ -21,6 +21,7 @@ from typing import Any
 from core.adapters.index_npy import numpy_available
 from core.adapters.lexical_tantivy import tantivy_available
 from core.cli.context import (
+    _acquire_package_lock,
     _add_common,
     _add_llm_model_flag,
     _add_phase4_flags,
@@ -32,6 +33,7 @@ from core.cli.context import (
     _load_corpus_urls,
     _load_render_modes,
     _open_state_store,
+    _package_lock_handle,
     _persist_llm_scenarios,
     _phases_until,
     _positive_int,
@@ -450,7 +452,27 @@ def _append_console(marker: tuple[Any, Any, Any] | None, text: str) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    """``run``: собрать прогон и провести ``Runner`` по реальным фазам Ш1–Ш9.
+    """``run``: держать файловый lock пакета и провести ``Runner`` по фазам Ш1–Ш9.
+
+    Файловый lock пакета (09 §4.4) берётся на время **реального** прогона: второй ``run``
+    на тот же пакет получает ``EXIT_USAGE`` с именем держателя, а не делит с ним
+    ``state.db``/``corpus_raw/``/``index_store/``. Захват отложен до момента, когда прогон
+    действительно занял пакет (см. :func:`_run_body`): ``--dry-run`` ничего не пишет, а
+    заблокированный онбордингом прогон не создаёт state, поэтому файла лока в этих случаях
+    тоже не появляется. Освобождение — здесь, в ``finally``: пакет занят до конца команды.
+    """
+    if bool(getattr(args, "dry_run", False)):
+        return _run_body(args)
+    lock = _package_lock_handle(args, command="run")
+    try:
+        return _run_body(args, package_lock=lock)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
+    """``run`` без захвата файлового лока пакета (захват — внутри, 09 §4.4).
 
     Composition root строит план и реестр фаз (:func:`build_phases`) и связывает их с
     портами профиля (:func:`_resolve_ports`). Гейты намеренно **не** автоматизируются
@@ -811,6 +833,14 @@ def run(args: argparse.Namespace) -> int:
                 _print_run_report(payload)
             return EXIT_BLOCKED
 
+        # 09 §4.4: пакет занимается **здесь**, а не на входе команды. Заблокированный
+        # онбордингом прогон state не создаёт (контракт §4.1) — значит и файла лока не
+        # создаёт; ``--dry-run`` вернулся выше. Прогон, который останавливается **до**
+        # онбординга (``--until plan``), пакет тоже не занимает: он не открывает
+        # ``state.db`` и не краулит, то есть нечего сериализовать. С этого места пакет
+        # занят до конца команды (освобождение — в :func:`run`).
+        if _onboarding_in_scope(args.until):
+            _acquire_package_lock(package_lock)
         # Реальный незаблокированный прогон: durable state пакета открывается/создаётся
         # здесь (заблокированный прогон state не создаёт). Перед префлайтом синхронизируем
         # авторский seed-набор → ``seed_set`` (09 §5.3): ``seeds.yaml`` — источник истины,

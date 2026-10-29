@@ -11,10 +11,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,7 @@ __all__ = [
     "GatewayFactory",
     "PhasesFactory",
     "PlanFactory",
+    "_acquire_package_lock",
     "_add_common",
     "_add_llm_model_flag",
     "_add_llm_slot_flag",
@@ -173,6 +175,8 @@ __all__ = [
     "_load_render_modes",
     "_manifest_partial",
     "_open_state_store",
+    "_package_lock",
+    "_package_lock_handle",
     "_persist_llm_scenarios",
     "_phases_until",
     "_plan_inputs_from_payload",
@@ -256,6 +260,83 @@ def _open_state_store(args: argparse.Namespace, *, create: bool = False) -> Any:
     if create:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     return SqliteStateStore(db_path)
+
+
+def _package_lock_handle(
+    args: argparse.Namespace, *, command: str | None = None
+) -> Any:
+    """Создаёт :class:`PackageLock` для пакета команды; ``None`` — пакет не определён.
+
+    Точка ресурса — каталог durable-состояния пакета (``state/{package_id}/``), файл —
+    ``state/{package_id}/.lock``: он один на пакет, переживает прогоны и уже резолвится
+    раскладкой (``args.paths.state`` / ``COHOUND_STATE_DIR``).
+
+    Лок **не берётся** здесь: вызывающий решает, когда пакет действительно занимается
+    (например, ``run`` не занимает его для заблокированного онбордингом прогона, который
+    state не создаёт). Отдельная функция нужна ещё и потому, что ``CliError`` о занятости
+    формируется в :func:`_acquire_package_lock` — по одному сообщению на все команды.
+
+    Пакет не определяется (нет ``--package`` или это не каталог) — ``None``: поведение
+    прежнее, это не ошибка.
+    """
+    from core.util.package_lock import PackageLock, package_lock_path
+
+    package = getattr(args, "package", None)
+    if not package or not Path(package).is_dir():
+        return None
+    paths = getattr(args, "paths", None)
+    if paths is None:
+        paths = _resolve_paths(args)
+    return PackageLock(
+        package_lock_path(paths.state, Path(package).name),
+        timeout_s=float(getattr(args, "lock_timeout", 0.0) or 0.0),
+        command=command,
+    )
+
+
+def _acquire_package_lock(lock: Any) -> None:
+    """Берёт лок пакета; занятый — :class:`CliError` с кодом ``state`` и ``EXIT_USAGE``.
+
+    Сообщение называет держателя (хост/pid/старт/команду) и путь файла: оператору нужен
+    ответ «кто именно», а не «занято». ``lock is None`` (пакет не определён) — no-op.
+    """
+    if lock is None:
+        return
+    from core.util.package_lock import LockHolder, PackageLocked
+
+    try:
+        lock.acquire()
+    except PackageLocked as exc:
+        holder = (exc.holder or LockHolder()).describe()
+        reason = f"; {exc.reason}" if exc.reason else ""
+        raise CliError(
+            f"пакет '{lock.path.parent.name}' уже используется {holder}{reason}; "
+            f"файл лока: {lock.path}",
+            code="state",
+            exit_code=EXIT_USAGE,
+        ) from exc
+
+
+@contextlib.contextmanager
+def _package_lock(
+    args: argparse.Namespace, *, command: str | None = None
+) -> Iterator[Any]:
+    """Держит файловый lock пакета на время команды (09 §4.4).
+
+    Зачем: WAL + ``busy_timeout`` сериализует запись в **БД**, но две операции над одним
+    пакетом (два краула, краул и ``run``) делят сеть, бюджет, ``corpus_raw/`` и
+    ``index_store/``, а не отвергают друг друга (``core/util/package_lock.py``).
+
+    ``--dry-run`` лок не берёт **сам** (см. вызывающих): создание файла лока было бы
+    записью, а флаг обещает, что её нет.
+    """
+    lock = _package_lock_handle(args, command=command)
+    _acquire_package_lock(lock)
+    try:
+        yield lock
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def _previous_cycle_id(args: argparse.Namespace) -> str | None:

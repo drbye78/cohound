@@ -59,3 +59,25 @@ def _isolated_operational_caches(tmp_path_factory: pytest.TempPathFactory) -> No
     root = tmp_path_factory.mktemp("operational_caches")
     for index, name in enumerate(_CACHE_ENV):
         os.environ[name] = str(root / f"cache{index}")
+
+
+@pytest.fixture
+def isolated_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Изолированный ``COHOUND_STATE_DIR`` — по одному на тест (09 §4.4).
+
+    ``state/{package_id}/`` — точка ресурса **пакета**, и с файловым локом пакета она
+    эксклюзивна: второй писатель того же пакета получает отказ, а не делит файл. Тесты
+    подменяют пакет временным каталогом, но имя пакета у них общее (``package``), а
+    ``state`` без ``COHOUND_HOME`` CWD-относителен — значит все тесты и все xdist-воркеры
+    делили ``<repo>/state/package/`` и честно упирались в лок друг друга. Изоляция —
+    обязанность тестов: каталог состояния один на пакет по построению, и «общий на весь
+    набор» сделал бы его узким местом набора, а не проверкой.
+
+    Не ``autouse``: модули, которые сами утверждают раскладку (``COHOUND_HOME`` и
+    ``home/state``), подключают его явно — иначе фикстура подменила бы предмет проверки.
+    """
+    root = tmp_path / "state"
+    monkeypatch.setenv("COHOUND_STATE_DIR", str(root))
+    return root

@@ -60,6 +60,11 @@ from tests.fakes.ports import (
 from tests.helpers.output import json_out
 from tests.helpers.packages import REGISTRY_FIXTURES, run_argv, valid_package
 
+# ``state/{package_id}/`` — эксклюзивный ресурс пакета (файловый лок, 09 §4.4):
+# у каждого теста свой каталог состояния, иначе xdist-воркеры упираются в лок друг
+# друга на общем ``<repo>/state/package/``.
+pytestmark = pytest.mark.usefixtures("isolated_state_dir")
+
 # ---------------------------------------------------------------------------
 # Помощники
 # ---------------------------------------------------------------------------

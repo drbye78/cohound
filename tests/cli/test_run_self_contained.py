@@ -28,6 +28,11 @@ from core.cli.main import (
 from tests.helpers.output import json_out
 from tests.helpers.packages import run_argv
 
+# ``state/{package_id}/`` — эксклюзивный ресурс пакета (файловый лок, 09 §4.4):
+# у каждого теста свой каталог состояния, иначе xdist-воркеры упираются в лок друг
+# друга на общем ``<repo>/state/package/``.
+pytestmark = pytest.mark.usefixtures("isolated_state_dir")
+
 #: Корень e2e-фикстур (``tests/fixtures/e2e``) — валидный пакет для ``run``.
 E2E_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
 #: Фикстуры пакета (``tests/config/fixtures``) — второй (отличный) каталог для приоритета.

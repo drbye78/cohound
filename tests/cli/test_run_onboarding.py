@@ -19,6 +19,11 @@ from core.cli.wiring import build_store
 from tests.helpers.output import json_out
 from tests.helpers.packages import run_argv, valid_package
 
+# ``state/{package_id}/`` — эксклюзивный ресурс пакета (файловый лок, 09 §4.4):
+# у каждого теста свой каталог состояния, иначе xdist-воркеры упираются в лок друг
+# друга на общем ``<repo>/state/package/``.
+pytestmark = pytest.mark.usefixtures("isolated_state_dir")
+
 
 def _blocked_product(package: Path, product_id: str = "p3") -> None:
     """Добавляет продукт в когорту/run без seed'а (``pending_seeds``-эквивалент)."""
