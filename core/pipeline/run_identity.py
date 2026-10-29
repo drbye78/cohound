@@ -33,8 +33,15 @@ from typing import Any, Protocol
 
 from core.domain.enums import ChangeClass, RefreshPolicy, RunScope
 from core.domain.models import RunConfig
-from core.pipeline.digests import execution_contract_digest
+from core.pipeline.digests import (
+    catalog_digest,
+    execution_contract_digest,
+)
+from core.pipeline.digests import (
+    scoring_policy_version as _scoring_policy_identity,
+)
 from core.pipeline.normalize import RunInputs
+from core.ports.state import RunLineageRow
 from core.util.hashing import content_hash
 
 __all__ = [
@@ -45,6 +52,7 @@ __all__ = [
     "check_update_scope",
     "classify_change",
     "golden_required_for",
+    "previous_run_of",
     "resolve_cycle_id",
     "resolve_refresh_policy",
     "resolve_run_scope",
@@ -81,6 +89,10 @@ class DeclaredAxesLike(Protocol):
     evaluation_policy: dict[str, Any] | None
     llm_scenarios: tuple[dict[str, Any], ...]
     extractor_stack: str
+    #: 16-runs-schema-boundary §4.2: устройство эмбеддера (``cpu`` | ``cuda``). Место
+    #: счёта — условие измерения: векторы CPU и CUDA численно разные, поэтому один
+    #: ``run_id`` не может описывать оба исполнения. ``None`` — ось не передана.
+    embed_device: str | None = None
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов. Раунд подачи
     #: добавляет документы корпуса, то есть доказательства, — это **условие измерения**,
     #: а не провенанс записи: спрятать его значило бы дать корпусу измениться без
@@ -265,13 +277,30 @@ def build_execution_contract(
     Прочие поля: ``methodology_version`` (``run.yaml``), ``package_version``
     (``package.yaml``), ``cohort_digest``, ``seeds_digest``, ретривал-профиль/K/params
     (передаёт composition root после нормализации args). ``status_dict_version`` —
-    из словаря статусов; ``scoring_policy_version``/``catalog_version`` принимаются
-    аргументами, но честного источника в этом срезе нет — ``None`` (значение не
-    выдумывается, A3). ``None`` — часть контракта (см.
-    :func:`core.pipeline.digests.execution_contract_digest`).
+    из словаря статусов. ``catalog_version``/``scoring_policy_version`` при ``None``
+    выводятся из объявленных входов: отпечаток содержимого ``inputs.catalog``
+    (:func:`core.pipeline.digests.catalog_digest`) и политика расчёта §6
+    (:func:`core.pipeline.digests.scoring_policy_version`). До 29.10.2026 источника у
+    них не было, и в контракт уходило ``None``, а в манифест ``"0.0.0"`` — смена
+    каталога не меняла ``run_id``. ``None`` остаётся только у «входа нет вовсе»
+    (stub-объект без ``catalog``), и это отличимо от «каталог объявлен пустым».
 
     Функция **чистая**: не читает БД/файлы, все значения приходят аргументами.
     """
+    # 09 §12.5: ``catalog_version``/``scoring_policy_version`` были полями контракта без
+    # источника — в контракт уходило ``None``, в манифест ``"0.0.0"``, и смена каталога
+    # или политики расчёта не меняла ``run_id`` (два одинаковых ``"0.0.0"`` в diff).
+    # Источник теперь настоящий: отпечаток содержимого каталога и объявленная политика
+    # §6. Оба вычислимы из ``inputs``/констант кода до сборки портов, поэтому «функция
+    # входа» сохраняется. Аргументы остаются переопределением (тесты, будущий слой
+    # ``run.yaml``): явно переданное значение не перезаписывается.
+    if catalog_version is None:
+        catalog_rows = getattr(inputs, "catalog", None)
+        catalog_version = (
+            catalog_digest(catalog_rows) if catalog_rows is not None else None
+        )
+    if scoring_policy_version is None:
+        scoring_policy_version = _scoring_policy_identity()
     values = {
         "methodology_version": inputs.run.methodology_version,
         "scoring_policy_version": scoring_policy_version,
@@ -295,6 +324,11 @@ def build_execution_contract(
         "passports_digest": _declared(declared, "passports_digest"),
         "lexical_spec": _declared(declared, "lexical_spec"),
         "extractor_stack": _declared(declared, "extractor_stack"),
+        # 16-runs-schema-boundary §4.2: устройство эмбеддера. Объявленная ось
+        # (``deploy.yaml:embed.device`` < ``run.yaml:embed.device``), вычислима до сборки
+        # портов, поэтому остаётся «функцией входа». ``None`` — ось не передана (чистые
+        # вызовы): «не объявлено» отличимо от «объявлено ``cpu``».
+        "embed_device": _declared(declared, "embed_device"),
         "crawl_strategy": _declared(declared, "crawl_strategy"),
         "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),
         "crawl_config_digest": _declared(declared, "crawl_config_digest"),
@@ -376,6 +410,59 @@ def golden_required_for(change_class: ChangeClass) -> str:
     ):
         return "full"
     return "none"
+
+
+def previous_run_of(
+    state: Any,
+    package_id: str,
+    *,
+    run_id: str,
+    explicit: str | None = None,
+) -> RunLineageRow | None:
+    """Предыдущий прогон пакета — **единственная** формула правила (§12.3).
+
+    Зачем отдельная функция: «предыдущий прогон» вычислялся в двух местах по-разному
+    (``run`` с ``--since-run`` и исключением себя, adoption durable-состояния), и две
+    копии правила — это два способа разойтись: манифест называл бы один предшественник,
+    а carry-forward считался бы против другого. Здесь правило одно:
+
+    * ``explicit`` задан (``--since-run``) → строка по нему; нет строки — :class:`ValueError`
+      (сообщение называет ``--since-run``; CLI переводит его в ``EXIT_USAGE``). Отсутствие
+      ``state`` при явном запросе — тоже отказ: «не нашли» не подменяется «нет истории»;
+    * иначе — последняя строка lineage пакета (:meth:`ProductStatePort.previous_lineage`);
+    * найденный ``run_id`` совпал с текущим → ``None``: resume текущего прогона не
+      «предыдущий», carry-forward против самого себя не выполняется (§12.3);
+    * ``state is None`` (модульный вызов/``--until plan``) → ``None``: истории нет, а не
+      «история пуста и это факт измерения».
+
+    **Предшественник не входит в материал ``run_id``** (:func:`derive_run_id`): иначе
+    идентичность прогона зависела бы от собственной истории — тот же объявленный вход
+    давал бы разный ``run_id`` в зависимости от того, что случилось раньше, а resume
+    перестал бы находить свою строку (``run_id`` вычисляется до исполнения фаз, когда
+    предшественник ещё может измениться). Он входит в lineage/манифест — провенанс
+    сравнения, а не условие измерения.
+
+    :param state: durable-состояние пакета (:class:`~core.ports.state.ProductStatePort`)
+        либо ``None``.
+    :param package_id: идентичность пакета **той же формы**, что у записи lineage
+        (имя каталога пакета) — иначе «последний прогон» ищется в чужой истории.
+    :param run_id: идентификатор текущего прогона (исключение себя).
+    :param explicit: явно названный предшественник (``--since-run``).
+    :raises ValueError: явный предшественник не найден в ``state.db``.
+    """
+    if explicit is not None:
+        row = state.get_run_lineage(explicit) if state is not None else None
+        if row is None:
+            raise ValueError(
+                f"--since-run: прогон '{explicit}' не найден в state.db"
+            )
+        return None if row.run_id == run_id else row
+    if state is None:
+        return None
+    row = state.previous_lineage(package_id)
+    if row is None or row.run_id == run_id:
+        return None
+    return row
 
 
 def build_run_identity(

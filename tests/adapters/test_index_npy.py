@@ -5,7 +5,9 @@
 детерминированный ``build_id`` (одинаковые входы → тот же id; смена версий/снимка → другой);
 приоритет явного ``meta.extra["partition_build_id"]``; продукт-партиции (I17); иммутабельность
 (повторная сборка того же ключа с другим содержимым → ``ImmutableBuildError``); провенанс
-манифеста; структурное соответствие порту; путь без ``numpy`` (guard). Нейтральность (§1.3).
+манифеста (включая ``embed_device``); пересчёт ``vector_digest`` с диска и обнаружение
+подменённой матрицы (16 §5.2); структурное соответствие порту; путь без ``numpy`` (guard).
+Нейтральность (§1.3).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from core.adapters.index_npy import (
     ImmutableBuildError,
     NpyIndexBuilder,
     derive_build_id,
+    recompute_vector_digest,
 )
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.types import Chunk
@@ -302,6 +305,75 @@ def test_manifest_extra_is_persisted(tmp_path: Path) -> None:
     bid = NpyIndexBuilder(tmp_path).build(_chunks(), _vectors(), meta)
     manifest = index_format.read_manifest(tmp_path, PKG, bid, "p1")
     assert manifest["extra"]["round"] == "R1-serp"
+
+
+# --------------------------------------------------------------------------- #
+# Устройство счёта и полный отпечаток партиции (16 §5.1/§5.2)
+# --------------------------------------------------------------------------- #
+
+
+@requires_numpy
+def test_manifest_carries_embed_device(tmp_path: Path) -> None:
+    """``embed_device`` из входов ``pb`` доезжает до манифеста партиции (16 §5.1)."""
+    bid = NpyIndexBuilder(tmp_path).build(
+        _chunks(), _vectors(), _meta(extra={"embed_device": "cuda"})
+    )
+    manifest = index_format.read_manifest(tmp_path, PKG, bid, "p1")
+    assert manifest["embed_device"] == "cuda"
+
+
+@requires_numpy
+def test_manifest_embed_device_is_null_when_not_declared(tmp_path: Path) -> None:
+    """Необъявленное устройство — ``None``, а не догадка (``cpu`` по умолчанию)."""
+    bid = NpyIndexBuilder(tmp_path).build(_chunks(), _vectors(), _meta())
+    assert index_format.read_manifest(tmp_path, PKG, bid, "p1")["embed_device"] is None
+
+
+@requires_numpy
+def test_recompute_vector_digest_matches_builder(tmp_path: Path) -> None:
+    """Пересчёт с диска даёт ровно тот ``vector_digest``, что записал сборщик.
+
+    Это и есть проверка, которой не было: манифест сам лежит рядом с артефактами и
+    доказательством их целостности не является (16 §5.2).
+    """
+    bid = NpyIndexBuilder(tmp_path).build(_chunks(), _vectors(), _meta())
+    manifest = index_format.read_manifest(tmp_path, PKG, bid, "p1")
+    partition = index_format.build_root(tmp_path, PKG, bid, "p1")
+    assert recompute_vector_digest(partition) == manifest["vector_digest"]
+
+
+@requires_numpy
+def test_recompute_vector_digest_detects_tampered_matrix(tmp_path: Path) -> None:
+    """Подмена ``vectors.fp16.npy`` при неизменном манифесте видна пересчётом."""
+    bid = NpyIndexBuilder(tmp_path).build(_chunks(), _vectors(), _meta())
+    manifest = index_format.read_manifest(tmp_path, PKG, bid, "p1")
+    partition = index_format.build_root(tmp_path, PKG, bid, "p1")
+    tampered = np.load(partition / "vectors.fp16.npy").copy()
+    tampered[0][0] = 9.0
+    np.save(partition / "vectors.fp16.npy", tampered)
+
+    recomputed = recompute_vector_digest(partition)
+    assert recomputed is not None
+    assert recomputed != manifest["vector_digest"]
+
+
+@requires_numpy
+def test_legacy_partition_is_readable_but_digest_is_unprovable(tmp_path: Path) -> None:
+    """Партиция без ``content_hash`` читается, но отпечаток её недоказуем (``None``)."""
+    index_format.write_partition(
+        tmp_path, PKG, "ib_legacy", "p1", [[1.0, 0.0], [0.0, 1.0]], ["c1", "c2"], {"dim": 2}
+    )
+    partition = index_format.build_root(tmp_path, PKG, "ib_legacy", "p1")
+    assert index_format.read_partition(tmp_path, PKG, "ib_legacy", "p1").chunk_ids == [
+        "c1",
+        "c2",
+    ]
+    assert recompute_vector_digest(partition) is None
+
+
+def test_recompute_vector_digest_is_none_on_missing_partition(tmp_path: Path) -> None:
+    """Битый вход — ``None``, а не исключение: партицию просто пересоберут."""
+    assert recompute_vector_digest(tmp_path / "нет-такой-партиции") is None
 
 
 @requires_numpy

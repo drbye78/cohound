@@ -41,7 +41,7 @@
   (`core/domain/models.py:1495`, `core/pipeline/corpus.py:575-582`, условие 2).
 - Неполное покрытие ⇒ `❌` с `absence_rule=explicit` требует человеческой подписи
   `scope_attested_by` (I2c). Докстринг называет это прямо: **«человеческий escape hatch»**
-  (`core/pipeline/corpus.py:607-610`).
+  (`core/pipeline/corpus.py:697-700`).
 
 То есть сегодня единственный способ разблокировать `❌` — человек подписывает, что
 «ненаблюдённая часть сайта могла бы содержать параметр». Это честно, но это **слабее**
@@ -306,9 +306,9 @@ gaps:
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
-   `core/pipeline/corpus.py:5063`; `origin` — `core/store/sqlite.py:115`;
-   `resolved_manually` — `core/domain/models.py:2004` + `core/pipeline/corpus.py:701`;
-   доля — `core/pipeline/phases.py:1342`; дайджест — `core/pipeline/digests.py:131`).
+   `core/pipeline/corpus.py:5059`; `origin` — `core/store/sqlite.py:118`;
+   `resolved_manually` — `core/domain/models.py:2085` + `core/pipeline/corpus.py:711`;
+   доля — `core/pipeline/phases.py:1432`; дайджест — `core/pipeline/digests.py:339`).
    As-built и расхождения — §10.
 3. ⬜ не сделано — `parent_run_id` прогона-продолжения в коде отсутствует
    (`grep -rn "parent_run_id" core/` — 0 совпадений), `hound diff` показывает дельту через

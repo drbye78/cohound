@@ -40,6 +40,7 @@ from core.domain import (
     CorpusChunk,
     CrawlProvenance,
     CrawlSessionProvenance,
+    EmbedDevice,
     LLMCellOutput,
     LLMEvidence,
     RunManifest,
@@ -50,6 +51,7 @@ from core.pipeline.composition import derive_composition_id
 from core.pipeline.compute import compute
 from core.pipeline.corpus import _derive_partition_build_id, _product_content_token
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
+from core.pipeline.incremental import doc_version_id
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.phases import build_phases
@@ -80,9 +82,12 @@ PAGE_URL = "https://example.com/a"
 PAGE_TEXT = "Функция alpha подтверждена в официальной документации продукта."
 PAGE_BYTES = PAGE_TEXT.encode("utf-8")
 
-#: ``chunk_id``, который выведет корпус: ``{product}:{doc_hash}:{chunk_no}`` (corpus._chunk_id).
+#: ``chunk_id``, который выведет корпус (16 §6.1): ``{product}:{doc_version_id}:{chunk_no}``.
+#: Версия документа — ключ 09 §4.2 (содержимое + версия экстрактора + уровень), поэтому
+#: адрес выводится той же функцией, что в фазе, а не из хеша байтов.
 DOC_HASH = content_hash(PAGE_BYTES)
-CHUNK_ID = f"p1:{DOC_HASH}:0"
+DOC_VERSION = doc_version_id("p1", DOC_HASH, FakeExtractor.version, "full")
+CHUNK_ID = f"p1:{DOC_VERSION}:0"
 
 #: Явный синтетический актор: тест играет человека на гейтах (S9/I6/I7).
 ACTOR = "repro-gate"
@@ -144,6 +149,7 @@ _BUILD_ID_BASE: dict[str, Any] = {
     "product_id": "p1",
     "chunker_version": "fake-chunker-1",
     "embed_model_id": "fake-embedder-1",
+    "embed_device": "cpu",
     "extractor_version": "fake-extractor-1",
     "lexical_engine_version": "fake-bm25-1",
     "vector_store": "fake",
@@ -218,6 +224,8 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         product_id="p1",
         chunker_version=FakeChunker.version,
         embed_model_id=FakeEmbedder().model_id,
+        # 16 §4.1: ось ``embed.device`` не объявлена ⇒ объявленный дефолт ``cpu``.
+        embed_device=EmbedDevice.CPU.value,
         extractor_version=FakeExtractor.version,
         lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
         vector_store=FakeIndexBuilder.vector_store,
@@ -584,6 +592,8 @@ def test_partition_build_id_is_input_determined() -> None:
         {"product_id": "p2"},
         {"chunker_version": "fake-chunker-2"},
         {"embed_model_id": "fake-embedder-2"},
+        # 16 §4.1/§5.1: место счёта — часть условий сборки (CPU- и CUDA-векторы разные).
+        {"embed_device": "cuda"},
         {"extractor_version": "fake-extractor-2"},
         {"lexical_engine_version": "fake-bm25-2"},
         {"vector_store": "other-store"},

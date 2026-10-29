@@ -61,7 +61,7 @@ application-layer firewall (L7). Функционал, которому нуже
 |---|---|---|
 | **Z0 CORE** (доверенная) | **нет** веб-эгрессии; недоступна для входящих из DMZ; секретов эгрессии нет | `pipeline` (оркестратор, гейты), `domain`, `store`, индексы/ретривал, **клиент evaluator-LLM (I18)**, `compute`, `report` |
 | **Z1 EDGE / DMZ** (условно-доверенная) | есть веб-эгрессия; **считается компрометируемой**; процесс только отвечает, не инициирует в Z0 | `crawler` (Scrapy+playwright · **прямой Playwright/CDP** — honest/hybrid, альтернатива Scrapy), HTTP-fetch, `search`-адаптер (SERP), `registry`-фетчеры, `poller` (feed/channel/sitemap), discovery/concept-scout (search-enabled) |
-| **Z2 PARSE** (roadmap; **не реализована**) | hardening парсинга недоверенного контента | *пока ничего: экстрактор исполняется в ядре (§2, `extractor_zone`); целевой контракт — `10` §5.4* — ⬜ не сделано: зоны Z2 в коде нет, `EXTRACTOR_ZONES` (`core/config/deploy.py:80`) — только объявление |
+| **Z2 PARSE** (roadmap; **не реализована**) | hardening парсинга недоверенного контента | *пока ничего: экстрактор исполняется в ядре (§2, `extractor_zone`); целевой контракт — `10` §5.4* — ⬜ не сделано: зоны Z2 в коде нет, `EXTRACTOR_ZONES` (`core/config/deploy.py:88`) — только объявление |
 | **Зона LLM корп. облака** (внешняя, внутр. сеть) | [OI]-совместимый API; веса/движок — забота облака | evaluator-LLM (только Z0-originated трафик), discovery-LLM (search-enabled, Z1) |
 
 **Классификация портов (`Zone`):**

@@ -124,7 +124,7 @@ from core.config.passports import passport_content_digests
 from core.domain.dictionary import load_dictionary
 from core.domain.enums import PdfDevice, RefreshPolicy, SearchMode
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
-from core.pipeline.crawl_frontier import resolve_pdf_device
+from core.pipeline.crawl_frontier import resolve_embed_device, resolve_pdf_device
 from core.pipeline.digests import passports_digest, render_modes_digest
 from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.manual_artifacts import load_manual_artifacts
@@ -593,6 +593,13 @@ class DeclaredExecutionAxes:
     chunker_version: str | None
     llm_scenarios: tuple[dict[str, Any], ...]
     extractor_stack: str
+    #: Устройство эмбеддера (ось ``embed.device``, :class:`core.domain.enums.EmbedDevice`):
+    #: строка ``cpu``/``cuda`` из той же цепочки ``app < run``, что увидит исполнение
+    #: (:func:`core.pipeline.crawl_frontier.resolve_embed_device`). Входит в контракт
+    #: (поле ``embed_device``), потому что векторы CPU и CUDA численно разные: без оси
+    #: ``run_id`` не описывал бы, на чём считался индекс. ``None`` — ось не передана
+    #: (чистые вызовы/legacy-конструкторы в тестах): «не объявлено», а не «cpu».
+    embed_device: str | None = None
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов
     #: (``sources/manual_artifacts.yaml``). Объявленный вход (файл пакета), поэтому
     #: вычислим до сборки портов; материал — ``(product_id, url, sha256)``, где
@@ -946,6 +953,15 @@ def resolve_declared_axes(
                 getattr(getattr(inputs, "run", None), "crawl", None),
             )
         ),
+        # Ось ``embed.device``: та же формула ``app < run``, что у исполнения, и без
+        # per-site слоя (устройство — свойство хоста, а не сайта). Значение — строка
+        # (``cpu``/``cuda``), чтобы поле контракта/манифеста было JSON-сериализуемо.
+        # Доступность CUDA здесь **не** проверяется: это preflight, а не условие
+        # идентичности (иначе ``run_id`` стал бы функцией хоста).
+        embed_device=resolve_embed_device(
+            config.embed,
+            getattr(getattr(inputs, "run", None), "embed", None),
+        ).value,
         # 13-manual-artifacts §3.2: ручные артефакты объявлены файлом пакета, поэтому
         # отпечаток — функция входа (как seeds_digest), а не наблюдение прогона.
         manual_artifacts_digest=_manual_artifacts_digest(args),

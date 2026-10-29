@@ -558,6 +558,30 @@ class PdfDevice(StrEnum):
     CUDA = "cuda"
 
 
+class EmbedDevice(StrEnum):
+    """Устройство, **на котором считается вектор** эмбеддера (ось ``embed.device``).
+
+    Ось объявляет место счёта, а не «пусть движок решит»: значения только ``cpu`` и
+    ``cuda``. ``auto`` **не** существует намеренно (R5) — и по той же причине, что у
+    :class:`PdfDevice`: ``auto`` означал бы «устройство выбрало окружение», а тогда два
+    хоста с одним ``run.yaml`` получили бы разные векторы под одним ``run_id``. Ровно
+    этот дефект и был измерен: ``LocalEmbedder`` не передавал ``device`` в
+    ``SentenceTransformer``, и torch выбирал CUDA сам (``14`` оговорка 5).
+
+    Дефолт — ``cpu``: прогон, не объявивший ось, не начинает занимать видеопамять чужого
+    хоста. ``cuda`` требует доступного CUDA-устройства: недоступность — отказ
+    (``EXIT_USAGE``) с числами, **не** тихий фолбэк на CPU.
+
+    Устройство входит в ``EXECUTION_CONTRACT_FIELDS`` (поле ``embed_device``), в материал
+    ``pb`` (идентификатор партиции) и в ключ ``embed_cache``: векторы CPU и CUDA численно
+    разные, поэтому без оси CPU-партиция молча переиспользовалась бы CUDA-прогоном.
+    Смена оси — граница класса ``execution_change`` (§13), не ``methodology_change``.
+    """
+
+    CPU = "cpu"
+    CUDA = "cuda"
+
+
 class ArchiveDescent(StrEnum):
     """P6: глубина спуска в **контейнеры** (ось ``crawl.archive_descent``).
 
@@ -887,6 +911,32 @@ class RunScope(StrEnum):
     FULL = "full"
     ONLY_FAILED = "only_failed"
     PRODUCT_ONLY = "product_only"
+
+class RunProductStatus(StrEnum):
+    """Статус **продукта в прогоне** (16 §3.2; носитель — таблица ``run_product``).
+
+    Почему отдельное перечисление, а не ``ProductMode``/``CrawlSessionStatus``: это третья
+    ось, отвечающая на другой вопрос. ``ProductMode`` — *как* продукт обрабатывается
+    (``new``/``full``/``incremental``), ``RunProductStatus`` — *чем кончился* он в этом
+    прогоне. Смешивать их значило бы вывести «продукт не пустил префлайт» из режима.
+
+    ``partial`` не означает сбой: часть работы не выполнена по политике (усечение,
+    отложенный хвост), и причина обязана быть названа в ``error_kind``/``error``.
+    ``blocked`` — не сбой измерения, а несостоявшееся измерение: продукт в плане, но
+    префлайт/гейт его не пустил, поэтому отличать его от ``failed`` (I4: прибор не смог)
+    обязательно — иначе процедурное условие выглядело бы отказом прибора.
+
+    Наблюдаемость прогона, не семантика правил: добавление значения не поднимает
+    ``status_dictionary_version`` (правило в шапке словаря). Источник истины —
+    ``docs/status-dictionary.yaml`` (секция ``run_product_status``).
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    BLOCKED = "blocked"
 
 
 class PublishabilityClass(StrEnum):

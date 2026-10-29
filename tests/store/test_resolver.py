@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import datetime as _dt
+import sqlite3
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -93,6 +95,17 @@ def _insert_chunk(
         )
 
 
+def _insert_version(
+    store: SqliteStore, doc_version_id: str, product_id: str, doc_id: str
+) -> None:
+    """Строка отображения версии в документ (16 §6) — носитель ``dv`` → ``doc_id``."""
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO corpus_doc_version (doc_version_id, product_id, doc_id)"
+            " VALUES (?, ?, ?)",
+            (doc_version_id, product_id, doc_id),
+        )
+
 # --------------------------------------------------------------------------- #
 # T3.4 — resolve / SourceResolver
 # --------------------------------------------------------------------------- #
@@ -147,6 +160,180 @@ def test_resolve_unknown_and_malformed_returns_none(store: SqliteStore) -> None:
     assert store.resolve("a:b:c:d:e") is None               # 5 сегментов → ValueError
     assert store.resolve("p9:doc-9:3") is None              # валидный формат, но нет строки
 
+
+def test_resolve_fallback_finds_chunk_by_product_prefixed_doc_id(
+    store: SqliteStore,
+) -> None:
+    """Фолбэк по ``source_id`` **находит** чанк: ``doc_id`` в корпусе — ``product_id:hash``.
+
+    16 §6.3: прежний фолбэк искал по голому хешу там, где лежит ``product_id:hash``, и не
+    срабатывал ни разу — мнимая страховка. Здесь ``chunk_id`` намеренно **не** совпадает с
+    ``source_id`` (новый формат ``product:doc_version_id:chunk_no``), поэтому прямой lookup
+    промахивается, и чанк находится только вторым путём.
+    """
+    _insert_chunk(
+        store,
+        chunk_id="p1:dv_c0ffee:0",
+        doc_id="p1:hash-abc",
+        product_id="p1",
+        chunk_no=0,
+    )
+    resolved = store.resolve(source_id("p1", "hash-abc", 0))
+    assert resolved is not None, "фолбэк по (product_id, doc_id) обязан сработать"
+    assert resolved.chunk_id == "p1:dv_c0ffee:0"
+    assert resolved.source_url == _URL
+
+
+def test_resolve_fallback_respects_build_id(store: SqliteStore) -> None:
+    """Фолбэк не теряет ``build_id``: чанк другой сборки по тому же адресу не подставляется."""
+    _insert_chunk(
+        store,
+        chunk_id="p1:dv_a:1",
+        doc_id="p1:hash-a",
+        product_id="p1",
+        chunk_no=1,
+        build_id="build-2",
+    )
+    assert store.resolve(source_id("p1", "hash-a", 1, "build-1")) is None
+    resolved = store.resolve(source_id("p1", "hash-a", 1, "build-2"))
+    assert resolved is not None and resolved.chunk_id == "p1:dv_a:1"
+
+
+def test_resolve_direct_lookup_of_new_format_chunk_id(store: SqliteStore) -> None:
+    """``chunk_id`` нового формата (``product:doc_version_id:chunk_no``) резолвится прямо.
+
+    Это первый путь :meth:`resolve`; он не зависит от разбора ``source_id``, поэтому смена
+    формата ``chunk_id`` (16 §6) его не ломает — в отличие от фолбэка.
+    """
+    _insert_chunk(
+        store,
+        chunk_id="p1:dv_5f3a:7",
+        doc_id="p1:hash-z",
+        product_id="p1",
+        chunk_no=7,
+    )
+    resolved = store.resolve("p1:dv_5f3a:7")
+    assert resolved is not None
+    assert resolved.chunk_id == "p1:dv_5f3a:7"
+    assert resolved.source_url == _URL
+
+
+def test_resolve_source_id_carrying_doc_version(store: SqliteStore) -> None:
+    """``source_id`` с версией документа во втором сегменте резолвится через ``corpus_docs``.
+
+    Граница A (16 §6): ``chunk_id``/``source_id`` несут ``dv_...``, а ``doc_id`` в корпусе —
+    ``product:content_hash``; ``dv_`` из хеша не выводится (``short_hash`` необратим).
+    Прямой lookup промахивается (у ``chunk_id`` три сегмента, у ``source_id`` — четыре),
+    поэтому единственный путь — отобразить версию в ``doc_id`` запросом по ``corpus_docs``.
+    """
+    _insert_chunk(
+        store,
+        chunk_id="p1:dv_c0ffee:0",
+        doc_id="p1:hash-abc",
+        product_id="p1",
+        chunk_no=0,
+    )
+    _insert_version(store, "dv_c0ffee", "p1", "p1:hash-abc")
+
+    resolved = store.resolve(source_id("p1", "dv_c0ffee", 0, "build-1"))
+    assert resolved is not None, "версия обязана отобразиться в doc_id корпуса"
+    assert resolved.chunk_id == "p1:dv_c0ffee:0"
+    assert resolved.source_url == _URL
+    assert resolved.build_id == "build-1"
+
+def test_resolve_second_version_of_the_same_document(store: SqliteStore) -> None:
+    """Вторая версия того же документа резолвится: у документа версий больше одной.
+
+    ``dv`` включает уровень извлечения, ``doc_id`` — нет, поэтому один текст на двух
+    уровнях — один документ корпуса и две версии. Отображение обязано быть тотальным
+    (версия → документ), иначе evidence второй версии не адресует свой чанк.
+    """
+    _insert_chunk(
+        store,
+        chunk_id="p1:dv_text:0",
+        doc_id="p1:hash-abc",
+        product_id="p1",
+        chunk_no=0,
+        build_id="build-1",
+    )
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO corpus_chunks"
+            " (chunk_id, doc_id, product_id, url, heading_path, chunk_no, text,"
+            "  context_prefix, content_hash, build_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "p1:dv_layout:0",
+                "p1:hash-abc",
+                "p1",
+                _URL,
+                "H1",
+                0,
+                "body text",
+                "prefix",
+                _HASH,
+                "build-1",
+            ),
+        )
+    _insert_version(store, "dv_text", "p1", "p1:hash-abc")
+    _insert_version(store, "dv_layout", "p1", "p1:hash-abc")
+
+    for version, expected in (("dv_text", "p1:dv_text:0"), ("dv_layout", "p1:dv_layout:0")):
+        resolved = store.resolve(source_id("p1", version, 0, "build-1"))
+        assert resolved is not None, version
+        assert resolved.chunk_id == expected
+
+def test_resolve_doc_version_without_corpus_mapping_returns_none(
+    store: SqliteStore,
+) -> None:
+    """Версия, которой нет в ``corpus_docs``, не резолвится — и не падает.
+
+    ``dv_`` не выводится из ``content_hash``, поэтому догадка вместо отображения была бы
+    резолвом в никуда; честный ответ здесь — ``None``.
+    """
+    _insert_chunk(
+        store,
+        chunk_id="p1:dv_other:0",
+        doc_id="p1:hash-abc",
+        product_id="p1",
+        chunk_no=0,
+    )
+
+    assert store.resolve(source_id("p1", "dv_missing", 0)) is None
+
+def test_resolve_on_db_without_version_table_does_not_fail(tmp_path: Path) -> None:
+    """Read-only БД прошлой версии (без таблицы отображения): чтение не падает.
+
+    Точный адрес чанка от таблицы не зависит — он и есть ``chunk_id`` (16 §6), поэтому
+    резолв 4-сегментного ``source_id`` работает и здесь. Отображение версий в такой БД
+    пустое: «не записано», а не сбой чтения.
+    """
+    path = tmp_path / "legacy.db"
+    store = SqliteStore(path)
+    store.create_run("run-1", _cfg())
+    _insert_chunk(
+        store,
+        chunk_id="p1:dv_c0ffee:0",
+        doc_id="p1:hash-abc",
+        product_id="p1",
+        chunk_no=0,
+    )
+    store.close()
+
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TABLE corpus_doc_version")
+    raw.commit()
+    raw.close()
+
+    legacy = SqliteStore(path, read_only=True)
+    try:
+        assert legacy.resolve("p1:dv_c0ffee:0") is not None
+        resolved = legacy.resolve(source_id("p1", "dv_c0ffee", 0, "build-1"))
+        assert resolved is not None
+        assert resolved.chunk_id == "p1:dv_c0ffee:0"
+        assert legacy.iter_corpus_doc_versions("run-1", "p1") == {}
+    finally:
+        legacy.close()
 
 def test_get_chunk_and_resolve_agree_on_row(store: SqliteStore) -> None:
     _insert_chunk(store, chunk_id="chunk-9", doc_id="doc-9", product_id="p1")

@@ -19,7 +19,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from core.cli.main import EXIT_BLOCKED, EXIT_OK, main
+
+# 09 §4.4: ``state/{package_id}/`` — точка ресурса **пакета**, и с файловым локом она
+# эксклюзивна. Модуль гоняет ``run`` по фикстуре ``tests/fixtures/e2e`` прямо из
+# репозитория, поэтому без изоляции все тесты и все xdist-воркеры делят
+# ``<repo>/state/e2e/.lock`` и падают по очереди с «пакет уже используется» — флак
+# параллелизма, а не регрессия. Раскладку ``state`` модуль не утверждает, поэтому
+# фикстура предмет проверки не подменяет.
+pytestmark = pytest.mark.usefixtures("isolated_state_dir")
 
 #: Корень e2e-фикстур (``tests/fixtures/e2e``).
 E2E_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"

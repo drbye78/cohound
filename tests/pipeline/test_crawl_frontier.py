@@ -10,16 +10,18 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from core.config.deploy import CrawlConfig
+from core.config.deploy import CrawlConfig, EmbedConfig
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import PdfDevice
-from core.domain.models import CrawlRunConfig
+from core.domain.enums import EmbedDevice, PdfDevice
+from core.domain.models import CrawlRunConfig, EmbedRunConfig
 from core.pipeline.crawl_frontier import (
+    DUPLICATE_FORM_EXAMPLES_MAX,
     CrawlLimits,
     Frontier,
     blacklist_match,
     is_blacklisted,
     resolve_crawl_limits,
+    resolve_embed_device,
     resolve_pdf_device,
     root_path_prefix,
 )
@@ -814,3 +816,122 @@ def test_pdf_device_rejects_auto() -> None:
     """``auto`` — не значение оси: лишнее значение обязано падать на входе, не в прогоне."""
     with pytest.raises(ValidationError):
         CrawlRunConfig(pdf_device="auto")  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# 16 §4.1: устройство эмбеддера (embed.device) — та же цепочка app < run
+# --------------------------------------------------------------------------- #
+
+
+def test_embed_device_defaults_to_cpu() -> None:
+    """Ось не объявлена — ``cpu``; ``auto`` не существует (R5)."""
+    assert resolve_embed_device(EmbedConfig(), None) is EmbedDevice.CPU
+    assert resolve_embed_device(EmbedConfig(device="cpu"), None) is EmbedDevice.CPU
+
+
+def test_embed_device_run_layer_overrides_app() -> None:
+    """``run.yaml:embed.device`` побеждает app-дефолт; ``None`` его не отменяет."""
+    assert (
+        resolve_embed_device(EmbedConfig(), EmbedRunConfig(device="cuda"))
+        is EmbedDevice.CUDA
+    )
+    assert (
+        resolve_embed_device(EmbedConfig(device="cuda"), EmbedRunConfig(device="cpu"))
+        is EmbedDevice.CPU
+    )
+    assert (
+        resolve_embed_device(EmbedConfig(device="cuda"), EmbedRunConfig())
+        is EmbedDevice.CUDA
+    )
+
+
+def test_embed_device_rejects_auto() -> None:
+    """``auto`` — не значение оси: лишнее значение падает на входе, не в прогоне."""
+    with pytest.raises(ValidationError):
+        EmbedRunConfig(device="auto")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        EmbedConfig(device="auto")  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Дефект краула 2: ``/page`` и ``/page/`` — один элемент очереди
+# --------------------------------------------------------------------------- #
+
+
+def test_trailing_slash_forms_collapse_to_one_queue_item() -> None:
+    """Одна страница — один GET; схлопывание **видимо** (счётчик + примеры).
+
+    Измерено: 1164 из 2402 ``fetched`` (48.5 %) были дублями форм у одного продукта
+    (``2026-10-29-crawl-url-duplication``).
+    """
+    frontier = Frontier("https://h/docs", CrawlLimits(max_depth=3))
+    assert frontier.discover("https://h/docs/page", 1) is True
+    assert frontier.discover("https://h/docs/page/", 1) is False
+
+    assert len(frontier) == 1
+    # В очередь идёт **исходная** форма: нормализация не подменяет URL.
+    assert frontier.next() == ("https://h/docs/page", 1)
+    assert frontier.duplicate_form_count == 1
+    assert frontier.duplicate_form_examples == ["https://h/docs/page/"]
+
+
+def test_seeds_of_both_forms_are_both_queued() -> None:
+    """Seed'ы ``p`` и ``p/`` — разные утверждения автора (seed задаёт path-prefix).
+
+    Правило ``09`` §7.2 для seeds не отменяется: оба ставятся в очередь. Но найденная
+    позже ссылка другой формы второй GET не получит — ключ формы записан и для seed'а.
+    """
+    frontier = Frontier("https://h/docs", CrawlLimits(max_depth=3))
+    assert frontier.add_seed("https://h/docs/p") == "queued"
+    assert frontier.add_seed("https://h/docs/p/") == "queued"
+    assert len(frontier) == 2
+    assert frontier.duplicate_form_count == 0
+
+    # Обнаруженная ссылка любой из двух форм — уже известна: второго GET нет.
+    assert frontier.discover("https://h/docs/p", 1) is False
+    assert frontier.discover("https://h/docs/p/", 1) is False
+    # Обе формы поставлены seed'ами, поэтому это точные дубли, а не схлопывание.
+    assert frontier.duplicate_form_count == 0
+
+
+def test_seed_form_key_blocks_discovered_other_form() -> None:
+    """Seed ``p`` + обнаруженный ``p/`` → один элемент очереди и видимый счётчик."""
+    frontier = Frontier("https://h/docs", CrawlLimits(max_depth=3))
+    assert frontier.add_seed("https://h/docs/p") == "queued"
+    assert frontier.discover("https://h/docs/p/", 1) is False
+    assert len(frontier) == 1
+    assert frontier.duplicate_form_count == 1
+
+
+def test_revalidate_seed_collapses_other_form() -> None:
+    """``add_revalidate_seed`` блокируется тем же ключом формы (без второго GET)."""
+    frontier = Frontier("https://h/docs", CrawlLimits(max_depth=3))
+    assert frontier.add_revalidate_seed("https://h/docs/a") == "queued"
+    assert frontier.add_revalidate_seed("https://h/docs/a/") == "dup"
+    assert len(frontier) == 1
+    assert frontier.duplicate_form_count == 1
+
+
+def test_duplicate_form_examples_are_bounded_but_count_is_exact() -> None:
+    """Примеров не больше потолка, счётчик — точный (сотни URL не топят провенанс)."""
+    frontier = Frontier("https://h/", CrawlLimits(max_depth=3))
+    frontier.add_seed("https://h/")
+    total = DUPLICATE_FORM_EXAMPLES_MAX + 5
+    for index in range(total):
+        # Форма с хвостовым ``/`` ставится, форма без него — схлопывается.
+        assert frontier.discover(f"https://h/page{index}/", 1) is True
+        assert frontier.discover(f"https://h/page{index}", 1) is False
+    assert frontier.duplicate_form_count == total
+    assert len(frontier.duplicate_form_examples) == DUPLICATE_FORM_EXAMPLES_MAX
+
+
+def test_duplicate_form_survives_with_limits_clone() -> None:
+    """Клон несёт счётчик/примеры схлопнутых форм — иначе провенанс корня теряется."""
+    frontier = Frontier("https://h/", CrawlLimits(max_depth=3))
+    frontier.discover("https://h/page", 1)
+    frontier.discover("https://h/page/", 1)
+    clone = frontier.with_limits(CrawlLimits(max_depth=1))
+    assert clone.duplicate_form_count == frontier.duplicate_form_count == 1
+    assert clone.duplicate_form_examples == ["https://h/page/"]
+    # Клон тоже схлопывает: форма уже известна в скопированном множестве.
+    assert clone.discover("https://h/page/", 1) is False

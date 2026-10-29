@@ -34,6 +34,7 @@ from core.domain.enums import (
     ArchiveDescent,
     Decoder,
     DocumentLevel,
+    EmbedDevice,
     PdfDevice,
     PdfPipeline,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "CrawlConfig",
     "DeployConfig",
     "EdgeConfig",
+    "EmbedConfig",
     "LLMDeployConfig",
     "LLMSlotConfig",
     "OIDCConfig",
@@ -505,6 +507,25 @@ class CrawlConfig(BaseModel):
             raise ValueError(f"crawl.attachment_formats: {exc}") from exc
 
 
+class EmbedConfig(BaseModel):
+    """Секция ``embed`` deploy-конфига: где считается вектор (ось ``embed.device``).
+
+    Намеренно **только** устройство: ``backend``/``base_url``/``model_version``
+    (``14`` §6 п. 5) остаются недекларированными до решения о появлении инстанса.
+    Устройство — не «настройка адаптера»: оно входит в ``EXECUTION_CONTRACT_FIELDS``,
+    поэтому объявлено в конфиге, а не читается у эмбеддера.
+
+    ``extra="forbid"``: ключ без модели отвергается, а не игнорируется молча — иначе
+    ``deploy.yaml`` с ``embed: {backend: ...}`` создавал бы впечатление объявленного
+    backend'а, которого никто не исполняет. Секции ``embed:`` в ``config/deploy.yaml``
+    может не быть: дефолт ``cpu`` и есть отсутствие секции.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device: EmbedDevice = EmbedDevice.CPU
+
+
 class LLMSlotConfig(BaseModel):
     """Конфиг одного именованного LLM-слота (commodity/execution-слой §7.4).
 
@@ -592,6 +613,9 @@ class DeployConfig(BaseModel):
     extractor_zone: str = "core"
     search: SearchDeployConfig = Field(default_factory=SearchDeployConfig)
     crawl: CrawlConfig = Field(default_factory=CrawlConfig)
+    #: Устройство эмбеддера (ось ``embed.device``). Отсутствие секции = ``cpu``: дефолт
+    #: объявлен здесь, а не выведен из окружения (torch выбирать устройство не должен).
+    embed: EmbedConfig = Field(default_factory=EmbedConfig)
     llm: LLMDeployConfig = Field(default_factory=LLMDeployConfig)
 
     @field_validator("profile")

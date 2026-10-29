@@ -34,6 +34,15 @@
 ``content_digest`` — контентный отпечаток партиции из id-формулы (09 §8.1/§8.5).
 ``commit()`` фиксирует сборки (проверяет наличие артефактов) и ничего не возвращает.
 
+**Партиция ``partition-2`` (16 §5).** Сборщик пишет ``content_hash`` каждого чанка в
+``chunk_ids.jsonl``, поэтому ``vector_digest`` **пересчитывается с диска**
+(:func:`recompute_vector_digest`) — это нужно второму контролю переиспользования, где
+сборка не строится и манифест остаётся единственным свидетелем. Формула отпечатка живёт в
+:func:`core.util.index_partition.vector_digest` (слой, доступный и ``pipeline``, и
+``adapters``), поэтому она одна на запись и на пересчёт. В манифест пишется ``embed_device``
+— устройство счёта векторов: CPU- и CUDA-векторы численно разные, и «на чём считалось» —
+часть физического провенанса партиции, а не диагностика.
+
 **Зависимости.** ``numpy`` — необязательный (extra ``retrieval``): модуль импортируется без
 него, а ``build()`` поднимает понятную ``RuntimeError`` при отсутствии. Нейтрален (§1.3).
 """
@@ -48,9 +57,16 @@ from core.adapters import index_format
 from core.ports.index_builder import ImmutableBuildError as PortImmutableBuildError
 from core.ports.index_builder import IndexMeta
 from core.ports.types import Chunk
-from core.util.hashing import content_hash, short_hash
+from core.util.hashing import short_hash
+from core.util.index_partition import recompute_vector_digest, vector_digest
 
-__all__ = ["ImmutableBuildError", "NpyIndexBuilder", "derive_build_id", "numpy_available"]
+__all__ = [
+    "ImmutableBuildError",
+    "NpyIndexBuilder",
+    "derive_build_id",
+    "numpy_available",
+    "recompute_vector_digest",
+]
 
 #: Префикс ``build_id`` (стиль ``corpus._derive_partition_build_id``: партиция).
 _BUILD_ID_PREFIX = "pb_"
@@ -122,12 +138,15 @@ def _content_digest(
     content_hashes: Sequence[str],
     vectors: Sequence[Sequence[float]],
 ) -> str:
-    """Отпечаток содержимого партиции: id/хеши чанков + байты ``float16``-матрицы (I19)."""
+    """Отпечаток содержимого партиции: id/хеши чанков + байты ``float16``-матрицы (I19).
+
+    Формула — не здесь, а в :func:`core.util.index_partition.vector_digest`: её обязана
+    уметь пересчитать с диска проверка переиспользования, живущая в ``pipeline``, куда
+    ``core.adapters`` импортировать нельзя (01 §1). Вторая копия формулы разошлась бы с
+    первой молча — ровно поэтому она одна.
+    """
     matrix = np.asarray(vectors, dtype=np.float16)
-    meta_material = _GROUP_SEP.join(
-        (_FIELD_SEP.join(chunk_ids), _FIELD_SEP.join(content_hashes))
-    ).encode("utf-8")
-    return content_hash(meta_material + _GROUP_SEP.encode("utf-8") + matrix.tobytes())
+    return vector_digest(chunk_ids, content_hashes, matrix.tobytes())
 
 
 class ImmutableBuildError(PortImmutableBuildError):
@@ -253,6 +272,11 @@ class NpyIndexBuilder:
             "package": package,
             "product_id": product_id,
             "embed_model_id": meta.embed_model_id,
+            # Устройство счёта векторов (объявленная ось прогона, 16 §5.1): CPU- и
+            # CUDA-векторы численно разные, поэтому «на чём считалось» — часть
+            # физического провенанса партиции, а не диагностика. ``None`` — не объявлено
+            # (юнит-путь/старая сборка): догадываться о нём запрещено.
+            "embed_device": str(extra.get("embed_device") or "") or None,
             "chunker_version": meta.chunker_version,
             # 09 §8.1: версии производства/формата — часть второго, физического
             # контроля переиспользования партиции (§8.5), поэтому лежат в манифесте.
@@ -275,7 +299,17 @@ class NpyIndexBuilder:
             "vector_digest": digest,
         }
         index_format.write_partition(
-            self._index_root, package, build_id, product_id, vectors, chunk_ids, manifest
+            self._index_root,
+            package,
+            build_id,
+            product_id,
+            vectors,
+            chunk_ids,
+            manifest,
+            # ``partition-2``: хеши текстов рядом с id — иначе ``vector_digest`` нельзя
+            # пересчитать с диска и проверка переиспользования остаётся недоказуемой
+            # (16 §5.2).
+            content_hashes=content_hashes,
         )
         self._content[key] = digest
         self._pending.add(key)
@@ -285,8 +319,13 @@ class NpyIndexBuilder:
         """Отказывает в мутации зафиксированной сборки другим содержимым (K2/§13).
 
         Проверяет (1) сборки этого инстанса и (2) уже зафиксированную партицию на диске —
-        последнее даёт защиту между процессами (``vector_digest``; legacy-партиции
-        хранят полный отпечаток в ``content_digest``).
+        последнее даёт защиту между процессами. Для партиции формата ``partition-2``
+        отпечаток **пересчитывается с диска** (:func:`recompute_vector_digest`) и
+        сверяется с манифестом: манифест — не доказательство целостности артефактов, он
+        сам лежит рядом с ними и мог быть подменён вместе с ними (16 §5.2). Партиция
+        исходного формата (без ``content_hash`` в ``chunk_ids.jsonl``) сверяется по
+        манифесту, как раньше: пересчитать её отпечаток нечем, а объявить её совпадающей
+        «по умолчанию» значило бы вернуть дефект.
         """
         existing = self._content.get(key)
         if existing is not None and existing != digest:
@@ -306,7 +345,16 @@ class NpyIndexBuilder:
         )
         # ``vector_digest`` — полный отпечаток (id/хеши + векторы); legacy-партиции
         # хранят его в ``content_digest``.
-        old_digest = manifest.get("vector_digest") or manifest.get("content_digest")
+        declared = manifest.get("vector_digest") or manifest.get("content_digest")
+        on_disk = recompute_vector_digest(
+            index_format.build_root(self._index_root, package, build_id, product_id)
+        )
+        if on_disk is not None and declared is not None and declared != on_disk:
+            raise ImmutableBuildError(
+                f"NpyIndexBuilder: партиция {key!r} на диске не совпадает со своим "
+                "манифестом (§13: артефакты сборки не мутируются)"
+            )
+        old_digest = on_disk if on_disk is not None else declared
         if old_digest != digest:
             raise ImmutableBuildError(
                 f"NpyIndexBuilder: партиция {key!r} уже зафиксирована на диске с другим "

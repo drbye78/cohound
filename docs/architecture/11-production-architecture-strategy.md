@@ -225,8 +225,8 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`docling_extractor_version`), живое значение в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0,trafilatura-html-2` (сегмент
 >   `cpu`/`cuda` — ось `crawl.pdf_device`, P9).
-> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2438` (`workers_from_budget`),
->   preflight `core/cli/wiring.py:2404` (`preflight_extraction_budget`, `EXIT_USAGE`).
+> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2506` (`workers_from_budget`),
+>   preflight `core/cli/wiring.py:2448` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
 >   `core/pipeline/corpus.py:7701`; видимая строка пропуска по бюджету —

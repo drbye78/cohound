@@ -1,7 +1,9 @@
 """Тесты формата индексной сборки (02 §B.2, 09 §8.2): раскладка и ``is_committed``.
 
-Проверяются: служебный ``_compositions`` не считается сборкой/партицией и
-``is_committed`` требует все три артефакта **и** читаемый манифест. Файлы создаются
+Проверяются: служебный ``_compositions`` не считается сборкой/партицией,
+``is_committed`` требует все три артефакта **и** читаемый манифест, обе формы
+``chunk_ids.jsonl`` (``partition-2`` с ``content_hash`` и исходная) читаются, а
+несовпадение длин ``content_hashes``/``chunk_ids`` отвергается. Файлы создаются
 вручную — тест не зависит от ``numpy``. Нейтрален (§1.3).
 """
 
@@ -151,3 +153,82 @@ def test_write_partition_failure_keeps_previous_partition(
     assert index_format.is_committed(tmp_path, PKG, BUILD, PRODUCT)
     assert index_format.read_partition(tmp_path, PKG, BUILD, PRODUCT).chunk_ids == ["c1", "c2"]
     assert _leftovers(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# ``content_hash`` в ``chunk_ids.jsonl`` (формат ``partition-2``, 16 §5.2)
+# ---------------------------------------------------------------------------
+
+
+def _rows(root: Path) -> list[dict[str, object]]:
+    path = index_format.build_root(root, PKG, BUILD, PRODUCT) / "chunk_ids.jsonl"
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+@requires_numpy
+def test_write_partition_records_content_hashes_when_given(tmp_path: Path) -> None:
+    """Переданные ``content_hashes`` попадают в строки рядом с ``chunk_id``."""
+    index_format.write_partition(
+        tmp_path,
+        PKG,
+        BUILD,
+        PRODUCT,
+        [[1.0, 0.0], [0.0, 1.0]],
+        ["c1", "c2"],
+        {"dim": 2},
+        content_hashes=["h1", "h2"],
+    )
+    assert _rows(tmp_path) == [
+        {"chunk_id": "c1", "content_hash": "h1"},
+        {"chunk_id": "c2", "content_hash": "h2"},
+    ]
+
+
+@requires_numpy
+def test_write_partition_without_content_hashes_keeps_legacy_form(tmp_path: Path) -> None:
+    """Без ``content_hashes`` формат прежний: старая партиция остаётся читаемой."""
+    _write(tmp_path, ["c1", "c2"])
+    assert _rows(tmp_path) == [{"chunk_id": "c1"}, {"chunk_id": "c2"}]
+    assert index_format.read_partition(tmp_path, PKG, BUILD, PRODUCT).chunk_ids == [
+        "c1",
+        "c2",
+    ]
+
+
+@requires_numpy
+def test_write_partition_rejects_content_hashes_length_mismatch(tmp_path: Path) -> None:
+    """Длина ``content_hashes`` обязана совпадать с ``chunk_ids`` (как у ``vectors``)."""
+    with pytest.raises(ValueError):
+        index_format.write_partition(
+            tmp_path,
+            PKG,
+            BUILD,
+            PRODUCT,
+            [[1.0, 0.0], [0.0, 1.0]],
+            ["c1", "c2"],
+            {"dim": 2},
+            content_hashes=["h1"],
+        )
+
+
+@requires_numpy
+def test_reader_accepts_both_chunk_id_forms(tmp_path: Path) -> None:
+    """Читатель не требует ``content_hash``: обе формы дают те же ``chunk_ids``."""
+    _write(tmp_path, ["c1", "c2"])
+    legacy = index_format.read_partition(tmp_path, PKG, BUILD, PRODUCT)
+    index_format.write_partition(
+        tmp_path,
+        PKG,
+        BUILD,
+        PRODUCT,
+        [[1.0, 0.0], [0.0, 1.0]],
+        ["c1", "c2"],
+        {"dim": 2},
+        content_hashes=["h1", "h2"],
+    )
+    current = index_format.read_partition(tmp_path, PKG, BUILD, PRODUCT)
+    assert current.chunk_ids == legacy.chunk_ids == ["c1", "c2"]

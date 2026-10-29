@@ -34,10 +34,13 @@ from core.pipeline.run_identity import (
     build_run_identity,
     classify_change,
     golden_required_for,
+    previous_run_of,
     resolve_cycle_id,
     resolve_refresh_policy,
     resolve_run_scope,
 )
+from core.ports.state import RunLineageRow
+from core.store.state_store import SqliteStateStore
 
 
 def _run_config(**overrides: object) -> RunConfig:
@@ -438,3 +441,86 @@ def test_build_run_identity_with_previous_execution_change() -> None:
     assert identity.change_class is ChangeClass.EXECUTION_CHANGE
     assert identity.golden_required == "full"
     assert identity.refresh_policy is RefreshPolicy.REVALIDATE
+
+
+# ---------------------------------------------------------------------------
+# previous_run_of — единственная формула «предыдущего прогона» (§12.3)
+# ---------------------------------------------------------------------------
+
+PACKAGE = "case_x"
+
+
+def _lineage(run_id: str, *, started_at: str, previous_run_id: str | None = None) -> RunLineageRow:
+    """Строка lineage пакета ``case_x`` (минимально полная: NOT NULL-поля заданы)."""
+    return RunLineageRow(
+        run_id=run_id,
+        package_id=PACKAGE,
+        cycle_id="2026-06-01",
+        cohort_digest="cohort",
+        seeds_digest="seeds",
+        execution_contract_digest="contract",
+        change_class="none",
+        status="complete",
+        started_at=started_at,
+        previous_run_id=previous_run_id,
+    )
+
+
+def _state_with(*rows: RunLineageRow) -> SqliteStateStore:
+    """``:memory:``-state с записанными строками lineage."""
+    store = SqliteStateStore(":memory:")
+    for row in rows:
+        store.record_run_lineage(row)
+    return store
+
+
+def test_previous_run_of_returns_latest_lineage_row() -> None:
+    with _state_with(
+        _lineage("run-1", started_at="2026-06-01T10:00:00Z"),
+        _lineage("run-2", started_at="2026-06-02T10:00:00Z", previous_run_id="run-1"),
+    ) as state:
+        row = previous_run_of(state, PACKAGE, run_id="run-3")
+    assert row is not None and row.run_id == "run-2"
+
+
+def test_previous_run_of_explicit_overrides_history() -> None:
+    with _state_with(
+        _lineage("run-1", started_at="2026-06-01T10:00:00Z"),
+        _lineage("run-2", started_at="2026-06-02T10:00:00Z", previous_run_id="run-1"),
+    ) as state:
+        row = previous_run_of(state, PACKAGE, run_id="run-3", explicit="run-1")
+    # ``--since-run`` сильнее истории: сравнение идёт против названного прогона.
+    assert row is not None and row.run_id == "run-1"
+
+
+def test_previous_run_of_explicit_missing_raises_usage_error() -> None:
+    with (
+        _state_with(_lineage("run-1", started_at="2026-06-01T10:00:00Z")) as state,
+        pytest.raises(ValueError, match="--since-run"),
+    ):
+        previous_run_of(state, PACKAGE, run_id="run-2", explicit="nope")
+
+
+def test_previous_run_of_explicit_missing_without_state_is_not_silent() -> None:
+    """Явный запрос без ``state`` — отказ, а не «истории нет» (поведение CLI сохранено)."""
+    with pytest.raises(ValueError, match="--since-run"):
+        previous_run_of(None, PACKAGE, run_id="run-2", explicit="nope")
+
+
+def test_previous_run_of_ignores_current_run() -> None:
+    """Resume текущего прогона — не предшественник: carry-forward против себя не идёт."""
+    with _state_with(_lineage("run-1", started_at="2026-06-01T10:00:00Z")) as state:
+        assert previous_run_of(state, PACKAGE, run_id="run-1") is None
+        assert (
+            previous_run_of(state, PACKAGE, run_id="run-1", explicit="run-1") is None
+        )
+
+
+def test_previous_run_of_without_state_is_none() -> None:
+    assert previous_run_of(None, PACKAGE, run_id="run-1") is None
+
+
+def test_previous_run_of_other_package_history_is_not_predecessor() -> None:
+    """История другого пакета — не предшественник: ищется пакет, а не «последний вообще»."""
+    with _state_with(_lineage("run-1", started_at="2026-06-01T10:00:00Z")) as state:
+        assert previous_run_of(state, "case_y", run_id="run-2") is None

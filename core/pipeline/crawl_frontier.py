@@ -62,11 +62,17 @@ from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import ArchiveDescent, DocumentLevel, PdfDevice, PdfPipeline
+from core.domain.enums import (
+    ArchiveDescent,
+    DocumentLevel,
+    EmbedDevice,
+    PdfDevice,
+    PdfPipeline,
+)
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
     DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
@@ -96,8 +102,10 @@ __all__ = [
     "is_blacklisted",
     "normalize_scope_host",
     "resolve_crawl_limits",
+    "resolve_embed_device",
     "resolve_pdf_device",
     "root_path_prefix",
+    "url_form_key",
 ]
 
 #: Исходы scope-допуска (:meth:`Frontier.scope_admission`): URL в scope корня.
@@ -112,6 +120,33 @@ ARTIFACT_BYPASS_EXAMPLES_MAX = 10
 
 #: Потолок примеров отвергнутых поддоменов **на хост** в провенансе (счётчик — точный).
 SUBDOMAIN_REJECT_EXAMPLES_MAX = 3
+
+#: Потолок **примеров** схлопнутых форм одного URL в провенансе (счётчик — точный).
+DUPLICATE_FORM_EXAMPLES_MAX = 10
+
+
+def url_form_key(url: str) -> str:
+    """Ключ дедупа, схлопывающий формы одного URL, различающиеся хвостовым ``/``.
+
+    ``/page`` и ``/page/`` — одна страница, но два элемента очереди при дедупе по точной
+    строке: измерено 1164 из 2402 ``fetched`` (48.5 %) у одного продукта
+    (``2026-10-29-crawl-url-duplication``). Поэтому ключ снимает **один** завершающий
+    ``/`` (путь ``/`` не трогается: это корень), а пустой путь приводится к ``/`` —
+    ``https://host`` и ``https://host/`` тоже одна страница.
+
+    Ключ — **только** для сравнения: сохраняемый в очереди URL не нормализуется, иначе
+    форма, которую увидел автор ссылки, исчезла бы из провенанса. Seed'ы правило не
+    применяют вовсе: ``p`` и ``p/`` — разные утверждения автора, потому что seed задаёт
+    path-prefix корня (``09`` §7.2).
+    """
+    parts = urlsplit(url)
+    path = parts.path
+    if path.endswith("/") and path != "/":
+        path = path[:-1]
+    elif path == "":
+        path = "/"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
 
 #: Потолок времени извлечения **одного** документа/члена контейнера
 #: (ось ``crawl.document_timeout_s``), секунды.
@@ -340,6 +375,37 @@ def resolve_pdf_device(app: object, run: object | None = None) -> PdfDevice:
     # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``PdfDevice``
     # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
     return PdfDevice(PdfDevice.CPU if value is None else value)  # type: ignore[arg-type]
+
+
+def resolve_embed_device(app: object, run: object | None = None) -> EmbedDevice:
+    """Устройство эмбеддера по объявленным слоям: app < run.
+
+    Цепочка та же, что у :func:`resolve_pdf_device`, и **без** per-site слагаемого:
+    устройство — свойство хоста исполнения, а не сайта. Подставлять ``None`` третьим
+    слагаемым значило бы обещать per-site слой, которого нет.
+
+    Дефолт ``cpu`` — **объявленное** значение, а не «что выберет torch»: ``auto``
+    запрещён (R5), иначе прогон на машине с CUDA молча считал бы векторы на GPU, а
+    ``embed_device``/``pb``/ключ ``embed_cache`` называли бы устройство, которого вход
+    не объявлял (измеренный дефект ``14`` оговорки 5).
+
+    Функция чистая (никаких импортов torch): доступность CUDA — отдельная проверка
+    (:func:`core.cli.wiring.require_embed_device`), а не часть резолва.
+
+    :param app: app-слой (:class:`core.config.deploy.EmbedConfig`). Допускается и
+        контейнер (:class:`DeployConfig`): тогда берётся его секция ``embed``. Терпимость
+        к контейнеру намеренная — иначе вызов с ``deploy`` вместо ``deploy.embed`` молча
+        вернул бы ``cpu`` и объявил бы неисполнявшееся устройство (тот же класс, что тихий
+        фолбэк).
+    :param run: run-слой (:class:`core.domain.models.EmbedRunConfig`) или ``None``.
+    """
+    app_layer = getattr(app, "embed", app)
+    run_layer = getattr(run, "embed", run) if run is not None else None
+    run_value = getattr(run_layer, "device", None) if run_layer is not None else None
+    value = _pick(getattr(app_layer, "device", None), run_value, None)
+    # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``EmbedDevice``
+    # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
+    return EmbedDevice(EmbedDevice.CPU if value is None else value)  # type: ignore[arg-type]
 
 
 def _pick(app: object, run: object, site: object) -> object:
@@ -810,7 +876,9 @@ class Frontier:
     """BFS-очередь одного seed-root: scope/блэклист/лимиты при постановке (D1/D2).
 
     FIFO (:class:`collections.deque`) — детерминированный обход; ключ дедупликации —
-    нормализованный URL (см. ``core.util.html_links``). ``fetched`` считает успешно
+    нормализованный URL (см. ``core.util.html_links``) плюс :func:`url_form_key`, который
+    схлопывает формы одного URL, различающиеся хвостовым ``/`` (схлопывание видимо:
+    :attr:`duplicate_form_count`). ``fetched`` считает успешно
     добытые (retained) страницы этого корня — для ``max_documents``. ``truncated``/
     ``truncated_reason`` фиксируют усечение (потолок документов или глубины) для
     провенанса (D1/G — «честность усечения»).
@@ -842,6 +910,17 @@ class Frontier:
         )
         self._queue: deque[tuple[str, int]] = deque()
         self._seen: set[str] = set()
+        #: Ключи дедупа (:func:`url_form_key`) — **вторая** форма одного URL не даёт
+        #: второго GET. Хранится отдельно от ``_seen``: точные строки нужны для
+        #: ``is_revalidation`` и провенанса, а схлопывание форм — только для решения
+        #: «ставить ли в очередь».
+        self._seen_forms: set[str] = set()
+        #: Схлопнутые формы URL: точный счётчик + ограниченные примеры
+        #: (:data:`DUPLICATE_FORM_EXAMPLES_MAX`). Тихое отбрасывание URL запрещено —
+        #: это тот же класс дефекта, что «тихий обход path-prefix».
+        self.duplicate_form_count = 0
+        self.duplicate_form_examples: list[str] = []
+        self._duplicate_form_seen: set[str] = set()
         #: Известные URL ревалидации (depth-0 листья): поставлены отдельным путём,
         #: не расходуют ``max_documents`` и не расширяют BFS исходящими ссылками.
         self._revalidation: set[str] = set()
@@ -1046,6 +1125,11 @@ class Frontier:
         Блэклист применяется и к seeds (D1/H: отфильтрованы seeds, записи каталогов и
         обнаруженные URL). Возвращает статус: ``"queued"`` | ``"blacklisted"`` |
         ``"truncated"`` | ``"dup"``.
+
+        Дедуп seed'а — **только по точной форме**: ``p`` и ``p/`` остаются разными
+        утверждениями автора, потому что seed задаёт path-prefix корня (``09`` §7.2).
+        Нормализованный ключ при этом попадает в множество форм, чтобы обнаруженная
+        ссылка другой формы не дала второй GET.
         """
         if url in self._seen:
             return "dup"
@@ -1056,6 +1140,7 @@ class Frontier:
             self._mark_truncated("max_documents")
             return "truncated"
         self._seen.add(url)
+        self._seen_forms.add(url_form_key(url))
         self._queue.append((url, 0))
         self.note_host_accept(url)
         return "queued"
@@ -1077,12 +1162,13 @@ class Frontier:
           SSRF обязательны, блэклист побеждает, обход видим
           (:meth:`note_artifact_bypass`);
         * блэклист — с видимой записью ``skipped_blacklisted`` (не тихий дроп);
-        * дедуп ``_seen`` — известный URL, переоткрытый ссылкой из BFS, не получает
-          второй GET (304-экономия).
+        * дедуп — известный URL, переоткрытый ссылкой из BFS, не получает второй GET
+          (304-экономия); форма, отличающаяся хвостовым ``/``, считается тем же URL и
+          схлопывается **видимо** (:attr:`duplicate_form_count`).
 
         Возвращает ``"queued"`` | ``"blacklisted"`` | ``"out_of_scope"`` | ``"dup"``.
         """
-        if url in self._seen:
+        if self._known_in_any_form(url):
             return "dup"
         admission = self.scope_admission(url)
         if admission == SCOPE_OUT:
@@ -1093,6 +1179,7 @@ class Frontier:
         if admission == SCOPE_ARTIFACT_OUTSIDE_PREFIX:
             self.note_artifact_bypass(url)
         self._seen.add(url)
+        self._seen_forms.add(url_form_key(url))
         self._revalidation.add(url)
         self._queue.append((url, 0))
         self.note_host_accept(url)
@@ -1122,8 +1209,12 @@ class Frontier:
         **допускается** (P6b), но host scope, SSRF-валидация, traversal-guard и блэклист
         оператора действуют как прежде — блэклист побеждает. Обход фиксируется
         (:meth:`note_artifact_bypass`) только по факту постановки в очередь.
+
+        Дедуп — по **нормализованному** ключу (:func:`url_form_key`): ``/page`` и
+        ``/page/`` дают один элемент очереди, а схлопывание видно в
+        :attr:`duplicate_form_count`. В очередь идёт **исходная** форма URL.
         """
-        if url in self._seen:
+        if self._known_in_any_form(url):
             return False
         if depth > self.limits.max_depth:
             return False
@@ -1139,6 +1230,7 @@ class Frontier:
         if admission == SCOPE_ARTIFACT_OUTSIDE_PREFIX:
             self.note_artifact_bypass(url)
         self._seen.add(url)
+        self._seen_forms.add(url_form_key(url))
         self._queue.append((url, depth))
         self.note_host_accept(url)
         return True
@@ -1182,6 +1274,10 @@ class Frontier:
         """Копия frontier с урезанными лимитами (seam для D4/D3 без мутации)."""
         clone = Frontier(self.root_url, limits, scope_hosts=self.scope_hosts)
         clone._seen = set(self._seen)
+        clone._seen_forms = set(self._seen_forms)
+        clone.duplicate_form_count = self.duplicate_form_count
+        clone.duplicate_form_examples = list(self.duplicate_form_examples)
+        clone._duplicate_form_seen = set(self._duplicate_form_seen)
         clone._queue = deque(self._queue)
         clone._revalidation = set(self._revalidation)
         clone.fetched = self.fetched
@@ -1200,6 +1296,35 @@ class Frontier:
         return clone
 
     # -- внутреннее --------------------------------------------------------- #
+
+    def note_duplicate_form(self, url: str) -> None:
+        """Учесть схлопнутую форму URL (``/page/`` при известном ``/page``).
+
+        Счётчик точный и дедуплицированный по строке URL: один и тот же ``/page/``
+        предлагается со многих страниц, а вопрос провенанса — «сколько URL схлопнуто»,
+        не «сколько упоминаний». Примеры ограничены
+        (:data:`DUPLICATE_FORM_EXAMPLES_MAX`).
+        """
+        if url in self._duplicate_form_seen:
+            return
+        self._duplicate_form_seen.add(url)
+        self.duplicate_form_count += 1
+        if len(self.duplicate_form_examples) < DUPLICATE_FORM_EXAMPLES_MAX:
+            self.duplicate_form_examples.append(url)
+
+    def _known_in_any_form(self, url: str) -> bool:
+        """Известен ли URL в любой форме: точная строка либо ключ без хвостового ``/``.
+
+        Точное совпадение — обычный дубль (молча, как прежде). Совпадение по
+        нормализованному ключу — схлопывание формы: оно **видимо**
+        (:meth:`note_duplicate_form`), потому что URL не ставится в очередь.
+        """
+        if url in self._seen:
+            return True
+        if url_form_key(url) in self._seen_forms:
+            self.note_duplicate_form(url)
+            return True
+        return False
 
     def _mark_truncated(self, reason: str) -> None:
         """Фиксирует усечение (первый повод побеждает; не перезаписываем причину)."""

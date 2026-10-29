@@ -31,10 +31,18 @@ import yaml
 
 from core.cli.wiring import build_store
 from core.config.seeds import load_seeds
-from core.domain import CellState, CorpusChunk, LLMCellOutput, LLMEvidence, Status
+from core.domain import (
+    CellState,
+    CorpusChunk,
+    EmbedDevice,
+    LLMCellOutput,
+    LLMEvidence,
+    Status,
+)
 from core.pipeline.composition import derive_composition_id
 from core.pipeline.corpus import _derive_partition_build_id, _product_content_token
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
+from core.pipeline.incremental import doc_version_id
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.phases import build_phases
@@ -64,10 +72,13 @@ PAGE_URL = "https://example.com/a"
 PAGE_TEXT = "Функция alpha подтверждена в официальной документации продукта."
 PAGE_BYTES = PAGE_TEXT.encode("utf-8")
 
-#: ``chunk_id``, который выведет корпус: ``{product}:{doc_hash}:{chunk_no}`` (corpus._chunk_id).
-#: ``doc_hash`` = SHA-256 сырых байтов (совпадает с ``FakeExtractor``/``corpus``).
+#: ``chunk_id``, который выведет корпус (16 §6.1): ``{product}:{doc_version_id}:{chunk_no}``.
+#: ``doc_hash`` = SHA-256 сырых байтов (совпадает с ``FakeExtractor``/``corpus``), а второй
+#: сегмент — **версия документа** (ключ 09 §4.2: содержимое + версия экстрактора + уровень):
+#: один текст на разных уровнях извлечения — разные версии и разные адреса чанков.
 DOC_HASH = content_hash(PAGE_BYTES)
-CHUNK_ID = f"p1:{DOC_HASH}:0"
+DOC_VERSION = doc_version_id("p1", DOC_HASH, FakeExtractor.version, "full")
+CHUNK_ID = f"p1:{DOC_VERSION}:0"
 
 #: Явный синтетический актор: тест играет человека на гейтах (не автоматизация, S9/I6/I7).
 ACTOR = "e2e-smoke"
@@ -111,6 +122,9 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         product_id="p1",
         chunker_version=FakeChunker.version,
         embed_model_id=FakeEmbedder().model_id,
+        # 16 §4.1: прогон не объявляет ось ``embed.device`` ⇒ действует объявленный
+        # дефолт ``cpu`` (его и передаёт фаза).
+        embed_device=EmbedDevice.CPU.value,
         extractor_version=FakeExtractor.version,
         lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
         vector_store=FakeIndexBuilder.vector_store,

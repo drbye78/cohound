@@ -344,7 +344,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `crawl_sessions.owner`/`heartbeat_at` в DDL
 > (`core/store/sqlite.py:326-327`), `core/pipeline/liveness.py` (свидетельство живости,
 > recovery-on-open, `interrupt_session`), heartbeat в корпусе
-> (`core/pipeline/corpus.py:4055`), `interrupted` в словаре (`core/domain/enums.py:697`).
+> (`core/pipeline/corpus.py:4477`), `interrupted` в словаре (`core/domain/enums.py:721`).
 > Остаток решения, названный К-4: это **не** lease — переназначения элемента другому
 > исполнителю нет, конфликт двух нод только виден (`owner`).
 
@@ -645,7 +645,7 @@ RTX 3050 — 1.10× при ΣVRAM 1 344 MB, то есть карта не свя
 > ✅ **сделано** (F1) — `core/pipeline/liveness.py` (`current_owner`, `owner_is_alive`,
 > `stale_reason`, `interrupt_session`, `recover_interrupted_sessions`, `Heartbeat`),
 > `crawl_sessions.owner`/`heartbeat_at` в DDL (`core/store/sqlite.py:326-327`),
-> `interrupted` в `CrawlSessionStatus` (`core/domain/enums.py:697`) и в словаре
+> `interrupted` в `CrawlSessionStatus` (`core/domain/enums.py:721`) и в словаре
 > (`docs/status-dictionary.yaml:531`). Терминальность — `_TERMINAL_SESSION_STATUSES`
 > (`core/cli/context.py`), как и предупреждает раздел.
 
@@ -974,14 +974,14 @@ B1 включает B2 (без идентичности нет паритета)
 | 8.4 | `chunk_window` — **документ + две фазы**; коммутативный аккумулятор токена отклонён | §5.7, B5 |
 
 > ✅ **8.2 сделано** — `interrupted` в словаре и enum'е, `_TERMINAL_SESSION_STATUSES`,
-> recovery-on-open (`core/domain/enums.py:697`, `core/pipeline/liveness.py`).
+> recovery-on-open (`core/domain/enums.py:721`, `core/pipeline/liveness.py`).
 > ⬜ **8.1 не сделано** — M1 (передача артефакта чанками) не реализована: `contracts/seam/`
 > не содержит `extract/*`; модели M2/M3 остаются отклонёнными (➖).
 > ✅ **8.3 сделано** (под `local`) — профиль домена читается резолвером
 > (`core/config/domain_profiles.py:100`; цепочка app < run < site в
-> `core/pipeline/crawl_frontier.py:469-472`), `document_level` входит в `CrawlLimits.as_dict`
+> `core/pipeline/crawl_frontier.py:411-417`), `document_level` входит в `CrawlLimits.as_dict`
 > (`:289`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
-> ключ профиля плюс `__default__` (`core/pipeline/report.py:586-599`), не по скаляру.
+> ключ профиля плюс `__default__` (`core/pipeline/report.py:666-671`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
 > (`core/pipeline/corpus.py:5145,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.

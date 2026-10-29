@@ -614,28 +614,49 @@ def test_office_level_only_off_differs(tmp_path: Path) -> None:
     content = b"office stub"
     pages = {docx_url: (content, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
 
-    texts: dict[str, str] = {}
+    # Текст — по сохранённому контенту чанков, адрес версии — по ``content_digest``
+    # партиции. Это разные величины, и после 16 §6.1 они расходятся: адрес чанка несёт
+    # ``doc_version_id``, а версия документа включает уровень извлечения (09 §4.2).
+    texts: dict[str, tuple[str, ...]] = {}
+    digests: dict[str, str] = {}
     for level in (
         DocumentLevel.TEXT,
         DocumentLevel.LAYOUT,
         DocumentLevel.LAYOUT_TABLES,
         DocumentLevel.FULL,
     ):
-        result = _build(
-            tmp_path / level.value,
-            pages=pages,
-            urls={"p1": [docx_url]},
-            crawl_defaults=CrawlRunConfig(document_level=level),
-            extractor_factory=_level_factory,
-        )
-        build = _build_of(result)
-        assert build.doc_count == 1, level
-        # Идентичность текста пинится отпечатком содержимого партиции (``chunk_id`` +
-        # ``content_hash``): документы из результата фазы больше не читаются (Д-2/A4).
-        texts[level.value] = build.entries[0].content_digest
+        store = SqliteStore(":memory:")
+        try:
+            _make_run(store)
+            result = _build(
+                tmp_path / level.value,
+                pages=pages,
+                urls={"p1": [docx_url]},
+                store=store,
+                run_id=RUN_ID,
+                crawl_defaults=CrawlRunConfig(document_level=level),
+                extractor_factory=_level_factory,
+            )
+            build = _build_of(result)
+            assert build.doc_count == 1, level
+            texts[level.value] = tuple(
+                sorted(
+                    row["content_hash"]
+                    for row in store.conn.execute(
+                        "SELECT content_hash FROM corpus_chunks"
+                    )
+                )
+            )
+            digests[level.value] = build.entries[0].content_digest
+        finally:
+            store.close()
     # Ось не меняет Office-текст (реальный docling: SimplePipeline игнорирует PDF-опции).
     # Фейк возвращает один и тот же текст для документа => один content_hash.
     assert len(set(texts.values())) == 1
+    # Но версия документа у уровней разная, значит и адреса чанков, значит и отпечаток
+    # chunk-сета. Один текст, четыре адреса — ровно то, что объявляет §6.1: «уровень
+    # извлечения — часть версии», а не «уровень меняет текст».
+    assert len(set(digests.values())) == 4
 
     off = _build(
         tmp_path / "off",
@@ -687,18 +708,32 @@ def test_default_identity_preserves_manifest_only_churn(tmp_path: Path) -> None:
     pages = {DOC_URL: (DOC_BYTES, PDF_CONTENT_TYPE), ROOT: (HTML_PAGE, "text/html")}
     urls = {"p1": [ROOT, DOC_URL]}
 
+    def _run(root: Path, **kwargs: Any) -> tuple[IndexBuild, tuple[str, ...]]:
+        """Сборка + сохранённые хеши содержимого чанков (документы из фазы не читаются)."""
+        store = SqliteStore(":memory:")
+        try:
+            _make_run(store)
+            result = _build(root, pages=pages, urls=urls, store=store, run_id=RUN_ID, **kwargs)
+            return _build_of(result), tuple(
+                sorted(
+                    row["content_hash"]
+                    for row in store.conn.execute(
+                        "SELECT content_hash FROM corpus_chunks"
+                    )
+                )
+            )
+        finally:
+            store.close()
+
     # Дефолт (ось не задана) и явный full — байт-в-байт по контенту и по сборке.
-    default = _build(tmp_path / "default", pages=pages, urls=urls)
-    explicit_full = _build(
+    bd, hashes_default = _run(tmp_path / "default")
+    bf, hashes_full = _run(
         tmp_path / "full",
-        pages=pages,
-        urls=urls,
         crawl_defaults=CrawlRunConfig(document_level=DocumentLevel.FULL),
         extractor_factory=_level_factory,
     )
-    bd, bf = _build_of(default), _build_of(explicit_full)
-    # Контент тот же: отпечаток партиции включает ``chunk_id`` и ``content_hash`` чанков,
-    # а документы из результата фазы больше не читаются (Д-2/A4).
+    # Контент тот же: сохранённые хеши чанков совпадают.
+    assert hashes_default == hashes_full
     assert [e.content_digest for e in bd.entries] == [
         e.content_digest for e in bf.entries
     ]
@@ -706,19 +741,24 @@ def test_default_identity_preserves_manifest_only_churn(tmp_path: Path) -> None:
     assert bd.index_build_id == bf.index_build_id
     assert bd.chunk_count == bf.chunk_count
 
-    # Не-full уровень: контент (текст по фейку) тот же, но сборка иная (execution churn).
-    text = _build(
+    # Не-full уровень: текст (по фейку) тот же, но сборка иная (execution churn).
+    bt, hashes_text = _run(
         tmp_path / "text",
-        pages=pages,
-        urls=urls,
         crawl_defaults=CrawlRunConfig(document_level=DocumentLevel.TEXT),
         extractor_factory=_level_factory,
     )
-    bt = _build_of(text)
-    assert [e.content_digest for e in bt.entries] == [
+    # Текст сохранён: контент чанков не изменился — ось меняет условия извлечения,
+    # а не извлечённый текст.
+    assert hashes_text == hashes_default
+    assert bt.doc_count == bd.doc_count
+    assert bt.chunk_count == bd.chunk_count
+    assert bt.index_build_id != bd.index_build_id
+    # 16 §6.1: адрес чанка — ``product:doc_version_id:chunk_no``, и версия документа
+    # включает уровень (09 §4.2). Поэтому ``content_digest`` тоже расходится: это
+    # объявленная смена идентичности адреса, а не изменения текста (доказано выше).
+    assert [e.content_digest for e in bt.entries] != [
         e.content_digest for e in bd.entries
     ]
-    assert bt.index_build_id != bd.index_build_id
 
 
 # --------------------------------------------------------------------------- #

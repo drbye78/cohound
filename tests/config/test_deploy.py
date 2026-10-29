@@ -22,6 +22,7 @@ from core.config.deploy import (
     CrawlBrowserConfig,
     CrawlConfig,
     DeployConfig,
+    EmbedConfig,
     LLMDeployConfig,
     LLMSlotConfig,
     SearchDeployConfig,
@@ -33,6 +34,9 @@ from core.config.deploy import (
     resolve_search_provider,
     resolve_serp_rounds,
 )
+from core.domain.enums import EmbedDevice
+from core.domain.models import EmbedRunConfig
+from core.pipeline.crawl_frontier import resolve_embed_device
 
 FIXTURES = Path(__file__).parent / "fixtures"
 # ---------------------------------------------------------------------------
@@ -660,6 +664,12 @@ def test_malformed_yaml_rejected(tmp_path: Path) -> None:
         pytest.param(
             _dump({"profile": "local", "llm": {"cheap": {"endpoint": "x"}}}), id="llm-slot"
         ),
+        pytest.param(
+            _dump({"profile": "local", "embed": {"backend": "remote"}}), id="embed"
+        ),
+        pytest.param(
+            _dump({"profile": "local", "embed": {"device": "auto"}}), id="embed-auto"
+        ),
     ],
 )
 def test_extra_fields_rejected(tmp_path: Path, text: str) -> None:
@@ -873,3 +883,72 @@ def test_llm_slot_non_positive_timeout_rejected(tmp_path: Path) -> None:
     path = _write(tmp_path, _dump({"profile": "local", "llm": {"cheap": {"timeout_s": 0}}}))
     with pytest.raises(ValidationError, match="timeout_s"):
         load_deploy_config(path)
+
+
+# ---------------------------------------------------------------------------
+# Секция embed: устройство эмбеддера (ось ``embed.device``, 16 §4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_embed_defaults_to_cpu_without_section(tmp_path: Path) -> None:
+    """Отсутствие секции ``embed`` = ``cpu``: объявленный дефолт, не выбор torch."""
+    cfg = load_deploy_config(_write(tmp_path, "profile: local\n"))
+    assert cfg.embed == EmbedConfig()
+    assert cfg.embed.device is EmbedDevice.CPU
+
+
+def test_embed_section_parsed(tmp_path: Path) -> None:
+    cfg = load_deploy_config(_write(tmp_path, "profile: local\nembed:\n  device: cuda\n"))
+    assert cfg.embed.device is EmbedDevice.CUDA
+
+
+def test_embed_rejects_unknown_key_inside_section() -> None:
+    """``extra="forbid"`` внутри ``embed:``: ключ без модели отвергается, а не игнорируется.
+
+    Иначе ``embed: {backend: remote}`` создавал бы впечатление объявленного backend'а,
+    которого никто не исполняет (``14`` §6 п. 5 — backend остаётся недекларированным).
+    """
+    with pytest.raises(ValidationError):
+        EmbedConfig.model_validate({"backend": "remote"})
+
+
+def test_embed_run_layer_default_is_none() -> None:
+    """Дефолт run-слоя — ``None``: иначе он перекрыл бы app-слой в ``_pick``."""
+    assert EmbedRunConfig().device is None
+
+
+def test_embed_device_resolves_app_then_run() -> None:
+    """Цепочка app < run и **никакого** per-site слоя (устройство — свойство хоста)."""
+    assert resolve_embed_device(EmbedConfig(), None) is EmbedDevice.CPU
+    assert (
+        resolve_embed_device(EmbedConfig(device="cuda"), None) is EmbedDevice.CUDA
+    )
+    assert (
+        resolve_embed_device(
+            EmbedConfig(device="cpu"), EmbedRunConfig(device="cuda")
+        )
+        is EmbedDevice.CUDA
+    )
+    # run-слой ``None`` не отменяет app: «не задано» ≠ «cpu».
+    assert (
+        resolve_embed_device(
+            EmbedConfig(device="cuda"), EmbedRunConfig(device=None)
+        )
+        is EmbedDevice.CUDA
+    )
+    # Контейнер тоже принимается: вызов с ``deploy`` не должен молча дать ``cpu``.
+    assert (
+        resolve_embed_device(
+            DeployConfig(embed=EmbedConfig(device="cuda")), None
+        )
+        is EmbedDevice.CUDA
+    )
+
+
+def test_embed_device_has_no_site_layer() -> None:
+    """Профиль домена не объявляет устройство эмбеддера (``extra="forbid"``)."""
+    from core.config.domain_profiles import DomainProfile
+
+    assert not hasattr(DomainProfile(), "embed_device")
+    with pytest.raises(ValidationError):
+        DomainProfile(embed_device="cuda")  # type: ignore[call-arg]

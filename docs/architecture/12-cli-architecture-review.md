@@ -167,7 +167,7 @@ evaluate, review, g3, compute, g4, report`.
 То есть `35e4373` закрыл **один** путь: отсутствующий файл БД → `EXIT_NOT_FOUND`
 (`build_store(read_only=True)` → `StoreNotInitialized`). Второй путь — файл есть, а прогона в
 нём нет — по-прежнему `EXIT_USAGE`: `read_manifest` бросает `ValueError("прогон не найден…")`
-(`core/store/sqlite_store.py:2213-2219`), и CLI печатает `E: прогон не найден: 'ghost'` кодом 2.
+(`core/store/sqlite_store.py:2499`), и CLI печатает `E: прогон не найден: 'ghost'` кодом 2.
 Для скрипта это одно и то же событие с двумя кодами — в зависимости от того, кто создал файл.
 
 Историческая часть ниже (проверка на момент разбора):
@@ -394,7 +394,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 
 ### Команды «только для чтения» создают БД
 
-✅ сделано (`core/store/sqlite.py:596` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
+✅ сделано (`core/store/sqlite.py:641` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
 Перемер на тех же трёх командах и несуществующем пути: `review --db /tmp/…/x.db`,
 `sensitivity --db …`, `golden --golden … --db …` → **`exit 4`**, каталог не создаётся
 (`ls: cannot access …`: файла нет). Сообщение называет причину: «read-only команда файл не

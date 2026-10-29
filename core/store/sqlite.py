@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS runs (
     crawl_config_digest   TEXT,                        -- §13/N6: дайджест разрешённой конфигурации контроля краула (execution_change)
     registry_spec_digest  TEXT,                        -- §13/E2: дайджест package-scoped спецификаций реестров (execution_change)
     execution_contract_digest TEXT,                    -- §13/09 §12.5: отпечаток условий измерения (methodology_change boundary)
+    previous_run_id       TEXT,                        -- 09 §12.3: прогон, против которого считался этот (lineage)
+    change_class          TEXT,                        -- §13: класс изменения относительно предыдущего прогона
+    cycle_id              TEXT,                        -- 09 §2.4: эффективный цикл прогона (материал run_id)
     manual_artifacts_digest TEXT,                      -- 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов (execution_change)
     manual_artifacts_json TEXT,                        -- 13-manual-artifacts §3.4: доля ручного (наблюдение, не потолок)
     partial_docs_json     TEXT,                        -- I2/I2c: частичное извлечение числом (наблюдение, не потолок)
@@ -140,6 +143,19 @@ CREATE TABLE IF NOT EXISTS manual_artifacts (
     created_at      TEXT,
     PRIMARY KEY (run_id, product_id, url),
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+
+-- 16 §6: версия документа → строка корпуса. Производный индекс: ``dv`` уникален
+-- (включает ``content_hash`` + версию экстрактора + уровень), а ``doc_id`` — нет
+-- (``product_id:content_hash``, без уровня), поэтому «версия на строку» теряла бы версии
+-- при совпадении текста на разных уровнях извлечения (ось ``document_level`` — per-site).
+-- Хранится потому, что ни одно из направлений не выводится: ``dv`` → ``doc_id`` не
+-- вычисляется (``short_hash`` необратим), ``doc_id`` → ``dv`` неоднозначно (версий у
+-- документа бывает несколько). Колонкой строки это не выразить — отсюда таблица.
+CREATE TABLE IF NOT EXISTS corpus_doc_version (
+    doc_version_id TEXT PRIMARY KEY,
+    product_id     TEXT NOT NULL,
+    doc_id         TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS corpus_chunks (
@@ -376,6 +392,34 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
     PRIMARY KEY (run_id, product_id)
 );
 
+-- 16 §3.2: статус продукта **в прогоне** — первоклассная строка, а не снимок в ``state.db``
+-- (09 §4.3/§6.5) и не текст в ``results[].notes``. Пишется на границе продукта и
+-- переписывается в конце фазы (образец — ``corpus_coverage``), поэтому ``run_product`` —
+-- носитель величин ``cells_total``/``cells_pending``/``baseline_complete``, а ``notes``
+-- остаётся для оператора. ``cells_carried``/``cells_measured`` **не заводятся**: переноса
+-- ячеек нет (09 §10), и колонка, всегда равная нулю, — ложь о существующем механизме.
+-- ``coverage_complete`` NULL = покрытие не считалось (не «полное»).
+CREATE TABLE IF NOT EXISTS run_product (
+    run_id            TEXT NOT NULL,
+    product_id        TEXT NOT NULL,
+    mode              TEXT NOT NULL,            -- new|full|incremental
+    status            TEXT NOT NULL,            -- pending|running|complete|partial|failed|blocked
+    scope             TEXT NOT NULL DEFAULT 'full',
+    phase             TEXT,
+    coverage_complete INTEGER,
+    docs_total        INTEGER NOT NULL DEFAULT 0,
+    docs_reused       INTEGER NOT NULL DEFAULT 0,
+    docs_new          INTEGER NOT NULL DEFAULT 0,
+    cells_total       INTEGER NOT NULL DEFAULT 0,
+    cells_pending     INTEGER NOT NULL DEFAULT 0,
+    baseline_complete INTEGER NOT NULL DEFAULT 0,
+    error_kind        TEXT,
+    error             TEXT,
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (run_id, product_id),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+
 -- B3 (schema 3.10.0): члены контейнеров — **производный** вид ретейленного архива (§6.7).
 -- Байты членов отдельно не хранятся: архив — сырьё (I19), член ре-выводится из него тем
 -- же ``open_member`` по ``archive_path``. Идентичность — ``(archive_content_hash,
@@ -406,6 +450,10 @@ CREATE TABLE IF NOT EXISTS corpus_members (
 
 CREATE INDEX IF NOT EXISTS idx_corpus_members_product ON corpus_members(product_id);
 CREATE INDEX IF NOT EXISTS idx_corpus_members_doc     ON corpus_members(doc_id);
+-- 16 §6: отображение версии в документ спрашивается по паре (продукт, документ) — например
+-- при резолве ``source_id``, где второй сегмент несёт версию.
+CREATE INDEX IF NOT EXISTS idx_corpus_doc_version_doc
+    ON corpus_doc_version(product_id, doc_id);
 
 -- B3 (schema 3.10.0): наблюдения спуска — прогноз (до извлечения) + исход.
 -- Запись существует для **каждого** контейнера, включая пустой и нечитаемый: «спуск
@@ -818,6 +866,53 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
             "extracted_chars": "INTEGER",
         },
     )
+    # 16 §3.1/§3.3 (граница ``runs``, аддитивно, ``schema_version`` **не** поднимается):
+    # ``runs.run_scope``/``runs.product_plan_json`` — провенанс среза прогона (``--only-product``
+    # меняет смысл измерения и обязан быть виден в артефакте, 09 §13.6); ``runs.embed_device``
+    # — наблюдаемое поле объявленной оси (в ``run_id`` оно уже входит через контракт, здесь —
+    # чтобы «на чём считались векторы» читалось запросом, а не восстановлением из дайджеста).
+    # ``corpus_docs.http_status``/``reuse_kind`` — происхождение наблюдения (09 §11.2):
+    # без них 304-документ неотличим от живого 200, и правило «``❌`` нельзя публиковать на
+    # неподтверждённом наблюдении» неисполнимо. ``reuse_kind IS NULL`` = «наблюдение не
+    # записано» (legacy-строки), а не «наблюдение подтверждено».
+    _ensure_columns(
+        conn,
+        "runs",
+        {
+            "run_scope": "TEXT",
+            "product_plan_json": "TEXT",
+            "embed_device": "TEXT",
+        },
+    )
+    # 09 §12.3/§13 (аддитивно, ``schema_version`` **не** поднимается): ``runs.previous_run_id``
+    # и ``runs.change_class`` — провенанс сравнения прогона; ``runs.cycle_id`` — эффективный
+    # цикл (материал ``run_id``, 09 §2.4). Поля были объявлены в манифесте (``cycle_id`` —
+    # вовсе не был объявлен) и не писались никуда, поэтому ``run_manifest.yaml`` и
+    # ``hound report --json`` молчали о том, против какого прогона и в каком цикле считался
+    # этот. Источник — строка ``run_lineage`` (там ``change_class`` и вычисляется); колонки
+    # делают те же факты читаемыми из строки прогона, без открытия ``state.db``.
+    # NULL = «не записано» (legacy-строка), а не «предшественника не было».
+    _ensure_columns(
+        conn,
+        "runs",
+        {"previous_run_id": "TEXT", "change_class": "TEXT", "cycle_id": "TEXT"},
+    )
+    # Версия документа (16 §6) — вторая форма адреса: ``chunk_id`` (и
+    # ``CellEvidence.source_id``) несёт версию (``dv_...``), а ``doc_id`` остаётся
+    # ``product_id:content_hash`` (на нём держится дедуп по хешу). Носитель отображения —
+    # **отдельная** таблица ``corpus_doc_version`` (одна версия → один документ; обратное
+    # неверно), а не колонка: ``dv`` включает уровень извлечения, ``doc_id`` — нет, поэтому
+    # «версия на строку» теряла бы версии при совпадении текста на разных уровнях
+    # (``document_level`` — per-site ось, две версии одного документа в одном прогоне —
+    # законное состояние). Таблица создаётся ``CREATE TABLE IF NOT EXISTS`` в DDL — ALTER
+    # не нужен, ``schema_version`` **не** поднимается (аддитивно).
+    _ensure_columns(
+        conn,
+        "corpus_docs",
+        {"http_status": "INTEGER", "reuse_kind": "TEXT"},
+    )
+    # Таблица ``run_product`` (16 §3.2) создаётся ``CREATE TABLE IF NOT EXISTS`` в DDL —
+    # новые таблицы не требуют ALTER; вызов идемпотентен на любой БД.
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     # DDL-миграция v3.11.0 (G3/G4 как точки интеграции): решение гейта привязывается к

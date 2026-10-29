@@ -24,6 +24,7 @@ from core.domain.enums import (
     DenialClaim,
     DenialStrength,
     DocumentLevel,
+    EmbedDevice,
     ExcludedCellClass,
     ExtractionRoute,
     FailureKind,
@@ -43,6 +44,7 @@ from core.domain.enums import (
     RankingRestriction,
     RefreshPolicy,
     ReuseKind,
+    RunProductStatus,
     RunScope,
     SearchKind,
     SearchMode,
@@ -107,6 +109,10 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "pdf_pipeline",
         # P9: устройство моделей извлечения PDF (crawl.pdf_device).
         "pdf_device",
+        # 16 §4.1: устройство эмбеддера (embed.device) — объявленная ось прогона.
+        "embed_device",
+        # 16 §3.2: статус продукта в прогоне (носитель — таблица run_product).
+        "run_product_status",
         # §7.1/§7.4: механизм constrained decoding оценщика (V4).
         "decoder",
         # P6: глубина спуска в контейнеры (crawl.archive_descent).
@@ -169,6 +175,14 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "document_level": {v.value for v in DocumentLevel},
         "pdf_pipeline": {v.value for v in PdfPipeline},
         "pdf_device": {v.value for v in PdfDevice},
+        # 16 §4.1: ось устройства эмбеддера — сверяется с enum'ом, потому что производитель
+        # у неё есть (резолвер ``resolve_embed_device`` + контракт ``embed_device``).
+        "embed_device": {v.value for v in EmbedDevice},
+        # 16 §3.2: статус продукта в прогоне. Сверка есть, потому что производитель
+        # появился вместе с писателем ``run_product``: перечисление без писателя было бы
+        # объявлением семантики, которую некому исполнять, а секция словаря без сверки
+        # разъехалась бы с enum'ом молча.
+        "run_product_status": {v.value for v in RunProductStatus},
         "decoder": {v.value for v in Decoder},
         "archive_descent": {v.value for v in ArchiveDescent},
         "archive_descent_status": {v.value for v in ArchiveDescentStatus},

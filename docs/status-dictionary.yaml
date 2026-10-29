@@ -10,7 +10,8 @@
 # Операционные (добавление значений НЕ требует бампа status_dictionary_version):
 # crawl_*, archive_*, document_*, fetch_mode, extraction_route, seed_*, onboarding_state,
 # product_mode, refresh_policy, product_scope, incremental_kind, reuse_kind, change_class,
-# run_scope, skip_reason, stale_reason, search_phase, termination_reason, adapter_kind,
+# run_scope, run_product_status, embed_device, skip_reason, stale_reason, search_phase,
+# termination_reason, adapter_kind,
 # endpoint_kind, llm_scenario, gate/gate_source/gate_verdict/gate_policy, golden_tier, cap,
 # importance, param_type, archetype, anchor_relation, crawl_probe_*,
 # ranking_restriction, uncertainty_provenance.
@@ -438,6 +439,22 @@ pdf_device:
   - cpu
   - cuda
 
+# 16 §4.1. Устройство эмбеддера (embed.device): на чём считаются векторы корпуса.
+# Значения только cpu | cuda — `auto` НЕ существует по той же причине, что у pdf_device
+# выше (R5): объявленная ось обязана действовать, а `auto` = «устройство выбрало
+# окружение», то есть тот же класс дефекта, что чтение модели оценщика из env (§7.4).
+# Ось входит в `EXECUTION_CONTRACT_FIELDS` (поле `embed_device`, 28 → 29), поэтому её
+# смена — `execution_change` (новый `run_id`); входит в материал `pb` и в ключ
+# `embed_cache` — иначе CPU-прогон получил бы CUDA-векторы под тем же ключом. Дефолт —
+# cpu (app-слой `deploy.yaml:embed.device`; run-слой `run.yaml:embed.device` его
+# перекрывает, per-site слоя нет: устройство — свойство хоста исполнения).
+# `cuda` при недоступном устройстве — отказ (EXIT_USAGE) с числами, не тихий CPU:
+# иначе `extractor_version`/манифест назвали бы GPU, на котором прогон не исполнялся.
+# Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря.
+embed_device:
+  - cpu
+  - cuda
+
 # §4.1/§5. Семейство документа — выбор чанкера (``ExtractedDoc.family`` →
 # ``chunker_family``): markdown → чанкер с ``heading_path``, text → абзацный,
 # epub → читатель stdlib-OCF + текстовый чанкер. Де-факто перечисление: в коде это
@@ -671,6 +688,23 @@ run_scope:
   - full
   - only_failed
   - product_only
+
+# 16 §3.2. Статус продукта **в прогоне** (таблица `run_product`, колонка `status`).
+# Носитель — строка `run_product` (PK `run_id, product_id`), а не снимок в `state.db`:
+# статус относится к этому прогону и обязан читаться из прогонной БД. `pending` —
+# продукт в плане, но не начат; `running` — фаза идёт; `complete` — продукт пройден
+# целиком; `partial` — часть работы не выполнена (причина в `error_kind`/`error`);
+# `failed` — сбой прибора; `blocked` — префлайт/гейт не пустил (не сбой измерения).
+# Операционное перечисление (наблюдаемость прогона, не семантика правил) — добавление
+# без бампа версии словаря. Сверки с enum'ом здесь нет намеренно: StrEnum заводится там,
+# где у перечисления есть производитель (писатель `run_product`), а словарь — раньше него.
+run_product_status:
+  - pending
+  - running
+  - complete
+  - partial
+  - failed
+  - blocked
 
 # P6c. Ограничение ранжирования полосой неопределённости вердиктов.
 # Операционное перечисление (условие публикации, не семантика правила): добавление

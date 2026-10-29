@@ -64,7 +64,12 @@ from core.domain import (
 from core.pipeline.compute import compute
 from core.pipeline.evaluate import evaluate_phase
 from core.pipeline.normalize import RunInputs
-from core.pipeline.phases import IMPLEMENTED_PHASES, _package_id, build_phases
+from core.pipeline.phases import (
+    IMPLEMENTED_PHASES,
+    _lineage_provenance,
+    _package_id,
+    build_phases,
+)
 from core.pipeline.plan import RunPlan
 from core.pipeline.report import build_manifest
 from core.pipeline.runner import (
@@ -75,6 +80,7 @@ from core.pipeline.runner import (
     RunContext,
     Runner,
 )
+from core.ports.state import RunLineageRow
 from core.ports.types import FetchPlan, RawPage
 from core.ports.vector_index import RetrievedChunk
 from core.store.sqlite_store import SqliteStore
@@ -926,6 +932,48 @@ def test_evaluate_phase_uses_retrieval_and_never_search() -> None:
     assert "cutoff_K" in (p1[0].retrieval_params_json or "")
 
 
+def _evaluate_log(*, previous_run_id: str | None) -> list[str]:
+    """Лог фазы оценки при заданном/отсутствующем предшественнике (09 §12.3)."""
+    from core.domain import CorpusCoverage
+
+    ports = Ports(evaluator=FakeEvaluator(default=_ok_output()), lexical_index=_chunks_index())
+    store = _store()
+    store.save_corpus_coverage(
+        RUN_ID,
+        CorpusCoverage(
+            product_id="p1",
+            complete=True,
+            expected_sources=1,
+            observed_sources=1,
+            computed_at="2026-01-01T00:00:00+00:00",
+        ),
+    )
+    try:
+        result = evaluate_phase(
+            plan=_plan(),
+            ports=ports,
+            store=store,
+            run_id=RUN_ID,
+            profile="R0",
+            cutoff_k=3,
+            previous_run_id=previous_run_id,
+        )
+    finally:
+        store.close()
+    assert result.status == "ok"
+    return [str(entry) for entry in result.log_entries]
+
+
+def test_evaluate_phase_log_names_previous_run() -> None:
+    """База сравнения видна в логе фазы, а не только в ``state.db``."""
+    assert "evaluate: previous=run-prev" in _evaluate_log(previous_run_id="run-prev")
+
+
+def test_evaluate_phase_log_marks_absent_previous_run() -> None:
+    """Предшественника нет — ``previous=—``: отсутствие базы названо, а не угадано."""
+    assert "evaluate: previous=—" in _evaluate_log(previous_run_id=None)
+
+
 def test_evaluate_phase_without_evaluator_fails() -> None:
     result = evaluate_phase(
         plan=_plan(), ports=Ports(), store=_store(), run_id=RUN_ID
@@ -1083,6 +1131,116 @@ def test_build_phases_without_deploy_provenance_is_backward_compatible(
     assert manifest["deploy_profile"] is None
     assert manifest["edge_schema_version"] is None
     assert manifest["edge_capabilities"] == {}
+
+
+def test_build_phases_forwards_lineage_provenance_to_manifest(tmp_path: Path) -> None:
+    """09 §2.4/§12.3/§13: цикл, предшественник и класс изменения доходят до артефакта.
+
+    ``previous_run_id``/``change_class`` были объявлены и **никогда** не заполнялись, а
+    ``cycle_id`` не был объявлен вовсе: читатель ``run_manifest.yaml`` не видел ни цикла
+    (а он входит в материал ``run_id``), ни базы сравнения.
+    """
+    manifest = _run_chain_to_report(
+        tmp_path,
+        previous_run_id="run-prev",
+        change_class="execution_change",
+        cycle_id="2026-W43",
+    )
+    assert manifest["cycle_id"] == "2026-W43"
+    assert manifest["previous_run_id"] == "run-prev"
+    assert manifest["change_class"] == "execution_change"
+
+
+def test_build_phases_without_lineage_provenance_is_honest_none(tmp_path: Path) -> None:
+    """Нечего назвать — ``None``, а не выдуманное значение (A3)."""
+    manifest = _run_chain_to_report(tmp_path)
+    assert manifest["cycle_id"] is None
+    assert manifest["previous_run_id"] is None
+    assert manifest["change_class"] is None
+
+
+class _LineageState:
+    """Минимальный носитель ``get_run_lineage`` (порт ``ProductStatePort``)."""
+
+    def __init__(self, row: RunLineageRow | None, *, broken: bool = False) -> None:
+        self._row = row
+        self._broken = broken
+
+    def get_run_lineage(self, run_id: str) -> RunLineageRow | None:
+        if self._broken:
+            raise RuntimeError("state.db недоступен")
+        return self._row
+
+
+def _recorded_lineage() -> RunLineageRow:
+    return RunLineageRow(
+        run_id=RUN_ID,
+        package_id="case-1",
+        cycle_id="2026-01-01",
+        cohort_digest="cohort",
+        seeds_digest="seeds",
+        execution_contract_digest="contract",
+        change_class="cohort_expansion",
+        status="complete",
+        started_at=FIXED_TS,
+        previous_run_id="run-row",
+    )
+
+
+def test_lineage_provenance_prefers_recorded_row() -> None:
+    """Записанная строка lineage — правда: манифест обязан совпадать с ``state.db``."""
+    notes: list[str] = []
+    assert _lineage_provenance(
+        _LineageState(_recorded_lineage()),
+        RUN_ID,
+        declared_cycle="declared-cycle",
+        declared_previous="run-declared",
+        declared_change="none",
+        notes=notes,
+    ) == ("2026-01-01", "run-row", "cohort_expansion")
+    assert notes == []
+
+
+def test_lineage_provenance_falls_back_to_declared_identity() -> None:
+    """Строки ещё нет (её пишет ``record_run_outcome`` после фаз) — берём идентичность."""
+    notes: list[str] = []
+    assert _lineage_provenance(
+        _LineageState(None),
+        RUN_ID,
+        declared_cycle="declared-cycle",
+        declared_previous="run-declared",
+        declared_change="none",
+        notes=notes,
+    ) == ("declared-cycle", "run-declared", "none")
+    assert notes == []
+
+
+def test_lineage_provenance_read_failure_is_a_note_not_a_crash() -> None:
+    """Сбой чтения lineage — замечание провенанса, а не падение фазы отчёта."""
+    notes: list[str] = []
+    assert _lineage_provenance(
+        _LineageState(None, broken=True),
+        RUN_ID,
+        declared_cycle="declared-cycle",
+        declared_previous="run-declared",
+        declared_change="none",
+        notes=notes,
+    ) == ("declared-cycle", "run-declared", "none")
+    assert notes and "state.db недоступен" in notes[0]
+
+
+def test_lineage_provenance_without_state_is_none() -> None:
+    """``state is None`` — «не записано», а не «истории не было»."""
+    notes: list[str] = []
+    assert _lineage_provenance(
+        None,
+        RUN_ID,
+        declared_cycle=None,
+        declared_previous=None,
+        declared_change=None,
+        notes=notes,
+    ) == (None, None, None)
+    assert notes == []
 
 
 def test_build_phases_records_default_retrieval_provenance(tmp_path: Path) -> None:

@@ -34,6 +34,7 @@ from core.domain import (
     CrawlSessionStatus,
     CrawlStrategy,
     DocumentLevel,
+    EmbedDevice,
     FailureKind,
     RateLimitSpec,
     RunConfig,
@@ -754,23 +755,39 @@ def test_chunk_id_is_deterministic(tmp_path: Path) -> None:
     pages = {URL_P1_A: b"chunk me", URL_P2_A: b"other"}
     urls = {"p1": [URL_P1_A], "p2": [URL_P2_A]}
 
-    def _ids(root: Path) -> list[str]:
+    def _ids(root: Path) -> tuple[list[str], dict[str, str]]:
         store = SqliteStore(":memory:")
+        state = SqliteStateStore(":memory:")
         try:
-            _build(root, pages=pages, urls=urls, store=store)
-            return sorted(
+            _build(root, pages=pages, urls=urls, store=store, state=state)
+            ids = sorted(
                 row["chunk_id"]
                 for row in store.conn.execute("SELECT chunk_id FROM corpus_chunks")
             )
+            # Версия документа — из durable-субстрата: адрес чанка обязан быть
+            # функцией именно её (16 §6.1), а не пересказом внутренних полей.
+            versions = {
+                pid: (row.doc_version_id or "")
+                for pid, url in (("p1", URL_P1_A), ("p2", URL_P2_A))
+                if (row := state.get_url_state(pid, url)) is not None
+            }
+            return ids, versions
         finally:
+            state.close()
             store.close()
 
-    first = _ids(tmp_path / "a")
-    second = _ids(tmp_path / "b")
+    first, versions = _ids(tmp_path / "a")
+    second, versions_again = _ids(tmp_path / "b")
     assert first == second
-    # Формат: product:doc_hash:chunk_no — глобально уникальный.
-    doc_hash = content_hash(b"chunk me")
-    assert f"p1:{doc_hash}:0" in first
+    assert versions == versions_again
+    # 16 §6.1: адрес чанка — ``product:doc_version_id:chunk_no``, то есть **версия
+    # документа**, а не хеш его байтов. Разница видна ровно там, где важна: один и тот же
+    # текст, извлечённый другим экстрактором или на другом уровне, — разные версии
+    # документа (09 §4.2), и их chunk-сеты не должны сливаться в один адрес.
+    assert versions["p1"].startswith("dv_")
+    assert f"p1:{versions['p1']}:0" in first
+    # Хеш байтов в адресе не участвует: он — содержимое версии, а не её имя.
+    assert not any(content_hash(b"chunk me") in cid for cid in first)
 
 
 def test_chunk_content_hash_from_text_and_build_id(tmp_path: Path) -> None:
@@ -882,6 +899,7 @@ def test_partition_build_id_ignores_retrieval_and_provenance() -> None:
         "product_id",
         "chunker_version",
         "embed_model_id",
+        "embed_device",
         "extractor_version",
         "lexical_engine_version",
         "vector_store",
@@ -896,6 +914,7 @@ def test_partition_build_id_deterministic_and_sensitive() -> None:
         product_id="p1",
         chunker_version="chunker-1",
         embed_model_id="embed-1",
+        embed_device="cpu",
         extractor_version="extractor-1",
         lexical_engine_version="lex-1",
         vector_store="npy-fp16",
@@ -909,6 +928,10 @@ def test_partition_build_id_deterministic_and_sensitive() -> None:
         {"product_id": "p2"},
         {"chunker_version": "chunker-2"},
         {"embed_model_id": "embed-2"},
+        # 16 §4.1/§5.1: место счёта векторов — часть условий сборки. Числа CPU и CUDA
+        # численно разные, поэтому партиция, посчитанная на другом устройстве, — другая
+        # сборка, а не «та же с другим провенансом».
+        {"embed_device": "cuda"},
         {"extractor_version": "extractor-2"},
         {"lexical_engine_version": "lex-2"},
         {"vector_store": "other"},
@@ -969,6 +992,9 @@ def test_partition_build_id_uses_actual_builder_engine(tmp_path: Path) -> None:
         product_id="p1",
         chunker_version=entry.chunker_version or "",
         embed_model_id=entry.embed_model_id or "",
+        # Ось устройства объявлена здесь как дефолт: ``_build`` её не задаёт, а партиция
+        # в этом прогоне посчитана именно дефолтом (16 §4.1, ``cpu``).
+        embed_device=EmbedDevice.CPU.value,
         extractor_version=entry.extractor_version or "",
         lexical_engine_version="tantivy-0.26.2",
         vector_store=entry.vector_store or "",
@@ -1233,11 +1259,11 @@ class _FlakyDocStore(SqliteStore):
         self.fail_doc_ids = set(fail_doc_ids)
         self.doc_attempts: list[str] = []
 
-    def upsert_corpus_doc(self, doc: CorpusDoc) -> None:
+    def upsert_corpus_doc(self, doc: CorpusDoc, **kwargs: Any) -> None:
         self.doc_attempts.append(doc.doc_id)
         if doc.doc_id in self.fail_doc_ids:
             raise RuntimeError("store unavailable")
-        super().upsert_corpus_doc(doc)
+        super().upsert_corpus_doc(doc, **kwargs)
 
 
 def test_docs_persisted_mid_product_survive_abort(tmp_path: Path) -> None:
@@ -4176,13 +4202,17 @@ SHARED_DURABLE = "https://docs.test/p1/shared"
 
 
 def test_sitemap_multi_root_resume_budget_counts_shared_url_once(tmp_path: Path) -> None:
-    """F13 (multi-root, секция sitemap/бюджет): URL в scope двух корней заряжает
-    ``max_documents`` **один раз** (продукт).
+    """F13 (multi-root, секция sitemap/бюджет): URL заряжает ``max_documents`` **один раз**
+    и только **своему владельцу** (продукт-wide, 09 §6.3 «Владение known-URL»).
 
     Раньше ``consumed`` считался по каждому корню отдельно: URL, лежащий в scope host-корня
     и вложенного path-корня, заряжался обоим, и на resume бюджет вложенного корня
-    исчерпывался досрочно (ложный ``truncated``). Теперь первый корень-претендент помечает
-    URL, последующие его не пересчитывают; fresh-путь (``note_fetched``) не изменён.
+    исчерпывался досрочно (ложный ``truncated``). Теперь зарядку получает **владелец** —
+    корень с самым специфичным ``root_path_prefix`` (:func:`_scope_owner`, тот же предикат,
+    что у группировки ревалидации), а не первый корень-претендент: иначе host-корень с
+    префиксом ``/`` забирал зарядку у docs-корня, и потолок умножался на число
+    перезапусков (измерено: 1610 ``fetched`` при потолке 800). Fresh-путь
+    (``note_fetched``) не изменён.
     """
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -4204,10 +4234,10 @@ def test_sitemap_multi_root_resume_budget_counts_shared_url_once(tmp_path: Path)
         )
         assert {i.url for i in _items(store)} >= {HOST_SCOPE_ROOT, SHARED_DURABLE}
 
-        # Второй прогон: host-корень идёт первым и забирает оба durable-URL; вложенному
-        # корню бюджет не заряжается повторно. Порядок теперь **авторский**
-        # (execution_change §13: `sorted()` снят), поэтому он объявлен в списке явно —
-        # раньше его давала лексикографическая сортировка, и пин молча зависел от неё.
+        # Второй прогон: оба корня объявлены, общий durable-URL принадлежит вложенному
+        # (``/p1/`` специфичнее ``/``). Порядок **авторский** (execution_change §13:
+        # `sorted()` снят), поэтому он объявлен в списке явно — раньше его давала
+        # лексикографическая сортировка, и пин молча зависел от неё.
         crawler = _Crawler({PATH_SCOPE_ROOT: b"path seed"})
         result = _build(
             tmp_path,
@@ -4223,12 +4253,20 @@ def test_sitemap_multi_root_resume_budget_counts_shared_url_once(tmp_path: Path)
         )
         assert result.errors == []
         records = {rec["root"]: rec for rec in _build_of(result).truncation}
-        # Host-корень заряжен обоими durable-URL (2 < 5) — не усечён.
-        assert records[HOST_SCOPE_ROOT]["pages_fetched"] == 2
+        # Host-корень заряжен только своим seed'ом: общий URL — не его (1 < 5).
+        assert records[HOST_SCOPE_ROOT]["pages_fetched"] == 1
         assert records[HOST_SCOPE_ROOT]["truncated"] is False
-        # Вложенный корень: 0 заряженных (URL уже учтён продуктом) + 1 свежий seed.
-        assert records[PATH_SCOPE_ROOT]["pages_fetched"] == 1
-        assert records[PATH_SCOPE_ROOT]["truncated"] is False
+        # Вложенный корень: 1 заряженный общий URL + 1 свежий seed = 2 = его потолок.
+        # Ровно 2, а не 3: зарядка не задвоилась продукт-wide (``resume_counted``).
+        assert records[PATH_SCOPE_ROOT]["pages_fetched"] == 2
+        # ``truncated=True`` здесь — **зафиксированное поведение HEAD**, а не следствие
+        # дефекта 1: корень, ровно заполнивший ``max_documents``, объявляется усечённым
+        # независимо от того, осталась ли в очереди работа. Это отдельная семантика
+        # (цена — ложный ``complete=False`` и лишний ``scope_acceptance`` для ``❌``,
+        # I2c) и кандидат на свою границу ``methodology_change``; тест её пинит, чтобы
+        # смена не прошла молча.
+        assert records[PATH_SCOPE_ROOT]["truncated"] is True
+        assert records[PATH_SCOPE_ROOT]["truncated_reason"] == "max_documents"
         assert [u for u, _ in crawler.calls] == [PATH_SCOPE_ROOT]
         assert PATH_SCOPE_ROOT in {d.url for d in _docs(store)}
     finally:

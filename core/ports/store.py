@@ -349,6 +349,43 @@ class StorePort(Protocol):
         """Итерирует покрытие прогона; детерминированный порядок ``product_id``."""
         ...
 
+    # -- статус продукта в прогоне (16 §3.2) -------------------------------- #
+    def save_run_product(
+        self,
+        run_id: str,
+        product_id: str,
+        *,
+        mode: str,
+        status: str,
+        scope: str = "full",
+        phase: str | None = None,
+        coverage_complete: bool | None = None,
+        docs_total: int = 0,
+        docs_reused: int = 0,
+        docs_new: int = 0,
+        cells_total: int = 0,
+        cells_pending: int = 0,
+        baseline_complete: int = 0,
+        error_kind: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Идемпотентный upsert статуса продукта **в прогоне** по PK ``(run_id, product_id)``.
+
+        Носитель per-product состояния прогона: ``state.db`` хранит durable-субстрат между
+        прогонами, а прогонная БД обязана отвечать на «что случилось с продуктом **в этом**
+        прогоне» без обращения к ``state.db``. ``coverage_complete=None`` — покрытие не
+        считалось (не «полное»). ``updated_at`` ставит хранилище.
+        """
+        ...
+
+    def iter_run_products(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Итерирует строки ``run_product`` прогона (порядок ``product_id``).
+
+        Ключи — явный набор колонок таблицы; ``coverage_complete`` — ``bool | None``
+        (``None`` = покрытие не считалось), счётчики — ``int``.
+        """
+        ...
+
     # -- спуск в контейнеры (B3: прогноз/исход + члены) -------------------- #
     def save_archive_observation(self, observation: ArchiveObservation) -> None:
         """Идемпотентный upsert наблюдения спуска по PK ``observation_id``.

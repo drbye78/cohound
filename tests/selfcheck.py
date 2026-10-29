@@ -783,7 +783,10 @@ def _db_smoke() -> None:
               "search_exhaustion", "registry_facts", "run_inputs",
               "crawl_sessions", "crawl_session_items", "corpus_coverage",
               # B3: спуск в контейнеры — члены (производный вид архива) и наблюдения.
-              "corpus_members", "archive_observations"):
+              "corpus_members", "archive_observations",
+              # 16 §3.2: статус продукта **в прогоне** — первоклассная строка, а не снимок
+              # в ``state.db`` и не текст в ``results[].notes``.
+              "run_product"):
         _assert(t in tables)
 
     # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/
@@ -824,6 +827,25 @@ def _db_smoke() -> None:
     # ``hound diff`` (сравнивается контракт, а не ``index_build_id``); без колонки
     # недельный (инкрементальный) diff отказывал бы всегда.
     _assert("execution_contract_digest" in runs_cols)
+    # 16 §3.1/§3.2/§3.3 (граница ``runs``, ``schema_version`` НЕ поднят): срез прогона и
+    # исполненный план (09 §13.6 — без них полное измерение неотличимо от среза), наблюдаемая
+    # ось устройства эмбеддера, происхождение наблюдения у документа и таблица статуса
+    # продукта в прогоне. ``cells_carried``/``cells_measured`` обязаны отсутствовать:
+    # переноса ячеек нет (09 §10), и колонка, всегда равная нулю, — ложь о механизме.
+    _assert({"run_scope", "product_plan_json", "embed_device"} <= runs_cols)
+    _assert({"http_status", "reuse_kind"} <= docs_cols)
+    product_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_product)")}
+    _assert({"run_id", "product_id", "mode", "status", "scope", "phase",
+             "coverage_complete", "docs_total", "docs_reused", "docs_new",
+             "cells_total", "cells_pending", "baseline_complete", "error_kind", "error",
+             "updated_at"} == product_cols)
+    _assert("cells_carried" not in product_cols and "cells_measured" not in product_cols)
+    product_pk = [r["name"] for r in conn.execute("PRAGMA table_info(run_product)")
+                  if r["pk"]]
+    _assert(product_pk == ["run_id", "product_id"])
+    product_fks = [(fk["table"], fk["from"]) for fk in
+                   conn.execute("PRAGMA foreign_key_list(run_product)")]
+    _assert(product_fks == [("runs", "run_id")])
     inputs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_inputs)")}
     _assert({"run_id", "snapshot_version", "payload_json", "payload_sha256",
              "created_at"} <= inputs_cols)

@@ -111,6 +111,7 @@ from core.config.deploy import (
     SPLIT_PROFILES,
     CrawlConfig,
     DeployConfig,
+    EmbedConfig,
     LLMDeployConfig,
     LLMSlotConfig,
     is_split,
@@ -121,8 +122,8 @@ from core.config.deploy import (
     resolve_serp_rounds,
 )
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
-from core.domain.models import CrawlRunConfig
+from core.domain.enums import DocumentLevel, EmbedDevice, PdfDevice, PdfPipeline
+from core.domain.models import CrawlRunConfig, EmbedRunConfig
 from core.domain.scoring import endpoint_host_notices
 from core.pipeline import Ports, Runner
 from core.pipeline.composition import (
@@ -131,7 +132,11 @@ from core.pipeline.composition import (
     read_composition,
 )
 from core.pipeline.corpus import ExtractionPool
-from core.pipeline.crawl_frontier import resolve_crawl_limits, resolve_pdf_device
+from core.pipeline.crawl_frontier import (
+    resolve_crawl_limits,
+    resolve_embed_device,
+    resolve_pdf_device,
+)
 from core.pipeline.resources import (
     MEM_BUDGET_ENV,
     PARENT_FLOOR_MB,
@@ -2380,6 +2385,45 @@ def require_pdf_device(pdf_device: PdfDevice | str = PdfDevice.CPU) -> None:
     )
 
 
+def require_embed_device(device: EmbedDevice | str = EmbedDevice.CPU) -> None:
+    """``embed.device=cuda`` без CUDA-устройства — отказ с числами, а не тихий CPU.
+
+    Зеркало :func:`require_pdf_device` для оси эмбеддера. Ось объявлена входом, значит
+    прогон, объявивший ``cuda``, обязан посчитать векторы на GPU либо не начаться:
+    тихая подстановка ``cpu`` дала бы CPU-векторы под ``run_id``, который объявляет
+    ``cuda``, — ровно тот класс дефекта, ради которого ось вводится (``16`` §4.3).
+
+    Сообщение называет ось ``embed.device`` и несёт факты для починки входа: версию
+    установленного ``torch`` (из метаданных дистрибутива — без импорта, импорт стоил бы
+    сотни MB ради одного отказа), ``cuda_available`` и объём карты (``None`` — устройства
+    или драйвера нет). ``cpu`` проходит всегда: устройство не требуется.
+
+    :raises WiringError: ``cuda`` при недоступном CUDA-устройстве (``EXIT_USAGE``).
+    """
+    resolved = EmbedDevice(device)
+    if resolved is not EmbedDevice.CUDA:
+        return
+    if cuda_available():
+        return
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _dist_version
+
+    try:
+        torch_version = _dist_version("torch")
+    except PackageNotFoundError:  # pragma: no cover — окружение без torch
+        torch_version = "не установлен"
+    total = cuda_total_vram_mb()
+    raise WiringError(
+        "embed.device=cuda, но CUDA-устройство недоступно: "
+        f"torch={torch_version}, cuda_available=False, "
+        f"device_vram_mb={total if total is not None else 'нет устройства'}. "
+        "Объявите embed.device=cpu либо установите CUDA-колёса и драйвер "
+        "(индекс cu130: `uv sync --frozen --extra embed`). Тихая подмена устройства "
+        "запрещена: embed_device/партиция/ключ embed_cache назвали бы GPU, на котором "
+        "прогон не исполнялся"
+    )
+
+
 def preflight_pdf_device(
     *,
     deploy: DeployConfig | None = None,
@@ -2528,6 +2572,8 @@ def _build_local_ports(
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
     document_timeout: float | None = None,
     pdf_device: PdfDevice = PdfDevice.CPU,
+    embed_device: EmbedDevice | str = EmbedDevice.CPU,
+    embed_notices: list[str] | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -2546,6 +2592,12 @@ def _build_local_ports(
     ``torch``), если он готов (зависимость + локальный снапшот модели); иначе — качественный
     ``LocalEmbedder`` (bge-m3) при наличии ``sentence-transformers``; иначе ``None``.
     Выдуманных векторов/подмены модели нет: недоступность — явный ``None`` (A3).
+
+    **Устройство эмбеддера (``embed.device``).** ``embed_device`` — объявленная ось того же
+    резолва ``app < run``, что у исполнения. ``cpu`` сохраняет прежний приоритет; ``cuda``
+    исключает ``LiteEmbedder`` (NumPy/CPU by design) с видимой заметкой в ``embed_notices``
+    и требует ``LocalEmbedder`` — недоступность стека отказ, а не CPU-фолбэк
+    (:func:`_resolve_embedder`).
 
     **Dense- и лексическое плечи (P4a, I17).** ``vector_index``/``lexical_index`` строятся
     :func:`build_vector_index`/:func:`seed_lexical_index` только при наличии предпосылок
@@ -2602,7 +2654,13 @@ def _build_local_ports(
     )
 
     # Тяжёлые опциональные адаптеры: только при выполненной availability-предикате.
-    resolved_embedder = embedder if embedder is not None else _resolve_embedder()
+    # Устройство эмбеддера — **объявленная** ось (``embed.device``), а не свойство
+    # адаптера: спрашивать у эмбеддера «на чём ты считаешь» и есть дефект ``14`` оговорки 5.
+    resolved_embedder = (
+        embedder
+        if embedder is not None
+        else _resolve_embedder(embed_device, notices=embed_notices)
+    )
     index_builder = (
         NpyIndexBuilder(
             index_root=index_root,
@@ -2667,14 +2725,44 @@ def _build_local_ports(
     )
 
 
-def _resolve_embedder() -> EmbedderPort | None:
-    """Выбирает эмбеддер: оффлайн ``LiteEmbedder`` → ``LocalEmbedder`` → ``None`` (P4a).
+def _resolve_embedder(
+    device: EmbedDevice | str = EmbedDevice.CPU,
+    *,
+    notices: list[str] | None = None,
+) -> EmbedderPort | None:
+    """Выбирает эмбеддер по **объявленному** устройству (P4a + ось ``embed.device``).
 
-    Приоритет — лёгкий путь без ``torch`` (CI/fixation-friendly): он берётся, если
-    ``model2vec`` установлен **и** локальный снапшот модели разрешается (оффлайн). Иначе
-    сохраняется качественный ``LocalEmbedder`` (bge-m3) при наличии ``sentence-transformers``.
-    Если недоступно ни то, ни другое — ``None``: адаптер **не** фабрикуется (I19/A3).
+    Таблица ``16`` §4.3 — минимальная, backend остаётся недекларированным:
+
+    * ``cpu`` — как сегодня: ``LiteEmbedder`` (``model2vec``, NumPy/CPU без ``torch``) →
+      ``LocalEmbedder`` (bge-m3, ``sentence-transformers``) → ``None``. Обе реализации
+      CPU-честны, поэтому приоритет не меняется;
+    * ``cuda`` — ``LiteEmbedder`` **исключается** с видимой заметкой (``model2vec``
+      NumPy/CPU by design и ось исполнить не может), берётся ``LocalEmbedder(device="cuda")``;
+      недоступен стек — :class:`WiringError` (``EXIT_USAGE``), а не CPU-векторы.
+
+    Тихого фолбэка нет ни в одну сторону: прогон, объявивший ``cuda``, не должен получить
+    CPU-векторы под тем же ``run_id``.
+
+    :param device: объявленное устройство (:class:`EmbedDevice` или строка).
+    :param notices: список для видимых замечаний выбора (пишутся в журнал wiring).
+    :raises WiringError: ``cuda`` без ``sentence-transformers``/``LocalEmbedder``.
     """
+    resolved = EmbedDevice(device)
+    if resolved is EmbedDevice.CUDA:
+        if notices is not None and model2vec_available():
+            notices.append(
+                "embed.device=cuda: LiteEmbedder исключён — он NumPy/CPU by design и ось "
+                "исполнить не может; выбран LocalEmbedder (bge-m3) на cuda"
+            )
+        if not _module_installed("sentence_transformers"):
+            raise WiringError(
+                "embed.device=cuda требует sentence-transformers (LocalEmbedder): "
+                "установите extra 'embed' (`uv pip install -e '.[embed]'`) либо объявите "
+                "embed.device=cpu. Тихий фолбэк на CPU запрещён — прогон объявил cuda, "
+                "и CPU-векторы разошлись бы с embed_device/партицией/ключом embed_cache"
+            )
+        return LocalEmbedder(device=resolved.value)
     if model2vec_available():
         try:
             lite = build_lite_embedder()
@@ -2683,7 +2771,7 @@ def _resolve_embedder() -> EmbedderPort | None:
         if lite is not None and lite.available:
             return lite
     if _module_installed("sentence_transformers"):
-        return LocalEmbedder()
+        return LocalEmbedder(device=resolved.value)
     return None
 
 
@@ -2803,6 +2891,7 @@ def build_adapters(
     lexical_index: LexicalIndexPort | None = None,
     embedder: EmbedderPort | None = None,
     run_crawl: CrawlRunConfig | None = None,
+    run_embed: EmbedRunConfig | None = None,
     cli_max_depth: int | None = None,
     pdf_pipeline: PdfPipeline | None = None,
     engine_log: PhaseLogger | None = None,
@@ -2847,6 +2936,11 @@ def build_adapters(
         (план резолвится в pipeline).
     :param run_crawl: ``crawl``-секция ``run.yaml`` (run-слой осей краула) — для автодетекта
         discovery при включении принуждения ``robots.txt`` (N1).
+    :param run_embed: ``embed``-секция ``run.yaml`` (run-слой оси ``embed.device``) — резолв
+        ``app < run`` тот же, что у исполнения
+        (:func:`core.pipeline.crawl_frontier.resolve_embed_device`). ``None`` — run-слой не
+        задан, действует ``deploy.embed.device`` (по умолчанию ``cpu``). Устройство не
+        читается из окружения: иначе ``run_id`` перестал бы описывать место счёта векторов.
     :param cli_max_depth: ``--max-depth`` оператора — также участвует в автодетекте
         discovery (N1).
     :param pdf_pipeline: явный механизм PDF (операторский ``--pdf-pipeline``); ``None`` —
@@ -2947,7 +3041,17 @@ def build_adapters(
             if crawl_limits.document_timeout_s_explicit
             else None
         )
-        return _build_local_ports(
+        # Ось ``embed.device`` — тем же резолвом ``app < run``, что увидит исполнение
+        # (``resolve_embed_device``), а не копией формулы. Доступность CUDA проверяется
+        # здесь же (:func:`require_embed_device`): недоступное устройство — отказ до
+        # прогона, а не тихие CPU-векторы под объявленным ``cuda``.
+        embed_device = resolve_embed_device(
+            (deploy.embed if deploy is not None else EmbedConfig()),
+            run_embed,
+        )
+        require_embed_device(embed_device)
+        embed_notices: list[str] = []
+        ports = _build_local_ports(
             evaluator=evaluator,
             registry=registry,
             registry_fetchers=local_registry_fetchers or None,
@@ -2969,7 +3073,16 @@ def build_adapters(
             # пробный экстрактор обязан исполняться там же, где объявлено, иначе
             # ``extractor_version`` портов и Ш5 описывали бы разные устройства.
             pdf_device=crawl_limits.pdf_device,
+            embed_device=embed_device,
+            embed_notices=embed_notices,
         )
+        # Выбор эмбеддера под объявленное устройство виден в журнале wiring (тот же
+        # ``wiring.jsonl``, что и выбор движка краула): исключение Lite под ``cuda`` —
+        # не тихое решение.
+        if engine_log is not None:
+            for notice in embed_notices:
+                engine_log.warn(notice, event="embed_device_note")
+        return ports
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)
         if not is_split(config):

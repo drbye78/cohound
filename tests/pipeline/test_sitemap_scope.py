@@ -342,28 +342,43 @@ def test_loc_blacklisted_at_root_a_still_offered_to_root_b(
 def test_loc_budget_rejected_root_a_still_offered_to_root_b(tmp_path: Path) -> None:
     """Бюджет корня A исчерпан resume'ом — его locs не «съедены» и достаются корню B.
 
-    ``max_documents`` host-корня A = 1, а durable-страницы A уже занимают бюджет ⇒ seed A не
-    ставится (``truncated``, ранний выход). Раньше ``_fresh_sitemap_seeds`` успевал пометить
-    все in-scope ``<loc>`` использованными до этой проверки, и вложенный корень B не получал
-    ничего (F12). Теперь пометка — только по факту ``add_seed`` ∈ {queued, dup}.
+    ``max_documents`` host-корня A = 1, а durable-страницы **владельца A** (корень ``/``,
+    вне ``/p1/a``) уже занимают бюджет ⇒ seed A не ставится (``truncated``). Раньше
+    ``_fresh_sitemap_seeds`` успевал пометить все in-scope ``<loc>`` использованными до
+    этой проверки, и вложенный корень B не получал ничего (F12). Теперь пометка — только
+    по факту ``add_seed`` ∈ {queued, dup}.
+
+    Владение — по самому специфичному ``root_path_prefix`` (09 §6.3): ``LOC_SHARED``
+    (``/p1/a/page``) заряжает бюджет **B**, а не A, поэтому бюджет A исчерпывается именно
+    его собственными страницами. Без этого правила host-корень с префиксом ``/`` забирал
+    бы зарядку у docs-корня, и потолок умножался бы на число перезапусков.
     """
     store = SqliteStore(":memory:")
     _make_run(store)
     extra_loc = f"https://{HOST}/p1/a/extra"
+    host_page = f"https://{HOST}/other"
     try:
-        # Первый прогон: durable-страницы под /p1/a (seed + одна ссылка).
+        # Первый прогон: durable-страницы двух владельцев — A (``/``, страница вне
+        # ``/p1/a``) и B (``/p1/a``).
         _build(
             tmp_path,
             pages={},
-            urls={"p1": [ROOT_INNER]},
+            urls={"p1": [ROOT_HOST]},
             crawler=_Crawler(
-                {ROOT_INNER: f'<a href="{LOC_SHARED}">x</a>'.encode(), LOC_SHARED: b"x"}
+                {
+                    ROOT_HOST: (
+                        f'<a href="{host_page}">x</a>'
+                        f'<a href="{LOC_SHARED}">y</a>'
+                    ).encode(),
+                    host_page: b"other",
+                    LOC_SHARED: b"x",
+                }
             ),
-            domain_profiles={f"{HOST}/p1/a": DomainProfile(max_depth=1)},
+            domain_profiles={HOST: DomainProfile(max_depth=1)},
             store=store,
             run_id=RUN_ID,
         )
-        assert {i.url for i in _items(store)} >= {ROOT_INNER, LOC_SHARED}
+        assert {i.url for i in _items(store)} >= {ROOT_HOST, host_page, LOC_SHARED}
 
         # Второй прогон: host-корень A идёт первым (авторский порядок) и уже без бюджета;
         # B — вложенный /p1/a.
@@ -393,7 +408,14 @@ def test_loc_budget_rejected_root_a_still_offered_to_root_b(tmp_path: Path) -> N
         assert host_record["truncated"] is True
         assert host_record["truncated_reason"] == "max_documents"
         inner_record = _root_record(result, ROOT_INNER)
-        assert inner_record["truncated"] is False
+        # ``truncated=True`` у B — **зафиксированное поведение HEAD**: корень, ровно
+        # заполнивший ``max_documents`` (2 заряженных + 1 свежий seed = 3), объявляется
+        # усечённым независимо от остатка очереди. Отдельная семантика (цена — ложный
+        # ``complete=False``, I2c) и кандидат на свою границу ``methodology_change``;
+        # тест её пинит, чтобы смена не прошла молча. Предмет F12 — что loc корня A не
+        # «съеден» и достался B, и он доказан выше.
+        assert inner_record["truncated"] is True
+        assert inner_record["truncated_reason"] == "max_documents"
     finally:
         store.close()
 

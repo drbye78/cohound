@@ -28,7 +28,7 @@ import yaml
 from core.adapters.extract_html import HtmlExtractor
 from core.adapters.index_npy import NpyIndexBuilder, numpy_available
 from core.adapters.lexical_tantivy import tantivy_available
-from core.cli.main import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, main
+from core.cli.main import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
 from core.cli.wiring import (
     LOCAL_PROFILE,
     SPLIT_PROFILE,
@@ -514,6 +514,115 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
     assert loaded["deploy_profile"] == LOCAL_PROFILE
     assert loaded["edge_schema_version"] == SEAM_SCHEMA_VERSION
     assert loaded["edge_capabilities"] == {}
+
+
+def _run_offline_to_end(
+    package: Path,
+    *,
+    run_id: str,
+    db: Path,
+    runs_dir: Path,
+    extra: tuple[str, ...] = (),
+) -> int:
+    """Сквозной офлайн-прогон: решения гейтов предзаписаны, внешние порты — заглушки."""
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir, extra=extra)
+    assert main([*argv, "--until", "plan"]) == EXIT_OK
+    with build_store(db) as store:
+        for gate_fn in (gate_g1, gate_g2, gate_g3, gate_g4):
+            gate_fn(store, run_id, actor="cli-test")
+
+    def factory(**kwargs: Any) -> dict:
+        kwargs["retrieval_profile"] = "R0"
+        kwargs["cutoff_k"] = 3
+        kwargs["eval_cache"] = None
+        return build_phases(**kwargs)
+
+    return main(argv, ports=_absent_evaluator_ports(), phases_factory=factory)
+
+
+def test_cmd_run_manifest_names_previous_run_and_change_class(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """09 §2.4/§12.3/§13: артефакт и ``report --json`` называют цикл, прогон-базу и класс.
+
+    Поля были объявлены и не заполнялись ни одним писателем (``cycle_id`` не был объявлен
+    вовсе): читатель ``run_manifest.yaml`` не видел ни цикла — а он входит в материал
+    ``run_id``, — ни того, против какого прогона считался этот. Тест читает **именно эти
+    три поля** из артефакта и из машинного вывода.
+    """
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    first, second = "prev-first", "prev-second"
+
+    # Первый прогон пакета — базы сравнения ещё нет: ``previous_run_id`` пуст, а класс
+    # изменения записан тем же значением, что ляжет в lineage (``none``: сравнивать не с
+    # чем, см. ``classify_change``). Различает эти два факта именно ``previous_run_id``.
+    assert _run_offline_to_end(
+        package, run_id=first, db=db, runs_dir=runs_dir
+    ) == EXIT_OK
+    capsys.readouterr()
+    first_manifest = yaml.safe_load(
+        (runs_dir / first / "run_manifest.yaml").read_text(encoding="utf-8")
+    )
+    # Цикл записан всегда: он выводится из ``snapshot_date``, если не задан явно.
+    assert first_manifest["cycle_id"] == "2026-06-01"
+    assert first_manifest["previous_run_id"] is None
+    assert first_manifest["change_class"] == "none"
+
+    # Второй прогон того же пакета: база — первый (lineage ``state.db``).
+    assert _run_offline_to_end(
+        package, run_id=second, db=db, runs_dir=runs_dir
+    ) == EXIT_OK
+    capsys.readouterr()
+    manifest_path = runs_dir / second / "run_manifest.yaml"
+    loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert loaded["cycle_id"] == "2026-06-01"
+    assert loaded["previous_run_id"] == first
+    # Класс изменения записан (тот же контракт/когорта → ``none``), а не ``None``.
+    assert loaded["change_class"] == "none"
+
+    # Тот же факт — в машинном выводе пост-хок ``hound report`` (строки ``runs``).
+    out = tmp_path / "report-out"
+    assert (
+        main(
+            [
+                "report",
+                "--db",
+                str(db),
+                "--run-id",
+                second,
+                "--out",
+                str(out),
+                "--json",
+            ]
+        )
+        == EXIT_OK
+    )
+    payload = json_out(capsys)
+    assert payload["manifest"]["cycle_id"] == "2026-06-01"
+    assert payload["manifest"]["previous_run_id"] == first
+    assert payload["manifest"]["change_class"] == "none"
+
+
+def test_cmd_run_since_run_unknown_is_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--since-run`` на несуществующий прогон — ``EXIT_USAGE`` (регрессия поведения)."""
+    package = valid_package(tmp_path)
+    code = main(
+        run_argv(
+            package,
+            run_id="since-missing",
+            db=tmp_path / "cohound.db",
+            runs_dir=tmp_path / "runs",
+            until="plan",
+            extra=("--since-run", "no-such-run"),
+        )
+    )
+    assert code == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert "--since-run" in captured.out + captured.err
 
 
 def test_cmd_run_g3_g4_are_external_integration_points(

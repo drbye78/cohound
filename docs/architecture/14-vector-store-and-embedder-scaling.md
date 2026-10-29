@@ -213,9 +213,11 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 (`grep -rn RemoteEmbedder core/` — пусто), `remote_*` адаптеров шва по-прежнему **шесть**
 (`remote_crawler`/`remote_crawl_executor`/`remote_extractor`/`remote_gateway`/
 `remote_registry`/`remote_search`), седьмого нет. Спецификация §5.0 остаётся **решением**, а
-не реализацией: `DeployConfig` объявлен с `extra="forbid"` и поля `embed` не имеет
-(`core/config/deploy.py:574-581`), поэтому `deploy.yaml` с секцией `embed:` отвергается
-`ValidationError: Extra inputs are not permitted` (проба через `load_deploy_config`).
+не реализацией — но её форма частично появилась: `DeployConfig` несёт секцию `embed` с
+`extra="forbid"` (граница A, `16` §4.1), поэтому `deploy.yaml:embed.device` **принимается**,
+а неизвестный ключ внутри `embed:` по-прежнему отвергается `ValidationError` (это и
+проверяет тест). Внешний backend (`backend`/`base_url`/`model_version`) не объявлен —
+секция несёт только ось `device`.
 
 `EmbedderPort` (`core/ports/embedder.py`) — `model_id`, `dim`, `embed(texts)`. HTTP-адаптер
 ложится на него без изменения контракта: в `core/adapters/` уже шесть `remote_*` адаптеров
@@ -223,11 +225,16 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 
 Что уже есть и чего нет:
 
-- `_resolve_embedder()` (`core/cli/wiring.py:2670-2687`) выбирает эмбеддер **по факту
-  установки**: `LiteEmbedder` (model2vec) → `LocalEmbedder` (bge-m3) → `None`. Это выбор
-  средой, а не объявленным входом — та самая асимметрия, из-за которой модель оценщика
-  перестала читаться из env. Внешний инстанс обязан быть **объявленным** (`deploy.embed`),
-  иначе `pb` перестанет описывать, чем собраны векторы.
+- `_resolve_embedder()` выбирает эмбеддер **по факту установки**: `LiteEmbedder`
+  (model2vec) → `LocalEmbedder` (bge-m3) → `None`. Это выбор средой, а не объявленным
+  входом — та самая асимметрия, из-за которой модель оценщика перестала читаться из env.
+  **Граница A сузила её наполовину:** устройство счёта (`cpu`|`cuda`) теперь объявлено
+  (`deploy.embed.device` < `run.yaml:embed.device`), резолвится
+  :func:`core.pipeline.crawl_frontier.resolve_embed_device` и передаётся в
+  `SentenceTransformer(device=…)` явным параметром; `LiteEmbedder` под `cuda` исключается
+  с видимой заметкой, а `cuda` без устройства — `EXIT_USAGE`, не тихий CPU. Но **какая
+  модель** по-прежнему выбирается установкой: `backend`/`base_url`/`model_version` не
+  объявлены, и внешний инстанс всё ещё требует `deploy.embed` целиком.
   **⬜ не сделано на 2026-10-28:** функция не изменилась (строки сдвинулись: 2274-2295 →
   2510-2527), приоритет по-прежнему «что установлено на хосте». Это и есть открытый пункт 5 §6.
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
@@ -349,7 +356,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`evaluate.py:307-324`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`evaluate.py:430-447`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 
@@ -402,7 +409,23 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 
 ### Оговорка 5: устройство эмбеддера не объявлено, а `vector_digest` не сверяется
 
-⬜ не сделано — **замерено 29.10.2026 на живом прогоне** `ru-pg-dbms-3d3dc7c3c969`.
+✅ **дефекты 1 и 2 закрыты** границей A (`16-runs-schema-boundary.md`, 29.10.2026);
+дефект 3 (ресурсная арифметика VRAM) остаётся открытым. Ниже — замер, который её открыл,
+и что именно изменилось.
+
+**Что изменилось (as-built).** `EmbedDevice` (`cpu`|`cuda`, без `auto`) объявлен на двух
+слоях — `deploy.yaml:embed.device` < `run.yaml:embed.device`, per-site слоя нет (устройство —
+свойство хоста, а не сайта); резолвится одной чистой функцией
+:func:`core.pipeline.crawl_frontier.resolve_embed_device`; передаётся в
+`SentenceTransformer(..., device=…)` **явным параметром** (`core/adapters/embed_local.py`),
+а не спрашивается у адаптера. Ось входит в `EXECUTION_CONTRACT_FIELDS` (28 → 29), в материал
+`pb`, в манифест партиции и в ключ `embed_cache` — CPU- и CUDA-прогон больше не могут
+обменяться векторами. `vector_digest` пересчитывается с диска при проверке переиспользования
+(`core/util/index_partition.py:recompute_vector_digest`), поэтому партиция с чужими
+векторами — видимый отказ, а не тихое принятие. Цена миграции кэша измерена и опубликована:
+`docs/reports/measurements/2026-10-29-embed-cache-device-migration-cost.md`.
+
+
 
 **Факт.** `LocalEmbedder` не передаёт `device` в загрузчик: `SentenceTransformer(self._repo_id,
 revision=…, local_files_only=…)` (`core/adapters/embed_local.py:176`). Устройство выбирает
@@ -447,7 +470,10 @@ torch по умолчанию, то есть `cuda`, если она досту�
 отдельный сдвиг `run_id` — иначе прогресс обнуляется дважды. Спецификация —
 `16-runs-schema-boundary.md`. Порядок жёсткий: сначала `report` текущего
 прогона (правка `corpus.py`/`wiring.py` в живом прогоне запрещена, а поднятая версия схемы
-сделала бы завершающийся прогон нечитаемым).
+сделала бы завершающийся прогон нечитаемым). ✅ прогон остановлен и закрыт
+(`crawl cancel` → `interrupted`, `cancelled_by_operator`), `report` по нему невозможен
+(фаза `corpus` не зафиксирована), поэтому цена эмбеддинга взята из опубликованного замера
+темпа, а не из `stage_timings` этого прогона — см. отчёт о миграции кэша.
 
 1. ось `embed_device` (`cpu|cuda`, **без** `auto` — как у `pdf_device`: `auto` назвал бы
    устройство, на котором прогон не исполнялся);

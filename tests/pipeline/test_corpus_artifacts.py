@@ -700,3 +700,45 @@ def test_buffered_artifact_is_not_cut_by_page_ceiling(tmp_path: Path) -> None:
         assert items[page_url].error_kind == FailureKind.PAYLOAD_TOO_LARGE.value
     finally:
         store.close()
+
+def test_duplicate_url_forms_are_visible_in_provenance(tmp_path: Path) -> None:
+    """Дефект 2 (09 §6.3): схлопывание форм URL видно счётчиком, а не тихо.
+
+    ``/page`` и ``/page/`` — одна страница. Очередь не должна тратить на неё второй
+    бюджет, но и молчать об этом нельзя: тихое отбрасывание URL — тот же класс дефекта,
+    что тихий обход path-prefix. Счётчик живёт в ``Frontier``, поэтому единственное
+    место, где он становится наблюдаемым, — запись корня в провенансе усечения.
+    """
+    root = "https://docs.test/docs/"
+    page = "https://docs.test/docs/page.html"
+    body = (
+        b"<html><body>"
+        b'<a href="/docs/page.html">page</a>'
+        b'<a href="/docs/page.html/">page with slash</a>'
+        b"</body></html>"
+    )
+    crawler = _BufferedCrawler(
+        {root: body, page: b"<html><body>page</body></html>"},
+        {root: "text/html", page: "text/html"},
+    )
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path,
+            crawler=crawler,
+            urls=[root],
+            store=store,
+            crawl_defaults=CrawlRunConfig(max_depth=2),
+        )
+
+        # Вторая форма не фетчится: бюджет не потрачен дважды.
+        assert crawler.calls.count(page) == 1
+        record = _build_of(result).truncation[0]
+        assert record["root"] == root
+        # ... и это не тихо: счётчик назван числом.
+        assert record["duplicate_forms"] >= 1
+        # Схлопывание не выдаёт себя за усечение: полнота корня не страдает.
+        assert record["truncated"] is False
+    finally:
+        store.close()

@@ -70,6 +70,8 @@ from core.domain.models import (
 )
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
 from core.pipeline.compute import ScoreBundle, compute, publish_warnings
+from core.pipeline.evaluate import REUSE_UNCONFIRMED_REASON
+from core.pipeline.normalize import load_inputs
 from core.pipeline.report import (
     DIFF_BOUNDARY_FIELDS,
     EXECUTION_FIELDS,
@@ -83,12 +85,16 @@ from core.pipeline.report import (
     build_manifest,
     collect_corpus_coverage_anomalies,
     collect_i3_anomalies,
+    collect_reuse_unconfirmed_anomalies,
+    collect_run_products,
     compact_search_effort,
     diff_boundary_violations,
+    manifest_payload,
     render_battle_card,
     render_diff,
     render_nda_questions,
     render_preliminary_findings,
+    render_run_product,
     resolve_diff_change_class,
     write_reports,
     write_run_manifest,
@@ -2109,3 +2115,387 @@ def test_registry_denial_is_not_a_truncation_anomaly() -> None:
     anomalies = collect_crawl_truncation_anomalies([bounded_cell], truncated_products={"prod"})
     assert len(anomalies) == 1
     assert "bounded" in anomalies[0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 16 §8 п.4: «❌ требует live|revalidated» — зеркало в отчёте
+# ---------------------------------------------------------------------------
+
+
+def _reuse_demoted_cell(
+    product_id: str = PRODUCT_A,
+    param_id: str = "param.abs",
+    *,
+    reason: str | None = None,
+) -> Cell:
+    """Ячейка, у которой ``❌`` снят правилом ``reuse_unconfirmed`` (как пишет Ш6)."""
+    text = reason or (
+        f"{REUSE_UNCONFIRMED_REASON}: ❌ не публикуется — {product_id}/{param_id}: "
+        f"уровень evidence: документ {product_id}:hash_a: reuse_kind=reused"
+    )
+    return Cell(
+        run_id=RUN_ID,
+        product_id=product_id,
+        param_id=param_id,
+        state=CellState.EVALUATED,
+        status=Status.UNKNOWN,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED,
+            reason=text,
+            basis="evaluator:explicit->reuse_unconfirmed",
+        ),
+        validation_notes=[
+            f"{REUSE_UNCONFIRMED_REASON}: {product_id}/{param_id}: "
+            f"evidence: документ {product_id}:hash_a: reuse_kind=reused"
+        ],
+    )
+
+
+def test_reuse_unconfirmed_anomaly_is_visible_in_csv_and_artifacts(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Снятый ``❌`` виден в отчёте: продукт/параметр и виновник — из записи ячейки."""
+    cell = _reuse_demoted_cell()
+    _save(store, [cell])
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=[cell],
+        catalog=_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+    )
+
+    anomalies = artifacts.reuse_unconfirmed_anomalies
+    assert len(anomalies) == 1
+    assert anomalies[0]["product_id"] == PRODUCT_A
+    assert anomalies[0]["param_id"] == "param.abs"
+    assert REUSE_UNCONFIRMED_REASON in anomalies[0]["reason"]
+    assert f"{PRODUCT_A}:hash_a" in anomalies[0]["reason"]
+
+    rows = _read_csv(artifacts.nda_questions)
+    reuse_rows = [r for r in rows if r.get("anomaly_kind") == "reuse_unconfirmed"]
+    assert reuse_rows
+    assert reuse_rows[0]["product_id"] == PRODUCT_A
+    assert "reused" in reuse_rows[0]["i3_anomaly"]
+    # I12: аномалия — наблюдение; она входит в общий список аномалий прогона.
+    assert any(a.get("product_id") == PRODUCT_A for a in artifacts.i3_anomalies)
+
+
+def test_reuse_anomaly_reads_the_cell_record_not_a_second_computation() -> None:
+    """Отчёт читает запись ячейки: токен только в ``validation_notes`` тоже виден."""
+    only_notes = Cell(
+        run_id=RUN_ID,
+        product_id=PRODUCT_B,
+        param_id="param.b",
+        state=CellState.EVALUATED,
+        status=Status.UNKNOWN,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED, reason="просто не знаю"
+        ),
+        validation_notes=[
+            f"{REUSE_UNCONFIRMED_REASON}: {PRODUCT_B}/param.b: corpus: 2 из 3"
+        ],
+    )
+    anomalies = collect_reuse_unconfirmed_anomalies([only_notes])
+    assert len(anomalies) == 1
+    assert anomalies[0]["product_id"] == PRODUCT_B
+    assert REUSE_UNCONFIRMED_REASON in anomalies[0]["reason"]
+
+    # ❓ без токена — не аномалия правила: отчёт не догадывается о причине.
+    plain = Cell(
+        run_id=RUN_ID,
+        product_id=PRODUCT_A,
+        param_id="param.a",
+        state=CellState.EVALUATED,
+        status=Status.UNKNOWN,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED, reason="вендор молчит"
+        ),
+    )
+    assert collect_reuse_unconfirmed_anomalies([plain]) == []
+
+
+# ---------------------------------------------------------------------------
+# 16 §3.1: провенанс среза и ось устройства в манифесте и в payload
+# ---------------------------------------------------------------------------
+
+
+def test_build_manifest_carries_run_scope_product_plan_and_embed_device() -> None:
+    """``run_scope``/``product_plan``/``embed_device`` попадают в манифест как объявлены."""
+    run = SimpleNamespace(
+        case_id="case-1",
+        mode=RunMode.STRICT,
+        methodology_version="2.4.0",
+        cohort="cohort.yaml",
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+    )
+    inputs = SimpleNamespace(run=run, package=None)
+    plan = SimpleNamespace(
+        run_id="run-scope",
+        anchor=PRODUCT_A,
+        modules=[],
+        methodology_version="2.4.0",
+        catalog_version="1.0.0",
+        cohort_ref="cohort.yaml",
+    )
+    manifest = build_manifest(
+        inputs=inputs,  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+        run_scope="product:prod.a",
+        product_plan={"mode": "incremental", "blocked": [], "reasons": {}},
+        embed_device="cuda",
+    )
+
+    assert manifest.run_scope == "product:prod.a"
+    assert manifest.product_plan == {
+        "mode": "incremental",
+        "blocked": [],
+        "reasons": {},
+    }
+    assert manifest.embed_device == "cuda"
+
+    # Не объявлено — ``None``, а не догадка ``full``/``cpu`` (A3).
+    default = build_manifest(
+        inputs=inputs,  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert default.run_scope is None
+    assert default.product_plan is None
+    assert default.embed_device is None
+
+
+def test_build_manifest_takes_embed_device_from_declared_axes() -> None:
+    """Ось берётся из того же резолвера, что у контракта (``axes``), а не из окружения."""
+    run = SimpleNamespace(
+        case_id="case-1",
+        mode=RunMode.STRICT,
+        methodology_version="2.4.0",
+        cohort="cohort.yaml",
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+    )
+    inputs = SimpleNamespace(run=run, package=None)
+    plan = SimpleNamespace(
+        run_id="run-axes", anchor=PRODUCT_A, modules=[], cohort_ref="cohort.yaml"
+    )
+    manifest = build_manifest(
+        inputs=inputs,  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+        axes=SimpleNamespace(embed_device="cuda"),
+    )
+    assert manifest.embed_device == "cuda"
+
+
+def test_manifest_payload_is_the_single_builder_for_yaml_and_json(
+    tmp_path: Path,
+) -> None:
+    """``manifest`` в payload — **тот же** словарь, что ``run_manifest.yaml``."""
+    manifest = _manifest(run_scope="only_failed", embed_device="cpu")
+    path = write_run_manifest(manifest, tmp_path)
+
+    payload = manifest_payload(manifest)
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == payload
+    # Провенанс среза читается без ``state.db``: срез отличается от полного прогона.
+    assert payload["run_scope"] == "only_failed"
+    assert payload["embed_device"] == "cpu"
+
+
+def test_diff_names_embed_device_change_instead_of_unavailable(
+    tmp_path: Path,
+) -> None:
+    """16 §4.2: прогон без ``embed_device`` против ``cuda`` — ``execution_change``, а не «недоступно»."""
+    prev = _manifest(execution_contract_digest="ec_1")
+    assert prev.embed_device is None
+    curr = _manifest(execution_contract_digest="ec_2", embed_device="cuda")
+
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons
+    assert any("embed_device" in reason for reason in reasons)
+    assert all(reason.startswith("execution_change:") for reason in reasons)
+
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    message = str(excinfo.value)
+    assert "execution_change" in message
+    assert "embed_device" in message
+
+
+# ---------------------------------------------------------------------------
+# 16 §3.2: статус продукта в прогоне — таблица `run_product`
+# ---------------------------------------------------------------------------
+
+
+def test_run_product_rows_are_rendered_and_exposed(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """``run_product`` попадает в отчёт строками по продуктам (носитель — таблица)."""
+    store.save_run_product(
+        RUN_ID,
+        PRODUCT_A,
+        mode="incremental",
+        status="complete",
+        scope="full",
+        coverage_complete=True,
+        docs_total=10,
+        docs_reused=7,
+        docs_new=3,
+        cells_total=42,
+        cells_pending=0,
+    )
+    store.save_run_product(
+        RUN_ID,
+        PRODUCT_B,
+        mode="new",
+        status="partial",
+        scope="full",
+        coverage_complete=False,
+        docs_total=4,
+        cells_total=12,
+        cells_pending=5,
+        error_kind="crawl_truncated",
+    )
+
+    rows = collect_run_products(store, RUN_ID)
+    assert [row["product_id"] for row in rows] == [PRODUCT_A, PRODUCT_B]
+    assert rows[0]["docs_reused"] == 7
+    assert rows[1]["error_kind"] == "crawl_truncated"
+
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=[],
+        catalog=_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+        store=store,
+    )
+    assert artifacts.run_product is not None
+    csv_rows = _read_csv(artifacts.run_product)
+    assert [r["product_id"] for r in csv_rows] == [PRODUCT_A, PRODUCT_B]
+    assert csv_rows[0]["status"] == "complete"
+    assert csv_rows[1]["cells_pending"] == "5"
+    assert [row["product_id"] for row in artifacts.run_products] == [
+        PRODUCT_A,
+        PRODUCT_B,
+    ]
+    # ``cells_carried`` не существует: переноса ячеек нет (09 §10).
+    assert "cells_carried" not in csv_rows[0]
+
+
+def test_run_product_absent_is_not_reported_as_complete(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Нет строк ``run_product`` — нет и файла: «не записано» ≠ «всё complete»."""
+    assert collect_run_products(store, RUN_ID) == []
+    assert render_run_product([], tmp_path / "run_product.csv") is None
+    assert not (tmp_path / "run_product.csv").exists()
+
+
+# ---------------------------------------------------------------------------
+# 09 §12.5: `catalog_version`/`scoring_policy_version` — честный источник, не "0.0.0"
+# ---------------------------------------------------------------------------
+
+
+def _live_inputs() -> Any:
+    """**Живые** входы пакета: ``run.yaml`` + артефакты ``packages/_template``."""
+    package = Path(__file__).resolve().parents[2] / "packages" / "_template"
+    return load_inputs(package / "run.yaml", package)
+
+
+def test_manifest_versions_are_content_addressed_not_a_placeholder() -> None:
+    """Манифест из живых входов несёт отпечаток каталога и объявленную политику §6.
+
+    До правки оба поля были полями контракта **без источника**: в контракт уходило
+    ``None``, в манифест — фиктивное ``"0.0.0"``, поэтому смена каталога (новый параметр,
+    изменённое правило, другой ``absence_rule``) или политики расчёта меняла предмет
+    измерения, не меняя ни ``run_id``, ни ``hound diff`` (два одинаковых ``"0.0.0"``).
+    Проверка фиксирует, что значение — функция **содержимого**, и что это та же функция,
+    которой пользуется контракт: второй формулы нет.
+    """
+    from core.pipeline.digests import catalog_digest, scoring_policy_version
+    from core.pipeline.plan import plan as build_plan
+
+    inputs = _live_inputs()
+    manifest = build_manifest(
+        inputs=inputs,
+        plan=build_plan(inputs, run_id="run-catalog-digest"),
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    assert manifest.catalog_version != "0.0.0"
+    assert manifest.scoring_policy_version != "0.0.0"
+    # Тот же материал — то же значение: манифест не считает свою версию каталога.
+    assert manifest.catalog_version == catalog_digest(inputs.catalog)
+    assert manifest.scoring_policy_version == scoring_policy_version()
+
+
+def test_catalog_change_moves_manifest_version_and_contract_digest() -> None:
+    """Смена правила в каталоге двигает и ``catalog_version`` манифеста, и контракт.
+
+    Это и есть закрытие дефекта провенанса `09` §12.5: одно изменение материала видно
+    **обоими** носителями. Раньше контракт не менялся вовсе (поля не было в материале),
+    а манифест показывал то же ``"0.0.0"``.
+    """
+    import dataclasses
+
+    from core.pipeline.digests import catalog_digest
+    from core.pipeline.plan import plan as build_plan
+    from core.pipeline.run_identity import build_execution_contract
+
+    inputs = _live_inputs()
+    run_plan = build_plan(inputs, run_id="run-catalog-digest")
+    before = build_manifest(
+        inputs=inputs, plan=run_plan, created_at="2026-01-01T00:00:00Z"
+    )
+    contract_before = build_execution_contract(
+        inputs, cohort_digest="cohort", seeds_digest="seeds"
+    )
+
+    row = inputs.catalog[0].model_copy(update={"rule": inputs.catalog[0].rule + " (уточнено)"})
+    changed = dataclasses.replace(inputs, catalog=[row, *inputs.catalog[1:]])
+    after = build_manifest(
+        inputs=changed, plan=run_plan, created_at="2026-01-01T00:00:00Z"
+    )
+    contract_after = build_execution_contract(
+        changed, cohort_digest="cohort", seeds_digest="seeds"
+    )
+
+    assert after.catalog_version == catalog_digest(changed.catalog)
+    assert after.catalog_version != before.catalog_version
+    assert contract_after != contract_before
+    # Политика расчёта от каталога не зависит — и не должна сдвигаться.
+    assert after.scoring_policy_version == before.scoring_policy_version
+
+
+def test_placeholder_version_survives_only_without_a_source() -> None:
+    """Без ``inputs.catalog`` источника нет — остаётся прежний ``"0.0.0"``, а не догадка."""
+    run = SimpleNamespace(
+        case_id="case-1",
+        mode=RunMode.STRICT,
+        methodology_version="2.4.0",
+        cohort="cohort.yaml",
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+    )
+    plan = SimpleNamespace(
+        run_id="run-no-catalog", anchor=PRODUCT_A, modules=[], cohort_ref="cohort.yaml"
+    )
+    manifest = build_manifest(
+        inputs=SimpleNamespace(run=run, package=None),  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert manifest.catalog_version == "0.0.0"
+
+    # Явно переданная версия сильнее отпечатка: аргумент — переопределение, а не догадка.
+    explicit = build_manifest(
+        inputs=SimpleNamespace(run=run, package=None, catalog_version="cat-9"),  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert explicit.catalog_version == "cat-9"

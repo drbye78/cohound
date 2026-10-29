@@ -51,17 +51,19 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from core.domain.models import Cohort, SeedsConfig
+from core.domain.models import CatalogRow, Cohort, SeedsConfig
 from core.util.hashing import short_hash
 
 # ВАЖНО: срез только вычисляет дайджест; границы ``hound diff``/``content_change`` не меняются.
 __all__ = [
     "EXECUTION_CONTRACT_FIELDS",
+    "catalog_digest",
     "cohort_digest",
     "execution_contract_digest",
     "manual_artifacts_digest",
     "passports_digest",
     "render_modes_digest",
+    "scoring_policy_version",
     "seeds_digest",
 ]
 
@@ -91,6 +93,15 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     "retrieval_params_json",
     "chunker_version",
     "extractor_stack",
+    # 16-runs-schema-boundary §4.2: **устройство эмбеддера** (``cpu`` | ``cuda``). Та же
+    # природа, что у ``extractor_stack``: место счёта — условие измерения, а не провенанс
+    # хоста. До этого поля устройство выбирал torch (``SentenceTransformer`` без
+    # ``device=``), то есть два хоста с одним ``run.yaml`` могли посчитать векторы на
+    # разных устройствах под одним ``run_id``, а ``pb``/``embed_cache`` этого не
+    # различали. ``auto`` нет намеренно: объявленная ось обязана действовать (R5).
+    # Смена — ``execution_change``; в ``embed_model_id`` устройство **не** входит: там
+    # веса, а не место счёта.
+    "embed_device",
     "crawl_strategy",
     "crawl_rate_limit",
     "crawl_config_digest",
@@ -255,6 +266,74 @@ def seeds_digest(seeds: SeedsConfig) -> str:
     ]
     rows.sort(key=lambda row: (row["product_id"], row["order"]))
     return short_hash(_canonical({"products": rows}), _DIGEST_LEN)
+
+def catalog_digest(catalog: Iterable[CatalogRow]) -> str:
+    """Дайджест **содержимого каталога** — честный источник ``catalog_version``.
+
+    Проблема, которую это закрывает (`09` §12.5): поле ``catalog_version`` объявлено
+    полем контракта и границей ``EXECUTION_FIELDS``, но источника у него не было — в
+    контракт уходило ``None``, в манифест ``"0.0.0"``. То есть смена каталога (новый
+    параметр, изменённое правило, другой ``absence_rule``) меняла предмет измерения,
+    а ``run_id`` и ``hound diff`` этого не видели: сравнивались два одинаковых
+    ``"0.0.0"``. Авторской версии каталога в пакете нет (``catalog.csv`` — просто
+    таблица, ``catalog.lock.csv`` несёт только происхождение строк), поэтому
+    единственный **доказуемый** ответ на вопрос «какой каталог» — отпечаток содержимого.
+
+    Материал — все поля строки, кроме ``deprecated``/``replaced_by``: они помечают
+    отмену параметра, а не его правило, и меняются отдельной процедурой (§13). Порядок
+    канонизируется сортировкой по ``param_id``: перестановка строк в файле измерение не
+    меняет.
+
+    Почему это ``*_version``, а не отдельное поле: имя колонки — persisted data
+    (``runs.catalog_version``) и граница diff; переименование сломало бы чтение старых
+    прогонов ради косметики. Что значение **содержимое-адресное**, сказано здесь и в
+    ``09`` §12.5, а не угадывается по формату.
+    """
+    rows = [
+        {
+            "param_id": row.param_id,
+            "title": row.title,
+            "module": row.module,
+            "group": row.group,
+            "importance": row.importance.value,
+            "param_type": row.param_type.value,
+            "rule": row.rule,
+            "absence_rule": row.absence_rule.value,
+            "role_binding": row.role_binding,
+            "concept_terms": {
+                lang: list(terms)
+                for lang, terms in sorted(row.concept_terms.items())
+            },
+            "search_langs": list(row.search_langs),
+        }
+        for row in sorted(catalog, key=lambda item: item.param_id)
+    ]
+    return short_hash(_canonical({"catalog": rows}), _DIGEST_LEN)
+
+def scoring_policy_version() -> str:
+    """Версия политики расчёта §6 — честный источник ``scoring_policy_version``.
+
+    Проблема та же, что у :func:`catalog_digest` (`09` §12.5): поле контракта без
+    источника. Политика при этом **объявлена** — :func:`core.domain.scoring.scoring_policy_spec`
+    возвращает ровно те значения, с которыми исполняется формула (``capability_policy``,
+    ``unknown_policy``, ``partial_score``), и они же входят в ключ межпрогонного кэша
+    вердиктов (`09` §10.5).
+
+    Формат — ``<capability_policy>+<unknown_policy>@<hash>``: имя политики читаемо
+    человеком (``resolved-only-v1+excluded``), хеш ловит смену ``partial_score`` и любых
+    будущих слагаемых, которых в имени нет. Только имя было бы ложью о содержимом — тот
+    же довод, по которому ``prompt_template`` несёт ``@hash``; только хеш не сказал бы,
+    какая политика работала.
+
+    Значения берутся **из домена**, а не переписываются здесь: вторая копия разошлась бы
+    с первой (и ``test_manifest_scoring_defaults_match_declared_policy`` уже сверяет
+    дефолты манифеста с этой же функцией).
+    """
+    from core.domain.scoring import scoring_policy_spec
+
+    spec = scoring_policy_spec()
+    name = f"{spec['capability_policy']}+{spec['unknown_policy']}"
+    return f"{name}@{short_hash(_canonical(spec), 12)}"
 
 
 def manual_artifacts_digest(rows: Iterable[tuple[str, str, str]]) -> str:

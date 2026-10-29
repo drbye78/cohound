@@ -113,3 +113,34 @@ def test_interrupted_is_operational_not_methodological() -> None:
     assert str(data["status_dictionary_version"]) == "2.2.0"
     # Причина, по которой «просто добавить значение» было небезопасно: версия в METHODOLOGY_FIELDS.
     assert "status_dict_version" in METHODOLOGY_FIELDS
+
+
+def test_embed_device_and_run_product_status_are_dictionary_sections() -> None:
+    """16 §4.1/§3.2: ось ``embed_device`` и статус продукта в прогоне — в словаре.
+
+    ``embed_device`` сверяется с :class:`EmbedDevice` (у оси есть производитель —
+    резолвер ``resolve_embed_device`` и поле контракта). ``run_product_status``
+    объявлен **без** сверки с enum намеренно: ``StrEnum`` заводится там, где у
+    перечисления есть производитель (писатель таблицы ``run_product``), а словарь —
+    единственный источник значений и обязан называть их раньше кода. Поэтому здесь
+    фиксируется ровно то, что проверяет гейт: секция есть, значения стабильны, и версия
+    словаря не сдвинулась (оба перечисления операционные, §13).
+    """
+    from core.domain import EmbedDevice, load_dictionary
+
+    data = load_dictionary(DICT)
+    assert set(data["embed_device"]) == {v.value for v in EmbedDevice}
+    assert set(data["embed_device"]) == {"cpu", "cuda"}
+    # ``auto`` не существует: объявленная ось обязана действовать (R5).
+    assert "auto" not in data["embed_device"]
+
+    assert data["run_product_status"] == [
+        "pending",
+        "running",
+        "complete",
+        "partial",
+        "failed",
+        "blocked",
+    ]
+    # Операционные перечисления: версия словаря не двигается добавлением секций.
+    assert str(data["status_dictionary_version"]) == "2.2.0"

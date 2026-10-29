@@ -119,5 +119,110 @@ def test_cli_reports_schema_mismatch_in_json(
     assert "3.10.0" in payload["message"]
 
 
+def test_boundary_columns_exist_on_fresh_db_and_version_is_not_bumped() -> None:
+    """Граница ``runs`` (16 §3): аддитивные колонки и таблица ``run_product`` — без bump.
+
+    ``SCHEMA_VERSION`` здесь пинуется намеренно: подъём версии на аддитивном изменении
+    (11 §2.6) отверг бы уже завершённые прогоны, то есть выполнимое требование «старые
+    прогоны остаются читаемыми» было бы нарушено. Пин — единственный способ заметить
+    случайный bump в ревью, а не в живом чтении.
+    """
+    assert SCHEMA_VERSION == "3.13.0"
+
+    conn = connect(":memory:")
+    try:
+        runs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+        assert {"run_scope", "product_plan_json", "embed_device"} <= runs_cols
+
+        docs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_docs)")}
+        assert {"http_status", "reuse_kind"} <= docs_cols
+
+        tables = {
+            r["name"]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "run_product" in tables
+        product_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(run_product)")
+        }
+        # 16 §3.2: ровно эти колонки; ``cells_carried``/``cells_measured`` не заводятся
+        # (переноса ячеек нет, 09 §10, и колонка, всегда равная нулю, — ложь о механизме).
+        assert product_cols == {
+            "run_id",
+            "product_id",
+            "mode",
+            "status",
+            "scope",
+            "phase",
+            "coverage_complete",
+            "docs_total",
+            "docs_reused",
+            "docs_new",
+            "cells_total",
+            "cells_pending",
+            "baseline_complete",
+            "error_kind",
+            "error",
+            "updated_at",
+        }
+        assert "cells_carried" not in product_cols
+        assert "cells_measured" not in product_cols
+
+        pk = [
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(run_product)")
+            if r["pk"]
+        ]
+        assert pk == ["run_id", "product_id"]
+        fks = list(conn.execute("PRAGMA foreign_key_list(run_product)"))
+        assert [(fk["table"], fk["from"], fk["to"]) for fk in fks] == [
+            ("runs", "run_id", "run_id")
+        ]
+    finally:
+        conn.close()
+
+
+def test_3_13_0_db_without_boundary_columns_is_accepted_and_migrated(
+    tmp_path: Path,
+) -> None:
+    """Файл той же версии без новых колонок читается и получает их (аддитивность).
+
+    Это и есть смысл отказа от bump: граница применяется сразу после ``report``, и ни один
+    существующий ``runs/*/cohound.db`` не теряется.
+    """
+    db = tmp_path / "cohound.db"
+    conn = connect(db)
+    try:
+        for column in ("run_scope", "product_plan_json", "embed_device"):
+            conn.execute("ALTER TABLE runs DROP COLUMN " + column)
+        for column in ("http_status", "reuse_kind"):
+            conn.execute("ALTER TABLE corpus_docs DROP COLUMN " + column)
+        conn.execute("DROP TABLE run_product")
+        conn.commit()
+        # Версия в файле — та же (bump не делался), поэтому гейт молчит.
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        assert row["value"] == SCHEMA_VERSION
+    finally:
+        conn.close()
+
+    migrated = connect(db)
+    try:
+        runs_cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
+        assert {"run_scope", "product_plan_json", "embed_device"} <= runs_cols
+        docs_cols = {
+            r["name"] for r in migrated.execute("PRAGMA table_info(corpus_docs)")
+        }
+        assert {"http_status", "reuse_kind"} <= docs_cols
+        tables = {
+            r["name"]
+            for r in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "run_product" in tables
+    finally:
+        migrated.close()
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

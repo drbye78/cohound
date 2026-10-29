@@ -66,6 +66,10 @@ from core.util.ids import parse_source_id
 #: Размер пачки по умолчанию для батчевых записей (§B.2, T3.1).
 DEFAULT_BATCH_SIZE = 200
 
+#: Префикс версии документа (``incremental.doc_version_id``, 16 §6): им начинается второй
+#: сегмент ``source_id`` после границы A, тогда как ``corpus_docs.doc_id`` — content-hash.
+_DOC_VERSION_PREFIX = "dv_"
+
 #: Колонки ``cells``, которые реально несёт доменная модель ``Cell``. Прочие колонки
 #: таблицы (``justification``/``rule_note``/``failure_kind``/``model_id``/… ) заполняются
 #: другими контурами записи и здесь не пишутся (T3.1: «не писать колонки, которых нет в модели»).
@@ -222,6 +226,17 @@ def _row_optional(row: sqlite3.Row, column: str) -> Any:
     return row[column] if _has_column(row, column) else None
 
 
+def _product_plan_json(value: Mapping[str, Any] | None) -> str | None:
+    """Канонический JSON блока ``product_plan`` (16 §3.1) либо ``None``.
+
+    ``None`` остаётся ``None``: «план не записан» не превращается в ``"null"``/``{}`` —
+    иначе читатель не отличил бы legacy-строку от прогона с пустым планом.
+    """
+    if value is None:
+        return None
+    return json.dumps(dict(value), ensure_ascii=False, sort_keys=True)
+
+
 def _notes_from_text(raw: str | None) -> list[str]:
     """Разбирает ``cells.validation_notes`` в список заметок (терпимо к legacy-тексту).
 
@@ -351,12 +366,7 @@ class SqliteStore:
         так остаются читаемыми прогоны, сделанные до появления колонки (например
         ``cells.evidence_scope`` / ``cell_evidence.scope_acceptance``).
         """
-        present = self._present_columns.get(table)
-        if present is None:
-            present = frozenset(
-                row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")
-            )
-            self._present_columns[table] = present
+        present = self._table_columns(table)
         missing = [c for c in columns if c not in present]
         if not missing:
             return ", ".join(columns)
@@ -368,6 +378,21 @@ class SqliteStore:
                 f"таблица {table} не имеет ни одной ожидаемой колонки: схема не читается"
             )
         return ", ".join(c for c in columns if c in present)
+
+    def _table_columns(self, table: str) -> frozenset[str]:
+        """Фактические колонки ``table`` (кэш на соединение).
+
+        Нужен там, где вопрос не «как спроецировать», а «есть ли колонка вовсе»: в
+        read-only БД прошлой версии аддитивной колонки нет, и зависящий от неё путь
+        обязан не исполняться, а не падать.
+        """
+        present = self._present_columns.get(table)
+        if present is None:
+            present = frozenset(
+                row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")
+            )
+            self._present_columns[table] = present
+        return present
 
     # -- lifecycle ------------------------------------------------------- #
     def close(self) -> None:
@@ -437,7 +462,14 @@ class SqliteStore:
                     _as_text(cfg.mode),
                     cfg.case_id,
                     cfg.anchor,
-                    cfg.cohort,
+                    # 09 §12.2 / 16 §2: колонка называется ``cohort_ref`` и обязана нести
+                    # **авторскую ревизию** состава (``run.yaml:cohort_ref``), потому что
+                    # именно она входит в ``cohort_digest``. Здесь лежало ``cfg.cohort`` —
+                    # имя файла когорты, то есть манифест показывал ревизию, которой в
+                    # ``run_id`` не было, а настоящая ревизия не сохранялась нигде.
+                    # ``None`` — ревизия не объявлена: догадка «имя файла = ревизия» была
+                    # бы вторым таким же дефектом, поэтому наследования нет.
+                    cfg.cohort_ref,
                     json.dumps(cfg.focus.params, ensure_ascii=False),
                     json.dumps(cfg.focus.modules, ensure_ascii=False),
                     cfg.package,
@@ -1217,9 +1249,16 @@ class SqliteStore:
         ``execution_contract_digest`` (09 §12.5 — отпечаток условий измерения, по которому
         ``hound diff`` решает сравнимость циклов), деплой-провенанс
         ``deploy_profile``/``edge_schema_version``/``edge_capabilities_json``
-        (07 §7; execution-class, не методологическая версия). ``UPDATE`` по существующей
+        (07 §7; execution-class, не методологическая версия), а также провенанс среза
+        ``run_scope``/``product_plan_json`` (16 §3.1 — без него полное измерение неотличимо
+        от среза ``--only-product``) и наблюдаемое поле ``embed_device`` (ось уже входит в
+        ``execution_contract_digest``; здесь — чтобы «на чём считались векторы» читалось
+        запросом, а не восстановлением из дайджеста). ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
+
+        Список колонок — **явный**, а не ``SELECT *``: колонка, не вписанная сюда, остаётся
+        ``NULL`` навсегда, хотя ``ALTER TABLE`` её создал (16 §4.2).
         """
         provenance = manifest.settings_provenance or {}
         crawl_provenance = manifest.crawl_provenance
@@ -1239,7 +1278,9 @@ class SqliteStore:
                 " manual_artifacts_digest = ?, manual_artifacts_json = ?,"
                 " partial_docs_json = ?,"
                 " publishability_json = ?,"
-                " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
+                " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?,"
+                " run_scope = ?, product_plan_json = ?, embed_device = ?,"
+                " previous_run_id = ?, change_class = ?, cycle_id = ?"
                 " WHERE run_id = ?",
                 (
                     manifest.package_version,
@@ -1291,6 +1332,20 @@ class SqliteStore:
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
+                    # 16 §3.1: провенанс среза (``run_scope``/``product_plan``) и наблюдаемая
+                    # ось устройства эмбеддера. План пишется канонической JSON-формой
+                    # (``sort_keys``), ``None`` остаётся ``NULL``.
+                    manifest.run_scope,
+                    _product_plan_json(manifest.product_plan),
+                    manifest.embed_device,
+                    # 09 §12.3/§13: провенанс сравнения (предшественник + класс изменения).
+                    # Без записи ``read_manifest`` вернул бы ``None``, и пост-хок
+                    # ``hound report`` опубликовал бы прогон без базы сравнения.
+                    manifest.previous_run_id,
+                    manifest.change_class,
+                    # 09 §2.4: цикл прогона — материал ``run_id``; без колонки манифест,
+                    # пересобранный ``hound report``, молчал бы о цикле.
+                    manifest.cycle_id,
                     run_id,
                 ),
             )
@@ -1328,23 +1383,88 @@ class SqliteStore:
                 ),
             )
 
-    def upsert_corpus_doc(self, doc: CorpusDoc, *, origin: str = "crawl") -> None:
+    def upsert_corpus_doc(
+        self,
+        doc: CorpusDoc,
+        *,
+        origin: str = "crawl",
+        doc_version_id: str | None = None,
+    ) -> None:
         """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2).
 
         ``origin`` — происхождение **байтов** (13-manual-artifacts §3.3): ``crawl`` для
         обычного краула (дефолт, поведение прежнее) и ``manual`` для объявленного файла
         оператора. Один и тот же текст под одним продуктом — одна строка
-        (``doc_id = product_id:content_hash``), поэтому ``INSERT OR REPLACE`` оставляет
-        значение последнего писателя: если байты позже **наблюдены краулом**, строка честно
-        говорит ``crawl`` — это более сильное утверждение (сайт действительно прочитан).
+        (``doc_id = product_id:content_hash``), поэтому upsert оставляет значение последнего
+        писателя: если байты позже **наблюдены краулом**, строка честно говорит ``crawl`` —
+        это более сильное утверждение (сайт действительно прочитан).
+
+        ``http_status``/``reuse_kind`` (16 §3.3) — происхождение **наблюдения**: серверный
+        ответ этого цикла и классификация пути страницы. Значения приходят полями
+        ``CorpusDoc``.
+
+        ``doc_version_id`` (16 §6) — **адрес**, а не наблюдение, и потому не колонка
+        ``corpus_docs``: ``chunk_id`` и ``CellEvidence.source_id`` несут версию документа
+        (``dv_...``), а ``doc_id`` остаётся ``product_id:content_hash``. Отображение живёт
+        в производной таблице ``corpus_doc_version`` (одна версия → один документ; обратное
+        неверно: ``dv`` включает уровень извлечения, ``doc_id`` — нет, и на строку
+        помещается ровно одна версия). Пишется идемпотентно: повторная версия того же
+        документа перекрывает строку, а не плодит её. ``None`` — версия не объявлена
+        (legacy-путь); отображения тогда нет, и ``source_id`` ищется по ``content_hash``.
+
+        **Правило записи для ``reuse_kind`` — монотонное, и это не деталь.** Resume
+        перечитывает из retained-байтов и те документы, которые в этом же ``run_id`` уже были
+        получены от сервера (до перезапуска хоста), поэтому новое ``reused`` **не понижает**
+        записанное ``live``/``revalidated``: иначе resume стирал бы состоявшееся наблюдение,
+        а вместе с ним — основание публиковать ``❌`` (09 §11.2), и ``❌`` стал бы
+        недоказуем без причины. Правило узкое намеренно: понижает **только** ``reused``.
+        ``stale`` — это собственная классификация (условный GET пропущен по потолку
+        ревалидации), а ``NULL`` — «наблюдение не записано»; выдавать их за понижение
+        значило бы решать за писателя то, чего он не утверждал. Обратное движение
+        разрешено всегда: ``reused`` → ``live`` — новое, более сильное наблюдение.
+
+        ``http_status`` пишется **как пришло** и монотонности не имеет: ``NULL`` здесь значит
+        «сервер в этом цикле не отвечал», то есть факт о цикле, а не понижение прежнего
+        ответа. Сохранять прежний код вместо «не отвечал» — приписать серверу ответ,
+        которого в этом цикле не было.
+
+        Место правила — здесь: хранилище единственное знает прежнюю строку, писатель
+        конвейера (``corpus.py``) — нет, и спрашивать её на каждый документ значило бы
+        превратить запись корпуса в N+1 запросов.
         """
+        http_status = doc.http_status
+        reuse_kind = doc.reuse_kind
         with self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO corpus_docs"
+                "INSERT INTO corpus_docs"
                 " (doc_id, product_id, url, fetched_at, content_hash, raw_path,"
                 "  extractor_version, render_mode, lang, origin,"
-                "  partial, partial_reason, page_count, pages_converted, extracted_chars)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  partial, partial_reason, page_count, pages_converted, extracted_chars,"
+                "  http_status, reuse_kind)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(doc_id) DO UPDATE SET"
+                "  product_id = excluded.product_id,"
+                "  url = excluded.url,"
+                "  fetched_at = excluded.fetched_at,"
+                "  content_hash = excluded.content_hash,"
+                "  raw_path = excluded.raw_path,"
+                "  extractor_version = excluded.extractor_version,"
+                "  render_mode = excluded.render_mode,"
+                "  lang = excluded.lang,"
+                "  origin = excluded.origin,"
+                "  partial = excluded.partial,"
+                "  partial_reason = excluded.partial_reason,"
+                "  page_count = excluded.page_count,"
+                "  pages_converted = excluded.pages_converted,"
+                "  extracted_chars = excluded.extracted_chars,"
+                # ``http_status`` — факт о **цикле**, а не о документе: пишется как пришло.
+                "  http_status = excluded.http_status,"
+                # Монотонность наблюдения (16 §3.3): понижает только ``reused``, и только
+                # подтверждённое сервером. Сравнение строкой, а не ``IN``: ``stale`` и ``NULL``
+                # понижением не считаются (у них свой смысл, см. докстринг).
+                "  reuse_kind = CASE WHEN corpus_docs.reuse_kind IN ('live', 'revalidated')"
+                "    AND excluded.reuse_kind = 'reused'"
+                "   THEN corpus_docs.reuse_kind ELSE excluded.reuse_kind END",
                 (
                     doc.doc_id,
                     doc.product_id,
@@ -1363,8 +1483,21 @@ class SqliteStore:
                     doc.page_count,
                     doc.pages_converted,
                     doc.extracted_chars,
+                    None if http_status is None else int(http_status),
+                    _as_text(reuse_kind),
                 ),
             )
+            if doc_version_id:
+                # 16 §6: отображение версии в документ — отдельная строка, а не поле строки
+                # корпуса (см. докстринг). Идемпотентно по PK ``doc_version_id``.
+                self.conn.execute(
+                    "INSERT INTO corpus_doc_version (doc_version_id, product_id, doc_id)"
+                    " VALUES (?, ?, ?)"
+                    " ON CONFLICT(doc_version_id) DO UPDATE SET"
+                    "  product_id = excluded.product_id,"
+                    "  doc_id = excluded.doc_id",
+                    (str(doc_version_id), doc.product_id, doc.doc_id),
+                )
 
     def save_manual_artifact(self, record: Mapping[str, Any]) -> None:
         """Upsert аудит-строки предоставления (13-manual-artifacts §3.3).
@@ -2008,6 +2141,118 @@ class SqliteStore:
         ):
             yield self._row_to_corpus_coverage(row)
 
+    def save_run_product(
+        self,
+        run_id: str,
+        product_id: str,
+        *,
+        mode: str,
+        status: str,
+        scope: str = "full",
+        phase: str | None = None,
+        coverage_complete: bool | None = None,
+        docs_total: int = 0,
+        docs_reused: int = 0,
+        docs_new: int = 0,
+        cells_total: int = 0,
+        cells_pending: int = 0,
+        baseline_complete: int = 0,
+        error_kind: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Идемпотентный upsert статуса продукта **в прогоне** (16 §3.2).
+
+        Одна функция на продукт, вызывается на границе продукта и переписывается в конце
+        фазы (образец — :meth:`save_corpus_coverage`), поэтому ``updated_at`` ставит store,
+        а не вызывающий: момент записи — факт хранилища, а не догадка писателя.
+
+        ``coverage_complete=None`` — покрытие **не считалось** (не «полное»): NULL в колонке
+        и ``None`` в читателе, а не ``False``/``True`` из отсутствия значения.
+
+        ``cells_total``/``cells_pending``/``baseline_complete`` — те же величины, что
+        ``product_end`` пишет в ``results[].notes`` прогона; носитель — здесь, ``notes``
+        остаётся оператору, а расхождение между ними — аномалия отчёта (16 §3.2).
+        ``cells_carried``/``cells_measured`` не пишутся: переноса ячеек нет (09 §10).
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO run_product"
+                " (run_id, product_id, mode, status, scope, phase, coverage_complete,"
+                "  docs_total, docs_reused, docs_new, cells_total, cells_pending,"
+                "  baseline_complete, error_kind, error, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(run_id, product_id) DO UPDATE SET"
+                "  mode = excluded.mode,"
+                "  status = excluded.status,"
+                "  scope = excluded.scope,"
+                "  phase = excluded.phase,"
+                "  coverage_complete = excluded.coverage_complete,"
+                "  docs_total = excluded.docs_total,"
+                "  docs_reused = excluded.docs_reused,"
+                "  docs_new = excluded.docs_new,"
+                "  cells_total = excluded.cells_total,"
+                "  cells_pending = excluded.cells_pending,"
+                "  baseline_complete = excluded.baseline_complete,"
+                "  error_kind = excluded.error_kind,"
+                "  error = excluded.error,"
+                "  updated_at = excluded.updated_at",
+                (
+                    run_id,
+                    product_id,
+                    str(mode),
+                    str(status),
+                    str(scope),
+                    phase,
+                    None if coverage_complete is None else int(coverage_complete),
+                    int(docs_total),
+                    int(docs_reused),
+                    int(docs_new),
+                    int(cells_total),
+                    int(cells_pending),
+                    int(baseline_complete),
+                    error_kind,
+                    error,
+                    _now_iso(),
+                ),
+            )
+
+    def iter_run_products(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Итерирует строки ``run_product`` прогона (порядок ``product_id`` — детерминизм).
+
+        Возвращает словари с **явным** набором ключей (а не ``SELECT *``): читатель отчёта
+        не должен зависеть от порядка колонок в файле БД. ``coverage_complete`` отдаётся
+        ``bool | None`` (``None`` = покрытие не считалось), счётчики — ``int``.
+        """
+        for row in self.conn.execute(
+            "SELECT run_id, product_id, mode, status, scope, phase, coverage_complete,"
+            " docs_total, docs_reused, docs_new, cells_total, cells_pending,"
+            " baseline_complete, error_kind, error, updated_at"
+            " FROM run_product WHERE run_id = ? ORDER BY product_id",
+            (run_id,),
+        ):
+            yield {
+                "run_id": row["run_id"],
+                "product_id": row["product_id"],
+                "mode": row["mode"],
+                "status": row["status"],
+                "scope": row["scope"],
+                "phase": row["phase"],
+                "coverage_complete": (
+                    None
+                    if row["coverage_complete"] is None
+                    else bool(row["coverage_complete"])
+                ),
+                "docs_total": int(row["docs_total"] or 0),
+                "docs_reused": int(row["docs_reused"] or 0),
+                "docs_new": int(row["docs_new"] or 0),
+                "cells_total": int(row["cells_total"] or 0),
+                "cells_pending": int(row["cells_pending"] or 0),
+                "baseline_complete": int(row["baseline_complete"] or 0),
+                "error_kind": row["error_kind"],
+                "error": row["error"],
+                "updated_at": row["updated_at"],
+            }
+
     def iter_corpus_docs(self, run_id: str) -> Iterator[CorpusDoc]:
         """Итерирует документы корпуса прогона (детерминированно: ``product_id, doc_id``).
 
@@ -2049,6 +2294,11 @@ class SqliteStore:
                 page_count=doc["page_count"],
                 pages_converted=doc["pages_converted"],
                 extracted_chars=doc["extracted_chars"],
+                # 16 §3.3: происхождение наблюдения (серверный ответ + классификация пути).
+                # ``_row_optional`` — колонки аддитивные: read-only БД прошлой версии их не
+                # имеет, и отсутствие колонки значит «не записано», а не сбой чтения.
+                http_status=_row_optional(doc, "http_status"),
+                reuse_kind=_row_optional(doc, "reuse_kind"),
             )
 
     # -- спуск в контейнеры (B3) ------------------------------------------- #
@@ -2235,7 +2485,10 @@ class SqliteStore:
         из реальных колонок ``runs`` (схема v3.4, P1). Поля, не записанные манифестом,
         дают ``None`` (деплой-профиль/версия шва) либо пустой/дефолтный контейнер
         (``edge_capabilities``/``settings_provenance``/``CrawlProvenance``) — значения
-        не выдумываются.
+        не выдумываются. Провенанс среза (``run_scope``/``product_plan``) и устройство
+        эмбеддера (``embed_device``, 16 §3.1) читаются через ``_row_optional``: колонки
+        аддитивные, и на read-only файле прошлой версии их нет — отсутствие значит
+        «не записано», а не сбой чтения прогона.
 
         :raises ValueError: если строка прогона отсутствует.
         """
@@ -2314,6 +2567,19 @@ class SqliteStore:
         partial_docs_block = (
             partial_docs_raw if isinstance(partial_docs_raw, dict) else {}
         )
+        # 16 §3.1: провенанс среза (``run_scope``/``product_plan``) и наблюдаемая ось
+        # устройства эмбеддера. Колонки аддитивные ⇒ читаются через ``_row_optional``
+        # (read-only БД прошлой версии их не имеет); NULL/не-JSON → ``None``, а не пустой
+        # словарь: «план не записан» не выдумывается.
+        product_plan_raw = _parse_json_text(_row_optional(row, "product_plan_json"))
+        run_scope = _row_optional(row, "run_scope")
+        embed_device = _row_optional(row, "embed_device")
+        # 09 §12.3/§13: провенанс сравнения. Колонки аддитивные ⇒ ``_row_optional``:
+        # отсутствие колонки/значения — «не записано», а не «предшественника не было».
+        previous_run_id = _row_optional(row, "previous_run_id")
+        change_class = _row_optional(row, "change_class")
+        # 09 §2.4: цикл прогона — та же терпимость к старой БД (колонка аддитивная).
+        cycle_id = _row_optional(row, "cycle_id")
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -2369,6 +2635,15 @@ class SqliteStore:
             deploy_profile=row["deploy_profile"],
             edge_schema_version=row["edge_schema_version"],
             edge_capabilities=edge_capabilities,
+            # 16 §3.1: срез прогона, исполненный план и устройство эмбеддера.
+            run_scope=run_scope,
+            product_plan=(
+                product_plan_raw if isinstance(product_plan_raw, dict) else None
+            ),
+            embed_device=embed_device,
+            previous_run_id=previous_run_id,
+            change_class=change_class,
+            cycle_id=cycle_id,
         )
 
     def read_run_index_ref(self, run_id: str) -> RunIndexRef | None:
@@ -2526,8 +2801,31 @@ class SqliteStore:
 
         1. прямой lookup по ``corpus_chunks.chunk_id``;
         2. иначе — разбор через ``parse_source_id`` и матч по
-           ``(product_id, chunk_no[, build_id])`` (колонки ``corpus_chunks`` —
-           ``chunk_no``/``product_id``/``build_id``).
+           ``(product_id, doc_id, chunk_no[, build_id])``, где ``doc_id`` берётся в
+           **двух** формах: ``f"{product_id}:{ref.doc_id}"`` — так ``doc_id`` реально
+           лежит в ``corpus_docs``/``corpus_chunks`` (``product_id:content_hash``) — и
+           «голый» ``ref.doc_id`` для legacy-строк без префикса продукта.
+
+        Почему две формы, а не одна (16 §6.3): прежний фолбэк искал **только** голый
+        хеш, то есть по значению, которого в корпусе нет, и потому не срабатывал ни
+        разу — мнимая страховка. Префиксная форма ищется первой (она — настоящее
+        содержимое БД), голо́е совпадение остаётся ради строк, записанных до правила
+        ``doc_id = product_id:hash``: их читаемость не должна зависеть от порядка.
+
+        Второй сегмент ``source_id``, приходящего из evidence, — **версия** документа
+        (``dv_...``, 16 §6), а ``doc_id`` в корпусе остаётся ``product_id:content_hash``;
+        ``dv_`` из хеша не выводится (``short_hash`` необратим). Поэтому для такого
+        сегмента есть два добавочных шага, оба после прямого lookup:
+
+        * точный адрес чанка ``f"{product_id}:{doc_version_id}:{chunk_no}"`` — это и есть
+          форма ``corpus._chunk_id``, то есть адрес строки ``corpus_chunks``. Он
+          однозначен там, где матч по ``doc_id`` неоднозначен: у документа бывает
+          несколько версий (``dv`` включает уровень извлечения, ``doc_id`` — нет), и
+          ``(doc_id, chunk_no)`` у них совпадает;
+        * отображение версии в ``doc_id`` (``corpus_doc_version``) — для строк, чей
+          ``chunk_id`` записан не канонической формой. Порядок: точный адрес →
+          префиксная форма → отображённая версия → голая. В БД прошлой версии таблицы
+          отображения нет — шаг не исполняется, фолбэк остаётся прежним, а не падает.
 
         Малформед/неизвестный ``source_id`` → ``None`` (не исключение). Возвращает
         :class:`ResolvedSource` с ``chunk_id``/``url``/``content_hash``/``build_id``
@@ -2546,20 +2844,100 @@ class SqliteStore:
         except ValueError:
             return None
 
-        sql = (
-            "SELECT chunk_id, url, content_hash, build_id FROM corpus_chunks"
-            " WHERE product_id = ? AND doc_id = ? AND chunk_no = ?"
-        )
-        params: list[Any] = [ref.product_id, ref.doc_id, ref.chunk_no]
-        if ref.build_id is not None:
-            sql += " AND build_id = ?"
-            params.append(ref.build_id)
-        # Детерминизм: при нескольких кандидатах — стабильный порядок по PK.
-        sql += " ORDER BY chunk_id LIMIT 1"
-        row = self.conn.execute(sql, params).fetchone()
-        if row is None:
+        is_version = ref.doc_id.startswith(_DOC_VERSION_PREFIX)
+        if is_version:
+            # Точный адрес чанка: ``chunk_id = product:doc_version_id:chunk_no`` (16 §6).
+            # Ищется первым, потому что матч по ``doc_id`` у двух версий одного документа
+            # неоднозначен (``doc_id`` уровня не несёт), а этот адрес — однозначен.
+            exact_sql = (
+                "SELECT chunk_id, url, content_hash, build_id FROM corpus_chunks"
+                " WHERE chunk_id = ?"
+            )
+            exact_params: list[Any] = [
+                f"{ref.product_id}:{ref.doc_id}:{ref.chunk_no}"
+            ]
+            if ref.build_id is not None:
+                exact_sql += " AND build_id = ?"
+                exact_params.append(ref.build_id)
+            row = self.conn.execute(exact_sql, exact_params).fetchone()
+            if row is not None:
+                return self._row_to_resolved(row)
+
+        doc_ids: list[str] = [f"{ref.product_id}:{ref.doc_id}"]
+        if is_version:
+            mapped = self._doc_id_by_version(ref.product_id, ref.doc_id)
+            if mapped is not None and mapped not in doc_ids:
+                doc_ids.append(mapped)
+        doc_ids.append(ref.doc_id)
+
+        for doc_id in doc_ids:
+            sql = (
+                "SELECT chunk_id, url, content_hash, build_id FROM corpus_chunks"
+                " WHERE product_id = ? AND doc_id = ? AND chunk_no = ?"
+            )
+            params: list[Any] = [ref.product_id, doc_id, ref.chunk_no]
+            if ref.build_id is not None:
+                sql += " AND build_id = ?"
+                params.append(ref.build_id)
+            # Детерминизм: при нескольких кандидатах — стабильный порядок по PK.
+            sql += " ORDER BY chunk_id LIMIT 1"
+            row = self.conn.execute(sql, params).fetchone()
+            if row is not None:
+                return self._row_to_resolved(row)
+        return None
+
+    def _doc_id_by_version(self, product_id: str, doc_version_id: str) -> str | None:
+        """``corpus_docs.doc_id`` по версии документа (16 §6) либо ``None``.
+
+        Отображение ``dv_...`` → ``product_id:content_hash`` берётся из производной
+        таблицы ``corpus_doc_version``: обратной функции у ``short_hash`` нет, поэтому
+        версия из ``source_id`` иначе не адресует строку. Таблица аддитивная: в read-only
+        БД прошлой версии её нет — тогда отображения нет (``None``), и фолбэк
+        :meth:`resolve` остаётся прежним, а не падает.
+        """
+        if "doc_version_id" not in self._table_columns("corpus_doc_version"):
             return None
-        return self._row_to_resolved(row)
+        row = self.conn.execute(
+            "SELECT doc_id FROM corpus_doc_version"
+            " WHERE product_id = ? AND doc_version_id = ?",
+            (product_id, doc_version_id),
+        ).fetchone()
+        return None if row is None else str(row["doc_id"])
+
+    def iter_corpus_doc_versions(
+        self, run_id: str, product_id: str
+    ) -> dict[str, str]:
+        """Отображение ``doc_version_id → doc_id`` для продукта прогона (16 §6).
+
+        Одна версия → один документ; обратное неверно (``dv`` включает уровень извлечения,
+        ``doc_id`` — нет), поэтому носитель — производная таблица, а не колонка строки
+        корпуса. Читатель нужен там, где адрес приходит версией, а ``reuse_kind`` живёт
+        строкой корпуса: правило «``❌`` требует ``live|revalidated``» получает версию
+        **каждого** документа, а не одну на строку.
+
+        Область — как у :meth:`iter_corpus_docs`: ``corpus_doc_version`` не несёт
+        ``run_id``, поэтому выборка — корпус прогона (в штатной раскладке БД принадлежит
+        одному прогону). ``run_id`` проверяется на присутствие в БД (иначе
+        :class:`ValueError`): чужой/несуществующий прогон не отдаёт строк.
+
+        :raises ValueError: строки прогона ``run_id`` нет в этой БД.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"прогон не найден: {run_id!r}")
+        # Read-only БД прошлой версии таблицы не имеет: «отображений нет» — не сбой чтения.
+        if "doc_version_id" not in self._table_columns("corpus_doc_version"):
+            return {}
+        return {
+            str(row["doc_version_id"]): str(row["doc_id"])
+            for row in self.conn.execute(
+                "SELECT doc_version_id, doc_id FROM corpus_doc_version"
+                " WHERE product_id = ? ORDER BY doc_version_id",
+                (product_id,),
+            )
+        }
 
     @staticmethod
     def _row_to_resolved(row: sqlite3.Row) -> ResolvedSource:

@@ -59,10 +59,16 @@ CHILD_B = "https://docs.test/b"
 #: что и здесь: тот же план, те же страницы, те же фейковые порты). Инструментирование
 #: наблюдаемости не вправе сдвинуть ни одно из значений: иначе это уже не наблюдение,
 #: а смена условий измерения.
-PINNED_PARTITION_BUILD_ID = "pb_1f3e739c2d35af4ef2162694"
-PINNED_CONTENT_DIGEST = "761aa3da08cda85c38e68bdf"
-PINNED_INDEX_BUILD_ID = "cb_a9ec7f9f8e9c85247ffce7eb"
-PINNED_EXECUTION_CONTRACT_DIGEST = "c69774e1ba2ee321838838a9"
+#:
+#: Пересняты **один раз** версионной границей `runs` (16 §5/§6, 29.10.2026): ``pb`` получил
+#: ``embed_device`` в материал и схему ``partition-2``, ``chunk_id`` стал адресовать версию
+#: документа (``doc_version_id``), ``EXECUTION_CONTRACT_FIELDS`` вырос до 29 полей (ось
+#: ``embed_device``). ``content_digest``/``index_build_id`` следуют за ``chunk_id`` — это не
+#: дрейф инструментирования, а объявленная смена идентичности (``methodology_version``).
+PINNED_PARTITION_BUILD_ID = "pb_73f6be9e1dd88a028814154a"
+PINNED_CONTENT_DIGEST = "f26d9da9face8cc0662b9b6d"
+PINNED_INDEX_BUILD_ID = "cb_2b5c9399f9e69bf2d08d092f"
+PINNED_EXECUTION_CONTRACT_DIGEST = "22f2846925f7380875a95385"
 
 #: Поля, которые обязана нести строка продукта (``product_end``) и её Pass B-продолжение.
 CRAWL_BUCKETS = ("fetch_wait_s", "extract_wait_s", "chunk_s")
@@ -437,6 +443,8 @@ def test_build_failure_still_reports_build_s() -> None:
         package_id=PACKAGE,
         chunker_version="chunker-1",
         embed_model_id="fake-embedder-1",
+        # 16 §5.1: устройство счёта — обязательный keyword (дефолт объявленной оси).
+        embed_device="cpu",
         extractor_version="extractor-1",
         lexical_engine_version="fake-bm25-1",
         vector_store="fake",
@@ -471,6 +479,8 @@ def test_embed_failure_still_reports_embed_s() -> None:
         package_id=PACKAGE,
         chunker_version="chunker-1",
         embed_model_id="fake-embedder-1",
+        # 16 §5.1: устройство счёта — обязательный keyword (дефолт объявленной оси).
+        embed_device="cpu",
         extractor_version="extractor-1",
         lexical_engine_version="fake-bm25-1",
         vector_store="fake",

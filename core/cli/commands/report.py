@@ -27,7 +27,7 @@ from core.cli.wiring import build_store
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.gates import gate_trail
 from core.pipeline.partial_docs import human_line as partial_docs_human_line
-from core.pipeline.report import write_reports
+from core.pipeline.report import manifest_payload, write_reports
 from core.pipeline.support_quality import support_quality_line
 
 
@@ -143,6 +143,26 @@ def run(args: argparse.Namespace) -> int:
         "out": str(Path(out_dir) / run_id / "outputs"),
         "manifest_partial": partial,
         "artifacts": _artifacts_payload(artifacts),
+        # 16 §3.1/§4: провенанс прогона в машинном выводе, а не только в файле, который
+        # надо открыть. Тело — **тот же** словарь, что ``run_manifest.yaml``
+        # (:func:`core.pipeline.report.manifest_payload` — единственный сборщик), поэтому
+        # срез прогона (``run_scope``/``product_plan``) и наблюдаемая ось
+        # (``embed_device``) читаются потребителем без заглядывания в ``state.db``
+        # (09 §13.6). ``run_scope: null`` значит «не записано», а не «полный прогон»:
+        # подменять неизвестное на ``full`` запрещено (A3).
+        "manifest": manifest_payload(manifest),
+        # 16 §3.2: статус продукта **в прогоне** — строки таблицы ``run_product``
+        # (mode/status/scope/счётчики). Носитель один: ``results[].notes`` прогона
+        # остаётся операторским текстом, и отчёт его в статус не переводит.
+        "run_product": list(getattr(artifacts, "run_products", None) or []),
+        # Путь к таблице на диске: строки уже в payload, но артефакт без объявленного
+        # пути — та же невидимость, что и его отсутствие. ``None`` — строк нет (файл
+        # не создаётся: пустая таблица читалась бы как «продуктов нет»).
+        "run_product_csv": (
+            str(artifacts.run_product)
+            if getattr(artifacts, "run_product", None) is not None
+            else None
+        ),
         # A1/§6: класс публикуемости и числа, из которых он выведен — в машинном
         # выводе, а не только в шапке battle card. Отсутствие профиля не выдумывается
         # (``None``): синтетический бандл без профиля честно молчит.
@@ -158,6 +178,17 @@ def run(args: argparse.Namespace) -> int:
     else:
         for name, path in payload["artifacts"].items():
             sys.stdout.write(f"{name}: {path}\n")
+        # 16 §3.1: срез прогона и ось устройства — строкой, чтобы «полный прогон» и
+        # ``--only-product`` различались без открытия ``run_manifest.yaml``.
+        sys.stdout.write(f"run_scope: {manifest.run_scope or 'не записано'}\n")
+        sys.stdout.write(f"embed_device: {manifest.embed_device or 'не записано'}\n")
+        for row in payload["run_product"]:
+            sys.stdout.write(
+                f"product: {row.get('product_id')} mode={row.get('mode')} "
+                f"status={row.get('status')} scope={row.get('scope')} "
+                f"docs={row.get('docs_total')} cells={row.get('cells_total')}"
+                f"/{row.get('cells_pending')} pending\n"
+            )
         for note in notes:
             sys.stdout.write(f"note: {note}\n")
     return EXIT_OK

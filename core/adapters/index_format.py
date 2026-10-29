@@ -4,8 +4,8 @@
 
     index_store/{package}/{build}/{product_id}/
       vectors.fp16.npy      # float16, shape (N, dim)
-      chunk_ids.jsonl       # строка i ↔ chunk_id (порядок строк = порядок векторов)
-      manifest.json         # embed_model_id, dim, chunker_version, stats
+      chunk_ids.jsonl       # строка i ↔ chunk_id [+ content_hash] (порядок строк = порядок векторов)
+      manifest.json         # embed_model_id, embed_device, dim, chunker_version, stats
     index_store/{package}/_compositions/{composition_id}.json
                           # манифест композиции партиций (09 §8.2), не сборка
 
@@ -16,6 +16,14 @@
 Существующая сборка **не мутируется** (K2/§13): запись идёт в staging-каталог, прежняя
 партиция уводится одним rename в мусорное имя, и на её место встаёт staging атомарным
 ``os.replace`` — пути партиции не бывает «наполовину удалённым». Нейтрален (§1.3).
+
+**Две формы ``chunk_ids.jsonl`` (ревизия ``partition-2``).** Строка — либо
+``{"chunk_id": …}`` (исходный формат), либо ``{"chunk_id": …, "content_hash": …}``:
+вторую пишет сборщик, передавая ``content_hashes``. ``content_hash`` нужен, чтобы полный
+отпечаток партиции (``vector_digest``, :func:`core.util.index_partition.vector_digest`)
+пересчитывался **с диска**, а не только из входов сборки (09 §8.5). Обе формы читаются
+одинаково: отсутствие ``content_hash`` — не ошибка чтения, а отсутствие доказательства
+дайджеста (старая партиция остаётся читаемой, но не переиспользуемой по новому гейту).
 
 **Чтение — через ``mmap``.** ``read_partition`` отображает ``vectors.fp16.npy`` в память
 (``mmap_mode="r"``), а не читает его в кучу на каждый вызов; формат на диске остаётся
@@ -88,6 +96,8 @@ def write_partition(
     vectors: Sequence[Sequence[float]],
     chunk_ids: Sequence[str],
     manifest: dict[str, Any],
+    *,
+    content_hashes: Sequence[str] | None = None,
 ) -> Path:
     """Пишет партицию **атомарно** в ``index_store/{package}/{build}/{product_id}/``.
 
@@ -104,13 +114,19 @@ def write_partition(
     старая, либо целиком новая: окно между двумя rename — один системный вызов, а не
     длительность удаления дерева файлов.
 
-    :raises ValueError: если длины ``vectors`` и ``chunk_ids`` не совпадают.
+    :raises ValueError: если длины ``vectors`` и ``chunk_ids`` не совпадают (а также
+        ``content_hashes`` и ``chunk_ids``, когда ``content_hashes`` переданы).
     """
     import numpy as np
 
     if len(vectors) != len(chunk_ids):
         raise ValueError(
             f"vectors ({len(vectors)}) и chunk_ids ({len(chunk_ids)}) должны совпадать"
+        )
+    if content_hashes is not None and len(content_hashes) != len(chunk_ids):
+        raise ValueError(
+            f"content_hashes ({len(content_hashes)}) и chunk_ids ({len(chunk_ids)}) "
+            "должны совпадать"
         )
     target = build_root(index_root, package, build_id, product_id)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -122,8 +138,13 @@ def write_partition(
             matrix = matrix.reshape(len(vectors), -1)
         np.save(staging / _VECTORS, matrix)
         with (staging / _CHUNK_IDS).open("w", encoding="utf-8") as fh:
-            for chunk_id in chunk_ids:
-                fh.write(json.dumps({"chunk_id": chunk_id}, ensure_ascii=False) + "\n")
+            for index, chunk_id in enumerate(chunk_ids):
+                row: dict[str, str] = {"chunk_id": chunk_id}
+                if content_hashes is not None:
+                    # ``partition-2``: хеш текста чанка рядом с id — иначе полный
+                    # отпечаток партиции нельзя пересчитать с диска (09 §8.5).
+                    row["content_hash"] = content_hashes[index]
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         (staging / _MANIFEST).write_text(
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
@@ -154,6 +175,10 @@ def read_partition(
     mmap: bool = True,
 ) -> PartitionData:
     """Читает продукт-партицию (векторы + chunk_ids + манифест).
+
+    Строки ``chunk_ids.jsonl`` обеих форм (``partition-2`` и исходной) читаются одинаково:
+    берётся ``chunk_id``, а необязательный ``content_hash`` не требуется — старая партиция
+    остаётся читаемой (её отпечаток просто недоказуем; см. модульный docstring).
 
     **Векторы — через ``mmap`` по умолчанию.** ``np.load`` без ``mmap_mode`` читает
     ``vectors.fp16.npy`` целиком в кучу на **каждый** вызов: для партиции 11 400 × 1024

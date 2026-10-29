@@ -52,6 +52,7 @@ from typing import Any
 
 __all__ = [
     "DEFAULT_BATCH_SIZE",
+    "DEFAULT_DEVICE",
     "DEFAULT_DIM",
     "DEFAULT_MODEL_ID",
     "EmbedFn",
@@ -65,6 +66,8 @@ DEFAULT_MODEL_ID = "BAAI/bge-m3"
 DEFAULT_DIM = 1024
 #: Батч по умолчанию: компромисс памяти/скорости при CPU-инференсе.
 DEFAULT_BATCH_SIZE = 32
+#: Устройство по умолчанию — **объявленный** дефолт оси ``embed.device`` (``cpu``).
+DEFAULT_DEVICE = "cpu"
 
 #: Внедряемая функция эмбеддинга: батч текстов → батч векторов (без torch).
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -97,6 +100,12 @@ class LocalEmbedder:
         в момент прогона, а ``available`` говорит только о наличии стека, не о кэше.
         Оператор, которому нужен первый скачок, передаёт ``local_files_only=False``
         явно — тогда это его объявленное действие, а не умолчание адаптера.
+    :param device: устройство счёта вектора (``cpu``/``cuda``) — **объявленная** ось
+        ``embed.device``, а не выбор библиотеки. Передаётся в ``SentenceTransformer``
+        явно: до этого аргумента не было, и torch выбирал CUDA сам (``14`` оговорка 5),
+        то есть ``embed_device``/``pb``/ключ ``embed_cache`` называли бы устройство,
+        которого прогон не объявлял. Дефолт ``cpu`` — объявленный дефолт оси (не
+        ``None``: ``None`` снова отдал бы выбор окружению).
     """
 
     def __init__(
@@ -108,6 +117,7 @@ class LocalEmbedder:
         batch_size: int = DEFAULT_BATCH_SIZE,
         revision: str | None = None,
         local_files_only: bool = True,
+        device: str = DEFAULT_DEVICE,
     ) -> None:
         if not model_id:
             raise ValueError("model_id обязан быть непустым")
@@ -120,6 +130,8 @@ class LocalEmbedder:
         self.model_id = f"{model_id}@{revision}" if revision else model_id
         self.revision = revision
         self.local_files_only = local_files_only
+        #: Устройство счёта (``cpu``/``cuda``) — объявленная ось, не догадка библиотеки.
+        self.device = device
         self.dim = dim
         self.batch_size = batch_size
         self._embed_fn = embed_fn
@@ -177,6 +189,9 @@ class LocalEmbedder:
                 self._repo_id,
                 revision=self.revision,
                 local_files_only=self.local_files_only,
+                # Устройство — объявленная ось, а не выбор torch: без аргумента
+                # библиотека сама уходила на CUDA, если карта есть.
+                device=self.device,
             )
 
         model = self._model

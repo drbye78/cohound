@@ -5,8 +5,9 @@
 1. **Переиспользование только целой партицией.** Смена ``extractor_version``/
    ``chunker_version`` или добавление документа даёт новый ``pb`` и пересчитывает эмбеддинг
    всего продукта, хотя текст большинства чанков не изменился. Кэш адресует вектор по
-   ``(content_hash ТЕКСТА чанка, embed_model_id)`` — поэтому одинаковый текст, полученный
-   разными экстракторами, даёт **одно** попадание, а вектор другой модели — ни одного.
+   ``(content_hash ТЕКСТА чанка, embed_model_id, embed_device)`` — поэтому одинаковый текст,
+   полученный разными экстракторами, даёт **одно** попадание, вектор другой модели или
+   другого устройства — ни одного.
 2. **Порядок векторов (A3).** При смешанном батче хиты подставляются в свои позиции:
    порядок входа = порядок выхода, сборка индекса побитово равна живому эмбеддингу
    (fp16-квантизация кэша тождественна квантизации сборщика).
@@ -14,6 +15,12 @@
    «из кэша N (X%)» в итоговой строке продукта: без числа фича недоказуема.
 4. **Порча не роняет прогон.** Битый файл, неверная размерность, невалидный ключ — промах,
    а не исключение.
+5. **Устройство различает запись (16 §5.3).** Векторы CPU и CUDA — разные числа, поэтому
+   ``embed_device`` — обязательная компонента ключа, а запись без него — промах, а не хит.
+
+Сквозные тесты (``_embed_batched``/``_embed_and_build``) передают ``embed_device=`` явно:
+это тот же обязательный вход, что и у :class:`EmbedCache`, — ось объявляется в конвейере,
+а не угадывается кэшем.
 
 Нейтральные фикстуры: ``p1``, ``case``, ``fake-embedder``.
 """
@@ -59,6 +66,8 @@ from tests.fakes.ports import FakeEmbedder, FakeIndexBuilder
 
 MODEL = "fake-embedder-1"
 OTHER_MODEL = "another-embedder-1"
+DEVICE = "cpu"
+OTHER_DEVICE = "cuda"
 RUN_ID = "run-embed-cache"
 PACKAGE = "case"
 TS = "2026-01-01T00:00:00+00:00"
@@ -115,31 +124,35 @@ def _fp16(values) -> bytes:  # noqa: ANN001 — вспомогательная �
     return np.asarray(values, dtype=np.float16).tobytes()
 
 
+def _entry(root: Path, key: str, device: str = DEVICE) -> Path:
+    """Путь записи кэша: ``{root}/{модель}/{устройство}/{h2}/{hash}.vec``."""
+    return root / model_dir_name(MODEL) / device / key[:2] / f"{key}{SUFFIX}"
+
+
 # --------------------------------------------------------------------------- #
 # 1. Конверт: раскладка, fp16, независимость от версий производства
 # --------------------------------------------------------------------------- #
 
 
 def test_put_get_roundtrip_stores_two_bytes_per_axis(tmp_path: Path) -> None:
-    """Запись — ``{model}/{h2}/{hash}.vec``: заголовок + ровно 2 байта на ось."""
+    """Запись — ``{model}/{device}/{h2}/{hash}.vec``: заголовок + ровно 2 байта на ось."""
     cache = EmbedCache(tmp_path / "embed_cache")
     vector = [0.5, -0.25, 0.125, 1.0]
     key = content_hash("текст чанка")
-    cache.put(key, MODEL, vector, dim=4)
+    cache.put(key, MODEL, vector, embed_device=DEVICE, dim=4)
 
-    path = (
-        tmp_path / "embed_cache" / model_dir_name(MODEL) / key[:2] / f"{key}{SUFFIX}"
-    )
+    path = _entry(tmp_path / "embed_cache", key)
     raw = path.read_bytes()
     header, separator, payload = raw.partition(b"\n")
     assert separator == b"\n"
     assert b'"format":1' in header and b'"dim":4' in header
+    assert b'"embed_device":"cpu"' in header
     assert len(payload) == 4 * 2  # fp16, а не JSON-числа
 
     # Чтение возвращает ровно fp16-значения (та же величина, что положит сборщик).
-    assert cache.get(key, MODEL, dim=4) == np.asarray(vector, dtype=np.float16).astype(
-        float
-    ).tolist()
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=4) == np.asarray(
+        vector, dtype=np.float16
+    ).astype(float).tolist()
     assert cache.stats() == {
         "hits": 1,
         "misses": 0,
@@ -151,13 +164,71 @@ def test_put_get_roundtrip_stores_two_bytes_per_axis(tmp_path: Path) -> None:
     }
 
 
-def test_entry_is_addressed_by_text_and_model_only(tmp_path: Path) -> None:
-    """Ключ несёт текст и модель — и ничего о версиях производства/чанке/продукте."""
-    key = embed_cache_key(content_hash("t"), MODEL)
-    assert key == f"{content_hash('t')}\x1f{MODEL}"
+def test_entry_is_addressed_by_text_model_and_device_only(tmp_path: Path) -> None:
+    """Ключ несёт текст, модель и устройство — и ничего о версиях производства/чанке."""
+    key = embed_cache_key(content_hash("t"), MODEL, DEVICE)
+    assert key == f"{content_hash('t')}\x1f{MODEL}\x1f{DEVICE}"
+    # Устройство — отдельная компонента ключа: тот же текст другой оси не адресует.
+    assert embed_cache_key(content_hash("t"), MODEL, OTHER_DEVICE) != key
     # Санитизация каталога модели: путь-безопасное имя + хеш полного id (без коллизий).
     assert "/" not in model_dir_name("org/model:tag")
     assert model_dir_name("org/model:tag") != model_dir_name("org/model-tag")
+
+
+def test_vectors_of_different_devices_do_not_mix(tmp_path: Path) -> None:
+    """``put(cuda)`` не находится запросом ``cpu`` — и наоборот (16 §5.3).
+
+    Векторы CPU и CUDA одной модели численно разные, поэтому «устройство в ключе» — это
+    не провенанс, а часть значения: без него прогон, объявивший ``cuda``, молча получил бы
+    ``cpu``-векторы.
+    """
+    cache = EmbedCache(tmp_path / "embed_cache")
+    key = content_hash("текст")
+    cache.put(key, MODEL, [1.0, 2.0], embed_device=OTHER_DEVICE, dim=2)
+
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=2) is None
+    assert cache.get(key, MODEL, embed_device=OTHER_DEVICE, dim=2) == [1.0, 2.0]
+    # Записи живут раздельно: оси не перезаписывают друг друга (иначе каждый второй
+    # прогон платил бы полный эмбеддинг).
+    cache.put(key, MODEL, [3.0, 4.0], embed_device=DEVICE, dim=2)
+    assert cache.get(key, MODEL, embed_device=OTHER_DEVICE, dim=2) == [1.0, 2.0]
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=2) == [3.0, 4.0]
+
+
+def test_entry_without_embed_device_is_a_miss(tmp_path: Path) -> None:
+    """Старая запись без ``embed_device`` — **промах**, а не хит.
+
+    Приписать ей устройство было бы догадкой: неизвестно, на чём посчитан вектор, а
+    значения двух осей разные. Поэтому первый прогон после появления оси пере-эмбеддит
+    корпус (цена названа в 16 §5.3), а не переиспользует чужое.
+    """
+    root = tmp_path / "embed_cache"
+    cache = EmbedCache(root)
+    key = content_hash("текст")
+    path = _entry(root, key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = np.asarray([0.5, 0.25], dtype=np.float16).tobytes()
+    path.write_bytes(
+        json.dumps(
+            {
+                "byteorder": "little",
+                "content_hash": key,
+                "dim": 2,
+                "dtype": "float16",
+                "embed_model_id": MODEL,
+                "format": ENVELOPE_FORMAT,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+        + payload
+    )
+
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=2) is None
+    # Это не порча файла, а «не та ось»: счётчик порчи не растёт, растёт промах.
+    assert cache.stats()["corrupt"] == 0
+    assert cache.stats()["misses"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -170,11 +241,13 @@ def test_full_hit_never_calls_the_embedder(tmp_path: Path) -> None:
     cache = EmbedCache(tmp_path / "embed_cache")
     chunks = _chunks(EMBED_BATCH_CHUNKS * 2 + 3)
     warm = FakeEmbedder(dim=4)
-    _embed_batched(warm, chunks, cache=cache, embed_model_id=MODEL)
+    _embed_batched(warm, chunks, cache=cache, embed_model_id=MODEL, embed_device=DEVICE)
     assert len(warm.calls) == 3
 
     cold = FakeEmbedder(dim=4)
-    vectors = _embed_batched(cold, chunks, cache=cache, embed_model_id=MODEL)
+    vectors = _embed_batched(
+        cold, chunks, cache=cache, embed_model_id=MODEL, embed_device=DEVICE
+    )
     assert cold.calls == []  # эмбеддер не тронут
     assert _fp16(vectors) == _fp16(warm.embed([c.text for c in chunks]))
 
@@ -185,7 +258,9 @@ def test_full_miss_embeds_everything_and_fills_the_cache(tmp_path: Path) -> None
     chunks = _chunks(EMBED_BATCH_CHUNKS + 1)
     embedder = FakeEmbedder(dim=4)
 
-    vectors = _embed_batched(embedder, chunks, cache=cache, embed_model_id=MODEL)
+    vectors = _embed_batched(
+        embedder, chunks, cache=cache, embed_model_id=MODEL, embed_device=DEVICE
+    )
 
     assert vectors == FakeEmbedder(dim=4).embed([c.text for c in chunks])
     assert [len(call) for call in embedder.calls] == [EMBED_BATCH_CHUNKS, 1]
@@ -201,10 +276,18 @@ def test_mixed_batch_keeps_chunk_order(tmp_path: Path) -> None:
     # Прогреваем только чётные чанки: батч окажется смешанным.
     for index, chunk in enumerate(chunks):
         if index % 2 == 0:
-            cache.put(chunk.content_hash or "", MODEL, [float(index)] * 4, dim=4)
+            cache.put(
+                chunk.content_hash or "",
+                MODEL,
+                [float(index)] * 4,
+                embed_device=DEVICE,
+                dim=4,
+            )
 
     embedder = FakeEmbedder(dim=4)
-    vectors = _embed_batched(embedder, chunks, cache=cache, embed_model_id=MODEL)
+    vectors = _embed_batched(
+        embedder, chunks, cache=cache, embed_model_id=MODEL, embed_device=DEVICE
+    )
 
     assert len(vectors) == len(chunks)
     # Промахи — ровно нечётные чанки, и только они ушли в эмбеддер.
@@ -222,14 +305,21 @@ def test_models_do_not_mix(tmp_path: Path) -> None:
     """Вектор чужой модели не обслуживается: другая модель — полный промах."""
     cache = EmbedCache(tmp_path / "embed_cache")
     chunks = _chunks(3)
-    _embed_batched(FakeEmbedder(dim=4), chunks, cache=cache, embed_model_id=MODEL)
+    _embed_batched(
+        FakeEmbedder(dim=4), chunks, cache=cache, embed_model_id=MODEL,
+        embed_device=DEVICE,
+    )
 
     other = FakeEmbedder(dim=4, model_id=OTHER_MODEL)
-    _embed_batched(other, chunks, cache=cache, embed_model_id=OTHER_MODEL)
+    _embed_batched(
+        other, chunks, cache=cache, embed_model_id=OTHER_MODEL, embed_device=DEVICE
+    )
     assert len(other.calls) == 1  # эмбеддер вызван: векторов этой модели ещё нет
     # Обратно к первой модели — снова попадания (каталоги моделей не пересеклись).
     again = FakeEmbedder(dim=4)
-    _embed_batched(again, chunks, cache=cache, embed_model_id=MODEL)
+    _embed_batched(
+        again, chunks, cache=cache, embed_model_id=MODEL, embed_device=DEVICE
+    )
     assert again.calls == []
 
 
@@ -242,7 +332,11 @@ def test_same_text_from_another_extractor_is_a_hit(tmp_path: Path) -> None:
     cache = EmbedCache(tmp_path / "embed_cache")
     original = _chunk("неизменившийся абзац", chunk_id="p1:docA:3")
     _embed_batched(
-        FakeEmbedder(dim=4), [original], cache=cache, embed_model_id=MODEL
+        FakeEmbedder(dim=4),
+        [original],
+        cache=cache,
+        embed_model_id=MODEL,
+        embed_device=DEVICE,
     )
 
     # Другой экстрактор, другой документ, другой chunk_id — текст тот же.
@@ -253,15 +347,22 @@ def test_same_text_from_another_extractor_is_a_hit(tmp_path: Path) -> None:
         extractor_version="extractor-2",
     )
     embedder = FakeEmbedder(dim=4)
-    vectors = _embed_batched(embedder, [reprint], cache=cache, embed_model_id=MODEL)
+    vectors = _embed_batched(
+        embedder, [reprint], cache=cache, embed_model_id=MODEL, embed_device=DEVICE
+    )
 
     assert embedder.calls == []
-    assert cache.get(reprint.content_hash or "", MODEL, dim=4) is not None
+    assert (
+        cache.get(reprint.content_hash or "", MODEL, embed_device=DEVICE, dim=4)
+        is not None
+    )
     assert len(vectors) == 1
 
     # А изменившийся текст — промах (кэш не «схлопывает» разные тексты).
     changed = _chunk("изменившийся абзац", chunk_id="p1:docB:1")
-    _embed_batched(embedder, [changed], cache=cache, embed_model_id=MODEL)
+    _embed_batched(
+        embedder, [changed], cache=cache, embed_model_id=MODEL, embed_device=DEVICE
+    )
     assert len(embedder.calls) == 1
 
 
@@ -275,22 +376,22 @@ def test_corrupt_or_mismatched_entries_are_misses(tmp_path: Path) -> None:
     root = tmp_path / "embed_cache"
     cache = EmbedCache(root)
     key = content_hash("текст")
-    path = root / model_dir_name(MODEL) / key[:2] / f"{key}{SUFFIX}"
+    path = _entry(root, key)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     # 1) не JSON и без разделителя заголовка
     path.write_bytes(b"\x00\x01\x02not-a-converter")
-    assert cache.get(key, MODEL, dim=4) is None
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=4) is None
     # 2) заголовок валиден, payload обрезан (неверная длина)
-    cache.put(key, MODEL, [0.0, 0.1, 0.2, 0.3], dim=4)
+    cache.put(key, MODEL, [0.0, 0.1, 0.2, 0.3], embed_device=DEVICE, dim=4)
     header, _, payload = path.read_bytes().partition(b"\n")
     path.write_bytes(header + b"\n" + payload[:-2])
-    assert cache.get(key, MODEL, dim=4) is None
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=4) is None
     # 3) запись цела, но размерность не та, что ждёт модель
-    cache.put(key, MODEL, [0.0, 0.1, 0.2, 0.3], dim=4)
-    assert cache.get(key, MODEL, dim=8) is None
+    cache.put(key, MODEL, [0.0, 0.1, 0.2, 0.3], embed_device=DEVICE, dim=4)
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=8) is None
     # 4) несовместимая версия формата
-    cache.put(key, MODEL, [0.0, 0.1, 0.2, 0.3], dim=4)
+    cache.put(key, MODEL, [0.0, 0.1, 0.2, 0.3], embed_device=DEVICE, dim=4)
     raw = path.read_bytes().partition(b"\n")[2]
     path.write_bytes(
         json.dumps(
@@ -299,6 +400,7 @@ def test_corrupt_or_mismatched_entries_are_misses(tmp_path: Path) -> None:
                 "content_hash": key,
                 "dim": 4,
                 "dtype": "float16",
+                "embed_device": DEVICE,
                 "embed_model_id": MODEL,
                 "format": ENVELOPE_FORMAT + 1,
             }
@@ -306,14 +408,18 @@ def test_corrupt_or_mismatched_entries_are_misses(tmp_path: Path) -> None:
         + b"\n"
         + raw
     )
-    assert cache.get(key, MODEL, dim=4) is None
+    assert cache.get(key, MODEL, embed_device=DEVICE, dim=4) is None
     # Все случаи учтены как порча/промах, и ничего не брошено.
     assert cache.stats()["corrupt"] >= 4
 
     # Испорченный файл не мешает прогону: промах уходит в эмбеддер.
     embedder = FakeEmbedder(dim=4)
     _embed_batched(
-        embedder, [_chunk("текст")], cache=cache, embed_model_id=MODEL
+        embedder,
+        [_chunk("текст")],
+        cache=cache,
+        embed_model_id=MODEL,
+        embed_device=DEVICE,
     )
     assert len(embedder.calls) == 1
 
@@ -325,24 +431,31 @@ def test_invalid_key_is_a_miss_not_a_crash(tmp_path: Path) -> None:
         chunk_id="c1", doc_id="d1", product_id="p1", text="без хеша"
     )
     embedder = FakeEmbedder(dim=4)
-    vectors = _embed_batched(embedder, [bare], cache=cache, embed_model_id=MODEL)
+    vectors = _embed_batched(
+        embedder, [bare], cache=cache, embed_model_id=MODEL, embed_device=DEVICE
+    )
     assert len(vectors) == 1 and len(embedder.calls) == 1
     assert cache.stats()["invalid_key"] >= 1
-    assert cache.get("", MODEL) is None
-    assert cache.get("../../etc/passwd", MODEL) is None
+    assert cache.get("", MODEL, embed_device=DEVICE) is None
+    assert cache.get("../../etc/passwd", MODEL, embed_device=DEVICE) is None
+    # Необъявленное устройство — тоже невалидный ключ (пустая метка не адресует запись).
+    assert cache.get(content_hash("t"), MODEL, embed_device="") is None
+    assert cache.get(content_hash("t"), MODEL, embed_device="../cuda") is None
 
 
 def test_budget_evicts_oldest_entries(tmp_path: Path) -> None:
     """Бюджет байтов — управление диском: вытеснение видно в счётчиках."""
     cache = EmbedCache(tmp_path / "embed_cache")
     chunk = _chunk("текст")
-    cache.put(chunk.content_hash or "", MODEL, [0.1] * 64, dim=64)
+    cache.put(chunk.content_hash or "", MODEL, [0.1] * 64, embed_device=DEVICE, dim=64)
     entry = next((tmp_path / "embed_cache").rglob(f"*{SUFFIX}"))
     entry_size = entry.stat().st_size
 
     bounded = EmbedCache(tmp_path / "embed_cache", max_bytes=entry_size * 2)
     for index in range(3):
-        bounded.put(content_hash(f"t{index}"), MODEL, [0.1] * 64, dim=64)
+        bounded.put(
+            content_hash(f"t{index}"), MODEL, [0.1] * 64, embed_device=DEVICE, dim=64
+        )
 
     remaining = list((tmp_path / "embed_cache").rglob(f"*{SUFFIX}"))
     assert len(remaining) == 2
@@ -358,13 +471,15 @@ def test_budget_scan_is_not_paid_per_write(tmp_path: Path) -> None:
     """
     root = tmp_path / "embed_cache"
     probe = EmbedCache(root)
-    probe.put(content_hash("seed"), MODEL, [0.1] * 64, dim=64)
+    probe.put(content_hash("seed"), MODEL, [0.1] * 64, embed_device=DEVICE, dim=64)
     entry_size = next(root.rglob(f"*{SUFFIX}")).stat().st_size
 
     # Бюджет заведомо больше 50 записей — обход нужен только чтобы узнать базу.
     cache = EmbedCache(root, max_bytes=entry_size * 100)
     for index in range(50):
-        cache.put(content_hash(f"t{index}"), MODEL, [0.1] * 64, dim=64)
+        cache.put(
+            content_hash(f"t{index}"), MODEL, [0.1] * 64, embed_device=DEVICE, dim=64
+        )
 
     assert cache.stats()["writes"] == 50
     assert cache.stats()["scans"] == 1
@@ -383,7 +498,10 @@ def test_progress_publishes_cached_count_and_hit_ratio(tmp_path: Path) -> None:
     chunks = _chunks(total)
     # Прогреваем половину: ожидаемая доля попаданий — ровно половина продукта.
     warm = chunks[: total // 2]
-    _embed_batched(FakeEmbedder(dim=4), warm, cache=cache, embed_model_id=MODEL)
+    _embed_batched(
+        FakeEmbedder(dim=4), warm, cache=cache, embed_model_id=MODEL,
+        embed_device=DEVICE,
+    )
 
     census = _EmbedCensus()
     throughput = _EmbedThroughput()
@@ -403,6 +521,7 @@ def test_progress_publishes_cached_count_and_hit_ratio(tmp_path: Path) -> None:
         on_batch=report,
         cache=cache,
         embed_model_id=MODEL,
+        embed_device=DEVICE,
         census=census,
     )
 
@@ -449,6 +568,7 @@ def _build(vectors_cache: EmbedCache | None) -> FakeIndexBuilder:
         package_id=PACKAGE,
         chunker_version="chunker-1",
         embed_model_id=MODEL,
+        embed_device=DEVICE,
         extractor_version="extractor-1",
         lexical_engine_version="fake-bm25-1",
         vector_store="fake",

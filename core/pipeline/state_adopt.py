@@ -59,7 +59,7 @@ from core.domain.enums import DocumentLevel, OnboardingState, ProductScope
 from core.domain.models import METHODOLOGY_VERSION, CorpusCoverage
 from core.pipeline.incremental import chunk_row_id, doc_set_digest, doc_version_id
 from core.pipeline.package_admin import PackageAdminError
-from core.pipeline.run_identity import classify_change
+from core.pipeline.run_identity import classify_change, previous_run_of
 from core.pipeline.state_sync import (
     _coverage_digest,
     _doc_counters,
@@ -1484,12 +1484,10 @@ def apply_adoption(
         )
     cycle = str(cycle_id or "").strip() or plan.cycle_id
     warnings = list(plan.warnings)
-    previous = None if store is None else store.previous_lineage(plan.package_id)
+    # 09 §12.3: предшественник — по одной формуле (:func:`previous_run_of`). Повторный
+    # adoption того же прогона не «предыдущий»: цепочка не замыкается на себя.
+    previous = previous_run_of(store, plan.package_id, run_id=plan.run_id)
     previous_run_id = None if previous is None else previous.run_id
-    if previous_run_id == plan.run_id:
-        # Повторный adoption того же прогона — не «предыдущий»: цепочка не замыкается.
-        previous = None
-        previous_run_id = None
 
     results: list[ProductAdoptionResult] = []
     totals = {

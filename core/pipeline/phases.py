@@ -46,6 +46,7 @@ from core.domain.anchors import SourceResolver
 from core.domain.enums import (
     CrawlItemStatus,
     DocumentLevel,
+    EmbedDevice,
     PdfPipeline,
     SkipReason,
     TerminationReason,
@@ -787,6 +788,46 @@ def _gate_provenance(ctx: RunContext, plan: Any, inputs: Any) -> dict[str, Any]:
     }
 
 
+def _lineage_provenance(
+    state: Any,
+    run_id: str,
+    *,
+    declared_cycle: str | None,
+    declared_previous: str | None,
+    declared_change: str | None,
+    notes: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    """Цикл, предшественник и класс изменения для манифеста Ш9 (09 §2.4/§12.3/§13).
+
+    Источник — **строка lineage текущего прогона**: ``change_class`` вычисляется при её
+    записи (:func:`core.pipeline.run_identity.build_run_identity` →
+    ``record_run_lineage``), поэтому второго расчёта здесь нет — только чтение.
+
+    Строку пишет ``record_run_outcome`` **после** фаз (иначе она ссылалась бы на себя,
+    ``core/cli/commands/run.py``), поэтому на свежем прогоне её ещё нет. Тогда берутся те
+    же значения, переданные composition root из ``RunIdentity``: строка — их проекция, то
+    есть это не второй расчёт и не догадка, а тот же факт до записи. На resume/adoption
+    строка существует и побеждает: манифест обязан совпадать с ``state.db``, а не с
+    идентичностью процесса, который мог запуститься с другим ``--since-run``.
+
+    Сбой чтения — замечание в ``provenance_notes``, а не падение фазы: провенанс не
+    роняет отчёт (тот же класс, что у провенанса краула). ``state is None`` — значения
+    не записаны, и это честное ``None``, а не «истории нет».
+    """
+    if state is not None:
+        try:
+            row = state.get_run_lineage(run_id)
+        except Exception as exc:  # noqa: BLE001 — провенанс не роняет отчёт
+            notes.append(
+                f"lineage: {type(exc).__name__}: {exc} — cycle_id/previous_run_id/"
+                "change_class взяты из идентичности прогона"
+            )
+            row = None
+        if row is not None:
+            return row.cycle_id, row.previous_run_id, row.change_class
+    return declared_cycle, declared_previous, declared_change
+
+
 def build_phases(
     *,
     inputs: RunInputs,
@@ -836,6 +877,9 @@ def build_phases(
     declared_status_dict_version: str | None = None,
     mem_budget_mb: int | None = None,
     derive_extract_workers: bool = False,
+    previous_run_id: str | None = None,
+    change_class: str | None = None,
+    cycle_id: str | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -928,6 +972,20 @@ def build_phases(
         ``crawl.extract_workers`` не объявлена. ``True`` только для локального экстрактора;
         под ``split`` — ``False`` (воркеры живут на edge со своим бюджетом). Решает
         composition root, фаза лишь передаёт флаг в :func:`build_corpus`.
+    :param previous_run_id: прогон, против которого считается этот (09 §12.3), — результат
+        :func:`core.pipeline.run_identity.previous_run_of`. Резолвит composition root: он
+        один знает идентичность пакета, под которой пишется ``run_lineage``
+        (``Path(--package).name``), и разрешает правило **один** раз. Фаза оценки называет
+        его в ``log_entries`` (``previous=<id>`` / ``previous=—``), манифест Ш9 — полем
+        ``previous_run_id``. ``None`` — предшественника нет/resume текущего прогона; в
+        материал ``run_id`` он не входит (иначе идентичность зависела бы от истории).
+    :param change_class: класс изменения относительно предшественника (§13) из той же
+        ``RunIdentity`` — для манифеста Ш9. Не пересчитывается: расчёт живёт в
+        ``build_run_identity``, а его запись — в ``run_lineage``.
+    :param cycle_id: эффективный цикл прогона (09 §2.4/§6.2) — тот же материал, что вошёл
+        в ``run_id``, поэтому манифест обязан его называть: без поля два прогона разных
+        циклов различались только ``run_id``. Источник — строка lineage (единственный
+        писатель), см. :func:`_lineage_provenance`.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -1092,7 +1150,8 @@ def build_phases(
             # ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
             extract_cache=extract_cache,
             # Кэш **векторов** эмбеддинга (почанково, ключ ``(content_hash текста,
-            # embed_model_id)``). ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
+            # embed_model_id, embed_device)`` — 16 §5.3: CPU- и CUDA-векторы численно
+            # разные). ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
             embed_cache=embed_cache,
             # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
             # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
@@ -1100,6 +1159,14 @@ def build_phases(
             # D4 (P2-3): секция ``crawl`` run.yaml → дефолты оси стратегии/лимита для ``FetchPlan``.
             # ``RunConfig`` доступен как ``inputs.run`` (RunInputs.run), поле ``crawl`` опционально.
             crawl_defaults=run_crawl,
+            # 16 §4.1: устройство эмбеддера — **объявленная ось** прогона, уже резолвленная
+            # composition root'ом в ``axes`` (:func:`core.pipeline.crawl_frontier.resolve_embed_device`,
+            # app < run, per-site слоя нет). Фаза не читает env и не спрашивает адаптер:
+            # ``EmbedderPort`` об устройстве не знает, а «спросить» его — ровно тот дефект,
+            # ради которого ось вводится. Дефолт — объявленный дефолт оси (``cpu``).
+            embed_device=str(
+                getattr(axes, "embed_device", None) or EmbedDevice.CPU.value
+            ),
             # D1/D2: application-слой осей краула (deploy.yaml:crawl) — низший приоритет.
             crawl_app=crawl_app,
             # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
@@ -1198,6 +1265,10 @@ def build_phases(
             exhaustion_facts=_observed_exhaustion_facts(
                 ctx, plan, inputs, passports
             ),
+            # 09 §12.3: база сравнения — в ``log_entries`` фазы (``previous=<id>`` /
+            # ``previous=—``), чтобы она читалась в отчёте прогона, а не только в
+            # ``state.db``. Резолв — в composition root (:func:`previous_run_of`).
+            previous_run_id=previous_run_id,
         )
 
     # -- Ш7: ревью (advisory-очередь, ничего не решает за человека) ---------- #
@@ -1308,6 +1379,17 @@ def build_phases(
         # Изолированные отказы провенанса краула собираются здесь и уходят в ``pending``:
         # строка видима человеку, но фазу отчёта не роняет.
         provenance_notes: list[str] = []
+        # 09 §12.3/§13: предшественник и класс изменения — из строки lineage прогона
+        # (единственный носитель ``change_class``: он считается при её записи), а пока
+        # строки нет — из идентичности, переданной composition root (та же величина).
+        lineage_cycle, lineage_previous, lineage_change = _lineage_provenance(
+            state,
+            plan.run_id,
+            declared_cycle=cycle_id,
+            declared_previous=previous_run_id,
+            declared_change=change_class,
+            notes=provenance_notes,
+        )
         manifest = build_manifest(
             inputs=inputs,
             plan=plan,
@@ -1360,6 +1442,11 @@ def build_phases(
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
+            # 09 §12.3/§13: база сравнения прогона и класс изменения (см. helper выше).
+            previous_run_id=lineage_previous,
+            change_class=lineage_change,
+            # 09 §2.4/§6.2: цикл прогона — тот же материал, что вошёл в ``run_id``.
+            cycle_id=lineage_cycle,
             # Вариант 2: принятия риска, которыми прогон достиг ❌ класса bounded
             # (product → actor). Только продукты плана: подпись продукта вне плана
             # прогоном не использовалась.

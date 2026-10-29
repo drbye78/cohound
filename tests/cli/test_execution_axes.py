@@ -49,10 +49,11 @@ from core.config.deploy import (
     CrawlConfig,
     DeployConfig,
     EdgeConfig,
+    EmbedConfig,
     LLMDeployConfig,
     LLMSlotConfig,
 )
-from core.domain.enums import CrawlStrategy, DocumentLevel, PdfDevice
+from core.domain.enums import CrawlStrategy, DocumentLevel, EmbedDevice, PdfDevice
 from core.domain.models import CrawlRunConfig, RateLimitSpec
 from core.pipeline.digests import (
     EXECUTION_CONTRACT_FIELDS,
@@ -141,6 +142,9 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         "chunker_version",
         "llm_scenarios",
         "extractor_stack",
+        # 16 §4.2: устройство эмбеддера — объявленная ось (``deploy < run``), а не
+        # наблюдение: векторы CPU и CUDA численно разные.
+        "embed_device",
         "serp_rounds",
         "serp_source",
         # I3/§5: режим запроса поиска — отдельное условие измерения (какой бэкенд
@@ -1081,3 +1085,169 @@ def test_passports_change_the_contract(tmp_path: Path) -> None:
     assert a.passports_digest != b.passports_digest
     # Путь — провенанс: те же байты в другом каталоге дают тот же дайджест.
     assert a.passports_digest == relocated.passports_digest
+
+
+# ---------------------------------------------------------------------------
+# 16 §4: ось ``embed.device`` — объявленное устройство эмбеддера
+# ---------------------------------------------------------------------------
+
+
+def _with_embed(package: Path, *, device: str) -> Path:
+    """Дописывает секцию ``embed`` в ``run.yaml`` пакета (run-слой оси)."""
+    run_yaml = package / "run.yaml"
+    data = yaml.safe_load(run_yaml.read_text(encoding="utf-8"))
+    data["embed"] = {"device": device}
+    run_yaml.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return package
+
+
+def test_embed_device_axis_defaults_to_cpu(tmp_path: Path) -> None:
+    """Ось не объявлена — ``cpu``: объявленный дефолт, а не «что выберет torch»."""
+    assert _resolve(_package(tmp_path)).embed_device == "cpu"
+
+
+def test_embed_device_run_layer_overrides_deploy(tmp_path: Path) -> None:
+    """``run.yaml:embed.device`` сильнее ``deploy.embed.device`` (app < run)."""
+    package = _with_embed(_package(tmp_path), device="cuda")
+    declared = _resolve(package, deploy=DeployConfig(embed=EmbedConfig(device="cuda")))
+    assert declared.embed_device == "cuda"
+
+    # run-слой побеждает app: объявленный ``cpu`` в прогоне отменяет ``cuda`` конфига.
+    run_cpu = _with_embed(_package(tmp_path, name="cpu"), device="cpu")
+    declared_cpu = _resolve(
+        run_cpu, deploy=DeployConfig(embed=EmbedConfig(device="cuda"))
+    )
+    assert declared_cpu.embed_device == "cpu"
+
+
+def test_embed_device_value_is_json_serializable(tmp_path: Path) -> None:
+    """Поле контракта/манифеста — строка, а не enum: иначе словарь не сериализуется."""
+    declared = _resolve(_package(tmp_path))
+    assert json.loads(json.dumps({"embed_device": declared.embed_device})) == {
+        "embed_device": "cpu"
+    }
+
+
+# ---------------------------------------------------------------------------
+# 16 §4.3: выбор эмбеддера по объявленному устройству
+# ---------------------------------------------------------------------------
+
+
+class _FakeEmbedder:
+    """Подмена порта эмбеддера: запоминает переданное устройство."""
+
+    def __init__(self, device: str = "cpu") -> None:
+        self.device = device
+        self.model_id = "fake"
+        self.dim = 4
+        self.available = True
+
+
+def _stub_embed_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model2vec: bool,
+    sentence_transformers: bool,
+) -> dict[str, Any]:
+    """Подменяет availability-предикаты и ``LocalEmbedder`` в wiring."""
+    seen: dict[str, Any] = {}
+
+    class _Local(_FakeEmbedder):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(device=kwargs.get("device", "<не передан>"))
+            seen["local_kwargs"] = dict(kwargs)
+
+    monkeypatch.setattr(wiring_mod, "model2vec_available", lambda: model2vec)
+    monkeypatch.setattr(
+        wiring_mod, "_module_installed", lambda name: sentence_transformers
+    )
+    monkeypatch.setattr(wiring_mod, "LocalEmbedder", _Local)
+    return seen
+
+
+def test_cuda_excludes_lite_embedder_with_visible_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cuda``: ``LiteEmbedder`` не может исполнить ось — исключён, и это видно.
+
+    Молчаливый выбор Lite дал бы CPU-векторы под объявленным ``cuda`` — тот самый класс,
+    ради которого ось вводится. Заметка обязательна: решение не должно быть тихим.
+    """
+    seen = _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
+    lite = _FakeEmbedder()
+    monkeypatch.setattr(wiring_mod, "build_lite_embedder", lambda: lite)
+
+    notices: list[str] = []
+    resolved = wiring_mod._resolve_embedder(  # noqa: SLF001 — таблица §4.3 проверяется напрямую
+        EmbedDevice.CUDA, notices=notices
+    )
+
+    assert resolved is not lite
+    assert isinstance(resolved, _FakeEmbedder) and resolved.device == "cuda"
+    assert seen["local_kwargs"] == {"device": "cuda"}
+    assert len(notices) == 1
+    assert "LiteEmbedder исключён" in notices[0]
+    assert "cuda" in notices[0]
+
+
+def test_cuda_without_sentence_transformers_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cuda`` без стека ``LocalEmbedder`` — отказ (``EXIT_USAGE``), а не CPU-фолбэк."""
+    _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=False)
+
+    with pytest.raises(wiring_mod.WiringError) as excinfo:
+        wiring_mod._resolve_embedder(EmbedDevice.CUDA)  # noqa: SLF001
+    message = str(excinfo.value)
+    assert "embed.device" in message
+    assert "embed.device=cpu" in message
+    assert "sentence-transformers" in message
+
+
+def test_cpu_keeps_lite_embedder_priority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``cpu``: прежний приоритет (Lite → Local) — обе реализации CPU-честны."""
+    _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
+    lite = _FakeEmbedder()
+    monkeypatch.setattr(wiring_mod, "build_lite_embedder", lambda: lite)
+
+    assert wiring_mod._resolve_embedder(EmbedDevice.CPU) is lite  # noqa: SLF001
+
+
+def test_local_embedder_receives_declared_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``LocalEmbedder`` получает ``device`` из оси — устройство не выбирает библиотека."""
+    seen = _stub_embed_stack(monkeypatch, model2vec=False, sentence_transformers=True)
+
+    cpu = wiring_mod._resolve_embedder(EmbedDevice.CPU)  # noqa: SLF001
+    assert isinstance(cpu, _FakeEmbedder) and cpu.device == "cpu"
+    assert seen["local_kwargs"] == {"device": "cpu"}
+
+    cuda = wiring_mod._resolve_embedder("cuda")  # noqa: SLF001 — строка тоже принимается
+    assert isinstance(cuda, _FakeEmbedder) and cuda.device == "cuda"
+    assert seen["local_kwargs"] == {"device": "cuda"}
+
+
+def test_require_embed_device_passes_cpu_always() -> None:
+    """``cpu`` не требует устройства — проверка проходит на любом хосте."""
+    wiring_mod.require_embed_device(EmbedDevice.CPU)
+    wiring_mod.require_embed_device("cpu")
+
+
+def test_require_embed_device_cuda_without_device_is_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cuda`` без устройства — отказ с числами (``EXIT_USAGE``), а не тихий CPU."""
+    monkeypatch.setattr(wiring_mod, "cuda_available", lambda: False)
+    monkeypatch.setattr(wiring_mod, "cuda_total_vram_mb", lambda: None)
+
+    with pytest.raises(wiring_mod.WiringError) as excinfo:
+        wiring_mod.require_embed_device(EmbedDevice.CUDA)
+    message = str(excinfo.value)
+    # Сообщение называет **свою** ось (не ``crawl.pdf_device``) и несёт факты.
+    assert "embed.device=cuda" in message
+    assert "crawl.pdf_device" not in message
+    assert "cuda_available=False" in message
+    assert "device_vram_mb=нет устройства" in message

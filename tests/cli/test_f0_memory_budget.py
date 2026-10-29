@@ -41,6 +41,14 @@ from core.pipeline.resources import (
     workers_from_budget,
 )
 
+# 09 §4.4: ``state/{package_id}/`` — точка ресурса **пакета**, и с файловым локом она
+# эксклюзивна. Часть тестов гоняет ``run`` по фикстуре ``tests/fixtures/e2e`` прямо из
+# репозитория, поэтому без изоляции все тесты и все xdist-воркеры делят
+# ``<repo>/state/e2e/.lock`` и падают по очереди с «пакет уже используется» — флак
+# параллелизма, а не регрессия. Раскладку ``state`` модуль не утверждает, поэтому
+# фикстура предмет проверки не подменяет.
+pytestmark = pytest.mark.usefixtures("isolated_state_dir")
+
 E2E_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
 ROOT = "https://p1.test/docs"
 

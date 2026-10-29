@@ -85,6 +85,11 @@ from core.pipeline.compute import (
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
+from core.pipeline.digests import catalog_digest as _catalog_digest
+from core.pipeline.digests import (
+    scoring_policy_version as _declared_scoring_policy_version,
+)
+from core.pipeline.evaluate import REUSE_UNCONFIRMED_REASON
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
 from core.pipeline.partial_docs import (
@@ -123,13 +128,17 @@ __all__ = [
     "collect_crawl_truncation_anomalies",
     "collect_golden_exempt_anomalies",
     "collect_i3_anomalies",
+    "collect_reuse_unconfirmed_anomalies",
+    "collect_run_products",
     "compact_search_effort",
     "crawl_control_digest",
     "diff_boundary_violations",
+    "manifest_payload",
     "render_battle_card",
     "render_diff",
     "render_nda_questions",
     "render_preliminary_findings",
+    "render_run_product",
     "resolve_diff_change_class",
     "write_measurement_uncertainty_artifact",
     "write_reports",
@@ -268,6 +277,18 @@ class Artifacts:
     #: Продукты с объявленным waiver'ом эталона (``golden_exempt_product``), по
     #: ``product_id``; пусто — waiver'ов нет либо объявления не читали.
     golden_exempt_products: list[dict[str, Any]] = field(default_factory=list)
+    #: Ячейки, у которых ``❌`` **снят** правилом «``❌`` требует ``live|revalidated``»
+    #: (``reuse_unconfirmed``, 16 §8 п.4): продукт/параметр и названный виновник. Читается
+    #: из записи ячейки, а не пересчитывается — второй носитель правила разошёлся бы с
+    #: первым. Входят и в ``i3_anomalies`` (обратная совместимость имени).
+    reuse_unconfirmed_anomalies: list[dict[str, Any]] = field(default_factory=list)
+    #: ``outputs/run_product.csv`` — статус продукта **в прогоне** (16 §3.2): mode/status/
+    #: scope/счётчики документов и ячеек. ``None`` — строк нет (legacy-прогон без таблицы
+    #: ``run_product``): файл не создаётся, «нет строк» не выдаётся за «всё complete».
+    run_product: Path | None = None
+    #: Те же строки ``run_product``, что в файле, — для ``--json`` payload (провенанс
+    #: прогона без чтения БД и без разбора CSV).
+    run_products: list[dict[str, Any]] = field(default_factory=list)
     #: ``outputs/artifacts_gap.yaml`` — per-URL список недоступных артефактов и заготовка
     #: входа следующего прогона (13-manual-artifacts §4). ``None`` — файл не записан
     #: (сбой выгрузки); форма отчёта от этого не зависит.
@@ -563,6 +584,45 @@ def _axis_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
 
+def _run_embed_device(run: Any) -> str | None:
+    """``run.yaml:embed.device`` в канонической форме (``StrEnum`` → строка) либо ``None``.
+
+    Модульные вызовы ``build_manifest`` не несут ``axes``, и без этого запасного пути
+    ``embed_device`` в манифесте молчал бы, хотя прогон объявил ось в ``run.yaml``. Слой
+    app (``deploy.yaml``) здесь не разрешается: это работа резолвера
+    (``core.pipeline.crawl_frontier.resolve_embed_device``), а не манифеста.
+    """
+    embed = getattr(run, "embed", None)
+    return _document_level_value(getattr(embed, "device", None))
+
+
+#: Литерал версии на случай, когда источника нет вовсе (stub-объект без ``catalog``,
+#: модульный вызов без входов). Это **не** значение по умолчанию для живого прогона:
+#: там версия выводится из содержимого (см. :func:`_catalog_version_from_inputs`).
+_MISSING_VERSION = "0.0.0"
+
+
+def _catalog_version_from_inputs(inputs: Any) -> str:
+    """``catalog_version`` из **содержимого** каталога — тот же источник, что у контракта.
+
+    До 29.10.2026 ``catalog_version`` не имел источника: контракт нёс ``None``, манифест —
+    фиктивное ``"0.0.0"``, и смена каталога (новый параметр, изменённое правило, другой
+    ``absence_rule``) меняла предмет измерения, не меняя ни ``run_id``, ни ``hound diff``
+    (`09` §12.5). Теперь источник объявлен — отпечаток содержимого
+    (:func:`core.pipeline.digests.catalog_digest`), и манифест берёт **ту же функцию**,
+    что ``build_execution_contract``: второй формулы нет, поэтому манифест и контракт не
+    могут разойтись по одному и тому же материалу.
+
+    ``inputs.catalog`` отсутствует/``None`` (stub в тестах, вызов без входов) — источника
+    нет, остаётся :data:`_MISSING_VERSION`. Пустой объявленный каталог — **не** то же
+    самое: у него есть отпечаток, и он отличается от «версия не записана».
+    """
+    catalog = getattr(inputs, "catalog", None)
+    if catalog is None:
+        return _MISSING_VERSION
+    return _catalog_digest(catalog)
+
+
 def crawl_control_digest(
     *,
     run_crawl: Any,
@@ -700,6 +760,12 @@ def build_manifest(
     scope_attestations: Mapping[str, str] | None = None,
     observed_versions: Mapping[str, Any] | None = None,
     search_effort: Mapping[str, Any] | None = None,
+    run_scope: str | None = None,
+    product_plan: Mapping[str, Any] | None = None,
+    embed_device: str | None = None,
+    previous_run_id: str | None = None,
+    change_class: str | None = None,
+    cycle_id: str | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -708,6 +774,13 @@ def build_manifest(
     * версии — ``inputs.run`` (обогащённый конфиг прогона), затем ``inputs.package`` и
       ``plan``; пустые значения не затирают уже известные (в т.ч. ``methodology_version``
       не откатывается к ``"0.0.0"``, если он есть у входа);
+    * ``catalog_version``/``scoring_policy_version`` (`09` §12.5) — те же функции, что у
+      контракта: отпечаток содержимого ``inputs.catalog``
+      (:func:`core.pipeline.digests.catalog_digest`) и объявленная политика расчёта §6
+      (:func:`core.pipeline.digests.scoring_policy_version`). Фиктивного ``"0.0.0"`` в
+      живом прогоне больше нет: манифест и ``execution_contract_digest`` описывают один
+      материал одним значением, а смена каталога/политики видна и в ``run_id``, и в diff.
+      Литерал остаётся только там, где источника нет вовсе (stub без ``catalog``);
     * идентификация — ``plan`` (``run_id``, ``anchor``, scope-модули) и ``inputs.run``
       (``case_id``, ``mode``, ``cohort``, ``snapshot_date``);
     * ранжирование — из ``bundle`` (``requested_ranking``/``computed_ranking``), иначе
@@ -770,6 +843,25 @@ def build_manifest(
       Источник именно манифест сборки, а не текущие порты: он описывает ту сборку, на
       которой реально считался прогон, а порты в новом процессе могут быть другими.
       Приоритет ниже ``run``/``inputs``: живое наблюдение, если оно есть, точнее.
+    * 16 §3.1/§4 — ``run_scope`` (``full`` | ``only_failed`` | ``product:<id>``),
+      ``product_plan`` (сериализованный ``ProductPlanSet``) и ``embed_device``
+      (``cpu``/``cuda``). Первые два — **провенанс среза**: без них полное измерение
+      неотличимо от ``--only-product`` без заглядывания в ``state.db`` (09 §13.6).
+      Третий — наблюдаемая ось: она уже входит в ``execution_contract_digest``, но «на чём
+      считались векторы» обязано читаться запросом. Все три приходят явным аргументом;
+      ``embed_device`` дополнительно берётся из ``axes`` (тот же резолвер, что у контракта),
+      затем из ``run.yaml:embed.device``. ``None`` — значение **не записано**, и подменять
+      его на ``full``/``cpu`` запрещено: догадка выдала бы себя за объявленный вход (A3).
+    * 09 §12.3/§13 — ``previous_run_id`` и ``change_class``: против какого прогона считался
+      этот и как классифицировано изменение. Источник — **строка lineage прогона**
+      (``change_class`` вычисляется при её записи, ``build_run_identity`` →
+      ``record_run_lineage``): здесь значение не пересчитывается. Оба ``None`` — не
+      записано (догадка запрещена: «предшественника не было» и «его не записали» —
+      разные факты, и второй виден по пустой истории ``state.db``).
+    * 09 §2.4/§6.2 — ``cycle_id``: эффективный цикл прогона, тот же, что вошёл в материал
+      ``run_id``. Источник тот же — строка lineage (писатель у неё один); ``None`` — не
+      записано, и подменять его на ``snapshot_date`` запрещено: эффективный цикл мог быть
+      задан ``--cycle-id``/``run.yaml`` и отличается от даты снимка.
 
     Функция детерминирована: все встраиваемые JSON-фрагменты сериализуются
     ``sort_keys=True`` (R7/§13), списки нормализуются сортировкой; единственный
@@ -789,20 +881,32 @@ def build_manifest(
         getattr(package, "package_version", None),
         getattr(inputs, "package_version", None),
     ) or "0.0.0"
+    # 09 §12.5: ``catalog_version``/``scoring_policy_version`` были полями контракта без
+    # источника — в манифест уходило фиктивное ``"0.0.0"``, а контракт нёс ``None``, то
+    # есть смена каталога или политики расчёта не меняла ни ``run_id``, ни diff. Теперь
+    # источники честные и **те же**, что у контракта
+    # (:func:`core.pipeline.digests.catalog_digest` по ``inputs.catalog`` и
+    # :func:`core.pipeline.digests.scoring_policy_version` по политике §6): второй
+    # формулы нет, поэтому манифест и контракт не могут разойтись по одному материалу.
+    # Литерал ``"0.0.0"`` остаётся только там, где источника нет вовсе (stub-объект без
+    # ``catalog``) — «не из чего вывести» отличимо от «каталог пуст».
     catalog_version = _first_present(
         getattr(run, "catalog_version", None),
         getattr(plan, "catalog_version", None),
         getattr(inputs, "catalog_version", None),
-    ) or "0.0.0"
+    ) or _catalog_version_from_inputs(inputs)
     status_dict_version = _first_present(
         getattr(run, "status_dict_version", None),
         getattr(inputs, "status_dict_version", None),
         declared_status_dict_version,
     ) or "0.0.0"
-    scoring_policy_version = _first_present(
-        getattr(run, "scoring_policy_version", None),
-        getattr(inputs, "scoring_policy_version", None),
-    ) or "0.0.0"
+    scoring_policy_version = (
+        _first_present(
+            getattr(run, "scoring_policy_version", None),
+            getattr(inputs, "scoring_policy_version", None),
+        )
+        or _declared_scoring_policy_version()
+    )
 
     created = _first_present(
         created_at,
@@ -1019,9 +1123,45 @@ def build_manifest(
         scoring_policy_version=str(scoring_policy_version),
         anchor_product_id=str(anchor_product_id),
         cohort_ref=_first_present(
-            getattr(run, "cohort", None),
+            # 09 §12.2 / 16 §2: колонка/поле несут **авторскую ревизию** состава, потому
+            # что именно она входит в ``cohort_digest``. Здесь стояло ``run.cohort`` —
+            # имя файла когорты, то есть манифест показывал ревизию, которой в ``run_id``
+            # не было, а настоящая ревизия не сохранялась нигде. ``None`` остаётся
+            # ``None``: «ревизия не объявлена» — честный факт, а подстановка имени файла
+            # была бы догадкой (A3).
+            getattr(run, "cohort_ref", None),
             getattr(plan, "cohort_ref", None),
         ),
+        # 16 §3.1: провенанс среза прогона. Явный аргумент → ``run.yaml`` → входы; ``None``
+        # не подменяется на ``full``: «не записано» — честный факт, догадка — нет.
+        run_scope=_first_present(
+            run_scope,
+            getattr(run, "run_scope", None),
+            getattr(inputs, "run_scope", None),
+            getattr(plan, "run_scope", None),
+        ),
+        product_plan=(
+            dict(product_plan)
+            if product_plan is not None
+            else getattr(plan, "product_plan", None)
+        ),
+        # 16 §4.1: наблюдаемая ось устройства. ``axes`` — тот же резолвер, что у контракта
+        # (``app < run``); ниже — прямой run-слой, чтобы модульные вызовы не теряли значение.
+        embed_device=_first_present(
+            embed_device,
+            getattr(axes, "embed_device", None) if axes is not None else None,
+            _run_embed_device(run),
+            getattr(inputs, "embed_device", None),
+        ),
+        # 09 §12.3/§13: предшественник и класс изменения — провенанс сравнения. Приходят
+        # явным аргументом из строки lineage прогона; ``None`` не подменяется значением
+        # «нет истории» — это разные факты (A3).
+        previous_run_id=previous_run_id,
+        change_class=change_class,
+        # 09 §2.4/§6.2: цикл прогона — тот же материал, что вошёл в ``run_id``. Источник
+        # тот же (строка lineage); ``None`` не подменяется ``snapshot_date``: эффективный
+        # цикл мог быть задан ``--cycle-id`` и отличаться от даты снимка.
+        cycle_id=cycle_id,
         focus_modules=focus_modules,
         index_build_id=resolved_index_build_id,
         embed_model_id=_first_present(
@@ -1119,17 +1259,34 @@ def build_manifest(
     )
 
 
+def manifest_payload(manifest: RunManifest) -> dict[str, Any]:
+    """Публичное представление манифеста — **один** сборщик для файла и ``--json``.
+
+    ``run_manifest.yaml`` (Ш9) и блок ``manifest`` в payload ``hound report --json``
+    обязаны быть одним и тем же: второй сборщик разошёлся бы с первым, и потребитель
+    читал бы не то, что лежит в артефакте прогона (та же дисциплина, что у ``run_product``
+    против ``results[].notes``, 16 §3.2). Поэтому путь один: :func:`write_run_manifest`
+    пишет YAML из этого словаря, а команда отчёта отдаёт его в payload как есть.
+
+    ``mode="json"`` — потому что в манифесте есть enum'ы и вложенные модели: потребитель
+    payload'а не должен разбирать ``StrEnum``/``Path``.
+    """
+    return manifest.model_dump(mode="json")
+
+
 def write_run_manifest(manifest: RunManifest, out_dir: str | Path) -> Path:
     """Пишет ``run_manifest.yaml`` (R7, §9) в ``out_dir``; YAML, ``sort_keys``.
 
     Использует доменный :class:`RunManifest` (уже агрегирует версии, ``llm_scenarios``,
     индексную сборку, ретривал-профиль+K, бюджет, политику расчёта). Детерминирован:
-    ``sort_keys=True`` + ``allow_unicode=True``.
+    ``sort_keys=True`` + ``allow_unicode=True``. Тело берётся у :func:`manifest_payload` —
+    тот же словарь уходит в ``hound report --json``, поэтому артефакт и payload не могут
+    разойтись.
     """
     directory = Path(out_dir)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "run_manifest.yaml"
-    payload = manifest.model_dump(mode="json")
+    payload = manifest_payload(manifest)
     text = yaml.safe_dump(
         payload, sort_keys=True, allow_unicode=True, default_flow_style=False
     )
@@ -1388,6 +1545,7 @@ def render_nda_questions(
     crawl_truncation_anomalies: Iterable[Mapping[str, Any]] | None = None,
     corpus_coverage_anomalies: Iterable[Mapping[str, Any]] | None = None,
     golden_exempt_anomalies: Iterable[Mapping[str, Any]] | None = None,
+    reuse_unconfirmed_anomalies: Iterable[Mapping[str, Any]] | None = None,
 ) -> Path:
     """Пишет ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры).
 
@@ -1414,6 +1572,11 @@ def render_nda_questions(
     отсутствует (:func:`collect_golden_exempt_anomalies`); строки
     ``anomaly_kind="golden_exempt_product"`` называют продукт и причину из объявления.
     Это наблюдение об инструменте проверки, а не о ячейке: статусы не меняются.
+
+    **16 §8 п.4.** ``reuse_unconfirmed_anomalies`` — ячейки, у которых ``❌`` снят правилом
+    «``❌`` требует ``live|revalidated``» (:func:`collect_reuse_unconfirmed_anomalies`);
+    строки ``anomaly_kind="reuse_unconfirmed"`` называют продукт, параметр и виновника
+    (документ или корпус продукта). Как и остальные, это **наблюдение**: ячейка уже ``❓``.
     """
     rows: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
@@ -1467,6 +1630,18 @@ def render_nda_questions(
                 "protocol_status": "",
                 "i3_anomaly": anomaly.get("reason", ""),
                 "anomaly_kind": "golden_exempt_product",
+            }
+        )
+    for anomaly in reuse_unconfirmed_anomalies or ():
+        rows.append(
+            {
+                "product_id": anomaly.get("product_id", ""),
+                "param_id": anomaly.get("param_id", ""),
+                "status": "reuse_unconfirmed",
+                "exhausted_contours": "",
+                "protocol_status": "",
+                "i3_anomaly": anomaly.get("reason", ""),
+                "anomaly_kind": "reuse_unconfirmed",
             }
         )
     return _write_csv(
@@ -1545,6 +1720,113 @@ def collect_i3_anomalies(
                 }
             )
     return anomalies
+
+
+def collect_reuse_unconfirmed_anomalies(
+    cells: Iterable[Any],
+) -> list[dict[str, Any]]:
+    """16 §8 п.4: ``❌`` снят, потому что наблюдение в этом цикле не подтверждено.
+
+    Источник — **запись ячейки**, а не пересчёт правила: машинный токен
+    ``reuse_unconfirmed`` пишет конвейер в ``evidence_scope.reason`` и в
+    ``cells.validation_notes``, и отчёт читает ровно то, что записано. Второе вычисление
+    здесь разошлось бы с первым (та же дисциплина, что у ``run_product`` против
+    ``results[].notes``): отчёт обязан объяснять опубликованную карту, а не строить свою.
+
+    Запись называет **виновника** — текст берётся из причины ячейки, где конвейер уже
+    указал ``{product_id}/{param_id}``, документ (или корпус продукта) и что именно не так.
+    Аномалия — наблюдение (I12): статус ячейки не меняется, она и так ``❓``.
+    """
+    anomalies: list[dict[str, Any]] = []
+    for cell in _cell_list(cells):
+        scope = getattr(cell, "evidence_scope", None)
+        reason = str(getattr(scope, "reason", None) or "")
+        notes = [
+            str(note) for note in (getattr(cell, "validation_notes", None) or [])
+        ]
+        if REUSE_UNCONFIRMED_REASON not in reason and not any(
+            REUSE_UNCONFIRMED_REASON in note for note in notes
+        ):
+            continue
+        # Причина ячейки несёт полный текст виновника; если токен есть только в заметке
+        # (строка, записанная до появления причины, либо причина перезаписана позже) —
+        # берётся заметка: отчёт называет то, что записано, и не дописывает своё.
+        detail = (
+            reason
+            if REUSE_UNCONFIRMED_REASON in reason
+            else next(note for note in notes if REUSE_UNCONFIRMED_REASON in note)
+        )
+        anomalies.append(
+            {
+                "product_id": str(cell.product_id),
+                "param_id": str(cell.param_id),
+                "reason": detail,
+            }
+        )
+    return sorted(anomalies, key=lambda row: (row["product_id"], row["param_id"]))
+
+
+def collect_run_products(
+    store: Any | None,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    """Строки ``run_product`` прогона (16 §3.2) — статус продукта **в прогоне**.
+
+    Носитель — таблица ``run_product``; ``results[].notes`` прогона остаётся
+    операторским текстом. Два носителя одной величины разошлись бы, если бы отчёт
+    собирал статус заново, поэтому здесь **только чтение**: ``iter_run_products``.
+
+    ``store`` без метода (синтетические бандлы тестов, legacy-прогон) — пустой список:
+    «строк нет» не выдаётся за «все продукты ``complete``». Сбой чтения тоже пустой
+    список, но прогон от этого не падает: таблица — провенанс, а не измерение.
+    """
+    reader = getattr(store, "iter_run_products", None)
+    if not callable(reader):
+        return []
+    try:
+        return list(reader(run_id))
+    except Exception:  # noqa: BLE001 — провенанс не роняет отчёт
+        return []
+
+
+#: Колонки ``outputs/run_product.csv`` — порядок совпадает с записью ``run_product``.
+_RUN_PRODUCT_COLUMNS: tuple[str, ...] = (
+    "run_id",
+    "product_id",
+    "mode",
+    "status",
+    "scope",
+    "phase",
+    "coverage_complete",
+    "docs_total",
+    "docs_reused",
+    "docs_new",
+    "cells_total",
+    "cells_pending",
+    "baseline_complete",
+    "error_kind",
+    "error",
+    "updated_at",
+)
+
+
+def render_run_product(
+    rows: Iterable[Mapping[str, Any]],
+    out_path: str | Path,
+) -> Path | None:
+    """Пишет ``outputs/run_product.csv``: строки по продуктам прогона.
+
+    ``None`` при пустом списке: файл с заголовком и без строк читался бы как «продуктов
+    нет», а это другой факт. Пустая таблица ``run_product`` — «статус не записан».
+    """
+    materialized = list(rows)
+    if not materialized:
+        return None
+    return _write_csv(
+        Path(out_path),
+        list(_RUN_PRODUCT_COLUMNS),
+        [{column: row.get(column) for column in _RUN_PRODUCT_COLUMNS} for row in materialized],
+    )
 
 
 def collect_crawl_truncation_anomalies(
@@ -2668,6 +2950,11 @@ def write_reports(
 
     I3 (§5): strict-``❓`` без полного протокола исчерпания фиксируются как аномалии
     (:attr:`Artifacts.i3_anomalies`) — статус ячейки при этом не меняется.
+
+    16 §3.2/§8 п.4: пишет ``outputs/run_product.csv`` (статус продукта **в прогоне**, из
+    таблицы ``run_product``) и собирает аномалии ``reuse_unconfirmed`` (``❌`` снят
+    правилом «``❌`` требует ``live|revalidated``»). Оба — чтение уже записанного:
+    отчёт не пересчитывает ни статус продукта, ни правило допуска ``❌``.
     """
     cell_list = _cell_list(cells)
     run_dir = Path(out_dir) / run_id
@@ -2748,6 +3035,19 @@ def write_reports(
             resolved_golden_status = read_golden_status(package_dir)
     golden_exempt_anomalies = collect_golden_exempt_anomalies(resolved_golden_status)
 
+    # 16 §8 п.4: ячейки, у которых ``❌`` снят правилом «``❌`` требует ``live|revalidated``».
+    # Читается **из записи ячейки** (причина/заметки), а не пересчитывается: правило живёт
+    # в конвейере, отчёт обязан объяснять опубликованную карту, а не строить свою.
+    reuse_anomalies = collect_reuse_unconfirmed_anomalies(cell_list)
+
+    # 16 §3.2: статус продукта **в прогоне** — строки ``run_product`` (mode/status/scope/
+    # счётчики). Носитель — таблица; ``results[].notes`` прогона остаётся операторским
+    # текстом, поэтому отчёт ничего не выводит из ячеек: только чтение.
+    run_product_rows = collect_run_products(store, run_id)
+    run_product_path = render_run_product(
+        run_product_rows, outputs_dir / "run_product.csv"
+    )
+
     # §13/K2: ячейки со ``stale_reason`` исключены из Capability/Coverage
     # (:mod:`core.pipeline.compute`), но человек обязан их видеть: это очередь
     # пере-оценки, а не тихое вычитание. Файл пишется только при непустом списке.
@@ -2795,6 +3095,7 @@ def write_reports(
         crawl_truncation_anomalies=truncation_anomalies,
         corpus_coverage_anomalies=coverage_anomalies,
         golden_exempt_anomalies=golden_exempt_anomalies,
+        reuse_unconfirmed_anomalies=reuse_anomalies,
     )
     preliminary = render_preliminary_findings(
         cell_list, outputs_dir / "preliminary_findings.xlsx"
@@ -2814,6 +3115,7 @@ def write_reports(
     anomalies.extend(truncation_anomalies)
     anomalies.extend(coverage_anomalies)
     anomalies.extend(golden_exempt_anomalies)
+    anomalies.extend(reuse_anomalies)
 
     # 13-manual-artifacts §4: тот же генератор, что у фазы ``corpus`` (один код — две
     # точки вызова), поэтому повторная выгрузка отчёта обновляет файл, а формы двух
@@ -2841,5 +3143,8 @@ def write_reports(
         crawl_truncation_anomalies=truncation_anomalies,
         corpus_coverage_anomalies=coverage_anomalies,
         golden_exempt_products=golden_exempt_anomalies,
+        reuse_unconfirmed_anomalies=reuse_anomalies,
+        run_product=run_product_path,
+        run_products=run_product_rows,
         artifacts_gap=artifacts_gap,
     )

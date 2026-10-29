@@ -20,6 +20,7 @@ import pytest
 import core.adapters.embed_local as module
 from core.adapters.embed_local import (
     DEFAULT_BATCH_SIZE,
+    DEFAULT_DEVICE,
     DEFAULT_DIM,
     DEFAULT_MODEL_ID,
     EmbedderUnavailable,
@@ -223,8 +224,13 @@ def test_real_path_lazy_loads_and_batches(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert emb._model is instances[0]
     assert instances[0].model_id == "test/model"
-    # Ревизия и оффлайн-режим передаются явно: по умолчанию сеть не трогается (C11).
-    assert instances[0].init_kwargs == {"revision": None, "local_files_only": True}
+    # Ревизия, оффлайн-режим и **объявленное устройство** передаются явно: по умолчанию
+    # сеть не трогается (C11), а устройство не выбирает torch (``14`` оговорка 5).
+    assert instances[0].init_kwargs == {
+        "revision": None,
+        "local_files_only": True,
+        "device": "cpu",
+    }
     assert [call["batch"] for call in instances[0].encode_calls] == [["a", "bb"], ["ccc"]]
     assert instances[0].encode_calls[0]["normalize_embeddings"] is True
     assert instances[0].encode_calls[0]["convert_to_numpy"] is True
@@ -254,4 +260,41 @@ def test_revision_is_pinned_and_passed_to_loader(monkeypatch: pytest.MonkeyPatch
 
     # Веса загружаются по repo, а не по «repo@rev»: ревизия — отдельный аргумент.
     assert instances[0].model_id == "test/model"
-    assert instances[0].init_kwargs == {"revision": "abc123", "local_files_only": False}
+    assert instances[0].init_kwargs == {
+        "revision": "abc123",
+        "local_files_only": False,
+        "device": "cpu",
+    }
+
+
+def test_device_is_declared_and_passed_to_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``device`` — **объявленная** ось ``embed.device``, а не выбор torch.
+
+    До правки аргумента не было, и ``SentenceTransformer`` сам уходил на CUDA, если карта
+    есть: ``embed_device``/``pb``/ключ ``embed_cache`` называли бы устройство, которого
+    прогон не объявлял (``14`` оговорка 5). Дефолт — объявленный ``cpu``, не ``None``.
+    """
+    assert DEFAULT_DEVICE == "cpu"
+    assert LocalEmbedder().device == "cpu"
+
+    fake, instances = _fake_st_module(dim=2)
+    monkeypatch.setattr(module, "_sentence_transformers_available", lambda: True)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+    emb = LocalEmbedder(model_id="test/model", dim=2, device="cuda")
+    assert emb.device == "cuda"
+    emb.embed(["a"])
+    assert instances[0].init_kwargs["device"] == "cuda"
+
+
+def test_embed_fn_seam_ignores_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Тестовый шов ``embed_fn`` работает как раньше: устройство его не касается."""
+    calls: list[list[str]] = []
+
+    def _fn(batch: list[str]) -> list[list[float]]:
+        calls.append(batch)
+        return [[1.0, 0.0] for _ in batch]
+
+    emb = LocalEmbedder(_fn, dim=2, device="cuda")
+    assert emb.embed(["a", "b"]) == [[1.0, 0.0], [1.0, 0.0]]
+    assert calls == [["a", "b"]]

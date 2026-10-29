@@ -30,6 +30,7 @@ from core.domain.enums import (
     DenialClaim,
     DenialStrength,
     DocumentLevel,
+    EmbedDevice,
     EndpointKind,
     EvidenceState,
     EvidenceType,
@@ -52,6 +53,7 @@ from core.domain.enums import (
     RankingPolicy,
     RefreshPolicy,
     Relationship,
+    ReuseKind,
     RunMode,
     SatelliteState,
     SearchKind,
@@ -122,7 +124,16 @@ _FROZEN = ConfigDict(
 #: старые манифесты несут ``2.4.0`` и читаются как есть (версия манифеста — то, что было
 #: записано), расхождение с текущей константой видно в ``hound diff`` строкой
 #: ``methodology_change``, но **не** является ошибкой чтения прогона.
-METHODOLOGY_VERSION = "0.1.0"
+#: 0.2.0 — граница ``runs`` 29.10.2026 (``16-runs-schema-boundary``): **условие публикации
+#: ``❌`` меняется** — корпусное/``explicit``/``authoritative`` отрицание опирается только на
+#: наблюдение с серверным подтверждением (``corpus_docs.reuse_kind ∈ {live, revalidated}``,
+#: ``09`` §11.2), иначе ячейка уходит в ``❓`` с причиной ``reuse_unconfirmed``. Это
+#: absence/evidence-модель, а не исполнение, поэтому класс границы — ``methodology_change``
+#: с обязательными ``golden-full`` **и** пере-аннотацией golden (§13). В ту же границу
+#: вошли ось ``embed_device``, формат ``chunk_id``/партиции и дефекты краула: сам по себе
+#: каждый дал бы ``execution_change``/``content_change``, но самый сильный класс поглощает
+#: остальные, и объединение дешевле (одна пере-аннотация, а не две).
+METHODOLOGY_VERSION = "0.2.0"
 
 #: P0/OOM: дефолтный потолок одного HTTP-ответа/retained-файла — 20 MiB. Операционная
 #: ось исполнения (``crawl.max_response_bytes``), не методология; адаптеры используют
@@ -474,6 +485,23 @@ def canonical_rate_limit(spec: RateLimitSpec | None) -> str | None:
     return f"uniform(min={float(spec.min_s)!r},max={float(spec.max_s)!r})"
 
 
+class EmbedRunConfig(BaseModel):
+    """``run.yaml`` → секция ``embed``: run-слой устройства эмбеддера (``embed.device``).
+
+    ``device`` — ``None`` = не задано на этом слое: резолв берёт app-дефолт ``cpu``. Не
+    ``cpu`` по умолчанию — по той же причине, что у ``CrawlRunConfig.pdf_device``: дефолт
+    run-слоя перекрыл бы app-слой в цепочке ``_pick``, и объявленный
+    ``deploy.yaml:embed.device`` молча не действовал бы (R5).
+
+    Per-site слоя нет: устройство — свойство **хоста исполнения**, а не сайта (тот же
+    довод, что в :func:`core.pipeline.crawl_frontier.resolve_pdf_device`).
+    """
+
+    model_config = _BASE
+
+    device: EmbedDevice | None = None
+
+
 class CrawlRunConfig(BaseModel):
     """``run.yaml`` → секция ``crawl``: дефолты оси стратегии и диапазона задержек.
 
@@ -665,6 +693,11 @@ class RunConfig(BaseModel):
     #: Секция ``crawl`` (D4): дефолты оси стратегии и диапазона задержек. Отсутствие
     #: секции (``None``) → поведение краула не меняется (обратная совместимость).
     crawl: CrawlRunConfig | None = None
+    #: Секция ``embed`` — устройство эмбеддера этого прогона (``embed.device``). ``None``
+    #: — секция не задана: действует app-слой (``deploy.yaml:embed.device``), затем
+    #: объявленный дефолт ``cpu``. Смена значения — ``execution_change`` (входит в
+    #: ``execution_contract_digest`` через ось ``embed_device``).
+    embed: EmbedRunConfig | None = None
     #: Секция ``gates`` — политика гейтов G3/G4 для этого прогона
     #: (``{g3: external|waived, g4: external|waived}``; по умолчанию ``external``).
     #: Это **управление процессом**, а не условие измерения: в
@@ -1465,10 +1498,40 @@ class RunManifest(BaseModel):
     scoring_policy_version: str
     anchor_product_id: str
     cohort_ref: str | None = None
+    #: §13.6/09 §13.6: **срез** прогона — ``full`` | ``only_failed`` | ``product:<id>``.
+    #: ``--only-product`` меняет смысл среза, поэтому без поля читатель отчёта не может
+    #: отличить полное измерение от частичного, не заглядывая в ``state.db``. Провенанс,
+    #: ``run_id`` **не** меняется (срез уже входит в материал ``run_id``, ``plan.py``).
+    run_scope: str | None = None
+    #: Сериализованный :class:`ProductPlanSet` (mode/blocked/reasons) — план по продуктам,
+    #: который прогон фактически исполнял. Раньше не персистился ни разу.
+    product_plan: dict[str, Any] | None = None
+    #: 09 §2.4/§6.2: эффективный **цикл** прогона (``--cycle-id`` > ``run.yaml`` >
+    #: ``snapshot_date``). Он входит в материал ``run_id``, то есть является условием
+    #: измерения, а не подписью: без поля читатель артефакта не мог назвать цикл, не
+    #: заглядывая в ``state.db``, а два прогона разных циклов различались только ``run_id``.
+    #: ``None`` — не записано (legacy-строка), а не «цикл не объявлен».
+    cycle_id: str | None = None
+    #: 09 §12.3: прогон, **против которого** считался этот (предшественник для
+    #: carry-forward). Поле было объявлено только у :class:`ProductPlanSet` и никем не
+    #: заполнялось, поэтому читатель артефакта не видел, с чем сравнивался прогон.
+    #: ``None`` — предшественника нет (или он не записан): догадка запрещена (A3).
+    #: В материал ``run_id`` **не** входит: иначе идентичность зависела бы от истории.
+    previous_run_id: str | None = None
+    #: §13: класс изменения относительно предшественника (``none``/``cohort_*``/
+    #: ``execution_change``/``methodology_change``) — тот же, что записан в lineage:
+    #: второго расчёта нет, значение приходит из строки lineage прогона.
+    change_class: str | None = None
     focus_modules: list[str] = Field(default_factory=list)
     # Индексный/ретривал-контур (§13, I16/I20/S1)
     index_build_id: str | None = None
     embed_model_id: str | None = None
+    #: Устройство, **на котором считались векторы** (ось ``embed.device``, :class:`EmbedDevice`).
+    #: Наблюдаемое поле: ось уже входит в ``execution_contract_digest``, но без поля «на чём
+    #: считались векторы» нельзя прочитать запросом — только восстановить из контракта.
+    #: Имя совпадает с именем поля контракта (``report._contract_field_attr`` сопоставляет
+    #: их напрямую), иначе диагностика назвала бы ось «недоступной» вместо «изменённой».
+    embed_device: str | None = None
     chunker_version: str | None = None
     extractor_version: str | None = None
     lexical_engine_version: str | None = None
@@ -1696,6 +1759,16 @@ class CorpusDoc(BaseModel):
     pages_converted: int | None = None
     #: Длина извлечённого текста (не сумма чанков: чанки могут быть отброшены I19).
     extracted_chars: int | None = None
+    #: HTTP-статус, которым сервер ответил **в этом цикле**; ``None`` — сервер не отвечал
+    #: (документ прочитан из retained-байтов либо наблюдение не записано). Поле не
+    #: провенанс-в-никуда: правило «``❌`` нельзя публиковать на неподтверждённом
+    #: наблюдении» (I2c/``09`` §11.2) обязано спрашивать происхождение наблюдения здесь.
+    http_status: int | None = None
+    #: Происхождение наблюдения: ``live``/``revalidated`` (сервер ответил) либо
+    #: ``reused``/``stale`` (взяты retained-байты). ``None`` — наблюдение не записано
+    #: (legacy-строки) ⇒ ``❌`` не публикуется: наследовать ``url_state.reuse_kind``
+    #: нельзя, там последняя классификация, в том числе из прошлого цикла.
+    reuse_kind: ReuseKind | None = None
 
     @model_validator(mode="after")
     def _check_partial(self) -> CorpusDoc:

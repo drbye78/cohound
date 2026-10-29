@@ -125,6 +125,7 @@ from core.pipeline.run_identity import (
     build_execution_contract,
     build_run_identity,
     check_update_scope,
+    previous_run_of,
     resolve_cycle_id,
     resolve_refresh_policy,
     resolve_run_scope,
@@ -672,27 +673,20 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 status_dict_version=status_dict_version,
             )
 
-    previous_run_id = getattr(args, "since_run", None)
-    previous = None
-    if previous_run_id is not None:
-        previous = (
-            state_store.get_run_lineage(previous_run_id)
-            if state_store is not None
-            else None
+    # 09 §12.3: предшественник — по **одной** формуле (:func:`previous_run_of`): явный
+    # ``--since-run`` (нет строки — отказ использования, а не «истории нет»), иначе
+    # последняя строка lineage пакета; совпадение с текущим ``run_id`` — не предшественник
+    # (resume не делает carry-forward против себя).
+    try:
+        previous = previous_run_of(
+            state_store,
+            package_id,
+            run_id=run_id,
+            explicit=getattr(args, "since_run", None),
         )
-        if previous is None:
-            raise CliError(
-                f"--since-run: прогон '{previous_run_id}' не найден в state.db",
-                code="usage",
-                exit_code=EXIT_USAGE,
-            )
-    else:
-        previous = previous_lineage
-        previous_run_id = previous.run_id if previous is not None else None
-    # Resume текущего прогона — не «предыдущий»: carry-forward не выполняется (§12.3).
-    if previous_run_id == run_id:
-        previous_run_id = None
-        previous = None
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    previous_run_id = previous.run_id if previous is not None else None
     identity = build_run_identity(
         run_id=run_id,
         cycle_id=cycle_id,
@@ -1083,6 +1077,15 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 # §13 (2.4.0): те же декларированные оси, что у контракта, — один резолвер.
                 axes=declared,
                 declared_status_dict_version=status_dict_version,
+                # 09 §12.3/§13: база сравнения прогона и класс изменения. Предшественник
+                # разрешён **один** раз выше (:func:`previous_run_of` — та же величина, что
+                # пойдёт в ``run_lineage``); класс — из той же ``RunIdentity``. Фаза оценки
+                # называет предшественника в логе, манифест — полем ``previous_run_id``.
+                previous_run_id=previous_run_id,
+                change_class=identity.change_class.value,
+                # 09 §2.4/§6.2: цикл — та же величина, что вошла в ``run_id``; в манифест
+                # он попадает полем (иначе цикл читался бы только из ``run_id``/lineage).
+                cycle_id=identity.cycle_id,
                 # F0: бюджет памяти — тот же, что проверил preflight (один резолв на прогон).
                 mem_budget_mb=mem_budget_mb,
                 derive_extract_workers=derive_extract_workers,

@@ -1648,6 +1648,15 @@ def _resolve_ports(
             if inputs is not None
             else None
         ),
+        # Ось ``embed.device``: run-слой (``run.yaml:embed``) уходит тем же путём, что
+        # ``run_crawl``; резолв ``app < run`` делает wiring той же функцией, что
+        # ``resolve_declared_axes``. Окружение здесь не читается: устройство объявлено
+        # входом, иначе ``run_id`` не описывал бы место счёта векторов.
+        run_embed=(
+            getattr(getattr(inputs, "run", None), "embed", None)
+            if inputs is not None
+            else None
+        ),
         cli_max_depth=getattr(args, "max_depth", None),
         # P7: механизм PDF — объявленная ось прогона; порты (пробный экстрактор,
         # диагностика) обязаны видеть тот же, что и Ш5 (``--pdf-pipeline``).
@@ -2029,6 +2038,9 @@ def _resolve_phases(
     declared_status_dict_version: str | None = None,
     mem_budget_mb: int | None = None,
     derive_extract_workers: bool | None = None,
+    previous_run_id: str | None = None,
+    change_class: str | None = None,
+    cycle_id: str | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -2201,6 +2213,12 @@ def _resolve_phases(
         "refresh_policy": refresh_policy,
         # 09 §12.5: готовый отпечаток условий измерения → манифест Ш9 (без пересчёта).
         "execution_contract_digest": execution_contract_digest,
+        # 09 §12.3/§13: база сравнения прогона (результат ``previous_run_of`` — резолвится
+        # один раз в команде ``run``) и класс изменения из той же ``RunIdentity``.
+        "previous_run_id": previous_run_id,
+        "change_class": change_class,
+        # 09 §2.4/§6.2: цикл прогона — тот же, что вошёл в ``run_id``.
+        "cycle_id": cycle_id,
         # §13 (2.4.0): декларированные оси исполнения — один резолвер с контрактом
         # (deploy-профиль/чанкер/оси краула/реестры/llm_scenarios).
         "axes": axes,

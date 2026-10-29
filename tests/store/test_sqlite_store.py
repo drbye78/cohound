@@ -37,6 +37,7 @@ from core.domain import (
     ProtocolExhaustion,
     RankingPolicy,
     RegistryFact,
+    ReuseKind,
     RunConfig,
     RunManifest,
     RunMode,
@@ -243,11 +244,29 @@ def test_create_run_then_read_manifest_round_trip(store: SqliteStore) -> None:
     assert manifest.case_id == "case-1"
     assert manifest.mode is RunMode.STRICT
     assert manifest.anchor_product_id == "p1"
-    assert manifest.cohort_ref == "cohort.yaml"
+    # 09 §12.2 / 16 §2: колонка несёт **авторскую ревизию** состава, а не имя файла
+    # когорты. ``_cfg()`` ревизию не объявляет ⇒ ``None`` (не подстановка имени файла).
+    assert manifest.cohort_ref is None
     assert manifest.focus_modules == ["m1", "m2"]
     assert manifest.snapshot_date == "2026-01-01"
     assert manifest.requested_ranking is RankingPolicy.CAPABILITY_RANKED
     assert manifest.created_at  # ISO now
+
+
+def test_create_run_stores_declared_cohort_revision_not_file_name(
+    store: SqliteStore,
+) -> None:
+    """``runs.cohort_ref`` — авторская ревизия, а не имя файла когорты (09 §12.2, 16 §2).
+
+    Именно ревизия входит в ``cohort_digest``. Прежний писатель клал ``cfg.cohort``
+    (имя файла), и манифест показывал ревизию, которой в ``run_id`` не было, а настоящая
+    ревизия не сохранялась нигде. Проверка различает два поля на одном входе — иначе
+    тест прошёл бы и при подстановке имени файла.
+    """
+    cfg = _cfg().model_copy(update={"cohort_ref": "cohort-case-1-r2"})
+    store.create_run(RUN_ID, cfg)
+    assert cfg.cohort == "cohort.yaml"
+    assert store.read_manifest(RUN_ID).cohort_ref == "cohort-case-1-r2"
 
 
 def test_set_phase_state_convention(store: SqliteStore) -> None:
@@ -1880,3 +1899,283 @@ def test_read_manifest_tolerates_missing_publishability_column(tmp_path: Path) -
         assert read.run_id == RUN_ID
     finally:
         legacy.close()
+
+
+# --------------------------------------------------------------------------- #
+# 16 §3 — граница ``runs``: аддитивные колонки, ``run_product``, писатель манифеста
+# --------------------------------------------------------------------------- #
+
+
+def _manifest(**overrides: Any) -> RunManifest:
+    """Манифест с минимальными обязательными полями плюс ``overrides`` (валидируемые)."""
+    base: dict[str, Any] = {
+        "run_id": RUN_ID,
+        "case_id": "case-1",
+        "created_at": "2026-01-01T00:00:00Z",
+        "mode": RunMode.STRICT,
+        "methodology_version": "0.1.0",
+        "package_version": "pkg-1.2.3",
+        "catalog_version": "cat-1",
+        "status_dict_version": "sd-1",
+        "scoring_policy_version": "sp-1",
+        "anchor_product_id": "p1",
+    }
+    base.update(overrides)
+    return RunManifest(**base)
+
+
+def test_persist_manifest_writes_boundary_columns(store: SqliteStore) -> None:
+    """``persist_manifest`` **пишет** новые колонки — иначе они ``NULL`` навсегда.
+
+    Это не формальность: ``ALTER TABLE`` создаёт колонку, но не заполняет её, и колонка,
+    не вписанная в явный список ``UPDATE``, остаётся пустой при живом прогоне. Проверка
+    читает строку SQL-ом, а не через ``read_manifest``: проверяется запись, а не пара
+    «писатель+читатель», которые могут разделять одну ошибку.
+    """
+    store.create_run(RUN_ID, _cfg())
+    store.persist_manifest(
+        RUN_ID,
+        _manifest(
+            run_scope="product:p1",
+            product_plan={"mode": "scoped", "products": ["p1"], "blocked": []},
+            embed_device="cuda",
+        ),
+    )
+
+    row = store.conn.execute(
+        "SELECT run_scope, product_plan_json, embed_device FROM runs WHERE run_id = ?",
+        (RUN_ID,),
+    ).fetchone()
+    assert row["run_scope"] == "product:p1"
+    assert row["embed_device"] == "cuda"
+    # Каноническая форма: ``sort_keys`` — иначе дайджест/сравнение зависели бы от порядка.
+    assert row["product_plan_json"] == json.dumps(
+        {"mode": "scoped", "products": ["p1"], "blocked": []},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def test_persist_manifest_leaves_boundary_columns_null_when_unset(
+    store: SqliteStore,
+) -> None:
+    """Незаполненные поля остаются ``NULL``: пустой план не фабрикуется.
+
+    ``{}`` вместо ``NULL`` читался бы как «план записан и пуст» — утверждение, которого
+    прогон не делал.
+    """
+    store.create_run(RUN_ID, _cfg())
+    store.persist_manifest(RUN_ID, _manifest())
+
+    row = store.conn.execute(
+        "SELECT run_scope, product_plan_json, embed_device FROM runs WHERE run_id = ?",
+        (RUN_ID,),
+    ).fetchone()
+    assert row["run_scope"] is None
+    assert row["product_plan_json"] is None
+    assert row["embed_device"] is None
+
+
+def test_read_manifest_tolerates_missing_boundary_columns(tmp_path: Path) -> None:
+    """Read-only БД прошлой версии: колонок нет ⇒ чтение не падает (иначе ``IndexError``).
+
+    Миграция аддитивна и ``schema_version`` не поднят, поэтому файлы без новых колонок
+    существуют в живом виде; читатель обязан их открыть.
+    """
+    path = tmp_path / "legacy.db"
+    store = SqliteStore(path)
+    store.create_run(RUN_ID, _cfg())
+    store.persist_manifest(RUN_ID, _manifest())
+    store.close()
+
+    raw = sqlite3.connect(path)
+    for column in ("run_scope", "product_plan_json", "embed_device"):
+        raw.execute("ALTER TABLE runs DROP COLUMN " + column)
+    for column in ("http_status", "reuse_kind"):
+        raw.execute("ALTER TABLE corpus_docs DROP COLUMN " + column)
+    raw.commit()
+    raw.close()
+
+    legacy = SqliteStore(path, read_only=True)
+    try:
+        read = legacy.read_manifest(RUN_ID)
+        assert read.run_id == RUN_ID
+        assert read.anchor_product_id == "p1"
+        # Отсутствие колонки — «значение не записано», а не сбой чтения прогона.
+        assert read.run_scope is None
+        assert read.product_plan is None
+        assert read.embed_device is None
+    finally:
+        legacy.close()
+
+
+def test_read_manifest_reads_boundary_columns_back(store: SqliteStore) -> None:
+    """``persist_manifest``→``read_manifest``: срез, план и устройство читаются обратно."""
+    store.create_run(RUN_ID, _cfg())
+    store.persist_manifest(
+        RUN_ID,
+        _manifest(
+            run_scope="product:p1",
+            product_plan={"mode": "scoped", "products": ["p1"]},
+            embed_device="cpu",
+        ),
+    )
+
+    read = store.read_manifest(RUN_ID)
+    assert read.run_scope == "product:p1"
+    assert read.product_plan == {"mode": "scoped", "products": ["p1"]}
+    assert read.embed_device == "cpu"
+
+
+def test_persist_manifest_writes_lineage_provenance_columns(store: SqliteStore) -> None:
+    """09 §2.4/§12.3/§13: цикл, предшественник и класс изменения **пишутся** в строку.
+
+    Поля были объявлены в манифесте (``cycle_id`` — вовсе не был) и не вписывались ни в
+    один ``UPDATE``: колонка осталась бы ``NULL`` навсегда, а ``hound report`` молчал бы
+    о цикле и базе сравнения. Проверяется и запись (SQL), и чтение (``read_manifest``) —
+    одна ошибка в паре «писатель+читатель» не должна выглядеть как успех.
+    """
+    store.create_run(RUN_ID, _cfg())
+    store.persist_manifest(
+        RUN_ID,
+        _manifest(
+            cycle_id="2026-W43",
+            previous_run_id="run-prev",
+            change_class="execution_change",
+        ),
+    )
+
+    row = store.conn.execute(
+        "SELECT cycle_id, previous_run_id, change_class FROM runs WHERE run_id = ?",
+        (RUN_ID,),
+    ).fetchone()
+    assert row["cycle_id"] == "2026-W43"
+    assert row["previous_run_id"] == "run-prev"
+    assert row["change_class"] == "execution_change"
+
+    read = store.read_manifest(RUN_ID)
+    assert read.cycle_id == "2026-W43"
+    assert read.previous_run_id == "run-prev"
+    assert read.change_class == "execution_change"
+
+
+def test_read_manifest_lineage_provenance_is_null_when_not_recorded(
+    store: SqliteStore,
+) -> None:
+    """Не записано — ``None``: «предшественника не было» не выводится из пустоты (A3)."""
+    store.create_run(RUN_ID, _cfg())
+    store.persist_manifest(RUN_ID, _manifest())
+
+    read = store.read_manifest(RUN_ID)
+    assert read.cycle_id is None
+    assert read.previous_run_id is None
+    assert read.change_class is None
+
+
+def test_run_product_upsert_is_idempotent_and_overwrites(store: SqliteStore) -> None:
+    """``save_run_product``: одна строка на ``(run_id, product_id)``, переписывается целиком."""
+    store.create_run(RUN_ID, _cfg())
+    store.save_run_product(
+        RUN_ID,
+        "p1",
+        mode="full",
+        status="running",
+        phase="corpus",
+        docs_total=10,
+        docs_new=10,
+    )
+    first = list(store.iter_run_products(RUN_ID))
+    assert len(first) == 1
+    assert first[0]["status"] == "running"
+    assert first[0]["phase"] == "corpus"
+    assert first[0]["scope"] == "full"  # дефолт схемы и писателя совпадают
+    assert first[0]["coverage_complete"] is None  # покрытие ещё не считалось
+    assert first[0]["baseline_complete"] == 0
+    assert first[0]["updated_at"]
+
+    store.save_run_product(
+        RUN_ID,
+        "p1",
+        mode="full",
+        status="complete",
+        phase="compute",
+        coverage_complete=True,
+        docs_total=10,
+        docs_reused=4,
+        docs_new=6,
+        cells_total=119,
+        cells_pending=0,
+        baseline_complete=1,
+    )
+    second = list(store.iter_run_products(RUN_ID))
+    assert len(second) == 1, "upsert по PK обязан переписывать строку, а не плодить её"
+    assert second[0]["status"] == "complete"
+    assert second[0]["phase"] == "compute"
+    assert second[0]["coverage_complete"] is True
+    assert (second[0]["docs_total"], second[0]["docs_reused"], second[0]["docs_new"]) == (
+        10,
+        4,
+        6,
+    )
+    assert second[0]["cells_total"] == 119
+    assert second[0]["baseline_complete"] == 1
+
+
+def test_iter_run_products_is_per_run_and_deterministic(store: SqliteStore) -> None:
+    """Читатель отдаёт продукты прогона в порядке ``product_id`` и не мешает чужим."""
+    store.create_run(RUN_ID, _cfg())
+    other = "run-2"
+    store.create_run(other, _cfg())
+    for product_id in ("p2", "p1"):
+        store.save_run_product(
+            RUN_ID, product_id, mode="full", status="pending", error_kind="crawl_blocked"
+        )
+    store.save_run_product(other, "p1", mode="full", status="failed", error="boom")
+
+    rows = list(store.iter_run_products(RUN_ID))
+    assert [row["product_id"] for row in rows] == ["p1", "p2"]
+    assert {row["status"] for row in rows} == {"pending"}
+    assert rows[0]["error_kind"] == "crawl_blocked"
+    assert [row["status"] for row in store.iter_run_products(other)] == ["failed"]
+    assert list(store.iter_run_products("run-unknown")) == []
+
+
+def test_run_product_rejects_unknown_run_by_foreign_key(store: SqliteStore) -> None:
+    """FK на ``runs(run_id)`` действует: статус продукта не существует без прогона."""
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_run_product("run-ghost", "p1", mode="full", status="pending")
+
+
+def test_upsert_corpus_doc_writes_observation_provenance(store: SqliteStore) -> None:
+    """``http_status``/``reuse_kind`` доезжают до строки ``corpus_docs`` (16 §3.3)."""
+    store.create_run(RUN_ID, _cfg())
+    doc = CorpusDoc(
+        doc_id="p1:doc-1",
+        product_id="p1",
+        url="https://docs.test/p1/doc-1",
+        http_status=304,
+        reuse_kind=ReuseKind.REVALIDATED,
+    )
+    store.upsert_corpus_doc(doc)
+
+    row = store.conn.execute(
+        "SELECT http_status, reuse_kind FROM corpus_docs WHERE doc_id = ?", ("p1:doc-1",)
+    ).fetchone()
+    assert row["http_status"] == 304
+    assert row["reuse_kind"] == "revalidated"
+
+
+def test_upsert_corpus_doc_without_provenance_keeps_columns_null(
+    store: SqliteStore,
+) -> None:
+    """Документ без наблюдения пишет ``NULL``: «не записано» ≠ «подтверждено сервером»."""
+    store.create_run(RUN_ID, _cfg())
+    store.upsert_corpus_doc(
+        CorpusDoc(doc_id="p1:doc-2", product_id="p1", url="https://docs.test/p1/doc-2")
+    )
+
+    row = store.conn.execute(
+        "SELECT http_status, reuse_kind FROM corpus_docs WHERE doc_id = ?", ("p1:doc-2",)
+    ).fetchone()
+    assert row["http_status"] is None
+    assert row["reuse_kind"] is None
