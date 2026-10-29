@@ -1,0 +1,17 @@
+product_id: digital_q_database
+canonical_name: "Digital Q.DataBase"
+vendor: "Диасофт"
+upstream:
+  baseline_id: upstream-pg
+  version: '18'
+  evidence:
+    url: "https://database.diasoft.ru/"
+    quote: "Digital Q.DataBase является сильно доработанным форком СУБД PostgreSQL; версия 18.0 использует ядро postgres 18 версии"
+edition_assessed: null
+version: "PostgreSQL 18 / Digital Q.DataBase 18.0"
+jurisdiction: RU
+doc_domains:
+  - "database.diasoft.ru"
+  - "database.diasoft.ru/docs/ru/q-database/versiya-180"
+satellites: []
+snapshot_date: '2026-10-28'

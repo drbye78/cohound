@@ -1,5 +1,5 @@
 # Корпусный вход прогона (--urls) для кейса ru-pg-dbms (§11.6).
-# Выведен детерминированно из passports/{product}/2026-10-01.yaml :: doc_domains
+# Выведен детерминированно из passports/{product}/2026-10-28.yaml :: doc_domains
 # (core.config.passport_urls). Это лишь КАНДИДАТЫ-источники контента: они не являются
 # evidence до corpus_raw → hash → index (I19). Homepage-домены → базовые URL '/'.
 # Регенерация: python -c "...passport_urls..." (см. docs/architecture/03 §D.6 runbook).
@@ -14,7 +14,24 @@ jatoba:
 - https://jatoba.ru/
 - https://www.gaz-is.ru/
 - https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/
+digital_q_database:
+# Корень документации — РОДИТЕЛЬСКИЙ каталог версии, а не `/index/`. Замер 28.10:
+# `/versiya-180/index/` отдаёт ту же страницу, но seed-root задаёт path-prefix краула
+# (core.pipeline.crawl_frontier.root_path_prefix), поэтому префикс `/…/versiya-180/index`
+# оставил бы вне scope все страницы `/…/versiya-180/<page>/` — обход сошёл бы ровно одну
+# страницу. `/versiya-180/` — TOC, 700 уникальных ссылок на страницы документации.
+- https://database.diasoft.ru/
+- https://database.diasoft.ru/docs/ru/q-database/versiya-180/
 pangolin:
+# Документация — первым: это дерево и есть карта возможностей, а корень, который идёт
+# последним, — корень, который может не выполниться (порядок = приоритет, §13).
+# Версия 8.1.0, а не «текущая 8.3.0»: паспорт объявляет `version: Pangolin 8.1`, и
+# свидетельство о другой редакции не подтверждает утверждение об объявленной
+# (precision-first). Смена редакции — правка паспорта, а не этого файла.
+# Почему не родитель `/docs/public/PSQ/`: его префикс накрывает все 18 версий дерева,
+# бюджет корня делился бы между ними, а содержимое версий дублируется — платили бы за
+# дубликаты до дедупа по content_hash.
+- https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/
 - https://pangolin.sbertech.ru/
 - https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/
 - https://sbertech.ru/

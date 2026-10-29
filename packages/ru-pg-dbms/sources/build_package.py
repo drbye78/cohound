@@ -829,7 +829,10 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     ``sitemap`` (D3). Ключ — ``host`` с опциональным ``/path`` (приоритет резолвит pipeline).
 
     Значения согласованы с живыми замерами (2026-10): ``*.sbertech.ru`` отдают 401
-    обычному HTTP (антибот) → ``browser``; ``pangolin.sbertech.ru`` дополнительно требует
+    обычному HTTP (антибот) → ``browser``, кроме измеренного исключения — статическое
+    дерево документации ``platformv.sbertech.ru/docs/public/PSQ`` отдаёт 200 (29.10.2026),
+    поэтому вынесено на path-ключ с ``http``: антибот на хосте не означает антибот на
+    каждом пути хоста; ``pangolin.sbertech.ru`` дополнительно требует
     ``wait_for`` (JS-challenge завершается и перезагружает страницу после
     ``domcontentloaded``); ``tantorlabs.ru/products/dbms`` — 403 обычному HTTP → ``browser``;
     остальные домены отдают 200 обычному HTTP.
@@ -850,7 +853,8 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     Confluence-пространство TANDOCS «База Знаний Tantor»).
 
     **Sitemap — только там, где он даёт покрытие.** Path-scoped seed внутри host-wide
-    sitemap почти не получает ``<loc>`` в scope (``platformv.sbertech.ru`` — 1 из 801,
+    sitemap почти не получает ``<loc>`` в scope (``platformv.sbertech.ru`` — замер
+    29.10.2026: 816 ``<loc>``, из них под ``/docs/public/PSQ/`` **ноль**;
     ``tantorlabs.ru/products/dbms`` — 3 из 58) и лишь порождает запись об отказе на каждом
     прогоне, поэтому sitemap объявлен на host-ключах, а не на этих path-ключах.
 
@@ -877,6 +881,29 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "max_depth": 8,
             "max_documents": 2000,
+        },
+        # Host-root seed (https://database.diasoft.ru/) — корень сайта вендора, а не
+        # продукта: любой обход с depth > 0 затянул бы в партицию Q.DataBase страницы
+        # соседних продуктов Диасофта (I17). При depth 0 обходится только сам корень ⇒
+        # бюджет 10 (как у прочих host-корней).
+        "database.diasoft.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 0,
+            "max_documents": 10,
+        },
+        # Корень документации продукта. Замер 28.10: TOC `/versiya-180/` ссылается на
+        # **700** уникальных страниц (`/versiya-180/<page>/`); sitemap документацию не
+        # публикует (`sitemap-files.xml` — 1 URL `/docs/`, iblock-карты — 0 страниц
+        # `/docs/`), поэтому глубина 8 — единственный ориентир, а размер берётся из TOC.
+        # Потолок 800 — выше измеренных 700: потолок ниже измерения объявил бы весь
+        # продукт `truncated: max_documents` (ложная аномалия exhaustive-отсутствия
+        # I2/I2b) и снял бы все ❌ этого продукта в ❓.
+        "database.diasoft.ru/docs/ru/q-database/versiya-180": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 800,
         },
         # Учебные материалы (курсы/раздатки). Отдельный корень и профиль (execution_change
         # §13): до 22.10 хост попадал в партицию только как «любой поддомен»
@@ -933,14 +960,43 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_documents": 600,
             "sitemap": "https://pangolin.sbertech.ru/sitemap.xml",
         },
+        # Оси хоста platformv.sbertech.ru **не однородны по пути** — замер 29.10.2026:
+        # страницы документации PSQ отдают 200 обычному HTTP (`/PSQ/8.1.0/`,
+        # `/PSQ/8.1.0/common/`, глубокая страница раздела), а маркетинговый корень
+        # продукта — 401 (антибот). Ключ профиля — `host[/path]`, побеждает самый длинный
+        # path_key (`core/pipeline/fetch_plan.py`), поэтому пути разведены: docs — `http`,
+        # остальной хост — `browser` + `honest`. До замера стоял один host-ключ с
+        # `browser`, и статическое дерево документации платило цену рендера.
+        "platformv.sbertech.ru/docs/public/PSQ": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            # Бюджет выше измерения, а не «круглое число». Замер 29.10.2026, дерево версии
+            # 8.1.0 (та, что объявлена в паспорте — `version: Pangolin 8.1`): нижняя
+            # граница 1299 страниц = сумма ссылок 15 разделов
+            # `common/documents/<sec>/index.html` (about 12, administration-guide 113,
+            # architecture-components 254, description-of-functionality 99,
+            # developer-guide 10, distribution-kit 4, extensions 127, glossary 17,
+            # installation-guide 44, instructions-and-notes 12, programming-guide 222,
+            # reference-guide 50, reference-guide-postgresql 123, reference-guide-sql 206,
+            # what-is-new 6). Выборочная проверка страниц добавляет перекрёстные ссылки,
+            # то есть 1299 — нижняя граница. Потолок ниже измерения объявил бы продукт
+            # `truncated: max_documents` и снял бы все его ❌ (ложная аномалия I2/I2b),
+            # поэтому 2000 выше измеренного; точное число — по замеру следующего прогона.
+            "max_documents": 2000,
+        },
         "platformv.sbertech.ru": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
             "max_depth": 8,
+            # 300 — как было: под этим префиксом остались маркетинговые страницы продукта
+            # (`/products/rabota-s-dannymi/pangolin/`), объём мал; дерево документации
+            # вынесено на path-ключ выше и свой бюджет не отбирает.
             "max_documents": 300,
-            # Sitemap намеренно НЕ задан: seed — глубокий путь внутри host-wide sitemap
-            # (801 <loc>, в scope 1) ⇒ почти no-op плюс запись об отказе на каждом прогоне.
+            # Sitemap намеренно НЕ задан. Замер 29.10.2026: host-wide sitemap — 816 <loc>,
+            # из них под /docs/public/PSQ/ **ноль** (дерево документации в карту не входит)
+            # ⇒ sitemap был бы no-op плюс запись об отказе на каждом прогоне.
         },
         # Sitemap 404 (advertised) ⇒ размер не измерен; 800 — потолок для крупного
         # docs-портала (несколько версий документации), а не заявка на полноту.

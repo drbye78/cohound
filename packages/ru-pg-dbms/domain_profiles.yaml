@@ -21,6 +21,26 @@
 # discovery (BFS или host-wide sitemap) затянет в партицию одного продукта страницы соседних
 # продуктов (I17). Поэтому host-ключи мульти-продуктовых сайтов объявляются с max_depth 0
 # (только сама страница корня), а обход живёт на path-ключе продукта.
+database.diasoft.ru:
+  # Host-root seed (https://database.diasoft.ru/) — корень сайта вендора, а не продукта:
+  # обход с depth > 0 затянул бы в партицию Q.DataBase страницы соседних продуктов
+  # Диасофта (I17). При depth 0 обходится только сам корень ⇒ бюджет 10.
+  extract: auto
+  fetch: http
+  max_depth: 0
+  max_documents: 10
+database.diasoft.ru/docs/ru/q-database/versiya-180:
+  # Корень документации продукта. Замер 28.10: TOC `/versiya-180/` ссылается на **700**
+  # уникальных страниц (`/versiya-180/<page>/`), sitemap документации не публикует
+  # (`sitemap-files.xml` — 1 URL `/docs/`, iblock-карты — 0 страниц `/docs/`), поэтому
+  # глубина 8 — единственный ориентир, а размер берётся из TOC. Потолок 800 — выше
+  # измеренных 700: потолок ниже измерения объявил бы весь продукт
+  # `truncated: max_documents` (ложная аномалия exhaustive-отсутствия I2/I2b) и снял бы
+  # все ❌ этого продукта в ❓.
+  extract: auto
+  fetch: http
+  max_depth: 8
+  max_documents: 800
 docs.tantorlabs.ru:
   # sitemap 404 (host 301 → tantorlabs.ru/docs/, sitemap → 404) → глубина как единственный
   # ориентир. Это крупный docs-хост: лендинг /docs/ ссылается на 6 doc-деревьев (tdb,
@@ -88,15 +108,47 @@ pangolin.sbertech.ru:
   sitemap: https://pangolin.sbertech.ru/sitemap.xml
   strategy: honest
   wait_for: () => document.body && document.body.innerText.length > 200
+# Оси хоста platformv.sbertech.ru **не однородны по пути** — измерено 29.10.2026, поэтому
+# профиль расщеплён: ключ профиля — `host[/path]`, побеждает самый длинный path_key
+# (`core/pipeline/fetch_plan.py:71-109`). Порядок ключей в файле — сортированный: файл
+# сверяется с `yaml_dump(build_domain_profiles())` (sort_keys=True) тестом
+# `tests/packages/test_build_package.py`, поэтому host-ключ идёт первым.
 platformv.sbertech.ru:
-  # seed — глубокий путь, поэтому 8; <loc> вне scope корня отсекаются (дефект-B-фикс).
-  # Sitemap намеренно не задан: seed — path внутри host-wide sitemap (801 <loc>, в scope 1)
-  # ⇒ почти no-op плюс запись об отказе на каждом прогоне.
+  # Маркетинговые страницы продукта (`/products/rabota-s-dannymi/pangolin/`) и остальной
+  # хост: 401 обычному HTTP (антибот) ⇒ browser + honest. Бюджет 300 — тот же, что был:
+  # под этим префиксом дерева документации больше нет, объём мал.
+  #
+  # Sitemap намеренно не задан. Замер 29.10.2026: host-wide sitemap — 816 <loc>, из них
+  # под /docs/public/PSQ/ **ноль** (дерево документации в карту не входит), поэтому
+  # sitemap — no-op плюс запись об отказе на каждом прогоне.
   extract: auto
   fetch: browser
   max_depth: 8
   max_documents: 300
   strategy: honest
+platformv.sbertech.ru/docs/public/PSQ:
+  # Дерево документации PSQ. Версия выбирается корнем в `corpus_urls.yaml` (сейчас
+  # 8.1.0 — редакция из паспорта), а не префиксом профиля: этот ключ описывает оси, не scope.
+  # `fetch: http` — измерено: страницы документации отдают 200 обычному HTTP (проверено на
+  # `/PSQ/8.1.0/`, `/PSQ/8.1.0/common/` и глубокой странице раздела), тогда как
+  # маркетинговый корень того же хоста — 401. Антибот на хосте не означает антибот на
+  # каждом пути хоста; до замера статическое дерево платило цену браузерного рендера.
+  extract: auto
+  fetch: http
+  max_depth: 8
+  # Бюджет выше измерения, а не «по ощущению» (замер 29.10.2026, дерево версии 8.1.0 —
+  # той, что объявлена в паспорте: `version: Pangolin 8.1`):
+  #   нижняя граница 1299 страниц = сумма ссылок 15 разделов
+  #   `common/documents/<sec>/index.html` (about 12, administration-guide 113,
+  #    architecture-components 254, description-of-functionality 99, developer-guide 10,
+  #    distribution-kit 4, extensions 127, glossary 17, installation-guide 44,
+  #    instructions-and-notes 12, programming-guide 222, reference-guide 50,
+  #    reference-guide-postgresql 123, reference-guide-sql 206, what-is-new 6).
+  # Выборочная проверка страниц даёт ещё несколько ссылок (перекрёстные), то есть 1299 —
+  # нижняя граница, а не итог. Потолок ниже измерения объявил бы весь продукт
+  # `truncated: max_documents` и снял бы все его ❌ (ложная аномалия I2/I2b), поэтому 2000
+  # выше измеренного; точное число ставится по замеру следующего прогона, а не здесь.
+  max_documents: 2000
 postgrespro.ru:
   # Портал /docs без sitemap (advertised → 404): размер не измерен, бюджет — потолок,
   # а не заявленная полнота. 800 — потому что docs-портал крупный (несколько версий

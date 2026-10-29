@@ -10,6 +10,12 @@ edition_assessed: null
 version: "Pangolin 8.1 (31.05.2026, ядро 11.1.0, Patroni 4.1.0)"
 jurisdiction: RU
 doc_domains:
+  # Дерево документации PSQ объявленной редакции (version: Pangolin 8.1) — первым:
+  # corpus_urls.yaml выводится из этого списка, и порядок = приоритет обхода.
+  # Добавлено 29.10.2026 по замеру живого прогона: 161 отказ `redirect_out_of_scope`
+  # вёл на `platformv.sbertech.ru/docs/public/PSQ/...`, то есть реальное дерево
+  # документации продукта лежало вне path-prefix маркетингового корня.
+  - "platformv.sbertech.ru/docs/public/PSQ/8.1.0"
   - "pangolin.sbertech.ru"
   - "platformv.sbertech.ru/products/rabota-s-dannymi/pangolin"
   - "sbertech.ru"
