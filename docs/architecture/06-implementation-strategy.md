@@ -328,7 +328,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 ### W2 — Домен — ✅ done
 
 ✅ сделано (проверено) — `core/domain/models.py:71` (`ConfigDict(extra="forbid", …)` — база всех моделей),
-`core/domain/scoring.py:407` (знаменатель `scope_universe`), property-тесты — `tests/domain/`.
+`core/domain/scoring.py:444` (знаменатель `scope_universe`), property-тесты — `tests/domain/`.
 
 - Модели Pydantic с `extra="forbid"`, `StrEnum`-перечисления, чистые `check_*`-инварианты,
   `scoring` (capability/coverage/failure_rate/comparability/sensitivity/modules), `r2`, `anchors`
@@ -358,7 +358,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ✅ сделано (проверено) — `core/pipeline/runner.py:167` (`PhaseResult` c
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
-`core/cli/context.py:1197` (`make_profile_gate` подключён в CLI).
+`core/cli/context.py:1214` (`make_profile_gate` подключён в CLI).
 ⬜ не сделано — durable-аттестация профиля: `save_profile_attestation` не вызывается ни из
 одного прод-пути (`grep -rn save_profile_attestation core` → только определение), строку пишут тесты.
 
@@ -390,8 +390,8 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 ### W5 — Конфиг и CLI — ✅ done
 
 ✅ сделано (проверено) — `core/pipeline/lint.py:105` (`LintReport.ready`); сборка парсера даёт
-21 верхнеуровневую команду (`core/cli/parser.py`, проба на `f6100c7`) и 25 подкоманд
-`hound package` (`core/cli/package/parser.py`).
+21 верхнеуровневую команду (`core/cli/parser.py`, проба на `f6100c7`) и 27 подкоманд
+`hound package` (`core/cli/package/parser.py`, перемер 29.10.2026: +`seeds`, +`state`).
 
 - `core/config/run_config.py` + загрузчики пакета (`core/pipeline/normalize.py`), `lint.py`,
   `plan.py`; `core/config/paths.py` (раскладка операционных каталогов).
@@ -681,10 +681,11 @@ P5), но строка помечена здесь как неактуальна
   `state_sync.py` (синхронизация durable-состояния продукта), `composition.py` (композиция
   индексных сборок), `digests.py` (дайджесты идентичности), `run_identity.py`; кэши —
   `eval_cache.py` (вердикты оценщика) и `extract_cache.py` (результаты экстракции).
-  CLI-фасад — `core/cli/package/*`, **25 подкоманд** `hound package` (`new`, `show`, `validate`,
+  CLI-фасад — `core/cli/package/*`, **27 подкоманд** `hound package` (`new`, `show`, `validate`,
   `list`, `set-archetype`, `bump-version`, `module`, `role`, `param`, `infer-archetype`,
-  `compose-baselines`, `baseline`, `cohort`, `scope`, `golden`, `run`, `artifact`, `suggest`,
-  `candidates`, `apply`, `scout`, `crawl-probe`, `add-product`, `index-gc`, `builds-gc`).
+  `compose-baselines`, `baseline`, `cohort`, `scope`, `golden`, `seeds`, `state`, `run`,
+  `artifact`, `suggest`, `candidates`, `apply`, `scout`, `crawl-probe`, `add-product`,
+  `index-gc`, `builds-gc`).
   Выход авторских команд — кандидаты/черновики (`needs_human=True`), не evidence (I18/I19/A3).
 - **`edge/scheduler`.** `core/edge/scheduler.py` (`EdgeScheduler`) + `edge/crawler_factory.py`/
   `edge/poller.py` — durable-очередь краула/опроса за швом (§W13, Phase 3/5).
@@ -925,7 +926,7 @@ uv sync --frozen --extra dev
    (тот же класс, что `reviewed_by`), иначе смена подписанта рвала бы межцикловый diff.
    Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
-   ✅ проверено на `f6100c7`: правило — `core/pipeline/lint.py:318` (`absence-attestation`),
+   ✅ проверено на `f6100c7`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
    канал в Ш6 — `core/pipeline/phases.py:1180`. Имя параметра сменилось: `scope_acceptance`
    (принятие риска), `scope_attested_by` остался deprecated-алиасом — `core/pipeline/evaluate.py:1863-1895`.
 

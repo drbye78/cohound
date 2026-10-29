@@ -456,7 +456,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 **Статус на 2026-10-29.** ✅ V3–V7 · 🟡 V2 · ⬜ V1.
 
 - ⬜ V1 — **не сделано** в части «аномалия класса утверждения»: замер предмета есть
-  (`core/pipeline/evaluate.py:769` `support_subject_overlap`, артефакт `support_quality.yaml`),
+  (`core/pipeline/evaluate.py:791` `support_subject_overlap`, артефакт `support_quality.yaml`),
   но `anomaly_kind` в отчёте по-прежнему три (`core/pipeline/report.py:1414-1438`:
   `i3_protocol`, `crawl_truncation`, `corpus_incomplete`) — строки «✅ при цитате без предмета»
   среди них нет. §7 ставил этот шаг **после** P7; P7 сделан, шаг — нет. Плюс остаток P0 по
@@ -486,10 +486,10 @@ absence-модель, scoring и определения Coverage/Comparability �
 | # | Пункт | Вердикт | Доказательство | Фикс |
 |---|---|---|---|---|
 | 1 | Бэкслеши в guidance `distribution_absence` | **ПОДТВЕРЖДЕНО** (на v4 тоже) | `prompt.py:110`: в отрендеренном тексте `denial_strength=\"explicit\"`, рядом `v4:35` — чистое `denial_strength="explicit"`; затрагивает **119/119** ячеек (`catalog.csv` целиком `distribution_absence`) | S |
-| 2 | Пустой раздел ДАННЫЕ | **ЧАСТИЧНО**: текст закрыт v4, конвейер — нет | v4:32/45 задают семантику; но `evaluate.py:1650` компилирует безусловно, `:1735` вызывает модель → **1 вызов LLM на пустом срезе**, ячейка `❓` без заметки, `relevant_evidence_coverage=None` | M |
+| 2 | Пустой раздел ДАННЫЕ | **ЧАСТИЧНО**: текст закрыт v4, конвейер — нет | v4:32/45 задают семантику; но `evaluate.py:1929` компилирует безусловно, `:2058` вызывает модель → **1 вызов LLM на пустом срезе**, ячейка `❓` без заметки, `relevant_evidence_coverage=None` | M |
 | 3 | Нет правила «цитируй на языке фрагмента» | **ПОДТВЕРЖДЕНО**, ни в v1–v4 | `validate.py:109-115` сверяет байты → перевод = `validation_failed` = retry = `failed` | S (новый файл `evaluator_v5`) |
 | 4 | `min_retrieval_score` только для ✅ | **ПОДТВЕРЖДЕНО, и хуже**: порог **не подключён вовсе** | `validate.py:367-381`; `evaluate_phase`→`evaluate_batch` (`evaluate.py:2214-2230`) его не передаёт, в `config/`/`packages/` нет → аномалия §10.4 в прогоне недостижима | S + M (сначала объявить вход) |
-| 5 | `_resolve_denial` берёт `quotes[0]` | **ПОДТВЕРЖДЕНО прогоном** | `evaluate.py:1122-1160`; проба: evidence = [«добавлена поддержка» (a), «не поддерживаются» (b)] → `❌`, `citation_quote` = **первая**, не отрицающая. Живой экспозиции нет: `❌` = 0 ячеек. v4 расширяет риск (`v4:35` делает ветку `explicit` нормальной) | M |
+| 5 | `_resolve_denial` берёт `quotes[0]` | **ПОДТВЕРЖДЕНО прогоном** | `evaluate.py:1144-1182` (ныне `_designated_denial_quote`); проба: evidence = [«добавлена поддержка» (a), «не поддерживаются» (b)] → `❌`, `citation_quote` = **первая**, не отрицающая. Живой экспозиции нет: `❌` = 0 ячеек. v4 расширяет риск (`v4:35` делает ветку `explicit` нормальной) | M |
 | 6 | `assert last_validation is not None` | **ОПРОВЕРГНУТО** — починено в `97b2776` | `evaluate.py:1753-1754` теперь `if … raise RuntimeError`; ассертов в `evaluate/validate/prompt/retrieve` нет | — |
 | 7 | Adversarial — 9 кейсов | **ПОДТВЕРЖДЕНО** и задокументировано | `fixtures/adversarial_prompts.json` (9), `adversarial.py:3-5` «регрессионный gate, а не заявление о безопасности» | — |
 | 8 | `extra_instructions` мёртв в проде | **ПОДТВЕРЖДЕНО** | `evaluate_cell`/`evaluate_batch` имеют параметр, `evaluate_phase` не передаёт (`evaluate.py:2214-2230`); тест пинит влияние на ключ кэша | S |
@@ -498,15 +498,15 @@ absence-модель, scoring и определения Coverage/Comparability �
 
 - ✅ 1 — бэкслеши сняты: в `ABSENCE_GUIDANCE` текст объявлен прямо, без экранирования
   (`core/pipeline/prompt.py:141,151`), шаблон `evaluator_v5` (`:117`).
-- ✅ 2 — пустой срез не тратит вызов модели и не выдаётся за вердикт: `core/pipeline/evaluate.py:1911`
-  (`no_fragments`), причина зафиксирована комментарием `:1909-1911`.
+- ✅ 2 — пустой срез не тратит вызов модели и не выдаётся за вердикт: `core/pipeline/evaluate.py:1940`
+  (`no_fragments`), причина зафиксирована комментарием `:1938-1940`.
 - ✅ 3 — правило языка цитаты есть в `evaluator_v5` (`core/pipeline/prompt.py:108-115`, `:117`).
 - ⬜ 4 — **не сделано**: `min_retrieval_score` объявлен в `core/pipeline/validate.py:374` и в
   подписи `core/pipeline/evaluate.py:1832`, но `evaluate_batch` его не передаёт
   (`:2287-2305`) и в `config/`/`packages/` значения нет (`grep -rn min_retrieval_score core/config packages` —
   пусто) ⇒ аномалия §10.4 по-прежнему недостижима.
 - ✅ 5 — designated-quote вместо `quotes[0]`: `_designated_denial_quote`
-  (`core/pipeline/evaluate.py:1122`), выбор по числу маркеров отрицания, детерминированный.
+  (`core/pipeline/evaluate.py:1144`), выбор по числу маркеров отрицания, детерминированный.
 - ✅ 6 — `assert` заменён на `RuntimeError`: `core/pipeline/evaluate.py:2032-2033` (`97b2776`).
 - ✅ 7 — adversarial-набор на месте: `tests/pipeline/fixtures/adversarial_prompts.json`.
 - ⬜ 8 — **не сделано**: `extra_instructions` принимается (`core/pipeline/evaluate.py:1836,2262`),
@@ -743,7 +743,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
   (`core/pipeline/digests.py:109-118` — это записано как причина, по которой `deploy_profile`
   входит в контракт).
 - ➖ **A1-профиль публикуемости — реализован**, строка выше устарела: класс и разложение
-  неизвестности считаются (`core/domain/scoring.py:1077`), классы
+  неизвестности считаются (`core/domain/scoring.py:1114`), классы
   `PUBLISHABLE`/`PUBLISHABLE_WITH_CAVEAT`/`ANALYTICAL_ONLY`/`NOT_COMPARABLE` объявлены
   (`core/domain/enums.py:887-890`), причины `UnknownCause` — `core/domain/enums.py:893-939`,
   артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:2302`), в Ш8 —

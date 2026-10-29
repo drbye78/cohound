@@ -44,14 +44,14 @@ production-масштабе, — это четыре дефекта **нашег
 
 ## 2. Ключевой факт: поиск никогда не идёт по всему корпусу
 
-✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:441-460`) объявляет
+✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:443-462`) объявляет
 `product_ids: Sequence[str] | None = None` с докстрингом «по умолчанию `[product_id]`;
 сателлиты добавляет вызывающий (I17)», а `NpyVectorIndex.search_many`
 (`core/adapters/vector_npy.py:272-330`) обходит `for product_id in products` и читает
 партицию продукта. Номера строк в абзаце ниже сверены с кодом (2026-10-28):
-`evaluate.py:441`, `vector_npy.py:312-330`; смысл не изменился.
+`evaluate.py:443`, `vector_npy.py:312-330`; смысл не изменился.
 
-`core/pipeline/evaluate.py:441` + `retrieve_for_cell` (`:441-513`): `product_ids` — по
+`core/pipeline/evaluate.py:443` + `retrieve_for_cell` (`:443-515`): `product_ids` — по
 умолчанию `[product_id]`, сателлиты добавляет вызывающий (I17). В
 `core/adapters/vector_npy.py:312-330` цикл `for product_id in dict.fromkeys(q.product_ids)`
 читает **партицию продукта**, а не общий индекс.
@@ -348,7 +348,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`evaluate.py:305-322`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`evaluate.py:307-324`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 

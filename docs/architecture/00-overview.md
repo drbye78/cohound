@@ -437,7 +437,7 @@ M0 должен давать **сквозной вертикальный сре�
 ✅ проверено на `f6100c7` (код-носители): 0001–0011 — `core/ports/*` + `core/domain/*`;
 0012 — шимы `core/schemas.py`/`core/db.py` **удалены** (`ls` → No such file); 0018/0019 —
 `core/edge/server.py`, `contracts/seam/openapi.json`; 0020 — знаменатель `scope_universe`
-(`core/domain/scoring.py:407`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);
+(`core/domain/scoring.py:444`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);
 0022 — `core/util/memory.py` (`malloc_trim`); 0023 — `core/pipeline/gate_subject.py` + `gates/*-request.json`.
 
 **Открытые вопросы (для итераций):**

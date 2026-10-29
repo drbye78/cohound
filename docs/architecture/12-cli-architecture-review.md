@@ -189,16 +189,17 @@ evaluate, review, g3, compute, g4, report`.
 
 ### 2.5 `package` — не команда, а ящик
 
-⬜ не сделано — 25 подкоманд второго уровня (столько же, сколько в разборе) и **50** листьев
-под `package`; четыре CRUD-семейства на месте: `module` 6, `role` 5, `param` 5, `baseline` 5
-листьев `add/get/list/remove/update` (`core/cli/package/parser.py`). `index-gc`, `builds-gc` и
+⬜ не сделано — **27** подкоманд второго уровня и **57** листьев под `package`
+(перемер по собранному парсеру 29.10.2026; в разборе было 25/50 — плюс `seeds` 5 и
+`state` 2 листа); четыре CRUD-семейства на месте: `module` 6, `role` 5, `param` 5,
+`baseline` 5 листьев `add/get/list/remove/update` (`core/cli/package/parser.py`). `index-gc`, `builds-gc` и
 `crawl-probe` остались в пакете. Подпункт «READ/WRITE выражен единообразно» не закрыт, а
 ухудшился: `--dry-run` у **27** листьев, `--apply` у 3 (`package add-product`, `package
 index-gc`, `package builds-gc`), `--write` у 2 — и он по-прежнему значит разное: «записать
 JSON-план в файл» (`package candidates`, `core/cli/package/parser.py:528`) против «внести измеренные оси в
 `domain_profiles.yaml`» (`package crawl-probe`, `:668-671`).
 
-25 подкоманд, из них:
+27 подкоманд, из них:
 
 - **4 семейства с идентичной CRUD-формой** — `module`, `role`, `param`, `baseline`:
   `add / update / remove / list / get`. Это **24 листовых команды**, отличающихся только
@@ -484,7 +485,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 ⬜ не сделано — `registry`, `inheritance`, `compute` отдельными командами не появились
 (перемер по собранному парсеру: листьев с такими именами нет), отдельного «исполнить одну
 фазу» тоже нет — только `run --until PHASE`, который пишет БД. `package compose-baselines`
-по-прежнему черновик «без записи» (`core/cli/package/parser.py:343`), `sensitivity` — пост-хок.
+по-прежнему черновик «без записи» (`core/cli/package/parser.py:350`), `sensitivity` — пост-хок.
 Что осталось: либо команда на фазу (с явным read/write), либо `hound status`/`run --until` как
 единственный названный способ.
 

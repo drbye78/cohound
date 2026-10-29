@@ -48,7 +48,8 @@ repo/
     sources/                 # авторские входы и операторские артефакты
       golden_status.yaml     # ОПЦ.: состояние эталона (`schema: golden_status/1`):
                              # absent | present | declined (+ reason/declined_by) —
-                             # объявленное «сверять не с чем» вместо удаления golden.csv
+                             # объявленное «сверять не с чем» вместо удаления golden.csv;
+                             # exempt_products — waiver по продукту (эталона для него нет)
       seeds.yaml             # КАНОНИЧЕСКИЙ seed-набор (`schema: seeds/1`, §A.1.1);
                              # сейчас пакеты ещё на legacy corpus_urls.yaml
       corpus_urls.yaml       # legacy `{product_id: [url, …]}` (миграционный fallback)
@@ -1358,10 +1359,10 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound baseline-agreement --annotations <csv>` | согласие независимых аннотаторов §11.5: Cohen's κ по полному набору меток **и отдельно** по бинарному решению N/A-vs-не-N/A (N/A задаёт знаменатель Coverage, I6/I7), + матрица расхождений и счётчики. Непарные ячейки исключаются и перечисляются; нулевая вариация маргиналов → `undefined` (не выдуманное число). Разметку не создаёт: это ручная работа человека | — (отчёт; артефакт разметки — вход) |
 | `hound package crawl-probe` | **измерение** оптимальных осей краула для каждого ключа `domain_profiles.yaml` (A3): лестница `http` → `browser/hybrid` → `browser/honest`; решение принимает исход **браузерного** яруса (`RawPage.fetch_mode`), а не текст ошибки — оба яруса провалились ⇒ `unresolved` с причиной (транзиентный сбой не выдаётся за `browser`); причина **диагностична**: сбой транспорта (`both_tiers_failed`) отличается от «транспорт дошёл, но экстракция дала 0 символов» (`extraction_empty` — смотреть экстрактор, не краулер; при расхождении ярусов в отчёте обе причины). Пригодность меряется **выходом реального экстрактора**, не размером байт. `wait_for`/`rate_limit` не выдумываются: только подсказка (`needs_confirmation`) и только при `429`. URL — `--urls` > `corpus_docs` (`--corpus-db`) > синтез `https://{host}{path}/` (`confidence: low`). По умолчанию **только предложение**; `--write` (требует `--actor`) правит `domain_profiles.yaml`, сохраняя шапку байт-в-байт и не тронутые блоки дословно, при отсутствии изменений — no-op. Смена осей краула — граница `execution_change` (§13), не `methodology_version` | `packages/{case_id}/sources/crawl_probe/{date}.proposal.yaml` |
 
-**Полный состав `hound package` — 25 подкоманд** (`hound package --help`): `new`, `show`,
+**Полный состав `hound package` — 27 подкоманд** (`hound package --help`): `new`, `show`,
 `validate`, `list`, `set-archetype`, `bump-version`, `module`, `role`, `param`,
-`infer-archetype`, `compose-baselines`, `baseline`, `cohort`, `scope`, `golden`, `run`,
-`artifact`, `suggest`, `candidates`, `apply`, `scout`, `crawl-probe`, `add-product`,
+`infer-archetype`, `compose-baselines`, `baseline`, `cohort`, `scope`, `golden`, `seeds`,
+`state`, `run`, `artifact`, `suggest`, `candidates`, `apply`, `scout`, `crawl-probe`, `add-product`,
 `index-gc`, `builds-gc`.
 
 Матрица «подкоманда → глаголы» (универсальной формулы `{get|list|show}` **нет**):
@@ -1375,6 +1376,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `cohort` | `update` · `set` · `show` |
 | `scope` | `set` · `clear` · `show` |
 | `golden` | `list` |
+| `seeds` | `list` · `add` · `disable` · `enable` · `export` |
 | `run` | `show` |
 | `artifact` | `list` · `get` |
 
@@ -1385,7 +1387,8 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 записи), `suggest`/`candidates` (эвристики/план кандидатов — в пакет не пишут), `apply`
 (**применяет** кандидатов; требует `--actor`), `scout`, `crawl-probe`, `add-product`
 (добавить продукт в когорту: SERP+scout+ключи доменов; по умолчанию plan-only, `--apply`
-пишет), `index-gc` (прунинг композиций, на которые не ссылается ни один прогон; dry-run,
+пишет), `seeds export` (legacy-экспорт активных seed'ов в `corpus_urls.yaml`, read-only без
+`--out`), `index-gc` (прунинг композиций, на которые не ссылается ни один прогон; dry-run,
 `--apply` требует `--actor`), `builds-gc` (прунинг индексных сборок вне композиций; то же).
 
 > `hound package apply`, `index-gc`, `builds-gc` с `--apply` — **разрушающие** операции над

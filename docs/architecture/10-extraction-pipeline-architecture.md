@@ -809,7 +809,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 > ✅ **A1 сделан** (2026-10-28): зеркала нет. `TantivyLexicalIndex` не держит записей —
 > тело чанка читается из store одним батчем на поисковое окно
 > (`core/adapters/lexical_tantivy.py:624-668`, `StorePort.get_chunks` —
-> `core/ports/store.py:383`, реализация `core/store/sqlite_store.py:2446`), засев
+> `core/ports/store.py:421`, реализация `core/store/sqlite_store.py:2473`), засев
 > потоковый (`index(chunks: Iterable)`, `:409`), `product_id` объявлен `stored`
 > (ось скоупа I17 читается из документа, а не из гидрированной записи). Приёмка —
 > `tests/adapters/test_lexical_tantivy.py`: `weakref`'ы всех засеянных записей мертвы
