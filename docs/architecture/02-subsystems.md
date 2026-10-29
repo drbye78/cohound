@@ -202,8 +202,8 @@ plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для
 
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
-| `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`corpus.py:5888-5900`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`corpus.py:5126-5175`) | один на прогон, переиспользуется всеми корнями/продуктами |
+| `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`core/pipeline/corpus.py:4154-4166`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:3392-3441`) | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
@@ -344,7 +344,7 @@ top-level URL, затем опрос каталогов, волна 2 — зап
   контейнера, включая пустой и нечитаемый: «внутри нет ингестируемого» — это наблюдение,
   а не отсутствие данных.
 - **Члены извлекаются через фазовый пул экстракции**, с окном упреждения
-  `K = extract_window` и **строгой FIFO-доводкой** (`corpus.py:5375-5479`,
+  `K = extract_window` и **строгой FIFO-доводкой** (`core/pipeline/corpus.py:3641-3745`,
   `ArchiveDescentWalker(defer_member=…, window=…)`). Это не оптимизация порядка, а условие
   корректности: `_content_digest` сборки склеивает чанки **в порядке вставки**, а
   `partition_build_id` от порядка **не** зависит. Коммит в порядке завершения дал бы тот же
@@ -389,7 +389,7 @@ top-level URL, затем опрос каталогов, волна 2 — зап
 
 - `partition_build_id` = `"pb_" + short_hash(_PARTITION_SCHEMA, package_id, product_id,
   chunker_version, embed_model_id, extractor_version, lexical_engine_version, vector_store,
-  product_content_token)` (`_derive_partition_build_id`, `corpus.py:1904-1953`).
+  product_content_token)` (`_derive_partition_build_id`, `core/pipeline/corpus_index.py:80-139`).
   `product_content_token` — отпечаток содержимого партиции, sorted `(chunk_id,
   content_hash)`: порядко-независим и чувствителен к любому изменению контента.
   **`params_token` (каталог/фокус) и `snapshot_date` намеренно исключены** — каталог и фокус
@@ -799,5 +799,5 @@ flowchart LR
 (`core/util/cache.py:133`, проводка `core/cli/context.py:1355`); политика ретраев и backoff —
 ✅ сделано (общая политика `core/util/retry.py:1`, потребитель — `core/adapters/search_glm.py:66`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано (`core/store/sqlite.py:21` WAL +
-`core/store/sqlite_store.py:69` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:626` — одна
+`core/store/sqlite_store.py:88` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:626` — одна
 транзакция на пачку).

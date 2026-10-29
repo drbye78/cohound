@@ -430,7 +430,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 **Факт.** `LocalEmbedder` не передаёт `device` в загрузчик: `SentenceTransformer(self._repo_id,
 revision=…, local_files_only=…)` (`core/adapters/embed_local.py:176`). Устройство выбирает
 torch по умолчанию, то есть `cuda`, если она доступна. В этом окружении
-`torch 2.14.1+cu130`, `cuda_available=True`, `_resolve_embedder()` (`core/cli/wiring.py:2670`)
+`torch 2.14.1+cu130`, `cuda_available=True`, `_resolve_embedder()` (`core/cli/wiring.py:2728-2775`)
 выбрал `LocalEmbedder` (bge-m3, dim 1024) — значит эмбеддинг исполнялся **на карте**, и это
 видно не по декларации, а по факту `nvidia-smi --query-compute-apps`. Состав процессов
 меняется по фазе, и это как раз доказательство: в docling-фазе на карте **два** процесса
@@ -442,10 +442,10 @@ torch по умолчанию, то есть `cuda`, если она досту�
 экстрактора ровно этот класс закрыт: `pdf_device` входит в `extractor_version`
 (`docling-doc-3:layout_tables/cuda/…`) и в `extractor_stack`. Для эмбеддера такой оси **нет**:
 прогон на CPU и прогон на CUDA дают одинаковый `embed_model_id`, то есть одинаковый `pb`
-(`core/pipeline/corpus.py:1966-1972` — `embed_model_id` в материале хеша).
+(`core/pipeline/corpus.py:967-973` — `embed_model_id` в материале хеша).
 
 **Дефект 2 — переиспользование не проверяет векторы.** `_partition_reuse_reason`
-(`core/pipeline/corpus.py:2839-2846`) сверяет шесть объявленных полей манифеста:
+(`core/pipeline/corpus_index.py:713-792`) сверяет шесть объявленных полей манифеста:
 `content_digest`, `chunker_version`, `embed_model_id`, `extractor_version`,
 `lexical_engine_version`, `vector_store`. `vector_digest` — полный отпечаток, включающий
 **байты векторов** (`core/adapters/index_npy.py:275`) — в этом списке отсутствует, хотя
@@ -486,7 +486,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
    от переиспользования, а не тихой подменой прибора.
 
 Отдельно, не в этой правке: `corpus_chunks.embedded_at` пишется `None` всегда
-(`core/pipeline/corpus.py:3378`, `:5175`) — колонка без писателя, и «не эмбеддилось» по ней
+(`core/pipeline/corpus.py:1644`, `:5175`) — колонка без писателя, и «не эмбеддилось» по ней
 не читается; фактический признак — `vectors.fp16.npy` в партиции.
 
 ## 6. Порядок работ
@@ -544,7 +544,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
    (решение владельца 29.10.2026, `09` §14.1); делать после отчёта текущего прогона.
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`wiring.py:2670-2687` — `model2vec_available()` → `_module_installed("sentence_transformers")`
+установки** (`core/cli/wiring.py:2670-2687` — `model2vec_available()` → `_module_installed("sentence_transformers")`
 → `None`). При появлении `deploy.embed` приоритет становится объявленным:
 `backend` из конфига, а наличие библиотек — предпосылка, а не решение.
 **Проверено на 2026-10-28: не сделано** (строки 2274-2295 → 2510-2527, логика прежняя).

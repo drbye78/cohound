@@ -151,14 +151,14 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:9242`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:1108-1137`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277,304`), вызов — `preflight` из `core/cli/commands/run.py:676,774` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
-| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`core/pipeline/corpus.py:6620`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
+| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`core/pipeline/corpus.py:1108-1137`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
-| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus.py:7676`; зонд — `:3256,5390,7787`), семейство чанкеров — `chunker_family` |
+| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus.py:1108-1137`; зонд — `:3256,5390,7787`), семейство чанкеров — `chunker_family` |
 | §6.9 | ✅ сделано | `make_profile_gate` подключён (`core/cli/context.py:1217`), waiver-след (`core/pipeline/runner.py:467`) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/cli/package/commands.py:2193`) |
@@ -1211,7 +1211,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > adoption наполняет durable-субстрат (`document_version`, `chunk_store`/`chunk_meta`,
 > `url_state`, `index_partition`, снимок, lineage), но `--update` всё равно идёт полным
 > краулом (`new` → `full`; `plan_incremental` вызывается только для `incremental`,
-> `core/pipeline/corpus.py:6616`). Это честное следствие «нет ни одного complete-baseline»,
+> `core/pipeline/corpus.py:4882`). Это честное следствие «нет ни одного complete-baseline»,
 > а не дефект команды; записывать `complete` при неполном покрытии было бы ложью.
 >
 > **Критерий принятия продукта** — наличие строки `corpus_coverage` (зеркало
@@ -1313,7 +1313,7 @@ Durable-субстрат чанков в `state.db` (`chunk_store`/`chunk_meta`)
 **Провенанс спуска в контейнеры — тоже write-through (F1 закрыт).**
 `archive_observations`/`corpus_members` пишутся **сразу** за появлением факта, а не в конце
 фазы: `ArchiveDescentWalker` получает синки `persist_observation`/`persist_member`
-(`core/pipeline/corpus.py:7716-7717`, реализации `:2057`/`:2087`), поэтому SIGKILL/OOM теряет
+(`core/pipeline/corpus.py:5982-5983`, реализации `:2057`/`:2087`), поэтому SIGKILL/OOM теряет
 максимум контейнер (наблюдение) или член (строку) «в полёте». Идемпотентность —
 `observation_id` детерминирован (`run|product|root|hash|depth`), `corpus_members` — UPSERT по
 PK. Запись в конце фазы (`:9544-9558`) осталась, но это **reconciliation-pass**: она добирает
@@ -1323,18 +1323,18 @@ PK. Запись в конце фазы (`:9544-9558`) осталась, но э
 
 **Память освобождается на границе продукта (A3/A4).** После того как продукт зафиксирован
 (документы, чанки, партиция), фаза **отпускает** его данные: `ingest.docs = []`,
-`ingest.chunks = []`, `del product_chunks` (`core/pipeline/corpus.py:9262-9265`). Граница
+`ingest.chunks = []`, `del product_chunks` (`core/pipeline/index_build.py:25-108`). Граница
 продукта — это не только граница durability, но и граница **памяти**: держать чанки всех
 продуктов до конца фазы значило бы, что RSS растёт с числом продуктов, а не с размером
 одного. Счётчики при этом не теряются: они ведутся отдельно (`doc_counters`) и пишутся в
 `IndexBuild.doc_count` — прежнее поле `IndexBuild.docs` со списком объектов убрано
-(`core/pipeline/corpus.py:1505`), потому что «сколько документов в партиции» — число, а не
+(`core/pipeline/index_build.py:25-108`), потому что «сколько документов в партиции» — число, а не
 список, и хранение списка ради числа удерживало память ровно там, где её отпускают.
 
 **Наблюдаемость фазы — стадийные бакеты времени (`3fbdbfb`).** Время фазы разложено по
 стадиям, а не по продуктам-целиком: события `product_end` / `product_index_end` несут
 `fetch_wait_s`, `extract_wait_s`, `chunk_s`, `embed_s`, `build_s`, `overhead_s`
-(`_CorpusStageTimings`, `core/pipeline/corpus.py:2286`; агрегат —
+(`_CorpusStageTimings`, `core/pipeline/corpus.py:1174`; агрегат —
 `_stage_timings_aggregate:2399`), и то же попадает в `metrics.json` как
 `resources.stage_timings` (`ResourcesObservation.stage_timings`,
 `build_resources_block`). Это **наблюдаемость, а не контракт**: значения не входят ни в
@@ -1770,7 +1770,7 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
 - **Дефект 29.10.2026: на resume бюджет заряжается не тому корню, и потолок умножается
   на число перезапусков** (**✅ исправлен** — см. конец пункта). Измерено на живом прогоне
   `ru-pg-dbms-3d3dc7c3c969`.
-  Реконструкция «уже израсходованного» (`corpus.py:7379-7410`) идёт по продукту-wide
+  Реконструкция «уже израсходованного» (`core/pipeline/corpus.py:5645-5676`) идёт по продукту-wide
   множеству `resume_counted` (`:7066`), где побеждает **первый корень-претендент**
   («последующие корни его не пересчитывают», `:7379-7386`). У `digital_q_database`
   авторский порядок — host-корень `https://database.diasoft.ru/` (prefix `/`,
@@ -1791,7 +1791,7 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
   ревалидации, то есть одно правило вместо двух похожих.
   **Правильное правило уже есть в коде — для другого механизма.** Группировка
   ревалидации приписывает известный URL **самому специфичному** корню
-  (`_group_revalidation_items`, `corpus.py:6653-6688`: «побеждает самый специфичный
+  (`_group_revalidation_items`, `core/pipeline/corpus.py:4919-4954`: «побеждает самый специфичный
   `root_path_prefix`»). Реконструкция бюджета должна пользоваться тем же предикатом, а не
   «кто первый». Это и есть правка: зарядка по владельцу, а не по претенденту.
   **Побочный вывод, который важнее правки.** Потолок 800 был объявлен по замеру 28.10
@@ -1830,10 +1830,10 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
 - **Дефект 29.10.2026 (третий, найден при разборе потери чанков): зарядка бюджета на
   resume не делает заряженный URL дренируемым.** В `_drain_root` реконструкция
   «уже израсходованного» считает `consumed` из durable-элементов сеанса
-  (`corpus.py:7379-7410`) и вызывает `frontier.note_consumed(consumed)`, но **не ставит
+  (`core/pipeline/corpus.py:5645-5676`) и вызывает `frontier.note_consumed(consumed)`, но **не ставит
   эти URL в очередь**. Дренируемыми они становятся только через
   `add_revalidate_seed`, а этот work-set строится лишь для `ProductMode.INCREMENTAL`
-  (`_revalidation_items`, `corpus.py:6612-6624`). Итог для продукта в режиме `new`/`full`:
+  (`_revalidation_items`, `core/pipeline/corpus.py:4878-4890`). Итог для продукта в режиме `new`/`full`:
   корень заряжен в потолок ⇒ `add_seed` возвращает `truncated` ⇒ BFS не идёт ⇒
   `revalidation_queued == 0` ⇒ дренаж корня выходит **до** обхода (`:7436-7438`). Зарядка
   и постановка в очередь расцеплены: бюджет заплачен, работа не сделана.
@@ -2039,7 +2039,7 @@ RAM-потолка пишется в staging-файл и публикуется 
 > **Подключено срезом B3 — читать вместе с §6.7.1.** Прежняя редакция этой секции
 > утверждала, что спуск «не подключён к `pipeline`» и является «следующим шагом». Это
 > описание состояния до B3 и коду больше не соответствует: `ArchiveDescentWalker`
-> вызывается из фазы корпуса (`core/pipeline/corpus.py:7676`), зонд артефакта — `:3256`,
+> вызывается из фазы корпуса (`core/pipeline/corpus.py:5942`), зонд артефакта — `:3256`,
 > `:5390`, `:7787`; отказ читателя контейнера виден как
 > `archive_observations.status = unreadable` / `container_reader_unavailable`, а не как
 > тихое «не развернули». Подключение — инъекция `container_for` через `Ports.container`,
@@ -2693,7 +2693,7 @@ class CompositionView:
 
 - записи идут **генератором** из `store.iter_chunks(partition_build_id, product_id=…)`
   прямо в `index.index(records, …)` — ни список записей, ни их текст не живут в памяти
-  (`core/cli/wiring.py:422`, докстринг `seed_lexical_index`);
+  (`core/cli/wiring.py:427-495`, докстринг `seed_lexical_index`);
 - при поиске текст догружается **из store пачкой** — `StorePort.get_chunks(chunk_ids)`
   (`core/store/sqlite_store.py`, `SqliteStore.get_chunks`, шаг `_CHUNK_ID_BATCH = 500`),
   передаётся адаптеру как провайдер гидртации, поэтому адаптер не знает ни SQL, ни
@@ -2715,10 +2715,10 @@ class CompositionView:
   новый текст. **Кэш реализован и подключён** (`core/pipeline/embed_cache.py`;
   инстанцируется в composition root — `EmbedCache(str(paths.embed_cache))`,
   `core/cli/context.py:2120`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
-  параметр `cache` у `build_corpus`/`_embed_product`, `core/pipeline/corpus.py:234`).
+  параметр `cache` у `build_corpus`/`_embed_product`, `core/pipeline/corpus.py:290`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
   до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и
-  `metrics.json` (`core/pipeline/corpus.py:2543-2581`) — «кэш включён» не доказывается
+  `metrics.json` (`core/pipeline/corpus_index.py:335-373`) — «кэш включён» не доказывается
   фактом инициализации. Он по-прежнему **не** условие измерения: кэш — про стоимость, а не
   про провенанс; промах/хит не меняет ни `pb`, ни `run_id`. `embed_cache is None` —
   прежнее поведение байт-в-байт.
@@ -3236,9 +3236,9 @@ CREATE TABLE corpus_coverage (
 > **Аудит 29.10.2026: вопрос про `❌` на reused-корпусе — про проводку, а не про семантику.**
 > Различение «наблюдён в этом цикле» уже существует, но живёт **только** в durable-состоянии:
 > `url_state.reuse_kind ∈ {live, revalidated, reused, stale}` + `last_http_status` +
-> `last_checked_at` (`core/store/state_sqlite.py:93`), пишется из `corpus.py:5479-5493`
+> `last_checked_at` (`core/store/state_sqlite.py:93`), пишется из `core/pipeline/corpus.py:1477-1530`
 > (при 304 — `revalidated`/`304`, `last_changed_at=NULL`). Условный GET реально уходит:
-> `_validators` (`corpus.py:4508`) отдаёт `If-None-Match`/`If-Modified-Since` из `url_state`,
+> `_validators` (`core/pipeline/corpus.py:1477-1530`) отдаёт `If-None-Match`/`If-Modified-Since` из `url_state`,
 > 304 переиспользует версию документа **до** экстракции (`_reuse_for_page:4620` →
 > `_reuse_not_modified:4590`), и в `state.db` живого прогона на снимке 29.10 09:20 таких
 > строк **467** из 5979.
@@ -3364,7 +3364,7 @@ CREATE TABLE corpus_coverage (
   `core/pipeline/normalize.py:145` — имя сменилось вместе с `scope_attested_by` →
   `scope_acceptance`) и передаёт их в Ш6 как `scope_acceptance`
   **per product** (покрытие per product ⇒ подпись per product; чтение —
-  `core/pipeline/phases.py:942`, передача — `core/pipeline/phases.py:1190`). Продукт без подписи ведёт себя ровно как раньше: `❌` при
+  `core/pipeline/phases.py:943`, передача — `core/pipeline/phases.py:1191`). Продукт без подписи ведёт себя ровно как раньше: `❌` при
   неполном корпусе не публикуется (ячейка остаётся `pending`-кандидатом с `review_reason`).
 - **Почему не `gate_decisions`:** гейт per-run, а профиль/аттестация квази-константны
   (недельные прогоны; смена когорты/ролевой матрицы — 2–5 раз в год). Переписывать подпись
@@ -3379,7 +3379,7 @@ CREATE TABLE corpus_coverage (
   совпали; иначе `superseded_at`» — намерение.
 - **Остаточный дефект имени исправлен 29.10.2026.** Deprecated-алиас `scope_attested_by`
   удалён из `evaluate_cell`/`evaluate_phase` (`core/pipeline/evaluate.py`), вызов в
-  `phases.py:1180` переименован в `scope_acceptance`. Алиас не оставлен намеренно: два
+  `core/pipeline/phases.py:1181` переименован в `scope_acceptance`. Алиас не оставлен намеренно: два
   имени одного поля разводили смысл («аттестация» против «принятие риска»), а обратная
   совместимость не требуется. Тест фиксирует отказ по старому имени
   (`tests/pipeline/test_evaluate.py::test_scope_acceptance_is_the_only_name`).
@@ -3436,7 +3436,7 @@ CREATE TABLE corpus_coverage (
 > `runs.cohort_ref` хранила другое поле.**
 > В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:632`) — имя файла
 > когорты из `run.yaml`, и `cohort_ref: str | None` (`:646`) — авторская ревизия, которая
-> **входит в `cohort_digest`**. `sqlite_store.py:440` кладёт в колонку `cohort_ref` значение
+> **входит в `cohort_digest`**. `core/store/sqlite_store.py:339` кладёт в колонку `cohort_ref` значение
 > `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:531`).
 > Следствие на живом прогоне `ru-pg-dbms-3d3dc7c3c969`: `runs.cohort_ref =
 > 'cohort-ru-pg-dbms-2026-10-28-golden00'` (имя файла), а в дайджест ушло `None` — то есть
@@ -3867,7 +3867,7 @@ ALTER TABLE cell_evidence ADD COLUMN origin_evidence_id TEXT;
 плановых входов молча. Это был разрыв O11 (§3.3): «входы плана — источник истины» держался
 на дисциплине вызывающего, а не на схеме.
 
-**Сделано.** `save_plan_inputs` (`core/store/sqlite_store.py:1157`) пишет снимок один раз,
+**Сделано.** `save_plan_inputs` (`core/store/sqlite_store.py:1056`) пишет снимок один раз,
 и у него три исхода:
 
 * записи нет → `INSERT … ON CONFLICT(run_id) DO NOTHING`, возвращается `True`;
@@ -4089,7 +4089,7 @@ runs/{run_id}/
    `CompositionViewPort` принимается как `view`, `build_id` композиции сверяется с
    `view.composition_id` и расхождение отвергается (`:219-226`), каждая партиция читается
    по своей карте.
-7. `seed_lexical_index` (`core/cli/wiring.py:422`) — ✅ **реализовано**: итерация по
+7. `seed_lexical_index` (`core/cli/wiring.py:427-495`) — ✅ **реализовано**: итерация по
    `view.members` через `store.iter_chunks(partition_build_id, product_id=…)`, потоково
    (генератор, без списка записей), с гидртацией текста из store через `get_chunks`.
 8. `--only-failed` (`core/cli/context.py`, `_filter_corpus_urls:1579`) — **сессионный и
@@ -4106,7 +4106,7 @@ runs/{run_id}/
     `EVAL_CACHE_FORMAT` поднят до `2`, конверт формата 1 читается как промах (§10.5).
     Состав `cell_reuse_key` (перенос ячеек) остаётся design-only — это другое: ключ
     **кэша вердиктов** уже честен, ключ **переноса ячеек** не существует.
-11. `_chunk_id` (`core/pipeline/corpus.py:2005`) — сейчас
+11. `_chunk_id` (`core/pipeline/corpus_index.py:83`) — сейчас
     `f"{product_id}:{doc_hash}:{chunk_no}"`, где `doc_hash` — **content hash**; станет
     `f"{product_id}:{doc_version_id}:{chunk_no}"` (**design-only**; это корень частичного
     O4, §3.3). Решение 29.10.2026: `chunker_version` в `chunk_id` **не входит**, и это не

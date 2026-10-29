@@ -131,12 +131,12 @@ from core.pipeline.composition import (
     legacy_view,
     read_composition,
 )
-from core.pipeline.corpus import ExtractionPool
 from core.pipeline.crawl_frontier import (
     resolve_crawl_limits,
     resolve_embed_device,
     resolve_pdf_device,
 )
+from core.pipeline.extraction_runtime import ExtractionPool
 from core.pipeline.resources import (
     MEM_BUDGET_ENV,
     PARENT_FLOOR_MB,
@@ -2146,11 +2146,11 @@ def _extract_worker_init(
 
     ``extractor_factory`` — module-level (picklable by reference); ``level`` — уровень корня,
     ``pdf_pipeline`` — механизм PDF (C1: пул — фазовый, ключ ``(уровень, механизм, окно)``).
-    Глобал экстрактора живёт в ``core.pipeline.corpus`` (общий воркер
-    :func:`core.pipeline.corpus._extract_worker`); фабрика передаётся и туда — защитный
-    lazy-путь, если задание принесёт иную пару (уровень, механизм).
+    Глобал экстрактора живёт в ``core.pipeline.extraction_runtime`` (общий воркер
+    :func:`core.pipeline.extraction_runtime.extract_worker`); фабрика передаётся и туда —
+    защитный lazy-путь, если задание принесёт иную пару (уровень, механизм).
     """
-    from core.pipeline.corpus import set_worker_extractor
+    from core.pipeline.extraction_runtime import set_worker_extractor
 
     set_worker_extractor(
         extractor_factory(level, pdf_pipeline),
@@ -2226,8 +2226,8 @@ def build_extraction_pool(
     """Собирает исполнитель экстракции по профилю развёртывания (P4/§7).
 
     * ``local`` — процессный пул (``ProcessPoolExecutor``/forkserver); воркер —
-      module-level :func:`core.pipeline.corpus._extract_worker`, экстрактор строится
-      инициализатором **в** процессе.
+      module-level :func:`core.pipeline.extraction_runtime.extract_worker`, экстрактор
+      строится инициализатором **в** процессе.
     * ``split`` — потоковый пул (``ThreadPoolExecutor``) поверх переданного
       ``extractor`` (``RemoteExtractor`` I/O-bound); шов (``/v1/*``) не меняется.
     * иначе/без экстрактора — ``None`` (фаза отработает ось ``extract_workers`` inline).
@@ -2247,7 +2247,7 @@ def build_extraction_pool(
     Для ``split`` остаётся ``None``: воркеры живут на edge, их пик не виден ядру, и
     выдумывать его нельзя.
     """
-    from core.pipeline.corpus import _extract_worker, _run_extract
+    from core.pipeline.extraction_runtime import extract_worker, run_extract
 
     if profile == LOCAL_PROFILE:
         default_recycle = max_tasks_per_child
@@ -2278,13 +2278,13 @@ def build_extraction_pool(
 
         return ExtractionPool(
             pool_factory=_local_factory,
-            worker=_extract_worker,
+            worker=extract_worker,
             supports_worker_recycling=True,
             worker_rss_dir=worker_rss_dir,
         )
     if profile == SPLIT_PROFILE and extractor is not None:
         def _remote_worker(request: Any) -> Any:
-            return _run_extract(extractor, request)
+            return run_extract(extractor, request)
 
         # P5/P9: ось ``document_level``/``pdf_device`` здесь не действует — она уже
         # объявлена на собранном ``RemoteExtractor`` и едет в ``extract/submit``

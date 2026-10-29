@@ -167,7 +167,7 @@ evaluate, review, g3, compute, g4, report`.
 То есть `35e4373` закрыл **один** путь: отсутствующий файл БД → `EXIT_NOT_FOUND`
 (`build_store(read_only=True)` → `StoreNotInitialized`). Второй путь — файл есть, а прогона в
 нём нет — по-прежнему `EXIT_USAGE`: `read_manifest` бросает `ValueError("прогон не найден…")`
-(`core/store/sqlite_store.py:2499`), и CLI печатает `E: прогон не найден: 'ghost'` кодом 2.
+(`core/store/sqlite_store.py:2398`), и CLI печатает `E: прогон не найден: 'ghost'` кодом 2.
 Для скрипта это одно и то же событие с двумя кодами — в зависимости от того, кто создал файл.
 
 Историческая часть ниже (проверка на момент разбора):
@@ -430,7 +430,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:677-698`, `core/store/sqlite_store.py:1795-1797`,
+✅ сделано (`core/cli/commands/crawl.py:677-698`, `core/store/sqlite_store.py:1694-1696`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
 текстовом выводе (`:713`), и в JSON (`:682`). Докстринг `iter_crawl_sessions` прямо называет
 этот дефект причиной фильтра.

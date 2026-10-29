@@ -87,12 +87,12 @@
 (`core/cli/context.py:1648`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
-(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:975,981`, `gate_delegated_external`/
+(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:976,981`, `gate_delegated_external`/
 `gate_not_blocking` — `core/pipeline/runner.py:608,552`, `no_embedder` — на уровне CLI,
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
 URL сейчас выражается не пропуском фазы, а zero-source причиной продукта (`ZERO_SOURCE_NO_URLS_ENTRY`,
-`core/pipeline/corpus.py:777`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
+`core/pipeline/corpus_coverage.py:184`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
 оставлены в словаре как объявленные, но выдавать их за работающие механизмы нельзя.
 
 **Оси, которые входят в `run_id` (и почему).** `DocumentLevel`, `PdfPipeline`, `PdfDevice`,
@@ -470,7 +470,7 @@ trafilatura) → EPUB (`extract_epub`, stdlib OCF, главы через тот 
 `adapters/remote_extractor.py:214`: локальный композит читает байты по `RawPage.source_path`, а
 remote получает их отдельной операцией шва (`extract/upload`) — то есть путь как таковой ему не
 нужен, но контракт «работаю без тела в RAM» он выполняет. `corpus` проверяет флаг
-(`core/pipeline/corpus.py:3195`) прежде чем отдать локальный путь: адаптер без флага получил бы
+(`core/pipeline/corpus.py:1461`) прежде чем отдать локальный путь: адаптер без флага получил бы
 путь, которого не существует в его зоне. `content_hash` считает адаптер (§10/I19).
 
 **Единственный источник истины по форматам — `core/util/document_formats.py`**
@@ -832,7 +832,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 **Состояние as-built:** механизм есть, **ни один пакет реестровых спецификаций сегодня не имеет**
 (`packages/*/registries/` отсутствует, включая `_template`). Пустой `Ports.registry_fetchers` →
-волна пуста, фаза `registry` завершается `ok` с нулём ячеек (`core/pipeline/phases.py:991`) — это
+волна пуста, фаза `registry` завершается `ok` с нулём ячеек (`core/pipeline/phases.py:992`) — это
 не ошибка и не «нет данных»: реестры просто не сконфигурированы. `SkipReason.NO_REGISTRY_SPEC`
 объявлен, но конвейером **не производится** (`grep` по `core/pipeline/` пуст) — значение ждёт
 своего производителя, и выдавать его за работающий механизм нельзя.

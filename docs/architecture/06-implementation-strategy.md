@@ -547,7 +547,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:3925` вызывает `_run_serp_contour`
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:1917-2045` вызывает `_run_serp_contour`
 (поиск → допуск → расширение seed-набора **до** дренажа, одна сборка), `core/pipeline/search_log.py`
 (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1549`)
@@ -927,7 +927,7 @@ uv sync --frozen --extra dev
    Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
    ✅ проверено на `f6100c7`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
-   канал в Ш6 — `core/pipeline/phases.py:1247`. Имя параметра сменилось: `scope_acceptance`
+   канал в Ш6 — `core/pipeline/phases.py:1248`. Имя параметра сменилось: `scope_acceptance`
    (принятие риска) — `core/pipeline/evaluate.py:2696`. Прежнее `scope_attested_by` живёт
    **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:313-315`)
    и как миграция колонки (`core/store/sqlite.py:564-579`); в сигнатуре оценщика алиаса нет —

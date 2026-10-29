@@ -62,7 +62,6 @@ from core.domain import (
     TerminationReason,
 )
 from core.domain.enums import SearchPhase
-from core.pipeline.corpus import IndexBuild
 from core.pipeline.crawl_frontier import (
     CrawlLimits,
     is_blacklisted,
@@ -70,6 +69,7 @@ from core.pipeline.crawl_frontier import (
     root_path_prefix,
 )
 from core.pipeline.idempotency import mark_stale, upsert_cells
+from core.pipeline.index_build import IndexBuild
 from core.pipeline.search_log import (
     SearchBudget,
     SearchEffort,

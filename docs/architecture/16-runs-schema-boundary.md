@@ -129,14 +129,14 @@ CREATE TABLE IF NOT EXISTS run_product (
 
 Пишется на границе продукта (там же, где `corpus_docs`, `09` §4.7) и переписывается в конце
 фазы — так же, как `corpus_coverage`. Прецедент записи — `store.save_corpus_coverage(run_id,
-coverage)` (`core/pipeline/corpus.py:998`): одна функция на продукт, вызывается на границе,
+coverage)` (`core/pipeline/corpus_coverage.py:405`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: переноса
 ячеек нет (`09` §10), и колонка, всегда равная нулю, — ложь о том, что механизм
 существует.
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — те же величины, что `product_end` пишет в `results[].notes` прогона
-(`corpus.py:786-808`). Два носителя одной величины разойдутся, если один из них обновят, а
+(`core/pipeline/corpus_coverage.py:193-215`). Два носителя одной величины разойдутся, если один из них обновят, а
 второй нет. Решение границы: **`run_product` — носитель, `notes` остаётся для оператора**
 (текст), и расхождение между ними — аномалия отчёта, а не допустимое состояние.
 
@@ -154,7 +154,7 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`_resume_page`, `corpus.py:3110`) — `reused`. Resume перечитывает и те документы, которые
+(`_resume_page`, `core/pipeline/corpus.py:1477-1530`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -165,19 +165,19 @@ retained-байтов).
 публикуется; писатель границы всегда пишет значение.
 
 **Оба значения уже в руках у единственного писателя** — новой проводки не нужно:
-`CorpusDoc(...)` собирается в `core/pipeline/corpus.py:5076`, рядом живут `reuse`
+`CorpusDoc(...)` собирается в `core/pipeline/corpus.py:1008-1048`, рядом живут `reuse`
 (`:5197` `reused = active_reuse is not None`) и `page.status_code` (он же уже уходит в
 `url_state` как `last_http_status`, `:5217`; второй путь — `:5053`). Точка записи одна — `_persist_docs`
-(`corpus.py:2021`, докстринг сам это фиксирует).
+(`core/pipeline/corpus.py:1008-1048`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
-`upsert_corpus_doc`. Прецедент в коде — `origin` (`corpus.py:2050-2052`): это kwarg, а не
+`upsert_corpus_doc`. Прецедент в коде — `origin` (`core/pipeline/corpus_index.py:128-130`): это kwarg, а не
 поле модели, с доводом «доменная модель не получает смысла, которого у неё нет». Довод
 здесь **не переносится**: `origin` пишется и назад не читается, а `http_status`/`reuse_kind`
 обязаны читаться — `hound diff` строит дельту документов по `corpus_docs`
 (`core/cli/commands/diff.py:105`), а правило `❌`-допустимости (I2c) обязано спрашивать
 происхождение наблюдения там же. Решение границы: **поля
-`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2011-2040`, явные
+`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_rows.py:74-83`, явные
 kwargs) + `_has_column`-терпимость к старым БД (`:203`). ✅ As-built — так и сделано.
 
 ### 3.4. `corpus_doc_version` — отображение версии документа в строку корпуса (**as-built**)
@@ -237,8 +237,8 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `phases.py:1096` → `corpus.py:3810`/`:2601`/`:2699`, там же, где уже
-  идёт `embed_model_id` (`corpus.py:4161` — единственный источник этого значения).
+  **явным параметром**: `core/pipeline/phases.py:1097` → `core/pipeline/corpus.py:2076`/`:2601`/`:2699`, там же, где уже
+  идёт `embed_model_id` (`core/pipeline/corpus.py:2427` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
@@ -262,14 +262,14 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
 Строку манифеста в БД тоже надо дописать: `persist_manifest`
-(`core/store/sqlite_store.py:1351-1413`) — **явный список** из 29 колонок, а не `SELECT *`.
+(`core/store/sqlite_rows.py:74-83`) — **явный список** из 29 колонок, а не `SELECT *`.
 Колонка, не вписанная туда, останется `NULL` навсегда при живом `ALTER TABLE`; чтение —
 `read_manifest` (`:2243-2380`), где новые поля идут через `_has_column` (`:203`), иначе
 `row["embed_device"]` на старой БД даст `IndexError`.
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено»
 
-`_resolve_embedder` (`core/cli/wiring.py:2670-2687`) сегодня выбирает по факту установки:
+`_resolve_embedder` (`core/cli/wiring.py:2728-2775`) сегодня выбирает по факту установки:
 `model2vec` → `LocalEmbedder` → `None`. `LiteEmbedder` — NumPy/CPU by design
 (`core/adapters/embed_model2vec.py:4`), и `device` он игнорировать обязан.
 
@@ -292,7 +292,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 
 ## 5. Партиция: формат `partition-2`
 
-`_PARTITION_SCHEMA = "partition-1"` (`core/pipeline/corpus.py:322`) → `partition-2`.
+`_PARTITION_SCHEMA = "partition-1"` (`core/pipeline/corpus_index.py:48`) → `partition-2`.
 Ревизия схемы уже даёт новые `pb` (старые партиции остаются на диске, но не
 переиспользуются) — это и есть механизм, которым вносятся три изменения сразу.
 
@@ -304,14 +304,14 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 
 ### 5.1. `embed_device` в материале и в манифесте (**✅ as-built**)
 
-Материал `_derive_partition_build_id` (`corpus.py:1959-1972`) получает `embed_device`
+Материал `_derive_partition_build_id` (`core/pipeline/corpus.py:960-973`) получает `embed_device`
 рядом с `embed_model_id`; манифест партиции — ключ `embed_device` в том же явном словаре
 (`core/adapters/index_npy.py:250-276`, где `extra` сливается на `:270`; второго места нет);
-проверка `_partition_reuse_reason` (`corpus.py:2801-2854`) — в `expected` рядом с шестью
+проверка `_partition_reuse_reason` (`core/pipeline/corpus_index.py:590-642`) — в `expected` рядом с шестью
 текущими (`:2840-2846`: `content_digest`, `chunker_version`, `embed_model_id`,
 `extractor_version`, `lexical_engine_version`, `vector_store`).
 
-`_derive_partition_build_id` вызывается из `corpus.py:9130`, а в тестах — с явными kwargs
+`_derive_partition_build_id` вызывается из `core/pipeline/corpus_index.py:80-139`, а в тестах — с явными kwargs
 (`tests/pipeline/test_corpus_phase_boundary.py:153-162`,
 `tests/pipeline/test_document_levels.py:574-585`): новый **обязательный** аргумент даёт там
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
@@ -366,7 +366,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 
 ## 6. `chunk_id` (run-level)
 
-`_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`corpus.py:2005-2013`, где
+`_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:169-187`, где
 `doc_hash` — `extracted.content_hash`, `:3287`) → **`f"{product_id}:{doc_version_id}:{chunk_no}"`**.
 Почему в этой границе: `chunk_id` — часть `LexicalChunk`/`RetrievedChunk` и адрес гидртации
 из store, поэтому смена формата и так требует пересборки партиций; делать её отдельным
@@ -388,7 +388,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 - `chunker_version` — поле `EXECUTION_CONTRACT_FIELDS`, то есть **один чанкер на прогон**;
   внутри прогонной БД `chunk_id` уникален и без него (PK `corpus_chunks.chunk_id`);
 - смена чанкера уже меняет `pb` (он в `expected` у `_partition_reuse_reason`,
-  `corpus.py:2970-2980`), то есть даёт новую партицию;
+  `core/pipeline/corpus_index.py:757-767`), то есть даёт новую партицию;
 - evidence уже несёт физическую партицию (`cell_evidence.partition_build_id`), поэтому
   `(chunk_id, partition_build_id)` различает то, что «голый» `chunk_id` не различает.
 
@@ -421,7 +421,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 > `chunk_id` записан не канонической формой. В БД прошлой версии таблицы нет: шаг не
 > исполняется, фолбэк остаётся прежним, а не падает.
 
-`StorePort.resolve` (`core/store/sqlite_store.py:2521-2560`) сначала делает прямой lookup по
+`StorePort.resolve` (`core/store/sqlite_store.py:2420-2459`) сначала делает прямой lookup по
 `corpus_chunks.chunk_id`, а при промахе разбирает `source_id` через `parse_source_id` и ищет
 `WHERE product_id = ? AND doc_id = ? AND chunk_no = ?`. **Этот второй путь не может
 сработать**: `parse_source_id` возвращает `doc_id` = второй сегмент = `doc_hash`
@@ -537,7 +537,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
    - **словарь**: `core/domain/dictionary.py` + `docs/status-dictionary.yaml`
      (`embed_device`, статусы продукта прогона);
    - **дефекты краула 1 и 3 — одна правка, не две.** Зарядка бюджета на resume
-     (`core/pipeline/corpus.py:7702-7740`) и дренаж уже добытого расцеплены: URL
+     (`core/pipeline/corpus.py:5968-6006`) и дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed`, чей work-set гейтится режимом продукта
      (`_revalidation_items`, `:6612-6624`). Правило: **заряженный URL обязан быть и
@@ -658,7 +658,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
 `core/pipeline/report.py:1960`, а не `:1970`; `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:106`, а не `:93` (там комментарий); `_PARTITION_SCHEMA` —
-`core/pipeline/corpus.py:322`; `composition.py` исключён из состава (§8);
+`core/pipeline/corpus_index.py:48`; `composition.py` исключён из состава (§8);
 «`embed_device` в `extra` **и** в корне» — одно место, а не два (§5.1); «геттер в
 `_CONTRACT_FIELD_GETTERS`» — поле на манифесте достаточно (§4.2).
 

@@ -443,7 +443,7 @@ M0 должен давать **сквозной вертикальный сре�
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).
   ✅ закрыто — батч-запись: `save_cells_batch` / `add_evidence_batch` через `executemany`
-  (`core/store/sqlite_store.py:626`, `:779`).
+  (`core/store/sqlite_store.py:525`, `:779`).
 - Формат и версионирование `prompt_hash` при смене шаблона (итерация 2).
   ✅ закрыто — контракт `H(template_version, rule, absence_rule, sorted(chunk_ids))`
   (`core/pipeline/prompt.py:34`); машинный токен «тот же hash — другой текст» — `:79`.

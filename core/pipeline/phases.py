@@ -58,7 +58,7 @@ from core.domain.models import (
     Satellite,
 )
 from core.pipeline.compute import bundle_for_run
-from core.pipeline.corpus import ExtractionPool, build_corpus
+from core.pipeline.corpus import build_corpus
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
@@ -72,6 +72,7 @@ from core.pipeline.evaluate import (
 )
 from core.pipeline.exhaustion import ExhaustionFacts, contours_run
 from core.pipeline.extract_cache import ExtractionCache
+from core.pipeline.extraction_runtime import ExtractionPool
 from core.pipeline.gates import gate_trail
 from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.manual_artifacts import (

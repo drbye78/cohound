@@ -93,7 +93,7 @@ application-layer firewall (L7). Функционал, которому нуже
 >
 > ⬜ **не сделано (2026-10-28), подтверждено кодом:** `grep -rn extractor_zone core/` даёт только
 > `core/config/deploy.py:592` и валидатор `:607`; сборка экстрактора (
-> `core/cli/wiring.py:2038-2110` `build_worker_extractor`) на поле не смотрит.
+> `core/cli/wiring.py:2065-2137` `build_worker_extractor`) на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из
 > интернета — это основная поверхность атаки (парсеры/шрифты/архивы). Идея «вынести её в edge»
