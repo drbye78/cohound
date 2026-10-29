@@ -784,11 +784,17 @@ def run(args: argparse.Namespace) -> int:
             scenario_errors: list[str] = []
             try:
                 _ensure_run(blocked_store, run_id, inputs)
-                _snapshot_run_inputs(
-                    args, run_id, inputs=inputs, run_plan=run_plan, store=blocked_store
+                # Замечания снимка входов не выбрасываются: заблокированный прогон —
+                # ровно тот случай, когда оператор читает отчёт о том, чего не хватило
+                # (``run_inputs`` — источник истины плана), и молча потерять их значило бы
+                # оставить его без причины блокировки.
+                scenario_errors.extend(
+                    _snapshot_run_inputs(
+                        args, run_id, inputs=inputs, run_plan=run_plan, store=blocked_store
+                    )
                 )
-                scenario_errors = _persist_llm_scenarios(
-                    blocked_store, run_id, declared
+                scenario_errors.extend(
+                    _persist_llm_scenarios(blocked_store, run_id, declared)
                 )
             finally:
                 blocked_store.close()
