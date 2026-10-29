@@ -1,0 +1,36 @@
+{
+  "host": "platformv.sbertech.ru",
+  "http_probes": {
+    "https://pangolin.sbertech.ru/": 401,
+    "https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/": 200,
+    "https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/common/": 200,
+    "https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/common/documents/about/index.html": 200,
+    "https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/": 401
+  },
+  "measured_at": "2026-10-29T15:50+03:00",
+  "pages_lower_bound": 1299,
+  "section_count": 15,
+  "sections": {
+    "about": 12,
+    "administration-guide": 113,
+    "architecture-components": 254,
+    "description-of-functionality": 99,
+    "developer-guide": 10,
+    "distribution-kit": 4,
+    "extensions": 127,
+    "glossary": 17,
+    "installation-guide": 44,
+    "instructions-and-notes": 12,
+    "programming-guide": 222,
+    "reference-guide": 50,
+    "reference-guide-postgresql": 123,
+    "reference-guide-sql": 206,
+    "what-is-new": 6
+  },
+  "sitemap": {
+    "loc_count": 816,
+    "loc_under_docs_public_psq": 0,
+    "status": 200
+  },
+  "version": "8.1.0"
+}
