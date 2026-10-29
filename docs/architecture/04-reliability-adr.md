@@ -205,19 +205,16 @@ write-site'ов у них пока нет, но словарь обязан их
 | **Разрешимость зависимостей** | `pyproject.toml` резолвится на базлайне Python 3.14 | `uv pip compile --python-version 3.14` |
 | **Браузерный smoke (V5)** | scrapy-playwright: HTTP не видит JS, рендер видит (chromium+firefox) | `tests/smoke_scrapy_playwright.py` (отдельное окружение, 0/1/2) |
 
-**`golden-fast` — не гейт (решение D-4).** Страта `fast` в `ru-pg-dbms` **пуста**:
-`golden.csv` — 236 строк, все `tier=full` (118 `pangolin` + 118 `postgrespro`). Гейт снят
-из таблицы по существу, а не из-за тихого «прошло»: пустой набор сегодня **падает** честно
-(`agreement = 0.0` при нуле строк, плюс `has_absent_stratum = False` → `ok: no`,
-`EXIT_ERROR`), но проверять ему нечего — зелёный результат такого прогона означал бы только
-«строк не было». Он вернётся, когда страта `fast` появится: выделение дешёвых строк —
-методологическое решение, а не предвидение (A3). Механизм тира живой: в `_template` есть
-2 строки `fast`.
+**`golden-fast` — не гейт (решение D-4).** В `ru-pg-dbms` страта `fast` содержит 155
+ячеек: все 31 параметр раздела «Масштабируемость и надежность» (№47–77) на пяти
+продуктах. Она проверяет положительные, частичные и отрицательные ожидания на каждом
+PR; остальные строки остаются в `golden-full`. Выделение fast-строк — методологическое
+решение, а не предвидение (A3). Механизм тира живой: в `_template` есть строки `fast`.
 
 ### C.2. Проверки на релиз/смену версий (golden-full)
 
-- `golden-full` — **236 строк** в `packages/ru-pg-dbms/golden.csv`, **все** `tier=full`
-  (118 `pangolin` + 118 `postgrespro`); страта `fast` пуста. Допуск по критическим классам —
+- `golden-full` — строки `tier=full` в `packages/ru-pg-dbms/golden.csv`; 155 строк
+  выделены в `golden-fast`. Допуск по критическим классам —
   **0** false-✅ и **0** false-❌ на Кр (`max_false_ok=0`, `max_critical_false_absence=0`):
   это порог, а не измеренный результат прогона.
 - retrieval-golden: R9/R10 с cut-off = pipeline-K.
@@ -284,13 +281,13 @@ tests/
   одним замером; мера (`.npy`-шарды) есть: `core/adapters/vector_npy.py:247`.
 - ANN-альтернатива — ❔ не проверено — условие срабатывания (`brute-force p95 вне бюджета` /
   партиция не влезает в RAM) не измерено; ANN-адаптера нет.
-- эмбеддинги на CPU — ✅ сделано — батчевый путь реализован: `core/adapters/embed_local.py:146`
+- эмбеддинги на CPU — ✅ сделано — батчевый путь реализован: `core/adapters/embed_local.py:158`
   (нарезка входа `batch_size`); цена в часах опубликована
   (`docs/reports/measurements/2026-10-25-embedding-throughput.md`: 8.2–9.4 ч на корпус).
 - массовая запись в SQLite — ✅ сделано — `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:21`)
-  и одна транзакция на пачку 200 (`core/store/sqlite_store.py:67`, `save_cells_batch` `:626`).
+  и одна транзакция на пачку 200 (`core/store/sqlite_store.py:69`, `save_cells_batch` `:626`).
 - search-адаптер latency/стоимость — ✅ сделано — бюджет фазы объявляется и проверяется
-  (`core/pipeline/corpus.py:3348`, безлимит запрещён `:3361`), кэш — `core/util/cache.py:133`.
+  (`core/pipeline/corpus.py:3703`, безлимит запрещён `:3704`), кэш — `core/util/cache.py:133`.
 
 ### D.1. Память и OOM
 

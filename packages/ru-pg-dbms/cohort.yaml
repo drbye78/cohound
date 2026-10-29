@@ -16,4 +16,8 @@ entries:
   product_id: jatoba
   role_overlap: 0.7
   selection_reason: Российская СУБД на PostgreSQL; частичное перекрытие ролей.
-frozen_at: '2026-10-01'
+- anchor_relation: analog
+  product_id: digital_q_database
+  role_overlap: 1.0
+  selection_reason: Присутствует в исходной comparative table; PostgreSQL-derived DBMS.
+frozen_at: '2026-10-28'
