@@ -140,7 +140,11 @@ URL/документов/чанков:
   каждый переиспользованный чанк проверяется по I19 (``content_hash(text) == row.content_hash``),
   при любом расхождении — обычная экстракция + нарезка и видимая запись в ``errors``;
 * все сбои state-записи изолируются в ``errors`` (контракт :func:`_persist_docs`): фаза не
-  падает и не меняет код возврата.
+  падает и не меняет код возврата;
+* политика ``offline`` — **ноль сетевых вызовов** (ни фетча, ни условного GET, ни
+  sitemap/feed-развёртки, ни внешнего поиска): корпус собирается из того же субстрата
+  отдельным проходом, ``reuse_kind=reused``, экстрактор/чанкер не вызываются, а
+  переиспользование остаётся **не** наблюдением этого прогона (``observed_sources=0``).
 
 ``state is None`` — прежнее поведение байт-в-байт (никаких чтений/записей субстрата,
 пустой ``IndexBuild.doc_counters``, тот же ``index_build_id``).
@@ -203,11 +207,11 @@ from core.pipeline.composition import (
 # наоборот.
 from core.pipeline.corpus_commit import PendingExtract, PhaseLifecycle, RootDrain
 
-# L2: расчёт/персистенция покрытия и статуса продукта вынесены в свой модуль, но
-# **реэкспортируются здесь**. Причина та же, что у L1: тесты и ``selfcheck`` адресуют эти
-# имена по ``core.pipeline.corpus``, а существующие тесты в этой волне не редактируются
-# (§0.3 плана декомпозиции). ``noqa: F401`` — осознанно: имена обязаны резолвиться здесь.
+# L2: расчёт/персистенция покрытия и статуса продукта вынесены в свой модуль. Здесь
+# остаются имена, которые этот модуль читает сам, и публичный ``derive_corpus_coverage``
+# (``__all__``; тесты и ``selfcheck`` адресуют его по ``corpus`` — ``noqa: F401``).
 from core.pipeline.corpus_coverage import (  # noqa: F401
+    ONLY_FAILED_REPAIR_REASON,
     ZERO_SOURCE_ALL_SEEDS_REJECTED,
     ZERO_SOURCE_NO_SEEDS,
     ZERO_SOURCE_NO_URLS_ENTRY,
@@ -226,19 +230,14 @@ from core.pipeline.corpus_drain import (  # noqa: F401
     ingest_member_doc as _ingest_member_doc,
 )
 
-# L3: идентичность сборки и эмбеддинг продукт-партиции вынесены в свой модуль и
-# **реэкспортируются здесь** — по той же причине (§0.3): тесты адресуют эти имена по
-# ``core.pipeline.corpus``, а существующие тесты в этой волне не редактируются.
+# L3: идентичность сборки и эмбеддинг продукт-партиции вынесены в свой модуль.
+# ``EMBED_BATCH_CHUNKS`` остаётся реэкспортом: это **публичное** имя модуля-владельца, и
+# тесты адресуют его по ``corpus`` (``noqa: F401`` — внутри этого модуля оно не читается).
 from core.pipeline.corpus_index import (  # noqa: F401
-    _EMBED_RATE_ALPHA,
-    _FIELD_SEP,
-    _PARTITION_SCHEMA,
     EMBED_BATCH_CHUNKS,
-    _chunk_id,
     _CorpusStageTimings,
     _derive_partition_build_id,
     _embed_and_build,
-    _embed_batched,
     _EmbedCensus,
     _EmbedThroughput,
     _make_embed_reporter,
@@ -248,26 +247,15 @@ from core.pipeline.corpus_index import (  # noqa: F401
     format_embed_progress,
 )
 
-#: Реэкспорт для существующих тестов (§0.3 плана): ``test_corpus.py`` берёт эти два имени
-#: по ``core.pipeline.corpus``. Приватность сохранена намеренно — это те же приватные имена
-#: модуля-владельца, а не новый контракт; ``noqa: F401`` — имена обязаны резолвиться здесь.
+#: Из ``corpus_ingest`` этот модуль читает ``ProductIngest``/``terminal_failure_kind`` сам;
+#: ``PARTIAL_REASON_UNSTATED`` адресуют тесты по ``corpus`` (``noqa: F401``).
 from core.pipeline.corpus_ingest import (  # noqa: F401
-    _SUBMIT_MAX_ATTEMPTS,
-    DIRECTORY_KINDS,
-    MEMBER_CONTENT_TYPES,
     PARTIAL_REASON_UNSTATED,
-    LocalFetch,
     ProductIngest,
-    RetainedRaw,
-    RetainedReject,
-    SitemapSeeds,
-    _work_set_idempotency_key,
-    artifact_is_terminal,
-    looks_like_html,
-    resume_retained,
     terminal_failure_kind,
 )
-from core.pipeline.corpus_ingest import persist_docs as _persist_docs  # noqa: F401
+from core.pipeline.corpus_ingest import offline_reuse_product as _offline_reuse_product
+from core.pipeline.corpus_ingest import persist_docs as _persist_docs
 from core.pipeline.corpus_persist import (
     emit_product,
     emit_progress,
@@ -298,32 +286,13 @@ from core.pipeline.crawl_sources import (
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
 
-# L1: runtime экстракции вынесен в свой модуль, но **реэкспортируется здесь**. Причина —
-# не удобство: 46 операторов импорта в 29 тестовых файлах адресуют эти имена по
-# ``core.pipeline.corpus``, а существующие тесты в этой волне не редактируются (§0.3
-# плана декомпозиции). Импорт помечен ``noqa: F401`` осознанно: имена, которые внутри
-# этого модуля больше не вызываются, всё равно обязаны здесь резолвиться — иначе тест,
-# адресующий ``core.pipeline.corpus._extract_worker``, перестал бы импортироваться.
+# L1: runtime экстракции вынесен в свой модуль. Здесь остаются имена, которые этот модуль
+# читает сам (``_EXTRACT_MAX_POOL_REBUILDS``, ``_ExtractPools``, ``ExtractionPool``), и
+# публичный ``set_worker_extractor``: его адресуют тесты по ``corpus`` (``noqa: F401``).
 from core.pipeline.extraction_runtime import (  # noqa: F401
-    _EXTRACT_DEAD_POOL_TIMEOUTS,
     _EXTRACT_MAX_POOL_REBUILDS,
-    _RESUME_READ_CHUNK,
     ExtractionPool,
-    _as_text,
-    _cache_extractor_version,
-    _extract_cache_key,
-    _extract_worker,
-    _ExtractPoolKey,
     _ExtractPools,
-    _ExtractPoolSlot,
-    _ExtractRequest,
-    _hash_file,
-    _page_with_source_path,
-    _run_extract,
-    _trim_worker_arenas,
-    _worker_extractor_for,
-    _worker_peak_rss_mb,
-    _write_worker_peak_rss,
     set_worker_extractor,
 )
 from core.pipeline.index_build import IndexBuild
@@ -354,10 +323,6 @@ from core.ports.types import (
 from core.util.index_partition import build_root as _partition_root
 from core.util.rate_limit import RateLimiter
 
-#: Алиас для ``selfcheck``: он адресует набор директорных kind-ов по ``corpus`` (§0.3
-#: плана декомпозиции); сам набор живёт в ``corpus_ingest``.
-_DIRECTORY_KINDS = DIRECTORY_KINDS
-
 __all__ = ["ExtractionPool", "IndexBuild", "build_corpus", "derive_corpus_coverage"]
 
 
@@ -384,6 +349,19 @@ _EXECUTOR_MAX_WAVES_PER_ROOT = 1000
 #: этот артефакт (``extraction_timeout``), пул продолжает работу; пересборка — только если
 #: пул не дал ни одного завершения за ``2 × timeout`` (см. :class:`_ExtractPools`).
 _EXTRACT_TASK_TIMEOUT_S = 1800.0
+
+#: Причина нулевого наблюдения корпуса при политике ``offline`` (``--refresh offline``).
+#:
+#: Это **не** ``no_seeds``: seed'ы есть, но сети в этой политике нет — документы берутся
+#: из durable-субстрата (``reuse_kind=reused``), а наблюдением это не является.
+#: ``observed_sources`` поэтому остаётся нулём, ``complete`` — ``False``: оффлайн-прогон
+#: не вправе выдавать себя за полный корпус. Токен наблюдательный (колонка ``reason`` —
+#: свободная строка), но названный: молчаливый ``no_seeds`` утверждал бы, что источников
+#: не было, а они были.
+COVERAGE_OFFLINE_NO_OBSERVATION = "offline_no_network_observation"
+
+#: Причина неисполненных раундов SERP-контура при ``offline``: поиск — тоже сеть.
+_SERP_OFFLINE_REASON = "offline_refresh_policy"
 
 
 def _as_refresh_policy(value: str) -> RefreshPolicy:
@@ -874,9 +852,15 @@ def _serp_note(observation: Mapping[str, Any]) -> str:
     rounds = observation.get("rounds") or {}
     budget = observation.get("budget") or {}
     if not observation.get("enabled"):
+        # Причина неисполнения называется, когда она есть: «контур выключен» без неё
+        # читалось бы как решение оператора, а ``offline`` — политика прогона, при
+        # которой внешний поиск не трогается наравне с краулом.
+        reason = rounds.get("not_executed_reason")
         return (
             "serp: контур выключен "
-            f"(источник: {rounds.get('source', 'default')}) — вызовов внешнего поиска нет"
+            f"(источник: {rounds.get('source', 'default')}"
+            + (f", причина: {reason}" if reason else "")
+            + ") — вызовов внешнего поиска нет"
         )
     accepted = observation.get("accepted") or {}
     accepted_total = sum(len(urls) for urls in accepted.values())
@@ -1080,6 +1064,7 @@ def _build_corpus(
     state: ProductStatePort | None = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    only_failed_repairs: Mapping[str, list[str]] | None = None,
     container_for: Callable[[str | Path], ContainerPort | None] | None = None,
     pools: _ExtractPools,
     lifecycle: PhaseLifecycle | None = None,
@@ -1267,9 +1252,25 @@ def _build_corpus(
         прежнюю развёртку BFS/sitemap. Игнорируется при ``state is None``.
     :param refresh_policy: политика наблюдения (значение :class:`RefreshPolicy`):
         ``auto``/``revalidate`` — условный GET с валидаторами; ``refresh`` — безусловный
-        GET (валидаторы не отправляются); ``offline`` — известные URL без сети, но
-        переиспользование ``reuse`` в этом срезе **не реализовано** (видимая ошибка на
-        продукт, элемент обрабатывается как ``revalidate``).
+        GET (валидаторы не отправляются); ``offline`` — **ноль сетевых вызовов**: ни
+        фетча, ни условного GET, ни sitemap/feed-развёртки, ни внешнего поиска. Корпус
+        собирается из durable-субстрата отдельным проходом
+        (:func:`core.pipeline.corpus_ingest.offline_reuse_product`), документы получают
+        ``reuse_kind=reused`` и ``http_status=NULL``, экстрактор и чанкер не вызываются.
+        Авторский корень, известный ``url_state``, тоже переиспользуется; корень, которого
+        в состоянии нет, — видимая ошибка (сеть в этой политике отсутствует). Покрытие
+        такого прогона неполно по построению: наблюдений **этого** прогона нет
+        (``observed_sources=0``, причина ``offline_no_network_observation``).
+    :param only_failed_repairs: ``product_id → [url, ...]`` — work-set **ремонта**
+        (``--only-failed``, межпрогонный носитель ``url_state``; резолвится composition
+        root'ом: ``core.cli.context._only_failed_work_set``). Для названного продукта
+        (а) авторские корни **не дренятся** — ремонт не полный обход, поэтому BFS и
+        sitemap не исполняются, а объявленные корни остаются только пространством
+        scope-инференса; (б) work-set строится из переданного множества
+        (:func:`core.pipeline.corpus_ingest.plan_repair_items`) **независимо** от
+        ``product_modes``, и каждый элемент идёт depth-0 листом через
+        ``Frontier.add_revalidate_seed`` (вне бюджета ``max_documents``). ``None``/пустой
+        словарь ⇒ поведение прежнее, байт-в-байт.
     :param container_for: B3 — инъекция читателя контейнеров
         (``Callable[[path], ContainerPort | None]``; composition root передаёт
         ``core.adapters.container_any.container_for``). ``None`` → спуск не исполняется, но
@@ -1359,6 +1360,15 @@ def _build_corpus(
 
     errors: list[str] = []
 
+    # 09 §6.3/§9 (MVP-3b): политика наблюдения и режимы продуктов. ``state is None`` —
+    # legacy-путь: все три аргумента игнорируются целиком (поведение байт-в-байт).
+    # Резолвится **до** SERP-контура и дренажа: ``offline`` — «наблюдать нечем и не
+    # будем», то есть ни фетча, ни условного GET, ни sitemap/feed-развёртки, ни внешнего
+    # поиска. Корпус в этом случае собирается из durable-субстрата
+    # (:func:`core.pipeline.corpus_ingest.offline_reuse_product`).
+    policy = _as_refresh_policy(refresh_policy)
+    offline = policy is RefreshPolicy.OFFLINE
+
     # --- SERP-контур (I3/§5): поиск → допуск → расширение объявленного seed-набора --- #
     # Контур исполняется **внутри** фазы корпуса (не отдельной фазой ``PHASES``) и до
     # дренажа: найденные URL входят в тот же набор, что и авторские, поэтому проходят
@@ -1370,7 +1380,14 @@ def _build_corpus(
     serp_seeds_by_product: dict[str, dict[str, list[str]]] = {}
     #: Судьба находок по продуктам (``queued``/``dup``/``blacklisted``/``truncated``).
     serp_ingest_by_product: dict[str, dict[str, Any]] = {}
-    if serp_rounds:
+    #: 09 §6.3: ``offline`` — ноль сетевых вызовов, и внешний поиск тоже сеть. Контур не
+    #: исполняется, но и не молчит: наблюдение называет причину (``not_executed_reason``),
+    #: иначе «контур выключен» читалось бы как решение оператора, а не как политика прогона.
+    if policy is RefreshPolicy.OFFLINE and serp_rounds:
+        serp_observation["rounds"]["declared"] = int(serp_rounds)
+        serp_observation["rounds"]["not_executed"] = int(serp_rounds)
+        serp_observation["rounds"]["not_executed_reason"] = _SERP_OFFLINE_REASON
+    elif serp_rounds:
         try:
             serp_observation, serp_seeds_by_product = _run_serp_contour(
                 plan=plan,
@@ -1450,10 +1467,6 @@ def _build_corpus(
     #: Заполняются только при наличии durable-субстрата (``state``), иначе карта пуста.
     doc_counters: dict[str, dict[str, int]] = {}
 
-    # 09 §6.3/§9 (MVP-3b): политика наблюдения и режимы продуктов. ``state is None`` —
-    # legacy-путь: все три аргумента игнорируются целиком (поведение байт-в-байт).
-    policy = _as_refresh_policy(refresh_policy)
-
     # D4: дефолты оси стратегии/задержек из run.yaml ``crawl`` (профиль домена их переопределяет).
     crawl_strategy_default = (
         crawl_defaults.strategy if crawl_defaults is not None else CrawlStrategy.AUTO
@@ -1527,6 +1540,15 @@ def _build_corpus(
     #: Валидаторы условного GET из инкрементального work-set:
     #: ``(product_id, normalized_url) → (If-None-Match, If-Modified-Since)``.
     planned_validators: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+
+    #: ``--only-failed``: строки учёта ремонта по продукту — «поставлено в work-set /
+    #: отброшено и почему». Строки попадают в ``log_entries`` (→ ``results[].notes``):
+    #: отброшенный URL не исчезает молча, а назван числом с причиной.
+    repair_notes: list[str] = []
+    #: ``--only-failed``: ``product_id → токен причины`` — продукты, которые этот прогон
+    #: по построению не наблюдал целиком (ремонт). Покрытие такого продукта не ``complete``
+    #: даже при всех ``FETCHED``: иначе ремонт одного URL объявлял бы сайт прочитанным.
+    coverage_incomplete: dict[str, str] = {}
 
     #: v5: ``product_id → [url]`` документов, у которых переиспользуется версия, а признак
     #: частичности в ней **не записан** (``document_version.extract_partial IS NULL``:
@@ -1660,6 +1682,16 @@ def _build_corpus(
         state=state,
         policy=policy,
         product_modes=product_modes,
+        planned_validators=planned_validators,
+        errors=errors,
+    )
+    # Ремонт провалов (``--only-failed``) — отдельный планировщик: он не зависит от
+    # режима продукта и не выводится из ``url_state`` целиком (иначе ``new``/``full``
+    # получил бы полный краул вместо ремонта).
+    _plan_repair_items = partial(
+        corpus_ingest.plan_repair_items,
+        state=state,
+        policy=policy,
         planned_validators=planned_validators,
         errors=errors,
     )
@@ -1865,9 +1897,17 @@ def _build_corpus(
     #: (``N/M чанков, X чанк/с``). Это наблюдение о **цене** работы, а не о её составе:
     #: в ``run_id`` не входит (не измерение карты, A3), но оператор его видит.
     embed_notes: list[str] = []
+    #: 09 §6.3: строки оффлайн-прохода (``--refresh offline``) — по одной на продукт.
+    #: Оператор обязан видеть, что корпус собран **без наблюдения**: сколько документов
+    #: переиспользовано и скольким URL переиспользовать было нечего.
+    offline_notes: list[str] = []
     #: Причина zero-source покрытия по продукту (``None`` — причина не названа счётчиками).
     #: Заполняется на ``product_end`` и передаётся в :func:`_persist_corpus_coverage`.
     zero_source_reasons: dict[str, str | None] = {}
+    #: 09 §6.3: ``product_id → причина`` для **всех** продуктов оффлайн-прогона. Отдельная
+    #: карта, потому что ``zero_source_reasons`` управляет статусом (``blocked``), а здесь
+    #: речь о честности покрытия: наблюдений не было, даже если документы переиспользованы.
+    offline_reasons: dict[str, str] = {}
     #: Advisory-очередь «что осталось человеку» (``PhaseResult.pending``): zero-source
     #: продукты видны в конце фазы корпуса — **до** дорогой Ш6, а не только в отчёте.
     zero_source_pending: list[str] = []
@@ -2066,12 +2106,75 @@ def _build_corpus(
             errors=errors,
             status=RunProductStatus.RUNNING,
         )
+        #: ``--only-failed``: разрешённое множество ремонта для этого продукта
+        #: (``None``/пусто — обычный путь). Ремонт — **не** вопрос режима продукта, поэтому
+        #: он выбирает планировщик ниже, а не гейт ``ProductMode`` в
+        #: :func:`core.pipeline.corpus_ingest.plan_incremental_items`.
+        repair_urls = list((only_failed_repairs or {}).get(product_id) or ())
         #: 09 §6.3: известные URL продукта (``revalidate``) — после авторских корней.
-        incremental_items = _plan_incremental_items(product_id, product_roots)
+        if repair_urls:
+            # Ремонт провалов: набор берётся **ровно** из разрешённого множества и
+            # независимо от режима; ``plan_incremental`` сюда не зовётся — для ``new``/
+            # ``full`` он вернул бы корни и весь ``url_state``, то есть полный краул.
+            incremental_items, repair_dropped = _plan_repair_items(
+                product_id, repair_urls, scopes=owner_scopes
+            )
+            dropped_by_reason: dict[str, int] = {}
+            for _url, reason in repair_dropped:
+                dropped_by_reason[reason] = dropped_by_reason.get(reason, 0) + 1
+            repair_notes.append(
+                f"corpus: {product_id}: ремонт --only-failed — в work-set "
+                f"{len(incremental_items)} из {len(repair_urls)} URL "
+                f"(depth-0 известные URL, авторские корни не обходятся); отброшено "
+                f"{len(repair_dropped)}"
+                + (
+                    " ("
+                    + ", ".join(
+                        f"{reason}={count}"
+                        for reason, count in sorted(dropped_by_reason.items())
+                    )
+                    + ")"
+                    if dropped_by_reason
+                    else ""
+                )
+            )
+        else:
+            incremental_items = _plan_incremental_items(product_id, product_roots)
+        if repair_urls:
+            # Честность покрытия (I2/I2c): ремонт наблюдал только проваленные URL —
+            # «complete» на нём означало бы «сайт прочитан», а не «ремонт выполнен».
+            coverage_incomplete[product_id] = ONLY_FAILED_REPAIR_REASON
+        #: 09 §6.3: ``offline`` — корпус из durable-субстрата **до** дренажа и вместо него.
+        #: Отдельный проход, а не дренаж с ревалидационными seed'ами: у оффлайн-элемента
+        #: нет ни фетча, ни sitemap/feed-развёртки, ни BFS, поэтому проход не заходит в
+        #: код, единственное назначение которого — сеть. Корни продукта разрешаются в
+        #: состоянии (корень, которого там нет, — видимая ошибка, а не GET).
+        offline_report = None
+        if offline:
+            offline_report = _offline_reuse_product(
+                product_id,
+                product_roots,
+                incremental_items,
+                state=state,
+                errors=errors,
+                chunker_version=resolved_chunker_version,
+                embed_model_id=embed_model_id,
+                store=store,
+                ingest=ingest,
+                seen_docs=seen_docs,
+                seen_chunk_ids=seen_chunk_ids,
+                duplicates=duplicates,
+                doc_counters=doc_counters,
+                partial_unknown_products=partial_unknown_products,
+                persist_docs=_persist_docs,
+            )
+            offline_notes.append(offline_report.note(product_id))
         #: 09 §6.3: группировка **всех** известных URL по авторским корням (scope
         #: inference) до применения операторского потолка. ``state is None``/
-        #: не-incremental ⇒ пусто: grouping — no-op (байт-в-байт).
-        if incremental_items:
+        #: не-incremental/``offline`` ⇒ пусто: grouping — no-op (байт-в-байт). Под
+        #: ``offline`` группировка не нужна: она адресует ревалидационные бакеты дренажа,
+        #: а дренажа в этой политике нет — известные URL уже разрешены выше.
+        if incremental_items and not offline:
             all_revalidation_groups, all_orphan_buckets = (
                 _group_revalidation_items(
                     product_id, product_roots, incremental_items
@@ -2167,7 +2270,13 @@ def _build_corpus(
         # ingest (interleaving-трюк ``work_by_product`` больше не нужен).
         #: Корни, реально дренированные в этом продукте (для leftover-групп каталогов).
         drained_roots: set[str] = set()
-        for url in url_map.get(product_id, []):
+        # Ремонт (``--only-failed``) — **не** обход: авторские корни не дренятся, их роль
+        # здесь — только пространство scope-инференса для группировки известных URL.
+        # Работа идёт через leftover-группы/orphan-бакеты ниже (``seed=False`` ⇒
+        # ``add_revalidate_seed``, depth-0 листья вне бюджета discovery).
+        # ``offline`` — дренажа нет вовсе: корпус уже собран из durable-субстрата, а дренаж
+        # начинается с seed-фетча, то есть с сети.
+        for url in (() if (repair_urls or offline) else url_map.get(product_id, [])):
             prior_item = items.get((product_id, url))
 
             # Phase 4: потолок попыток (``--max-attempts``). URL, уже исчерпавший попытки,
@@ -2469,12 +2578,39 @@ def _build_corpus(
             if item.status in (CrawlItemStatus.FAILED, CrawlItemStatus.CANCELLED)
         )
         product_reason: str | None = None
+        if offline:
+            # 09 §6.3: оффлайн-прогон **не наблюдал ничего** — ни одного сетевого вызова.
+            # Это не ``no_seeds`` (seed'ы есть) и не «продукт пуст» (документы могут быть
+            # переиспользованы из durable-субстрата). Причина называется в строке покрытия
+            # всегда: ``observed_sources`` — счётчик наблюдений **этого** прогона, и он
+            # нулевой, поэтому ``complete`` не может стать ``True`` (условие «ни одного
+            # наблюдения» в :func:`derive_corpus_coverage`). ``blocked`` ставится только
+            # когда переиспользовать было нечего: «материал есть, охват неполон» — это
+            # ``partial``, а не ``blocked``.
+            offline_reasons[product_id] = COVERAGE_OFFLINE_NO_OBSERVATION
+            if not ingest.docs and not manual_resolved:
+                product_reason = COVERAGE_OFFLINE_NO_OBSERVATION
+                zero_source_pending.append(
+                    f"{product_id}: offline — переиспользовать нечего и сеть не "
+                    "трогалась; корпус пуст, оценка отметит все ячейки failed, а не ❌. "
+                    "Нужен прогон с --refresh auto/revalidate"
+                )
+                errors.append(
+                    f"{product_id}: offline corpus без единого документа "
+                    f"({COVERAGE_OFFLINE_NO_OBSERVATION}): "
+                    f"roots={len(product_roots)}, "
+                    f"reused=0, no_version="
+                    f"{len(offline_report.no_version) if offline_report else 0}, "
+                    f"unknown_roots="
+                    f"{len(offline_report.unknown_roots) if offline_report else 0} — "
+                    "ячейки будут failed, не ❌"
+                )
         # Zero-source — утверждение о **сеансе**: без сеанса «нет элементов» не значит
         # «нет источников» (счётчики просто не ведутся), поэтому причина не выдумывается.
         # ``and not manual_resolved``: продукт, чей материал предъявлен объявленным
         # артефактом, без источников **не** остался — иначе ошибка утверждала бы
         # пустой корпус при непустом.
-        if session is not None and not product_items and not manual_resolved:
+        elif session is not None and not product_items and not manual_resolved:
             # Истинная причина вместо единой константы ``no_seeds``: пустой seed-набор,
             # полностью отклонённые seed'ы и отсутствие записи в ``urls`` — разные пути.
             if product_id not in url_map:
@@ -2546,6 +2682,19 @@ def _build_corpus(
                 # разные факты, и разницу нельзя выводить один из другого.
                 "manual_declared": len(manual_entries),
                 "manual_resolved": len(manual_resolved),
+                # 09 §6.3: оффлайн-проход — отдельные поля, а не пересказ ``fetched``/
+                # ``docs``: «взято из состояния» и «наблюдено в этом прогоне» — разные
+                # факты, и первое не становится вторым от того, что документ попал в корпус.
+                "offline": (
+                    None
+                    if offline_report is None
+                    else {
+                        "reused_docs": offline_report.reused,
+                        "reused_chunks": offline_report.chunks,
+                        "no_version": list(offline_report.no_version),
+                        "unknown_roots": list(offline_report.unknown_roots),
+                    }
+                ),
                 "elapsed_seconds": round(product_crawl_elapsed, 3),
                 # Наблюдаемость стадий (**не** контракт): ожидание фетча/экстракции и работа
                 # нарезки на главном потоке + остаток этого же окна. ``embed_s``/``build_s``
@@ -2773,9 +2922,11 @@ def _build_corpus(
                     truncated_products,
                     _now_iso(),
                     products=[product_id],
-                    reasons=zero_source_reasons,
+                    reasons={**zero_source_reasons, **offline_reasons},
                     resolved_manually=manual_urls_by_product,
                     partial_docs=partial_urls_by_product,
+                    # ``--only-failed``: ремонт не наблюдал продукт целиком.
+                    incomplete_reasons=coverage_incomplete,
                 )
                 # 16 §3.2: ``coverage_complete`` строки продукта — та же величина, что
                 # легла в ``corpus_coverage``, а не второй её расчёт.
@@ -2877,11 +3028,14 @@ def _build_corpus(
                 truncated_products,
                 _now_iso(),
                 products=products,
-                reasons=zero_source_reasons,
+                reasons={**zero_source_reasons, **offline_reasons},
                 resolved_manually=manual_urls_by_product,
                 # I2/I2c: та же карта, что на границе продукта — конец фазы
                 # перезаписывает строки покрытия и обязан сохранить причину.
                 partial_docs=partial_urls_by_product,
+                # Тот же набор продуктов-ремонтов: перезапись не должна вернуть им
+                # ``complete``, которого они не заслужили.
+                incomplete_reasons=coverage_incomplete,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(
@@ -3163,6 +3317,9 @@ def _build_corpus(
         # оператор узнал о пробеле из вывода фазы, а не из чтения файла.
         *([gap_line] if gap_line else []),
         *embed_notes,
+        # 09 §6.3: оффлайн-проход — по строке на продукт. Строка нужна оператору: без неё
+        # «корпус собрался» читалось бы как «сайт прочитан», хотя сети не было вовсе.
+        *offline_notes,
         # I3/§5: наблюдение SERP-контура — структурная запись (машинному потребителю) и
         # строка (оператору). Пишется и при выключенном контуре: «выключено, источник X»
         # отличимо от «контур был, но ничего не дал».
@@ -3175,6 +3332,9 @@ def _build_corpus(
         # K2/§13: пометка ячеек прошлой сборки — наблюдение фазы (очередь пере-оценки),
         # а не ошибка: корпус собран, вердикты прошлой сборки опубликованы не будут.
         *stale_notes,
+        # ``--only-failed``: учёт ремонта (work-set / отброшено с причиной) — одна строка
+        # на продукт, чтобы ни один провал не исчез молча.
+        *repair_notes,
     ]
     # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
     # ``archive_observations``/``corpus_members``). Запись есть даже при нулевом выходе.

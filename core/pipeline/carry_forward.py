@@ -63,6 +63,7 @@ from core.ports.state import CellMeasurementRow, ProductStatePort
 from core.ports.store import StorePort
 from core.ports.vector_index import RetrievalResult
 from core.util.hashing import short_hash
+from core.util.ids import doc_version_of
 
 __all__ = [
     "CARRYABLE_STATES",
@@ -295,25 +296,52 @@ def _partition_of(retrieved: Sequence[Any], fallback: str | None) -> str | None:
     return fallback
 
 
+def _retrieved_doc_versions(retrieved: Sequence[Any]) -> frozenset[str]:
+    """Версии документов retrieved-набора текущей ячейки (O5).
+
+    Источник — ``chunk_id`` каждого чанка (``product:doc_version_id:chunk_no``), разбор —
+    :func:`core.util.ids.doc_version_of` (та же грамматика, что у писателя evidence в Ш6).
+    Чанки с legacy-адресом (``product:content_hash:chunk_no``) версии не несут и в набор
+    не попадают: у такой строки ``doc_version_id`` в БД не записан, и требование к ней не
+    предъявляется — иначе исторические прогоны стали бы непереносимыми из-за формы адреса,
+    а не из-за смены документа.
+    """
+    versions = {
+        version
+        for chunk in retrieved
+        if (version := doc_version_of(str(getattr(chunk, "chunk_id", "") or "")))
+    }
+    return frozenset(versions)
+
+
 def _evidence_chain_valid(
     evidence: Sequence[CellEvidence],
     *,
     product_id: str,
     retrieved_hashes: frozenset[str],
+    retrieved_doc_versions: frozenset[str] = frozenset(),
 ) -> bool:
-    """Цепочка доказательств переносимой ячейки (09 §10.2, I17/I19).
+    """Цепочка доказательств переносимой ячейки (09 §10.2, I17/I19, O5).
 
     Проверяется ровно то, что делает перенос честным:
 
     * ``ev.product_id == product_id`` — I17: доказательство чужого продукта не переезжает;
     * ``ev.content_hash`` непуст и **входит в retrieved-набор текущей ячейки**: иначе
       переносилось бы доказательство из документа, которого ячейка в этом прогоне не
-      видела, и вердикт выглядел бы подтверждённым текстом, которого у неё не было.
+      видела, и вердикт выглядел бы подтверждённым текстом, которого у неё не было;
+    * ``ev.doc_version_id`` (O5), если он записан, **тоже** входит в retrieved-набор
+      версий: ``content_hash`` — версия текста и не различает уровень извлечения и версию
+      экстрактора, поэтому один и тот же текст в другой версии документа проходил бы
+      прежнюю проверку.
 
-    Форма проверки — по ``content_hash``, потому что это и есть версия текста (I19), и
-    потому что ``cell_evidence`` не несёт ``doc_version_id`` (колонки нет: O5 закрыт
-    частично). Пустой набор evidence перенос не запрещает: ``❓`` без цитат — законный
-    исход, и его защищает ключ (включая отпечаток retrieved-набора), а не цитата.
+    **Проверка строже прежней, не слабее.** Адрес версии добавляется к требованию по
+    ``content_hash``, а не заменяет его, поэтому набор разрешённых переносов только
+    сжимается. Строки прошлых прогонов без ``doc_version_id`` (колонки не было) остаются
+    на прежней проверке по ``content_hash`` — «не записано» не превращается ни в «любая
+    версия подходит», ни в отказ читать прогон.
+
+    Пустой набор evidence перенос не запрещает: ``❓`` без цитат — законный исход, и его
+    защищает ключ (включая отпечаток retrieved-набора), а не цитата.
     """
     for ev in evidence:
         if str(ev.product_id) != str(product_id):
@@ -321,11 +349,17 @@ def _evidence_chain_valid(
         content_hash = str(ev.content_hash or "")
         if not content_hash or content_hash not in retrieved_hashes:
             return False
+        doc_version = str(ev.doc_version_id or "")
+        if doc_version and doc_version not in retrieved_doc_versions:
+            return False
     return True
 
 
 def _absence_chain_valid(
-    records: Sequence[dict[str, Any]], *, retrieved_hashes: frozenset[str]
+    records: Sequence[dict[str, Any]],
+    *,
+    retrieved_hashes: frozenset[str],
+    retrieved_doc_versions: frozenset[str] = frozenset(),
 ) -> bool:
     """Протокол отсутствия: цитируемые документы обязаны быть в retrieved-наборе.
 
@@ -333,11 +367,15 @@ def _absence_chain_valid(
     контуру), а не цитата из документа: их законность держится на отпечатке покрытия и
     правила ``❌``, а не на конкретном чанке. Записи **с** ``content_hash`` проверяются так
     же, как типизированный evidence: перенос не должен опираться на текст, которого
-    ячейка в этом прогоне не видела.
+    ячейка в этом прогоне не видела. Записанный ``doc_version_id`` (O5) проверяется тем же
+    правилом и так же **добавляется** к проверке по хешу.
     """
     for record in records:
         content_hash = str(record.get("content_hash") or "")
         if content_hash and content_hash not in retrieved_hashes:
+            return False
+        doc_version = str(record.get("doc_version_id") or "")
+        if doc_version and doc_version not in retrieved_doc_versions:
             return False
     return True
 
@@ -502,12 +540,18 @@ def carry_forward_cell(
         str(getattr(chunk, "content_hash", "") or "") for chunk in retrieved
     )
     retrieved_hashes = frozenset(item for item in retrieved_hashes if item)
+    retrieved_doc_versions = _retrieved_doc_versions(retrieved)
     if not _evidence_chain_valid(
-        evidence, product_id=product_id, retrieved_hashes=retrieved_hashes
+        evidence,
+        product_id=product_id,
+        retrieved_hashes=retrieved_hashes,
+        retrieved_doc_versions=retrieved_doc_versions,
     ):
         return None
     if not _absence_chain_valid(
-        previous_cell.absence_evidence, retrieved_hashes=retrieved_hashes
+        previous_cell.absence_evidence,
+        retrieved_hashes=retrieved_hashes,
+        retrieved_doc_versions=retrieved_doc_versions,
     ):
         return None
     if previous.evidence_digest and previous.evidence_digest != evidence_digest(evidence):

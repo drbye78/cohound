@@ -44,13 +44,15 @@ from core.domain import (
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     EMBED_BATCH_CHUNKS,
+    build_corpus,
+    format_embed_progress,
+)
+from core.pipeline.corpus_index import (
     _embed_and_build,
     _embed_batched,
     _EmbedCensus,
     _EmbedThroughput,
     _make_embed_reporter,
-    build_corpus,
-    format_embed_progress,
 )
 from core.pipeline.embed_cache import (
     ENVELOPE_FORMAT,

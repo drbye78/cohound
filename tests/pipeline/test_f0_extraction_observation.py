@@ -37,9 +37,9 @@ from core.domain.enums import DocumentLevel
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     ExtractionPool,
-    _write_worker_peak_rss,
     build_corpus,
 )
+from core.pipeline.extraction_runtime import _write_worker_peak_rss
 from core.pipeline.resources import ResourcesObservation
 from core.ports.types import (
     Chunk,

@@ -1048,7 +1048,7 @@ def test_build_extraction_pool_split_thread_pool(tmp_path: Path) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     from core.cli.wiring import build_extraction_pool
-    from core.pipeline.corpus import _ExtractRequest
+    from core.pipeline.extraction_runtime import _ExtractRequest
     from core.ports.types import ExtractedDoc, RawPage
     from core.util.hashing import content_hash
 
@@ -1262,7 +1262,7 @@ def test_local_extract_pool_recycles_worker_and_reinits_extractor(
     """
     from core.cli.wiring import _local_extract_pool_factory
     from core.domain.enums import DocumentLevel
-    from core.pipeline.corpus import _extract_worker, _ExtractRequest
+    from core.pipeline.extraction_runtime import _extract_worker, _ExtractRequest
     from core.ports.types import ExtractionRoute
 
     raw = tmp_path / "page.bin"

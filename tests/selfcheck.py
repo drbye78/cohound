@@ -3251,11 +3251,11 @@ def _directory_kinds_helpers() -> None:
     используются обоими поллерами; ``RFC822`` и ISO ``Z`` разбираются единообразно.
     """
 
-    from core.pipeline.corpus import _DIRECTORY_KINDS
+    from core.pipeline.corpus_ingest import DIRECTORY_KINDS
     from core.util.feed import FeedEntry, entry_not_before, parse_instant
 
-    if frozenset({"feed", "channel"}) != _DIRECTORY_KINDS:
-        raise AssertionError(f"директорные kind неверны: {_DIRECTORY_KINDS}")
+    if frozenset({"feed", "channel"}) != DIRECTORY_KINDS:
+        raise AssertionError(f"директорные kind неверны: {DIRECTORY_KINDS}")
     threshold = parse_instant("2026-10-08T00:00:00Z")
     if threshold is None or threshold.tzinfo is None:
         raise AssertionError("parse_instant обязан вернуть aware datetime")

@@ -40,7 +40,10 @@ from core.domain import (
     Status,
 )
 from core.pipeline.composition import derive_composition_id
-from core.pipeline.corpus import _derive_partition_build_id, _product_content_token
+from core.pipeline.corpus_index import (
+    _derive_partition_build_id,
+    _product_content_token,
+)
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.pipeline.incremental import doc_version_id
 from core.pipeline.lint import lint_run_inputs

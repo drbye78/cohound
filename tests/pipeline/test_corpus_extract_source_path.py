@@ -23,12 +23,12 @@ from pathlib import Path
 import pytest
 
 from core.domain.enums import DocumentLevel
-from core.pipeline.corpus import (
+from core.pipeline.extract_cache import ExtractionCache
+from core.pipeline.extraction_runtime import (
     _extract_cache_key,
     _ExtractRequest,
     _run_extract,
 )
-from core.pipeline.extract_cache import ExtractionCache
 from core.ports.types import ExtractedDoc, ExtractionRoute, FetchMode, RawPage
 from core.util.hashing import content_hash
 

@@ -28,8 +28,8 @@ from core.pipeline.corpus import (
     ZERO_SOURCE_ALL_SEEDS_REJECTED,
     ZERO_SOURCE_NO_SEEDS,
     ZERO_SOURCE_NO_URLS_ENTRY,
-    _product_notes,
 )
+from core.pipeline.corpus_coverage import _product_notes
 
 
 def _end(product_id: str, **over: Any) -> dict[str, Any]:

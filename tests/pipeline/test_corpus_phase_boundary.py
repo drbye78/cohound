@@ -34,8 +34,8 @@ from test_corpus import RUN_ID, SqliteStore, _build, _build_of, _make_run
 
 from core.domain.enums import EmbedDevice
 from core.pipeline import corpus as corpus_module
-from core.pipeline.corpus import (
-    IndexBuild,
+from core.pipeline.corpus import IndexBuild
+from core.pipeline.corpus_index import (
     _derive_partition_build_id,
     _product_content_token,
 )

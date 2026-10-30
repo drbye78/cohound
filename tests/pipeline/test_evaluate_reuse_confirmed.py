@@ -41,7 +41,7 @@ from core.domain import (
     Status,
     check_cell,
 )
-from core.pipeline.corpus import _chunk_id
+from core.pipeline.corpus_index import _chunk_id
 from core.pipeline.evaluate import (
     ABSENCE_COVERAGE_UNSATISFIED_REASON,
     REUSE_UNCONFIRMED_REASON,

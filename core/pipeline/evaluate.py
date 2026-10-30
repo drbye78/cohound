@@ -126,7 +126,7 @@ from core.ports.vector_index import (
     batched_search,
 )
 from core.util.hashing import content_hash
-from core.util.ids import parse_source_id
+from core.util.ids import doc_version_of, parse_source_id
 
 __all__ = [
     "ABSENCE_COVERAGE_UNSATISFIED_REASON",
@@ -199,6 +199,13 @@ ABSENCE_COVERAGE_UNSATISFIED_REASON = "absence_coverage_unsatisfied"
 #: записано вовсе). Пишется и в ``evidence_scope.reason`` (почему ``❓``), и в
 #: ``cells.validation_notes`` (что именно не так) — предъявим после прогона.
 REUSE_UNCONFIRMED_REASON = "reuse_unconfirmed"
+
+#: Машинный токен O5: у evidence **нет адреса версии документа**. Пишется в
+#: ``cells.validation_notes``, когда ``chunk_id`` ретривнутого чанка не разбирается в
+#: версию (``dv_...``): малформед-адрес либо legacy-форма ``product:content_hash:chunk_no``,
+#: где версия текста есть, а уровня извлечения/версии экстрактора нет. Колонка при этом
+#: остаётся ``NULL`` — выдуманный адрес хуже отсутствующего: он выглядит проверенным.
+EVIDENCE_DOC_VERSION_UNRESOLVED_REASON = "evidence_doc_version_unresolved"
 
 #: Классы отрицания, чьё «нет» держится на **конкретном** документе (цитата вендора либо
 #: авторитетная энумерация): у них проверяется каждый документ, на который опирается ``❌``.
@@ -942,6 +949,9 @@ def _absence_dict(ev) -> dict:  # noqa: ANN001 - CellEvidence, без импор
         "scope_acceptance": ev.scope_acceptance,
         # R7/09 §8.1: та же привязка, что у ``cell_evidence`` — композиция прогона.
         "index_build_id": ev.index_build_id,
+        # O5: адрес версии документа едет с записью так же, как ``content_hash``: запись
+        # протокола отсутствия — тоже evidence-строка, и версия у неё та же, что у цитаты.
+        "doc_version_id": ev.doc_version_id,
     }
 
 
@@ -1728,6 +1738,9 @@ def _build_absence_evidence(
             "evidence_type": EvidenceType.ABSENCE.value,
             "scope_acceptance": scope.scope_acceptance,
             "index_build_id": composition_id,
+            # O5: у синтетического протокола нет чанка, значит нет и версии документа —
+            # ``NULL`` честнее выдуманного адреса (это утверждение о корпусе, не о чанке).
+            "doc_version_id": None,
             "denial_strength": scope.denial_strength.value,
             "denial_basis": scope.basis,
             "note": (
@@ -2368,6 +2381,66 @@ def _no_fragments_outcome(
         ),
     )
 
+def _with_doc_versions(
+    validation: ValidationResult,
+    *,
+    chunks: Mapping[str, ChunkLike],
+) -> ValidationResult:
+    """O5: каждой evidence-строке — адрес версии документа, из которой взята цитата.
+
+    Адрес берётся из ``chunk_id`` **ретривнутого чанка** (второй сегмент, ``dv_...``,
+    16 §6), а не из ``content_hash``: хеш — версия **текста**, он не различает уровень
+    извлечения и версию экстрактора, поэтому две разные версии одного текста были бы
+    неотличимы, и перенос ячейки (``carry_forward._evidence_chain_valid``) мог бы
+    «подтвердить» цитату документом, которого ячейка в этом прогоне не видела.
+
+    Разбор — :func:`core.util.ids.doc_version_of` (та же грамматика ``source_id``, второго
+    парсера нет). Малформед-адрес и legacy-форма ``product:content_hash:chunk_no`` версии
+    не несут → колонка ``NULL`` и **видимая** запись в ``cells.validation_notes``: значение
+    не выдумывается, а отсутствие адреса не остаётся молчаливым.
+
+    Почему здесь, а не в :func:`core.pipeline.validate.validate_output`. Сверка §10 решает,
+    **какие** цитаты становятся evidence; адрес версии — провенанс уже принятого evidence,
+    и его источник (карта чанков этого вызова) живёт в Ш6. Обе ветки — живой ответ и хит
+    ``eval_cache`` — проходят через один и тот же ``_validate``, поэтому адрес заполняется
+    одинаково и при повторной валидации кэшированного вердикта.
+    """
+    if not validation.resolved_evidence:
+        return validation
+    notes = list(validation.notes)
+    updated: list[Any] = []
+    changed = False
+    for ev in validation.resolved_evidence:
+        chunk = chunks.get(str(ev.source_id))
+        chunk_id = str(getattr(chunk, "chunk_id", "") or "") if chunk is not None else ""
+        doc_version = doc_version_of(chunk_id)
+        if doc_version is None:
+            detail = (
+                "чанк не найден среди переданных оценщику"
+                if chunk is None
+                else f"chunk_id={chunk_id or '—'}"
+            )
+            note = (
+                f"{EVIDENCE_DOC_VERSION_UNRESOLVED_REASON}: evidence "
+                f"{ev.source_id!r} без адреса версии документа ({detail}) — "
+                "doc_version_id не записан"
+            )
+            if note not in notes:
+                notes.append(note)
+        if doc_version != ev.doc_version_id:
+            ev = ev.model_copy(update={"doc_version_id": doc_version})
+            changed = True
+        updated.append(ev)
+    if not changed and len(notes) == len(validation.notes):
+        return validation
+    return ValidationResult(
+        ok=validation.ok,
+        failure_kind=validation.failure_kind,
+        notes=notes,
+        resolved_evidence=updated,
+    )
+
+
 def evaluate_cell(
     *,
     param: CatalogRow,
@@ -2544,19 +2617,24 @@ def evaluate_cell(
 
     def _validate(response: LLMResponse) -> ValidationResult:
         """Единый эшелон §10 для живого ответа и для кэшированного вердикта."""
-        return validate_output(
-            output=response.output,
+        return _with_doc_versions(
+            validate_output(
+                output=response.output,
+                chunks=chunks_by_id,
+                product_id=product_id,
+                param_id=param.param_id,
+                run_id=run_id,
+                resolver=resolver,
+                strict=strict,
+                min_retrieval_score=min_retrieval_score,
+                # 09 §8.1: композиция прогона — из провенанса ретривала
+                # (``RetrievalResult.build_id``); нужна, чтобы legacy-чанк с id сборки не
+                # выдал композицию за физическую партицию в evidence.
+                composition_id=provenance[0],
+            ),
+            # O5: адрес версии документа — из ``chunk_id`` того же чанка, что был передан
+            # оценщику (карта построена по этому вызову, I17).
             chunks=chunks_by_id,
-            product_id=product_id,
-            param_id=param.param_id,
-            run_id=run_id,
-            resolver=resolver,
-            strict=strict,
-            min_retrieval_score=min_retrieval_score,
-            # 09 §8.1: композиция прогона — из провенанса ретривала
-            # (``RetrievalResult.build_id``); нужна, чтобы legacy-чанк с id сборки не
-            # выдал композицию за физическую партицию в evidence.
-            composition_id=provenance[0],
         )
 
     # Хит — дополнительная попытка **до** цикла повторов: он не тратит бюджет

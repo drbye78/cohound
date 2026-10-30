@@ -53,11 +53,11 @@ from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     ExtractionPool,
     IndexBuild,
-    _ExtractRequest,
     build_corpus,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
+from core.pipeline.extraction_runtime import _ExtractRequest
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
@@ -522,7 +522,7 @@ def test_extractor_version_carries_level(tmp_path: Path) -> None:
         DoclingDocumentExtractor,
         docling_extractor_version,
     )
-    from core.pipeline.corpus import (
+    from core.pipeline.corpus_index import (
         _derive_partition_build_id,
         _product_extractor_token,
     )

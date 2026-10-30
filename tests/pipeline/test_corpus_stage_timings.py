@@ -35,10 +35,12 @@ from core.domain import (
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
-    _CorpusStageTimings,
-    _embed_and_build,
     _stage_timings_aggregate,
     build_corpus,
+)
+from core.pipeline.corpus_index import (
+    _CorpusStageTimings,
+    _embed_and_build,
 )
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS, execution_contract_digest
 from core.pipeline.resources import ResourcesObservation, build_resources_block
@@ -337,7 +339,8 @@ def test_extract_wait_is_measured_through_the_pool(tmp_path: Path) -> None:
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from core.pipeline.corpus import ExtractionPool, _ExtractRequest
+    from core.pipeline.corpus import ExtractionPool
+    from core.pipeline.extraction_runtime import _ExtractRequest
 
     def _slow_worker(request: _ExtractRequest) -> ExtractedDoc:
         time.sleep(0.02)

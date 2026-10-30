@@ -27,11 +27,11 @@ from core.cli.context import (
     _add_phase4_flags,
     _concise,
     _ensure_run,
-    _filter_corpus_urls,
     _follow_session,
     _gate_runtime,
     _load_corpus_urls,
     _load_render_modes,
+    _only_failed_work_set,
     _open_state_store,
     _package_lock_handle,
     _persist_llm_scenarios,
@@ -981,14 +981,21 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         # обращение к необъявленному имени на пути исключения было бы NameError вместо
         # исходной ошибки.
         previous_store: Any = None
+        #: ``--only-failed``: work-set ремонта (``product_id → [url]``) — отдельный вход Ш5.
+        #: Провал глубокой страницы не становится seed-корнем: ремонт идёт известными
+        #: depth-0 URL, авторские корни не обходятся (см. ``_only_failed_work_set``).
+        only_failed_repairs: dict[str, list[str]] = {}
         try:
             if only_failed or only_product is not None:
-                corpus_urls, filter_notes = _filter_corpus_urls(
+                corpus_urls, only_failed_repairs, filter_notes = _only_failed_work_set(
                     corpus_urls,
                     store=store,
                     session_id=session_id,
                     only_failed=only_failed,
                     only_product=only_product,
+                    # Межпрогонный носитель провалов: тот же ``state.db`` пакета, что увидит
+                    # Ш5. ``None`` — состояние недоступно (тогда ремонт пуст и это видно).
+                    state=state_store,
                 )
             # F0/§3.3: preflight бюджета памяти — **до** запуска фаз и до сборки портов.
             # Это отказ начинать заведомо невозможную конфигурацию (0 воркеров при
@@ -1122,6 +1129,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                     else None
                 ),
                 refresh_policy=refresh_policy.value,
+                # ``--only-failed``: work-set ремонта — отдельный вход Ш5 (не ``urls``:
+                # провал глубокой страницы не становится seed-корнем). Пусто ⇒ прежнее
+                # поведение; продукты без провалов в набор не попадают и не краулятся.
+                only_failed_repairs=only_failed_repairs or None,
                 # 09 §12.5: тот же дайджест, что ушёл в ``run_id``/lineage (``contract_d``),
                 # — манифест/``runs`` не пересчитывают его из другого набора значений.
                 execution_contract_digest=contract_d,

@@ -37,21 +37,27 @@ from core.domain import (
     EmbedDevice,
     FailureKind,
     RateLimitSpec,
+    ReuseKind,
     RunConfig,
     RunMode,
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
-    _SUBMIT_MAX_ATTEMPTS,
+    COVERAGE_OFFLINE_NO_OBSERVATION,
     ZERO_SOURCE_ALL_SEEDS_REJECTED,
     ZERO_SOURCE_NO_SEEDS,
     ZERO_SOURCE_NO_URLS_ENTRY,
     IndexBuild,
-    _derive_partition_build_id,
-    _product_content_token,
-    _work_set_idempotency_key,
     build_corpus,
     derive_corpus_coverage,
+)
+from core.pipeline.corpus_index import (
+    _derive_partition_build_id,
+    _product_content_token,
+)
+from core.pipeline.corpus_ingest import (
+    _SUBMIT_MAX_ATTEMPTS,
+    _work_set_idempotency_key,
 )
 from core.pipeline.crawl_frontier import CrawlLimits
 from core.pipeline.crawl_session import default_session_id, truncation_summary
@@ -5707,33 +5713,123 @@ def test_state_executor_preserves_validators_and_304(tmp_path: Path) -> None:
         assert state.get_url_state("p1", URL_P1_A).doc_version_id == version.doc_version_id
 
 
-def test_state_offline_reports_explicit_error_and_still_crawls(tmp_path: Path) -> None:
-    """``offline``: reuse не реализован — видимая ошибка на продукт, известный URL краулится."""
+class _OfflineBombCrawler(_Crawler):
+    """Краулер, обязанный НЕ вызываться под ``--refresh offline``.
+
+    Доказательство отсутствия сети: вызов **сначала** попадает в ``calls``, затем падает.
+    Порядок важен — иначе «сети не было» доказывалось бы пустым списком, который пуст и
+    при падении до записи. Фазовый контракт изолирует исключение краулера в ``errors``,
+    поэтому тест утверждает ещё и пустой ``errors``: одного ``calls == []`` мало.
+    """
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
+        self.calls.append((url, plan))
+        raise AssertionError(
+            f"сеть тронута под --refresh offline: fetch({url}) — политика запрещает "
+            "любой сетевой вызов"
+        )
+
+
+def test_state_offline_reuses_from_state_without_network(tmp_path: Path) -> None:
+    """``offline``: сеть не тронута, известные URL переиспользованы из durable-субстрата.
+
+    Инверсия прежнего утверждения (было: «reuse не реализован — видимая ошибка на
+    продукт, известный URL краулится»). Решение владельца: политика ``offline`` означает
+    «наблюдать нечем и не будем», поэтому документ и его chunk-set берутся из
+    ``state.db`` (``url_state`` → ``document_version`` → ``chunk_store``), HTTP-статуса нет
+    вовсе, а ``reuse_kind`` честно равен ``reused`` (не ``revalidated``: сервер не
+    спрашивался).
+
+    Субстрат наполняется **реальным** путём (первый прогон с ``auto``), а не собран руками:
+    иначе тест доказывал бы согласие заглушки с заглушкой. Второй прогон доказывает
+    отсутствие сети падающим краулером (любой ``fetch`` — провал теста) и пустым
+    ``errors``; экстрактор и чанкер считают вызовы и обязаны остаться нетронутыми.
+    """
     with SqliteStateStore(":memory:") as state:
-        state.upsert_url_state(
-            UrlStateRow(
-                product_id="p1",
-                url=URL_P1_B,
-                normalized_url=URL_P1_B,
-                doc_version_id="dv_known",
-                etag=STATE_ETAG,
-            )
-        )
-        crawler = _StatefulCrawler(
-            {URL_P1_A: b"page one", URL_P1_B: b"page two"}
-        )
-        result = _state_run(
-            tmp_path,
+        # 1. Наполнение durable-субстрата: url_state + document_version + chunk-set.
+        first = _state_run(
+            tmp_path / "r1",
             state,
-            pages={},
-            urls={"p1": [URL_P1_A]},
-            crawler=crawler,
-            refresh_policy="offline",
+            pages={URL_P1_A: b"page one", URL_P1_B: b"page two"},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+            crawler=_StatefulCrawler(
+                {URL_P1_A: b"page one", URL_P1_B: b"page two"}
+            ),
         )
-        assert "offline reuse не реализован в corpus: p1" in result.errors
-        # Элемент обработан как revalidate: сеть тронута, а не молча пропущена.
-        assert [u for u, _plan in crawler.calls] == [URL_P1_A, URL_P1_B]
-        assert _validators_sent(crawler, URL_P1_B) == (None, None)
+        assert _build_of(first).doc_counters == {
+            "p1": {"total": 2, "new": 2, "reused": 0}
+        }
+        known_versions = {
+            row.url: row.doc_version_id
+            for row in state.iter_url_state("p1")
+        }
+        assert set(known_versions) == {URL_P1_A, URL_P1_B}
+        assert all(known_versions.values())
+
+        # 2. Оффлайн-прогон: сеть запрещена, корпус — из субстрата.
+        second_store = SqliteStore(":memory:")
+        _make_run(second_store)
+        try:
+            bomb = _OfflineBombCrawler({})
+            extractor = _Extractor()
+            chunker = _CountingChunker()
+            second = _state_run(
+                tmp_path / "r2",
+                state,
+                pages={},
+                urls={"p1": [URL_P1_A, URL_P1_B]},
+                crawler=bomb,
+                extractor=extractor,
+                chunker=chunker,
+                store=second_store,
+                run_id=RUN_ID,
+                refresh_policy="offline",
+            )
+            # Сеть не тронута: ни вызова краулера, ни записи о его сбое в ``errors``
+            # (исключение краулера фаза изолирует — значит проверять надо оба факта).
+            assert bomb.calls == []
+            assert second.errors == [], second.errors
+            # Экстракция и нарезка не повторяются: переиспользуется готовый chunk-set.
+            assert extractor.calls == 0
+            assert chunker.calls == 0
+
+            build = _build_of(second)
+            assert build.doc_counters == {"p1": {"total": 2, "new": 0, "reused": 2}}
+
+            docs = _docs(second_store)
+            # ``corpus_docs`` не несёт ``run_id``: носитель разграничен БД прогона, и этот
+            # стор обслуживает только второй прогон.
+            rows = {
+                row["url"]: row
+                for row in second_store.conn.execute(
+                    "SELECT url, http_status, reuse_kind, fetched_at FROM corpus_docs"
+                )
+            }
+            coverage = second_store.read_corpus_coverage(RUN_ID, "p1")
+        finally:
+            second_store.close()
+
+    assert {doc.url for doc in docs} == {URL_P1_A, URL_P1_B}
+    for doc in docs:
+        # Провенанс: полученного ответа не было, поэтому статуса и момента нет.
+        assert doc.reuse_kind is ReuseKind.REUSED
+        assert doc.http_status is None
+        assert doc.fetched_at is None
+        # Версия документа — та же durable-версия, а не новая запись «на всякий случай».
+        assert known_versions[doc.url]
+
+    # Тот же факт в **колонках** БД: NULL, а не «0»/«200» и не пустая строка.
+    assert set(rows) == {URL_P1_A, URL_P1_B}
+    for row in rows.values():
+        assert row["http_status"] is None
+        assert row["reuse_kind"] == ReuseKind.REUSED.value
+        assert row["fetched_at"] is None
+
+    # Честность покрытия (I2/I2c): наблюдений в этом прогоне нет — «полно» не объявляется.
+    assert coverage is not None
+    assert coverage.observed_sources == 0
+    assert coverage.complete is False
+    assert coverage.reason == COVERAGE_OFFLINE_NO_OBSERVATION
 
 
 def test_state_incremental_grows_corpus_via_existing_bfs(tmp_path: Path) -> None:

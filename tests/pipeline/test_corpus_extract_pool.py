@@ -46,16 +46,18 @@ from core.domain import (
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
-    _EXTRACT_MAX_POOL_REBUILDS,
     ExtractionPool,
     IndexBuild,
-    _extract_cache_key,
-    _ExtractRequest,
     build_corpus,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.extract_cache import ExtractionCache
+from core.pipeline.extraction_runtime import (
+    _EXTRACT_MAX_POOL_REBUILDS,
+    _extract_cache_key,
+    _ExtractRequest,
+)
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -1039,7 +1041,7 @@ def test_extract_request_carries_no_bytes(tmp_path: Path) -> None:
     assert "cache" not in names and "extract_cache" not in names
 
     # Воркер получает ровно один аргумент (payload) и не несёт ссылок на store/session.
-    from core.pipeline.corpus import _extract_worker
+    from core.pipeline.extraction_runtime import _extract_worker
 
     assert list(_extract_worker.__code__.co_varnames)[:1] == ["request"]
     assert "store" not in _extract_worker.__code__.co_names
@@ -1720,7 +1722,8 @@ def test_extract_worker_trims_arenas_once_per_document(
     Счётчик — подмена ``core.util.memory.release_free_arenas``: проверяется не эффект
     ``malloc_trim`` (он платформенный), а факт и кратность вызова в воркере.
     """
-    from core.pipeline.corpus import _extract_worker, set_worker_extractor
+    from core.pipeline.corpus import set_worker_extractor
+    from core.pipeline.extraction_runtime import _extract_worker
     from core.util import memory
 
     calls: list[int] = []
@@ -1745,7 +1748,8 @@ def test_extract_worker_trim_failure_does_not_fail_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Падающий хук памяти не ломает извлечение: документ возвращается как обычно."""
-    from core.pipeline.corpus import _extract_worker, set_worker_extractor
+    from core.pipeline.corpus import set_worker_extractor
+    from core.pipeline.extraction_runtime import _extract_worker
     from core.util import memory
 
     def _boom() -> bool:
@@ -1770,7 +1774,8 @@ def test_extract_worker_trims_even_when_extraction_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Отказ экстрактора: trim всё равно происходит, исключение идёт дальше как прежде."""
-    from core.pipeline.corpus import _extract_worker, set_worker_extractor
+    from core.pipeline.corpus import set_worker_extractor
+    from core.pipeline.extraction_runtime import _extract_worker
     from core.util import memory
 
     calls: list[int] = []
@@ -1830,7 +1835,7 @@ def test_corpus_phase_has_no_trim_note_without_pool(tmp_path: Path) -> None:
 
 def _rss_writing_worker(request: _ExtractRequest) -> ExtractedDoc:
     """Воркер-процесс: пишет свой пик в сток (``rss_dir``) и извлекает как прежде."""
-    from core.pipeline.corpus import _write_worker_peak_rss
+    from core.pipeline.extraction_runtime import _write_worker_peak_rss
 
     try:
         return _reconstruct_worker(request)
@@ -1843,7 +1848,7 @@ def test_worker_rss_sink_is_max_over_pid_files(tmp_path: Path) -> None:
     Контракт ``_ExtractRequest → ExtractedDoc`` не меняется: пик не едет в документе,
     поэтому проверяется сток, а не результат воркера.
     """
-    from core.pipeline.corpus import _write_worker_peak_rss
+    from core.pipeline.extraction_runtime import _write_worker_peak_rss
 
     workers = tmp_path / "workers"
     _write_worker_peak_rss(str(workers))

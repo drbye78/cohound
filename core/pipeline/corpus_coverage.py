@@ -220,6 +220,11 @@ ZERO_SOURCE_ALL_SEEDS_REJECTED = "all_seeds_rejected"
 развёртка источника-каталога. Конкретный URL называет per-seed запись ``errors``."""
 ZERO_SOURCE_NO_URLS_ENTRY = "no_urls_entry"
 """У продукта плана нет записи в отображении ``urls`` вовсе."""
+ONLY_FAILED_REPAIR_REASON = "only_failed_repair"
+"""Прогон ``--only-failed``: в работе были только ранее проваленные URL, остальной корпус
+продукта в этом прогоне не читался. Поэтому покрытие **не** ``complete``, даже если все
+элементы ремонта дошли до ``FETCHED``: «полно» здесь означало бы «полно относительно
+ремонта», а читалось бы как «сайт прочитан» (I2/I2c)."""
 
 
 def _product_notes(events: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -337,6 +342,7 @@ def _persist_corpus_coverage(
     reasons: Mapping[str, str | None] | None = None,
     resolved_manually: Mapping[str, Iterable[str]] | None = None,
     partial_docs: Mapping[str, Iterable[str]] | None = None,
+    incomplete_reasons: Mapping[str, str] | None = None,
 ) -> dict[str, CorpusCoverage]:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
 
@@ -366,6 +372,14 @@ def _persist_corpus_coverage(
     версии» (``304``-переиспользование): оба — наблюдения одного и того же документа, и
     второе не становится слабее от того, что прибор не вызывался повторно (v5).
 
+    ``incomplete_reasons`` — ``product_id → машинный токен``: прогон **по построению** не
+    наблюдал продукт целиком, даже если все его элементы дошли до ``FETCHED``. Сегодня
+    единственный производитель — ремонт провалов (``--only-failed``: в работе были только
+    ранее проваленные URL, остальной корпус не читался) с токеном
+    :data:`ONLY_FAILED_REPAIR_REASON`. Такая строка получает ``complete=False`` и названную
+    причину: иначе ремонт одного URL объявлял бы покрытие полным, а ``❌`` публиковался бы
+    на корпусе, который в этом прогоне не наблюдался. Пустая карта — поведение прежнее.
+
     :returns: ``product_id → CorpusCoverage`` — ровно те строки, которые записаны. Нужен
         писателю ``run_product`` (16 §3.2): ``coverage_complete`` — та же величина, что
         легла в ``corpus_coverage``, а не второй её расчёт (два носителя одной величины
@@ -377,6 +391,8 @@ def _persist_corpus_coverage(
         by_product.setdefault(item.product_id, []).append(item)
     planned = {str(product_id) for product_id in (products or ())}
     known_reasons = dict(reasons or {})
+    #: Продукты, которые этот прогон по построению не наблюдал целиком (ремонт провалов).
+    scope_incomplete = dict(incomplete_reasons or {})
     for product_id in sorted(planned | set(by_product)):
         items = by_product.get(product_id, [])
         if not items:
@@ -402,6 +418,13 @@ def _persist_corpus_coverage(
                 # ``partial_extraction`` в ``blocked``).
                 partial_docs=(partial_docs or {}).get(product_id, ()),
             )
+            token = scope_incomplete.get(product_id)
+            if token:
+                # Прогон не наблюдал продукт целиком (ремонт провалов): «все элементы
+                # дошли до FETCHED» здесь означает «дошли те, что были в ремонте».
+                coverage = coverage.model_copy(
+                    update={"complete": False, "reason": token}
+                )
         store.save_corpus_coverage(run_id, coverage)
         written[product_id] = coverage
     return written

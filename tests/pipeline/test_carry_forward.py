@@ -40,7 +40,7 @@ from core.pipeline.carry_forward import (
     cell_reuse_conditions,
     evidence_digest,
 )
-from core.pipeline.corpus import _chunk_id
+from core.pipeline.corpus_index import _chunk_id
 from core.pipeline.digests import (
     CELL_REUSE_SCHEMA,
     cell_reuse_key,

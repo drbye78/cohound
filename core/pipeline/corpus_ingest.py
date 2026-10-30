@@ -37,7 +37,7 @@ import json
 import os
 import shutil
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -122,7 +122,7 @@ from core.ports.crawl_executor import (
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.poller import PollPort
-from core.ports.state import ProductStatePort, UrlStateRow
+from core.ports.state import DocumentVersionRow, ProductStatePort, UrlStateRow
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
@@ -1259,6 +1259,71 @@ def persist_docs(
             errors.append(f"upsert_corpus_doc({doc.doc_id}): {type(exc).__name__}: {exc}")
 
 
+def _accept_chunk_candidates(
+    product_id: str,
+    document_id: str,
+    dv_id: str,
+    candidates: Iterable[tuple[int, str, str, str, str]],
+    *,
+    ingest: ProductIngest,
+    seen_chunk_ids: set[str],
+    errors: list[str],
+    url: str,
+    lang: str | None,
+    embed_model_id: str,
+) -> list[tuple[int, str, str, str]]:
+    """Допускает чанк-кандидаты в корпус — **единственная** точка I19-гейта чанка.
+
+    Кандидат приходит ``(chunk_no, text, heading_path, context_prefix, provided_hash)``:
+    так выглядит и результат чанкера, и переиспользованный chunk-set. Один гейт на оба
+    пути — иначе «нарезка» и «переиспользование» разошлись бы в проверках, а
+    переиспользование как раз и есть место, где текст не пере-наблюдается.
+
+    Отклонение видно (``errors``) и не тихо: чанк без ``content_hash``, чанк с пустым
+    текстом и дублирующийся ``chunk_id`` не попадают в корпус, но и не исчезают молча.
+
+    :returns: принятые ``(chunk_no, text, heading_path, context_prefix)`` — вход
+        durable-записи ``chunk_meta``/``chunk_store`` (09 §4.2/§9).
+    """
+    accepted: list[tuple[int, str, str, str]] = []
+    for chunk_no, text, heading_path, context_prefix, provided_hash in candidates:
+        # I19: у каждого индексируемого чанка обязан быть непустой hash.
+        if not provided_hash:
+            errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
+            continue
+        if not text.strip():
+            errors.append(f"I19: {document_id}: чанк с пустым текстом отклонён")
+            continue
+
+        cid = _chunk_id(product_id, dv_id, chunk_no)
+        if cid in seen_chunk_ids:
+            errors.append(f"{document_id}: дублирующийся chunk_id {cid!r} отклонён")
+            continue
+        seen_chunk_ids.add(cid)
+
+        ingest.chunks.append(
+            CorpusChunk(
+                chunk_id=cid,
+                doc_id=document_id,
+                product_id=product_id,
+                url=url,
+                heading_path=heading_path,
+                lang=lang,
+                chunk_no=chunk_no,
+                text=text,
+                context_prefix=context_prefix,
+                # Авторитетный хеш — от чистого текста (I19/§10).
+                content_hash=content_hash(text),
+                # build_id проставляется в Pass B после фиксации id сборки.
+                build_id=None,
+                embed_model_id=embed_model_id or None,
+                embedded_at=None,
+            )
+        )
+        accepted.append((chunk_no, text, heading_path, context_prefix))
+    return accepted
+
+
 def finish_one(
     product_id: str,
     url: str,
@@ -1536,42 +1601,18 @@ def finish_one(
             )
         ]
 
-    accepted: list[tuple[int, str, str, str]] = []
-    for chunk_no, text, heading_path, context_prefix, provided_hash in candidates:
-        # I19: у каждого индексируемого чанка обязан быть непустой hash.
-        if not provided_hash:
-            errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
-            continue
-        if not text.strip():
-            errors.append(f"I19: {document_id}: чанк с пустым текстом отклонён")
-            continue
-
-        cid = _chunk_id(product_id, dv_id, chunk_no)
-        if cid in seen_chunk_ids:
-            errors.append(f"{document_id}: дублирующийся chunk_id {cid!r} отклонён")
-            continue
-        seen_chunk_ids.add(cid)
-
-        ingest.chunks.append(
-            CorpusChunk(
-                chunk_id=cid,
-                doc_id=document_id,
-                product_id=product_id,
-                url=page.url,
-                heading_path=heading_path,
-                lang=page.lang,
-                chunk_no=chunk_no,
-                text=text,
-                context_prefix=context_prefix,
-                # Авторитетный хеш — от чистого текста (I19/§10).
-                content_hash=content_hash(text),
-                # build_id проставляется в Pass B после фиксации id сборки.
-                build_id=None,
-                embed_model_id=embed_model_id or None,
-                embedded_at=None,
-            )
-        )
-        accepted.append((chunk_no, text, heading_path, context_prefix))
+    accepted: list[tuple[int, str, str, str]] = _accept_chunk_candidates(
+        product_id,
+        document_id,
+        dv_id,
+        candidates,
+        ingest=ingest,
+        seen_chunk_ids=seen_chunk_ids,
+        errors=errors,
+        url=page.url,
+        lang=page.lang,
+        embed_model_id=embed_model_id,
+    )
 
     # 09 §6.3/§9: версия документа + chunk-set в durable-субстрате. Идентификатор
     # (``dv_id``) выведен выше — тем же ключом §4.2, которым адресованы ``chunk_id``.
@@ -2762,9 +2803,17 @@ def plan_incremental_items(
     набора нет; ``Frontier`` всё равно применяет блэклист к каждому seed и оставляет
     видимую запись, а не тихий пропуск.
 
-    ``reuse`` (политика ``offline``) в этом срезе **не реализован**: элемент честно
-    деградирует до ``revalidate`` с одной видимой ошибкой на продукт — молчаливая
-    смена политики запрещена. ``new``/``full`` план не расширяют (прежний BFS/sitemap).
+    **``reuse`` (политика ``offline``).** Элемент ``reuse`` доходит до фазы как есть:
+    ``corpus`` исполняет его отдельным проходом без сети
+    (:func:`offline_reuse_product`) и **не** понижает до ``revalidate``. Понижение
+    означало бы, что политика «без сети» ходит в сеть: ``revalidate`` без валидаторов —
+    это безусловный GET. Авторские корни сюда не входят, но и они под ``offline``
+    разрешаются в состоянии, а не в сети — решает вызывающий (он знает корни).
+
+    ``new``/``full`` план не расширяют (прежний BFS/sitemap).
+
+    Ремонт провалов (``--only-failed``) идёт **не** этим путём: он не зависит от режима
+    продукта и не выводится из ``url_state`` целиком — см. :func:`plan_repair_items`.
     """
     if state is None:
         return []
@@ -2789,15 +2838,9 @@ def plan_incremental_items(
         return []
     author = {_state_url_key(url) for url in roots}
     extra: list[IncrementalItem] = []
-    reuse_reported = False
     for item in planned:
         if item.root_url is not None and item.normalized_url in author:
             continue  # авторский корень — прежний путь (каталог/sitemap)
-        if item.kind is IncrementalKind.REUSE:
-            if not reuse_reported:
-                errors.append(f"offline reuse не реализован в corpus: {product_id}")
-                reuse_reported = True
-            item = replace(item, kind=IncrementalKind.REVALIDATE)
         if item.kind is IncrementalKind.REVALIDATE:
             # Валидаторы едут и в локальный ``FetchPlan``, и в ``CrawlWorkItem``.
             planned_validators[(product_id, item.normalized_url)] = (
@@ -2806,6 +2849,431 @@ def plan_incremental_items(
             )
         extra.append(item)
     return extra
+
+
+def _host_declared(url: str, scopes: Sequence[tuple[str, Frontier]]) -> bool:
+    """Объявлен ли host URL хотя бы одним корнем продукта (C: объявленные хосты).
+
+    Предикат — ``Frontier.host_in_scope`` (тот же, что у краула), а не ``in_scope``:
+    path-prefix здесь не проверяется, потому что ремонтный URL — **известный** лист,
+    а не точка продолжения навигации; принадлежность «своему» префиксу решает
+    группировка (:func:`group_revalidation_items`), а host — право вообще тратить
+    бюджет продукта.
+    """
+    host = (urlsplit(url).hostname or "").strip().lower()
+    if not host:
+        return False
+    return any(probe.host_in_scope(host) for _root, probe in scopes)
+
+
+def plan_repair_items(
+    product_id: str,
+    urls: Sequence[str],
+    *,
+    state: ProductStatePort | None,
+    policy: RefreshPolicy,
+    planned_validators: dict[tuple[str, str], tuple[str | None, str | None]],
+    errors: list[str],
+    scopes: Sequence[tuple[str, Frontier]] = (),
+) -> tuple[list[IncrementalItem], list[tuple[str, str]]]:
+    """Work-set **ремонта** проваленных URL (``--only-failed``, межпрогонный носитель).
+
+    Вход — уже разрешённое множество провалов (``core.cli.context._only_failed_work_set``:
+    ``FAILED``-элементы текущего сеанса, иначе строки ``url_state`` с
+    ``consecutive_failures > 0``). Здесь оно превращается в элементы плана, а не в seed'ы:
+    ремонт — это повторная проверка **известных** URL, а не обход.
+
+    Почему отдельная функция, а не ветка :func:`plan_incremental_items`:
+
+    * ремонт **не зависит от режима продукта**. ``plan_incremental_items`` возвращает ``[]``
+      для ``new``/``full`` — это верно для инкрементального плана (полный обход — прежний
+      путь), но провал прошлого цикла существует и у продукта, который сейчас ``new``/``full``
+      (например, когорта расширилась, а прежние провалы никуда не делись);
+    * и наоборот: :func:`plan_incremental` для такого продукта вернул бы корни **и все**
+      строки ``url_state`` — то есть ремонт превратился бы в полный краул. Поэтому набор
+      берётся **ровно** из переданного множества, а не выводится из состояния целиком.
+
+    Семантика элемента: ``kind=revalidate``, ``depth=0``, ``root_url=None`` — известный
+    лист. Он встаёт в дренаж через ``Frontier.add_revalidate_seed`` (вне бюджета
+    ``max_documents``), поэтому не расширяет BFS и не тратит discovery-бюджет корня;
+    группировку по корням делает вызывающий (:func:`group_revalidation_items`), так что
+    авторские корни под ``--only-failed`` **не обходятся**.
+
+    Валидаторы (``ETag``/``Last-Modified``) и ``doc_version_id`` переносятся из
+    ``url_state``, если строка есть: ремонт — условный GET, а не безусловный.
+
+    **``not_found`` в наборе не появляется.** ``record_url_state`` увеличивает
+    ``consecutive_failures`` только на транзиентных сбоях; ``not_found`` (404) — терминальное
+    наблюдение, он лишь обнуляет ``doc_version_id`` (версия ``superseded``). Ретраить 404
+    значит выдавать терминальное наблюдение за сбой, который стоит повторять; строка с
+    ``last_error_kind=not_found`` поэтому исключается, даже если счётчик остался от прежних
+    транзиентных сбоев (иначе такой URL попадал бы в каждый ремонт бесконечно: счётчик на
+    404 не растёт и не сбрасывается).
+
+    :param urls: разрешённое множество провалов (порядок сохраняется, дубли схлопываются).
+    :param state: durable-состояние продукта; ``None`` — ремонт без валидаторов (видимо).
+    :param policy: политика наблюдения прогона. ``offline`` — элемент тоже ``reuse``:
+        ремонт остаётся повторной проверкой **известных** URL, но проверяет он состояние,
+        а не сервер (сети в этой политике нет — понижение до ``revalidate`` означало бы
+        безусловный GET).
+    :param planned_validators: общий словарь прогона ``(product, normalized) → (etag, lm)``.
+    :param scopes: ``(root, Frontier)`` продукта — только для проверки объявленных хостов.
+    :returns: ``(элементы, отброшенные)``; отброшенные — пары ``(url, причина)``, чтобы
+        вызывающий опубликовал число и причину, а не потерял URL молча.
+    """
+    rows: dict[str, UrlStateRow] = {}
+    if state is not None:
+        try:
+            rows = {
+                row.normalized_url: row
+                for row in state.iter_url_state(product_id)  # type: ignore[union-attr]
+            }
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"{product_id}: repair: state.iter_url_state: {type(exc).__name__}: "
+                f"{exc} — ремонт без валидаторов"
+            )
+
+    items: list[IncrementalItem] = []
+    dropped: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in urls:
+        text = str(raw)
+        normalized = _state_url_key(text)
+        if normalized is None:
+            errors.append(
+                f"{product_id}/{text}: repair: URL не нормализуется — не поставлен"
+            )
+            dropped.append((text, "not_normalizable"))
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        row = rows.get(normalized)
+        if row is not None and row.last_error_kind == FailureKind.NOT_FOUND.value:
+            # Терминальное наблюдение (404), а не транзиентный сбой: не ремонтируется.
+            dropped.append((text, "not_found_terminal"))
+            continue
+        if not _host_declared(text, scopes):
+            dropped.append((text, "out_of_declared_hosts"))
+            continue
+        if policy is not RefreshPolicy.OFFLINE:
+            # Валидаторы условного GET: ремонт — повторная проверка известного URL.
+            planned_validators[(product_id, normalized)] = (
+                row.etag if row is not None else None,
+                row.last_modified if row is not None else None,
+            )
+        items.append(
+            IncrementalItem(
+                url=text,
+                normalized_url=normalized,
+                # Происхождение в ``url_state`` не сохранено, а ремонт корней не обходит.
+                root_url=None,
+                depth=0,
+                kind=(
+                    IncrementalKind.REUSE
+                    if policy is RefreshPolicy.OFFLINE
+                    else IncrementalKind.REVALIDATE
+                ),
+                etag=row.etag if row is not None else None,
+                last_modified=row.last_modified if row is not None else None,
+                doc_version_id=row.doc_version_id if row is not None else None,
+            )
+        )
+    return items, dropped
+
+
+#: Тексты оффлайн-исходов (09 §6.3, ``refresh_policy=offline``). Токены вынесены в
+#: константы, потому что их читают оператор и тесты: смена формулировки не должна
+#: незаметно менять смысл («не наблюдали» ≠ «нечего переиспользовать» ≠ «ошибка фазы»).
+OFFLINE_UNKNOWN_ROOT_TEXT = (
+    "offline: URL отсутствует в durable-состоянии (url_state) — оффлайн-наблюдение "
+    "невозможно: сети в этой политике нет, а переиспользовать нечего. Прогоните "
+    "--refresh auto/revalidate, чтобы получить документ"
+)
+OFFLINE_NO_VERSION_TEXT = (
+    "offline: переиспользовать нечего — у URL нет активной версии документа либо "
+    "chunk-set отвергнут проверкой I19; документ не вошёл в корпус (сеть не трогается)"
+)
+
+
+@dataclass(frozen=True)
+class OfflineReuseReport:
+    """Итог оффлайн-прохода продукта: что переиспользовано и что не удалось (09 §6.3).
+
+    Отчёт существует, потому что «переиспользовано N» и «переиспользовать нечего»
+    — разные факты, и второй не должен выглядеть как первый. Все три счётчика
+    публикуются строкой продукта и в ``errors`` (для второго и третьего), поэтому
+    оффлайн-прогон нельзя спутать с полным.
+
+    :param reused: документов вошло в корпус из durable-субстрата.
+    :param chunks: чанков переиспользовано (сумма по принятым документам).
+    :param no_version: URL известны состоянию, но переиспользовать нечего (нет активной
+        версии либо chunk-set отвергнут ``classify_reuse``/I19-проверкой).
+    :param unknown_roots: авторские корни, которых нет в ``url_state``: оффлайн их
+        наблюдать нечем, и сети для этого прогона не существует.
+    :param urls: URL, для которых сеть не трогалась (порядок прохода).
+    """
+
+    reused: int = 0
+    chunks: int = 0
+    no_version: tuple[str, ...] = ()
+    unknown_roots: tuple[str, ...] = ()
+    urls: tuple[str, ...] = ()
+
+    def note(self, product_id: str) -> str:
+        """Операторская строка продукта: оффлайн-проход и его цена в наблюдении."""
+        return (
+            f"corpus: offline {product_id} — переиспользовано документов {self.reused} "
+            f"(чанков {self.chunks}), переиспользовать нечего "
+            f"{len(self.no_version)}, корней вне состояния {len(self.unknown_roots)}; "
+            "сеть не трогалась, наблюдений этого прогона нет (❌ не публикуется)"
+        )
+
+
+def offline_reuse_product(
+    product_id: str,
+    roots: Sequence[str],
+    items: Sequence[IncrementalItem],
+    *,
+    state: ProductStatePort | None,
+    errors: list[str],
+    chunker_version: str,
+    embed_model_id: str,
+    store: Any,
+    ingest: ProductIngest,
+    seen_docs: dict[str, str],
+    seen_chunk_ids: set[str],
+    duplicates: dict[str, int],
+    doc_counters: dict[str, dict[str, int]],
+    partial_unknown_products: dict[str, list[str]],
+    persist_docs: Callable[..., None],
+) -> OfflineReuseReport:
+    """Оффлайн-проход продукта: корпус из durable-субстрата, **ноль сетевых вызовов**.
+
+    Политика ``offline`` (``--refresh offline``) означает «наблюдать нечем и не будем»:
+    документ и его chunk-set берутся из ``state.db`` (``url_state`` →
+    ``document_version`` → ``chunk_meta``/``chunk_store``), экстрактор и чанкер **не
+    вызываются**, HTTP-статус — ``NULL``, ``reuse_kind=reused``. Это тот же
+    переиспользованный набор, что у ``304`` (:func:`reuse_not_modified`), но без самого
+    ``304``: сервер не спрашивался.
+
+    **Почему отдельный проход, а не дренаж с ревалидационными seed'ами.** Дренаж — это
+    сеть по построению: seed-фетч, sitemap/feed-развёртка, BFS. Оффлайн-элемент не имеет
+    ни одного из этих шагов, поэтому идти через ``drain_root`` значило бы провести
+    «без сети» через код, единственное назначение которого — сеть. Здесь нет ни
+    ``frontier``, ни ``limits``, ни ``FetchPlan``: нет и места, где сеть могла бы
+    случиться.
+
+    **Авторский корень.** Корень, известный ``url_state``, переиспользуется как любой
+    другой URL: «без сети» не может начинаться с GET корня. Корень, которого в состоянии
+    нет, оффлайн наблюдать нечем — это видимая ошибка с продуктом и URL
+    (:data:`OFFLINE_UNKNOWN_ROOT_TEXT`), а не тихий пропуск и не поход в сеть: пустой
+    корпус без причины читался бы как «у продукта ничего нет».
+
+    **Известный URL без пригодной версии.** Нет ``document_version`` либо chunk-set
+    отвергнут ``reuse_plan`` (несовпадение версии чанкера, текст не сошёлся с
+    ``content_hash``, пустой набор) — переиспользовать нечего: документ в корпус не
+    попадает. Причина отказа записывается самим ``reuse_plan``, а следствие называет
+    :data:`OFFLINE_NO_VERSION_TEXT` — две строки говорят разное («почему субстрат не
+    годится» и «что стало с документом»), и вторая не выводится из первой. Это **не**
+    успех: счётчик ``no_version`` и ``errors`` не дают выдать пропуск за
+    переиспользование.
+
+    **Чего здесь нет намеренно.** Нет записи в ``url_state``: наблюдения не было, и
+    ``reuse_kind``/``last_http_status`` прошлого цикла переписывать нельзя — иначе
+    следующий прогон прочитал бы «reused» как последнюю классификацию этого URL. Нет
+    элемента сеанса краула: ``crawl_session_items`` — учёт фетчей, а фетчей не было.
+    Отсюда следствие для покрытия: ``observed_sources`` остаётся нулём, потому что
+    наблюдений **в этом прогоне** нет, и ``complete`` не может стать ``True``
+    (``derive_corpus_coverage``: условие «ни одного наблюдения»). Переиспользованный
+    документ честно называется переиспользованным, а не наблюдённым.
+
+    :returns: :class:`OfflineReuseReport` — что переиспользовано и что не удалось.
+    """
+    report_reused = 0
+    report_chunks = 0
+    no_version: list[str] = []
+    unknown_roots: list[str] = []
+    touched: list[str] = []
+    seen_urls: set[str] = set()
+
+    # Порядок: авторские корни (порядок входа) → известные URL (порядок планировщика).
+    # Корни идут первыми, потому что они — авторское решение: если корень недоступен
+    # оффлайн, это первое, что должен увидеть оператор.
+    ordered: list[str] = [*roots, *(item.url for item in items)]
+    for url in ordered:
+        key = _state_url_key(url)
+        if key is None:
+            errors.append(
+                f"{product_id}/{url}: offline: URL не нормализуется — "
+                "переиспользование невозможно (состояние по нему не ведётся)"
+            )
+            continue
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        touched.append(url)
+
+        # Версия берётся из durable-субстрата **напрямую** (:func:`reuse_plan`), а не через
+        # :func:`reuse_not_modified`: у того классификация ``304``-специфична
+        # (``classify_reuse(not_modified=True)``), а здесь сервер не отвечал вовсе —
+        # провенанс не должен утверждать контакт, которого не было. Сам переиспользуемый
+        # набор (документ + верифицированный chunk-set) — тот же примитив.
+        prior = _prior_url_state(product_id, key, url, state=state, errors=errors)
+        if prior is None:
+            unknown_roots.append(url)
+            errors.append(f"{product_id}/{url}: {OFFLINE_UNKNOWN_ROOT_TEXT}")
+            continue
+        prior_doc = _prior_document_version(
+            prior, product_id, url, state=state, errors=errors
+        )
+        reuse = reuse_plan(
+            product_id,
+            url,
+            prior_doc,
+            state=state,
+            errors=errors,
+            chunker_version=chunker_version,
+        )
+        if reuse is None:
+            # Причина отказа уже записана ``reuse_plan``/``load_reused_chunks`` (версия
+            # чанкера, I19-расхождение, пустой набор) — а следствие для корпуса
+            # называется здесь: молча пропустить документ значило бы выдать пропуск за
+            # переиспользование.
+            no_version.append(url)
+            errors.append(f"{product_id}/{url}: {OFFLINE_NO_VERSION_TEXT}")
+            continue
+
+        doc_hash = str(reuse.doc_version.content_hash or "")
+        if not doc_hash:
+            # I19: версия без хеша не адресует ни документ, ни чанки — переиспользовать
+            # её значило бы выдумать идентичность контента.
+            errors.append(
+                f"I19: {product_id}/{url}: durable-версия без content_hash — "
+                "переиспользование отклонено (offline)"
+            )
+            no_version.append(url)
+            continue
+        document_id = f"{product_id}:{doc_hash}"
+        if doc_hash in seen_docs:
+            duplicates[product_id] = duplicates.get(product_id, 0) + 1
+            continue
+        seen_docs[doc_hash] = url
+
+        extractor_token = str(reuse.doc_version.extractor_version or "")
+        level_text = str(reuse.doc_version.level or "")
+        dv_id = doc_version_id(product_id, doc_hash, extractor_token, level_text)
+        partial_fields, partial_known = _reused_partial_fields(reuse.doc_version)
+        if not partial_known:
+            # v5: признак частичности в версии не записан — «не измерено», и это
+            # называется отдельно (строка продукта), а не выдаётся за «прочитано всё».
+            partial_unknown_products.setdefault(product_id, []).append(url)
+        doc = CorpusDoc(
+            doc_id=document_id,
+            product_id=product_id,
+            url=url,
+            # Получения не было: ``fetched_at``/``render_mode``/``lang`` — NULL, а не
+            # «сейчас»/«http»/дефолт. Провенанс записи — ``reuse_kind=reused``.
+            fetched_at=None,
+            content_hash=doc_hash,
+            # Путь retained-байтов — из durable-версии: это байты, чей хеш и есть
+            # идентичность документа (I19). Новых байтов оффлайн не появляется.
+            raw_path=reuse.doc_version.raw_path,
+            extractor_version=extractor_token or None,
+            render_mode=None,
+            lang=None,
+            http_status=None,
+            reuse_kind=ReuseKind.REUSED,
+            **partial_fields,
+        )
+        ingest.docs.append(doc)
+        persist_docs(store, [doc], errors, versions_by_doc={document_id: dv_id})
+        accepted = _accept_chunk_candidates(
+            product_id,
+            document_id,
+            dv_id,
+            [
+                (
+                    chunk.chunk_no,
+                    chunk.text,
+                    chunk.heading_path,
+                    chunk.context_prefix,
+                    chunk.content_hash,
+                )
+                for chunk in reuse.chunks
+            ],
+            ingest=ingest,
+            seen_chunk_ids=seen_chunk_ids,
+            errors=errors,
+            url=url,
+            lang=None,
+            embed_model_id=embed_model_id,
+        )
+        count_doc(product_id, reused=True, state=state, doc_counters=doc_counters)
+        report_reused += 1
+        report_chunks += len(accepted)
+
+    return OfflineReuseReport(
+        reused=report_reused,
+        chunks=report_chunks,
+        no_version=tuple(no_version),
+        unknown_roots=tuple(unknown_roots),
+        urls=tuple(touched),
+    )
+
+
+def _prior_url_state(
+    product_id: str,
+    key: str,
+    url: str,
+    *,
+    state: ProductStatePort | None,
+    errors: list[str],
+) -> UrlStateRow | None:
+    """Строка ``url_state`` **только для диагностики** оффлайн-исхода (не решение).
+
+    Решение принимает :func:`reuse_not_modified`; здесь нужен лишь ответ на вопрос
+    «URL вообще известен состоянию?» — от него зависит текст ошибки: «корня нет в
+    состоянии» и «версии переиспользовать нечего» ведут оператора в разные места.
+    """
+    if state is None:
+        return None
+    try:
+        return state.get_url_state(product_id, key)
+    except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+        errors.append(
+            f"{product_id}/{url}: offline: state: get_url_state: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+
+
+def _prior_document_version(
+    prior: UrlStateRow,
+    product_id: str,
+    url: str,
+    *,
+    state: ProductStatePort | None,
+    errors: list[str],
+) -> DocumentVersionRow | None:
+    """Версия документа, на которую указывает ``url_state.doc_version_id`` (или ``None``).
+
+    ``None`` — либо версии у URL ещё не было, либо строка ``document_version`` пропала/
+    стала ``superseded``: ``reuse_plan`` откажет в обоих случаях, и вызывающий назовёт
+    это одной причиной («переиспользовать нечего»), а не выдумает различие, которого
+    в субстрате нет.
+    """
+    if state is None or not prior.doc_version_id:
+        return None
+    try:
+        return state.get_document_version(prior.doc_version_id)
+    except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+        errors.append(
+            f"{product_id}/{url}: offline: state: get_document_version"
+            f"({prior.doc_version_id}): {type(exc).__name__}: {exc}"
+        )
+        return None
 
 
 def group_revalidation_items(

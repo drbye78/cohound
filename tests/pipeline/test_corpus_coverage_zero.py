@@ -33,8 +33,8 @@ from core.domain import (
 from core.pipeline.corpus import (
     ZERO_SOURCE_ALL_SEEDS_REJECTED,
     ZERO_SOURCE_NO_SEEDS,
-    _persist_corpus_coverage,
 )
+from core.pipeline.corpus_coverage import _persist_corpus_coverage
 from core.pipeline.crawl_session import default_session_id, open_session
 from core.pipeline.evaluate import _coverage_for, evaluate_phase
 from core.pipeline.runner import Ports

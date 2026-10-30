@@ -17,7 +17,20 @@ _SLUG_RE = re.compile(r"^[a-z0-9_]+$")
 # Номер чанка — неотрицательное целое в десятичной записи (без знаков/пробелов).
 _CHUNK_RE = re.compile(r"^[0-9]+$")
 
-__all__ = ["SourceRef", "parse_source_id", "source_id", "validate_slug"]
+#: Префикс адреса **версии документа** (16 §6): ``doc_version_id = "dv_" + short_hash(
+#: product_id, content_hash, extractor_version, level)``. Им начинается второй сегмент
+#: ``source_id``/``chunk_id`` после границы A; ``doc_id`` корпуса (``product_id:hash``)
+#: версии не несёт — ``dv_`` из хеша не выводится (``short_hash`` необратим).
+DOC_VERSION_PREFIX = "dv_"
+
+__all__ = [
+    "DOC_VERSION_PREFIX",
+    "SourceRef",
+    "doc_version_of",
+    "parse_source_id",
+    "source_id",
+    "validate_slug",
+]
 
 
 @dataclass(frozen=True)
@@ -80,6 +93,30 @@ def parse_source_id(source_id: str) -> SourceRef:
         chunk_no=int(chunk_raw),
         build_id=build_id,
     )
+
+
+def doc_version_of(source_id: str | None) -> str | None:
+    """Адрес **версии документа**, который несёт ``source_id``/``chunk_id`` (O5).
+
+    Run-level адрес чанка — ``f"{product_id}:{doc_version_id}:{chunk_no}"``
+    (:func:`core.pipeline.corpus_index._chunk_id`), поэтому второй сегмент и есть версия
+    документа. Возвращается он, только если действительно начинается с
+    :data:`DOC_VERSION_PREFIX`:
+
+    * ``None`` — адрес не разбирается (малформед) либо второй сегмент версией **не**
+      является (legacy-адрес ``product:content_hash:chunk_no``: версия текста без уровня
+      извлечения и версии экстрактора). Выдавать хеш за версию значило бы назвать
+      evidence адресом, который её не различает.
+
+    Разбор — через :func:`parse_source_id` (одна грамматика на проект, второго парсера нет).
+    """
+    if not source_id:
+        return None
+    try:
+        ref = parse_source_id(source_id)
+    except ValueError:
+        return None
+    return ref.doc_id if ref.doc_id.startswith(DOC_VERSION_PREFIX) else None
 
 
 def validate_slug(slug: str) -> str:

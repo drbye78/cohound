@@ -873,6 +873,7 @@ def build_phases(
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    only_failed_repairs: Mapping[str, list[str]] | None = None,
     execution_contract_digest: str | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
@@ -954,6 +955,10 @@ def build_phases(
         onboarding-плана; ``None`` ⇒ все продукты трактуются как ``new``.
     :param refresh_policy: политика наблюдения прогона (``auto``|``revalidate``|
         ``refresh``|``offline``) — влияет на условный GET и переиспользование в Ш5.
+    :param only_failed_repairs: ``product_id → [url, ...]`` — work-set ремонта
+        ``--only-failed`` (резолвится composition root'ом, ``core.cli.context``), идёт в
+        Ш5 отдельным входом: ремонт — известные depth-0 URL, а не обход авторских корней,
+        и не зависит от режима продукта. ``None`` ⇒ прежнее поведение байт-в-байт.
     :param execution_contract_digest: готовый отпечаток условий измерения (09 §12.5),
         вычисленный composition root для ``run_id``/lineage. Протягивается в манифест Ш9
         без пересчёта; ``None`` — неизвестен (legacy/вызов без идентичности), тогда
@@ -1188,6 +1193,10 @@ def build_phases(
             state=state,
             product_modes=product_modes,
             refresh_policy=refresh_policy,
+            # ``--only-failed`` (межпрогонный ремонт): разрешённое множество провалов по
+            # продукту — depth-0 известные URL, авторские корни не обходятся. ``None`` ⇒
+            # прежнее поведение байт-в-байт.
+            only_failed_repairs=only_failed_repairs,
             # B3: спуск в контейнеры — читатель инъектируется composition root'ом
             # (``container_any.container_for``); ``None`` → спуск не исполняется, но видимо.
             container_for=getattr(ctx.ports, "container", None),

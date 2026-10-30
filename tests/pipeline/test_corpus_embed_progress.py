@@ -40,12 +40,14 @@ from core.domain import (
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     EMBED_BATCH_CHUNKS,
+    build_corpus,
+    format_embed_progress,
+)
+from core.pipeline.corpus_index import (
     _embed_and_build,
     _embed_batched,
     _EmbedThroughput,
     _make_embed_reporter,
-    build_corpus,
-    format_embed_progress,
 )
 from core.pipeline.crawl_session import default_session_id
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage

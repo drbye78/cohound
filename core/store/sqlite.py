@@ -248,6 +248,7 @@ CREATE TABLE IF NOT EXISTS cell_evidence (
     scope_acceptance  TEXT,                             -- принятие риска человеком (было scope_attested_by)
     index_build_id    TEXT,                             -- привязка evidence к сборке (R7)
     partition_build_id TEXT,                            -- партиция чанка-evidence (09 §8.1)
+    doc_version_id    TEXT,                             -- O5: адрес версии документа (dv_...); NULL = не записано
     retrieved_at      TEXT
 );
 
@@ -824,6 +825,14 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # из какого физического чанка-партиции пришла цитата. NULL — неизвестно; backfill
     # не выполняется (исторические строки остаются как есть).
     _ensure_columns(conn, "cell_evidence", {"partition_build_id": "TEXT"})
+    # O5 (09 §3.3): additive ``doc_version_id`` у evidence — адрес **версии документа**,
+    # из которой взята цитата (``dv_...``, 16 §6). Прежде цепочка evidence проверялась по
+    # ``content_hash`` — версии текста, не различающей уровень извлечения и версию
+    # экстрактора. Старые строки получают ``NULL`` (= «версия не записана»), backfill не
+    # выполняется: ``dv_`` из хеша не выводится, а выдуманное значение было бы ложным
+    # адресом. ``SCHEMA_VERSION`` не поднимается: изменение аддитивное, читатель старого
+    # прогона видит ``NULL`` и остаётся на прежней проверке по ``content_hash``.
+    _ensure_columns(conn, "cell_evidence", {"doc_version_id": "TEXT"})
     # DDL-миграция v3.4 (P1): деплой-провенанс манифеста (07 §7) и порог ранжирования
     # (§6/B-1) — реальные колонки. Back-compat не требуется: forward-compat хелпер чтения
     # удалён, старая БД получает колонки, значения остаются NULL до записи манифеста.

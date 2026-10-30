@@ -447,7 +447,8 @@ CONTRACT_FLAGS: tuple[ContractFlag, ...] = (
         material=MATERIAL_SCOPE,
         action="store_true",
         default=False,
-        help="только URL со статусом failed в сеансе (нет сеанса → обычный прогон)",
+        help="только провалы: FAILED текущего сеанса, иначе url_state прошлого прогона; "
+        "ремонт идёт известными URL (авторские корни не обходятся)",
     ),
     ContractFlag(
         dest="only_product",

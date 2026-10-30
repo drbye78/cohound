@@ -270,6 +270,9 @@ def _evidence_row(ev: CellEvidence) -> tuple[Any, ...]:
         ev.scope_acceptance,
         ev.index_build_id,
         ev.partition_build_id,
+        # O5: адрес версии документа (``dv_...``) — из ``chunk_id`` чанка-цитаты, не из
+        # ``content_hash``. ``None`` — версия не установлена (не выдумываем).
+        ev.doc_version_id,
         ev.retrieved_at,
     )
 
@@ -281,6 +284,8 @@ def _absence_evidence_row(entry: Mapping[str, Any]) -> tuple[Any, ...]:
     остаются ``NULL``: у протокола отсутствия нет ни чанка-партиции, ни момента
     извлечения. ``source_id``/``content_hash``/``source_kind`` — ``NULL``, когда
     отсутствие синтетическое (цитировать нечего); это законно, PK — ``evidence_id``.
+    ``doc_version_id`` берётся из записи (O5): у цитаты, попавшей в протокол, версия
+    известна, у синтетической записи протокола её нет — тогда ``NULL``.
     """
     return (
         entry["evidence_id"],
@@ -297,6 +302,7 @@ def _absence_evidence_row(entry: Mapping[str, Any]) -> tuple[Any, ...]:
         entry.get("scope_acceptance"),
         entry.get("index_build_id"),
         None,
+        entry.get("doc_version_id"),
         None,
     )
 
@@ -306,6 +312,8 @@ def _row_to_absence(row: sqlite3.Row) -> dict[str, Any]:
 
     Ключи совпадают с тем, что кладёт в ячейку Ш6 (``evaluate._absence_dict`` /
     протокол отсутствия), поэтому читатель приклеивает запись к ``Cell`` как есть.
+    ``doc_version_id`` (O5) читается терпимо: в БД прошлой версии колонки нет — тогда
+    «версия не записана» (``None``), а не сбой чтения.
     """
     return {
         "evidence_id": row["evidence_id"],
@@ -321,6 +329,7 @@ def _row_to_absence(row: sqlite3.Row) -> dict[str, Any]:
         "source_scope": row["source_scope"],
         "scope_acceptance": row["scope_acceptance"],
         "index_build_id": row["index_build_id"],
+        "doc_version_id": _row_optional(row, "doc_version_id"),
     }
 
 

@@ -70,6 +70,7 @@ from core.domain.enums import (
     TerminationReason,
 )
 from core.util.document_formats import normalize_attachment_formats
+from core.util.ids import doc_version_of
 
 _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -996,6 +997,14 @@ class CellEvidence(BaseModel):
     #: 09 §8.1: партиция, из которой пришёл чанк-цитата. ``None`` — неизвестно
     #: (исторические строки/не корпусный источник); аддитивно, без backfill.
     partition_build_id: str | None = None
+    #: O5: адрес **версии документа** (``dv_...``), из которой взята цитата. Берётся из
+    #: ``chunk_id`` ретривнутого чанка (:func:`core.util.ids.doc_version_of`), а не из
+    #: ``content_hash``: хеш — версия **текста**, он не различает уровень извлечения и
+    #: версию экстрактора, поэтому два разных адреса с одним текстом были бы неотличимы.
+    #: ``None`` — версия не установлена (историческая строка, неразбираемый адрес,
+    #: непечённый источник); читатель обязан трактовать это как «не записано», а не как
+    #: «любая версия подходит».
+    doc_version_id: str | None = None
     retrieved_at: str | None = None
 
     @model_validator(mode="after")
@@ -1012,6 +1021,18 @@ class CellEvidence(BaseModel):
         # absence-evidence: scope по типу правила проверяется на уровне Cell.
         if self.source_kind is SourceKind.REGISTRY and not self.source_url:
             raise ValueError("R1: registry evidence обязан иметь source_url")
+        # O5: версия документа — не свободное поле, а второй сегмент адреса. Расхождение
+        # означало бы, что evidence ссылается на чанк одной версии, а объявляет другую
+        # (например, перенос «приклеил» адрес от другого документа).
+        if self.doc_version_id is not None:
+            if not self.doc_version_id:
+                raise ValueError("O5: doc_version_id не может быть пустым")
+            addressed = doc_version_of(self.source_id)
+            if addressed != self.doc_version_id:
+                raise ValueError(
+                    f"O5: doc_version_id {self.doc_version_id!r} расходится с адресом "
+                    f"source_id {self.source_id!r} (там {addressed!r})"
+                )
         return self
 
 

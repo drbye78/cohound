@@ -161,6 +161,9 @@ _EVIDENCE_COLUMNS = (
     "scope_acceptance",
     "index_build_id",
     "partition_build_id",
+    # O5: адрес версии документа (``dv_...``), из которой взята цитата. Колонки нет в БД
+    # прошлых версий — ``_readable`` отфильтрует её, а ``_row_optional`` вернёт ``None``.
+    "doc_version_id",
     "retrieved_at",
 )
 
@@ -261,6 +264,9 @@ def _row_to_typed_evidence(row: sqlite3.Row) -> CellEvidence | None:
             scope_acceptance=_row_optional(row, "scope_acceptance"),
             index_build_id=_row_optional(row, "index_build_id"),
             partition_build_id=_row_optional(row, "partition_build_id"),
+            # O5: ``NULL`` (историческая строка/неразбираемый адрес) — «версия не
+            # записана»; перенос тогда остаётся на прежней проверке по ``content_hash``.
+            doc_version_id=_row_optional(row, "doc_version_id"),
             retrieved_at=_row_optional(row, "retrieved_at"),
         )
     except (ValueError, TypeError):

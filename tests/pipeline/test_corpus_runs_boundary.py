@@ -51,7 +51,7 @@ from core.domain import (
     ReuseKind,
     RunProductStatus,
 )
-from core.pipeline.corpus import (
+from core.pipeline.corpus_index import (
     _derive_partition_build_id,
     _partition_reuse_reason,
 )

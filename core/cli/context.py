@@ -176,6 +176,7 @@ __all__ = [
     "_load_passports_dir",
     "_load_render_modes",
     "_manifest_partial",
+    "_only_failed_work_set",
     "_open_state_store",
     "_package_lock",
     "_package_lock_handle",
@@ -1751,6 +1752,12 @@ def _filter_corpus_urls(
 ) -> tuple[dict[str, list[str]], list[str]]:
     """Phase 4: фильтр набора URL по durable-сеансу краула (``--only-failed``/``--only-product``).
 
+    Путь **отдельного сеанса краула** (``hound crawl run``): провалы здесь — это провалы
+    *этого* сеанса, и пере-фетч идёт от объявленных URL. ``hound run`` этим путём больше не
+    идёт: межпрогонный ремонт (``url_state`` + depth-0 известные URL) живёт в
+    :func:`_only_failed_work_set`, потому что там провал глубокой страницы не имеет права
+    становиться seed-корнем.
+
     Единственный владелец состояния — ``store``; чтение сеанса делается здесь, до резолва
     фаз, чтобы исполнитель (его work-set выводится из отфильтрованных ``urls``) увидел тот
     же набор, что и локальный путь.
@@ -1805,6 +1812,165 @@ def _filter_corpus_urls(
     if only_failed and failed is not None and not filtered:
         notes.append("only-failed: failed-элементов нет — пере-фетчить нечего")
     return filtered, notes
+
+
+def _only_failed_work_set(
+    urls: Mapping[str, list[str]],
+    *,
+    store: Any,
+    session_id: str,
+    only_failed: bool,
+    only_product: str | None,
+    state: Any = None,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
+    """Phase 4: work-set ``--only-failed`` — сеанс текущего прогона **или** durable-состояние.
+
+    Возвращает ``(seed_urls, repair_urls, notes)``:
+
+    * ``seed_urls`` — объявленные корни, которые увидит Ш5. Под ``--only-failed`` это
+      **не** провалы, а объявленные корни тех продуктов, у которых есть что ремонтировать:
+      они нужны как пространство scope-инференса, и Ш5 их **не** дренит (ремонт — не
+      обход). Продукт без провалов в набор не попадает и не краулится вовсе.
+    * ``repair_urls`` — ``product_id → [url]`` — собственно ремонт. Он идёт в Ш5 отдельным
+      входом (``only_failed_repairs``) и попадает в дренаж как **известные** depth-0 URL
+      (``Frontier.add_revalidate_seed``), а не как BFS-корни.
+    * ``notes`` — что именно сработало и сколько URL дало. Молчаливого выбора источника нет.
+
+    **Порядок источников (решение, не эвристика):**
+
+    1. ``FAILED``-элементы **текущего** сеанса ``crawl:{run_id}``. Это точный набор: прогон
+       возобновляется на том же ``run_id`` и знает, что именно не доехало.
+    2. Если сеанса нет **или** в нём нет ``FAILED``-элементов — строки ``url_state``
+       пакета с ``consecutive_failures > 0``. Это межпрогонный носитель: ``url_state``
+       пишется на **каждый** исход URL (:func:`core.pipeline.corpus_ingest.record_url_state`),
+       сбой увеличивает счётчик, успех его сбрасывает. Он нужен именно потому, что сеанс
+       живёт один прогон: добавление продукта без ``--update`` уже меняет ``run_id`` (и
+       сеанс), и провалы прошлого цикла сеансовым фильтром были не видны.
+
+    ``not_found`` (404) в наборе не ретраится: счётчик ``consecutive_failures`` на него не
+    растёт (терминальное наблюдение, а не транзиентный сбой) — отсев терминальных строк
+    делает Ш5 видимой причиной ``not_found_terminal``
+    (:func:`core.pipeline.corpus_ingest.plan_repair_items`).
+
+    ``state is None`` (``state.db`` пакета не открыт — например, состояние ещё не создано)
+    означает, что межпрогонный источник недоступен: тогда work-set **пуст** и в ``notes``
+    сказано почему. Обычный прогон «по всем URL» здесь был бы не ремонтом, а полным
+    обходом — то есть другим измерением, чем объявлено флагом.
+
+    :param store: открытый стор прогона (``get_crawl_session``/``iter_crawl_session_items``).
+    :param session_id: канонический ``f"crawl:{run_id}"``.
+    :param state: durable-состояние пакета (``iter_url_state``); ``None`` — недоступно.
+    """
+    declared = {str(pid): [str(u) for u in values] for pid, values in urls.items()}
+    notes: list[str] = []
+    if not only_failed and only_product is None:
+        return declared, {}, notes
+
+    if only_product is not None:
+        if str(only_product) not in declared:
+            notes.append(f"only-product: {only_product!r} нет в --urls — набор пуст")
+        declared = {
+            pid: values for pid, values in declared.items() if pid == str(only_product)
+        }
+
+    if not only_failed:
+        return declared, {}, notes
+
+    # (а) текущий сеанс: FAILED-элементы — точный набор того, что не доехало.
+    found: dict[str, list[str]] = {}
+    source: str | None = None
+    session_failed: set[tuple[str, str]] = set()
+    session = store.get_crawl_session(session_id) if session_id else None
+    if session is not None:
+        session_failed = {
+            (item.product_id, item.url)
+            for item in store.iter_crawl_session_items(
+                session_id, status=CrawlItemStatus.FAILED
+            )
+        }
+    if session_failed:
+        source = "session"
+        for pid, url in sorted(session_failed):
+            found.setdefault(pid, []).append(url)
+        notes.append(
+            f"only-failed: источник — сеанс {session_id or '—'}: "
+            f"{len(session_failed)} failed-элемент(ов)"
+        )
+    else:
+        reason = (
+            f"сеанса {session_id} нет"
+            if session is None and session_id
+            else (
+                "сеанс не определён"
+                if session is None
+                else f"в сеансе {session_id} failed-элементов нет"
+            )
+        )
+        if state is None:
+            notes.append(
+                f"only-failed: {reason}, state.db пакета не открыт — межпрогонный носитель "
+                "не прочитан; work-set пуст (полный обход не подменяет ремонт)"
+            )
+            return {}, {}, notes
+        # (б) межпрогонный носитель: провалы, зафиксированные durable-состоянием.
+        # Область чтения — **объявленные** продукты: у порта нет перечисления продуктов, а
+        # продукт, которого нет в ``--urls``, не имеет ни объявленных хостов, ни пространства
+        # scope, то есть ремонтировать его всё равно нечем (это сказано в ``notes``).
+        for product_id in declared:
+            try:
+                rows = list(state.iter_url_state(product_id))
+            except Exception as exc:  # noqa: BLE001 — чтение состояния не роняет прогон
+                notes.append(
+                    f"only-failed: url_state({product_id}) не прочитан: "
+                    f"{type(exc).__name__}: {_concise(exc)} — провалы продукта неизвестны"
+                )
+                continue
+            failed_urls = [
+                row.url for row in rows if int(row.consecutive_failures or 0) > 0
+            ]
+            if failed_urls:
+                found[product_id] = failed_urls
+        source = "url_state"
+        notes.append(
+            f"only-failed: {reason} — источник url_state предыдущего прогона "
+            f"(объявленные продукты: {', '.join(sorted(declared)) or '—'}): "
+            f"{sum(len(v) for v in found.values())} URL с consecutive_failures>0"
+        )
+
+    repair: dict[str, list[str]] = {}
+    undeclared = 0
+    for product_id, product_urls in found.items():
+        if product_id not in declared:
+            # Продукт не объявлен в ``--urls``: у него нет ни объявленных хостов, ни
+            # пространства scope. Не выдумываем корни — считаем отброшенным.
+            undeclared += len(product_urls)
+            continue
+        seen: set[str] = set()
+        kept: list[str] = []
+        for url in product_urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            kept.append(url)
+        if kept:
+            repair[product_id] = kept
+    if undeclared:
+        notes.append(
+            f"only-failed: {undeclared} URL отброшено — продукт не объявлен в --urls"
+        )
+    if not repair:
+        notes.append(
+            "only-failed: провалов нет — пере-фетчить нечего (авторские корни не обходятся)"
+        )
+    else:
+        notes.append(
+            f"only-failed: ремонт {sum(len(v) for v in repair.values())} URL по "
+            f"{len(repair)} продукт(ам) из {source} — depth-0 известные URL, "
+            "авторские корни не обходятся"
+        )
+    # Корни — только у продуктов с ремонтом: продукт без провалов не краулится вовсе.
+    seeds = {pid: list(values) for pid, values in declared.items() if pid in repair}
+    return seeds, repair, notes
 
 
 #: Phase 4: терминальные статусы сеанса краула (дальнейший опрос бесполезен).
@@ -2036,6 +2202,7 @@ def _resolve_phases(
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    only_failed_repairs: Mapping[str, list[str]] | None = None,
     execution_contract_digest: str | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
@@ -2083,6 +2250,9 @@ def _resolve_phases(
         субстрат корпуса выключен (dry-run/``crawl`` без состояния).
     :param product_modes: ``product_id → mode`` из onboarding-плана; ``None`` → все ``new``.
     :param refresh_policy: политика наблюдения прогона (значение ``RefreshPolicy``).
+    :param only_failed_repairs: ``--only-failed`` — work-set ремонта ``product_id → [url]``
+        (см. :func:`_only_failed_work_set`); идёт в Ш5 отдельным входом. ``None`` ⇒
+        прежнее поведение.
     :param execution_contract_digest: готовый ``execution_contract_digest`` прогона
         (09 §12.5), вычисленный composition root до исполнения фаз; протягивается в
         манифест Ш9 без пересчёта (``None`` — неизвестен, значение не выдумывается).
@@ -2215,6 +2385,9 @@ def _resolve_phases(
         "state": state,
         "product_modes": product_modes,
         "refresh_policy": refresh_policy,
+        # ``--only-failed``: work-set ремонта (провалы из сеанса либо ``url_state``) —
+        # отдельный вход Ш5: ремонт идёт известными depth-0 URL, а не обходом корней.
+        "only_failed_repairs": only_failed_repairs,
         # 09 §12.5: готовый отпечаток условий измерения → манифест Ш9 (без пересчёта).
         "execution_contract_digest": execution_contract_digest,
         # 09 §12.3/§13: база сравнения прогона (результат ``previous_run_of`` — резолвится
@@ -2631,7 +2804,8 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
     """Phase 4: флаги ``run``/``crawl run|resume|restart`` — кэш, фильтры, потолок, follow.
 
     ``--from-scratch`` — сброс сеанса + живой ре-фетч в обход R7-кэша (``cache=None``);
-    ``--only-failed``/``--only-product`` — фильтр URL по durable-сеансу; ``--max-attempts`` —
+    ``--only-failed`` — ремонт провалов (``FAILED`` сеанса, иначе ``url_state``) известными
+    depth-0 URL; ``--only-product`` — фильтр объёма; ``--max-attempts`` —
     потолок попыток по URL; ``--follow``/``--watch`` (+``--interval``) — прогресс до терминала.
     """
     parser.add_argument(
@@ -2644,7 +2818,8 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         "--only-failed",
         dest="only_failed",
         action="store_true",
-        help="только URL со статусом failed в сеансе (нет сеанса → обычный прогон)",
+        help="только провалы: FAILED текущего сеанса, иначе url_state прошлого прогона; "
+        "ремонт идёт известными URL (авторские корни не обходятся)",
     )
     parser.add_argument(
         "--only-product",

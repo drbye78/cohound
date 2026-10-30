@@ -66,10 +66,10 @@ from core.pipeline.archive_descent import (
 from core.pipeline.corpus import (
     ExtractionPool,
     IndexBuild,
-    _ExtractRequest,
     build_corpus,
 )
 from core.pipeline.crawl_session import default_session_id
+from core.pipeline.extraction_runtime import _ExtractRequest
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
