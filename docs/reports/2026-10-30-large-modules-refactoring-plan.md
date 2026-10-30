@@ -260,7 +260,7 @@ _cache_extractor_version 1217-1240  _run_extract 1243-1295
 _trim_worker_arenas 1298-1316  _worker_peak_rss_mb 1319-1334
 _write_worker_peak_rss 1337-1368  _extract_worker 1371-1409
 _ExtractPoolSlot 1413-1422     _ExtractPools 1425-1532
-+ константа _EXTRACT_MAX_POOL_REBUILDS (corpus.py:379)
++ константа _EXTRACT_MAX_POOL_REBUILDS (core/pipeline/corpus.py:402)
 ```
 
 **Это не косметика, а дефект, который чинится.** `core/cli/wiring.py` — composition root —

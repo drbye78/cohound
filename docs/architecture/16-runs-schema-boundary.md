@@ -154,7 +154,7 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`_resume_page`, `core/pipeline/corpus.py:1477-1530`) — `reused`. Resume перечитывает и те документы, которые
+(`_resume_page`, `core/pipeline/corpus.py:1356-1409`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -165,10 +165,10 @@ retained-байтов).
 публикуется; писатель границы всегда пишет значение.
 
 **Оба значения уже в руках у единственного писателя** — новой проводки не нужно:
-`CorpusDoc(...)` собирается в `core/pipeline/corpus.py:1008-1048`, рядом живут `reuse`
+`CorpusDoc(...)` собирается в `core/pipeline/corpus.py:887-927`, рядом живут `reuse`
 (`:5197` `reused = active_reuse is not None`) и `page.status_code` (он же уже уходит в
 `url_state` как `last_http_status`, `:5217`; второй путь — `:5053`). Точка записи одна — `_persist_docs`
-(`core/pipeline/corpus.py:1008-1048`, докстринг сам это фиксирует).
+(`core/pipeline/corpus.py:887-927`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
 `upsert_corpus_doc`. Прецедент в коде — `origin` (`core/pipeline/corpus_index.py:128-130`): это kwarg, а не
@@ -237,8 +237,8 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1097` → `core/pipeline/corpus.py:2076`/`:2601`/`:2699`, там же, где уже
-  идёт `embed_model_id` (`core/pipeline/corpus.py:2427` — единственный источник этого значения).
+  **явным параметром**: `core/pipeline/phases.py:1097` → `core/pipeline/corpus.py:1955`/`:2601`/`:2699`, там же, где уже
+  идёт `embed_model_id` (`core/pipeline/corpus.py:2306` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
@@ -304,7 +304,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 
 ### 5.1. `embed_device` в материале и в манифесте (**✅ as-built**)
 
-Материал `_derive_partition_build_id` (`core/pipeline/corpus.py:960-973`) получает `embed_device`
+Материал `_derive_partition_build_id` (`core/pipeline/corpus.py:839-852`) получает `embed_device`
 рядом с `embed_model_id`; манифест партиции — ключ `embed_device` в том же явном словаре
 (`core/adapters/index_npy.py:250-276`, где `extra` сливается на `:270`; второго места нет);
 проверка `_partition_reuse_reason` (`core/pipeline/corpus_index.py:590-642`) — в `expected` рядом с шестью
@@ -537,7 +537,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
    - **словарь**: `core/domain/dictionary.py` + `docs/status-dictionary.yaml`
      (`embed_device`, статусы продукта прогона);
    - **дефекты краула 1 и 3 — одна правка, не две.** Зарядка бюджета на resume
-     (`core/pipeline/corpus.py:5968-6006`) и дренаж уже добытого расцеплены: URL
+     (`core/pipeline/corpus.py:5847-5885`) и дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed`, чей work-set гейтится режимом продукта
      (`_revalidation_items`, `:6612-6624`). Правило: **заряженный URL обязан быть и

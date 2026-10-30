@@ -247,6 +247,34 @@ from core.pipeline.corpus_index import (  # noqa: F401
     _product_extractor_token,
     format_embed_progress,
 )
+
+# L5 (шаг 1): durable-субстрат тела ``_build_corpus`` вынесен в свой модуль. Имена здесь
+# **публичные** — это межмодульный контракт, а не приватность, пробитая наружу: приватное
+# имя через границу модуля было дефектом в L1 (``wiring.py``). Модуль — лист (он не
+# импортирует ``corpus``), поэтому обратного импорта нет.
+from core.pipeline.corpus_persist import (
+    CLEAR_SESSION_FIELD,
+    DocReuse,
+    as_product_mode,
+    canonical_failure_kind,
+    count_doc,
+    emit_product,
+    emit_progress,
+    find_doc_version,
+    manual_host_scope,
+    mark_session,
+    persist_manual_audit,
+    reuse_plan,
+    save_run_product,
+    sitemap_url_for,
+    supersede_document,
+    write_document_state,
+)
+
+# L5 (шаг 1): мутабельное состояние фазы, которое раньше текло через ``nonlocal``.
+# Отдельный модуль — чтобы следующие шаги (``corpus_ingest``/``corpus_commit``) могли
+# аннотировать им свои функции, не создавая цикла с ``corpus``.
+from core.pipeline.corpus_state import CorpusCounters
 from core.pipeline.crawl_frontier import (
     SCOPE_ARTIFACT_OUTSIDE_PREFIX,
     SCOPE_OUT,
@@ -301,11 +329,9 @@ from core.pipeline.extraction_runtime import (  # noqa: F401
 )
 from core.pipeline.fetch_plan import (
     _host_matches,
-    select_domain_profile,
 )
 from core.pipeline.incremental import (
     IncrementalItem,
-    chunk_row_id,
     classify_reuse,
     doc_version_id,
     plan_incremental,
@@ -317,7 +343,6 @@ from core.pipeline.manual_artifacts import (
     ORIGIN_MANUAL,
     ManualArtifact,
     ManualArtifacts,
-    artifact_record,
 )
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
 from core.pipeline.runner import PhaseResult
@@ -335,8 +360,6 @@ from core.ports.extractor import ExtractorPort
 from core.ports.index_builder import IndexBuilderPort
 from core.ports.poller import PollPort
 from core.ports.state import (
-    ChunkRow,
-    DocumentVersionRow,
     IndexCompositionRow,
     IndexPartitionRow,
     ProductStatePort,
@@ -421,43 +444,6 @@ _EXTRACT_TASK_TIMEOUT_S = 1800.0
 #: ``_commit_outcome`` (inline-путь вызывает ``_ingest_one``; пул передаёт готовый результат).
 _INLINE = object()
 
-#: P0/OOM: явно очистить carry-forward поле элемента сеанса (``_mark`` пропускает ``None``).
-_CLEAR = object()
-
-
-#: Статус активной версии документа (``document_version.status``, 09 §4.2).
-_DOC_ACTIVE = "active"
-#: Статус вытесненной версии: документ больше не наблюдается по URL (``404``/``410``, 09 §6.3).
-_DOC_SUPERSEDED = "superseded"
-
-
-@dataclass(frozen=True)
-class _ReusedChunk:
-    """Переиспользованный чанк документа: текст уже верифицирован по I19.
-
-    ``content_hash`` — hash **чистого текста** из ``chunk_store``; он сверен с
-    ``chunk_meta.content_hash`` при загрузке (:func:`_load_reused_chunks`), поэтому
-    неверифицированный текст сюда не попадает.
-    """
-
-    chunk_no: int
-    text: str
-    content_hash: str
-    heading_path: str
-    context_prefix: str
-
-
-@dataclass(frozen=True)
-class _DocReuse:
-    """Готовая к переиспользованию версия документа + её проверенный chunk-set.
-
-    :param doc_version: строка ``document_version`` (``active``), чей контент совпал.
-    :param chunks: чанки в порядке ``chunk_no``; непусты (пустой набор → не reuse).
-    """
-
-    doc_version: DocumentVersionRow
-    chunks: tuple[_ReusedChunk, ...]
-
 
 def _state_url_key(url: str) -> str | None:
     """Ключ ``url_state`` для URL: канонизация §7.2 (:func:`normalize_seed_url`).
@@ -508,97 +494,6 @@ def _scope_owner(url: str, scopes: Sequence[tuple[str, Frontier]]) -> str | None
     return best
 
 
-def _as_product_mode(value: str | None) -> ProductMode:
-    """Режим продукта по строке плана онбординга; отсутствие/неизвестное — ``new``.
-
-    ``new`` — честный дефолт: продукт без записи в ``product_modes`` ведёт себя как
-    первый прогон (полный BFS), а не как инкрементальный.
-    """
-    if value is None:
-        return ProductMode.NEW
-    try:
-        return ProductMode(value)
-    except ValueError:
-        return ProductMode.NEW
-
-
-def _load_reused_chunks(
-    state: ProductStatePort,
-    doc_version: DocumentVersionRow,
-    *,
-    chunker_version: str,
-    where: str,
-    errors: list[str],
-) -> tuple[_ReusedChunk, ...] | None:
-    """Читает и **верифицирует** chunk-set версии документа из durable-субстрата (I19).
-
-    Переиспользовать можно только текст, который доказуемо тот же, что был проиндексирован:
-    для каждого ``chunk_meta`` берётся ``chunk_store.text`` по ``content_hash`` и
-    пересчитывается ``content_hash(text)``. Любое расхождение (нет текста, хеш не сошёлся,
-    пустой набор) — отказ от переиспользования с видимой записью в ``errors``: вызывающий
-    идёт обычным путём экстракции/нарезки. Молчаливая подмена текста запрещена.
-
-    ``chunker_version`` обязан совпасть с версией прогона: иначе границы чанков другой
-    версии чанкера молча смешались бы с текущей сборкой (durable ``chunk_meta`` различает
-    версии, ``document_version`` — нет).
-
-    :returns: верифицированные чанки в порядке ``chunk_no`` либо ``None`` (не переиспользуем).
-    """
-    doc_version_id_ = doc_version.doc_version_id
-    if doc_version.chunker_version and doc_version.chunker_version != chunker_version:
-        errors.append(
-            f"{where}: reuse: версия чанкера {doc_version.chunker_version!r} != "
-            f"{chunker_version!r} — повторная нарезка"
-        )
-        return None
-    try:
-        rows = list(state.iter_doc_chunks(doc_version_id_))
-    except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
-        errors.append(
-            f"{where}: reuse: iter_doc_chunks({doc_version_id_}): "
-            f"{type(exc).__name__}: {exc} — повторная нарезка"
-        )
-        return None
-    if not rows:
-        errors.append(
-            f"{where}: reuse: пустой chunk-set {doc_version_id_!r} — повторная нарезка"
-        )
-        return None
-    reused: list[_ReusedChunk] = []
-    for row in rows:
-        try:
-            text = state.get_chunk_text(row.content_hash)
-        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
-            errors.append(
-                f"{where}: reuse: get_chunk_text({row.content_hash}): "
-                f"{type(exc).__name__}: {exc} — повторная нарезка"
-            )
-            return None
-        if text is None:
-            errors.append(
-                f"{where}: reuse: текст чанка {row.chunk_id!r} не сохранён "
-                "(chunk_store) — повторная нарезка"
-            )
-            return None
-        if content_hash(text) != row.content_hash:
-            errors.append(
-                f"{where}: reuse: I19: текст чанка {row.chunk_id!r} не совпадает с "
-                "content_hash — повторная нарезка (неверифицированный текст не "
-                "переиспользуется)"
-            )
-            return None
-        reused.append(
-            _ReusedChunk(
-                chunk_no=int(row.chunk_no),
-                text=text,
-                content_hash=row.content_hash,
-                heading_path=row.heading_path or "",
-                context_prefix=row.context_prefix or "",
-            )
-        )
-    return tuple(reused)
-
-
 @dataclass(frozen=True)
 class _RetainedReject:
     """Retained raw не пригоден по границе исполнения (P0): терминально, без экстракции."""
@@ -606,22 +501,6 @@ class _RetainedReject:
     error_kind: FailureKind
     reason: str
     path: Path
-
-
-def _canonical_failure_kind(reason: str | None) -> str:
-    """Единый маппинг любого ``error_kind``-значения в канонический :class:`FailureKind`.
-
-    Все записи ``crawl_session_items`` идут через :func:`_mark`, который вызывает этот
-    helper: ad-hoc-литералы (``redirect_out_of_scope``) и ``refusal_reason`` адаптеров
-    (``robots_disallow``) канонизируются в одном месте, а не в каждом write-site.
-    Неизвестное значение не выдумывает класс: это ``source_unavailable`` (честный дефолт).
-    """
-    if not reason:
-        return FailureKind.SOURCE_UNAVAILABLE.value
-    try:
-        return FailureKind(reason).value
-    except ValueError:
-        return FailureKind.SOURCE_UNAVAILABLE.value
 
 
 @dataclass
@@ -2611,53 +2490,6 @@ def _build_corpus(
     #: измеренные числа уже закрытых — второй расчёт той же величины разошёлся бы с первым.
     run_products_written: set[str] = set()
 
-    def _save_run_product(
-        pid: str,
-        *,
-        status: RunProductStatus,
-        coverage_complete: bool | None = None,
-        docs_total: int = 0,
-        docs_new: int = 0,
-        docs_reused: int = 0,
-        error_kind: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Пишет строку ``run_product`` на границе продукта (16 §3.2).
-
-        Одна запись на продукт, вызывается дважды: ``running`` перед Pass A и финальный
-        статус после Pass B (образец — :meth:`save_corpus_coverage`). Числа берутся из
-        того, что фаза уже посчитала (``ingest.docs``/``doc_counters``/``CorpusCoverage``),
-        а не считаются заново: второй расчёт той же величины разошёлся бы с первым.
-
-        ``cells_total``/``cells_pending`` не передаются (остаются ``0``): на границе
-        ``corpus`` ячеек ещё нет — их считает Ш6. Колонка означает «на границе corpus
-        столько», и переписывать её из другой фазы нельзя (16 §3.2).
-
-        Сбой записи изолируется в ``errors`` (как ``_persist_docs``): потерянная строка
-        наблюдаемости хуже падения уже собранного корпуса, но и молчать нельзя.
-        """
-        if store is None or not run_id:
-            return
-        try:
-            store.save_run_product(
-                str(run_id),
-                pid,
-                mode=_as_product_mode((product_modes or {}).get(pid)).value,
-                status=status,
-                scope=run_scope,
-                phase="corpus",
-                coverage_complete=coverage_complete,
-                docs_total=docs_total,
-                docs_reused=docs_reused,
-                docs_new=docs_new,
-                error_kind=error_kind,
-                error=error,
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(f"run_product({pid}): {type(exc).__name__}: {exc}")
-        else:
-            run_products_written.add(pid)
-
     package = _resolve_package_id(plan, package_id)
     snapshot = _resolve_snapshot_date(plan, snapshot_date)
     resolved_chunker_version = (
@@ -2809,58 +2641,7 @@ def _build_corpus(
             return None, None
         return row.etag, row.last_modified
 
-    def _count_doc(pid: str, *, reused: bool) -> None:
-        """Считает принятый документ прогона (``total``/``new``/``reused``, 09 §6.3).
-
-        Считается **документ**, а не URL: повтор/алиас (дедуп ``seen_docs``) не создаёт
-        записи в корпусе и сюда не попадает.
-        """
-        if state is None:
-            return
-        bucket = doc_counters.setdefault(pid, {"total": 0, "new": 0, "reused": 0})
-        bucket["total"] += 1
-        bucket["reused" if reused else "new"] += 1
-
-    def _find_doc_version(
-        pid: str, doc_hash: str, extractor_token: str, level_text: str
-    ) -> DocumentVersionRow | None:
-        """Версия документа по ключу §4.2 (``content_hash``+``extractor_version``+``level``)."""
-        if state is None:
-            return None
-        try:
-            return state.find_document_version(
-                pid,
-                content_hash=doc_hash,
-                extractor_version=extractor_token,
-                level=level_text,
-            )
-        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
-            errors.append(
-                f"state: find_document_version({pid}/{doc_hash}): "
-                f"{type(exc).__name__}: {exc}"
-            )
-            return None
-
-    def _reuse_plan(
-        pid: str, url: str, doc_version: DocumentVersionRow | None
-    ) -> _DocReuse | None:
-        """Проверенный chunk-set версии документа либо ``None`` (не переиспользуем)."""
-        if state is None or doc_version is None:
-            return None
-        if doc_version.status != _DOC_ACTIVE:
-            return None
-        chunks = _load_reused_chunks(
-            state,
-            doc_version,
-            chunker_version=resolved_chunker_version,
-            where=f"{pid}/{url}",
-            errors=errors,
-        )
-        if chunks is None:
-            return None
-        return _DocReuse(doc_version=doc_version, chunks=chunks)
-
-    def _reuse_not_modified(pid: str, url: str) -> _DocReuse | None:
+    def _reuse_not_modified(pid: str, url: str) -> DocReuse | None:
         """Переиспользование по ``304`` — **до** экстракции (её вызов не нужен).
 
         ``content_hash`` документа известен из ``url_state.doc_version_id``: сервер
@@ -2888,9 +2669,16 @@ def _build_corpus(
             prior=prior, prior_doc=prior_doc, not_modified=True, content_hash=None
         ) is not ReuseKind.REVALIDATED:
             return None
-        return _reuse_plan(pid, url, prior_doc)
+        return reuse_plan(
+            pid,
+            url,
+            prior_doc,
+            state=state,
+            errors=errors,
+            chunker_version=resolved_chunker_version,
+        )
 
-    def _reuse_for_page(pid: str, url: str, page: RawPage) -> _DocReuse | None:
+    def _reuse_for_page(pid: str, url: str, page: RawPage) -> DocReuse | None:
         """Переиспользование по ``304`` с видимой записью, если версии нет.
 
         ``304`` без известной версии (или с отвергнутым chunk-set) — не повод молчать:
@@ -2911,7 +2699,7 @@ def _build_corpus(
 
     def _reuse_same_hash(
         pid: str, url: str, doc_hash: str, extractor_token: str, level_text: str
-    ) -> _DocReuse | None:
+    ) -> DocReuse | None:
         """Переиспользование при ``200`` с прежним ``content_hash`` (после экстракции)."""
         if state is None:
             return None
@@ -2925,27 +2713,21 @@ def _build_corpus(
                 f"{pid}/{url}: state: get_url_state: {type(exc).__name__}: {exc}"
             )
             return None
-        prior_doc = _find_doc_version(pid, doc_hash, extractor_token, level_text)
+        prior_doc = find_doc_version(
+            pid, doc_hash, extractor_token, level_text, state=state, errors=errors
+        )
         if classify_reuse(
             prior=prior, prior_doc=prior_doc, not_modified=False, content_hash=doc_hash
         ) is not ReuseKind.REVALIDATED:
             return None
-        return _reuse_plan(pid, url, prior_doc)
-
-    def _supersede_document(pid: str, url: str, dv_id: str | None) -> None:
-        """Помечает прежнюю версию ``superseded`` (09 §6.3: ``404``/``410`` по URL)."""
-        if state is None or not dv_id:
-            return
-        try:
-            row = state.get_document_version(dv_id)
-            if row is None or row.status != _DOC_ACTIVE:
-                return
-            state.upsert_document_version(replace(row, status=_DOC_SUPERSEDED))
-        except Exception as exc:  # noqa: BLE001 — изоляция state-записи
-            errors.append(
-                f"{pid}/{url}: state: supersede({dv_id}): "
-                f"{type(exc).__name__}: {exc}"
-            )
+        return reuse_plan(
+            pid,
+            url,
+            prior_doc,
+            state=state,
+            errors=errors,
+            chunker_version=resolved_chunker_version,
+        )
 
     def _record_url_state(
         pid: str,
@@ -3011,9 +2793,11 @@ def _build_corpus(
                 failures = 0
                 error_kind = None
             else:
-                error_kind = _canonical_failure_kind(fields.get("error_kind"))
+                error_kind = canonical_failure_kind(fields.get("error_kind"))
                 if error_kind == FailureKind.NOT_FOUND.value:
-                    _supersede_document(pid, url, base.doc_version_id)
+                    supersede_document(
+                        pid, url, base.doc_version_id, state=state, errors=errors
+                    )
                     current["doc_version_id"] = None
                 else:
                     failures += 1
@@ -3040,224 +2824,29 @@ def _build_corpus(
                 f"state: url_state({pid}/{url}): {type(exc).__name__}: {exc}"
             )
 
-    def _write_document_state(
-        pid: str,
-        url: str,
-        page: RawPage,
-        *,
-        dv_id: str,
-        doc_hash: str,
-        extractor_token: str,
-        level_text: str,
-        raw_path: Path,
-        chunks: Sequence[tuple[int, str, str, str]],
-        partial_fields: Mapping[str, Any],
-        partial_known: bool,
-    ) -> None:
-        """Пишет версию документа и её chunk-set в durable-субстрат (09 §4.2/§9).
-
-        Порядок — по FK: ``document_version`` → ``chunk_store`` → ``chunk_meta``.
-        ``chunk_meta`` адресуется durable-ключом :func:`chunk_row_id` (не run-level
-        ``chunk_id``) и различает версию чанкера. ``chunk_store``-ключ — hash **фактически
-        записываемого текста** (I19): испорченная строка под старым хешем не «заражает»
-        новую запись.
-
-        ``first_seen_*`` существующей версии не затирается: иначе повторное наблюдение
-        того же документа выглядело бы как новый (``docs_new``/``docs_reused`` в
-        :func:`core.pipeline.state_sync.record_run_outcome`).
-
-        **Частичность (v5).** ``partial_fields``/``partial_known`` — признак, пришедший из
-        извлечения (или восстановленный из этой же строки при переиспользовании). Он
-        пишется вместе с версией, потому что переиспользование (``304``) — единственное
-        место, где признак нельзя пере-наблюдать, и до v5 там молча подставлялось
-        «полное». ``partial_known=False`` пишет ``NULL`` во все четыре колонки: «не
-        измерено» не превращается в «полное».
-
-        Смена признака при записи — видимый факт (:data:`partiality_changes`), а не тихая
-        перезапись: «было частично — стало полное» означает, что тот же ключ
-        ``(байты, движок, уровень)`` дал другой объём работы (пере-извлечение, смена
-        окружения), и молчать об этом значило бы терять деградацию так же, как её потерю.
-
-        :param chunks: ``(chunk_no, text, heading_path, context_prefix)`` принятых чанков.
-        """
-        if state is None:
-            return
-        try:
-            now = _now_iso()
-            existing = state.get_document_version(dv_id)
-            previous_partial = (
-                None if existing is None else existing.extract_partial
-            )
-            new_partial = (
-                None if not partial_known else bool(partial_fields.get("partial"))
-            )
-            if (
-                partial_known
-                and previous_partial is not None
-                and bool(previous_partial) != bool(new_partial)
-            ):
-                partiality_changes.append(
-                    {
-                        "product_id": pid,
-                        "url": url,
-                        "doc_version_id": dv_id,
-                        "was": "partial" if previous_partial else "full",
-                        "now": "partial" if new_partial else "full",
-                        "was_pages_converted": getattr(
-                            existing, "extract_pages_converted", None
-                        ),
-                        "was_page_count": getattr(existing, "extract_page_count", None),
-                        "now_pages_converted": partial_fields.get("pages_converted"),
-                        "now_page_count": partial_fields.get("page_count"),
-                    }
-                )
-            run_token = str(run_id or "")
-            rows: list[tuple[ChunkRow, str]] = []
-            for chunk_no, text, heading_path, context_prefix in chunks:
-                row = ChunkRow(
-                    chunk_id=chunk_row_id(dv_id, resolved_chunker_version, chunk_no),
-                    doc_version_id=dv_id,
-                    product_id=pid,
-                    chunk_no=chunk_no,
-                    content_hash=content_hash(text),
-                    chunker_version=resolved_chunker_version,
-                    heading_path=heading_path or None,
-                    context_prefix=context_prefix or None,
-                    lang=page.lang,
-                )
-                rows.append((row, text))
-            digest = short_hash(
-                _FIELD_SEP.join(sorted(row.chunk_id for row, _text in rows)), 24
-            )
-            state.upsert_document_version(
-                DocumentVersionRow(
-                    doc_version_id=dv_id,
-                    doc_id=f"{pid}:{doc_hash}",
-                    product_id=pid,
-                    url=page.url,
-                    content_hash=doc_hash,
-                    extractor_version=extractor_token,
-                    level=level_text,
-                    raw_path=str(raw_path),
-                    chunker_version=resolved_chunker_version,
-                    chunk_ids_digest=digest,
-                    # v5: частичность — измеренное свойство версии. При неизвестном
-                    # признаке в колонках остаётся NULL (не 0): «полное» здесь было бы
-                    # утверждением, которого никто не делал.
-                    extract_partial=new_partial,
-                    extract_partial_reason=(
-                        partial_fields.get("partial_reason")
-                        if new_partial
-                        else None
-                    ),
-                    extract_pages_converted=(
-                        partial_fields.get("pages_converted") if new_partial else None
-                    ),
-                    extract_page_count=(
-                        partial_fields.get("page_count") if partial_known else None
-                    ),
-                    first_seen_run_id=(
-                        existing.first_seen_run_id if existing is not None else run_token
-                    ),
-                    last_seen_run_id=run_token,
-                    first_seen_at=(
-                        existing.first_seen_at if existing is not None else now
-                    ),
-                    last_seen_at=now,
-                    status=_DOC_ACTIVE,
-                )
-            )
-            for row, text in rows:
-                state.put_chunk_text(row.content_hash, text, lang=page.lang)
-            state.replace_doc_chunks(dv_id, [row for row, _text in rows])
-        except Exception as exc:  # noqa: BLE001 — изоляция state-записи
-            errors.append(
-                f"state: document_version({pid}/{url}): {type(exc).__name__}: {exc}"
-            )
-
     def _mark(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
         """Помечает исход URL: сеанс краула (L1a) + durable ``url_state`` (09 §6.3).
 
-        Сеанс — прежнее поведение (:func:`_mark_session`); ``url_state`` пишется при
+        Сеанс — прежнее поведение (:func:`mark_session`); ``url_state`` пишется при
         наличии ``state`` для **каждого** исхода URL. ``state_fields`` — поля исхода
         документа (``doc_version_id``/``reuse_kind``/валидаторы/``http_status``), которые
         нельзя пронести через ``CrawlSessionItem`` (у него нет таких колонок).
         """
         state_fields = fields.pop("state_fields", None)
-        _mark_session(pid, u, status, **fields)
-        _record_url_state(pid, u, status, fields, state_fields)
-
-    def _mark_session(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
-        """Помечает исход URL и (при активном сеансе) персистит элемент краула (L1a).
-
-        Пишет **полную** строку ``crawl_session_items``: поля предыдущего элемента
-        переносятся (carry-forward), переданные не-``None`` поля перекрывают. Счётчики
-        сеанса поддерживаются стором транзакционно. Сбой изолируется в ``errors``; без
-        сеанса durable-краул выключен — строка не пишется (наблюдаемость идёт из
-        ``IndexBuild``-счётчиков, которые при отсутствии сеанса нулевые).
-
-        Phase 2.1/S1: ``engine`` — **применённый** транспорт (``applied_engines``), а не
-        запрошенный ``target.engine``; откат на ``target.engine`` при отсутствии записи.
-        """
-        if session is None:
-            return
-        key = (pid, u)
-        base = items.get(key)
-        target = targets.get(key)
-        applied = applied_engines.get(key)
-        engine_value = applied if applied is not None else (
-            target.engine if target is not None else None
+        mark_session(
+            pid,
+            u,
+            status,
+            session=session,
+            store=store,
+            items=items,
+            targets=targets,
+            applied_engines=applied_engines,
+            errors=errors,
+            heartbeat=heartbeat,
+            **fields,
         )
-        now = _now_iso()
-        attempts = base.attempts if base is not None else 0
-        if status in (CrawlItemStatus.FETCHED, CrawlItemStatus.FAILED) and (
-            base is None or base.status is not status
-        ):
-            attempts += 1
-        record: dict[str, Any] = {
-            "session_id": session,
-            "product_id": pid,
-            "url": u,
-            "status": status,
-            "attempts": attempts,
-            "depth": base.depth if base is not None else None,
-            "engine": engine_value,
-            "kind": target.kind if target is not None else None,
-            "fetch_mode": base.fetch_mode if base is not None else None,
-            "extract_route": base.extract_route if base is not None else None,
-            "strategy": base.strategy if base is not None else None,
-            "http_status": base.http_status if base is not None else None,
-            "content_type": base.content_type if base is not None else None,
-            "lang": base.lang if base is not None else None,
-            "content_hash": base.content_hash if base is not None else None,
-            "raw_path": base.raw_path if base is not None else None,
-            "error_kind": base.error_kind if base is not None else None,
-            "error": base.error if base is not None else None,
-            "first_seen": (base.first_seen if base is not None and base.first_seen else now),
-            "last_attempt": now,
-        }
-        for name, value in fields.items():
-            if value is _CLEAR:
-                record[name] = None
-                continue
-            if value is not None:
-                if name == "error_kind":
-                    # Ф0: единственная воронка записи ``crawl_session_items`` — здесь
-                    # канонизируем класс сбоя, чтобы persisted-значение всегда было
-                    # членом FailureKind (или source_unavailable для неизвестного).
-                    value = _canonical_failure_kind(value)
-                record[name] = value
-        try:
-            item = CrawlSessionItem(**record)
-            store.upsert_crawl_session_item(item)
-            items[key] = item
-            # F1/Д-6: каждая запись исхода URL — честный признак жизни процесса.
-            heartbeat.touch()
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(
-                f"{pid}/{u}: crawl_session_item {_as_text(status)}: "
-                f"{type(exc).__name__}: {exc}"
-            )
+        _record_url_state(pid, u, status, fields, state_fields)
 
     def _retain(
         product_id: str,
@@ -3448,7 +3037,7 @@ def _build_corpus(
         reuse_kind: ReuseKind,
         extract_error: str | None = None,
         extract_failure_kind: FailureKind | None = None,
-        reuse: _DocReuse | None = None,
+        reuse: DocReuse | None = None,
         origin: str = ORIGIN_CRAWL,
     ) -> str | None:
         """Доводка одного URL после экстракции: дедуп → нарезка → ``_mark`` (главный поток).
@@ -3462,9 +3051,9 @@ def _build_corpus(
         ``304``, экстракция не вызывалась); ``None`` — обычная экстракция. При ``200`` с
         прежним ``content_hash`` версия ищется здесь же (:func:`_reuse_same_hash`): чанкер
         не вызывается, chunk-set берётся из ``chunk_store`` после проверки I19
-        (:func:`_load_reused_chunks`). Run-level ``chunk_id`` адресует версию документа
-        (``doc_version_id``, 16 §6), поэтому идентификаторы индекса от переиспользования
-        не меняются.
+        (:func:`core.pipeline.corpus_persist.load_reused_chunks`). Run-level ``chunk_id``
+        адресует версию документа (``doc_version_id``, 16 §6), поэтому идентификаторы
+        индекса от переиспользования не меняются.
 
         ``reuse_kind`` — происхождение наблюдения (16 §3.3), приходит **аргументом**:
         ``reused`` (байты из retained, ``_resume_page``), ``revalidated`` (304 либо 200 с
@@ -3561,8 +3150,13 @@ def _build_corpus(
             # Байты сохранены и контент уже проиндексирован близнецом в этой партиции.
             # Алиас получает ту же версию документа (если она уже записана), чтобы
             # следующий инкрементальный план знал, что контент URL уже в корпусе.
-            found = _find_doc_version(
-                product_id, doc_hash, extractor_token, level_text
+            found = find_doc_version(
+                product_id,
+                doc_hash,
+                extractor_token,
+                level_text,
+                state=state,
+                errors=errors,
             )
             mark(
                 product_id,
@@ -3728,7 +3322,7 @@ def _build_corpus(
 
         # 09 §6.3/§9: версия документа + chunk-set в durable-субстрате. Идентификатор
         # (``dv_id``) выведен выше — тем же ключом §4.2, которым адресованы ``chunk_id``.
-        _write_document_state(
+        write_document_state(
             product_id,
             url,
             page,
@@ -3740,9 +3334,16 @@ def _build_corpus(
             chunks=accepted,
             partial_fields=partial_fields,
             partial_known=partial_known,
+            state=state,
+            errors=errors,
+            partiality_changes=partiality_changes,
+            chunker_version=resolved_chunker_version,
+            run_id=run_id,
         )
         reused = active_reuse is not None
-        _count_doc(product_id, reused=reused)
+        count_doc(
+            product_id, reused=reused, state=state, doc_counters=doc_counters
+        )
 
         # L1a: документ успешно добыт и нарезан → элемент сеанса терминален ``FETCHED``
         # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
@@ -3766,50 +3367,6 @@ def _build_corpus(
         return document_id
 
     # -- 13-manual-artifacts §3: подача объявленных файлов оператора ---------- #
-    def _manual_host_scope(product_id: str) -> tuple[frozenset[str], frozenset[str]]:
-        """``(own_hosts, declared_hosts)`` продукта — та же семантика, что у scope краула.
-
-        Собственные хосты продукта (его seed-корни) и **все** объявленные хосты прогона
-        (корни + ключи ``domain_profiles.yaml``). Ручной артефакт не расширяет scope:
-        поддомен допускается только объявленным, чужой хост — нет. Иначе «предоставление»
-        стало бы способом дописать корпус чужим хостом — то есть execution_change,
-        проведённым мимо ``run_id``.
-        """
-        from core.pipeline.serp_loop import declared_serp_hosts
-
-        own_by_product, declared = declared_serp_hosts(
-            {product_id: url_map.get(product_id, [])}, domain_profiles
-        )
-        return own_by_product.get(product_id, frozenset()), declared
-
-    def _persist_manual_audit(
-        entry: ManualArtifact, *, doc_id: str | None, raw_path: Path | None
-    ) -> None:
-        """Аудит предоставления (§3.3): акт человека, а не «повторная попытка фетча».
-
-        Пишется и при неудаче (``doc_id``/``raw_path`` — ``None``): «объявлено, но не
-        дошло» — факт, который нельзя терять, иначе провал подачи выглядел бы как её
-        отсутствие. Отказ краула по этому URL живёт отдельно (``crawl_session_items``)
-        и этим методом не трогается.
-        """
-        if store is None:
-            return
-        try:
-            store.save_manual_artifact(
-                artifact_record(
-                    entry,
-                    run_id=str(run_id or ""),
-                    doc_id=doc_id,
-                    raw_path=None if raw_path is None else str(raw_path),
-                    created_at=_now_iso(),
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(
-                f"{entry.product_id}/{entry.url}: manual_artifact audit: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
     def _feed_manual_artifact(
         product_id: str,
         entry: ManualArtifact,
@@ -3852,7 +3409,9 @@ def _build_corpus(
             errors.append(f"{where}: URL не проходит SSRF-проверку ({exc}) — не допущен")
             return None, None
         # 2. Scope — только объявленные хосты продукта (поддомен — если объявлен).
-        own_hosts, declared_hosts = _manual_host_scope(product_id)
+        own_hosts, declared_hosts = manual_host_scope(
+            product_id, url_map=url_map, domain_profiles=domain_profiles
+        )
         if not serp_host_in_scope(
             urlsplit(url).hostname or "", own_hosts, declared_hosts
         ):
@@ -4139,39 +3698,7 @@ def _build_corpus(
     # обе ветки используют её, не дублируя логику.
     ingests: list[_ProductIngest] = []
 
-    def _emit_progress() -> None:
-        """Phase 4: снимок прогресса сеанса для колбэка ``progress`` (``--follow``).
-
-        Читает ``crawl_session_counts`` (единственный владелец — стор); ошибки колбэка/
-        чтения изолируются (наблюдаемость не роняет фазу). Без активного сеанса — no-op.
-
-        F1/Д-6: здесь же — признак жизни сеанса (``heartbeat.touch``). Точка выбрана
-        намеренно: она стоит на каждой границе шага дренажа (фетч/экстракция/расширение
-        frontier), поэтому её покрытие не зависит от того, включён ли ``--follow``.
-        """
-        heartbeat.touch()
-        if progress is None or session is None:
-            return
-        # Сбой колбэка ``--follow`` не роняет дренаж: прогресс наблюдаем, но не измеряем.
-        # Оператор увидит потерю живых строк и итоговые счётчики фазы/продукта в отчёте.
-        with contextlib.suppress(Exception):
-            progress(dict(store.crawl_session_counts(session)))
-
-    def _emit_product(phase: str, product_id: str) -> None:
-        """Живая граница продукта для ``on_product`` (``--follow``).
-
-        В отличие от ``log_entries`` (материализуются в конце фазы), этот канал
-        срабатывает **во время** дренажа: оператор видит, что продукт начат, а не
-        гадает «потерян или ещё в очереди». Ошибки колбэка изолируются.
-        """
-        if on_product is None:
-            return
-        # Сбой колбэка границы продукта тоже не роняет фазу: продукт дренируется дальше,
-        # а его исход виден в ``errors``/провенансе и в ``crawl_product`` итогового отчёта.
-        with contextlib.suppress(Exception):
-            on_product(phase, product_id)
-
-    _emit_progress()
+    emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
 
     # --- C1/L1: фазовый пул и FIFO-очередь экстракции ------------------------- #
     # Пул создаётся лениво на ключ ``(level, window)`` и живёт до ``finally`` фазы
@@ -4304,7 +3831,7 @@ def _build_corpus(
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
             )
-            _emit_progress()
+            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
             return []
 
         problems = poller.validate_params(target.kind, target.params)
@@ -4321,7 +3848,7 @@ def _build_corpus(
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
             )
-            _emit_progress()
+            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
             return []
 
         try:
@@ -4338,14 +3865,14 @@ def _build_corpus(
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
             )
-            _emit_progress()
+            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
             return []
 
         # Каталог добыт: элемент ``FETCHED`` (raw НЕ сохраняется — это не контент/evidence,
         # только ссылки; resume такого элемента не даёт — ``_resume_source`` требует ``raw_path``).
         applied_engines[(pid, url)] = target.engine
         _mark(pid, url, CrawlItemStatus.FETCHED)
-        _emit_progress()
+        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
 
         entry_urls: list[str] = []
         # N2: самокаталог — URL каталога уже добыт выше (kind/engine записи унаследуют
@@ -4376,14 +3903,6 @@ def _build_corpus(
     #: ``<loc>``, уже прикреплённые к какому-либо seed-root продукта (дедуп между seeds).
     sitemap_seed_used: set[tuple[str, str]] = set()
 
-    def _sitemap_url_for(seed_url: str) -> str | None:
-        """URL sitemap из лучшего per-site профиля seed-URL (``DomainProfile.sitemap``)."""
-        profile = select_domain_profile(seed_url, domain_profiles or {})
-        if profile is None:
-            return None
-        value = getattr(profile, "sitemap", None)
-        return str(value) if value else None
-
     def _expand_sitemap(pid: str, seed_url: str) -> list[str]:
         """D3: разворачивает per-site ``sitemap`` в дополнительные depth-0 seed-URLs.
 
@@ -4392,7 +3911,7 @@ def _build_corpus(
         ``raw_path``, I19). Сбой/отсутствие поллера изолируется в ``errors`` (seed оператора
         сохраняется). Кэш по ``(product, sitemap_url)`` — один опрос на сайт.
         """
-        sitemap_url = _sitemap_url_for(seed_url)
+        sitemap_url = sitemap_url_for(seed_url, domain_profiles=domain_profiles)
         if not sitemap_url:
             return []
         key = (pid, sitemap_url)
@@ -4415,7 +3934,7 @@ def _build_corpus(
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
             )
-            _emit_progress()
+            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
             sitemap_cache[key] = locs
             return locs
 
@@ -4430,7 +3949,7 @@ def _build_corpus(
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
             )
-            _emit_progress()
+            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
             sitemap_cache[key] = locs
             return locs
 
@@ -4461,13 +3980,13 @@ def _build_corpus(
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
             )
-            _emit_progress()
+            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
             sitemap_cache[key] = locs
             return locs
 
         applied_engines[(pid, sitemap_url)] = starget.engine
         _mark(pid, sitemap_url, CrawlItemStatus.FETCHED)  # без raw: не контент (I19)
-        _emit_progress()
+        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
 
         # ``<loc>`` — кандидаты: SSRF-перепроверка до становления seed (не ``evidence``).
         seen: set[str] = {sitemap_url}
@@ -4793,8 +4312,8 @@ def _build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=reject.error_kind.value,
                 error=reject.reason,
-                raw_path=_CLEAR,
-                content_hash=_CLEAR,
+                raw_path=CLEAR_SESSION_FIELD,
+                content_hash=CLEAR_SESSION_FIELD,
                 depth=desc.depth,
             )
             return None
@@ -4860,7 +4379,7 @@ def _build_corpus(
             # видел (429/403/503/404 …). ``error_kind`` остаётся прежним — таксономия
             # ``FailureKind`` этим срезом не меняется; статус лишь делает отказ различимым
             # (транзиентный rate-limit vs политический запрет). Нет статуса — ``None``,
-            # не выдумываем (carry-forward в ``_mark_session`` не перекрывает прежнее).
+            # не выдумываем (carry-forward в ``mark_session`` не перекрывает прежнее).
             _mark(
                 pid,
                 wu,
@@ -4943,8 +4462,8 @@ def _build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.PAYLOAD_TOO_LARGE.value,
                 error=reason,
-                raw_path=_CLEAR,
-                content_hash=_CLEAR,
+                raw_path=CLEAR_SESSION_FIELD,
+                content_hash=CLEAR_SESSION_FIELD,
                 depth=desc.depth,
             )
             return None
@@ -4963,8 +4482,8 @@ def _build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.UNSUPPORTED_BINARY.value,
                 error=reason,
-                raw_path=_CLEAR,
-                content_hash=_CLEAR,
+                raw_path=CLEAR_SESSION_FIELD,
+                content_hash=CLEAR_SESSION_FIELD,
                 depth=desc.depth,
             )
             return None
@@ -5023,9 +4542,11 @@ def _build_corpus(
     # ``(product, seed-root)``; флаг/продукты уходят в провенанс сеанса и ``IndexBuild``.
     truncation_records: list[dict[str, Any]] = []
     truncated_products: set[str] = set()
-    pages_fetched_total = 0
-    #: S1: фактически добытые ревалидационные страницы (discovery-счётчик отдельно).
-    revalidation_fetched_total = 0
+    # L5: мутабельное состояние фазы — ровно те имена, что раньше текли через
+    # ``nonlocal`` (накопители и флаги шага; смысл каждого поля — в
+    # :class:`core.pipeline.corpus_state.CorpusCounters`). Один экземпляр на вызов:
+    # замыкания читают ссылку и мутируют поля, поэтому ``nonlocal`` в теле не осталось.
+    counters = CorpusCounters()
 
     def _persist_partial_crawl_provenance() -> None:
         """Пишет наблюдение scope/усечения в ``crawl_sessions.provenance_json`` **по корню**.
@@ -5079,9 +4600,8 @@ def _build_corpus(
         ``None`` — у корня не было известных URL: ключ не появляется, payload
         ``state is None`` байт-в-байт прежний.
         """
-        nonlocal pages_fetched_total, revalidation_fetched_total
-        pages_fetched_total += frontier.fetched
-        revalidation_fetched_total += frontier.revalidation_fetched
+        counters.pages_fetched_total += frontier.fetched
+        counters.revalidation_fetched_total += frontier.revalidation_fetched
         if frontier.truncated:
             truncated_products.add(product_id)
         # P5: пропуск документов «прореживает» корпус продукта по построению — он
@@ -5173,7 +4693,7 @@ def _build_corpus(
         if state is None:
             return []
         if (
-            _as_product_mode((product_modes or {}).get(product_id))
+            as_product_mode((product_modes or {}).get(product_id))
             is not ProductMode.INCREMENTAL
         ):
             return []
@@ -5483,9 +5003,6 @@ def _build_corpus(
     #: (``build``/переиспользование). Строка ``index_manifest`` пишется только для них.
     physically_ok: dict[str, bool] = {}
 
-    #: Наблюдаемость: сеанс краула закрыт (финализация — одна на фазу, см. ``_finalize_crawl_session``).
-    session_finalized = False
-
     def _finalize_crawl_session() -> None:
         """L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``).
 
@@ -5502,10 +5019,9 @@ def _build_corpus(
         сеанс терминально (:func:`_finalize_interrupted_session`); исключение после неё
         (эмбеддинг/сборка/композиция) легитимный ``completed``/``partial`` не переписывает.
         """
-        nonlocal session_finalized
-        if session is None or session_finalized:
+        if session is None or counters.session_finalized:
             return
-        session_finalized = True
+        counters.session_finalized = True
         try:
             # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
             # элементов** (``items.values()``: фактически применённый ``engine`` и ``kind``
@@ -5533,8 +5049,8 @@ def _build_corpus(
                 # эффективные лимиты/число добытых страниц/усечённые продукты — в провенанс.
                 truncated=bool(truncated_products),
                 effective_limits={"roots": truncation_records},
-                pages_fetched=pages_fetched_total,
-                revalidation_fetched=revalidation_fetched_total,
+                pages_fetched=counters.pages_fetched_total,
+                revalidation_fetched=counters.revalidation_fetched_total,
                 truncated_products=sorted(truncated_products),
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
@@ -5558,12 +5074,6 @@ def _build_corpus(
     #: на границе продукта из уже посчитанных ``ingest.docs``/``ingest.chunks``: никаких
     #: дополнительных SQL-запросов на документ.
     observed_documents: list[tuple[str, int]] = []
-    #: Наблюдённое расписание экстракции: максимум разрешённого окна по корням, максимум
-    #: рециклинга и признак «окно выведено из бюджета хотя бы на одном корне».
-    observed_extract_workers: int | None = None
-    observed_extract_max_tasks: int | None = None
-    observed_extract_derived = False
-
     def _note_scheduling(limits: CrawlLimits) -> None:
         """Запоминает разрешённое окно экстракции корня (F0, наблюдаемость расписания).
 
@@ -5572,21 +5082,22 @@ def _build_corpus(
         использованных. ``derived`` — «хотя бы на одном корне» (§2.10): тогда источник
         расписания в метриках — бюджет памяти, а не воля оператора.
         """
-        nonlocal observed_extract_workers, observed_extract_max_tasks
-        nonlocal observed_extract_derived
         if limits.extract_workers is not None:
             candidate = int(limits.extract_workers)
-            if observed_extract_workers is None or candidate > observed_extract_workers:
-                observed_extract_workers = candidate
+            if (
+                counters.observed_extract_workers is None
+                or candidate > counters.observed_extract_workers
+            ):
+                counters.observed_extract_workers = candidate
         if limits.extract_max_tasks_per_child is not None:
             candidate_tasks = int(limits.extract_max_tasks_per_child)
             if (
-                observed_extract_max_tasks is None
-                or candidate_tasks > observed_extract_max_tasks
+                counters.observed_extract_max_tasks is None
+                or candidate_tasks > counters.observed_extract_max_tasks
             ):
-                observed_extract_max_tasks = candidate_tasks
+                counters.observed_extract_max_tasks = candidate_tasks
         if limits.extract_workers_derived:
-            observed_extract_derived = True
+            counters.observed_extract_derived = True
 
     #: 13-manual-artifacts §3.3: ``product_id → [url]``, чей материал **предъявлен**
     #: объявленным артефактом и дошёл до корпуса. Это вход ``derive_corpus_coverage``:
@@ -5672,14 +5183,24 @@ def _build_corpus(
             }
         )
         #: Сколько seed'ов фактически поставлено в очередь (авторские + sitemap). Растёт
-        #: в :func:`_drain_root`; нужен для честной причины zero-source.
-        product_seeds_enqueued = 0
+        #: в :func:`_drain_root`; нужен для честной причины zero-source. Сбрасывается на
+        #: каждом продукте — поле общего состояния, а не локальная переменная.
+        counters.product_seeds_enqueued = 0
         #: Живая граница продукта: до первого дренажа (продукт может идти часами).
-        _emit_product("start", product_id)
+        emit_product("start", product_id, on_product=on_product)
         # 16 §3.2: граница продукта — строка ``run_product`` в статусе ``running``. Пишется
         # до Pass A, потому что «продукт начат» и «продукт потерян» должны различаться
         # запросом, а не догадкой; финальный статус перезапишет её после Pass B.
-        _save_run_product(product_id, status=RunProductStatus.RUNNING)
+        save_run_product(
+            product_id,
+            store=store,
+            run_id=run_id,
+            run_scope=run_scope,
+            product_modes=product_modes,
+            run_products_written=run_products_written,
+            errors=errors,
+            status=RunProductStatus.RUNNING,
+        )
         #: 09 §6.3: известные URL продукта (``revalidate``) — после авторских корней.
         incremental_items = _plan_incremental_items(product_id, product_roots)
         #: 09 §6.3: группировка **всех** известных URL по авторским корням (scope
@@ -5808,7 +5329,6 @@ def _build_corpus(
             в фазовой очереди (C1). ``defer_tail=False`` (synthetic-бакеты ревалидации,
             вызывающий читает счётчики frontier сразу) — хвост доводится здесь же.
             """
-            nonlocal product_seeds_enqueued
             limits = resolve_crawl_limits(
                 root_url,
                 app=crawl_app or CrawlConfig(),
@@ -5948,7 +5468,9 @@ def _build_corpus(
                 else None
             )
             #: Исполнять ли экстракцию в пуле (снимается inline-fallback'ом при отказе).
-            defer_extract = extract_window is not None and extraction_pool is not None
+            counters.defer_extract = (
+                extract_window is not None and extraction_pool is not None
+            )
             #: C1: хвост этого корня в фазовой очереди доводки (счётчик + финализатор).
             root_drain = _RootDrain()
             # A2b/§6(b)/§10: egress-политика robots — **условна от discovery** и
@@ -6014,7 +5536,7 @@ def _build_corpus(
             frontier.note_consumed(consumed)
             seed_status = frontier.add_seed(root_url) if seed else "synthetic"
             if seed_status == "queued":
-                product_seeds_enqueued += 1
+                counters.product_seeds_enqueued += 1
             seed_blacklisted = seed_status == "blacklisted"
             seed_truncated = seed_status == "truncated"
             if seed_blacklisted:
@@ -6062,7 +5584,7 @@ def _build_corpus(
                 and revalidation_queued == 0
                 and charged_queued == 0
             ):
-                _emit_progress()
+                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                 return frontier, list(sitemap.skipped), root_drain
 
             # D3: дополнительные depth-0 seeds (``<loc>`` sitemap) — под тем же блэклистом и
@@ -6080,7 +5602,7 @@ def _build_corpus(
                 if extra_status in ("queued", "dup"):
                     sitemap_seed_used.add((pid, extra))
                     if extra_status == "queued":
-                        product_seeds_enqueued += 1
+                        counters.product_seeds_enqueued += 1
                 elif extra_status == "blacklisted":
                     errors.append(
                         f"{pid}/{extra}: sitemap-seed зачёркнут блэклистом "
@@ -6101,7 +5623,7 @@ def _build_corpus(
             for found in serp_seeds:
                 found_status = frontier.add_seed(found)
                 if found_status == "queued":
-                    product_seeds_enqueued += 1
+                    counters.product_seeds_enqueued += 1
                     serp_ingest["enqueued"] += 1
                 elif found_status == "dup":
                     serp_ingest["dup"] += 1
@@ -6196,10 +5718,14 @@ def _build_corpus(
                 # ``run_id`` ради чистого рычага пропускной способности (§13: это не смена
                 # условий измерения).
                 defer_member: MemberDeferral | None = None
-                if defer_extract and extraction_pool is not None and pool_key is not None:
+                if (
+                    counters.defer_extract
+                    and extraction_pool is not None
+                    and pool_key is not None
+                ):
                     #: Пул этого спуска признан мёртвым (``2 × timeout`` без завершений):
                     #: остаток членов — видимый пропуск, а не 47 ожиданий по таймауту.
-                    member_pool_dead = False
+                    counters.member_pool_dead = False
 
                     def _submit_member(task: MemberTask) -> Any:
                         """Submit извлечения члена; ``MemberOutcome`` — немедленный исход.
@@ -6208,11 +5734,10 @@ def _build_corpus(
                         ``supports_source_path``, и без этой проверки шов получил бы локальный
                         путь вместо URL (капитуляция была бы невидимой).
                         """
-                        nonlocal member_pool_dead
                         unavailable = _member_extract_unavailable(root_extractor)
                         if unavailable is not None:
                             return unavailable
-                        if member_pool_dead:
+                        if counters.member_pool_dead:
                             return MemberOutcome(
                                 skip_reason=SKIP_EXTRACT_FAILED,
                                 detail=(
@@ -6252,7 +5777,6 @@ def _build_corpus(
                         где ``root.pending`` ещё включает сам архив, и рекурсивная доводка
                         той же фазовой очереди занизила бы/задвоила счётчики корней.
                         """
-                        nonlocal member_pool_dead
                         try:
                             _wait_started = time.perf_counter()
                             try:
@@ -6262,13 +5786,13 @@ def _build_corpus(
                                 # экстракции на главном потоке (член контейнера).
                                 timings.extract_wait_s += time.perf_counter() - _wait_started
                         except TimeoutError:
-                            member_pool_dead = pools.note_timeout(pool_key)
+                            counters.member_pool_dead = pools.note_timeout(pool_key)
                             return MemberOutcome(
                                 skip_reason=SKIP_EXTRACT_FAILED,
                                 detail=f"extraction timeout ({_extract_timeout} s)",
                             )
                         except BrokenProcessPool:
-                            member_pool_dead = True
+                            counters.member_pool_dead = True
                             return MemberOutcome(
                                 skip_reason=SKIP_EXTRACT_FAILED,
                                 detail="extraction worker died",
@@ -6419,7 +5943,7 @@ def _build_corpus(
                     and document_content_type(page.content_type) is not None
                 ):
                     _record_document_skip(work_url, "content_type")
-                    _emit_progress()
+                    emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                     return
                 # B3: допущенный терминальный артефакт (документ **или** контейнер) проходит
                 # **зонд** до экстракции: класс/формат/размер по байтам, ``page_count`` PDF
@@ -6442,7 +5966,7 @@ def _build_corpus(
                         # Контейнер — не документ: вместо экстракции исполняется спуск
                         # (``archive_descent=plan`` — только листинг и прогноз).
                         _descend_container(pid, work_url, page, raw_path, reuse_kind=reuse_kind)
-                        _emit_progress()
+                        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                         return
                 if extracted is _INLINE:
                     # 09 §6.3/§9: ``304`` переиспользует версию документа **до**
@@ -6504,7 +6028,7 @@ def _build_corpus(
                             else None
                         ),
                     )
-                _emit_progress()
+                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                 # D1: извлечение in-site ссылок и следующий уровень BFS. При max_depth=0
                 # извлечение не выполняется вовсе (байт-в-байт прежнее поведение).
                 # 09 §6.3: ревалидация — лист; её ссылки не расширяют discovery (иначе
@@ -6631,11 +6155,10 @@ def _build_corpus(
                 слот воркера и не оплачивая инициализатор. Проба в воркере остаётся защитой;
                 ключ родителя и воркера — один и тот же хеш ретенированных байтов.
                 """
-                nonlocal defer_extract
                 if outcome is None:
                     return
                 page, raw_path, fetch_plan, freshly_fetched = outcome
-                if defer_extract and extract_cache is not None:
+                if counters.defer_extract and extract_cache is not None:
                     # C1/L4: проба — в родителе, до submit и до проверки исчерпания пула:
                     # готовый текст не требует экстракции вовсе. Ключ — ``raw_path.stem``
                     # (тот же хеш, что воркер считает из прочитанных байтов).
@@ -6668,12 +6191,12 @@ def _build_corpus(
                         ),
                     )
                     return
-                if not defer_extract:
+                if not counters.defer_extract:
                     _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
                     return
 
                 if pool_key is None:
-                    # Инвариант ветки: ``defer_extract`` истинно только при заданном окне,
+                    # Инвариант ветки: ``counters.defer_extract`` истинно только при окне,
                     # а окно и есть ключ пула. Проверка явная — под ``-O`` assert исчез бы
                     # и ключ ушёл бы в ``pools.executor`` как ``None``.
                     raise AssertionError(
@@ -6687,7 +6210,7 @@ def _build_corpus(
                         f"{pid_arg}/{url_arg}: extract pool: "
                         f"{type(exc).__name__}: {exc} — inline"
                     )
-                    defer_extract = False
+                    counters.defer_extract = False
                     _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
                     return
                 try:
@@ -6757,7 +6280,7 @@ def _build_corpus(
                             error=reason,
                             depth=entry.depth,
                         )
-                        _emit_progress()
+                        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                         continue
                     desc = entry.desc
                     if desc is None:
@@ -6863,7 +6386,7 @@ def _build_corpus(
                                 f"({_EXECUTOR_MAX_WAVES_PER_ROOT} волн) — обход остановлен "
                                 "(round_budget)"
                             )
-                            _emit_progress()
+                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                             break
                         remaining = (
                             None
@@ -6910,7 +6433,7 @@ def _build_corpus(
                                 continue
                             if _skip_document_prefetch(work_url):
                                 # P5: документ при ``off`` — pre-fetch-пропуск (виден).
-                                _emit_progress()
+                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                                 continue
                             prior_item = items.get((pid, work_url))
                             if _terminal_failure_kind(prior_item) is not None:
@@ -7030,7 +6553,7 @@ def _build_corpus(
                                     ),
                                     depth=entry.depth,
                                 )
-                                _emit_progress()
+                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                                 continue
                             if entry.kind == "attempts":
                                 prior_item = entry.prior_item
@@ -7054,7 +6577,7 @@ def _build_corpus(
                                     error=reason,
                                     depth=entry.depth,
                                 )
-                                _emit_progress()
+                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                                 continue
                             desc = entry.desc
                             if desc is None:
@@ -7081,7 +6604,7 @@ def _build_corpus(
                                     error="executor: результат не получен",
                                     depth=entry.depth,
                                 )
-                                _emit_progress()
+                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                                 continue
                             if result.error or result.raw_bytes is None:
                                 reason = result.error or "executor: пустой raw_bytes"
@@ -7098,7 +6621,7 @@ def _build_corpus(
                                     depth=entry.depth,
                                     http_status=result.http_status,
                                 )
-                                _emit_progress()
+                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                                 continue
                             # S1: применяемый движок — фактический транспорт из результата шва.
                             desc.engine_value = result.engine or desc.engine_value
@@ -7148,7 +6671,7 @@ def _build_corpus(
                             continue
                         if _skip_document_prefetch(work_url):
                             # P5: документ при ``off`` — pre-fetch-пропуск (виден; не в max_documents).
-                            _emit_progress()
+                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                             continue
                         prior_item = items.get((pid, work_url))
                         if (
@@ -7170,7 +6693,7 @@ def _build_corpus(
                                 error=reason,
                                 depth=depth,
                             )
-                            _emit_progress()
+                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                             continue
 
                         work_target = _resolve_target(pid, work_url)
@@ -7241,7 +6764,7 @@ def _build_corpus(
                             continue
                         if _skip_document_prefetch(work_url):
                             # P5: документ при ``off`` — pre-fetch-пропуск (виден).
-                            _emit_progress()
+                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                             continue
                         prior_item = items.get((pid, work_url))
                         if (
@@ -7334,7 +6857,7 @@ def _build_corpus(
                     error_kind=_MAX_ATTEMPTS_ERROR_KIND,
                     error=reason,
                 )
-                _emit_progress()
+                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
                 continue
 
             # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру,
@@ -7509,7 +7032,7 @@ def _build_corpus(
                 }
             revalidation_orphans[f"{product_id}:catalog:{group_root}"] = info
             if frontier is not None:
-                revalidation_fetched_total += frontier.revalidation_fetched
+                counters.revalidation_fetched_total += frontier.revalidation_fetched
 
         # 09 §6.3: известные URL вне scope **всех** авторских корней (author-scope
         # drift: корень удалён/ключ пути сужен). Один synthetic-бакет на (продукт,
@@ -7554,12 +7077,12 @@ def _build_corpus(
             revalidation_orphans[f"{product_id}:{origin}"] = info
             revalidation_orphan_total += len(all_known_urls)
             if frontier is not None:
-                revalidation_fetched_total += frontier.revalidation_fetched
+                counters.revalidation_fetched_total += frontier.revalidation_fetched
             # Targets известных URL резолвятся лениво в ``_drain_root``
             # (``_resolve_target``) — предварительная резолюция не нужна.
 
         # C1: хвосты экстракции продукта обязаны быть доведены до расчёта провенанса
-        # (``truncation_records``/``pages_fetched_total``/финализаторы корней). Пул —
+        # (``truncation_records``/``counters.pages_fetched_total``/финализаторы корней). Пул —
         # фазовый, поэтому здесь же доводятся хвосты всех корней продукта (FIFO).
         while extract_pending:
             _finish_extract(extract_pending.popleft())
@@ -7581,7 +7104,14 @@ def _build_corpus(
             )
             if doc_id is not None:
                 manual_resolved.append(entry.url)
-            _persist_manual_audit(entry, doc_id=doc_id, raw_path=raw_path)
+            persist_manual_audit(
+                entry,
+                doc_id=doc_id,
+                raw_path=raw_path,
+                store=store,
+                run_id=run_id,
+                errors=errors,
+            )
         if manual_resolved:
             manual_urls_by_product[product_id] = manual_resolved
 
@@ -7664,7 +7194,7 @@ def _build_corpus(
                 product_reason = ZERO_SOURCE_NO_URLS_ENTRY
             elif not product_roots:
                 product_reason = ZERO_SOURCE_NO_SEEDS
-            elif product_seeds_enqueued == 0:
+            elif counters.product_seeds_enqueued == 0:
                 product_reason = ZERO_SOURCE_ALL_SEEDS_REJECTED
             # Иначе seed'ы поставлены, но исходов нет — причину называют ``errors``
             # (сбои исполнителя/экстракции); выдумывать четвёртую причину не нужно.
@@ -7680,7 +7210,7 @@ def _build_corpus(
                 f"{product_id}: zero-source corpus "
                 f"({product_reason or 'no session items'}): "
                 f"roots={len(product_roots)}, "
-                f"seeds_enqueued={product_seeds_enqueued} — ячейки будут failed, не ❌"
+                f"seeds_enqueued={counters.product_seeds_enqueued} — ячейки будут failed, не ❌"
             )
         # I2/I2c: документы, прочитанные **не целиком**. Признак уже в ``CorpusDoc`` —
         # здесь он только считается, чтобы попасть в две наблюдаемые точки: строку
@@ -7704,7 +7234,7 @@ def _build_corpus(
                 "product_id": product_id,
                 "roots": len(drained_roots),
                 "seeds_declared": len(product_roots),
-                "seeds_enqueued": product_seeds_enqueued,
+                "seeds_enqueued": counters.product_seeds_enqueued,
                 "session_items": len(product_items),
                 "fetched": product_fetched,
                 "failed": product_failed,
@@ -7740,7 +7270,7 @@ def _build_corpus(
         )
         #: Живая граница продукта: тело завершено — в том числе при нулевом выходе
         #: (именно этот случай раньше был немым до конца фазы).
-        _emit_product("end", product_id)
+        emit_product("end", product_id, on_product=on_product)
 
         # Наблюдаемость: последний продукт — конец **краула**. Сеанс закрывается здесь,
         # до Pass B этого продукта: эмбеддинг/сборка индекса — работа фазы, и терминальный
@@ -7976,8 +7506,14 @@ def _build_corpus(
         # другой фазы нельзя — она означает «на границе corpus столько».
         _product_counters = doc_counters.get(product_id) or {}
         _docs_reused = int(_product_counters.get("reused", 0))
-        _save_run_product(
+        save_run_product(
             product_id,
+            store=store,
+            run_id=run_id,
+            run_scope=run_scope,
+            product_modes=product_modes,
+            run_products_written=run_products_written,
+            errors=errors,
             status=_final_product_status(
                 zero_source_reason=product_reason,
                 physical_ok=physical_ok,
@@ -7989,7 +7525,7 @@ def _build_corpus(
             docs_total=product_docs_total,
             # «Новое» = всё, что не переиспользовано: члены контейнеров и ручные
             # артефакты проходят экстракцию в этом прогоне, и отдельного счётчика
-            # «reused» у них нет (``_count_doc`` вызывается только для страниц).
+            # «reused» у них нет (``count_doc`` вызывается только для страниц).
             docs_new=max(0, product_docs_total - _docs_reused),
             docs_reused=_docs_reused,
             error_kind=product_reason,
@@ -8082,8 +7618,14 @@ def _build_corpus(
                 if zero_reason is None and pid not in url_map:
                     zero_reason = ZERO_SOURCE_NO_URLS_ENTRY
                 coverage = end_coverage.get(pid)
-                _save_run_product(
+                save_run_product(
                     pid,
+                    store=store,
+                    run_id=run_id,
+                    run_scope=run_scope,
+                    product_modes=product_modes,
+                    run_products_written=run_products_written,
+                    errors=errors,
                     status=(
                         RunProductStatus.BLOCKED
                         if zero_reason is not None
@@ -8117,7 +7659,7 @@ def _build_corpus(
 
     # Дальше — пост-краульная работа фазы (манифест, композиция). Терминальный статус
     # сеанса выше уже зафиксирован и от неё не зависит.
-    _emit_progress()
+    emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
 
     # --- Манифест и композиция (09 §8.1) ------------------------------------- #
     # Партиции уже физически зафиксированы, а их чанки персистентны (Pass B шёл в
@@ -8392,10 +7934,10 @@ def _build_corpus(
             chunks_per_doc=summarize_chunks_per_doc(observed_documents),
             documents=len(observed_documents),
             chunks=chunk_count,
-            extract_workers=observed_extract_workers,
-            extract_max_tasks_per_child=observed_extract_max_tasks,
+            extract_workers=counters.observed_extract_workers,
+            extract_max_tasks_per_child=counters.observed_extract_max_tasks,
             scheduling_source=(
-                "derived" if observed_extract_derived else "declared"
+                "derived" if counters.observed_extract_derived else "declared"
             ),
             workers_peak_rss_mb=(
                 extraction_pool.peak_worker_rss_mb()

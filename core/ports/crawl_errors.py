@@ -102,7 +102,7 @@ class CrawlRefused(CrawlError):
 
     ``FailureKind`` сегодня знает только ``robots_disallow``; ``robots_unavailable``
     канонизируется в ``source_unavailable`` до появления одноимённого класса в словаре
-    (``core/pipeline/corpus._canonical_failure_kind``). Поэтому наблюдение дополнительно
+    (``core/pipeline/corpus_persist.canonical_failure_kind``). Поэтому наблюдение дополнительно
     называет состояние ленты текстом ошибки — код не должен терять различие молча.
     """
 
