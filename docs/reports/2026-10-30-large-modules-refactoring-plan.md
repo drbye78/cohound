@@ -547,7 +547,7 @@ _partition_reuse_reason 2926-3005
    докстринги-ссылки на переехавшие приватные имена тоже перенаправлены — 0 устаревших
    ссылок проверено AST-проходом по `core/`).
 4. **Тестовых файлов отредактировано — 19** (миграция выполнена 30.10.2026 после решения
-   владельца, §0 п. 3). `git diff --stat tests/`: **+61 / −39**, и в нём **ни одной**
+   владельца, §0 п. 3). Миграция как таковая: **+61 / −39**, и в ней **ни одной**
    изменённой строки `assert` — проверено `git diff -U0 tests/ | grep '^[+-].*assert '`
    (пусто). Единственная не-импортная правка — `tests/selfcheck.py`, где локальное
    `_DIRECTORY_KINDS` стало `DIRECTORY_KINDS`: это тот же объект (`corpus.py:359` в HEAD
@@ -563,6 +563,11 @@ _partition_reuse_reason 2926-3005
    `corpus_ingest.persist_docs` тест **не** роняет, на `corpus._persist_docs` — роняет.
    `_EXECUTOR_MAX_WAVES_PER_ROOT` читается в `corpus.py:1959` — подмена реального дефолта
    на `1000` роняет тест на `assert 2 == 1`.
+   **Суммарно по `tests/` коммит даёт 24 файла, +2056 / −69** — разница с 19/+61/−39 не
+   относится к миграции: 4 файла новые (`test_corpus_offline.py` 11 тестов,
+   `test_only_failed_interrun.py`, `test_only_failed_work_set.py`,
+   `test_evidence_doc_version.py` 7 тестов), плюс `test_corpus_write_order.py` (разделение
+   пина на два) и инвертированный `test_corpus.py::test_state_offline_…`.
 5. **`run_id` — совпал на каждом шаге**: `ru-pg-dbms-895dbfa4d045` /
    `d65c32c32e5acd1048898083`. Версии схемы не двигались: `SCHEMA_VERSION 3.13.0`,
    `METHODOLOGY_VERSION 0.2.0`, `SEAM_SCHEMA_VERSION "1"`.
