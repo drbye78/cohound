@@ -67,7 +67,7 @@ id: ретривал-конфиг не меняет чанкинг/вектор�
 
 **Два прохода (один вызов, без ре-краула).** Pass A (ingest) по каждому продукту выполняет
 краул → retention (I19) → экстракцию → дедуп(``content_hash``) → чанкинг и копит
-``_ProductIngest`` в памяти **только на время своего продукта**; ``corpus_docs`` персистятся
+``ProductIngest`` в памяти **только на время своего продукта**; ``corpus_docs`` персистятся
 **инкрементально** — сразу при
 коммите каждого документа (retention-провенанс не зависит от сборки), поэтому жёсткое
 убийство теряет максимум документ «в полёте», а не весь продукт; ``build_id`` чанков пока
@@ -77,7 +77,7 @@ id: ретривал-конфиг не меняет чанкинг/вектор�
 переиспользуется (ноль эмбеддингов, 09 §8.5), либо собирается ``_embed_and_build``; при
 успехе **сразу** персистятся ``corpus_chunks`` («сначала диск, потом БД»). Иначе смерть на
 N-м продукте уничтожала бы посчитанную, но не персистентную работу предыдущих. Там же, на
-границе продукта, ``_ProductIngest`` **освобождает** ``docs``/``chunks``: после персистенции
+границе продукта, ``ProductIngest`` **освобождает** ``docs``/``chunks``: после персистенции
 единственный носитель продукта — БД, а в памяти остаётся сводка (``chunk_count``/
 ``distinct_docs``), которой достаточно пост-циклу. Поэтому пик памяти фазы определяется
 **одним** продуктом, а не их суммой (Д-2). Только
@@ -152,17 +152,14 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
-import errno
-import hashlib
 import json
-import os
-import shutil
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -170,7 +167,6 @@ from urllib.parse import urlsplit
 from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
-from core.config.seeds import normalize_seed_url
 from core.domain import (
     ArchiveDescentStatus,
     ArchiveObservation,
@@ -186,15 +182,14 @@ from core.domain import (
     DocumentLevel,
     EmbedDevice,
     FailureKind,
-    IncrementalKind,
     IndexManifestEntry,
     PdfPipeline,
-    ProductMode,
     RefreshPolicy,
     ReuseKind,
     RunProductStatus,
     RunScope,
 )
+from core.pipeline import corpus_commit, corpus_ingest
 from core.pipeline.archive_descent import (
     SKIP_EXTRACT_FAILED,
     SKIP_EXTRACT_UNAVAILABLE,
@@ -211,6 +206,17 @@ from core.pipeline.composition import (
     derive_composition_id,
     write_composition,
 )
+
+# L5 (шаг 1): durable-субстрат тела ``_build_corpus`` вынесен в свой модуль. Имена здесь
+# **публичные** — это межмодульный контракт, а не приватность, пробитая наружу: приватное
+# имя через границу модуля было дефектом в L1 (``wiring.py``). Модуль — лист (он не
+# импортирует ``corpus``), поэтому обратного импорта нет.
+# L5 (шаг 2): допуск/разбор одного URL (``corpus_ingest``) и фиксация исхода корня
+# (``corpus_commit``) вынесены в свои модули. Имена через границу — **публичные**: приватное
+# имя через границу модуля — дефект (L1, ``wiring.py``). Оба модуля — листья (``corpus`` они
+# не импортируют), поэтому цикла нет: ``corpus_commit`` импортирует ``corpus_ingest``, но не
+# наоборот.
+from core.pipeline.corpus_commit import PendingExtract, PhaseLifecycle, RootDrain
 
 # L2: расчёт/персистенция покрытия и статуса продукта вынесены в свой модуль, но
 # **реэкспортируются здесь**. Причина та же, что у L1: тесты и ``selfcheck`` адресуют эти
@@ -248,26 +254,32 @@ from core.pipeline.corpus_index import (  # noqa: F401
     format_embed_progress,
 )
 
-# L5 (шаг 1): durable-субстрат тела ``_build_corpus`` вынесен в свой модуль. Имена здесь
-# **публичные** — это межмодульный контракт, а не приватность, пробитая наружу: приватное
-# имя через границу модуля было дефектом в L1 (``wiring.py``). Модуль — лист (он не
-# импортирует ``corpus``), поэтому обратного импорта нет.
+#: Реэкспорт для существующих тестов (§0.3 плана): ``test_corpus.py`` берёт эти два имени
+#: по ``core.pipeline.corpus``. Приватность сохранена намеренно — это те же приватные имена
+#: модуля-владельца, а не новый контракт; ``noqa: F401`` — имена обязаны резолвиться здесь.
+from core.pipeline.corpus_ingest import (  # noqa: F401
+    _SUBMIT_MAX_ATTEMPTS,
+    DIRECTORY_KINDS,
+    MEMBER_CONTENT_TYPES,
+    LocalFetch,
+    ProductIngest,
+    RetainedRaw,
+    RetainedReject,
+    SitemapSeeds,
+    _work_set_idempotency_key,
+    artifact_is_terminal,
+    looks_like_html,
+    resume_retained,
+    terminal_failure_kind,
+)
 from core.pipeline.corpus_persist import (
-    CLEAR_SESSION_FIELD,
     DocReuse,
-    as_product_mode,
-    canonical_failure_kind,
     count_doc,
     emit_product,
     emit_progress,
     find_doc_version,
-    manual_host_scope,
-    mark_session,
     persist_manual_audit,
-    reuse_plan,
     save_run_product,
-    sitemap_url_for,
-    supersede_document,
     write_document_state,
 )
 
@@ -276,24 +288,20 @@ from core.pipeline.corpus_persist import (
 # аннотировать им свои функции, не создавая цикла с ``corpus``.
 from core.pipeline.corpus_state import CorpusCounters
 from core.pipeline.crawl_frontier import (
-    SCOPE_ARTIFACT_OUTSIDE_PREFIX,
     SCOPE_OUT,
     CrawlLimits,
     Frontier,
-    is_blacklisted,
     normalize_scope_host,
     resolve_crawl_limits,
 )
 from core.pipeline.crawl_session import (
     default_session_id,
-    finalize_session,
     open_session,
     prior_items,
     read_provenance,
 )
 from core.pipeline.crawl_sources import (
     CrawlTarget,
-    crawl_sources_digest,
     resolve_crawl_target,
 )
 from core.pipeline.embed_cache import EmbedCache
@@ -327,21 +335,13 @@ from core.pipeline.extraction_runtime import (  # noqa: F401
     _write_worker_peak_rss,
     set_worker_extractor,
 )
-from core.pipeline.fetch_plan import (
-    _host_matches,
-)
 from core.pipeline.incremental import (
-    IncrementalItem,
-    classify_reuse,
     doc_version_id,
-    plan_incremental,
 )
 from core.pipeline.index_build import IndexBuild
 from core.pipeline.liveness import Heartbeat
 from core.pipeline.manual_artifacts import (
     ORIGIN_CRAWL,
-    ORIGIN_MANUAL,
-    ManualArtifact,
     ManualArtifacts,
 )
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
@@ -349,9 +349,7 @@ from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_executor import (
-    ACTIVE_JOB_STATUSES,
     CrawlExecutorPort,
-    CrawlResultItem,
     CrawlWorkItem,
 )
 from core.ports.crawler import CrawlerPort
@@ -363,7 +361,6 @@ from core.ports.state import (
     IndexCompositionRow,
     IndexPartitionRow,
     ProductStatePort,
-    UrlStateRow,
 )
 from core.ports.types import (
     ExtractionRoute,
@@ -372,53 +369,30 @@ from core.ports.types import (
     RawPage,
 )
 from core.util.document_formats import (
-    BINARY_SNIFF_BYTES,
     DOCUMENT_SUFFIXES,
     document_content_type,
     document_suffix,
-    is_terminal_artifact,
-    unsupported_binary_reason,
 )
-from core.util.hashing import content_hash, short_hash
+from core.util.hashing import content_hash
 from core.util.html_links import extract_links
 from core.util.index_partition import build_root as _partition_root
 from core.util.rate_limit import RateLimiter
-from core.util.security import validate_url
+
+#: Алиас для ``selfcheck``: он адресует набор директорных kind-ов по ``corpus`` (§0.3
+#: плана декомпозиции); сам набор живёт в ``corpus_ingest``.
+_DIRECTORY_KINDS = DIRECTORY_KINDS
 
 __all__ = ["ExtractionPool", "IndexBuild", "build_corpus", "derive_corpus_coverage"]
 
 
-#: P6: подкаталог ``raw_root`` для staging-файлов допущенных артефактов. Тот же ФС, что
-#: и ``corpus_raw``, поэтому публикация — ``os.replace`` (переезд, не копия).
-_STAGING_DIRNAME = "_staging"
-
 #: Phase 3 B2: максимум попыток подачи работ исполнителю при back-pressure
 #: (``accepted=False``). После исчерпания — изолированный ``FAILED`` (``source_unavailable``),
 #: а не тихий провал всего прогона.
-_SUBMIT_MAX_ATTEMPTS = 5
 
 #: Phase 4/Ф0: ``error_kind`` терминального ``FAILED`` при исчерпании ``--max-attempts``.
 #: Канонический класс сбоя (``FailureKind.ATTEMPTS_EXHAUSTED``): отличает «попытки
 #: кончились» от сетевого/браузерного сбоя, не выходя за словарь §4.1.
 _MAX_ATTEMPTS_ERROR_KIND = FailureKind.ATTEMPTS_EXHAUSTED.value
-
-#: Phase 5.2: семантика источника-каталога (свободная строка-данные, не доменный enum).
-#: URL с таким ``target.kind`` — не контент-страница, а лента/канал: он **поллится** через
-#: ``Ports.pollers[kind]``, а полученные ссылки-записи добываются обычным путём. Один уровень
-#: развёртки: записи повторно не расширяются.
-_DIRECTORY_KINDS: frozenset[str] = frozenset({"feed", "channel"})
-
-#: D3: ``kind`` опроса sitemap (``DomainProfile.sitemap``) — свободная строка-данные. Sitemap
-#: не входит в ``_DIRECTORY_KINDS``: это per-site опция профиля домена, а не источник
-#: ``crawl_sources.yaml``. Разворачивается через ``pollers["sitemap"]`` (local ‖ split).
-_SITEMAP_KIND = "sitemap"
-
-#: Классы отказа ``<loc>`` sitemap от scope корня (F6): ``host`` — sitemap рекламирует
-#: другой host (сигнал чужого сайта/SSRF), ``path`` — host тот же, но путь вне префикса
-#: корня (host-wide sitemap при path-scoped seed — **нормальная** конфигурация). Классы
-#: считаются и репортятся раздельно: их смешение скрывало бы host-сигнал в массе path-отказов.
-_SITEMAP_SKIP_HOST = "host"
-_SITEMAP_SKIP_PATH = "path"
 
 #: P3-A2: размер волны (раунда) executor-транспорта — число узлов фронтьера на один
 #: ``_submit_collect``. **Не** ``CrawlLimits.max_workers``: ``max_workers`` — ось локального
@@ -445,132 +419,12 @@ _EXTRACT_TASK_TIMEOUT_S = 1800.0
 _INLINE = object()
 
 
-def _state_url_key(url: str) -> str | None:
-    """Ключ ``url_state`` для URL: канонизация §7.2 (:func:`normalize_seed_url`).
-
-    Единственный источник истины нормализации URL — ``core.config.seeds``: и seed-набор,
-    и планировщик (``incremental._normalize_url``), и этот ключ обязаны совпадать, иначе
-    строка состояния не нашлась бы по только что наблюдённому URL.
-
-    :returns: нормализованный URL либо ``None`` (URL не нормализуется — состояние по нему
-        не ведётся; вызывающий решает, писать ли видимую ошибку).
-    """
-    try:
-        return normalize_seed_url(str(url or ""))
-    except ValueError:
-        return None
-
-
 def _as_refresh_policy(value: str) -> RefreshPolicy:
     """Приводит строку политики наблюдения к :class:`RefreshPolicy` (дефолт ``auto``)."""
     try:
         return RefreshPolicy(value)
     except ValueError:
         return RefreshPolicy.AUTO
-
-
-def _scope_owner(url: str, scopes: Sequence[tuple[str, Frontier]]) -> str | None:
-    """Корень-владелец URL по scope-инференсу (09 §6.3, «Владение known-URL»).
-
-    Побеждает **самый специфичный** ``root_path_prefix`` (длина пути), при равенстве —
-    авторский порядок (``scopes`` идёт в авторском порядке, строгое ``>`` оставляет
-    первого). ``None`` — URL вне scope всех корней: он не принадлежит никому, и тратить
-    бюджет чужого корня на него нельзя.
-
-    Функция — **единственный** носитель этого предиката: им пользуются и группировка
-    ревалидации (``_group_revalidation_items``), и реконструкция израсходованного бюджета
-    на resume (``_drain_root``). Два разных правила («кто первый» vs «кто специфичнее»)
-    расходились бы ровно на тех URL, где это дороже всего: измерено, что host-корень с
-    префиксом ``/`` забирал зарядку у docs-корня, и потолок умножался на число перезапусков.
-    """
-    best: str | None = None
-    best_len = -1
-    for root, probe in scopes:
-        if not probe.in_scope(url):
-            continue
-        if len(probe.path_prefix) > best_len:
-            best = root
-            best_len = len(probe.path_prefix)
-    return best
-
-
-@dataclass(frozen=True)
-class _RetainedReject:
-    """Retained raw не пригоден по границе исполнения (P0): терминально, без экстракции."""
-
-    error_kind: FailureKind
-    reason: str
-    path: Path
-
-
-@dataclass
-class _ProductIngest:
-    """Промежуточный результат Pass A (ingest) по одному продукту.
-
-    Копит ``docs`` (retention + провенанс экстракции) и ``chunks`` — но **только до
-    границы продукта**. Там чанки персистятся (Pass B, «сначала диск, потом БД»),
-    документы уже персистентны (``corpus_docs`` пишется инкрементально), и обе коллекции
-    освобождаются: пик памяти фазы должен определяться **одним** продуктом, а не их суммой.
-
-    После освобождения остаётся сводка — ``chunk_count``/``distinct_docs``. Финальному
-    циклу манифеста этого достаточно: ``partition_build_id``/``content_digest``/
-    ``extractor_version`` лежат в ``product_plans``, а сами данные — в БД.
-
-    Граница честности: копление — **память, а не durability**. Персистенция на границе
-    продукта переживает падение; освобождение ниже её не заменяет, а снимает удержание.
-    """
-
-    product_id: str
-    docs: list[CorpusDoc] = field(default_factory=list)
-    chunks: list[CorpusChunk] = field(default_factory=list)
-    #: Сколько чанков продукта записано (нужно финальному циклу манифеста для ``stats_json``).
-    chunk_count: int = 0
-    #: Сколько **разных** документов эти чанки покрывают (``stats_json.docs``). Документ
-    #: без чанков сюда не входит — это и есть прежняя семантика поля.
-    distinct_docs: int = 0
-
-
-@dataclass
-class _LocalFetch:
-    """D4: дескриптор отложенного сетевого фетча локального пути.
-
-    Расщепляет ``_process_local`` на три фазы: **pre-fetch** (главный поток — resume,
-    browser-guard, решение о пейсинге/ёмкости), **fetch** (пул — только
-    ``limiter.wait`` + ``active.fetch``) и **post-fetch** (главный поток — redirect-scope
-    и retention). Дескриптор несёт всё нужное пост-фазе и не содержит мутаций.
-
-    ``resume``/``browser_blocked`` вычисляются пре-фазой (чисто), а коммитятся
-    (соответственно ``_resume_page`` или ``FAILED``-``_mark``) пост-фазой в FIFO-порядке
-    отправки (детерминизм победителя дедупа и ``errors``).
-
-    ``poolable`` — идёт ли живой фетч в пул: ``True`` только для не-браузерного живого
-    фетча (resume/browser-guard/терминальный ``not_found``/``FetchMode.BROWSER`` — всегда
-    inline на главном потоке).
-
-    ``terminal`` — элемент уже получил определённый ответ «ресурса нет» (``not_found``):
-    живой фетч не выполняется, пост-фаза лишь подтверждает терминальный исход.
-    """
-
-    pid: str
-    wu: str
-    depth: int | None
-    fetch_plan: FetchPlan
-    active: Any
-    engine_value: str | None
-    prior_item: CrawlSessionItem | None
-    resume: _RetainedRaw | None
-    browser_blocked: bool
-    poolable: bool
-    host: str
-    scope_host: str | None
-    enforce_redirect_scope: bool
-    terminal: bool = False
-    #: P0: retained raw отклонён по размеру/бинарности — терминальный исход без экстракции.
-    reject: _RetainedReject | None = None
-    #: P6: класс-aware потолок артефакта-контейнера и заявленный набор форматов (нужны
-    #: пост-фазе для допуска/размера; ``None``/пусто — наследовать поведение страницы).
-    max_artifact_bytes: int | None = None
-    attachment_formats: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -587,69 +441,9 @@ class _WaveEntry:
     wu: str
     depth: int | None
     kind: str
-    desc: _LocalFetch | None = None
+    desc: LocalFetch | None = None
     future: Any = None
     prior_item: CrawlSessionItem | None = None
-
-
-@dataclass
-class _RootDrain:
-    """C1: хвост экстракции одного seed-root в **фазовой** очереди доводки.
-
-    Пул и FIFO-очередь экстракции живут в области фазы (:func:`build_corpus`), поэтому
-    задание может быть доведено уже после возврата своего корня. ``pending`` — число
-    недоведённых заданий корня; ``finalize`` — замыкание вызывающего, которое считает
-    провенанс корня (``revalidation``/``truncation``) **после** доводки хвоста; оно
-    вызывается ровно один раз (:func:`_finalize_ready_roots`), в порядке корней.
-    """
-
-    pending: int = 0
-    finalize: Callable[[], None] | None = None
-    finalized: bool = False
-
-
-@dataclass
-class _PendingExtract:
-    """P4: отложенная экстракция (главный поток, FIFO-очередь доводки).
-
-    Несёт всё, что нужно финишу: реконструированный ``RawPage``, ``raw_path`` (перечитывается
-    воркером, I19), ``fetch_plan`` (ось ``extract``), флаг свежести (для ``note_fetched`` и
-    учёта ёмкости с in-flight) и ``future`` пула. Мутаций состояния сеанса/корпуса здесь нет.
-
-    C1: очередь — **фазовая**, поэтому задание несёт ``root`` (свой корень: фильтр ёмкости,
-    учёт хвоста) и ``commit`` — замыкание ``_commit_outcome`` именно своего корня. Это
-    позволяет доводить хвост корня A во время фетча корня B без потери провенанса.
-    """
-
-    pid: str
-    url: str
-    depth: int | None
-    page: RawPage
-    raw_path: Path
-    fetch_plan: FetchPlan
-    freshly_fetched: bool
-    future: Any
-    #: C1: корень задания (хвост/финализация провенанса).
-    root: _RootDrain
-    #: C1: доводка исхода — ``(extracted, extract_error, failure_kind) → None``.
-    commit: Callable[[Any, str | None, FailureKind | None], None]
-    #: C1: ключ фазового пула ``(level, window)`` — учёт завершений/таймаутов и пересборка.
-    pool_key: _ExtractPoolKey
-
-
-@dataclass(frozen=True)
-class _SitemapSeeds:
-    """D3: развёртка sitemap корня — свежие ``<loc>``-seeds + отвергнутые scope.
-
-    :param fresh: ``<loc>`` в scope корня, ещё не прикреплённые ни к одному корню продукта.
-    :param skipped: агрегированный **провенанс** отказов scope: не более одной записи на
-        класс (``host``/``path``) на корень — ``{"reason", "count", "examples", "message"}``.
-        Отказ scope — не ``errors`` (F10): host-wide sitemap при path-scoped seed отвергает
-        большинство ``<loc>`` штатно, и канал сбоев не должен выглядеть деградировавшим.
-    """
-
-    fresh: tuple[str, ...] = ()
-    skipped: tuple[dict[str, Any], ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -767,80 +561,9 @@ def _reused_partial_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
     )
 
 
-def _looks_like_html(page: RawPage) -> bool:
-    """Похожа ли страница на HTML (для извлечения ссылок при ``max_depth > 0``, D1).
-
-    Если ``content_type`` известен — по нему (``html``/``xml``); иначе — эвристика по телу
-    (маркер ``<html``/``<!doctype`` или наличие ``<a `` в начале). Не-HTML (PDF/бинарники)
-    не парсится на ссылки.
-    """
-    content_type = (page.content_type or "").lower()
-    if content_type:
-        return "html" in content_type or "xml" in content_type
-    head = page.content.lstrip()[:256].lower()
-    return head.startswith(b"<html") or head.startswith(b"<!doctype") or b"<a " in head
-
-
-def _url_origin(url: str) -> str:
-    """Origin URL (``scheme://host[:port]``) — ключ orphan-бакета ревалидации.
-
-    ``url_state`` не хранит seed-происхождение; для известного URL вне scope всех
-    авторских корней единственная устойчивая группировка — origin (продукт + origin).
-    """
-    parts = urlsplit(url)
-    return f"{(parts.scheme or '').lower()}://{parts.netloc.lower()}"
-
-
-def _sitemap_skip_class(loc: str, root_url: str) -> str:
-    """Класс отказа ``<loc>`` sitemap от scope корня (F6): ``host`` либо ``path``.
-
-    ``host`` — host ``<loc>`` не совпадает с host корня (sitemap рекламирует другой сайт —
-    сигнал чужого host/SSRF). ``path`` — host тот же, но путь вне path-префикса корня
-    (в т.ч. traversal-guard ``..``): host-wide sitemap при path-scoped seed, т.е. штатная
-    конфигурация. Вызывается только для loc, уже отвергнутых ``Frontier.in_scope`` (SSRF-
-    отклонённые loc до этого не доходят — у них своя построчная запись в ``_expand_sitemap``).
-    """
-    root_host = (urlsplit(root_url).hostname or "").lower()
-    host = (urlsplit(loc).hostname or "").lower()
-    if not host or not _host_matches(host, root_host):
-        return _SITEMAP_SKIP_HOST
-    return _SITEMAP_SKIP_PATH
-
-
 def _now_iso() -> str:
     """Текущее время в ISO-8601 (UTC) — для провенанса элементов сеанса (L1a)."""
     return _dt.datetime.now(_dt.UTC).isoformat()
-
-
-def _work_set_idempotency_key(work: Sequence[CrawlWorkItem]) -> str:
-    """Ключ идемпотентности по **набору работ** попытки (Phase 3 B2, детерминирован).
-
-    Ключ выводится из содержимого ``work`` (``product_id``/``url`` + применённые оси), а
-    не из ``session_id``: resume пропускает уже добытые URL, поэтому набор работ
-    сокращается → ключ меняется → edge создаёт **новое** задание для оставшихся/сбойных
-    URL (иначе он вернул бы старое терминальное задание и молча потерял новые работы).
-    Повторная подача идентичного набора даёт тот же ключ (идемпотентно). Идемпотентность —
-    **по набору работ**, не по сеансу.
-
-    Канонизация: ``sorted`` по ``(product_id, url)`` (уникальны в наборе) →
-    ``json.dumps(sort_keys=True, ensure_ascii=False)`` → :func:`short_hash`.
-    """
-    rows = sorted(
-        (
-            (
-                w.product_id,
-                w.url,
-                w.engine,
-                _as_text(w.fetch),
-                _as_text(w.strategy),
-                w.wait_for,
-            )
-            for w in work
-        ),
-        key=lambda row: (row[0], row[1]),
-    )
-    material = json.dumps(rows, sort_keys=True, ensure_ascii=False)
-    return short_hash(material, 24)
 
 
 def _resolve_package_id(plan: Any, package_id: str | None) -> str:
@@ -1164,249 +887,7 @@ def _stage_timings_aggregate(
 # --------------------------------------------------------------------------- #
 
 
-@dataclass(frozen=True)
-class _RetainedRaw:
-    """Retained-файл, пригодный для resume (D3) без обязательного чтения в RAM.
-
-    ``data is None`` — файл **не** буферизован (допущенный артефакт-контейнер): байты
-    читает только тот, кому они реально нужны (спуск/экстрактор), а path остаётся
-    источником истины I19. ``head`` — первые :data:`BINARY_SNIFF_BYTES` байт (post-fetch
-    классификация без чтения файла); у буферизованных страниц ``head is None``.
-    """
-
-    path: Path
-    content_hash: str
-    size: int
-    head: bytes | None = None
-    data: bytes | None = None
-
-
-def _publish_staged(staged: Path, target: Path) -> None:
-    """Публикует staging-файл как retained: ``os.replace`` (переезд, не копия).
-
-    Staging-каталог создаётся ядром под ``raw_root``, поэтому штатно файлы на одном ФС и
-    ``os.replace`` атомарен. Если адаптер всё же дал файл с другого ФС (``EXDEV``) —
-    потоковая копия ядром (``shutil.copyfile``: sendfile/``copy_file_range``, без чтения
-    тела в RAM) и удаление staging: байты не теряются, но и RAM не растёт.
-    """
-    try:
-        os.replace(staged, target)
-        return
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            raise
-    shutil.copyfile(staged, target)
-    staged.unlink(missing_ok=True)
-
-
-def _is_terminal_artifact(
-    url: str | None,
-    content_type: str | None,
-    attachment_formats: Sequence[str] | None,
-) -> bool:
-    """Класс «терминальный артефакт» — контейнер **или** документ (P6b).
-
-    Единый класс допуска/потолка: такой ответ не продолжает навигацию, поэтому вправе
-    быть больше страничного ``max_response_bytes`` и удерживаться под
-    ``max_artifact_bytes`` (``pdf``/``docx``/``pptx``/``xlsx`` и ``zip``/``7z``/``rar``).
-    Документная часть от ``attachment_formats`` не зависит (совпадает с реестром
-    экстрактора); ``.rtf`` не допускается — читателя нет.
-    """
-    return is_terminal_artifact(url or None, content_type, attachment_formats)
-
-
-def _resume_source(
-    item: CrawlSessionItem | None,
-    *,
-    max_bytes: int | None = None,
-    artifact_max_bytes: int | None = None,
-    attachment_formats: Sequence[str] | None = None,
-) -> _RetainedRaw | _RetainedReject | None:
-    """Возвращает retained-источник для resume, если элемент сеанса позволяет НЕ фетчить (D3).
-
-    Пригодны элементы ``FETCHED`` (сырые байты уже сохранены) и ``FAILED`` с сохранённым
-    ``raw_path`` (re-extract из тех же байтов без сети). ``PENDING``/``RUNNING``/отсутствие
-    записи, отсутствие ``raw_path`` или файла на диске → ``None`` (обычный путь фетча).
-
-    **P0/P6b: потолок по классу.** Размер проверяется по ``stat`` **до** чтения. Класс
-    определяется по метаданным записи (URL-суффикс/``Content-Type``, заявленный набор
-    ``attachment_formats``): допущенный **терминальный артефакт** — документ
-    (``pdf``/``docx``/``pptx``/``xlsx``) **или** контейнер (``zip``/``7z``/``rar``) —
-    ограничен ``artifact_max_bytes``, страница — ``max_bytes``. Так retained-PDF/артефакт в
-    125 MB резюмится, а страница того же размера по-прежнему терминально отвергается
-    ``payload_too_large``.
-
-    **Память.** Страницы (≤ ``max_bytes``) буферизуются как прежде — путь байт-в-байт
-    прежний. Артефакт **не** буферизуется: возвращается :class:`_RetainedRaw` с путём,
-    потоковым хешем и первыми 8 KiB (``head``) — файл целиком в RAM не попадает.
-
-    **Верификация (D3).** Если в записи задан ``content_hash``, а потоковый хеш файла
-    не совпадает, файл считается непригодным (повреждён/подменён) → ``None``: резюм не
-    должен молча давать другой ``index_build_id`` и самопротиворечивую аудит-строку.
-    I19: retained raw — источник; экстракция детерминирована.
-    """
-    if item is None:
-        return None
-    if item.status not in (CrawlItemStatus.FETCHED, CrawlItemStatus.FAILED):
-        return None
-    if not item.raw_path:
-        return None
-    path = Path(item.raw_path)
-    if not path.is_file():
-        return None
-    artifact = _is_terminal_artifact(item.url, item.content_type, attachment_formats)
-    cap = artifact_max_bytes if artifact and artifact_max_bytes is not None else max_bytes
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return None
-    if cap is not None and size > cap:
-        return _RetainedReject(
-            FailureKind.PAYLOAD_TOO_LARGE,
-            f"retained {size} байт > лимита {cap} (payload_too_large)",
-            path,
-        )
-    hasher = hashlib.sha256()
-    head = bytearray()
-    buffer: bytearray | None = None if artifact else bytearray()
-    read = 0
-    try:
-        with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(_RESUME_READ_CHUNK)
-                if not chunk:
-                    break
-                read += len(chunk)
-                if cap is not None and read > cap:
-                    # Файл вырос после stat: режем до буферизации остатка.
-                    return _RetainedReject(
-                        FailureKind.PAYLOAD_TOO_LARGE,
-                        f"retained превысил лимит {cap} при чтении "
-                        "(payload_too_large)",
-                        path,
-                    )
-                hasher.update(chunk)
-                if len(head) < BINARY_SNIFF_BYTES:
-                    head.extend(chunk[: BINARY_SNIFF_BYTES - len(head)])
-                if buffer is not None:
-                    buffer.extend(chunk)
-    except OSError:
-        return None
-    digest = hasher.hexdigest()
-    if item.content_hash and digest != item.content_hash:
-        return None
-    snapshot = bytes(head)
-    buffered = None if buffer is None else bytes(buffer)
-    binary_reason = unsupported_binary_reason(
-        buffered if buffered is not None else snapshot,
-        url=item.url,
-        content_type=item.content_type,
-        attachment_formats=attachment_formats,
-    )
-    if binary_reason is not None:
-        return _RetainedReject(
-            FailureKind.UNSUPPORTED_BINARY,
-            f"retained: {binary_reason}",
-            path,
-        )
-    return _RetainedRaw(
-        path=path,
-        content_hash=digest,
-        size=read,
-        head=None if buffered is not None else snapshot,
-        data=buffered,
-    )
-
-
 #: Терминальные классы: повторный фетч/экстракция не дадут нового знания (P0/I4).
-_TERMINAL_FAILURE_KINDS: frozenset[FailureKind] = frozenset(
-    {
-        FailureKind.NOT_FOUND,
-        FailureKind.PAYLOAD_TOO_LARGE,
-        FailureKind.UNSUPPORTED_BINARY,
-    }
-)
-
-
-def _terminal_failure_kind(item: CrawlSessionItem | None) -> FailureKind | None:
-    """Терминальный класс ``FAILED``-элемента (``not_found``/``payload_too_large``/
-    ``unsupported_binary``) либо ``None``.
-
-    Это не транзиентные сбои: origin уже дал определённый ответ/исполнение упёрлось в
-    осознанную границу (потолок байтов, бинарный не-документ). Такой элемент **не**
-    пере-фетчивается при resume и **не** превращается в ``attempts_exhausted``.
-
-    Терминальность — только для ``FAILED``: ``FETCHED`` с этим классом невозможен, а
-    ``pending``/``running`` не несут окончательного ответа.
-    """
-    if item is None or item.status is not CrawlItemStatus.FAILED or not item.error_kind:
-        return None
-    try:
-        kind = FailureKind(item.error_kind)
-    except ValueError:
-        return None
-    return kind if kind in _TERMINAL_FAILURE_KINDS else None
-
-
-def _terminal_not_found(item: CrawlSessionItem | None) -> bool:
-    """Совместимость: терминален ли элемент определённым ответом «ресурса нет»."""
-    return _terminal_failure_kind(item) is FailureKind.NOT_FOUND
-
-
-def _resume_page(
-    item: CrawlSessionItem,
-    url: str,
-    retained: _RetainedRaw,
-    fetch_plan: FetchPlan,
-    validators: tuple[str | None, str | None] | None = None,
-) -> RawPage:
-    """Реконструирует ``RawPage`` из retained-источника и элемента сеанса (без сети, D3).
-
-    ``retained.data is not None`` — обычная страница: ``content`` — буферизованные байты
-    (байт-в-байт прежнее поведение). ``data is None`` — артефакт-контейнер: ``content``
-    пуст, ``staged_path`` указывает на retained-файл, ``head`` — первые 8 KiB; файл в RAM
-    не читается.
-
-    ``fetched_at`` — из ``last_attempt`` записи, иначе mtime файла (UTC). ``fetch_mode`` —
-    из записи (если распознаётся, иначе ``fetch_plan.fetch``). ``content_type``/``lang``/
-    ``status_code`` — из провенанса записи (``lang`` персистится, иначе свежий и
-    возобновлённый прогоны расходились бы по ``corpus_docs.lang``/``corpus_chunks.lang``).
-
-    **Валидаторы (09 §6.3).** ``CrawlSessionItem`` не хранит ``ETag``/``Last-Modified``
-    (колонок нет — сеанс трекает краул, а не условную валидацию), поэтому валидаторы
-    приходят аргументом из ``url_state`` (durable-источник) и переносятся в ``RawPage``,
-    чтобы запись состояния после resume не потеряла их. ``not_modified`` всегда ``False``:
-    resume перечитывает retained-байты, серверного подтверждения ``304`` не было.
-    """
-    fetched_at = item.last_attempt
-    if not fetched_at:
-        try:
-            fetched_at = _dt.datetime.fromtimestamp(
-                retained.path.stat().st_mtime, tz=_dt.UTC
-            ).isoformat()
-        except OSError:
-            fetched_at = ""
-    fetch_mode = fetch_plan.fetch
-    if item.fetch_mode:
-        try:
-            fetch_mode = FetchMode(item.fetch_mode)
-        except ValueError:
-            fetch_mode = fetch_plan.fetch
-    etag, last_modified = validators if validators is not None else (None, None)
-    buffered = retained.data is not None
-    return RawPage(
-        url=url,
-        content=retained.data or b"",
-        fetched_at=fetched_at or "",
-        fetch_mode=fetch_mode,
-        lang=item.lang,
-        status_code=item.http_status,
-        content_type=item.content_type,
-        etag=etag,
-        last_modified=last_modified,
-        staged_path=None if buffered else str(retained.path),
-        head=None if buffered else retained.head,
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1419,21 +900,6 @@ def _resume_page(
 _DOCUMENT_SUFFIX_SET: frozenset[str] = frozenset(DOCUMENT_SUFFIXES)
 
 #: ``Content-Type`` члена по суффиксу — для экстрактора и провенанса (данные, не эвристика).
-_MEMBER_CONTENT_TYPES: dict[str, str] = {
-    ".pdf": "application/pdf",
-    ".docx": (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ),
-    ".pptx": (
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    ),
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".md": "text/markdown",
-    ".markdown": "text/markdown",
-    ".txt": "text/plain",
-    ".html": "text/html",
-    ".htm": "text/html",
-}
 
 
 def _member_route(suffix: str) -> ExtractionRoute:
@@ -1471,7 +937,7 @@ def _member_extract_request(
         fetch_mode=FetchMode.HTTP,
         lang=lang,
         status_code=None,
-        content_type=_MEMBER_CONTENT_TYPES.get(suffix),
+        content_type=MEMBER_CONTENT_TYPES.get(suffix),
         engine=None,
         route=_member_route(suffix),
         level=level,
@@ -1504,7 +970,7 @@ def _ingest_member_doc(
     *,
     extractor: ExtractorPort,
     chunker: ChunkerPort,
-    ingest: _ProductIngest,
+    ingest: ProductIngest,
     seen_docs: dict[str, str],
     seen_chunk_ids: set[str],
     errors: list[str],
@@ -1554,7 +1020,7 @@ def _ingest_member_doc(
             task.temp_path,
             product_id=task.product_id,
             url=task.member_url,
-            content_type=_MEMBER_CONTENT_TYPES.get(suffix),
+            content_type=MEMBER_CONTENT_TYPES.get(suffix),
             container_for=None,
         ).as_dict()
     )
@@ -1563,7 +1029,7 @@ def _ingest_member_doc(
         content=b"",
         fetched_at=fetched_at,
         fetch_mode=FetchMode.HTTP,
-        content_type=_MEMBER_CONTENT_TYPES.get(suffix),
+        content_type=MEMBER_CONTENT_TYPES.get(suffix),
         lang=lang,
         source_path=task.temp_path,
     )
@@ -1700,33 +1166,6 @@ def _ingest_member_doc(
         partial=member_partial,
         partial_reason=member_partial_reason,
     )
-
-
-@dataclass
-class _PhaseLifecycle:
-    """Адрес durable-сеанса краула для обработчика прерывания в обёртке фазы.
-
-    ``_build_corpus`` открывает сеанс внутри себя, а обработчик прерывания принадлежит
-    обёртке :func:`build_corpus` (там же единственный ``pools.shutdown``). Без этого
-    адреса прерванная фаза оставляла бы сеанс в ``running`` навсегда — ровно дефект
-    «фантомных краулов в полёте» в ``hound crawl status``.
-
-    ``completed`` ставится **только** после штатной финализации сеанса
-    (:func:`core.pipeline.crawl_session.finalize_session`): любое исключение (включая
-    ``KeyboardInterrupt``/``BaseException``) оставляет ``False``, и обёртка закрывает
-    сеанс терминально (:func:`_finalize_interrupted_session`). Обратное тоже важно:
-    исключение **после** успешной финализации не переписывает легитимный
-    ``completed``/``partial`` на статус прерывания.
-
-    Граница честности: ``SIGKILL``/OOM-killer не перехватывается ни одним Python-кодом,
-    поэтому после него сеанс остаётся ``running``; это лечится recovery-on-open
-    (:func:`core.pipeline.crawl_session.open_session`) при следующем запуске, а не
-    обработчиком прерывания.
-    """
-
-    store: Any = None
-    session_id: str | None = None
-    completed: bool = False
 
 
 def _serp_disabled_observation(
@@ -2155,7 +1594,7 @@ def _build_corpus(
     refresh_policy: str = "auto",
     container_for: Callable[[str | Path], ContainerPort | None] | None = None,
     pools: _ExtractPools,
-    lifecycle: _PhaseLifecycle | None = None,
+    lifecycle: PhaseLifecycle | None = None,
     mem_budget_mb: int | None = None,
     derive_extract_workers: bool = False,
     search: Any = None,
@@ -2563,7 +2002,7 @@ def _build_corpus(
         except Exception as exc:  # noqa: BLE001 — resume best-effort, не роняет фазу
             errors.append(f"open_crawl_session: {type(exc).__name__}: {exc}")
             session = None
-    #: Прерванная фаза обязана закрыть сеанс терминально (см. ``_PhaseLifecycle``):
+    #: Прерванная фаза обязана закрыть сеанс терминально (см. ``PhaseLifecycle``):
     #: адрес сеанса известен только здесь, а ``finally`` — в обёртке :func:`build_corpus`.
     if lifecycle is not None:
         lifecycle.store = store
@@ -2610,416 +2049,148 @@ def _build_corpus(
     #: Смена — факт наблюдения, а не ошибка: он попадает в строку продукта, а не в ``errors``.
     partiality_changes: list[dict[str, Any]] = []
 
-    def _validators(pid: str, url: str) -> tuple[str | None, str | None]:
-        """Валидаторы условного GET для URL (09 §6.3): ``(etag, last_modified)``.
-
-        Источник — ``url_state`` (durable), а не сеанс краула: валидаторы переживают
-        прогоны. Отправляются только при политике ``auto``/``revalidate``: ``refresh``
-        обязан получить свежий ответ (безусловный GET), ``offline`` сеть не трогает.
-        Плановые значения (из ``plan_incremental``) приоритетнее повторного чтения строки —
-        это тот же источник, прочитанный один раз на продукт.
-
-        Сбой чтения состояния изолируется в ``errors``: отсутствие валидатора деградирует
-        запрос до безусловного GET (безопасно), а не роняет фазу.
-        """
-        if state is None or policy in (RefreshPolicy.REFRESH, RefreshPolicy.OFFLINE):
-            return None, None
-        key = _state_url_key(url)
-        if key is None:
-            return None, None
-        planned = planned_validators.get((pid, key))
-        if planned is not None:
-            return planned
-        try:
-            row = state.get_url_state(pid, key)
-        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
-            errors.append(
-                f"state: get_url_state({pid}/{key}): {type(exc).__name__}: {exc}"
-            )
-            return None, None
-        if row is None:
-            return None, None
-        return row.etag, row.last_modified
-
-    def _reuse_not_modified(pid: str, url: str) -> DocReuse | None:
-        """Переиспользование по ``304`` — **до** экстракции (её вызов не нужен).
-
-        ``content_hash`` документа известен из ``url_state.doc_version_id``: сервер
-        подтвердил, что представление не изменилось. Нет версии/чанков — ``None``
-        (вызывающий идёт обычным путём экстракции).
-        """
-        if state is None:
-            return None
-        key = _state_url_key(url)
-        if key is None:
-            return None
-        try:
-            prior = state.get_url_state(pid, key)
-            prior_doc = (
-                state.get_document_version(prior.doc_version_id)
-                if prior is not None and prior.doc_version_id
-                else None
-            )
-        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
-            errors.append(
-                f"{pid}/{url}: state: reuse(304): {type(exc).__name__}: {exc}"
-            )
-            return None
-        if classify_reuse(
-            prior=prior, prior_doc=prior_doc, not_modified=True, content_hash=None
-        ) is not ReuseKind.REVALIDATED:
-            return None
-        return reuse_plan(
-            pid,
-            url,
-            prior_doc,
-            state=state,
-            errors=errors,
-            chunker_version=resolved_chunker_version,
-        )
-
-    def _reuse_for_page(pid: str, url: str, page: RawPage) -> DocReuse | None:
-        """Переиспользование по ``304`` с видимой записью, если версии нет.
-
-        ``304`` без известной версии (или с отвергнутым chunk-set) — не повод молчать:
-        сервер подтвердил «не изменилось», а переиспользовать нечего, поэтому прогон
-        идёт обычной экстракцией, а факт фиксируется в ``errors``. Конкретная причина
-        отказа уже записана :func:`_reuse_not_modified` — дублирующая запись не нужна.
-        """
-        if not page.not_modified:
-            return None
-        before = len(errors)
-        reuse = _reuse_not_modified(pid, url)
-        if reuse is None and len(errors) == before:
-            errors.append(
-                f"{pid}/{url}: 304 без переиспользуемой версии документа — "
-                "обычная экстракция"
-            )
-        return reuse
-
-    def _reuse_same_hash(
-        pid: str, url: str, doc_hash: str, extractor_token: str, level_text: str
-    ) -> DocReuse | None:
-        """Переиспользование при ``200`` с прежним ``content_hash`` (после экстракции)."""
-        if state is None:
-            return None
-        key = _state_url_key(url)
-        if key is None:
-            return None
-        try:
-            prior = state.get_url_state(pid, key)
-        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
-            errors.append(
-                f"{pid}/{url}: state: get_url_state: {type(exc).__name__}: {exc}"
-            )
-            return None
-        prior_doc = find_doc_version(
-            pid, doc_hash, extractor_token, level_text, state=state, errors=errors
-        )
-        if classify_reuse(
-            prior=prior, prior_doc=prior_doc, not_modified=False, content_hash=doc_hash
-        ) is not ReuseKind.REVALIDATED:
-            return None
-        return reuse_plan(
-            pid,
-            url,
-            prior_doc,
-            state=state,
-            errors=errors,
-            chunker_version=resolved_chunker_version,
-        )
-
-    def _record_url_state(
-        pid: str,
-        url: str,
-        status: CrawlItemStatus,
-        fields: Mapping[str, Any],
-        extra: Mapping[str, Any] | None,
-    ) -> None:
-        """Пишет ``url_state`` по исходу одного URL (09 §6.3).
-
-        Вызывается из :func:`_mark` — единственной воронки терминальных исходов, поэтому
-        покрывает **каждый** URL независимо от режима продукта (субстрат наполняется уже
-        на первом прогоне). Правила:
-
-        * ``FETCHED`` + новый/изменившийся документ → новый ``doc_version_id``,
-          ``reuse_kind=live``, счётчик сбоев сброшен;
-        * ``FETCHED`` + ``304``/тот же ``content_hash`` → ``doc_version_id`` сохраняется,
-          ``reuse_kind=revalidated``;
-        * ``not_found`` → ``doc_version_id=NULL``, ``last_error_kind=not_found``, прежняя
-          версия документа — ``superseded``;
-        * прочие сбои (``robots_disallow``/``parser_failed``/``extraction_timeout``/
-          ``attempts_exhausted``/…) → ``last_error_kind``, ``consecutive_failures += 1``,
-          прежняя версия сохраняется.
-
-        ``FETCHED`` без ``raw_path`` (каталог/sitemap — не контент, I19) в состояние не
-        попадает: иначе следующий инкрементальный план принял бы их за документы.
-        Любой сбой записи изолируется в ``errors`` (никогда не роняет фазу).
-        """
-        if state is None:
-            return
-        if status is CrawlItemStatus.FETCHED and not fields.get("raw_path"):
-            return
-        key = _state_url_key(url)
-        if key is None:
-            errors.append(
-                f"{pid}/{url}: state: URL не нормализуется — url_state не записан"
-            )
-            return
-        try:
-            prior = state.get_url_state(pid, key)
-            base = (
-                prior
-                if prior is not None
-                else UrlStateRow(product_id=pid, url=url, normalized_url=key)
-            )
-            now = _now_iso()
-            current: dict[str, Any] = {
-                "doc_version_id": base.doc_version_id,
-                "reuse_kind": base.reuse_kind,
-                "etag": base.etag,
-                "last_modified": base.last_modified,
-                "last_http_status": base.last_http_status,
-                "last_changed_at": base.last_changed_at,
-            }
-            # Не-``None`` значения исхода перекрывают прежние (COALESCE-семантика):
-            # сервер, переставший отдавать ETag, не обязан стирать валидатор.
-            for name, value in (extra or {}).items():
-                if value is not None:
-                    current[name] = value
-            failures = base.consecutive_failures
-            error_kind = base.last_error_kind
-            if status is CrawlItemStatus.FETCHED:
-                failures = 0
-                error_kind = None
-            else:
-                error_kind = canonical_failure_kind(fields.get("error_kind"))
-                if error_kind == FailureKind.NOT_FOUND.value:
-                    supersede_document(
-                        pid, url, base.doc_version_id, state=state, errors=errors
-                    )
-                    current["doc_version_id"] = None
-                else:
-                    failures += 1
-            state.upsert_url_state(
-                UrlStateRow(
-                    product_id=pid,
-                    url=url,
-                    normalized_url=key,
-                    doc_version_id=current["doc_version_id"],
-                    etag=current["etag"],
-                    last_modified=current["last_modified"],
-                    last_http_status=current["last_http_status"],
-                    last_checked_at=now,
-                    last_changed_at=current["last_changed_at"],
-                    next_check_at=base.next_check_at,
-                    consecutive_failures=failures,
-                    last_error_kind=error_kind,
-                    reuse_kind=current["reuse_kind"],
-                    seed_id=base.seed_id,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 — изоляция state-записи
-            errors.append(
-                f"state: url_state({pid}/{url}): {type(exc).__name__}: {exc}"
-            )
-
-    def _mark(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
-        """Помечает исход URL: сеанс краула (L1a) + durable ``url_state`` (09 §6.3).
-
-        Сеанс — прежнее поведение (:func:`mark_session`); ``url_state`` пишется при
-        наличии ``state`` для **каждого** исхода URL. ``state_fields`` — поля исхода
-        документа (``doc_version_id``/``reuse_kind``/валидаторы/``http_status``), которые
-        нельзя пронести через ``CrawlSessionItem`` (у него нет таких колонок).
-        """
-        state_fields = fields.pop("state_fields", None)
-        mark_session(
-            pid,
-            u,
-            status,
-            session=session,
-            store=store,
-            items=items,
-            targets=targets,
-            applied_engines=applied_engines,
-            errors=errors,
-            heartbeat=heartbeat,
-            **fields,
-        )
-        _record_url_state(pid, u, status, fields, state_fields)
-
-    def _retain(
-        product_id: str,
-        url: str,
-        page: RawPage,
-        fetch_plan: FetchPlan,
-        *,
-        depth: int | None = None,
-        origin: str = ORIGIN_CRAWL,
-    ) -> Path | None:
-        """Retention сырых байтов (I19) + durable-элемент ``FETCHED``; ``None`` при сбое.
-
-        Байты пишутся в ``raw_root/{product_id}/{raw_hash}.bin`` **до** экстракции; при
-        удаче элемент сеанса фиксируется ``FETCHED`` (provenance фетча). Сбой сохранения =
-        недоступность источника по этому URL: строка помечается ``FAILED``
-        (``source_unavailable``), чтобы очередь/счётчики были правдивы; возвращается ``None``.
-        Общий шаг локального и executor путей (без дублирования).
-
-        **Файловый staging (P6).** ``page.staged_path`` — тело уже лежит файлом у
-        адаптера: хеш считается **потоково** по файлу (I19: адаптерному хешу не доверяем —
-        его и нет), публикация — :func:`_publish_staged` (переезд в том же ФС без копии и
-        без чтения в RAM). ``staged_path is None`` — прежний путь ``write_bytes``
-        байт-в-байт.
-
-        **Ручной артефакт (§3.3).** ``origin != 'crawl'`` — байты предъявил человек: цепочка
-        та же (хеш считается здесь же, публикация та же), но элемент сеанса **не**
-        перезаписывается. Отказ краула (``failed`` + ``robots_disallow``) остаётся фактом
-        аудита; наблюдённость материала видна отдельно — ``corpus_docs.origin='manual'``.
-        Поэтому ``_mark`` здесь не вызывается ни при успехе, ни при сбое: иначе карта
-        выглядела бы так, будто сайт прочитан.
-        """
-        staged = Path(page.staged_path) if page.staged_path else None
-        manual = origin != ORIGIN_CRAWL
-        raw_path: Path | None = None
-        try:
-            raw_hash = _hash_file(staged) if staged is not None else content_hash(page.content)
-            raw_path = raw_root_path / product_id / f"{raw_hash}.bin"
-            raw_path.parent.mkdir(parents=True, exist_ok=True)
-            if staged is not None:
-                _publish_staged(staged, raw_path)
-            else:
-                raw_path.write_bytes(page.content)
-        except Exception as exc:  # noqa: BLE001
-            if staged is not None:
-                # Сбой удаления staging-файла не меняет исход: retention уже провален и
-                # его причина ниже попадёт в ``errors`` (и в элемент сеанса). Осиротевший
-                # staging-файл — цена меньше, чем подмена причины отказа.
-                with contextlib.suppress(OSError):
-                    staged.unlink(missing_ok=True)
-            reason = f"{type(exc).__name__}: {exc}"
-            errors.append(f"{product_id}/{url}: retention: {reason}")
-            if manual:
-                return None
-            # L1a: сбой сохранения байтов = недоступность источника по этому URL;
-            # помечаем FAILED, чтобы очередь/счётчики были правдивы (не ``pending``).
-            _mark(
-                product_id,
-                url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=f"retention: {reason}",
-                depth=depth,
-            )
-            return None
-        if manual:
-            return raw_path
-        # L1a: байты сохранены — durable-элемент сеанса (provenance фетча).
-        _mark(
-            product_id,
-            url,
-            CrawlItemStatus.FETCHED,
-            content_hash=raw_hash,
-            raw_path=str(raw_path),
-            http_status=page.status_code,
-            content_type=page.content_type,
-            lang=page.lang,
-            fetch_mode=_as_text(fetch_plan.fetch),
-            extract_route=_as_text(fetch_plan.extract),
-            strategy=_as_text(fetch_plan.strategy),
-            depth=depth,
-        )
-        return raw_path
-
-    def _ingest_one(
-        product_id: str,
-        url: str,
-        page: RawPage,
-        fetch_plan: FetchPlan,
-        raw_path: Path,
-        ingest: _ProductIngest,
-        seen_docs: dict[str, str],
-        seen_chunk_ids: set[str],
-        extractor_obj: ExtractorPort,
-        level: DocumentLevel,
-        *,
-        reuse_kind: ReuseKind,
-        origin: str = ORIGIN_CRAWL,
-    ) -> str | None:
-        """Inline-экстракция → доводка одного URL (путь без пула, ``None``/``1``).
-
-        Тело экстракции (``extractor_obj.extract``) вынесено в :func:`_finish_one`; здесь —
-        только inline-вызов и перевод исключения в ту же ошибку ``parser_failed``, что и
-        пул-путь (P4: единая семантика отказа). ``extractor_obj`` — экстрактор уровня
-        корня (P5; ``full`` переиспользует переданный порт). ``level`` — уровень корня:
-        нужен как ключ кэша экстракции (Ф1.2) и не выводится из ``extractor_obj``, потому
-        что ``full`` переиспользует переданный порт.
-
-        :returns: ``doc_id`` созданного/найденного документа корпуса либо ``None`` — исход
-            не дал документа (сбой экстракции/нарезки). Нужен ручной подаче
-            (13-manual-artifacts §3.3): только дошедший до корпуса артефакт закрывает
-            пробел покрытия, а не «объявленный файл».
-        :param reuse_kind: происхождение наблюдения этого URL **в этом прогоне**
-            (16 §3.3) — вычислено вызывающим по пути страницы (``_resume_page`` ⇒
-            ``reused``, 304 ⇒ ``revalidated``, живой fetch ⇒ ``live``), а не здесь:
-            у ``_finish_one`` нет разницы «resume vs живой fetch», а угадывать её из
-            ``page`` нельзя (у resume ``not_modified`` всегда ``False``).
-        """
-        try:
-            level_text = _as_text(level)
-            # I19: ключ — хеш тех же байтов, что retention положил в ``raw_path``.
-            # ``raw_path.stem`` и есть этот хеш (``_retain`` называет файл ``{hash}.bin``),
-            # поэтому для страницы ключ байт-идентичен ``content_hash(page.content)``, а для
-            # staging-артефакта (``page.content`` пуст) ключ не вырождается в хеш пустоты.
-            cache_key = raw_path.stem
-            probe_page = _page_with_source_path(page, raw_path)
-            extracted = (
-                None
-                if extract_cache is None
-                else extract_cache.get(
-                    cache_key,
-                    _cache_extractor_version(extractor_obj, probe_page, fetch_plan.extract),
-                    level_text,
-                )
-            )
-            if extracted is None:
-                extracted = extractor_obj.extract(probe_page, fetch_plan.extract)
-                if extract_cache is not None:
-                    extract_cache.put(
-                        extracted, level=level_text, content_hash=cache_key
-                    )
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            _finish_one(
-                product_id,
-                url,
-                page,
-                fetch_plan,
-                raw_path,
-                None,
-                ingest,
-                seen_docs,
-                seen_chunk_ids,
-                extractor_obj,
-                level,
-                extract_error=f"{type(exc).__name__}: {exc}",
-                reuse_kind=reuse_kind,
-                origin=origin,
-            )
-            return None
-        return _finish_one(
-            product_id,
-            url,
-            page,
-            fetch_plan,
-            raw_path,
-            extracted,
-            ingest,
-            seen_docs,
-            seen_chunk_ids,
-            extractor_obj,
-            level,
-            reuse_kind=reuse_kind,
-            origin=origin,
-        )
+    # ------------------------------------------------------------------ #
+    # L5 шаг 2: связывание константных аргументов фазы (``functools.partial``)
+    # ------------------------------------------------------------------ #
+    # Замыкания среднего слоя вынесены в ``corpus_ingest``/``corpus_commit`` и получают
+    # зависимости **параметрами** — сигнатура называет, что функция читает и куда пишет.
+    # Здесь эти зависимости связываются один раз: ``partial`` только фиксирует аргументы
+    # (не замыкание и не состояние, ничего не мутирует), поэтому глубоко вложенные места
+    # не повторяют по восемь одинаковых ``store=``/``session=`` и не вылезают за 100
+    # символов. Имена алиасов — прежние: точки вызова не меняются.
+    emit = partial(
+        emit_progress,
+        store=store,
+        session=session,
+        progress=progress,
+        heartbeat=heartbeat,
+    )
+    #: Резолв ``CrawlTarget`` — те же пять осей у всех путей добычи (5 точек вызова).
+    _crawl_target = partial(
+        resolve_crawl_target,
+        sources=crawl_sources or CrawlSourcesConfig(),
+        profiles=domain_profiles or {},
+        explicit=explicit_fetch,
+        run_default_strategy=crawl_strategy_default,
+        run_default_rate_limit=crawl_rate_default,
+    )
+    #: Резолв осей краула ``app < run < site``: одна проводимость бюджета на фазу
+    #: (F0: ``derive_extract_workers``/``mem_budget_mb`` едут тем же путём).
+    _limits_for_url = partial(
+        resolve_crawl_limits,
+        app=crawl_app or CrawlConfig(),
+        run=crawl_defaults,
+        profiles=domain_profiles or {},
+        derive_extract_workers=derive_extract_workers,
+        mem_budget_mb=mem_budget_mb,
+    )
+    _validators = partial(
+        corpus_ingest.validators,
+        state=state,
+        policy=policy,
+        planned_validators=planned_validators,
+        errors=errors,
+    )
+    _reuse_for_page = partial(
+        corpus_ingest.reuse_for_page,
+        state=state,
+        errors=errors,
+        chunker_version=resolved_chunker_version,
+    )
+    _reuse_same_hash = partial(
+        corpus_ingest.reuse_same_hash,
+        state=state,
+        errors=errors,
+        chunker_version=resolved_chunker_version,
+    )
+    _mark = partial(
+        corpus_ingest.mark,
+        session=session,
+        store=store,
+        items=items,
+        targets=targets,
+        applied_engines=applied_engines,
+        errors=errors,
+        heartbeat=heartbeat,
+        state=state,
+    )
+    _retain = partial(
+        corpus_ingest.retain,
+        mark=_mark,
+        errors=errors,
+        raw_root_path=raw_root_path,
+    )
+    _commit_local = partial(
+        corpus_ingest.commit_local,
+        mark=_mark,
+        retain=_retain,
+        validators=_validators,
+        errors=errors,
+        applied_engines=applied_engines,
+    )
+    _local_fetch = partial(corpus_ingest.local_fetch, limiter=limiter)
+    _fetch_and_commit = partial(
+        corpus_ingest.fetch_and_commit,
+        limiter=limiter,
+        commit_local=_commit_local,
+    )
+    _local_prefetch = partial(
+        corpus_ingest.local_prefetch,
+        validators=_validators,
+        crawler=crawler,
+        crawlers=crawlers,
+        items=items,
+        raw_root_path=raw_root_path,
+    )
+    _process_local = partial(
+        corpus_ingest.process_local,
+        local_prefetch=_local_prefetch,
+        commit_local=_commit_local,
+        fetch_and_commit=_fetch_and_commit,
+    )
+    _submit_collect = partial(
+        corpus_ingest.submit_collect,
+        executor=executor,
+        errors=errors,
+        session=session,
+        run_id=run_id,
+        executor_poll_interval=executor_poll_interval,
+        executor_sleep=executor_sleep,
+    )
+    _work_item = partial(corpus_ingest.work_item, validators=_validators)
+    _resolve_target = partial(
+        corpus_ingest.resolve_target,
+        targets=targets,
+        crawl_sources=crawl_sources,
+        domain_profiles=domain_profiles,
+        explicit_fetch=explicit_fetch,
+        crawl_strategy_default=crawl_strategy_default,
+        crawl_rate_default=crawl_rate_default,
+    )
+    _plan_incremental_items = partial(
+        corpus_ingest.plan_incremental_items,
+        state=state,
+        policy=policy,
+        product_modes=product_modes,
+        planned_validators=planned_validators,
+        errors=errors,
+    )
+    _group_revalidation_items = partial(
+        corpus_ingest.group_revalidation_items,
+        scope_hosts_by_product=scope_hosts_by_product,
+    )
+    _resolve_product_revalidate_cap = partial(
+        corpus_ingest.resolve_product_revalidate_cap,
+        limits_for=_limits_for_url,
+    )
+    _expand_directory = partial(
+        corpus_ingest.expand_directory,
+        mark=_mark,
+        emit=emit,
+        errors=errors,
+        pollers=pollers,
+        applied_engines=applied_engines,
+    )
 
     def _finish_one(
         product_id: str,
@@ -3028,7 +2199,7 @@ def _build_corpus(
         fetch_plan: FetchPlan,
         raw_path: Path,
         extracted: Any,
-        ingest: _ProductIngest,
+        ingest: ProductIngest,
         seen_docs: dict[str, str],
         seen_chunk_ids: set[str],
         extractor_obj: ExtractorPort,
@@ -3056,7 +2227,7 @@ def _build_corpus(
         индекса от переиспользования не меняются.
 
         ``reuse_kind`` — происхождение наблюдения (16 §3.3), приходит **аргументом**:
-        ``reused`` (байты из retained, ``_resume_page``), ``revalidated`` (304 либо 200 с
+        ``reused`` (байты из retained, ``resume_page``), ``revalidated`` (304 либо 200 с
         прежним ``content_hash``) либо ``live`` (живой fetch). Выводить его из ``page``
         здесь нельзя: у resume-страницы ``not_modified`` всегда ``False``, и «живой 200»
         стал бы ложной провенанс-записью. ``200``-совпадение хеша повышает ``live`` до
@@ -3367,324 +2538,6 @@ def _build_corpus(
         return document_id
 
     # -- 13-manual-artifacts §3: подача объявленных файлов оператора ---------- #
-    def _feed_manual_artifact(
-        product_id: str,
-        entry: ManualArtifact,
-        ingest: _ProductIngest,
-        seen_docs: dict[str, str],
-        seen_chunk_ids: set[str],
-    ) -> tuple[str | None, Path | None]:
-        """Один объявленный файл: допуск → retention → экстракция → корпус (I19).
-
-        **Чего здесь нет.** Нет второго пути байтов: файл оператора читается и отдаётся
-        ``RawPage``, дальше работает :func:`_retain` — единственный writer сырых байтов,
-        который сам хеширует их и кладёт в ``corpus_raw``. Файл оператора **не
-        перемещается и не изменяется**: ``_publish_staged`` (переезд staging-файла) здесь
-        не используется вовсе, поэтому предоставленный файл остаётся там, где его положил
-        человек, и следующий прогон перечитает его же.
-
-        **Краулер обходится, границы — нет** (§3.3): живой фетч не выполняется (robots
-        снова отказал бы), но SSRF-валидация, scope объявленных хостов продукта и
-        блэклист остаются обязательными, а потолок размера артефакта берётся тот же, что
-        у краулера (не новый лимит, а уже объявленный ``crawl.max_artifact_bytes``).
-
-        **Отказ не стирается.** Элемент сеанса этим путём не перезаписывается
-        (``origin=ORIGIN_MANUAL`` отключает ``_mark``): ``failed`` + ``robots_disallow``
-        остаётся в ``crawl_session_items``, а наблюдённость материала видна отдельно —
-        ``corpus_docs.origin = 'manual'``.
-
-        :returns: ``(doc_id, raw_path)``: ``doc_id`` — документ попал в корпус (только
-            такой артефакт закрывает пробел покрытия), ``raw_path`` — retained-байты
-            (``None`` — байты не сохранены).
-        """
-        from core.pipeline.serp_loop import serp_host_in_scope
-
-        url = entry.url
-        where = f"{product_id}/{url}: manual_artifact"
-        # 1. SSRF — та же единственная проверка URL, что у всего прогона. Дублируется
-        #    намеренно: загрузчик проверяет декларацию, фаза — допуск байтов.
-        try:
-            validate_url(url)
-        except ValueError as exc:
-            errors.append(f"{where}: URL не проходит SSRF-проверку ({exc}) — не допущен")
-            return None, None
-        # 2. Scope — только объявленные хосты продукта (поддомен — если объявлен).
-        own_hosts, declared_hosts = manual_host_scope(
-            product_id, url_map=url_map, domain_profiles=domain_profiles
-        )
-        if not serp_host_in_scope(
-            urlsplit(url).hostname or "", own_hosts, declared_hosts
-        ):
-            errors.append(
-                f"{where}: хост вне объявленных хостов продукта — не допущен "
-                "(предоставление не расширяет scope краула)"
-            )
-            return None, None
-        # 3. Пределы — те же объявленные оси, что у краула (app < run < site).
-        limits = resolve_crawl_limits(
-            url,
-            app=crawl_app or CrawlConfig(),
-            run=crawl_defaults,
-            profiles=domain_profiles or {},
-            derive_extract_workers=derive_extract_workers,
-            mem_budget_mb=mem_budget_mb,
-        )
-        if is_blacklisted(url, limits):
-            errors.append(f"{where}: URL в блэклисте — не допущен")
-            return None, None
-        if entry.size > limits.max_artifact_bytes:
-            # Не новый потолок: ровно та граница, на которой краулер отказал бы этому же
-            # файлу (``payload_too_large``). Молчаливая обрезка запрещена.
-            errors.append(
-                f"{where}: {entry.size} Б > crawl.max_artifact_bytes="
-                f"{limits.max_artifact_bytes} — не допущен "
-                f"({FailureKind.PAYLOAD_TOO_LARGE.value}, как у краула)"
-            )
-            return None, None
-        target = resolve_crawl_target(
-            product_id,
-            url,
-            sources=crawl_sources or CrawlSourcesConfig(),
-            profiles=domain_profiles or {},
-            explicit=explicit_fetch,
-            run_default_strategy=crawl_strategy_default,
-            run_default_rate_limit=crawl_rate_default,
-        )
-        fetch_plan = target.plan
-        level = limits.document_level
-        extractor_obj: ExtractorPort = extractor
-        if extractor_factory is not None and (
-            level is not DocumentLevel.FULL
-            or limits.pdf_pipeline is not PdfPipeline.STRUCTURED
-        ):
-            # Зеркало пути корня (P5): уровень/механизм — свойство настройки, а не
-            # «какой экстрактор случайно передали». Отказ фабрики — видимая деградация.
-            try:
-                extractor_obj = extractor_factory(level, limits.pdf_pipeline)
-            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                errors.append(
-                    f"{where}: extractor_factory({level.value}, "
-                    f"{limits.pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
-                    "понижен до переданного экстрактора"
-                )
-                extractor_obj = extractor
-        # 4. Байты оператора → RawPage. Файл только читается (аудит сохраняет его на
-        #    месте): retained-копию пишет ``_retain``, и именно её хеш станет evidence.
-        try:
-            body = entry.path.read_bytes()
-        except OSError as exc:
-            errors.append(f"{where}: объявленный файл не читается: {exc}")
-            return None, None
-        page = RawPage(
-            url=url,
-            content=body,
-            fetched_at=_now_iso(),
-            # Получения не было: ``render_mode='http'`` был бы ложной провенанс-записью,
-            # поэтому NULL + ``origin='manual'`` (два факта вместо одного неверного).
-            fetch_mode=None,  # type: ignore[arg-type]
-            content_type=_MEMBER_CONTENT_TYPES.get(document_suffix(url) or ""),
-            engine=ORIGIN_MANUAL,
-        )
-        raw_path = _retain(product_id, url, page, fetch_plan, origin=ORIGIN_MANUAL)
-        if raw_path is None:
-            return None, None
-        # 5. Контейнер — маршрут **спуска**, а не экстрактора; спуск живёт внутри дренажа
-        #    корня (пулы/окна/провенанс). Ручная подача его не исполняет, поэтому говорит
-        #    это вслух: тихая попытка «скормить zip docling-у» дала бы невнятный
-        #    ``parser_failed`` вместо честного «предоставьте документы членами».
-        try:
-            probe = probe_artifact(
-                raw_path,
-                product_id=product_id,
-                url=url,
-                content_type=page.content_type,
-                container_for=container_for,
-            )
-            artifact_probes.append(probe.as_dict())
-            if probe.is_container:
-                errors.append(
-                    f"{where}: контейнер ({probe.artifact.format}) — спуск для ручной "
-                    "подачи не подключён; предоставьте документы членами архива "
-                    "(спуск исполняется только краулом)"
-                )
-                return None, raw_path
-        except Exception as exc:  # noqa: BLE001 — зонд не роняет фазу
-            errors.append(
-                f"{where}: зонд артефакта: {type(exc).__name__}: {exc} — "
-                "артефакт подан экстрактору как есть"
-            )
-        doc_id = _ingest_one(
-            product_id,
-            url,
-            page,
-            fetch_plan,
-            raw_path,
-            ingest,
-            seen_docs,
-            seen_chunk_ids,
-            extractor_obj,
-            level,
-            # 16 §3.3: байты оператора пришли **не от сервера** — «живым наблюдением»
-            # такой документ не является. ``live`` здесь был бы ложной провенанс-записью,
-            # а ``stale`` (пропуск по потолку ревалидации) — не тот механизм. Сеть не
-            # трогалась ⇒ ``reused``; последствия для публикации ``❌`` считает правило
-            # §11.2 там, где оно исполняется (``evaluate``), а не писатель строки.
-            reuse_kind=ReuseKind.REUSED,
-            origin=ORIGIN_MANUAL,
-        )
-        return doc_id, raw_path
-
-    def _submit_collect(work: list[CrawlWorkItem]) -> dict[tuple[str, str], CrawlResultItem]:
-        """Phase 3.3/5.3: подача набора работ исполнителю → ожидание → сбор результатов.
-
-        Единая машинерия одной «волны» (submit с back-pressure → опрос статуса → сбор
-        пагинацией); ошибки шва изолируются в ``errors``. Пустой набор → ``{}`` без обращения
-        к исполнителю. ``idempotency_key`` — по набору работ **этой** волны (разные волны ⇒
-        разные ключи ⇒ разные задания), ``session_id`` стабилен на прогон.
-
-        **P3-A2 (§3): бисекция back-pressure.** Если после :data:`_SUBMIT_MAX_ATTEMPTS`
-        попыток волна всё ещё отвергнута (``accepted=false``), она делится **пополам** и
-        каждая половина обрабатывается как своя волна (свой ``idempotency_key`` — он выводится
-        из набора работ); рекурсия до одиночных элементов. Одиночный элемент, всё ещё
-        отвергнутый, возвращается синтетическим ``CrawlResultItem(status="failed",
-        error=...)`` — вызывающий честно помечает его per-URL ``FAILED`` ``source_unavailable``
-        (без молчаливого дропа), сеанс финализируется ``PARTIAL``. Отвергнутые ``submit`` не
-        создают заданий, поэтому повтор после деления безопасен.
-        """
-        if executor is None:
-            # Внутренний инвариант: волны подаёт только транспортный путь (``split``).
-            # Явная проверка, а не ``assert``: под ``-O`` assert исчез, и функция упала бы
-            # позже на ``executor.submit`` с неинформативным ``AttributeError``.
-            raise AssertionError(
-                "_submit_collect вызван без исполнителя (локальный краул волны не подаёт)"
-            )
-        if not work:
-            return {}
-
-        # B2: ``session_id`` стабилен на прогон, а ``idempotency_key`` — по набору работ этой
-        # волны (resume/развёртка каталога меняют набор → новый ключ → новое задание).
-        session_key = session or default_session_id(str(run_id or ""))
-        idempotency_key = _work_set_idempotency_key(work)
-        profile = getattr(executor, "profile", None) or "split"
-
-        # C2: подача с повтором при back-pressure (``accepted=False``), ограниченно.
-        handle = ""
-        accepted = False
-        for attempt in range(_SUBMIT_MAX_ATTEMPTS):
-            try:
-                submission = executor.submit(
-                    work,
-                    session_id=session_key,
-                    run_id=str(run_id or ""),
-                    profile=profile,
-                    idempotency_key=idempotency_key,
-                )
-            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                errors.append(f"executor.submit: {type(exc).__name__}: {exc}")
-                return {}
-            if submission.accepted:
-                handle = submission.job_id
-                accepted = True
-                break
-            # Back-pressure: подождать (сначала ``retry_after_s``, иначе интервал опроса).
-            if attempt + 1 < _SUBMIT_MAX_ATTEMPTS:
-                executor_sleep(
-                    submission.retry_after_s
-                    if submission.retry_after_s is not None
-                    else executor_poll_interval
-                )
-
-        if not accepted:
-            # §3: back-pressure не снят. Одиночный элемент — честный per-URL ``FAILED``;
-            # иначе — бисекция волны (рекурсия до одиночных).
-            if len(work) == 1:
-                only = work[0]
-                reason = (
-                    "executor.submit: back-pressure не снят после "
-                    f"{_SUBMIT_MAX_ATTEMPTS} попыток (accepted=false)"
-                )
-                errors.append(f"{only.product_id}/{only.url}: {reason}")
-                return {
-                    (only.product_id, only.url): CrawlResultItem(
-                        product_id=only.product_id,
-                        url=only.url,
-                        status="failed",
-                        engine=only.engine,
-                        kind=only.kind,
-                        error=reason,
-                    )
-                }
-            mid = len(work) // 2
-            errors.append(
-                "executor.submit: back-pressure не снят после "
-                f"{_SUBMIT_MAX_ATTEMPTS} попыток (accepted=false) для волны из "
-                f"{len(work)} работ — бисекция пополам"
-            )
-            left = _submit_collect(work[:mid])
-            right = _submit_collect(work[mid:])
-            left.update(right)
-            return left
-
-        # Опрос до терминального статуса (уже терминальное задание не пейсится).
-        try:
-            progress = executor.status(handle)
-            while progress.status in ACTIVE_JOB_STATUSES:
-                executor_sleep(executor_poll_interval)
-                progress = executor.status(handle)
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            errors.append(f"executor: {type(exc).__name__}: {exc}")
-            return {}
-
-        # Сбор результатов пагинацией (``next_cursor``/``done``).
-        collected: dict[tuple[str, str], CrawlResultItem] = {}
-        cursor: str | None = None
-        try:
-            while True:
-                batch = executor.collect(handle, cursor=cursor)
-                for result in batch.items:
-                    collected[(result.product_id, result.url)] = result
-                if batch.done or not batch.next_cursor:
-                    break
-                cursor = batch.next_cursor
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            errors.append(f"executor.collect: {type(exc).__name__}: {exc}")
-        return collected
-
-    def _work_item(
-        pid: str, url: str, target: Any, *, robots: bool = False
-    ) -> CrawlWorkItem:
-        """Собирает работу волны из резолвнутой цели (оси ``FetchPlan`` + провенанс).
-
-        P3-A2/A2c: ``rate_limit`` переносится per-item — ровно тот **резолвнутый** лимит
-        (``target.plan.rate_limit``), что локально лежит в ``desc.fetch_plan.rate_limit``
-        после иерархии источников; pacing исполняет edge (§11). ``None`` — без пейсинга.
-
-        A2b/§6(b): ``robots`` — egress-политика, вычисленная ядром на **корень**; edge
-        строит краулеры «голыми», поэтому флаг обязан ехать с работы (иначе split-discovery
-        не применяет robots и расходится с local по контенту).
-
-        ``if_none_match``/``if_modified_since`` (09 §6.3) — валидаторы условного GET из
-        ``url_state``: edge отправляет ``304`` тем же контрактом, что и локальный путь, и
-        обязан получить их в работе (иначе split-профиль не экономит трафик). ``None`` —
-        прежний безусловный GET (байт-идентичное поведение).
-        """
-        plan_i = target.plan
-        if_none_match, if_modified_since = _validators(pid, url)
-        return CrawlWorkItem(
-            product_id=pid,
-            url=url,
-            engine=target.engine,
-            kind=target.kind,
-            fetch=plan_i.fetch,
-            extract=plan_i.extract,
-            strategy=plan_i.strategy,
-            wait_for=plan_i.wait_for,
-            lang=None,
-            rate_limit=plan_i.rate_limit,
-            robots=robots,
-            if_none_match=if_none_match,
-            if_modified_since=if_modified_since,
-        )
 
     # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
     # Векторы/физический индекс и персистенция corpus_chunks здесь не выполняются:
@@ -3696,205 +2549,46 @@ def _build_corpus(
     # поведение) и через ``executor`` (``split``/edge-планировщик). Общая часть (retention/
     # экстракция/дедуп/нарезка/сеансовый трекинг) вынесена в ``_retain``/``_ingest_one`` —
     # обе ветки используют её, не дублируя логику.
-    ingests: list[_ProductIngest] = []
+    ingests: list[ProductIngest] = []
 
-    emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+    emit()
 
     # --- C1/L1: фазовый пул и FIFO-очередь экстракции ------------------------- #
     # Пул создаётся лениво на ключ ``(level, window)`` и живёт до ``finally`` фазы
     # (обёртка :func:`build_corpus`), а не на seed-root. Очередь доводки — тоже фазовая:
     # хвост корня, не способный расширить свой frontier, доводится во время фетча
     # следующего корня, а не блокирует его.
-    extract_pending: deque[_PendingExtract] = deque()
+    extract_pending: deque[PendingExtract] = deque()
     #: Корни с недоведённым хвостом — в порядке дренажа (порядок провенанса сохраняется).
-    extract_finalizers: deque[_RootDrain] = deque()
+    extract_finalizers: deque[RootDrain] = deque()
     #: Бакеты стадий **текущего** продукта (наблюдаемость, не контракт). Объявлены здесь, а
     #: не в цикле продуктов, потому что closures ниже (``_submit_collect``/``_finish_extract``)
     #: видят переменную ячейкой; цикл обнуляет тот же объект (:meth:`_CorpusStageTimings.reset`).
     timings = _CorpusStageTimings()
+    _finish_extract = partial(
+        corpus_commit.finish_extract,
+        pools=pools,
+        errors=errors,
+        timings=timings,
+        extract_timeout=_extract_timeout,
+        extract_pending=extract_pending,
+        extract_finalizers=extract_finalizers,
+    )
+    _finalize_ready_roots = partial(
+        corpus_commit.finalize_ready_roots,
+        extract_finalizers=extract_finalizers,
+    )
+    _recover_extract_pool = partial(
+        corpus_commit.recover_extract_pool,
+        pools=pools,
+        errors=errors,
+    )
+    _abort_extract_pending = partial(
+        corpus_commit.abort_extract_pending,
+        extract_pending=extract_pending,
+        extract_finalizers=extract_finalizers,
+    )
 
-    def _finalize_ready_roots() -> None:
-        """Вызывает финализаторы корней, чьи хвосты доведены, — строго в порядке корней."""
-        while extract_finalizers and extract_finalizers[0].pending == 0:
-            drain = extract_finalizers.popleft()
-            finalize = drain.finalize
-            if finalize is not None and not drain.finalized:
-                drain.finalized = True
-                finalize()
-
-    def _recover_extract_pool(
-        pool_key: _ExtractPoolKey, label: str
-    ) -> None:
-        """Отравленный пул: discard + bounded rebuild; исчерпание — терминальный отказ.
-
-        Повторное использование мёртвого пула запрещено; авто-ретрая нет. Inline после
-        исчерпания не включается: на memory-constrained хосте docling в родителе — худший
-        режим, а тихая деградация скрыла бы дефект.
-        """
-        if pools.rebuild(pool_key):
-            return
-        errors.append(
-            f"{label}: пул экстракции {pool_key[0].value}/{pool_key[1].value}"
-            f"/W={pool_key[2]} исчерпал "
-            f"пересборки ({_EXTRACT_MAX_POOL_REBUILDS}) — остаток прогона терминально "
-            "FAILED (parser_failed), без inline-экстракции"
-        )
-
-    def _abort_extract_pending(reason: str) -> None:
-        """Помечает все in-flight задания (все корни) ``FAILED`` — пул мёртв.
-
-        Хвосты уже отложенных корней тоже принадлежат этому пулу, поэтому отказ получают
-        все: исход видим, а не потерян вместе с пересборкой.
-        """
-        while extract_pending:
-            item = extract_pending.popleft()
-            item.commit(None, reason, None)
-            item.root.pending -= 1
-        _finalize_ready_roots()
-
-    def _finish_extract(item: _PendingExtract) -> None:
-        """Доводит oldest задание фазовой очереди: ``future.result`` → доводка корня (FIFO).
-
-        P4/C1: ``BrokenProcessPool`` — воркер умер (краш/OOM): все in-flight → ``FAILED``,
-        пул discard+rebuild (bounded) либо терминальный отказ. Таймаут — **per-artifact**:
-        терминально помечается только это задание (``extraction_timeout``), пул продолжает
-        работу; пересборка — только если пул не дал ни одного завершения за ``2 × timeout``
-        (:meth:`_ExtractPools.note_timeout`).
-
-        Наблюдаемость: время ``future.result()`` (включая таймаут и смерть воркера) идёт в
-        ``timings.extract_wait_s`` — это **ожидание** главного потока, а не работа: при окне
-        ``extract_workers > 1`` оно включает и чужие задания, поэтому окно публикуется рядом.
-        """
-        try:
-            _wait_started = time.perf_counter()
-            try:
-                extracted = item.future.result(timeout=_extract_timeout)
-            finally:
-                # ``extract_wait_s`` — **ожидание** экстракции на главном потоке (в т.ч. при
-                # таймауте/сбое воркера). При окне > 1 включает ожидание чужих заданий:
-                # рядом публикуется фактическое окно (``extract_workers``).
-                timings.extract_wait_s += time.perf_counter() - _wait_started
-        except TimeoutError:
-            # C1: зависший артефакт инвалидируется точечно; пул (и его здоровые воркеры)
-            # продолжает работу. ``cancel`` на уже исполняемом future — no-op.
-            cancel = getattr(item.future, "cancel", None)
-            if cancel is not None:
-                # Инвалидация best-effort: задание всё равно коммитится как
-                # ``extraction_timeout`` ниже, поэтому оператор видит исход артефакта
-                # независимо от того, удалось ли отменить future.
-                with contextlib.suppress(Exception):
-                    cancel()
-            item.commit(None, "extraction timeout", FailureKind.EXTRACTION_TIMEOUT)
-            if pools.note_timeout(item.pool_key):
-                # ``2 × timeout`` без единого завершения: пул мёртв — reap + bounded rebuild.
-                pools.terminate(item.pool_key)
-                _abort_extract_pending("extraction pool terminated after timeout")
-                _recover_extract_pool(item.pool_key, f"{item.pid}/{item.url}")
-        except BrokenProcessPool:
-            item.commit(None, "extraction worker died", None)
-            _abort_extract_pending("extraction worker died")
-            _recover_extract_pool(item.pool_key, f"{item.pid}/{item.url}")
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            item.commit(None, f"{type(exc).__name__}: {exc}", None)
-        else:
-            pools.note_completion(item.pool_key)
-            item.commit(extracted, None, None)
-        finally:
-            item.root.pending -= 1
-            _finalize_ready_roots()
-
-    def _expand_directory(pid: str, url: str, target: Any) -> list[str] | None:
-        """Phase 5.2: разворачивает источник-каталог (``feed``/``channel``) в список ссылок.
-
-        Возвращает ``None``, если ``target.kind`` — **не** директорийный (URL обрабатывается
-        как обычная страница). Иначе поллит каталог через ``pollers[kind]`` и возвращает
-        URL-записи (кандидаты, не evidence — I19): сам каталог **не** ретейнится и не даёт
-        ``CorpusDoc``/чанков. Любой сбой каталога (нет поллера / плохие ``params`` / ошибка
-        поллинга) — терминальный ``FAILED`` ``source_unavailable`` (сеанс финализируется
-        ``PARTIAL``, а не «тихо пусто»). Записи ре-валидируются SSRF-политикой и дедуплицируются
-        с сохранением порядка поллера; один уровень развёртки (записи повторно не расширяются).
-        """
-        if target.kind not in _DIRECTORY_KINDS:
-            return None
-
-        poller = (pollers or {}).get(target.kind)
-        if poller is None:
-            reason = (
-                f"{pid}/{url}: источник-каталог kind={target.kind}, "
-                "но поллер не сконфигурирован"
-            )
-            errors.append(reason)
-            _mark(
-                pid,
-                url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=reason,
-            )
-            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-            return []
-
-        problems = poller.validate_params(target.kind, target.params)
-        if problems:
-            reason = (
-                f"{pid}/{url}: источник-каталог kind={target.kind}: "
-                + "; ".join(problems)
-            )
-            errors.append(reason)
-            _mark(
-                pid,
-                url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=reason,
-            )
-            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-            return []
-
-        try:
-            entries = poller.poll(
-                url, kind=target.kind, params=target.params, plan=target.plan
-            )
-        except Exception as exc:  # noqa: BLE001 — изоляция каталога (не роняет фазу)
-            reason = f"{pid}/{url}: poll: {type(exc).__name__}: {exc}"
-            errors.append(reason)
-            _mark(
-                pid,
-                url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=reason,
-            )
-            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-            return []
-
-        # Каталог добыт: элемент ``FETCHED`` (raw НЕ сохраняется — это не контент/evidence,
-        # только ссылки; resume такого элемента не даёт — ``_resume_source`` требует ``raw_path``).
-        applied_engines[(pid, url)] = target.engine
-        _mark(pid, url, CrawlItemStatus.FETCHED)
-        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-
-        entry_urls: list[str] = []
-        # N2: самокаталог — URL каталога уже добыт выше (kind/engine записи унаследуют
-        # его); запись с URL == каталогу (self-listing фид) не фетчится повторно, не
-        # ретейнится и не перезаписывает ``targets[(pid, url)]``.
-        seen: set[str] = {url}
-        for entry in entries:
-            entry_url = str(getattr(entry, "url", "") or "")
-            if not entry_url:
-                continue
-            try:
-                validate_url(entry_url)
-            except Exception as exc:  # noqa: BLE001 — SSRF-политика на каждой записи
-                errors.append(
-                    f"{pid}/{entry_url}: entry URL отклонён SSRF-политикой: {exc}"
-                )
-                continue
-            if entry_url in seen:
-                continue
-            seen.add(entry_url)
-            entry_urls.append(entry_url)
-        return entry_urls
 
     # D3: sitemap разворачивается через ``PollPort(kind="sitemap")`` (local in-process ‖
     # split через шов ``crawl/poll``) и кэшируется по ``(product, sitemap_url)``: сайт
@@ -3902,641 +2596,24 @@ def _build_corpus(
     sitemap_cache: dict[tuple[str, str], list[str]] = {}
     #: ``<loc>``, уже прикреплённые к какому-либо seed-root продукта (дедуп между seeds).
     sitemap_seed_used: set[tuple[str, str]] = set()
+    _expand_sitemap = partial(
+        corpus_ingest.expand_sitemap,
+        mark=_mark,
+        emit=emit,
+        errors=errors,
+        pollers=pollers,
+        sitemap_cache=sitemap_cache,
+        targets=targets,
+        applied_engines=applied_engines,
+        domain_profiles=domain_profiles,
+        resolve_target=_crawl_target,
+    )
+    _fresh_sitemap_seeds = partial(
+        corpus_ingest.fresh_sitemap_seeds,
+        expand_sitemap=_expand_sitemap,
+        sitemap_seed_used=sitemap_seed_used,
+    )
 
-    def _expand_sitemap(pid: str, seed_url: str) -> list[str]:
-        """D3: разворачивает per-site ``sitemap`` в дополнительные depth-0 seed-URLs.
-
-        Возвращает ``<loc>`` (после SSRF-проверки) или ``[]``, если у сайта нет sitemap. Сам
-        sitemap — не страница: не ретейнится/не ингестится (элемент сеанса ``FETCHED`` без
-        ``raw_path``, I19). Сбой/отсутствие поллера изолируется в ``errors`` (seed оператора
-        сохраняется). Кэш по ``(product, sitemap_url)`` — один опрос на сайт.
-        """
-        sitemap_url = sitemap_url_for(seed_url, domain_profiles=domain_profiles)
-        if not sitemap_url:
-            return []
-        key = (pid, sitemap_url)
-        cached = sitemap_cache.get(key)
-        if cached is not None:
-            return list(cached)
-
-        locs: list[str] = []
-        poller = (pollers or {}).get(_SITEMAP_KIND)
-        if poller is None:
-            reason = (
-                f"{pid}/{sitemap_url}: sitemap задан профилем домена, "
-                "но поллер sitemap не сконфигурирован"
-            )
-            errors.append(reason)
-            _mark(
-                pid,
-                sitemap_url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=reason,
-            )
-            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-            sitemap_cache[key] = locs
-            return locs
-
-        problems = poller.validate_params(_SITEMAP_KIND, {})
-        if problems:
-            reason = f"{pid}/{sitemap_url}: sitemap: " + "; ".join(problems)
-            errors.append(reason)
-            _mark(
-                pid,
-                sitemap_url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=reason,
-            )
-            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-            sitemap_cache[key] = locs
-            return locs
-
-        # Провенанс: sitemap — не страница, собственный ``kind="sitemap"`` (строка-данные).
-        starget = resolve_crawl_target(
-            pid,
-            sitemap_url,
-            sources=crawl_sources or CrawlSourcesConfig(),
-            profiles=domain_profiles or {},
-            explicit=explicit_fetch,
-            run_default_strategy=crawl_strategy_default,
-            run_default_rate_limit=crawl_rate_default,
-        )
-        targets[(pid, sitemap_url)] = CrawlTarget(
-            plan=starget.plan, engine=starget.engine, kind=_SITEMAP_KIND, params={}
-        )
-        try:
-            entries = poller.poll(
-                sitemap_url, kind=_SITEMAP_KIND, params={}, plan=starget.plan
-            )
-        except Exception as exc:  # noqa: BLE001 — изоляция sitemap (не роняет фазу)
-            reason = f"{pid}/{sitemap_url}: sitemap poll: {type(exc).__name__}: {exc}"
-            errors.append(reason)
-            _mark(
-                pid,
-                sitemap_url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=reason,
-            )
-            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-            sitemap_cache[key] = locs
-            return locs
-
-        applied_engines[(pid, sitemap_url)] = starget.engine
-        _mark(pid, sitemap_url, CrawlItemStatus.FETCHED)  # без raw: не контент (I19)
-        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
-
-        # ``<loc>`` — кандидаты: SSRF-перепроверка до становления seed (не ``evidence``).
-        seen: set[str] = {sitemap_url}
-        for entry in entries:
-            loc = str(getattr(entry, "url", "") or "")
-            if not loc or loc in seen:
-                continue
-            try:
-                validate_url(loc)
-            except Exception as exc:  # noqa: BLE001 — SSRF-политика на каждом <loc>
-                errors.append(f"{pid}/{loc}: sitemap <loc> отклонён SSRF-политикой: {exc}")
-                continue
-            seen.add(loc)
-            locs.append(loc)
-        sitemap_cache[key] = locs
-        return list(locs)
-
-    def _fresh_sitemap_seeds(
-        pid: str, seed_url: str, frontier: Frontier
-    ) -> _SitemapSeeds:
-        """``<loc>`` sitemap, ещё не прикреплённые ни к одному seed-root продукта (дедуп).
-
-        Один и тот же sitemap у нескольких seed-URL даёт один набор ``<loc>``; прикреплять
-        их к каждому корню — двойной фетч/бюджет, поэтому свежие seeds отдаются один раз.
-
-        ``<loc>`` — **подчинённые** seeds корня, а не задающие scope: loc проходит тот же
-        scope-допуск (host + path-граница + traversal-guard), что и обнаруженная ссылка,
-        **кроме** классового исключения терминального артефакта (P6b): ``<loc>`` на
-        ``.pdf``/``.docx``/``.pptx``/``.xlsx`` или заявленный контейнер вне path-prefix
-        **ставится в очередь**, а не считается ``_SITEMAP_SKIP_PATH`` (host scope, SSRF и
-        traversal-guard сохраняются; обход видим через
-        :meth:`Frontier.note_artifact_bypass`). Scope-чек исполняется **до** пометки
-        ``(pid, loc)`` использованным, поэтому loc, отвергнутый этим корнем, остаётся
-        доступным другому корню продукта. Кэш опроса sitemap (``(pid, sitemap_url)``)
-        остаётся нефильтрованным.
-
-        Пометка ``(pid, loc)`` **не** делается здесь (F12): loc может быть отвергнут уже
-        после scope — блэклистом профиля корня (``exclude_paths``/``exclude_documents``) или
-        ``max_documents`` при постановке в очередь. Такой loc обязан остаться доступным
-        другому корню продукта, поэтому ``sitemap_seed_used`` пополняется в
-        :func:`_drain_root` только по факту приёма в очередь (``add_seed`` → ``queued``/
-        ``dup``).
-
-        Отказ scope — **провенанс**, не ``errors`` (F10): host-wide sitemap при path-scoped
-        seed отвергает большинство ``<loc>`` штатно. Отказы агрегируются по классу
-        (:func:`_sitemap_skip_class`): ``host`` (sitemap рекламирует другой host) отдельно
-        от ``path`` (тот же host, путь вне префикса) — иначе host-сигнал тонул бы в массе
-        path-отказов. На корень — не более одной записи на класс (не на loc).
-        """
-        fresh: list[str] = []
-        rejected: dict[str, list[str]] = {_SITEMAP_SKIP_HOST: [], _SITEMAP_SKIP_PATH: []}
-        for loc in _expand_sitemap(pid, seed_url):
-            admission = frontier.scope_admission(loc)
-            if admission == SCOPE_OUT:
-                rejected[_sitemap_skip_class(loc, frontier.root_url)].append(loc)
-                continue
-            if admission == SCOPE_ARTIFACT_OUTSIDE_PREFIX and not frontier.blacklisted(
-                loc
-            ):
-                # P6b: терминальный артефакт вне path-prefix — enqueued, но обход обязан
-                # быть видимым. Блэклист решается позже (``add_seed``, F12); здесь только
-                # не пишем в провенанс то, что заведомо будет отброшено.
-                frontier.note_artifact_bypass(loc)
-            key = (pid, loc)
-            if key in sitemap_seed_used:
-                continue
-            fresh.append(loc)
-        skipped: list[dict[str, Any]] = []
-        for reason, label in (
-            (_SITEMAP_SKIP_HOST, "чужой host"),
-            (_SITEMAP_SKIP_PATH, "path вне префикса корня"),
-        ):
-            locs = rejected[reason]
-            if not locs:
-                continue
-            # Сотни loc на один корень (host-wide sitemap при узком seed) — одна запись:
-            # построчные затопили бы провенанс. Примеры — первые три (счётчик — точный).
-            preview = ", ".join(locs[:3])
-            if len(locs) > 3:
-                preview += f" и ещё {len(locs) - 3}"
-            skipped.append(
-                {
-                    "reason": reason,
-                    "count": len(locs),
-                    "examples": list(locs[:3]),
-                    "message": (
-                        f"{pid}/{seed_url}: sitemap: {len(locs)} <loc> вне scope корня "
-                        f"{frontier.root_url} ({label}) — не enqueued (например: {preview})"
-                    ),
-                }
-            )
-        return _SitemapSeeds(fresh=tuple(fresh), skipped=tuple(skipped))
-
-    def _local_prefetch(
-        pid: str,
-        wu: str,
-        wtarget: Any,
-        *,
-        depth: int | None = None,
-        scope_host: str | None = None,
-        enforce_redirect_scope: bool = False,
-        robots: bool = False,
-        max_response_bytes: int,
-        artifact_max_bytes: int | None = None,
-        attachment_formats: Sequence[str] | None = None,
-    ) -> _LocalFetch:
-        """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
-
-        **Чистая** фаза: не пишет ни в сеанс, ни в ``applied_engines``. Единственное
-        исключение — сбой чтения ``url_state`` (09 §6.3) фиксируется в ``errors``: он
-        деградирует запрос до безусловного GET, а не роняет фазу. Все прочие мутации
-        отложены в :func:`_commit_local` (FIFO-порядок коммита) — это позволяет
-        исполнять саму сеть в пуле, а исходы коммитить детерминированно на главном потоке.
-        Активный краулер выбирается по ``wtarget.engine`` (fallback — ``crawler``).
-
-        A2b/§6(b): ``robots`` проставляется в ``plan.robots`` (``dataclasses.replace``) —
-        адаптер применяет ``robots.txt``-гейт только при ``self._robots is not None and
-        plan.robots``; без discovery/принуждения флаг False (никаких лишних ``robots.txt``).
-
-        **Условный GET (09 §6.3).** При политике ``auto``/``revalidate`` валидаторы из
-        ``url_state`` переносятся в ``FetchPlan`` (``dataclasses.replace`` — план не
-        мутируется): ``304`` экономит трафик, а трафик-нейтральный ``None`` сохраняет
-        прежний безусловный GET байт-в-байт.
-        """
-        fetch_plan = (
-            wtarget.plan
-            if getattr(wtarget.plan, "robots", False) == robots
-            else replace(wtarget.plan, robots=robots)
-        )
-        # P0: per-site/run потолок ответа едет на плане (адаптер применяет его к стриму).
-        fetch_plan = replace(fetch_plan, max_response_bytes=max_response_bytes)
-        # P6: допуск артефакта-контейнера. Страница остаётся под ``max_response_bytes``;
-        # артефакт класса «контейнер» (суффикс/``Content-Type``) вправе уйти в staging-файл
-        # под ``raw_root`` и ограничен ``max_artifact_bytes``. Класс решает адаптер по
-        # заявленному набору: незаявленный контейнер получает прежний ``payload_too_large``.
-        if artifact_max_bytes is not None:
-            fetch_plan = replace(
-                fetch_plan,
-                staging_dir=str(raw_root_path / _STAGING_DIRNAME),
-                max_stream_bytes=int(artifact_max_bytes),
-                attachment_formats=(
-                    None if attachment_formats is None else tuple(attachment_formats)
-                ),
-            )
-        # 09 §6.3: валидаторы условного GET (только auto/revalidate; refresh — безусловный).
-        if_none_match, if_modified_since = _validators(pid, wu)
-        if if_none_match is not None or if_modified_since is not None:
-            fetch_plan = replace(
-                fetch_plan,
-                if_none_match=if_none_match,
-                if_modified_since=if_modified_since,
-            )
-        prior_item = items.get((pid, wu))
-        resume_source = (
-            _resume_source(
-                prior_item,
-                max_bytes=max_response_bytes,
-                artifact_max_bytes=artifact_max_bytes,
-                attachment_formats=attachment_formats,
-            )
-            if prior_item is not None
-            else None
-        )
-        reject = (
-            resume_source
-            if isinstance(resume_source, _RetainedReject)
-            else None
-        )
-        resume = resume_source if isinstance(resume_source, _RetainedRaw) else None
-        # Терминальный класс (not_found/payload_too_large/unsupported_binary): живой
-        # фетч не нужен и вреден (см. helper).
-        terminal = _terminal_failure_kind(prior_item) is not None
-        # Движок: явный ``wtarget.engine`` (из ``crawl_sources``) приоритетен; при его
-        # отсутствии ключ выводится из оси профиля домена (``fetch: browser`` → ``"browser"``).
-        # Зеркало edge ``scheduler._resolve_engine`` и ``wiring._referenced_crawl_engines``
-        # (последний кладёт ``browser`` в карту именно по ``domain_profiles.fetch``).
-        # Литерал ``"browser"`` совпадает с ключом карты в ``wiring`` (импорт CLI-константы
-        # нарушил бы слой ``pipeline ↛ cli``). Если карта не содержит ``"browser"``
-        # (зависимость недоступна) — прежний фолбэк на ``crawler``, и честная
-        # URL-скоупедированная ошибка D2 ниже срабатывает как раньше.
-        engine_key = wtarget.engine or (
-            "browser" if fetch_plan.fetch is FetchMode.BROWSER else None
-        )
-        active = ((crawlers or {}).get(engine_key) if engine_key else None) or crawler
-        browser_blocked = (
-            getattr(active, "supports_browser", True) is False
-            and fetch_plan.fetch is FetchMode.BROWSER
-        )
-        # D4/e: в пул идёт ТОЛЬКО живой не-браузерный фетч. Браузерные элементы (даже при
-        # ``supports_browser`` краулере) — никогда: ``BrowserCrawler`` водит единственную
-        # ``_page`` без лока. Resume живого фетча не делает вовсе.
-        poolable = (
-            resume is None
-            and reject is None
-            and not terminal
-            and not browser_blocked
-            and fetch_plan.fetch is not FetchMode.BROWSER
-        )
-        host = (urlsplit(wu).hostname or "").lower()
-        return _LocalFetch(
-            pid=pid,
-            wu=wu,
-            depth=depth,
-            fetch_plan=fetch_plan,
-            active=active,
-            engine_value=getattr(active, "engine", None) or wtarget.engine,
-            prior_item=prior_item,
-            resume=resume,
-            browser_blocked=browser_blocked,
-            poolable=poolable,
-            host=host,
-            scope_host=scope_host,
-            enforce_redirect_scope=enforce_redirect_scope,
-            terminal=terminal,
-            reject=reject,
-            max_artifact_bytes=artifact_max_bytes,
-            attachment_formats=(
-                None if attachment_formats is None else tuple(attachment_formats)
-            ),
-        )
-
-    def _local_fetch(desc: _LocalFetch) -> RawPage:
-        """D4 fetch-фаза (**единственный** вызов, идущий в пул): pacing + ``active.fetch``.
-
-        Никакой мутации состояния сеанса здесь нет — только живой сетевой вызов.
-        ``limiter.wait`` даёт интервал **по origin**: воркеры пула зовут pacing
-        конкурентно, и ``RateLimiter`` резервирует слот на origin под локом, а спит уже
-        вне него — иначе один хост блокировал бы все остальные. Гарантия — внутри
-        процесса; при пуле процессов состояние не разделяется (см. ``util/rate_limit``).
-        """
-        limiter.wait(desc.host, desc.fetch_plan.rate_limit)
-        return desc.active.fetch(desc.wu, desc.fetch_plan)
-
-    def _fetch_and_commit(
-        desc: _LocalFetch,
-    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
-        """Inline-фетч на главном потоке + коммит (последовательный путь и browser-режим D4).
-
-        Используется, когда фетч **не** уходит в пул: ``max_workers in (None, 1)`` либо
-        browser-элемент (``BrowserCrawler`` не потокобезопасен). ``limiter.wait`` — вне
-        ``try`` (как в прежнем ``_process_local``): его сбой — не сбой источника.
-        """
-        limiter.wait(desc.host, desc.fetch_plan.rate_limit)
-        try:
-            page = desc.active.fetch(desc.wu, desc.fetch_plan)
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            return _commit_local(desc, exc=exc)
-        return _commit_local(desc, page=page)
-
-    def _commit_local(
-        desc: _LocalFetch,
-        *,
-        page: RawPage | None = None,
-        exc: Exception | None = None,
-    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
-        """D4 post-fetch (главный поток): мутации исхода в FIFO-порядке отправки.
-
-        Возвращает ``(page, raw_path, fetch_plan, freshly_fetched)`` для последующей
-        ``_ingest_one``; ``None`` — исход пропущен/сбой (терминальный ``FAILED`` уже
-        проставлен ``_mark``), вызывающий делает ``continue``. ``freshly_fetched=False`` —
-        resume из retained raw (живого фетча не было; ``max_documents`` его не считает).
-
-        ``depth`` — глубина URL в BFS-frontier (персистится в элементе сеанса). ``scope_host``
-        — host seed-root, ``enforce_redirect_scope`` — включён ли жёсткий redirect-scope
-        (B4/D1): проверка финального URL применяется **только** при ``max_depth > 0``
-        (discovery). На глубине 0 оператор явно запросил URL — финальная страница
-        ретейнится как прежде (восстановленное поведение до D1). При discovery проверка
-        **симметрична** (``_host_matches(final, root) or _host_matches(root, final)``):
-        www↔apex / родительский редирект не теряется, а настоящий уход из семейства
-        поднимает явный ``redirect_out_of_scope`` (не молчаливый дроп).
-
-        **Детектируемость браузерного redirect-escape (A3).** ``BrowserCrawler`` теперь несёт в
-        ``RawPage.url`` **финальный** (пост-редиректный) URL навигации — так же, как Scrapy и httpx,
-        поэтому проверка ниже покрывает и браузерный путь. Исключение — кэш-хит браузера
-        (``BrowserCrawler._page_from_cache``): content-addressed кэш хранит только тело по ключу
-        запрошенного URL, восстановить финальный URL из него нельзя, поэтому для кэшированных
-        страниц браузерный escape по-прежнему недетектируем (задокументировано там же).
-        """
-        pid, wu = desc.pid, desc.wu
-        fetch_plan = desc.fetch_plan
-
-        # S1/Phase 2.1: применяемый движок — первая мутация исхода (ориентир для ``_mark``),
-        # как и прежде; всегда до resume-guard/бrowser-guard.
-        applied_engines[(pid, wu)] = desc.engine_value
-
-        # Терминальный класс (not_found/payload_too_large/unsupported_binary): определённый
-        # ответ уже получен либо исполнение упёрлось в осознанную границу; живой фетч не
-        # выполняется. Элемент остаётся ``FAILED`` (класс сбоя, не статус), ``attempts`` не
-        # растёт (``_mark`` инкрементит только при смене статуса), поэтому исход не
-        # превращается в ``attempts_exhausted``.
-        if desc.terminal:
-            prior = desc.prior_item
-            kind = _terminal_failure_kind(prior) or FailureKind.NOT_FOUND
-            _mark(
-                pid,
-                wu,
-                CrawlItemStatus.FAILED,
-                error_kind=kind.value,
-                error=(
-                    prior.error
-                    if prior is not None and prior.error
-                    else f"{kind.value}: терминально, без повтора"
-                ),
-                depth=desc.depth,
-            )
-            return None
-
-        # P0: retained raw отклонён по размеру/бинарности — терминально, без экстракции.
-        # Для бинарного артефакта сессия не должна ссылаться на байты: чистим raw_path/
-        # content_hash и удаляем retained-файл (он не evidence). Для oversize — та же
-        # очистка (на диске остаётся, но сессия больше на него не опирается).
-        if desc.reject is not None:
-            reject = desc.reject
-            # Сбой удаления файла не меняет исход: отказ уже терминальный и виден в
-            # ``errors`` + элементе сеанса (``raw_path``/``content_hash`` очищены, то есть
-            # байты вне evidence). Неудалённый файл — вопрос retention, не вердикта.
-            with contextlib.suppress(OSError):
-                reject.path.unlink(missing_ok=True)
-            errors.append(f"{pid}/{wu}: {reject.error_kind.value}: {reject.reason}")
-            _mark(
-                pid,
-                wu,
-                CrawlItemStatus.FAILED,
-                error_kind=reject.error_kind.value,
-                error=reject.reason,
-                raw_path=CLEAR_SESSION_FIELD,
-                content_hash=CLEAR_SESSION_FIELD,
-                depth=desc.depth,
-            )
-            return None
-
-        if desc.resume is not None:
-            if desc.prior_item is None:
-                # Инвариант сборки ``_LocalFetch``: resume существует только у элемента,
-                # который уже был в сеансе (иначе возобновлять нечего).
-                raise AssertionError(
-                    f"{pid}/{wu}: resume без prior_item — _LocalFetch собран неверно"
-                )
-            retained = desc.resume
-            # 09 §6.3: валидаторы сеанс не хранит — они приходят из ``url_state`` (durable),
-            # чтобы запись состояния после resume не потеряла условную валидацию.
-            page = _resume_page(
-                desc.prior_item, wu, retained, fetch_plan, _validators(pid, wu)
-            )
-            # Байты уже ретейнены (``retained.path`` — источник истины I19): повторной
-            # публикации/копии нет. Артефакт-контейнер в RAM не читался — ``content`` пуст,
-            # ``page.staged_path`` указывает на retained-файл.
-            raw_path = retained.path
-            # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
-            # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
-            # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
-            return page, raw_path, fetch_plan, False
-
-        # D2: браузерный рендер требует поддерживающего краулера. Проверка URL-скоупедирована
-        # (а не на сборке композиции): фаза не падает, пропускается только этот URL.
-        if desc.browser_blocked:
-            reason = (
-                f"{pid}/{wu}: требует браузерный рендер, но краулер "
-                f"{type(desc.active).__name__} не поддерживает browser; "
-                f"задайте COHOUND_SCOUT_CRAWLER=scrapy или browser"
-            )
-            errors.append(reason)
-            # B2: пропущенный URL — неразрешённый исход, а не «не записанный pending».
-            # При активном сеансе фиксируем элемент ``FAILED`` (source_unavailable),
-            # чтобы сеанс финализировался ``PARTIAL`` (а не ложно ``COMPLETED``), а URL
-            # оставался видимым/возобновляемым. Без сеанса — прежнее поведение (строки нет).
-            _mark(
-                pid,
-                wu,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error=reason,
-                depth=desc.depth,
-            )
-            return None
-
-        # 1. Краул: сбой/пустой RawPage — изоляция по контракту фазы.
-        if exc is not None:
-            reason = f"{type(exc).__name__}: {exc}"
-            # Класс исхода несёт сам адаптер: ``failure_kind`` (404/410 → ``not_found``)
-            # либо ``refusal_reason`` (robots-отказ, D1/§10). Нет атрибута — честный
-            # дефолт ``source_unavailable``. ``_mark`` канонизирует значение.
-            error_kind = (
-                getattr(exc, "failure_kind", None)
-                or getattr(exc, "refusal_reason", None)
-                or FailureKind.SOURCE_UNAVAILABLE.value
-            )
-            errors.append(f"{pid}/{wu}: crawl: {reason}")
-            # Наблюдаемость (не классификация): фактический HTTP-статус, если адаптер его
-            # видел (429/403/503/404 …). ``error_kind`` остаётся прежним — таксономия
-            # ``FailureKind`` этим срезом не меняется; статус лишь делает отказ различимым
-            # (транзиентный rate-limit vs политический запрет). Нет статуса — ``None``,
-            # не выдумываем (carry-forward в ``mark_session`` не перекрывает прежнее).
-            _mark(
-                pid,
-                wu,
-                CrawlItemStatus.FAILED,
-                error_kind=error_kind,
-                error=reason,
-                depth=desc.depth,
-                http_status=getattr(exc, "http_status", None),
-            )
-            return None
-        if page is None:
-            errors.append(f"{pid}/{wu}: crawl: пустой RawPage")
-            _mark(
-                pid,
-                wu,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                error="пустой RawPage",
-                depth=desc.depth,
-            )
-            return None
-
-        # D1/B4: redirect-escape. При discovery (``max_depth > 0``) финальный URL (после
-        # HTTP-редиректов) обязан остаться в host-scope корня — иначе страницу не ретейним
-        # и не расширяем frontier (не «вытаскиваем» чужой контент под видом in-site).
-        # На глубине 0 проверка выключена (оператор явно запросил URL) — прежнее поведение.
-        if desc.scope_host and desc.enforce_redirect_scope:
-            final_host = (urlsplit(page.url).hostname or "").lower()
-            # Симметрия: www→apex и apex→www — одно семейство; сравнение «final в root»
-            # в одну сторону теряло бы легитимный redirect www↔apex.
-            if final_host and not (
-                _host_matches(final_host, desc.scope_host)
-                or _host_matches(desc.scope_host, final_host)
-            ):
-                reason = (
-                    f"redirect вышел из scope: {page.url!r} "
-                    f"(root host {desc.scope_host!r})"
-                )
-                errors.append(f"{pid}/{wu}: {reason}")
-                _mark(
-                    pid,
-                    wu,
-                    CrawlItemStatus.FAILED,
-                    error_kind="redirect_out_of_scope",
-                    error=reason,
-                    depth=desc.depth,
-                )
-                return None
-
-        # P0: границы исполнения ДО retention/экстракции. Сначала размер (OVA/образ
-        # должен стать payload_too_large, а не binary-sniff), затем бинарный не-документ.
-        #
-        # **Потолок класс-aware (P6b).** Терминальный артефакт (документ или заявленный
-        # контейнер) меряется ``max_artifact_bytes``, страница — ``max_response_bytes``.
-        # Без этого транспорт, поднявший свой потолок до artifact-уровня, всё равно
-        # умирал бы здесь на страничном: живой прогон 22.10 — 125 727 643-байтный zip
-        # приезжал целиком (scrapy не имеет staging-пути) и получал
-        # ``payload_too_large: … > лимита 20971520`` уже после успешной загрузки.
-        artifact = _is_terminal_artifact(
-            page.url or wu, page.content_type, desc.attachment_formats
-        )
-        artifact_cap = (
-            fetch_plan.max_stream_bytes
-            if fetch_plan.max_stream_bytes is not None
-            else desc.max_artifact_bytes
-        )
-        cap = (
-            artifact_cap
-            if artifact and artifact_cap is not None
-            else fetch_plan.max_response_bytes
-        )
-        if cap is not None and len(page.content) > cap:
-            reason = (
-                f"payload_too_large: {len(page.content)} байт > лимита {cap}"
-            )
-            errors.append(f"{pid}/{wu}: {reason}")
-            _mark(
-                pid,
-                wu,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.PAYLOAD_TOO_LARGE.value,
-                error=reason,
-                raw_path=CLEAR_SESSION_FIELD,
-                content_hash=CLEAR_SESSION_FIELD,
-                depth=desc.depth,
-            )
-            return None
-        binary_reason = unsupported_binary_reason(
-            page.content or page.head or b"",
-            url=page.url or wu,
-            content_type=page.content_type,
-            attachment_formats=desc.attachment_formats,
-        )
-        if binary_reason is not None:
-            reason = f"unsupported_binary: {binary_reason}"
-            errors.append(f"{pid}/{wu}: {reason}")
-            _mark(
-                pid,
-                wu,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.UNSUPPORTED_BINARY.value,
-                error=reason,
-                raw_path=CLEAR_SESSION_FIELD,
-                content_hash=CLEAR_SESSION_FIELD,
-                depth=desc.depth,
-            )
-            return None
-
-        # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг).
-        raw_path = _retain(pid, wu, page, fetch_plan, depth=desc.depth)
-        if raw_path is None:
-            return None
-        return page, raw_path, fetch_plan, True
-
-    def _process_local(
-        pid: str,
-        wu: str,
-        wtarget: Any,
-        *,
-        depth: int | None = None,
-        scope_host: str | None = None,
-        enforce_redirect_scope: bool = False,
-        robots: bool = False,
-        max_response_bytes: int,
-        artifact_max_bytes: int | None = None,
-        attachment_formats: Sequence[str] | None = None,
-    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
-        """Локальный per-URL путь (последовательный): pre-fetch → fetch → post-fetch (D4).
-
-        Точка входа для ``max_workers in (None, 1)`` — прежний однопоточный путь (пул не
-        создаётся). Расщепление на фазы — задел под волновой пул (см.
-        :func:`_local_prefetch`/:func:`_local_fetch`/:func:`_commit_local`); здесь фетч
-        исполняется inline на главном потоке.
-        """
-        desc = _local_prefetch(
-            pid,
-            wu,
-            wtarget,
-            depth=depth,
-            scope_host=scope_host,
-            enforce_redirect_scope=enforce_redirect_scope,
-            robots=robots,
-            max_response_bytes=max_response_bytes,
-            artifact_max_bytes=artifact_max_bytes,
-            attachment_formats=attachment_formats,
-        )
-        if (
-            desc.resume is not None
-            or desc.reject is not None
-            or desc.browser_blocked
-            or desc.terminal
-        ):
-            return _commit_local(desc)
-
-        # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый). Применяется
-        # **только** к живому фетчу: путь ``resume`` (retained raw, выше) не пейсится.
-        return _fetch_and_commit(desc)
 
     # D1/G: accumulators честности усечения. ``truncation_records`` — детализация по
     # ``(product, seed-root)``; флаг/продукты уходят в провенанс сеанса и ``IndexBuild``.
@@ -4547,406 +2624,36 @@ def _build_corpus(
     # :class:`core.pipeline.corpus_state.CorpusCounters`). Один экземпляр на вызов:
     # замыкания читают ссылку и мутируют поля, поэтому ``nonlocal`` в теле не осталось.
     counters = CorpusCounters()
+    _note_scheduling = partial(corpus_ingest.note_scheduling, counters=counters)
+    _apply_revalidation_cap = partial(
+        corpus_ingest.apply_revalidation_cap,
+        state=state,
+        errors=errors,
+        limits_for=_limits_for_url,
+        counters=counters,
+    )
+    _record_root_outcome = partial(
+        corpus_commit.record_root_outcome,
+        counters=counters,
+        truncated_products=truncated_products,
+        truncation_records=truncation_records,
+        store=store,
+        session=session,
+        errors=errors,
+    )
+    _finalize_crawl_session = partial(
+        corpus_commit.finalize_crawl_session,
+        session=session,
+        counters=counters,
+        items=items,
+        store=store,
+        crawl_sources=crawl_sources,
+        truncated_products=truncated_products,
+        truncation_records=truncation_records,
+        errors=errors,
+        lifecycle=lifecycle,
+    )
 
-    def _persist_partial_crawl_provenance() -> None:
-        """Пишет наблюдение scope/усечения в ``crawl_sessions.provenance_json`` **по корню**.
-
-        Почему не только в ``finalize_session``: живой прогон 22.10 умер через ~3 часа, и
-        ``provenance_json`` остался ``{}`` — вся картина поддоменов (кто сколько забрал)
-        пропала вместе с процессом, хотя именно она объясняла дефект. Поэтому провенанс
-        корня персистится сразу после его drain, а не в конце фазы: упавший прогон всё
-        равно отвечает числом «сколько дали поддомены».
-
-        Форма совместима с финализацией (``effective_limits.roots`` — тот же канал, что
-        читает :func:`core.pipeline.crawl_session.truncation_summary`);
-        ``finalize_session`` позже перезаписывает его **полным** набором корней.
-        ``partial: true``/``status: "running"`` помечают незавершённый сеанс, чтобы
-        частичный провенанс не выглядел финальным.
-        """
-        if store is None or session is None:
-            return
-        try:
-            store.set_crawl_session_provenance(
-                session,
-                json.dumps(
-                    {
-                        "partial": True,
-                        "status": "running",
-                        "effective_limits": {"roots": truncation_records},
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость не валит фазу
-            errors.append(f"crawl_provenance(partial): {type(exc).__name__}: {exc}")
-
-    def _record_root_outcome(
-        product_id: str,
-        root_url: str,
-        frontier: Frontier,
-        sitemap_skips: Sequence[Mapping[str, Any]],
-        *,
-        revalidation: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Провенанс одного seed-root после drain: усечение/пропуски (D1/G, P5, D3/F10).
-
-        Общий шаг авторских корней и известных URL инкрементального work-set: порядок
-        записей и их содержимое не зависят от того, откуда пришёл корень.
-
-        ``revalidation`` — аддитивная наблюдаемость ревалидации **в любом режиме**:
-        ``{"selected": N, "fetched": M}`` (enqueued и фактически добытые) и, если
-        операторский потолок отложил/отсёк URL, ``"deferred": K``/``"skipped": S``.
-        ``None`` — у корня не было известных URL: ключ не появляется, payload
-        ``state is None`` байт-в-байт прежний.
-        """
-        counters.pages_fetched_total += frontier.fetched
-        counters.revalidation_fetched_total += frontier.revalidation_fetched
-        if frontier.truncated:
-            truncated_products.add(product_id)
-        # P5: пропуск документов «прореживает» корпус продукта по построению — он
-        # питает тот же канал аномалии, что и усечение (защита от false ❌ I2/I2b:
-        # `source_scope: exhaustive` поверх «прореженного» продукта — аномалия
-        # для человека). Причина — не ``max_*``, а ``document_level=off``.
-        if frontier.skipped_documents:
-            truncated_products.add(product_id)
-        record: dict[str, Any] = {
-            "product_id": product_id,
-            "root": root_url,
-            "pages_fetched": frontier.fetched,
-            "truncated": frontier.truncated,
-            "truncated_reason": frontier.truncated_reason,
-            "limits": frontier.limits.as_dict(),
-            "skipped_blacklisted": list(frontier.skipped_blacklisted),
-            # P5: видимые пропуски документов (``url_suffix``/``content_type``).
-            "skipped_documents": [dict(rec) for rec in frontier.skipped_documents],
-        }
-        # 09 §6.3, дефект 2: схлопывание форм одного URL (`/page` и `/page/`) обязано быть
-        # **видимым**, а не тихим: тихое отбрасывание URL — тот же класс дефекта, что тихий
-        # обход path-prefix. Счётчик живёт в frontier, поэтому его видно только здесь —
-        # без этой строки дедуп экономил бы бюджет молча, и «сколько сэкономили» нельзя
-        # было бы прочитать из артефакта. Ключ появляется только при наличии дублей:
-        # запись корня без них остаётся байт-в-байт прежней.
-        if frontier.duplicate_form_count:
-            record["duplicate_forms"] = frontier.duplicate_form_count
-        # P6b: обход path-prefix терминальными артефактами (документ/заявленный контейнер
-        # вне префикса корня) — счётчик + ограниченные примеры. Ключ появляется только при
-        # наличии обхода: запись корня без артефактов остаётся байт-в-байт прежней.
-        if frontier.artifacts_outside_prefix_count:
-            record["artifacts_outside_prefix"] = {
-                "count": frontier.artifacts_outside_prefix_count,
-                "examples": list(frontier.artifacts_outside_prefix),
-            }
-        # C (execution_change): видимость поддоменов. ``out_of_scope_subdomains`` —
-        # отвергнутые поддомены хоста корня (объявленных хостов не хватило): точный
-        # счётчик по хостам + ограниченные примеры. ``accepted_foreign_hosts`` — сколько
-        # принятых элементов корня пришло **не** с его собственного хоста (объявленный
-        # поддомен, у которого нет своего корня). Вместе они отвечают числом на вопрос
-        # «сколько дали поддомены» — и в живом прогоне, и в посмертном разборе.
-        # Ключи появляются только при наличии данных: запись корня без поддоменов
-        # остаётся байт-в-байт прежней.
-        if frontier.out_of_scope_subdomains:
-            record["out_of_scope_subdomains"] = {
-                "count": sum(frontier.out_of_scope_subdomains.values()),
-                "by_host": dict(sorted(frontier.out_of_scope_subdomains.items())),
-                "examples": {
-                    host: list(urls)
-                    for host, urls in sorted(
-                        frontier.out_of_scope_subdomain_examples.items()
-                    )
-                },
-            }
-        if frontier.accepted_foreign_hosts:
-            record["accepted_foreign_hosts"] = dict(
-                sorted(frontier.accepted_foreign_hosts.items())
-            )
-        # D3/F10: отказы scope у ``<loc>`` sitemap — провенанс, не ``errors``.
-        # Ключ появляется только при наличии отказов: без sitemap запись байт-в-байт
-        # прежняя. Классы ``host``/``path`` раздельны (F6).
-        if sitemap_skips:
-            record["skipped_out_of_scope"] = [dict(skip) for skip in sitemap_skips]
-        if revalidation is not None:
-            record["revalidation"] = dict(revalidation)
-        truncation_records.append(record)
-        # Наблюдаемость не должна умирать вместе с процессом: провенанс корня
-        # персистится сразу (см. ``_persist_partial_crawl_provenance``).
-        _persist_partial_crawl_provenance()
-
-    def _plan_incremental_items(
-        product_id: str, roots: Sequence[str]
-    ) -> list[IncrementalItem]:
-        """Дополнительный work-set инкрементального продукта (09 §6.3, MVP-3b).
-
-        Возвращает только **не**-авторские элементы: авторские корни обрабатывает прежний
-        путь (каталоги/sitemap), а планировщик лишь подтверждает их ``fetch``. Порядок —
-        планировщика (``url_state`` отсортирован по ``normalized_url``).
-
-        ``exclude_urls`` не передаётся: набор исключений резолвится per-root
-        (``resolve_crawl_limits``: ``app < run < site``), поэтому дешёвого продуктового
-        набора нет; ``Frontier`` всё равно применяет блэклист к каждому seed и оставляет
-        видимую запись, а не тихий пропуск.
-
-        ``reuse`` (политика ``offline``) в этом срезе **не реализован**: элемент честно
-        деградирует до ``revalidate`` с одной видимой ошибкой на продукт — молчаливая
-        смена политики запрещена. ``new``/``full`` план не расширяют (прежний BFS/sitemap).
-        """
-        if state is None:
-            return []
-        if (
-            as_product_mode((product_modes or {}).get(product_id))
-            is not ProductMode.INCREMENTAL
-        ):
-            return []
-        try:
-            planned = plan_incremental(
-                product_id=product_id,
-                roots=list(roots),
-                state=state,
-                policy=policy,
-                exclude_urls=(),
-            )
-        except Exception as exc:  # noqa: BLE001 — изоляция планировщика
-            errors.append(
-                f"{product_id}: plan_incremental: {type(exc).__name__}: {exc} — "
-                "работа только по авторским корням"
-            )
-            return []
-        author = {_state_url_key(url) for url in roots}
-        extra: list[IncrementalItem] = []
-        reuse_reported = False
-        for item in planned:
-            if item.root_url is not None and item.normalized_url in author:
-                continue  # авторский корень — прежний путь (каталог/sitemap)
-            if item.kind is IncrementalKind.REUSE:
-                if not reuse_reported:
-                    errors.append(f"offline reuse не реализован в corpus: {product_id}")
-                    reuse_reported = True
-                item = replace(item, kind=IncrementalKind.REVALIDATE)
-            if item.kind is IncrementalKind.REVALIDATE:
-                # Валидаторы едут и в локальный ``FetchPlan``, и в ``CrawlWorkItem``.
-                planned_validators[(product_id, item.normalized_url)] = (
-                    item.etag,
-                    item.last_modified,
-                )
-            extra.append(item)
-        return extra
-
-    def _group_revalidation_items(
-        product_id: str, roots: Sequence[str], items: Sequence[IncrementalItem]
-    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-        """Группирует известные URL по авторским корням (scope inference, каждый прогон).
-
-        ``url_state.seed_id`` вне этого среза: происхождение считается заново по
-        ``Frontier.in_scope``. Побеждает **самый специфичный** ``root_path_prefix``
-        (длина пути), при равенстве — авторский порядок. URL вне scope всех корней —
-        orphan (``origin -> urls``): один synthetic-бакет на origin, ревалидация без
-        записи усечения.
-
-        Scope-предикат — тот же, что у дренажа (C: объявленные хосты), поэтому известный
-        URL необъявленного поддомена не приписывается чужому корню: он становится orphan
-        и **виден** в ``revalidation_orphans``, а не молча добывается под чужим бюджетом.
-        """
-        product_scope_hosts = scope_hosts_by_product.get(product_id, frozenset())
-        scopes = [
-            (root, Frontier(root, CrawlLimits(), scope_hosts=product_scope_hosts))
-            for root in roots
-        ]
-        groups: dict[str, list[str]] = {root: [] for root in roots}
-        orphans: dict[str, list[str]] = {}
-        for item in items:
-            best_root = _scope_owner(item.url, scopes)
-            if best_root is None:
-                orphans.setdefault(_url_origin(item.url), []).append(item.url)
-            else:
-                groups[best_root].append(item.url)
-        return groups, orphans
-
-    def _resolve_product_revalidate_cap(roots: Sequence[str]) -> int | None:
-        """Разрешает ось ``crawl.revalidate_max_documents`` **на продукт**.
-
-        Ось живёт в :class:`CrawlLimits` и резолвится тем же
-        :func:`resolve_crawl_limits` (app < run < site), что и остальные оси, но
-        применяется к продукту целиком, а не к отдельному корню. У ``resolve_crawl_limits``
-        вход — URL (per-site слой), а у продукта URL-идентичности нет: представителем
-        продукта служит первый авторский корень (стабильный author/sorted порядок). Это
-        единственное место, где «per product» требует такого представителя; при нескольких
-        per-site значениях для одного продукта действует значение первого корня.
-        """
-        if not roots:
-            return None
-        return resolve_crawl_limits(
-            roots[0],
-            app=crawl_app or CrawlConfig(),
-            run=crawl_defaults,
-            profiles=domain_profiles or {},
-            # F0: та же проводимость бюджета, что у остальных резолвов фазы (значение
-            # здесь не используется — читается только ``revalidate_max_documents``).
-            derive_extract_workers=derive_extract_workers,
-            mem_budget_mb=mem_budget_mb,
-        ).revalidate_max_documents
-
-    def _apply_revalidation_cap(
-        product_id: str,
-        groups: Mapping[str, Sequence[str]],
-        orphans: Mapping[str, Sequence[str]],
-        items: Sequence[IncrementalItem],
-        cap: int,
-    ) -> tuple[
-        dict[str, list[str]],
-        dict[str, list[str]],
-        dict[str, int],
-        dict[str, int],
-        dict[str, int],
-        dict[str, int],
-        int,
-        int,
-        bool,
-    ]:
-        """Отбирает ``cap`` **исполнимых** известных URL продукта.
-
-        Сначала — eligibility-фильтр по resolved-лимитам владельца (root key для
-        root-группы, origin для orphan-бакета): ``exclude_paths``/``exclude_documents``
-        и pre-fetch-пропуск документа при ``document_level=off``. Иначе неисполнимый URL
-        навсегда занимал бы голову NULLs-first/oldest-first очереди: drain отверг бы его
-        без обновления ``url_state``, и потолок тратил бы слот на него каждый цикл.
-
-        Затем — порядок ``last_checked_at`` **NULLs first**, ``normalized_url``. Стабильное
-        «первые N» навсегда бы заморило хвост; «сначала старые» ротирует автоматически:
-        отложенные сохраняют старый ``last_checked_at`` и на следующем цикле оказываются
-        первыми. Отложенные получают ``reuse_kind=stale`` в ``url_state``; неисполнимые
-        не откладываются, а попадают в ``skipped``.
-
-        Возвращает ``(selected_groups, selected_orphans, deferred_by_root,
-        deferred_by_origin, skipped_by_root, skipped_by_origin, deferred_total,
-        skipped_total, cap_fired)``. Инвариант учёта:
-        ``selected + deferred + skipped == len(known)`` по продукту.
-        Сбой чтения состояния — явная ошибка и ось игнорируется целиком.
-        """
-        flat_groups = {key: list(urls) for key, urls in groups.items()}
-        flat_orphans = {key: list(urls) for key, urls in orphans.items()}
-        try:
-            rows = {
-                row.normalized_url: row
-                for row in state.iter_url_state(product_id)  # type: ignore[union-attr]
-            }
-        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
-            errors.append(
-                f"{product_id}: revalidate_max_documents: state.iter_url_state: "
-                f"{type(exc).__name__}: {exc} — ось игнорируется (все известные URL)"
-            )
-            return flat_groups, flat_orphans, {}, {}, {}, {}, 0, 0, False
-
-        normalized = {item.url: item.normalized_url for item in items}
-
-        def _normalized(url: str) -> str:
-            key = normalized.get(url) or _state_url_key(url)
-            return key or url
-
-        limits_cache: dict[str, CrawlLimits] = {}
-
-        def _limits_for(owner: str) -> CrawlLimits:
-            limits = limits_cache.get(owner)
-            if limits is None:
-                limits = resolve_crawl_limits(
-                    owner,
-                    app=crawl_app or CrawlConfig(),
-                    run=crawl_defaults,
-                    profiles=domain_profiles or {},
-                    derive_extract_workers=derive_extract_workers,
-                    mem_budget_mb=mem_budget_mb,
-                )
-                _note_scheduling(limits)
-                limits_cache[owner] = limits
-            return limits
-
-        def _ineligible(url: str, owner: str) -> bool:
-            limits = _limits_for(owner)
-            if is_blacklisted(url, limits):
-                return True
-            return (
-                limits.document_level is DocumentLevel.OFF
-                and document_suffix(url) is not None
-            )
-
-        entries: list[tuple[str, str, str]] = [
-            (url, "root", key)
-            for key, urls in flat_groups.items()
-            for url in urls
-        ] + [
-            (url, "orphan", key)
-            for key, urls in flat_orphans.items()
-            for url in urls
-        ]
-
-        skipped_by_root = {key: 0 for key in flat_groups}
-        skipped_by_origin = {key: 0 for key in flat_orphans}
-        eligible: list[tuple[str, str, str]] = []
-        for entry in entries:
-            url, kind, owner = entry
-            if not _ineligible(url, owner):
-                eligible.append(entry)
-                continue
-            target = skipped_by_root if kind == "root" else skipped_by_origin
-            target[owner] += 1
-
-        def _order(entry: tuple[str, str, str]) -> tuple[bool, str, str, str]:
-            url = entry[0]
-            key = _normalized(url)
-            row = rows.get(key)
-            checked = row.last_checked_at if row is not None else None
-            # ``False`` (NULL) сортируется раньше ``True`` — NULLs first.
-            return (checked is not None, checked or "", key, url)
-
-        ordered = sorted(eligible, key=_order)
-        selected = ordered[:cap]
-        deferred = ordered[cap:]
-        selected_urls = {url for url, _kind, _key in selected}
-        deferred_urls = {url for url, _kind, _key in deferred}
-
-        selected_groups = {
-            key: [url for url in urls if url in selected_urls]
-            for key, urls in flat_groups.items()
-        }
-        selected_orphans = {
-            key: [url for url in urls if url in selected_urls]
-            for key, urls in flat_orphans.items()
-        }
-        deferred_by_root = {
-            key: sum(1 for url in urls if url in deferred_urls)
-            for key, urls in flat_groups.items()
-        }
-        deferred_by_origin = {
-            key: sum(1 for url in urls if url in deferred_urls)
-            for key, urls in flat_orphans.items()
-        }
-
-        # ``stale`` — durable-сигнал следующему циклу: отложенный URL просрочен, а не
-        # «не существует». Значение enum берём из домена; нового перечисления не вводим.
-        for url, _kind, _key in deferred:
-            key = _normalized(url)
-            row = rows.get(key)
-            if row is None or row.reuse_kind == ReuseKind.STALE.value:
-                continue
-            try:
-                state.upsert_url_state(  # type: ignore[union-attr]
-                    replace(row, reuse_kind=ReuseKind.STALE.value)
-                )
-            except Exception as exc:  # noqa: BLE001 — изоляция state-записи
-                errors.append(
-                    f"state: url_state({product_id}/{key}): stale: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-        return (
-            selected_groups,
-            selected_orphans,
-            deferred_by_root,
-            deferred_by_origin,
-            skipped_by_root,
-            skipped_by_origin,
-            len(deferred),
-            sum(skipped_by_root.values()) + sum(skipped_by_origin.values()),
-            bool(deferred),
-        )
 
     #: B3: наблюдения спуска (прогноз + исход) и члены контейнеров — провенанс фазы.
     #: Списки нужны ``PhaseResult`` и финальному reconciliation-pass; durable-запись идёт
@@ -4955,6 +2662,26 @@ def _build_corpus(
     corpus_member_rows: list[CorpusMember] = []
     #: B3: зонд артефактов (класс/формат/размер/``page_count``/листинг) — до экстракции.
     artifact_probes: list[dict[str, Any]] = []
+    _ingest_one = partial(
+        corpus_ingest.ingest_one,
+        finish_one=_finish_one,
+        extract_cache=extract_cache,
+    )
+    _feed_manual_artifact = partial(
+        corpus_ingest.feed_manual_artifact,
+        ingest_one=_ingest_one,
+        retain=_retain,
+        limits_for=_limits_for_url,
+        resolve_target=_crawl_target,
+        url_map=url_map,
+        domain_profiles=domain_profiles,
+        extractor=extractor,
+        extractor_factory=extractor_factory,
+        container_for=container_for,
+        artifact_probes=artifact_probes,
+        errors=errors,
+    )
+
 
     #: Границы продукта в наблюдаемости (§B.1, аддитивно к фазовым start/end).
     #:
@@ -5003,64 +2730,6 @@ def _build_corpus(
     #: (``build``/переиспользование). Строка ``index_manifest`` пишется только для них.
     physically_ok: dict[str, bool] = {}
 
-    def _finalize_crawl_session() -> None:
-        """L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``).
-
-        **Граница — краул, а не фаза.** Сеанс закрывается, когда дренированы все продукты
-        (последний ``product_end``), а не когда закончилась фаза корпуса: эмбеддинг и сборка
-        индекса — работа фазы, к сеансу краула отношения не имеющая. Пока
-        ``finalize_session`` стоял после Pass B, сеанс висел ``running`` всё время
-        эмбеддинга и ``stale_reason`` (heartbeat, порог 600 с) называл ложную причину у
-        живого прогона: 2026-10-25 после ``crawl product end`` сеанс «протух» на 1280 с при
-        505 % CPU.
-
-        Инвариант :class:`_PhaseLifecycle` сохранён: ``completed`` ставится **только** после
-        штатной финализации. Исключение до неё оставляет ``False``, и обёртка закрывает
-        сеанс терминально (:func:`_finalize_interrupted_session`); исключение после неё
-        (эмбеддинг/сборка/композиция) легитимный ``completed``/``partial`` не переписывает.
-        """
-        if session is None or counters.session_finalized:
-            return
-        counters.session_finalized = True
-        try:
-            # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
-            # элементов** (``items.values()``: фактически применённый ``engine`` и ``kind``
-            # элемента) + дайджест конфигурации источников. ``targets`` для агрегата не
-            # годится: там лишь запрошенный движок (может быть ``None``).
-            engines = sorted(
-                {str(i.engine) for i in items.values() if i.engine}
-            )
-            kinds = sorted(
-                {str(i.kind) for i in items.values() if i.kind}
-            )
-            digest = (
-                crawl_sources_digest(crawl_sources)
-                if crawl_sources is not None
-                else None
-            )
-            finalize_session(
-                store,
-                session,
-                finished_at=_now_iso(),
-                engines=engines,
-                kinds=kinds,
-                crawl_sources_digest=digest,
-                # D1/G: политико-усечённый краул не рапортуется ``COMPLETED`` (→ ``PARTIAL``);
-                # эффективные лимиты/число добытых страниц/усечённые продукты — в провенанс.
-                truncated=bool(truncated_products),
-                effective_limits={"roots": truncation_records},
-                pages_fetched=counters.pages_fetched_total,
-                revalidation_fetched=counters.revalidation_fetched_total,
-                truncated_products=sorted(truncated_products),
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(f"finalize_session({session}): {type(exc).__name__}: {exc}")
-        else:
-            # Штатный финал: обёртке больше нечего закрывать (иначе ``finally``
-            # перезаписал бы ``completed``/``partial`` на терминальный сбой).
-            if lifecycle is not None:
-                lifecycle.completed = True
-
     # --- F0: наблюдаемость памяти и расписания (§4 F0) ----------------------- #
     #: Сток пика памяти воркеров приходит **готовым** от composition root
     #: (``{runs}/{run_id}/workers/{pid}.rss``): фаза не решает, собирается ли пик —
@@ -5074,30 +2743,6 @@ def _build_corpus(
     #: на границе продукта из уже посчитанных ``ingest.docs``/``ingest.chunks``: никаких
     #: дополнительных SQL-запросов на документ.
     observed_documents: list[tuple[str, int]] = []
-    def _note_scheduling(limits: CrawlLimits) -> None:
-        """Запоминает разрешённое окно экстракции корня (F0, наблюдаемость расписания).
-
-        Максимум по корням, а не последнее значение: пул — фазовый по ключу
-        ``(уровень, окно)``, и фактическая ширина параллелизма фазы — самая широкая из
-        использованных. ``derived`` — «хотя бы на одном корне» (§2.10): тогда источник
-        расписания в метриках — бюджет памяти, а не воля оператора.
-        """
-        if limits.extract_workers is not None:
-            candidate = int(limits.extract_workers)
-            if (
-                counters.observed_extract_workers is None
-                or candidate > counters.observed_extract_workers
-            ):
-                counters.observed_extract_workers = candidate
-        if limits.extract_max_tasks_per_child is not None:
-            candidate_tasks = int(limits.extract_max_tasks_per_child)
-            if (
-                counters.observed_extract_max_tasks is None
-                or candidate_tasks > counters.observed_extract_max_tasks
-            ):
-                counters.observed_extract_max_tasks = candidate_tasks
-        if limits.extract_workers_derived:
-            counters.observed_extract_derived = True
 
     #: 13-manual-artifacts §3.3: ``product_id → [url]``, чей материал **предъявлен**
     #: объявленным артефактом и дошёл до корпуса. Это вход ``derive_corpus_coverage``:
@@ -5121,7 +2766,7 @@ def _build_corpus(
         #: Объект один на фазу и обнуляется здесь — closures фазы видят его ячейкой, и
         #: переприсваивание внутри цикла было бы захватом переменной цикла.
         timings.reset()
-        ingest = _ProductIngest(product_id=product_id)
+        ingest = ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
         seen_chunk_ids: set[str] = set()
@@ -5131,7 +2776,7 @@ def _build_corpus(
         resume_counted: set[str] = set()
         product_roots = url_map.get(product_id, [])
         #: 09 §6.3 (дефект 1): владелец известного URL считается **один раз на продукт** —
-        #: тем же предикатом, что у группировки ревалидации (:func:`_scope_owner`): побеждает
+        #: тем же предикатом, что у группировки ревалидации (:func:`scope_owner`): побеждает
         #: самый специфичный ``root_path_prefix``, при равенстве — авторский порядок. Иначе
         #: реконструкция бюджета на resume отдавала бы зарядку первому корню-претенденту:
         #: host-корень (prefix ``/``) забирал её у docs-корня, потолок умножался на число
@@ -5149,18 +2794,14 @@ def _build_corpus(
         ]
         owner_cache: dict[str, str | None] = {}
 
-        def _owner_root(
-            url: str,
-            *,
-            # B023: привязка при определении (как у ``_finalize_root``) — иначе замыкание
-            # читало бы ``owner_scopes``/``owner_cache`` следующего продукта.
-            _scopes: Sequence[tuple[str, Frontier]] = owner_scopes,
-            _cache: dict[str, str | None] = owner_cache,
-        ) -> str | None:
-            """Корень-владелец URL (``None`` — вне scope всех авторских корней продукта)."""
-            if url not in _cache:
-                _cache[url] = _scope_owner(url, _scopes)
-            return _cache[url]
+        # L5 шаг 2: ``owner_root`` вынесен в ``corpus_ingest``; ``partial`` привязывает
+        # per-продуктное состояние при **создании** (а не поздним связыванием), поэтому
+        # B023-дефолты больше не нужны — привязка видна в точке определения.
+        _owner_root = partial(  # noqa: B023 — ``partial`` связывает значения при создании
+            corpus_ingest.owner_root,
+            owner_scopes=owner_scopes,
+            owner_cache=owner_cache,
+        )
 
         #: I3/§5: наблюдённая судьба SERP-находок этого продукта (``queued``/``dup``/
         #: ``blacklisted``/``truncated``). Пишется в провенанс контура ниже: «поиск нашёл»
@@ -5295,13 +2936,13 @@ def _build_corpus(
             # на каждой итерации цикла продуктов, а эти значения пересоздаются там же:
             # без привязки тело читало бы их поздним связыванием, то есть зависело бы от
             # порядка вызовов — а не от продукта, которому корень принадлежит.
-            ingest: _ProductIngest = ingest,
+            ingest: ProductIngest = ingest,
             seen_docs: dict[str, str] = seen_docs,
             seen_chunk_ids: set[str] = seen_chunk_ids,
             serp_ingest: dict[str, Any] = serp_ingest,
             resume_counted: set[str] = resume_counted,
             revalidation_url_set: set[str] = revalidation_url_set,
-        ) -> tuple[Frontier, list[dict[str, Any]], _RootDrain]:
+        ) -> tuple[Frontier, list[dict[str, Any]], RootDrain]:
             """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
             Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``sitemap_seeds``
@@ -5325,18 +2966,11 @@ def _build_corpus(
             постановку/обход этого корня.
             Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
             ``truncated_reason``), агрегированный провенанс отказов scope у ``<loc>``
-            (пусто без sitemap/без отказов) и :class:`_RootDrain` — хвост экстракции корня
+            (пусто без sitemap/без отказов) и :class:`RootDrain` — хвост экстракции корня
             в фазовой очереди (C1). ``defer_tail=False`` (synthetic-бакеты ревалидации,
             вызывающий читает счётчики frontier сразу) — хвост доводится здесь же.
             """
-            limits = resolve_crawl_limits(
-                root_url,
-                app=crawl_app or CrawlConfig(),
-                run=crawl_defaults,
-                profiles=domain_profiles or {},
-                derive_extract_workers=derive_extract_workers,
-                mem_budget_mb=mem_budget_mb,
-            )
+            limits = _limits_for_url(root_url)
             _note_scheduling(limits)
             frontier = Frontier(
                 root_url, limits, scope_hosts=scope_hosts_by_product.get(pid, frozenset())
@@ -5349,7 +2983,7 @@ def _build_corpus(
             sitemap = (
                 _fresh_sitemap_seeds(pid, root_url, frontier)
                 if sitemap_seeds
-                else _SitemapSeeds()
+                else SitemapSeeds()
             )
             extra_seeds = sitemap.fresh
             # P5: уровень извлечения документов — свойство корня (C1: ключ фазового пула
@@ -5472,7 +3106,57 @@ def _build_corpus(
                 extract_window is not None and extraction_pool is not None
             )
             #: C1: хвост этого корня в фазовой очереди доводки (счётчик + финализатор).
-            root_drain = _RootDrain()
+            root_drain = RootDrain()
+            # L5 шаг 2: ``partial`` привязывает состояние **этого** корня (окно, уровень,
+            # механизм PDF, frontier) — то, что остаётся в ``_drain_root`` до шага 3.
+            _new_extract_pool = partial(
+                corpus_ingest.new_extract_pool,
+                extraction_pool=extraction_pool,
+                extract_window=extract_window,
+                level=level,
+                pdf_pipeline=pdf_pipeline,
+                recycle_tasks=recycle_tasks,
+            )
+            _make_extract_request = partial(
+                corpus_ingest.make_extract_request,
+                extract_cache=extract_cache,
+                level=level,
+                pdf_pipeline=pdf_pipeline,
+                worker_rss_dir=worker_rss_dir,
+            )
+            _inflight_fresh = partial(
+                corpus_commit.inflight_fresh,
+                extract_pending=extract_pending,
+                frontier=frontier,
+                root_drain=root_drain,
+            )
+            _has_fetch_capacity = partial(
+                corpus_commit.has_fetch_capacity,
+                frontier=frontier,
+                limits=limits,
+                extract_pending=extract_pending,
+                root_drain=root_drain,
+            )
+            _tail_may_extend_frontier = partial(
+                corpus_commit.tail_may_extend_frontier,
+                extract_pending=extract_pending,
+                frontier=frontier,
+                limits=limits,
+                root_drain=root_drain,
+            )
+            _drain_for_window = partial(
+                corpus_commit.drain_for_window,
+                extract_pending=extract_pending,
+                extract_window=extract_window,
+                frontier=frontier,
+                limits=limits,
+                root_drain=root_drain,
+                pools=pools,
+                errors=errors,
+                timings=timings,
+                extract_timeout=_extract_timeout,
+                extract_finalizers=extract_finalizers,
+            )
             # A2b/§6(b)/§10: egress-политика robots — **условна от discovery** и
             # вычисляется ядром **на корень** (edge строит краулеры «голыми»). Значение
             # резолвится **одной** формулой в :func:`resolve_crawl_limits` (app-слой
@@ -5506,7 +3190,11 @@ def _build_corpus(
                 # и продукт ложно ``complete=False`` (регрессия B2/F13 уровнем выше).
                 if iurl in revalidation_url_set:
                     continue
-                owner = _owner_root(iurl)
+                # B023-исключение: ``_owner_root`` пересоздаётся на каждом продукте
+                # вместе с ``_drain_root`` (обе привязки — в одной итерации цикла), и
+                # дренаж продукта завершается до следующей итерации, поэтому поздняя
+                # привязка ячейки не подменяет владельца URL.
+                owner = _owner_root(iurl)  # noqa: B023 — см. выше
                 if owner is not None:
                     if owner != root_url:
                         # Владелец другой (более специфичный) корень — он и зарядит.
@@ -5521,13 +3209,13 @@ def _build_corpus(
                     # иначе повторный прогон тихо добывал бы лишнюю страницу сверх
                     # ``max_documents``.
                     continue
-                counted = _resume_source(
+                counted = resume_retained(
                     item,
                     max_bytes=limits.max_response_bytes,
                     artifact_max_bytes=limits.max_artifact_bytes,
                     attachment_formats=limits.attachment_formats,
                 )
-                if not isinstance(counted, _RetainedRaw):
+                if not isinstance(counted, RetainedRaw):
                     # Нет пригодного resume (oversize/binary/несовпадение) — не бюджет.
                     continue
                 consumed += 1
@@ -5584,7 +3272,7 @@ def _build_corpus(
                 and revalidation_queued == 0
                 and charged_queued == 0
             ):
-                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                emit()
                 return frontier, list(sitemap.skipped), root_drain
 
             # D3: дополнительные depth-0 seeds (``<loc>`` sitemap) — под тем же блэклистом и
@@ -5638,49 +3326,6 @@ def _build_corpus(
                     errors.append(
                         f"{pid}/{found}: serp-находка не поставлена — достигнут max_documents"
                     )
-
-            def _resolve_target(target_pid: str, target_url: str) -> Any:
-                """Разрешает ``CrawlTarget`` URL (кэш ``targets``), как в обоих путях.
-
-                ``target_pid``/``target_url`` вместо ``pid``/``url``: последние —
-                переменные циклов внешней области, и совпадение имён делало бы
-                привязку неотличимой от поздней (B023).
-                """
-                target = targets.get((target_pid, target_url))
-                if target is None:
-                    target = resolve_crawl_target(
-                        target_pid,
-                        target_url,
-                        sources=crawl_sources or CrawlSourcesConfig(),
-                        profiles=domain_profiles or {},
-                        explicit=explicit_fetch,
-                        run_default_strategy=crawl_strategy_default,
-                        run_default_rate_limit=crawl_rate_default,
-                    )
-                    targets[(target_pid, target_url)] = target
-                return target
-
-            def _new_extract_pool() -> Executor:
-                """Фабрика пула ключа ``(level, window)`` — одна на прогон (C1/L1).
-
-                Поднята из ``_commit_or_defer`` в область корня: пул нужен **двум**
-                потребителям — страницам и членам контейнеров (B3/P4). ``pools.executor``
-                кэширует исполнителя по ключу, поэтому тело исполняется один раз.
-                """
-                if (
-                    recycle_tasks is not None
-                    and extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
-                ):
-                    # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
-                    # (initializer `_extract_worker_init` строит экстрактор заново).
-                    return extraction_pool.pool_factory(  # type: ignore[union-attr]
-                        extract_window, level, pdf_pipeline=pdf_pipeline,
-                        max_tasks_per_child=recycle_tasks,
-                    )
-                # Счётчик рециклинга не задан — вызов без него (остальное то же).
-                return extraction_pool.pool_factory(  # type: ignore[union-attr]
-                    extract_window, level, pdf_pipeline=pdf_pipeline
-                )
 
             def _descend_container(
                 pid: str,
@@ -5913,7 +3558,7 @@ def _build_corpus(
                 # 16 §3.3: происхождение наблюдения берётся **из пути страницы этого
                 # прогона**, а не из ``url_state`` (там последняя классификация, в том
                 # числе из прошлого цикла). ``freshly_fetched=False`` — единственный путь
-                # без сети: ``_resume_page`` (retained-байты, ``not_modified`` у него
+                # без сети: ``resume_page`` (retained-байты, ``not_modified`` у него
                 # всегда ``False``). ``304`` — сервер ответил, версия не изменилась.
                 reuse_kind = (
                     ReuseKind.REUSED
@@ -5943,13 +3588,13 @@ def _build_corpus(
                     and document_content_type(page.content_type) is not None
                 ):
                     _record_document_skip(work_url, "content_type")
-                    emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                    emit()
                     return
                 # B3: допущенный терминальный артефакт (документ **или** контейнер) проходит
                 # **зонд** до экстракции: класс/формат/размер по байтам, ``page_count`` PDF
                 # по структуре файла, листинг контейнера — по индексу (central directory).
                 # Зонд — классификация, а не извлечение: тела членов он не читает.
-                if _is_terminal_artifact(
+                if artifact_is_terminal(
                     page.url or work_url,
                     page.content_type,
                     fetch_plan.attachment_formats,
@@ -5966,7 +3611,7 @@ def _build_corpus(
                         # Контейнер — не документ: вместо экстракции исполняется спуск
                         # (``archive_descent=plan`` — только листинг и прогноз).
                         _descend_container(pid, work_url, page, raw_path, reuse_kind=reuse_kind)
-                        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                        emit()
                         return
                 if extracted is _INLINE:
                     # 09 §6.3/§9: ``304`` переиспользует версию документа **до**
@@ -6028,7 +3673,7 @@ def _build_corpus(
                             else None
                         ),
                     )
-                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                emit()
                 # D1: извлечение in-site ссылок и следующий уровень BFS. При max_depth=0
                 # извлечение не выполняется вовсе (байт-в-байт прежнее поведение).
                 # 09 §6.3: ревалидация — лист; её ссылки не расширяют discovery (иначе
@@ -6036,83 +3681,9 @@ def _build_corpus(
                 if (
                     not is_revalidation
                     and limits.max_depth > 0
-                    and _looks_like_html(page)
+                    and looks_like_html(page)
                 ):
                     frontier.offer(extract_links(page.content, page.url), depth)
-
-            def _make_extract_request(
-                page: RawPage, raw_path: Path, fetch_plan: FetchPlan
-            ) -> _ExtractRequest:
-                """Строит picklable payload экстракции (примитивы + ``raw_path``; без байтов)."""
-                return _ExtractRequest(
-                    raw_path=str(raw_path),
-                    url=page.url,
-                    fetched_at=page.fetched_at,
-                    fetch_mode=page.fetch_mode,
-                    lang=page.lang,
-                    status_code=page.status_code,
-                    content_type=page.content_type,
-                    engine=page.engine,
-                    route=fetch_plan.extract,
-                    level=level,
-                    pdf_pipeline=pdf_pipeline,
-                    cache_root=(
-                        str(extract_cache.root) if extract_cache is not None else None
-                    ),
-                    cache_max_bytes=(
-                        extract_cache.max_bytes if extract_cache is not None else None
-                    ),
-                    # F0: сток пика памяти воркера (``None`` — пик не собирается).
-                    rss_dir=worker_rss_dir,
-                )
-
-            def _inflight_fresh() -> int:
-                """Свеже-добытые страницы **этого корня** «в полёте» (ёмкость с окном, P4/§3).
-
-                Очередь экстракции — фазовая (C1), поэтому фильтр по ``item.root``: хвосты
-                других корней не отнимают ёмкость у этого. Ревалидация исключена: она не
-                расходует ``max_documents`` и не должна отнимать ёмкость у discovery.
-                """
-                return sum(
-                    1
-                    for item in extract_pending
-                    if item.root is root_drain
-                    and item.freshly_fetched
-                    and not frontier.is_revalidation(item.url)
-                )
-
-            def _has_fetch_capacity() -> bool:
-                """Ёмкость корня с учётом in-flight: ``max_documents − fetched − inflight``."""
-                if limits.max_documents is None:
-                    return True
-                return limits.max_documents - frontier.fetched - _inflight_fresh() > 0
-
-            def _tail_may_extend_frontier() -> bool:
-                """Может ли хвост **этого** корня расширить его frontier (BFS-ссылки)?
-
-                ``_commit_outcome`` предлагает исходящие ссылки только для не-ревалидационной
-                HTML-страницы при ``max_depth > 0``. Если ни одно задание хвоста этого не
-                может, доводка безопасна после возврата корня: BFS от её момента не зависит,
-                а фетч следующего корня не ждёт экстракции (C1). Иначе хвост доводится здесь
-                же — прежний порядок байт-в-байт.
-                """
-                if limits.max_depth <= 0:
-                    return False
-                for item in extract_pending:
-                    if item.root is not root_drain:
-                        continue
-                    if frontier.is_revalidation(item.url):
-                        continue
-                    if _looks_like_html(item.page):
-                        return True
-                return False
-
-            def _drain_for_window() -> None:
-                """Доводит oldest, пока окно полно или ёмкость исчерпана (с in-flight)."""
-                while extract_pending and (
-                    len(extract_pending) >= extract_window or not _has_fetch_capacity()
-                ):
-                    _finish_extract(extract_pending.popleft())
 
             def _make_commit(
                 pid_arg: str,
@@ -6227,7 +3798,7 @@ def _build_corpus(
                     return
                 root_drain.pending += 1
                 extract_pending.append(
-                    _PendingExtract(
+                    PendingExtract(
                         pid=pid_arg,
                         url=url_arg,
                         depth=depth_arg,
@@ -6280,7 +3851,7 @@ def _build_corpus(
                             error=reason,
                             depth=entry.depth,
                         )
-                        emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                        emit()
                         continue
                     desc = entry.desc
                     if desc is None:
@@ -6386,7 +3957,7 @@ def _build_corpus(
                                 f"({_EXECUTOR_MAX_WAVES_PER_ROOT} волн) — обход остановлен "
                                 "(round_budget)"
                             )
-                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                            emit()
                             break
                         remaining = (
                             None
@@ -6433,10 +4004,10 @@ def _build_corpus(
                                 continue
                             if _skip_document_prefetch(work_url):
                                 # P5: документ при ``off`` — pre-fetch-пропуск (виден).
-                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                                emit()
                                 continue
                             prior_item = items.get((pid, work_url))
-                            if _terminal_failure_kind(prior_item) is not None:
+                            if terminal_failure_kind(prior_item) is not None:
                                 # Определённый ответ «ресурса нет» уже получен: в работу
                                 # не подаём (иначе 404 стоил бы запросов на каждом цикле).
                                 entries.append(
@@ -6466,7 +4037,7 @@ def _build_corpus(
                                 continue
                             work_target = _resolve_target(pid, work_url)
                             resume_source = (
-                                _resume_source(
+                                resume_retained(
                                     prior_item,
                                     max_bytes=limits.max_response_bytes,
                                     artifact_max_bytes=limits.max_artifact_bytes,
@@ -6477,18 +4048,18 @@ def _build_corpus(
                             )
                             reject = (
                                 resume_source
-                                if isinstance(resume_source, _RetainedReject)
+                                if isinstance(resume_source, RetainedReject)
                                 else None
                             )
                             resume = (
                                 resume_source
-                                if isinstance(resume_source, _RetainedRaw)
+                                if isinstance(resume_source, RetainedRaw)
                                 else None
                             )
                             # Дескриптор коммита строится вручную (не ``_local_prefetch``):
                             # browser-guard/``active`` — оси локального краулера, а здесь
                             # байты доставляет исполнитель; ``browser_blocked`` всегда False.
-                            desc = _LocalFetch(
+                            desc = LocalFetch(
                                 pid=pid,
                                 wu=work_url,
                                 depth=depth,
@@ -6538,7 +4109,7 @@ def _build_corpus(
                                 # элемент остаётся ``FAILED`` со своим ``error_kind``.
                                 prior_item = entry.prior_item
                                 kind = (
-                                    _terminal_failure_kind(prior_item)
+                                    terminal_failure_kind(prior_item)
                                     or FailureKind.NOT_FOUND
                                 )
                                 _mark(
@@ -6553,7 +4124,7 @@ def _build_corpus(
                                     ),
                                     depth=entry.depth,
                                 )
-                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                                emit()
                                 continue
                             if entry.kind == "attempts":
                                 prior_item = entry.prior_item
@@ -6577,7 +4148,7 @@ def _build_corpus(
                                     error=reason,
                                     depth=entry.depth,
                                 )
-                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                                emit()
                                 continue
                             desc = entry.desc
                             if desc is None:
@@ -6604,7 +4175,7 @@ def _build_corpus(
                                     error="executor: результат не получен",
                                     depth=entry.depth,
                                 )
-                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                                emit()
                                 continue
                             if result.error or result.raw_bytes is None:
                                 reason = result.error or "executor: пустой raw_bytes"
@@ -6621,7 +4192,7 @@ def _build_corpus(
                                     depth=entry.depth,
                                     http_status=result.http_status,
                                 )
-                                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                                emit()
                                 continue
                             # S1: применяемый движок — фактический транспорт из результата шва.
                             desc.engine_value = result.engine or desc.engine_value
@@ -6671,14 +4242,14 @@ def _build_corpus(
                             continue
                         if _skip_document_prefetch(work_url):
                             # P5: документ при ``off`` — pre-fetch-пропуск (виден; не в max_documents).
-                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                            emit()
                             continue
                         prior_item = items.get((pid, work_url))
                         if (
                             max_attempts is not None
                             and prior_item is not None
                             and prior_item.attempts >= max_attempts
-                            and _terminal_failure_kind(prior_item) is None
+                            and terminal_failure_kind(prior_item) is None
                         ):
                             reason = (
                                 f"max_attempts exhausted "
@@ -6693,7 +4264,7 @@ def _build_corpus(
                                 error=reason,
                                 depth=depth,
                             )
-                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                            emit()
                             continue
 
                         work_target = _resolve_target(pid, work_url)
@@ -6764,14 +4335,14 @@ def _build_corpus(
                             continue
                         if _skip_document_prefetch(work_url):
                             # P5: документ при ``off`` — pre-fetch-пропуск (виден).
-                            emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                            emit()
                             continue
                         prior_item = items.get((pid, work_url))
                         if (
                             max_attempts is not None
                             and prior_item is not None
                             and prior_item.attempts >= max_attempts
-                            and _terminal_failure_kind(prior_item) is None
+                            and terminal_failure_kind(prior_item) is None
                         ):
                             entries.append(
                                 _WaveEntry(
@@ -6843,7 +4414,7 @@ def _build_corpus(
                 max_attempts is not None
                 and prior_item is not None
                 and prior_item.attempts >= max_attempts
-                and _terminal_failure_kind(prior_item) is None
+                and terminal_failure_kind(prior_item) is None
             ):
                 reason = (
                     f"max_attempts exhausted "
@@ -6857,20 +4428,12 @@ def _build_corpus(
                     error_kind=_MAX_ATTEMPTS_ERROR_KIND,
                     error=reason,
                 )
-                emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+                emit()
                 continue
 
             # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру,
             # и экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
-            target = resolve_crawl_target(
-                product_id,
-                url,
-                sources=crawl_sources or CrawlSourcesConfig(),
-                profiles=domain_profiles or {},
-                explicit=explicit_fetch,
-                run_default_strategy=crawl_strategy_default,
-                run_default_rate_limit=crawl_rate_default,
-            )
+            target = _crawl_target(product_id, url)
             targets[(product_id, url)] = target
 
             # Phase 5.2: источник-каталог (feed/channel) разворачивается в ссылки-записи;
@@ -6886,15 +4449,7 @@ def _build_corpus(
             else:
                 roots = []
                 for entry_url in entry_urls:
-                    etarget = resolve_crawl_target(
-                        product_id,
-                        entry_url,
-                        sources=crawl_sources or CrawlSourcesConfig(),
-                        profiles=domain_profiles or {},
-                        explicit=explicit_fetch,
-                        run_default_strategy=crawl_strategy_default,
-                        run_default_rate_limit=crawl_rate_default,
-                    )
+                    etarget = _crawl_target(product_id, entry_url)
                     # Провенанс записи = ``kind`` каталога-источника + собственный engine
                     # URL-записи (схему не меняем — только ``CrawlTarget``).
                     entry_target = CrawlTarget(
@@ -6926,59 +4481,28 @@ def _build_corpus(
                     serp_seeds=serp_seeds_by_root.get(root_url, ()),
                 )
 
-                def _finalize_root(
-                    _pid: str = product_id,
-                    _root_url: str = root_url,
-                    _frontier: Frontier = frontier,
-                    _sitemap_skips: list[dict[str, Any]] = sitemap_skips,
-                    _known_urls: Sequence[str] = known_urls,
-                    # B023: провенанс ревалидации привязывается при определении — этот
-                    # финализатор живёт в ``extract_finalizers`` и вызывается **позже**
-                    # (когда хвост корня доведён), то есть уже после того, как цикл
-                    # продукта ушёл вперёд; поздняя привязка подменила бы его данными
-                    # следующего продукта.
-                    _all_revalidation_groups: Mapping[str, Sequence[str]] = (
-                        all_revalidation_groups
-                    ),
-                    _cap_fired: bool = revalidation_cap_fired,
-                    _deferred_by_root: Mapping[str, int] = deferred_by_root,
-                    _skipped_by_root: Mapping[str, int] = skipped_by_root,
-                ) -> None:
-                    """Провенанс корня после доводки его экстракционного хвоста (C1).
-
-                    Счётчики frontier (``fetched``/``revalidation_fetched``/усечение)
-                    меняются доводкой отложенных заданий, поэтому запись откладывается
-                    до момента, когда хвост корня доведён (:func:`_finalize_ready_roots`).
-                    Порядок записей — порядок корней (FIFO финализаторов).
-                    """
-                    #: Наблюдаемость в любом режиме: ключ есть ровно у корня, который имел
-                    #: известные URL (даже если cap отложил все — ``selected=0``). У корня
-                    #: без известных URL ключа нет: ``state is None`` остаётся байт-в-байт.
-                    revalidation_info: dict[str, Any] | None = None
-                    if _all_revalidation_groups.get(_root_url):
-                        revalidation_info = {
-                            "selected": sum(
-                                1
-                                for url in _known_urls
-                                if _frontier.is_revalidation(url)
-                            ),
-                            # S1: фактическая ревалидация, не «выбрано»; discovery-счётчик
-                            # ``pages_fetched`` не смешивается с этим полем.
-                            "fetched": _frontier.revalidation_fetched,
-                        }
-                        if _cap_fired:
-                            revalidation_info["deferred"] = _deferred_by_root.get(
-                                _root_url, 0
-                            )
-                        if _skipped_by_root.get(_root_url):
-                            revalidation_info["skipped"] = _skipped_by_root[_root_url]
-                    _record_root_outcome(
-                        _pid,
-                        _root_url,
-                        _frontier,
-                        _sitemap_skips,
-                        revalidation=revalidation_info,
-                    )
+                # L5 шаг 2: ``finalize_root`` вынесен в ``corpus_commit``; ``partial``
+                # привязывает провенанс корня при создании финализатора — он живёт в
+                # ``extract_finalizers`` и вызывается **позже** (после доводки хвоста),
+                # то есть когда цикл продукта уже ушёл вперёд.
+                _finalize_root = partial(
+                    corpus_commit.finalize_root,
+                    pid=product_id,
+                    root_url=root_url,
+                    frontier=frontier,
+                    sitemap_skips=sitemap_skips,
+                    known_urls=known_urls,
+                    all_revalidation_groups=all_revalidation_groups,
+                    cap_fired=revalidation_cap_fired,
+                    deferred_by_root=deferred_by_root,
+                    skipped_by_root=skipped_by_root,
+                    counters=counters,
+                    truncated_products=truncated_products,
+                    truncation_records=truncation_records,
+                    store=store,
+                    session=session,
+                    errors=errors,
+                )
 
                 if root_drain.pending:
                     # C1: хвост отложен в фазовую очередь — провенанс посчитается, когда
@@ -7659,7 +5183,7 @@ def _build_corpus(
 
     # Дальше — пост-краульная работа фазы (манифест, композиция). Терминальный статус
     # сеанса выше уже зафиксирован и от неё не зависит.
-    emit_progress(store=store, session=session, progress=progress, heartbeat=heartbeat)
+    emit()
 
     # --- Манифест и композиция (09 §8.1) ------------------------------------- #
     # Партиции уже физически зафиксированы, а их чанки персистентны (Pass B шёл в
@@ -7964,7 +5488,7 @@ def _build_corpus(
 
 
 def _finalize_interrupted_session(
-    lifecycle: _PhaseLifecycle, exc: BaseException
+    lifecycle: PhaseLifecycle, exc: BaseException
 ) -> None:
     """Закрывает сеанс краула терминальным статусом после прерывания фазы.
 
@@ -8018,7 +5542,7 @@ def build_corpus(*args: Any, **kwargs: Any) -> PhaseResult:
     docstring :func:`_build_corpus`).
     """
     pools = _ExtractPools(max_rebuilds=_EXTRACT_MAX_POOL_REBUILDS)
-    lifecycle = _PhaseLifecycle()
+    lifecycle = PhaseLifecycle()
     try:
         return _build_corpus(*args, pools=pools, lifecycle=lifecycle, **kwargs)
     except BaseException as exc:

@@ -72,7 +72,16 @@ def _isolated_operational_caches(tmp_path_factory: pytest.TempPathFactory) -> No
     тесте продолжает работать и сдвигает всё, кроме авторских каталогов.
     """
     root = tmp_path_factory.mktemp("operational_layout")
-    os.environ.setdefault(_ENV_LAYOUT_HOME, str(root / "home"))
+    home = root / "home"
+    # Дом создаётся сразу, а не по первому прогону. Объявленный и несуществующий дом —
+    # недействительная раскладка: `doctor` проверяет **родителя** каталога на запись
+    # (`core/cli/doctor.py::_dir_writable`), а родителем девяти осей служит сам дом.
+    # Без этого `run_doctor()` рапортовал FAIL по `runs`/`index_store`/`corpus_raw`/`cache`
+    # — и проходил только в тех прогонах, где какой-то предыдущий тест успевал создать
+    # `<дом>/runs` первым. То есть результат зависел от распределения тестов по
+    # xdist-воркерам, а не от предмета проверки.
+    home.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault(_ENV_LAYOUT_HOME, str(home))
     os.environ.setdefault("COHOUND_PACKAGES_DIR", str(ROOT / "packages"))
     os.environ.setdefault("COHOUND_PASSPORTS_DIR", str(ROOT / "passports"))
 

@@ -151,14 +151,14 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:987-1016`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:710-739`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277,304`), вызов — `preflight` из `core/cli/commands/run.py:676,774` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
-| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`core/pipeline/corpus.py:987-1016`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
+| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`core/pipeline/corpus.py:710-739`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
-| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus.py:987-1016`; зонд — `:3256,5390,7787`), семейство чанкеров — `chunker_family` |
+| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus.py:710-739`; зонд — `:3256,5390,7787`), семейство чанкеров — `chunker_family` |
 | §6.9 | ✅ сделано | `make_profile_gate` подключён (`core/cli/context.py:1217`), waiver-след (`core/pipeline/runner.py:467`) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/cli/package/commands.py:2193`) |
@@ -1211,7 +1211,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > adoption наполняет durable-субстрат (`document_version`, `chunk_store`/`chunk_meta`,
 > `url_state`, `index_partition`, снимок, lineage), но `--update` всё равно идёт полным
 > краулом (`new` → `full`; `plan_incremental` вызывается только для `incremental`,
-> `core/pipeline/corpus.py:4761`). Это честное следствие «нет ни одного complete-baseline»,
+> `core/pipeline/corpus.py:4200`). Это честное следствие «нет ни одного complete-baseline»,
 > а не дефект команды; записывать `complete` при неполном покрытии было бы ложью.
 >
 > **Критерий принятия продукта** — наличие строки `corpus_coverage` (зеркало
@@ -1313,7 +1313,7 @@ Durable-субстрат чанков в `state.db` (`chunk_store`/`chunk_meta`)
 **Провенанс спуска в контейнеры — тоже write-through (F1 закрыт).**
 `archive_observations`/`corpus_members` пишутся **сразу** за появлением факта, а не в конце
 фазы: `ArchiveDescentWalker` получает синки `persist_observation`/`persist_member`
-(`core/pipeline/corpus.py:5861-5862`, реализации `:2057`/`:2087`), поэтому SIGKILL/OOM теряет
+(`core/pipeline/corpus.py:5300-5301`, реализации `:2057`/`:2087`), поэтому SIGKILL/OOM теряет
 максимум контейнер (наблюдение) или член (строку) «в полёте». Идемпотентность —
 `observation_id` детерминирован (`run|product|root|hash|depth`), `corpus_members` — UPSERT по
 PK. Запись в конце фазы (`:9544-9558`) осталась, но это **reconciliation-pass**: она добирает
@@ -1334,7 +1334,7 @@ PK. Запись в конце фазы (`:9544-9558`) осталась, но э
 **Наблюдаемость фазы — стадийные бакеты времени (`3fbdbfb`).** Время фазы разложено по
 стадиям, а не по продуктам-целиком: события `product_end` / `product_index_end` несут
 `fetch_wait_s`, `extract_wait_s`, `chunk_s`, `embed_s`, `build_s`, `overhead_s`
-(`_CorpusStageTimings`, `core/pipeline/corpus.py:1124-1159`; агрегат —
+(`_CorpusStageTimings`, `core/pipeline/corpus.py:847-882`; агрегат —
 `_stage_timings_aggregate:2399`), и то же попадает в `metrics.json` как
 `resources.stage_timings` (`ResourcesObservation.stage_timings`,
 `build_resources_block`). Это **наблюдаемость, а не контракт**: значения не входят ни в
@@ -1770,7 +1770,7 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
 - **Дефект 29.10.2026: на resume бюджет заряжается не тому корню, и потолок умножается
   на число перезапусков** (**✅ исправлен** — см. конец пункта). Измерено на живом прогоне
   `ru-pg-dbms-3d3dc7c3c969`.
-  Реконструкция «уже израсходованного» (`core/pipeline/corpus.py:5524-5555`) идёт по продукту-wide
+  Реконструкция «уже израсходованного» (`core/pipeline/corpus.py:4963-4994`) идёт по продукту-wide
   множеству `resume_counted` (`:7066`), где побеждает **первый корень-претендент**
   («последующие корни его не пересчитывают», `:7379-7386`). У `digital_q_database`
   авторский порядок — host-корень `https://database.diasoft.ru/` (prefix `/`,
@@ -1791,7 +1791,7 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
   ревалидации, то есть одно правило вместо двух похожих.
   **Правильное правило уже есть в коде — для другого механизма.** Группировка
   ревалидации приписывает известный URL **самому специфичному** корню
-  (`_group_revalidation_items`, `core/pipeline/corpus.py:4798-4833`: «побеждает самый специфичный
+  (`_group_revalidation_items`, `core/pipeline/corpus.py:4237-4272`: «побеждает самый специфичный
   `root_path_prefix`»). Реконструкция бюджета должна пользоваться тем же предикатом, а не
   «кто первый». Это и есть правка: зарядка по владельцу, а не по претенденту.
   **Побочный вывод, который важнее правки.** Потолок 800 был объявлен по замеру 28.10
@@ -1830,10 +1830,10 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
 - **Дефект 29.10.2026 (третий, найден при разборе потери чанков): зарядка бюджета на
   resume не делает заряженный URL дренируемым.** В `_drain_root` реконструкция
   «уже израсходованного» считает `consumed` из durable-элементов сеанса
-  (`core/pipeline/corpus.py:5524-5555`) и вызывает `frontier.note_consumed(consumed)`, но **не ставит
+  (`core/pipeline/corpus.py:4963-4994`) и вызывает `frontier.note_consumed(consumed)`, но **не ставит
   эти URL в очередь**. Дренируемыми они становятся только через
   `add_revalidate_seed`, а этот work-set строится лишь для `ProductMode.INCREMENTAL`
-  (`_revalidation_items`, `core/pipeline/corpus.py:4757-4769`). Итог для продукта в режиме `new`/`full`:
+  (`_revalidation_items`, `core/pipeline/corpus.py:4196-4208`). Итог для продукта в режиме `new`/`full`:
   корень заряжен в потолок ⇒ `add_seed` возвращает `truncated` ⇒ BFS не идёт ⇒
   `revalidation_queued == 0` ⇒ дренаж корня выходит **до** обхода (`:7436-7438`). Зарядка
   и постановка в очередь расцеплены: бюджет заплачен, работа не сделана.
@@ -2039,7 +2039,7 @@ RAM-потолка пишется в staging-файл и публикуется 
 > **Подключено срезом B3 — читать вместе с §6.7.1.** Прежняя редакция этой секции
 > утверждала, что спуск «не подключён к `pipeline`» и является «следующим шагом». Это
 > описание состояния до B3 и коду больше не соответствует: `ArchiveDescentWalker`
-> вызывается из фазы корпуса (`core/pipeline/corpus.py:5821`), зонд артефакта — `:3256`,
+> вызывается из фазы корпуса (`core/pipeline/corpus.py:5260`), зонд артефакта — `:3256`,
 > `:5390`, `:7787`; отказ читателя контейнера виден как
 > `archive_observations.status = unreadable` / `container_reader_unavailable`, а не как
 > тихое «не развернули». Подключение — инъекция `container_for` через `Ports.container`,
@@ -2715,7 +2715,7 @@ class CompositionView:
   новый текст. **Кэш реализован и подключён** (`core/pipeline/embed_cache.py`;
   инстанцируется в composition root — `EmbedCache(str(paths.embed_cache))`,
   `core/cli/context.py:2120`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
-  параметр `cache` у `build_corpus`/`_embed_product`, `core/pipeline/corpus.py:313`).
+  параметр `cache` у `build_corpus`/`_embed_product`, `core/pipeline/corpus.py:310`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
   до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и
   `metrics.json` (`core/pipeline/corpus_index.py:335-373`) — «кэш включён» не доказывается

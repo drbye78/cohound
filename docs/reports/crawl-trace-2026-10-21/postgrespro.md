@@ -264,7 +264,7 @@ robots-запрет на `repo.postgrespro.ru` (104 URL) закрыл целое
   1 и 3, **из бюджета первого корня**.
 
 Что не установлено: механизм. Кандидаты по коду — ранние возвраты `_drain_root`
-(`seed_blacklisted`/`seed_truncated`, `core/pipeline/corpus.py:2763-2767`) и `note_consumed`
+(`seed_blacklisted`/`seed_truncated`, `core/pipeline/corpus.py:2202-2206`) и `note_consumed`
 (`:4560-4592`), но статически ни одно условие не воспроизводится: блэклист ложен, а
 `seed_truncated` требует `frontier.fetched >= 800` на момент `add_seed`. Лог прогона
 утрачен при перезагрузке хоста, `errors` фазы не персистится.
