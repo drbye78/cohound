@@ -45,14 +45,14 @@ production-масштабе, — это четыре дефекта **нашег
 
 ## 2. Ключевой факт: поиск никогда не идёт по всему корпусу
 
-✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:443-462`) объявляет
+✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:787-859`) объявляет
 `product_ids: Sequence[str] | None = None` с докстрингом «по умолчанию `[product_id]`;
 сателлиты добавляет вызывающий (I17)», а `NpyVectorIndex.search_many`
 (`core/adapters/vector_npy.py:272-330`) обходит `for product_id in products` и читает
 партицию продукта. Номера строк в абзаце ниже сверены с кодом (2026-10-28):
-`evaluate.py:443`, `vector_npy.py:312-330`; смысл не изменился.
+`core/pipeline/evaluate.py:787-859`, `vector_npy.py:312-330`; смысл не изменился.
 
-`core/pipeline/evaluate.py:443` + `retrieve_for_cell` (`:443-515`): `product_ids` — по
+`core/pipeline/evaluate.py:787-859` + `retrieve_for_cell` (`:443-515`): `product_ids` — по
 умолчанию `[product_id]`, сателлиты добавляет вызывающий (I17). В
 `core/adapters/vector_npy.py:312-330` цикл `for product_id in dict.fromkeys(q.product_ids)`
 читает **партицию продукта**, а не общий индекс.
@@ -91,7 +91,7 @@ Brute-force косинус, тот же код (`_cosine_scores`), 1024 dim:
 3. `for chunk_id, score in zip(...): meta = self._lookup(chunk_id)` (`:183`) — резолвер
    метаданных вызывается для **всех** 11 400 чанков, хотя нужны только `top_k=10`. В
    composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:332`,
-   `context.py:1658`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
+   `core/cli/context.py:1659`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
    point-lookup в БД прогона: 4 мкс ⇒ 42 ms на поиск.
 
 Сумма на один поиск при масштабе: 23.3 MB чтения + 27.8 ms конверсии + 4.5 ms матмула +
@@ -170,7 +170,7 @@ top-10 из 600** у близких соседей. Замер при едино
 | HNSW/IVF по 17 млн | **нет**: поиск продукт-скоупед, 11.4 тыс. — brute force быстрее ANN |
 | Квантование int8 (4× меньше) | частично: 35 GB → 9 GB, но fp16 уже даёт 2×, а диск не узкое место |
 | Фильтрация (payload) | **нет**: фильтр — это `product_id`, он и так задаёт партицию |
-| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id)`; подключён в `core/cli/context.py:2066`) |
+| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id)`; подключён в `core/cli/context.py:2232`) |
 | Общий индекс для нескольких нод | **да** — единственное настоящее преимущество, см. ниже |
 | Одновременные читатели/писатели | **нет**: у нас модель «иммутабельная сборка», читателей несколько, писатель один на прогон |
 
@@ -301,7 +301,7 @@ embed:
 объявлено ни в `.env.example`, ни в `03`, правило 6 (дефолт `local`) держится **побочно** —
 дефолт и есть единственная реализация. Единственное, что действует уже сейчас: кэш векторов
 по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash, embed_model_id)`), подключён в
-`core/cli/context.py:2057-2067` и в раскладку `core/config/paths.py:79`.
+`core/cli/context.py:2223-2233` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -349,14 +349,14 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
 ✅ сделано (`precompute_query_vectors`, `DEFAULT_QUERY_EMBED_BATCH = 32`,
-`core/pipeline/evaluate.py:244`, `:342-390`; вызовы — `:2414` и `:3093`) — уникальные тексты
+`core/pipeline/evaluate.py:251`, `:342-390`; вызовы — `:2414` и `:3093`) — уникальные тексты
 запросов пакета эмбеддятся батчами **до** цикла продуктов, карта `text → vector` передаётся
 в ячейки; `_query_vector` (`:305-317`) берёт вектор из карты и только вне фазы падает на
 одиночный `embed`. ⬜ durable text→vector кэш между пакетами не сделан: `embed_cache`
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`evaluate.py:430-447`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`core/pipeline/evaluate.py:651-668`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 
@@ -513,11 +513,11 @@ torch по умолчанию, то есть `cuda`, если она досту�
    (дефолт через цикл `search`, поэтому существующие реализации не сломаны).
    Проверено: `core/ports/vector_index.py:82` (`search_many` в порту), `:89-105`
    (`batched_search` с `getattr`-фолбэком), `core/adapters/vector_npy.py:272` (реализация),
-   вызывается из `core/pipeline/evaluate.py:435`.
+   вызывается из `core/pipeline/evaluate.py:442`.
 4. ✅ **Мемоизация векторов запроса** + пре-компьют `query_vectors` до `evaluate`
    (`precompute_query_vectors`, батчи по 32; это же закрывает оговорку 2 — оценщик
    больше не ходит за векторами вовсе).
-   Проверено: `core/pipeline/evaluate.py:244` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:342`,
+   Проверено: `core/pipeline/evaluate.py:251` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:342`,
    вызовы `:2414`, `:3093`; `_query_vector` (`:305`) читает карту первой.
 
 Замер после всех четырёх — §3.1: **309.1 → 5.29 ms** на поиск, lookup 11 400 → 10, чтений

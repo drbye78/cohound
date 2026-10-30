@@ -202,8 +202,8 @@ plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для
 
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
-| `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`core/pipeline/corpus.py:2960-2972`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:2198-2247`) | один на прогон, переиспользуется всеми корнями/продуктами |
+| `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`core/pipeline/corpus.py:2944-2956`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:2182-2231`) | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
@@ -344,7 +344,7 @@ top-level URL, затем опрос каталогов, волна 2 — зап
   контейнера, включая пустой и нечитаемый: «внутри нет ингестируемого» — это наблюдение,
   а не отсутствие данных.
 - **Члены извлекаются через фазовый пул экстракции**, с окном упреждения
-  `K = extract_window` и **строгой FIFO-доводкой** (`core/pipeline/corpus.py:2447-2551`,
+  `K = extract_window` и **строгой FIFO-доводкой** (`core/pipeline/corpus.py:2431-2535`,
   `ArchiveDescentWalker(defer_member=…, window=…)`). Это не оптимизация порядка, а условие
   корректности: `_content_digest` сборки склеивает чанки **в порядке вставки**, а
   `partition_build_id` от порядка **не** зависит. Коммит в порядке завершения дал бы тот же
@@ -537,7 +537,7 @@ prompt_hash = H(template_version, rule, absence_rule, sorted(chunk_ids))
 (`validate.py:300-381`), и ни одна не спрашивает, **следует ли заявленный статус из цитаты**.
 Регламент (§7.1) разрешает «частично механически» и требует следствия-*аномалии*, поэтому
 шаг присутствует в норме, но не в коде. Что существует вместо него: замер
-`support_subject_overlap` (`pipeline/evaluate.py:735`) — пересечение стемов параметра и цитаты
+`support_subject_overlap` (`core/pipeline/evaluate.py:1156-1194`) — пересечение стемов параметра и цитаты
 для ✅/⚠️; он **не меняет вердиктов**, пишет `cells.validation_notes`/`review_reason` и
 агрегируется в `outputs/support_quality.yaml`. Измеренный масштаб — в
 `docs/reports/measurements/2026-10-27-support-not-about-subject.md`: v2 публиковал 45 `✅`
@@ -796,7 +796,7 @@ flowchart LR
 (`core/pipeline/prompt.py:117`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
 `core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
 `core/util/hashing.py:45`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
-(`core/util/cache.py:133`, проводка `core/cli/context.py:1355`); политика ретраев и backoff —
+(`core/util/cache.py:133`, проводка `core/cli/context.py:1356`); политика ретраев и backoff —
 ✅ сделано (общая политика `core/util/retry.py:1`, потребитель — `core/adapters/search_glm.py:66`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано (`core/store/sqlite.py:21` WAL +
 `core/store/sqlite_store.py:88` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:626` — одна

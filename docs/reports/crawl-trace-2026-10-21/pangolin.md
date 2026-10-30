@@ -170,12 +170,12 @@ https://sbertech.ru/strapi/api/media/PSQ_8_2_0_exploitation_1988c54bf3.zip
 
 Что можно утверждать по коду: единственные пути, оставляющие seed **без строки**,
 это ранние возвраты в `_drain_root` — `seed_blacklisted`/`seed_truncated`
-(`core/pipeline/corpus.py:1690-1694`), `continue` по `max_attempts` (нужен
+(`core/pipeline/corpus.py:1674-1678`), `continue` по `max_attempts` (нужен
 `prior_item`, его нет) и `_expand_directory` (все ветки пишут `FAILED`). Оба ранних
 возврата требуют условия, которое статически не воспроизводится: блэклист ложен, а
 `seed_truncated` требует `frontier.fetched >= 10` на момент `add_seed`, тогда как
 единственные in-scope-retained элементы того момента (`pangolin.sbertech.ru`, 60 шт.)
-уже заряджены первым корнем через `resume_counted` (F13, `core/pipeline/corpus.py:1644`).
+уже заряджены первым корнем через `resume_counted` (F13, `core/pipeline/corpus.py:1628`).
 
 **Причина не установлена.** Лог прогона утрачен при перезагрузке хоста (23:22 MSK,
 `/tmp` очищен), а `errors` фазы не персистится. Что бы это закрыло: строка ошибки

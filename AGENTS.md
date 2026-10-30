@@ -105,7 +105,8 @@ corpus_raw/{product_id}/      # retention сырых байтов
 cache/serp/{query_hash}.json · cache/http/{url_hash}.bin  # глобальный content-addressed кэш (R7)
 state/{package_id}/state.db   # durable per-product состояние (09 §4.1): lineage, previous_run_id,
                               #   change_class; источник --since-run; таблица profile_attestation
-                              #   (G1/G2) — design-only: писателя в прогоне нет
+                              #   (G1/G2) — писателя в прогоне нет; строку пишет человек
+                              #   командой `hound package profile attest`
 eval_cache/ · extract_cache/  # межпрогонные кэши вердиктов оценщика и экстракции (в .gitignore)
 config/deploy.yaml · config/paths.example.yaml  # профиль зон (edge) · пример раскладки каталогов
                               #   (COHOUND_HOME/COHOUND_*_DIR)
@@ -193,11 +194,15 @@ SSRF-валидацию, (2) принадлежит **объявленному**
   выдаётся ни за отказ, ни за одобрение.
 - **G1/G2 — внутренняя аттестация.** Человек утверждает содержимое профиля пакета-якоря
   (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь — durable-аттестация
-  профиля (`profile_attestation` в `state/{package_id}/state.db`) — **объявлен и
-  проверяется** гейтом (`make_profile_gate` подключён в CLI), но **производителя в прогоне
-  нет** (design-only: строку пишут только тесты), поэтому описывать его как работающий
-  механизм нельзя. Рабочий путь сегодня один — per-run строка `gate_decisions` (аудит-след и
-  override), и она **приоритетна**.
+  профиля (`profile_attestation` в `state/{package_id}/state.db`) — **объявлен, проверяется**
+  гейтом (`make_profile_gate` подключён в CLI через `_profile_gate_resolver`,
+  `core/cli/context.py`) и **имеет производителя — человека**: строку пишет
+  `hound package profile attest --gate G1|G2 --actor …`
+  (`core/cli/package/commands.py:2841`; `--dry-run` не пишет и говорит об этом).
+  Прогон её **не пишет** — только читает, поэтому durable-путь работает лишь после
+  человеческого решения. Измерено 30.10.2026: **0 строк** во всех реальных `state.db` —
+  механизм есть, ни одной аттестации не подписано. Пока строк нет, рабочий путь один —
+  per-run строка `gate_decisions` (аудит-след и override), и она **приоритетна**.
 - **G3/G4 — точки интеграции.** coHound не решает ревью/публикацию: на блоке пишется
   `runs/{run_id}/gates/{gate}-request.json` (детерминированный предмет + `subject_digest`),
   решение приходит извне и только записывается.

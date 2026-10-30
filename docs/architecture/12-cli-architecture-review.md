@@ -167,7 +167,7 @@ evaluate, review, g3, compute, g4, report`.
 То есть `35e4373` закрыл **один** путь: отсутствующий файл БД → `EXIT_NOT_FOUND`
 (`build_store(read_only=True)` → `StoreNotInitialized`). Второй путь — файл есть, а прогона в
 нём нет — по-прежнему `EXIT_USAGE`: `read_manifest` бросает `ValueError("прогон не найден…")`
-(`core/store/sqlite_store.py:2398`), и CLI печатает `E: прогон не найден: 'ghost'` кодом 2.
+(`core/store/sqlite_store.py:2404`), и CLI печатает `E: прогон не найден: 'ghost'` кодом 2.
 Для скрипта это одно и то же событие с двумя кодами — в зависимости от того, кто создал файл.
 
 Историческая часть ниже (проверка на момент разбора):
@@ -379,7 +379,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 «это меняет run_id».
 **Уточнение 2026-10-28:** `--extract-workers` и `--crawl-strategy` флагами **не** являются и
 не были — обе оси живут в `run.yaml`/`deploy.yaml` (`crawl.extract_workers`,
-`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:649` через
+`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:671-674` через
 `_crawl_strategy(run_crawl)`). Флаговые контрактные оси сейчас: `--document-level`,
 `--pdf-pipeline`, `--document-timeout`, `--llm-model`, `--llm-slot`, `--retrieval-profile`,
 `--cutoff-k`, `--max-depth`, `--max-documents`, `--serp-rounds`. Пример в тексте был неточен
@@ -394,7 +394,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 
 ### Команды «только для чтения» создают БД
 
-✅ сделано (`core/store/sqlite.py:641` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
+✅ сделано (`core/store/sqlite.py:652-698` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
 Перемер на тех же трёх командах и несуществующем пути: `review --db /tmp/…/x.db`,
 `sensitivity --db …`, `golden --golden … --db …` → **`exit 4`**, каталог не создаётся
 (`ls: cannot access …`: файла нет). Сообщение называет причину: «read-only команда файл не
@@ -430,7 +430,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:677-698`, `core/store/sqlite_store.py:1694-1696`,
+✅ сделано (`core/cli/commands/crawl.py:677-698`, `core/store/sqlite_store.py:1700-1702`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
 текстовом выводе (`:713`), и в JSON (`:682`). Докстринг `iter_crawl_sessions` прямо называет
 этот дефект причиной фильтра.

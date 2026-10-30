@@ -344,7 +344,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `crawl_sessions.owner`/`heartbeat_at` в DDL
 > (`core/store/sqlite.py:326-327`), `core/pipeline/liveness.py` (свидетельство живости,
 > recovery-on-open, `interrupt_session`), heartbeat в корпусе
-> (`core/pipeline/corpus.py:1549`), `interrupted` в словаре (`core/domain/enums.py:721`).
+> (`core/pipeline/corpus.py:1533`), `interrupted` в словаре (`core/domain/enums.py:721`).
 > Остаток решения, названный К-4: это **не** lease — переназначения элемента другому
 > исполнителю нет, конфликт двух нод только виден (`owner`).
 
@@ -377,7 +377,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** — сборка движка входит в `extractor_version`:
 > `docling-doc-3:<level>/<device>/docling-<build>`, единственный источник —
 > `docling_engine_build()` (`core/adapters/extract_document.py:202-240`); тот же вызов питает
-> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:623-646`, `:938`).
+> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:631-653`, `:938`).
 > ✅ **расширено (2026-10-28, P9):** ключ различает **устройство** — без сегмента
 > `cpu`/`cuda` CUDA-прогон нашёл бы в `extract_cache` CPU-текст под тем же ключом (Д-8 в
 > новом виде). Смена устройства — `execution_change`: `run_id` меняется один раз, кэш один
@@ -473,7 +473,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 ### 5.2. Окно: что именно ограничено
 
 > ⬜ **не сделано** — ось `extract_window` есть только как число воркеров
-> (`crawl.extract_workers`, `core/domain/models.py:497`, выводится в
+> (`crawl.extract_workers`, `core/domain/models.py:498`, выводится в
 > `core/pipeline/crawl_frontier.py:497-507`); `chunk_window` и `retrieval_window` в коде
 > отсутствуют (`grep -rn "chunk_window\|retrieval_window" core/` — пусто).
 
@@ -683,8 +683,9 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 
 > ➖ **снято** — дизайн отменён в `11` §3.1 («две фазы не нужны»: с документным токеном `pb`
 > вычислим до первой нарезки). В коде не реализован **ни один** из вариантов: `pb`
-> по-прежнему хеширует пары `(chunk_id, content_hash)` (`core/pipeline/corpus.py:107-110`,
-> `_PARTITION_SCHEMA = "partition-1"`, `:305`), двухфазной записи и зачистки `NULL` нет.
+> по-прежнему хеширует пары `(chunk_id, content_hash)` (`core/pipeline/corpus_index.py:80`,
+> `_PARTITION_SCHEMA = "partition-2"` — `corpus_index.py:48`; `partition-1` был до границы A,
+> `3736fae`), двухфазной записи и зачистки `NULL` нет.
 >
 > ⚠️ **Отменено в `11` §3.1.** Раздел описывает обход, нужный только потому, что `pb` хеширует
 > **чанки**. При отказе от обратной совместимости `pb` считается по парам `(doc_id,
@@ -723,7 +724,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 
 > ✅ **сделано** — `docling_engine_build()` (`core/adapters/extract_document.py:191-199`),
 > `docling_extractor_version()` (`:202-228`), один и тот же вызов в `extractor_stack`
-> (`core/cli/execution_axes.py:623-646`).
+> (`core/cli/execution_axes.py:624-647`).
 
 Пока `extractor_version` не несёт сборку движка, `extract_cache` отдаёт текст, произведённый
 другим движком, и `run_id` об этом лжёт. Два варианта, различающиеся ценой:
@@ -809,7 +810,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 > ✅ **A1 сделан** (2026-10-28): зеркала нет. `TantivyLexicalIndex` не держит записей —
 > тело чанка читается из store одним батчем на поисковое окно
 > (`core/adapters/lexical_tantivy.py:624-668`, `StorePort.get_chunks` —
-> `core/ports/store.py:421`, реализация `core/store/sqlite_store.py:2372`), засев
+> `core/ports/store.py:421`, реализация `core/store/sqlite_store.py:2378`), засев
 > потоковый (`index(chunks: Iterable)`, `:409`), `product_id` объявлен `stored`
 > (ось скоупа I17 читается из документа, а не из гидрированной записи). Приёмка —
 > `tests/adapters/test_lexical_tantivy.py`: `weakref`'ы всех засеянных записей мертвы
@@ -906,7 +907,7 @@ SQLite-запросов, но **не** убирает O(N) чтения: `read_p
 > пула. То же ограничение, что у `pdf_pipeline`. Честный фикс — фабрика прокси по ключу
 > `(level, pipeline, window)`, отдельная работа.
 > ➖ **B5 снят как работа, но не заменён реализацией** — дизайн двух фаз отменён в `11` §3.1;
-> документного токена `pb` в коде нет (`core/pipeline/corpus.py:107-110`).
+> документного токена `pb` в коде нет (`core/pipeline/corpus_index.py:80`).
 > ⬜ **B6 не сделано** — общего носителя артефактов нет; `pooled` не существует как размещение.
 > ⚠️ **`extract_cache` под `split` остаётся write-only** (не регресс): проба ключа берёт
 > идентичность прокси, а запись — идентичность edge, которую нельзя узнать без извлечения.
@@ -983,7 +984,7 @@ B1 включает B2 (без идентичности нет паритета)
 > (`:289`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
 > ключ профиля плюс `__default__` (`core/pipeline/report.py:666-671`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
-> (`core/pipeline/corpus.py:2217,6575,7021`). Открытым остаётся **другой** пункт: под `split`
+> (`core/pipeline/corpus.py:2201,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.
 > ➖ **8.4 снято** — `11` §3.1 отменяет две фазы; реализация любого варианта отсутствует.
 

@@ -21,7 +21,7 @@
 Оценка **63 `❓`-ячеек** продукта `jatoba` повторена на **копии** БД прогона, без мутации
 оригинала:
 
-- профиль **R0** (тот же, что в прогоне: `evaluate.py:118`, `DEFAULT_RETRIEVAL_PROFILE`),
+- профиль **R0** (тот же, что в прогоне: `core/pipeline/evaluate.py:118`, `DEFAULT_RETRIEVAL_PROFILE`),
 - `cutoff_k = 10`, `strict=True`,
 - та же сборка (`cb_ecf3850d…`), тот же оценщик, тот же `model_id`.
 

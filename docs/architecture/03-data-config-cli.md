@@ -1561,7 +1561,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ сделано (T1.2; `core/domain/enums.py:1` … `core/domain/anchors.py:1`) — монолит **удалён**, гейт `tests/selfcheck.py:1123` |
 | 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ сделано (T1.3; `core/store/sqlite.py:21`) — монолит **удалён**, тот же гейт `tests/selfcheck.py:1123` |
 | 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ сделано (`core/ports/` — 20 модулей портов, напр. `core/ports/store.py:1`; импорт-граф — `tests/selfcheck.py:948`) |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1065` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:196` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1086` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:196` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется
@@ -1581,7 +1581,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | I10/I15 | B.1 (resolve_source_url) |
 | Развёртывание/DMZ (07) | A.1 (`edge/`, `config/deploy.yaml`), D.5, E.3 |
 
-**Открытые вопросы к итерации 4:** формат импорт-графа CI — ✅ сделано (`tests/selfcheck.py:948`,
+**Открытые вопросы к итерации 4:** формат импорт-графа CI — ✅ сделано (`tests/selfcheck.py:970-1012`,
 `_import_graph`, вызов `:354`; AST по `core.*`); структура логирования — ✅ сделано
 (`core/util/logging.py:1` — JSON-lines `runs/{run_id}/logs/{phase}.jsonl`, поля 04 §B.1); бэкап/
 восстановление прогона — ✅ сделано (`core/store/backup.py:139` `backup_run` + `:211` `restore_run` —

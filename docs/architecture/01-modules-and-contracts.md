@@ -72,7 +72,7 @@
 | Отрицание и охват | `AbsenceRuleType` (`explicit`, `parameter_reference`, `distribution_absence`, `registry_absence`) · `SourceScope` (`exhaustive`, `partial`, `unknown`) · `DenialStrength` (`authoritative`, `explicit`, `bounded`, `unobserved`, `not_stated`, `instrument_failed`) · `DenialClaim` (`explicit`, `not_stated`) |
 | Сбои | `FailureKind` — **17**: 5 классов сбоя ячейки (`search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`) + 11 наблюдаемых исходов краула (`not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`) + `partial_extraction` (документ получен, прочитана часть страниц — блокирующий класс корпуса) |
 | Пропуск фазы | `SkipReason` — **7**: `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external`, `gate_not_blocking` (последний — не блокирующий гейт: фаза идёт дальше, в `gate_decisions` ложится waiver-строка `actor=policy`) |
-| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:1648`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
+| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:1649`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
 | Извлечение | `ExtractionRoute` (`auto`, `html`, `document`) · `DocumentLevel` (`off`, `text`, `layout`, `layout_tables`, `full`) · `PdfPipeline` (`structured`, `text_layer`) · `PdfDevice` (`cpu`, `cuda`) |
 | Контейнеры | `ArchiveDescent` (`plan`, `full` — ось `crawl.archive_descent`) · `ArchiveDescentStatus` (`planned`, `descended`, `unreadable`, `budget_exhausted`) · `ContainerEncryption` (`encrypted`, `not_encrypted`, `unknown` — три состояния, а не булево: «предикат молчит» неотличим от «не зашифрован») |
 | Гейты | `Gate` (G1–G4) · `GateSource` (`internal`, `external`) · `GateVerdict` (`approved`, `rejected`) · `GatePolicy` (`external`, `waived`) |
@@ -84,7 +84,7 @@
 **Почему `interrupted` терминален.** Протухший `running` при открытии сеанса становится
 `interrupted`: тело краула не финализировано, поэтому это не `failed` и не `cancelled`. Без него в
 множестве терминальных `--follow` ждал бы вечно сеанс, который уже никто не исполняет
-(`core/cli/context.py:1648`).
+(`core/cli/context.py:1649`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
 (`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:976,981`, `gate_delegated_external`/
@@ -156,9 +156,9 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 остаётся `❓` (I12).
 
 **I2c — класс отрицания против наблюдённого охвата** (`check_absence_coverage`, `:286`;
-исполняется в Ш6: `core/pipeline/evaluate.py:1368` `_enforce_absence_coverage` →
+исполняется в Ш6: `core/pipeline/evaluate.py:1758-1842` `_enforce_absence_coverage` →
 `check_absence_coverage` на `:1418`, применяется к ячейке на `:2092`, токен причины
-`absence_coverage_unsatisfied` — `evaluate.py:176`). Условие `❌` зависит от **класса**, а не от
+`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:1758-1842`). Условие `❌` зависит от **класса**, а не от
 одной полноты краула: `explicit` (цитата вендора) и `authoritative` (энумерация) неполнотой не
 отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` требует
 `scope_acceptance` (принятия риска человеком); `unobserved`/`not_stated` дают `❓`. Нарушение →
@@ -470,7 +470,7 @@ trafilatura) → EPUB (`extract_epub`, stdlib OCF, главы через тот 
 `adapters/remote_extractor.py:214`: локальный композит читает байты по `RawPage.source_path`, а
 remote получает их отдельной операцией шва (`extract/upload`) — то есть путь как таковой ему не
 нужен, но контракт «работаю без тела в RAM» он выполняет. `corpus` проверяет флаг
-(`core/pipeline/corpus.py:828`) прежде чем отдать локальный путь: адаптер без флага получил бы
+(`core/pipeline/corpus.py:806`) прежде чем отдать локальный путь: адаптер без флага получил бы
 путь, которого не существует в его зоне. `content_hash` считает адаптер (§10/I19).
 
 **Единственный источник истины по форматам — `core/util/document_formats.py`**
@@ -891,8 +891,8 @@ pytest + `--cov` (`:78-88`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:98` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1375`; структура `ProtocolExhaustion` — `core/domain/models.py:1238`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:1829` (`max_retries`), цикл `:2003`;
+`core/domain/models.py:1396`; структура `ProtocolExhaustion` — `core/domain/models.py:1259`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:1842` (`max_retries`), цикл `:2003`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
-строит вызывающий (`core/pipeline/evaluate.py:2131`).
+строит вызывающий (`core/pipeline/evaluate.py:2144`).

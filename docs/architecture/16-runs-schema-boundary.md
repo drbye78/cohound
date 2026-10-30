@@ -81,7 +81,7 @@ absence/evidence-модель, а значит по `AGENTS.md` §13 это `met
 
 **Решение: `SCHEMA_VERSION` остаётся `3.13.0`** (`core/store/sqlite.py:15`). Все изменения
 ниже — аддитивные: колонки добавляет идемпотентный `_ensure_columns`
-(`core/store/sqlite.py:541-557`), таблицу — `CREATE TABLE IF NOT EXISTS` в `DDL`. Гейт
+(`core/store/sqlite.py:541-558`), таблицу — `CREATE TABLE IF NOT EXISTS` в `DDL`. Гейт
 `_reject_foreign_schema` (`:615-624`, вызовы `:683` и `:701`) существует ради
 **несовместимого** чтения, а не ради счётчика ревизий: поднимать версию на аддитивном
 изменении значило бы запретить чтение уже завершённых прогонов без причины.
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS run_product (
 
 Пишется на границе продукта (там же, где `corpus_docs`, `09` §4.7) и переписывается в конце
 фазы — так же, как `corpus_coverage`. Прецедент записи — `store.save_corpus_coverage(run_id,
-coverage)` (`core/pipeline/corpus_coverage.py:405`): одна функция на продукт, вызывается на границе,
+coverage)` (`core/pipeline/corpus_coverage.py:410`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: переноса
 ячеек нет (`09` §10), и колонка, всегда равная нулю, — ложь о том, что механизм
 существует.
@@ -154,7 +154,7 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`_resume_page`, `core/pipeline/corpus.py:844-897`) — `reused`. Resume перечитывает и те документы, которые
+(`_resume_page`, `core/pipeline/corpus.py:822-875`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -227,7 +227,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
   ось `device` — внешний backend (`backend`/`base_url`/`model_version`) не объявлен и
   остаётся решением `14` §6 п. 5.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
-  `core/domain/models.py:478`), дефолт `None` — по той же причине, что у `pdf_device`
+  `core/domain/models.py:479`), дефолт `None` — по той же причине, что у `pdf_device`
   (`:543-549`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
   что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:323-342`).
@@ -237,15 +237,15 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1097` → `core/pipeline/corpus.py:882`/`:2601`/`:2699`, там же, где уже
-  идёт `embed_model_id` (`core/pipeline/corpus.py:1233` — единственный источник этого значения).
+  **явным параметром**: `core/pipeline/phases.py:1097` → `core/pipeline/corpus.py:860`/`:2601`/`:2699`, там же, где уже
+  идёт `embed_model_id` (`core/pipeline/corpus.py:1217` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
 `EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:80-181`):
 добавляется `embed_device` рядом с `extractor_stack` (та же природа: устройство как условие
 измерения). Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:237`)
-из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:943`).
+из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:569-628`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
 (`core/pipeline/digests.py:394-416`) требует точного набора ключей, но вызывается ровно из
@@ -255,7 +255,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 `missing`, а не в исключение. Поэтому старые прогоны читаются, а их diff честно говорит
 `execution_change: embed_device`.
 
-`RunManifest` (`core/domain/models.py:1481`) получает поле `embed_device`, и этого
+`RunManifest` (`core/domain/models.py:1528-1740`) получает поле `embed_device`, и этого
 достаточно: `_contract_field_attr` (`core/pipeline/report.py:1968-1970`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS` (`:1960`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
@@ -316,7 +316,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 `tests/pipeline/test_document_levels.py:574-585`): новый **обязательный** аргумент даёт там
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
 же полосе. Пинованные значения — `PINNED_PARTITION_BUILD_ID`
-(`tests/pipeline/test_corpus_stage_timings.py:62`, сверка `:399`) — меняются неизбежно.
+(`tests/pipeline/test_corpus_stage_timings.py:64`, сверка `:399`) — меняются неизбежно.
 
 Почему **не** в `embed_model_id`: он описывает **веса**, а не место счёта, и классифицируется
 как `content_change` (`core/pipeline/digests.py:68-79`). Положив устройство туда, мы
@@ -373,8 +373,8 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 `content_change` после `partition-2` значило бы пересобирать дважды.
 
 `doc_version_id` = `"dv_" + short_hash(product, content_hash, extractor_version, level)`
-(`core/pipeline/incremental.py:271-279`) — **без двоеточий**, поэтому грамматика
-`source_id` (`product:doc:chunk_no[:build_id]`, `core/util/ids.py:33-45`;
+(`core/pipeline/incremental.py:279-287`) — **без двоеточий**, поэтому грамматика
+`source_id` (`product:doc:chunk_no[:build_id]`, `core/util/ids.py:46-58`;
 `parse_source_id` требует ровно 3 или 4 сегмента, `:47-60`) не меняется. Это не
 косметика: `doc_hash` не различает уровень извлечения и версию экстрактора, поэтому
 `layout`-документ и `text`-документ с одинаковым `content_hash` давали **один и тот же**
@@ -393,12 +393,12 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
   `(chunk_id, partition_build_id)` различает то, что «голый» `chunk_id` не различает.
 
 Добавление четвёртого сегмента сломало бы грамматику: четвёртый сегмент `source_id` — это
-`build_id` (`ids.py:33-45`), а `parse_source_id` требует, чтобы третий сегмент был целым
+`build_id` (`core/util/ids.py:46-58`), а `parse_source_id` требует, чтобы третий сегмент был целым
 (`_CHUNK_RE`). Двух разных смыслов у одной позиции быть не может.
 
 ### 6.2. Durable-пространство не меняется
 
-`chunk_row_id(doc_version_id, chunker_version, chunk_no)` (`incremental.py:281-296`) уже
+`chunk_row_id(doc_version_id, chunker_version, chunk_no)` (`core/pipeline/incremental.py:289-304`) уже
 содержит и `dv_id`, и `chunker_version`. Два идентификатора остаются разными намеренно
 (`09` §14.6 п. 11).
 
@@ -421,7 +421,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 > `chunk_id` записан не канонической формой. В БД прошлой версии таблицы нет: шаг не
 > исполняется, фолбэк остаётся прежним, а не падает.
 
-`StorePort.resolve` (`core/store/sqlite_store.py:2420-2459`) сначала делает прямой lookup по
+`StorePort.resolve` (`core/store/sqlite_store.py:2426-2465`) сначала делает прямой lookup по
 `corpus_chunks.chunk_id`, а при промахе разбирает `source_id` через `parse_source_id` и ищет
 `WHERE product_id = ? AND doc_id = ? AND chunk_no = ?`. **Этот второй путь не может
 сработать**: `parse_source_id` возвращает `doc_id` = второй сегмент = `doc_hash`
@@ -484,12 +484,12 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 
 ### 7.1. Тесты, которые граница обязана поправить (сейчас зафиксируют старое)
 
-- `tests/pipeline/test_corpus_stage_timings.py:62` `PINNED_PARTITION_BUILD_ID`, `:65`
+- `tests/pipeline/test_corpus_stage_timings.py:64` `PINNED_PARTITION_BUILD_ID`, `:65`
   `PINNED_EXECUTION_CONTRACT_DIGEST` (сверки `:399`, `:404`) — оба значения меняются.
 - `tests/pipeline/test_corpus_phase_boundary.py:153-162`,
   `tests/pipeline/test_document_levels.py:574-585` — вызывают
   `_derive_partition_build_id(**явные kwargs)`; новый обязательный аргумент → `TypeError`.
-- `tests/pipeline/test_corpus.py:875-892` — перечень вариантов чувствительности `pb`
+- `tests/pipeline/test_corpus.py:881-898` — перечень вариантов чувствительности `pb`
   (подмножество параметров проходит, но перечень вариантов надо расширить).
 - `tests/selfcheck.py:781-789` (список обязательных таблиц — `run_product` в него),
   `:800-826` (ассерты по колонкам `runs`/`corpus_docs`), `:1487-1490` (round-trip
@@ -537,7 +537,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
    - **словарь**: `core/domain/dictionary.py` + `docs/status-dictionary.yaml`
      (`embed_device`, статусы продукта прогона);
    - **дефекты краула 1 и 3 — одна правка, не две.** Зарядка бюджета на resume
-     (`core/pipeline/corpus.py:3250-3250`) и дренаж уже добытого расцеплены: URL
+     (`core/pipeline/corpus.py:3234`) и дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed`, чей work-set гейтится режимом продукта
      (`_revalidation_items`, `:6612-6624`). Правило: **заряженный URL обязан быть и
@@ -579,11 +579,11 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
    может отличить полное измерение от среза, не заглянув в `state.db`. Сегодня
    `run_scope` не хранится нигде, кроме материала `run_id` (`core/pipeline/plan.py:94`;
    прямо зафиксировано в `core/pipeline/state_adopt.py:33`, `:117`), а `ProductPlanSet`
-   существует (`core/domain/models.py:2282`) и не персистится ни разу — единственное
+   существует (`core/domain/models.py:2303`) и не персистится ни разу — единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей.
 4. **Правило `❌` (часть той же полосы, `09` §11.2).** Проверка рядом с
-   `_enforce_absence_coverage` (`core/pipeline/evaluate.py:1390`): у `explicit`/
+   `_enforce_absence_coverage` (`core/pipeline/evaluate.py:1758-1842`): у `explicit`/
    `authoritative` — каждый документ, на который опирается `❌`, обязан иметь
    `reuse_kind ∈ {live, revalidated}`; у корпусных классов — ни один документ корпуса
    продукта не `reused`/`stale`. Нарушение ⇒ ячейка `❓` (`not_stated`, I12) с причиной
