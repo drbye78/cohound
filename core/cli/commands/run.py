@@ -203,6 +203,42 @@ def _identity_payload(identity: RunIdentity) -> dict[str, Any]:
     }
 
 
+def _reconcile_declared_retirements(state_store: Any, seed_config: Any) -> None:
+    """Отражает авторский ``state: retired`` в durable ``product_state`` (09 §5.1, T15).
+
+    ``sources/seeds.yaml`` — авторский источник: продукт, объявленный ``retired``, обязан
+    стать ``retired`` и в durable-состоянии, иначе переход «выведен → возвращён» не
+    наблюдаем, а ``re_added_at`` (единственный вход режима ``new`` в ``_mode_for``)
+    никогда не выставляется.
+
+    Пустой набор передаётся **только** при объявленном ``retired``: продукт, у которого
+    просто нет активных seed'ов (``pending_seeds``/``blocked``), выведенным из работы не
+    считается — это разные решения человека. Продукт, отсутствующий в ``seeds.yaml``
+    вовсе, здесь не обрабатывается: у прогона нет о нём объявления (состав когорты —
+    ``run.yaml``), и выводить решение из молчания файла значило бы его выдумать.
+
+    Вызывается **до** проверки блокировки: заблокированный прогон — ровно тот, где
+    продукт выведен, и откладывать запись до «разблокируется» значило бы не записать
+    никогда. ``state_store`` открыт с ``create=False``, поэтому §4.1 («заблокированный
+    прогон state не создаёт») не нарушается.
+    """
+    from core.domain.enums import OnboardingState
+
+    products = getattr(seed_config, "products", None) or {}
+    for product_id, product in products.items():
+        if getattr(product, "state", None) is not OnboardingState.RETIRED:
+            continue
+        # Объявленный ``retired`` при **живых** seed'ах — противоречие в данных (O1:
+        # готовность считается по активным seed'ам, а не по полю ``state``). Здесь не
+        # действуем: записать ``retired`` значило бы на следующем прогоне получить
+        # ``if rows:`` → ``reconcile_seed_set(pid, rows)`` → ``re_added_at`` → снова
+        # ``new``, то есть мигание режима на одном и том же файле. Расхождение остаётся
+        # видимым (план покажет ``onboarding_state: ready``), а решение — за автором:
+        # убрать seed'ы или снять ``retired``.
+        if any(seed.is_enabled for seed in getattr(product, "seeds", ()) or ()):
+            continue
+        state_store.reconcile_seed_set(product_id, [])
+
 def _blocked_payload(
     run_id: str,
     db_path: Path,
@@ -830,6 +866,17 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         if not report.ready:
             raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
+        # 09 §5.1/§15.1 (T15): retirement — авторское решение в ``sources/seeds.yaml``
+        # (``state: retired``), отдельной команды у него нет. Отражаем его в durable
+        # ``product_state`` **до** выхода на блокировку: набор «seed'ы убраны» до сверки
+        # не доходит (``if rows:`` ниже), поэтому без этого переход ``retired → возврат``
+        # не наблюдаем, и ``re_added_at`` остаётся без производителя — то есть ветка
+        # ``_mode_for → new`` недостижима. ``state_store`` здесь открыт с ``create=False``,
+        # поэтому заблокированный прогон по-прежнему **не создаёт** ``state.db`` (§4.1):
+        # нет состояния — нечего отражать, и ничего не появляется.
+        if state_store is not None:
+            _reconcile_declared_retirements(state_store, seed_config)
+
         # Заблокированный продукт: пишем снимок входов (прогон виден), но не собираем
         # корпус/ячейки. ``onboarding`` — человеческая предпосылка, а не сбой кода.
         if onboarding is not None and onboarding.blocked:
@@ -843,7 +890,19 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 # оставить его без причины блокировки.
                 scenario_errors.extend(
                     _snapshot_run_inputs(
-                        args, run_id, inputs=inputs, run_plan=run_plan, store=blocked_store
+                        args,
+                        run_id,
+                        inputs=inputs,
+                        run_plan=run_plan,
+                        store=blocked_store,
+                        # v2 снимка (09 §14.2): цепочка циклов — та же идентичность, что
+                        # уже вошла в ``run_id``; план продуктов — то же значение, что
+                        # уходит в ``runs.product_plan_json``.
+                        cycle_id=cycle_id,
+                        cohort_digest=cohort_d,
+                        seeds_digest=seeds_d,
+                        previous_run_id=previous_run_id,
+                        product_plan=onboarding.plan_set.model_dump(mode="json"),
                     )
                 )
                 scenario_errors.extend(
@@ -1128,6 +1187,21 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                     if onboarding is not None
                     else None
                 ),
+                # 16 §3.1: план продуктов — **тот же** объект, что composition root кладёт
+                # в снимок входов (``run_inputs.product_plan``). Без него манифест берёт
+                # значение из снимка, а на ``--until plan`` снимок писался **до**
+                # онбординга и плана в нём нет — то есть срез остался бы неотличим от
+                # полного измерения. Значение не пересчитывается: это ровно тот
+                # ``model_dump``, что уходит в снимок.
+                product_plan=(
+                    onboarding.plan_set.model_dump(mode="json")
+                    if onboarding is not None
+                    else None
+                ),
+                # 09 §13.6: срез прогона — та же величина, что вошла в ``run_id``.
+                # Без неё ``runs.run_scope`` остаётся NULL, и читатель артефакта не
+                # отличает полное измерение от ``--only-product``/``--only-failed``.
+                run_scope=run_scope,
                 refresh_policy=refresh_policy.value,
                 # ``--only-failed``: work-set ремонта — отдельный вход Ш5 (не ``urls``:
                 # провал глубокой страницы не становится seed-корнем). Пусто ⇒ прежнее
@@ -1234,7 +1308,24 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
             try:
                 instrumentation_errors.extend(
                     _snapshot_run_inputs(
-                        args, run_id, inputs=inputs, run_plan=run_plan, store=store
+                        args,
+                        run_id,
+                        inputs=inputs,
+                        run_plan=run_plan,
+                        store=store,
+                        # v2 снимка (09 §14.2): цепочка циклов — та же идентичность, что
+                        # уже вошла в ``run_id``; план продуктов — то же значение, что
+                        # уходит в ``runs.product_plan_json`` (``None`` — онбординг вне
+                        # области прогона: ``--until`` до фазы онбординга).
+                        cycle_id=cycle_id,
+                        cohort_digest=cohort_d,
+                        seeds_digest=seeds_d,
+                        previous_run_id=previous_run_id,
+                        product_plan=(
+                            onboarding.plan_set.model_dump(mode="json")
+                            if onboarding is not None
+                            else None
+                        ),
                     )
                 )
             except Exception as exc:  # noqa: BLE001 — самодостаточность не роняет прогон

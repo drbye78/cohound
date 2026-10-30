@@ -16,6 +16,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,7 @@ from core.pipeline.runner import GateRuntime, PhaseFn
 from core.ports.gateway import ContentGateway
 from core.ports.store import PlanInputsConflict, StorePort
 from core.ports.types import FetchMode
+from core.store.state_sqlite import STATE_SCHEMA_VERSION
 from core.util.cache import ContentAddressedCache
 from core.util.logging import PhaseLogger
 from core.util.rate_limit import RateLimiter
@@ -142,12 +144,26 @@ _PROMOTE_STATUSES: tuple[str, ...] = (
 RUN_YAML_FILENAME = "run.yaml"
 #: Имя снимка входов плана в каталоге прогона (самодостаточность прогона, ``03`` §A.2).
 PLAN_INPUTS_FILENAME = "plan_inputs.json"
-#: Версия формата :data:`PLAN_INPUTS_FILENAME` (для будущей эволюции без поломки чтения).
-PLAN_INPUTS_SNAPSHOT_VERSION = 1
+#: Версия формата :data:`PLAN_INPUTS_FILENAME` (эволюция без поломки чтения).
+#:
+#: 1 — идентичность пакета + ``params``/``module_weights``/``renormalized_weights``/
+#:     ``cohort``: этого хватает, чтобы пересобрать каталог/веса/когорту без пакета, но
+#:     **не** чтобы восстановить цепочку циклов (нет цикла, дайджестов, плана продуктов).
+#: 2 — добавлены ``cycle_id``/``cohort_digest``/``seeds_digest``/``previous_run_id``/
+#:     ``product_plan``/``state_schema_version`` (09 §14.2, «состав payload»).
+#: Смена версии — **граница снимка**, а не «дописать поле»: ``payload_sha256`` меняется,
+#: поэтому уже записанный снимок прежней версии не перезаписывается (O11), а факт
+#: называется видимой строкой в ``issues`` (:func:`_snapshot_run_inputs`).
+PLAN_INPUTS_SNAPSHOT_VERSION = 2
+#: Версии снимка, которые **читатель** принимает (пишется всегда только текущая).
+#: v1 читается по своим полям, новые поля у неё — ``None`` («не записано»), а не
+#: ``0``/``""``: значения не выдумываются (A3).
+PLAN_INPUTS_SUPPORTED_VERSIONS: tuple[int, ...] = (1, 2)
 
 __all__ = [
     "PLAN_INPUTS_FILENAME",
     "PLAN_INPUTS_SNAPSHOT_VERSION",
+    "PLAN_INPUTS_SUPPORTED_VERSIONS",
     "RUN_YAML_FILENAME",
     "_FALLBACK_CODE",
     # Константы и приватные алиасы
@@ -156,6 +172,7 @@ __all__ = [
     "GatewayFactory",
     "PhasesFactory",
     "PlanFactory",
+    "PlanInputsSnapshot",
     "_acquire_package_lock",
     "_add_common",
     "_add_llm_model_flag",
@@ -713,9 +730,8 @@ def _restore_plan_inputs(
             raw = None
     restored = _plan_inputs_from_payload(raw, run_id) if raw is not None else None
     if restored is not None:
-        catalog, module_weights, cohort = restored
         notes.append("каталог/веса/когорта восстановлены из БД прогона")
-        return catalog, module_weights, cohort, notes
+        return restored.catalog, restored.module_weights, restored.cohort, notes
 
     notes.append(
         "входы плана (каталог/веса/когорта) отсутствуют в БД прогона — "
@@ -725,14 +741,53 @@ def _restore_plan_inputs(
     return {}, {}, None, notes
 
 
+@dataclass(frozen=True)
+class PlanInputsSnapshot:
+    """Разобранный снимок входов плана (``run_inputs``) — одна форма для всех версий.
+
+    Поля v1: ``catalog``/``module_weights``/``cohort`` — ровно то, что нужно для
+    пересборки плана без пакета. Поля v2 (``cycle_id``/``cohort_digest``/``seeds_digest``/
+    ``previous_run_id``/``product_plan``/``state_schema_version``) добавлены, чтобы
+    снимок позволял восстановить **цепочку циклов**, а не только каталог. У v1 они
+    ``None`` — «не записано», а не ``0``/``""``: снимок v1 этих величин не нёс, и
+    подставить их значило бы выдать догадку за записанный вход (A3).
+    """
+
+    snapshot_version: int
+    run_id: str
+    catalog: dict[str, CatalogRow]
+    module_weights: dict[str, float]
+    cohort: Cohort
+    cycle_id: str | None = None
+    cohort_digest: str | None = None
+    seeds_digest: str | None = None
+    previous_run_id: str | None = None
+    product_plan: dict[str, Any] | None = None
+    state_schema_version: str | None = None
+
+
+#: Маркер «поле есть, но не того типа» — отличается от ``None`` («не записано»).
+_INVALID_SNAPSHOT_FIELD: Any = object()
+
+
+def _snapshot_text(data: Mapping[str, Any], key: str) -> Any:
+    """Строковое поле снимка: ``None`` (не записано) либо ``str``; иначе маркер порчи."""
+    value = data.get(key)
+    if value is None:
+        return None
+    return value if isinstance(value, str) else _INVALID_SNAPSHOT_FIELD
+
+
 def _plan_inputs_from_payload(
     data: Any, run_id: str
-) -> tuple[dict[str, Any], dict[str, float], Any] | None:
+) -> PlanInputsSnapshot | None:
     """Валидирует разобранный снимок входов плана и восстанавливает его значения.
 
-    Возвращает ``(catalog, module_weights, cohort)`` либо ``None`` при отсутствии/
-    частичности/несовместимой версии снимка или ``run_id``-несоответствии. Несовпадение
-    ``run_id`` трактуется как чужой снимок: значения не подставляются (не выдумываем).
+    Принимает **обе** версии формата (:data:`PLAN_INPUTS_SUPPORTED_VERSIONS`): v1 —
+    по её собственным полям (новые остаются ``None``), v2 — по новым. Возвращает
+    :class:`PlanInputsSnapshot` либо ``None`` при отсутствии/частичности/несовместимой
+    версии снимка или ``run_id``-несоответствии. Несовпадение ``run_id`` трактуется как
+    чужой снимок: значения не подставляются (не выдумываем).
 
     Единая точка валидации формата снимка (``snapshot_version``/``run_id`` + состав),
     общая для чтения из БД (``StorePort.read_plan_inputs``) и производного экспорта
@@ -740,7 +795,8 @@ def _plan_inputs_from_payload(
     """
     if not isinstance(data, Mapping):
         return None
-    if data.get("snapshot_version") != PLAN_INPUTS_SNAPSHOT_VERSION:
+    version = data.get("snapshot_version")
+    if version not in PLAN_INPUTS_SUPPORTED_VERSIONS:
         return None
     if data.get("run_id") != run_id:
         return None
@@ -765,7 +821,51 @@ def _plan_inputs_from_payload(
         module_weights = {str(key): float(value) for key, value in weights.items()}
     except (TypeError, ValueError):
         return None
-    return catalog, module_weights, cohort
+
+    # Поля v2: у снимка v1 их нет вовсе, поэтому «не записано» = ``None``. Тип проверяется
+    # только у v2 — у v1 этих ключей быть не может, и подставлять их из чужих ключей нельзя.
+    cycle_id: str | None = None
+    cohort_digest: str | None = None
+    seeds_digest: str | None = None
+    previous_run_id: str | None = None
+    state_schema_version: str | None = None
+    product_plan: dict[str, Any] | None = None
+    if version >= 2:
+        cycle_id = _snapshot_text(data, "cycle_id")
+        cohort_digest = _snapshot_text(data, "cohort_digest")
+        seeds_digest = _snapshot_text(data, "seeds_digest")
+        previous_run_id = _snapshot_text(data, "previous_run_id")
+        state_schema_version = _snapshot_text(data, "state_schema_version")
+        raw_plan = data.get("product_plan")
+        if raw_plan is not None:
+            if not isinstance(raw_plan, Mapping):
+                return None
+            product_plan = dict(raw_plan)
+        if any(
+            value is _INVALID_SNAPSHOT_FIELD
+            for value in (
+                cycle_id,
+                cohort_digest,
+                seeds_digest,
+                previous_run_id,
+                state_schema_version,
+            )
+        ):
+            return None
+
+    return PlanInputsSnapshot(
+        snapshot_version=int(version),
+        run_id=run_id,
+        catalog=catalog,
+        module_weights=module_weights,
+        cohort=cohort,
+        cycle_id=cycle_id,
+        cohort_digest=cohort_digest,
+        seeds_digest=seeds_digest,
+        previous_run_id=previous_run_id,
+        product_plan=product_plan,
+        state_schema_version=state_schema_version,
+    )
 
 
 def _plan_inputs_sha256(payload: Mapping[str, Any]) -> str:
@@ -787,6 +887,11 @@ def _snapshot_run_inputs(
     inputs: RunInputs,
     run_plan: RunPlan,
     store: Any = None,
+    cycle_id: str | None = None,
+    cohort_digest: str | None = None,
+    seeds_digest: str | None = None,
+    previous_run_id: str | None = None,
+    product_plan: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Пишет снимок входов прогона: в БД прогона (источник истины) и в ``runs/{run_id}/``.
 
@@ -803,7 +908,24 @@ def _snapshot_run_inputs(
       прогон), идентичный — оставляется как есть;
     * ``plan_inputs.json`` — **производный экспорт** того же снимка (детерминированный
       JSON, ``sort_keys=True``/``ensure_ascii=False``); читатели на него больше не
-      опираются (источник — БД), но файл сохраняется как человекочитаемый артефакт.
+      опираются (источник — БД), но файл сохраняется как человекочитаемый артефакт и
+      держится **той же формы**, что строка в БД (второго формата быть не должно).
+
+    **Снимок другой версии формата не перезаписывается.** Если у ``run_id`` уже лежит
+    снимок версии, отличной от :data:`PLAN_INPUTS_SNAPSHOT_VERSION` (например, v1 после
+    подъёма формата до v2), запись **не выполняется**: ``payload_sha256`` заведомо другой,
+    и «разрешить конфликт, если отличается только версия» было бы ослаблением O11 —
+    снимок обязан остаться ровно тем, что записано первым. Факт называется видимой
+    строкой ``snapshot: run_inputs_v{n}_preserved: …`` в ``issues``, а прогон
+    продолжается (resume завершённого/прерванного прогона не ломается).
+
+    :param cycle_id: эффективный цикл прогона (тот же, что вошёл в ``run_id``).
+    :param cohort_digest: дайджест состава когорты (слагаемое ``run_id``).
+    :param seeds_digest: дайджест эффективного seed-набора (слагаемое ``run_id``).
+    :param previous_run_id: предшественник из lineage (``None`` — не записан).
+    :param product_plan: сериализованный ``ProductPlanSet`` (mode/scope/reasons) — то же
+        значение и та же форма, что уходят в ``runs.product_plan_json``; второй расчёт
+        не заводится. ``None`` — план продуктов не резолвился в этом прогоне.
 
     Никогда не бросает исключений: любая ошибка записи возвращается строкой для
     ``instrumentation_errors`` прогона (сбой снимка не подменяет код возврата).
@@ -814,8 +936,44 @@ def _snapshot_run_inputs(
     except OSError as exc:
         return [f"snapshot: не удалось создать каталог прогона {run_dir}: {_concise(exc)}"]
 
-    payload = _plan_inputs_payload(run_id, inputs=inputs, run_plan=run_plan)
+    payload = _plan_inputs_payload(
+        run_id,
+        inputs=inputs,
+        run_plan=run_plan,
+        cycle_id=cycle_id,
+        cohort_digest=cohort_digest,
+        seeds_digest=seeds_digest,
+        previous_run_id=previous_run_id,
+        product_plan=product_plan,
+    )
     issues = _snapshot_run_yaml(args.run_yaml, run_dir)
+
+    # O11 (09 §3.3/§14.2): сохранённый снимок — идентичность прогона. Сначала читаем его,
+    # чтобы отличить «версионную границу формата» (запись не выполняется, факт назван) от
+    # «того же формата, но другого содержимого» (конфликт дайджеста). Чтение best-effort:
+    # не удалось — идём в запись, конфликт всё равно поймается ниже и ничего не перезапишет.
+    stored: Any = None
+    if store is not None:
+        try:
+            stored = store.read_plan_inputs(run_id)
+        except Exception as exc:  # noqa: BLE001 — чтение best-effort, снимок не роняет прогон
+            issues.append(
+                f"snapshot: не удалось прочитать сохранённый снимок входов: {_concise(exc)}"
+            )
+    stored_version = (
+        stored.get("snapshot_version") if isinstance(stored, Mapping) else None
+    )
+    if isinstance(stored_version, int) and stored_version != PLAN_INPUTS_SNAPSHOT_VERSION:
+        issues.append(
+            f"snapshot: run_inputs_v{stored_version}_preserved: run_id={run_id};"
+            f" сохранён снимок формата {stored_version}, текущий"
+            f" {PLAN_INPUTS_SNAPSHOT_VERSION} — не перезаписан (иммутабельность, O11)"
+        )
+        # Производный экспорт — та же форма, что в БД: пишем сохранённый снимок, а не
+        # текущий, иначе файл и строка разошлись бы по версии формата.
+        issues.extend(_snapshot_plan_inputs(run_dir, stored))
+        return issues
+
     issues.extend(_snapshot_plan_inputs(run_dir, payload))
     if store is not None:
         try:
@@ -834,6 +992,10 @@ def _snapshot_run_inputs(
                 " снимок входов иммутабелен — нужен новый run_id, а не перезапись"
                 " (O11, 09 §3.3)"
             )
+            # Экспорт обязан описывать **сохранённый** снимок, а не предъявленный:
+            # иначе файл утверждал бы о прогоне то, чего в БД нет.
+            if isinstance(stored, Mapping):
+                issues.extend(_snapshot_plan_inputs(run_dir, stored))
         except Exception as exc:  # noqa: BLE001 — самодостаточность best-effort
             issues.append(
                 f"snapshot: не удалось записать входы плана в БД прогона: {_concise(exc)}"
@@ -872,7 +1034,10 @@ def _snapshot_plan_inputs(run_dir: Path, payload: Mapping[str, Any]) -> list[str
     """Пишет ``plan_inputs.json`` — производный экспорт снимка плановых входов (P1).
 
     Источник истины — таблица ``run_inputs`` в БД прогона; файл лишь удобен человеку и
-    больше не читается пост-хок командами.
+    больше не читается пост-хок командами. Поэтому ``payload`` — **тот же** снимок, что
+    лежит (или ляжет) в БД: при сохранённом снимке другой версии формата
+    (:func:`_snapshot_run_inputs`) сюда передаётся именно он, а не текущий — иначе файл и
+    строка разошлись бы по версии, то есть завёлся бы второй формат.
     """
     target = run_dir / PLAN_INPUTS_FILENAME
     try:
@@ -884,16 +1049,38 @@ def _snapshot_plan_inputs(run_dir: Path, payload: Mapping[str, Any]) -> list[str
 
 
 def _plan_inputs_payload(
-    run_id: str, *, inputs: RunInputs, run_plan: RunPlan
+    run_id: str,
+    *,
+    inputs: RunInputs,
+    run_plan: RunPlan,
+    cycle_id: str | None = None,
+    cohort_digest: str | None = None,
+    seeds_digest: str | None = None,
+    previous_run_id: str | None = None,
+    product_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Сериализует минимальный снимок входов плана (без всего :class:`RunInputs`).
 
-    Ключи: ``snapshot_version`` (версия формата), идентичность прогона
-    (``run_id``/``case_id``/``package_id``/``package_version``), и то, что нужно для
-    пересборки без пакета — ``params`` (``CatalogRow.model_dump(mode="json")``),
-    ``module_weights``/``renormalized_weights`` и ``cohort`` (``Cohort``). Ключей
-    ``params``/``cohort`` достаточно для :func:`_plan_inputs_from_payload`; прочие —
-    провенанс, а не «истина о продукте».
+    Ключи (``snapshot_version = 2``, 09 §14.2):
+
+    * ``snapshot_version`` — версия формата;
+    * идентичность прогона — ``run_id``/``case_id``/``package_id``/``package_version``,
+      ``anchor``/``products``;
+    * то, что нужно для пересборки без пакета — ``params``
+      (``CatalogRow.model_dump(mode="json")``), ``module_weights``/
+      ``renormalized_weights`` и ``cohort`` (``Cohort``);
+    * то, что нужно для восстановления **цепочки циклов** — ``cycle_id`` (эффективный
+      цикл прогона, тот же материал, что у ``run_id``), ``cohort_digest``/``seeds_digest``
+      (слагаемые ``run_id``), ``previous_run_id`` (предшественник из lineage; ``None`` —
+      не записан), ``product_plan`` (сериализованный ``ProductPlanSet``: mode/scope/
+      reasons по продуктам — то же значение и форма, что уходят в
+      ``runs.product_plan_json``), ``state_schema_version``
+      (:data:`core.store.state_sqlite.STATE_SCHEMA_VERSION` — схема ``state.db``, в
+      которой живёт цепочка).
+
+    Ключей ``params``/``cohort`` достаточно для :func:`_plan_inputs_from_payload`; прочие —
+    провенанс, а не «истина о продукте». Отсутствующее значение остаётся ``None``: снимок
+    не выдумывает ни цикла, ни дайджеста (A3).
     """
     return {
         "snapshot_version": PLAN_INPUTS_SNAPSHOT_VERSION,
@@ -907,6 +1094,19 @@ def _plan_inputs_payload(
         "module_weights": dict(run_plan.module_weights),
         "renormalized_weights": dict(run_plan.renormalized_weights),
         "cohort": run_plan.cohort.model_dump(mode="json"),
+        # v2: цепочка циклов. Значения приходят из той же идентичности, что уже вошла в
+        # ``run_id`` (второго расчёта нет), план продуктов — то же значение, что уходит в
+        # ``runs.product_plan_json`` (``build_manifest`` читает тот же атрибут ``plan``).
+        "cycle_id": cycle_id,
+        "cohort_digest": cohort_digest,
+        "seeds_digest": seeds_digest,
+        "previous_run_id": previous_run_id,
+        "product_plan": (
+            dict(product_plan)
+            if product_plan is not None
+            else getattr(run_plan, "product_plan", None)
+        ),
+        "state_schema_version": STATE_SCHEMA_VERSION,
     }
 
 
@@ -2201,6 +2401,8 @@ def _resolve_phases(
     pdf_pipeline: PdfPipeline | None = None,
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
+    product_plan: Mapping[str, Any] | None = None,
+    run_scope: str | None = None,
     refresh_policy: str = "auto",
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     execution_contract_digest: str | None = None,
@@ -2249,6 +2451,17 @@ def _resolve_phases(
     :param state: открытый ``ProductStatePort`` пакета (09 §4.1); ``None`` → инкрементальный
         субстрат корпуса выключен (dry-run/``crawl`` без состояния).
     :param product_modes: ``product_id → mode`` из onboarding-плана; ``None`` → все ``new``.
+    :param run_scope: срез прогона (``full`` | ``only_failed`` | ``product:<id>``) из
+        :func:`core.pipeline.run_identity.resolve_run_scope` — тот же, что вошёл в ``run_id``.
+        ``None`` → манифест пробует другие носители и оставляет ``None``, если их нет:
+        значение не подставляется догадкой (``full`` по умолчанию выдал бы полное
+        измерение за срез).
+    :param product_plan: сериализованный ``ProductPlanSet`` (mode/scope/reasons по продуктам)
+        — тот же объект, что composition root кладёт в снимок входов (``run_inputs``).
+        Протягивается в Ш9 → ``RunManifest.product_plan``/``runs.product_plan_json``; без
+        него срез ``--only-product`` неотличим от полного измерения, не заглядывая в
+        ``state.db``. ``None`` → значение берётся из снимка входов (Ш9), а если снимка нет —
+        остаётся ``None``: план не реконструируется из ``product_modes`` (там только режим).
     :param refresh_policy: политика наблюдения прогона (значение ``RefreshPolicy``).
     :param only_failed_repairs: ``--only-failed`` — work-set ремонта ``product_id → [url]``
         (см. :func:`_only_failed_work_set`); идёт в Ш5 отдельным входом. ``None`` ⇒
@@ -2384,6 +2597,12 @@ def _resolve_phases(
         # → build_corpus. ``state=None`` (dry-run/``crawl``) — поведение байт-в-байт.
         "state": state,
         "product_modes": product_modes,
+        # 16 §3.1/09 §14.2: план продуктов — тот же объект, что уходит в снимок входов.
+        "product_plan": product_plan,
+        # 09 §13.6/16 §3.1: срез прогона — та же величина, что вошла в ``run_id``
+        # (``resolve_run_scope``); без неё ``runs.run_scope`` остаётся NULL и срез
+        # неотличим от полного измерения.
+        "run_scope": run_scope,
         "refresh_policy": refresh_policy,
         # ``--only-failed``: work-set ремонта (провалы из сеанса либо ``url_state``) —
         # отдельный вход Ш5: ремонт идёт известными depth-0 URL, а не обходом корней.

@@ -92,7 +92,12 @@ from core.pipeline.registry import (
     registry_wave,
     resolve_registry_ids,
 )
-from core.pipeline.report import build_manifest, compact_search_effort, write_reports
+from core.pipeline.report import (
+    build_manifest,
+    compact_search_effort,
+    declared_identity_digests,
+    write_reports,
+)
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
@@ -455,6 +460,45 @@ def _observed_index_versions(store: Any, index_build_id: str | None) -> dict[str
         )
         if value
     }
+
+
+def _product_plan_provenance(
+    store: Any, run_id: str, notes: list[str]
+) -> dict[str, Any] | None:
+    """План продуктов прогона из снимка входов (``run_inputs.product_plan``).
+
+    ``RunManifest.product_plan``/``runs.product_plan_json`` были объявлены, писались и
+    читались, но **производителя не было**: фаза отчёта значение не передавала, и колонка
+    оставалась ``NULL`` навсегда — тот же класс «объявлено, но не написано», что закрывался
+    у ``cycle_id``/``previous_run_id``. Без плана читатель артефакта не отличал полное
+    измерение от среза ``--only-product``, не заглядывая в ``state.db``.
+
+    Источник — **снимок входов плана** (``run_inputs``), который composition root пишет до
+    исполнения фаз из ``onboarding.plan_set.model_dump(mode="json")``. Это ровно то же
+    значение, а не второй расчёт: снимок v2 и ``runs.product_plan_json`` обязаны совпадать,
+    иначе на один прогон было бы два разных «плана продуктов».
+
+    ``None`` — снимка нет, он v1 (поле не носилось) либо значение не словарь: «не
+    записано». Реконструировать план из ``product_modes`` (``product_id → mode``) запрещено:
+    там нет ``scope``/``reasons``/``blocked``, и такая подстановка была бы догадкой (A3).
+    Сбой чтения — замечание в ``notes``, а не падение фазы (как у провенанса краула).
+    """
+    try:
+        payload = store.read_plan_inputs(run_id)
+    except Exception as exc:  # noqa: BLE001 — провенанс не роняет отчёт
+        notes.append(
+            f"product_plan: {type(exc).__name__}: {exc} — план продуктов не прочитан"
+        )
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    # Снимок адресуется ``run_id`` и в строке БД, и в самом payload: расхождение значит
+    # «чужой/испорченный снимок», и значение из него не подставляется (как в
+    # ``_plan_inputs_from_payload``).
+    if payload.get("run_id") != run_id:
+        return None
+    raw = payload.get("product_plan")
+    return dict(raw) if isinstance(raw, Mapping) else None
 
 
 def _crawl_provenance(
@@ -883,6 +927,8 @@ def build_phases(
     previous_store: Any = None,
     change_class: str | None = None,
     cycle_id: str | None = None,
+    run_scope: str | None = None,
+    product_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -998,6 +1044,14 @@ def build_phases(
         в ``run_id``, поэтому манифест обязан его называть: без поля два прогона разных
         циклов различались только ``run_id``. Источник — строка lineage (единственный
         писатель), см. :func:`_lineage_provenance`.
+    :param product_plan: сериализованный ``ProductPlanSet``
+        (``onboarding.plan_set.model_dump(mode="json")``) — провенанс среза прогона
+        (16 §3.1): без него полное измерение неотличимо от ``--only-product``, не
+        заглядывая в ``state.db``. Явный аргумент приоритетен; ``None`` — значение берётся
+        из снимка входов плана (``run_inputs.product_plan``), который composition root
+        пишет тем же значением до исполнения фаз (:func:`_product_plan_provenance`).
+        Пересчёт из ``product_modes`` запрещён: там только режим, без ``scope``/
+        ``reasons``/``blocked`` — это была бы догадка (A3).
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -1411,6 +1465,34 @@ def build_phases(
             declared_change=change_class,
             notes=provenance_notes,
         )
+        # 09 §12.5: дайджесты когорты и seed-набора — слагаемые ``run_id`` и поля
+        # ``execution_contract_digest``. Прежде их не было ни на манифесте, ни в ``runs``,
+        # и ``hound diff`` называл ось невосстановимой вместо причины. Считаются теми же
+        # функциями и на тех же объявленных входах, что у composition root (второй
+        # формулы нет), и уходят на манифест готовыми.
+        identity_cohort, identity_seeds = declared_identity_digests(
+            inputs,
+            package_dir=package_dir,
+            urls=urls,
+            domain_profiles=domain_profiles,
+        )
+        # 16 §3.1: план продуктов — провенанс среза. Значение приходит от composition
+        # root, а если его нет — читается из снимка входов плана, куда тот же
+        # composition root положил ``onboarding.plan_set.model_dump(mode="json")``
+        # (одно значение, а не второй расчёт; см. :func:`_product_plan_provenance`).
+        # Приоритет — **снимок**, а не аргумент: снимок входов иммутабелен (O11) и
+        # фиксирует план, объявленный в начале прогона. На resume preflight считается
+        # заново по сдвинувшемуся состоянию (``last_corpus_run_id`` уже стоит), и его план
+        # описывает **продолжение**, а не исполненное измерение: отдать его на манифест
+        # значило бы записать ``mode=full`` прогону, который шёл как ``new``. Аргумент —
+        # резерв ровно на один случай: первый проход остановился до онбординга
+        # (``--until plan``), снимок записан без плана и перезаписаться не может; тогда
+        # плана нет ни в одном носителе, а измерительных фаз до этого не исполнялось —
+        # то есть план возобновлённого прохода и есть план исполненного прогона.
+        product_plan_provenance = (
+            _product_plan_provenance(ctx.store, plan.run_id, provenance_notes)
+            or (dict(product_plan) if product_plan is not None else None)
+        )
         manifest = build_manifest(
             inputs=inputs,
             plan=plan,
@@ -1466,8 +1548,19 @@ def build_phases(
             # 09 §12.3/§13: база сравнения прогона и класс изменения (см. helper выше).
             previous_run_id=lineage_previous,
             change_class=lineage_change,
+            # 09 §13.6/16 §3.1: **срез** прогона (``full`` | ``only_failed`` |
+            # ``product:<id>``). Колонка ``runs.run_scope`` и поле манифеста были
+            # объявлены, писались и читались, но производителя не было: значение ни разу
+            # не передавалось сюда, и читатель артефакта не отличал полное измерение от
+            # среза ``--only-product``. Берётся из той же идентичности, что вошла в
+            # ``run_id`` (``resolve_run_scope``), — второй формулы нет.
+            run_scope=run_scope,
             # 09 §2.4/§6.2: цикл прогона — тот же материал, что вошёл в ``run_id``.
             cycle_id=lineage_cycle,
+            # 09 §12.5: дайджесты когорты и seed-набора — тот же материал ``run_id``
+            # (проекция объявленного входа; см. helper выше).
+            cohort_digest=identity_cohort,
+            seeds_digest=identity_seeds,
             # Вариант 2: принятия риска, которыми прогон достиг ❌ класса bounded
             # (product → actor). Только продукты плана: подпись продукта вне плана
             # прогоном не использовалась.
@@ -1481,6 +1574,8 @@ def build_phases(
             # читалась отчётом, но никем не писалась (всегда ``null``); источник — durable
             # провенанс сеанса, поэтому значение переживает resume и не выдумывается.
             search_effort=compact_search_effort(_serp_facts(ctx.store, plan.run_id)),
+            # 16 §3.1: план продуктов — тот же JSON, что лёг в снимок входов (см. выше).
+            product_plan=product_plan_provenance,
         )
         # §13/точки интеграции: политика гейтов и waiver-строки — в манифест, чтобы
         # делегирование гейта наружу было видно в артефакте, а не подразумевалось.

@@ -8,6 +8,11 @@
    штатным API ``sqlite3.Connection.backup`` (не копированием файла) — иначе
    можно получить рассогласование WAL/SHM (§A.2, §R7). Секреты в архив не
    попадают (см. :data:`_SECRET_NAMES`/:data:`_SECRET_SUFFIXES`).
+   По запросу в бандл входит и **durable-состояние пакета**
+   (``state/{package_id}/state.db``) отдельным членом :data:`STATE_MEMBER`
+   (``state/state.db``) — тем же консистентным снапшотом; восстанавливается оно
+   **только явно** (:func:`restore_state`), а не как побочный эффект
+   восстановления прогона (09 §14.4).
 2. **GC индексных сборок** (``index_store/{package}/{build}/{product_id}/``).
    Старые сборки не удаляются «как попало» (§13): reference-aware политика удаляет
    только партиции, **не входящие ни в одну** композицию ``_compositions/*.json``,
@@ -24,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -35,16 +41,31 @@ from pathlib import Path, PurePosixPath
 from core.util.index_layout import COMPOSITIONS_DIR
 
 __all__ = [
+    "STATE_MEMBER",
     "CompositionGcResult",
+    "archive_has_state",
     "backup_run",
     "gc_index_builds",
     "gc_index_compositions",
     "list_builds",
     "restore_run",
+    "restore_state",
 ]
 
 #: Имя файла операционной БД прогона (§A.2).
 _DB_NAME = "cohound.db"
+
+#: Имя файла durable-состояния пакета (``state/{package_id}/state.db``, 09 §4.1).
+_STATE_DB_NAME = "state.db"
+
+#: Зарезервированный префикс архива под durable-состояние пакета (09 §14.4).
+#: Отдельный префикс нужен, чтобы :func:`restore_run` не смешивал файлы прогона с
+#: состоянием пакета: восстановление состояния — **явное** действие (:func:`restore_state`
+#: / ``state_into``), а не побочный эффект восстановления прогона.
+_STATE_PREFIX = "state"
+
+#: Единственный член архива, несущий состояние: ``state/state.db``.
+STATE_MEMBER = f"{_STATE_PREFIX}/{_STATE_DB_NAME}"
 
 #: Фиксированная метка времени членов архива — воспроизводимость бандла.
 #: Минимально допустимая для ZIP дата (MS-DOS epoch).
@@ -116,6 +137,13 @@ def _collect_run_entries(run_dir: Path, db_snapshot: Path | None, skip: Path) ->
     ``cohound.db`` подменяется консистентным снапшотом; прочие файлы читаются
     как есть. ``skip`` — путь самого архива (если он внутри ``run_dir``),
     чтобы не включить бандл в себя.
+
+    Префикс ``state/`` в архиве зарезервирован за durable-состоянием пакета
+    (:data:`STATE_MEMBER`), поэтому файл прогона с таким путём — отказ, а не тихий
+    пропуск: иначе он молча не попал бы в бандл (или был бы прочитан как состояние
+    пакета при восстановлении).
+
+    :raises ValueError: в каталоге прогона есть файл под зарезервированным префиксом.
     """
     entries: dict[str, bytes] = {}
     if db_snapshot is not None and db_snapshot.exists():
@@ -129,6 +157,12 @@ def _collect_run_entries(run_dir: Path, db_snapshot: Path | None, skip: Path) ->
         if _is_excluded(rel):
             continue
         posix = rel.as_posix()
+        if rel.parts and rel.parts[0] == _STATE_PREFIX:
+            raise ValueError(
+                f"каталог прогона содержит {posix!r} в префиксе {_STATE_PREFIX!r}, "
+                "зарезервированном за durable-состоянием пакета (09 §14.4); бандл без "
+                "потери этого файла невозможен"
+            )
         if posix == _DB_NAME:
             # Сырую БД не берём: вместо неё — консистентный снапшот выше.
             continue
@@ -136,7 +170,12 @@ def _collect_run_entries(run_dir: Path, db_snapshot: Path | None, skip: Path) ->
     return entries
 
 
-def backup_run(run_dir: str | Path, dest: str | Path | None = None) -> Path:
+def backup_run(
+    run_dir: str | Path,
+    dest: str | Path | None = None,
+    *,
+    state_db: str | Path | None = None,
+) -> Path:
     """Создаёт воспроизводимый бандл прогона ``runs/{run_id}/``.
 
     Содержимое архива (члены — относительно корня прогона):
@@ -147,15 +186,35 @@ def backup_run(run_dir: str | Path, dest: str | Path | None = None) -> Path:
     - **не** включаются секреты (``.env*``, ``*.pem``, ``*.key``, …) и sidecar-файлы
       SQLite (``cohound.db-wal``/``-shm``) — они уже учтены снапшотом.
 
+    ``state_db`` (09 §14.4) добавляет **durable-состояние пакета** отдельным членом
+    :data:`STATE_MEMBER` (``state/state.db``) — тоже консистентным снапшотом
+    (:func:`_snapshot_db`), а не копией файла: у живой БД есть ``-wal``, и копия
+    основного файла без него теряет зафиксированные транзакции. Состояние лежит под
+    отдельным префиксом, чтобы восстановление прогона его не смешивало с файлами
+    прогона (см. :func:`restore_run`).
+
+    Байтовая детерминированность бандла сохраняется для файлов прогона; снимок
+    состояния отражает **момент** вызова (это данные, а не воспроизводимый артефакт).
+
     :param run_dir: каталог прогона.
     :param dest: файл архива; если ``None`` — соседний ``{run_id}.zip``; если
         существующий каталог — ``{run_id}.zip`` внутри него.
+    :param state_db: ``state/{package_id}/state.db`` для включения в бандл;
+        ``None`` — бандл без состояния.
     :returns: путь созданного ``.zip``.
-    :raises FileNotFoundError: если ``run_dir`` не является каталогом.
+    :raises FileNotFoundError: если ``run_dir`` не является каталогом либо заданный
+        ``state_db`` не существует (тихий пропуск состояния запрещён: отсутствие
+        должно быть объявлено вызывающим, а не проглочено здесь).
+    :raises ValueError: в каталоге прогона есть файл под зарезервированным префиксом.
     """
     run_path = Path(run_dir)
     if not run_path.is_dir():
         raise FileNotFoundError(f"каталог прогона не найден: {run_path}")
+    state_path: Path | None = None
+    if state_db is not None:
+        state_path = Path(state_db)
+        if not state_path.is_file():
+            raise FileNotFoundError(f"состояние не найдено: {state_path}")
 
     if dest is None:
         archive = run_path.parent / f"{run_path.name}.zip"
@@ -176,6 +235,10 @@ def backup_run(run_dir: str | Path, dest: str | Path | None = None) -> Path:
         else:
             db_snapshot = None
         entries = _collect_run_entries(run_path, db_snapshot, archive)
+        if state_path is not None:
+            state_snapshot = Path(tmp) / f"state-{_STATE_DB_NAME}"
+            _snapshot_db(state_path, state_snapshot)
+            entries[STATE_MEMBER] = state_snapshot.read_bytes()
 
     # Детерминированный порядок членов + фиксированная метка времени.
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -214,26 +277,128 @@ def restore_run(archive: str | Path, dest_dir: str | Path) -> Path:
     Каждый член архива проверяется на path traversal (:func:`_validate_member`):
     ``..``, абсолютные пути и drive/UNC-префиксы отклоняются исключением.
 
-    :raises ValueError: если архив содержит небезопасный член.
+    Члены под префиксом ``state/`` (:data:`STATE_MEMBER`) в ``dest_dir`` **не пишутся**:
+    durable-состояние пакета — не файл прогона, и его восстановление поверх живой
+    ``state.db`` обязано быть произнесено отдельно (:func:`restore_state`). Любой другой
+    член в этом префиксе — отказ, а не тихий пропуск.
+
+    :raises ValueError: если архив содержит небезопасный либо неожиданный член.
     """
-    archive_path = Path(archive)
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    base = dest.resolve()
+    _extract_members(Path(archive), run_dir=dest, state_dir=None)
+    return dest
 
-    with zipfile.ZipFile(archive_path, "r") as zf:
+
+def restore_state(
+    archive: str | Path,
+    state_dir: str | Path,
+    *,
+    overwrite: bool = False,
+) -> Path:
+    """Восстанавливает **только** durable-состояние пакета из бандла прогона.
+
+    Явная операция: файлы прогона не распаковываются. Цель — ``state_dir/state.db``
+    (например ``state/{package_id}/``), т. е. ровно та раскладка, которую читает
+    :func:`core.store.state_sqlite.state_db_path`.
+
+    Перезапись существующей ``state.db`` требует ``overwrite=True``: это то действие,
+    которое обязано быть произнесено (в CLI — ``--force``), а не сделано молча.
+
+    :returns: путь записанного ``state.db``.
+    :raises ValueError: архив не содержит :data:`STATE_MEMBER` либо член небезопасен.
+    :raises FileExistsError: целевая ``state.db`` (или её sidecar ``-wal``/``-shm``)
+        существует, а ``overwrite`` не задан.
+    """
+    target = Path(state_dir)
+    archive_path = Path(archive)
+    if not archive_has_state(archive_path):
+        raise ValueError(f"в архиве нет состояния ({STATE_MEMBER}): {archive_path}")
+    _extract_members(archive_path, run_dir=None, state_dir=target, overwrite_state=overwrite)
+    return target / _STATE_DB_NAME
+
+
+def archive_has_state(archive: str | Path) -> bool:
+    """Есть ли в архиве снимок durable-состояния пакета (:data:`STATE_MEMBER`)."""
+    with zipfile.ZipFile(Path(archive), "r") as zf:
+        return any(
+            PurePosixPath(info.filename.replace("\\", "/")).as_posix() == STATE_MEMBER
+            for info in zf.infolist()
+        )
+
+
+def _write_state_snapshot(data: bytes, state_dir: Path, *, overwrite: bool) -> None:
+    """Пишет снимок состояния в ``state_dir/state.db`` (замена файла — атомарная).
+
+    Перезапись живой БД требует ``overwrite``. Вместе с основным файлом снимаются
+    устаревшие sidecar ``-wal``/``-shm``: они принадлежат **заменяемой** БД, и оставить
+    их значило бы попросить SQLite применить чужой WAL к новому файлу.
+
+    :raises FileExistsError: целевой файл (или его sidecar) существует без ``overwrite``.
+    """
+    target = state_dir / _STATE_DB_NAME
+    sidecars = [
+        target.with_name(f"{target.name}{suffix}") for suffix in ("-wal", "-shm")
+    ]
+    present = [path for path in [target, *sidecars] if path.exists()]
+    if present and not overwrite:
+        names = ", ".join(str(path) for path in present)
+        raise FileExistsError(
+            f"состояние уже существует: {names} — перезапись требует явного "
+            "подтверждения (--force)"
+        )
+    state_dir.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.incoming")
+    tmp.write_bytes(data)
+    os.replace(tmp, target)
+    for path in sidecars:
+        if path.exists():
+            path.unlink()
+
+
+def _extract_members(
+    archive: Path,
+    *,
+    run_dir: Path | None,
+    state_dir: Path | None,
+    overwrite_state: bool = False,
+) -> None:
+    """Распаковывает члены архива по назначениям: файлы прогона ‖ снимок состояния.
+
+    Валидация членов одна — :func:`_validate_member`; второй копии проверки нет.
+    ``run_dir=None`` — файлы прогона не пишутся; ``state_dir=None`` — снимок состояния
+    пропускается (но остаётся в архиве, см. :func:`archive_has_state`).
+
+    :raises ValueError: небезопасный член либо неожиданный член в префиксе ``state/``.
+    :raises FileExistsError: см. :func:`_write_state_snapshot`.
+    """
+    base = None if run_dir is None else run_dir.resolve()
+
+    with zipfile.ZipFile(archive, "r") as zf:
         for info in zf.infolist():
             rel = _validate_member(info.filename)
             if info.is_dir() or rel.name == "":
                 continue
-            target = dest.joinpath(*rel.parts)
+            if rel.parts[0] == _STATE_PREFIX:
+                if rel.as_posix() != STATE_MEMBER:
+                    raise ValueError(
+                        f"неожиданный член архива в префиксе {_STATE_PREFIX!r}: "
+                        f"{info.filename!r}"
+                    )
+                if state_dir is None:
+                    continue
+                _write_state_snapshot(
+                    zf.read(info), state_dir, overwrite=overwrite_state
+                )
+                continue
+            if run_dir is None or base is None:
+                continue
+            target = run_dir.joinpath(*rel.parts)
             resolved = target.resolve()
             if not (resolved == base or base in resolved.parents):
                 raise ValueError(f"небезопасный член архива (вне назначения): {info.filename!r}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(zf.read(info))
-
-    return dest
 
 
 def list_builds(index_root: str | Path, package: str) -> list[tuple[str, int, float]]:

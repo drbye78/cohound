@@ -86,13 +86,22 @@ from core.pipeline.compute import (
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
-from core.pipeline.digests import catalog_digest as _catalog_digest
+from core.pipeline.digests import (
+    catalog_digest as _catalog_digest,
+)
+from core.pipeline.digests import (
+    cohort_digest as _cohort_digest,
+)
 from core.pipeline.digests import (
     scoring_policy_version as _declared_scoring_policy_version,
+)
+from core.pipeline.digests import (
+    seeds_digest as _seeds_digest,
 )
 from core.pipeline.evaluate import REUSE_UNCONFIRMED_REASON
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
+from core.pipeline.onboarding import load_effective_seeds as _load_effective_seeds
 from core.pipeline.partial_docs import (
     partial_docs_summary,
     write_partial_docs_artifact,
@@ -133,6 +142,7 @@ __all__ = [
     "collect_run_products",
     "compact_search_effort",
     "crawl_control_digest",
+    "declared_identity_digests",
     "diff_boundary_violations",
     "manifest_payload",
     "render_battle_card",
@@ -740,6 +750,60 @@ def compact_search_effort(facts: Any) -> dict[str, Any] | None:
     }
 
 
+def declared_identity_digests(
+    inputs: RunInputs,
+    *,
+    package_dir: str | Path | None = None,
+    urls: Mapping[str, Sequence[str]] | None = None,
+    domain_profiles: Mapping[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Дайджесты когорты и seed-набора — **те же**, из которых выведен ``run_id``.
+
+    09 §12.5/§13: ``cohort_digest``/``seeds_digest`` — поля ``execution_contract_digest``
+    и слагаемые :func:`core.pipeline.plan.derive_run_id`. Прежде они не попадали ни на
+    манифест, ни в ``runs``, поэтому при расхождении контракта ``hound diff`` не мог
+    назвать ось и печатал «предел диагностики» вместо причины.
+
+    Здесь **нет второй формулы**: вызываются ровно те функции, которыми composition root
+    считает те же величины для ``run_id`` (:func:`core.pipeline.digests.cohort_digest` по
+    ``inputs.cohort`` и :func:`core.pipeline.digests.seeds_digest` по результату
+    :func:`core.pipeline.onboarding.load_effective_seeds`), и на тех же объявленных входах:
+    ``inputs.cohort`` + ``run.case_id``/``run.cohort_ref`` и эффективный seed-набор
+    (``urls`` — операторский ``--urls``, он **полностью** заменяет пакетный набор).
+    Поэтому манифест публикует проекцию объявленного входа, а не результат второго расчёта.
+
+    :param package_dir: каталог пакета — источник пакетного seed-набора. ``None`` без
+        ``urls`` означает, что набор не из чего разрешить: ``seeds_digest`` тогда ``None``
+        («не записано»), а не дайджест пустого набора (это разные факты).
+    :param urls: операторский корпус (``product_id → [url]``). Пустой mapping трактуется
+        как «переопределения нет»: пустой ``{}`` приходит и тогда, когда ``--urls`` не
+        задавался вовсе (composition root всегда передаёт mapping), и подменять им
+        пакетный набор было бы догадкой. Любая последовательность URL приводится к
+        ``list`` **на месте вызова**: :func:`core.pipeline.onboarding.load_effective_seeds`
+        объявляет ``Mapping[str, list[str]]``, и расширять её сигнатуру ради удобства
+        вызывающего — значит менять чужой контракт из-за формы входа.
+    :returns: пара ``(cohort_digest, seeds_digest)``.
+    """
+    run = inputs.run
+    cohort = _cohort_digest(
+        inputs.cohort,
+        case_id=run.case_id,
+        cohort_ref=getattr(run, "cohort_ref", None),
+    )
+    override = (
+        {str(key): list(value) for key, value in urls.items()} if urls else None
+    )
+    if override is None and package_dir is None:
+        return cohort, None
+    seeds_config, _warnings = _load_effective_seeds(
+        package_dir if package_dir is not None else "",
+        run.products,
+        profiles=domain_profiles,
+        urls_override=override,
+    )
+    return cohort, _seeds_digest(seeds_config)
+
+
 def build_manifest(
     *,
     inputs: RunInputs,
@@ -775,6 +839,8 @@ def build_manifest(
     previous_run_id: str | None = None,
     change_class: str | None = None,
     cycle_id: str | None = None,
+    cohort_digest: str | None = None,
+    seeds_digest: str | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -871,6 +937,11 @@ def build_manifest(
       ``run_id``. Источник тот же — строка lineage (писатель у неё один); ``None`` — не
       записано, и подменять его на ``snapshot_date`` запрещено: эффективный цикл мог быть
       задан ``--cycle-id``/``run.yaml`` и отличается от даты снимка.
+    * 09 §12.5/§13 — ``cohort_digest``/``seeds_digest``: слагаемые ``run_id`` и поля
+      ``execution_contract_digest``. Приходят **готовыми** (:func:`declared_identity_digests`
+      считает их теми же функциями и на тех же объявленных входах, что composition root для
+      ``run_id``); здесь не пересчитываются — манифест публикует проекцию входа, а не второй
+      расчёт. Без них ``hound diff`` не мог назвать ось расхождения контракта.
 
     Функция детерминирована: все встраиваемые JSON-фрагменты сериализуются
     ``sort_keys=True`` (R7/§13), списки нормализуются сортировкой; единственный
@@ -1171,6 +1242,13 @@ def build_manifest(
         # тот же (строка lineage); ``None`` не подменяется ``snapshot_date``: эффективный
         # цикл мог быть задан ``--cycle-id`` и отличаться от даты снимка.
         cycle_id=cycle_id,
+        # 09 §12.5: дайджесты когорты и seed-набора — **слагаемые** ``run_id`` и поля
+        # контракта. Приходят готовыми (тот же дайджест, из которого composition root
+        # вывел ``run_id``): здесь они не пересчитываются, иначе манифест описывал бы
+        # второй расчёт, а не объявленный вход. ``None`` — не записано (legacy/модульный
+        # вызов): ``hound diff`` тогда честно называет ось недоступной, а не выдумывает.
+        cohort_digest=cohort_digest,
+        seeds_digest=seeds_digest,
         focus_modules=focus_modules,
         index_build_id=resolved_index_build_id,
         embed_model_id=_first_present(
@@ -2255,6 +2333,15 @@ _CONTRACT_FIELD_GETTERS: dict[str, Callable[[RunManifest], Any]] = {
     "serp_mode": _serp_mode_from_manifest,
 }
 
+#: Поля контракта, которые современный прогон записывает **всегда** (слагаемые ``run_id``).
+#: Поэтому ``None`` у одной из сторон — не «пустое значение», а «не записано» (строка
+#: прошлой схемы, где колонки не было): сравнение с ним дало бы ложное «изменилось».
+#: У остальных полей ``None`` — законное состояние (реестров нет, секции ``crawl`` нет), и
+#: переход ``None → значение`` там действительно означает смену условий измерения.
+_CONTRACT_FIELDS_ALWAYS_RECORDED: frozenset[str] = frozenset(
+    {"cohort_digest", "seeds_digest"}
+)
+
 
 def _contract_field_attr(name: str) -> str:
     """Имя атрибута ``RunManifest``, несущего поле контракта (``cutoff_K`` → ``retrieval_cutoff_K``)."""
@@ -2269,9 +2356,10 @@ def _contract_field_diagnostics(
     Возвращает пару ``(различающиеся, отсутствующие)``; порядок обоих списков —
     порядок :data:`~core.pipeline.digests.EXECUTION_CONTRACT_FIELDS` (детерминизм
     вывода). Поле считается **доступным**, только если атрибут есть на манифесте с
-    обеих сторон: ``cohort_digest``/``seeds_digest`` свёрнуты в контракт, но на
-    ``RunManifest`` их нет (там лишь ``cohort_ref``), поэтому их различие по манифесту
-    не восстановимо — и выдумывать его нельзя (A3).
+    обеих сторон **и** значение записано. ``cohort_digest``/``seeds_digest`` теперь
+    несутся манифестом (``runs.cohort_digest``/``runs.seeds_digest``), поэтому
+    различаются наравне с прочими; недоступными они остаются только у строки прошлой
+    схемы, где колонки нет, — и это называется, а не выдумывается (A3).
 
     Сравнение значений — через :func:`_boundary_value` (та же нормализация
     ``llm_scenarios``, что и в legacy-ветке).
@@ -2297,6 +2385,13 @@ def _contract_field_diagnostics(
             continue
         before = _boundary_value(prev, attr)
         after = _boundary_value(curr, attr)
+        if name in _CONTRACT_FIELDS_ALWAYS_RECORDED and (before is None or after is None):
+            # У современного прогона эти слагаемые ``run_id`` записаны всегда, поэтому
+            # ``None`` здесь — «не записано» (строка прошлой схемы), а не пустое значение.
+            # Назвать это «изменилось» значило бы утверждать смену когорты/seed-набора
+            # без данных: причина остаётся невыводимой и называется отсутствием (A3).
+            missing.append(name)
+            continue
         if before != after:
             changed.append(
                 f"execution_change: execution_contract_digest: {name}: "
@@ -2395,9 +2490,13 @@ def diff_boundary_violations(
     :data:`~core.pipeline.digests.EXECUTION_CONTRACT_FIELDS`, доступные на
     ``RunManifest`` (в порядке кортежа): ``execution_change: execution_contract_digest:
     {field}: prev → curr``. Тот же префикс — класс и парсинг причин не меняются.
+    ``cohort_digest``/``seeds_digest`` — такие же поля манифеста (``runs.cohort_digest``/
+    ``runs.seeds_digest``, проекция объявленного входа), поэтому состав когорты и
+    seed-набор называются наравне с прочими осями, а не объявляются невосстановимыми.
     Если ни одно доступное поле не различается, а дайджесты разные, эмитится строка о
-    **пределе диагностики** с перечнем отсутствующих на манифесте полей
-    (``cohort_digest``/``seeds_digest``): причина не выдумывается (A3). Детализация —
+    **пределе диагностики** с перечнем полей, которых на манифесте нет; если таких нет,
+    строка не эмитится вовсе (предела больше нет — печатать его было бы неправдой).
+    Причина не выдумывается (A3). Детализация —
     только reporting: :func:`resolve_diff_change_class` и
     :func:`core.pipeline.run_identity.classify_change` не затрагиваются.
 
@@ -2456,9 +2555,12 @@ def diff_boundary_violations(
                 changed_fields, missing_fields = _contract_field_diagnostics(prev, curr)
                 if changed_fields:
                     violations.extend(changed_fields)
-                else:
-                    # Ни одно доступное поле не различается, а дайджесты разные:
-                    # причину не выдумываем — называем предел диагностики (A3).
+                elif missing_fields:
+                    # Ни одно доступное поле не различается, а дайджесты разные: причину
+                    # не выдумываем — называем **предел диагностики** и ровно те поля,
+                    # которых на манифесте нет. Предела нет — строки нет: пустой список
+                    # недоступных означает, что все оси сравнены (и совпали), и печатать
+                    # «не восстановимо» было бы неправдой.
                     violations.append(
                         "execution_change: execution_contract_digest: различающееся "
                         "поле не восстановимо из манифеста ("

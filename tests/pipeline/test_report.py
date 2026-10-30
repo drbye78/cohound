@@ -1482,12 +1482,17 @@ def test_diff_boundary_contract_mismatch_names_fields_in_contract_order() -> Non
 def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
     """Дайджесты разные, доступные поля совпадают → предел диагностики, без выдумки имён.
 
-    ``cohort_digest``/``seeds_digest``/``extractor_stack``/``prompt_template`` входят в
-    контракт, но на ``RunManifest`` их нет (только ``cohort_ref``; ни стека извлечения, ни
-    шаблона промпта манифест не несёт): причина не восстановима и **не** выдумывается (A3).
-    ``prompt_template`` попадает сюда сознательно: восстановить применённый шаблон из
-    манифеста нельзя, а объявить на манифесте текущий значило бы соврать про прогон,
-    сделанный другим шаблоном.
+    ``cohort_digest``/``seeds_digest`` теперь несутся манифестом (``runs.cohort_digest``/
+    ``runs.seeds_digest``), но **эта пара** их не записала: ``_manifest`` строит строку без
+    дайджестов идентичности, то есть повторяет манифест прошлой схемы. Отсутствие записи
+    здесь и называется (поле уходит в перечень недоступных), а не выдаётся за изменение
+    когорты (A3). ``extractor_stack``/``prompt_template`` недоступны и у современного
+    манифеста: ни стека извлечения, ни шаблона промпта он не несёт — причина не
+    восстановима и **не** выдумывается. ``prompt_template`` попадает сюда сознательно:
+    восстановить применённый шаблон из манифеста нельзя, а объявить на манифесте текущий
+    значило бы соврать про прогон, сделанный другим шаблоном. Что записанные дайджесты
+    **называются** осью, проверяет
+    ``tests/pipeline/test_manifest_identity_digests.py``.
     """
     prev = _manifest(execution_contract_digest="ec_1")
     curr = _manifest(execution_contract_digest="ec_2")
@@ -1532,6 +1537,8 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
     assert shrunk == ["execution_change: cohort_reduction: p2"]
 
     # Состав неизвестен — набор не выдумывается, причина остаётся общей (с детализацией).
+    # Дайджесты идентичности в этой паре не записаны (манифест прошлой схемы), поэтому они
+    # честно попадают в перечень недоступных; записанные — называются осью.
     assert diff_boundary_violations(prev, curr) == [
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "

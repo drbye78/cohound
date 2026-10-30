@@ -8,7 +8,15 @@
 Семантика seed-набора (§5.3): авторский ``sources/seeds.yaml`` — источник истины;
 ``reconcile_seed_set`` делает upsert по ``(product_id, normalized_url)``, а seed'ы,
 отсутствующие в файле, помечает ``state=disabled`` + ``retired_at`` (никогда не удаляет) —
-удаление из git обратимо и явно. Нейтрален к предметной категории (§1.3).
+удаление из git обратимо и явно. Та же сверка — единственный писатель меток
+``product_state.retired_at``/``re_added_at``: пустой набор означает retirement, возврат
+активного seed'а — ``re_added_at`` (``_mode_for`` даёт ``new``), а завершённый прогон после
+возврата метку снимает.
+
+``forget_product`` — человеческое решение «забыть продукт»: консистентный снимок
+``state.db`` рядом с файлом (``sqlite3`` backup API) и удаление строк **состояния**
+продукта одной транзакцией; история прогонов (``run_lineage``/``cycle``) не трогается.
+Нейтрален к предметной категории (§1.3).
 """
 
 from __future__ import annotations
@@ -26,6 +34,7 @@ from core.ports.state import (
     CellMeasurementRow,
     ChunkRow,
     DocumentVersionRow,
+    ForgetProductResult,
     IndexCompositionRow,
     IndexPartitionRow,
     ProductStateRow,
@@ -36,7 +45,13 @@ from core.ports.state import (
 )
 from core.store.state_sqlite import connect_state
 
-__all__ = ["SqliteStateStore", "read_previous_cycle_id"]
+__all__ = [
+    "FORGET_PRODUCT_TABLES",
+    "SqliteStateStore",
+    "backup_state_db",
+    "read_previous_cycle_id",
+    "read_product_counts",
+]
 
 #: Выборка последней строки lineage пакета — **одна** формула на штатное чтение
 #: (:meth:`SqliteStateStore.previous_lineage`) и на чтение без записи
@@ -274,6 +289,138 @@ def _upsert_sql(
     )
 
 
+#: Таблицы ``state.db``, строки которых принадлежат **продукту** (порядок — порядок
+#: удаления: ``chunk_meta`` ссылается на ``document_version`` и ``chunk_store``, поэтому
+#: уходит первым). Намеренно **не** входят: ``run_lineage``/``cycle`` (история прогонов и
+#: циклов), ``index_composition`` (иммутабельный реестр композиций когорты — общий для
+#: продуктов) и ``profile_attestation`` (человеческая аттестация профиля пакета-якоря, не
+#: свойство продукта). Сборки ``index_store/`` на диске тоже остаются: их прунит
+#: ``hound package index-gc``, а не забывание продукта.
+FORGET_PRODUCT_TABLES = (
+    "chunk_meta",
+    "document_version",
+    "url_state",
+    "product_snapshot",
+    "cell_measurement",
+    "seed_set",
+    "product_state",
+    "attestation",
+    "index_partition",
+)
+
+#: Тексты ``chunk_store``, которые уйдут вместе с продуктом: их знает только он
+#: (осиротевшие). Текст, разделяемый другим продуктом, остаётся — адресация по
+#: ``content_hash`` (I19) не даёт удалить чужое доказательство.
+_ORPHAN_CHUNK_COUNT_SQL = (
+    "SELECT COUNT(*) FROM chunk_store"
+    " WHERE content_hash IN (SELECT content_hash FROM chunk_meta WHERE product_id = ?)"
+    " AND content_hash NOT IN"
+    " (SELECT content_hash FROM chunk_meta WHERE product_id <> ?)"
+)
+
+#: Удаление осиротевшего текста — по одному ``content_hash`` (после удаления ``chunk_meta``).
+_DELETE_ORPHAN_CHUNK_SQL = (
+    "DELETE FROM chunk_store WHERE content_hash = ? AND NOT EXISTS ("
+    "SELECT 1 FROM chunk_meta WHERE chunk_meta.content_hash = chunk_store.content_hash)"
+)
+
+
+def _timestamp_token(at: str | None) -> str:
+    """Метка времени для имени снимка: ``2026-10-30T12:00:00Z`` → ``20261030T120000Z``."""
+    stamp = at or _now()
+    return str(stamp).replace("-", "").replace(":", "")
+
+
+def _snapshot_path(db_path: Path, at: str | None) -> Path:
+    """Путь снимка рядом с ``state.db``; существующий файл не перезаписывается.
+
+    Метка времени — секунды, поэтому два снимка в одну секунду (или повторный запуск в
+    тесте) получают суффикс ``-2``/``-3``: снимок оператора не затирается молча.
+    """
+    base = f"{db_path.name}.bak-{_timestamp_token(at)}"
+    candidate = db_path.with_name(base)
+    counter = 1
+    while candidate.exists():
+        counter += 1
+        candidate = db_path.with_name(f"{base}-{counter}")
+    return candidate
+
+
+def _snapshot_into(conn: sqlite3.Connection, target: Path) -> Path:
+    """Консистентный снимок открытой БД в ``target`` (``sqlite3`` backup API).
+
+    Не копирование файла: при WAL копия байтов может рассогласоваться с ``-wal``/``-shm``.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    dest = sqlite3.connect(str(target))
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    return target
+
+
+def backup_state_db(db_path: str | Path, *, at: str | None = None) -> Path:
+    """Снимок ``state.db`` рядом с файлом (09 §14.4; ``sqlite3`` backup API).
+
+    ``:memory:``-БД и отсутствующий файл — ``ValueError``: снимок кладётся **рядом** с
+    ``state.db``, и «некуда положить» не должно превращаться в тихое отсутствие бэкапа.
+    """
+    path = Path(db_path)
+    if str(path) == ":memory:" or not path.exists():
+        raise ValueError(
+            f"backup_state_db: нужен файл state.db рядом с которым кладётся снимок: {path}"
+        )
+    target = _snapshot_path(path, at)
+    conn = sqlite3.connect(str(path))
+    try:
+        return _snapshot_into(conn, target)
+    finally:
+        conn.close()
+
+
+def _product_row_counts(conn: sqlite3.Connection, product_id: str) -> dict[str, int]:
+    """Число строк продукта по таблицам состояния (``chunk_store`` — осиротевшие тексты).
+
+    Таблица без колонки ``product_id`` сюда попасть не может: ``FORGET_PRODUCT_TABLES`` —
+    модульная константа с именами, значения идут bind-параметрами.
+    """
+    counts: dict[str, int] = {}
+    for table in FORGET_PRODUCT_TABLES:
+        counts[table] = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE product_id = ?",  # noqa: S608 - имя из константы
+                (product_id,),
+            ).fetchone()[0]
+        )
+    counts["chunk_store"] = int(
+        conn.execute(
+            _ORPHAN_CHUNK_COUNT_SQL, (product_id, product_id)
+        ).fetchone()[0]
+    )
+    return counts
+
+
+def read_product_counts(
+    db_path: str | Path, product_id: str
+) -> dict[str, int] | None:
+    """Строки продукта по таблицам **без записи** в ``state.db`` (``mode=ro``).
+
+    Нужно ``--dry-run``: штатное открытие (:func:`connect_state`) применяет схему и пишет
+    ``schema_meta`` — это запись в файл оператора, а флаг обещает, что её нет.
+    Отсутствующий файл — ``None`` («состояния нет»), а не ошибка.
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        return _product_row_counts(conn, product_id)
+    finally:
+        conn.close()
+
+
 class SqliteStateStore:
     """``ProductStatePort`` над ``state/{package_id}/state.db`` (09 §4.2).
 
@@ -384,6 +531,74 @@ class SqliteStateStore:
             )
 
     # -- seeds ------------------------------------------------------------- #
+    def _retired_evidence(self, product_id: str) -> bool:
+        """Был ли продукт выведен из работы — по **durable** состоянию (09 §5.1).
+
+        Два независимых свидетеля:
+
+        * строка ``product_state`` помечена ``retired`` (``onboarding_state='retired'``
+          либо ``retired_at``) — решение человека о продукте;
+        * **весь** durable seed-набор продукта выведен: у каждой строки ``seed_set``
+          ``state='disabled'`` **и** ``retired_at`` (метку ставит
+          :meth:`reconcile_seed_set`, выключая seed'ы, исчезнувшие из авторского файла).
+          Seed, выключенный автором (``enabled: false``, ``retired_at IS NULL``), сюда не
+          относится: это не retirement, а отключение записи.
+
+        Строки нет и seed'ов нет — retirement не наблюдался (``False``): «не было» не равно
+        «было и прошло».
+        """
+        row = self._conn.execute(
+            "SELECT onboarding_state, retired_at FROM product_state WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+        if row is not None and (
+            row["retired_at"] is not None
+            or str(row["onboarding_state"]) == OnboardingState.RETIRED.value
+        ):
+            return True
+        seeds = self._conn.execute(
+            "SELECT COUNT(*) AS total,"
+            " COALESCE(SUM(CASE WHEN state = ? AND retired_at IS NOT NULL"
+            " THEN 1 ELSE 0 END), 0) AS retired"
+            " FROM seed_set WHERE product_id = ?",
+            (SeedState.DISABLED.value, product_id),
+        ).fetchone()
+        total = int(seeds["total"] or 0)
+        return total > 0 and int(seeds["retired"] or 0) == total
+
+    def _consume_re_added_at(self, product_id: str) -> None:
+        """Снимает ``re_added_at``, если возврат уже отработан прогоном после метки.
+
+        ``_mode_for`` отдаёт ``new`` при любой непустой метке, поэтому «вечная» метка
+        означала бы вечный полный краул. Метка живёт до первого прогона, который после неё
+        **собрал корпус** (``last_corpus_run_id``) или завершил измерение
+        (``last_completed_run_id``) — оба рубежа двигает ``record_run_outcome``.
+
+        Почему не только ``last_completed_run_id``: рубеж «все ячейки разрешены» на живой
+        когорте не достигается (``pending``-ячейки уходят в очередь ревью), и метка осталась
+        бы навсегда. Корпус же собирается в любом дошедшем до Ш5 прогоне — это и есть
+        «повторный полный краул случился».
+
+        Прогон без ``completed_at`` (упал/идёт) или неизвестный в ``run_lineage`` метку не
+        снимает: baseline ещё устарел, и это честное состояние, а не повод объявить его
+        свежим.
+        """
+        self._conn.execute(
+            """
+            UPDATE product_state SET re_added_at = NULL
+             WHERE product_id = ?
+               AND re_added_at IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM run_lineage
+                    WHERE run_lineage.run_id IN (product_state.last_corpus_run_id,
+                                                 product_state.last_completed_run_id)
+                      AND run_lineage.completed_at IS NOT NULL
+                      AND run_lineage.completed_at >= product_state.re_added_at
+               )
+            """,
+            (product_id,),
+        )
+
     def reconcile_seed_set(
         self, product_id: str, seeds: Sequence[SeedEntry]
     ) -> None:
@@ -391,9 +606,31 @@ class SqliteStateStore:
 
         ``added_at``/``added_by`` существующей строки не перезаписываются (провенанс
         первого появления), ``retired_at`` снимается, если seed вернулся в файл.
+
+        Здесь же — переходы человеческого решения «выведен/возвращён» (09 §5.1–§5.3),
+        потому что ``sources/seeds.yaml`` — авторский источник, а таблица — его durable
+        отражение; отдельной команды у retirement нет:
+
+        * **пустой набор** (в файле не осталось записей продукта) ⇒ продукт помечается
+          ``retired`` (``onboarding_state`` + ``retired_at``). Раньше выключались только
+          строки ``seed_set``, а ``product_state`` оставался ``ready`` — два разных факта об
+          одном продукте. Набор, где все записи выключены автором, retirement **не**
+          объявляет: файл по-прежнему их перечисляет;
+        * **возврат активного seed'а после retirement** ⇒ ``re_added_at`` = момент перехода,
+          ``retired_at`` снимается: ``_mode_for`` даёт ``new`` (полный краул — состояние за
+          время отсутствия устарело);
+        * **метка снимается**, когда после неё есть завершённый прогон
+          (:meth:`_consume_re_added_at`) — иначе продукт остался бы ``new`` навсегда.
+
+        Готовность (``ready``/``pending_seeds``) материализует ``sync_product_state`` по плану
+        префлайта; здесь снимается только отметка retirement — вместе с состоянием
+        ``retired``, которое перестало быть верным (``retired_at`` и ``re_added_at``
+        одновременно не живут).
         """
         now = _now()
         incoming = {seed.normalized_url for seed in seeds}
+        active = any(seed.is_enabled for seed in seeds)
+        was_retired = self._retired_evidence(product_id)
         with self._conn:
             for seed in seeds:
                 self._conn.execute(
@@ -451,6 +688,84 @@ class SqliteStateStore:
                         SeedState.DISABLED.value,
                     ),
                 )
+            if not seeds:
+                # Набора нет — продукт выведен из работы: пишем это в product_state, а не
+                # только в seed_set, иначе возврат неотличим от первого появления.
+                # Пустой набор ≠ «все seed'ы выключены автором»: во втором случае файл
+                # по-прежнему перечисляет записи, и продукт лишь остался без активного
+                # корпуса (``pending_seeds``/``blocked``) — retirement не объявляется.
+                self._conn.execute(
+                    "UPDATE product_state SET onboarding_state = ?,"
+                    " retired_at = COALESCE(retired_at, ?),"
+                    " onboarding_reason = COALESCE(onboarding_reason, ?)"
+                    " WHERE product_id = ?",
+                    (
+                        OnboardingState.RETIRED.value,
+                        now,
+                        "no_seeds",
+                        product_id,
+                    ),
+                )
+            elif active and was_retired:
+                self._conn.execute(
+                    "UPDATE product_state SET re_added_at = ?, retired_at = NULL,"
+                    " onboarding_state = ?, onboarding_reason = NULL"
+                    " WHERE product_id = ?",
+                    (now, OnboardingState.READY.value, product_id),
+                )
+            else:
+                self._consume_re_added_at(product_id)
+
+    def forget_product(
+        self, product_id: str, *, at: str | None = None
+    ) -> ForgetProductResult:
+        """Удаляет строки состояния продукта после снимка ``state.db`` (09 §4.1).
+
+        Условие, а не удобство: снимок делается **до** удаления (консистентно, через
+        ``sqlite3`` backup API) и кладётся рядом с ``state.db``; при невозможности снимка
+        метод отказывает и ничего не удаляет. Удаление — одна транзакция: ошибка на любой
+        таблице откатывает всё, включая уже удалённые строки.
+
+        Что остаётся намеренно: ``run_lineage``/``cycle`` (история прогонов — провенанс, а
+        не состояние продукта), ``index_composition`` (иммутабельный реестр композиций
+        когорты), ``profile_attestation`` (аттестация профиля пакета-якоря) и сборки
+        ``index_store/`` на диске (их прунит ``hound package index-gc``).
+
+        Продукта в состоянии нет — ``found=False``, снимок не создаётся: удалять нечего, и
+        бэкап «на всякий случай» не выдаётся за выполненную работу.
+        """
+        counts = _product_row_counts(self._conn, product_id)
+        if sum(counts.values()) == 0:
+            return ForgetProductResult(
+                product_id=product_id, found=False, counts=counts
+            )
+        path = Path(self.path)
+        if str(path) == ":memory:" or not path.exists():
+            raise ValueError(
+                "forget_product: нужен файловый state.db — снимок кладётся рядом с ним"
+            )
+        backup = _snapshot_into(self._conn, _snapshot_path(path, at))
+        with self._conn:
+            hashes = [
+                str(row["content_hash"])
+                for row in self._conn.execute(
+                    "SELECT content_hash FROM chunk_meta WHERE product_id = ?",
+                    (product_id,),
+                )
+            ]
+            for table in FORGET_PRODUCT_TABLES:
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE product_id = ?",  # noqa: S608 - имя из константы
+                    (product_id,),
+                )
+            for content_hash in sorted(set(hashes)):
+                self._conn.execute(_DELETE_ORPHAN_CHUNK_SQL, (content_hash,))
+        return ForgetProductResult(
+            product_id=product_id,
+            found=True,
+            counts=counts,
+            backup_path=str(backup),
+        )
 
     def seed_rows(self, product_id: str) -> list[SeedRow]:
         rows = self._conn.execute(

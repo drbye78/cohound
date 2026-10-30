@@ -1142,7 +1142,10 @@ class SqliteStore:
         ``run_scope``/``product_plan_json`` (16 §3.1 — без него полное измерение неотличимо
         от среза ``--only-product``) и наблюдаемое поле ``embed_device`` (ось уже входит в
         ``execution_contract_digest``; здесь — чтобы «на чём считались векторы» читалось
-        запросом, а не восстановлением из дайджеста). ``UPDATE`` по существующей
+        запросом, а не восстановлением из дайджеста), а также ``cohort_digest``/
+        ``seeds_digest`` (09 §12.5 — слагаемые ``run_id`` и поля контракта: без них
+        ``hound diff`` не мог назвать ось расхождения и печатал «предел диагностики»).
+        ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
 
@@ -1169,7 +1172,8 @@ class SqliteStore:
                 " publishability_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?,"
                 " run_scope = ?, product_plan_json = ?, embed_device = ?,"
-                " previous_run_id = ?, change_class = ?, cycle_id = ?"
+                " previous_run_id = ?, change_class = ?, cycle_id = ?,"
+                " cohort_digest = ?, seeds_digest = ?"
                 " WHERE run_id = ?",
                 (
                     manifest.package_version,
@@ -1235,6 +1239,11 @@ class SqliteStore:
                     # 09 §2.4: цикл прогона — материал ``run_id``; без колонки манифест,
                     # пересобранный ``hound report``, молчал бы о цикле.
                     manifest.cycle_id,
+                    # 09 §12.5: дайджесты когорты и seed-набора — слагаемые ``run_id``.
+                    # Без записи ``hound diff`` не мог назвать ось расхождения контракта и
+                    # печатал «предел диагностики» вместо причины.
+                    manifest.cohort_digest,
+                    manifest.seeds_digest,
                     run_id,
                 ),
             )
@@ -2294,7 +2303,10 @@ class SqliteStore:
         не выдумываются. Провенанс среза (``run_scope``/``product_plan``) и устройство
         эмбеддера (``embed_device``, 16 §3.1) читаются через ``_row_optional``: колонки
         аддитивные, и на read-only файле прошлой версии их нет — отсутствие значит
-        «не записано», а не сбой чтения прогона.
+        «не записано», а не сбой чтения прогона. То же у дайджестов идентичности
+        (``cohort_digest``/``seeds_digest``, 09 §12.5): они — слагаемые ``run_id`` и поля
+        контракта, поэтому ``hound diff`` называет их осью расхождения, а ``NULL``
+        (строка прошлой схемы) читается как «не записано», а не как пустая когорта.
 
         :raises ValueError: если строка прогона отсутствует.
         """
@@ -2386,6 +2398,11 @@ class SqliteStore:
         change_class = _row_optional(row, "change_class")
         # 09 §2.4: цикл прогона — та же терпимость к старой БД (колонка аддитивная).
         cycle_id = _row_optional(row, "cycle_id")
+        # 09 §12.5: дайджесты когорты и seed-набора — слагаемые ``run_id``. Колонки
+        # аддитивные ⇒ ``_row_optional``: у строки прошлой схемы их нет, и отсутствие
+        # значит «не записано», а не «когорта пуста».
+        cohort_digest = _row_optional(row, "cohort_digest")
+        seeds_digest = _row_optional(row, "seeds_digest")
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -2400,6 +2417,9 @@ class SqliteStore:
             scoring_policy_version=row["scoring_policy_version"] or "0.0.0",
             anchor_product_id=row["anchor_product_id"],
             cohort_ref=row["cohort_ref"],
+            # 09 §12.5: дайджесты, из которых выведен ``run_id`` (поля контракта).
+            cohort_digest=cohort_digest,
+            seeds_digest=seeds_digest,
             focus_modules=focus_modules,
             index_build_id=row["index_build_id"],
             embed_model_id=row["embed_model_id"],

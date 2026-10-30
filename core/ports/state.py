@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from core.domain.enums import Gate, OnboardingState, SeedRole, SeedSource, SeedState
 from core.domain.models import ProfileAttestationRow, SeedEntry
@@ -25,6 +25,7 @@ __all__ = [
     "CellMeasurementRow",
     "ChunkRow",
     "DocumentVersionRow",
+    "ForgetProductResult",
     "IndexCompositionRow",
     "IndexPartitionRow",
     "ProductStatePort",
@@ -42,6 +43,13 @@ class ProductStateRow:
 
     ``onboarding_state`` — :class:`OnboardingState`; ``last_*_run_id`` — рубежи §5.1
     (``last_corpus_run_id`` / ``last_evaluated_run_id`` / ``last_completed_run_id``).
+
+    ``retired_at``/``re_added_at`` — метки человеческого решения «выведен из работы» и
+    «возвращён в работу». ``re_added_at`` не декоративен: при выставленной метке
+    :func:`core.pipeline.onboarding._mode_for` даёт ``new`` (полный краул — за время
+    отсутствия состояние устарело, §5.1). Пишет их сверка seed-набора
+    (:meth:`ProductStatePort.reconcile_seed_set`), а не прогон: retired — решение
+    человека в данных (``sources/seeds.yaml``).
     """
 
     product_id: str
@@ -51,6 +59,7 @@ class ProductStateRow:
     added_by: str
     vendor: str | None = None
     onboarding_reason: str | None = None
+    #: Момент возврата продукта после ``retired``; ``None`` — не возвращался/метка снята.
     re_added_at: str | None = None
     retired_at: str | None = None
     last_corpus_run_id: str | None = None
@@ -266,6 +275,37 @@ class IndexCompositionRow:
 
 
 @dataclass(frozen=True)
+class ForgetProductResult:
+    """Итог забывания продукта: что удалено и куда положен снимок ``state.db``.
+
+    ``counts`` — число удалённых строк по таблицам; ``chunk_store`` считает только
+    **осиротевшие** тексты продукта (текст, разделяемый другим продуктом, остаётся).
+    ``found=False``/``backup_path=None`` — продукта в состоянии не было: «нечего забывать»
+    не ошибка, и снимок тогда не нужен (удалять нечего).
+    """
+
+    product_id: str
+    found: bool
+    counts: dict[str, int]
+    backup_path: str | None = None
+
+    @property
+    def total(self) -> int:
+        """Всего удалённых строк (сумма по таблицам)."""
+        return sum(self.counts.values())
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-представление результата."""
+        return {
+            "product": self.product_id,
+            "found": self.found,
+            "counts": dict(self.counts),
+            "total": self.total,
+            "backup": self.backup_path,
+        }
+
+
+@dataclass(frozen=True)
 class RunLineageRow:
     """Строка ``run_lineage``: провенанс прогона в цепочке циклов (§12.3).
 
@@ -323,11 +363,40 @@ class ProductStatePort(Protocol):
     def reconcile_seed_set(
         self, product_id: str, seeds: Sequence[SeedEntry]
     ) -> None:
-        """Синхронизирует авторский seed-набор → ``seed_set`` (upsert; без удаления)."""
+        """Синхронизирует авторский seed-набор → ``seed_set`` (upsert; без удаления).
+
+        Помимо строк ``seed_set`` метод — **единственный** писатель меток
+        ``product_state.retired_at``/``re_added_at`` (09 §5.1–§5.3): ``retired`` — решение
+        человека в данных (``sources/seeds.yaml``), поэтому переход ``retired → активен``
+        наблюдается здесь, при сверке набора с состоянием, а не командой.
+
+        * пустой набор активных seed'ов ⇒ продукт помечается ``retired``
+          (``onboarding_state='retired'`` + ``retired_at``), а строки ``seed_set`` —
+          ``disabled`` + ``retired_at``;
+        * возврат активного seed'а при прежнем признаке retirement ⇒ ``re_added_at`` =
+          момент перехода (и ``retired_at`` снимается): ``_mode_for`` даёт ``new``;
+        * ``re_added_at`` снимается, когда после перехода есть **завершённый** прогон
+          (``last_completed_run_id`` завершён позже метки) — иначе продукт остался бы
+          ``new`` навсегда.
+        """
         ...
 
     def seed_rows(self, product_id: str) -> list[SeedRow]:
         """Все строки seed'ов продукта, включая ``disabled``/``invalid``."""
+        ...
+
+    # -- забывание продукта (человеческое решение) ----------------------- #
+    def forget_product(
+        self, product_id: str, *, at: str | None = None
+    ) -> ForgetProductResult:
+        """Удаляет строки **состояния** продукта, предварительно сняв копию ``state.db``.
+
+        Условие, а не удобство: снимок делается консистентно (``sqlite3`` backup API) рядом
+        с файлом, и при невозможности снимка удаление не выполняется. Удаление — одна
+        транзакция (ошибка ⇒ откат). История прогонов (``run_lineage``/``cycle``) и
+        композиции индекса не трогаются: это провенанс, а не состояние продукта.
+        Продукта в состоянии нет — ``found=False`` (не ошибка), снимок не создаётся.
+        """
         ...
 
     # -- URL/document/chunk (MVP-3a: durable субстрат, 09 §4.2/§6.3) ---- #

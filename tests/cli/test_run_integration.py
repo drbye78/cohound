@@ -37,7 +37,7 @@ from core.cli.wiring import (
     build_lite_embedder,
     build_store,
 )
-from core.domain import Gate, LLMCellOutput, Status
+from core.domain import Gate, LLMCellOutput, ProductScope, Status
 from core.pipeline import (
     GATE_PHASES,
     IMPLEMENTED_PHASES,
@@ -609,6 +609,102 @@ def test_cmd_run_manifest_names_previous_run_and_change_class(
     assert payload["manifest"]["cycle_id"] == "2026-06-01"
     assert payload["manifest"]["previous_run_id"] == first
     assert payload["manifest"]["change_class"] == "none"
+
+
+def test_cmd_run_persists_product_plan_from_inputs_snapshot(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """16 §3.1: план продуктов реального прогона не ``NULL`` — он из снимка входов.
+
+    ``RunManifest.product_plan`` и ``runs.product_plan_json`` были объявлены, писались и
+    читались, но **производителя не было**: фаза отчёта значение не передавала, и колонка
+    оставалась ``NULL`` навсегда. Проверяется срез (``--only-product``) — ровно тот случай,
+    ради которого поле объявлено: без него полное измерение неотличимо от частичного, не
+    заглядывая в ``state.db``.
+
+    Источник — тот же снимок входов (``run_inputs.product_plan``), куда composition root
+    кладёт ``onboarding.plan_set.model_dump(mode="json")``. Тест сверяет **оба** носителя
+    одного прогона: они обязаны совпадать, иначе на прогон было бы два разных «плана».
+    """
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    run_id = "plan-slice"
+    argv = run_argv(
+        package,
+        run_id=run_id,
+        db=db,
+        runs_dir=runs_dir,
+        extra=("--only-product", "p1"),
+    )
+
+    # Первый проход — как в runbook: прогон доходит до блокирующего G4 и пишет снимок
+    # входов. Онбординг в области прогона, поэтому план продуктов уже в снимке.
+    ports = Ports(
+        evaluator=FakeEvaluator(
+            default=LLMCellOutput(
+                status=Status.ABSENT, justification="нет в срезе", evidence=[]
+            )
+        ),
+        lexical_index=FakeLexicalIndex(),
+        **_offline_crawl_kwargs(),
+    )
+    assert main(argv, ports=ports) == EXIT_BLOCKED
+    capsys.readouterr()
+
+    # Человеческие решения гейтов (I6/I7) — и resume до отчёта.
+    _finalize_gates(db, run_id)
+    assert main(argv, ports=ports) == EXIT_OK
+    capsys.readouterr()
+
+    with build_store(db) as store:
+        manifest = store.read_manifest(run_id)
+        row = store.conn.execute(
+            "SELECT product_plan_json, run_scope FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        snapshot = store.read_plan_inputs(run_id)
+
+    assert row["product_plan_json"] is not None, (
+        "колонка объявлена и читается, но снова не написана"
+    )
+    # 09 §13.6: срез прогона — второй «объявлено, но не записано» того же класса.
+    # Без него читатель артефакта не отличает ``--only-product`` от полного измерения.
+    # ``RunScope`` (``plan.py``): ``product:<id>`` — не ``ProductScope.PRODUCT_ONLY``
+    # (``product_only``): первое называет **срез прогона**, второе — область префлайта.
+    assert row["run_scope"] == "product:p1"
+    assert manifest.run_scope == "product:p1"
+    plan_set = manifest.product_plan
+    assert plan_set is not None
+    # Срез ``--only-product``: в плане ровно тот продукт, который исполнялся.
+    assert [item["product_id"] for item in plan_set["products"]] == ["p1"]
+    assert plan_set["products"][0]["mode"] in {"new", "full", "incremental"}
+    assert plan_set["products"][0]["scope"] == ProductScope.PRODUCT_ONLY.value
+    # Второй носитель того же факта — снимок входов v2: расхождение означало бы, что
+    # манифест собрал план вторым способом.
+    assert snapshot is not None and snapshot["product_plan"] == plan_set
+
+    out = tmp_path / "report-out"
+    assert (
+        main(
+            [
+                "report",
+                "--db",
+                str(db),
+                "--run-id",
+                run_id,
+                "--out",
+                str(out),
+                "--json",
+            ]
+        )
+        == EXIT_OK
+    )
+    payload = json_out(capsys)
+    assert payload["manifest"]["product_plan"] == plan_set
+    file_manifest = yaml.safe_load(
+        (out / run_id / "run_manifest.yaml").read_text(encoding="utf-8")
+    )
+    assert file_manifest["product_plan"] == plan_set
 
 
 def test_cmd_run_since_run_unknown_is_usage_error(

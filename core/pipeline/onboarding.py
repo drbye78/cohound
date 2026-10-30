@@ -288,6 +288,12 @@ def _mode_for(
     * иначе → ``incremental``.
 
     ``state is None`` (durable-состояния нет) — поведение MVP-1: всегда ``new``.
+
+    Метку ``re_added_at`` пишет сверка seed-набора
+    (:meth:`core.ports.state.ProductStatePort.reconcile_seed_set`), а не прогон: retired —
+    решение человека в данных, и переход ``retired → активен`` наблюдается при сверке
+    ``sources/seeds.yaml`` с ``state.db``. Метка снимается там же, когда после возврата
+    случился завершённый прогон, — иначе ветка ``new`` стала бы вечной.
     """
     if state is None or row is None or row.last_corpus_run_id is None:
         return ProductMode.NEW

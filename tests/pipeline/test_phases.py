@@ -71,7 +71,7 @@ from core.pipeline.phases import (
     build_phases,
 )
 from core.pipeline.plan import RunPlan
-from core.pipeline.report import build_manifest
+from core.pipeline.report import build_manifest, declared_identity_digests
 from core.pipeline.runner import (
     GATE_PHASES,
     PHASES,
@@ -1070,9 +1070,17 @@ def test_report_phase_without_compute_fails() -> None:
 
 
 def _run_chain_to_report(
-    tmp_path: Path, *, extractor: Any = None, **phase_kwargs: Any
+    tmp_path: Path,
+    *,
+    extractor: Any = None,
+    store: Any = None,
+    **phase_kwargs: Any,
 ) -> dict[str, Any]:
-    """Прогоняет registry→…→report на фейках и возвращает ``run_manifest.yaml`` как dict."""
+    """Прогоняет registry→…→report на фейках и возвращает ``run_manifest.yaml`` как dict.
+
+    ``store`` — заранее подготовленный стор прогона (например, со снимком входов плана);
+    ``None`` — свежий in-memory стор с одной строкой прогона.
+    """
     inputs = _inputs()
     plan = _plan()
     pages = {
@@ -1108,7 +1116,7 @@ def _run_chain_to_report(
         **phase_kwargs,
     }
     phases = build_phases(**build_kwargs)
-    store = _store()
+    store = _store() if store is None else store
     ctx = _context(store, ports)
     for name in ("registry", "inheritance", "corpus", "evaluate", "compute"):
         result = phases[name](ctx)
@@ -1167,6 +1175,128 @@ def test_build_phases_without_lineage_provenance_is_honest_none(tmp_path: Path) 
     assert manifest["cycle_id"] is None
     assert manifest["previous_run_id"] is None
     assert manifest["change_class"] is None
+
+
+def test_build_phases_forwards_identity_digests_to_manifest(tmp_path: Path) -> None:
+    """09 §12.5: слагаемые ``run_id`` (когорта и seed-набор) доходят до манифеста Ш9.
+
+    Прежде это были единственные два поля контракта, которых не было ни на манифесте,
+    ни в ``runs``: при расхождении контракта ``hound diff`` не мог назвать ось. Значения
+    обязаны быть **теми же**, что считает composition root для ``run_id``, поэтому
+    сверяются с :func:`declared_identity_digests` на тех же объявленных входах (тот же
+    операторский ``--urls``, что передан в фазы).
+    """
+    urls = {"p1": ["https://docs.test/p1"], "p2": ["https://docs.test/p2"]}
+    manifest = _run_chain_to_report(tmp_path)
+    cohort, seeds = declared_identity_digests(_inputs(), urls=urls)
+
+    assert manifest["cohort_digest"] == cohort
+    assert manifest["seeds_digest"] == seeds
+    assert manifest["cohort_digest"] and manifest["seeds_digest"]
+
+
+def test_build_phases_forwards_product_plan_from_snapshot(tmp_path: Path) -> None:
+    """16 §3.1: план продуктов из снимка входов доходит до манифеста **и** до ``runs``.
+
+    ``RunManifest.product_plan``/``runs.product_plan_json`` были объявлены, писались и
+    читались, но производителя не было: колонка оставалась ``NULL`` навсегда. Источник —
+    тот же снимок входов (``run_inputs.product_plan``), куда composition root кладёт
+    ``onboarding.plan_set.model_dump(mode="json")``; значения обязаны совпадать, иначе на
+    один прогон было бы два разных «плана продуктов».
+    """
+    plan_set = {
+        "products": [
+            {
+                "product_id": "p1",
+                "mode": "new",
+                "scope": "full",
+                "reasons": [],
+                "seed_count": 1,
+            }
+        ],
+        "blocked": [],
+        "cycle_id": "2026-01-01",
+        "previous_run_id": None,
+        "change_class": None,
+    }
+    store = _store()
+    store.save_plan_inputs(
+        RUN_ID,
+        payload={
+            "snapshot_version": 2,
+            "run_id": RUN_ID,
+            "product_plan": plan_set,
+        },
+        payload_sha256="sha-plan-1",
+    )
+
+    manifest = _run_chain_to_report(tmp_path, store=store)
+
+    assert manifest["product_plan"] == plan_set
+    # Тот же JSON читается обратно строкой прогона: ``hound report --json`` берёт его
+    # оттуда, а не из памяти процесса.
+    assert store.read_manifest(RUN_ID).product_plan == plan_set
+    stored = store.conn.execute(
+        "SELECT product_plan_json FROM runs WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()
+    assert stored["product_plan_json"] is not None
+
+
+def test_build_phases_without_snapshot_keeps_product_plan_unwritten(tmp_path: Path) -> None:
+    """Снимка нет ⇒ ``None``, а не план, собранный из ``product_modes`` (A3).
+
+    В ``product_modes`` только режим продукта: без ``scope``/``reasons``/``blocked``
+    реконструкция выдала бы догадку за записанный план.
+    """
+    manifest = _run_chain_to_report(tmp_path, product_modes={"p1": "new"})
+    assert manifest["product_plan"] is None
+
+
+def test_build_phases_snapshot_product_plan_wins_over_explicit(tmp_path: Path) -> None:
+    """Снимок входов сильнее аргумента: манифест проецирует **объявленный** вход (O11).
+
+    На resume preflight считается заново по сдвинувшемуся состоянию (``last_corpus_run_id``
+    уже стоит), и его план описывает продолжение, а не исполненное измерение: ``mode``
+    там уже ``full``. Отдать его на манифест значило бы записать прогону план, по
+    которому он не шёл. Аргумент остаётся резервом на случай, когда снимка плана нет
+    вовсе (первый проход встал до онбординга, ``--until plan``).
+    """
+    store = _store()
+    stored = {"products": [], "blocked": []}
+    store.save_plan_inputs(
+        RUN_ID,
+        payload={
+            "snapshot_version": 2,
+            "run_id": RUN_ID,
+            "product_plan": stored,
+        },
+        payload_sha256="sha-plan-2",
+    )
+    explicit = {"products": [{"product_id": "p2", "mode": "incremental"}], "blocked": []}
+
+    manifest = _run_chain_to_report(tmp_path, store=store, product_plan=explicit)
+    assert manifest["product_plan"] == stored
+
+
+def test_build_phases_explicit_product_plan_used_when_snapshot_has_none(
+    tmp_path: Path,
+) -> None:
+    """Снимок без плана (первый проход до онбординга) ⇒ план берётся из аргумента.
+
+    Иначе ``--until plan`` + полный прогон навсегда оставлял бы ``product_plan`` пустым:
+    снимок иммутабелен и дописаться не может, а измерительных фаз до остановки не
+    исполнялось — значит план возобновлённого прохода и есть план прогона.
+    """
+    store = _store()
+    store.save_plan_inputs(
+        RUN_ID,
+        payload={"snapshot_version": 2, "run_id": RUN_ID, "product_plan": None},
+        payload_sha256="sha-plan-3",
+    )
+    explicit = {"products": [{"product_id": "p2", "mode": "new"}], "blocked": []}
+
+    manifest = _run_chain_to_report(tmp_path, store=store, product_plan=explicit)
+    assert manifest["product_plan"] == explicit
 
 
 class _LineageState:

@@ -923,6 +923,7 @@ def add_package_parser(subparsers: Any) -> None:
     # остальных подкоманд (номера строк в регламенте — якоря документации).
     from core.cli.package.commands import (
         cmd_package_state_adopt,
+        cmd_package_state_forget_product,
         cmd_package_state_show,
     )
 
@@ -939,6 +940,28 @@ def add_package_parser(subparsers: Any) -> None:
         help="каталог прогонов для проверки «есть завершённые прогоны, а state пуст»",
     )
     p_state_show.set_defaults(handler=cmd_package_state_show)
+
+    p_state_forget = state.add_parser(
+        "forget-product",
+        help="забыть durable-состояние продукта (снимок state.db обязателен; --actor обязателен)",
+        description=(
+            "Сбрасывает состояние продукта в state.db: url_state, document_version, "
+            "chunk_meta и осиротевшие тексты chunk_store, product_snapshot, "
+            "cell_measurement, seed_set, product_state, attestation, index_partition. "
+            "Перед удалением кладёт рядом консистентный снимок state.db (sqlite3 backup "
+            "API) и называет путь; без снимка удаление не выполняется. Удаление — одна "
+            "транзакция (ошибка ⇒ откат). История прогонов (run_lineage/cycle) и реестр "
+            "композиций индекса не трогаются: это провенанс, а не состояние продукта. "
+            "--dry-run печатает число строк по таблицам и ничего не пишет."
+        ),
+    )
+    p_state_forget.add_argument(
+        "--product",
+        required=True,
+        help="product_id, durable-состояние которого забывается (lineage остаётся)",
+    )
+    _add_op_common(p_state_forget)
+    p_state_forget.set_defaults(handler=cmd_package_state_forget_product)
 
     # profile (аттестация профиля пакета-якоря для G1/G2, 09 §4.1) ---------- #
     # Ленивый импорт по той же причине, что у ``state``: импорт на месте не сдвигает

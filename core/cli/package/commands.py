@@ -2777,6 +2777,159 @@ def cmd_package_state_show(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Забывание продукта в durable-состоянии (09 §4.1)
+# ---------------------------------------------------------------------------
+
+def cmd_package_state_forget_product(args: argparse.Namespace) -> int:
+    """``hound package state forget-product`` — сброс durable-состояния продукта.
+
+    Сегодня сброс делался удалением ``state/{package_id}/state.db`` целиком: терялась
+    история **всех** продуктов пакета, а «забыть один» требовало ручной хирургии. Команда
+    удаляет строки одного продукта (``url_state``/``document_version``/``chunk_meta`` и
+    осиротевшие тексты ``chunk_store``/``product_snapshot``/``cell_measurement``/
+    ``seed_set``/``product_state``/``attestation``/``index_partition``) и оставляет
+    провенанс: ``run_lineage``/``cycle``/``index_composition``.
+
+    Бэкап — **условие**, а не удобство: перед удалением кладётся консистентный снимок
+    ``state.db`` (``sqlite3`` backup API) рядом с файлом, путь печатается. ``--actor``
+    обязателен — это человеческое решение, как у ``gate``/``profile attest``.
+    ``--dry-run`` печатает число строк по таблицам и **ничего не пишет** (ни ``state.db``,
+    ни файла лока): поэтому открывает БД только на чтение. Продукта в состоянии нет —
+    видимая строка «нечего забывать», а не ошибка и не пустой успех.
+    """
+    if bool(getattr(args, "dry_run", False)):
+        return _state_forget_product_body(args)
+    from core.cli.context import _package_lock
+
+    with _package_lock(args, command="package state forget-product"):
+        return _state_forget_product_body(args)
+
+
+def _state_forget_product_body(args: argparse.Namespace) -> int:
+    """``state forget-product`` без файлового лока пакета (``--dry-run`` его не берёт)."""
+    from core.store.state_store import read_product_counts
+
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
+    actor = str(getattr(args, "actor", None) or "").strip()
+    if not actor:
+        raise CliError(
+            "--actor обязателен: забывание durable-состояния — человеческое решение "
+            "(аудит); анонимное удаление не отвечает на вопрос «кто забыл»",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    product_id = str(getattr(args, "product", "") or "").strip()
+    if not product_id:
+        raise CliError(
+            "--product обязателен: забывание адресуется продукту, а не пакету",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    dry_run = bool(getattr(args, "dry_run", False))
+    db_path, package_id = _state_db_path(args)
+    kept = ["run_lineage", "cycle", "index_composition"]
+
+    if dry_run:
+        try:
+            counts = read_product_counts(db_path, product_id)
+        except sqlite3.DatabaseError as exc:
+            # Нечитаемая БД — отказ, а не «нечего забывать»: пустой ответ соврал бы.
+            raise CliError(
+                f"state.db не читается ({db_path}): {exc}",
+                code="state",
+                exit_code=EXIT_USAGE,
+            ) from exc
+        payload: dict[str, Any] = {
+            "ok": True,
+            "package": package_id,
+            "product": product_id,
+            "actor": actor,
+            "dry_run": True,
+            "db": str(db_path),
+            "found": counts is not None and sum(counts.values()) > 0,
+            "counts": dict(counts or {}),
+            "total": sum((counts or {}).values()),
+            "backup": None,
+            "kept": kept,
+        }
+        _emit(args, payload, _forget_lines(payload))
+        return EXIT_OK
+
+    from core.cli.context import _open_state_store
+
+    store = _open_state_store(args, create=False)
+    if store is None:
+        # Файла состояния нет: забывать нечего и создавать его ради ответа нельзя.
+        payload = {
+            "ok": True,
+            "package": package_id,
+            "product": product_id,
+            "actor": actor,
+            "dry_run": False,
+            "db": str(db_path),
+            "found": False,
+            "counts": {},
+            "total": 0,
+            "backup": None,
+            "kept": kept,
+        }
+        _emit(args, payload, _forget_lines(payload))
+        return EXIT_OK
+    try:
+        try:
+            result = store.forget_product(product_id)
+        except ValueError as exc:
+            # Снимок не удался/некуда положить — удаления не было (условие бэкапа).
+            raise CliError(str(exc), code="state", exit_code=EXIT_USAGE) from exc
+    finally:
+        store.close()
+    payload = {
+        "ok": True,
+        "package": package_id,
+        "product": product_id,
+        "actor": actor,
+        "dry_run": False,
+        "db": str(db_path),
+        "kept": kept,
+        **result.as_dict(),
+    }
+    _emit(args, payload, _forget_lines(payload))
+    return EXIT_OK
+
+
+def _forget_lines(payload: dict[str, Any]) -> list[str]:
+    """Человекочитаемый вывод ``state forget-product`` (таблицы, снимок, что осталось)."""
+    lines = [
+        f"db: {payload['db']}",
+        f"product: {payload['product']}",
+        f"actor: {payload['actor']}",
+        f"dry-run: {'yes' if payload['dry_run'] else 'no'}",
+    ]
+    counts = payload.get("counts") or {}
+    for table in sorted(counts):
+        lines.append(f"  {table}\t{counts[table]}")
+    if not payload.get("found"):
+        lines.append(
+            "нечего забывать: строк продукта в state.db нет "
+            "(состояние не создаётся ради ответа)"
+        )
+    if payload.get("backup"):
+        lines.append(f"backup: {payload['backup']}")
+    elif payload.get("found"):
+        lines.append("backup: — (dry-run: снимок не создаётся)")
+    lines.append(
+        "kept: " + ", ".join(payload.get("kept") or []) + " (история прогонов, не состояние)"
+    )
+    lines.append(
+        f"summary: {'deleted' if not payload['dry_run'] else 'would delete'}="
+        f"{payload.get('total', 0)}"
+    )
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Аттестация профиля пакета-якоря (G1/G2, durable state.db)
 # ---------------------------------------------------------------------------
 

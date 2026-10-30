@@ -10,6 +10,7 @@ argparse) и :func:`run` (тело команды). :data:`COMMANDS` фикси�
 from __future__ import annotations
 
 from core.cli.commands import (
+    backup,
     baseline,
     crawl,
     deploy,
@@ -46,6 +47,9 @@ COMMANDS = (
     golden,
     baseline,
     report,
+    # Бэкап/восстановление стоят сразу за отчётом: это операции над готовым прогоном
+    # (``runs/{run_id}/``) и его durable-состоянием, а не часть измерения.
+    backup,
     discover,
     passport_scout,
     review,

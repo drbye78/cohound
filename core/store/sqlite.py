@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS runs (
     case_id               TEXT NOT NULL,
     anchor_product_id     TEXT NOT NULL,
     cohort_ref            TEXT,                        -- cohort.yaml
+    cohort_digest         TEXT,                        -- 09 §12.5: дайджест состава когорты (слагаемое run_id, поле контракта)
+    seeds_digest          TEXT,                        -- 09 §12.5: дайджест seed-набора (слагаемое run_id, поле контракта)
     focus_text            TEXT,
     focus_modules         TEXT,                        -- JSON array
     package_id            TEXT,
@@ -928,6 +930,17 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         conn,
         "runs",
         {"previous_run_id": "TEXT", "change_class": "TEXT", "cycle_id": "TEXT"},
+    )
+    # 09 §12.5 (аддитивно, ``schema_version`` **не** поднимается): ``runs.cohort_digest`` и
+    # ``runs.seeds_digest`` — слагаемые ``run_id`` и поля ``execution_contract_digest``.
+    # Это были **единственные** два поля контракта, которых не было ни в ``runs``, ни на
+    # ``RunManifest``: при расхождении контракта ``hound diff`` не мог назвать ось и
+    # писал «предел диагностики». NULL = «не записано» (строка прошлой схемы) — значение
+    # не фабрикуется: современный прогон всегда несёт оба дайджеста.
+    _ensure_columns(
+        conn,
+        "runs",
+        {"cohort_digest": "TEXT", "seeds_digest": "TEXT"},
     )
     # Версия документа (16 §6) — вторая форма адреса: ``chunk_id`` (и
     # ``CellEvidence.source_id``) несёт версию (``dv_...``), а ``doc_id`` остаётся
