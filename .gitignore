@@ -58,6 +58,9 @@ htmlcov/
 # Локальный артефакт CodeGraphContext MCP (автогенерация, не зависимость проекта)
 .cgcignore
 
+# Индекс семантического поиска `zg` (zvec-grep): производный от дерева, машинно-специфичен
+.zvec-grep/
+
 # Намеренно untracked (решение владельца): план эволюции краула не коммитится.
 docs/architecture/08-crawl-platform-evolution-plan.md
 
