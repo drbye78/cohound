@@ -184,7 +184,7 @@
 (`core/pipeline/metrics.py:459`); живой прогон его несёт — `runs/ru-pg-dbms-3edf2b06097c/metrics.json`
 (`resources.budget.source = "available"`, `resources.phases.discovery.peak_rss_mb`).
 Распределение чанков по семействам наполняется фазой корпуса
-(`core/pipeline/corpus.py:5487` — `summarize_chunks_per_doc`), поэтому в прогоне без
+(`core/pipeline/corpus.py:3250` — `summarize_chunks_per_doc`), поэтому в прогоне без
 переисполнения корпуса блок пуст — это наблюдение, а не дефект.
 
 **Содержание.**
@@ -229,7 +229,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   preflight `core/cli/wiring.py:2448` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
->   `core/pipeline/corpus.py:5285`; видимая строка пропуска по бюджету —
+>   `core/pipeline/corpus.py:3250`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:1050` (`SKIP_BUDGET`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
 >   `core/store/sqlite.py:404`.
@@ -255,8 +255,8 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   Выбор — по замеру F0 достоверности таблиц, не по вкусу.
 - Хвост фазы durable: провенанс спуска по контейнеру, а не в конце. **Дизайн согласован
   (совет 2026-10-24, три полосы независимо + синтез).** `archive_observations`/
-  `corpus_members` копятся в памяти (`core/pipeline/corpus.py:2735-2736`) и пишутся пачкой в
-  `core/pipeline/corpus.py:4988-4997` ⇒ SIGKILL теряет всё. Лечение — write-through: `ArchiveDescentWalker`
+  `corpus_members` копятся в памяти (`core/pipeline/corpus.py:2223-2224`) и пишутся пачкой в
+  `core/pipeline/corpus.py:3250-3250` ⇒ SIGKILL теряет всё. Лечение — write-through: `ArchiveDescentWalker`
   получает два необязательных колбэка (`persist_observation`, `persist_member`), `None` —
   прежнее поведение байт-в-байт. Точки: наблюдение — `_record` (`archive_descent.py:332`,
   вызовы `409`/`445`/`467`/`741`), член — `_settle` (`:530`), где уже есть `doc_id`/
@@ -312,13 +312,13 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   поднимается», а не «endpoint берётся из env»; место исполнения объявлено флагом
 >   `rnd_endpoint` (`config/deploy.yaml:99`).
 > - **SERP-контур:** ✅ сделано, но **не** через `run_serp_loop`. Производитель запросов —
->   `_run_serp_contour` (`core/pipeline/corpus.py:1235-1363`), вызов внутри фазы корпуса **до**
->   дренажа — `core/pipeline/corpus.py:1235-1363`; `run_serp_loop` сам остаётся невызываемым
+>   `_run_serp_contour` (`core/pipeline/corpus.py:723-851`), вызов внутри фазы корпуса **до**
+>   дренажа — `core/pipeline/corpus.py:723-851`; `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1549` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:100`), значение из
 >   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1095`).
 >   Оговорка: контур исполняется только при объявленных `rounds > 0` **и** бюджете
->   (`core/pipeline/corpus.py:1235-1363`); на прогоне `ru-pg-dbms-3edf2b06097c` он не исполнялся.
+>   (`core/pipeline/corpus.py:723-851`); на прогоне `ru-pg-dbms-3edf2b06097c` он не исполнялся.
 > - **Exit:** прогон с непустой `llm_scenarios` и живыми вердиктами есть
 >   (`runs/ru-pg-dbms-3edf2b06097c/run_manifest.yaml` — сценарий `evaluator`,
 >   `web_tool: False`), а «посчитанный κ» — **нет**: golden-набор оказался непригоден

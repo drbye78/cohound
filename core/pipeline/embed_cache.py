@@ -3,8 +3,7 @@
 **Проблема, которую модуль закрывает.** Переиспользование индекса сегодня возможно только
 **целой продукт-партицией**: ``partition_build_id`` (``pb``) хеширует ``chunker_version``,
 ``embed_model_id``, ``extractor_version`` и отпечаток содержимого продукта
-(``core/pipeline/corpus_index.py``,
-:func:`~core.pipeline.corpus_index._derive_partition_build_id`).
+(``core/pipeline/corpus_index.py``, :func:`~core.pipeline.corpus_index._derive_partition_build_id`).
 Поэтому смена экстрактора (например, другого механизма извлечения PDF), добавление одного
 документа или смена версии чанкера дают новый ``pb``, гейт переиспользования не проходит — и
 эмбеддинг пересчитывается **для всего продукта**. Замеренная цена эмбеддинга — десятки

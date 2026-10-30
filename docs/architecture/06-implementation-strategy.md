@@ -547,7 +547,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:1235-1363` вызывает `_run_serp_contour`
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:723-851` вызывает `_run_serp_contour`
 (поиск → допуск → расширение seed-набора **до** дренажа, одна сборка), `core/pipeline/search_log.py`
 (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1549`)

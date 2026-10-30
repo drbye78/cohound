@@ -34,16 +34,23 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   search, crawler, crawl_executor, container, poller, extractor, chunker,
                               #   registry, store, gate_store, state, gateway, types
   store/                      # SQLite DDL §4.4 + триггеры (sqlite.py); StorePort/GateStore-реализация
-                              #   (sqlite_store.py); backup.py — бэкап/восстановление прогона
+                              #   (sqlite_store.py); sqlite_rows.py — чистые row-конвертеры (без чтения БД);
+                              #   backup.py — бэкап/восстановление прогона
   pipeline/                   # сценарии Ш1–Ш9: runner.py (PHASES + оркестратор), phases.py,
                               #   гейты: gates.py, gate_subject.py (предмет решения),
                               #   profile_attestation.py (аттестация профиля для G1/G2);
                               #   краул: crawl_frontier.py (scope хостов), crawl_session.py,
                               #   crawl_sources.py (source routing), fetch_plan.py, archive_descent.py
                               #   (спуск в контейнеры), artifact_probe.py (допуск артефактов);
-                              #   корпус/оценка: corpus.py, extract_cache.py, eval_cache.py, retrieve.py,
-                              #   evaluate.py, exhaustion.py (протокол исчерпания I3), prompt.py,
-                              #   review.py, compute.py, report.py;
+                              #   корпус/оценка: corpus.py (координация Ш5: входы, цикл продуктов,
+                              #   сборка результата), corpus_state.py (мутабельное состояние фазы),
+                              #   corpus_persist.py (персистенция), corpus_ingest.py (допуск и разбор
+                              #   одного URL/документа), corpus_commit.py (фиксация исхода корня),
+                              #   corpus_drain.py (дренаж корня), corpus_coverage.py, corpus_index.py
+                              #   (сборка/переиспользование индекса), extraction_runtime.py (пулы
+                              #   экстракции), index_build.py, extract_cache.py, eval_cache.py,
+                              #   retrieve.py, evaluate.py, exhaustion.py (протокол исчерпания I3),
+                              #   prompt.py, review.py, compute.py, report.py;
                               #   эксперименты: experiments.py, evaluator_benchmark.py, golden.py;
                               #   инкрементальность: incremental.py, onboarding.py, state_sync.py,
                               #   run_identity.py, digests.py, composition.py;
