@@ -2077,7 +2077,7 @@ class CorpusCoverage(BaseModel):
         элемента** (``observed_sources == 0`` при ``expected_sources > 0``): корпус без
         единого наблюдения не может доказывать отсутствие, а ``not_found`` на всех URL —
         наблюдение отсутствия этих URL, не продукта (см.
-        :func:`core.pipeline.corpus.derive_corpus_coverage`).
+        :func:`core.pipeline.corpus_coverage.derive_corpus_coverage`).
     :param expected_sources: всего элементов сеанса по продукту.
     :param observed_sources: элементов, дошедших до ``FETCHED``.
     :param blocked: ``error_kind → count`` по ``FAILED``-элементам (канонические классы;

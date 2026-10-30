@@ -16,12 +16,12 @@
 **``build_id`` (§13, T8.2 DoD).** Детерминированный, без random/UUID. Приоритет:
 
 1. явный ``meta.extra["partition_build_id"]`` — его передаёт Ш5 из
-   ``corpus._derive_partition_build_id``, поэтому физическая сборка и ``index_manifest``/
+   ``corpus_index._derive_partition_build_id``, поэтому физическая сборка и ``index_manifest``/
    ``corpus_chunks.build_id`` несут один и тот же идентификатор партиции;
 2. иначе — производный :func:`derive_build_id` от (``package`` + ``chunker_version`` +
    ``embed_model_id`` + упорядоченные ``chunk_id`` + ``content_hash``). ``snapshot_date``
    намеренно **не** входит (09 §8.1: снимок — провенанс, не содержимое). Это тот же стиль,
-   что и ``corpus._derive_partition_build_id`` (разделитель ``\\x1f``, префикс ``pb_``,
+   что и ``corpus_index._derive_partition_build_id`` (разделитель ``\\x1f``, префикс ``pb_``,
    ``short_hash(..., 24)``), но дополнительно с содержимым чанков — автономная сборка
    чувствительна к контенту. Совпадения с corpus-id для тех же входов не требуется:
    corpus всегда передаёт явный id.
@@ -68,7 +68,7 @@ __all__ = [
     "recompute_vector_digest",
 ]
 
-#: Префикс ``build_id`` (стиль ``corpus._derive_partition_build_id``: партиция).
+#: Префикс ``build_id`` (стиль ``corpus_index._derive_partition_build_id``: партиция).
 _BUILD_ID_PREFIX = "pb_"
 #: Разделитель полей material-строки (unit separator — однозначная склейка).
 _FIELD_SEP = "\x1f"

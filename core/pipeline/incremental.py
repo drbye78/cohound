@@ -286,7 +286,7 @@ def chunk_row_id(doc_version_id: str, chunker_version: str, chunk_no: int) -> st
     """Id строки ``chunk_meta``: ``short_hash(doc_version_id, chunker_version, no)``.
 
     Это **durable**-пространство идентификаторов (state.db). Run-level ``chunk_id``
-    (``core.pipeline.corpus._chunk_id``) — другое пространство
+    (``core.pipeline.corpus_index._chunk_id``) — другое пространство
     ``f"{product_id}:{doc_hash}:{chunk_no}"``: он адресует чанк внутри конкретного
     прогона/партиции, тогда как ``chunk_meta.chunk_id`` переживает прогоны и различает
     версии чанкера. Смешивать их нельзя — одинаковый текст при разных

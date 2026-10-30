@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, field, replace
@@ -61,18 +62,21 @@ from core.domain import (
     ReuseKind,
 )
 from core.pipeline.artifact_probe import probe_artifact
+from core.pipeline.corpus_index import _chunk_id, _CorpusStageTimings
 from core.pipeline.corpus_persist import (
     CLEAR_SESSION_FIELD,
     DocReuse,
     _now_iso,
     as_product_mode,
     canonical_failure_kind,
+    count_doc,
     find_doc_version,
     manual_host_scope,
     mark_session,
     reuse_plan,
     sitemap_url_for,
     supersede_document,
+    write_document_state,
 )
 from core.pipeline.corpus_state import CorpusCounters
 from core.pipeline.crawl_frontier import (
@@ -95,13 +99,19 @@ from core.pipeline.extraction_runtime import (
     _page_with_source_path,
 )
 from core.pipeline.fetch_plan import _host_matches
-from core.pipeline.incremental import IncrementalItem, classify_reuse, plan_incremental
+from core.pipeline.incremental import (
+    IncrementalItem,
+    classify_reuse,
+    doc_version_id,
+    plan_incremental,
+)
 from core.pipeline.liveness import Heartbeat
 from core.pipeline.manual_artifacts import (
     ORIGIN_CRAWL,
     ORIGIN_MANUAL,
     ManualArtifact,
 )
+from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_executor import (
     ACTIVE_JOB_STATUSES,
@@ -626,7 +636,6 @@ class SitemapSeeds:
     skipped: tuple[dict[str, Any], ...] = ()
 
 
-
 # --------------------------------------------------------------------------- #
 # Разбор одного URL: переиспользование версии, воронка исходов, retention
 # --------------------------------------------------------------------------- #
@@ -1106,6 +1115,509 @@ def ingest_one(
         reuse_kind=reuse_kind,
         origin=origin,
     )
+
+
+# --------------------------------------------------------------------------- #
+# L5 шаг 3: доводка одного документа (было замыканием ``_build_corpus``)
+# --------------------------------------------------------------------------- #
+
+
+#: Причина частичности, когда экстрактор её не назвал. Не выдумка причины, а **факт её
+#: отсутствия**: частичный документ обязан остаться в корпусе (текст реален) и обязан
+#: быть помечен, поэтому «причина не сообщена» честнее и тихого ``partial=False``, и
+#: падения на инварианте ``CorpusDoc``, и придуманного объяснения.
+PARTIAL_REASON_UNSTATED = "извлечение частичное: причина экстрактором не сообщена"
+
+
+def _partial_fields(extracted: Any) -> dict[str, Any]:
+    """Поля частичности ``ExtractedDoc`` → ``CorpusDoc`` (общая точка обоих путей).
+
+    Один маппинг на страницу и на члена контейнера: иначе «пул vs inline» или «страница
+    vs член архива» могли бы разойтись в признаке, а это признак, ради которого всё и
+    делается. ``None``/нечисло остаются ``None`` — «не измерено» не превращается в ноль.
+    """
+    partial = bool(getattr(extracted, "partial", False))
+    reason = str(getattr(extracted, "partial_reason", None) or "").strip() or None
+    page_count = getattr(extracted, "page_count", None)
+    pages_converted = getattr(extracted, "pages_converted", None)
+    text = getattr(extracted, "text", None)
+    return {
+        "partial": partial,
+        "partial_reason": (reason or PARTIAL_REASON_UNSTATED) if partial else None,
+        "page_count": (
+            page_count
+            if isinstance(page_count, int) and not isinstance(page_count, bool)
+            else None
+        ),
+        "pages_converted": (
+            pages_converted
+            if isinstance(pages_converted, int) and not isinstance(pages_converted, bool)
+            else None
+        ),
+        "extracted_chars": len(text) if isinstance(text, str) else None,
+    }
+
+
+def _reused_partial_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
+    """Поля частичности **из durable-записи** версии: ``(поля CorpusDoc, признак известен)``.
+
+    Переиспользование версии (``304``: экстракции не было) не вправе ответить на вопрос
+    «прочитан документ целиком?» из самого факта переиспользования. До v5 ответа не было
+    вовсе, и ``partial=False`` означал «в этом прогоне не наблюдался» — то есть усечённый
+    текст молча объявлялся полным, а ``CorpusCoverage`` объявляло покрытие полным на
+    нём (I2/I2c). Теперь признак лежит в ``document_version`` рядом с версией, к которой
+    он относится, и переиспользование его **восстанавливает**.
+
+    :returns: ``(поля, известен)``. ``известен=False`` — строка записана версией, которая
+        признак не сохраняла (``extract_partial IS NULL``). Тогда поля не утверждают
+        ничего (``partial=False`` — вынужденное булево модели, а не измерение), и
+        вызывающий обязан **сказать**, что признак неизвестен, а не выдать это за
+        «полное».
+    """
+    raw = getattr(doc_version, "extract_partial", None)
+    if raw is None:
+        return (
+            {
+                "partial": False,
+                "partial_reason": None,
+                "page_count": None,
+                "pages_converted": None,
+                "extracted_chars": None,
+            },
+            False,
+        )
+    partial = bool(raw)
+    reason = (
+        str(getattr(doc_version, "extract_partial_reason", None) or "").strip() or None
+    )
+    page_count = getattr(doc_version, "extract_page_count", None)
+    pages_converted = getattr(doc_version, "extract_pages_converted", None)
+    return (
+        {
+            "partial": partial,
+            # Частичный документ обязан назвать причину (инвариант ``CorpusDoc``); причина
+            # из записи — это причина, которую **сообщил прибор**, а не пересказ.
+            "partial_reason": (reason or PARTIAL_REASON_UNSTATED) if partial else None,
+            "page_count": (
+                page_count
+                if isinstance(page_count, int) and not isinstance(page_count, bool)
+                else None
+            ),
+            "pages_converted": (
+                pages_converted
+                if isinstance(pages_converted, int)
+                and not isinstance(pages_converted, bool)
+                and partial
+                else None
+            ),
+            "extracted_chars": None,
+        },
+        True,
+    )
+
+
+def persist_docs(
+    store: Any,
+    docs: list[CorpusDoc],
+    errors: list[str],
+    *,
+    origin: str = ORIGIN_CRAWL,
+    versions_by_doc: Mapping[str, str] | None = None,
+) -> None:
+    """Пишет ``corpus_docs`` (retention + provenance экстракции, §3.2).
+
+    **Единственная** точка записи ``corpus_docs``. В Pass A вызывается инкрементально —
+    сразу после ``ingest.docs.append`` для каждого полностью сформированного документа
+    (см. ``_finish_one``), поэтому при жёстком убийстве теряется максимум документ
+    «в полёте». Retention-провенанс не зависит от иммутабельности индексной сборки (I19),
+    поэтому запись не откладывается до Pass B.
+
+    Каждая запись обёрнута в try/except: сбой одного ``upsert_corpus_doc`` фиксируется в
+    ``errors`` и не прерывает ни обработку остальных документов, ни краул (контракт
+    изоляции фаз, ``runner.py``).
+
+    ``origin`` (13-manual-artifacts §3.3) — происхождение **байтов**: ``crawl`` (дефолт,
+    вызов байт-в-байт прежний — лишний kwarg не передаётся) либо ``manual``. Отдельный
+    аргумент, а не поле ``CorpusDoc``: доменная модель не получает смысла, которого у неё
+    нет, а ``corpus_docs.origin`` — провенанс записи байтов, а не документа.
+
+    ``versions_by_doc`` (16 §6) — ``doc_id → doc_version_id``: адрес версии, которую несёт
+    ``chunk_id``. Тоже отдельный аргумент и по той же причине: версия — не свойство строки
+    корпуса (их у документа бывает несколько — ``dv`` включает уровень извлечения), а
+    производное отображение ``corpus_doc_version``, которое пишет хранилище.
+    """
+    if store is None:
+        return
+    for doc in docs:
+        version = None if versions_by_doc is None else versions_by_doc.get(doc.doc_id)
+        try:
+            if origin == ORIGIN_CRAWL:
+                store.upsert_corpus_doc(doc, doc_version_id=version)
+            else:
+                store.upsert_corpus_doc(doc, origin=origin, doc_version_id=version)
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(f"upsert_corpus_doc({doc.doc_id}): {type(exc).__name__}: {exc}")
+
+
+def finish_one(
+    product_id: str,
+    url: str,
+    page: RawPage,
+    fetch_plan: FetchPlan,
+    raw_path: Path,
+    extracted: Any,
+    ingest: ProductIngest,
+    seen_docs: dict[str, str],
+    seen_chunk_ids: set[str],
+    extractor_obj: ExtractorPort,
+    level: DocumentLevel,
+    *,
+    mark_item: Callable[..., None],
+    errors: list[str],
+    store: Any,
+    chunker: ChunkerPort,
+    timings: _CorpusStageTimings,
+    state: ProductStatePort | None,
+    duplicates: dict[str, int],
+    doc_counters: dict[str, dict[str, int]],
+    partial_unknown_products: dict[str, list[str]],
+    partiality_changes: list[dict[str, Any]],
+    reuse_same_hash: Callable[..., DocReuse | None],
+    persist_docs: Callable[..., None],
+    chunker_version: str,
+    run_id: str | None,
+    embed_model_id: str,
+    reuse_kind: ReuseKind,
+    extract_error: str | None = None,
+    extract_failure_kind: FailureKind | None = None,
+    reuse: DocReuse | None = None,
+    origin: str = ORIGIN_CRAWL,
+) -> str | None:
+    """Доводка одного URL после экстракции: дедуп → нарезка → ``mark_item`` (главный поток).
+
+    P4: граница расщепления проходит **механически** по ``extracted`` — результат
+    экстракции приходит либо из inline-вызова, либо из ``future.result()`` пула. Сырые
+    байты уже сохранены (``raw_path``); шаги изолируют ошибки в ``errors`` и фиксируют
+    терминальный статус элемента сеанса через ``mark_item`` (FIFO на главном потоке).
+
+    **Переиспользование (09 §6.3/§9).** ``reuse`` — готовая версия документа (путь
+    ``304``, экстракция не вызывалась); ``None`` — обычная экстракция. При ``200`` с
+    прежним ``content_hash`` версия ищется здесь же (:func:`reuse_same_hash`): чанкер
+    не вызывается, chunk-set берётся из ``chunk_store`` после проверки I19
+    (:func:`core.pipeline.corpus_persist.load_reused_chunks`). Run-level ``chunk_id``
+    адресует версию документа (``doc_version_id``, 16 §6), поэтому идентификаторы
+    индекса от переиспользования не меняются.
+
+    ``reuse_kind`` — происхождение наблюдения (16 §3.3), приходит **аргументом**:
+    ``reused`` (байты из retained, ``resume_page``), ``revalidated`` (304 либо 200 с
+    прежним ``content_hash``) либо ``live`` (живой fetch). Выводить его из ``page``
+    здесь нельзя: у resume-страницы ``not_modified`` всегда ``False``, и «живой 200»
+    стал бы ложной провенанс-записью. ``200``-совпадение хеша повышает ``live`` до
+    ``revalidated`` (сервер ответил, контент тот же), но ``reused`` не понижается и не
+    повышается: сети не было, сильнейшего наблюдения не появилось.
+
+    ``extract_failure_kind`` — класс отказа извлечения: ``None`` ⇒ ``parser_failed``
+    (прежнее отображение), таймаут задания пула приходит как ``extraction_timeout``.
+
+    **Ручной артефакт (§3.3).** ``origin != 'crawl'`` — элемент сеанса не пишется:
+    отказ краула (``robots_disallow``) остаётся фактом аудита, а не превращается в
+    ``fetched``. Меняется только писатель ``corpus_docs`` (``origin='manual'``).
+    :returns: ``doc_id``, если документ попал в корпус, иначе ``None`` — по этому
+        признаку ручная подача закрывает пробел покрытия.
+    """
+    manual = origin != ORIGIN_CRAWL
+
+    def mark(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
+        """``mark_item`` для краула; для ручного артефакта — no-op (аудит не перезаписывается)."""
+        if manual:
+            return
+        mark_item(pid, u, status, **fields)
+
+    if reuse is not None and extracted is not None and getattr(extracted, "error", None):
+        # Экстрактор текущего прогона сообщил сбой: переиспользование скрыло бы его,
+        # а сбой парсера — это сигнал о конвейере, а не повод «взять старое».
+        reuse = None
+    extractor_token = str(getattr(extractor_obj, "version", "") or "")
+    level_text = _as_text(level)
+    doc_extractor_version = extractor_token or None
+
+    # 3. Экстракция (грациозная деградация адаптера через .error).
+    if reuse is None:
+        if extract_error is not None:
+            errors.append(f"{product_id}/{url}: extract: {extract_error}")
+            mark(
+                product_id,
+                url,
+                CrawlItemStatus.FAILED,
+                error_kind=(
+                    extract_failure_kind or FailureKind.PARSER_FAILED
+                ).value,
+                error=extract_error,
+                raw_path=str(raw_path),
+            )
+            return None
+        if extracted is None or getattr(extracted, "error", None):
+            reason = getattr(extracted, "error", None) or "пустой ExtractedDoc"
+            errors.append(f"{product_id}/{url}: extract: {reason}")
+            mark(
+                product_id,
+                url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.PARSER_FAILED.value,
+                error=reason,
+                raw_path=str(raw_path),
+            )
+            return None
+
+        doc_hash = str(getattr(extracted, "content_hash", "") or "")
+        if not doc_hash:
+            errors.append(
+                f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён"
+            )
+            mark(
+                product_id,
+                url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.PARSER_FAILED.value,
+                error="ExtractedDoc без content_hash",
+                raw_path=str(raw_path),
+            )
+            return None
+        doc_extractor_version = getattr(extracted, "extractor_version", None)
+        extractor_token = str(doc_extractor_version or "") or extractor_token
+    else:
+        doc_hash = reuse.doc_version.content_hash
+        doc_extractor_version = reuse.doc_version.extractor_version or None
+        extractor_token = (
+            reuse.doc_version.extractor_version or extractor_token
+        )
+        level_text = reuse.doc_version.level or level_text
+
+    # 4. Дедуп по content_hash (в пределах продукта).
+    document_id = f"{product_id}:{doc_hash}"
+    if doc_hash in seen_docs:
+        # Наблюдаемость: сколько документов схлопнулось по продукту. Класс исхода
+        # не меняется (алиас получает ``FETCHED`` и версию близнеца) — это счётчик,
+        # а не ошибка.
+        duplicates[product_id] = duplicates.get(product_id, 0) + 1
+        # Байты сохранены и контент уже проиндексирован близнецом в этой партиции.
+        # Алиас получает ту же версию документа (если она уже записана), чтобы
+        # следующий инкрементальный план знал, что контент URL уже в корпусе.
+        found = find_doc_version(
+            product_id,
+            doc_hash,
+            extractor_token,
+            level_text,
+            state=state,
+            errors=errors,
+        )
+        mark(
+            product_id,
+            url,
+            CrawlItemStatus.FETCHED,
+            raw_path=str(raw_path),
+            state_fields={
+                "doc_version_id": (
+                    found.doc_version_id if found is not None else None
+                ),
+                "etag": page.etag,
+                "last_modified": page.last_modified,
+                "last_http_status": page.status_code,
+            },
+        )
+        return document_id
+    seen_docs[doc_hash] = url
+
+    # 16 §6: адрес версии документа — тот же ключ §4.2, что уходит в
+    # ``document_version`` ниже (``content_hash`` + версия экстрактора + уровень).
+    # Считается **до** нарезки: ``chunk_id`` адресует версию, а не голый хеш
+    # (иначе ``layout``- и ``text``-документы одного текста давали один ``chunk_id``).
+    dv_id = doc_version_id(product_id, doc_hash, extractor_token, level_text)
+
+    # 5. Переиспользование версии (200 с прежним content_hash) либо чанкер.
+    # Разрешается **до** создания ``CorpusDoc``: происхождение наблюдения
+    # (``reuse_kind``) — поле той же строки (16 §3.3), а «200 с прежним хешем» —
+    # это ``revalidated``, а не ``live`` (09 §6.3 ``classify``).
+    active_reuse = reuse
+    if active_reuse is None:
+        active_reuse = reuse_same_hash(
+            product_id, url, doc_hash, extractor_token, level_text
+        )
+    if active_reuse is not None and reuse_kind is ReuseKind.LIVE:
+        # Сервер ответил (200), контент тот же ⇒ ревалидация. ``reused`` (retained-
+        # байты без сети) не повышается: сильнейшего наблюдения не появилось.
+        reuse_kind = ReuseKind.REVALIDATED
+
+    # Частичность — **измеренное** свойство, а не вывод из текста: «прочитано 7 страниц
+    # из 2763» сообщает прибор (``ExtractedDoc.partial``), а markdown-строка об этом
+    # молчит. Два пути, и оба обязаны назвать одно и то же:
+    # * извлечение было (inline/пул/кэш) — признак из ``ExtractedDoc``;
+    # * переиспользование (``304``) — извлечения не было, поэтому признак берётся из
+    #   durable-записи версии (``document_version.extract_partial``). До v5 его там не
+    #   было, и усечённый текст объявлялся полным; теперь ``partial_known`` различает
+    #   «полное» и «не измерено», и второе не выдаётся за первое.
+    if reuse is None:
+        partial_fields = _partial_fields(extracted)
+        partial_known = True
+    else:
+        partial_fields, partial_known = _reused_partial_fields(reuse.doc_version)
+        if not partial_known:
+            # «Не измерено» называется явно: иначе этот документ в отчёте неотличим от
+            # прочитанного целиком, а ``CorpusCoverage`` считает полноту по признаку.
+            partial_unknown_products.setdefault(product_id, []).append(page.url)
+    doc = CorpusDoc(
+        doc_id=document_id,
+        product_id=product_id,
+        url=page.url,
+        fetched_at=page.fetched_at,
+        content_hash=doc_hash,
+        raw_path=str(raw_path),
+        extractor_version=doc_extractor_version,
+        render_mode=_as_text(page.fetch_mode),
+        lang=page.lang,
+        # 16 §3.3: происхождение наблюдения **этого** прогона. ``http_status`` —
+        # ответ сервера в этом цикле. У retained-байтов сервер не отвечал, поэтому
+        # ``NULL``, даже если ``RawPage.status_code`` несёт прежний ответ (он нужен
+        # ``url_state.last_http_status`` — факт прошлого цикла, не этого).
+        http_status=(
+            None if reuse_kind is ReuseKind.REUSED else page.status_code
+        ),
+        reuse_kind=reuse_kind,
+        **partial_fields,
+    )
+    ingest.docs.append(doc)
+    # Инкрементальная персистенция retention-провенанса: ``doc`` полностью сформирован
+    # выше (``doc_id``/``content_hash``/``raw_path``/``extractor_version``/``lang``/
+    # ``render_mode``), а сырые байты уже на диске (retention выполнен до экстракции).
+    # Поэтому пишем строку сразу, а не в конце продукта: жёсткое убийство (OOM/SIGKILL)
+    # теряет максимум документ «в полёте» (ещё извлекаемый), а не весь накопленный
+    # продукт. ``persist_docs`` изолирует сбой записи в ``errors`` — краул продолжается.
+    persist_docs(
+        store, [doc], errors, origin=origin, versions_by_doc={document_id: dv_id}
+    )
+
+    #: ``(chunk_no, text, heading_path, context_prefix, provided_hash)`` — общая форма
+    #: для чанкера и переиспользованного набора (I19-проверки ниже одинаковы).
+    candidates: list[tuple[int, str, str, str, str]] = []
+    if active_reuse is not None:
+        candidates = [
+            (
+                chunk.chunk_no,
+                chunk.text,
+                chunk.heading_path,
+                chunk.context_prefix,
+                chunk.content_hash,
+            )
+            for chunk in active_reuse.chunks
+        ]
+    else:
+        try:
+            _chunk_started = time.perf_counter()
+            try:
+                chunks = chunker.chunk(extracted, document_id)
+            finally:
+                # ``chunk_s`` — работа главного потока; считается и при отказе нарезки.
+                timings.chunk_s += time.perf_counter() - _chunk_started
+        except Exception as exc:  # noqa: BLE001
+            # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
+            # повторный resume сможет ре-извлечь без ре-фетча.
+            errors.append(f"{product_id}/{url}: chunk: {type(exc).__name__}: {exc}")
+            return None
+        candidates = [
+            (
+                int(getattr(chunk, "chunk_no", 0)),
+                getattr(chunk, "text", "") or "",
+                getattr(chunk, "heading_path", "") or "",
+                getattr(chunk, "context_prefix", "") or "",
+                str(getattr(chunk, "content_hash", "") or "").strip(),
+            )
+            for chunk in sorted(
+                chunks or [], key=lambda c: getattr(c, "chunk_no", 0)
+            )
+        ]
+
+    accepted: list[tuple[int, str, str, str]] = []
+    for chunk_no, text, heading_path, context_prefix, provided_hash in candidates:
+        # I19: у каждого индексируемого чанка обязан быть непустой hash.
+        if not provided_hash:
+            errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
+            continue
+        if not text.strip():
+            errors.append(f"I19: {document_id}: чанк с пустым текстом отклонён")
+            continue
+
+        cid = _chunk_id(product_id, dv_id, chunk_no)
+        if cid in seen_chunk_ids:
+            errors.append(f"{document_id}: дублирующийся chunk_id {cid!r} отклонён")
+            continue
+        seen_chunk_ids.add(cid)
+
+        ingest.chunks.append(
+            CorpusChunk(
+                chunk_id=cid,
+                doc_id=document_id,
+                product_id=product_id,
+                url=page.url,
+                heading_path=heading_path,
+                lang=page.lang,
+                chunk_no=chunk_no,
+                text=text,
+                context_prefix=context_prefix,
+                # Авторитетный хеш — от чистого текста (I19/§10).
+                content_hash=content_hash(text),
+                # build_id проставляется в Pass B после фиксации id сборки.
+                build_id=None,
+                embed_model_id=embed_model_id or None,
+                embedded_at=None,
+            )
+        )
+        accepted.append((chunk_no, text, heading_path, context_prefix))
+
+    # 09 §6.3/§9: версия документа + chunk-set в durable-субстрате. Идентификатор
+    # (``dv_id``) выведен выше — тем же ключом §4.2, которым адресованы ``chunk_id``.
+    write_document_state(
+        product_id,
+        url,
+        page,
+        dv_id=dv_id,
+        doc_hash=doc_hash,
+        extractor_token=extractor_token,
+        level_text=level_text,
+        raw_path=raw_path,
+        chunks=accepted,
+        partial_fields=partial_fields,
+        partial_known=partial_known,
+        state=state,
+        errors=errors,
+        partiality_changes=partiality_changes,
+        chunker_version=chunker_version,
+        run_id=run_id,
+    )
+    reused = active_reuse is not None
+    count_doc(
+        product_id, reused=reused, state=state, doc_counters=doc_counters
+    )
+
+    # L1a: документ успешно добыт и нарезан → элемент сеанса терминален ``FETCHED``
+    # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
+    # Для ручного артефакта ``mark`` — no-op: отказ краула остаётся в аудите (§3.3).
+    mark(
+        product_id,
+        url,
+        CrawlItemStatus.FETCHED,
+        raw_path=str(raw_path),
+        state_fields={
+            "doc_version_id": dv_id,
+            "reuse_kind": (
+                ReuseKind.REVALIDATED.value if reused else ReuseKind.LIVE.value
+            ),
+            "etag": page.etag,
+            "last_modified": page.last_modified,
+            "last_http_status": page.status_code,
+            "last_changed_at": None if reused else _now_iso(),
+        },
+    )
+    return document_id
 
 
 def feed_manual_artifact(

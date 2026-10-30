@@ -164,7 +164,7 @@ ChunkLike = Chunk | RetrievedChunk
 #: Хвост ``chunk_id``, отделяющий номер фрагмента от идентификатора документа.
 #:
 #: Оба объявленных формата ядра несут номер в конце: ``{document_id}#{no}`` (чанкер) и
-#: ``{product_id}:{doc_hash}:{no}`` (run-level id, ``corpus._chunk_id``). Отрезается
+#: ``{product_id}:{doc_hash}:{no}`` (run-level id, ``corpus_index._chunk_id``). Отрезается
 #: **только** числовой хвост, поэтому непредусмотренный формат даёт пустой документ
 #: (строка ``document:`` не печатается), а не выдуманный идентификатор.
 _CHUNK_NO_SUFFIX_RE = re.compile(r"(?:#|:)\d+$")

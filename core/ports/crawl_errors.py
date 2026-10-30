@@ -131,7 +131,7 @@ class CrawlNotFound(CrawlError):
     значило бы потерять различие «мы не пошли» / «нам ответили».
 
     Форма повторяет ``CrawlRefused``: машинный код — атрибут экземпляра, который
-    pipeline читает через ``getattr`` (``corpus._commit_local``).
+    pipeline читает через ``getattr`` (``corpus_ingest.commit_local``).
     """
 
     def __init__(

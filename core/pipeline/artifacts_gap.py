@@ -83,7 +83,7 @@ def _origin(url: str) -> str:
 def _failure_kind(value: str | None) -> FailureKind | None:
     """Канонический класс сбоя; ``None`` — значение вне словаря или пусто.
 
-    ``crawl_session_items.error_kind`` пишется через :func:`core.pipeline.corpus._mark`
+    ``crawl_session_items.error_kind`` пишется через :func:`core.pipeline.corpus_ingest.mark`
     и валидируется :class:`~core.domain.models.CrawlSessionItem`, поэтому значение вне
     ``FailureKind`` — дефект записи. Такую строку файл не классифицирует (и не выдумывает
     класс), но и не роняет генерацию: она не попадёт ни в ``gaps``, ни в

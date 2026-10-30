@@ -341,7 +341,7 @@ def _thread_fetch(
 ) -> dict[str, Any]:
     """Воркер-поток (in-process): пейсит, фетчит инъецированным краулером; та же форма.
 
-    ``limiter.wait`` — до фетча (A2c, §11.2, зеркало ``corpus._local_fetch``); при
+    ``limiter.wait`` — до фетча (A2c, §11.2, зеркало ``corpus_ingest.local_fetch``); при
     ``plan.rate_limit=None`` :meth:`RateLimiter.wait` возвращает ``0.0`` **без** ``sleep``.
     """
     limiter.wait(_fetch_host(url), plan.rate_limit)

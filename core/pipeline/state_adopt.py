@@ -1394,7 +1394,7 @@ def _partitions(
 
 
 def _content_token(pairs: Iterable[tuple[str, str]]) -> str:
-    """Отпечаток содержимого партиции — та же формула, что ``corpus._product_content_token``.
+    """Отпечаток содержимого партиции — та же формула, что ``corpus_index._product_content_token``.
 
     Сортированные пары ``(chunk_id, content_hash)``, склеенные ``_FIELD_SEP``. Здесь
     ``chunk_id`` — **прогонное** пространство идентификаторов (``corpus_chunks.chunk_id``),
