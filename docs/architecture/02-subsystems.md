@@ -791,12 +791,12 @@ flowchart LR
 | I16–I23 | A–E |
 
 **Открытые вопросы к итерации 3:** формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
-(раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2, `core/pipeline/report.py:2572`,
+(раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2, `core/pipeline/report.py:2674`,
 `core/pipeline/gate_subject.py:427`); версионирование `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:117`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
 `core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
 `core/util/hashing.py:45`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
-(`core/util/cache.py:133`, проводка `core/cli/context.py:1356`); политика ретраев и backoff —
+(`core/util/cache.py:133`, проводка `core/cli/context.py:1556`); политика ретраев и backoff —
 ✅ сделано (общая политика `core/util/retry.py:1`, потребитель — `core/adapters/search_glm.py:66`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано (`core/store/sqlite.py:21` WAL +
 `core/store/sqlite_store.py:88` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:626` — одна

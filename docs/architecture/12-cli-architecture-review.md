@@ -128,7 +128,7 @@ $ diff <(plan --json) <(plan --dry-run --json)
 
 ⬜ не сделано — расхождение осталось дословным: `plan`/`review`/`report`/`run` есть и в
 `PHASES` (`core/pipeline/runner.py`), и как команды; `run --until` принимает **все** 15 фаз
-включительно с `plan` (`core/cli/commands/run.py:1387`), то есть «посмотреть план без записи»
+включительно с `plan` (`core/cli/commands/run.py:1423`), то есть «посмотреть план без записи»
 и «записать прогон до фазы plan» по-прежнему две команды с одним словом.
 Статус `status` называет следующую команду — это отвечает на «что дальше», но не устраняет
 двоение имён.
@@ -268,7 +268,7 @@ hound run --package <dir>        # run.yaml берётся из пакета
 ### 4.2 Фаза не равна команде
 
 ⬜ не сделано — `hound plan` остался на месте (и не переименован), `run --until plan` остался
-(`core/cli/commands/run.py:1387`, `choices=PHASES`), `review` и `gate` — отдельные команды, а не
+(`core/cli/commands/run.py:1423`, `choices=PHASES`), `review` и `gate` — отдельные команды, а не
 фазы, `hound approve`/`hound reject` не появились. Сделана только читающая часть сценария —
 `hound status <run_id>`, которая печатает готовую команду продолжения.
 
@@ -394,7 +394,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 
 ### Команды «только для чтения» создают БД
 
-✅ сделано (`core/store/sqlite.py:652-698` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
+✅ сделано (`core/store/sqlite.py:654-700` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
 Перемер на тех же трёх командах и несуществующем пути: `review --db /tmp/…/x.db`,
 `sensitivity --db …`, `golden --golden … --db …` → **`exit 4`**, каталог не создаётся
 (`ls: cannot access …`: файла нет). Сообщение называет причину: «read-only команда файл не

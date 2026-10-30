@@ -38,7 +38,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:110-119`).
 - Любой такой элемент **по построению** делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2085-2227`, `core/pipeline/corpus_drain.py:124-131`, условие 2).
+  (`core/domain/models.py:2096-2238`, `core/pipeline/corpus_drain.py:124-131`, условие 2).
 - Неполное покрытие ⇒ `❌` с `absence_rule=explicit` требует человеческой подписи
   `scope_attested_by` (I2c). Докстринг называет это прямо: **«человеческий escape hatch»**
   (`core/pipeline/corpus_coverage.py:104-107`).
@@ -197,13 +197,13 @@ robots остаётся в аудите.
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **Сегодня его нет.** Провалы фетчей попадают в отчёт только агрегатами
-(`core/domain/models.py:1064` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1188-1193`
-— движки в шапке; `core/pipeline/report.py:1606-1646` — `blocked = {error_kind: count}` и
+(`core/domain/models.py:1064` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1252-1257`
+— движки в шапке; `core/pipeline/report.py:1684-1724` — `blocked = {error_kind: count}` и
 `unreadable_origins` от `derive_corpus_coverage`). Ни URL, ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 
-Ближайший образец формы — `core/pipeline/report.py:1370` `render_nda_questions`: единый CSV, строка =
+Ближайший образец формы — `core/pipeline/report.py:1627-1746` `render_nda_questions`: единый CSV, строка =
 аномалия, `anomaly_kind ∈ {i3_protocol, crawl_truncation, corpus_incomplete}`. Тот же приём,
 другая таблица.
 
@@ -299,7 +299,7 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:314` — единственный writer, зовут
-   `core/pipeline/corpus.py:3234` и `core/pipeline/report.py:2708`; человеческая строка —
+   `core/pipeline/corpus.py:3234` и `core/pipeline/report.py:2810`; человеческая строка —
    `core/pipeline/artifacts_gap.py:196`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
@@ -307,12 +307,12 @@ gaps:
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
    `core/pipeline/corpus.py:2115`; `origin` — `core/store/sqlite.py:118`;
-   `resolved_manually` — `core/domain/models.py:2106` + `core/pipeline/corpus_coverage.py:118`;
-   доля — `core/pipeline/phases.py:1433`; дайджест — `core/pipeline/digests.py:339`).
+   `resolved_manually` — `core/domain/models.py:2117` + `core/pipeline/corpus_coverage.py:118`;
+   доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:339`).
    As-built и расхождения — §10.
 3. ⬜ не сделано — `parent_run_id` прогона-продолжения в коде отсутствует
    (`grep -rn "parent_run_id" core/` — 0 совпадений), `hound diff` показывает дельту через
-   `execution_change: … manual_artifacts_digest` (`core/pipeline/report.py:1897-1908`,
+   `execution_change: … manual_artifacts_digest` (`core/pipeline/report.py:1975-1986`,
    поле входит в `EXECUTION_CONTRACT_FIELDS`), но связи «этот прогон — продолжение того» нет.
    **Связность**: `parent_run_id` для прогона-продолжения, дельта в `hound diff`.
 4. ⬜ не сделано — `pb` остаётся продукт-скоупед: W14 (F3) не начат
@@ -401,7 +401,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   схема `manual_artifacts/1` (`:67`), путь от пакета (`:192-212`), сверка `sha256` (`:297-303`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:3234`), и `report` (`core/pipeline/report.py:2708`); форма —
+  (`core/pipeline/corpus.py:3234`), и `report` (`core/pipeline/report.py:2810`); форма —
   `core/pipeline/artifacts_gap.py:219` (`collect_artifact_gaps`), человеческая строка —
   `:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:132`); подача

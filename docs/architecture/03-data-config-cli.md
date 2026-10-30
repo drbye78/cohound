@@ -1584,7 +1584,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 **Открытые вопросы к итерации 4:** формат импорт-графа CI — ✅ сделано (`tests/selfcheck.py:970-1012`,
 `_import_graph`, вызов `:354`; AST по `core.*`); структура логирования — ✅ сделано
 (`core/util/logging.py:1` — JSON-lines `runs/{run_id}/logs/{phase}.jsonl`, поля 04 §B.1); бэкап/
-восстановление прогона — ✅ сделано (`core/store/backup.py:139` `backup_run` + `:211` `restore_run` —
+восстановление прогона — ✅ сделано (`core/store/backup.py:173` `backup_run` + `:211` `restore_run` —
 zip-бандл + `sqlite3.Connection.backup`, не копирование файла); как считать `prompt`-шаблоны версиями — ✅ сделано
 (`core/pipeline/prompt.py:117` — по файлам `templates/{version}.txt`, версия входит в `prompt_hash`).
 Отдельная корпусная БД — ➖ снято (S6, B.2; единая БД сохраняет FK).

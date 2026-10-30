@@ -340,7 +340,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 ✅ сделано (проверено) — `core/store/sqlite.py:15` (`SCHEMA_VERSION = "3.13.0"`; на `f6100c7` в схеме
 21 таблица, из них 20 предметных + `sqlite_sequence` — текст ниже говорит «19», это устарело),
 `core/store/state_sqlite.py:41` (`STATE_SCHEMA_VERSION = "5"`, в тексте ниже `"4"`),
-`core/store/state_store.py:875` (`save_profile_attestation` — писателя в прогоне нет, см. §5.W4).
+`core/store/state_store.py:1022` (`save_profile_attestation` — писателя в прогоне нет, см. §5.W4).
 
 - `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.13.0"`
   (19 таблиц, включая `schema_meta`; гейт версии схемы — файл другой версии отвергается,
@@ -358,7 +358,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ✅ сделано (проверено) — `core/pipeline/runner.py:167` (`PhaseResult` c
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
-`core/cli/context.py:1218` (`make_profile_gate` подключён в CLI).
+`core/cli/context.py:1418` (`make_profile_gate` подключён в CLI).
 ⬜ не сделано — durable-аттестация профиля: `save_profile_attestation` не вызывается ни из
 одного прод-пути (`grep -rn save_profile_attestation core` → только определение), строку пишут тесты.
 
@@ -535,7 +535,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:123-126` (`render_battle_card`,
+✅ сделано (проверено) — `core/pipeline/report.py:132-135` (`render_battle_card`,
 `render_nda_questions`, `render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, включая `battle_card.xlsx` и `diff.md`).
 
@@ -566,7 +566,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
-⬜ не сделано — код есть (`core/store/backup.py:139/211/300` — `backup_run`/`restore_run`/
+⬜ не сделано — код есть (`core/store/backup.py:173/211/300` — `backup_run`/`restore_run`/
 `gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:2932`),
 но приёмочный контур не пройден: golden-full дал 6.8 % (`2026-10-27-golden-reference-set-unusable.md`),
 §11.5-baseline и кейсы 2–5 не делались.
@@ -927,10 +927,10 @@ uv sync --frozen --extra dev
    Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
    ✅ проверено на `f6100c7`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
-   канал в Ш6 — `core/pipeline/phases.py:1248`. Имя параметра сменилось: `scope_acceptance`
+   канал в Ш6 — `core/pipeline/phases.py:1292`. Имя параметра сменилось: `scope_acceptance`
    (принятие риска) — `core/pipeline/evaluate.py:3060-3528`. Прежнее `scope_attested_by` живёт
    **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:313-315`)
-   и как миграция колонки (`core/store/sqlite.py:565-580`); в сигнатуре оценщика алиаса нет —
+   и как миграция колонки (`core/store/sqlite.py:567-582`); в сигнатуре оценщика алиаса нет —
    прежняя редакция выдавала желаемое за сделанное.
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой

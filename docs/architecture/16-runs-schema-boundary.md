@@ -81,7 +81,7 @@ absence/evidence-модель, а значит по `AGENTS.md` §13 это `met
 
 **Решение: `SCHEMA_VERSION` остаётся `3.13.0`** (`core/store/sqlite.py:15`). Все изменения
 ниже — аддитивные: колонки добавляет идемпотентный `_ensure_columns`
-(`core/store/sqlite.py:541-558`), таблицу — `CREATE TABLE IF NOT EXISTS` в `DDL`. Гейт
+(`core/store/sqlite.py:541-560`), таблицу — `CREATE TABLE IF NOT EXISTS` в `DDL`. Гейт
 `_reject_foreign_schema` (`:615-624`, вызовы `:683` и `:701`) существует ради
 **несовместимого** чтения, а не ради счётчика ревизий: поднимать версию на аддитивном
 изменении значило бы запретить чтение уже завершённых прогонов без причины.
@@ -237,7 +237,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1097` → `core/pipeline/corpus.py:860`/`:2601`/`:2699`, там же, где уже
+  **явным параметром**: `core/pipeline/phases.py:1141` → `core/pipeline/corpus.py:860`/`:2601`/`:2699`, там же, где уже
   идёт `embed_model_id` (`core/pipeline/corpus.py:1217` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
@@ -251,12 +251,12 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 (`core/pipeline/digests.py:394-416`) требует точного набора ключей, но вызывается ровно из
 одного места — `run_identity.py:321`, внутри `build_execution_contract`, то есть только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:1976-2000`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:2054-2078`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. Поэтому старые прогоны читаются, а их diff честно говорит
 `execution_change: embed_device`.
 
 `RunManifest` (`core/domain/models.py:1528-1740`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:1968-1970`) сопоставляет имя
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2346-2348`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS` (`:1960`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
@@ -579,7 +579,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
    может отличить полное измерение от среза, не заглянув в `state.db`. Сегодня
    `run_scope` не хранится нигде, кроме материала `run_id` (`core/pipeline/plan.py:94`;
    прямо зафиксировано в `core/pipeline/state_adopt.py:33`, `:117`), а `ProductPlanSet`
-   существует (`core/domain/models.py:2303`) и не персистится ни разу — единственное
+   существует (`core/domain/models.py:2314`) и не персистится ни разу — единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей.
 4. **Правило `❌` (часть той же полосы, `09` §11.2).** Проверка рядом с
@@ -656,7 +656,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 Записаны здесь, чтобы вторая редакция не повторяла ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:1960`, а не `:1970`; `reuse_kind` в `url_state` —
+`core/pipeline/report.py:2038`, а не `:1970`; `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:106`, а не `:93` (там комментарий); `_PARTITION_SCHEMA` —
 `core/pipeline/corpus_index.py:48`; `composition.py` исключён из состава (§8);
 «`embed_device` в `extra` **и** в корне» — одно место, а не два (§5.1); «геттер в

@@ -488,12 +488,12 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   `core/pipeline/prompt.py:117` (`TEMPLATE_VERSION = "evaluator_v5"`), `templates/{version}.txt`,
   версия входит в `prompt_hash` (`core/util/hashing.py:45`);
 - retention/GC индексных сборок: старые сборки не удаляются (§13) — нужен явный лимит/политика —
-  ✅ сделано (`core/store/backup.py:300` `gc_index_builds`: reference-aware по `_compositions/*.json`,
+  ✅ сделано (`core/store/backup.py:465` `gc_index_builds`: reference-aware по `_compositions/*.json`,
   по умолчанию `dry_run`), лимита-числа нет намеренно — политика ссылочная, а не пороговая;
-- стратегия бэкапа/восстановления прогона — ✅ сделано (`core/store/backup.py:139` `backup_run`,
+- стратегия бэкапа/восстановления прогона — ✅ сделано (`core/store/backup.py:173` `backup_run`,
   `:211` `restore_run`; снапшот через `sqlite3.Connection.backup`, не копирование файла);
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
-  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:2572`; маркер
+  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:2674`; маркер
   `NOT_FOR_PUBLICATION` — `:149`; профиль публикуемости `outputs/publishability.yaml` — `:266`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через

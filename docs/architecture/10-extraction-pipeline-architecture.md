@@ -342,7 +342,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 ### Д-6. Мёртвый элемент неотличим от медленного (R3)
 
 > ✅ **сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `crawl_sessions.owner`/`heartbeat_at` в DDL
-> (`core/store/sqlite.py:326-327`), `core/pipeline/liveness.py` (свидетельство живости,
+> (`core/store/sqlite.py:328-329`), `core/pipeline/liveness.py` (свидетельство живости,
 > recovery-on-open, `interrupt_session`), heartbeat в корпусе
 > (`core/pipeline/corpus.py:1533`), `interrupted` в словаре (`core/domain/enums.py:721`).
 > Остаток решения, названный К-4: это **не** lease — переназначения элемента другому
@@ -644,7 +644,7 @@ RTX 3050 — 1.10× при ΣVRAM 1 344 MB, то есть карта не свя
 
 > ✅ **сделано** (F1) — `core/pipeline/liveness.py` (`current_owner`, `owner_is_alive`,
 > `stale_reason`, `interrupt_session`, `recover_interrupted_sessions`, `Heartbeat`),
-> `crawl_sessions.owner`/`heartbeat_at` в DDL (`core/store/sqlite.py:326-327`),
+> `crawl_sessions.owner`/`heartbeat_at` в DDL (`core/store/sqlite.py:328-329`),
 > `interrupted` в `CrawlSessionStatus` (`core/domain/enums.py:721`) и в словаре
 > (`docs/status-dictionary.yaml:531`). Терминальность — `_TERMINAL_SESSION_STATUSES`
 > (`core/cli/context.py`), как и предупреждает раздел.
@@ -876,7 +876,7 @@ SQLite-запросов, но **не** убирает O(N) чтения: `read_p
 | B6 | Общий носитель артефактов (`corpus_raw` + `index_store`) для `pooled` | масштабирование поздних стадий | продукт-шард на другой ноде читает raw и пишет партицию |
 
 > ✅ **B4 сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `core/pipeline/liveness.py`,
-> `crawl_sessions.owner`/`heartbeat_at` (`core/store/sqlite.py:326-327`), `interrupted`
+> `crawl_sessions.owner`/`heartbeat_at` (`core/store/sqlite.py:328-329`), `interrupted`
 > (`core/domain/enums.py:667`), recovery-on-open (`core/pipeline/crawl_session.py:65`).
 > ✅ **B1 сделано** (2026-10-28) — четыре операции в шве
 > (`contracts/seam/extract.schema.json`, `openapi.json`), сервис приёма и извлечения в DMZ
@@ -982,7 +982,7 @@ B1 включает B2 (без идентичности нет паритета)
 > (`core/config/domain_profiles.py:100`; цепочка app < run < site в
 > `core/pipeline/crawl_frontier.py:411-417`), `document_level` входит в `CrawlLimits.as_dict`
 > (`:289`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
-> ключ профиля плюс `__default__` (`core/pipeline/report.py:666-671`), не по скаляру.
+> ключ профиля плюс `__default__` (`core/pipeline/report.py:676-681`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
 > (`core/pipeline/corpus.py:2201,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.

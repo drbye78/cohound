@@ -72,7 +72,7 @@
 | Отрицание и охват | `AbsenceRuleType` (`explicit`, `parameter_reference`, `distribution_absence`, `registry_absence`) · `SourceScope` (`exhaustive`, `partial`, `unknown`) · `DenialStrength` (`authoritative`, `explicit`, `bounded`, `unobserved`, `not_stated`, `instrument_failed`) · `DenialClaim` (`explicit`, `not_stated`) |
 | Сбои | `FailureKind` — **17**: 5 классов сбоя ячейки (`search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`) + 11 наблюдаемых исходов краула (`not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`) + `partial_extraction` (документ получен, прочитана часть страниц — блокирующий класс корпуса) |
 | Пропуск фазы | `SkipReason` — **7**: `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external`, `gate_not_blocking` (последний — не блокирующий гейт: фаза идёт дальше, в `gate_decisions` ложится waiver-строка `actor=policy`) |
-| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:1649`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
+| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:1849`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
 | Извлечение | `ExtractionRoute` (`auto`, `html`, `document`) · `DocumentLevel` (`off`, `text`, `layout`, `layout_tables`, `full`) · `PdfPipeline` (`structured`, `text_layer`) · `PdfDevice` (`cpu`, `cuda`) |
 | Контейнеры | `ArchiveDescent` (`plan`, `full` — ось `crawl.archive_descent`) · `ArchiveDescentStatus` (`planned`, `descended`, `unreadable`, `budget_exhausted`) · `ContainerEncryption` (`encrypted`, `not_encrypted`, `unknown` — три состояния, а не булево: «предикат молчит» неотличим от «не зашифрован») |
 | Гейты | `Gate` (G1–G4) · `GateSource` (`internal`, `external`) · `GateVerdict` (`approved`, `rejected`) · `GatePolicy` (`external`, `waived`) |
@@ -84,10 +84,10 @@
 **Почему `interrupted` терминален.** Протухший `running` при открытии сеанса становится
 `interrupted`: тело краула не финализировано, поэтому это не `failed` и не `cancelled`. Без него в
 множестве терминальных `--follow` ждал бы вечно сеанс, который уже никто не исполняет
-(`core/cli/context.py:1649`).
+(`core/cli/context.py:1849`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
-(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:976,981`, `gate_delegated_external`/
+(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1020,981`, `gate_delegated_external`/
 `gate_not_blocking` — `core/pipeline/runner.py:608,552`, `no_embedder` — на уровне CLI,
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
@@ -832,7 +832,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 **Состояние as-built:** механизм есть, **ни один пакет реестровых спецификаций сегодня не имеет**
 (`packages/*/registries/` отсутствует, включая `_template`). Пустой `Ports.registry_fetchers` →
-волна пуста, фаза `registry` завершается `ok` с нулём ячеек (`core/pipeline/phases.py:992`) — это
+волна пуста, фаза `registry` завершается `ok` с нулём ячеек (`core/pipeline/phases.py:1036`) — это
 не ошибка и не «нет данных»: реестры просто не сконфигурированы. `SkipReason.NO_REGISTRY_SPEC`
 объявлен, но конвейером **не производится** (`grep` по `core/pipeline/` пуст) — значение ждёт
 своего производителя, и выдавать его за работающий механизм нельзя.

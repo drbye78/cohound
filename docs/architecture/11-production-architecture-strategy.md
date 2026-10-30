@@ -180,7 +180,7 @@
 из бюджета вместо константы, preflight с `EXIT_USAGE`, пик воркера через файл-сток,
 `COHOUND_MEM_BUDGET_MB` (`03` §D.6). Закрывает Д-7.
 *Доказательство исполнения (HEAD `f6100c7`):* блок собирается в прогоне
-(`core/cli/commands/run.py:1261` — `build_resources_block`) и пишется в `metrics.json`
+(`core/cli/commands/run.py:1297` — `build_resources_block`) и пишется в `metrics.json`
 (`core/pipeline/metrics.py:459`); живой прогон его несёт — `runs/ru-pg-dbms-3edf2b06097c/metrics.json`
 (`resources.budget.source = "available"`, `resources.phases.discovery.peak_rss_mb`).
 Распределение чанков по семействам наполняется фазой корпуса
@@ -232,7 +232,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `core/pipeline/corpus.py:3234`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:1050` (`SKIP_BUDGET`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
->   `core/store/sqlite.py:404`.
+>   `core/store/sqlite.py:406`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
