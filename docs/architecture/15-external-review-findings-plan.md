@@ -120,7 +120,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ R7 — `final_url` валидируется до присвоения: `core/adapters/remote_crawl_executor.py:61-81`,
   `:340`.
 - ⬜ R8 — **не сделано**: http-фолбэка для robots нет, оба фетчера жёстко берут `https://`
-  (`core/cli/wiring.py:1377`, `core/edge/crawler_factory.py:56`); http-origin без TLS
+  (`core/cli/wiring.py:1402`, `core/edge/crawler_factory.py:56`); http-origin без TLS
   остаётся без ленты, а `404`-разрешение (`CrawlNotFound`) этого случая не покрывает.
 - ✅ R9 — сайдкар меты пишется (`core/adapters/crawl_http.py:308-316`) и читается
   (`:742-752`); легаси-запись названа явно (`core/util/cache.py:10-12`).
@@ -194,11 +194,12 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
-| S1 | SERP-кэш не реализован → R7 на поисковом контуре недостижим | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`: кэш собирается `resolve_content_cache`, ключ несёт язык) | `serp_key` только `cache.py:84`,`:113`; `get_json`/`put_json` не вызываются; адаптеры собираются без `cache` (`core/cli/wiring.py:764-785`) при готовом объекте в `core/cli/context.py:1701-1714` | кэш-примитивы покрыты, прод-путь нет | М | **P1** |
+| S1 | SERP-кэш не реализован → R7 на поисковом контуре недостижим | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`: кэш собирается `resolve_content_cache`, ключ несёт язык) | `serp_key` только `cache.py:84`,`:113`; `get_json`/`put_json` не вызываются; адаптеры собираются без `cache` (сборка `build_search_adapter` — `core/cli/wiring.py:715-741`) при готовом объекте в
+`core/cli/context.py:1701-1714` | кэш-примитивы покрыты, прод-путь нет | М | **P1** |
 | S2 | `run_serp_round`/`run_serp_loop` без производителя; спека устарела | ЧАСТИЧНО | мертвы только эти две; `invalidate_affected` вызывается (`core/pipeline/corpus.py:1006`), `SearchPhase.SERP` излучается (`core/pipeline/corpus.py:795`) | — | Г | P0 |
 | S3 | набор запросов фиксирован между раундами: `rounds>1` жжёт бюджет | ПОДТВЕРЖДЕНО → **закрыто** (`no_query_variation`: раунды 2..n не исполняются, причина в наблюдении — «измерять и называть», не потолок) | `core/pipeline/serp_loop.py:126-131`, `:1313` | `test_serp_discover.py::test_rounds_above_one_without_query_variation_are_not_executed` | Д | P5 |
 | S4 | контур последовательный, poll 30 с, async-режим: ~10 ч/продукт/раунд | ПОДТВЕРЖДЕНО → **измеряемо** (`SearchTiming`: `wait_seconds`/`request_seconds`/`polls`/`measured`, инъектируемые часы и `sleep`); параллелизм не вводился — «медленно» стало числом, а не диагнозом | `search_yandex.py:108-128`, `:418` | тайминги инъекцией `sleep` | Д | P5 |
-| S5 | адаптер поиска собирается без кэша | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`) | `core/cli/wiring.py:764-785`; краулеры кэш получают (`:1468-1513`) | только соответствие порту (`tests/selfcheck.py:3687`) | М | **P1** |
+| S5 | адаптер поиска собирается без кэша | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`) | `core/cli/wiring.py:715-741`; краулеры кэш получают (`:1616-1635`) | только соответствие порту (`tests/selfcheck.py:3687`) | М | **P1** |
 | S6 | GLM без ретраев 429/5xx, бюджет при этом списывается | ПОДТВЕРЖДЕНО → **закрыто** (общая политика `core/util/retry.py` применена в GLM; списание при неуспехе сделано **видимым**: `budget.charged`, `yield.errors`, текст отказа в `query_outcomes[].error`) | `search_glm.py:44-66`, `:363,376` | `test_search_glm.py::test_post_retries_429_then_succeeds`, `::test_retry_exhaustion_raises_search_error` | Д | P5 |
 | S7 | `queries_log` пишется после `if not results: continue` → знаменатель приёмки завышен | ПОДТВЕРЖДЕНО → **закрыто** (запись до `continue`; добавлен per-query исход `results`/`no_results`/`error`/`budget_exhausted` и блок `yield` с явным знаменателем) | `core/pipeline/serp_loop.py:1363-1370`, `:731-770`, `:810-817` | `test_serp_discover.py` (исходы запросов, accepted per query) | Г | P5 |
 | S8 | ошибка адаптера неотличима от «не нашлось» в наблюдении | ПОДТВЕРЖДЕНО → **закрыто** (`errors` отделены от `no_results` в наблюдении контура; сбой — отдельная строка знаменателя, а не «ничего не нашлось») | `core/pipeline/serp_loop.py:1100-1114`, `:737-760` | `test_serp_discover.py` (`yield.errors` отдельно от `no_results`), `test_search_log.py` | Г | P5 |

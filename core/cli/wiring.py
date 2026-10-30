@@ -186,7 +186,6 @@ from core.util.robots import RobotsGate
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
 __all__ = [
-    "DEFAULT_REGISTRY_ID",
     "DEFAULT_SCOUT_CRAWLER",
     "ENV_EMBED_LITE_MODEL",
     "ENV_EMBED_LITE_PATH",
@@ -246,14 +245,6 @@ SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = (
     "yandex",
     "glm",
 )
-
-#: Идентификатор реестра по умолчанию для remote-прокси (``split``, ``RemoteRegistry``).
-#: Рабочие спецификации реестров — **package-scoped** (``packages/{case_id}/registries/
-#: {registry_id}.yaml``, перечислены в ``package.yaml: registries``, 03 §D.4); корневого
-#: ``registries/`` больше нет. ``DeployConfig`` не несёт ``registry_fetchers``, поэтому
-#: ``split``-прокси использует этот плейсхолдер-идентификатор, а конкретные id приходят
-#: из манифеста пакета (данные, не предметная категория).
-DEFAULT_REGISTRY_ID = "edge"
 
 #: Префикс env-переменных LLM-разведки (``passport-scout``). Провайдер/модель — данные.
 ENV_LLM_BASE_URL = "COHOUND_LLM_BASE_URL"
@@ -2555,7 +2546,6 @@ def preflight_extraction_budget(
 def _build_local_ports(
     *,
     evaluator: EvaluatorPort | None,
-    registry: RegistryFetcherPort | None,
     registry_fetchers: Mapping[str, RegistryFetcherPort] | None = None,
     registry_spec_digest: str | None = None,
     index_root: str | Path,
@@ -2578,8 +2568,8 @@ def _build_local_ports(
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
     Гарантия: никогда не бросает из-за отсутствия опциональной зависимости — недоступный
-    тяжёлый адаптер остаётся ``None``. ``evaluator``/``registry`` не создаются сами:
-    передаются вызывающим (генератор/конфиг; I6/I7/I18 не автоматизируются).
+    тяжёлый адаптер остаётся ``None``. ``evaluator`` не создаётся сам:
+    передаётся вызывающим (генератор/конфиг; I6/I7/I18 не автоматизируются).
     ``registry_fetchers``/``registry_spec_digest`` (E2) — готовые mapping фетчеров
     (``registry_id → RegistryFetcherPort``) и дайджест их спецификаций из composition root.
     ``crawler`` — опциональный HTTP-краулер корпуса, собранный composition root из
@@ -2696,7 +2686,6 @@ def _build_local_ports(
 
     return Ports(
         evaluator=evaluator,
-        registry=registry,
         # E2: mapping реестровых фетчеров (registry_id → fetcher) из package-scoped
         # спецификаций + дайджест спецификаций (провенанс манифеста, §13).
         registry_fetchers=registry_fetchers,
@@ -2873,10 +2862,8 @@ def build_adapters(
     deploy: DeployConfig | None = None,
     transport: TransportFn | None = None,
     gateway: ContentGateway | None = None,
-    registry_id: str = DEFAULT_REGISTRY_ID,
     extra_headers: Mapping[str, str] | None = None,
     evaluator: EvaluatorPort | None = None,
-    registry: RegistryFetcherPort | None = None,
     registry_specs: Mapping[str, RegistryConfig] | None = None,
     registry_http_get: Any | None = None,
     index_root: str | Path = "index_store",
@@ -2910,13 +2897,10 @@ def build_adapters(
     :param deploy: типизированный deploy-конфиг; ``None`` → :func:`load_deploy_config`.
     :param transport: инъектируемый шов gateway (тесты без сокета).
     :param gateway: готовый ``ContentGateway`` (переопределяет сборку по конфигу).
-    :param registry_id: идентификатор реестра для ``RemoteRegistry`` (данные).
     :param extra_headers: доп. заголовки шва (напр. OIDC bearer).
     :param evaluator: готовый оценщик (``local``); ``None`` → остаётся ``None`` (не
         конструируется автоматически: сценарий evaluator требует OI-совместимого endpoint
         корпоративного облака, см. :func:`build_evaluator_llm`).
-    :param registry: готовый реестровый фетчер (``local``); ``None`` → остаётся ``None``
-        (legacy-поле; конфиг реестра — данные вызывающего).
     :param registry_specs: загруженные package-scoped спецификации реестров
         (``{registry_id: RegistryConfig}``, 03 §D.4) — из них собирается **mapping**
         ``Ports.registry_fetchers`` (``GenericRegistryFetcher`` для ``local``,
@@ -3053,7 +3037,6 @@ def build_adapters(
         embed_notices: list[str] = []
         ports = _build_local_ports(
             evaluator=evaluator,
-            registry=registry,
             registry_fetchers=local_registry_fetchers or None,
             registry_spec_digest=registry_specs_digest(resolved_specs),
             index_root=index_root,
@@ -3157,7 +3140,6 @@ def build_adapters(
                 # зашитый 1800 с), а не второй таймер на стороне адаптера.
                 document_timeout=split_limits.document_timeout_s,
             ),
-            registry=RemoteRegistry(content_gateway, registry_id=registry_id),
             registry_fetchers=split_registry_fetchers or None,
             registry_spec_digest=registry_specs_digest(resolved_specs),
         )

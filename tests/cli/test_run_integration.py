@@ -94,7 +94,7 @@ def test_local_adapters_set_safe_ports_and_skip_missing_heavy() -> None:
     assert ports.crawler is None
     assert ports.search is None
     assert ports.evaluator is None
-    assert ports.registry is None
+    assert ports.registry_fetchers is None
     # Dense-плечо: без ``chunk_lookup``/зафиксированной сборки — явный ``None`` (P4a, N3).
     assert ports.vector_index is None
     # Лексическое плечо симметрично: без store/сборки порт не поднимается (P4a, N3).
@@ -106,16 +106,21 @@ def test_local_adapters_set_safe_ports_and_skip_missing_heavy() -> None:
     assert (ports.index_builder is not None) is _has_module("numpy")
 
 
-def test_local_adapters_accept_injected_evaluator_and_registry() -> None:
-    """Оценщик/реестр не создаются сами, но принимаются инъекцией (генератор/конфиг)."""
+def test_local_adapters_accept_injected_evaluator() -> None:
+    """Оценщик не создаётся сам, но принимается инъекцией (генератор/конфиг).
+
+    Здесь раньше проверялась и инъекция реестра через вестигиальное одиночное поле
+    ``Ports.registry``. Поля больше нет (E2): единственный вход — карта ``registry_fetchers``,
+    которую строит composition root из спецификаций, и эта проводка проверяется на живом
+    пути в :func:`test_build_adapters_wires_local_registry_fetchers_and_digest` — там же,
+    где дайджест.
+    """
     evaluator = FakeEvaluator(default=LLMCellOutput(
         status=Status.ABSENT, justification="нет в срезе", evidence=[]
     ))
-    registry = object()  # достаточно наличия инъекции (порт — структурный)
-    ports = build_adapters(profile=LOCAL_PROFILE, evaluator=evaluator, registry=registry)  # type: ignore[arg-type]
+    ports = build_adapters(profile=LOCAL_PROFILE, evaluator=evaluator)
 
     assert ports.evaluator is evaluator
-    assert ports.registry is registry
 
 
 _REGISTRY_SPEC = (
@@ -232,6 +237,26 @@ def test_load_registry_specs_raises_on_declared_missing(tmp_path: Path) -> None:
 
     # Пакет без объявленных реестров → пусто (реестры опциональны).
     assert _load_registry_specs(args, SimpleNamespace(package=SimpleNamespace(registries=[]))) == {}
+
+
+def test_load_registry_specs_refuses_package_without_inputs(tmp_path: Path) -> None:
+    """E2: `--package` без входов — отказ, а не тихое `{}` (иначе пустой `registry_spec_digest`).
+
+    Дайджест спецификаций входит в условия измерения: молчаливая пустота на этом пути
+    подменила бы идентичность прогона тишиной (`run_id` описывал бы не тот набор реестров).
+    """
+    from types import SimpleNamespace
+
+    from core.cli.context import _load_registry_specs
+    from core.cli.errors import CliError
+
+    args = SimpleNamespace(package=str(tmp_path / "pkg"))
+    with pytest.raises(CliError) as caught:
+        _load_registry_specs(args, None)
+    assert "реестры пакета" in str(caught.value)
+
+    # Без `--package` реестров не бывает вовсе — пусто законно и молчаливо.
+    assert _load_registry_specs(SimpleNamespace(package=None), None) == {}
 
 
 def test_unknown_profile_still_rejected() -> None:

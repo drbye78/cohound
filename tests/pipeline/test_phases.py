@@ -400,12 +400,13 @@ def test_registry_phase_passes_registry_fetchers_mapping() -> None:
 def test_registry_phase_is_inert_without_fetchers() -> None:
     """E2: без mapping (реестры не сконфигурированы) волна пуста — ``ok`` без ячеек.
 
-    Одиночный legacy ``Ports.registry`` больше не «оживляет» фазу молча: единственный вход —
-    ``registry_fetchers`` (проводка только в composition root).
+    Единственный вход волны — ``registry_fetchers`` (проводка только в composition root);
+    вестигиального одиночного ``Ports.registry`` больше нет, поэтому «пусто» проверяется
+    пустыми портами целиком, а не полем-заглушкой.
     """
     inputs = _inputs()
     plan = _plan()
-    ports = Ports(registry=FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID))
+    ports = Ports()
     store = _store()
     result = build_phases(inputs=inputs, plan=plan, ports=ports)["registry"](_context(store, ports))
     assert result.status == "ok"

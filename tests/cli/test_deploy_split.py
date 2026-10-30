@@ -301,12 +301,40 @@ def test_split_wiring_builds_remote_proxies() -> None:
     assert isinstance(ports.crawler, RemoteCrawler)
     assert isinstance(ports.search, RemoteSearch)
     assert isinstance(ports.extractor, RemoteExtractor)
-    assert isinstance(ports.registry, RemoteRegistry)
     # Контракт портов не изменён: remote-прокси доступны, не-веб порты ещё не собраны.
     assert ports.crawler.available is True
     assert ports.search.adapter_kind == "example_adapter"
-    assert ports.registry.registry_id  # данные конфигурации реестра
+    # E2: реестровый прокси строится **по объявленным спецификациям**, а не безусловно:
+    # без объявлений карты нет (отдельный тест ниже) — вестигиального одиночного поля нет.
+    assert ports.registry_fetchers is None
     assert ports.evaluator is None
+
+
+def test_split_registry_fetchers_are_remote_proxies_per_spec() -> None:
+    """E2: под ``split`` каждая объявленная спецификация даёт ``RemoteRegistry`` в карте."""
+    from core.adapters.registry_generic import RegistryConfig
+
+    spec = RegistryConfig(
+        registry_id="reg_x",
+        jurisdiction="XX",
+        endpoint="https://registry.example.invalid/api/search/{query}",
+        format="json",
+        records_path="items",
+        mapping={"name": "name"},
+    )
+    ports = build_adapters(
+        profile=SPLIT_PROFILE,
+        deploy=_split_config(),
+        transport=_edge_transport,
+        registry_specs={"reg_x": spec},
+    )
+
+    assert ports.registry_fetchers is not None
+    assert set(ports.registry_fetchers) == {"reg_x"}
+    fetcher = ports.registry_fetchers["reg_x"]
+    assert isinstance(fetcher, RemoteRegistry)
+    assert fetcher.registry_id == "reg_x"  # данные конфигурации реестра
+    assert ports.registry_spec_digest
 
 
 def test_split_search_proxy_drop_in_returns_candidates() -> None:

@@ -228,9 +228,9 @@ class Ports:
     корпус ссылками из публичных лент/каналов (кандидаты, не evidence — I19). ``None`` →
     опрос фидов выключен.
 
-    ``registry`` — одиночный реестровый фетчер (legacy-поле). ``registry_fetchers`` —
-    карта ``registry_id → RegistryFetcherPort``, собранная composition root из
-    package-scoped спецификаций (``packages/{case_id}/registries/*.yaml``, E2/03 §D.4):
+    ``registry_fetchers`` — карта ``registry_id → RegistryFetcherPort``, собранная
+    composition root из package-scoped спецификаций
+    (``packages/{case_id}/registries/*.yaml``, E2/03 §D.4):
     реестровая волна Ш3 передаёт её в ``registry_wave``. ``None``/пусто → реестры не
     сконфигурированы (волна пуста, без ячеек). ``registry_spec_digest`` — стабильный
     дайджест загруженных спецификаций (провенанс манифеста, §13 ``execution_change``);
@@ -254,7 +254,6 @@ class Ports:
     #: (composition root передаёт ``core.adapters.container_any.container_for``). Фаза
     #: корпуса не импортирует адаптеры: читатель — такой же внешний порт, как краулер.
     container: Callable[[Any], ContainerPort | None] | None = None
-    registry: RegistryFetcherPort | None = None
     registry_fetchers: Mapping[str, RegistryFetcherPort] | None = None
     registry_spec_digest: str | None = None
 

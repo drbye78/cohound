@@ -279,7 +279,6 @@ def _build_ports(composition_id: str, partition_id: str) -> Ports:
         lexical_index=lexical,
         vector_index=None,
         search=None,
-        registry=None,
     )
 
 

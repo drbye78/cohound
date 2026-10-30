@@ -988,16 +988,19 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`cb_ecf3850d1bf7b0b2fdb08235` → `pb_72868f6b2a683d21bee7beb6`). Отсутствует KS-sweep.
 - **Остаток `crawl-completion` — переехал сюда 30.10.2026.** Прежний deepwork-план
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
-  Открытыми остались **восемь** пунктов, и они записаны здесь, а не только в рабочем журнале:
+  Открытыми остались **семь** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
   materialize core/` даёт только локальную переменную `core/pipeline/report.py:1909-1915`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `_template`), паритет реестров под `split`
   (`core/cli/context.py:1674` против `core/edge/server.py:1104`), R3 (ревизия весов моделей не
   входит в `extractor_version`, `core/adapters/extract_document.py:205-207`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`), A1 follow-up (root/product-мультиплексирование;
-  нит `limiter.wait` внутри/вне `try`, `core/pipeline/corpus_drain.py:1893`), E2 follow-up
-  (вестигиальное `Ports.registry` рядом с `registry_fetchers` — `core/pipeline/runner.py:257`;
-  `_load_registry_specs` молча отдаёт `{}` без `inputs` — `core/cli/context.py:1688`).
+  нит `limiter.wait` внутри/вне `try`, `core/pipeline/corpus_drain.py:1893`).
+  ➖ **E2 follow-up закрыт 31.10.2026:** вестигиальное `Ports.registry`/`DEFAULT_REGISTRY_ID` и
+  параметры `registry`/`registry_id` у `build_adapters` сняты (читателей не было — Ш3 берёт только
+  `registry_fetchers`); `_load_registry_specs` при `--package` без входов теперь отказывает
+  (`CliError(code="registries")`), а не отдаёт тихий `{}`: пустой `registry_spec_digest` подменил бы
+  условие измерения. Прежний подпункт «нет CLI-теста persist→read→digest» снят раньше — тест есть.
   Детализация — `08` §8.1; **этот файл отслеживается, `08` — нет** (`.gitignore:65`), поэтому
   запись держится здесь.
   ⬜ не сделано. Паритет реестров **сводится в один замер** с уже открытым паритетом `pb`

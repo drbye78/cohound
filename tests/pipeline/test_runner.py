@@ -288,7 +288,7 @@ def test_ports_container_is_optional() -> None:
             ports.crawler,
             ports.extractor,
             ports.chunker,
-            ports.registry,
+            ports.registry_fetchers,
         )
     )
 
