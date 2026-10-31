@@ -254,6 +254,17 @@ class StorePort(Protocol):
     # -- корпус (Ш5, W7) -------------------------------------------------- #
     def upsert_corpus_doc(self, doc: CorpusDoc) -> None: ...
 
+    def set_corpus_doc_url(self, doc_id: str, url: str) -> bool:
+        """Переписывает канонический адрес документа (17 §6, F3).
+
+        Меняется **только** поле ``url`` строки ``corpus_docs``: идентичность документа
+        (``doc_id = product_id:content_hash``), версия, retained-байты и признак
+        частичности не трогаются. Возвращает ``True`` только когда строка действительно
+        изменилась — повторный вызов с тем же адресом идемпотентен (``False``), и
+        вызывающий отличает «адрес уже канонический» от «адрес переставлен».
+        """
+        ...
+
     def add_chunk(self, chunk: CorpusChunk) -> None: ...
 
     def add_chunks_batch(self, chunks: list[CorpusChunk]) -> None: ...

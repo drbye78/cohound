@@ -48,14 +48,24 @@ _OWNER = re.compile(r"'[A-Za-z0-9_.\-]+/\d+/\d+'")
 #: изменение внутри оператора (список колонок, ``ON CONFLICT``-ветка) и перестановку двух
 #: писателей, которое сводка «BEGIN/INSERT …» не покажет. Это и есть claim модуля: порядок
 #: побочных эффектов не изменился.
-EXPECTED_WRITE_DIGEST = "0db7f593fd0e75511f43793e51ec72207dd77edfc57d46c4998a05e717bbab8e"
+#:
+#: **Пересобран 2026-10-31 осознанно** (F3 плана ``17``, слаг семантики ``CrawlLimits``
+#: ``crawl-2``), по двум названным причинам и ни по какой другой:
+#:   1. порядок обхода frontier стал ключом ``(depth, url)`` вместо порядка поступления,
+#:      поэтому два документа этого прогона ингестятся в обратном порядке (сдвиг блока
+#:      ``INSERT crawl_session_items`` относительно ``INSERT corpus_docs``);
+#:   2. аддитивная колонка ``crawl_session_items.doc_hash`` (носитель ключа дедупа для
+#:      ``min(url)``) меняет текст каждого ``INSERT`` этой таблицы.
+#: Число операторов (146) и записей (117) при этом не изменилось — новый оператор не
+#: появился, читающая проекция не тронута (это видно по ``EXPECTED_TRACE_DIGEST``).
+EXPECTED_WRITE_DIGEST = "087aa55663773d3d09ff90dfdfa148b5b2d6873e65fd7769809a2269e22fd919"
 
 #: Дайджест **полного** трассированного следа, включая ``SELECT``. Второй пин, а не первый:
 #: он видит то, чего пин записей не видит по построению, — появление нового чтения (N+1) и
 #: смену текста read-проекции. Смена **только** этого дайджеста при неизменном
 #: ``EXPECTED_WRITE_DIGEST`` означает «запись не тронута, чтение изменилось» — другой
 #: диагноз и другая реакция, чем «поехал порядок записи».
-EXPECTED_TRACE_DIGEST = "711077e0442cf015d4b8de5eaa14e8a86c6cd522a69632460cc9c88a2ae39111"
+EXPECTED_TRACE_DIGEST = "8b1d734d86b50885160ebba4629c93472a6b7448b7e73b7f42c53fe10701fa85"
 
 #: Глаголы, меняющие данные или схему. Транзакционные границы входят в пин записей: без них
 #: «две записи в одной транзакции» и «две записи в разных» дали бы один дайджест.
@@ -124,15 +134,6 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, "UPDATE crawl_sessions"),
     (1, "COMMIT"),
     (1, "BEGIN"),
-    (1, "INSERT corpus_docs"),
-    (1, "INSERT corpus_doc_version"),
-    (1, "COMMIT"),
-    (1, "BEGIN"),
-    (1, "INSERT crawl_session_items"),
-    (1, "SELECT status,"),
-    (1, "UPDATE crawl_sessions"),
-    (1, "COMMIT"),
-    (1, "BEGIN"),
     (1, "INSERT crawl_session_items"),
     (1, "SELECT status,"),
     (1, "UPDATE crawl_sessions"),
@@ -145,6 +146,15 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, "INSERT crawl_session_items"),
     (1, "SELECT status,"),
     (1, "UPDATE crawl_sessions"),
+    (1, "COMMIT"),
+    (1, "BEGIN"),
+    (1, "INSERT crawl_session_items"),
+    (1, "SELECT status,"),
+    (1, "UPDATE crawl_sessions"),
+    (1, "COMMIT"),
+    (1, "BEGIN"),
+    (1, "INSERT corpus_docs"),
+    (1, "INSERT corpus_doc_version"),
     (1, "COMMIT"),
     (1, "BEGIN"),
     (1, "INSERT crawl_session_items"),

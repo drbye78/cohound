@@ -1399,6 +1399,21 @@ class SqliteStore:
                     (str(doc_version_id), doc.product_id, doc.doc_id),
                 )
 
+    def set_corpus_doc_url(self, doc_id: str, url: str) -> bool:
+        """Переписывает канонический адрес документа (17 §6, F3); ``True`` — строка изменена.
+
+        Один ``UPDATE`` с условием ``url <> ?``: повторный вызов с тем же адресом ничего не
+        пишет и возвращает ``False`` (идемпотентность — свойство запроса, а не вызывающего).
+        Меняется только ``url``: ``doc_id``/``content_hash``/``raw_path``/версия/признак
+        частичности — идентичность и провенанс документа, а не адрес.
+        """
+        with self.conn:
+            cursor = self.conn.execute(
+                "UPDATE corpus_docs SET url = ? WHERE doc_id = ? AND url <> ?",
+                (str(url), str(doc_id), str(url)),
+            )
+            return bool(cursor.rowcount)
+
     def save_manual_artifact(self, record: Mapping[str, Any]) -> None:
         """Upsert аудит-строки предоставления (13-manual-artifacts §3.3).
 
@@ -1578,6 +1593,7 @@ class SqliteStore:
         "content_type",
         "lang",
         "content_hash",
+        "doc_hash",
         "raw_path",
         "error_kind",
         "error",
@@ -1741,6 +1757,7 @@ class SqliteStore:
             item.content_type,
             item.lang,
             item.content_hash,
+            item.doc_hash,
             item.raw_path,
             item.error_kind,
             item.error,

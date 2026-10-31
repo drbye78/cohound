@@ -1481,6 +1481,10 @@ def finish_one(
             url,
             CrawlItemStatus.FETCHED,
             raw_path=str(raw_path),
+            # 17 §6 (F3): алиас знает ключ дедупа (он пришёл с тем же ``doc_hash``) —
+            # носитель канонического адреса заполняется и для него: иначе ``min(url)``
+            # выбирался бы среди тех URL, что успели стать документом, а не среди всех.
+            doc_hash=doc_hash,
             state_fields={
                 "doc_version_id": (
                     found.doc_version_id if found is not None else None
@@ -1647,6 +1651,9 @@ def finish_one(
         url,
         CrawlItemStatus.FETCHED,
         raw_path=str(raw_path),
+        # 17 §6 (F3): хеш **извлечённого текста** — ключ, по которому канонический адрес
+        # документа выбирается запросом (``min(url)`` среди равных), а не порядком готовности.
+        doc_hash=doc_hash,
         state_fields={
             "doc_version_id": dv_id,
             "reuse_kind": (

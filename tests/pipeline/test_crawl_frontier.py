@@ -200,15 +200,29 @@ def test_frontier_bfs_offer_depth_and_truncation() -> None:
 
 
 def test_frontier_max_documents_capacity() -> None:
+    """F3/A2: бюджет решается **на изъятии**, а не на постановке.
+
+    Прежняя проверка («``discover`` отвергает после потолка») снята не по слабости, а
+    потому что механизм переехал: отвергать на постановке значило делать набор
+    поставленных URL (а значит и добытых) функцией порядка завершения страниц. Теперь
+    постановка проходит, а ``next`` отказывает и **ставит** усечение — тихой остановки
+    нет.
+    """
     limits = CrawlLimits(max_depth=5, max_documents=1)
     frontier = Frontier("https://h/", limits)
     assert frontier.add_seed("https://h/") == "queued"
     frontier.note_fetched()
     assert frontier.has_capacity is False
-    # Постановка нового URL после достижения потолка → усечение, не исключение.
-    assert frontier.discover("https://h/a", 1) is False
+    # Постановка нового URL после достижения потолка — принимается (решение от порядка
+    # не зависит) и не бросает исключение.
+    assert frontier.discover("https://h/a", 1) is True
+    assert len(frontier) == 2  # seed ещё в очереди + поставленный URL
+    assert frontier.truncated is False  # усечения ещё не было: изъятия не было
+    # Изъятие отказывает и объявляет усечение видимым.
+    assert frontier.next() is None
     assert frontier.truncated is True
     assert frontier.truncated_reason == "max_documents"
+    assert len(frontier) == 2  # факт «в очереди осталось N» не потерян
 
 
 def test_frontier_blacklisted_seed_surfaced() -> None:

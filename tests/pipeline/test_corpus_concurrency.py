@@ -122,12 +122,18 @@ class _Crawler:
         raise_urls: set[str] | None = None,
         gate_to: int | None = None,
         gate_timeout: float = 0.5,
+        delays: dict[str, float] | None = None,
     ) -> None:
         self.pages = dict(pages)
         self.raise_urls = set(raise_urls or ())
         self.calls: list[str] = []
+        #: Порядок **завершения** фетчей (F3, T3/T4): не порядок отправки. Именно он
+        #: проверяет, что артефакты корпуса от него не зависят.
+        self.completed: list[str] = []
         self._gate_to = gate_to
         self._gate_timeout = gate_timeout
+        #: Управляемые задержки по URL: переставляют порядок завершения страниц.
+        self._delays = dict(delays or {})
         self._lock = threading.Lock()
         self._active = 0
         self.max_active = 0
@@ -147,13 +153,19 @@ class _Crawler:
                     time.sleep(0.001)
             if url in self.raise_urls:
                 raise RuntimeError(f"crawl failed: {url}")
-            return RawPage(
+            delay = self._delays.get(url)
+            if delay:
+                time.sleep(delay)
+            page = RawPage(
                 url=url,
                 content=self.pages[url],
                 fetched_at=TS,
                 fetch_mode=plan.fetch,
                 lang="en",
             )
+            with self._lock:
+                self.completed.append(url)
+            return page
         finally:
             with self._lock:
                 self._active -= 1
@@ -537,3 +549,171 @@ def test_pool_transport_revalidates_all_known_urls_in_bounded_batches(
             "selected": len(known),
             "fetched": len(known),
         }
+
+
+# --------------------------------------------------------------------------- #
+# F3/T3–T4 (план 17): артефакты не зависят от порядка завершения страниц
+# --------------------------------------------------------------------------- #
+
+#: Четыре страницы с **переставленными** задержками: порядок завершения фетчей второй
+#: группы — обратный первой (шаг 0.02 с заметно больше дрожания планировщика).
+_DELAYS_FORWARD = {
+    "https://h0.docs.test/0": 0.02,
+    "https://h1.docs.test/1": 0.04,
+    "https://h2.docs.test/2": 0.06,
+    "https://h3.docs.test/3": 0.08,
+}
+_DELAYS_REVERSED = {url: round(0.10 - delay, 2) for url, delay in _DELAYS_FORWARD.items()}
+
+
+def _corpus_rows(store: SqliteStore) -> list[tuple[str, str, str, str]]:
+    """``(product_id, doc_id, url, content_hash)`` из ``corpus_docs``, детерминированно.
+
+    Именно этот кортеж — durable-факт корпуса (I19): он и обязан совпадать при любом
+    порядке завершения страниц.
+    """
+    return sorted(
+        (doc.product_id, doc.doc_id, doc.url, doc.content_hash)
+        for doc in store.iter_corpus_docs(RUN_ID)
+    )
+
+
+def _dedup_winner(store: SqliteStore, content: bytes) -> str:
+    """URL единственного документа с данным ``content_hash`` (I17: один на контент)."""
+    winners = [
+        doc.url
+        for doc in store.iter_corpus_docs(RUN_ID)
+        if doc.content_hash == content_hash(content)
+    ]
+    assert len(winners) == 1, winners
+    return winners[0]
+
+
+def _dedup_pages() -> dict[str, bytes]:
+    """Страницы T3: два URL с одинаковыми байтами (дубликат) + два разных."""
+    dup = b"<html>same</html>"
+    links = "".join(
+        f'<a href="https://h{i}.docs.test/{i}">{i}</a>' for i in range(4)
+    )
+    return {
+        ROOT: f"<html>{links}</html>".encode(),
+        "https://h0.docs.test/0": dup,
+        "https://h1.docs.test/1": dup,
+        "https://h2.docs.test/2": b"<html>two</html>",
+        "https://h3.docs.test/3": b"<html>three</html>",
+    }
+
+
+def test_corpus_is_identical_for_any_concurrency(tmp_path: Path) -> None:
+    """T3: конкурентность 1/2/4 при переставленных задержках даёт один и тот же корпус.
+
+    Порядок завершения фетчей наблюдаемо разный (``_Crawler.completed``), а набор
+    ``(product_id, doc_id, url, content_hash)`` и победитель контент-дедупа — одни и те
+    же. Проверяется именно независимость от **момента готовности**: порядок обхода задан
+    ключом ``(depth, url)`` (F3/A1), поэтому задержки сети его не переставляют.
+
+    Победитель дедупа здесь утверждается как «тот же во всех прогонах», а не как
+    ``min(url)``: выбор канонического URL — предмет F3B; этот тест доказывает лишь, что
+    он не зависит от порядка прихода.
+    """
+    pages = _dedup_pages()
+    runs: dict[str, Any] = {}
+    stores: list[SqliteStore] = []
+    try:
+        for label, workers, delays in (
+            ("k1", 1, _DELAYS_FORWARD),
+            ("k2", 2, _DELAYS_REVERSED),
+            ("k4", 4, _DELAYS_FORWARD),
+        ):
+            store = SqliteStore(":memory:")
+            stores.append(store)
+            _make_run(store)
+            crawler = _Crawler(pages, delays=delays)
+            runs[label] = _build(
+                tmp_path / label,
+                pages=pages,
+                crawler=crawler,
+                domain_profiles=_declared_multi_host_profiles(4),
+                crawl_defaults=CrawlRunConfig(max_depth=1, max_workers=workers),
+                store=store,
+                run_id=RUN_ID,
+            )
+            runs[f"{label}_crawler"] = crawler
+
+        # Предусловие теста: порядок **завершения** действительно перемешан, иначе
+        # совпадение корпуса ничего не доказывало бы.
+        assert runs["k2_crawler"].completed != runs["k4_crawler"].completed
+        assert runs["k4_crawler"].completed[1:] == [
+            "https://h0.docs.test/0",
+            "https://h1.docs.test/1",
+            "https://h2.docs.test/2",
+            "https://h3.docs.test/3",
+        ]
+        # K=2 идёт двумя подволнами, поэтому порядок завершения внутри подволны
+        # обратный задержке: главное — он **не** совпадает с порядком отправки.
+        assert runs["k2_crawler"].completed[1:] != runs["k4_crawler"].completed[1:]
+        assert set(runs["k2_crawler"].completed) == set(runs["k4_crawler"].completed)
+
+        k1, k2, k4 = (_corpus_rows(store) for store in stores)
+        assert k1 == k2 == k4
+        assert len(k1) == 4  # seed + 3 документа: два URL с одинаковыми байтами дали один
+        assert runs["k1"].errors == runs["k2"].errors == runs["k4"].errors == []
+
+        winners = {_dedup_winner(store, b"<html>same</html>") for store in stores}
+        assert len(winners) == 1  # победитель дедупа не зависит от порядка прихода
+    finally:
+        for store in stores:
+            store.close()
+
+
+def test_truncation_is_independent_of_arrival_order(tmp_path: Path) -> None:
+    """T4: при ``max_documents`` меньше достижимого набор добытых URL одинаков.
+
+    Бюджет решается **на изъятии** (F3/A2), а изъятие идёт по ключу ``(depth, url)``,
+    поэтому при переставленных задержках добываются одни и те же страницы: минимальные
+    ``(depth, url)``. Усечение видно (``truncated``/``queue_remaining``), а не тихо.
+
+    Оговорка: пул фетча коммитит исходы в порядке **отправки**, поэтому данная
+    реализация уже не делает порядко-зависимости; тест пинит свойство, на которое
+    опираются T3 и будущие F4-полосы (коммит по завершению), а не только сегодняшний
+    код.
+    """
+    links = [f"https://h{i}.docs.test/{i}" for i in range(6)]
+    pages: dict[str, bytes] = {
+        ROOT: "".join(f'<a href="{url}">{url}</a>' for url in links).encode(),
+        **{url: f"<html>page-{url}</html>".encode() for url in links},
+    }
+    delays = {url: 0.02 + 0.01 * index for index, url in enumerate(links)}
+
+    fetched: list[set[str]] = []
+    remaining: list[int] = []
+    stores: list[SqliteStore] = []
+    try:
+        for label, delay_map in (("forward", delays), ("reversed", {u: round(0.10 - d, 2) for u, d in delays.items()})):
+            store = SqliteStore(":memory:")
+            stores.append(store)
+            _make_run(store)
+            result = _build(
+                tmp_path / label,
+                pages=pages,
+                crawler=_Crawler(pages, delays=delay_map),
+                domain_profiles=_declared_multi_host_profiles(6),
+                crawl_defaults=CrawlRunConfig(max_depth=1, max_workers=4, max_documents=3),
+                store=store,
+                run_id=RUN_ID,
+            )
+            build = _build_of(result)
+            assert build.truncated is True
+            assert build.truncation[0]["truncated_reason"] == "max_documents"
+            assert result.errors == []
+            fetched.append({url for _pid, _doc, url, _hash in _corpus_rows(store)})
+            remaining.append(int(build.truncation[0]["queue_remaining"]))
+
+        assert fetched[0] == fetched[1]
+        # Ровно потолок и ровно минимальные по ``(depth, url)``: seed, затем h0/h1.
+        assert fetched[0] == {ROOT, links[0], links[1]}
+        # «Осталось N» опубликовано числом и тоже не зависит от порядка прихода.
+        assert remaining[0] == remaining[1] == 4
+    finally:
+        for store in stores:
+            store.close()

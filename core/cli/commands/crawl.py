@@ -602,6 +602,12 @@ def _execute_crawl_locked(
             close()
 
     phase_status = result.status if result is not None else "skipped"
+    # 17 §6 (F3): публикуемая форма ``errors`` — лексикографический порядок (тот же, что у
+    # ``results[].errors``): порядок событий краула зависит от планировщика и не должен
+    # попадать в артефакт. Сортировка — **in place** по скопированному списку: значение
+    # остаётся прежнего типа (``list[Any]``), поэтому форма payload'а не меняется.
+    phase_errors = list(getattr(result, "errors", []) or [])
+    phase_errors.sort()
     payload = {
         "ok": phase_status == "ok",
         "mode": mode,
@@ -613,7 +619,7 @@ def _execute_crawl_locked(
         "cleared": cleared,
         "follow": follow,
         "crawl": _crawl_counts(result),
-        "errors": list(getattr(result, "errors", []) or []),
+        "errors": phase_errors,
         "notes": notes,
         # F2 (17 §4): режим «краул без конверсии» и содержимое durable-очереди.
         # ``crawl_only=false`` в полном крауле — не украшение: по этому полю видно,

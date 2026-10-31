@@ -507,6 +507,10 @@ def mark_session(
         "content_type": base.content_type if base is not None else None,
         "lang": base.lang if base is not None else None,
         "content_hash": base.content_hash if base is not None else None,
+        # 17 §6 (F3): носитель канонического адреса переносится как любое другое поле
+        # элемента: ``retain`` пишет строку **до** извлечения (``doc_hash`` ещё нет), и
+        # последующая пометка исхода не должна стирать уже известный ключ дедупа.
+        "doc_hash": base.doc_hash if base is not None else None,
         "raw_path": base.raw_path if base is not None else None,
         "error_kind": base.error_kind if base is not None else None,
         "error": base.error if base is not None else None,

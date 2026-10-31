@@ -378,6 +378,9 @@ def _row_to_crawl_item(row: sqlite3.Row) -> CrawlSessionItem:
         content_type=row["content_type"],
         lang=row["lang"],
         content_hash=row["content_hash"],
+        # Read-only открытие старой БД не применяет аддитивных миграций: колонки нет —
+        # значение «не записано», а не сбой чтения (тот же приём, что у ``corpus_docs``).
+        doc_hash=_row_optional(row, "doc_hash"),
         raw_path=row["raw_path"],
         error_kind=row["error_kind"],
         error=row["error"],

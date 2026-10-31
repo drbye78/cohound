@@ -370,6 +370,12 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
     content_type  TEXT,
     lang          TEXT,
     content_hash  TEXT,
+    -- 17 §6 (F3): хеш **извлечённого текста** (ключ дедупа корпуса), а не байтов выше.
+    -- Носитель канонического адреса: ``min(url)`` среди равных ``doc_hash`` спрашивается у
+    -- этой колонки, поэтому победитель дедупа не зависит от порядка готовности страниц.
+    -- Аддитивная колонка, ``SCHEMA_VERSION`` не поднимается (прецедент —
+    -- ``cell_evidence.doc_version_id``): старые строки читаются как «не записано».
+    doc_hash      TEXT,
     raw_path      TEXT,
     error_kind    TEXT,                    -- FailureKind (валидируется доменной моделью)
     error         TEXT,
@@ -889,6 +895,13 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # `crawl_session_items.depth`; старые БД получают NULL (глубина неизвестна, resume
     # best-effort). Значение доменного класса — execution/операционный провенанс (не §13).
     _ensure_columns(conn, "crawl_session_items", {"depth": "INTEGER"})
+    # 17 §6 (F3): ``crawl_session_items.doc_hash`` — хеш извлечённого текста, носитель
+    # канонического адреса документа (``min(url)`` среди равных ``doc_hash``). Аддитивно:
+    # старые БД получают ``NULL`` = «не записано» (прецедент — ``cell_evidence.doc_version_id``),
+    # backfill не выполняется — ``doc_hash`` из retained-байтов не выводится, а выдуманный
+    # ключ дал бы ложного победителя дедупа.
+    # ``SCHEMA_VERSION`` не поднимается: гейт версии (11 §2.6) отверг бы существующие прогоны.
+    _ensure_columns(conn, "crawl_session_items", {"doc_hash": "TEXT"})
     # DDL-миграция v3.7.0 (Ф0): ``corpus_coverage`` создаётся ``CREATE TABLE IF NOT EXISTS``
     # в DDL — новые таблицы не требуют ALTER; вызов идемпотентен на любой БД.
     # 17 §4.1 (F2): ``extract_queue`` — **новая** таблица, создаётся

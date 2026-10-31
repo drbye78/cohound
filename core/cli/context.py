@@ -102,7 +102,7 @@ from core.pipeline.profile_attestation import (
     profile_material,
 )
 from core.pipeline.review import ReviewItem, review_queue
-from core.pipeline.runner import GateRuntime, PhaseFn
+from core.pipeline.runner import GateRuntime, PhaseFn, sorted_error_lines
 from core.ports.gateway import ContentGateway
 from core.ports.store import PlanInputsConflict, StorePort
 from core.ports.types import FetchMode
@@ -2815,7 +2815,15 @@ def _run_report_payload(run_id: str, report: RunReport, db_path: Path) -> dict[s
             for item in report.results
             if item.status == "skipped"
         ],
-        "errors": list(report.errors),
+        "errors": [
+            # 17 §6 (F3): лексикографический порядок **внутри фазы** — артефакт не должен
+            # зависеть от порядка событий (сеть/пул воркеров). Группировка по фазам
+            # сохраняется: ``results[].errors`` — срез «кто это сказал», и перемешивать
+            # фазы в общем списке значило бы потерять адрес ошибки.
+            err
+            for item in report.results
+            for err in sorted_error_lines(item.errors)
+        ],
         "results": [
             {
                 "phase": item.phase,
@@ -2824,7 +2832,7 @@ def _run_report_payload(run_id: str, report: RunReport, db_path: Path) -> dict[s
                     item.skip_reason.value if item.skip_reason is not None else None
                 ),
                 "pending": list(item.pending),
-                "errors": list(item.errors),
+                "errors": sorted_error_lines(item.errors),
                 "notes": [entry for entry in item.log_entries if isinstance(entry, str)],
             }
             for item in report.results

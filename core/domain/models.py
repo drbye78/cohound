@@ -2071,6 +2071,13 @@ class CrawlSessionItem(BaseModel):
     content_type: str | None = None
     lang: str | None = None
     content_hash: str | None = None
+    #: 17 §6 (F3): ``content_hash`` **извлечённого текста** (тот же ключ, по которому идёт
+    #: дедуп корпуса), а не retained-байтов — это разные величины, и ``content_hash`` выше
+    #: хранит хеш байтов (I19). Носитель аддитивный: по нему канонический ``url`` документа
+    #: выбирается запросом (``min(url)`` среди равных ``doc_hash``), а не моментом
+    #: готовности страницы. ``None`` — запись прошлой схемы либо URL, не ставший документом
+    #: (отказ фетча/извлечения): «неизвестно» не выдаётся за минимум.
+    doc_hash: str | None = None
     raw_path: str | None = None
     error_kind: str | None = None
     error: str | None = None

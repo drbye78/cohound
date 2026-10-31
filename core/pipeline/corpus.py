@@ -174,6 +174,7 @@ from core.domain import (
     ArchiveObservation,
     CorpusChunk,
     CorpusCoverage,
+    CorpusDoc,
     CorpusMember,
     CrawlItemStatus,
     CrawlRunConfig,
@@ -301,7 +302,7 @@ from core.pipeline.manual_artifacts import (
     ManualArtifacts,
 )
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
-from core.pipeline.runner import PhaseResult
+from core.pipeline.runner import PhaseResult, sorted_error_lines
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_executor import (
@@ -323,7 +324,13 @@ from core.ports.types import (
 from core.util.index_partition import build_root as _partition_root
 from core.util.rate_limit import RateLimiter
 
-__all__ = ["ExtractionPool", "IndexBuild", "build_corpus", "derive_corpus_coverage"]
+__all__ = [
+    "ExtractionPool",
+    "IndexBuild",
+    "build_corpus",
+    "canonicalize_doc_urls",
+    "derive_corpus_coverage",
+]
 
 
 #: Phase 3 B2: максимум попыток подачи работ исполнителю при back-pressure
@@ -505,6 +512,113 @@ def _persist_manifest(
             ok = False
             errors.append(f"save_index_manifest({entry.product_id}): {type(exc).__name__}: {exc}")
     return ok
+
+
+CANONICAL_URL_CHANGED_NOTE = (
+    "corpus: {product_id}: канонический адрес {count} документов переопределён "
+    "минимумом url среди равных doc_hash (дедуп не зависит от порядка наблюдения)"
+)
+
+
+def canonicalize_doc_urls(
+    product_id: str,
+    *,
+    items: Mapping[tuple[str, str], CrawlSessionItem],
+    store: Any,
+    run_id: str | None,
+    errors: list[str],
+    docs: Sequence[CorpusDoc] = (),
+) -> int:
+    """Согласует ``corpus_docs.url`` с каноническим адресом: ``min(url)`` среди равных ``doc_hash``.
+
+    17 §6 (F3): «победитель контент-дедупа — запрос, а не гонка». Кто первый доехал до
+    ``ingest_one``, тот и записал документ (``seen_docs``), а при нескольких полосах
+    «первый» — это момент готовности страницы, то есть состав корпуса зависел бы от
+    планировщика. Поэтому после персиста документов продукта адрес **согласуется**
+    запросом: ``(product_id, doc_hash) → {url}``, победитель — :func:`min` множества.
+
+    **Носитель.** Группы берутся из ``crawl_session_items.doc_hash`` (durable: переживает
+    resume и повторный ингест), а не из памяти фазы: словарь ``seen_docs`` начинается
+    пустым при реюзе/``--only-failed``, и «победитель» снова стал бы случайным.
+    ``corpus_docs.content_hash`` для группировки не годится — это тот же ключ, но
+    ``crawl_session_items.content_hash`` хранит хеш **сырых байтов** (I19), а дедуп идёт по
+    хешу **извлечённого текста**: разные величины, и по байтам алиасы не собрать.
+
+    **Границы (и почему проход ничего не портит).**
+
+    * документ с единственным URL — группа из одного элемента, ничего не меняется;
+    * строка истории без ``doc_hash`` (БД прошлой схемы) в группу **не входит**: «неизвестно»
+      не выдаётся за минимум. Если текущий адрес документа не входит в известную группу,
+      документ **пропускается**: значит часть адресов этого текста неизвестна, и минимум по
+      неполному множеству был бы подменой;
+    * реюз версии документа из прошлого прогона (``304``/retained-байты/offline) не мешает:
+      алиас этого прогона получает ``doc_hash`` при ингесте, поэтому попадает в группу
+      этого прогона.
+
+    Меняется **только** поле ``url`` строки корпуса: ``doc_id``, ``content_hash``, версия,
+    retained-байты и признак частичности — идентичность и провенанс документа, а не адрес.
+    Счётчик ``duplicates``/семантика алиасов не затрагиваются.
+
+    Изменение артефакта **видимо**: вызывающий пишет число изменённых адресов в лог фазы
+    (:data:`CANONICAL_URL_CHANGED_NOTE`), а не подменяет адрес молча.
+
+    Проход идемпотентен и не зависит от порядка: повторный вызов на согласованном корпусе
+    возвращает ``0`` (условие ``url <> ?`` в сторе), а :func:`min` по множеству не зависит
+    от порядка обхода.
+
+    ``docs`` — документы продукта в памяти фазы (``ingest.docs``): адрес переписывается и
+    там, иначе ``product_partial``/``observed_documents`` назвали бы документ по адресу,
+    которого в ``corpus_docs`` уже нет. Необязателен: согласование durable-строки от него
+    не зависит.
+
+    :returns: число документов, чей канонический адрес был переписан.
+    """
+    if store is None or run_id is None:
+        return 0
+    groups: dict[str, set[str]] = {}
+    for (item_product_id, item_url), item in items.items():
+        if item_product_id != product_id or not item.doc_hash:
+            continue
+        groups.setdefault(item.doc_hash, set()).add(item_url)
+    # (а) документ с единственным URL согласовывать не с чем, поэтому пары фильтруются
+    # **до** чтения корпуса: прогон без дедупа не приобретает ни одного лишнего запроса
+    # (наблюдаемость важна и в обратную сторону — молчаливая цена чтения тоже видна).
+    contested = {
+        doc_hash: urls for doc_hash, urls in groups.items() if len(urls) > 1
+    }
+    if not contested:
+        return 0
+    changed = 0
+    try:
+        urls_by_doc = {
+            doc.doc_id: doc.url
+            for doc in store.iter_corpus_docs(run_id)
+            if doc.product_id == product_id
+        }
+        for doc_hash in sorted(contested):
+            urls = contested[doc_hash]
+            doc_id = f"{product_id}:{doc_hash}"
+            current = urls_by_doc.get(doc_id)
+            if current is None or current not in urls:
+                # (б) текущий адрес не принадлежит известной группе: часть адресов этого
+                # текста не записана (старая БД), и минимум по неполному множеству был бы
+                # выдуманным. Пропуск виден в счётчике ``changed``, а не маскируется.
+                continue
+            canonical = min(urls)
+            if canonical == current:
+                continue
+            if store.set_corpus_doc_url(doc_id, canonical):
+                changed += 1
+                # Память продукта говорит то же, что durable-строка: иначе строка продукта
+                # и покрытие назвали бы документ по адресу, которого в корпусе уже нет.
+                for doc in docs:
+                    if doc.doc_id == doc_id:
+                        doc.url = canonical
+    except Exception as exc:  # noqa: BLE001 — изоляция персистенции (контракт фазы)
+        errors.append(
+            f"canonical_url({product_id}): {type(exc).__name__}: {exc}"
+        )
+    return changed
 
 
 def _register_composition_state(
@@ -1477,6 +1591,10 @@ def _build_corpus(
     #: Считается по продукту (``seen_docs`` — per-product), поэтому и карта продуктовая;
     #: суммарный ``duplicate_count`` — сумма. Дедуп легитимен, но не должен быть невидим.
     duplicates: dict[str, int] = {}
+    #: 17 §6 (F3): сколько документов продукта получили канонический адрес ``min(url)``
+    #: вместо «первого дошедшего». Обязано быть видно оператору (строка лога), потому что
+    #: это смена адреса в артефакте, а не косметика.
+    canonical_url_changes: dict[str, int] = {}
     raw_root_path = Path(raw_root)
     #: P5: видимые пропуски документов уровнем ``off`` (никогда не тихо) — агрегат по всем
     #: корням/продуктам прогона; кладётся в ``IndexBuild.document_skips``.
@@ -2668,6 +2786,22 @@ def _build_corpus(
                 f"roots={len(product_roots)}, "
                 f"seeds_enqueued={counters.product_seeds_enqueued} — ячейки будут failed, не ❌"
             )
+        # 17 §6 (F3): канонический адрес документа — **запрос**, а не гонка. После персиста
+        # документов продукта адрес согласуется по durable-носителю
+        # (``crawl_session_items.doc_hash``): победитель дедупа — ``min(url)``, поэтому
+        # состав корпуса не зависит от того, какая полоса доехала первой. Проход
+        # идемпотентен; число переписанных адресов идёт в лог фазы (видимая смена
+        # артефакта), а не в ``errors``: это не сбой, а исправление порядка.
+        canonical_changed = canonicalize_doc_urls(
+            product_id,
+            items=items,
+            store=store,
+            run_id=run_id,
+            errors=errors,
+            docs=ingest.docs,
+        )
+        if canonical_changed:
+            canonical_url_changes[product_id] = canonical_changed
         # I2/I2c: документы, прочитанные **не целиком**. Признак уже в ``CorpusDoc`` —
         # здесь он только считается, чтобы попасть в две наблюдаемые точки: строку
         # продукта (``results[].notes``) и строку покрытия (``blocked`` с причиной
@@ -2695,6 +2829,10 @@ def _build_corpus(
                 "fetched": product_fetched,
                 "failed": product_failed,
                 "docs": product_docs_total,
+                # 17 §6 (F3): сколько адресов документов согласовано запросом
+                # (``min(url)`` среди равных ``doc_hash``). Машинный канал к тому же
+                # числу, что в строке лога: «артефакт изменился» видно запросом.
+                "canonical_url_changes": canonical_changed,
                 "partial_docs": len(product_partial),
                 # v5: «признак частичности неизвестен» — отдельный факт, а не «полное».
                 # Строка версии могла быть записана до v5 (признак не сохранялся), и
@@ -3353,6 +3491,13 @@ def _build_corpus(
         # 09 §6.3: оффлайн-проход — по строке на продукт. Строка нужна оператору: без неё
         # «корпус собрался» читалось бы как «сайт прочитан», хотя сети не было вовсе.
         *offline_notes,
+        # 17 §6 (F3): смена канонического адреса документа — по строке на продукт, где это
+        # случилось. Строка обязательна: адрес попадает в отчёт/цитаты, и тихая подмена
+        # одного адреса другим была бы невидимым изменением артефакта.
+        *(
+            CANONICAL_URL_CHANGED_NOTE.format(product_id=note_product, count=count)
+            for note_product, count in sorted(canonical_url_changes.items())
+        ),
         # I3/§5: наблюдение SERP-контура — структурная запись (машинному потребителю) и
         # строка (оператору). Пишется и при выключенном контуре: «выключено, источник X»
         # отличимо от «контур был, но ничего не дал».
@@ -3434,7 +3579,12 @@ def _build_corpus(
         phase="corpus",
         cells=[],
         log_entries=log_entries,
-        errors=errors,
+        # 17 §6 (F3): публикуемая форма ``errors`` — лексикографический порядок, а не
+        # порядок событий: иначе артефакт (``results[].errors``) зависел бы от планировщика
+        # (сеть/пул воркеров дают разный порядок при одинаковом результате). Накопленный
+        # список до этой точки хронологический; дубликаты сохраняются (два события — две
+        # строки), поэтому ``sorted_error_lines`` не дедуплицирует.
+        errors=sorted_error_lines(errors),
         # Advisory (не влияет на status/гейты/resume): zero-source продукты — «что осталось
         # человеку» уже на выходе Ш5, до дорогой Ш6. Видно в ``hound run`` (``pending:``),
         # ``--json`` (``results[].pending``) и в ``runs/{run_id}/logs/corpus.jsonl``

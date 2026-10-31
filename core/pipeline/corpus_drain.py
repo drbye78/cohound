@@ -832,19 +832,36 @@ def drain_root(
         resume_counted.add(iurl)
         charged_urls.append(iurl)
     frontier.note_consumed(consumed)
-    seed_status = frontier.add_seed(root_url) if seed else "synthetic"
+    charged_set = set(charged_urls)
+    if seed and not frontier.has_capacity and root_url in charged_set:
+        # A2 (F3 плана 17): бюджет закрыт resume-зарядкой ⇒ как discovery seed его
+        # никто не изымет (``next`` откажет). Но байты корня уже ретенированы и
+        # зарядили бюджет — это ровно ревалидация известного URL, а её путь бюджет не
+        # расходует. Иначе страница корня выпала бы из корпуса (дефект 3, 09 §6.3).
+        seed_status = frontier.add_revalidate_seed(root_url)
+    else:
+        seed_status = frontier.add_seed(root_url) if seed else "synthetic"
     if seed_status == "queued":
         counters.product_seeds_enqueued += 1
     seed_blacklisted = seed_status == "blacklisted"
-    seed_truncated = seed_status == "truncated"
     if seed_blacklisted:
         errors.append(
             f"{pid}/{root_url}: seed зачёркнут блэклистом "
             "(exclude_paths/exclude_documents) — не enqueued"
         )
-    if seed_truncated:
+    # A2 (F3 плана 17): бюджет ``max_documents`` решается **на изъятии**, поэтому
+    # ``add_seed`` его больше не проверяет и статуса ``truncated`` не возвращает.
+    # Но корень, чей бюджет уже израсходован (resume-зарядка ``note_consumed``), не
+    # изымет **ничего**: ``next`` откажет на первом же узле. Это надо назвать сейчас,
+    # потому что sitemap/SERP-находки расходуют **общий на продукт** loc-пул
+    # (``sitemap_seed_used``): постановка их корнем, который за ними не сойдёт,
+    # «съела» бы loc у другого корня того же продукта (F12).
+    budget_closed = not frontier.has_capacity
+    if budget_closed:
+        frontier.mark_truncated("max_documents")
         errors.append(
-            f"{pid}/{root_url}: seed не поставлен — достигнут max_documents"
+            f"{pid}/{root_url}: discovery не изымается — достигнут max_documents "
+            "(усечение на изъятии; ревалидация известных URL бюджет не расходует)"
         )
 
     # 09 §6.3: известные URL — depth-0 листья **после** авторского seed и **до**
@@ -878,7 +895,7 @@ def drain_root(
     # (``charged_queued``) считаются наравне с ревалидацией известных URL, иначе
     # усечённый корень терял бы уже добытое дерево.
     if (
-        (seed_blacklisted or seed_truncated)
+        (seed_blacklisted or budget_closed)
         and revalidation_queued == 0
         and charged_queued == 0
     ):
@@ -895,7 +912,7 @@ def drain_root(
     # (``queued``/``dup`` — loc уже у этого корня). Отказ блэклистом/бюджетом не
     # расходует loc: другой корень того же продукта ещё вправе его взять. Инвариант
     # «один loc — не более одного фетча на продукт» держится именно этой пометкой.
-    for extra in (() if (seed_blacklisted or seed_truncated) else extra_seeds):
+    for extra in (() if (seed_blacklisted or budget_closed) else extra_seeds):
         extra_status = frontier.add_seed(extra)
         if extra_status in ("queued", "dup"):
             sitemap_seed_used.add((pid, extra))
@@ -905,10 +922,6 @@ def drain_root(
             errors.append(
                 f"{pid}/{extra}: sitemap-seed зачёркнут блэклистом "
                 "(exclude_paths/exclude_documents) — не enqueued"
-            )
-        elif extra_status == "truncated":
-            errors.append(
-                f"{pid}/{extra}: sitemap-seed не поставлен — достигнут max_documents"
             )
 
     # I3/§5: документы, найденные SERP-контуром, — depth-0 seeds **этого** корня.
@@ -931,11 +944,11 @@ def drain_root(
                 f"{pid}/{found}: serp-находка зачёркнута блэклистом "
                 "(exclude_paths/exclude_documents) — не enqueued"
             )
-        elif found_status == "truncated":
-            serp_ingest["truncated"].append(found)
-            errors.append(
-                f"{pid}/{found}: serp-находка не поставлена — достигнут max_documents"
-            )
+        # A2 (F3): отказа по ``max_documents`` на постановке больше нет — находка
+        # ставится в очередь, а бюджет решается на изъятии. Поэтому список
+        # ``serp_ingest["truncated"]`` остаётся в payload (он опубликован), но
+        # пустым: «находка не поставлена» больше не бывает, а «поставлена и не
+        # изъята» видно числом ``queue_remaining`` в провенансе корня.
 
     def _descend_container(
         pid: str,
@@ -1648,6 +1661,11 @@ def drain_root(
                     max(reval_n, reval_n + room),
                 )
                 if wave_size <= 0:
+                    # A2 (F3): нулевая волна при непустой очереди — это остановка
+                    # по бюджету изъятия. Она обязана быть видимой: без пометки
+                    # усечение было бы тихим (осталось N узлов, которых не изымаем).
+                    if len(frontier) and not frontier.has_capacity:
+                        frontier.mark_truncated("max_documents")
                     break
                 entries: list[_WaveEntry] = []
                 work: list[CrawlWorkItem] = []
@@ -1885,17 +1903,24 @@ def drain_root(
                 continue
             if pool is None:
                 # --- Последовательный путь (max_workers None/1): как прежде. --- #
-                node = frontier.next()
-                if node is None:
+                # A2 (F3): бюджет изъятия проверяется **до** изъятия — узел,
+                # снятый с очереди и отвергнутый по ёмкости, выпал бы из счёта
+                # «в очереди осталось N». ``peek`` не изымает и о бюджете не решает.
+                head = frontier.peek()
+                if head is None:
                     break
-                work_url, depth = node
-                # 09 §6.3: бюджет discovery исчерпан, а из очереди пришёл не
-                # ревалидационный лист — останавливаем обход (ревалидация
-                # обрабатывается отдельно и бюджет не расходует).
+                work_url, depth = head
+                # 09 §6.3: бюджет discovery исчерпан (с учётом окна экстракции), а
+                # голова очереди — не ревалидационный лист: останавливаем обход
+                # (ревалидация обрабатывается отдельно и бюджет не расходует).
                 if not _has_fetch_capacity() and not frontier.is_revalidation(
                     work_url
                 ):
                     frontier.mark_truncated("max_documents")
+                    break
+                if frontier.next() is None:
+                    # Ёмкость (``fetched``) исчерпана самим ``next``: он уже поставил
+                    # усечение ``max_documents``.
                     break
                 # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
                 if frontier.blacklisted(work_url):
@@ -1984,6 +2009,10 @@ def drain_root(
                 max(reval_n, reval_n + room),
             )
             if wave_size <= 0:
+                # A2 (F3): та же видимость остановки по бюджету изъятия, что в
+                # executor-ветке: непустая очередь + исчерпанный ``fetched``.
+                if len(frontier) and not frontier.has_capacity:
+                    frontier.mark_truncated("max_documents")
                 break
             entries: list[_WaveEntry] = []
             for _ in range(wave_size):

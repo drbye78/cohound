@@ -58,7 +58,7 @@ case-sensitive); ``exclude_documents`` — glob по **basename** (послед�
 
 from __future__ import annotations
 
-from collections import deque
+import heapq
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -91,6 +91,7 @@ from core.util.document_formats import (
 from core.util.security import validate_url
 
 __all__ = [
+    "CRAWL_SEMANTICS",
     "DEFAULT_DOCUMENT_TIMEOUT_S",
     "SCOPE_ARTIFACT_OUTSIDE_PREFIX",
     "SCOPE_IN",
@@ -123,6 +124,20 @@ SUBDOMAIN_REJECT_EXAMPLES_MAX = 3
 
 #: Потолок **примеров** схлопнутых форм одного URL в провенансе (счётчик — точный).
 DUPLICATE_FORM_EXAMPLES_MAX = 10
+
+#: Слаг **семантики краула** — версия правил обхода, а не осей (F3 плана 17).
+#:
+#: Входит в :meth:`CrawlLimits.as_dict` **безусловно** и через ``crawl_config_digest``
+#: попадает в ``run_id``: семантика решает **состав корпуса** (порядок изъятия frontier,
+#: момент решения о ``max_documents``, выбор победителя контент-дедупа), поэтому два
+#: прогона с одинаковыми осями, но разной семантикой — разные измерения. Число осей
+#: (``EXECUTION_CONTRACT_FIELDS``) при этом не меняется: носитель — дайджест краула,
+#: у которого уже есть эта роль (``robots``/``max_depth``).
+#:
+#: ``crawl-2`` — порядок ``(depth, url)`` и бюджет на изъятии. Bump — при следующей смене
+#: семантики обхода/дедупа, одной строкой и вместе с golden-переаннотацией
+#: (``execution_change``, §9).
+CRAWL_SEMANTICS = "crawl-2"
 
 
 def url_form_key(url: str) -> str:
@@ -321,6 +336,12 @@ class CrawlLimits:
         есть является условием измерения; прогон с robots и прогон без него обязаны
         иметь разный ``crawl_config_digest``, иначе один ``run_id`` описывал бы два
         разных корпуса (I19/§15).
+
+        ``semantics`` (:data:`CRAWL_SEMANTICS`) — второй такой ключ, но по другой причине:
+        это не ось, а **версия правил обхода** (порядок ``(depth, url)``, бюджет
+        ``max_documents`` на изъятии, победитель контент-дедупа). Правила меняют состав
+        корпуса при тех же осях, поэтому прогон, снятый прежней семантикой, обязан иметь
+        другой ``run_id`` — безусловность здесь и есть механизм (§13).
         """
         payload: dict[str, object] = {
             "max_workers": self.max_workers,
@@ -331,13 +352,38 @@ class CrawlLimits:
             "document_level": self.document_level.value,
             "pdf_pipeline": self.pdf_pipeline.value,
             "robots": self.robots,
+            # F3 (план 17): слаг **семантики краула** — безусловный ключ, как ``robots``.
+            # Порядок обхода frontier (``(depth, url)``) и бюджет ``max_documents``,
+            # решаемый на изъятии, меняют **состав корпуса** на ограниченных прогонах,
+            # поэтому обязаны менять ``run_id``. Носитель — именно ``crawl_config_digest``
+            # (:func:`core.pipeline.report.crawl_control_digest`): ``EXECUTION_CONTRACT_FIELDS``
+            # (29 полей, ``digests.py``) не трогаются, слаг входит в контракт через этот
+            # дайджест. Ключ безусловный намеренно: это не ось, которую оператор может
+            # объявить или не объявить, а версия правил — прогон, снятый прежней
+            # семантикой, несравним с новым при тех же осях, и один ``run_id`` над двумя
+            # разными корпусами был бы ложью о провенансе (§13). Значение покрывает и
+            # F3B (победитель контент-дедупа ``min(url)``): смена канонического URL —
+            # тоже смена корпуса. Bump ``crawl-3`` — при следующей смене семантики
+            # краула (не осей: оси входят в словарь сами). Обратной сборки
+            # ``CrawlLimits(**as_dict())`` в дереве нет — словарь только сериализуется.
+            "semantics": CRAWL_SEMANTICS,
         }
         # Та же обратная совместимость: ключ появляется только при явно заданной оси,
         # поэтому дайджест прогонов без неё не меняется, а при задании — честно меняется.
         if self.document_timeout_s_explicit:
             payload["document_timeout_s"] = self.document_timeout_s
-        # F1 (план 17): ось параллельности краула. Только при объявлении — иначе
-        # дайджест прогонов без неё не меняется (пин `ru-pg-dbms-895dbfa4d045`).
+        # F1 (план 17): ось параллельности краула. Только при объявлении — иначе дайджест
+        # прогонов без неё не меняется, а при задании — честно меняется.
+        #
+        # Пин ``run_id`` прогона **без осей** — не константа кода, а величина, которую
+        # фиксирует эталон (замер ``2026-10-31-crawl-parallelism-limits.md``), и её
+        # держит инвариант теста ``test_host_concurrency_default_does_not_change_digest``
+        # («ключ не просачивается из дефолта»). Поэтому здесь не записан ни прежний, ни
+        # текущий хеш: значение меняется объявлением, а комментарий с числом устаревает
+        # молча. Текущее значение — ``./hound.py plan --run-yaml packages/ru-pg-dbms/run.yaml``
+        # (``ru-pg-dbms-6f31dce1a5ba`` на момент F3). Сдвинулось оно один раз осознанно —
+        # вместе со слагом семантики ``crawl-2`` (F3), а не от объявления этой оси: слаг
+        # входит в те же ``crawl_config_digest`` безусловно.
         if self.host_concurrency_explicit:
             payload["host_concurrency"] = self.host_concurrency
         if self.revalidate_max_documents is not None:
@@ -900,12 +946,26 @@ def decoded_scope_path(path: str) -> str | None:
 
 
 class Frontier:
-    """BFS-очередь одного seed-root: scope/блэклист/лимиты при постановке (D1/D2).
+    """Приоритетная BFS-очередь одного seed-root: scope/блэклист/лимиты при постановке.
 
-    FIFO (:class:`collections.deque`) — детерминированный обход; ключ дедупликации —
-    нормализованный URL (см. ``core.util.html_links``) плюс :func:`url_form_key`, который
-    схлопывает формы одного URL, различающиеся хвостовым ``/`` (схлопывание видимо:
-    :attr:`duplicate_form_count`). ``fetched`` считает успешно
+    **Порядок обхода — ключ ``(depth, url)``, а не порядок поступления** (F3 плана 17,
+    семантика ``crawl-2``). Очередь — двоичная куча (:mod:`heapq`) с ключом ``(depth, url)``:
+    :meth:`next` отдаёт минимальную глубину, а внутри одной глубины — лексикографически
+    меньший URL. Причина не в эстетике: при FIFO состав корпуса зависел от того, какая
+    страница какой волны завершилась первой, то есть от планировщика (``max_workers``,
+    задержки сети), а не от объявленного входа. Порядок, выведенный из ключа, делает
+    «набор добытого» функцией объявленных входов — без этого требования T3/T4
+    (порядко-независимость корпуса) недоказуемы в принципе.
+
+    **Бюджет ``max_documents`` решается на изъятии, а не на постановке** (F3/A2):
+    :meth:`discover`/:meth:`add_seed` ставят всё, что проходит scope/блэклист/глубину/дедуп
+    (эти решения от порядка не зависят), а :meth:`next` возвращает ``None``, когда
+    ``fetched`` достиг потолка, — с явной пометкой усечения. Так отказ перестаёт быть
+    функцией момента готовности.
+
+    Ключ дедупликации — нормализованный URL (см. ``core.util.html_links``) плюс
+    :func:`url_form_key`, который схлопывает формы одного URL, различающиеся хвостовым ``/``
+    (схлопывание видимо: :attr:`duplicate_form_count`). ``fetched`` считает успешно
     добытые (retained) страницы этого корня — для ``max_documents``. ``truncated``/
     ``truncated_reason`` фиксируют усечение (потолок документов или глубины) для
     провенанса (D1/G — «честность усечения»).
@@ -935,7 +995,18 @@ class Frontier:
             for host in (normalize_scope_host(raw) for raw in (scope_hosts or ()))
             if host
         )
-        self._queue: deque[tuple[str, int]] = deque()
+        #: Очередь **discovery** — двоичная куча с ключом ``(depth, url)`` (F3 плана 17).
+        #: Кортеж именно в этом порядке полей: сравнение идёт по глубине, затем по URL,
+        #: поэтому индекс ``0`` — глубина, ``1`` — URL (прежний FIFO-порядок полей был
+        #: обратным, поэтому все чтения головы переписаны явно).
+        self._queue: list[tuple[int, str]] = []
+        #: Очередь **ревалидации** известных URL (depth-0 листья) — отдельная куча с тем
+        #: же ключом. Отдельная не для скорости, а для бюджета: ревалидация его **не**
+        #: расходует (``09`` §6.3), поэтому при исчерпанном ``max_documents`` она обязана
+        #: обслуживаться, а discovery — нет. Один общий heap этого не выражает: узел
+        #: discovery с меньшим ключом навсегда закрыл бы голову. Пока бюджет есть,
+        #: :meth:`next` берёт минимум из двух голов — порядок совпадает с единым heap.
+        self._revalidation_queue: list[tuple[int, str]] = []
         self._seen: set[str] = set()
         #: Ключи дедупа (:func:`url_form_key`) — **вторая** форма одного URL не даёт
         #: второго GET. Хранится отдельно от ``_seen``: точные строки нужны для
@@ -1114,7 +1185,13 @@ class Frontier:
 
     @property
     def has_capacity(self) -> bool:
-        """Есть ли место под ещё одну добытую страницу по ``max_documents``."""
+        """Есть ли место под ещё одну **добытую** страницу по ``max_documents``.
+
+        Предикат бюджета **изъятия**: им пользуется :meth:`next` (и дренаж через
+        ``has_fetch_capacity``), а не постановка в очередь. На постановке бюджет не
+        проверяется намеренно (F3/A2): иначе набор поставленных — а значит и добытых —
+        URL зависел бы от порядка завершения страниц, то есть от планировщика.
+        """
         return self.limits.max_documents is None or self.fetched < self.limits.max_documents
 
     def note_fetched(self) -> None:
@@ -1150,25 +1227,26 @@ class Frontier:
         """Ставит seed (глубина 0); seed **задаёт** scope, поэтому scope-чек опущен.
 
         Блэклист применяется и к seeds (D1/H: отфильтрованы seeds, записи каталогов и
-        обнаруженные URL). Возвращает статус: ``"queued"`` | ``"blacklisted"`` |
-        ``"truncated"`` | ``"dup"``.
+        обнаруженные URL). Возвращает статус: ``"queued"`` | ``"blacklisted"`` | ``"dup"``.
 
         Дедуп seed'а — **только по точной форме**: ``p`` и ``p/`` остаются разными
         утверждениями автора, потому что seed задаёт path-prefix корня (``09`` §7.2).
         Нормализованный ключ при этом попадает в множество форм, чтобы обнаруженная
         ссылка другой формы не дала второй GET.
+
+        Бюджет ``max_documents`` здесь **не** проверяется (F3/A2): решение о нём
+        принимается на изъятии (:meth:`next`), иначе набор поставленных URL зависел бы
+        от порядка завершения страниц. Статус ``"truncated"`` поэтому больше не
+        возвращается — усечение ставит :meth:`next`/дренаж.
         """
         if url in self._seen:
             return "dup"
         if self.blacklisted(url):
             self.skipped_blacklisted.append(url)
             return "blacklisted"
-        if not self.has_capacity:
-            self._mark_truncated("max_documents")
-            return "truncated"
         self._seen.add(url)
         self._seen_forms.add(url_form_key(url))
-        self._queue.append((url, 0))
+        heapq.heappush(self._queue, (0, url))
         self.note_host_accept(url)
         return "queued"
 
@@ -1208,7 +1286,7 @@ class Frontier:
         self._seen.add(url)
         self._seen_forms.add(url_form_key(url))
         self._revalidation.add(url)
-        self._queue.append((url, 0))
+        heapq.heappush(self._revalidation_queue, (0, url))
         self.note_host_accept(url)
         return "queued"
 
@@ -1217,25 +1295,47 @@ class Frontier:
         return url in self._revalidation
 
     def next_is_revalidation(self) -> bool:
-        """Голова очереди — URL ревалидации (проверка бюджета discovery в цикле)."""
-        return bool(self._queue) and self._queue[0][0] in self._revalidation
+        """Голова **обслуживаемого** порядка — URL ревалидации (проверка бюджета)."""
+        head = self._served_head()
+        return head is not None and head[1]
 
     def revalidation_head_count(self, limit: int) -> int:
-        """Сколько подряд URL ревалидации в голове очереди (не более ``limit``)."""
+        """Сколько подряд URL ревалидации в голове обслуживаемого порядка (≤ ``limit``).
+
+        Порядок — тот же, в котором отдаёт :meth:`next`: при исчерпанном бюджете
+        обслуживается только ревалидация (весь её блок), иначе две головы сливаются по
+        ключу ``(depth, url)``. Внутренняя раскладка кучи порядком обхода не является,
+        поэтому первые ``limit`` элементов берутся через :func:`heapq.nsmallest`.
+        """
+        if limit <= 0:
+            return 0
+        if not self.has_capacity:
+            return min(limit, len(self._revalidation_queue))
+        discovery = heapq.nsmallest(limit, self._queue)
+        revalidation = heapq.nsmallest(limit, self._revalidation_queue)
+        next_discovery = discovery[0] if discovery else None
         count = 0
-        for url, _depth in self._queue:
-            if url not in self._revalidation or count >= limit:
+        for key in revalidation:
+            if count >= limit:
+                break
+            if next_discovery is not None and next_discovery < key:
+                # узел discovery в голове — непрерывный блок ревалидации кончился
                 break
             count += 1
         return count
 
     def discover(self, url: str, depth: int) -> bool:
-        """Ставит обнаруженный URL глубины ``depth`` при прохождении scope/блэклиста/ёмкости.
+        """Ставит обнаруженный URL глубины ``depth`` при прохождении scope/блэклиста.
 
         Терминальный артефакт (документ/заявленный контейнер) вне path-prefix корня
         **допускается** (P6b), но host scope, SSRF-валидация, traversal-guard и блэклист
         оператора действуют как прежде — блэклист побеждает. Обход фиксируется
         (:meth:`note_artifact_bypass`) только по факту постановки в очередь.
+
+        Бюджет ``max_documents`` здесь **не** проверяется (F3/A2): отказы, зависящие от
+        момента готовности страниц, сделали бы состав корпуса функцией планировщика.
+        Поэтому отказ остаётся только по scope/блэклисту/глубине/дедупу — эти решения
+        от порядка не зависят.
 
         Дедуп — по **нормализованному** ключу (:func:`url_form_key`): ``/page`` и
         ``/page/`` дают один элемент очереди, а схлопывание видно в
@@ -1251,14 +1351,11 @@ class Frontier:
         if self.blacklisted(url):
             self.skipped_blacklisted.append(url)
             return False
-        if not self.has_capacity:
-            self._mark_truncated("max_documents")
-            return False
         if admission == SCOPE_ARTIFACT_OUTSIDE_PREFIX:
             self.note_artifact_bypass(url)
         self._seen.add(url)
         self._seen_forms.add(url_form_key(url))
-        self._queue.append((url, depth))
+        heapq.heappush(self._queue, (depth, url))
         self.note_host_accept(url)
         return True
 
@@ -1285,17 +1382,71 @@ class Frontier:
 
     # -- drain -------------------------------------------------------------- #
 
-    def next(self) -> tuple[str, int] | None:
-        """Следующий ``(url, depth)`` из FIFO-очереди или ``None`` (очередь пуста)."""
-        if not self._queue:
+    def _served_head(self) -> tuple[tuple[int, str], bool] | None:
+        """Голова **обслуживаемого** порядка: ``((depth, url), is_revalidation)``.
+
+        Пока бюджет не исчерпан, обслуживаемый порядок — слияние двух куч по ключу
+        ``(depth, url)`` (то же, что единый heap). При исчерпанном ``max_documents``
+        discovery не обслуживается вовсе, а ревалидация обслуживается: она бюджет не
+        расходует (``09`` §6.3). ``None`` — обслуживать нечего.
+        """
+        discovery = self._queue[0] if self._queue else None
+        revalidation = (
+            self._revalidation_queue[0] if self._revalidation_queue else None
+        )
+        if not self.has_capacity:
+            return None if revalidation is None else (revalidation, True)
+        if discovery is None:
+            return None if revalidation is None else (revalidation, True)
+        if revalidation is None or discovery < revalidation:
+            return (discovery, False)
+        return (revalidation, True)
+
+    def peek(self) -> tuple[str, int] | None:
+        """Голова обслуживаемого порядка ``(url, depth)`` **без** изъятия.
+
+        Нужна дренажу: сперва посмотреть, что будет изъято (с учётом ёмкости окна
+        экстракции, ``has_fetch_capacity``), и только потом изымать — иначе узел,
+        снятый с очереди и отвергнутый по ёмкости, терял бы позицию в счёте
+        «в очереди осталось N».
+        """
+        head = self._served_head()
+        if head is None:
             return None
-        return self._queue.popleft()
+        depth, url = head[0]
+        return url, depth
+
+    def next(self) -> tuple[str, int] | None:
+        """Следующий ``(url, depth)`` по ключу ``(depth, url)`` или ``None``.
+
+        ``None`` — очередь пуста **или** бюджет ``max_documents`` исчерпан
+        (``fetched >= max_documents``), а обслуживаемых узлов не осталось (обнаруженные
+        ещё лежат в очереди, ревалидации нет). Второй случай **не** тихий: ставится
+        усечение ``max_documents`` (первый повод побеждает), поэтому «осталось N, но не
+        изымаем» видно в провенансе корня (``queue_remaining``).
+
+        Ревалидация известных URL бюджет не расходует (``09`` §6.3), поэтому её
+        элементы изымаются и при исчерпанном бюджете discovery: она не «документ,
+        который добавляет обход».
+        """
+        head = self._served_head()
+        if head is None:
+            if self._queue and not self.has_capacity:
+                # Discovery остался, но бюджет исчерпан — усечение обязано быть видимым.
+                self._mark_truncated("max_documents")
+            return None
+        (depth, url), is_revalidation = head
+        if is_revalidation:
+            heapq.heappop(self._revalidation_queue)
+        else:
+            heapq.heappop(self._queue)
+        return url, depth
 
     def __bool__(self) -> bool:
-        return bool(self._queue)
+        return bool(self._queue) or bool(self._revalidation_queue)
 
     def __len__(self) -> int:
-        return len(self._queue)
+        return len(self._queue) + len(self._revalidation_queue)
 
     def with_limits(self, limits: CrawlLimits) -> Frontier:
         """Копия frontier с урезанными лимитами (seam для D4/D3 без мутации)."""
@@ -1305,7 +1456,8 @@ class Frontier:
         clone.duplicate_form_count = self.duplicate_form_count
         clone.duplicate_form_examples = list(self.duplicate_form_examples)
         clone._duplicate_form_seen = set(self._duplicate_form_seen)
-        clone._queue = deque(self._queue)
+        clone._queue = list(self._queue)  # копия массива кучи остаётся корректной кучей
+        clone._revalidation_queue = list(self._revalidation_queue)
         clone._revalidation = set(self._revalidation)
         clone.fetched = self.fetched
         clone.skipped_blacklisted = list(self.skipped_blacklisted)

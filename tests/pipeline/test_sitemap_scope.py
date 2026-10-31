@@ -398,10 +398,13 @@ def test_loc_budget_rejected_root_a_still_offered_to_root_b(tmp_path: Path) -> N
             run_id=RUN_ID,
         )
         # A отвергнут бюджетом (seed), но loc не «съеден»: B поставил его и добыл.
+        # A2 (F3): отказа по ``max_documents`` на постановке больше нет — усечение
+        # решается на изъятии, поэтому сообщение теперь про изъятие, а видимость
+        # усечения несёт провенанс корня (``truncated``/``truncated_reason`` ниже).
         assert any(
-            f"{ROOT_HOST}: seed не поставлен — достигнут max_documents" in e
+            f"{ROOT_HOST}: discovery не изымается — достигнут max_documents" in e
             for e in result.errors
-        )
+        ), result.errors
         assert [u for u, _ in crawler.calls].count(extra_loc) == 1
         assert extra_loc in _doc_urls(store)
         host_record = _root_record(result, ROOT_HOST)
