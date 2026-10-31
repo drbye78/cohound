@@ -432,7 +432,13 @@ uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract --e
 ```
 
 `uv lock --check` passes; if you change dependencies, update the lock in the same commit or
-`--frozen` refuses. Third-party selection, licences and rejections live in
+`--frozen` refuses. **Editing the lock by hand is legitimate** — move the requirement where it
+belongs (`dependencies` / extra / `requires-dist` marker) and confirm with `uv lock --check`.
+A bare `uv lock` on this host (uv 0.11.16) re-resolves the whole graph and upgrades unrelated
+packages (measured: 1886 changed lines, `aiohttp` 3.14.4 → 3.14.5 and ~10 more) — a dependency
+upgrade nobody asked for, hidden inside a one-line change.
+
+Third-party selection, licences and rejections live in
 `docs/architecture/05-dependency-stack.md` (LangChain/LlamaIndex and all hosted parsers were
 rejected); implementation status W1–W14, M0–M3 in `06-implementation-strategy.md`; zones and
 the DMZ seam in `07-deployment-topology.md`; seam schemas in `contracts/seam/`. Source routing
@@ -449,11 +455,14 @@ Host utilities, chosen by task rather than by habit. Measured 2026-10-31.
 | Exact text / literal / non-code (yaml, sql, md) | `rg` 13.0.0 | `rg -n -t py 'pattern' core/` · `rg -F 'literal'` · `rg -e 'a|b'` |
 | Files by extension/name/content | `fdfind` 8.6.0 (`fd` is a symlink) | `fdfind -e py -t f root_drain core/` · `fdfind -x rg -n 'pat' {}` |
 | Code **structure** (callers, decorators, rewrites) | `ast-grep` 0.45.3 | `ast-grep run -p '$OBJ.insert($$$)' -l python core/` · `ast-grep outline -l python file.py` |
+| Literal / regex substitution with a reviewable diff | `sd` 1.0.0 | `sd -p -F 'old' 'new' $(rg -l -F 'old' -t py core/)` |
 | JSON | `jq` 1.6 | `jq -r '.results[].notes' run.json` |
+| "Where is X implemented" without knowing the name | `zg` 0.2.2 (`zvec-grep`) | `zg status` · `zg query "where is crawl scope decided"` · `zg query --fts host_in_scope` |
 | YAML / XML | `yq` 4.54.1 | `yq '.crawl' config/deploy.yaml` · `yq -o json …` |
 | SQLite (runs, state) | `litecli` 1.17.1 | `litecli db.sqlite -e "select …"` |
 | Profiling a live process | `py-spy` 0.4.2 | `py-spy record -d 3 -r 50 -f speedscope -o /tmp/p.json -- .venv/bin/python …` |
 | Structural diff (did the move change behaviour?) | `difftastic` 0.71.0 | `difft --color never --display inline /tmp/old new` |
+| Readable unified diff (presentation only) | `delta` 0.20.1 | `git diff \| delta --paging=never` |
 | Reading files with syntax highlighting | `bat` 0.22.1 | `bat -p --line-range 100:160 file.py` |
 
 Traps that cost time:
@@ -467,8 +476,14 @@ Traps that cost time:
 - `ast-grep`'s `sg` alias is deprecated; `sg` without arguments prints a banner. Use
   `ast-grep`. `ast-grep` rewrites write files in place and know nothing about parallel editing
   lanes — do not run rewrite mode over `core/` while other writers work there.
+- `sd` is **regex by default** (`-F` for a literal pass) and rewrites **in place** — use
+  `-p` first. It knows nothing about `.gitignore` or lanes either: feed it an explicit file
+  list (`$(rg -l …)` or `$(fdfind …)`) instead of a bare `**/*` glob, or it will happily
+  rewrite `runs/`, caches and generated artifacts.
 - `difft` cannot read stdin: `git diff | difft` is useless. Materialize both sides
-  (`git show HEAD:path > /tmp/old`, copy the working file to `/tmp/new`).
+  (`git show HEAD:path > /tmp/old`, copy the working file to `/tmp/new`). `delta` is the
+  opposite — it reads stdin and only *presents* a diff; it compares nothing, so it never
+  replaces `difft` when the question is "did this move change behaviour".
 - `py-spy` attach needs `sudo` on this host (`kernel.yama.ptrace_scope=1`). As a parent it
   needs no privileges. For a hung run, `sudo py-spy dump --pid <pid>` beats guessing from
   logs.
@@ -476,6 +491,12 @@ Traps that cost time:
 - `pgrep -f 'core.cli run'` matches **its own** command line — a false ALIVE. Use
   `pgrep -f '[c]ore.cli run'`. Likewise `pkill -f "python -m pytest"` kills the wrapping shell
   command too.
+- `zg` answers only what it has indexed: `zg status` first (measured 2026-10-31 on this tree —
+  89 % coverage, 554/625 files, already 62 files behind). It is a **semantic entry point**
+  ("where is X implemented" when the name is unknown), not a replacement for `rg` (exact
+  text) or `ast-grep` (structure). The index is derived and host-specific
+  (`.zvec-grep/index.zvec`, gitignored); the embedding model is local
+  (`local/potion-code-16m-v2`), so no external key is involved.
 - A code-graph MCP server is not part of the toolchain: its call-graph and dead-code answers
   were measured as wrong on this repo, while its complexity ranking and raw cypher were fine.
 
