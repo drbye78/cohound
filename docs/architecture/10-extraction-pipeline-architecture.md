@@ -473,7 +473,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 ### 5.2. Окно: что именно ограничено
 
 > ⬜ **не сделано** — ось `extract_window` есть только как число воркеров
-> (`crawl.extract_workers`, `core/domain/models.py:498`, выводится в
+> (`crawl.extract_workers`, `core/domain/models.py:533`, выводится в
 > `core/pipeline/crawl_frontier.py:497-507`); `chunk_window` и `retrieval_window` в коде
 > отсутствуют (`grep -rn "chunk_window\|retrieval_window" core/` — пусто).
 

@@ -197,7 +197,7 @@ robots остаётся в аудите.
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **Сегодня его нет.** Провалы фетчей попадают в отчёт только агрегатами
-(`core/domain/models.py:1064` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1252-1257`
+(`core/domain/models.py:1494` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1252-1257`
 — движки в шапке; `core/pipeline/report.py:1684-1724` — `blocked = {error_kind: count}` и
 `unreadable_origins` от `derive_corpus_coverage`). Ни URL, ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
@@ -307,7 +307,7 @@ gaps:
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
    `core/pipeline/corpus.py:2115`; `origin` — `core/store/sqlite.py:118`;
-   `resolved_manually` — `core/domain/models.py:2117` + `core/pipeline/corpus_coverage.py:118`;
+   `resolved_manually` — `core/domain/models.py:2207` + `core/pipeline/corpus_coverage.py:118`;
    доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:339`).
    As-built и расхождения — §10.
 3. ⬜ не сделано — `parent_run_id` прогона-продолжения в коде отсутствует
