@@ -22,6 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
@@ -30,6 +31,7 @@ from core.domain import (
     Cohort,
     CohortEntry,
     CrawlRunConfig,
+    RateLimitSpec,
     RunConfig,
     RunMode,
 )
@@ -123,6 +125,7 @@ class _Crawler:
         gate_to: int | None = None,
         gate_timeout: float = 0.5,
         delays: dict[str, float] | None = None,
+        gate_urls: set[str] | None = None,
     ) -> None:
         self.pages = dict(pages)
         self.raise_urls = set(raise_urls or ())
@@ -132,6 +135,9 @@ class _Crawler:
         self.completed: list[str] = []
         self._gate_to = gate_to
         self._gate_timeout = gate_timeout
+        #: Гейт только на эти URL (``None`` — на все). Нужен, когда гейт изображает
+        #: встречу **корней**, а не любых страниц: иначе волны детей платят таймаут.
+        self._gate_urls = set(gate_urls) if gate_urls is not None else None
         #: Управляемые задержки по URL: переставляют порядок завершения страниц.
         self._delays = dict(delays or {})
         self._lock = threading.Lock()
@@ -144,7 +150,11 @@ class _Crawler:
             self._active += 1
             self.max_active = max(self.max_active, self._active)
         try:
-            if self._gate_to is not None and self._gate_to > 1:
+            if (
+                self._gate_to is not None
+                and self._gate_to > 1
+                and (self._gate_urls is None or url in self._gate_urls)
+            ):
                 deadline = time.monotonic() + self._gate_timeout
                 while time.monotonic() < deadline:
                     with self._lock:
@@ -176,6 +186,95 @@ class _BombCrawler(_Crawler):
 
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         raise AssertionError("краулер вызван при наличии retained-байтов (resume)")
+
+
+class _TimedCrawler(_Crawler):
+    """Краулер с отметками начала фетча и пиком активности **по host** (T1/T2).
+
+    T1 спрашивает: два корня одного host не идут одновременно и интервал между их
+    запросами не меньше объявленного минимума. T2 — что разные host'ы идут
+    одновременно. Оба факта наблюдаемы только по времени/активности, поэтому
+    ``_Crawler`` дополняется, а не подменяется: гейт ``gate_to`` остаётся тем же
+    (он и делает конкурентность детерминированно наблюдаемой).
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.started_at: list[tuple[str, float]] = []
+        self.host_active: dict[str, int] = {}
+        self.host_max_active: dict[str, int] = {}
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
+        host = (urlsplit(url).hostname or "").lower()
+        with self._lock:
+            self.started_at.append((url, time.monotonic()))
+            self.host_active[host] = self.host_active.get(host, 0) + 1
+            self.host_max_active[host] = max(
+                self.host_max_active.get(host, 0), self.host_active[host]
+            )
+        try:
+            return super().fetch(url, plan)
+        finally:
+            with self._lock:
+                self.host_active[host] -= 1
+
+
+class _ThreadGuardStore:
+    """Стор с thread-affinity: мутация из чужого потока — провал теста (T5).
+
+    Инвариант 17 §6 (F4b): состояние фазы мутирует только на потоке драйвера
+    (главном), а пулы исполняют ровно ``local_fetch``. Проверка сделана падением, а
+    не сверкой лога: нарушение иначе видно только как редкая гонка под нагрузкой.
+    """
+
+    #: Префиксы **мутирующих** методов ``StorePort``: чтения разрешены с любого
+    #: потока (они и так наблюдаются), записи — только с потока владельца.
+    _MUTATING = (
+        "add_",
+        "create_",
+        "delete_",
+        "record_",
+        "register_",
+        "replace_",
+        "save_",
+        "set_",
+        "touch_",
+        "update_",
+        "upsert_",
+        "write_",
+    )
+
+    def __init__(self, inner: SqliteStore) -> None:
+        self._inner = inner
+        self.owner = threading.get_ident()
+        self.writes = 0
+        self.write_threads: set[int] = set()
+        self.read_threads: set[int] = set()
+        #: Вызовы, пришедшие не с потока владельца (мутирующие — сразу падение).
+        self.foreign: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+        mutating = name.startswith(self._MUTATING)
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            ident = threading.get_ident()
+            if ident != self.owner:
+                self.foreign.append(f"{name}@{threading.current_thread().name}")
+                if mutating:
+                    raise AssertionError(
+                        f"состояние фазы пишется из чужого потока: {name} "
+                        f"({threading.current_thread().name})"
+                    )
+                self.read_threads.add(ident)
+            elif mutating:
+                self.writes += 1
+                self.write_threads.add(ident)
+            return attr(*args, **kwargs)
+
+        return call
 
 
 class _Extractor:
@@ -615,6 +714,11 @@ def test_corpus_is_identical_for_any_concurrency(tmp_path: Path) -> None:
     Победитель дедупа здесь утверждается как «тот же во всех прогонах», а не как
     ``min(url)``: выбор канонического URL — предмет F3B; этот тест доказывает лишь, что
     он не зависит от порядка прихода.
+
+    Вторая половина (F4b, план 17 §6) — та же независимость по оси
+    ``crawl.host_concurrency``: три корня на разных host'ах, ``host_concurrency``
+    1/2/3. Один корень полос не создаёт, поэтому ось бессмысленно проверять на
+    одиночном корне.
     """
     pages = _dedup_pages()
     runs: dict[str, Any] = {}
@@ -663,6 +767,78 @@ def test_corpus_is_identical_for_any_concurrency(tmp_path: Path) -> None:
         assert len(winners) == 1  # победитель дедупа не зависит от порядка прихода
     finally:
         for store in stores:
+            store.close()
+
+    # --- F4b (план 17 §6): та же независимость по оси ``host_concurrency`` ------ #
+    # Один корень полос не создаёт (носитель состояния — корень), поэтому ось
+    # проверяется на **нескольких** корнях продукта: три host'а, у каждого свои дети,
+    # а ``r0/a`` и ``r1/a`` — один и тот же текст (дедуп **через** корни, не внутри).
+    lane_roots = [f"https://r{i}.docs.test/" for i in range(3)]
+    lane_dup = b"<html>dup</html>"
+    lane_pages: dict[str, bytes] = {
+        lane_roots[0]: b'<html><a href="/a">a</a><a href="/b">b</a></html>',
+        lane_roots[1]: b'<html><a href="/a">a</a><a href="/c">c</a></html>',
+        lane_roots[2]: b'<html><a href="/d">d</a><a href="/e">e</a></html>',
+        "https://r0.docs.test/a": lane_dup,
+        "https://r1.docs.test/a": lane_dup,
+        "https://r0.docs.test/b": b"<html>b</html>",
+        "https://r1.docs.test/c": b"<html>c</html>",
+        "https://r2.docs.test/d": b"<html>d</html>",
+        "https://r2.docs.test/e": b"<html>e</html>",
+    }
+    lane_stores: list[SqliteStore] = []
+    lane_runs: dict[str, Any] = {}
+    lane_crawlers: dict[str, _TimedCrawler] = {}
+    try:
+        for label, lanes in (("hc1", 1), ("hc2", 2), ("hc3", 3)):
+            store = SqliteStore(":memory:")
+            lane_stores.append(store)
+            _make_run(store)
+            # Гейт на 3: в hc=1 одновременно не бывает трёх фетчей (полоса одна,
+            # пул шириной 2), поэтому гейт открывается только при чередовании.
+            # Гейтятся только seed-корни: встреча корней — предмет проверки, а
+            # волны детей платили бы таймаут впустую.
+            crawler = _TimedCrawler(
+                lane_pages,
+                gate_to=3,
+                gate_timeout=0.25,
+                gate_urls=set(lane_roots),
+            )
+            lane_crawlers[label] = crawler
+            lane_runs[label] = _build(
+                tmp_path / label,
+                pages=lane_pages,
+                crawler=crawler,
+                urls={"p1": lane_roots},
+                crawl_defaults=CrawlRunConfig(
+                    max_depth=1, max_workers=2, host_concurrency=lanes
+                ),
+                store=store,
+                run_id=RUN_ID,
+            )
+
+        # Предусловие: ось действительно работает. Один корень даёт не более 2
+        # одновременных фетчей (ширина пула), три полосы — три host'а сразу.
+        assert lane_crawlers["hc1"].max_active <= 2
+        assert lane_crawlers["hc3"].max_active >= 3
+
+        lane_rows = [_corpus_rows(store) for store in lane_stores]
+        assert lane_rows[0] == lane_rows[1] == lane_rows[2]
+        assert len(lane_rows[0]) == 8  # 3 корня + 6 детей − 1 дубликат
+        assert all(run.errors == [] for run in lane_runs.values())
+
+        lane_winners = {_dedup_winner(store, lane_dup) for store in lane_stores}
+        assert len(lane_winners) == 1
+        assert lane_winners.pop() == "https://r0.docs.test/a"  # ``min(url)``, F3
+
+        # Провенанс корней — в **авторском** порядке при любой полосности: слот
+        # занят при планировании (F4b), а не при завершении корня.
+        for run in lane_runs.values():
+            records = _build_of(run).truncation
+            assert [rec["root"] for rec in records] == lane_roots
+            assert all(rec.get("planned") is not True for rec in records)
+    finally:
+        for store in lane_stores:
             store.close()
 
 
@@ -717,3 +893,150 @@ def test_truncation_is_independent_of_arrival_order(tmp_path: Path) -> None:
     finally:
         for store in stores:
             store.close()
+
+
+# --------------------------------------------------------------------------- #
+# F4b (план 17 §6): полосы — право на host, а не объект
+# --------------------------------------------------------------------------- #
+
+
+def _same_host_roots(n: int = 2) -> list[str]:
+    return [f"https://same.docs.test/root{i}" for i in range(n)]
+
+
+def _cross_host_roots(n: int = 3) -> list[str]:
+    return [f"https://h{i}.docs.test/" for i in range(n)]
+
+
+def test_lane_serializes_within_host(tmp_path: Path) -> None:
+    """T1: два корня **одного** host не идут одновременно и держат минимум интервала.
+
+    ``host_concurrency=2`` объявлен, но host один: право на него выдаётся волне, а
+    волна живёт до коммита, поэтому второй корень припаркован. Проверяется не «код
+    вызвал claim», а наблюдаемое: пик одновременных фетчей этого host'а = 1 и
+    фактический интервал между запросами не меньше объявленного минимума
+    (``rate_limit``). Гейт ``gate_to=2`` делает нарушение детерминированным: при
+    параллельных корнях двух фетчей хватило бы, чтобы гейт открылся сразу.
+    """
+    roots = _same_host_roots(2)
+    pages = {root: f"<html>root-{i}</html>".encode() for i, root in enumerate(roots)}
+    crawler = _TimedCrawler(pages, gate_to=2, gate_timeout=0.2)
+
+    result = _build(
+        tmp_path,
+        pages=pages,
+        crawler=crawler,
+        urls={"p1": roots},
+        crawl_defaults=CrawlRunConfig(
+            max_depth=0,
+            max_workers=2,
+            host_concurrency=2,
+            rate_limit=RateLimitSpec(min_s=0.06, max_s=0.06),
+        ),
+    )
+
+    assert result.errors == []
+    assert result.status == "ok"
+    assert crawler.host_max_active["same.docs.test"] == 1
+    assert crawler.max_active == 1
+    assert len(crawler.started_at) == 2
+    starts = sorted(moment for _url, moment in crawler.started_at)
+    # Минимум интервала — объявленный ``rate_limit.min_s`` (0.06 с); допуск 0.01 с
+    # покрывает планировщик, но не «почти одновременно».
+    assert starts[1] - starts[0] >= 0.05
+
+
+def test_lanes_run_concurrently_across_hosts(tmp_path: Path) -> None:
+    """T2: три host'а идут полосами — критический путь, а не сумма.
+
+    Три корня на разных host'ах, ``host_concurrency=3``: все три волны допущены
+    сразу (claim'ы не пересекаются). Наблюдаемое — пик 3 одновременных фетча и
+    укладывание в критический путь: гейт ``gate_to=3`` отпускает только когда все
+    три в полёте, поэтому при последовательной работе прогон стоил бы
+    ``3 × gate_timeout`` (1.2 с), а при полосах — один гейт.
+    """
+    roots = _cross_host_roots(3)
+    pages = {root: f"<html>root-{i}</html>".encode() for i, root in enumerate(roots)}
+    crawler = _TimedCrawler(pages, gate_to=3, gate_timeout=0.4)
+
+    started = time.monotonic()
+    result = _build(
+        tmp_path,
+        pages=pages,
+        crawler=crawler,
+        urls={"p1": roots},
+        crawl_defaults=CrawlRunConfig(
+            max_depth=0,
+            max_workers=2,
+            host_concurrency=3,
+            rate_limit=RateLimitSpec(min_s=0.0, max_s=0.0),
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.errors == []
+    assert result.status == "ok"
+    # Все три полосы были в сети одновременно и каждая — одна волна на host.
+    assert crawler.max_active == 3
+    assert set(crawler.host_max_active) == {"h0.docs.test", "h1.docs.test", "h2.docs.test"}
+    assert all(peak == 1 for peak in crawler.host_max_active.values())
+    # Критический путь ≈ один гейт, а не сумма: последовательный путь — 3 × 0.4 с.
+    assert elapsed < 1.0
+
+
+def test_state_is_written_only_by_driver(tmp_path: Path) -> None:
+    """T5: состояние фазы пишет только поток драйвера (thread-affinity — инвариант).
+
+    Стор обёрнут ``_ThreadGuardStore``: мутирующий вызов из чужого потока падает
+    ``AssertionError``. Сначала доказывается, что обёртка **жива** (запись из чужого
+    потока действительно отвергается), иначе «нарушений не было» ничего не значило
+    бы. Затем полосами (3 host'а, ``max_workers=2``) собирается корпус, и проверяется,
+    что все записи прошли на потоке владельца, а чтения с чужих потоков отсутствуют.
+    """
+    roots = _cross_host_roots(3)
+    pages: dict[str, bytes] = {}
+    for i, root in enumerate(roots):
+        child = f"https://h{i}.docs.test/a"
+        pages[root] = b'<html><a href="/a">a</a></html>'
+        pages[child] = f"<html>child-{i}</html>".encode()
+
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    guarded = _ThreadGuardStore(store)
+    try:
+        # Предусловие: обёртка падает на мутации из чужого потока.
+        foreign_errors: list[BaseException] = []
+
+        def _foreign_write() -> None:
+            try:
+                guarded.upsert_corpus_doc(None)
+            except BaseException as exc:  # noqa: BLE001 — проверяется именно отказ
+                foreign_errors.append(exc)
+
+        worker = threading.Thread(target=_foreign_write, name="foreign-writer")
+        worker.start()
+        worker.join()
+        assert len(foreign_errors) == 1
+        assert isinstance(foreign_errors[0], AssertionError)
+
+        result = _build(
+            tmp_path,
+            pages=pages,
+            crawler=_TimedCrawler(pages),
+            urls={"p1": roots},
+            store=guarded,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1, max_workers=2, host_concurrency=3
+            ),
+        )
+
+        assert result.errors == []
+        assert result.status == "ok"
+        assert guarded.writes > 0  # записи были — проверка не вакуумная
+        assert guarded.write_threads == {guarded.owner}
+        assert guarded.read_threads == set()
+        # Единственный «чужой» вызов — предусловие выше; в прогоне их нет.
+        assert guarded.foreign == ["upsert_corpus_doc@foreign-writer"]
+    finally:
+        store.close()

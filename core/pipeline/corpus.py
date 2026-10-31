@@ -159,7 +159,7 @@ import datetime as _dt
 import json
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import replace
 from functools import partial
@@ -189,7 +189,7 @@ from core.domain import (
     RunProductStatus,
     RunScope,
 )
-from core.pipeline import corpus_commit, corpus_drain, corpus_ingest
+from core.pipeline import corpus_commit, corpus_drain, corpus_driver, corpus_ingest
 from core.pipeline.artifacts_gap import write_artifacts_gap
 from core.pipeline.composition import (
     CompositionView,
@@ -1274,7 +1274,7 @@ def _build_corpus(
         дедуп/нарезка и сеансовое трекинг — общие с локальным путём (``_ingest_one``).
         ``crawler``/``crawlers`` при этом не используются. **P3-A2:** ``executor`` — лишь
         подключаемый **batch-транспорт** того же drain-алгоритма, что и локальный пул
-        (``_drain_root``): BFS-раунды, ``Frontier``, блэклисты, ``max_depth``/``max_documents``
+        (``root_lifecycle``): BFS-раунды, ``Frontier``, блэклисты, ``max_depth``/``max_documents``
         и redirect-scope — на стороне ядра, одинаково для обоих профилей. ``None`` →
         локальный per-URL путь (пул/последовательный).
     :param executor_poll_interval: пауза между опросами прогресса задания исполнителя, с
@@ -2114,14 +2114,19 @@ def _build_corpus(
     #: Копятся до конца фазы — агрегат публикуется рядом с наблюдением ресурсов
     #: (``metrics.json.resources.stage_timings``), а не только строками продуктов.
     stage_timings_rows: list[tuple[str, float, _CorpusStageTimings]] = []
+    #: 17 §6 (F4b): наблюдённые факты о полосах — по строке на продукт. Публикуются
+    #: строкой, а не ``errors``: «ось объявлена, а host'ов меньше», «под executor
+    #: чередование не действует» — это факты прогона, а не сбои. Строки появляются
+    #: **только когда ось объявлена**: прогон, её не объявивший, не обрастает ими.
+    lane_notes: list[str] = []
 
-    # L5 шаг 3: ``drain_root`` (дренаж одного корня) вынесен в ``corpus_drain``. Фазовые
-    # зависимости связываются здесь один раз (``partial`` не замыкание и не состояние —
-    # он только фиксирует аргументы). Per-продуктные связываются на границе продукта:
-    # они пересоздаются на каждой итерации, и позднее связывание было бы дефектом (B023),
-    # а не удобством.
-    _drain_root_phase = partial(
-        corpus_drain.drain_root,
+    # L5 шаг 3: дренаж одного корня вынесен в ``corpus_drain``, чередование корней
+    # продукта — в ``corpus_driver`` (F4b). Фазовые зависимости связываются здесь один раз
+    # (``partial`` не замыкание и не состояние — он только фиксирует аргументы).
+    # Per-продуктные связываются на границе продукта: они пересоздаются на каждой
+    # итерации, и позднее связывание было бы дефектом (B023), а не удобством.
+    _root_lifecycle = partial(
+        corpus_drain.root_lifecycle,
         errors=errors,
         store=store,
         run_id=run_id,
@@ -2139,7 +2144,6 @@ def _build_corpus(
         extractor=extractor,
         extractor_factory=extractor_factory,
         executor=executor,
-        pool_factory=pool_factory,
         pools=pools,
         extract_pending=extract_pending,
         extract_finalizers=extract_finalizers,
@@ -2155,7 +2159,6 @@ def _build_corpus(
         emit=emit,
         mark=_mark,
         commit_local=_commit_local,
-        local_fetch=_local_fetch,
         local_prefetch=_local_prefetch,
         process_local=_process_local,
         submit_collect=_submit_collect,
@@ -2174,6 +2177,213 @@ def _build_corpus(
         crawl_only=crawl_only,
         session_id=session,
     )
+
+    def _lane_width(root: corpus_drain.RootPlan) -> int | None:
+        """Ширина пула фетча полосы для корня — та же формула, что у самого корня.
+
+        Оси резолвятся у **корня** (``app < run < site``), поэтому драйвер не заводит
+        второй источник: он спрашивает то же разрешение, что и ``root_lifecycle``.
+        """
+        return corpus_drain.lane_width(_limits_for_url(root.root_url), executor=executor)
+
+    def _reserve_root_record(
+        product_id: str, root_url: str, *, truncation_records: list[dict[str, Any]]
+    ) -> int:
+        """Занять слот записи провенанса корня в ``truncation_records`` (F4b).
+
+        Заглушка остаётся в списке только при обрыве прогона до финализации корня — и
+        тогда она **честно** называет корень, у которого исхода нет, вместо тихого
+        пропуска в артефакте. На штатном пути слот перезаписывается записью целиком
+        (:func:`core.pipeline.corpus_commit.record_root_outcome`).
+        """
+        truncation_records.append(
+            {"product_id": product_id, "root": root_url, "planned": True}
+        )
+        return len(truncation_records) - 1
+
+    def _save_root(
+        outcome: corpus_driver.RootOutcome,
+        *,
+        product_id: str,
+        all_revalidation_groups: Mapping[str, Sequence[str]],
+        cap_fired: bool,
+        deferred_by_root: Mapping[str, int],
+        skipped_by_root: Mapping[str, int],
+        counters: CorpusCounters,
+        truncated_products: set[str],
+        truncation_records: list[dict[str, Any]],
+        store: Any,
+        session: str | None,
+        errors: list[str],
+        extract_finalizers: deque[RootDrain],
+    ) -> None:
+        """Провенанс завершённого корня — в **свой** слот, а не в конец списка (F4b).
+
+        Слот занят при планировании корня (``RootPlan.record_slot``), то есть в
+        авторском порядке, поэтому ``truncation_records`` — артефакт манифеста
+        (``effective_limits.roots``) — не зависит от порядка завершения корней. При
+        чередовании порядок завершения другой, и без слота порядок объявления читался
+        бы как порядок работы. Прецедент — ``sorted_error_lines`` (F3): артефакт
+        приводится к авторскому порядку, а не к наблюдаемому.
+
+        **Почему параметры, а не замыкание.** Функция объявлена один раз на фазу, а
+        продуктные значения приходят ``partial``-ом, собранным в итерации продукта:
+        захват переменных цикла сделал бы отложенный финализатор (он живёт в
+        ``extract_finalizers`` и вызывается **позже** — после доводки хвоста) читателем
+        чужого продукта.
+        """
+        root = outcome.plan
+        _finalize_root = partial(
+            corpus_commit.finalize_root,
+            pid=product_id,
+            root_url=root.root_url,
+            frontier=outcome.frontier,
+            sitemap_skips=outcome.sitemap_skips,
+            record_slot=root.record_slot,
+            known_urls=root.known_urls,
+            all_revalidation_groups=all_revalidation_groups,
+            cap_fired=cap_fired,
+            deferred_by_root=deferred_by_root,
+            skipped_by_root=skipped_by_root,
+            counters=counters,
+            truncated_products=truncated_products,
+            truncation_records=truncation_records,
+            store=store,
+            session=session,
+            errors=errors,
+        )
+
+        if outcome.drain.pending:
+            # C1: хвост отложен в фазовую очередь — провенанс посчитается, когда
+            # он будет доведён (фетч следующего корня уже не ждёт экстракции).
+            outcome.drain.finalize = _finalize_root
+            extract_finalizers.append(outcome.drain)
+        else:
+            _finalize_root()
+
+
+    def _author_root_plans(
+        product_id: str,
+        *,
+        author_urls: Sequence[str],
+        items: Mapping[tuple[str, str], CrawlSessionItem],
+        max_attempts: int | None,
+        errors: list[str],
+        emit: Callable[[], None],
+        mark: Callable[..., None],
+        crawl_target: Callable[..., Any],
+        expand_directory: Callable[..., list[str] | None],
+        targets: dict[tuple[str, str], Any],
+        revalidation_groups: Mapping[str, Sequence[str]],
+        serp_seeds_by_root: Mapping[str, Sequence[str]],
+        drained_roots: set[str],
+        truncation_records: list[dict[str, Any]],
+    ) -> Iterator[corpus_drain.RootPlan]:
+        """Корни продукта в авторском порядке — ленивый генератор драйвера полос (F4b).
+
+        **Ленивый, а не список.** Тело исполняется по одному корню, в момент допуска
+        драйвером: резолв цели, развёртка каталога и ``max_attempts`` — это побочные
+        эффекты (``errors``/``mark``/``emit``), и при ``host_concurrency`` ``None``/``1``
+        их порядок прежний: корень N+1 не планируется, пока корень N не дренирован.
+
+        **Слот провенанса — здесь**, в авторском порядке планирования:
+        ``truncation_records`` (артефакт ``effective_limits.roots``) поэтому не зависит от
+        порядка завершения корней.
+
+        **Почему параметры, а не замыкание.** Генератор объявлен один раз на фазу;
+        продуктные значения приходят из итерации продукта, и захват переменных цикла
+        сделал бы ленивый генератор читателем чужого продукта.
+        """
+        for url in author_urls:
+            prior_item = items.get((product_id, url))
+
+            # Phase 4: потолок попыток (``--max-attempts``). URL, уже исчерпавший попытки,
+            # не фетчится/не разворачивается: терминальный ``FAILED`` с явным ``error_kind``
+            # (не тихий дроп) → сеанс финализируется ``PARTIAL``.
+            if (
+                max_attempts is not None
+                and prior_item is not None
+                and prior_item.attempts >= max_attempts
+                and terminal_failure_kind(prior_item) is None
+            ):
+                reason = (
+                    f"max_attempts exhausted "
+                    f"(attempts={prior_item.attempts} >= {max_attempts})"
+                )
+                errors.append(f"{product_id}/{url}: {reason}")
+                mark(
+                    product_id,
+                    url,
+                    CrawlItemStatus.FAILED,
+                    error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                    error=reason,
+                )
+                emit()
+                continue
+
+            # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру,
+            # и экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
+            target = crawl_target(product_id, url)
+            targets[(product_id, url)] = target
+
+            # Phase 5.2: источник-каталог (feed/channel) разворачивается в ссылки-записи;
+            # каждая запись — **отдельный seed-root** глубины 0 (один уровень развёртки,
+            # без ре-расширения). Обычный URL — единственный корень.
+            entry_urls = expand_directory(product_id, url, target)
+            if entry_urls is None:
+                # D3: seed оператора; его per-site sitemap разворачивается в **подчинённые**
+                # depth-0 seeds того же корня уже внутри ``root_lifecycle`` — там есть frontier,
+                # чей scope фильтрует ``<loc>`` (дефект B/I17). Без sitemap — путь не
+                # исполняется (поведение неизменно).
+                roots: list[corpus_drain.RootPlan] = [
+                    corpus_drain.RootPlan(
+                        root_url=url,
+                        target=target,
+                        sitemap_seeds=True,
+                        known_urls=revalidation_groups.get(url, ()),
+                        serp_seeds=serp_seeds_by_root.get(url, ()),
+                    )
+                ]
+            else:
+                roots = []
+                for entry_url in entry_urls:
+                    etarget = crawl_target(product_id, entry_url)
+                    # Провенанс записи = ``kind`` каталога-источника + собственный engine
+                    # URL-записи (схему не меняем — только ``CrawlTarget``).
+                    entry_target = CrawlTarget(
+                        plan=etarget.plan,
+                        engine=etarget.engine,
+                        kind=target.kind,
+                        params=etarget.params,
+                    )
+                    targets[(product_id, entry_url)] = entry_target
+                    # Запись каталога — самостоятельный корень без sitemap-аугментации
+                    # (развёртка sitemap — свойство seed оператора, не записей каталога).
+                    roots.append(
+                        corpus_drain.RootPlan(
+                            root_url=entry_url,
+                            target=entry_target,
+                            sitemap_seeds=False,
+                            known_urls=revalidation_groups.get(entry_url, ()),
+                            serp_seeds=serp_seeds_by_root.get(entry_url, ()),
+                        )
+                    )
+
+            # D1: marks корней этого URL для leftover-групп каталогов и — слоты провенанса.
+            # F4: корень описан значением (``RootPlan``), а не пятью аргументами вызова —
+            # драйверу полос (F4b) нужен сам корень, а порядок остаётся авторским.
+            for root in roots:
+                drained_roots.add(root.root_url)
+                yield replace(
+                    root,
+                    record_slot=_reserve_root_record(
+                        product_id,
+                        root.root_url,
+                        truncation_records=truncation_records,
+                    ),
+                )
+
+
     for product_id in products:
         product_started = time.perf_counter()
         #: Бакеты стадий этого продукта: Pass A (краул+нарезка) и Pass B (эмбеддинг+сборка).
@@ -2238,7 +2448,7 @@ def _build_corpus(
             }
         )
         #: Сколько seed'ов фактически поставлено в очередь (авторские + sitemap). Растёт
-        #: в :func:`_drain_root`; нужен для честной причины zero-source. Сбрасывается на
+        #: в :func:`root_lifecycle`; нужен для честной причины zero-source. Сбрасывается на
         #: каждом продукте — поле общего состояния, а не локальная переменная.
         counters.product_seeds_enqueued = 0
         #: Живая граница продукта: до первого дренажа (продукт может идти часами).
@@ -2398,12 +2608,13 @@ def _build_corpus(
             for url in urls
         }
 
-        # L5 шаг 3: per-продуктное состояние ``drain_root`` связывается здесь, при
-        # создании ``partial``. Раньше это были B023-дефолты замыкания: значения
-        # пересоздаются на каждой итерации цикла, и привязка в точке определения была
-        # единственным способом не прочитать чужой продукт.
-        _drain_root = partial(
-            _drain_root_phase,
+        # L5 шаг 3: per-продуктное состояние корня связывается здесь, при создании
+        # ``partial``. Раньше это были B023-дефолты замыкания: значения пересоздаются на
+        # каждой итерации цикла, и привязка в точке определения была единственным
+        # способом не прочитать чужой продукт.
+        _root_begin = partial(
+            _root_lifecycle,
+            product_id,
             ingest=ingest,
             seen_docs=seen_docs,
             seen_chunk_ids=seen_chunk_ids,
@@ -2413,146 +2624,94 @@ def _build_corpus(
             owner_root=_owner_root,
         )
 
-
-        # P3-A2: **однопутевой** product-цикл. Развёртка каталогов/sitemap делается один раз
-        # до drain (общий блок построения корней); транспорт выбирается по ``executor is None``.
-        # Порядок expand → seed → drain на корень совпадает с локальным и является порядком
-        # ingest (interleaving-трюк ``work_by_product`` больше не нужен).
         #: Корни, реально дренированные в этом продукте (для leftover-групп каталогов).
         drained_roots: set[str] = set()
-        # Ремонт (``--only-failed``) — **не** обход: авторские корни не дренятся, их роль
-        # здесь — только пространство scope-инференса для группировки известных URL.
-        # Работа идёт через leftover-группы/orphan-бакеты ниже (``seed=False`` ⇒
-        # ``add_revalidate_seed``, depth-0 листья вне бюджета discovery).
-        # ``offline`` — дренажа нет вовсе: корпус уже собран из durable-субстрата, а дренаж
-        # начинается с seed-фетча, то есть с сети.
-        for url in (() if (repair_urls or offline) else url_map.get(product_id, [])):
-            prior_item = items.get((product_id, url))
 
-            # Phase 4: потолок попыток (``--max-attempts``). URL, уже исчерпавший попытки,
-            # не фетчится/не разворачивается: терминальный ``FAILED`` с явным ``error_kind``
-            # (не тихий дроп) → сеанс финализируется ``PARTIAL``.
-            if (
-                max_attempts is not None
-                and prior_item is not None
-                and prior_item.attempts >= max_attempts
-                and terminal_failure_kind(prior_item) is None
-            ):
-                reason = (
-                    f"max_attempts exhausted "
-                    f"(attempts={prior_item.attempts} >= {max_attempts})"
+        # 17 §6 (F4b): число полос — **объявленный** вход продукта. Ось описывает процесс
+        # краула, а не сайт, поэтому берётся у первого авторского корня той же цепочкой
+        # ``app < run < site``, что и остальные оси краула (второго источника нет).
+        lane_axis: int | None = (
+            _limits_for_url(product_roots[0]).host_concurrency
+            if product_roots
+            else None
+        )
+        if lane_axis is not None and int(lane_axis) > 1:
+            lane_values = {
+                _limits_for_url(url).host_concurrency for url in product_roots
+            }
+            declared_hosts = {
+                normalize_scope_host(urlsplit(url).hostname or "")
+                for url in product_roots
+            }
+            if executor is not None:
+                # Не ошибка и не деградация: под ``executor`` волну собирает шов одним
+                # блокирующим вызовом, промежуточной точки «план волны» там нет.
+                lane_notes.append(
+                    f"crawl: продукт {product_id}: host_concurrency={lane_axis} объявлен, "
+                    "но корни идут через executor — чередование не действует "
+                    "(сбор волны — один блокирующий вызов шва)"
                 )
-                errors.append(f"{product_id}/{url}: {reason}")
-                _mark(
-                    product_id,
-                    url,
-                    CrawlItemStatus.FAILED,
-                    error_kind=_MAX_ATTEMPTS_ERROR_KIND,
-                    error=reason,
+            elif len(declared_hosts) < int(lane_axis):
+                # «не ограничивать, а измерять»: ось не усекает прогон и не выдумывает
+                # полосы — факт публикуется числом.
+                lane_notes.append(
+                    f"crawl: продукт {product_id}: host_concurrency={lane_axis} объявлен, "
+                    f"host'ов в продукте {len(declared_hosts)} — одновременно полос не "
+                    f"больше {len(declared_hosts)}"
                 )
-                emit()
-                continue
-
-            # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру,
-            # и экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
-            target = _crawl_target(product_id, url)
-            targets[(product_id, url)] = target
-
-            # Phase 5.2: источник-каталог (feed/channel) разворачивается в ссылки-записи;
-            # каждая запись — **отдельный seed-root** глубины 0 (один уровень развёртки,
-            # без ре-расширения). Обычный URL — единственный корень.
-            entry_urls = _expand_directory(product_id, url, target)
-            if entry_urls is None:
-                # D3: seed оператора; его per-site sitemap разворачивается в **подчинённые**
-                # depth-0 seeds того же корня уже внутри ``_drain_root`` — там есть frontier,
-                # чей scope фильтрует ``<loc>`` (дефект B/I17). Без sitemap — путь не
-                # исполняется (поведение неизменно).
-                roots: list[corpus_drain.RootPlan] = [
-                    corpus_drain.RootPlan(
-                        root_url=url,
-                        target=target,
-                        sitemap_seeds=True,
-                        known_urls=revalidation_groups.get(url, ()),
-                        serp_seeds=serp_seeds_by_root.get(url, ()),
-                    )
-                ]
-            else:
-                roots = []
-                for entry_url in entry_urls:
-                    etarget = _crawl_target(product_id, entry_url)
-                    # Провенанс записи = ``kind`` каталога-источника + собственный engine
-                    # URL-записи (схему не меняем — только ``CrawlTarget``).
-                    entry_target = CrawlTarget(
-                        plan=etarget.plan,
-                        engine=etarget.engine,
-                        kind=target.kind,
-                        params=etarget.params,
-                    )
-                    targets[(product_id, entry_url)] = entry_target
-                    # Запись каталога — самостоятельный корень без sitemap-аугментации
-                    # (развёртка sitemap — свойство seed оператора, не записей каталога).
-                    roots.append(
-                        corpus_drain.RootPlan(
-                            root_url=entry_url,
-                            target=entry_target,
-                            sitemap_seeds=False,
-                            known_urls=revalidation_groups.get(entry_url, ()),
-                            serp_seeds=serp_seeds_by_root.get(entry_url, ()),
-                        )
-                    )
-
-            # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
-            # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
-            # 09 §6.3: известные URL этого корня — в его же дренаж (после seed, до BFS),
-            # а не отдельными frontier'ами: одна запись усечения на корень, один бюджет.
-            # F4: корень описан значением (``RootPlan``), а не пятью аргументами вызова —
-            # драйверу полос (F4b) этот список нужен целиком, а порядок корней прежний.
-            for root in roots:
-                root_url = root.root_url
-                root_target = root.target
-                drained_roots.add(root_url)
-                known_urls = root.known_urls
-                frontier, sitemap_skips, root_drain = _drain_root(
-                    product_id,
-                    root_url,
-                    root_target,
-                    sitemap_seeds=root.sitemap_seeds,
-                    revalidate=known_urls,
-                    # SERP-находки этого корня: depth-0 seeds под тем же блэклистом
-                    # и ``max_documents``, что и авторские/`<loc>` seeds.
-                    serp_seeds=root.serp_seeds,
+            if len(lane_values) > 1:
+                lane_notes.append(
+                    f"crawl: продукт {product_id}: host_concurrency объявлен по-разному "
+                    f"для корней продукта {sorted(v for v in lane_values if v is not None)}"
+                    f" — полос {lane_axis} (значение первого корня)"
                 )
 
-                # L5 шаг 2: ``finalize_root`` вынесен в ``corpus_commit``; ``partial``
-                # привязывает провенанс корня при создании финализатора — он живёт в
-                # ``extract_finalizers`` и вызывается **позже** (после доводки хвоста),
-                # то есть когда цикл продукта уже ушёл вперёд.
-                _finalize_root = partial(
-                    corpus_commit.finalize_root,
-                    pid=product_id,
-                    root_url=root_url,
-                    frontier=frontier,
-                    sitemap_skips=sitemap_skips,
-                    known_urls=known_urls,
-                    all_revalidation_groups=all_revalidation_groups,
-                    cap_fired=revalidation_cap_fired,
-                    deferred_by_root=deferred_by_root,
-                    skipped_by_root=skipped_by_root,
-                    counters=counters,
-                    truncated_products=truncated_products,
-                    truncation_records=truncation_records,
-                    store=store,
-                    session=session,
-                    errors=errors,
-                )
-
-                if root_drain.pending:
-                    # C1: хвост отложен в фазовую очередь — провенанс посчитается, когда
-                    # он будет доведён (фетч следующего корня уже не ждёт экстракции).
-                    root_drain.finalize = _finalize_root
-                    extract_finalizers.append(root_drain)
-                else:
-                    _finalize_root()
+        corpus_driver.drive_roots(
+            _author_root_plans(
+                product_id,
+                author_urls=(
+                    () if (repair_urls or offline) else url_map.get(product_id, [])
+                ),
+                items=items,
+                max_attempts=max_attempts,
+                errors=errors,
+                emit=emit,
+                mark=_mark,
+                crawl_target=_crawl_target,
+                expand_directory=_expand_directory,
+                targets=targets,
+                revalidation_groups=revalidation_groups,
+                serp_seeds_by_root=serp_seeds_by_root,
+                drained_roots=drained_roots,
+                truncation_records=truncation_records,
+            ),
+            host_concurrency=lane_axis,
+            begin=_root_begin,
+            lane_width=_lane_width,
+            local_fetch=_local_fetch,
+            timings=timings,
+            errors=errors,
+            pool_factory=pool_factory,
+            on_root_done=partial(
+                _save_root,
+                product_id=product_id,
+                all_revalidation_groups=all_revalidation_groups,
+                cap_fired=revalidation_cap_fired,
+                deferred_by_root=deferred_by_root,
+                skipped_by_root=skipped_by_root,
+                counters=counters,
+                truncated_products=truncated_products,
+                truncation_records=truncation_records,
+                store=store,
+                session=session,
+                errors=errors,
+                extract_finalizers=extract_finalizers,
+            ),
+            # Teardown: очередь экстракции отбрасывается штатным путём фазы — in-flight
+            # задания получают видимый ``FAILED``, а не теряются вместе с исключением.
+            abort=_abort_extract_pending,
+            label=f" {product_id}",
+        )
 
         # Каталог (feed/channel) разворачивается в **другие** корни, поэтому группа,
         # привязанная к авторскому URL каталога, может не совпасть ни с одним drain'ом.
@@ -2565,15 +2724,22 @@ def _build_corpus(
             if known_urls:
                 # C1: synthetic-бакет — вызывающий читает счётчики frontier сразу,
                 # поэтому хвост доводится здесь же (``defer_tail=False``).
-                frontier, _skips, _drain = _drain_root(
-                    product_id,
-                    group_root,
-                    None,
-                    sitemap_seeds=False,
-                    revalidate=known_urls,
-                    seed=False,
-                    defer_tail=False,
-                )
+                frontier = corpus_driver.drain_one(
+                    corpus_drain.RootPlan(
+                        root_url=group_root,
+                        target=None,
+                        sitemap_seeds=False,
+                        known_urls=known_urls,
+                        seed=False,
+                        defer_tail=False,
+                    ),
+                    begin=_root_begin,
+                    lane_width=_lane_width,
+                    local_fetch=_local_fetch,
+                    timings=timings,
+                    errors=errors,
+                    pool_factory=pool_factory,
+                ).frontier
             # S2: leftover-группа каталога — тоже видимый бакет, а не потерянный frontier.
             info: dict[str, Any] = {
                 "selected": (
@@ -2610,15 +2776,22 @@ def _build_corpus(
             frontier: Frontier | None = None
             if selected_urls:
                 # C1: synthetic-бакет — хвост доводится здесь же (``defer_tail=False``).
-                frontier, _skips, _drain = _drain_root(
-                    product_id,
-                    origin,
-                    None,
-                    sitemap_seeds=False,
-                    revalidate=selected_urls,
-                    seed=False,
-                    defer_tail=False,
-                )
+                frontier = corpus_driver.drain_one(
+                    corpus_drain.RootPlan(
+                        root_url=origin,
+                        target=None,
+                        sitemap_seeds=False,
+                        known_urls=selected_urls,
+                        seed=False,
+                        defer_tail=False,
+                    ),
+                    begin=_root_begin,
+                    lane_width=_lane_width,
+                    local_fetch=_local_fetch,
+                    timings=timings,
+                    errors=errors,
+                    pool_factory=pool_factory,
+                ).frontier
             info: dict[str, Any] = {
                 "selected": (
                     sum(1 for url in selected_urls if frontier.is_revalidation(url))
@@ -3510,6 +3683,10 @@ def _build_corpus(
         # 09 §6.3: оффлайн-проход — по строке на продукт. Строка нужна оператору: без неё
         # «корпус собрался» читалось бы как «сайт прочитан», хотя сети не было вовсе.
         *offline_notes,
+        # 17 §6 (F4b): факты о полосах — по строке на продукт, и только когда ось
+        # ``crawl.host_concurrency`` объявлена. Тихая замена «полос N» на «работали
+        # последовательно» была бы ровно тем дефектом, который ось обязана называть.
+        *lane_notes,
         # 17 §6 (F3): смена канонического адреса документа — по строке на продукт, где это
         # случилось. Строка обязательна: адрес попадает в отчёт/цитаты, и тихая подмена
         # одного адреса другим была бы невидимым изменением артефакта.

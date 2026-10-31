@@ -7,7 +7,7 @@
 #
 # Перегенерация — только осознанно и с объяснением в сообщении коммита:
 #   python3 scripts/mypy_gate.py --update
-# Записей: 121
+# Записей: 117
 
 core/adapters/container_any.py: Dict entry 0 has incompatible type "str": "ZipContainer"; expected "str": "ContainerPort"  [dict-item]
 core/adapters/container_any.py: Dict entry 1 has incompatible type "str": "SevenZipContainer"; expected "str": "ContainerPort"  [dict-item]
@@ -63,12 +63,8 @@ core/pipeline/corpus.py: Argument 1 to "append" of "list" has incompatible type 
 core/pipeline/corpus.py: Argument 2 to "_persist_corpus_coverage" has incompatible type "str | None"; expected "str"  [arg-type]
 core/pipeline/corpus.py: Argument 2 to "_persist_corpus_coverage" has incompatible type "str | None"; expected "str"  [arg-type]
 core/pipeline/corpus.py: Incompatible types in assignment (expression has type "IndexManifestEntry", variable has type "ManualArtifact")  [assignment]
-core/pipeline/corpus.py: Incompatible types in assignment (expression has type "dict[str, Any]", variable has type "CrawlTarget")  [assignment]
-core/pipeline/corpus.py: Name "frontier" already defined on line <N>  [no-redef]
 core/pipeline/corpus.py: Name "frontier" already defined on line <N>  [no-redef]
 core/pipeline/corpus.py: Name "info" already defined on line <N>  [no-redef]
-core/pipeline/corpus.py: Unsupported target for indexed assignment ("CrawlTarget")  [index]
-core/pipeline/corpus.py: Unsupported target for indexed assignment ("CrawlTarget")  [index]
 core/pipeline/corpus_commit.py: Unsupported operand types for >= ("int" and "None")  [operator]
 core/pipeline/corpus_drain.py: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex"  [arg-type]
 core/pipeline/corpus_drain.py: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex"  [arg-type]

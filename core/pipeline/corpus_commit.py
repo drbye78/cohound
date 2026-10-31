@@ -173,6 +173,7 @@ def record_root_outcome(
     session: str | None,
     errors: list[str],
     revalidation: Mapping[str, Any] | None = None,
+    record_slot: int | None = None,
 ) -> None:
     """Провенанс одного seed-root после drain: усечение/пропуски (D1/G, P5, D3/F10).
 
@@ -184,6 +185,11 @@ def record_root_outcome(
     операторский потолок отложил/отсёк URL, ``"deferred": K``/``"skipped": S``.
     ``None`` — у корня не было известных URL: ключ не появляется, payload
     ``state is None`` байт-в-байт прежний.
+
+    ``record_slot`` (F4b) — слот, занятый при **планировании** корня: при чередовании
+    корней запись приходит в порядке завершения, а артефакт манифеста
+    (``effective_limits.roots``) обязан остаться авторским. ``None`` — слота нет
+    (synthetic-бакеты, repair-пути): запись добавляется в конец, как прежде.
     """
     counters.pages_fetched_total += frontier.fetched
     counters.revalidation_fetched_total += frontier.revalidation_fetched
@@ -259,7 +265,12 @@ def record_root_outcome(
         record["skipped_out_of_scope"] = [dict(skip) for skip in sitemap_skips]
     if revalidation is not None:
         record["revalidation"] = dict(revalidation)
-    truncation_records.append(record)
+    if record_slot is None or record_slot >= len(truncation_records):
+        truncation_records.append(record)
+    else:
+        # Слот занят при планировании корня (F4b): перезаписываем заглушку **на месте**,
+        # поэтому порядок записей — авторский, а не порядок завершения корней.
+        truncation_records[record_slot] = record
     # Наблюдаемость не должна умирать вместе с процессом: провенанс корня
     # персистится сразу (см. ``persist_partial_crawl_provenance``).
     persist_partial_crawl_provenance(
@@ -487,13 +498,16 @@ def finalize_root(
     store: Any,
     session: str | None,
     errors: list[str],
+    record_slot: int | None = None,
 ) -> None:
     """Провенанс корня после доводки его экстракционного хвоста (C1).
 
     Счётчики frontier (``fetched``/``revalidation_fetched``/усечение)
     меняются доводкой отложенных заданий, поэтому запись откладывается
     до момента, когда хвост корня доведён (:func:`finalize_ready_roots`).
-    Порядок записей — порядок корней (FIFO финализаторов).
+    Порядок записей — порядок корней (FIFO финализаторов); ``record_slot`` (F4b)
+    закрепляет за корнем слот, занятый при его планировании, поэтому при чередовании
+    корней записи всё равно выходят в авторском порядке.
     """
     #: Наблюдаемость в любом режиме: ключ есть ровно у корня, который имел
     #: известные URL (даже если cap отложил все — ``selected=0``). У корня
@@ -528,6 +542,7 @@ def finalize_root(
         session=session,
         errors=errors,
         revalidation=revalidation_info,
+        record_slot=record_slot,
     )
 
 

@@ -25,10 +25,12 @@ L5 шаг 3). Здесь — то, что делает работу **одног
 доходить до писателя.
 
 **Шаги, а не волна целиком (F4).** Волновой цикл вынесен в генератор
-:func:`root_steps`, который выдаёт :class:`WaveRequest` в точке отправки и получает
-:class:`WaveOutcomes`; :func:`drain_root` — тонкий драйвер, гоняющий его до конца. Так
-подготовлено чередование корней (F4b): полоса — это **право на host**, а не объект, и
-кооперативные шаги не требуют ни потоков-полос, ни мутаций вне главного потока.
+:func:`root_steps`, который выдаёт **план** волны (:class:`WavePlan`) и получает
+:class:`WaveOutcomes`; :func:`root_lifecycle` — генератор корня целиком (подготовка +
+шаги). Так исполнено чередование корней (F4b): полоса — это **право на host**, а не
+объект, поэтому кооперативные шаги не требуют ни потоков-полос, ни мутаций вне главного
+потока. Отправку волны и ожидание исполняет драйвер
+(:mod:`core.pipeline.corpus_driver`), потому что допуск волны решается до отправки.
 
 **Порядок записи не меняется.** Оракул — ``tests/pipeline/test_corpus_write_order.py``.
 """
@@ -38,7 +40,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from collections.abc import Callable, Generator, Mapping, Sequence
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Executor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from functools import partial
@@ -495,6 +497,17 @@ class RootPlan:
     known_urls: Sequence[str] = ()
     #: Документы, найденные SERP-контуром (I3/§5): depth-0 seeds **этого** корня.
     serp_seeds: Sequence[str] = ()
+    #: ``False`` — synthetic-бакет (orphan): авторского seed нет, только ревалидация.
+    seed: bool = True
+    #: ``False`` — хвост экстракции доводится здесь же (вызывающий читает счётчики
+    #: frontier сразу); ``True`` — откладывается в фазовую очередь (C1).
+    defer_tail: bool = True
+    #: Слот записи провенанса в ``truncation_records`` (F4b). Занимается **в момент
+    #: планирования**, то есть в авторском порядке корней, а не в порядке их завершения:
+    #: при чередовании корней порядок завершения другой, а артефакт манифеста
+    #: (``effective_limits.roots``) обязан остаться авторским. ``None`` — корень, у
+    #: которого слота нет (synthetic-бакеты): запись добавляется в конец.
+    record_slot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -509,6 +522,61 @@ class WaveRequest:
 
     entries: list[_WaveEntry]
     non_poolable: bool = False
+
+
+@dataclass(frozen=True)
+class WavePlan:
+    """План волны: записи, право на host'ы и маршрут — **до** отправки (F4b).
+
+    Драйвер полос решает допуск волны **до** того, как она уйдёт в пул, поэтому
+    генератор отдаёт план, а не отправленную волну: отправка и ожидание — работа
+    драйвера (``corpus_driver``), коммит исходов — по-прежнему этого корня.
+
+    ``hosts`` — hosts записей с живым фетчем (``LocalFetch.host``, тот же ключ, что у
+    ``limiter.wait``, — см. :func:`corpus_ingest.local_fetch`): это ровно то право,
+    которое драйвер резервирует за корнем на время волны. Пустое множество (волна без
+    живого фетча: блэклист/исчерпанные попытки/resume) не пересекается ни с чем и
+    допускается всегда.
+
+    ``non_poolable`` — в волне есть живой фетч не-poolable маршрута (browser): ему нужен
+    пул из **одного** потока (см. :func:`_dispatch_wave`), и драйвер обязан его дать.
+    """
+
+    entries: list[_WaveEntry]
+    hosts: frozenset[str] = frozenset()
+    non_poolable: bool = False
+
+
+def _wave_plan(entries: list[_WaveEntry]) -> WavePlan:
+    """Право волны на host'ы + маршрут — по готовым записям (F4b).
+
+    ``hosts`` берутся **из дескрипторов** (``desc.host``), а не из URL записи: ключ права
+    обязан совпадать с ключом вежливости (``limiter.wait(desc.host, …)``), иначе полосы
+    пейсили бы один сайт двумя независимыми бюджетами.
+
+    ``non_poolable`` повторяет условие ветки :func:`_dispatch_wave` (живой фетч вне пула
+    фетча): resume/reject/browser-guard/терминальный класс живого фетча не делают.
+    Расхождение с :func:`_dispatch_wave` — это не тихая ошибка: там сработает
+    ``AssertionError`` «не-poolable маршрут без своего пула».
+    """
+    hosts = {
+        entry.desc.host
+        for entry in entries
+        if entry.kind == "fetch" and entry.desc is not None and entry.desc.host
+    }
+    non_poolable = any(
+        entry.kind == "fetch"
+        and entry.desc is not None
+        and not entry.desc.poolable
+        and entry.desc.resume is None
+        and entry.desc.reject is None
+        and not entry.desc.browser_blocked
+        and not entry.desc.terminal
+        for entry in entries
+    )
+    return WavePlan(
+        entries=entries, hosts=frozenset(hosts), non_poolable=non_poolable
+    )
 
 
 @dataclass(frozen=True)
@@ -713,7 +781,6 @@ def root_steps(
     emit: Callable[[], None],
     mark: Callable[..., None],
     commit_local: Callable[..., Any],
-    local_fetch: Callable[[LocalFetch], RawPage],
     local_prefetch: Callable[..., LocalFetch],
     process_local: Callable[..., Any],
     submit_collect: Callable[..., Mapping[tuple[str, str], Any]],
@@ -729,7 +796,6 @@ def root_steps(
     timings: _CorpusStageTimings,
     executor: CrawlExecutorPort | None,
     pool: Executor | None,
-    non_poolable_pool: Executor | None,
     max_workers: int | None,
     defer_tail: bool,
     sitemap_skips: Sequence[dict[str, Any]],
@@ -740,30 +806,33 @@ def root_steps(
     _skip_document_prefetch: Callable[[str], bool],
     _commit_or_defer: Callable[..., None],
 ) -> Generator[
-    WaveRequest, WaveOutcomes, tuple[Frontier, list[dict[str, Any]], RootDrain]
+    WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]], RootDrain]
 ]:
     """Шаги дренажа одного seed-root: волновой цикл, frontier, коммит исходов (F4).
 
     Тело волнового цикла прежнего ``drain_root``, вынесенное **дословно**; изменилось
     только то, что относится к отправке волны: ``_commit_wave`` разделён на
-    :func:`_dispatch_wave` (отправка) и :func:`_commit_wave_results` (FIFO-коммит), а
-    между ними стоит ``yield``.
+    :func:`_dispatch_wave` (отправка), :func:`_await_wave` (ожидание) и
+    :func:`_commit_wave_results` (FIFO-коммит), а между отправкой и коммитом стоит
+    ``yield``. С F4b генератор отдаёт **план** волны (:class:`WavePlan`): допуск волны
+    (право на host'ы) решается до отправки, поэтому отправку и ожидание исполняет
+    драйвер, а коммит остаётся здесь.
 
     **Зачем генератор.** Полоса при чередовании корней — не объект, а **право на host**:
     один корень штатно фетчит несколько host'ов, поэтому носителем состояния остаётся
     корень, а «полоса» выражается правом на host. Тотальная мутация сеанса и корпуса
     допустима только на главном потоке (T5), поэтому параллельность здесь —
-    кооперативные шаги, а не потоки-полосы: генератор выдаёт волну и получает исходы,
-    драйвер решает, когда их ждать. Пока драйвер один и гоняет генератор до конца,
-    поведение прежнее байт-в-байт.
+    кооперативные шаги, а не потоки-полосы: генератор выдаёт план волны и получает
+    исходы, драйвер решает, когда их ждать. Пока драйвер гоняет один корень до конца
+    (``host_concurrency`` None/1), поведение прежнее байт-в-байт.
 
     **Порядок — инвариант.** Внутри корня коммит идёт FIFO-порядком отправки: от него
     зависят победитель дедупа, порядок ``errors`` и порядок записи корпуса. Оракул —
     ``tests/pipeline/test_corpus_write_order.py``.
 
-    **Пул — параметр, а не владение.** ``pool``/``non_poolable_pool`` принадлежат полосе:
-    при чередовании корней пул **один на полосу**, иначе 11 полос дали бы 11 пулов
-    фетча и столько же пулов браузерного маршрута. ``pool is None`` — прежний
+    **Пул — параметр, а не владение.** ``pool`` принадлежит полосе: при чередовании
+    корней одновременно живут не более ``host_concurrency`` пулов фетча (и столько же
+    пулов браузерного маршрута), а не по пулу на корень. ``pool is None`` — прежний
     последовательный путь (``max_workers`` ``None``/``1``), байт-в-байт.
     """
     waves = 0
@@ -1249,15 +1318,11 @@ def root_steps(
             entries.append(
                 _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
             )
-        # Точка отправки волны (F4): корень отдаёт описание готовых заданий и получает
-        # исходы. Пул принадлежит **полосе**, поэтому «отправить и дождаться» — работа
-        # драйвера; коммит ниже остаётся FIFO-порядком этого корня.
-        outcomes = yield _dispatch_wave(
-            entries,
-            pool=pool,
-            non_poolable_pool=non_poolable_pool,
-            local_fetch=local_fetch,
-        )
+        # Точка плана волны (F4b): корень отдаёт готовые записи **до** отправки, драйвер
+        # решает допуск (право на host'ы), отправляет и ждёт. Коммит ниже остаётся
+        # FIFO-порядком этого корня и исполняется на главном потоке сразу после того, как
+        # драйвер вернёт исходы.
+        outcomes = yield _wave_plan(entries)
         _commit_wave_results(
             entries,
             outcomes,
@@ -1284,16 +1349,28 @@ def root_steps(
     return frontier, list(sitemap_skips), root_drain
 
 
-def drain_root(
+def lane_width(limits: CrawlLimits, *, executor: CrawlExecutorPort | None) -> int | None:
+    """Ширина пула фетча полосы: ``max_workers`` или ``None`` (живого пула нет).
+
+    Одна формула на два читателя — драйвер полос (создаёт пул) и сам корень (выбирает
+    ветку «волна/последовательно»): второй копии правила быть не должно, иначе полоса
+    получила бы пул, которого корень не ждёт, или наоборот.
+
+    ``None`` возвращается в трёх случаях, и все три — не деградация: ``executor``
+    (split: работу делает шов, ``submit_collect`` — один блокирующий вызов волны) и
+    ``max_workers`` ``None``/``1`` (прежний последовательный путь без пула).
+    """
+    if executor is not None:
+        return None
+    if limits.max_workers is None or int(limits.max_workers) <= 1:
+        return None
+    return int(limits.max_workers)
+
+
+def root_lifecycle(
     pid: str,
-    root_url: str,
-    root_target: Any,
+    root: RootPlan,
     *,
-    sitemap_seeds: bool = False,
-    revalidate: Sequence[str] = (),
-    serp_seeds: Sequence[str] = (),
-    seed: bool = True,
-    defer_tail: bool = True,
     # -- per-продуктное состояние: связывается на границе продукта --------------- #
     ingest: ProductIngest,
     seen_docs: dict[str, str],
@@ -1318,7 +1395,6 @@ def drain_root(
     extractor: ExtractorPort,
     extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None,
     executor: CrawlExecutorPort | None,
-    pool_factory: Callable[[int], Executor] | None,
     pools: _ExtractPools,
     extract_pending: deque[PendingExtract],
     extract_finalizers: deque[RootDrain],
@@ -1335,7 +1411,6 @@ def drain_root(
     emit: Callable[[], None],
     mark: Callable[..., None],
     commit_local: Callable[..., Any],
-    local_fetch: Callable[[LocalFetch], RawPage],
     local_prefetch: Callable[..., LocalFetch],
     process_local: Callable[..., Any],
     submit_collect: Callable[..., Mapping[tuple[str, str], Any]],
@@ -1353,27 +1428,29 @@ def drain_root(
     # -- F2 (17 §4): краул без конверсии — durable передача в очередь ------------ #
     crawl_only: bool = False,
     session_id: str | None = None,
-    # -- F4b: пулы **полосы** (готовые). ``None`` ⇒ создаются здесь, как прежде -- #
+    # -- F4b: пулы **полосы** (создаёт драйвер, см. ``lane_width``) -------------- #
     fetch_pool: Executor | None = None,
     browser_pool: Executor | None = None,
-) -> tuple[Frontier, list[dict[str, Any]], RootDrain]:
+) -> Generator[
+    WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]], RootDrain]
+]:
     """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
-    Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``sitemap_seeds``
+    Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``root.sitemap_seeds``
     — развернуть per-site sitemap корня в дополнительные depth-0 seeds (D3); они
     **подчинены** scope корня (``frontier.in_scope``), проходят тот же блэклист/
     бюджет ``max_documents``, что и seed оператора.
-    ``revalidate`` — известные URL этого корня (scope inference): ставятся
+    ``root.known_urls`` — известные URL этого корня (scope inference): ставятся
     **после** авторского seed и **до** BFS отдельным путём
     (:meth:`Frontier.add_revalidate_seed`), поэтому не расходуют ``max_documents``,
     не расширяют BFS (листья) и дедуплицируются ``_seen`` с переоткрытием ссылкой.
-    ``serp_seeds`` — документы, найденные внешним поиском (I3/§5): ставятся
+    ``root.serp_seeds`` — документы, найденные внешним поиском (I3/§5): ставятся
     depth-0 seed'ами **этого** корня через :meth:`Frontier.add_seed`, то есть
     расходуют его ``max_documents`` и проходят блэклист, но не становятся новыми
     корнями. Так «доход» поиска платит из бюджета уже объявленного корня
     (нет умножения бюджета числом находок) и ``seeds_declared`` остаётся
     авторским.
-    ``seed=False`` — synthetic-бакет (orphan): авторского seed нет, только
+    ``root.seed=False`` — synthetic-бакет (orphan): авторского seed нет, только
     ревалидация; усечение такого бакета не пишется вызывающим.
     Ставка в очередь гейтится scope (объявленный host + path-граница, C) и
     блэклистом; ``max_documents`` — жёсткий стоп (не исключение): останавливает
@@ -1381,7 +1458,7 @@ def drain_root(
     Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
     ``truncated_reason``), агрегированный провенанс отказов scope у ``<loc>``
     (пусто без sitemap/без отказов) и :class:`RootDrain` — хвост экстракции корня
-    в фазовой очереди (C1). ``defer_tail=False`` (synthetic-бакеты ревалидации,
+    в фазовой очереди (C1). ``root.defer_tail=False`` (synthetic-бакеты ревалидации,
     вызывающий читает счётчики frontier сразу) — хвост доводится здесь же.
 
     ``crawl_only`` (17 §4, F2) — режим «краул без конверсии»: добытый документ
@@ -1393,14 +1470,25 @@ def drain_root(
     тем же без конверсии. ``session_id`` — адрес очереди; без него режим невозможен
     (факту некуда лечь).
 
-    **F4 (17 §6): тонкий драйвер шагов.** Подготовка (limits/frontier/seeds/зарядка
-    бюджета) — здесь; волновой цикл — в :func:`root_steps`. Этот вызов гоняет генератор
-    до конца и ждёт каждую волну сам, поэтому порядок вызовов, исходы и возврат прежние.
-    ``fetch_pool``/``browser_pool`` — пулы **полосы** (F4b): при ``None`` создаются
-    здесь, байт-в-байт как прежде. При чередовании корней пул один на полосу, иначе
-    11 полос дали бы 11 пулов фетча и столько же пулов браузерного маршрута.
+    **F4b (17 §6): генератор шагов, а не функция.** Подготовка
+    (limits/frontier/seeds/зарядка бюджета) исполняется при первом ``next`` — то есть в
+    момент допуска корня драйвером, а не при создании объекта. Дальше корень выдаёт
+    :class:`WavePlan` и получает :class:`WaveOutcomes`; **отправку** волны и **ожидание**
+    исполняет драйвер (:mod:`core.pipeline.corpus_driver`), потому что допуск волны
+    (право на host'ы) решается до отправки. Коммит исходов остаётся здесь и идёт
+    FIFO-порядком отправки.
+
+    ``fetch_pool``/``browser_pool`` — пулы **полосы**, их создаёт драйвер (одна пара на
+    активную полосу, не на корень). Их отсутствие при объявленном ``max_workers`` —
+    ``AssertionError``: молчаливый inline-фетч на главном потоке схлопнул бы полосы.
     """
-        # ``persist_docs`` приходит параметром (тесты подменяют его атрибутом модуля
+    root_url = root.root_url
+    sitemap_seeds = root.sitemap_seeds
+    revalidate = root.known_urls
+    serp_seeds = root.serp_seeds
+    seed = root.seed
+    defer_tail = root.defer_tail
+    # ``persist_docs`` приходит параметром (тесты подменяют его атрибутом модуля
     # ``corpus``): связываем один раз, чтобы три точки вызова не повторяли kwarg.
     ingest_member = partial(ingest_member_doc, persist_docs=persist_docs)
     limits = limits_for(root_url)
@@ -2348,43 +2436,28 @@ def drain_root(
                     extract_pending=extract_pending, root_drain=root_drain
                 )
             )
-    # D4: ограниченный пул ТОЛЬКО на сетевой fetch локального пути. Пул создаётся
-    # лишь при ``max_workers > 1``: ``None``/``1`` — прежний однопоточный путь без
-    # пула (байт-в-байт). В пул идут лишь work-items с живым HTTP-фетчем; браузерные
-    # элементы — никогда (см. ``local_prefetch`` и ``_dispatch_wave``).
+    # D4: ограниченный пул ТОЛЬКО на сетевой fetch локального пути. Пул создаёт
+    # **драйвер полосы** (``lane_width`` — одна формула на обоих), потому что полоса
+    # живёт дольше одного корня: при чередовании одновременно существуют не более
+    # ``host_concurrency`` пулов фетча, а не по пулу на корень. В пул идут лишь
+    # work-items с живым HTTP-фетчем; браузерные элементы — никогда (см.
+    # ``local_prefetch`` и ``_dispatch_wave``).
     max_workers = limits.max_workers
-    pool: Executor | None = None
-    #: Не-poolable маршрут (browser) — **свой** пул из одного потока. ``BrowserCrawler``
-    #: водит единственную ``_page`` без лока, поэтому поток-владелец обязателен; но
-    #: исполнение на потоке драйвера при чередовании корней остановило бы все полосы.
-    non_poolable_pool: Executor | None = None
-    own_pool = False
-    own_non_poolable_pool = False
-    # P3-A2: executor — подключаемый batch-транспорт; локальный пул при нём не нужен.
-    if (
-        executor is None
-        and max_workers is not None
-        and int(max_workers) > 1
+    pool = fetch_pool
+    non_poolable_pool = browser_pool
+    if lane_width(limits, executor=executor) is not None and (
+        pool is None or non_poolable_pool is None
     ):
-        # F4b: готовые пулы полосы приходят аргументом, при ``None`` создаются здесь
-        # байт-в-байт как прежде. При чередовании корней пул **один на полосу**: иначе
-        # 11 полос дали бы 11 пулов фетча и столько же пулов браузерного маршрута.
-        pool = fetch_pool
-        if pool is None:
-            pool = (
-                pool_factory(int(max_workers))
-                if pool_factory is not None
-                else ThreadPoolExecutor(max_workers=int(max_workers))
-            )
-            own_pool = True
-        non_poolable_pool = browser_pool
-        if non_poolable_pool is None:
-            non_poolable_pool = ThreadPoolExecutor(max_workers=1)
-            own_non_poolable_pool = True
-    # F4: шаги корня — генератор. Пока драйвер один, он гоняет генератор до конца и
-    # ждёт каждую волну сам: порядок вызовов прежний. Драйвер полос (F4b) будет вести
-    # несколько генераторов кооперативно — ``yield`` в ``root_steps`` и есть эта точка.
-    steps = root_steps(
+        # Не тихая деградация: без пула живой фетч пошёл бы inline на главном потоке и
+        # полосы схлопнулись бы в одну без единой ошибки в артефактах.
+        raise AssertionError(
+            f"{pid}/{root_url}: полоса без пула фетча при max_workers="
+            f"{max_workers} — пул обязан создать драйвер"
+        )
+    # F4b: шаги корня — генератор. Отправку волны и ожидание исполняет драйвер
+    # (:mod:`core.pipeline.corpus_driver`): «отправить и дождаться» не может быть
+    # работой корня, потому что допуск волны (право на host'ы) решается до отправки.
+    return (yield from root_steps(
         pid,
         root_url,
         frontier,
@@ -2395,7 +2468,6 @@ def drain_root(
         emit=emit,
         mark=mark,
         commit_local=commit_local,
-        local_fetch=local_fetch,
         local_prefetch=local_prefetch,
         process_local=process_local,
         submit_collect=submit_collect,
@@ -2411,7 +2483,6 @@ def drain_root(
         timings=timings,
         executor=executor,
         pool=pool,
-        non_poolable_pool=non_poolable_pool,
         max_workers=max_workers,
         defer_tail=defer_tail,
         sitemap_skips=sitemap.skipped,
@@ -2421,23 +2492,4 @@ def drain_root(
         _tail_may_extend_frontier=_tail_may_extend_frontier,
         _skip_document_prefetch=_skip_document_prefetch,
         _commit_or_defer=_commit_or_defer,
-    )
-    try:
-        request = next(steps)
-        while True:
-            outcomes = _await_wave(request, timings=timings)
-            request = steps.send(outcomes)
-    except StopIteration as finished:
-        return finished.value
-    finally:
-        # F4: приостановленный генератор не должен переживать драйвер. Если ожидание
-        # волны прервано (исключение, сигнал), ``close()`` исполняет его ``finally``
-        # **сейчас** — закрытие построенного конвертера, доводка хвоста, — а не при
-        # сборке мусора, где порядок уже не наш. На завершившемся генераторе — no-op.
-        steps.close()
-        # C1: пул экстракции — фазовый (``shutdown`` в ``finally`` фазы), здесь
-        # закрываются только пулы полосы, созданные этим корнем.
-        if own_pool and pool is not None:
-            pool.shutdown(wait=True)
-        if own_non_poolable_pool and non_poolable_pool is not None:
-            non_poolable_pool.shutdown(wait=True)
+    ))
