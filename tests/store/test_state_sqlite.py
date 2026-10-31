@@ -67,7 +67,7 @@ def test_schema_version(conn: sqlite3.Connection) -> None:
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     assert row is not None
-    assert row["value"] == STATE_SCHEMA_VERSION == "5"
+    assert row["value"] == STATE_SCHEMA_VERSION == "6"
 
 
 @pytest.mark.parametrize(
@@ -132,24 +132,16 @@ def test_reconnect_is_idempotent(tmp_path: Path) -> None:
         second.close()
 
 
-def test_additive_migration_adds_lineage_columns(tmp_path: Path) -> None:
-    """Старая ``run_lineage`` без ``products_json``/``refresh_policy`` досоздаётся."""
-    db_path = tmp_path / "state.db"
-    legacy = sqlite3.connect(db_path)
-    legacy.execute(
-        "CREATE TABLE run_lineage (run_id TEXT PRIMARY KEY, package_id TEXT NOT NULL)"
-    )
-    legacy.commit()
-    legacy.close()
+def test_fresh_db_declares_lineage_columns(conn: sqlite3.Connection) -> None:
+    """Колонки ``run_lineage``, прежде досоздаваемые ``ALTER TABLE``, объявлены в DDL.
 
-    conn = connect_state(db_path)
-    try:
-        columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(run_lineage)")
-        }
-    finally:
-        conn.close()
-
+    Прежде тест строил «старую» таблицу без этих колонок и проверял, что открытие их
+    допишет. Шим удалён (решение владельца 01.11.2026), поэтому проверка переехала на
+    новый носитель — ``STATE_DDL``: колонки обязаны быть в свежей БД, иначе колонку
+    забыли при объявлении. Отказ старому файлу проверяет
+    ``tests/store/test_state_schema_gate.py``.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(run_lineage)")}
     assert {"products_json", "refresh_policy"} <= columns
 
 

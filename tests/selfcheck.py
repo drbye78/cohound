@@ -910,61 +910,42 @@ def _db_smoke() -> None:
             raise
     conn.close()
 
-    # DDL-дельта v2.1 (A3): старая БД без settings_provenance_json мигрирует идемпотентно.
+    # 3.14.0: шимы ``ALTER TABLE ... ADD COLUMN`` удалены — колонки объявлены в ``DDL``,
+    # а файл другой версии отвергается гейтом **до** схемы. Прежняя проверка («старая БД
+    # мигрирует идемпотентно») жила ровно на шиме; эквивалент — на новом носителе:
+    # (1) колонки есть в свежей БД, (2) файл без версии схемы отвергается и не меняется.
     import os as _os
     import sqlite3 as _sqlite3
     import tempfile as _tf
 
+    from core.store.sqlite import SchemaVersionMismatch as _SchemaVersionMismatch
+
+    fresh = connect(":memory:")
+    try:
+        for table, columns in (
+            ("runs", ("settings_provenance_json", "crawl_provenance_json")),
+            ("corpus_chunks", ("extractor_version",)),
+            ("index_manifest", ("extractor_version", "content_digest")),
+        ):
+            have = {r["name"] for r in fresh.execute(f"PRAGMA table_info({table})")}
+            _assert(set(columns) <= have)
+    finally:
+        fresh.close()
+
     fd, legacy_path = _tf.mkstemp(suffix=".db")
     _os.close(fd)
     legacy = _sqlite3.connect(legacy_path)
-    legacy.execute(
-        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,"
-        " mode TEXT, case_id TEXT, anchor_product_id TEXT)"
-    )
-    legacy.execute(
-        "INSERT INTO runs(run_id, created_at, mode, case_id, anchor_product_id)"
-        " VALUES ('r1','now','strict','c','p')"
-    )
+    legacy.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY)")
     legacy.commit()
     legacy.close()
-    migrated = connect(legacy_path)
-    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
-    _assert("settings_provenance_json" in cols)
-    migrated.close()
-    _os.unlink(legacy_path)
-
-    # DDL-миграция v2.2 (P2): старая БД без extractor_version/content_digest мигрирует
-    # идемпотентно (повторный connect не падает и не дублирует колонки).
-    fd2, legacy2_path = _tf.mkstemp(suffix=".db")
-    _os.close(fd2)
-    legacy2 = _sqlite3.connect(legacy2_path)
-    legacy2.execute(
-        "CREATE TABLE corpus_chunks (chunk_id TEXT PRIMARY KEY, doc_id TEXT,"
-        " product_id TEXT, text TEXT, build_id TEXT)"
-    )
-    legacy2.execute(
-        "CREATE TABLE index_manifest (index_build_id TEXT, product_id TEXT,"
-        " chunker_version TEXT, PRIMARY KEY (index_build_id, product_id))"
-    )
-    legacy2.commit()
-    legacy2.close()
-
-    migrated2 = connect(legacy2_path)
-    m_chunk_cols = {r["name"] for r in migrated2.execute("PRAGMA table_info(corpus_chunks)")}
-    m_manifest_cols = {
-        r["name"] for r in migrated2.execute("PRAGMA table_info(index_manifest)")
-    }
-    _assert("extractor_version" in m_chunk_cols)
-    _assert("extractor_version" in m_manifest_cols and "content_digest" in m_manifest_cols)
-    migrated2.close()
-
-    # Идемпотентность: повторный connect на уже мигрированной БД — no-op.
-    migrated2b = connect(legacy2_path)
-    m2_chunk_cols = {r["name"] for r in migrated2b.execute("PRAGMA table_info(corpus_chunks)")}
-    _assert(m2_chunk_cols == m_chunk_cols)
-    migrated2b.close()
-    _os.unlink(legacy2_path)
+    try:
+        connect(legacy_path)
+    except _SchemaVersionMismatch:
+        pass
+    else:
+        raise AssertionError("файл без объявленной версии схемы принят молча — гейт не работает")
+    finally:
+        _os.unlink(legacy_path)
 
 
 def _import_graph() -> None:

@@ -10,12 +10,24 @@
 Модуль только **открывает** БД и применяет идемпотентную схему (``IF NOT EXISTS``); он не
 содержит бизнес-логики чтения/записи — это ``core/store/state_store.py``
 (``SqliteStateStore``). Нейтрален к предметной категории (§1.3): пакет — данные.
+
+**Версия схемы — гейт, а не метка.** Штатное открытие читает
+``schema_meta.schema_version`` **до** ``STATE_DDL``; файл другой версии (или файл с
+таблицами, но без объявленной версии) отвергается
+:class:`core.store.sqlite.SchemaVersionMismatch`. Миграций при открытии нет ни одной:
+``ALTER TABLE ... ADD COLUMN`` не осталось, все колонки объявлены в :data:`STATE_DDL`.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+
+from core.util.schema_gate import (
+    SchemaVersionMismatch,
+    declared_schema_version,
+    schema_mismatch_message,
+)
 
 __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"]
 
@@ -25,20 +37,23 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: 3 — durable-субстрат инкрементального корпуса (09 §4.2/§6.3): ``url_state``,
 #: ``document_version``, ``chunk_store``, ``chunk_meta`` объявлены рабочими таблицами
 #: (колонки уже были в DDL с v1), добавлены поддерживающие индексы
-#: ``idx_url_state_product``/``idx_chunk_meta_doc``; миграция лечит дрейф колонок.
+#: ``idx_url_state_product``/``idx_chunk_meta_doc``; миграция лечила дрейф колонок.
 #: 4 — аттестация **профиля** пакета-якоря (``profile_attestation``): человек аттестует
 #: содержимое профиля (дайджест) один раз, последующие прогоны с тем же профилем не
-#: требуют повторного решения G1/G2. Таблица **новая**, поэтому миграция аддитивна и
-#: сводится к ``CREATE TABLE IF NOT EXISTS``: старые БД получают её при открытии, строки
-#: не переносятся и не пересчитываются (отсутствие строк = «профиль не аттестован»).
+#: требуют повторного решения G1/G2.
 #: 5 — частичность извлечения как **durable** свойство версии документа
 #: (``document_version.extract_partial``/``extract_partial_reason``/
-#: ``extract_pages_converted``/``extract_page_count``). Причина: переиспользование версии
+#: ``extract_pages_converted``/``extract_page_count``): переиспользование версии
 #: (``304``/тот же ``content_hash``) не знало, прочитан ли документ целиком, и объявляло
-#: покрытие полным там, где текст был усечён. Колонки аддитивны и допускают ``NULL``:
-#: строки, записанные до v5, признак не несли, и ``NULL`` («не измерено») — единственное
-#: честное значение для них (``0`` утверждало бы полноту, небывшую наблюдением).
-STATE_SCHEMA_VERSION = "5"
+#: покрытие полным там, где текст был усечён. Колонки допускают ``NULL``, и ``NULL``
+#: («не измерено») — единственное честное значение для строк, записанных до v5.
+#: 6 — **гейт версии вместо миграции** (решение владельца 01.11.2026): все колонки, которые
+#: прежде досоздавались при открытии (``_ADDITIVE_COLUMNS``), и индексы
+#: (``_POST_MIGRATION_DDL``) объявлены прямо в :data:`STATE_DDL`. ``ALTER TABLE ... ADD COLUMN``
+#: при штатном открытии не осталось ни одного, а старая БД отвергается видимо: тихий догон
+#: схемы объявлял файл «новым», не будучи им. Цена названа прямо — каждый существующий
+#: ``state/{package_id}/state.db`` версий ≤ 5 отвергается и пересоздаётся оператором.
+STATE_SCHEMA_VERSION = "6"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -292,118 +307,66 @@ CREATE INDEX IF NOT EXISTS idx_doc_product  ON document_version(product_id, stat
 CREATE INDEX IF NOT EXISTS idx_snapshot_product ON product_snapshot(product_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_cell_measure_product ON cell_measurement(product_id, run_id);
 CREATE INDEX IF NOT EXISTS idx_partition_product ON index_partition(package_id, product_id);
-"""
-
-
-#: Аддитивные колонки, появившиеся после первой версии схемы (``{table: {column: type}}``).
-#: ``CREATE TABLE IF NOT EXISTS`` не добавляет колонки в уже существующую таблицу,
-#: поэтому при открытии старой БД они досоздаются через ``ALTER TABLE``.
-#:
-#: Для v3 перечислены **все** неключевые колонки durable-субстрата: в штатной v2-БД они
-#: уже есть (DDL §4.2 не менялся), поэтому миграция — no-op; но если историческая БД
-#: дрейфанула (таблица создана вручную/ранним прототипом), недостающие колонки
-#: досоздаются без потери строк. ``NOT NULL``-колонки получают безопасный DEFAULT,
-#: потому что ``ALTER TABLE ADD COLUMN`` иначе не применим к непустой таблице.
-_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
-    "run_lineage": {
-        "products_json": "TEXT",
-        "refresh_policy": "TEXT",
-    },
-    "url_state": {
-        "doc_version_id": "TEXT",
-        "etag": "TEXT",
-        "last_modified": "TEXT",
-        "last_http_status": "INTEGER",
-        "last_checked_at": "TEXT",
-        "last_changed_at": "TEXT",
-        "next_check_at": "TEXT",
-        "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
-        "last_error_kind": "TEXT",
-        "reuse_kind": "TEXT",
-        "seed_id": "TEXT",
-    },
-    "document_version": {
-        "doc_id": "TEXT NOT NULL DEFAULT ''",
-        "product_id": "TEXT NOT NULL DEFAULT ''",
-        "url": "TEXT NOT NULL DEFAULT ''",
-        "content_hash": "TEXT NOT NULL DEFAULT ''",
-        "extractor_version": "TEXT NOT NULL DEFAULT ''",
-        "level": "TEXT NOT NULL DEFAULT ''",
-        "raw_path": "TEXT",
-        "chunker_version": "TEXT",
-        "chunk_ids_digest": "TEXT",
-        # v5: nullable by design — отсутствие значения означает «не измерено», а не
-        # «полностью прочитано» (см. STATE_SCHEMA_VERSION).
-        "extract_partial": "INTEGER",
-        "extract_partial_reason": "TEXT",
-        "extract_pages_converted": "INTEGER",
-        "extract_page_count": "INTEGER",
-        "first_seen_run_id": "TEXT NOT NULL DEFAULT ''",
-        "last_seen_run_id": "TEXT NOT NULL DEFAULT ''",
-        "first_seen_at": "TEXT NOT NULL DEFAULT ''",
-        "last_seen_at": "TEXT NOT NULL DEFAULT ''",
-        "status": "TEXT NOT NULL DEFAULT 'active'",
-    },
-    "chunk_store": {
-        "text": "TEXT NOT NULL DEFAULT ''",
-        "lang": "TEXT",
-    },
-    "chunk_meta": {
-        "doc_version_id": "TEXT NOT NULL DEFAULT ''",
-        "product_id": "TEXT NOT NULL DEFAULT ''",
-        "chunk_no": "INTEGER NOT NULL DEFAULT 0",
-        "content_hash": "TEXT NOT NULL DEFAULT ''",
-        "chunker_version": "TEXT NOT NULL DEFAULT ''",
-        "heading_path": "TEXT",
-        "context_prefix": "TEXT",
-        "lang": "TEXT",
-    },
-}
-
-#: Индексы, появившиеся в v3. Выполняются **после** :func:`_migrate`, чтобы не
-#: ссылаться на колонку, которую дрейфующая старая таблица ещё не получила.
-_POST_MIGRATION_DDL = """
+-- v6: индексы durable-субстрата (v3) объявлены прямо здесь. Прежде они выполнялись после
+-- ``ALTER TABLE``-миграции колонок — то есть существовали только на пути «догнать старую БД».
 CREATE INDEX IF NOT EXISTS idx_url_state_product ON url_state(product_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_meta_doc ON chunk_meta(doc_version_id, chunk_no);
 """
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Досоздаёт аддитивные колонки в существующих таблицах (идемпотентно).
-
-    ``PRAGMA table_info`` даёт фактический набор колонок; отсутствующие добавляются
-    ``ALTER TABLE ... ADD COLUMN`` с объявленным типом/DEFAULT. Повторный вызов — no-op.
-    """
-    for table, columns in _ADDITIVE_COLUMNS.items():
-        existing = {
-            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
-        }
-        if not existing:
-            # Таблицы нет — её создаст STATE_DDL; добавлять колонки некуда.
-            continue
-        for column, sql_type in columns.items():
-            if column not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+# Миграций при открытии нет: ``_ADDITIVE_COLUMNS``/``_POST_MIGRATION_DDL``/``_migrate``
+# удалены вместе с ``STATE_SCHEMA_VERSION`` 6. Все их колонки и индексы объявлены в
+# :data:`STATE_DDL` выше, а файл другой версии отвергается гейтом (:func:`connect_state`)
+# **до** применения схемы. Второй путь записи схемы («догнать старую БД при открытии»)
+# означал бы, что старая БД объявляет себя новой, не будучи ею (решение владельца
+# 01.11.2026: шимы не тащим, отказ видимый).
 
 
 def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает ``state.db`` и применяет идемпотентную схему §4.2.
+    """Открывает ``state.db`` и применяет идемпотентную схему §4.2 — через гейт версии.
 
     ``row_factory = sqlite3.Row`` — доступ к колонкам по имени (как в
-    :func:`core.store.sqlite.connect`). Схема применяется на каждом открытии
-    (``IF NOT EXISTS`` — no-op для существующих объектов), версия схемы пишется в
-    ``schema_meta``. Аддитивные колонки, появившиеся после v1, досоздаются
-    :func:`_migrate` (``ALTER TABLE ... ADD COLUMN``), а индексы v3 — после миграции,
-    поэтому старая БД открывается без потери данных. v4 (``profile_attestation``) —
-    новая таблица, поэтому миграция v3 → v4 целиком покрыта ``IF NOT EXISTS``.
-    v5 (частичность извлечения) — четыре nullable-колонки ``document_version``: старые
-    строки получают ``NULL`` = «не измерено», и это значение не переписывается на ``0``.
+    :func:`core.store.sqlite.connect`). Порядок важен и он один:
+
+    1. версия схемы читается **до** ``STATE_DDL`` (:func:`core.util.schema_gate.declared_schema_version`);
+    2. несовпадение — :class:`~core.store.sqlite.SchemaVersionMismatch` с путём файла и
+       указанием, что пересоздавать; соединение закрывается, файл **не меняется**;
+    3. только затем применяется ``STATE_DDL`` (``IF NOT EXISTS`` — no-op на текущей БД) и
+       пишется ``schema_meta.schema_version``.
+
+    Миграций нет ни одной: все колонки и индексы объявлены в :data:`STATE_DDL`. Старая БД
+    (версия ≤ 5, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
+    пакета не переносится между версиями схемы, а тихий ``ALTER TABLE`` объявлял бы файл
+    новой версии, не будучи им.
+
+    ``":memory:"`` — пустая БД: таблиц нет, сверять нечего, схема создаётся с нуля.
+
+    :raises SchemaVersionMismatch: файл объявляет другую ``schema_version`` (или не объявляет
+        её вовсе, уже имея таблицы) — пересоздайте ``state.db`` пакета.
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.executescript(STATE_DDL)
-    _migrate(conn)
-    conn.executescript(_POST_MIGRATION_DDL)
+    try:
+        has_tables, found = declared_schema_version(conn)
+        if found != STATE_SCHEMA_VERSION and (found is not None or has_tables):
+            raise SchemaVersionMismatch(
+                schema_mismatch_message(
+                    db_path,
+                    found=found,
+                    expected=STATE_SCHEMA_VERSION,
+                    what="09 §4.1",
+                    action=(
+                        "durable-состояние пакета не переносится между версиями схемы — "
+                        "пересоздайте state.db (например, "
+                        "``rm <root>/state/<package_id>/state.db``); историю прошлой схемы "
+                        "миграция не догоняет, прогон начнёт её заново."
+                    ),
+                )
+            )
+        conn.executescript(STATE_DDL)
+    except BaseException:
+        conn.close()
+        raise
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (STATE_SCHEMA_VERSION,),

@@ -103,44 +103,35 @@ def _cell(param_id: str, **overrides: object) -> Cell:
 # --------------------------------------------------------------------------- #
 
 
-def test_corpus_coverage_additive_migration_adds_origin_columns(
-    tmp_path: Path,
-) -> None:
-    """Ф0/3.8.0: старая ``corpus_coverage`` без origin-колонок мигрирует аддитивно."""
-    path = tmp_path / "legacy.db"
-    legacy = sqlite3.connect(path)
-    legacy.execute(
-        "CREATE TABLE corpus_coverage ("
-        " run_id TEXT NOT NULL, product_id TEXT NOT NULL, complete INTEGER NOT NULL,"
-        " expected_sources INTEGER NOT NULL DEFAULT 0,"
-        " observed_sources INTEGER NOT NULL DEFAULT 0,"
-        " blocked_json TEXT NOT NULL DEFAULT '{}',"
-        " truncated INTEGER NOT NULL DEFAULT 0, computed_at TEXT NOT NULL,"
-        " PRIMARY KEY (run_id, product_id))"
+def test_corpus_coverage_declares_origin_columns(store: SqliteStore) -> None:
+    """Ф0/3.8.0: origin-колонки ``corpus_coverage`` объявлены в ``DDL`` и работают.
+
+    Прежде тест строил «старую» таблицу без этих колонок и ждал ``ALTER TABLE`` при
+    открытии. Миграций больше нет (``SCHEMA_VERSION`` 3.14.0, решение владельца
+    01.11.2026), поэтому проверка переехала на новый носитель: колонки обязаны быть в
+    свежей БД, а значение по умолчанию — читаться без записи. Отказ старому файлу —
+    ``tests/store/test_schema_gate.py``.
+    """
+    cols = {
+        r["name"] for r in store.conn.execute("PRAGMA table_info(corpus_coverage)")
+    }
+    assert {
+        "unreadable_origins_json",
+        "partial_blocks_json",
+        "reason",
+        "resolved_manually",
+    } <= cols
+
+    store.create_run(RUN_ID, _cfg())
+    coverage = CorpusCoverage(
+        product_id="p1",
+        complete=True,
+        expected_sources=2,
+        observed_sources=2,
+        computed_at="2026-01-01T00:00:00+00:00",
     )
-    legacy.commit()
-    legacy.close()
-
-    store = SqliteStore(path)
-    try:
-        cols = {
-            r["name"]
-            for r in store.conn.execute("PRAGMA table_info(corpus_coverage)")
-        }
-        assert {"unreadable_origins_json", "partial_blocks_json"} <= cols
-
-        store.create_run(RUN_ID, _cfg())
-        coverage = CorpusCoverage(
-            product_id="p1",
-            complete=True,
-            expected_sources=2,
-            observed_sources=2,
-            computed_at="2026-01-01T00:00:00+00:00",
-        )
-        store.save_corpus_coverage(RUN_ID, coverage)
-        assert store.read_corpus_coverage(RUN_ID, "p1") == coverage
-    finally:
-        store.close()
+    store.save_corpus_coverage(RUN_ID, coverage)
+    assert store.read_corpus_coverage(RUN_ID, "p1") == coverage
 
 
 def test_corpus_coverage_model_rejects_complete_with_unreadable_origin() -> None:
@@ -1151,11 +1142,23 @@ def test_index_manifest_legacy_row_has_null_partition_build_id(
     assert entry.partition_build_id is None
 
 
-def test_connect_migrates_legacy_index_manifest_partition_build_id(
+def test_index_manifest_declares_partition_build_id_and_legacy_file_is_rejected(
     tmp_path: Path,
 ) -> None:
-    """Старая ``index_manifest`` получает additive-колонку; строки целы (NULL)."""
-    from core.store.sqlite import connect
+    """``index_manifest.partition_build_id`` объявлена в ``DDL``, а старый файл — отказ.
+
+    До 3.14.0 колонка досоздавалась при открытии. Теперь её носитель — ``CREATE TABLE``,
+    а файл другой версии отвергается до схемы (иначе он объявил бы себя текущим).
+    """
+    from core.store.sqlite import SchemaVersionMismatch, connect
+
+    fresh = connect(":memory:")
+    try:
+        assert "partition_build_id" in {
+            r["name"] for r in fresh.execute("PRAGMA table_info(index_manifest)")
+        }
+    finally:
+        fresh.close()
 
     db = tmp_path / "legacy_index.db"
     legacy = sqlite3.connect(db)
@@ -1169,16 +1172,11 @@ def test_connect_migrates_legacy_index_manifest_partition_build_id(
     )
     legacy.commit()
     legacy.close()
+    before = db.read_bytes()
 
-    migrated = connect(db)
-    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(index_manifest)")}
-    assert "partition_build_id" in cols
-    row = migrated.execute(
-        "SELECT index_build_id, partition_build_id FROM index_manifest"
-    ).fetchone()
-    assert row["index_build_id"] == "ib_old"
-    assert row["partition_build_id"] is None
-    migrated.close()
+    with pytest.raises(SchemaVersionMismatch):
+        connect(db)
+    assert db.read_bytes() == before
 
 
 def test_crawl_provenance_roundtrip(store: SqliteStore) -> None:
@@ -1340,11 +1338,19 @@ def test_iter_corpus_docs_returns_run_docs(store: SqliteStore) -> None:
         list(store.iter_corpus_docs("unknown-run"))
 
 
-def test_connect_migrates_legacy_runs_without_execution_contract_digest(
+def test_runs_declares_execution_contract_digest_and_legacy_file_is_rejected(
     tmp_path: Path,
 ) -> None:
-    """09 §12.5: старая ``runs`` без колонки мигрирует; строки целы, значение NULL."""
-    from core.store.sqlite import connect
+    """09 §12.5: колонка объявлена в ``DDL``; файл прежней схемы — отказ, не миграция."""
+    from core.store.sqlite import SchemaVersionMismatch, connect
+
+    fresh = connect(":memory:")
+    try:
+        assert "execution_contract_digest" in {
+            r["name"] for r in fresh.execute("PRAGMA table_info(runs)")
+        }
+    finally:
+        fresh.close()
 
     db = tmp_path / "legacy_contract.db"
     legacy = sqlite3.connect(db)
@@ -1358,26 +1364,26 @@ def test_connect_migrates_legacy_runs_without_execution_contract_digest(
     )
     legacy.commit()
     legacy.close()
+    before = db.read_bytes()
 
-    migrated = connect(db)
-    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
-    assert "execution_contract_digest" in cols
-    row = migrated.execute(
-        "SELECT run_id, index_build_id, execution_contract_digest FROM runs"
-    ).fetchone()
-    assert row["run_id"] == "r1"
-    assert row["index_build_id"] == "ib_1"
-    assert row["execution_contract_digest"] is None
-    migrated.close()
-
-    again = connect(db)
-    assert {r["name"] for r in again.execute("PRAGMA table_info(runs)")} == cols
-    again.close()
+    with pytest.raises(SchemaVersionMismatch):
+        connect(db)
+    assert db.read_bytes() == before
 
 
-def test_connect_migrates_legacy_runs_without_registry_spec_digest(tmp_path: Path) -> None:
-    """D1/E2: старая ``runs`` без ``registry_spec_digest`` мигрирует; строки/значения целы."""
-    from core.store.sqlite import connect
+def test_runs_declares_registry_spec_digest_and_legacy_file_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """D1/E2: ``registry_spec_digest`` объявлена в ``DDL``; старый файл — отказ."""
+    from core.store.sqlite import SchemaVersionMismatch, connect
+
+    fresh = connect(":memory:")
+    try:
+        assert "registry_spec_digest" in {
+            r["name"] for r in fresh.execute("PRAGMA table_info(runs)")
+        }
+    finally:
+        fresh.close()
 
     db = tmp_path / "legacy_runs.db"
     legacy = sqlite3.connect(db)
@@ -1391,23 +1397,11 @@ def test_connect_migrates_legacy_runs_without_registry_spec_digest(tmp_path: Pat
     )
     legacy.commit()
     legacy.close()
+    before = db.read_bytes()
 
-    migrated = connect(db)
-    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
-    assert "registry_spec_digest" in cols
-    row = migrated.execute(
-        "SELECT run_id, crawl_config_digest, registry_spec_digest FROM runs"
-    ).fetchone()
-    # Существующая строка сохранена; новая колонка — NULL (значение не выдумывается).
-    assert row["run_id"] == "r1"
-    assert row["crawl_config_digest"] == "d"
-    assert row["registry_spec_digest"] is None
-    migrated.close()
-
-    # Идемпотентность: повторный ``connect`` не падает и не дублирует колонку.
-    again = connect(db)
-    assert {r["name"] for r in again.execute("PRAGMA table_info(runs)")} == cols
-    again.close()
+    with pytest.raises(SchemaVersionMismatch):
+        connect(db)
+    assert db.read_bytes() == before
 
 
 def test_iter_exhaustions(store: SqliteStore) -> None:
@@ -1643,14 +1637,26 @@ def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> 
     assert entry["scope_acceptance"] is None
 
 
-def test_connect_migrates_scope_attested_by_to_scope_acceptance(tmp_path: Path) -> None:
-    """Вариант 2: подпись старой схемы копируется в ``scope_acceptance`` при открытии.
+def test_scope_acceptance_column_replaces_scope_attested_by(tmp_path: Path) -> None:
+    """Вариант 2: носитель подписи — ``scope_acceptance``; старой колонки в схеме нет.
 
-    Переименование смысла (аттестация полноты → принятие риска) не должно терять
-    аудит-след: читатель больше не смотрит на старую колонку, поэтому без копирования
-    подпись исторического прогона исчезла бы, а не «переехала».
+    Прежняя проверка («при открытии подпись ``scope_attested_by`` копируется в
+    ``scope_acceptance``») держалась на шиме ``_migrate_scope_acceptance``. Шим удалён
+    (решение владельца 01.11.2026): файл, где лежит старая колонка, отвергается по версии
+    целиком, поэтому копировать подпись некуда и не для кого — исторический аудит-след
+    живёт в том файле, который отвергнут, а не «переезжает» в текущую схему.
+    Эквивалент на новом носителе: в свежей БД ``scope_acceptance`` объявлена, а
+    ``scope_attested_by`` отсутствует.
     """
-    from core.store.sqlite import connect
+    from core.store.sqlite import SchemaVersionMismatch, connect
+
+    fresh = connect(":memory:")
+    try:
+        cols = {r["name"] for r in fresh.execute("PRAGMA table_info(cell_evidence)")}
+    finally:
+        fresh.close()
+    assert "scope_acceptance" in cols
+    assert "scope_attested_by" not in cols
 
     db = tmp_path / "legacy_scope.db"
     legacy = sqlite3.connect(db)
@@ -1666,40 +1672,18 @@ def test_connect_migrates_scope_attested_by_to_scope_acceptance(tmp_path: Path) 
     )
     legacy.commit()
     legacy.close()
+    before = db.read_bytes()
 
-    migrated = connect(db)
-    row = migrated.execute(
-        "SELECT scope_attested_by, scope_acceptance FROM cell_evidence"
-        " WHERE evidence_id = 'ev-1'"
-    ).fetchone()
-    assert row["scope_acceptance"] == "human-1"
-    # Старая колонка не стирается: SQLite не умеет удалять колонки без пересборки таблицы,
-    # и её значение остаётся проверяемым следом миграции.
-    assert row["scope_attested_by"] == "human-1"
-    migrated.close()
-
-    # Идемпотентно: повторное открытие не переписывает уже заполненное значение.
-    again = connect(db)
-    again.execute(
-        "UPDATE cell_evidence SET scope_acceptance = 'human-2' WHERE evidence_id = 'ev-1'"
-    )
-    again.commit()
-    again.close()
-    third = connect(db)
-    assert (
-        third.execute(
-            "SELECT scope_acceptance FROM cell_evidence WHERE evidence_id = 'ev-1'"
-        ).fetchone()["scope_acceptance"]
-        == "human-2"
-    )
-    third.close()
+    with pytest.raises(SchemaVersionMismatch):
+        connect(db)
+    assert db.read_bytes() == before
 
 
 def test_optional_column_read_tolerates_legacy_row() -> None:
-    """Read-only открытие старой БД: отсутствующей колонки нет — это «не записано».
+    """Отсутствующая колонка в строке — «не записано», а не сбой чтения.
 
-    ``connect_read_only`` не применяет аддитивные миграции (файл только читается),
-    поэтому чтение не должно падать на колонке, добавленной в новой схеме.
+    Гейт отвергает файл другой версии, поэтому путь достижим только для файла, который
+    объявляет текущую версию, но колонки не имеет (повреждённый/пересобранный вручную).
     """
     from core.store.sqlite_store import _parse_evidence_scope, _row_optional
 
@@ -1977,10 +1961,12 @@ def test_persist_manifest_leaves_boundary_columns_null_when_unset(
 
 
 def test_read_manifest_tolerates_missing_boundary_columns(tmp_path: Path) -> None:
-    """Read-only БД прошлой версии: колонок нет ⇒ чтение не падает (иначе ``IndexError``).
+    """Файл, объявляющий текущую версию, но без новых колонок: чтение не падает.
 
-    Миграция аддитивна и ``schema_version`` не поднят, поэтому файлы без новых колонок
-    существуют в живом виде; читатель обязан их открыть.
+    Гейт отвергает файл **другой** версии, поэтому штатно такой БД быть не может; остаётся
+    случай «версия объявлена текущей, а колонок нет» (пересобранный вручную/повреждённый
+    файл). Тогда отсутствие колонки — «значение не записано», а не сбой чтения прогона:
+    ``_readable`` фильтрует проекцию, ``_row_optional`` отдаёт ``None``.
     """
     path = tmp_path / "legacy.db"
     store = SqliteStore(path)
@@ -1991,8 +1977,6 @@ def test_read_manifest_tolerates_missing_boundary_columns(tmp_path: Path) -> Non
     raw = sqlite3.connect(path)
     for column in ("run_scope", "product_plan_json", "embed_device"):
         raw.execute("ALTER TABLE runs DROP COLUMN " + column)
-    for column in ("http_status", "reuse_kind"):
-        raw.execute("ALTER TABLE corpus_docs DROP COLUMN " + column)
     raw.commit()
     raw.close()
 

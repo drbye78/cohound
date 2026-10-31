@@ -224,9 +224,17 @@ def test_persist_manifest_roundtrips_identity_digests() -> None:
         assert read.seeds_digest == "sd_1"
 
 
-def test_runs_table_has_identity_digest_columns() -> None:
-    """Колонки аддитивные: ``SCHEMA_VERSION`` не поднимается, старая БД получает их."""
-    from core.store.sqlite import SCHEMA_VERSION, connect
+def test_runs_table_declares_identity_digest_columns() -> None:
+    """Колонки объявлены в ``DDL``: второго пути их появления больше нет.
+
+    Прежде проверка утверждала «аддитивно, ``SCHEMA_VERSION`` не поднимается» и держала
+    версию ``3.13.0`` — то есть фиксировала механизм досоздания при открытии. В волне S
+    плана 17 этот механизм снесён (версия поднята, старая БД отвергается гейтом), поэтому
+    эквивалент утверждения — «колонка есть в свежей схеме, и `ALTER TABLE`-шима нет»:
+    пропуск в `CREATE TABLE` теперь не догоняется ничем, и тест обязан падать.
+    """
+    from core.store import sqlite as sqlite_module
+    from core.store.sqlite import connect
 
     conn = connect(":memory:")
     try:
@@ -234,9 +242,7 @@ def test_runs_table_has_identity_digest_columns() -> None:
         assert {"cohort_digest", "seeds_digest"} <= columns
     finally:
         conn.close()
-    # Подъём версии отверг бы гейтом (11 §2.6) все существующие прогоны ради метки,
-    # которая ничего не добавляет к читаемости аддитивной колонки.
-    assert SCHEMA_VERSION == "3.13.0"
+    assert not hasattr(sqlite_module, "_ensure_columns")
 
 
 # --------------------------------------------------------------------------- #

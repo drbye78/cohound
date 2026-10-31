@@ -64,8 +64,8 @@ def _observation(**overrides: object) -> ArchiveObservation:
 
 
 def test_schema_version_is_additive_bump() -> None:
-    """Новые таблицы аддитивны: ``CREATE TABLE IF NOT EXISTS`` + бамп версии схемы."""
-    assert SCHEMA_VERSION == "3.13.0"
+    """Новые таблицы объявлены в ``DDL``; версия схемы пинуется (3.14.0 — свёртка шимов)."""
+    assert SCHEMA_VERSION == "3.14.0"
     conn = connect(":memory:")
     try:
         tables = {

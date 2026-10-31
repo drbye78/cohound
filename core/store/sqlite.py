@@ -12,10 +12,27 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.13.0"
+# Код ошибки, класс отказа и текст сообщения гейта версии схемы живут в
+# ``core.util.schema_gate``: тот же отказ поднимает DMZ (``core/edge/scheduler.py``,
+# ``edge_jobs.db``), а матрица слоёв (``01`` §1) запрещает ``edge → store``. Реэкспорт
+# оставляет поверхность ``core.store.sqlite`` прежней и гарантирует **один** класс на все
+# три БД: иначе ``except SchemaVersionMismatch`` в composition root ловил бы половину
+# отказов, а вторая редакция сообщения разошлась бы с первой.
+from core.util.schema_gate import (  # noqa: F401 - реэкспорт: поверхность модуля сохранена
+    SCHEMA_VERSION_CODE,
+    SchemaVersionMismatch,
+    declared_schema_version,
+    schema_mismatch_message,
+)
 
-#: Код ошибки гейта версии схемы (``03`` §A.2, ``11`` §2.6): старый ``cohound.db`` не читается.
-SCHEMA_VERSION_CODE = "schema_version"
+#: Версия схемы ``cohound.db``.
+#: 3.14.0 — **все** аддитивные колонки, которые прежде досоздавались при открытии
+#: (``_ensure_columns``), объявлены прямо в ``DDL``. Шимы удалены: файл другой версии
+#: отвергается гейтом (:class:`SchemaVersionMismatch`) до любых миграций, поэтому
+#: ``ALTER TABLE ... ADD COLUMN`` в штатном открытии не осталось ни одного. Цена названа
+#: прямо: существующие ``runs/*/cohound.db`` версий ≤ 3.13.0 отвергаются — прогон
+#: переносится пересозданием (новый каталог/``run_id``), а не тихим догоном схемы.
+SCHEMA_VERSION = "3.14.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -55,6 +72,7 @@ CREATE TABLE IF NOT EXISTS runs (
     scoring_policy_version TEXT,
     methodology_version   TEXT,
     embed_model_id        TEXT,
+    embed_device          TEXT,                        -- §13/R5: место вычисления векторов (cpu|cuda; auto нет)
     index_build_id        TEXT,
     retrieval_profile     TEXT,                        -- R0|R1|R2
     retrieval_params_json TEXT,                        -- fusion-параметры (rrf_k и пр.) — S1
@@ -72,6 +90,10 @@ CREATE TABLE IF NOT EXISTS runs (
     previous_run_id       TEXT,                        -- 09 §12.3: прогон, против которого считался этот (lineage)
     change_class          TEXT,                        -- §13: класс изменения относительно предыдущего прогона
     cycle_id              TEXT,                        -- 09 §2.4: эффективный цикл прогона (материал run_id)
+    -- 16 §3.1: провенанс среза прогона. ``--only-product`` меняет смысл измерения и обязан
+    -- быть виден в артефакте (09 §13.6), иначе «полный» и «срезочный» прогоны неотличимы.
+    run_scope             TEXT,
+    product_plan_json     TEXT,                        -- JSON: плановый состав продуктов среза
     manual_artifacts_digest TEXT,                      -- 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов (execution_change)
     manual_artifacts_json TEXT,                        -- 13-manual-artifacts §3.4: доля ручного (наблюдение, не потолок)
     partial_docs_json     TEXT,                        -- I2/I2c: частичное извлечение числом (наблюдение, не потолок)
@@ -125,7 +147,12 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
     partial_reason   TEXT,
     page_count       INTEGER,           -- заявлено документом; NULL — не сообщено
     pages_converted  INTEGER,           -- реально прочитано; NULL — не измерено
-    extracted_chars  INTEGER            -- длина извлечённого текста
+    extracted_chars  INTEGER,           -- длина извлечённого текста
+    -- 09 §11.2: происхождение наблюдения. Без них 304-документ неотличим от живого 200.
+    -- NULL = «наблюдение не записано» (legacy-строка), а не «наблюдение подтверждено».
+    http_status      INTEGER,
+    -- live|revalidated|reused|stale
+    reuse_kind       TEXT
 );
 
 -- 13-manual-artifacts §3.3: аудит предоставления. Строка на объявленную подачу, дошедшую
@@ -373,8 +400,7 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
     -- 17 §6 (F3): хеш **извлечённого текста** (ключ дедупа корпуса), а не байтов выше.
     -- Носитель канонического адреса: ``min(url)`` среди равных ``doc_hash`` спрашивается у
     -- этой колонки, поэтому победитель дедупа не зависит от порядка готовности страниц.
-    -- Аддитивная колонка, ``SCHEMA_VERSION`` не поднимается (прецедент —
-    -- ``cell_evidence.doc_version_id``): старые строки читаются как «не записано».
+    -- NULL = «не записано» (строка, созданная до появления колонки), а не «хеша нет».
     doc_hash      TEXT,
     raw_path      TEXT,
     error_kind    TEXT,                    -- FailureKind (валидируется доменной моделью)
@@ -390,9 +416,13 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
 -- конверсии берёт строку (``claimed``) и объявляет готовность (``done``). Это и есть
 -- разделение «краул выполнен ≠ корпус собран»: строки пишет **только** краул, состояние
 -- меняет **только** потребитель. ``level``/``pdf_pipeline`` — условия измерения корня
--- (без них ``extractor_version`` документа невоспроизводим). Аддитивная таблица:
--- ``CREATE TABLE IF NOT EXISTS``, ``SCHEMA_VERSION`` не поднимается (см. комментарий
--- в ``_migrate``).
+-- (без них ``extractor_version`` документа невоспроизводим).
+-- Провенанс **получения** (``fetched_at``…``extract_route``) — вторая половина тех же
+-- условий: ось ``extract_route`` выбирается по ``fetch_mode``/``content_type``/``lang``,
+-- поэтому потребитель обязан получить их из строки, а не угадать по retained-байтам —
+-- иначе тот же документ изъят другим маршрутом, ``extractor_version``/``doc_version_id``
+-- другие, и корпус меняется при неизменных объявленных входах (I19, A3).
+-- Таблица объявлена в ``DDL`` целиком, поэтому переживает открытие без миграций.
 CREATE TABLE IF NOT EXISTS extract_queue (
     session_id      TEXT NOT NULL,
     product_id      TEXT NOT NULL,
@@ -401,6 +431,17 @@ CREATE TABLE IF NOT EXISTS extract_queue (
     raw_path        TEXT NOT NULL,           -- файл в corpus_raw; живёт до done
     level           TEXT NOT NULL,           -- document_level корня
     pdf_pipeline    TEXT NOT NULL,           -- pdf_pipeline корня
+    -- Провенанс получения: те же величины, что ``crawl_session_items`` несёт у себя
+    -- (``http_status`` здесь назван ``status_code`` — по имени поля payload'а
+    -- ``_ExtractRequest``, чтобы потребитель не переводил имена). NULL = «не записано»
+    -- (строка прежнего производителя), а не «сервер не отвечал».
+    fetched_at      TEXT,
+    fetch_mode      TEXT,                    -- FetchMode (ось получения)
+    lang            TEXT,
+    status_code     INTEGER,                 -- HTTP-статус получения
+    content_type    TEXT,
+    engine          TEXT,                    -- движок фетча (http|browser|…)
+    extract_route   TEXT,                    -- ExtractionRoute (ось извлечения)
     state           TEXT NOT NULL DEFAULT 'pending',  -- ExtractQueueState
     attempts        INTEGER NOT NULL DEFAULT 0,
     enqueued_at     TEXT NOT NULL,
@@ -587,89 +628,40 @@ END;
 """
 
 
-def _ensure_columns(
-    conn: sqlite3.Connection, table: str, columns: dict[str, str]
+# ``_ensure_columns`` (``ALTER TABLE ... ADD COLUMN`` при открытии) удалён вместе с
+# ``_migrate_scope_acceptance`` и ``SCHEMA_VERSION`` 3.14.0: все аддитивные колонки
+# объявлены в ``DDL`` выше, а файл другой версии отвергается гейтом (:func:`connect`)
+# **до** любых миграций (``11`` §2.6). Держать второй, никем не проверяемый путь записи
+# схемы — значит иметь способ тихо «догнать» старую БД и объявить её новой; владелец
+# запретил именно это. Историческая подпись ``scope_attested_by`` → ``scope_acceptance``
+# больше не копируется: копировать её некуда и не для кого — БД, где она лежит, отвергается
+# целиком по версии, а не открывается частично читаемой.
+
+
+# ``SchemaVersionMismatch``/``schema_mismatch_message``/``SCHEMA_VERSION_CODE`` объявлены
+# в ``core.util.schema_gate`` (реэкспорт — в шапке модуля): тот же отказ поднимает DMZ, а
+# ``edge → store`` запрещён матрицей слоёв. Один класс и один формат сообщения на три БД.
+
+
+def _reject_foreign_schema(
+    db_path: str | Path, has_tables: bool, found: str | None
 ) -> None:
-    """Идемпотентно добавляет недостающие колонки ``table`` (DDL-миграция).
-
-    ``CREATE TABLE IF NOT EXISTS`` не меняет существующую таблицу, поэтому дельты схемы
-    добавляются явными ``ALTER TABLE ... ADD COLUMN``. Повторный вызов (в т.ч. на уже
-    мигрированной БД) — no-op (проверка через ``PRAGMA table_info``).
-
-    С гейтом версии (:func:`connect`) это **не** путь чтения старой БД: файл другой версии
-    отвергается до миграций (``11`` §2.6), поэтому ``_ensure_columns`` обслуживает только
-    «полусозданную» БД в пределах объявленной версии — страховка, а не молчаливая миграция.
-    """
-    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-    for name, ddl_type in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
-
-
-def _migrate_scope_acceptance(conn: sqlite3.Connection) -> None:
-    """Копирует прежнюю подпись ``scope_attested_by`` в ``scope_acceptance`` (Вариант 2).
-
-    Переименование смысла: человек не «аттестует полноту охвата», а **принимает риск**
-    ненаблюдённой части. Старая колонка остаётся в файле (SQLite не умеет удалять
-    колонки без пересборки таблицы), но читатель её больше не использует, поэтому
-    значения обязаны быть скопированы: иначе подпись исторического прогона стала бы
-    невидимой — потеря аудит-следа, а не «чистое» переименование.
-
-    Идемпотентно: копируются только строки, где новое значение ещё пусто, а старое есть.
-    """
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(cell_evidence)")}
-    if "scope_attested_by" not in columns or "scope_acceptance" not in columns:
-        return
-    conn.execute(
-        "UPDATE cell_evidence SET scope_acceptance = scope_attested_by"
-        " WHERE scope_acceptance IS NULL AND scope_attested_by IS NOT NULL"
-    )
-
-
-class SchemaVersionMismatch(RuntimeError):
-    """Файл ``cohound.db`` объявляет другую версию схемы, чем ожидает код.
-
-    Гейт версии (``11`` §2.6): прогон — durable-артефакт, но **не** переносится между
-    версиями схемы. Читать старую БД молча нельзя: аддитивные дельты сделали бы «старую»
-    строку неотличимой от «новой», а прогон объявлял бы условия измерения, которых не
-    применял. Поэтому несовпадение — отказ с внятным сообщением, а не тихий апгрейд.
-
-    ``code`` — код правила для ``CODE: message`` в CLI; сама строка сообщения кода не
-    повторяет (иначе получилось бы ``schema_version: schema_version: …``).
-    """
-
-    #: Код ошибки (совпадает с :data:`SCHEMA_VERSION_CODE`).
-    code = SCHEMA_VERSION_CODE
-
-
-def _declared_schema_version(conn: sqlite3.Connection) -> str | None:
-    """Версия схемы, уже записанная в файле (``None`` — БД пустая/новая).
-
-    Читается **до** ``DDL``/миграций: гейт обязан увидеть исходное состояние файла, а не
-    результат ``CREATE TABLE IF NOT EXISTS``.
-    """
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'"
-    ).fetchone()
-    if row is None:
-        return None
-    row = conn.execute(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-    ).fetchone()
-    if row is None:
-        return None
-    return str(row["value"])
-
-
-def _reject_foreign_schema(db_path: str | Path, found: str | None) -> None:
     """Гейт версии схемы: несовпадение — отказ с сообщением о действии оператора."""
-    if found is None or found == SCHEMA_VERSION:
+    if found == SCHEMA_VERSION:
+        return
+    if found is None and not has_tables:
         return
     raise SchemaVersionMismatch(
-        f"схема БД несовместима: файл {str(db_path)!r} объявляет "
-        f"schema_version={found!r}, а код ожидает {SCHEMA_VERSION!r} (11 §2.6). "
-        "Молчаливое чтение чужой схемы запрещено: прогон переносится только пересозданием — "
-        "запустите прогон в новом каталоге (новый run_id) или удалите устаревший cohound.db."
+        schema_mismatch_message(
+            db_path,
+            found=found,
+            expected=SCHEMA_VERSION,
+            what="11 §2.6",
+            action=(
+                "прогон переносится только пересозданием — запустите прогон в новом "
+                "каталоге (новый run_id) или удалите устаревший cohound.db."
+            ),
+        )
     )
 
 
@@ -729,7 +721,7 @@ def connect_read_only(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         # ``busy_timeout`` — не запись, а ожидание чужой блокировки: живой писатель держит
         # WAL недолго, и без таймаута читатель получал бы мгновенный ``database is locked``.
         conn.execute("PRAGMA busy_timeout = 5000")
-        _reject_foreign_schema(path, _declared_schema_version(conn))
+        _reject_foreign_schema(path, *declared_schema_version(conn))
     except BaseException:
         conn.close()
         raise
@@ -737,294 +729,30 @@ def connect_read_only(db_path: str | Path = ":memory:") -> sqlite3.Connection:
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.6).
+    """Открывает БД и применяет схему. Миграций колонок при открытии **нет**.
 
     Создаёт файл и схему (каталог — забота вызывающего): это путь **писателя**. Читателю нужен
     :func:`connect_read_only` — иначе опечатка в пути оставит на диске пустую БД.
 
-    :raises SchemaVersionMismatch: файл объявляет другую ``schema_version`` (гейт §2.6).
+    Все колонки объявлены в :data:`DDL` для текущей :data:`SCHEMA_VERSION`; файл другой
+    версии отвергается гейтом (:func:`_reject_foreign_schema`) до применения схемы. Поэтому
+    «догнать» старую БД при открытии нечем и не нужно: аддитивная дельта, дописанная тихо,
+    сделала бы строку прошлой схемы неотличимой от текущей.
+
+    :raises SchemaVersionMismatch: файл объявляет другую ``schema_version`` (гейт ``11`` §2.6).
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        _reject_foreign_schema(db_path, _declared_schema_version(conn))
+        _reject_foreign_schema(db_path, *declared_schema_version(conn))
     except SchemaVersionMismatch:
         conn.close()
         raise
     conn.executescript(DDL)
-    # DDL-миграция v2.1 (A3): старая БД без settings_provenance_json получает колонку.
-    # CREATE TABLE IF NOT EXISTS не меняет существующую таблицу — добавляем явно.
-    _ensure_columns(conn, "runs", {"settings_provenance_json": "TEXT"})
-    # DDL-миграция v3.2 (Phase 2): провенанс краула (сеансы/движки/дайджест источников).
-    _ensure_columns(conn, "runs", {"crawl_provenance_json": "TEXT"})
-    # DDL-миграция v3.3 (Backlog B): операционные оси краула (стратегия/диапазон задержек) —
-    # границы класса ``execution_change`` (§13); additive, старые БД получают колонки.
-    _ensure_columns(
-        conn,
-        "runs",
-        {"crawl_strategy": "TEXT", "crawl_rate_limit": "TEXT"},
-    )
-    # DDL-миграция v3.4 (N6): дайджест разрешённой конфигурации контроля краула — граница
-    # класса ``execution_change`` (§13); additive, старые БД получают колонку.
-    _ensure_columns(conn, "runs", {"crawl_config_digest": "TEXT"})
-    # DDL-миграция v3.5 (E2): дайджест package-scoped спецификаций реестров — граница класса
-    # ``execution_change`` (§13); additive, старые БД получают колонку (без неё ``hound diff``
-    # не видел смену спецификации реестра).
-    _ensure_columns(conn, "runs", {"registry_spec_digest": "TEXT"})
-    # DDL-миграция (09 §12.5, methodology 2.3.0): отпечаток условий измерения
-    # (``execution_contract_digest``) — носитель границы класса ``methodology_change``:
-    # ``hound diff`` сравнивает контракт, а не ``index_build_id``, поэтому без колонки
-    # недельный (инкрементальный) diff всегда отказывал бы. Аддитивно и идемпотентно;
-    # старые строки получают NULL — legacy-прогон, дайджест не фабрикуется.
-    _ensure_columns(conn, "runs", {"execution_contract_digest": "TEXT"})
-    # 13-manual-artifacts §3.2/§3.4: отпечаток объявленных ручных артефактов (поле
-    # контракта, поэтому ``hound diff`` обязан его называть) и опубликованный блок доли
-    # ручного. Аддитивно: старые строки получают NULL (дайджест не вычислялся — не
-    # фабрикуется), блок — пустой словарь при чтении.
-    _ensure_columns(
-        conn,
-        "runs",
-        {
-            "manual_artifacts_digest": "TEXT",
-            "manual_artifacts_json": "TEXT",
-        },
-    )
-    # I2/I2c: частичное извлечение в манифесте — блок наблюдения (документы/страницы/
-    # символы по продуктам), а не пересчёт читателя. Колонка аддитивная: старые строки
-    # получают NULL (блок читается пустым). ``schema_version`` **не** поднимается —
-    # форма читаемых данных не меняется (прецедент — ``manual_artifacts_json``).
-    _ensure_columns(conn, "runs", {"partial_docs_json": "TEXT"})
-    # §6/A1: профиль публикуемости — блок манифеста, а не пересчёт читателя. Колонка
-    # аддитивная и идемпотентная: старые строки получают NULL (профиль не вычислялся —
-    # не фабрикуется). ``schema_version`` **не** поднимается: аддитивная миграция не
-    # меняет форму читаемых данных, а подъём версии (11 §2.6) отверг бы существующие
-    # прогоны — их читаемость здесь важнее формальной метки.
-    _ensure_columns(conn, "runs", {"publishability_json": "TEXT"})
-    # DDL-миграция v3.6 (P6): аннотация причины pending-ячейки (конфликт источников vs
-    # условное наследование). Аддитивно и идемпотентно; это не статус и не перечисление.
-    _ensure_columns(conn, "cells", {"review_reason": "TEXT"})
-    # Вариант 2 (сила отрицания, §2.3): объект ``EvidenceScope`` — единственный носитель
-    # ответа «можно ли утверждать отсутствие». Хранится **JSON-колонкой**, а не
-    # нормализацией: объект читается и пишется целиком, отдельных запросов по его полям
-    # нет, а вектор охвата у каждого прогона свой. Аддитивная колонка: старые БД получают
-    # NULL (строки без объекта читаются прежним правилом), ``schema_version`` не
-    # поднимается — иначе гейт версии (11 §2.6) отверг бы уже существующие прогоны, а
-    # «старые прогоны остаются читаемыми» здесь важнее формальной метки.
-    _ensure_columns(conn, "cells", {"evidence_scope": "TEXT"})
-    # Правило отсутствия параметра (I2): прежде оно жило только в каталоге, и читатель
-    # подставлял ``explicit`` — прочитанная ячейка утверждала правило, которого никто не
-    # объявлял, а ``review.promote`` работает именно с прочитанными ячейками. Колонка
-    # аддитивная, старые строки получают NULL = «правило не записано» (не подставляется);
-    # ``schema_version`` **не** поднимается — иначе гейт версии (11 §2.6) отверг бы
-    # существующие прогоны, а их читаемость здесь важнее формальной метки.
-    _ensure_columns(conn, "cells", {"absence_rule": "TEXT"})
-    # 09 §10 (схема cell-reuse-2): происхождение ячейки — перенос вердикта из прогона-
-    # предшественника. Аддитивно и **без** подъёма ``schema_version`` (решение владельца
-    # 29.10.2026): ``carried_from_run_id``/``cell_reuse_key`` у старых строк остаются NULL
-    # («не вычислялось»), а ``measurement_origin`` получает дефолт ``observed`` — он верен
-    # и для исторических строк, потому что они действительно были измерены. Подъём версии
-    # отверг бы гейтом (11 §2.6) все существующие прогоны ради метки, которая ничего не
-    # добавляет к читаемости.
-    _ensure_columns(
-        conn,
-        "cells",
-        {
-            "measurement_origin": "TEXT NOT NULL DEFAULT 'observed'",
-            "carried_from_run_id": "TEXT",
-            "cell_reuse_key": "TEXT",
-        },
-    )
-    # V5/V6: условия генерации оценщика — хост endpoint'а и потолок токенов. Оба факта
-    # обязаны быть в манифесте, иначе «куда ушёл корпус» и «обрезали ли ответ» — догадки.
-    _ensure_columns(
-        conn,
-        "llm_scenarios",
-        {"endpoint_host": "TEXT", "max_tokens": "INTEGER"},
-    )
-    # Переименование подписи: ``scope_attested_by`` → ``scope_acceptance`` (смысл —
-    # принятие риска, а не аттестация полноты). Колонка аддитивная, значения старых строк
-    # **копируются**: читатель больше не смотрит на старую колонку, и без копирования
-    # подпись исторического прогона стала бы невидимой (потеря аудит-следа).
-    _ensure_columns(conn, "cell_evidence", {"scope_acceptance": "TEXT"})
-    _migrate_scope_acceptance(conn)
-    # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
-    # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
-    _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})
-    _ensure_columns(
-        conn,
-        "index_manifest",
-        {"extractor_version": "TEXT", "content_digest": "TEXT"},
-    )
-    # DDL-миграция MVP-4 шаг 1 (09 §8.1–§8.2): additive ``partition_build_id`` —
-    # сборка продукт-партиции. Старые строки получают NULL (тогда читатель падает
-    # обратно на ``index_build_id``); формула ``index_build_id`` не меняется.
-    _ensure_columns(conn, "index_manifest", {"partition_build_id": "TEXT"})
-    # DDL-миграция MVP-4 шаг 2 (09 §8.1): additive ``partition_build_id`` у evidence —
-    # из какого физического чанка-партиции пришла цитата. NULL — неизвестно; backfill
-    # не выполняется (исторические строки остаются как есть).
-    _ensure_columns(conn, "cell_evidence", {"partition_build_id": "TEXT"})
-    # O5 (09 §3.3): additive ``doc_version_id`` у evidence — адрес **версии документа**,
-    # из которой взята цитата (``dv_...``, 16 §6). Прежде цепочка evidence проверялась по
-    # ``content_hash`` — версии текста, не различающей уровень извлечения и версию
-    # экстрактора. Старые строки получают ``NULL`` (= «версия не записана»), backfill не
-    # выполняется: ``dv_`` из хеша не выводится, а выдуманное значение было бы ложным
-    # адресом. ``SCHEMA_VERSION`` не поднимается: изменение аддитивное, читатель старого
-    # прогона видит ``NULL`` и остаётся на прежней проверке по ``content_hash``.
-    _ensure_columns(conn, "cell_evidence", {"doc_version_id": "TEXT"})
-    # DDL-миграция v3.4 (P1): деплой-провенанс манифеста (07 §7) и порог ранжирования
-    # (§6/B-1) — реальные колонки. Back-compat не требуется: forward-compat хелпер чтения
-    # удалён, старая БД получает колонки, значения остаются NULL до записи манифеста.
-    _ensure_columns(
-        conn,
-        "runs",
-        {
-            "ranking_epsilon": "REAL",
-            "deploy_profile": "TEXT",
-            "edge_schema_version": "TEXT",
-            "edge_capabilities_json": "TEXT",
-        },
-    )
-    # DDL-миграция v3.0 (Lane B): crawl_sessions/crawl_session_items создаются
-    # `CREATE TABLE IF NOT EXISTS` в DDL — ALTER не нужен (новые таблицы), вызов
-    # идемпотентен на любой БД. Гэп forward-compat закрывается `_ensure_columns` при
-    # появлении additive-колонок в будущем.
-    # v3.12.0 (F1/Д-6): `crawl_sessions.owner`/`heartbeat_at` объявлены прямо в DDL — ALTER не
-    # нужен, потому что файл с прежней версией схемы до миграций **не доходит** (гейт версии
-    # выше, `11` §2.6). Это осознанная цена: старые прогоны не становятся частично читаемыми.
-    # DDL-миграция v3.5 (D1): глубина URL в BFS-frontier seed-root — additive-колонка
-    # `crawl_session_items.depth`; старые БД получают NULL (глубина неизвестна, resume
-    # best-effort). Значение доменного класса — execution/операционный провенанс (не §13).
-    _ensure_columns(conn, "crawl_session_items", {"depth": "INTEGER"})
-    # 17 §6 (F3): ``crawl_session_items.doc_hash`` — хеш извлечённого текста, носитель
-    # канонического адреса документа (``min(url)`` среди равных ``doc_hash``). Аддитивно:
-    # старые БД получают ``NULL`` = «не записано» (прецедент — ``cell_evidence.doc_version_id``),
-    # backfill не выполняется — ``doc_hash`` из retained-байтов не выводится, а выдуманный
-    # ключ дал бы ложного победителя дедупа.
-    # ``SCHEMA_VERSION`` не поднимается: гейт версии (11 §2.6) отверг бы существующие прогоны.
-    _ensure_columns(conn, "crawl_session_items", {"doc_hash": "TEXT"})
-    # DDL-миграция v3.7.0 (Ф0): ``corpus_coverage`` создаётся ``CREATE TABLE IF NOT EXISTS``
-    # в DDL — новые таблицы не требуют ALTER; вызов идемпотентен на любой БД.
-    # 17 §4.1 (F2): ``extract_queue`` — **новая** таблица, создаётся
-    # ``CREATE TABLE IF NOT EXISTS`` прямо в DDL. ``SCHEMA_VERSION`` поэтому **не**
-    # поднимается: bump отверг бы уже существующие прогоны гейтом версии (11 §2.6),
-    # то есть выполнимое требование «старый прогон остаётся читаемым» было бы нарушено
-    # (прецеденты — ``corpus_coverage``:862, ``run_product``:959). Старая БД читается
-    # без изменений: таблица создаётся при открытии, строк в ней нет — «очередь пуста»
-    # (и это правда: до F2 её никто не наполнял).
-    # DDL-миграция v3.8.0 (Ф0, origin-уровневый порог): additive-колонки покрытия корпуса;
-    # старые БД получают пустые значения (``[]``/``{}``) — нечитаемых origin'ов не знали.
-    _ensure_columns(
-        conn,
-        "corpus_coverage",
-        {
-            "unreadable_origins_json": "TEXT NOT NULL DEFAULT '[]'",
-            "partial_blocks_json": "TEXT NOT NULL DEFAULT '{}'",
-            # MVP-1 (09 §11.3): причина zero-source/аномалии покрытия.
-            "reason": "TEXT",
-            # 13-manual-artifacts §3.3: блокирующий отказ, закрытый объявленным артефактом.
-            # Аддитивно: старые строки читаются как «ручных подач не было» (0).
-            "resolved_manually": "INTEGER NOT NULL DEFAULT 0",
-        },
-    )
-    # 13-manual-artifacts §3.3: происхождение **байтов** корпуса — аддитивная колонка
-    # (``crawl`` по умолчанию): старые БД читают прежние строки как «получено краулом»,
-    # а ``schema_version`` **не** поднимается — гейт версии (11 §2.6) отверг бы уже
-    # существующие прогоны, то есть выполнимое требование «старый прогон остаётся
-    # читаемым» было бы нарушено (прецедент — ``cells.evidence_scope``). Таблица
-    # ``manual_artifacts`` создаётся ``CREATE TABLE IF NOT EXISTS`` в DDL — ALTER не нужен.
-    _ensure_columns(conn, "corpus_docs", {"origin": "TEXT NOT NULL DEFAULT 'crawl'"})
-    # Частичное извлечение (I2/I2c): признак существовал у ``ExtractedDoc`` и умирал на
-    # границе корпуса — документ, прочитанный на 7 страницах из 2763, был неотличим от
-    # полного. Колонки аддитивные: старые строки читаются как «прочитано полностью»
-    # (``partial=0``), чисел нет (``NULL``) — выдумывать их нельзя. ``schema_version``
-    # **не** поднимается: форма читаемых данных не меняется, а гейт версии (11 §2.6)
-    # отверг бы уже существующие прогоны (прецедент — ``cells.evidence_scope``).
-    _ensure_columns(
-        conn,
-        "corpus_docs",
-        {
-            "partial": "INTEGER NOT NULL DEFAULT 0",
-            "partial_reason": "TEXT",
-            "page_count": "INTEGER",
-            "pages_converted": "INTEGER",
-            "extracted_chars": "INTEGER",
-        },
-    )
-    # 16 §3.1/§3.3 (граница ``runs``, аддитивно, ``schema_version`` **не** поднимается):
-    # ``runs.run_scope``/``runs.product_plan_json`` — провенанс среза прогона (``--only-product``
-    # меняет смысл измерения и обязан быть виден в артефакте, 09 §13.6); ``runs.embed_device``
-    # — наблюдаемое поле объявленной оси (в ``run_id`` оно уже входит через контракт, здесь —
-    # чтобы «на чём считались векторы» читалось запросом, а не восстановлением из дайджеста).
-    # ``corpus_docs.http_status``/``reuse_kind`` — происхождение наблюдения (09 §11.2):
-    # без них 304-документ неотличим от живого 200, и правило «``❌`` нельзя публиковать на
-    # неподтверждённом наблюдении» неисполнимо. ``reuse_kind IS NULL`` = «наблюдение не
-    # записано» (legacy-строки), а не «наблюдение подтверждено».
-    _ensure_columns(
-        conn,
-        "runs",
-        {
-            "run_scope": "TEXT",
-            "product_plan_json": "TEXT",
-            "embed_device": "TEXT",
-        },
-    )
-    # 09 §12.3/§13 (аддитивно, ``schema_version`` **не** поднимается): ``runs.previous_run_id``
-    # и ``runs.change_class`` — провенанс сравнения прогона; ``runs.cycle_id`` — эффективный
-    # цикл (материал ``run_id``, 09 §2.4). Поля были объявлены в манифесте (``cycle_id`` —
-    # вовсе не был объявлен) и не писались никуда, поэтому ``run_manifest.yaml`` и
-    # ``hound report --json`` молчали о том, против какого прогона и в каком цикле считался
-    # этот. Источник — строка ``run_lineage`` (там ``change_class`` и вычисляется); колонки
-    # делают те же факты читаемыми из строки прогона, без открытия ``state.db``.
-    # NULL = «не записано» (legacy-строка), а не «предшественника не было».
-    _ensure_columns(
-        conn,
-        "runs",
-        {"previous_run_id": "TEXT", "change_class": "TEXT", "cycle_id": "TEXT"},
-    )
-    # 09 §12.5 (аддитивно, ``schema_version`` **не** поднимается): ``runs.cohort_digest`` и
-    # ``runs.seeds_digest`` — слагаемые ``run_id`` и поля ``execution_contract_digest``.
-    # Это были **единственные** два поля контракта, которых не было ни в ``runs``, ни на
-    # ``RunManifest``: при расхождении контракта ``hound diff`` не мог назвать ось и
-    # писал «предел диагностики». NULL = «не записано» (строка прошлой схемы) — значение
-    # не фабрикуется: современный прогон всегда несёт оба дайджеста.
-    _ensure_columns(
-        conn,
-        "runs",
-        {"cohort_digest": "TEXT", "seeds_digest": "TEXT"},
-    )
-    # Версия документа (16 §6) — вторая форма адреса: ``chunk_id`` (и
-    # ``CellEvidence.source_id``) несёт версию (``dv_...``), а ``doc_id`` остаётся
-    # ``product_id:content_hash`` (на нём держится дедуп по хешу). Носитель отображения —
-    # **отдельная** таблица ``corpus_doc_version`` (одна версия → один документ; обратное
-    # неверно), а не колонка: ``dv`` включает уровень извлечения, ``doc_id`` — нет, поэтому
-    # «версия на строку» теряла бы версии при совпадении текста на разных уровнях
-    # (``document_level`` — per-site ось, две версии одного документа в одном прогоне —
-    # законное состояние). Таблица создаётся ``CREATE TABLE IF NOT EXISTS`` в DDL — ALTER
-    # не нужен, ``schema_version`` **не** поднимается (аддитивно).
-    _ensure_columns(
-        conn,
-        "corpus_docs",
-        {"http_status": "INTEGER", "reuse_kind": "TEXT"},
-    )
-    # Таблица ``run_product`` (16 §3.2) создаётся ``CREATE TABLE IF NOT EXISTS`` в DDL —
-    # новые таблицы не требуют ALTER; вызов идемпотентен на любой БД.
-    # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
-    # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
-    # DDL-миграция v3.11.0 (G3/G4 как точки интеграции): решение гейта привязывается к
-    # предмету (``subject_digest``), несёт источник (``source``), ссылку во внешнюю
-    # систему (``external_ref``) и вердикт (``verdict``). Аддитивно: старые строки
-    # получают ``''``/``internal``/``approved`` — прежние прогоны продолжают проходить
-    # гейты без пере-аттестации (обратная совместимость).
-    _ensure_columns(
-        conn,
-        "gate_decisions",
-        {
-            "subject_digest": "TEXT NOT NULL DEFAULT ''",
-            "source": "TEXT NOT NULL DEFAULT 'internal'",
-            "external_ref": "TEXT",
-            "verdict": "TEXT NOT NULL DEFAULT 'approved'",
-        },
-    )
+    # Миграций при открытии нет: гейт версии выше отвергает файл другой версии **до**
+    # любого чтения (``11`` §2.6), поэтому все колонки обязаны быть объявлены в ``DDL``,
+    # а ``ALTER TABLE ... ADD COLUMN`` в штатном открытии не осталось ни одного.
+    # Решение владельца 01.11.2026: шимы не тащим, старая БД отвергается видимо.
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

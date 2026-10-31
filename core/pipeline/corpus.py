@@ -159,7 +159,14 @@ import datetime as _dt
 import json
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import Executor
 from dataclasses import replace
 from functools import partial
@@ -1513,7 +1520,7 @@ def _build_corpus(
     #: Найденные SERP документы, разложенные по авторским корням: ``product → root → urls``.
     #: Второй проход по ним — обычный дренаж тех же корней (глубина 0), не «долив в индекс».
     serp_seeds_by_product: dict[str, dict[str, list[str]]] = {}
-    #: Судьба находок по продуктам (``queued``/``dup``/``blacklisted``/``truncated``).
+    #: Судьба находок по продуктам (``enqueued``/``dup``/``blacklisted``).
     serp_ingest_by_product: dict[str, dict[str, Any]] = {}
     #: 09 §6.3: ``offline`` — ноль сетевых вызовов, и внешний поиск тоже сеть. Контур не
     #: исполняется, но и не молчит: наблюдение называет причину (``not_executed_reason``),
@@ -2121,12 +2128,12 @@ def _build_corpus(
     lane_notes: list[str] = []
 
     # L5 шаг 3: дренаж одного корня вынесен в ``corpus_drain``, чередование корней
-    # продукта — в ``corpus_driver`` (F4b). Фазовые зависимости связываются здесь один раз
-    # (``partial`` не замыкание и не состояние — он только фиксирует аргументы).
-    # Per-продуктные связываются на границе продукта: они пересоздаются на каждой
-    # итерации, и позднее связывание было бы дефектом (B023), а не удобством.
-    _root_lifecycle = partial(
-        corpus_drain.root_lifecycle,
+    # продукта — в ``corpus_driver`` (F4b). Зависимости приходят корню **носителями по
+    # владению** (S2): фазовый скоуп и операции фазы создаются здесь один раз,
+    # продуктовый — на границе продукта. Так точка вызова называет владельца состояния, а
+    # не перечисляет 60 kwargs трёх разных природ.
+    #: Состояние и оси фазы (общее для всех продуктов и корней).
+    _phase_scope = corpus_drain.PhaseDrainScope(
         errors=errors,
         store=store,
         run_id=run_id,
@@ -2135,8 +2142,9 @@ def _build_corpus(
         items=items,
         max_attempts=max_attempts,
         wave_items=wave_items,
-        # Читается из глобала модуля в точке вызова: тест
-        # ``test_split_round_budget_valve_truncates`` подменяет его атрибутом ``corpus``.
+        # Читается из глобала модуля в точке создания носителя (до цикла продуктов):
+        # тест ``test_split_round_budget_valve_truncates`` подменяет его атрибутом
+        # ``corpus``, и подмена обязана попасть в носитель.
         max_waves=_EXECUTOR_MAX_WAVES_PER_ROOT,
         worker_rss_dir=worker_rss_dir,
         extraction_pool=extraction_pool,
@@ -2156,6 +2164,13 @@ def _build_corpus(
         artifact_probes=artifact_probes,
         archive_observations=archive_observations,
         corpus_member_rows=corpus_member_rows,
+        # 17 §4 (F2): режим «краул без конверсии» + адрес durable-очереди.
+        crawl_only=crawl_only,
+        session_id=session,
+    )
+    #: Замкнутые операции фазы (их сигнатуры держат этот модуль и тесты — носитель их
+    #: не переписывает, только называет владельца).
+    _phase_operations = corpus_drain.PhaseDrainOperations(
         emit=emit,
         mark=_mark,
         commit_local=_commit_local,
@@ -2173,10 +2188,30 @@ def _build_corpus(
         note_scheduling=_note_scheduling,
         ingest_member_doc=_ingest_member_doc,
         persist_docs=_persist_docs,
-        # 17 §4 (F2): режим «краул без конверсии» + адрес durable-очереди.
-        crawl_only=crawl_only,
-        session_id=session,
     )
+
+    def _begin_root(
+        plan: corpus_drain.RootPlan,
+        *,
+        product: corpus_drain.ProductDrainScope,
+        phase: corpus_drain.PhaseDrainScope,
+        operations: corpus_drain.PhaseDrainOperations,
+        fetch_pool: Executor | None = None,
+        browser_pool: Executor | None = None,
+    ) -> Generator[corpus_drain.WavePlan, corpus_drain.WaveOutcomes, Any]:
+        """``begin=`` драйвера полос (F4b): генератор корня с его носителями.
+
+        Пулы фетча создаёт **драйвер** на полосу (``lane_width``), поэтому фазовый
+        носитель копируется на корень через :func:`dataclasses.replace`: контейнеры
+        внутри копии остаются общими (копия — не новое состояние), меняются только две
+        ссылки на пулы.
+        """
+        return corpus_drain.root_lifecycle(
+            plan,
+            product=product,
+            phase=replace(phase, fetch_pool=fetch_pool, browser_pool=browser_pool),
+            operations=operations,
+        )
 
     def _lane_width(root: corpus_drain.RootPlan) -> int | None:
         """Ширина пула фетча полосы для корня — та же формула, что у самого корня.
@@ -2427,14 +2462,16 @@ def _build_corpus(
             owner_cache=owner_cache,
         )
 
-        #: I3/§5: наблюдённая судьба SERP-находок этого продукта (``queued``/``dup``/
-        #: ``blacklisted``/``truncated``). Пишется в провенанс контура ниже: «поиск нашёл»
-        #: и «находка вошла в корпус» — разные факты, и второй нельзя выводить из первого.
+        #: I3/§5: наблюдённая судьба SERP-находок этого продукта (``enqueued``/``dup``/
+        #: ``blacklisted``). Пишется в провенанс контура ниже: «поиск нашёл» и «находка
+        #: вошла в корпус» — разные факты, и второй нельзя выводить из первого. Ключа
+        #: ``truncated`` здесь нет: усечения на постановке не бывает (A2/F3 — бюджет
+        #: решается на изъятии), а «поставлена и не изъята» видно числом
+        #: ``queue_remaining`` в провенансе корня.
         serp_ingest: dict[str, Any] = {
             "enqueued": 0,
             "dup": 0,
             "blacklisted": [],
-            "truncated": [],
         }
         #: Находки, разложенные по корням этого продукта (:func:`assign_serp_seeds`).
         serp_seeds_by_root = dict(serp_seeds_by_product.get(str(product_id), {}))
@@ -2608,13 +2645,14 @@ def _build_corpus(
             for url in urls
         }
 
-        # L5 шаг 3: per-продуктное состояние корня связывается здесь, при создании
-        # ``partial``. Раньше это были B023-дефолты замыкания: значения пересоздаются на
+        # L5 шаг 3 / S2: per-продуктное состояние связывается здесь, при создании
+        # носителя. Раньше это были B023-дефолты замыкания: значения пересоздаются на
         # каждой итерации цикла, и привязка в точке определения была единственным
-        # способом не прочитать чужой продукт.
-        _root_begin = partial(
-            _root_lifecycle,
-            product_id,
+        # способом не прочитать чужой продукт. Носитель продуктового скоупа — **общий**
+        # для всех корней продукта, поэтому корни получают ссылку на один объект, а не
+        # копию (копия вернула бы тихий баг: корень обновляет копию, сосед не видит).
+        _product_scope = corpus_drain.ProductDrainScope(
+            pid=product_id,
             ingest=ingest,
             seen_docs=seen_docs,
             seen_chunk_ids=seen_chunk_ids,
@@ -2622,6 +2660,12 @@ def _build_corpus(
             resume_counted=resume_counted,
             revalidation_url_set=revalidation_url_set,
             owner_root=_owner_root,
+        )
+        _root_begin = partial(
+            _begin_root,
+            product=_product_scope,
+            phase=_phase_scope,
+            operations=_phase_operations,
         )
 
         #: Корни, реально дренированные в этом продукте (для leftover-групп каталогов).
@@ -3345,7 +3389,6 @@ def _build_corpus(
                 "enqueued": int(serp_ingest["enqueued"]),
                 "dup": int(serp_ingest["dup"]),
                 "blacklisted": list(serp_ingest["blacklisted"]),
-                "truncated": list(serp_ingest["truncated"]),
             }
 
     # Продукт плана **без записи** в непустом ``urls``: в цикл он не попал (``products``

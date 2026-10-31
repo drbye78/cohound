@@ -6,9 +6,10 @@
 
 * запись/чтение признака не теряет ни одного из трёх состояний:
   ``True`` (частично) / ``False`` (полное) / ``NULL`` (не измерено);
-* строка, созданная **до** v5, читается как «не измерено», а не как «полное»: иначе
-  апгрейд схемы задним числом объявил бы весь накопленный корпус прочитанным целиком;
-* миграция аддитивна (``ALTER TABLE ADD COLUMN``) и не теряет строк.
+* свежая ``state.db`` содержит все четыре колонки частичности, и значение «не измерено»
+  остаётся ``NULL``, а не превращается в ``0`` (``0`` утверждал бы полноту);
+* файл схемы ≤ 5 отвергается видимо (``SchemaVersionMismatch``), а не догоняется
+  ``ALTER TABLE`` при открытии: тихая миграция объявляла бы старую БД новой.
 """
 
 from __future__ import annotations
@@ -16,12 +17,15 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from core.ports.state import DocumentVersionRow
+from core.store.sqlite import SchemaVersionMismatch
 from core.store.state_sqlite import STATE_SCHEMA_VERSION, connect_state
 from core.store.state_store import SqliteStateStore
 
-#: ``document_version`` в редакции до v5: колонок частичности нет. Остальные таблицы
-#: создаст ``STATE_DDL`` (``IF NOT EXISTS``), потому что они от миграции не зависят.
+#: ``document_version`` в редакции до v5: колонок частичности нет, версия схемы не
+#: объявлена вовсе. Гейт (v6) обязан отвергнуть такой файл, а не достроить его.
 V4_DOCUMENT_VERSION_DDL = """
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -91,9 +95,26 @@ def _build_v4(db_path: Path) -> None:
         conn.close()
 
 
-def test_state_schema_version_is_five() -> None:
-    """Частичность — аддитивная правка схемы, поэтому версия сдвинута на v5."""
-    assert STATE_SCHEMA_VERSION == "5"
+def test_state_schema_version_is_six() -> None:
+    """v6 — гейт версии вместо миграции: частичность (v5) уже в объявленном DDL."""
+    assert STATE_SCHEMA_VERSION == "6"
+
+
+def test_document_version_carries_partiality_columns() -> None:
+    """Свежая БД объявляет все четыре колонки частичности (носитель — ``STATE_DDL``)."""
+    conn = connect_state(":memory:")
+    try:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(document_version)")
+        }
+    finally:
+        conn.close()
+    assert {
+        "extract_partial",
+        "extract_partial_reason",
+        "extract_pages_converted",
+        "extract_page_count",
+    } <= columns
 
 
 def test_partiality_round_trips_as_three_states() -> None:
@@ -128,45 +149,25 @@ def test_partiality_round_trips_as_three_states() -> None:
         assert raw["extract_partial"] is None
 
 
-def test_v4_row_reads_as_unknown_and_survives_migration(tmp_path: Path) -> None:
-    """Строка до v5 получает ``NULL`` (= не измерено) и не теряется при миграции."""
+def test_v4_file_is_rejected_instead_of_migrated(tmp_path: Path) -> None:
+    """Файл до v5 получает **отказ**, а не тихий ``ALTER TABLE``: миграции нет.
+
+    Прежняя проверка («строка v4 читается как ``NULL`` после миграции») жила на шиме
+    ``_ADDITIVE_COLUMNS``; его удалили (решение владельца 01.11.2026), поэтому эквивалент
+    переехал на два носителя: свежий ``STATE_DDL`` объявляет колонки
+    (:func:`test_document_version_carries_partiality_columns`), а файл прежней версии
+    отвергается видимо и **не меняется** — иначе он объявил бы себя схемой v6, не будучи ею.
+    """
     db_path = tmp_path / "state.db"
     _build_v4(db_path)
+    before = db_path.read_bytes()
 
-    conn = connect_state(db_path)
-    try:
-        columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(document_version)")
-        }
-        assert {
-            "extract_partial",
-            "extract_partial_reason",
-            "extract_pages_converted",
-            "extract_page_count",
-        } <= columns
-        assert (
-            conn.execute(
-                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-            ).fetchone()["value"]
-            == STATE_SCHEMA_VERSION
-        )
-        old = conn.execute(
-            "SELECT * FROM document_version WHERE doc_version_id = 'dv_old'"
-        ).fetchone()
-        # Строка на месте и признак — «не измерено». Это не «полное»: до v5 признак
-        # никто не сохранял, и выдумывать полноту при миграции нельзя.
-        assert old is not None
-        assert old["extract_partial"] is None
-        assert old["content_hash"] == "h"
-    finally:
-        conn.close()
+    with pytest.raises(SchemaVersionMismatch) as excinfo:
+        connect_state(db_path)
 
-    # Повторное открытие идемпотентно (миграция не плодит второй набор колонок).
-    conn = connect_state(db_path)
-    try:
-        columns = [
-            row["name"] for row in conn.execute("PRAGMA table_info(document_version)")
-        ]
-        assert columns.count("extract_partial") == 1
-    finally:
-        conn.close()
+    message = str(excinfo.value)
+    assert "state.db" in message  # оператор знает, какой файл пересоздавать
+    assert STATE_SCHEMA_VERSION in message
+    assert excinfo.value.code == "schema_version"
+    # Файл не тронут: отказ — не «полумиграция».
+    assert db_path.read_bytes() == before

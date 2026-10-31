@@ -34,6 +34,7 @@ from core.domain.enums import (
     EndpointKind,
     EvidenceState,
     EvidenceType,
+    ExtractionRoute,
     ExtractQueueState,
     FailureKind,
     Gate,
@@ -78,6 +79,13 @@ _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
 #: Канонические значения :class:`FailureKind` — единый набор для валидаторов persisted-полей
 #: (``crawl_session_items.error_kind`` и ``corpus_coverage.blocked``).
 _KNOWN_FAILURE_KINDS: frozenset[str] = frozenset(kind.value for kind in FailureKind)
+
+#: Канонические значения :class:`ExtractionRoute` — для валидатора провенанса очереди
+#: конверсии (``extract_route``): persisted-поле остаётся ``str``, но членство в оси
+#: проверяется, чтобы маршрут не дрейфовал строкой.
+_KNOWN_EXTRACTION_ROUTES: frozenset[str] = frozenset(
+    route.value for route in ExtractionRoute
+)
 
 #: Строковые значения блокирующих классов — для :attr:`CorpusCoverage.blocking_failures`.
 _BLOCKING_FAILURE_VALUES: frozenset[str] = frozenset(
@@ -2120,6 +2128,17 @@ class ExtractQueueItem(BaseModel):
     файл, и «нет пути» означало бы разрыв цепочки evidence до начала конверсии.
     ``level``/``pdf_pipeline`` — условия измерения корня, объявленные краулом: без них
     потребитель не может воспроизвести ``extractor_version`` этого документа.
+    ``fetched_at``…``extract_route`` — провенанс **получения** (``_ExtractRequest``): по
+    ``fetch_mode``/``content_type``/``lang`` выбирается ось ``extract_route``, поэтому
+    потребитель обязан воспроизвести эти условия из строки, а не вывести их заново —
+    иначе тот же документ изъят другим маршрутом и корпус другой при тех же объявленных
+    входах. Для ``pending``/``claimed`` три поля — ``fetched_at``, ``fetch_mode``,
+    ``extract_route`` — обязаны быть непустыми (проверяет
+    :meth:`_validate_pending_has_fetch_provenance`): пустая колонка, читающаяся как
+    ``NULL``, — не «нейтрально», а дыра в цепочке evidence. ``content_type``/``lang``/
+    ``status_code``/``engine`` остаются nullable: у законного получения их может не быть
+    (нет заголовка, retained-байты без ответа сервера, локальный адаптер без имени), и
+    ``None`` там означает «не наблюдалось», а не «производитель забыл».
     """
 
     model_config = _BASE
@@ -2133,6 +2152,19 @@ class ExtractQueueItem(BaseModel):
     level: str = ""
     #: Механизм извлечения PDF, объявленный корнем (``pdf_pipeline``).
     pdf_pipeline: str = ""
+    #: Провенанс получения: ``FetchMode``-примитив (``http|browser|…``).
+    fetch_mode: str | None = None
+    #: HTTP-статус получения (имя — как у поля payload'а ``_ExtractRequest.status_code``;
+    #: тот же факт, что ``crawl_session_items.http_status``).
+    status_code: int | None = None
+    content_type: str | None = None
+    lang: str | None = None
+    #: Чем получено (движок фетча) — часть условий, а не «как получилось».
+    engine: str | None = None
+    #: ``ExtractionRoute``-примитив: ось извлечения, выбранная потребителем при ``claimed``.
+    extract_route: str | None = None
+    #: Время получения как объявленная координата (не wall-clock чтения очереди).
+    fetched_at: str | None = None
     state: ExtractQueueState = ExtractQueueState.PENDING
     attempts: int = 0
     enqueued_at: str
@@ -2160,6 +2192,43 @@ class ExtractQueueItem(BaseModel):
                 raise ValueError(
                     f"state={self.state.value} требует непустых {', '.join(missing)}: "
                     "без адреса retained-байтов и его хеша конверсия не воспроизводима (I19)"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_pending_has_fetch_provenance(self) -> ExtractQueueItem:
+        """``pending``/``claimed`` обязаны нести провенанс получения документа.
+
+        Контракт очереди — не только «байты на диске», но и **условия получения**:
+        потребитель (F6) строит из строки ``_ExtractRequest`` (``raw_path, url,
+        fetched_at, fetch_mode, lang, status_code, content_type, engine, route, level,
+        pdf_pipeline``) и не вправе вывести их заново. Без ``fetched_at``/``fetch_mode``/
+        ``extract_route`` он подставит своё: другой ``route`` даёт другой
+        ``extractor_version``/``doc_version_id``/``chunk_id``, то есть другой корпус при
+        тех же объявленных входах (I19, A3).
+
+        Терминальные состояния не проверяются: ``done``/``failed``/``skipped`` — исход
+        конверсии, а не обещание воспроизводимости. ``content_type``/``lang``/
+        ``status_code``/``engine`` в обязательный набор не входят: «не наблюдалось» —
+        законное значение этих колонок (нет заголовка, retained-байты без ответа сервера,
+        локальный адаптер без имени).
+        """
+        if self.state in (ExtractQueueState.PENDING, ExtractQueueState.CLAIMED):
+            missing = [
+                name
+                for name in ("fetched_at", "fetch_mode", "extract_route")
+                if not str(getattr(self, name) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"state={self.state.value} требует непустых {', '.join(missing)}: "
+                    "без провенанса получения конверсия не воспроизводит условия "
+                    "измерения этого документа (I19, A3)"
+                )
+            if self.extract_route not in _KNOWN_EXTRACTION_ROUTES:
+                raise ValueError(
+                    f"extract_route={self.extract_route!r} вне ExtractionRoute "
+                    f"(допустимо: {', '.join(sorted(_KNOWN_EXTRACTION_ROUTES))})"
                 )
         return self
 

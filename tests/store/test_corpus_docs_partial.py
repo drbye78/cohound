@@ -23,6 +23,7 @@ from core.domain import (
     RunManifest,
     RunMode,
 )
+from core.store.sqlite import DDL, SCHEMA_VERSION, SchemaVersionMismatch
 from core.store.sqlite_store import SqliteStore
 
 RUN_ID = "run-partial"
@@ -91,8 +92,32 @@ def test_corpus_doc_full_read_roundtrips_without_partial_marks(
     assert row["partial"] == 0
     assert row["partial_reason"] is None
 
-def test_corpus_docs_partial_columns_migrate_additively(tmp_path: Path) -> None:
-    """Старая ``corpus_docs`` без колонок получает их аддитивно (``schema_version`` цел)."""
+def test_corpus_docs_partial_columns_are_declared(store: SqliteStore) -> None:
+    """Колонки частичности объявлены в ``DDL`` свежей БД, а не досоздаются при открытии.
+
+    Прежняя проверка («старая ``corpus_docs`` получает колонки аддитивно») держалась на
+    шиме ``_ensure_columns``. Шим удалён (``SCHEMA_VERSION`` 3.14.0), поэтому проверка
+    переехала на новый носитель: набор колонок обязан быть в ``CREATE TABLE``, иначе
+    открытие старой БД осталось бы единственным способом их получить, а такого пути нет.
+    """
+    cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(corpus_docs)")}
+    assert {
+        "partial",
+        "partial_reason",
+        "page_count",
+        "pages_converted",
+        "extracted_chars",
+    } <= cols
+
+    # Значения по умолчанию читаются без записи: частичности нет, чисел нет (не выдуманы).
+    store.upsert_corpus_doc(_doc("p1:defaults"))
+    read = {item.doc_id: item for item in store.iter_corpus_docs(RUN_ID)}
+    assert read["p1:defaults"].partial is False
+    assert read["p1:defaults"].partial_reason is None
+
+
+def test_legacy_corpus_docs_file_is_rejected(tmp_path: Path) -> None:
+    """Файл без версии схемы и без колонок — отказ, а не тихий ``ALTER TABLE``."""
     path = tmp_path / "legacy.db"
     legacy = sqlite3.connect(path)
     legacy.execute(
@@ -101,49 +126,13 @@ def test_corpus_docs_partial_columns_migrate_additively(tmp_path: Path) -> None:
         " fetched_at TEXT, content_hash TEXT, raw_path TEXT,"
         " extractor_version TEXT, render_mode TEXT, lang TEXT)"
     )
-    legacy.execute(
-        "INSERT INTO corpus_docs (doc_id, product_id, url)"
-        " VALUES ('p1:old', 'p1', 'https://docs.test/p1/old')"
-    )
     legacy.commit()
     legacy.close()
+    before = path.read_bytes()
 
-    store = SqliteStore(path)
-    try:
-        cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(corpus_docs)")}
-        assert {
-            "partial",
-            "partial_reason",
-            "page_count",
-            "pages_converted",
-            "extracted_chars",
-        } <= cols
-    finally:
-        store.close()
-
-    # Старая строка читается как «полная»: выдумывать частичность из отсутствия
-    # колонки нельзя, а падать на исторической БД — тем более.
-    store = SqliteStore(path)
-    try:
-        store.create_run(
-            RUN_ID,
-            RunConfig(
-                case_id="case",
-                anchor="p1",
-                cohort="cohort.yaml",
-                products=["p1"],
-                package="pkg",
-                focus=Focus(),
-                snapshot_date=_dt.date(2026, 1, 1),
-                mode=RunMode.STRICT,
-                ranking_policy=RankingPolicy.CAPABILITY_RANKED,
-            ),
-        )
-        read = {item.doc_id: item for item in store.iter_corpus_docs(RUN_ID)}
-        assert read["p1:old"].partial is False
-        assert read["p1:old"].partial_reason is None
-    finally:
-        store.close()
+    with pytest.raises(SchemaVersionMismatch):
+        SqliteStore(path)
+    assert path.read_bytes() == before
 
 def test_manifest_partial_docs_block_roundtrips(store: SqliteStore) -> None:
     """Блок ``partial_docs`` манифеста переживает ``persist_manifest``→``read_manifest``."""
@@ -280,37 +269,75 @@ def test_corpus_doc_version_mapping_is_per_product(store: SqliteStore) -> None:
 
     assert store.iter_corpus_doc_versions(RUN_ID, "p1") == {"dv_mine": "p1:mine"}
 
-def test_legacy_corpus_docs_without_observation_columns_read(tmp_path: Path) -> None:
-    """БД ``3.13.0`` без новых колонок: документ читается, наблюдение — «не записано».
+def _create_sql(table: str) -> str:
+    """``CREATE TABLE`` текущей схемы — ровно как он записан в ``sqlite_master``."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(DDL)
+        return str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
 
-    Чтение идёт через ``_has_column``: колонка, добавленная позже, в read-only файле
-    отсутствует, и отсутствие обязано значить «значение не записано», а не сбой чтения.
+
+def _create_sql_without(table: str, columns: tuple[str, ...]) -> str:
+    """Тот же ``CREATE TABLE``, но без объявлений указанных колонок.
+
+    Исторический (или повреждённый) файл строится из **настоящего** DDL, а не из
+    ``ALTER TABLE ... DROP COLUMN``: SQLite падает на повторном DROP при комментариях
+    внутри определения таблицы, а нам нужна форма файла, а не борьба с его планировщиком.
+    """
+    sql = _create_sql(table)
+    kept = [
+        line
+        for line in sql.splitlines()
+        if not any(line.strip().startswith(name + " ") for name in columns)
+    ]
+    # Последняя оставшаяся колонка не должна нести запятую: иначе ``... INTEGER,)``.
+    for index in range(len(kept) - 1, -1, -1):
+        stripped = kept[index].strip()
+        if not stripped or stripped == ")" or stripped.startswith("--"):
+            continue
+        code, sep, comment = kept[index].partition("--")
+        if code.rstrip().endswith(","):
+            kept[index] = code.rstrip()[:-1] + (sep + comment if sep else "")
+        break
+    return "\n".join(kept)
+
+
+def test_legacy_corpus_docs_without_observation_columns_read(tmp_path: Path) -> None:
+    """БД без колонок наблюдения: документ читается, наблюдение — «не записано».
+
+    Гейт отвергает файл другой версии, поэтому кейс формулируется честно: файл объявляет
+    **текущую** версию, но колонок наблюдения не имеет (пересобранный/повреждённый).
+    Чтение идёт через ``_has_column``: отсутствие обязано значить «значение не записано»,
+    а не сбой чтения.
     """
     path = tmp_path / "legacy.db"
-    store = SqliteStore(path)
-    store.create_run(
-        RUN_ID,
-        RunConfig(
-            case_id="case",
-            anchor="p1",
-            cohort="cohort.yaml",
-            products=["p1"],
-            package="pkg",
-            focus=Focus(),
-            snapshot_date=_dt.date(2026, 1, 1),
-            mode=RunMode.STRICT,
-            ranking_policy=RankingPolicy.CAPABILITY_RANKED,
-        ),
-    )
-    store.upsert_corpus_doc(_doc("p1:old"))
-    store.close()
-
-    raw = sqlite3.connect(path)
-    raw.execute("ALTER TABLE corpus_docs DROP COLUMN http_status")
-    raw.execute("ALTER TABLE corpus_docs DROP COLUMN reuse_kind")
-    raw.execute("DROP TABLE corpus_doc_version")
-    raw.commit()
-    raw.close()
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(DDL.replace(_create_sql("corpus_docs"), _create_sql_without("corpus_docs", ("http_status", "reuse_kind"))))
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+            (SCHEMA_VERSION,),
+        )
+        # Минимальная строка прогона: читатель корпуса проверяет его существование.
+        conn.execute(
+            "INSERT INTO runs (run_id, created_at, mode, case_id, anchor_product_id)"
+            " VALUES (?, '2026-01-01T00:00:00Z', 'strict', 'case', 'p1')",
+            (RUN_ID,),
+        )
+        conn.execute(
+            "INSERT INTO corpus_docs (doc_id, product_id, url)"
+            " VALUES ('p1:old', 'p1', 'https://docs.test/p1/old')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     legacy = SqliteStore(path, read_only=True)
     try:

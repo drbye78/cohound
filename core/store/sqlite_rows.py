@@ -390,7 +390,14 @@ def _row_to_crawl_item(row: sqlite3.Row) -> CrawlSessionItem:
 
 
 def _row_to_extract_queue_item(row: sqlite3.Row) -> ExtractQueueItem:
-    """Восстанавливает ``ExtractQueueItem`` из строки ``extract_queue`` (17 §4.1)."""
+    """Восстанавливает ``ExtractQueueItem`` из строки ``extract_queue`` (17 §4.1).
+
+    Провенанс получения читается через ``_row_optional``: отсутствие колонки должно давать
+    ``None``, а не ``KeyError`` — так отказ называет **поле контракта**, которого нет, и
+    выносит его доменный валидатор (``pending``/``claimed`` без провенанса отвергаются с
+    именем поля). Терминальные состояния ``NULL`` разрешают по построению, поэтому чтение
+    остаётся возможным и для строк, которые потребитель уже закрыл.
+    """
     attempts = row["attempts"]
     return ExtractQueueItem(
         session_id=row["session_id"],
@@ -400,6 +407,13 @@ def _row_to_extract_queue_item(row: sqlite3.Row) -> ExtractQueueItem:
         raw_path=row["raw_path"],
         level=row["level"],
         pdf_pipeline=row["pdf_pipeline"],
+        fetch_mode=_row_optional(row, "fetch_mode"),
+        status_code=_row_optional(row, "status_code"),
+        content_type=_row_optional(row, "content_type"),
+        lang=_row_optional(row, "lang"),
+        engine=_row_optional(row, "engine"),
+        extract_route=_row_optional(row, "extract_route"),
+        fetched_at=_row_optional(row, "fetched_at"),
         state=ExtractQueueState(row["state"]),
         attempts=0 if attempts is None else int(attempts),
         enqueued_at=row["enqueued_at"],

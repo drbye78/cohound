@@ -7,6 +7,10 @@
 прогон с ``crawl_only=False`` собирает корпус — то есть режим меняет именно конверсию,
 а не краул.
 
+Строка очереди проверяется как **контракт передачи условий измерения**: провенанс
+получения (``fetched_at``/``fetch_mode``/``extract_route``/``content_type``/``engine``)
+берётся из наблюдённого ответа, а повторная запись того же URL не перезаписывает строку.
+
 Фейки локальные и нейтральные (§1.3): ``p1``, ``docs.test``. Сеть не используется.
 """
 
@@ -39,6 +43,7 @@ from core.ports.types import (
     Chunk,
     ExtractedDoc,
     ExtractionRoute,
+    FetchMode,
     FetchPlan,
     RawPage,
 )
@@ -128,12 +133,17 @@ class _Crawler:
 
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта
         self.calls.append(url)
+        # Наблюдённый ответ: провенанс получения (тип/статус/движок) — то, что несёт
+        # ``_ExtractRequest`` документа и что обязана повторить строка очереди.
         return RawPage(
             url=url,
             content=self.pages[url],
             fetched_at=TS,
             fetch_mode=plan.fetch,
             lang="en",
+            status_code=200,
+            content_type="text/html",
+            engine=self.engine,
         )
 
 
@@ -273,6 +283,65 @@ def test_crawl_only_fetches_but_does_not_build_corpus(tmp_path: Path) -> None:
             if row.status is CrawlItemStatus.FETCHED
         }
         assert fetched == {item.url for item in queue}
+    finally:
+        store.close()
+
+
+def test_crawl_only_queue_carries_observed_fetch_provenance(tmp_path: Path) -> None:
+    """Producer заполняет провенанс получения из наблюдённого ответа (F6, I19).
+
+    Потребитель конверсии строит ``_ExtractRequest`` **из строки**, а не из конфига:
+    ``fetch_mode``/``content_type``/``lang`` участвуют в выборе маршрута, ``engine`` —
+    в провенансе получения. Пустая колонка, читающаяся как ``NULL``, означала бы, что
+    потребитель выведет условия сам и получит другой ``extractor_version`` — то есть
+    другой корпус при тех же объявленных входах (A3).
+
+    Здесь же проверяется, что повторный прогон по тем же URL **не перезаписывает**
+    строку (``ON CONFLICT DO NOTHING``): состояние и адрес факта принадлежат потребителю.
+    """
+    store = SqliteStore(":memory:")
+    crawler = _Crawler(_two_host_pages())
+    try:
+        _build(tmp_path, store, crawler, _Extractor(), _Chunker(), crawl_only=True)
+
+        queue = {item.url: item for item in store.iter_extract_queue(SESSION_ID)}
+        assert set(queue) == set(crawler.calls)
+        for item in queue.values():
+            # Наблюдённые значения ответа — ровно те, что ушли бы в заявку экстракции.
+            assert item.fetched_at == TS  # момент получения, а не момент коммита
+            assert item.fetch_mode == FetchMode.HTTP.value
+            assert item.extract_route == ExtractionRoute.AUTO.value
+            assert item.content_type == "text/html"
+            assert item.status_code == 200
+            assert item.engine == "http"
+            assert item.lang == "en"
+
+        # Потребитель забрал один документ: состояние строки принадлежит ему.
+        taken_url = sorted(queue)[0]
+        store.conn.execute(
+            "UPDATE extract_queue SET state = ?, enqueued_at = ?"
+            " WHERE session_id = ? AND url = ?",
+            (
+                ExtractQueueState.DONE.value,
+                "2026-01-01T00:00:09+00:00",
+                SESSION_ID,
+                taken_url,
+            ),
+        )
+
+        # Повторный прогон: те же URL уже ``FETCHED`` в сеансе ⇒ resume из retained-байтов.
+        second = _Crawler(_two_host_pages())
+        _build(tmp_path, store, second, _Extractor(), _Chunker(), crawl_only=True)
+        assert second.calls == []  # живого фетча не было — проверяется именно запись строки
+
+        again = {item.url: item for item in store.iter_extract_queue(SESSION_ID)}
+        assert set(again) == set(queue)
+        assert again[taken_url].state is ExtractQueueState.DONE
+        assert again[taken_url].enqueued_at == "2026-01-01T00:00:09+00:00"
+        for url, item in queue.items():
+            assert again[url].fetched_at == item.fetched_at
+            assert again[url].raw_path == item.raw_path
+            assert again[url].content_hash == item.content_hash
     finally:
         store.close()
 

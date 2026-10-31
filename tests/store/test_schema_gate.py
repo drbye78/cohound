@@ -1,9 +1,10 @@
 """Гейт версии схемы run DB (`11` §2.6): старая БД отвергается сообщением, а не читается молча.
 
-Прогон — durable-артефакт, но **не** переносится между версиями схемы: аддитивные дельты
-сделали бы «старую» строку неотличимой от «новой», и прогон объявлял бы условия измерения,
-которых не применял. Проверяется: отказ с обоими номерами версий, отсутствие трейсбека в CLI
-(сообщение + ``EXIT_USAGE``) и то, что свежая БД открывается повторно (идемпотентность).
+Прогон — durable-артефакт, но **не** переносится между версиями схемы. Проверяется: отказ с
+обоими номерами версий и путём файла, отсутствие трейсбека в CLI (сообщение + ``EXIT_USAGE``),
+идемпотентность открытия свежей БД и полнота объявленной схемы — все колонки, которые до
+3.14.0 досоздавались шимом ``_ensure_columns``, обязаны быть в ``DDL`` (иначе открытие
+старой БД было бы единственным способом их получить, а такого пути больше нет).
 Нейтральные фикстуры (§1.3), сеть не используется.
 """
 
@@ -119,15 +120,130 @@ def test_cli_reports_schema_mismatch_in_json(
     assert "3.10.0" in payload["message"]
 
 
-def test_boundary_columns_exist_on_fresh_db_and_version_is_not_bumped() -> None:
-    """Граница ``runs`` (16 §3): аддитивные колонки и таблица ``run_product`` — без bump.
+#: Колонки, которые до 3.14.0 досоздавались при открытии (``_ensure_columns``). Теперь они
+#: обязаны быть объявлены в ``DDL``; список остаётся здесь **данными**, поэтому удаление
+#: колонки из ``DDL`` роняет проверку, а не проходит незамеченным.
+FORMER_SHIM_COLUMNS: dict[str, tuple[str, ...]] = {
+    "runs": (
+        "settings_provenance_json",
+        "crawl_provenance_json",
+        "crawl_strategy",
+        "crawl_rate_limit",
+        "crawl_config_digest",
+        "registry_spec_digest",
+        "execution_contract_digest",
+        "manual_artifacts_digest",
+        "manual_artifacts_json",
+        "partial_docs_json",
+        "publishability_json",
+        "ranking_epsilon",
+        "deploy_profile",
+        "edge_schema_version",
+        "edge_capabilities_json",
+        "run_scope",
+        "product_plan_json",
+        "embed_device",
+        "previous_run_id",
+        "change_class",
+        "cycle_id",
+        "cohort_digest",
+        "seeds_digest",
+    ),
+    "cells": (
+        "review_reason",
+        "evidence_scope",
+        "absence_rule",
+        "measurement_origin",
+        "carried_from_run_id",
+        "cell_reuse_key",
+    ),
+    "llm_scenarios": ("endpoint_host", "max_tokens"),
+    "cell_evidence": ("scope_acceptance", "partition_build_id", "doc_version_id"),
+    "corpus_chunks": ("extractor_version",),
+    "index_manifest": ("extractor_version", "content_digest", "partition_build_id"),
+    "crawl_session_items": ("depth", "doc_hash"),
+    "corpus_coverage": (
+        "unreadable_origins_json",
+        "partial_blocks_json",
+        "reason",
+        "resolved_manually",
+    ),
+    "corpus_docs": (
+        "origin",
+        "partial",
+        "partial_reason",
+        "page_count",
+        "pages_converted",
+        "extracted_chars",
+        "http_status",
+        "reuse_kind",
+    ),
+    "gate_decisions": ("subject_digest", "source", "external_ref", "verdict"),
+}
 
-    ``SCHEMA_VERSION`` здесь пинуется намеренно: подъём версии на аддитивном изменении
-    (11 §2.6) отверг бы уже завершённые прогоны, то есть выполнимое требование «старые
-    прогоны остаются читаемыми» было бы нарушено. Пин — единственный способ заметить
-    случайный bump в ревью, а не в живом чтении.
+
+def test_fresh_db_declares_every_former_shim_column() -> None:
+    """Каждая колонка из бывших ``_ensure_columns`` объявлена в ``DDL`` свежей БД."""
+    conn = connect(":memory:")
+    try:
+        for table, columns in FORMER_SHIM_COLUMNS.items():
+            have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            missing = sorted(set(columns) - have)
+            assert not missing, f"{table}: колонки не объявлены в DDL: {missing}"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "declared_type", "not_null", "default"),
+    [
+        # Тип/ограничения перенесены из шима ровно как были: читатель опирается на дефолт,
+        # а не на «допишем при открытии».
+        ("cells", "measurement_origin", "TEXT", True, "'observed'"),
+        ("corpus_docs", "origin", "TEXT", True, "'crawl'"),
+        ("corpus_docs", "partial", "INTEGER", True, "0"),
+        ("corpus_coverage", "unreadable_origins_json", "TEXT", True, "'[]'"),
+        ("corpus_coverage", "partial_blocks_json", "TEXT", True, "'{}'"),
+        ("corpus_coverage", "resolved_manually", "INTEGER", True, "0"),
+        ("gate_decisions", "subject_digest", "TEXT", True, "''"),
+        ("gate_decisions", "source", "TEXT", True, "'internal'"),
+        ("gate_decisions", "verdict", "TEXT", True, "'approved'"),
+        ("crawl_session_items", "depth", "INTEGER", False, None),
+        ("runs", "ranking_epsilon", "REAL", False, None),
+    ],
+)
+def test_shim_column_types_and_defaults_are_preserved(
+    table: str,
+    column: str,
+    declared_type: str,
+    not_null: bool,
+    default: str | None,
+) -> None:
+    """Тип, ``NOT NULL`` и ``DEFAULT`` перенесённой колонки совпадают с прежним шимом."""
+    conn = connect(":memory:")
+    try:
+        info = {
+            r["name"]: r for r in conn.execute(f"PRAGMA table_info({table})")
+        }
+    finally:
+        conn.close()
+    assert column in info, f"{table}.{column} не объявлена"
+    row = info[column]
+    assert row["type"] == declared_type
+    assert bool(row["notnull"]) is not_null
+    assert row["dflt_value"] == default
+
+
+def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
+    """Граница ``runs``/``corpus_docs`` (16 §3) объявлена в DDL; версия — пин.
+
+    ``SCHEMA_VERSION`` пинуется намеренно: 3.14.0 — это версия, в которой шимы
+    (``_ensure_columns``) свёрнуты в ``DDL``, то есть **отказ** всем файлам ≤ 3.13.0.
+    Случайный bump здесь так же опасен, как случайное отсутствие bump: и то и другое
+    меняет множество читаемых прогонов, поэтому пин — единственный способ увидеть это в
+    ревью, а не в живом чтении.
     """
-    assert SCHEMA_VERSION == "3.13.0"
+    assert SCHEMA_VERSION == "3.14.0"
 
     conn = connect(":memory:")
     try:
@@ -182,46 +298,25 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_not_bumped() -> None:
         conn.close()
 
 
-def test_3_13_0_db_without_boundary_columns_is_accepted_and_migrated(
-    tmp_path: Path,
-) -> None:
-    """Файл той же версии без новых колонок читается и получает их (аддитивность).
+def test_3_13_0_db_is_rejected_and_left_untouched(tmp_path: Path) -> None:
+    """Файл прежней версии — **отказ**, а не тихий ``ALTER TABLE`` при открытии.
 
-    Это и есть смысл отказа от bump: граница применяется сразу после ``report``, и ни один
-    существующий ``runs/*/cohound.db`` не теряется.
+    Прежняя проверка («файл той же версии без новых колонок принимается и мигрирует»)
+    держалась на шиме ``_ensure_columns``. Шим удалён вместе с ``SCHEMA_VERSION`` 3.14.0,
+    поэтому эквивалент переехал на два носителя: свежий ``DDL`` объявляет колонки
+    (:func:`test_fresh_db_declares_every_former_shim_column`), а чужой файл отвергается
+    видимо и не меняется — иначе он объявил бы себя схемой 3.14.0, не будучи ею.
     """
-    db = tmp_path / "cohound.db"
-    conn = connect(db)
-    try:
-        for column in ("run_scope", "product_plan_json", "embed_device"):
-            conn.execute("ALTER TABLE runs DROP COLUMN " + column)
-        for column in ("http_status", "reuse_kind"):
-            conn.execute("ALTER TABLE corpus_docs DROP COLUMN " + column)
-        conn.execute("DROP TABLE run_product")
-        conn.commit()
-        # Версия в файле — та же (bump не делался), поэтому гейт молчит.
-        row = conn.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()
-        assert row["value"] == SCHEMA_VERSION
-    finally:
-        conn.close()
+    db = _legacy_db(tmp_path / "cohound.db", "3.13.0")
+    before = db.read_bytes()
 
-    migrated = connect(db)
-    try:
-        runs_cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
-        assert {"run_scope", "product_plan_json", "embed_device"} <= runs_cols
-        docs_cols = {
-            r["name"] for r in migrated.execute("PRAGMA table_info(corpus_docs)")
-        }
-        assert {"http_status", "reuse_kind"} <= docs_cols
-        tables = {
-            r["name"]
-            for r in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        assert "run_product" in tables
-    finally:
-        migrated.close()
+    with pytest.raises(SchemaVersionMismatch) as excinfo:
+        connect(db)
+
+    message = str(excinfo.value)
+    assert "3.13.0" in message
+    assert SCHEMA_VERSION in message
+    assert db.read_bytes() == before
 
 
 if __name__ == "__main__":  # pragma: no cover

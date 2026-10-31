@@ -29,6 +29,7 @@ from core.domain.models import RateLimitSpec
 from core.edge.config import EdgeRuntimeConfig
 from core.edge.crawler_factory import crawler_factory
 from core.edge.scheduler import (
+    EDGE_JOBS_SCHEMA_VERSION,
     ITEM_CANCELLED,
     ITEM_FETCHED,
     ITEM_PENDING,
@@ -44,6 +45,7 @@ from core.edge.seam_schema import validate_crawl_request
 from core.ports.crawl_executor import CrawlWorkItem
 from core.ports.types import FetchPlan, RawPage
 from core.util.rate_limit import RateLimiter
+from core.util.schema_gate import SchemaVersionMismatch
 
 _FIXED_TIME = "2026-01-01T00:00:00+00:00"
 _CONTENT = b"<html>scheduled body</html>"
@@ -350,7 +352,7 @@ def test_schema_created_idempotently(make_scheduler: Any) -> None:
         row[0]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
-    assert {"edge_jobs", "edge_job_items"} <= names
+    assert {"edge_jobs", "edge_job_items", "schema_meta"} <= names
     indexes = {
         row[0]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
@@ -1012,6 +1014,9 @@ def test_edge_conditional_fetch_roundtrip(make_scheduler: Any) -> None:
 
 
 _OLD_SCHEMA = """
+-- Схема ``edge_jobs.db`` **до** версии 1 (волна S): без ``schema_meta`` и без
+-- аддитивных колонок ``edge_job_items``. Такой файл обязан быть отвергнут по версии, а
+-- не «догнан» миграцией при открытии.
 CREATE TABLE edge_jobs (
     job_id          TEXT PRIMARY KEY,
     run_id          TEXT NOT NULL,
@@ -1055,58 +1060,180 @@ CREATE TABLE edge_job_items (
 """
 
 
-def test_edge_schema_migration_adds_final_url(make_scheduler: Any, tmp_path: Path) -> None:
-    """§6a/§11.6.6: старая ``edge_jobs.db`` доливается колонками, строки целы.
+#: Колонки ``edge_job_items``, которые до волны S доливались ``ALTER TABLE`` при открытии.
+#: Список — **данными теста**, а не импортом из модуля: удаление колонки из ``_SCHEMA``
+#: обязано падать здесь. Импорт константы из ``core.edge.scheduler`` сделал бы проверку
+#: тавтологией (сверили бы DDL сам с собой).
+_FORMER_MIGRATED_COLUMNS: tuple[str, ...] = (
+    "robots",
+    "final_url",
+    "rate_limit",
+    "if_none_match",
+    "if_modified_since",
+    "etag",
+    "last_modified",
+    "not_modified",
+)
 
-    ``CREATE TABLE IF NOT EXISTS`` не расширяет существующую таблицу — миграция обязана
-    добавить ``robots``/``final_url``/``rate_limit`` и колонки условного фетча
-    идемпотентно, не трогая строки.
-    """
-    db_path = tmp_path / "edge_jobs.db"
-    legacy = sqlite3.connect(str(db_path))
+#: Индексы, которые обязана объявлять схема (волна S: ``CREATE INDEX IF NOT EXISTS`` в
+#: ``_SCHEMA``, а не после ``ALTER TABLE``).
+_EXPECTED_INDEXES: frozenset[str] = frozenset({"idx_edge_job_items_job_status"})
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Имена колонок таблицы (``PRAGMA table_info``)."""
+    # Имя таблицы — литерал теста (значение параметра, не пользовательский ввод).
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
+
+
+def _declared_version(conn: sqlite3.Connection) -> str | None:
+    """Версия схемы, объявленная файлом (``schema_meta.schema_version``)."""
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    return None if row is None else str(row["value"])
+
+
+def _legacy_edge_db(path: Path, version: str | None) -> Path:
+    """Файл прежней схемы с (опционально) объявленной **чужой** версией."""
+    conn = sqlite3.connect(str(path))
     try:
-        legacy.executescript(_OLD_SCHEMA)
-        with legacy:
-            legacy.execute(
-                "INSERT INTO edge_jobs (job_id, run_id, session_id, idempotency_key, status,"
-                " total, pending, running, fetched, failed, cancelled, created_at, started_at)"
-                " VALUES ('jold', 'r1', 's1', 'kold', 'completed', 1, 0, 0, 1, 0, 0, ?, ?)",
-                (_FIXED_TIME, _FIXED_TIME),
+        conn.executescript(_OLD_SCHEMA)
+        if version is not None:
+            conn.executescript(
+                "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
             )
-            legacy.execute(
-                "INSERT INTO edge_job_items (job_id, product_id, url, status, content_hash)"
-                " VALUES ('jold', 'p1', 'https://x.test/old', 'fetched', 'legacy-hash')"
+            conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (version,),
             )
-        legacy.commit()
+        conn.commit()
     finally:
-        legacy.close()
+        conn.close()
+    return path
+
+
+def test_fresh_db_declares_every_former_migrated_column(make_scheduler: Any) -> None:
+    """Волна S: колонки, прежде досоздаваемые ``ALTER TABLE``, объявлены в ``_SCHEMA``.
+
+    Миграции при открытии больше нет ни одной, поэтому пропущенная в ``CREATE TABLE``
+    колонка — дефект DDL. Проверка идёт по списку-данным (``_FORMER_MIGRATED_COLUMNS``):
+    свежая ``edge_jobs.db`` обязана содержать **все** прежние аддитивные колонки.
+    """
+    scheduler = make_scheduler()
+    conn = scheduler._connect()
+    missing = sorted(set(_FORMER_MIGRATED_COLUMNS) - _columns(conn, "edge_job_items"))
+    assert not missing, f"edge_job_items: колонки не объявлены в _SCHEMA: {missing}"
+
+
+def test_fresh_db_declares_every_index(make_scheduler: Any) -> None:
+    """Волна S: индексы объявлены в ``_SCHEMA``, а не создаются на пути миграции."""
+    scheduler = make_scheduler()
+    conn = scheduler._connect()
+    indexes = {
+        str(row["name"])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+            " AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    missing = sorted(_EXPECTED_INDEXES - indexes)
+    assert not missing, f"индексы не объявлены в _SCHEMA: {missing}"
+
+
+@pytest.mark.parametrize("version", ["0", "2", "3.13.0", "99"])
+def test_foreign_version_rejected_and_file_untouched(
+    make_scheduler: Any, tmp_path: Path, version: str
+) -> None:
+    """Чужая версия — отказ с путём файла; содержимое файла не меняется ни на байт.
+
+    ``PRAGMA journal_mode = WAL`` пишет заголовок файла, поэтому гейт обязан стоять
+    **до** него: иначе отказ оставлял бы файл в другом режиме журнала.
+    """
+    db_path = _legacy_edge_db(tmp_path / "edge_jobs.db", version)
+    before = db_path.read_bytes()
+    names_before = sorted(p.name for p in tmp_path.iterdir())
 
     scheduler = make_scheduler(state_dir=tmp_path)
-    scheduler.start()  # recovery + миграция
+    with pytest.raises(SchemaVersionMismatch) as excinfo:
+        scheduler._connect()
+
+    message = str(excinfo.value)
+    assert "edge_jobs.db" in message  # оператор знает, какой файл пересоздавать
+    assert version in message  # что объявлено
+    assert EDGE_JOBS_SCHEMA_VERSION in message  # что ожидает код
+    assert "schema_version" in message  # что именно сверялось
+    assert excinfo.value.code == "schema_version"
+    assert not message.startswith("schema_version:")
+    assert "пересоздайте файл" in message
+    assert db_path.read_bytes() == before  # файл не меняется
+    assert sorted(p.name for p in tmp_path.iterdir()) == names_before  # ни -wal, ни -shm
+
+
+def test_tables_without_declared_version_rejected(
+    make_scheduler: Any, tmp_path: Path
+) -> None:
+    """Таблицы есть, ``schema_version`` нет — это не «новый файл», а файл чужой схемы."""
+    db_path = _legacy_edge_db(tmp_path / "edge_jobs.db", None)
+    before = db_path.read_bytes()
+
+    scheduler = make_scheduler(state_dir=tmp_path)
+    with pytest.raises(SchemaVersionMismatch) as excinfo:
+        scheduler._connect()
+
+    message = str(excinfo.value)
+    assert "не объявляет schema_version" in message
+    assert EDGE_JOBS_SCHEMA_VERSION in message
+    assert "edge_jobs.db" in message
+    assert db_path.read_bytes() == before
+
+
+def test_empty_file_opens_and_declares_current_version(
+    make_scheduler: Any, tmp_path: Path
+) -> None:
+    """Пустой файл: сверять нечего — схема создаётся с нуля и объявляет текущую версию."""
+    db_path = tmp_path / "edge_jobs.db"
+    db_path.touch()
+
+    scheduler = make_scheduler(state_dir=tmp_path)
     conn = scheduler._connect()
-    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(edge_job_items)")}
-    assert {
-        "final_url",
-        "rate_limit",
-        "robots",
-        "if_none_match",
-        "if_modified_since",
-        "etag",
-        "last_modified",
-        "not_modified",
-    } <= columns
 
-    # Существующая строка цела (не пересоздана, значения сохранены).
-    row = conn.execute(
-        "SELECT url, status, content_hash FROM edge_job_items WHERE job_id = 'jold'"
-    ).fetchone()
-    assert row["url"] == "https://x.test/old"
-    assert row["status"] == "fetched"
-    assert row["content_hash"] == "legacy-hash"
+    assert _declared_version(conn) == EDGE_JOBS_SCHEMA_VERSION
+    tables = {
+        str(row["name"])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+            " AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert {"edge_jobs", "edge_job_items", "schema_meta"} <= tables
+    assert set(_FORMER_MIGRATED_COLUMNS) <= _columns(conn, "edge_job_items")
 
-    # Идемпотентность: повторная миграция — no-op (набор колонок не меняется).
-    scheduler._migrate(conn)
-    assert {str(r[1]) for r in conn.execute("PRAGMA table_info(edge_job_items)")} == columns
+
+def test_reopen_is_idempotent_and_keeps_rows(
+    make_scheduler: Any, tmp_path: Path
+) -> None:
+    """Повторное открытие текущей БД: та же версия, те же колонки, строки целы."""
+    first = make_scheduler(state_dir=tmp_path)
+    conn = first._connect()
+    columns_first = _columns(conn, "edge_job_items")
+    conn.execute(
+        "INSERT INTO edge_jobs (job_id, run_id, session_id, idempotency_key, status,"
+        " total, pending, running, fetched, failed, cancelled, created_at)"
+        " VALUES ('jkeep', 'r1', 's1', 'kkeep', 'completed', 0, 0, 0, 0, 0, 0, ?)",
+        (_FIXED_TIME,),
+    )
+    conn.commit()
+    first.close()
+
+    second = make_scheduler(state_dir=tmp_path)
+    conn = second._connect()
+    assert _declared_version(conn) == EDGE_JOBS_SCHEMA_VERSION
+    assert _columns(conn, "edge_job_items") == columns_first
+    row = conn.execute("SELECT job_id FROM edge_jobs WHERE job_id = 'jkeep'").fetchone()
+    assert row is not None and str(row["job_id"]) == "jkeep"
+    # Повторный connect того же планировщика — no-op (то же соединение).
+    assert second._connect() is conn
 
 
 # ---------------------------------------------------------------------------

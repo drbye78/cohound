@@ -25,6 +25,9 @@ SQLite), поэтому соединение не пересекает гран�
 **никогда** ``store``/``pipeline``/``cli``. I18/I19: edge возвращает сырые байты, не
 evidence; ядро пересчитывает хэш. Опора — только stdlib (``sqlite3``/``threading``/
 ``concurrent.futures``/``multiprocessing``/``base64``/``hashlib``). Нейтрален (§1.3).
+Гейт версии схемы берётся из ``core.util.schema_gate`` (а не из ``core.store.sqlite``) —
+именно потому, что ``edge → store`` запрещён матрицей слоёв: класс отказа и формат
+сообщения у трёх БД общие, а направление импорта — нет.
 
 Recovery-on-start зеркалит ``core.pipeline``-семантику: застрявшие ``running``-элементы
 возвращаются в ``pending``, счётчики пересчитываются (прерванный процесс не теряет
@@ -80,9 +83,15 @@ from core.ports.types import (
 from core.util.hashing import content_hash
 from core.util.rate_limit import RateLimiter
 from core.util.robots import RobotsGate
+from core.util.schema_gate import (
+    SchemaVersionMismatch,
+    declared_schema_version,
+    schema_mismatch_message,
+)
 from core.util.security import validate_url
 
 __all__ = [
+    "EDGE_JOBS_SCHEMA_VERSION",
     "ITEM_CANCELLED",
     "ITEM_FAILED",
     "ITEM_FETCHED",
@@ -162,8 +171,27 @@ _DEFAULT_COLLECT_LIMIT = 100
 #: Бюджет декодированных байтов на страницу ``collect`` (bounded-память).
 _COLLECT_MAX_BYTES = 8 * 1024 * 1024
 
+#: Версия схемы ``edge_jobs.db`` (пишется в ``schema_meta.schema_version``).
+#: Первая версия файла, который объявляет себя сам: до неё ``edge_jobs.db`` версии не
+#: имел вовсе и «догонялся» через ``ALTER TABLE`` при каждом открытии.
+#: Версия **своя**, а не ``EDGE_SCHEMA_VERSION`` из ``core/edge/server.py``: там —
+#: версия контракта шва ``/v1/*`` (внешний протокол, публикуемые схемы в
+#: ``contracts/seam/``), здесь — раскладка таблиц очереди заданий. Это разные объекты с
+#: разными причинами изменения: новая колонка в ответе ``/v1/*`` не делает очередь
+#: несовместимой, а пересоздание ``edge_jobs.db`` не меняет протокол. Одна общая константа
+#: означала бы, что любое поле шва объявляет несовместимость локального файла (и наоборот).
+EDGE_JOBS_SCHEMA_VERSION = "1"
+
 #: DDL edge-локальной БД (идемпотентно; PRAGMA выставляются отдельно).
+#: **Все** колонки и индексы объявлены здесь: аддитивных ``ALTER TABLE ... ADD COLUMN``
+#: при открытии нет ни одного. Забытая в ``CREATE TABLE`` колонка — дефект DDL, а не
+#: повод досоздать её в чужом файле (гейт версии — :func:`EdgeScheduler._connect`).
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS edge_jobs (
     job_id          TEXT PRIMARY KEY,
     run_id          TEXT NOT NULL,
@@ -183,6 +211,9 @@ CREATE TABLE IF NOT EXISTS edge_jobs (
     UNIQUE (run_id, session_id, idempotency_key)
 );
 
+-- Условный фетч (``if_none_match``/``if_modified_since``/``etag``/``last_modified``/
+-- ``not_modified``) и оси плана (``robots``/``final_url``/``rate_limit``) объявлены
+-- здесь же: прежде они доливались миграцией при открытии, теперь миграции нет.
 CREATE TABLE IF NOT EXISTS edge_job_items (
     job_id       TEXT NOT NULL,
     product_id   TEXT NOT NULL,
@@ -216,21 +247,6 @@ CREATE TABLE IF NOT EXISTS edge_job_items (
 CREATE INDEX IF NOT EXISTS idx_edge_job_items_job_status
     ON edge_job_items (job_id, status);
 """
-
-#: Аддитивные колонки ``edge_job_items`` (имя, тип), добавляемые идемпотентной миграцией
-#: (§6a/§11). ``CREATE TABLE IF NOT EXISTS`` НЕ расширяет существующую ``edge_jobs.db`` —
-#: колонки доливаются через ``ALTER TABLE`` (``_connect`` → ``_migrate``).
-_ITEM_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("robots", "INTEGER"),
-    ("final_url", "TEXT"),
-    ("rate_limit", "TEXT"),
-    # Условный фетч (additive): валидаторы запроса/ответа и признак 304.
-    ("if_none_match", "TEXT"),
-    ("if_modified_since", "TEXT"),
-    ("etag", "TEXT"),
-    ("last_modified", "TEXT"),
-    ("not_modified", "INTEGER"),
-)
 
 
 def _utc_now_iso() -> str:
@@ -549,35 +565,73 @@ class EdgeScheduler:
     # -- БД --------------------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        """Лениво открывает edge-локальную БД и создаёт схему (идемпотентно)."""
+        """Лениво открывает edge-локальную БД через гейт версии схемы (идемпотентно).
+
+        Порядок тот же, что у ``cohound.db`` (:func:`core.store.sqlite.connect`) и
+        ``state.db`` (:func:`core.store.state_sqlite.connect_state`), потому что способ
+        хранения версии общий — ``schema_meta(key, value)``:
+
+        1. версия читается **до** ``_SCHEMA`` и до PRAGMA, меняющих файл
+           (:func:`core.util.schema_gate.declared_schema_version`): гейт обязан видеть
+           исходное состояние, а не результат ``CREATE TABLE IF NOT EXISTS``;
+        2. несовпадение (файл объявляет другую версию, либо уже имеет таблицы без
+           объявленной версии) — :class:`~core.util.schema_gate.SchemaVersionMismatch`
+           с путём файла (``EXIT_USAGE`` в CLI); соединение закрывается, файл **не
+           меняется** — ``PRAGMA journal_mode = WAL`` пишет заголовок файла, поэтому
+           выставляется только после гейта;
+        3. только затем ``_SCHEMA`` (``IF NOT EXISTS`` — no-op на текущей БД) и запись
+           ``schema_meta.schema_version``.
+
+        Миграций нет ни одной: все колонки и индексы объявлены в ``_SCHEMA``.
+
+        **Почему гейт, а не миграция.** ``edge_jobs.db`` — операционное состояние edge
+        (задания краула в полёте), а не измерение: строки описывают, что фетчится
+        *сейчас*, и после перезапуска краула ценятся только как «что не доделано».
+        Поэтому отказ здесь означает «пересоздать файл», а не «перенести историю»:
+        терять нечего, кроме незавершённых заданий, которые и так перезапрашиваются
+        ядром. Гейт дешевле миграции и, главное, честнее: тихий догон объявлял бы файл
+        текущим, не будучи им (колонка появилась бы, а смысл старых строк — нет).
+        """
         with self._lock:
             if self._conn is None:
                 self._state_dir.mkdir(parents=True, exist_ok=True)
                 conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
                 conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode = WAL")
-                conn.execute("PRAGMA busy_timeout = 5000")
-                conn.execute("PRAGMA synchronous = NORMAL")
-                conn.executescript(_SCHEMA)
-                self._migrate(conn)
+                try:
+                    has_tables, found = declared_schema_version(conn)
+                    if found != EDGE_JOBS_SCHEMA_VERSION and (
+                        found is not None or has_tables
+                    ):
+                        raise SchemaVersionMismatch(
+                            schema_mismatch_message(
+                                self._db_path,
+                                found=found,
+                                expected=EDGE_JOBS_SCHEMA_VERSION,
+                                what="07 §7 / 11 §2.6",
+                                action=(
+                                    "edge_jobs.db — операционное состояние edge, а не "
+                                    "измерение: пересоздайте файл (удалите "
+                                    f"{self._db_path}) — задания в полёте будут потеряны "
+                                    "и перезапросятся ядром; историю прошлой схемы "
+                                    "миграция не догоняет."
+                                ),
+                            )
+                        )
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    conn.execute("PRAGMA busy_timeout = 5000")
+                    conn.execute("PRAGMA synchronous = NORMAL")
+                    conn.executescript(_SCHEMA)
+                except BaseException:
+                    conn.close()
+                    raise
+                conn.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value)"
+                    " VALUES ('schema_version', ?)",
+                    (EDGE_JOBS_SCHEMA_VERSION,),
+                )
                 conn.commit()
                 self._conn = conn
             return self._conn
-
-    @staticmethod
-    def _migrate(conn: sqlite3.Connection) -> None:
-        """Идемпотентно доливает аддитивные колонки ``edge_job_items`` (§6a/§11).
-
-        ``CREATE TABLE IF NOT EXISTS`` НЕ добавляет колонку в **существующую**
-        ``edge_jobs.db`` — поэтому недостающие колонки (``robots``/``final_url``/
-        ``rate_limit``) доливаются через ``ALTER TABLE ... ADD COLUMN``. Повторный вызов
-        — no-op (колонка уже есть); существующие строки не трогаются. Имена колонок —
-        литералы модуля (не из данных), SQL-инъекция невозможна.
-        """
-        existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(edge_job_items)")}
-        for column, column_type in _ITEM_MIGRATED_COLUMNS:
-            if column not in existing:
-                conn.execute(f"ALTER TABLE edge_job_items ADD COLUMN {column} {column_type}")
 
     def _get_job(self, conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
         """Строка задания; неизвестное задание → ``ValueError`` (edge честно ошибается)."""

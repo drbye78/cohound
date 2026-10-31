@@ -325,15 +325,12 @@ class SqliteStore:
     def _readable(self, table: str, columns: tuple[str, ...]) -> str:
         """Список колонок для ``SELECT``, отфильтрованный по **фактической** схеме.
 
-        ``connect_read_only`` не применяет аддитивных миграций (файл только читается),
-        поэтому колонка, добавленная позже, в старой БД отсутствует. Проекция обязана это
-        учитывать: иначе чтение падает на ``no such column``, хотя данные целы.
-        :func:`_row_optional` спасает доступ к **строке**, но не сам SQL — а проекция
-        собирается из кортежа имён, объявленного текущим кодом.
-
-        Отсутствующая колонка означает «значение не записано», а не сбой чтения прогона:
-        так остаются читаемыми прогоны, сделанные до появления колонки (например
-        ``cells.evidence_scope`` / ``cell_evidence.scope_acceptance``).
+        Гейт версии (:func:`core.store.sqlite.connect`) отвергает файл другой версии, поэтому
+        штатно набор колонок совпадает с объявленным в ``DDL``. Проверка остаётся защитой от
+        файла, который утверждает текущую версию, но не описывает свои данные (пересобранный
+        вручную/повреждённый): проекция, собранная из имён текущего кода, иначе падала бы на
+        ``no such column`` — а это выглядело бы как порча данных, хотя строка просто неполна.
+        :func:`_row_optional` спасает доступ к **строке**, но не сам SQL.
         """
         present = self._table_columns(table)
         missing = [c for c in columns if c not in present]
@@ -344,7 +341,10 @@ class SqliteStore:
         # отказ будет видимым, а не молча пустым.
         if len(missing) == len(columns):
             raise SchemaVersionMismatch(
-                f"таблица {table} не имеет ни одной ожидаемой колонки: схема не читается"
+                f"схема БД несовместима: файл {str(self.db_path)!r}: таблица {table} "
+                "не имеет ни одной ожидаемой колонки — схема не читается. "
+                "Пересоздайте БД прогона (новый каталог/run_id): молчаливое чтение "
+                "файла, не описывающего свои данные, запрещено (11 §2.6)."
             )
         return ", ".join(c for c in columns if c in present)
 
@@ -1918,14 +1918,21 @@ class SqliteStore:
         права вернуть ``done`` в ``pending`` (иначе конверсия перечитала бы собранное).
         Доменная модель уже проверила инвариант «``pending``/``claimed`` несут адрес
         retained-байтов и хеш» (I19).
+
+        Строка несёт **все** условия измерения документа: оси корня (``level``/
+        ``pdf_pipeline``) и провенанс получения (``fetched_at``/``fetch_mode``/``lang``/
+        ``status_code``/``content_type``/``engine``/``extract_route``). Иначе потребитель
+        выберет маршрут извлечения сам, и при тех же объявленных входах получится другой
+        ``extractor_version``/``doc_version_id`` — то есть другой корпус (I19, A3).
         """
         with self.conn:
             self.conn.execute(
                 "INSERT INTO extract_queue"
                 " (session_id, product_id, url, content_hash, raw_path, level,"
-                "  pdf_pipeline, state, attempts, enqueued_at, state_changed_at,"
-                "  claimed_by, error_kind, error)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  pdf_pipeline, fetch_mode, status_code, content_type, lang, engine,"
+                "  extract_route, fetched_at, state, attempts, enqueued_at,"
+                "  state_changed_at, claimed_by, error_kind, error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(session_id, product_id, url) DO NOTHING",
                 (
                     item.session_id,
@@ -1935,6 +1942,13 @@ class SqliteStore:
                     item.raw_path,
                     item.level,
                     item.pdf_pipeline,
+                    item.fetch_mode,
+                    item.status_code,
+                    item.content_type,
+                    item.lang,
+                    item.engine,
+                    item.extract_route,
+                    item.fetched_at,
                     _as_text(item.state),
                     item.attempts,
                     item.enqueued_at,
@@ -1957,7 +1971,14 @@ class SqliteStore:
         return counts
 
     def iter_extract_queue(self, session_id: str) -> Iterator[ExtractQueueItem]:
-        """Итерирует очередь сеанса; порядок ``product_id, url`` (детерминизм)."""
+        """Итерирует очередь сеанса; порядок ``product_id, url`` — канонический.
+
+        Это порядок **содержимого**, а не постановки: он не зависит от того, в каком
+        порядке страницы стали доступны, и потому одинаков на двух хостах при одном наборе
+        документов (нужно для F5: очередь станет единственным hand-off'ом, а его чтение —
+        сравнимым). Порядок постановки потребовал бы ``seq`` — счётчика расписания, который
+        сделал бы вывод функции от wall-clock; такая колонка здесь не заводится.
+        """
         for row in self.conn.execute(
             "SELECT * FROM extract_queue WHERE session_id = ? ORDER BY product_id, url",
             (session_id,),

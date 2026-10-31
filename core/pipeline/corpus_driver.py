@@ -78,9 +78,12 @@ class RootOutcome:
 
 @dataclass
 class _Lane:
-    """Активный корень: генератор шагов, его пулы и занятое право на host'ы."""
+    """Активный корень: генератор шагов, его пулы и занятое право на host'ы.
 
-    seq: int
+    Номера корня здесь нет: порядок — авторский, и его держит очередь драйвера, а не
+    поле полосы (поле никем не читалось).
+    """
+
     plan: RootPlan
     steps: (
         Generator[WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]], RootDrain]]
@@ -131,7 +134,9 @@ def drive_roots(
     :param host_concurrency: объявленная ось (``crawl.host_concurrency``). ``None``/``1`` —
         одна полоса, сегодняшнее поведение.
     :param begin: ``begin(plan, fetch_pool=…, browser_pool=…)`` — генератор корня
-        (:func:`core.pipeline.corpus_drain.root_lifecycle` с уже связанными осями фазы).
+        (:func:`core.pipeline.corpus_drain.root_lifecycle` с уже связанными носителями:
+        продуктовый скоуп, фазовый скоуп, операции фазы). Пулы приходят от полосы, потому
+        что их число ограничено правом на host'ы, а не числом корней.
     :param lane_width: ширина пула фетча для корня
         (:func:`core.pipeline.corpus_drain.lane_width`); ``None`` — живого пула нет.
     :param pool_factory: фабрика пула фетча (D4, инжектится тестами); ``None`` —
@@ -155,7 +160,6 @@ def drive_roots(
     #: Занятые host'ы: держит только отправленная волна (снимается на её коммите).
     claimed: set[str] = set()
     done: list[RootOutcome] = []
-    seq = 0
 
     def _close(lane: _Lane) -> None:
         """Закрыть генератор корня и его пулы. Сбой закрытия виден, но не маскирует исход."""
@@ -186,10 +190,10 @@ def drive_roots(
         claimed.difference_update(lane.claim)
         lane.claim = frozenset()
 
-    def _open(plan: RootPlan, number: int) -> _Lane:
+    def _open(plan: RootPlan) -> _Lane:
         """Открыть полосу под корень: пулы — по ``lane_width``, генератор — ``begin``."""
         width = lane_width(plan)
-        lane = _Lane(seq=number, plan=plan, steps=None)
+        lane = _Lane(plan=plan, steps=None)
         try:
             if width is not None:
                 lane.fetch_pool = (
@@ -311,8 +315,7 @@ def drive_roots(
                 if plan is _NO_PLAN:
                     queue_open = False
                     break
-                seq += 1
-                lane = _open(plan, seq)
+                lane = _open(plan)
                 lanes.append(lane)
                 # Подготовка корня (limits/frontier/seeds/зарядка бюджета) — на первом
                 # ``next``: при ``host_concurrency`` None/1 это ровно прежний момент.

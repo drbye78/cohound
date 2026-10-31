@@ -10,11 +10,16 @@ L5 шаг 3). Здесь — то, что делает работу **одног
 окно экстракции. Вынесен **целиком** и **дословно**: тело перенесено по AST-диапазону,
 изменились только заголовок и имена вызовов.
 
-**Почему параметры, а не состояние.** Всё, что раньше было свободной переменной
-замыкания, приходит аргументом: сигнатура называет, что корень читает и куда пишет.
-Параметров много (~58) — и это осознанный выбор: 58 параметров видны в сигнатуре и в
-точке вызова, а 58 полей «объекта прогона» не видны нигде, и отличить «читает» от
-«пишет» по ним нельзя. Зависимости уровня фазы связываются один раз через
+**Почему носители, а не 60 параметров.** Всё, что раньше было свободной переменной
+замыкания, по-прежнему приходит аргументом, но не поштучно: корень получает три носителя,
+разделённые **по владению** — :class:`ProductDrainScope` (продуктовое состояние, общее для
+всех корней продукта), :class:`PhaseDrainScope` (состояние и оси фазы) и
+:class:`PhaseDrainOperations` (замкнутые операции фазы). Плоский список из 60 kwargs трёх
+разных природ не отвечал на вопрос «что корень читает и что меняет»: имя носителя называет
+владельца, имя поля — конкретное состояние. Носители — ``frozen`` dataclass'ы со
+**ссылками** на мутируемые контейнеры: ``frozen`` запрещает подменить поле, а не изменить
+содержимое, и это ровно то, что нужно (копия контейнера вернула бы тихий баг: корень
+обновил бы копию, а сосед не увидел). Зависимости уровня фазы связываются один раз через
 :func:`functools.partial` в точке вызова (``corpus._build_corpus``), per-продуктные —
 на границе продукта.
 
@@ -1367,70 +1372,188 @@ def lane_width(limits: CrawlLimits, *, executor: CrawlExecutorPort | None) -> in
     return int(limits.max_workers)
 
 
+@dataclass(frozen=True)
+class ProductDrainScope:
+    """Продуктовый скоуп дренажа: состояние, живущее весь продукт и общее корням.
+
+    Один объект на продукт. Здесь то, что не принадлежит ни одному корню: накопитель
+    ингеста, дедуп-множества продукт-партиции (I17), судьба SERP-находок, множество
+    уже заряженных в resume-бюджет URL, все известные URL ревалидации и предикат
+    владельца URL. Корни одного продукта **делят** это состояние, поэтому корень не
+    вправе получить копию.
+
+    Почему ``frozen``. Поля — ссылки на мутируемые контейнеры; ``frozen`` запрещает
+    подменить поле (корень не подсунет свой словарь вместо продуктового), но не
+    запрещает писать в содержимое — а писать он обязан именно в общее: копия вернула
+    бы тихий дефект «корень обновил копию, сосед не увидел».
+
+    Владелец — фаза сборки корпуса: создаётся на границе продукта
+    (``corpus._build_corpus``), живёт до конца продукта.
+    """
+
+    #: Идентификатор продукта: единственное место, где он теперь назван в дренаже.
+    pid: str
+    #: Накопитель продукта (документы/чанки/счётчики ингеста).
+    ingest: ProductIngest
+    #: I17: ``content_hash → doc_id`` в пределах продукт-партиции.
+    seen_docs: dict[str, str]
+    #: I17: ``chunk_id`` в пределах продукт-партиции.
+    seen_chunk_ids: set[str]
+    #: Наблюдённая судьба SERP-находок (``enqueued``/``dup``/``blacklisted``).
+    serp_ingest: dict[str, Any]
+    #: F13: durable-URL, уже заряженные в resume-бюджет **продукта**.
+    resume_counted: set[str]
+    #: Известные URL ревалидации: вне бюджета discovery (B2/F13).
+    revalidation_url_set: set[str]
+    #: Самый специфичный корень-владелец URL (тот же предикат, что у группировки
+    #: ревалидации); ``None`` — URL не принадлежит ни одному авторскому корню.
+    owner_root: Callable[[str], str | None]
+
+
+@dataclass(frozen=True)
+class PhaseDrainScope:
+    """Фазовый скоуп дренажа: состояние и оси одной фазы сборки корпуса.
+
+    Один объект на фазу (не на продукт и не на корень): каналы видимости
+    (``errors``), store и идентификатор прогона, порты (чанкер, экстрактор, контейнеры),
+    фазовые очереди экстракции/финализаторов и пул экстракции, накопители наблюдений
+    (пропуски документов, пробы артефактов, наблюдения архивов, члены контейнеров),
+    оси фазы (``max_attempts``, размер волны, предохранитель раундов, таймаут) и режим
+    «краул без конверсии» с адресом durable-очереди.
+
+    Почему ``frozen``. Поля — ссылки на мутируемые контейнеры и на неизменяемые оси:
+    подменять ось в полёте нельзя (она — условие измерения), а писать в общие списки
+    ``errors``/наблюдений обязательно. ``frozen`` различает эти два случая.
+
+    ``fetch_pool``/``browser_pool`` — единственные поля **полосы**: их создаёт драйвер
+    на полосу (``lane_width``) и передаёт при допуске корня, поэтому на корень фазовый
+    носитель копируется через :func:`dataclasses.replace`. Копия — не новое состояние:
+    все контейнеры внутри неё общие, меняются только эти две ссылки.
+    """
+
+    #: Канал видимости фазы: каждая деградация обязана быть названа здесь.
+    errors: list[str]
+    #: Склад фазы (документы/чанки/очередь экстракции/сеанс).
+    store: Any
+    #: Идентификатор прогона для durable-записей провенанса (``None`` — прогона нет).
+    run_id: str | None
+    #: Чанкер фазы (версия входит в ``pb``).
+    chunker: ChunkerPort
+    #: Читатель контейнеров фазы (``None`` — бэкенда нет, спуск не открывается).
+    container_for: Callable[[str | Path], ContainerPort | None] | None
+    #: Durable-элементы сеанса: resume-бюджет и адрес документа (I19).
+    items: Mapping[tuple[str, str], CrawlSessionItem]
+    #: ``--max-attempts``: терминальный ``FAILED`` по исчерпанию попыток.
+    max_attempts: int | None
+    #: Размер волны фетча в узлах (ось executor-транспорта).
+    wave_items: int
+    #: Предохранитель раундов BFS (``round_budget``).
+    max_waves: int
+    #: Каталог стока пика памяти воркеров (``None`` — пик не собирается).
+    worker_rss_dir: str | None
+    #: Фазовый пул экстракции (``None`` — экстракция inline).
+    extraction_pool: ExtractionPool | None
+    #: Межпрогонный кэш извлечённого текста (ключ — хеш ретенированных байтов).
+    extract_cache: ExtractionCache | None
+    #: Экстрактор по умолчанию (композит ``full`` + ``structured``).
+    extractor: ExtractorPort
+    #: Фабрика экстрактора под уровень/механизм корня (``None`` — только переданный).
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None
+    #: Исполнитель краула (split: работу делает шов, локального пула нет).
+    executor: CrawlExecutorPort | None
+    #: Реестр фазовых пулов экстракции (ключ — уровень + механизм + окно).
+    pools: _ExtractPools
+    #: Фазовая FIFO-очередь отложенной экстракции (общая для корней).
+    extract_pending: deque[PendingExtract]
+    #: Хвосты корней, чей провенанс считается после доводки (C1).
+    extract_finalizers: deque[RootDrain]
+    #: Потолок одного ожидания пула, секунды (``deep``-таймаут корня).
+    extract_timeout: float
+    #: Накопители фазы (наблюдённые объёмы, а не лимиты).
+    counters: CorpusCounters
+    #: Бакеты стадий продукта: ожидание фетча/экстракции, нарезка, эмбеддинг.
+    timings: _CorpusStageTimings
+    #: Объявленные host'ы по продуктам (scope корня, §6).
+    scope_hosts_by_product: Mapping[str, frozenset[str]]
+    #: F12: ``(pid, loc)`` sitemap, уже принятые в очередь: один loc — один фетч.
+    sitemap_seed_used: set[tuple[str, str]]
+    #: P5: видимые пропуски документов (``off``-уровень) для агрегата сборки.
+    document_skips: list[dict[str, Any]]
+    #: B3: пробы терминальных артефактов (класс/формат/размер/``page_count``).
+    artifact_probes: list[dict[str, Any]]
+    #: B3: наблюдения спуска в контейнеры (в том числе пустые — молчания нет).
+    archive_observations: list[ArchiveObservation]
+    #: B3: члены контейнеров, дошедшие до корпуса.
+    corpus_member_rows: list[CorpusMember]
+    #: F2 (17 §4): режим «краул без конверсии» — durable-факт вместо сборки.
+    crawl_only: bool
+    #: F2: адрес durable-очереди ``extract_queue`` (без него режим невозможен).
+    session_id: str | None
+    #: F4b: пул фетча **полосы** (создаёт драйвер, см. :func:`lane_width`).
+    fetch_pool: Executor | None = None
+    #: F4b: пул не-poolable маршрута (браузер) — один поток на полосу.
+    browser_pool: Executor | None = None
+
+
+@dataclass(frozen=True)
+class PhaseDrainOperations:
+    """Замкнутые операции фазы: **чем** корень действует, а не что он читает/меняет.
+
+    Все поля — callable'ы, связанные один раз на фазу в ``corpus._build_corpus``
+    (``partial`` и замыкания над сеансом, складом и наблюдением фазы). Корень их только
+    вызывает: подменить операцию нельзя (``frozen``), и это важно — операция несёт
+    адресацию записи (какой продукт, какой сеанс), а не параметр корня.
+
+    **Сигнатуры операций не меняются.** Их держат ``corpus.py`` и тесты (в том числе
+    подменой атрибутов модуля ``corpus``), поэтому носитель их не переписывает: он
+    называет владельца, а не форму вызова.
+
+    Владелец — фаза: носитель создаётся один раз, до цикла продуктов, и переиспользуется
+    всеми продуктами и корнями.
+    """
+
+    #: Наблюдаемость: границы продукта/строки прогресса (мутация — на главном потоке).
+    emit: Callable[[], None]
+    #: Отметка элемента сеанса (``CrawlItemStatus`` + класс сбоя).
+    mark: Callable[..., None]
+    #: Коммит исхода на главном потоке (retention + доводка + BFS).
+    commit_local: Callable[..., Any]
+    #: Локальный фетч (единственная функция, исполняемая в потоке пула).
+    local_prefetch: Callable[..., LocalFetch]
+    #: Доводка одного локального элемента (запись страницы в сеанс).
+    process_local: Callable[..., Any]
+    #: Волна через шов (split): подача + опрос + сбор результатов.
+    submit_collect: Callable[..., Mapping[tuple[str, str], Any]]
+    #: Рабочий элемент исполнителя из разрешённой цели.
+    work_item: Callable[..., CrawlWorkItem]
+    #: Резолв цели краула (движок/вид из слоёв источников).
+    resolve_target: Callable[..., Any]
+    #: Переиспользование версии документа (``304``): чанки без экстракции.
+    reuse_for_page: Callable[..., DocReuse | None]
+    #: Ингест одного документа (extract → chunk → запись), inline-путь.
+    ingest_one: Callable[..., str | None]
+    #: Фиксация готового извлечения (пул/кэш/переиспользование) — без экстракции.
+    finish_one: Callable[..., str | None]
+    #: Доводка одного отложенного задания фазовой очереди.
+    finish_extract: Callable[[PendingExtract], None]
+    #: D3: развёртка per-site sitemap корня в подчинённые depth-0 seeds.
+    fresh_sitemap_seeds: Callable[..., SitemapSeeds]
+    #: Оси краула корня (``app < run < site``) — единственная формула резолва.
+    limits_for: Callable[[str], CrawlLimits]
+    #: Наблюдение расписания экстракции (окно → строка продукта/метрики).
+    note_scheduling: Callable[[CrawlLimits], None]
+    #: Ингест члена контейнера (спуск B3), адрес записи — продукт.
+    ingest_member_doc: Callable[..., MemberOutcome]
+    #: Durable-персистенция документов продукта (инкрементально, I19).
+    persist_docs: Callable[..., None]
+
+
 def root_lifecycle(
-    pid: str,
     root: RootPlan,
     *,
-    # -- per-продуктное состояние: связывается на границе продукта --------------- #
-    ingest: ProductIngest,
-    seen_docs: dict[str, str],
-    seen_chunk_ids: set[str],
-    serp_ingest: dict[str, Any],
-    resume_counted: set[str],
-    revalidation_url_set: set[str],
-    owner_root: Callable[[str], str | None],
-    # -- состояние и оси фазы --------------------------------------------------- #
-    errors: list[str],
-    store: Any,
-    run_id: str | None,
-    chunker: ChunkerPort,
-    container_for: Callable[[str | Path], ContainerPort | None] | None,
-    items: Mapping[tuple[str, str], CrawlSessionItem],
-    max_attempts: int | None,
-    wave_items: int,
-    max_waves: int,
-    worker_rss_dir: str | None,
-    extraction_pool: ExtractionPool | None,
-    extract_cache: ExtractionCache | None,
-    extractor: ExtractorPort,
-    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None,
-    executor: CrawlExecutorPort | None,
-    pools: _ExtractPools,
-    extract_pending: deque[PendingExtract],
-    extract_finalizers: deque[RootDrain],
-    extract_timeout: float,
-    counters: CorpusCounters,
-    timings: _CorpusStageTimings,
-    scope_hosts_by_product: Mapping[str, frozenset[str]],
-    sitemap_seed_used: set[tuple[str, str]],
-    document_skips: list[dict[str, Any]],
-    artifact_probes: list[dict[str, Any]],
-    archive_observations: list[ArchiveObservation],
-    corpus_member_rows: list[CorpusMember],
-    # -- вызываемые объекты, связанные на фазе ---------------------------------- #
-    emit: Callable[[], None],
-    mark: Callable[..., None],
-    commit_local: Callable[..., Any],
-    local_prefetch: Callable[..., LocalFetch],
-    process_local: Callable[..., Any],
-    submit_collect: Callable[..., Mapping[tuple[str, str], Any]],
-    work_item: Callable[..., CrawlWorkItem],
-    resolve_target: Callable[..., Any],
-    reuse_for_page: Callable[..., DocReuse | None],
-    ingest_one: Callable[..., str | None],
-    finish_one: Callable[..., str | None],
-    finish_extract: Callable[[PendingExtract], None],
-    fresh_sitemap_seeds: Callable[..., SitemapSeeds],
-    limits_for: Callable[[str], CrawlLimits],
-    note_scheduling: Callable[[CrawlLimits], None],
-    ingest_member_doc: Callable[..., MemberOutcome],
-    persist_docs: Callable[..., None],
-    # -- F2 (17 §4): краул без конверсии — durable передача в очередь ------------ #
-    crawl_only: bool = False,
-    session_id: str | None = None,
-    # -- F4b: пулы **полосы** (создаёт драйвер, см. ``lane_width``) -------------- #
-    fetch_pool: Executor | None = None,
-    browser_pool: Executor | None = None,
+    product: ProductDrainScope,
+    phase: PhaseDrainScope,
+    operations: PhaseDrainOperations,
 ) -> Generator[
     WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]], RootDrain]
 ]:
@@ -1461,14 +1584,22 @@ def root_lifecycle(
     в фазовой очереди (C1). ``root.defer_tail=False`` (synthetic-бакеты ревалидации,
     вызывающий читает счётчики frontier сразу) — хвост доводится здесь же.
 
-    ``crawl_only`` (17 §4, F2) — режим «краул без конверсии»: добытый документ
+    **Носители — по владению.** ``product`` (:class:`ProductDrainScope`) — общее
+    состояние продукта, корни его делят, а не копируют. ``phase``
+    (:class:`PhaseDrainScope`) — состояние и оси фазы, включая адрес durable-очереди и
+    режим ``crawl_only``. ``operations`` (:class:`PhaseDrainOperations`) — замкнутые
+    операции фазы (их сигнатуры держат ``corpus.py`` и тесты). Тело читает и пишет
+    через эти три имени, поэтому «кто владеет этим полем» отвечает точка доступа, а не
+    память читателя.
+
+    ``phase.crawl_only`` (17 §4, F2) — режим «краул без конверсии»: добытый документ
     записывается durable-фактом в ``extract_queue``, а зонд артефакта, спуск в
     контейнеры, ``ingest_one``/``finish_one`` и нарезка **не** выполняются. Так
     «краул выполнен» перестаёт быть синонимом «корпус собран»: сборка — работа
     потребителя очереди. Счётчики (``max_documents``/``pages_fetched``/усечение) и
     расширение BFS-ссылок остаются теми же — иначе режим был бы другим краулом, а не
-    тем же без конверсии. ``session_id`` — адрес очереди; без него режим невозможен
-    (факту некуда лечь).
+    тем же без конверсии. ``phase.session_id`` — адрес очереди; без него режим
+    невозможен (факту некуда лечь).
 
     **F4b (17 §6): генератор шагов, а не функция.** Подготовка
     (limits/frontier/seeds/зарядка бюджета) исполняется при первом ``next`` — то есть в
@@ -1478,9 +1609,11 @@ def root_lifecycle(
     (право на host'ы) решается до отправки. Коммит исходов остаётся здесь и идёт
     FIFO-порядком отправки.
 
-    ``fetch_pool``/``browser_pool`` — пулы **полосы**, их создаёт драйвер (одна пара на
-    активную полосу, не на корень). Их отсутствие при объявленном ``max_workers`` —
-    ``AssertionError``: молчаливый inline-фетч на главном потоке схлопнул бы полосы.
+    ``phase.fetch_pool``/``phase.browser_pool`` — пулы **полосы**, их создаёт драйвер
+    (одна пара на активную полосу, не на корень) и передаёт при допуске корня, из-за
+    чего фазовый носитель копируется на корень через :func:`dataclasses.replace`. Их
+    отсутствие при объявленном ``max_workers`` — ``AssertionError``: молчаливый
+    inline-фетч на главном потоке схлопнул бы полосы.
     """
     root_url = root.root_url
     sitemap_seeds = root.sitemap_seeds
@@ -1488,13 +1621,17 @@ def root_lifecycle(
     serp_seeds = root.serp_seeds
     seed = root.seed
     defer_tail = root.defer_tail
-    # ``persist_docs`` приходит параметром (тесты подменяют его атрибутом модуля
+    # ``persist_docs`` приходит операцией фазы (тесты подменяют его атрибутом модуля
     # ``corpus``): связываем один раз, чтобы три точки вызова не повторяли kwarg.
-    ingest_member = partial(ingest_member_doc, persist_docs=persist_docs)
-    limits = limits_for(root_url)
-    note_scheduling(limits)
+    ingest_member = partial(
+        operations.ingest_member_doc, persist_docs=operations.persist_docs
+    )
+    limits = operations.limits_for(root_url)
+    operations.note_scheduling(limits)
     frontier = Frontier(
-        root_url, limits, scope_hosts=scope_hosts_by_product.get(pid, frozenset())
+        root_url,
+        limits,
+        scope_hosts=phase.scope_hosts_by_product.get(product.pid, frozenset()),
     )
     # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
     # применяется до дедупа ``(pid, loc)``. Дедуп-пометка — не здесь, а по факту
@@ -1502,7 +1639,7 @@ def root_lifecycle(
     # ``_expand_sitemap`` отдаёт ``[]`` без обращения к поллеру — путь не исполняется
     # (поведение байт-в-байт).
     sitemap = (
-        fresh_sitemap_seeds(pid, root_url, frontier)
+        operations.fresh_sitemap_seeds(product.pid, root_url, frontier)
         if sitemap_seeds
         else SitemapSeeds()
     )
@@ -1514,7 +1651,7 @@ def root_lifecycle(
     level = limits.document_level
     # P7: механизм PDF — тоже свойство корня (ключ пула включает и его).
     pdf_pipeline = limits.pdf_pipeline
-    root_extractor: ExtractorPort = extractor
+    root_extractor: ExtractorPort = phase.extractor
     # Композит по умолчанию — ``full`` + ``structured``; переданный экстрактор и есть
     # эта пара, поэтому для неё «понижение до переданного» невозможно. Отказ OCR на
     # ``full`` приходит из адаптера на построении конвертера и становится
@@ -1523,19 +1660,19 @@ def root_lifecycle(
     # 17 §4 (F2): в режиме «краул без конверсии» конвертер не строится вовсе — его
     # построение и есть конверсия (загрузка весов). Экстрактор, таким образом, остаётся
     # переданным и не вызывается: ``ingest_one``/``finish_one`` этот режим не исполняет.
-    if not crawl_only and extractor_factory is not None and (
+    if not phase.crawl_only and phase.extractor_factory is not None and (
         level is not DocumentLevel.FULL
         or pdf_pipeline is not PdfPipeline.STRUCTURED
     ):
         try:
-            root_extractor = extractor_factory(level, pdf_pipeline)
+            root_extractor = phase.extractor_factory(level, pdf_pipeline)
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            errors.append(
-                f"{pid}/{root_url}: extractor_factory({level.value}, "
+            phase.errors.append(
+                f"{product.pid}/{root_url}: extractor_factory({level.value}, "
                 f"{pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
                 "понижен до переданного экстрактора"
             )
-            root_extractor = extractor
+            root_extractor = phase.extractor
 
     def _record_document_skip(skip_url: str, reason: str) -> None:
         """P5: видимая запись пропуска документа (frontier + агрегат ``IndexBuild``).
@@ -1545,9 +1682,9 @@ def root_lifecycle(
         неотличимым от позднего (B023).
         """
         frontier.note_document_skip(skip_url, reason)
-        document_skips.append(
+        phase.document_skips.append(
             {
-                "product_id": pid,
+                "product_id": product.pid,
                 "url": skip_url,
                 "reason": reason,
                 "level": level.value,
@@ -1583,33 +1720,33 @@ def root_lifecycle(
     recycle_tasks = limits.extract_max_tasks_per_child
     can_recycle = bool(
         recycle_tasks is not None
-        and extraction_pool is not None
-        and extraction_pool.supports_worker_recycling
+        and phase.extraction_pool is not None
+        and phase.extraction_pool.supports_worker_recycling
     )
     extract_window = (
         extract_workers_axis
         if extract_workers_axis is not None
         else (1 if can_recycle else None)
     )
-    if extract_workers_axis is not None and extraction_pool is None:
+    if extract_workers_axis is not None and phase.extraction_pool is None:
         # Ось задана, но пул не сконфигурирован — не тихо: явная запись + inline.
-        errors.append(
-            f"{pid}/{root_url}: crawl.extract_workers={extract_window} задан, "
+        phase.errors.append(
+            f"{product.pid}/{root_url}: crawl.extract_workers={extract_window} задан, "
             "но пул экстракции не сконфигурирован — экстракция inline"
         )
-    if recycle_tasks is not None and extraction_pool is None:
-        errors.append(
-            f"{pid}/{root_url}: crawl.extract_max_tasks_per_child="
+    if recycle_tasks is not None and phase.extraction_pool is None:
+        phase.errors.append(
+            f"{product.pid}/{root_url}: crawl.extract_max_tasks_per_child="
             f"{recycle_tasks} задан, но пул экстракции не сконфигурирован — "
             "экстракция inline"
         )
     elif (
         recycle_tasks is not None
-        and not extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
+        and not phase.extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
     ):
         # ``split`` (потоковый пул) не пересоздаёт воркеров — не молчим.
-        errors.append(
-            f"{pid}/{root_url}: crawl.extract_max_tasks_per_child="
+        phase.errors.append(
+            f"{product.pid}/{root_url}: crawl.extract_max_tasks_per_child="
             f"{recycle_tasks} поддерживается только процессным пулом (local) — "
             "ось игнорируется"
         )
@@ -1619,7 +1756,7 @@ def root_lifecycle(
     #: ``shutdown`` — один раз в ``finally`` фазы.
     #: Наблюдаемость: фактическое окно уходит в строку продукта рядом с
     #: ``extract_wait_s`` — иначе «ожидание» при окне > 1 читалось бы как работа.
-    timings.note_extract_window(extract_window)
+    phase.timings.note_extract_window(extract_window)
     pool_key: _ExtractPoolKey | None = (
         (level, pdf_pipeline, extract_window)
         if extract_window is not None
@@ -1631,7 +1768,7 @@ def root_lifecycle(
     #: конвертировал бы inline на драйвере — конкурентность схлопнулась бы без единой
     #: ошибки в артефактах.
     defer_extract = (
-        extract_window is not None and extraction_pool is not None
+        extract_window is not None and phase.extraction_pool is not None
     )
     #: Пул экстракции текущего спуска признан мёртвым (``2 × timeout`` без
     #: завершений). Тоже флаг корня и по той же причине: общий объект выключал бы
@@ -1643,7 +1780,7 @@ def root_lifecycle(
     # механизм PDF, frontier) — то, что остаётся в ``_drain_root`` до шага 3.
     _new_extract_pool = partial(
         corpus_ingest.new_extract_pool,
-        extraction_pool=extraction_pool,
+        extraction_pool=phase.extraction_pool,
         extract_window=extract_window,
         level=level,
         pdf_pipeline=pdf_pipeline,
@@ -1651,14 +1788,14 @@ def root_lifecycle(
     )
     _make_extract_request = partial(
         corpus_ingest.make_extract_request,
-        extract_cache=extract_cache,
+        extract_cache=phase.extract_cache,
         level=level,
         pdf_pipeline=pdf_pipeline,
-        worker_rss_dir=worker_rss_dir,
+        worker_rss_dir=phase.worker_rss_dir,
     )
     _inflight_fresh = partial(
         corpus_commit.inflight_fresh,
-        extract_pending=extract_pending,
+        extract_pending=phase.extract_pending,
         frontier=frontier,
         root_drain=root_drain,
     )
@@ -1666,28 +1803,28 @@ def root_lifecycle(
         corpus_commit.has_fetch_capacity,
         frontier=frontier,
         limits=limits,
-        extract_pending=extract_pending,
+        extract_pending=phase.extract_pending,
         root_drain=root_drain,
     )
     _tail_may_extend_frontier = partial(
         corpus_commit.tail_may_extend_frontier,
-        extract_pending=extract_pending,
+        extract_pending=phase.extract_pending,
         frontier=frontier,
         limits=limits,
         root_drain=root_drain,
     )
     _drain_for_window = partial(
         corpus_commit.drain_for_window,
-        extract_pending=extract_pending,
+        extract_pending=phase.extract_pending,
         extract_window=extract_window,
         frontier=frontier,
         limits=limits,
         root_drain=root_drain,
-        pools=pools,
-        errors=errors,
-        timings=timings,
-        extract_timeout=extract_timeout,
-        extract_finalizers=extract_finalizers,
+        pools=phase.pools,
+        errors=phase.errors,
+        timings=phase.timings,
+        extract_timeout=phase.extract_timeout,
+        extract_finalizers=phase.extract_finalizers,
     )
     # A2b/§6(b)/§10: egress-политика robots — **условна от discovery** и
     # вычисляется ядром **на корень** (edge строит краулеры «голыми»). Значение
@@ -1714,19 +1851,19 @@ def root_lifecycle(
     consumed = 0
     #: Заряженные этим корнем URL: каждый обязан быть и **дренируемым** (см. ниже).
     charged_urls: list[str] = []
-    for (ipid, iurl), item in items.items():
-        if ipid != pid or iurl in resume_counted:
+    for (ipid, iurl), item in phase.items.items():
+        if ipid != product.pid or iurl in product.resume_counted:
             continue
         # Известные URL ревалидации — вне бюджета discovery: иначе resumed
         # сессия заряжала бы ими ``max_documents``, seed стал бы ``truncated``
         # и продукт ложно ``complete=False`` (регрессия B2/F13 уровнем выше).
-        if iurl in revalidation_url_set:
+        if iurl in product.revalidation_url_set:
             continue
         # B023-исключение: ``owner_root`` пересоздаётся на каждом продукте
         # вместе с ``_drain_root`` (обе привязки — в одной итерации цикла), и
         # дренаж продукта завершается до следующей итерации, поэтому поздняя
         # привязка ячейки не подменяет владельца URL.
-        owner = owner_root(iurl)  # noqa: B023 — см. выше
+        owner = product.owner_root(iurl)  # noqa: B023 — см. выше
         if owner is not None:
             if owner != root_url:
                 # Владелец другой (более специфичный) корень — он и зарядит.
@@ -1751,7 +1888,7 @@ def root_lifecycle(
             # Нет пригодного resume (oversize/binary/несовпадение) — не бюджет.
             continue
         consumed += 1
-        resume_counted.add(iurl)
+        product.resume_counted.add(iurl)
         charged_urls.append(iurl)
     frontier.note_consumed(consumed)
     charged_set = set(charged_urls)
@@ -1764,11 +1901,11 @@ def root_lifecycle(
     else:
         seed_status = frontier.add_seed(root_url) if seed else "synthetic"
     if seed_status == "queued":
-        counters.product_seeds_enqueued += 1
+        phase.counters.product_seeds_enqueued += 1
     seed_blacklisted = seed_status == "blacklisted"
     if seed_blacklisted:
-        errors.append(
-            f"{pid}/{root_url}: seed зачёркнут блэклистом "
+        phase.errors.append(
+            f"{product.pid}/{root_url}: seed зачёркнут блэклистом "
             "(exclude_paths/exclude_documents) — не enqueued"
         )
     # A2 (F3 плана 17): бюджет ``max_documents`` решается **на изъятии**, поэтому
@@ -1781,8 +1918,8 @@ def root_lifecycle(
     budget_closed = not frontier.has_capacity
     if budget_closed:
         frontier.mark_truncated("max_documents")
-        errors.append(
-            f"{pid}/{root_url}: discovery не изымается — достигнут max_documents "
+        phase.errors.append(
+            f"{product.pid}/{root_url}: discovery не изымается — достигнут max_documents "
             "(усечение на изъятии; ревалидация известных URL бюджет не расходует)"
         )
 
@@ -1821,7 +1958,7 @@ def root_lifecycle(
         and revalidation_queued == 0
         and charged_queued == 0
     ):
-        emit()
+        operations.emit()
         return frontier, list(sitemap.skipped), root_drain
 
     # D3: дополнительные depth-0 seeds (``<loc>`` sitemap) — под тем же блэклистом и
@@ -1837,12 +1974,12 @@ def root_lifecycle(
     for extra in (() if (seed_blacklisted or budget_closed) else extra_seeds):
         extra_status = frontier.add_seed(extra)
         if extra_status in ("queued", "dup"):
-            sitemap_seed_used.add((pid, extra))
+            phase.sitemap_seed_used.add((product.pid, extra))
             if extra_status == "queued":
-                counters.product_seeds_enqueued += 1
+                phase.counters.product_seeds_enqueued += 1
         elif extra_status == "blacklisted":
-            errors.append(
-                f"{pid}/{extra}: sitemap-seed зачёркнут блэклистом "
+            phase.errors.append(
+                f"{product.pid}/{extra}: sitemap-seed зачёркнут блэклистом "
                 "(exclude_paths/exclude_documents) — не enqueued"
             )
 
@@ -1856,21 +1993,23 @@ def root_lifecycle(
     for found in serp_seeds:
         found_status = frontier.add_seed(found)
         if found_status == "queued":
-            counters.product_seeds_enqueued += 1
-            serp_ingest["enqueued"] += 1
+            phase.counters.product_seeds_enqueued += 1
+            product.serp_ingest["enqueued"] += 1
         elif found_status == "dup":
-            serp_ingest["dup"] += 1
+            product.serp_ingest["dup"] += 1
         elif found_status == "blacklisted":
-            serp_ingest["blacklisted"].append(found)
-            errors.append(
-                f"{pid}/{found}: serp-находка зачёркнута блэклистом "
+            product.serp_ingest["blacklisted"].append(found)
+            phase.errors.append(
+                f"{product.pid}/{found}: serp-находка зачёркнута блэклистом "
                 "(exclude_paths/exclude_documents) — не enqueued"
             )
         # A2 (F3): отказа по ``max_documents`` на постановке больше нет — находка
-        # ставится в очередь, а бюджет решается на изъятии. Поэтому список
-        # ``serp_ingest["truncated"]`` остаётся в payload (он опубликован), но
-        # пустым: «находка не поставлена» больше не бывает, а «поставлена и не
-        # изъята» видно числом ``queue_remaining`` в провенансе корня.
+        # ставится в очередь, а бюджет решается на изъятии. Поэтому усечения на
+        # постановке не бывает вовсе, и ключа ``truncated`` в наблюдении нет:
+        # «поставлена и не изъята» видно числом ``queue_remaining`` в провенансе
+        # корня. Мёртвый ключ (объявлен, но никем не наполнялся) удалён, а не
+        # оставлен пустым: пустой список читался бы как наблюдённый факт
+        # «усечения не было».
 
     def _descend_container(
         pid: str,
@@ -1913,9 +2052,13 @@ def root_lifecycle(
         nonlocal member_pool_dead
         if (
             defer_extract
-            and extraction_pool is not None
+            and phase.extraction_pool is not None
             and pool_key is not None
         ):
+            # Сужение типа: поле носителя — ``ExtractionPool | None``, а вложенное
+            # замыкание ниже читает пул уже **точно** (mypy не сужает атрибуты через
+            # границу функции). Локальная ссылка — то же состояние, не копия.
+            member_pool = phase.extraction_pool
             #: Пул этого спуска признан мёртвым (``2 × timeout`` без завершений):
             #: остаток членов — видимый пропуск, а не 47 ожиданий по таймауту.
             member_pool_dead = False
@@ -1939,7 +2082,7 @@ def root_lifecycle(
                             "извлечён (inline после отказа пула запрещён)"
                         ),
                     )
-                if pools.abandoned(pool_key):
+                if phase.pools.abandoned(pool_key):
                     # Как у страниц: пул исчерпал пересборки — inline запрещён
                     # (docling в родителе на memory-constrained хосте = худший режим).
                     return MemberOutcome(
@@ -1949,16 +2092,16 @@ def root_lifecycle(
                             f"{_EXTRACT_MAX_POOL_REBUILDS} rebuilds — inline disabled"
                         ),
                     )
-                executor = pools.executor(pool_key, _new_extract_pool)
+                executor = phase.pools.executor(pool_key, _new_extract_pool)
                 return executor.submit(
-                    extraction_pool.worker,
+                    member_pool.worker,
                     member_extract_request(
                         task,
                         fetched_at=page.fetched_at,
                         lang=page.lang,
                         level=level,
                         pdf_pipeline=pdf_pipeline,
-                        rss_dir=worker_rss_dir,
+                        rss_dir=phase.worker_rss_dir,
                     ),
                 )
 
@@ -1977,16 +2120,16 @@ def root_lifecycle(
                 try:
                     _wait_started = time.perf_counter()
                     try:
-                        extracted = handle.result(timeout=extract_timeout)
+                        extracted = handle.result(timeout=phase.extract_timeout)
                     finally:
                         # Тот же бакет, что и у страничной доводки: ожидание пула
                         # экстракции на главном потоке (член контейнера).
-                        timings.extract_wait_s += time.perf_counter() - _wait_started
+                        phase.timings.extract_wait_s += time.perf_counter() - _wait_started
                 except TimeoutError:
-                    member_pool_dead = pools.note_timeout(pool_key)
+                    member_pool_dead = phase.pools.note_timeout(pool_key)
                     return MemberOutcome(
                         skip_reason=SKIP_EXTRACT_FAILED,
-                        detail=f"extraction timeout ({extract_timeout} s)",
+                        detail=f"extraction timeout ({phase.extract_timeout} s)",
                     )
                 except BrokenProcessPool:
                     member_pool_dead = True
@@ -2002,22 +2145,22 @@ def root_lifecycle(
                 # Операционная наблюдаемость: член — такое же доведённое задание
                 # пула, поэтому он входит в ``pools.completed`` (строка «документов
                 # через пул» в конце фазы) и в сброс серии таймаутов.
-                pools.note_completion(pool_key)
+                phase.pools.note_completion(pool_key)
                 return ingest_member(
                     task,
                     extractor=root_extractor,
-                    chunker=chunker,
-                    ingest=ingest,
-                    seen_docs=seen_docs,
-                    seen_chunk_ids=seen_chunk_ids,
-                    errors=errors,
-                    store=store,
+                    chunker=phase.chunker,
+                    ingest=product.ingest,
+                    seen_docs=product.seen_docs,
+                    seen_chunk_ids=product.seen_chunk_ids,
+                    errors=phase.errors,
+                    store=phase.store,
                     level=level,
                     fetched_at=page.fetched_at,
                     lang=page.lang,
-                    artifact_probes=artifact_probes,
+                    artifact_probes=phase.artifact_probes,
                     extracted=extracted,
-                    timings=timings,
+                    timings=phase.timings,
                     reuse_kind=reuse_kind,
                 )
 
@@ -2037,27 +2180,27 @@ def root_lifecycle(
                     limits.archive_max_total_uncompressed_bytes
                 ),
             ),
-            container_for=container_for,
+            container_for=phase.container_for,
             ingest_member=lambda task: ingest_member(
                 task,
                 extractor=root_extractor,
-                chunker=chunker,
-                ingest=ingest,
-                seen_docs=seen_docs,
-                seen_chunk_ids=seen_chunk_ids,
-                errors=errors,
-                store=store,
+                chunker=phase.chunker,
+                ingest=product.ingest,
+                seen_docs=product.seen_docs,
+                seen_chunk_ids=product.seen_chunk_ids,
+                errors=phase.errors,
+                store=phase.store,
                 level=level,
                 fetched_at=page.fetched_at,
                 lang=page.lang,
-                artifact_probes=artifact_probes,
-                timings=timings,
+                artifact_probes=phase.artifact_probes,
+                timings=phase.timings,
                 reuse_kind=reuse_kind,
             ),
-            observations=archive_observations,
-            members=corpus_member_rows,
-            errors=errors,
-            run_id=run_id,
+            observations=phase.archive_observations,
+            members=phase.corpus_member_rows,
+            errors=phase.errors,
+            run_id=phase.run_id,
             created_at=_now_iso(),
             defer_member=defer_member,
             #: Окно упреждения = окно экстракции корня (``extract_workers``);
@@ -2066,8 +2209,8 @@ def root_lifecycle(
             #: Write-through (F1): провенанс спуска durable на каждом шаге, а не в
             #: конце фазы. Отказ стора изолируется в ``errors`` синком, поэтому
             #: спуск продолжается (провенанс важнее, падение фазы — хуже).
-            persist_observation=persist_observation_sync(store, errors),
-            persist_member=persist_member_sync(store, errors),
+            persist_observation=persist_observation_sync(phase.store, phase.errors),
+            persist_member=persist_member_sync(phase.store, phase.errors),
         )
         observation = walker.descend(
             archive_path=raw_path,
@@ -2076,7 +2219,7 @@ def root_lifecycle(
         )
         if observation.status is ArchiveDescentStatus.UNREADABLE:
             reason = f"archive_unreadable: {observation.reason}"
-            mark(
+            operations.mark(
                 pid,
                 work_url,
                 CrawlItemStatus.FAILED,
@@ -2098,7 +2241,9 @@ def root_lifecycle(
         if not is_revalidation and limits.max_depth > 0 and looks_like_html(page):
             frontier.offer(extract_links(page.content, page.url), depth)
 
-    def _enqueue_extract(pid: str, work_url: str) -> None:
+    def _enqueue_extract(
+        pid: str, work_url: str, page: RawPage, fetch_plan: FetchPlan
+    ) -> None:
         """Пишет durable-факт «документ добыт» в ``extract_queue`` (17 §4.1).
 
         Адрес берётся из элемента сеанса: ``retain`` уже проставил там ``content_hash``
@@ -2106,32 +2251,64 @@ def root_lifecycle(
         был бы другим хешем для staged-артефакта (тело в файле, ``content`` пуст) и
         разорвал бы цепочку I19 ещё до конверсии.
 
+        Провенанс **получения** приходит из наблюдённого результата (``page`` и
+        ``fetch_plan``), а не из строки сеанса: это ровно те значения, которые ушли бы в
+        ``_ExtractRequest`` этого документа (:func:`core.pipeline.corpus_ingest.
+        make_extract_request`), поэтому потребитель (F6) воспроизводит условия измерения
+        из строки вместо того, чтобы выводить их заново. Иначе тот же документ изъят
+        другим маршрутом — другой ``extractor_version``/``doc_version_id`` — то есть
+        другой корпус при тех же объявленных входах (I19, A3).
+
         Отсутствие адреса (``session_id``/элемент без хеша) — не повод молча потерять
         документ: факт уходит в ``errors`` фазы, то есть в ``results[].notes`` и манифест.
         """
-        if session_id is None:
+        if phase.session_id is None:
             raise ValueError(
                 "crawl_only требует активного сеанса краула: без session_id "
                 "durable-очередь extract_queue не адресуема"
             )
-        item = items.get((pid, work_url))
+        item = phase.items.get((pid, work_url))
         content_value = getattr(item, "content_hash", None)
         raw_value = getattr(item, "raw_path", None)
         if not content_value or not raw_value:
-            errors.append(
+            phase.errors.append(
                 f"{pid}/{work_url}: extract_queue: у элемента сеанса нет "
                 "content_hash/raw_path — документ НЕ поставлен в очередь конверсии"
             )
             return
-        store.enqueue_extract_item(
+        phase.store.enqueue_extract_item(
             ExtractQueueItem(
-                session_id=session_id,
+                session_id=phase.session_id,
                 product_id=pid,
                 url=work_url,
                 content_hash=str(content_value),
                 raw_path=str(raw_value),
                 level=level.value,
                 pdf_pipeline=pdf_pipeline.value,
+                #: Режим получения — **наблюдённый** (``RawPage.fetch_mode``), а не
+                #: объявленный планом: браузерный адаптер вправе доставить байты
+                #: HTTP-путём (``crawl_browser.py:668``), и именно это значение несла бы
+                #: заявка экстракции (``make_extract_request`` → ``RawPage.fetch_mode``).
+                fetch_mode=_as_text(page.fetch_mode),
+                #: Ось извлечения — из плана: она объявлена краулом для этого URL и
+                #: определяет ``extractor_version`` документа.
+                extract_route=_as_text(fetch_plan.extract),
+                #: Движок: названный страницей (фактически доставивший байты) — первым,
+                #: объявленный осью — если адаптер себя не назвал.
+                engine=page.engine or fetch_plan.engine,
+                content_type=page.content_type,
+                lang=page.lang,
+                #: ``RawPage.status_code`` — тот же факт, что ушёл бы в заявку. Для
+                #: retained-байтов (``resume``) это ответ **прошлого** цикла: сервер в
+                #: этом прогоне не отвечал, но заявка экстракции несла ровно его.
+                status_code=page.status_code,
+                #: Время получения — штамп страницы: он уже посчитан там, где ответ
+                #: получен (``local_fetch``) или восстановлен из элемента сеанса
+                #: (``resume_page``: ``last_attempt``, иначе mtime файла). Вырожденный
+                #: штамп (пустая строка у resume без mtime) заменяется временем коммита:
+                #: это **верхняя граница** момента получения, и она честнее, чем NULL в
+                #: колонке, которую контракт очереди требует непустой.
+                fetched_at=page.fetched_at or _now_iso(),
                 enqueued_at=_now_iso(),
             )
         )
@@ -2191,15 +2368,15 @@ def root_lifecycle(
             and document_content_type(page.content_type) is not None
         ):
             _record_document_skip(work_url, "content_type")
-            emit()
+            operations.emit()
             return
         # 17 §4.1 (F2): crawl-only — краул кончается durable-фактом. Документ не
         # конвертируется (ни зонда, ни спуска, ни ``ingest_one``/``finish_one``),
         # но кладётся в ``extract_queue``; frontier расширяется тем же кодом ниже
         # (``_extend_links``), поэтому обход остаётся полным.
-        if crawl_only:
-            _enqueue_extract(pid, work_url)
-            emit()
+        if phase.crawl_only:
+            _enqueue_extract(pid, work_url, page, fetch_plan)
+            operations.emit()
             _extend_links(page, depth, is_revalidation)
             return
         # B3: допущенный терминальный артефакт (документ **или** контейнер) проходит
@@ -2216,47 +2393,47 @@ def root_lifecycle(
                 product_id=pid,
                 url=page.url or work_url,
                 content_type=page.content_type,
-                container_for=container_for,
+                container_for=phase.container_for,
             )
-            artifact_probes.append(probe.as_dict())
+            phase.artifact_probes.append(probe.as_dict())
             if probe.is_container:
                 # Контейнер — не документ: вместо экстракции исполняется спуск
                 # (``archive_descent=plan`` — только листинг и прогноз).
                 _descend_container(pid, work_url, page, raw_path, reuse_kind=reuse_kind)
-                emit()
+                operations.emit()
                 return
         if extracted is _INLINE:
             # 09 §6.3/§9: ``304`` переиспользует версию документа **до**
             # экстракции (экстрактор/чанкер не вызываются). Неудача reuse
             # (нет версии/чанков, I19-расхождение) — видимая запись уже сделана,
             # дальше обычный путь экстракции.
-            reuse = reuse_for_page(pid, work_url, page)
+            reuse = operations.reuse_for_page(pid, work_url, page)
             if reuse is not None:
-                finish_one(
+                operations.finish_one(
                     pid,
                     work_url,
                     page,
                     fetch_plan,
                     raw_path,
                     None,
-                    ingest,
-                    seen_docs,
-                    seen_chunk_ids,
+                    product.ingest,
+                    product.seen_docs,
+                    product.seen_chunk_ids,
                     root_extractor,
                     level,
                     reuse_kind=reuse_kind,
                     reuse=reuse,
                 )
             else:
-                ingest_one(
+                operations.ingest_one(
                     pid,
                     work_url,
                     page,
                     fetch_plan,
                     raw_path,
-                    ingest,
-                    seen_docs,
-                    seen_chunk_ids,
+                    product.ingest,
+                    product.seen_docs,
+                    product.seen_chunk_ids,
                     root_extractor,
                     level,
                     reuse_kind=reuse_kind,
@@ -2264,28 +2441,28 @@ def root_lifecycle(
         else:
             # 09 §6.3: пул уже извлёк документ (экстракция не отменяется — она
             # оплачена), но при ``304`` нарезка переиспользуется: чанкер не зовётся.
-            finish_one(
+            operations.finish_one(
                 pid,
                 work_url,
                 page,
                 fetch_plan,
                 raw_path,
                 extracted,
-                ingest,
-                seen_docs,
-                seen_chunk_ids,
+                product.ingest,
+                product.seen_docs,
+                product.seen_chunk_ids,
                 root_extractor,
                 level,
                 extract_error=extract_error,
                 extract_failure_kind=extract_failure_kind,
                 reuse_kind=reuse_kind,
                 reuse=(
-                    reuse_for_page(pid, work_url, page)
+                    operations.reuse_for_page(pid, work_url, page)
                     if extract_error is None
                     else None
                 ),
             )
-        emit()
+        operations.emit()
         # D1: извлечение in-site ссылок и следующий уровень BFS (общий хвост с
         # ``crawl_only`` — см. ``_extend_links``).
         _extend_links(page, depth, is_revalidation)
@@ -2338,11 +2515,11 @@ def root_lifecycle(
         if outcome is None:
             return
         page, raw_path, fetch_plan, freshly_fetched = outcome
-        if defer_extract and extract_cache is not None:
+        if defer_extract and phase.extract_cache is not None:
             # C1/L4: проба — в родителе, до submit и до проверки исчерпания пула:
             # готовый текст не требует экстракции вовсе. Ключ — ``raw_path.stem``
             # (тот же хеш, что воркер считает из прочитанных байтов).
-            cached = extract_cache.get(
+            cached = phase.extract_cache.get(
                 _extract_cache_key(raw_path),
                 _cache_extractor_version(
                     root_extractor,
@@ -2356,7 +2533,7 @@ def root_lifecycle(
                     pid_arg, url_arg, depth_arg, outcome, extracted=cached
                 )
                 return
-        if pool_key is not None and pools.abandoned(pool_key):
+        if pool_key is not None and phase.pools.abandoned(pool_key):
             # Пул исчерпал пересборки: никакой inline-экстракции. Страница
             # ретейнена, но исход терминален и видим (parser_failed).
             _commit_outcome(
@@ -2384,9 +2561,9 @@ def root_lifecycle(
                 "(окно экстракции не задано)"
             )
         try:
-            executor = pools.executor(pool_key, _new_extract_pool)
+            executor = phase.pools.executor(pool_key, _new_extract_pool)
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            errors.append(
+            phase.errors.append(
                 f"{pid_arg}/{url_arg}: extract pool: "
                 f"{type(exc).__name__}: {exc} — inline"
             )
@@ -2395,18 +2572,18 @@ def root_lifecycle(
             return
         try:
             future = executor.submit(
-                extraction_pool.worker,  # type: ignore[union-attr]
+                phase.extraction_pool.worker,  # type: ignore[union-attr]
                 _make_extract_request(page, raw_path, fetch_plan),
             )
         except Exception as exc:  # noqa: BLE001 — непиклящийся вход/сбой submit
-            errors.append(
+            phase.errors.append(
                 f"{pid_arg}/{url_arg}: extract submit: "
                 f"{type(exc).__name__}: {exc}"
             )
             _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
             return
         root_drain.pending += 1
-        extract_pending.append(
+        phase.extract_pending.append(
             PendingExtract(
                 pid=pid_arg,
                 url=url_arg,
@@ -2427,13 +2604,13 @@ def root_lifecycle(
         # бы корни на пуле экстракции и подменило окно памяти максимумом по корням).
         while (
             corpus_commit.pending_count_for_root(
-                extract_pending=extract_pending, root_drain=root_drain
+                extract_pending=phase.extract_pending, root_drain=root_drain
             )
             >= extract_window
         ):
-            finish_extract(
+            operations.finish_extract(
                 popleft_for_root(
-                    extract_pending=extract_pending, root_drain=root_drain
+                    extract_pending=phase.extract_pending, root_drain=root_drain
                 )
             )
     # D4: ограниченный пул ТОЛЬКО на сетевой fetch локального пути. Пул создаёт
@@ -2443,45 +2620,45 @@ def root_lifecycle(
     # work-items с живым HTTP-фетчем; браузерные элементы — никогда (см.
     # ``local_prefetch`` и ``_dispatch_wave``).
     max_workers = limits.max_workers
-    pool = fetch_pool
-    non_poolable_pool = browser_pool
-    if lane_width(limits, executor=executor) is not None and (
+    pool = phase.fetch_pool
+    non_poolable_pool = phase.browser_pool
+    if lane_width(limits, executor=phase.executor) is not None and (
         pool is None or non_poolable_pool is None
     ):
         # Не тихая деградация: без пула живой фетч пошёл бы inline на главном потоке и
         # полосы схлопнулись бы в одну без единой ошибки в артефактах.
         raise AssertionError(
-            f"{pid}/{root_url}: полоса без пула фетча при max_workers="
+            f"{product.pid}/{root_url}: полоса без пула фетча при max_workers="
             f"{max_workers} — пул обязан создать драйвер"
         )
     # F4b: шаги корня — генератор. Отправку волны и ожидание исполняет драйвер
     # (:mod:`core.pipeline.corpus_driver`): «отправить и дождаться» не может быть
     # работой корня, потому что допуск волны (право на host'ы) решается до отправки.
     return (yield from root_steps(
-        pid,
+        product.pid,
         root_url,
         frontier,
         root_drain=root_drain,
         limits=limits,
-        items=items,
-        errors=errors,
-        emit=emit,
-        mark=mark,
-        commit_local=commit_local,
-        local_prefetch=local_prefetch,
-        process_local=process_local,
-        submit_collect=submit_collect,
-        work_item=work_item,
-        resolve_target=resolve_target,
-        finish_extract=finish_extract,
-        extract_pending=extract_pending,
+        items=phase.items,
+        errors=phase.errors,
+        emit=operations.emit,
+        mark=operations.mark,
+        commit_local=operations.commit_local,
+        local_prefetch=operations.local_prefetch,
+        process_local=operations.process_local,
+        submit_collect=operations.submit_collect,
+        work_item=operations.work_item,
+        resolve_target=operations.resolve_target,
+        finish_extract=operations.finish_extract,
+        extract_pending=phase.extract_pending,
         extract_window=extract_window,
-        max_attempts=max_attempts,
-        max_waves=max_waves,
-        wave_items=wave_items,
+        max_attempts=phase.max_attempts,
+        max_waves=phase.max_waves,
+        wave_items=phase.wave_items,
         robots_enabled=robots_enabled,
-        timings=timings,
-        executor=executor,
+        timings=phase.timings,
+        executor=phase.executor,
         pool=pool,
         max_workers=max_workers,
         defer_tail=defer_tail,

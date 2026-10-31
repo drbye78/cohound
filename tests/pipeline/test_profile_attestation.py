@@ -7,7 +7,8 @@
   (таблично, по одному тесту на компонент);
 * durable-строку ``profile_attestation``: round-trip, идемпотентный upsert по
   ``attestation_id``, ``superseded_at`` (отзыв не «воскресает» повторной записью),
-  миграцию ``state.db`` schema 3 → 4 на существующем файле;
+  отказ файла ``state.db`` прежней схемы (``"3"``) — ``SchemaVersionMismatch`` без
+  изменения файла (миграции больше нет, решение владельца 01.11.2026);
 * логику гейта: нет ни строки ``gate_decisions``, ни аттестации → ``blocked``;
   действующая аттестация → ``ok`` без per-run строки; устаревший дайджест → ``blocked``
   **с названием изменившегося компонента**; per-run строка → ``ok`` без аттестации;
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -50,6 +52,7 @@ from core.pipeline.runner import (
     RunContext,
     _gate_phase,
 )
+from core.store.sqlite import SchemaVersionMismatch
 from core.store.sqlite_store import SqliteStore
 from core.store.state_sqlite import STATE_SCHEMA_VERSION, connect_state
 from core.store.state_store import SqliteStateStore
@@ -412,11 +415,21 @@ def test_supersede_marks_attestation_and_survives_repeated_save() -> None:
         )
 
 
-def test_state_db_migrates_from_schema_3_to_4(tmp_path: Path) -> None:
-    """Старая ``state.db`` (schema 3) открывается, получает ``profile_attestation``.
+def test_state_db_with_previous_schema_is_refused_and_left_untouched(
+    tmp_path: Path,
+) -> None:
+    """Файл ``state.db`` прежней схемы (``"3"``) **отвергается**, а не догоняется.
 
-    БД строится текущим DDL и затем приведена к состоянию «до v4»: таблицы
-    ``profile_attestation`` нет, версия схемы ``"3"``. Строки v3 обязаны сохраниться.
+    Прежде здесь проверялась миграция 3 → 4: старая БД открывалась, получала
+    ``profile_attestation`` и объявляла себя текущей. Миграции больше нет (решение
+    владельца 01.11.2026): версия читается **до** ``DDL``, несовпадение —
+    :class:`~core.store.sqlite.SchemaVersionMismatch`, файл не меняется. Проверка
+    переехала на новый носитель без потери утверждений: путь аттестации профиля обязан
+    **видеть** отказ, а не молча работать на чужой схеме.
+
+    Утверждения: отказ приходит и называет файл; файл не изменён (версия в
+    ``schema_meta`` та же, таблицы ``profile_attestation`` нет); строки продукта на месте
+    (отказ — не «полумиграция» и не удаление данных).
     """
     db_path = tmp_path / "state.db"
     conn = connect_state(db_path)
@@ -430,31 +443,53 @@ def test_state_db_migrates_from_schema_3_to_4(tmp_path: Path) -> None:
     )
     conn.commit()
     conn.close()
+    before = db_path.read_bytes()
 
-    migrated = connect_state(db_path)
+    with pytest.raises(SchemaVersionMismatch) as excinfo:
+        connect_state(db_path)
+
+    assert STATE_SCHEMA_VERSION in str(excinfo.value)
+    assert "3" in str(excinfo.value)
+    assert db_path.read_bytes() == before
+
+    # Файл не «домигрирован»: версия та же, таблицы аттестации нет, строка продукта жива.
+    raw = sqlite3.connect(str(db_path))
     try:
-        version = migrated.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()["value"]
-        assert version == STATE_SCHEMA_VERSION == "5"
-        tables = {
-            row["name"]
-            for row in migrated.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        assert "profile_attestation" in tables
-        # Cell-level аттестация охвата (I2b) — отдельная таблица, не переиспользована.
-        assert "attestation" in tables
         assert (
-            migrated.execute(
+            raw.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()[0]
+            == "3"
+        )
+        tables = {
+            row[0]
+            for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "profile_attestation" not in tables
+        assert (
+            raw.execute(
                 "SELECT canonical_name FROM product_state WHERE product_id = 'p1'"
-            ).fetchone()["canonical_name"]
+            ).fetchone()[0]
             == "Product One"
         )
+    finally:
+        raw.close()
+
+    # И запись аттестации в отвергнутый файл не идёт: путь аттестации профиля упирается
+    # в тот же гейт версии, а не пишет в БД чужой схемы.
+    with pytest.raises(SchemaVersionMismatch), SqliteStateStore(db_path) as state:
+        material = _material()
+        state.save_profile_attestation(
+            _attestation(material=material, digest=material_digest(material))
+        )
+
+    # Носитель аттестации существует там, где ему место — в **текущей** схеме: колонки
+    # ``profile_attestation`` объявлены ``STATE_DDL`` целиком (прежде это утверждение
+    # стояло на «домигрированной» таблице).
+    fresh = connect_state(":memory:")
+    try:
         columns = {
-            row["name"]
-            for row in migrated.execute("PRAGMA table_info(profile_attestation)")
+            row["name"] for row in fresh.execute("PRAGMA table_info(profile_attestation)")
         }
         assert columns == {
             "attestation_id",
@@ -470,29 +505,7 @@ def test_state_db_migrates_from_schema_3_to_4(tmp_path: Path) -> None:
             "notes",
         }
     finally:
-        migrated.close()
-
-    # Повторное открытие идемпотентно (миграция — no-op, версия та же).
-    again = connect_state(db_path)
-    try:
-        assert (
-            again.execute(
-                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-            ).fetchone()["value"]
-            == "5"
-        )
-    finally:
-        again.close()
-
-    # И запись аттестации в миграционно обновлённую БД работает.
-    material = _material()
-    with SqliteStateStore(db_path) as state:
-        state.save_profile_attestation(
-            _attestation(material=material, digest=material_digest(material))
-        )
-        assert state.find_profile_attestation(
-            CASE_ID, PACKAGE_ID, ANCHOR, Gate.G1, material_digest(material)
-        ) is not None
+        fresh.close()
 
 
 # ---------------------------------------------------------------------------

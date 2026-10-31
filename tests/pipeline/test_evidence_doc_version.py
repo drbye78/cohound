@@ -295,17 +295,23 @@ def test_evidence_row_is_null_and_note_visible_without_version_address(
     assert any(EVIDENCE_DOC_VERSION_UNRESOLVED_REASON in note for note in notes), notes
 
 
-def test_schema_adds_column_additively() -> None:
-    """Колонка аддитивна: в схеме есть, версия схемы не поднята."""
-    from core.store.sqlite import SCHEMA_VERSION, connect
+def test_schema_declares_doc_version_id_column() -> None:
+    """Колонка объявлена в ``DDL``; досоздания при открытии больше нет.
+
+    Прежде тест утверждал «аддитивно, версия схемы не поднята» — то есть фиксировал шим,
+    снесённый в волне S плана 17. Эквивалент на новом носителе: колонка есть в свежей схеме,
+    и `ALTER TABLE`-шима нет (пропуск в `CREATE TABLE` не догоняется ничем).
+    """
+    from core.store import sqlite as sqlite_module
+    from core.store.sqlite import connect
 
     conn = connect(":memory:")
     try:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(cell_evidence)")}
         assert "doc_version_id" in columns
-        assert SCHEMA_VERSION == "3.13.0"
     finally:
         conn.close()
+    assert not hasattr(sqlite_module, "_ensure_columns")
 
 
 def test_model_rejects_version_that_contradicts_the_address() -> None:

@@ -2,8 +2,10 @@
 
 Проверяется ровно контракт очереди: идемпотентность записи (краул не перезаписывает
 состояние потребителя), счётчики по состояниям и чтение в детерминированном порядке.
-Плюс доменный инвариант модели: ``pending``/``claimed`` несут адрес retained-байтов и
-его хеш — без них цепочка I19 рвётся до начала конверсии.
+Плюс доменные инварианты модели: ``pending``/``claimed`` несут адрес retained-байтов
+и его хеш, а также провенанс получения (``fetched_at``/``fetch_mode``/``extract_route``) —
+без них цепочка I19 рвётся до начала конверсии, а условия измерения документа
+перестают быть воспроизводимыми.
 
 Все тесты на ``:memory:``-БД; нейтральны (§1.3): ``p1/p2``, ``docs.test``.
 """
@@ -58,6 +60,11 @@ def _item(url: str, **overrides: object) -> ExtractQueueItem:
         "raw_path": f"corpus_raw/p1/{url.rsplit('/', 1)[-1]}.bin",
         "level": "full",
         "pdf_pipeline": "structured",
+        # Провенанс получения обязателен для ``pending``/``claimed`` (валидатор модели):
+        # очередь обещает воспроизводимость условий измерения, а не только файл.
+        "fetched_at": TS,
+        "fetch_mode": "http",
+        "extract_route": "html",
         "enqueued_at": TS,
     }
     base.update(overrides)
@@ -139,6 +146,75 @@ def test_iter_extract_queue_is_deterministic_and_carries_conditions(
     assert rows[0].state_changed_at is None
 
 
+#: Провенанс получения, который потребитель обязан воспроизвести (``_ExtractRequest``,
+#: ``core/pipeline/extraction_runtime.py``): ``{колонка: (имя поля модели, тип, значение)}``.
+#: Список — данные теста, поэтому забытая в ``DDL``/INSERT/конвертере колонка роняет проверку.
+FETCH_PROVENANCE: dict[str, tuple[str, str, object]] = {
+    "fetched_at": ("fetched_at", "TEXT", "2026-01-01T00:00:03+00:00"),
+    "fetch_mode": ("fetch_mode", "TEXT", "http"),
+    "lang": ("lang", "TEXT", "en"),
+    "status_code": ("status_code", "INTEGER", 200),
+    "content_type": ("content_type", "TEXT", "text/html"),
+    "engine": ("engine", "TEXT", "http"),
+    "extract_route": ("extract_route", "TEXT", "html"),
+}
+
+
+def test_extract_queue_declares_fetch_provenance_columns(store: SqliteStore) -> None:
+    """Свежая ``extract_queue`` объявляет все колонки провенанса получения.
+
+    Без них потребитель не воспроизводит условия получения, выбирает маршрут заново и
+    получает другой ``extractor_version``/``doc_version_id`` — другой корпус при тех же
+    объявленных входах (I19, A3). Колонки nullable и без ``DEFAULT``: «не записано» —
+    это ``NULL``, а не подобранное значение.
+    """
+    info = {
+        row["name"]: row for row in store.conn.execute("PRAGMA table_info(extract_queue)")
+    }
+    for column, (field, declared_type, _) in FETCH_PROVENANCE.items():
+        assert column in info, f"extract_queue.{column} не объявлена (поле {field})"
+        assert info[column]["type"] == declared_type
+        assert not info[column]["notnull"], f"{column} обязана быть nullable"
+        assert info[column]["dflt_value"] is None, f"{column} не должна иметь DEFAULT"
+
+
+def test_fetch_provenance_round_trips_through_queue(store: SqliteStore) -> None:
+    """Провенанс получения переживает запись→чтение (INSERT и конвертер строки).
+
+    Проверка ловит забытое поле в любую сторону: пропуск в ``INSERT`` даёт ``NULL`` при
+    чтении, пропуск в конвертере — ``None`` в модели.
+    """
+    values = {field: value for field, _, value in FETCH_PROVENANCE.values()}
+    store.enqueue_extract_item(_item("https://docs.test/provenance", **values))
+
+    row = next(iter(store.iter_extract_queue(SESSION_ID)))
+    for field, _, value in FETCH_PROVENANCE.values():
+        assert getattr(row, field) == value, f"поле {field} потеряно на границе очереди"
+
+
+def test_fetch_provenance_is_null_when_not_recorded(store: SqliteStore) -> None:
+    """Строка без провенанса читается ``None`` — «не записано», а не выдуманный маршрут.
+
+    Проверяется на **терминальном** состоянии: ``pending``/``claimed`` такой формы уже
+    не допускают (валидатор ``_validate_pending_has_fetch_provenance``), потому что
+    потребителю нечего воспроизводить. Для ``done``/``skipped`` NULL остаётся честным
+    «не наблюдалось» и не подменяется догадкой.
+    """
+    store.enqueue_extract_item(
+        _item(
+            "https://docs.test/plain",
+            state=ExtractQueueState.SKIPPED,
+            fetched_at=None,
+            fetch_mode=None,
+            extract_route=None,
+        )
+    )
+
+    row = next(iter(store.iter_extract_queue(SESSION_ID)))
+    for field, _, _ in FETCH_PROVENANCE.values():
+        assert getattr(row, field) is None
+
+
 # --------------------------------------------------------------------------- #
 # (5) сброс сеанса снимает и очередь конверсии
 # --------------------------------------------------------------------------- #
@@ -183,6 +259,44 @@ def test_terminal_state_does_not_require_address() -> None:
         content_hash="",
     )
     assert item.state is ExtractQueueState.SKIPPED
+
+
+# --------------------------------------------------------------------------- #
+# (7) доменный инвариант: pending/claimed несут провенанс получения
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("state", [ExtractQueueState.PENDING, ExtractQueueState.CLAIMED])
+@pytest.mark.parametrize("field", ["fetched_at", "fetch_mode", "extract_route"])
+def test_pending_without_fetch_provenance_is_rejected(
+    state: ExtractQueueState, field: str
+) -> None:
+    """Без провенанса получения потребитель выведет условия сам — другой корпус (I19, A3).
+
+    Сообщение обязано называть **чего именно** не хватает: иначе отказ неотличим от
+    «что-то не так с моделью», а чинить нужно конкретную колонку производителя.
+    """
+    with pytest.raises(ValidationError, match=field):
+        _item("https://docs.test/a", state=state, **{field: None})
+
+
+def test_extract_route_outside_the_axis_is_rejected() -> None:
+    """``extract_route`` — член ``ExtractionRoute``: свободная строка не пройдёт."""
+    with pytest.raises(ValidationError, match="ExtractionRoute"):
+        _item("https://docs.test/a", extract_route="guesswork")
+
+
+def test_terminal_state_does_not_require_fetch_provenance() -> None:
+    """Исход конверсии (``failed``) воспроизводимости не обещает — провенанс не обязателен."""
+    item = _item(
+        "https://docs.test/a",
+        state=ExtractQueueState.FAILED,
+        fetched_at=None,
+        fetch_mode=None,
+        extract_route="не ось",
+        error_kind="parser_failed",
+    )
+    assert item.state is ExtractQueueState.FAILED
 
 
 def test_enqueued_row_matches_retained_file_convention() -> None:
