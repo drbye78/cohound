@@ -204,7 +204,7 @@ CREATE INDEX IF NOT EXISTS idx_corpus_doc_version_doc
 
 **Почему таблица, а не колонка `corpus_docs.doc_version_id`.** `doc_id` дедуплицируется по
 `content_hash`, который **не включает уровень извлечения**, а `document_level` объявлен
-per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одного текста в одном прогоне
+per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня одного текста в одном прогоне
 законны. Колонка держит одну версию на строку, то есть теряет вторую молча. Воспроизведение
 и цена — §10 п. 8.
 
@@ -693,7 +693,7 @@ per-site (`core/pipeline/crawl_frontier.py:535`) — два уровня одн�
 
    Причина не в реализации, а в схеме: `doc_id = product:content_hash` **не различает
    уровень извлечения**, а `dv` различает — и `document_level` объявлен **per-site**
-   (`core/pipeline/crawl_frontier.py:535`), то есть два уровня в одном прогоне законны.
+   (`core/pipeline/crawl_frontier.py:604-609`), то есть два уровня в одном прогоне законны.
    Вторая версия терялась бы молча, и evidence, цитирующий её, получал бы «наблюдение не
    записано» — ложное утверждение о прогоне. Носитель — производная таблица
    `corpus_doc_version(doc_version_id PK, product_id, doc_id)`: одна версия → один документ,

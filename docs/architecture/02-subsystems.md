@@ -202,7 +202,7 @@ plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для
 
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
-| `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`core/pipeline/corpus.py:2944-2956`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
+| `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`core/pipeline/corpus.py:3082-3094`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
 | `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:2182-2231`) | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |

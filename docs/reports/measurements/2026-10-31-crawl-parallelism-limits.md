@@ -20,13 +20,19 @@ extract-archives/safety/ops` (`uv sync --frozen`, 223 пакета).
 |---|---|
 | хост | WSL2, 6.9 GiB RAM (бюджет `resolve_mem_budget_mb` = **5 077 MB**), 12 threads |
 | карта | RTX 3050 Laptop, 4096 MiB, доступно **3 583 MB** |
-| пакет | `packages/ru-pg-dbms`, `run_id` плана = `ru-pg-dbms-895dbfa4d045` |
+| пакет | `packages/ru-pg-dbms`, `run_id` плана = `ru-pg-dbms-895dbfa4d045` на момент замера |
 | оси краула (run.yaml) | `strategy: honest`, `rate_limit: 1.0–5.0 с`, `max_workers: 3`, `max_depth: 8`, `max_documents: 600` |
 | извлечение (deploy.yaml) | `pdf_device: cuda`, `document_level: layout_tables`, `pdf_pipeline: structured` |
 | SERP | `rounds: 1`, `budget: 362` на продукт, `mode: sync` |
 
 Корни и бюджеты сняты **резолвером кода**, а не чтением yaml: `resolve_crawl_limits` +
 `resolve_fetch_plan` по `corpus_urls.yaml` и `domain_profiles.yaml`.
+
+> **Поправка от 2026-10-31 (после публикации).** `run_id` из таблицы — величина **на момент
+> замера**. Фаза F3 плана `17` подняла слаг семантики краула до `crawl-2` (порядок frontier
+> `(depth, url)`, бюджет `max_documents` на изъятии, победитель дедупа `min(url)`), поэтому
+> тот же пакет даёт теперь `ru-pg-dbms-6f31dce1a5ba`. Числа этого отчёта — о **вежливости,
+> корнях и бюджетах** (они не менялись); на порядко-зависимые величины они не опираются.
 
 ## 2. Пейсинг: пул не даёт пропускной способности внутри одного хоста
 

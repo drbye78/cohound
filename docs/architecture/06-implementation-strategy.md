@@ -722,7 +722,7 @@ P5), но строка помечена здесь как неактуальна
 
   ➖ снято — утверждение выше, что `extract_workers` входит в `crawl_config_digest` и класс
   `execution_change`, **неверно на `f6100c7`** (F0): параллелизм извлечения в `as_dict()` не входит,
-  иначе `run_id` стал бы функцией хоста — `core/pipeline/crawl_frontier.py:141-160`.
+  иначе `run_id` стал бы функцией хоста — `core/pipeline/crawl_frontier.py:201-206`.
 
 - **Уровни извлечения документов (P5, as-built).** Ось `crawl.document_level`
   (`off`|`text`|`layout`|`layout_tables`|`full`; app < run < site, per seed-root,

@@ -430,7 +430,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:677-698`, `core/store/sqlite_store.py:1700-1702`,
+✅ сделано (`core/cli/commands/crawl.py:765`, `core/store/sqlite_store.py:1700-1702`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
 текстовом выводе (`:713`), и в JSON (`:682`). Докстринг `iter_crawl_sessions` прямо называет
 этот дефект причиной фильтра.

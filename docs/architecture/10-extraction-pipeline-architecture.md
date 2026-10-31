@@ -361,7 +361,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 
 > ✅ **сделано** — формула `min(floor((budget − parent_floor) / peak(level)), cpu_cap)`
 > (`core/pipeline/resources.py:542-614`), ось `extract_workers_derived`
-> (`core/pipeline/crawl_frontier.py:165`, `:497-507`), отказ при `workers=0` с называнием
+> (`core/pipeline/crawl_frontier.py:180`, `:497-507`), отказ при `workers=0` с называнием
 > пика и пола (`core/cli/wiring.py:2457-2465`). Явно объявленная
 > `crawl.extract_workers` сильнее бюджета — это оставлено намеренно.
 > ✅ **расширено (2026-10-28, P9):** под `crawl.pdf_device: cuda` добавляется второе
@@ -587,7 +587,7 @@ R2 выполняется, когда у каждого артефакта ес�
 
 > ✅ **сделано** — формула реализована в `core/pipeline/resources.py:542-614`
 > (`workers_from_budget`, `peak_mb`, `parent_floor_mb` публикуются в сообщении/метриках), ось
-> `extract_workers_derived` в `core/pipeline/crawl_frontier.py:165`, `:497-507`;
+> `extract_workers_derived` в `core/pipeline/crawl_frontier.py:180`, `:497-507`;
 > `workers=0` — ошибка конфигурации (`core/cli/wiring.py:2457-2465`). `pooled`-часть
 > (число как свойство пула) не реализована — пула как размещения нет.
 > ✅ **сделано (2026-10-28): второе ограничение — VRAM** (ось `crawl.pdf_device`, P9);
