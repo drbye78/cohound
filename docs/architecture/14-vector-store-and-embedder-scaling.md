@@ -239,20 +239,23 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
   2510-2527), приоритет по-прежнему «что установлено на хосте». Это и есть открытый пункт 5 §6.
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
-  ✅ форма на месте (`core/config/deploy.py:494-517`, `LLMSlotConfig`), ⬜ переиспользована не
+  ✅ форма на месте (`core/config/deploy.py:533`, `LLMSlotConfig`), ⬜ переиспользована не
   была: `DeployConfig` (`:564-581`) поля `embed` не имеет и лишний ключ отвергает.
 
 ### 5.0 Спецификация `deploy.embed` (оформлено; реализация — по появлении инстанса)
 
-⬜ не сделано (на 2026-10-28) — оформлена только спецификация в этом документе; в коде нет ни
-секции конфига, ни адаптера: `DeployConfig` (`core/config/deploy.py:564-581`) не имеет поля
-`embed` и отвергает его как лишний ввод (`extra="forbid"`), `RemoteEmbedder` не существует,
-маршрута `embed` в контурах шва нет (`contracts/seam/`: `capabilities`, `crawl`, `envelope`,
-`fetch`, `health`, `openapi`, `registry`, `search` — схемы эмбеддинга среди них нет).
+⬜ не сделано (проверено 2026-10-31) — оформлена только спецификация в этом документе.
+Уточнение против записи 28.10: поле `embed` в `DeployConfig` **появилось**
+(`core/config/deploy.py:603`), но объявляет ровно одно — `device`
+(`EmbedConfig`, `core/config/deploy.py:514`), потому что устройство входит в контракт;
+`backend`/`base_url`/`model_version` по-прежнему отвергаются (`extra="forbid"`), а
+`RemoteEmbedder` не существует и маршрута `embed` в контурах шва нет (`contracts/seam/`:
+`capabilities`, `crawl`, `envelope`, `extract`, `fetch`, `health`, `openapi`, `registry`,
+`search` — схемы эмбеддинга среди них нет).
 Форма-образец (`deploy.llm` со слотами `base_url`/`model_id`/`model_version`/`timeout_s`)
-наличествует: `core/config/deploy.py:494-517` (`LLMSlotConfig`).
-Что осталось: схема конфига + `RemoteEmbedder` за портом + правило `backend: remote` ⇒
-непустой `model_version` с `EXIT_USAGE`/код `embed`.
+наличествует: `core/config/deploy.py:533` (`LLMSlotConfig`).
+Что осталось: `backend`/`model_version` в схеме конфига + `RemoteEmbedder` за портом +
+правило `backend: remote` ⇒ непустой `model_version` с `EXIT_USAGE`/код `embed`.
 
 Форма — зеркало `llm:`, потому что это тот же класс вещи: commodity-модель за
 [OI]-совместимым API внутреннего периметра. Отличие одно: `llm` обслуживает **вердикты**,
