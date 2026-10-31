@@ -183,6 +183,7 @@ CRAWL_AXIS_DESTS: tuple[str, ...] = (
     "document_level",
     "pdf_pipeline",
     "document_timeout_s",
+    "host_concurrency",
 )
 
 
@@ -262,6 +263,17 @@ def add_crawl_axis_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "потолок времени на извлечение одного документа в секундах "
             "(дефолт 1800 = сегодняшнее поведение; ось входит в run_id при объявлении)"
+        ),
+    )
+    parser.add_argument(
+        "--host-concurrency",
+        dest="host_concurrency",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "сколько host'ов процесс краула ведёт одновременно "
+            "(дефолт: последовательно, как сегодня; ось входит в run_id при объявлении)"
         ),
     )
 

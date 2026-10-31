@@ -193,6 +193,13 @@ class CrawlLimits:
     """
 
     max_workers: int | None = None
+    #: F1 (план 17): сколько **host'ов** ведёт один процесс краула. ``None``/``1`` —
+    #: сегодняшнее поведение (одна полоса за раз). Единица — host, потому что лимитер
+    #: пейсит per-host (`core/util/rate_limit.py:53`), а внутри host параллельность
+    #: пропускной способности не даёт (замер 2026-10-31). ``host_concurrency_explicit``
+    #: отмечает объявление на app/run слое: только тогда ключ попадает в ``as_dict``.
+    host_concurrency: int | None = None
+    host_concurrency_explicit: bool = False
     extract_workers: int | None = None
     #: F0: ``True`` — ``extract_workers`` выведен из бюджета памяти
     #: (:func:`core.pipeline.resources.workers_from_budget`), а не объявлен на слое
@@ -329,6 +336,10 @@ class CrawlLimits:
         # поэтому дайджест прогонов без неё не меняется, а при задании — честно меняется.
         if self.document_timeout_s_explicit:
             payload["document_timeout_s"] = self.document_timeout_s
+        # F1 (план 17): ось параллельности краула. Только при объявлении — иначе
+        # дайджест прогонов без неё не меняется (пин `ru-pg-dbms-895dbfa4d045`).
+        if self.host_concurrency_explicit:
+            payload["host_concurrency"] = self.host_concurrency
         if self.revalidate_max_documents is not None:
             payload["revalidate_max_documents"] = self.revalidate_max_documents
         if self.max_response_bytes_explicit:
@@ -480,6 +491,16 @@ def resolve_crawl_limits(
         return getattr(profile, name) if profile is not None else None
 
     run_max_workers = run.max_workers if run is not None else None
+    # F1 (план 17): app < run, без per-site слоя — число полос есть свойство узла.
+    run_host_concurrency = (
+        getattr(run, "host_concurrency", None) if run is not None else None
+    )
+    app_host_concurrency = getattr(app, "host_concurrency", None)
+    host_concurrency = (
+        run_host_concurrency
+        if run_host_concurrency is not None
+        else app_host_concurrency
+    )
     run_extract_workers = (
         getattr(run, "extract_workers", None) if run is not None else None
     )
@@ -697,6 +718,12 @@ def resolve_crawl_limits(
 
     return CrawlLimits(
         max_workers=None if max_workers is None else int(max_workers),  # type: ignore[arg-type]
+        host_concurrency=(
+            None if host_concurrency is None else int(host_concurrency)  # type: ignore[arg-type]
+        ),
+        host_concurrency_explicit=_axis_explicit(
+            app, "host_concurrency", run_host_concurrency, None
+        ),
         extract_workers=(
             None if extract_workers is None else int(extract_workers)  # type: ignore[arg-type]
         ),

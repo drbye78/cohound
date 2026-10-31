@@ -231,6 +231,7 @@ def test_serp_rounds_flag_matches_run() -> None:
         ["--exclude-path", "/archive/*"],
         ["--document-level", "text"],
         ["--pdf-pipeline", "text_layer"],
+        ["--host-concurrency", "3"],
     ],
 )
 def test_plan_run_id_matches_run(
@@ -435,3 +436,54 @@ def test_plan_axes_visible_in_declared_axes(
     )
     # ``pdf_pipeline`` не задан флагом — наследуется (None на run-слое), не подменяется.
     assert PdfPipeline.STRUCTURED.value == "structured"
+
+
+def test_host_concurrency_is_declared_axis_only(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--host-concurrency`` меняет ``run_id``, а без флага дайджест краула не сдвигается.
+
+    Ось объявлена (F1 плана 17): она меняет порядок наблюдения корпуса, поэтому обязана
+    входить в ``crawl_config_digest``. Обратная половина не менее важна: прогон без флага
+    обязан остаться байт-в-байт прежним, иначе поедет ``run_id`` всех прежних прогонов.
+    """
+    package = valid_package(tmp_path)
+    common = _common(package)
+
+    assert main(["plan", *common]) == EXIT_OK
+    declared = _payload(capsys)
+    assert main(["plan", *common, "--host-concurrency", "4"]) == EXIT_OK
+    flagged = _payload(capsys)
+
+    assert flagged["run_id"] != declared["run_id"]
+    assert flagged["crawl_config_digest"] != declared["crawl_config_digest"]
+
+
+def test_host_concurrency_default_does_not_change_digest(
+    tmp_path: Path, home: Path
+) -> None:
+    """Без объявления ось не появляется в словаре: дайджест равен прежнему.
+
+    Проверяется на чистой функции: ``CrawlLimits.as_dict()`` без оси равен такому же
+    словарю, собранному из тех же осей вручную, — то есть ключ ``host_concurrency``
+    в дайджест не просачивается из дефолта.
+    """
+    app = CrawlConfig()
+    limits = resolve_crawl_limits(
+        "https://example.test/",
+        app=app,
+        run=CrawlRunConfig(),
+        profiles={},
+    )
+    assert "host_concurrency" not in limits.as_dict()
+    assert limits.host_concurrency is None
+    assert limits.host_concurrency_explicit is False
+
+    declared = resolve_crawl_limits(
+        "https://example.test/",
+        app=app,
+        run=CrawlRunConfig(host_concurrency=5),
+        profiles={},
+    )
+    assert declared.as_dict()["host_concurrency"] == 5
+    assert declared.host_concurrency_explicit is True

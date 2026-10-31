@@ -522,6 +522,11 @@ class CrawlRunConfig(BaseModel):
     strategy: CrawlStrategy = CrawlStrategy.AUTO
     rate_limit: RateLimitSpec | None = None
     max_workers: int | None = Field(default=None, ge=1)
+    # F1 (план 17): сколько **host'ов** (ключ вежливости лимитера) этот процесс краула
+    # ведёт одновременно. ``None``/``1`` = сегодняшнее поведение (одна полоса за раз).
+    # Это не размер пула фетча: внутри одного host параллельность пропускной способности
+    # не даёт (замер 2026-10-31), поэтому ось считает полосы, а не потоки.
+    host_concurrency: int | None = Field(default=None, ge=1)
     # P4: отдельная ось CPU-параллелизма экстракции (пул процессов/потоков). ``None``/``1``
     # = поведение байт-в-байт (inline); не смешивается с ``max_workers`` (сетевой fetch-пул).
     extract_workers: int | None = Field(default=None, ge=1)

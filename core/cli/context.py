@@ -3146,6 +3146,17 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--host-concurrency",
+        dest="host_concurrency",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "сколько host'ов процесс краула ведёт одновременно "
+            "(дефолт: последовательно, как сегодня; ось входит в run_id при объявлении)"
+        ),
+    )
+    parser.add_argument(
         "--follow",
         "--watch",
         dest="follow",
