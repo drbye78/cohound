@@ -27,6 +27,7 @@ from core.domain import (
     CrawlSession,
     CrawlSessionItem,
     CrawlSessionStatus,
+    ExtractQueueItem,
     GateDecision,
     IndexManifestEntry,
     ProtocolExhaustion,
@@ -342,6 +343,29 @@ class StorePort(Protocol):
         Не задевает счётчики/метаданные сеанса — безопасно для провенанса, вычисленного
         по элементам после финализации.
         """
+        ...
+
+    # -- durable передача в конверсию (17 §4.1) ---------------------------- #
+    def enqueue_extract_item(self, item: ExtractQueueItem) -> None:
+        """Пишет строку ``extract_queue`` **идемпотентно** по PK.
+
+        Ключ — ``(session_id, product_id, url)``: повторная запись того же факта
+        (resume/повторный фетч того же URL) не создаёт вторую строку и **не**
+        перезаписывает состояние, выставленное потребителем, — ``ON CONFLICT DO NOTHING``.
+        Иначе краул, продолживший сеанс, сбрасывал бы ``done`` обратно в ``pending`` и
+        заставлял конверсию перечитывать уже собранные документы.
+        """
+        ...
+
+    def count_extract_queue(self, session_id: str) -> dict[str, int]:
+        """Число строк очереди сеанса по состояниям; **только непустые** состояния.
+
+        Пустой словарь = очередь пуста. Ключи — значения :class:`ExtractQueueState`.
+        """
+        ...
+
+    def iter_extract_queue(self, session_id: str) -> Iterable[ExtractQueueItem]:
+        """Итерирует строки очереди сеанса в детерминированном порядке ``product_id, url``."""
         ...
 
     # -- покрытие корпуса (Ф0: гейт ❌) ----------------------------------- #

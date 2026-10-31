@@ -27,6 +27,7 @@ from core.domain.enums import (
     EmbedDevice,
     ExcludedCellClass,
     ExtractionRoute,
+    ExtractQueueState,
     FailureKind,
     FetchMode,
     Gate,
@@ -127,6 +128,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
+        # 17 §4.1: состояние durable-очереди передачи документа в конверсию.
+        "extract_queue_state",
         # P2a: машинная причина пропуска фазы (PhaseStatus="skipped").
         "skip_reason",
         # MVP-1 (09 §3.1): онбординг продукта и seed-набор.
@@ -202,6 +205,10 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "search_mode": {v.value for v in SearchMode},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
+        # 17 §4.1: состояние durable-очереди конверсии. Производитель есть — краул
+        # (``crawl run --crawl-only``) пишет строки; словарь и enum сверяются, чтобы
+        # «краул выполнен» и «корпус собран» не разъехались молча.
+        "extract_queue_state": {v.value for v in ExtractQueueState},
         "skip_reason": {v.value for v in SkipReason},
         # MVP-1 (09 §3.1): онбординг продукта и seed-набор.
         "seed_role": {v.value for v in SeedRole},

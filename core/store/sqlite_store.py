@@ -36,6 +36,7 @@ from core.domain import (
     CrawlSessionStatus,
     EndpointKind,
     EvidenceType,
+    ExtractQueueItem,
     Gate,
     GateDecision,
     IndexManifestEntry,
@@ -74,6 +75,7 @@ from core.store.sqlite_rows import (
     _row_to_corpus_coverage,
     _row_to_crawl_item,
     _row_to_crawl_session,
+    _row_to_extract_queue_item,
     _row_to_resolved,
 )
 
@@ -1857,8 +1859,17 @@ class SqliteStore:
         return recovered
 
     def clear_crawl_session(self, session_id: str) -> None:
-        """Удаляет элементы сеанса, затем сам сеанс (одна транзакция)."""
+        """Удаляет очередь конверсии и элементы сеанса, затем сам сеанс (одна транзакция).
+
+        ``extract_queue`` — проекция **этого** сеанса (17 §4.1): сброс сеанса означает «этого
+        краула больше нет», и строки очереди, оставленные им, были бы ложью о том, что
+        добыто сейчас. Пере-добыча после сброса поставит их снова (``pending`` повторно —
+        норма для «сделать заново»), а конверсия идемпотентна по ``content_hash``.
+        """
         with self.conn:
+            self.conn.execute(
+                "DELETE FROM extract_queue WHERE session_id = ?", (session_id,)
+            )
             self.conn.execute(
                 "DELETE FROM crawl_session_items WHERE session_id = ?", (session_id,)
             )
@@ -1876,6 +1887,65 @@ class SqliteStore:
                 "UPDATE crawl_sessions SET provenance_json = ? WHERE session_id = ?",
                 (provenance_json, session_id),
             )
+
+    # -- durable передача в конверсию (17 §4.1) ---------------------------- #
+    @staticmethod
+    def _row_to_extract_queue_item(row: sqlite3.Row) -> ExtractQueueItem:
+        return _row_to_extract_queue_item(row)
+
+    def enqueue_extract_item(self, item: ExtractQueueItem) -> None:
+        """Идемпотентная запись строки ``extract_queue`` (``ON CONFLICT DO NOTHING``).
+
+        Повтор того же ``(session_id, product_id, url)`` — не ошибка и не перезапись:
+        состояние строки принадлежит потребителю, и краул, продолживший сеанс, не имеет
+        права вернуть ``done`` в ``pending`` (иначе конверсия перечитала бы собранное).
+        Доменная модель уже проверила инвариант «``pending``/``claimed`` несут адрес
+        retained-байтов и хеш» (I19).
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO extract_queue"
+                " (session_id, product_id, url, content_hash, raw_path, level,"
+                "  pdf_pipeline, state, attempts, enqueued_at, state_changed_at,"
+                "  claimed_by, error_kind, error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(session_id, product_id, url) DO NOTHING",
+                (
+                    item.session_id,
+                    item.product_id,
+                    item.url,
+                    item.content_hash,
+                    item.raw_path,
+                    item.level,
+                    item.pdf_pipeline,
+                    _as_text(item.state),
+                    item.attempts,
+                    item.enqueued_at,
+                    item.state_changed_at,
+                    item.claimed_by,
+                    item.error_kind,
+                    item.error,
+                ),
+            )
+
+    def count_extract_queue(self, session_id: str) -> dict[str, int]:
+        """Число строк очереди сеанса по состояниям (непустые состояния только)."""
+        counts: dict[str, int] = {}
+        for row in self.conn.execute(
+            "SELECT state, COUNT(*) AS n FROM extract_queue WHERE session_id = ?"
+            " GROUP BY state ORDER BY state",
+            (session_id,),
+        ):
+            counts[str(row["state"])] = int(row["n"])
+        return counts
+
+    def iter_extract_queue(self, session_id: str) -> Iterator[ExtractQueueItem]:
+        """Итерирует очередь сеанса; порядок ``product_id, url`` (детерминизм)."""
+        for row in self.conn.execute(
+            "SELECT * FROM extract_queue WHERE session_id = ? ORDER BY product_id, url",
+            (session_id,),
+        ):
+            yield self._row_to_extract_queue_item(row)
 
     @staticmethod
     def _row_to_corpus_coverage(row: sqlite3.Row) -> CorpusCoverage:

@@ -2432,6 +2432,7 @@ def _resolve_phases(
     previous_store: Any = None,
     change_class: str | None = None,
     cycle_id: str | None = None,
+    crawl_only: bool = False,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -2498,6 +2499,10 @@ def _resolve_phases(
     :param derive_extract_workers: F0 — выводить окно экстракции из бюджета (только для
         локального экстрактора). ``None`` — не передано: composition root резолвит бюджет
         и флаг сам по профилю зон (здесь же, один раз на сборку фаз).
+    :param crawl_only: F2 (17 §4) — «краул без конверсии» (``crawl run --crawl-only``).
+        Здесь же решается несовместимость с пулом экстракции: пул **не передаётся**
+        (``None``), потому что режим не извлекает документы, а ``build_corpus`` отвергает
+        их сочетание явным ``ValueError``. ``False`` — прежнее поведение байт-в-байт.
     """
     passports_dir = _resolve_passports_dir(args, paths)
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
@@ -2617,6 +2622,8 @@ def _resolve_phases(
         "product_modes": product_modes,
         # 16 §3.1/09 §14.2: план продуктов — тот же объект, что уходит в снимок входов.
         "product_plan": product_plan,
+        # 17 §4 (F2): «краул без конверсии» — вход Ш5; полный ``run`` его не выставляет.
+        "crawl_only": crawl_only,
         # 09 §13.6/16 §3.1: срез прогона — та же величина, что вошла в ``run_id``
         # (``resolve_run_scope``); без неё ``runs.run_scope`` остаётся NULL и срез
         # неотличим от полного измерения.
@@ -2649,16 +2656,23 @@ def _resolve_phases(
         # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
         # split — потоки поверх RemoteExtractor). Ось ``crawl.extract_workers`` решается
         # в pipeline; при ``None``/``1`` пул не создаётся (поведение байт-в-байт).
-        "extraction_pool": build_extraction_pool(
-            deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
-            extractor=getattr(ports, "extractor", None),
-            max_tasks_per_child=run_extract_max_tasks,
-            # F0: внутри профильной фабрики — ``None`` для ``split`` (пик воркеров edge
-            # ядру не виден), путь стока для локального процессного пула.
-            worker_rss_dir=worker_rss_dir,
-            # P9: устройство — свойство хоста, поэтому захватывается фабрикой пула, а не
-            # приходит в payload задания; под ``split`` игнорируется (edge своим конфигом).
-            pdf_device=resolved_pdf_device,
+        # F2 (17 §4): в режиме «краул без конверсии» пул **не передаётся** вовсе —
+        # ``build_corpus`` отвергает сочетание ``crawl_only`` + пул явным ``ValueError``
+        # (извлечение в режиме «без извлечения» было бы молчаливым противоречием).
+        "extraction_pool": (
+            build_extraction_pool(
+                deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
+                extractor=getattr(ports, "extractor", None),
+                max_tasks_per_child=run_extract_max_tasks,
+                # F0: внутри профильной фабрики — ``None`` для ``split`` (пик воркеров edge
+                # ядру не виден), путь стока для локального процессного пула.
+                worker_rss_dir=worker_rss_dir,
+                # P9: устройство — свойство хоста, поэтому захватывается фабрикой пула, а не
+                # приходит в payload задания; под ``split`` игнорируется (edge своим конфигом).
+                pdf_device=resolved_pdf_device,
+            )
+            if not crawl_only
+            else None
         ),
         # F0: бюджет памяти и решение «окно из бюджета» — явные входы Ш5 (не env).
         "mem_budget_mb": mem_budget_mb,

@@ -34,6 +34,8 @@ from core.domain import (
     CrawlSessionStatus,
     EvidenceScope,
     EvidenceType,
+    ExtractQueueItem,
+    ExtractQueueState,
     MeasurementOrigin,
     ResolvedSource,
     SourceKind,
@@ -381,6 +383,27 @@ def _row_to_crawl_item(row: sqlite3.Row) -> CrawlSessionItem:
         error=row["error"],
         first_seen=row["first_seen"],
         last_attempt=row["last_attempt"],
+    )
+
+
+def _row_to_extract_queue_item(row: sqlite3.Row) -> ExtractQueueItem:
+    """Восстанавливает ``ExtractQueueItem`` из строки ``extract_queue`` (17 §4.1)."""
+    attempts = row["attempts"]
+    return ExtractQueueItem(
+        session_id=row["session_id"],
+        product_id=row["product_id"],
+        url=row["url"],
+        content_hash=row["content_hash"],
+        raw_path=row["raw_path"],
+        level=row["level"],
+        pdf_pipeline=row["pdf_pipeline"],
+        state=ExtractQueueState(row["state"]),
+        attempts=0 if attempts is None else int(attempts),
+        enqueued_at=row["enqueued_at"],
+        state_changed_at=row["state_changed_at"],
+        claimed_by=row["claimed_by"],
+        error_kind=row["error_kind"],
+        error=row["error"],
     )
 
 

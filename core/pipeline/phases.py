@@ -929,6 +929,7 @@ def build_phases(
     cycle_id: str | None = None,
     run_scope: str | None = None,
     product_plan: Mapping[str, Any] | None = None,
+    crawl_only: bool = False,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -1052,6 +1053,11 @@ def build_phases(
         пишет тем же значением до исполнения фаз (:func:`_product_plan_provenance`).
         Пересчёт из ``product_modes`` запрещён: там только режим, без ``scope``/
         ``reasons``/``blocked`` — это была бы догадка (A3).
+    :param crawl_only: F2 (17 §4) — «краул без конверсии»: Ш5 исполняет frontier/фетч/
+        retention/``FETCHED`` и публикует ``extract_queue``, но не конвертирует. Вход
+        приходит только от ``hound crawl run|resume|restart --crawl-only``; полный ``run``
+        его не объявляет (иначе прогон печатал бы корпус без документов). ``False`` —
+        прежнее поведение байт-в-байт.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -1278,6 +1284,9 @@ def build_phases(
                 for pid, passport in (passports or {}).items()
                 if getattr(passport, "canonical_name", None)
             },
+            # 17 §4 (F2): «краул без конверсии» — публикация durable-очереди
+            # ``extract_queue`` вместо сборки корпуса. ``False`` ⇒ байт-в-байт прежнее.
+            crawl_only=crawl_only,
         )
         _capture_index_build(holder, result)
         # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).

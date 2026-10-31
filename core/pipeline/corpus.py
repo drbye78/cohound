@@ -1078,6 +1078,7 @@ def _build_corpus(
     serp_langs: Sequence[str] | None = None,
     product_names: Mapping[str, str] | None = None,
     manual_artifacts: ManualArtifacts | None = None,
+    crawl_only: bool = False,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -1308,16 +1309,36 @@ def _build_corpus(
     :param product_names: ``product_id → каноническое имя`` (из паспорта) для запросов
         «каталог + имя продукта» (замер: с именем 45/63 попаданий против 27/63 без него).
         Продукт без имени ищется по заголовку параметра, и это видно в провенансе.
+    :param crawl_only: F2 (17 §4) — **краул без конверсии**. Frontier, фетч, retention и
+        элемент сеанса ``FETCHED`` исполняются как обычно, а каждый добытый документ
+        становится строкой durable-очереди ``extract_queue``; зонд артефакта, спуск в
+        контейнеры, экстракция, нарезка, дедуп и запись ``corpus_docs``/``corpus_chunks``
+        **не** выполняются. Смысл: «краул выполнен» (элементы терминальны, frontier
+        исчерпан, усечение записано) перестаёт означать «корпус собран» — сборка
+        становится работой потребителя очереди, и время краула измеряется без чужой
+        стоимости. Счётчики ``max_documents``/``pages_fetched``/усечения те же, что в
+        полном прогоне: это тот же краул, а не другой. Требует активного сеанса
+        (``store`` + ``run_id``) и **несовместим** с ``extraction_pool`` — извлечение в
+        режиме «без извлечения» было бы молчаливым противоречием (:raises ValueError).
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild, ResourcesObservation]``
     (сборка + счётчики; F0 — наблюдённые ресурсные факты фазы: расписание экстракции,
     чанки на документ, пик воркеров).
 
-    :raises ValueError: если ``urls`` задан, но не является отображением.
+    :raises ValueError: если ``urls`` задан, но не является отображением; если
+        ``crawl_only`` запрошен вместе с ``extraction_pool`` или без сеанса.
     """
     if urls is not None and not isinstance(urls, Mapping):
         raise ValueError("urls обязан быть отображением product_id → список URL")
+    # 17 §4 (F2): режим «без извлечения» несовместим с исполнителем извлечения. Молча
+    # проигнорировать пул нельзя: прогон объявил бы краул без конверсии, а исполнял
+    # конверсию (или наоборот) — и это было бы неотличимо в артефактах.
+    if crawl_only and extraction_pool is not None:
+        raise ValueError(
+            "crawl_only несовместим с extraction_pool: режим «краул без конверсии» "
+            "не извлекает документы, а пул экстракции существует ровно для извлечения"
+        )
 
     url_map: dict[str, list[str]] = {}
     if urls:
@@ -1503,6 +1524,15 @@ def _build_corpus(
         except Exception as exc:  # noqa: BLE001 — resume best-effort, не роняет фазу
             errors.append(f"open_crawl_session: {type(exc).__name__}: {exc}")
             session = None
+    # 17 §4 (F2): «краул без конверсии» без сеанса — противоречие в самом входе:
+    # durable-очередь адресуется ``session_id``, и без него добытый документ некуда
+    # положить. ValueError, а не тихий краул без публикации: последний выглядел бы как
+    # успешный краул с пустой очередью.
+    if crawl_only and session is None:
+        raise ValueError(
+            "crawl_only требует активного сеанса краула (store + run_id): "
+            "без session_id durable-очередь extract_queue не адресуема"
+        )
     #: Прерванная фаза обязана закрыть сеанс терминально (см. ``PhaseLifecycle``):
     #: адрес сеанса известен только здесь, а ``finally`` — в обёртке :func:`build_corpus`.
     if lifecycle is not None:
@@ -2023,6 +2053,9 @@ def _build_corpus(
         note_scheduling=_note_scheduling,
         ingest_member_doc=_ingest_member_doc,
         persist_docs=_persist_docs,
+        # 17 §4 (F2): режим «краул без конверсии» + адрес durable-очереди.
+        crawl_only=crawl_only,
+        session_id=session,
     )
     for product_id in products:
         product_started = time.perf_counter()

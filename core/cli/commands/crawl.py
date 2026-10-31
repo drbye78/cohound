@@ -22,6 +22,11 @@
 * ``cancel``  — терминально снять сеанс: ``running`` → ``interrupted`` (best-effort;
   foreground без worker'а), неисполнявшийся → ``cancelled``.
 
+F2 (``17`` §4): ``run``/``resume``/``restart`` принимают ``--crawl-only`` — краул без
+конверсии (frontier + фетч + retention + ``FETCHED``), документы уходят в durable-очередь
+``extract_queue``, корпус **не** собирается. Режим допустим только при ``--until`` не позже
+``corpus``; у полного ``run`` этого флага нет.
+
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 """
 
@@ -250,6 +255,19 @@ def _print_crawl_run(payload: dict[str, Any]) -> None:
         lines.append(
             "crawl: " + ", ".join(f"{key}={counts[key]}" for key in sorted(counts))
         )
+    # F2 (17 §4): «краул без конверсии» виден явно, иначе пустой корпус читался бы как
+    # провал сборки, а не как объявленный режим.
+    if payload.get("crawl_only"):
+        lines.append("crawl_only: true")
+        queue = payload.get("extract_queue") or {}
+        lines.append(
+            "extract_queue: "
+            + (
+                ", ".join(f"{key}={queue[key]}" for key in sorted(queue))
+                if queue
+                else "пусто"
+            )
+        )
     for note in payload.get("notes", ()):
         lines.append(f"note: {note}")
     for error in payload.get("errors", ()):
@@ -274,10 +292,39 @@ def _execute_crawl(
     ``index_store/``, а не отвергают друг друга. Занятый лок — ``EXIT_USAGE`` с именем
     держателя и путём файла. ``resume``/``restart`` идут тем же путём осознанно: они
     продолжают сеанс того же пакета и попадают под тот же ресурс.
+
+    F2 (17 §4): ``--crawl-only`` проверяется **до** лока и до открытия БД — это отказ во
+    входе (несовместимый ``--until``), а не операция над пакетом.
     """
+    _reject_crawl_only_beyond_corpus(args)
     with _package_lock(args, command=f"crawl {mode}"):
         return _execute_crawl_locked(
             args, mode=mode, clear_first=clear_first, from_scratch=from_scratch
+        )
+
+
+def _reject_crawl_only_beyond_corpus(args: argparse.Namespace) -> None:
+    """F2 (17 §4): ``--crawl-only`` разрешён, только если фаза-потолок не позже ``corpus``.
+
+    Режим «краул без конверсии» корпус **не** собирает, поэтому ``--until evaluate``
+    обещал бы оценку по пустому корпусу — то есть выдал бы отсутствие документов за
+    результат измерения. Отказ — ``EXIT_USAGE`` с объяснением, а не тихое усечение.
+    """
+    if not bool(getattr(args, "crawl_only", False)):
+        return
+    until = getattr(args, "until", None) or "corpus"
+    beyond = [
+        phase
+        for phase in _phases_until(until)
+        if PHASES.index(phase) > PHASES.index("corpus")
+    ]
+    if beyond:
+        raise CliError(
+            f"crawl-only не производит корпус: --until={until} требует фаз после corpus "
+            f"({', '.join(beyond)}), а они читают собранный корпус. Допустимо "
+            "--until corpus (дефолт) или фаза не позже corpus.",
+            code="usage",
+            exit_code=EXIT_USAGE,
         )
 
 
@@ -367,6 +414,7 @@ def _execute_crawl_locked(
 
     session_id = default_session_id(run_id)
     until = getattr(args, "until", None) or "corpus"
+    crawl_only = bool(getattr(args, "crawl_only", False))
     json_mode = bool(getattr(args, "json", False))
     only_failed = bool(getattr(args, "only_failed", False))
     only_product = getattr(args, "only_product", None)
@@ -408,6 +456,7 @@ def _execute_crawl_locked(
     final_status: str | None = None
     final_counts: dict[str, int] = {}
     truncation: dict[str, Any] = {}
+    extract_queue: dict[str, int] = {}
     try:
         _ensure_run(store, run_id, inputs)
         # I21/§7.4: объявленный маршрут «сценарий → модель» — durable-факт строки прогона.
@@ -502,6 +551,8 @@ def _execute_crawl_locked(
             # F0: бюджет/окно экстракции — явные входы Ш5 (тот же резолв, что у preflight).
             mem_budget_mb=mem_budget_mb,
             derive_extract_workers=derive_extract_workers,
+            # F2 (17 §4): режим «краул без конверсии» — публикация extract_queue.
+            crawl_only=crawl_only,
         )
         if clear_first:
             store.clear_crawl_session(session_id)
@@ -538,6 +589,10 @@ def _execute_crawl_locked(
                 if session_obj is not None
                 else {}
             )
+            # F2 (17 §4): очередь конверсии — публикуемое число, а не внутренний факт:
+            # «краул добыл 900 документов, конверсия не начиналась» обязан быть виден
+            # одной командой (``crawl status`` показывает то же самое).
+            extract_queue = store.count_extract_queue(session_id)
         except Exception as exc:  # noqa: BLE001 — наблюдаемость best-effort
             notes.append(f"truncation: {type(exc).__name__}: {exc}")
     finally:
@@ -560,6 +615,11 @@ def _execute_crawl_locked(
         "crawl": _crawl_counts(result),
         "errors": list(getattr(result, "errors", []) or []),
         "notes": notes,
+        # F2 (17 §4): режим «краул без конверсии» и содержимое durable-очереди.
+        # ``crawl_only=false`` в полном крауле — не украшение: по этому полю видно,
+        # что корпус собирался, а не только добывался.
+        "crawl_only": crawl_only,
+        "extract_queue": extract_queue,
     }
     if truncation:
         # N4: усечение видно в crawl/--json payload (не только во внутреннем провенансе).
@@ -653,6 +713,11 @@ def status(args: argparse.Namespace) -> int:
             "session_id": session_id,
             "db": str(db_path),
             "counts": counts,
+            # F2 (17 §4): очередь конверсии — то же число, что печатает ``crawl run``:
+            # «краул добыл N, конверсия взяла 0» видно, не открывая БД.
+            "extract_queue": (
+                store.count_extract_queue(session_id) if session is not None else {}
+            ),
             **_session_fields(session),
         }
         if per_url:
@@ -668,6 +733,13 @@ def status(args: argparse.Namespace) -> int:
                 f"total: {session.total}",
                 "counts: " + ", ".join(f"{key}={counts[key]}" for key in sorted(counts)),
             ]
+            # F2 (17 §4): очередь конверсии — рядом со счётчиками краула.
+            queue = payload.get("extract_queue") or {}
+            if queue:
+                lines.append(
+                    "extract_queue: "
+                    + ", ".join(f"{key}={queue[key]}" for key in sorted(queue))
+                )
             # F1: свидетельство живости — видно, что ``running`` живой, а не фантом.
             if payload.get("heartbeat_at") or payload.get("owner"):
                 lines.append(
@@ -826,6 +898,23 @@ def _no_subcommand(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _add_crawl_only_flag(parser: argparse.ArgumentParser) -> None:
+    """F2 (17 §4): ``--crawl-only`` — краул без конверсии, с публикацией ``extract_queue``.
+
+    Объявлен только у ``crawl run|resume|restart``: полному ``run`` этот режим
+    противопоказан (он печатал бы корпус без документов), и отсутствие флага там —
+    проверяемое свойство CLI, а не соглашение.
+    """
+    parser.add_argument(
+        "--crawl-only",
+        dest="crawl_only",
+        action="store_true",
+        help="краул без конверсии: frontier+фетч+retention+FETCHED, документы — в "
+        "durable-очередь extract_queue (корпус не собирается; допустимо только при "
+        "--until не позже corpus)",
+    )
+
+
 def _add_source_flags(parser: argparse.ArgumentParser) -> None:
     """Источники корпуса Ш5: ``--urls`` и ``--render-modes`` (как у ``run``)."""
     parser.add_argument(
@@ -901,6 +990,7 @@ def configure(sub: Any) -> None:
         "--reset", action="store_true", help="очистить сеанс краула перед запуском"
     )
     _add_phase4_flags(p_run)
+    _add_crawl_only_flag(p_run)
     _add_common(p_run)
     _add_llm_slot_flag(p_run)
     _add_llm_model_flag(p_run)
@@ -923,6 +1013,7 @@ def configure(sub: Any) -> None:
     _add_run_target_flags(p_resume)
     _add_source_flags(p_resume)
     _add_phase4_flags(p_resume)
+    _add_crawl_only_flag(p_resume)
     _add_common(p_resume)
     _add_llm_slot_flag(p_resume)
     _add_llm_model_flag(p_resume)
@@ -932,6 +1023,7 @@ def configure(sub: Any) -> None:
     _add_run_target_flags(p_restart)
     _add_source_flags(p_restart)
     _add_phase4_flags(p_restart)
+    _add_crawl_only_flag(p_restart)
     _add_common(p_restart)
     _add_llm_slot_flag(p_restart)
     _add_llm_model_flag(p_restart)

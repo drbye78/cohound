@@ -773,6 +773,28 @@ class CrawlItemStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ExtractQueueState(StrEnum):
+    """Состояние строки ``extract_queue`` — durable передачи документа в конверсию.
+
+    ``PENDING`` — краул записал факт, потребитель ещё не брал; ``CLAIMED`` — документ взят
+    одним потребителем (инвариант эксклюзивности держится conditional ``UPDATE``);
+    ``DONE`` — потребитель объявил готовность; ``FAILED`` — терминальный сбой конверсии
+    (класс в ``error_kind``); ``SKIPPED`` — документ сознательно не конвертируется
+    (пропуск по политике, а не сбой). Терминальные: ``done|failed|skipped``.
+
+    Это **состояние очереди**, а не доменной ячейки и не статус краула: строку пишет
+    краул, состояние меняет потребитель, и только он вправе объявить ``done``
+    (17-crawl-host-scheduler-plan §4.1/§4.2). Словарь-источник истины —
+    ``docs/status-dictionary.yaml`` (секция ``extract_queue_state``).
+    """
+
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 class SeedRole(StrEnum):
     """Роль seed'а в корпусе продукта (09 §7).
 

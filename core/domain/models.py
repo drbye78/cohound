@@ -34,6 +34,7 @@ from core.domain.enums import (
     EndpointKind,
     EvidenceState,
     EvidenceType,
+    ExtractQueueState,
     FailureKind,
     Gate,
     GatePolicy,
@@ -2096,6 +2097,64 @@ class CrawlSessionItem(BaseModel):
                 f"(допустимо: {', '.join(sorted(known))})"
             )
         return value
+
+
+class ExtractQueueItem(BaseModel):
+    """Строка ``extract_queue``: durable передача добытого документа в конверсию.
+
+    Носитель контракта «краул выполнен ≠ корпус собран» (17 §1/§4): краул записывает
+    факт ``(session_id, product_id, url, content_hash, raw_path, level, pdf_pipeline)``,
+    потребитель конверсии берёт строку (``claimed``) и объявляет готовность. Строки
+    пишет **только** краул, состояние меняет **только** потребитель — разделение
+    владения по данным, а не по коду.
+
+    Инвариант (I19): пока документ ``pending``/``claimed``, ``raw_path`` и
+    ``content_hash`` обязаны быть непустыми — очередь обещает существующий retained
+    файл, и «нет пути» означало бы разрыв цепочки evidence до начала конверсии.
+    ``level``/``pdf_pipeline`` — условия измерения корня, объявленные краулом: без них
+    потребитель не может воспроизвести ``extractor_version`` этого документа.
+    """
+
+    model_config = _BASE
+
+    session_id: str
+    product_id: str
+    url: str
+    content_hash: str = ""
+    raw_path: str = ""
+    #: Уровень извлечения документных форматов, объявленный корнем (``document_level``).
+    level: str = ""
+    #: Механизм извлечения PDF, объявленный корнем (``pdf_pipeline``).
+    pdf_pipeline: str = ""
+    state: ExtractQueueState = ExtractQueueState.PENDING
+    attempts: int = 0
+    enqueued_at: str
+    state_changed_at: str | None = None
+    #: Кто взял документ (``claimed``) — провенанс потребителя, а не блокировка.
+    claimed_by: str | None = None
+    error_kind: str | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_pending_has_bytes(self) -> ExtractQueueItem:
+        """``pending``/``claimed`` обязаны нести адрес retained-файла и его хеш.
+
+        Проверяется ровно то, что обещает очередь: «документ добыт и лежит на диске».
+        Терминальные состояния (``done``/``failed``/``skipped``) адрес не обязаны
+        сохранять — их проверяет потребитель, а не производитель.
+        """
+        if self.state in (ExtractQueueState.PENDING, ExtractQueueState.CLAIMED):
+            missing = [
+                name
+                for name in ("raw_path", "content_hash")
+                if not str(getattr(self, name) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"state={self.state.value} требует непустых {', '.join(missing)}: "
+                    "без адреса retained-байтов и его хеша конверсия не воспроизводима (I19)"
+                )
+        return self
 
 
 class CorpusCoverage(BaseModel):

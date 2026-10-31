@@ -379,6 +379,36 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id)
 );
 
+-- 17 §4.1: durable передача добытого документа в конверсию. Краул (``crawl run
+-- --crawl-only``) записывает факт «документ добыт и лежит в ``corpus_raw``», потребитель
+-- конверсии берёт строку (``claimed``) и объявляет готовность (``done``). Это и есть
+-- разделение «краул выполнен ≠ корпус собран»: строки пишет **только** краул, состояние
+-- меняет **только** потребитель. ``level``/``pdf_pipeline`` — условия измерения корня
+-- (без них ``extractor_version`` документа невоспроизводим). Аддитивная таблица:
+-- ``CREATE TABLE IF NOT EXISTS``, ``SCHEMA_VERSION`` не поднимается (см. комментарий
+-- в ``_migrate``).
+CREATE TABLE IF NOT EXISTS extract_queue (
+    session_id      TEXT NOT NULL,
+    product_id      TEXT NOT NULL,
+    url             TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,           -- хеш retained-байтов (I19)
+    raw_path        TEXT NOT NULL,           -- файл в corpus_raw; живёт до done
+    level           TEXT NOT NULL,           -- document_level корня
+    pdf_pipeline    TEXT NOT NULL,           -- pdf_pipeline корня
+    state           TEXT NOT NULL DEFAULT 'pending',  -- ExtractQueueState
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    enqueued_at     TEXT NOT NULL,
+    state_changed_at TEXT,
+    claimed_by      TEXT,                    -- кто взял (провенанс, не блокировка)
+    error_kind      TEXT,
+    error           TEXT,
+    PRIMARY KEY (session_id, product_id, url)
+);
+
+-- Ops: «сколько в очереди по состояниям» спрашивается на каждый ``crawl status``.
+CREATE INDEX IF NOT EXISTS idx_extract_queue_state
+    ON extract_queue(session_id, state);
+
 -- Ф0 (schema 3.8.0): покрытие корпуса продукта по исходам краула — первоклассный факт.
 -- Производно от персистентных ``crawl_session_items`` + записей об усечении; гейтит
 -- публикацию ``❌`` (I2c). Аддитивная таблица, идемпотентная через CREATE TABLE IF NOT EXISTS.
@@ -861,6 +891,13 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     _ensure_columns(conn, "crawl_session_items", {"depth": "INTEGER"})
     # DDL-миграция v3.7.0 (Ф0): ``corpus_coverage`` создаётся ``CREATE TABLE IF NOT EXISTS``
     # в DDL — новые таблицы не требуют ALTER; вызов идемпотентен на любой БД.
+    # 17 §4.1 (F2): ``extract_queue`` — **новая** таблица, создаётся
+    # ``CREATE TABLE IF NOT EXISTS`` прямо в DDL. ``SCHEMA_VERSION`` поэтому **не**
+    # поднимается: bump отверг бы уже существующие прогоны гейтом версии (11 §2.6),
+    # то есть выполнимое требование «старый прогон остаётся читаемым» было бы нарушено
+    # (прецеденты — ``corpus_coverage``:862, ``run_product``:959). Старая БД читается
+    # без изменений: таблица создаётся при открытии, строк в ней нет — «очередь пуста»
+    # (и это правда: до F2 её никто не наполнял).
     # DDL-миграция v3.8.0 (Ф0, origin-уровневый порог): additive-колонки покрытия корпуса;
     # старые БД получают пустые значения (``[]``/``{}``) — нечитаемых origin'ов не знали.
     _ensure_columns(

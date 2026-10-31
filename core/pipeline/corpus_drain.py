@@ -49,6 +49,7 @@ from core.domain import (
     CrawlItemStatus,
     CrawlSessionItem,
     DocumentLevel,
+    ExtractQueueItem,
     FailureKind,
     PdfPipeline,
     ReuseKind,
@@ -533,6 +534,9 @@ def drain_root(
     note_scheduling: Callable[[CrawlLimits], None],
     ingest_member_doc: Callable[..., MemberOutcome],
     persist_docs: Callable[..., None],
+    # -- F2 (17 §4): краул без конверсии — durable передача в очередь ------------ #
+    crawl_only: bool = False,
+    session_id: str | None = None,
 ) -> tuple[Frontier, list[dict[str, Any]], RootDrain]:
     """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
@@ -560,6 +564,15 @@ def drain_root(
     (пусто без sitemap/без отказов) и :class:`RootDrain` — хвост экстракции корня
     в фазовой очереди (C1). ``defer_tail=False`` (synthetic-бакеты ревалидации,
     вызывающий читает счётчики frontier сразу) — хвост доводится здесь же.
+
+    ``crawl_only`` (17 §4, F2) — режим «краул без конверсии»: добытый документ
+    записывается durable-фактом в ``extract_queue``, а зонд артефакта, спуск в
+    контейнеры, ``ingest_one``/``finish_one`` и нарезка **не** выполняются. Так
+    «краул выполнен» перестаёт быть синонимом «корпус собран»: сборка — работа
+    потребителя очереди. Счётчики (``max_documents``/``pages_fetched``/усечение) и
+    расширение BFS-ссылок остаются теми же — иначе режим был бы другим краулом, а не
+    тем же без конверсии. ``session_id`` — адрес очереди; без него режим невозможен
+    (факту некуда лечь).
     """
         # ``persist_docs`` приходит параметром (тесты подменяют его атрибутом модуля
     # ``corpus``): связываем один раз, чтобы три точки вызова не повторяли kwarg.
@@ -593,7 +606,10 @@ def drain_root(
     # ``full`` приходит из адаптера на построении конвертера и становится
     # ``parser_failed`` (видимая запись ``errors`` через ``finish_one``/
     # ``finish_extract``), а не тихой подменой уровня.
-    if extractor_factory is not None and (
+    # 17 §4 (F2): в режиме «краул без конверсии» конвертер не строится вовсе — его
+    # построение и есть конверсия (загрузка весов). Экстрактор, таким образом, остаётся
+    # переданным и не вызывается: ``ingest_one``/``finish_one`` этот режим не исполняет.
+    if not crawl_only and extractor_factory is not None and (
         level is not DocumentLevel.FULL
         or pdf_pipeline is not PdfPipeline.STRUCTURED
     ):
@@ -1127,6 +1143,57 @@ def drain_root(
                 raw_path=str(raw_path),
             )
 
+    def _extend_links(page: RawPage, depth: int | None, is_revalidation: bool) -> None:
+        """D1: расширение BFS ссылками страницы — общий хвост обоих режимов.
+
+        Вынесено в один носитель ради ``crawl_only`` (F2): режим «краул без конверсии»
+        обязан обходить **тот же** frontier, иначе «краул выполнен» означало бы «обошли
+        только seeds». При ``max_depth=0`` извлечение не выполняется вовсе (байт-в-байт
+        прежнее поведение). 09 §6.3: ревалидация — лист; её ссылки не расширяют
+        discovery (иначе глубокая страница, пере-добытая на depth 0, меняла бы
+        coverage/стоимость).
+        """
+        if not is_revalidation and limits.max_depth > 0 and looks_like_html(page):
+            frontier.offer(extract_links(page.content, page.url), depth)
+
+    def _enqueue_extract(pid: str, work_url: str) -> None:
+        """Пишет durable-факт «документ добыт» в ``extract_queue`` (17 §4.1).
+
+        Адрес берётся из элемента сеанса: ``retain`` уже проставил там ``content_hash``
+        и ``raw_path``, посчитанные по **retained-байтам**. Пересчёт из ``page.content``
+        был бы другим хешем для staged-артефакта (тело в файле, ``content`` пуст) и
+        разорвал бы цепочку I19 ещё до конверсии.
+
+        Отсутствие адреса (``session_id``/элемент без хеша) — не повод молча потерять
+        документ: факт уходит в ``errors`` фазы, то есть в ``results[].notes`` и манифест.
+        """
+        if session_id is None:
+            raise ValueError(
+                "crawl_only требует активного сеанса краула: без session_id "
+                "durable-очередь extract_queue не адресуема"
+            )
+        item = items.get((pid, work_url))
+        content_value = getattr(item, "content_hash", None)
+        raw_value = getattr(item, "raw_path", None)
+        if not content_value or not raw_value:
+            errors.append(
+                f"{pid}/{work_url}: extract_queue: у элемента сеанса нет "
+                "content_hash/raw_path — документ НЕ поставлен в очередь конверсии"
+            )
+            return
+        store.enqueue_extract_item(
+            ExtractQueueItem(
+                session_id=session_id,
+                product_id=pid,
+                url=work_url,
+                content_hash=str(content_value),
+                raw_path=str(raw_value),
+                level=level.value,
+                pdf_pipeline=pdf_pipeline.value,
+                enqueued_at=_now_iso(),
+            )
+        )
+
     def _commit_outcome(
         pid: str,
         work_url: str,
@@ -1183,6 +1250,15 @@ def drain_root(
         ):
             _record_document_skip(work_url, "content_type")
             emit()
+            return
+        # 17 §4.1 (F2): crawl-only — краул кончается durable-фактом. Документ не
+        # конвертируется (ни зонда, ни спуска, ни ``ingest_one``/``finish_one``),
+        # но кладётся в ``extract_queue``; frontier расширяется тем же кодом ниже
+        # (``_extend_links``), поэтому обход остаётся полным.
+        if crawl_only:
+            _enqueue_extract(pid, work_url)
+            emit()
+            _extend_links(page, depth, is_revalidation)
             return
         # B3: допущенный терминальный артефакт (документ **или** контейнер) проходит
         # **зонд** до экстракции: класс/формат/размер по байтам, ``page_count`` PDF
@@ -1268,16 +1344,9 @@ def drain_root(
                 ),
             )
         emit()
-        # D1: извлечение in-site ссылок и следующий уровень BFS. При max_depth=0
-        # извлечение не выполняется вовсе (байт-в-байт прежнее поведение).
-        # 09 §6.3: ревалидация — лист; её ссылки не расширяют discovery (иначе
-        # глубокая страница, пере-добытая на depth 0, меняла бы coverage/стоимость).
-        if (
-            not is_revalidation
-            and limits.max_depth > 0
-            and looks_like_html(page)
-        ):
-            frontier.offer(extract_links(page.content, page.url), depth)
+        # D1: извлечение in-site ссылок и следующий уровень BFS (общий хвост с
+        # ``crawl_only`` — см. ``_extend_links``).
+        _extend_links(page, depth, is_revalidation)
 
     def _make_commit(
         pid_arg: str,
