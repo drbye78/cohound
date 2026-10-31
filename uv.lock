@@ -516,6 +516,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
+    { name = "pypdfium2" },
     { name = "pyyaml" },
 ]
 
@@ -550,7 +551,6 @@ embed-lite = [
 extract = [
     { name = "docling-slim", extra = ["format-office"] },
     { name = "openpyxl" },
-    { name = "pypdfium2" },
     { name = "rtree" },
     { name = "trafilatura" },
 ]
@@ -612,7 +612,7 @@ requires-dist = [
     { name = "py7zr", marker = "extra == 'extract-archives'", specifier = ">=1.1.4" },
     { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "pypdf", marker = "extra == 'fallback'", specifier = ">=6.19,<7" },
-    { name = "pypdfium2", marker = "extra == 'extract'", specifier = ">=5.14,<6" },
+    { name = "pypdfium2", specifier = ">=5.14,<6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1,<10" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1,<8" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.8,<4" },

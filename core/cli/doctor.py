@@ -113,10 +113,12 @@ OPERATIONAL_DIRS: tuple[str, ...] = ("runs", "index_store", "corpus_raw", "cache
 #: ``pyproject.toml`` (05-dependency-stack.md). Отсутствие обязательной → ``fail``,
 #: опциональной → ``warn``.
 DEPENDENCY_GROUPS: tuple[tuple[str, bool, tuple[str, ...]], ...] = (
-    ("deps:core", True, ("pydantic", "yaml")),
+    # pypdfium2 — базовая зависимость (`text_layer` — объявленная ось, R5), поэтому здесь,
+    # а не в `deps:extract`: его отсутствие означает сломанную установку, а не пропущенный extra.
+    ("deps:core", True, ("pydantic", "yaml", "pypdfium2")),
     ("deps:retrieval", False, ("numpy", "tantivy")),
     ("deps:crawl", False, ("scrapy", "playwright")),
-    ("deps:extract", False, ("trafilatura", "docling", "openpyxl", "rtree", "pypdfium2")),
+    ("deps:extract", False, ("trafilatura", "docling", "openpyxl", "rtree")),
     ("deps:safety", False, ("nh3", "defusedxml")),
     ("deps:ops", False, ("tenacity", "structlog")),
     ("deps:embed", False, ("sentence_transformers",)),

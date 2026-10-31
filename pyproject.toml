@@ -17,6 +17,10 @@ authors = [{ name = "Marusin Dmitry", email = "drbye@mail.ru" }]
 # имеют cp314/abi3/py3-колёса — см. 05 §1). Тяжёлые контуры — в extras.
 dependencies = [
     "pydantic>=2.13,<3",
+    # Механизм `text_layer` (ось `crawl.pdf_pipeline`): текстовый слой PDF без моделей,
+    # колесо без torch/transformers. Объявленная ось обязана быть исполнимой без установки
+    # extra (R5), поэтому зависимость **базовая**, а не член `extract`/`extract-pdf`.
+    "pypdfium2>=5.14,<6",
     "pyyaml>=6.0,<7",
 ]
 
@@ -53,10 +57,6 @@ extract = [
     "docling-slim[format-office]>=2.135,<3",
     "rtree>=1.3,<2",
     "openpyxl>=3.1,<4",
-    # Механизм `text_layer` (crawl.pdf_pipeline): текстовый слой PDF без моделей.
-    # Колесо pdfium без torch/transformers — поэтому живёт в лёгком extra, а не в
-    # `extract-pdf`; нужен только когда ось выбрана явно (дефолт — docling).
-    "pypdfium2>=5.14,<6",
 ]
 
 # Экстракция PDF с layout-моделями (таблицы фич-матриц) — тяжёлая: подтягивает torch.
