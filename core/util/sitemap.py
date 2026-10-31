@@ -34,9 +34,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import defusedxml.ElementTree as _DET
-from defusedxml.common import DefusedXmlException
-
 from core.util.feed import (
     FeedEntry,
     _children,
@@ -47,6 +44,7 @@ from core.util.feed import (
     _resolve,
     _text,
 )
+from core.util.xml_safe import defused_xml
 
 __all__ = [
     "MAX_CHILD_SITEMAPS",
@@ -153,11 +151,12 @@ def parse_sitemap(
     if not text.strip():
         raise SitemapParseError("пустой sitemap: нет XML-содержимого")
 
+    det, defused_error = defused_xml()
     try:
-        root = _DET.fromstring(text, forbid_dtd=_FORBID_DTD)
-    except DefusedXmlException as exc:
+        root = det.fromstring(text, forbid_dtd=_FORBID_DTD)
+    except defused_error as exc:
         raise SitemapParseError(f"небезопасный XML sitemap: {exc}") from exc
-    except _DET.ParseError as exc:
+    except det.ParseError as exc:
         raise SitemapParseError(f"некорректный XML sitemap: {exc}") from exc
     except ValueError as exc:  # защитно: парсер может бросить ValueError
         raise SitemapParseError(f"некорректный XML sitemap: {exc}") from exc

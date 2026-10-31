@@ -33,10 +33,8 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
 
-import defusedxml.ElementTree as _DET
-from defusedxml.common import DefusedXmlException
-
 from core.util.sanitize import strip_control_chars
+from core.util.xml_safe import defused_xml
 
 __all__ = [
     "FeedEntry",
@@ -296,11 +294,12 @@ def parse_feed(
     if not text.strip():
         raise FeedParseError("пустой фид: нет XML-содержимого")
 
+    det, defused_error = defused_xml()
     try:
-        root = _DET.fromstring(text, forbid_dtd=_FORBID_DTD)
-    except DefusedXmlException as exc:
+        root = det.fromstring(text, forbid_dtd=_FORBID_DTD)
+    except defused_error as exc:
         raise FeedParseError(f"небезопасный XML фида: {exc}") from exc
-    except _DET.ParseError as exc:
+    except det.ParseError as exc:
         raise FeedParseError(f"некорректный XML фида: {exc}") from exc
     except ValueError as exc:  # защитно: парсер может бросить ValueError
         raise FeedParseError(f"некорректный XML фида: {exc}") from exc
