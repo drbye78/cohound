@@ -216,7 +216,7 @@ text/markdown/EPUB как первый класс (`adapters/extract_text.py`, `
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
 бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
-`SCHEMA_VERSION` = **`3.13.0`** (версия SQLite-схемы прогона, **не** регламента), и файл с
+`SCHEMA_VERSION` = **`3.14.0`** (версия SQLite-схемы прогона, **не** регламента), и файл с
 другой версией **отвергается** с сообщением, а не читается молча (гейт `11` §2.6); durable
 per-product состояние `state/{package_id}/state.db` версионируется отдельно —
 `STATE_SCHEMA_VERSION` = **`"4"`** (`store/state_sqlite.py`, см. `09` §4); `runs.settings_provenance_json`

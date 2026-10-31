@@ -161,7 +161,7 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:445`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:463`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277,304`), вызов — `preflight` из `core/cli/commands/run.py:712,774` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
@@ -176,7 +176,7 @@
 | §10 | ✅ сделано | `cell_reuse_key` (`cell-reuse-2`, 21 слагаемое), `carry_forward_cell`, `measurement_origin`, писатель `cell_measurement` (Ш6), счётчики `cells_carried` в снимке и отчёте; **§10.5 (ключ eval cache) — ✅ сделано** ранее. Per-cell (решение 29.10.2026): ключ после retrieval, `retrieved_doc_set_digest` вместо doc-set продукта. Приёмка — `tests/pipeline/test_carry_forward.py` |
 | §11 | ✅ сделано | колонки покрытия (включая `resolved_manually`); `scope_acceptance` — канал проложен (§11.5); **правило `❌` → только `live\|revalidated` исполняется** (`_enforce_reuse_confirmed`), и оно же применяется к перенесённой ячейке (`_carried_rules_hold`); **§11.4** — `cells_carried`/`cells_measured` в снимке (`state_sync._cell_stats`) и `outputs/cell_origin.csv` + `--json: cell_origin` (`report.collect_cell_origins`) |
 | §12.1–§12.2, §12.5 | ✅ сделано | `execution_contract_digest`, `content_change`; дефект `runs.cohort_ref` (хранила имя файла вместо ревизии) закрыт границей A |
-| §12.3 | ✅ сделано | lineage пишется в `state.db.run_lineage` и читается в манифест: `cycle_id`/`previous_run_id`/`change_class` (правило — один резолвер `previous_run_of`); те же три поля аддитивно есть и в `runs` (`core/store/sqlite.py:929-933`) |
+| §12.3 | ✅ сделано | lineage пишется в `state.db.run_lineage` и читается в манифест: `cycle_id`/`previous_run_id`/`change_class` (правило — один резолвер `previous_run_of`); те же три поля есть и в `runs` (`core/store/sqlite.py:89-91`) |
 | §13 | ✅ сделано | §13.3 (carry-forward) исполняется; смена класса изменения по-прежнему переоценивает ячейки — перенос не переживает смену условий (§10.3) |
 | §14 | ✅ разобрано 30.10.2026 | §14.1: колонки добавлены аддитивно (`SCHEMA_VERSION` не поднят), а **девять полей снято** — каждое дублировало величину, которую уже несёт другая колонка/таблица (§14.1, таблица обоснований); §14.2: снимок входов `snapshot_version` 1 → 2 (цепочка циклов без `state.db`), O11 не ослаблен — снимок прежней версии не перезаписывается, факт назван; §14.3: имена дизайна сверены с `core/ports/state.py` как **замены**, а не долг; §14.4: `hound backup`/`restore` + `--include-state` (согласованный снимок `state.db`). Пп. 1–11 §14.6 ✅, п. 12 — **➖ снято** (решение 29.10.2026) |
 | §15 | ✅ сделано | T1 **➖ снят** (ожидание было неверным: код отказывает, а не планирует); T13/T20 переписаны под реализацию; T16 — as-built по материалу дайджестов; **T15 закрыт 30.10.2026** — retirement получил производителя (`_reconcile_declared_retirements`) и наблюдаемый возврат (`re_added_at`). Тесты волны 2 (`tests/pipeline/test_carry_forward.py`, 16 шт.) — **не** T15–T20: нумерация занята другими приёмками |
@@ -1154,17 +1154,18 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 
 ### 4.3. Что остаётся в `runs/{run_id}/cohound.db` — ✅ реализовано (граница A)
 
-> **Статус: ✅ сделано, аддитивно (`SCHEMA_VERSION` не поднят).** В `runs` есть
-> `cycle_id`/`previous_run_id`/`change_class` (`_ensure_columns`, `core/store/sqlite.py:929-933`),
-> `run_scope`/`product_plan_json`/`embed_device` (`:910-918`) и таблица `run_product`
-> (`core/store/sqlite.py:412`; писатель — корпус, `core/pipeline/corpus_persist.py:540`;
+> **Статус: ✅ сделано; схема версионируется (`SCHEMA_VERSION = "3.14.0"`), аддитивных
+> `ALTER TABLE` нет ни одного (волна S плана 17).** В `runs` есть
+> `cycle_id`/`previous_run_id`/`change_class` (`core/store/sqlite.py:89-91`),
+> `run_scope`/`product_plan_json` (`:94-95`), `embed_device` (`:74`) и таблица `run_product`
+> (`core/store/sqlite.py:488`; писатель — корпус, `core/pipeline/corpus_persist.py:540`;
 > читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:1856`).
 > Полей `cohort_digest`/`seeds_digest` в `runs` **нет** — они живут в `run_id` и
 > `state.db.run_lineage` (§12.3); `RunManifest` несёт `cycle_id`/`previous_run_id`/
 > `change_class` и `run_scope`/`product_plan`.
 
-Фактическое содержимое run DB (`SCHEMA_VERSION = "3.13.0"`), **22** таблицы включая
-`schema_meta` (21 предметная; проверяется `connect(':memory:')` + `sqlite_master`; граница A
+Фактическое содержимое run DB (`SCHEMA_VERSION = "3.14.0"`), **23** таблицы включая
+`schema_meta` (22 предметных; проверяется `connect(':memory:')` + `sqlite_master`; граница A
 добавила `run_product` и `corpus_doc_version`):
 
 - `runs` — идентичность прогона и провенанс: `run_id`, `case_id`, `anchor_product_id`,
@@ -1177,7 +1178,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
   вычисленный), `settings_provenance_json`, `search_effort_budget_json`,
   `deploy_profile`, `edge_schema_version`, `edge_capabilities_json`,
   `snapshot_date`, `state`. Прежняя редакция перечисляла здесь неполный набор и
-  пропускала семь колонок — читать `core/store/sqlite.py:42`;
+  пропускала семь колонок — читать `core/store/sqlite.py:54`;
 - `corpus_docs` / `corpus_chunks` — срез документов/чанков **этого** прогона. Текст чанков
   здесь действительно дублируется (self-containment), но см. §4.7 — пишется он поздно;
 - `index_manifest` — по строке на продукт: `(index_build_id=composition_id, product_id,
@@ -2265,7 +2266,7 @@ RAM), поэтому адаптер извлекает **один** член в�
 исход (`members_ingested`/`members_failed`/`skipped` с причинами и ограниченными примерами/
 `stopped_reason`/`cycle_stops`/`bytes_written`). Запись есть для **каждого** контейнера,
 включая пустой и нечитаемый. Обе таблицы добавлены аддитивно (`CREATE TABLE IF NOT EXISTS`)
-в схеме 3.10.0; текущая `SCHEMA_VERSION` — `3.13.0` (`core/store/sqlite.py`), то есть
+в схеме 3.10.0; текущая `SCHEMA_VERSION` — `3.14.0` (`core/store/sqlite.py`), то есть
 колонки с тех пор дополнялись в рамках той же таблицы.
 
 **Вложенность без потолка глубины — и всё же конечная.** Оси `archive_max_*`
@@ -3256,7 +3257,7 @@ for param in plan.params:
 
 ### 11.1. Поля `corpus_coverage` — реализовано (реальный состав)
 
-Фактическая таблица (`core/store/sqlite.py`, `SCHEMA_VERSION = "3.13.0"`; миграция старой БД
+Фактическая таблица (`core/store/sqlite.py`, `SCHEMA_VERSION = "3.14.0"`; миграция старой БД
 запрещена гейтом версии — файл другой версии отвергается, `11` §2.6):
 
 ```sql
@@ -3473,8 +3474,9 @@ CREATE TABLE corpus_coverage (
 > **Имя сменилось.** Прежнее `scope_attested_by`/`scope_attestations` заменено на
 > `scope_acceptance` и в домене (`core/domain/models.py:1528-1751`, `:995`), и в манифесте
 > (`RunManifest.scope_acceptance`, `core/domain/models.py:1591`), и в run DB
-> (`cell_evidence.scope_acceptance`, `core/store/sqlite.py:227`; миграция старой колонки —
-> `:515-531`). Причина в коде названа прямо: подпись — **принятие риска**
+> (`cell_evidence.scope_acceptance`, `core/store/sqlite.py:276`; колонки `scope_attested_by`
+> в схеме 3.14.0 нет — старые run DB отвергаются гейтом версии, поэтому копирующей
+> миграции не существует). Причина в коде названа прямо: подпись — **принятие риска**
 > ненаблюдённой части, а не аттестация полноты. Старые манифесты читаются:
 > `_migrate_legacy_keys` перекладывает исторический ключ. **SQL против
 > `scope_attested_by` вернёт пусто** — это не «нет подписей», а неверное имя.
@@ -3578,9 +3580,9 @@ CREATE TABLE corpus_coverage (
 
 > **Статус: ✅ сделано.** `RunManifest` несёт `cycle_id`, `previous_run_id`,
 > `change_class` (и они **заполняются** — до 29.10.2026 были объявлены и всегда `None`),
-> а `state.db.run_lineage` остаётся полной цепочкой. Те же три поля появились и в `runs`
-> — аддитивно, без подъёма `SCHEMA_VERSION` (`_ensure_columns`,
-> `core/store/sqlite.py:929-933`): провенанс прогона читается запросом, без открытия
+> а `state.db.run_lineage` остаётся полной цепочкой. Те же три поля есть и в `runs`
+> (`core/store/sqlite.py:89-91`, объявлены в `CREATE TABLE`; схема версионируется —
+> `SCHEMA_VERSION = "3.14.0"`): провенанс прогона читается запросом, без открытия
 > `state.db`. Цепочка при этом остаётся свойством пакета: `runs` описывает один прогон,
 > `run_lineage` — переходы между ними.
 
@@ -3883,7 +3885,7 @@ golden**.
 > `core/ports/state.py`: имена в дизайне и в коде разошлись, и это записано как соответствие,
 > а не как долг.
 >
-> Фактическая схема run DB — 22 таблицы (`SCHEMA_VERSION = "3.13.0"`), фактическая схема
+> Фактическая схема run DB — 23 таблицы (`SCHEMA_VERSION = "3.14.0"`), фактическая схема
 > `state.db` — 15 таблиц (`STATE_SCHEMA_VERSION = "5"`); реальные колонки — §4.2/§4.3.
 > **`SCHEMA_VERSION` за всю эту работу не поднят ни разу**: все изменения аддитивны, а
 > гейт `_reject_foreign_schema` (`core/store/sqlite.py`) существует ради несовместимого
@@ -3898,11 +3900,11 @@ golden**.
 > которому снята `CoverageFreshness` (§3.1): два носителя одной величины расходятся, и
 > расходятся молча.
 
-**Сделано аддитивно** (`_ensure_columns` + `CREATE TABLE IF NOT EXISTS`, `SCHEMA_VERSION`
-не поднят — остаётся `3.13.0`, `_reject_foreign_schema` существует ради несовместимого
-чтения, а не ради счётчика ревизий):
+**Сделано; схема версионируется** (`SCHEMA_VERSION = "3.14.0"`, волна S плана 17):
+аддитивных `ALTER TABLE` нет, все колонки объявлены в `CREATE TABLE`, а файл прежней
+версии отвергается гейтом (`_reject_foreign_schema`) и пересоздаётся оператором:
 
-- `run_product` (граница A, `core/store/sqlite.py:412`);
+- `run_product` (граница A, `core/store/sqlite.py:488`);
 - `runs.{cycle_id, previous_run_id, change_class, run_scope, product_plan_json, embed_device}`;
 - `corpus_docs.{http_status, reuse_kind}`;
 - `corpus_doc_version` (таблица `doc_version_id → doc_id`);

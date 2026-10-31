@@ -11,6 +11,14 @@
 >
 > **`METHODOLOGY_VERSION` — `0.2.0`** (класс `methodology_change`, §1). `SCHEMA_VERSION`
 > остался `3.13.0`: всё аддитивно. `SEAM_SCHEMA_VERSION` остался `"1"`.
+>
+> **ОБНОВЛЕНО 2026-11-01 (волна S плана 17).** Решение «без bump, аддитивно» **отменено
+> владельцем**: совместимость схемы не сохраняется. `SCHEMA_VERSION = "3.14.0"`,
+> `STATE_SCHEMA_VERSION = "6"`, `EDGE_JOBS_SCHEMA_VERSION = "1"`; аддитивные
+> `ALTER TABLE ADD COLUMN`-шимы снесены во всех трёх БД, все колонки и индексы объявлены в
+> `CREATE TABLE`, файл прежней версии отвергается гейтом (`SchemaVersionMismatch` →
+> `EXIT_USAGE`/`schema_version`). Запись ниже сохранена как **история решения на 29.10.2026**:
+> она объясняет, почему граница A обошлась без bump'а, и больше не описывает поведение кода.
 
 **Дата:** 2026-10-29. **Основание:** `09` §14.1 (состав границы), `14` оговорка 5 (замер
 устройства эмбеддера).
@@ -77,7 +85,11 @@ absence/evidence-модель, а значит по `AGENTS.md` §13 это `met
 
 ---
 
-## 3. Схема прогонной БД: **без** bump `SCHEMA_VERSION`
+## 3. Схема прогонной БД: **без** bump `SCHEMA_VERSION` (решение 29.10.2026 — отменено 01.11.2026)
+
+> ⚠️ Раздел описывает **отменённое** решение. Сегодня: версия поднята, шимов нет, старая БД
+> отвергается. Ссылки на `_ensure_columns` ниже указывают на удалённый код — они оставлены
+> как след принятого тогда решения, а не как описание текущего состояния.
 
 **Решение: `SCHEMA_VERSION` остаётся `3.13.0`** (`core/store/sqlite.py:15`). Все изменения
 ниже — аддитивные: колонки добавляет идемпотентный `_ensure_columns`
@@ -177,8 +189,9 @@ retained-байтов).
 обязаны читаться — `hound diff` строит дельту документов по `corpus_docs`
 (`core/cli/commands/diff.py:105`), а правило `❌`-допустимости (I2c) обязано спрашивать
 происхождение наблюдения там же. Решение границы: **поля
-`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2157`, явные
-kwargs) + `_has_column`-терпимость к старым БД (`:203`). ✅ As-built — так и сделано.
+`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2195`, явные
+kwargs) + `_has_column`-терпимость к необязательным колонкам
+(`core/store/sqlite_rows.py:76`). ✅ As-built — так и сделано.
 
 ### 3.4. `corpus_doc_version` — отображение версии документа в строку корпуса (**as-built**)
 
@@ -262,10 +275,11 @@ per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня о�
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
 Строку манифеста в БД тоже надо дописать: `persist_manifest`
-(`core/store/sqlite_store.py:2157`) — **явный список** из 29 колонок, а не `SELECT *`.
-Колонка, не вписанная туда, останется `NULL` навсегда при живом `ALTER TABLE`; чтение —
-`read_manifest` (`:2243-2380`), где новые поля идут через `_has_column` (`:203`), иначе
-`row["embed_device"]` на старой БД даст `IndexError`.
+(`core/store/sqlite_store.py:1131`) — **явный список** из 29 колонок, а не `SELECT *`.
+Колонка, не вписанная туда, останется `NULL` навсегда: штатного `ALTER TABLE` больше нет
+(схема версионируется, старая БД отвергается), поэтому расхождение списка с `DDL` — дефект,
+а не «домигрируется». Чтение — `read_manifest` (`:2243-2380`), где необязательные поля идут
+через `_has_column` (`core/store/sqlite_rows.py:76`).
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено»
 
@@ -421,7 +435,7 @@ per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня о�
 > `chunk_id` записан не канонической формой. В БД прошлой версии таблицы нет: шаг не
 > исполняется, фолбэк остаётся прежним, а не падает.
 
-`StorePort.resolve` (`core/store/sqlite_store.py:2426-2465`) сначала делает прямой lookup по
+`StorePort.resolve` (`core/store/sqlite_store.py:2718-2810`) сначала делает прямой lookup по
 `corpus_chunks.chunk_id`, а при промахе разбирает `source_id` через `parse_source_id` и ищет
 `WHERE product_id = ? AND doc_id = ? AND chunk_no = ?`. **Этот второй путь не может
 сработать**: `parse_source_id` возвращает `doc_id` = второй сегмент = `doc_hash`
@@ -451,10 +465,11 @@ per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня о�
 `tests/pipeline/test_corpus_partition_reuse.py`, `tests/pipeline/test_corpus_coverage.py`,
 `tests/cli/test_run_report_scope.py`; такого деления в репозитории нет).
 
-1. `tests/store/test_schema_gate.py` + `tests/store/test_sqlite_store.py` — аддитивные
-   колонки создаются на пустой БД и на БД `3.13.0` без них; `SCHEMA_VERSION` не изменился;
-   чужой `schema_version` по-прежнему отвергается; `persist_manifest` пишет новые колонки
-   (иначе они `NULL` навсегда), `read_manifest` читает старую БД без `IndexError`.
+1. `tests/store/test_schema_gate.py` + `tests/store/test_sqlite_store.py` — **сегодня**
+   проверяют обратное исходному решению: свежая БД объявляет все прежние аддитивные колонки
+   и индексы, файл чужой версии отвергается и остаётся неизменным. `persist_manifest` пишет
+   новые колонки (иначе они `NULL` навсегда), `read_manifest` терпит необязательные колонки
+   без `IndexError`.
 2. `tests/pipeline/test_run_identity.py` — `embed_device` в контракте: `cpu`→`cuda` даёт
    другой `execution_contract_digest`; тот же — стабилен; `len(EXECUTION_CONTRACT_FIELDS) == 29`.
 3. `tests/config/test_deploy.py` — `deploy.embed.device` объявлен; неизвестный ключ в

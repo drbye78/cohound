@@ -277,6 +277,12 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
     mark; `golden-full` required.
   - **`content_change`**: observed host/dependency facts. Visible in provenance, `pb`,
     `index_build_id`.
+- **Схема БД не мигрирует.** Три БД (`runs/{run_id}/cohound.db`, `state/{package_id}/state.db`,
+  `edge_jobs.db`) версионируются одинаково: версия читается **до** DDL, несовпадение —
+  `SchemaVersionMismatch` с путём файла (`EXIT_USAGE`), файл не меняется. Аддитивных
+  `ALTER TABLE ADD COLUMN` при открытии нет ни одного; колонки и индексы объявлены в
+  `CREATE TABLE`. Колонка, которой там нет, — дефект DDL, а не повод досоздать её на открытии:
+  тихий догон объявляет файл текущим, не будучи им (решение владельца 2026-11-01).
 - Slugs (`param_id`, `product_id`) are immutable; retirement is `deprecated` +
   `replaced_by` (spec §13).
 

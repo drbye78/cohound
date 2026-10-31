@@ -344,12 +344,12 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W3 — Store — ✅ done
 
-✅ сделано (проверено) — `core/store/sqlite.py:15` (`SCHEMA_VERSION = "3.13.0"`; на `f6100c7` в схеме
+✅ сделано (проверено) — `core/store/sqlite.py:22` (`SCHEMA_VERSION = "3.14.0"`; на `f6100c7` в схеме
 21 таблица, из них 20 предметных + `sqlite_sequence` — текст ниже говорит «19», это устарело),
 `core/store/state_sqlite.py:41` (`STATE_SCHEMA_VERSION = "5"`, в тексте ниже `"4"`),
 `core/store/state_store.py:1022` (`save_profile_attestation` — писателя в прогоне нет, см. §5.W4).
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.13.0"`
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.14.0"`
   (19 таблиц, включая `schema_meta`; гейт версии схемы — файл другой версии отвергается,
   `11` §2.6; свидетельство живости сеанса краула — F1).
 - `core/pipeline/liveness.py` — `owner`/`heartbeat_at`, recovery-on-open (`running` → `interrupted`),
@@ -574,7 +574,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173/211/300` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:2932`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:2922`),
 но приёмочный контур не пройден: golden-full дал 6.8 % (`2026-10-27-golden-reference-set-unusable.md`),
 §11.5-baseline и кейсы 2–5 не делались.
 
