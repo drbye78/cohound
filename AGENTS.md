@@ -284,17 +284,30 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
 
 - **HTML** is the primary source. **Plain text/markdown** (all variants) and **EPUB** are
   first-class, with their own readers (`extract_text`, `extract_epub`) and chunkers — not
-  docling. **PDF and Office** (docx/pptx/xlsx) go through docling.
-- `crawl.document_level`: `off|text|layout|layout_tables|full`.
-- `crawl.pdf_pipeline` names the **mechanism**, not the library
-  (`core/domain/enums.py:505`):
-  - `structured` (default) — document pipeline with layout models, table reconstruction and
-    OCR; the only mechanism where `document_level` applies. Today: docling.
-  - `text_layer` — text layer only, no models (pypdfium2), document order, no tables/OCR,
-    `document_level` does not apply.
-  A missing `pypdfium2` under an explicit `text_layer` is a **visible error**, never a silent
-  substitution of the mechanism. Any mechanism change is `execution_change` and changes the
-  `extract_cache` key: `(content_hash, extractor_version, level)`.
+  docling. **Office** (docx/pptx/xlsx) goes through docling; **PDF** goes through whichever
+  mechanism the `crawl.pdf_pipeline` axis declares.
+- PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
+  **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:505`).
+  - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The
+    only mechanism where `crawl.document_level` (`off|text|layout|layout_tables|full`)
+    applies.
+  - `text_layer` — the file's own text layer, no models (`pypdfium2`). Page order as stored,
+    no tables, no OCR, no levels to declare.
+  `pypdfium2` is a **base dependency** (torch-free, `pyproject.toml` `dependencies`), so both
+  mechanisms work out of the box and choosing one is a config decision, not an install step.
+  Where it is missing or broken, an explicit `text_layer` raises `WiringError` →
+  `EXIT_USAGE`: silent substitution is forbidden, because `extractor_version` would name an
+  engine that never ran. Any mechanism change is `execution_change` and changes the
+  `extract_cache` key `(content_hash, extractor_version, level)`.
+- **The price of `text_layer` is measured, not extrapolated**: `PDFIUM_TEXT_PEAK_MB` = 134 MB
+  for the whole anchor PDF corpus (240 documents, 15 929 pages, 20.9 M characters, 26.8 s,
+  0 errors) and **0 VRAM** — a measured fact, not "unknown", since a native parser loads no
+  models. That number drives the worker window, so `text_layer` gets the workers that
+  docling's peak would deny. Its honest limits: tables are not rebuilt, scans are not read —
+  183 of 16 073 pages (1.14 %) carry no text layer and surface as `error="no_text_layer"`, a
+  visible extraction refusal, never an empty document; a failing page does not kill the
+  document (`partial=True`); control characters and `\r\n` are normalized, without which the
+  paragraph chunker matches nothing and the document becomes one chunk.
 - **There is no hybrid PDF pipeline, and that is a measurement decision, not an unfinished
   job**: pdfium lost 6.7 % of docling identifiers on a real book, and the only table detector
   with recall 1.0 flags 90 % of pages (`docs/reports/measurements/2026-10-28-hybrid-quality-gate.md`).
@@ -323,9 +336,10 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
 - **Memory:** after each document a worker returns free glibc arenas to the OS
   (`core/util/memory.py`, `malloc_trim`); without it RSS ratchets to OOM (measurements in the
   module docstring).
-- VRAM peak for level `full` is **not measured**, so under `cuda` the VRAM term of the
-  scheduling window is not applied — this is visible as a preflight warning
-  (`core/cli/wiring.py` `preflight_extraction_budget`, `vram_peak_mb`).
+- VRAM peak for `structured` level `full` is **not measured**, so under `cuda` the VRAM term
+  of the scheduling window is not applied — visible as a preflight warning
+  (`core/cli/wiring.py` `preflight_extraction_budget`). `text_layer` is not affected: its
+  VRAM term is a measured 0 (`vram_peak_mb`).
 
 ## 11. Commands
 
@@ -462,8 +476,6 @@ Traps that cost time:
 - `pgrep -f 'core.cli run'` matches **its own** command line — a false ALIVE. Use
   `pgrep -f '[c]ore.cli run'`. Likewise `pkill -f "python -m pytest"` kills the wrapping shell
   command too.
-- Not installed here: `sd` (use `rg -l … -0 | xargs -0` plus `python`/`perl -pi` for textual
-  substitution, `ast-grep` for structural), `zq` (use `jq`/`yq`), `lnav`, `delta`.
 - A code-graph MCP server is not part of the toolchain: its call-graph and dead-code answers
   were measured as wrong on this repo, while its complexity ranking and raw cypher were fine.
 
