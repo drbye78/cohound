@@ -24,6 +24,12 @@ L5 шаг 3). Здесь — то, что делает работу **одног
 приходит параметром: тесты подменяют их атрибутами модуля ``corpus``, и подмена обязана
 доходить до писателя.
 
+**Шаги, а не волна целиком (F4).** Волновой цикл вынесен в генератор
+:func:`root_steps`, который выдаёт :class:`WaveRequest` в точке отправки и получает
+:class:`WaveOutcomes`; :func:`drain_root` — тонкий драйвер, гоняющий его до конца. Так
+подготовлено чередование корней (F4b): полоса — это **право на host**, а не объект, и
+кооперативные шаги не требуют ни потоков-полос, ни мутаций вне главного потока.
+
 **Порядок записи не меняется.** Оракул — ``tests/pipeline/test_corpus_write_order.py``.
 """
 
@@ -31,7 +37,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
@@ -65,7 +71,11 @@ from core.pipeline.archive_descent import (
     MemberTask,
 )
 from core.pipeline.artifact_probe import probe_artifact
-from core.pipeline.corpus_commit import PendingExtract, RootDrain
+from core.pipeline.corpus_commit import (
+    PendingExtract,
+    RootDrain,
+    popleft_for_root,
+)
 from core.pipeline.corpus_index import _chunk_id, _CorpusStageTimings
 from core.pipeline.corpus_ingest import (
     MEMBER_CONTENT_TYPES,
@@ -467,6 +477,813 @@ def ingest_member_doc(
     )
 
 
+@dataclass(frozen=True)
+class RootPlan:
+    """Один seed-root продукта: адрес, цель краула и чем его аугментировать (F4).
+
+    Зачем отдельный тип. Дренаж корня принимает пять значений на корень; драйверу полос
+    (F4b) они нужны как **значение**, иначе будущая функция драйвера стала бы
+    70-параметровой — то есть перестала бы называть, что она читает. ``known_urls`` и
+    ``serp_seeds`` зависят от корня, поэтому резолвятся в точке построения плана
+    (``corpus._build_corpus``), а не внутри дренажа: корень их только потребляет.
+    """
+
+    root_url: str
+    target: Any
+    sitemap_seeds: bool
+    #: Известные URL этого корня (ревалидация, 09 §6.3) — depth-0 листья вне бюджета.
+    known_urls: Sequence[str] = ()
+    #: Документы, найденные SERP-контуром (I3/§5): depth-0 seeds **этого** корня.
+    serp_seeds: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class WaveRequest:
+    """Задания волны, готовые к отправке, и маршрут её не-poolable части.
+
+    ``entries`` — записи в порядке отправки (FIFO). ``non_poolable`` сообщает, что в
+    волне есть живой фетч не-poolable маршрута (browser): он исполняется **отдельным
+    пулом из одного потока**, а не на потоке драйвера, — иначе один браузерный фетч
+    остановил бы все полосы (F4).
+    """
+
+    entries: list[_WaveEntry]
+    non_poolable: bool = False
+
+
+@dataclass(frozen=True)
+class _WaveFetch:
+    """Исход одного фетча: страница **или** сбой (ровно одно из двух)."""
+
+    page: RawPage | None = None
+    exc: Exception | None = None
+
+
+@dataclass(frozen=True)
+class WaveOutcomes:
+    """Исходы отправленной волны: по элементу на запись, в том же порядке.
+
+    ``fetch[i] is None`` — живого фетча у записи не было (блэклист, исчерпанные попытки,
+    resume/reject/browser-guard/терминальный класс). Длина списка равна длине
+    ``WaveRequest.entries``: коммит идёт по парам и порядок не восстанавливает.
+    """
+
+    fetch: list[_WaveFetch | None]
+
+
+def _dispatch_wave(
+    entries: list[_WaveEntry],
+    *,
+    pool: Executor | None,
+    non_poolable_pool: Executor | None,
+    local_fetch: Callable[[LocalFetch], RawPage],
+) -> WaveRequest:
+    """Отправка волны: живой фетч — в пул, браузерный — в пул из **одного** потока.
+
+    Мутаций состояния сеанса/корпуса здесь нет (как и в прежнем ``_commit_wave``):
+    отправляется только ``local_fetch`` — чистый сетевой вызов. Разделение с
+    :func:`_commit_wave_results` — по владению: отправка и коммит остаются на главном
+    потоке корня, ожидание — работа драйвера.
+
+    Не-poolable маршрут (браузерный фетч) идёт в **отдельный однопоточный** пул. Прежний
+    путь исполнял его на потоке драйвера, и при полосах один браузерный фетч остановил бы
+    все полосы. Поток-владелец при этом сохранён: ``BrowserCrawler`` водит единственную
+    ``_page`` без лока, поэтому у маршрута ровно один поток — он и есть владелец. Коммит
+    исхода остаётся на главном потоке (T5: мутации пишет только драйвер).
+    """
+    non_poolable = False
+    for entry in entries:
+        if entry.kind != "fetch":
+            continue
+        desc = entry.desc
+        if desc is None:
+            # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись несёт ``desc``.
+            raise AssertionError(f"{entry.pid}/{entry.wu}: запись волны без desc")
+        if desc.poolable:
+            if pool is None:
+                # Инвариант ветки: ``poolable`` выставляется только при созданном пуле.
+                raise AssertionError(
+                    f"{desc.pid}/{desc.wu}: poolable без пула фетча"
+                )
+            entry.future = pool.submit(local_fetch, desc)
+        elif (
+            desc.resume is not None
+            or desc.reject is not None
+            or desc.browser_blocked
+            or desc.terminal
+        ):
+            # resume/reject/browser-guard/терминальный класс: живого фетча нет.
+            continue
+        else:
+            if non_poolable_pool is None:
+                # Инвариант ветки: волна живёт только при созданном пуле фетча, а он
+                # создаётся вместе с пулом не-poolable маршрута.
+                raise AssertionError(
+                    f"{desc.pid}/{desc.wu}: не-poolable маршрут без своего пула"
+                )
+            entry.future = non_poolable_pool.submit(local_fetch, desc)
+            non_poolable = True
+    return WaveRequest(entries=entries, non_poolable=non_poolable)
+
+
+def _await_wave(
+    request: WaveRequest,
+    *,
+    timings: _CorpusStageTimings,
+) -> WaveOutcomes:
+    """Дождаться исходов волны в порядке отправки.
+
+    ``fetch_wait_s`` — **ожидание** пула: работу делает он, коммит
+    (``_commit_wave_results``) остаётся работой главного потока и в бакет не входит.
+    Бакет пополняется здесь, а не в коммите, потому что ожидание — единственное, что
+    делает драйвер; порядок накопления — порядок элементов, то есть прежний.
+    """
+    fetch: list[_WaveFetch | None] = [None] * len(request.entries)
+    for index, entry in enumerate(request.entries):
+        if entry.future is None:
+            continue
+        _fetch_started = time.perf_counter()
+        try:
+            page = entry.future.result()
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            timings.fetch_wait_s += time.perf_counter() - _fetch_started
+            fetch[index] = _WaveFetch(exc=exc)
+        else:
+            timings.fetch_wait_s += time.perf_counter() - _fetch_started
+            fetch[index] = _WaveFetch(page=page)
+    return WaveOutcomes(fetch=fetch)
+
+
+def _commit_wave_results(
+    entries: list[_WaveEntry],
+    outcomes: WaveOutcomes,
+    *,
+    commit_local: Callable[..., Any],
+    commit_or_defer: Callable[..., None],
+    mark: Callable[..., None],
+    emit: Callable[[], None],
+    errors: list[str],
+    max_attempts: int | None,
+) -> None:
+    """Коммитит исходы волны на главном потоке в FIFO-порядке отправки (D4).
+
+    Порядок коммита = порядок отправки: детерминированы ``errors``, ``mark``,
+    победитель дедупа (``seen_docs[doc_hash] = url``) и ``offer`` — единственные
+    порядко-чувствительные артефакты (идентичность корпуса content-addressed).
+
+    Вторая половина прежнего ``_commit_wave`` (F4): ожидание исходов ушло в
+    :func:`_await_wave`, отправка — в :func:`_dispatch_wave`, а **порядок применения**
+    остался здесь и остаётся инвариантом: ``errors``, ``mark`` и дедуп-победитель видят
+    ровно прежнюю последовательность.
+    """
+    for index, entry in enumerate(entries):
+        if entry.kind == "blacklisted":
+            # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
+            errors.append(
+                f"{entry.pid}/{entry.wu}: зачёркнут блэклистом перед фетчем — пропущен"
+            )
+            continue
+        if entry.kind == "attempts":
+            prior_item = entry.prior_item
+            if prior_item is None:
+                # Инвариант сборки ``_WaveEntry(kind="attempts")``: запись
+                # создаётся только по существующему элементу сеанса.
+                raise AssertionError(
+                    f"{entry.pid}/{entry.wu}: attempts-запись без prior_item"
+                )
+            reason = (
+                f"max_attempts exhausted "
+                f"(attempts={prior_item.attempts} >= {max_attempts})"
+            )
+            errors.append(f"{entry.pid}/{entry.wu}: {reason}")
+            mark(
+                entry.pid,
+                entry.wu,
+                CrawlItemStatus.FAILED,
+                error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                error=reason,
+                depth=entry.depth,
+            )
+            emit()
+            continue
+        desc = entry.desc
+        if desc is None:
+            # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись несёт
+            # либо desc, либо future (и то и другое заполняется сборкой).
+            raise AssertionError(
+                f"{entry.pid}/{entry.wu}: запись волны без desc"
+            )
+        fetched = outcomes.fetch[index]
+        if fetched is not None:
+            # Исход фетча пришёл от пула (ожидание и бакет ``fetch_wait_s`` — в
+            # ``_await_wave``): живой фетч есть ровно у записей, у которых был
+            # ``future``, поэтому ветка «нет исхода» ниже — инвариант, а не режим.
+            outcome = (
+                commit_local(desc, exc=fetched.exc)
+                if fetched.exc is not None
+                else commit_local(desc, page=fetched.page)
+            )
+        elif (
+            desc.resume is not None
+            or desc.reject is not None
+            or desc.browser_blocked
+            or desc.terminal
+        ):
+            # resume/reject/browser-guard/терминальный класс: живого фетча нет.
+            outcome = commit_local(desc)
+        else:
+            # Инвариант ``_dispatch_wave``: живой фетч всегда отправлен (в пул или в
+            # пул не-poolable маршрута), поэтому «живого фетча нет» без исхода —
+            # ошибка сборки волны, а не исход.
+            raise AssertionError(
+                f"{entry.pid}/{entry.wu}: волна без исхода фетча"
+            )
+        commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
+
+
+def root_steps(
+    pid: str,
+    root_url: str,
+    frontier: Frontier,
+    *,
+    root_drain: RootDrain,
+    limits: CrawlLimits,
+    items: Mapping[tuple[str, str], CrawlSessionItem],
+    errors: list[str],
+    emit: Callable[[], None],
+    mark: Callable[..., None],
+    commit_local: Callable[..., Any],
+    local_fetch: Callable[[LocalFetch], RawPage],
+    local_prefetch: Callable[..., LocalFetch],
+    process_local: Callable[..., Any],
+    submit_collect: Callable[..., Mapping[tuple[str, str], Any]],
+    work_item: Callable[..., CrawlWorkItem],
+    resolve_target: Callable[..., Any],
+    finish_extract: Callable[[PendingExtract], None],
+    extract_pending: deque[PendingExtract],
+    extract_window: int | None,
+    max_attempts: int | None,
+    max_waves: int,
+    wave_items: int,
+    robots_enabled: bool,
+    timings: _CorpusStageTimings,
+    executor: CrawlExecutorPort | None,
+    pool: Executor | None,
+    non_poolable_pool: Executor | None,
+    max_workers: int | None,
+    defer_tail: bool,
+    sitemap_skips: Sequence[dict[str, Any]],
+    _drain_for_window: Callable[[], None],
+    _has_fetch_capacity: Callable[[], bool],
+    _inflight_fresh: Callable[[], int],
+    _tail_may_extend_frontier: Callable[[], bool],
+    _skip_document_prefetch: Callable[[str], bool],
+    _commit_or_defer: Callable[..., None],
+) -> Generator[
+    WaveRequest, WaveOutcomes, tuple[Frontier, list[dict[str, Any]], RootDrain]
+]:
+    """Шаги дренажа одного seed-root: волновой цикл, frontier, коммит исходов (F4).
+
+    Тело волнового цикла прежнего ``drain_root``, вынесенное **дословно**; изменилось
+    только то, что относится к отправке волны: ``_commit_wave`` разделён на
+    :func:`_dispatch_wave` (отправка) и :func:`_commit_wave_results` (FIFO-коммит), а
+    между ними стоит ``yield``.
+
+    **Зачем генератор.** Полоса при чередовании корней — не объект, а **право на host**:
+    один корень штатно фетчит несколько host'ов, поэтому носителем состояния остаётся
+    корень, а «полоса» выражается правом на host. Тотальная мутация сеанса и корпуса
+    допустима только на главном потоке (T5), поэтому параллельность здесь —
+    кооперативные шаги, а не потоки-полосы: генератор выдаёт волну и получает исходы,
+    драйвер решает, когда их ждать. Пока драйвер один и гоняет генератор до конца,
+    поведение прежнее байт-в-байт.
+
+    **Порядок — инвариант.** Внутри корня коммит идёт FIFO-порядком отправки: от него
+    зависят победитель дедупа, порядок ``errors`` и порядок записи корпуса. Оракул —
+    ``tests/pipeline/test_corpus_write_order.py``.
+
+    **Пул — параметр, а не владение.** ``pool``/``non_poolable_pool`` принадлежат полосе:
+    при чередовании корней пул **один на полосу**, иначе 11 полос дали бы 11 пулов
+    фетча и столько же пулов браузерного маршрута. ``pool is None`` — прежний
+    последовательный путь (``max_workers`` ``None``/``1``), байт-в-байт.
+    """
+    waves = 0
+    while True:
+        # P4: доводим окно экстракции (окно полно и/или ёмкость исчерпана с
+        # учётом in-flight) до постановки/выхода — иначе пере-удержание.
+        # C1: окно — фазовой очереди (пул общий), поэтому нужен лишь при
+        # активном пуле этого корня.
+        if extract_pending and extract_window is not None:
+            _drain_for_window()
+        if root_drain.pending and len(frontier) == 0:
+            # Очередь корня пуста, но доводка in-flight может добавить ссылки
+            # (``offer``/BFS на finish) — доводим всё, прежде чем счесть исчерпание.
+            # C1: если хвост BFS расширить не может, он откладывается на фазу —
+            # фетч следующего корня не ждёт экстракции.
+            if _tail_may_extend_frontier():
+                while root_drain.pending:
+                    finish_extract(
+                        popleft_for_root(
+                            extract_pending=extract_pending, root_drain=root_drain
+                        )
+                    )
+            else:
+                break
+        # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
+        # ограничивать и их (не только обнаруженные ссылки). Без лимита —
+        # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
+        # 09 §6.3: ревалидация известных URL бюджет не расходует; если
+        # голова очереди — такая группа, дренаж продолжается (бюджет
+        # исчерпан только для discovery).
+        if (
+            not _has_fetch_capacity()
+            and not root_drain.pending
+            and not frontier.next_is_revalidation()
+        ):
+            frontier.mark_truncated("max_documents")
+            break
+        if executor is not None:
+            # --- P3-A2: executor-волна (раунд). Один раунд = один submit; --- #
+            # раунды строго последовательны (набор работы N+1 зависит от ссылок N).
+            if waves >= max_waves:
+                # Предохранитель (§1(iii)): неограниченный BFS по общему edge —
+                # самонаведённый DoS. Никогда не останавливаться молча: усечение
+                # ``round_budget`` + явная ошибка + сеанс ``PARTIAL``.
+                frontier.mark_truncated("round_budget")
+                errors.append(
+                    f"{pid}/{root_url}: предохранитель раундов исчерпан "
+                    f"({max_waves} волн) — обход остановлен "
+                    "(round_budget)"
+                )
+                emit()
+                break
+            remaining = (
+                None
+                if limits.max_documents is None
+                else limits.max_documents
+                - frontier.fetched
+                - _inflight_fresh()
+            )
+            # M2: всегда впускаем непрерывный revalidation-блок **плюс**
+            # discovery-room. Иначе при 0 < remaining < wave_items волна
+            # берёт лишь remaining свободных URL, fetched не растёт, и
+            # предохранитель раундов срабатывает на хвосте ревалидации.
+            reval_n = min(
+                frontier.revalidation_head_count(wave_items),
+                wave_items // 2,
+            )
+            room = (
+                wave_items
+                if remaining is None
+                else min(wave_items, max(0, remaining))
+            )
+            wave_size = min(
+                len(frontier),
+                wave_items,
+                max(reval_n, reval_n + room),
+            )
+            if wave_size <= 0:
+                # A2 (F3): нулевая волна при непустой очереди — это остановка
+                # по бюджету изъятия. Она обязана быть видимой: без пометки
+                # усечение было бы тихим (осталось N узлов, которых не изымаем).
+                if len(frontier) and not frontier.has_capacity:
+                    frontier.mark_truncated("max_documents")
+                break
+            entries: list[_WaveEntry] = []
+            work: list[CrawlWorkItem] = []
+            wave_has_discovery = False
+            for _ in range(wave_size):
+                node = frontier.next()
+                if node is None:
+                    break
+                work_url, depth = node
+                if not frontier.is_revalidation(work_url):
+                    wave_has_discovery = True
+                if frontier.blacklisted(work_url):
+                    # D1/H: блэклист применяется и перед фетчем.
+                    entries.append(
+                        _WaveEntry(pid, work_url, depth, "blacklisted")
+                    )
+                    continue
+                if _skip_document_prefetch(work_url):
+                    # P5: документ при ``off`` — pre-fetch-пропуск (виден).
+                    emit()
+                    continue
+                prior_item = items.get((pid, work_url))
+                if terminal_failure_kind(prior_item) is not None:
+                    # Определённый ответ «ресурса нет» уже получен: в работу
+                    # не подаём (иначе 404 стоил бы запросов на каждом цикле).
+                    entries.append(
+                        _WaveEntry(
+                            pid,
+                            work_url,
+                            depth,
+                            "terminal_not_found",
+                            prior_item=prior_item,
+                        )
+                    )
+                    continue
+                if (
+                    max_attempts is not None
+                    and prior_item is not None
+                    and prior_item.attempts >= max_attempts
+                ):
+                    entries.append(
+                        _WaveEntry(
+                            pid,
+                            work_url,
+                            depth,
+                            "attempts",
+                            prior_item=prior_item,
+                        )
+                    )
+                    continue
+                work_target = resolve_target(pid, work_url)
+                resume_source = (
+                    resume_retained(
+                        prior_item,
+                        max_bytes=limits.max_response_bytes,
+                        artifact_max_bytes=limits.max_artifact_bytes,
+                        attachment_formats=limits.attachment_formats,
+                    )
+                    if prior_item is not None
+                    else None
+                )
+                reject = (
+                    resume_source
+                    if isinstance(resume_source, RetainedReject)
+                    else None
+                )
+                resume = (
+                    resume_source
+                    if isinstance(resume_source, RetainedRaw)
+                    else None
+                )
+                # Дескриптор коммита строится вручную (не ``local_prefetch``):
+                # browser-guard/``active`` — оси локального краулера, а здесь
+                # байты доставляет исполнитель; ``browser_blocked`` всегда False.
+                desc = LocalFetch(
+                    pid=pid,
+                    wu=work_url,
+                    depth=depth,
+                    fetch_plan=replace(
+                        work_target.plan,
+                        max_response_bytes=limits.max_response_bytes,
+                    ),
+                    active=None,
+                    engine_value=work_target.engine,
+                    prior_item=prior_item,
+                    resume=resume,
+                    browser_blocked=False,
+                    poolable=False,
+                    host=(urlsplit(work_url).hostname or "").lower(),
+                    scope_host=frontier.root_host,
+                    enforce_redirect_scope=limits.max_depth > 0,
+                    reject=reject,
+                )
+                entries.append(
+                    _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
+                )
+                if resume is None and reject is None:
+                    # Только живой фетч подаётся исполнителю; resume минует submit.
+                    work.append(
+                        work_item(
+                            pid, work_url, work_target, robots=robots_enabled
+                        )
+                    )
+            # ``fetch_wait_s`` split-пути: ``submit_collect`` — это подача +
+            # опрос статуса + сбор результатов, то есть **ожидание** исполнителя
+            # (работу делает он, а не главный поток). Тот же бакет, что и у
+            # локального пула: «участок фетча» — одна стадия продукта.
+            _fetch_started = time.perf_counter()
+            try:
+                collected = submit_collect(work)
+            finally:
+                timings.fetch_wait_s += time.perf_counter() - _fetch_started
+            for entry in entries:
+                if entry.kind == "blacklisted":
+                    errors.append(
+                        f"{entry.pid}/{entry.wu}: зачёркнут блэклистом "
+                        "перед фетчем — пропущен"
+                    )
+                    continue
+                if entry.kind == "terminal_not_found":
+                    # Терминальный класс уже получен: повторного фетча не было,
+                    # элемент остаётся ``FAILED`` со своим ``error_kind``.
+                    prior_item = entry.prior_item
+                    kind = (
+                        terminal_failure_kind(prior_item)
+                        or FailureKind.NOT_FOUND
+                    )
+                    mark(
+                        entry.pid,
+                        entry.wu,
+                        CrawlItemStatus.FAILED,
+                        error_kind=kind.value,
+                        error=(
+                            prior_item.error
+                            if prior_item is not None and prior_item.error
+                            else f"{kind.value}: терминально, без повтора"
+                        ),
+                        depth=entry.depth,
+                    )
+                    emit()
+                    continue
+                if entry.kind == "attempts":
+                    prior_item = entry.prior_item
+                    if prior_item is None:
+                        # См. инвариант ``_WaveEntry(kind="attempts")`` выше:
+                        # запись создаётся только по существующему элементу.
+                        raise AssertionError(
+                            f"{entry.pid}/{entry.wu}: attempts-запись "
+                            "без prior_item"
+                        )
+                    reason = (
+                        f"max_attempts exhausted "
+                        f"(attempts={prior_item.attempts} >= {max_attempts})"
+                    )
+                    errors.append(f"{entry.pid}/{entry.wu}: {reason}")
+                    mark(
+                        entry.pid,
+                        entry.wu,
+                        CrawlItemStatus.FAILED,
+                        error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                        error=reason,
+                        depth=entry.depth,
+                    )
+                    emit()
+                    continue
+                desc = entry.desc
+                if desc is None:
+                    # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись
+                    # несёт desc — иначе коммитить нечего.
+                    raise AssertionError(
+                        f"{entry.pid}/{entry.wu}: запись волны без desc"
+                    )
+                if desc.resume is not None or desc.reject is not None:
+                    # Resume/reject: живого фетча нет — коммит локально без submit.
+                    outcome = commit_local(desc)
+                    _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
+                    continue
+                result = collected.get((entry.pid, entry.wu))
+                if result is None:
+                    errors.append(
+                        f"{entry.pid}/{entry.wu}: executor: результат не получен"
+                    )
+                    mark(
+                        entry.pid,
+                        entry.wu,
+                        CrawlItemStatus.FAILED,
+                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                        error="executor: результат не получен",
+                        depth=entry.depth,
+                    )
+                    emit()
+                    continue
+                if result.error or result.raw_bytes is None:
+                    reason = result.error or "executor: пустой raw_bytes"
+                    errors.append(f"{entry.pid}/{entry.wu}: executor: {reason}")
+                    # Наблюдаемость (тот же дефект, что и на локальном пути):
+                    # шов уже несёт ``http_status`` отказа — не теряем его.
+                    # Класс отказа не меняется (``source_unavailable``).
+                    mark(
+                        entry.pid,
+                        entry.wu,
+                        CrawlItemStatus.FAILED,
+                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                        error=reason,
+                        depth=entry.depth,
+                        http_status=result.http_status,
+                    )
+                    emit()
+                    continue
+                # S1: применяемый движок — фактический транспорт из результата шва.
+                desc.engine_value = result.engine or desc.engine_value
+                page = RawPage(
+                    url=result.final_url or result.url,
+                    content=result.raw_bytes,
+                    fetched_at=result.fetched_at or "",
+                    fetch_mode=desc.fetch_plan.fetch,
+                    lang=None,
+                    status_code=result.http_status,
+                    content_type=result.content_type,
+                    engine=result.engine,
+                    # 09 §6.3: валидаторы ответа и признак 304 переносятся в
+                    # ``RawPage`` (раньше молча терялись — реальный дефект):
+                    # без них ``url_state`` не сохранит ETag/Last-Modified, а
+                    # ``304`` не распознается как переиспользование.
+                    etag=result.etag,
+                    last_modified=result.last_modified,
+                    not_modified=result.not_modified,
+                )
+                outcome = commit_local(desc, page=page)
+                _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
+            # M2: предохранитель — BFS-guard, поэтому чисто
+            # ревалидационная волна его не расходует.
+            if wave_has_discovery:
+                waves += 1
+            continue
+        if pool is None:
+            # --- Последовательный путь (max_workers None/1): как прежде. --- #
+            # A2 (F3): бюджет изъятия проверяется **до** изъятия — узел,
+            # снятый с очереди и отвергнутый по ёмкости, выпал бы из счёта
+            # «в очереди осталось N». ``peek`` не изымает и о бюджете не решает.
+            head = frontier.peek()
+            if head is None:
+                break
+            work_url, depth = head
+            # 09 §6.3: бюджет discovery исчерпан (с учётом окна экстракции), а
+            # голова очереди — не ревалидационный лист: останавливаем обход
+            # (ревалидация обрабатывается отдельно и бюджет не расходует).
+            if not _has_fetch_capacity() and not frontier.is_revalidation(
+                work_url
+            ):
+                frontier.mark_truncated("max_documents")
+                break
+            if frontier.next() is None:
+                # Ёмкость (``fetched``) исчерпана самим ``next``: он уже поставил
+                # усечение ``max_documents``.
+                break
+            # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
+            if frontier.blacklisted(work_url):
+                errors.append(
+                    f"{pid}/{work_url}: зачёркнут блэклистом перед фетчем — пропущен"
+                )
+                continue
+            if _skip_document_prefetch(work_url):
+                # P5: документ при ``off`` — pre-fetch-пропуск (виден; не в max_documents).
+                emit()
+                continue
+            prior_item = items.get((pid, work_url))
+            if (
+                max_attempts is not None
+                and prior_item is not None
+                and prior_item.attempts >= max_attempts
+                and terminal_failure_kind(prior_item) is None
+            ):
+                reason = (
+                    f"max_attempts exhausted "
+                    f"(attempts={prior_item.attempts} >= {max_attempts})"
+                )
+                errors.append(f"{pid}/{work_url}: {reason}")
+                mark(
+                    pid,
+                    work_url,
+                    CrawlItemStatus.FAILED,
+                    error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                    error=reason,
+                    depth=depth,
+                )
+                emit()
+                continue
+
+            work_target = resolve_target(pid, work_url)
+            # Последовательный путь (``max_workers in (None, 1)``): фетч inline на
+            # главном потоке, поэтому ``fetch_wait_s`` здесь — **работа**, а не
+            # ожидание (как и inline-ветка волны). Бакет общий: «участок фетча» —
+            # одна стадия продукта.
+            _fetch_started = time.perf_counter()
+            try:
+                outcome = process_local(
+                    pid,
+                    work_url,
+                    work_target,
+                    depth=depth,
+                    scope_host=frontier.root_host,
+                    # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
+                    # на глубине 0 финальная страница ретейнится как прежде.
+                    enforce_redirect_scope=limits.max_depth > 0,
+                    robots=robots_enabled,
+                    max_response_bytes=limits.max_response_bytes,
+                    artifact_max_bytes=limits.max_artifact_bytes,
+                    attachment_formats=limits.attachment_formats,
+                )
+            finally:
+                timings.fetch_wait_s += time.perf_counter() - _fetch_started
+            _commit_or_defer(pid, work_url, depth, outcome)
+            continue
+
+        # --- D4: волна fetch-only. Размер волны = min(K, остаток ёмкости, длина
+        # очереди): пере-удержание ``max_documents`` структурно невозможно.
+        # Диспатч (prefetch + submit) и коммит — на главном потоке; off-thread
+        # идёт только ``limiter.wait`` + ``active.fetch``. --- #
+        remaining = (
+            None
+            if limits.max_documents is None
+            else limits.max_documents
+            - frontier.fetched
+            - _inflight_fresh()
+        )
+        # M2: та же формула, что в executor-ветке: непрерывный
+        # revalidation-блок + discovery-room, без роста batch.
+        reval_n = min(
+            frontier.revalidation_head_count(max_workers),
+            int(max_workers) // 2,
+        )
+        room = (
+            int(max_workers)
+            if remaining is None
+            else min(int(max_workers), max(0, remaining))
+        )
+        wave_size = min(
+            len(frontier),
+            int(max_workers),
+            max(reval_n, reval_n + room),
+        )
+        if wave_size <= 0:
+            # A2 (F3): та же видимость остановки по бюджету изъятия, что в
+            # executor-ветке: непустая очередь + исчерпанный ``fetched``.
+            if len(frontier) and not frontier.has_capacity:
+                frontier.mark_truncated("max_documents")
+            break
+        entries: list[_WaveEntry] = []
+        for _ in range(wave_size):
+            node = frontier.next()
+            if node is None:
+                break
+            work_url, depth = node
+            if frontier.blacklisted(work_url):
+                entries.append(
+                    _WaveEntry(pid, work_url, depth, "blacklisted")
+                )
+                continue
+            if _skip_document_prefetch(work_url):
+                # P5: документ при ``off`` — pre-fetch-пропуск (виден).
+                emit()
+                continue
+            prior_item = items.get((pid, work_url))
+            if (
+                max_attempts is not None
+                and prior_item is not None
+                and prior_item.attempts >= max_attempts
+                and terminal_failure_kind(prior_item) is None
+            ):
+                entries.append(
+                    _WaveEntry(
+                        pid, work_url, depth, "attempts", prior_item=prior_item
+                    )
+                )
+                continue
+            work_target = resolve_target(pid, work_url)
+            desc = local_prefetch(
+                pid,
+                work_url,
+                work_target,
+                depth=depth,
+                scope_host=frontier.root_host,
+                enforce_redirect_scope=limits.max_depth > 0,
+                robots=robots_enabled,
+                max_response_bytes=limits.max_response_bytes,
+                artifact_max_bytes=limits.max_artifact_bytes,
+                attachment_formats=limits.attachment_formats,
+            )
+            # D2/e: browser-элементы НИКОГДА не пулятся (``BrowserCrawler`` водит
+            # единственную ``_page`` без лока) — у них свой маршрут с одним потоком
+            # (см. ``_dispatch_wave``); resume-элементы тоже минуют пул (живого
+            # фетча нет; ``poolable``).
+            if desc.poolable and pool is None:
+                # Инвариант ветки: ``poolable`` выставляется только когда создан
+                # пул фетча этого корня (``executor is None`` путь пула не имеет вовсе).
+                raise AssertionError(
+                    f"{desc.pid}/{desc.wu}: poolable без пула фетча"
+                )
+            entries.append(
+                _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
+            )
+        # Точка отправки волны (F4): корень отдаёт описание готовых заданий и получает
+        # исходы. Пул принадлежит **полосе**, поэтому «отправить и дождаться» — работа
+        # драйвера; коммит ниже остаётся FIFO-порядком этого корня.
+        outcomes = yield _dispatch_wave(
+            entries,
+            pool=pool,
+            non_poolable_pool=non_poolable_pool,
+            local_fetch=local_fetch,
+        )
+        _commit_wave_results(
+            entries,
+            outcomes,
+            commit_local=commit_local,
+            commit_or_defer=_commit_or_defer,
+            mark=mark,
+            emit=emit,
+            errors=errors,
+            max_attempts=max_attempts,
+        )
+    # P4/C1: хвост корня доводится здесь, только если он **может** расширить
+    # frontier (BFS-ссылки). Иначе он остаётся в фазовой очереди: пул общий,
+    # и фетч следующего корня не ждёт экстракции (провенанс корня посчитает
+    # финализатор — после доводки хвоста).
+    if root_drain.pending and (
+        not defer_tail or _tail_may_extend_frontier()
+    ):
+        while root_drain.pending:
+            finish_extract(
+                popleft_for_root(
+                    extract_pending=extract_pending, root_drain=root_drain
+                )
+            )
+    return frontier, list(sitemap_skips), root_drain
+
+
 def drain_root(
     pid: str,
     root_url: str,
@@ -519,7 +1336,6 @@ def drain_root(
     mark: Callable[..., None],
     commit_local: Callable[..., Any],
     local_fetch: Callable[[LocalFetch], RawPage],
-    fetch_and_commit: Callable[[LocalFetch], Any],
     local_prefetch: Callable[..., LocalFetch],
     process_local: Callable[..., Any],
     submit_collect: Callable[..., Mapping[tuple[str, str], Any]],
@@ -537,6 +1353,9 @@ def drain_root(
     # -- F2 (17 §4): краул без конверсии — durable передача в очередь ------------ #
     crawl_only: bool = False,
     session_id: str | None = None,
+    # -- F4b: пулы **полосы** (готовые). ``None`` ⇒ создаются здесь, как прежде -- #
+    fetch_pool: Executor | None = None,
+    browser_pool: Executor | None = None,
 ) -> tuple[Frontier, list[dict[str, Any]], RootDrain]:
     """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
@@ -573,6 +1392,13 @@ def drain_root(
     расширение BFS-ссылок остаются теми же — иначе режим был бы другим краулом, а не
     тем же без конверсии. ``session_id`` — адрес очереди; без него режим невозможен
     (факту некуда лечь).
+
+    **F4 (17 §6): тонкий драйвер шагов.** Подготовка (limits/frontier/seeds/зарядка
+    бюджета) — здесь; волновой цикл — в :func:`root_steps`. Этот вызов гоняет генератор
+    до конца и ждёт каждую волну сам, поэтому порядок вызовов, исходы и возврат прежние.
+    ``fetch_pool``/``browser_pool`` — пулы **полосы** (F4b): при ``None`` создаются
+    здесь, байт-в-байт как прежде. При чередовании корней пул один на полосу, иначе
+    11 полос дали бы 11 пулов фетча и столько же пулов браузерного маршрута.
     """
         # ``persist_docs`` приходит параметром (тесты подменяют его атрибутом модуля
     # ``corpus``): связываем один раз, чтобы три точки вызова не повторяли kwarg.
@@ -712,9 +1538,17 @@ def drain_root(
         else None
     )
     #: Исполнять ли экстракцию в пуле (снимается inline-fallback'ом при отказе).
-    counters.defer_extract = (
+    #: **Локальный для корня** флаг шага, а не поле продуктового ``counters``: при
+    #: чередовании корней корень без пула выставил бы ``False`` соседу, и тот
+    #: конвертировал бы inline на драйвере — конкурентность схлопнулась бы без единой
+    #: ошибки в артефактах.
+    defer_extract = (
         extract_window is not None and extraction_pool is not None
     )
+    #: Пул экстракции текущего спуска признан мёртвым (``2 × timeout`` без
+    #: завершений). Тоже флаг корня и по той же причине: общий объект выключал бы
+    #: членов соседнего корня.
+    member_pool_dead = False
     #: C1: хвост этого корня в фазовой очереди доводки (счётчик + финализатор).
     root_drain = RootDrain()
     # L5 шаг 2: ``partial`` привязывает состояние **этого** корня (окно, уровень,
@@ -986,14 +1820,17 @@ def drain_root(
         # ``run_id`` ради чистого рычага пропускной способности (§13: это не смена
         # условий измерения).
         defer_member: MemberDeferral | None = None
+        # ``member_pool_dead`` — флаг **этого** корня: объявлен на его уровне, чтобы
+        # при чередовании корней мёртвый пул одного не выключал членов соседа.
+        nonlocal member_pool_dead
         if (
-            counters.defer_extract
+            defer_extract
             and extraction_pool is not None
             and pool_key is not None
         ):
             #: Пул этого спуска признан мёртвым (``2 × timeout`` без завершений):
             #: остаток членов — видимый пропуск, а не 47 ожиданий по таймауту.
-            counters.member_pool_dead = False
+            member_pool_dead = False
 
             def _submit_member(task: MemberTask) -> Any:
                 """Submit извлечения члена; ``MemberOutcome`` — немедленный исход.
@@ -1005,7 +1842,7 @@ def drain_root(
                 unavailable = member_extract_unavailable(root_extractor)
                 if unavailable is not None:
                     return unavailable
-                if counters.member_pool_dead:
+                if member_pool_dead:
                     return MemberOutcome(
                         skip_reason=SKIP_EXTRACT_FAILED,
                         detail=(
@@ -1044,7 +1881,11 @@ def drain_root(
                 (:func:`finish_extract`): спуск исполняется внутри ``item.commit``,
                 где ``root.pending`` ещё включает сам архив, и рекурсивная доводка
                 той же фазовой очереди занизила бы/задвоила счётчики корней.
+
+                ``member_pool_dead`` — флаг **этого** корня (см. ``_descend_container``),
+                поэтому нужен ``nonlocal``.
                 """
+                nonlocal member_pool_dead
                 try:
                     _wait_started = time.perf_counter()
                     try:
@@ -1054,13 +1895,13 @@ def drain_root(
                         # экстракции на главном потоке (член контейнера).
                         timings.extract_wait_s += time.perf_counter() - _wait_started
                 except TimeoutError:
-                    counters.member_pool_dead = pools.note_timeout(pool_key)
+                    member_pool_dead = pools.note_timeout(pool_key)
                     return MemberOutcome(
                         skip_reason=SKIP_EXTRACT_FAILED,
                         detail=f"extraction timeout ({extract_timeout} s)",
                     )
                 except BrokenProcessPool:
-                    counters.member_pool_dead = True
+                    member_pool_dead = True
                     return MemberOutcome(
                         skip_reason=SKIP_EXTRACT_FAILED,
                         detail="extraction worker died",
@@ -1401,11 +2242,15 @@ def drain_root(
         «готовый текст» (тот же ``finish_one``, что у результата пула), не занимая
         слот воркера и не оплачивая инициализатор. Проба в воркере остаётся защитой;
         ключ родителя и воркера — один и тот же хеш ретенированных байтов.
+
+        Отказ пула снимает ``defer_extract`` **этого корня** (инлайн-fallback): флаг
+        объявлен на уровне ``drain_root``, поэтому нужен ``nonlocal``.
         """
+        nonlocal defer_extract
         if outcome is None:
             return
         page, raw_path, fetch_plan, freshly_fetched = outcome
-        if counters.defer_extract and extract_cache is not None:
+        if defer_extract and extract_cache is not None:
             # C1/L4: проба — в родителе, до submit и до проверки исчерпания пула:
             # готовый текст не требует экстракции вовсе. Ключ — ``raw_path.stem``
             # (тот же хеш, что воркер считает из прочитанных байтов).
@@ -1438,14 +2283,14 @@ def drain_root(
                 ),
             )
             return
-        if not counters.defer_extract:
+        if not defer_extract:
             _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
             return
 
         if pool_key is None:
-            # Инвариант ветки: ``counters.defer_extract`` истинно только при окне,
-            # а окно и есть ключ пула. Проверка явная — под ``-O`` assert исчез бы
-            # и ключ ушёл бы в ``pools.executor`` как ``None``.
+            # Инвариант ветки: ``defer_extract`` истинно только при окне, а окно и
+            # есть ключ пула. Проверка явная — под ``-O`` assert исчез бы и ключ ушёл
+            # бы в ``pools.executor`` как ``None``.
             raise AssertionError(
                 f"{pid_arg}/{url_arg}: defer_extract без ключа пула "
                 "(окно экстракции не задано)"
@@ -1457,7 +2302,7 @@ def drain_root(
                 f"{pid_arg}/{url_arg}: extract pool: "
                 f"{type(exc).__name__}: {exc} — inline"
             )
-            counters.defer_extract = False
+            defer_extract = False
             _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
             return
         try:
@@ -1488,604 +2333,111 @@ def drain_root(
                 pool_key=pool_key,
             )
         )
-        # Окно: не более ``W`` экстракций «в полёте» (доводка FIFO).
-        while len(extract_pending) >= extract_window:
-            finish_extract(extract_pending.popleft())
-
-    def _commit_wave(entries: list[_WaveEntry]) -> None:
-        """Коммитит исходы волны на главном потоке в FIFO-порядке отправки (D4).
-
-        Порядок коммита = порядок отправки: детерминированы ``errors``, ``mark``,
-        победитель дедупа (``seen_docs[doc_hash] = url``) и ``offer`` — единственные
-        порядко-чувствительные артефакты (идентичность корпуса content-addressed).
-        """
-        for entry in entries:
-            if entry.kind == "blacklisted":
-                # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
-                errors.append(
-                    f"{entry.pid}/{entry.wu}: зачёркнут блэклистом перед фетчем — пропущен"
+        # Окно: не более ``W`` экстракций **этого** корня «в полёте» (доводка FIFO).
+        # Счёт по ``item.root``: ``len(extract_pending)`` считал бы и чужие задания, и
+        # корень ждал бы окна, которого не использовал (при полосах это сериализовало
+        # бы корни на пуле экстракции и подменило окно памяти максимумом по корням).
+        while (
+            corpus_commit.pending_count_for_root(
+                extract_pending=extract_pending, root_drain=root_drain
+            )
+            >= extract_window
+        ):
+            finish_extract(
+                popleft_for_root(
+                    extract_pending=extract_pending, root_drain=root_drain
                 )
-                continue
-            if entry.kind == "attempts":
-                prior_item = entry.prior_item
-                if prior_item is None:
-                    # Инвариант сборки ``_WaveEntry(kind="attempts")``: запись
-                    # создаётся только по существующему элементу сеанса.
-                    raise AssertionError(
-                        f"{entry.pid}/{entry.wu}: attempts-запись без prior_item"
-                    )
-                reason = (
-                    f"max_attempts exhausted "
-                    f"(attempts={prior_item.attempts} >= {max_attempts})"
-                )
-                errors.append(f"{entry.pid}/{entry.wu}: {reason}")
-                mark(
-                    entry.pid,
-                    entry.wu,
-                    CrawlItemStatus.FAILED,
-                    error_kind=_MAX_ATTEMPTS_ERROR_KIND,
-                    error=reason,
-                    depth=entry.depth,
-                )
-                emit()
-                continue
-            desc = entry.desc
-            if desc is None:
-                # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись несёт
-                # либо desc, либо future (и то и другое заполняется сборкой).
-                raise AssertionError(
-                    f"{entry.pid}/{entry.wu}: запись волны без desc"
-                )
-            if entry.future is not None:
-                _fetch_started = time.perf_counter()
-                try:
-                    page = entry.future.result()
-                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                    # ``fetch_wait_s`` — **ожидание** пула ``local_fetch``; коммит
-                    # (``commit_local``) остаётся работой главного потока и в бакет
-                    # не входит.
-                    timings.fetch_wait_s += time.perf_counter() - _fetch_started
-                    outcome = commit_local(desc, exc=exc)
-                else:
-                    timings.fetch_wait_s += time.perf_counter() - _fetch_started
-                    outcome = commit_local(desc, page=page)
-            elif (
-                desc.resume is not None
-                or desc.reject is not None
-                or desc.browser_blocked
-                or desc.terminal
-            ):
-                # resume/reject/browser-guard/терминальный класс: живого фетча нет.
-                outcome = commit_local(desc)
-            else:
-                # browser-режим (``supports_browser`` краулер): в пул не идёт —
-                # фетч inline на главном потоке (``fetch_and_commit``), как прежде.
-                # Здесь ``fetch_wait_s`` — **работа**, а не ожидание: живого пула нет,
-                # фетч (и коммит) исполняются на этом же потоке. Имя бакета общее с
-                # пуловым путём намеренно: «участок фетча» — одна стадия продукта.
-                _fetch_started = time.perf_counter()
-                try:
-                    outcome = fetch_and_commit(desc)
-                finally:
-                    timings.fetch_wait_s += time.perf_counter() - _fetch_started
-            _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
-
+            )
     # D4: ограниченный пул ТОЛЬКО на сетевой fetch локального пути. Пул создаётся
     # лишь при ``max_workers > 1``: ``None``/``1`` — прежний однопоточный путь без
     # пула (байт-в-байт). В пул идут лишь work-items с живым HTTP-фетчем; браузерные
-    # элементы — никогда (см. ``local_prefetch``).
+    # элементы — никогда (см. ``local_prefetch`` и ``_dispatch_wave``).
     max_workers = limits.max_workers
     pool: Executor | None = None
+    #: Не-poolable маршрут (browser) — **свой** пул из одного потока. ``BrowserCrawler``
+    #: водит единственную ``_page`` без лока, поэтому поток-владелец обязателен; но
+    #: исполнение на потоке драйвера при чередовании корней остановило бы все полосы.
+    non_poolable_pool: Executor | None = None
+    own_pool = False
+    own_non_poolable_pool = False
     # P3-A2: executor — подключаемый batch-транспорт; локальный пул при нём не нужен.
     if (
         executor is None
         and max_workers is not None
         and int(max_workers) > 1
     ):
-        pool = (
-            pool_factory(int(max_workers))
-            if pool_factory is not None
-            else ThreadPoolExecutor(max_workers=int(max_workers))
-        )
-    # P3-A2 (§1(iii)): счётчик раундов executor-транспорта на этот корень.
-    waves = 0
+        # F4b: готовые пулы полосы приходят аргументом, при ``None`` создаются здесь
+        # байт-в-байт как прежде. При чередовании корней пул **один на полосу**: иначе
+        # 11 полос дали бы 11 пулов фетча и столько же пулов браузерного маршрута.
+        pool = fetch_pool
+        if pool is None:
+            pool = (
+                pool_factory(int(max_workers))
+                if pool_factory is not None
+                else ThreadPoolExecutor(max_workers=int(max_workers))
+            )
+            own_pool = True
+        non_poolable_pool = browser_pool
+        if non_poolable_pool is None:
+            non_poolable_pool = ThreadPoolExecutor(max_workers=1)
+            own_non_poolable_pool = True
+    # F4: шаги корня — генератор. Пока драйвер один, он гоняет генератор до конца и
+    # ждёт каждую волну сам: порядок вызовов прежний. Драйвер полос (F4b) будет вести
+    # несколько генераторов кооперативно — ``yield`` в ``root_steps`` и есть эта точка.
+    steps = root_steps(
+        pid,
+        root_url,
+        frontier,
+        root_drain=root_drain,
+        limits=limits,
+        items=items,
+        errors=errors,
+        emit=emit,
+        mark=mark,
+        commit_local=commit_local,
+        local_fetch=local_fetch,
+        local_prefetch=local_prefetch,
+        process_local=process_local,
+        submit_collect=submit_collect,
+        work_item=work_item,
+        resolve_target=resolve_target,
+        finish_extract=finish_extract,
+        extract_pending=extract_pending,
+        extract_window=extract_window,
+        max_attempts=max_attempts,
+        max_waves=max_waves,
+        wave_items=wave_items,
+        robots_enabled=robots_enabled,
+        timings=timings,
+        executor=executor,
+        pool=pool,
+        non_poolable_pool=non_poolable_pool,
+        max_workers=max_workers,
+        defer_tail=defer_tail,
+        sitemap_skips=sitemap.skipped,
+        _drain_for_window=_drain_for_window,
+        _has_fetch_capacity=_has_fetch_capacity,
+        _inflight_fresh=_inflight_fresh,
+        _tail_may_extend_frontier=_tail_may_extend_frontier,
+        _skip_document_prefetch=_skip_document_prefetch,
+        _commit_or_defer=_commit_or_defer,
+    )
     try:
+        request = next(steps)
         while True:
-            # P4: доводим окно экстракции (окно полно и/или ёмкость исчерпана с
-            # учётом in-flight) до постановки/выхода — иначе пере-удержание.
-            # C1: окно — фазовой очереди (пул общий), поэтому нужен лишь при
-            # активном пуле этого корня.
-            if extract_pending and extract_window is not None:
-                _drain_for_window()
-            if root_drain.pending and len(frontier) == 0:
-                # Очередь корня пуста, но доводка in-flight может добавить ссылки
-                # (``offer``/BFS на finish) — доводим всё, прежде чем счесть исчерпание.
-                # C1: если хвост BFS расширить не может, он откладывается на фазу —
-                # фетч следующего корня не ждёт экстракции.
-                if _tail_may_extend_frontier():
-                    while root_drain.pending:
-                        finish_extract(extract_pending.popleft())
-                else:
-                    break
-            # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
-            # ограничивать и их (не только обнаруженные ссылки). Без лимита —
-            # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
-            # 09 §6.3: ревалидация известных URL бюджет не расходует; если
-            # голова очереди — такая группа, дренаж продолжается (бюджет
-            # исчерпан только для discovery).
-            if (
-                not _has_fetch_capacity()
-                and not root_drain.pending
-                and not frontier.next_is_revalidation()
-            ):
-                frontier.mark_truncated("max_documents")
-                break
-            if executor is not None:
-                # --- P3-A2: executor-волна (раунд). Один раунд = один submit; --- #
-                # раунды строго последовательны (набор работы N+1 зависит от ссылок N).
-                if waves >= max_waves:
-                    # Предохранитель (§1(iii)): неограниченный BFS по общему edge —
-                    # самонаведённый DoS. Никогда не останавливаться молча: усечение
-                    # ``round_budget`` + явная ошибка + сеанс ``PARTIAL``.
-                    frontier.mark_truncated("round_budget")
-                    errors.append(
-                        f"{pid}/{root_url}: предохранитель раундов исчерпан "
-                        f"({max_waves} волн) — обход остановлен "
-                        "(round_budget)"
-                    )
-                    emit()
-                    break
-                remaining = (
-                    None
-                    if limits.max_documents is None
-                    else limits.max_documents
-                    - frontier.fetched
-                    - _inflight_fresh()
-                )
-                # M2: всегда впускаем непрерывный revalidation-блок **плюс**
-                # discovery-room. Иначе при 0 < remaining < wave_items волна
-                # берёт лишь remaining свободных URL, fetched не растёт, и
-                # предохранитель раундов срабатывает на хвосте ревалидации.
-                reval_n = min(
-                    frontier.revalidation_head_count(wave_items),
-                    wave_items // 2,
-                )
-                room = (
-                    wave_items
-                    if remaining is None
-                    else min(wave_items, max(0, remaining))
-                )
-                wave_size = min(
-                    len(frontier),
-                    wave_items,
-                    max(reval_n, reval_n + room),
-                )
-                if wave_size <= 0:
-                    # A2 (F3): нулевая волна при непустой очереди — это остановка
-                    # по бюджету изъятия. Она обязана быть видимой: без пометки
-                    # усечение было бы тихим (осталось N узлов, которых не изымаем).
-                    if len(frontier) and not frontier.has_capacity:
-                        frontier.mark_truncated("max_documents")
-                    break
-                entries: list[_WaveEntry] = []
-                work: list[CrawlWorkItem] = []
-                wave_has_discovery = False
-                for _ in range(wave_size):
-                    node = frontier.next()
-                    if node is None:
-                        break
-                    work_url, depth = node
-                    if not frontier.is_revalidation(work_url):
-                        wave_has_discovery = True
-                    if frontier.blacklisted(work_url):
-                        # D1/H: блэклист применяется и перед фетчем.
-                        entries.append(
-                            _WaveEntry(pid, work_url, depth, "blacklisted")
-                        )
-                        continue
-                    if _skip_document_prefetch(work_url):
-                        # P5: документ при ``off`` — pre-fetch-пропуск (виден).
-                        emit()
-                        continue
-                    prior_item = items.get((pid, work_url))
-                    if terminal_failure_kind(prior_item) is not None:
-                        # Определённый ответ «ресурса нет» уже получен: в работу
-                        # не подаём (иначе 404 стоил бы запросов на каждом цикле).
-                        entries.append(
-                            _WaveEntry(
-                                pid,
-                                work_url,
-                                depth,
-                                "terminal_not_found",
-                                prior_item=prior_item,
-                            )
-                        )
-                        continue
-                    if (
-                        max_attempts is not None
-                        and prior_item is not None
-                        and prior_item.attempts >= max_attempts
-                    ):
-                        entries.append(
-                            _WaveEntry(
-                                pid,
-                                work_url,
-                                depth,
-                                "attempts",
-                                prior_item=prior_item,
-                            )
-                        )
-                        continue
-                    work_target = resolve_target(pid, work_url)
-                    resume_source = (
-                        resume_retained(
-                            prior_item,
-                            max_bytes=limits.max_response_bytes,
-                            artifact_max_bytes=limits.max_artifact_bytes,
-                            attachment_formats=limits.attachment_formats,
-                        )
-                        if prior_item is not None
-                        else None
-                    )
-                    reject = (
-                        resume_source
-                        if isinstance(resume_source, RetainedReject)
-                        else None
-                    )
-                    resume = (
-                        resume_source
-                        if isinstance(resume_source, RetainedRaw)
-                        else None
-                    )
-                    # Дескриптор коммита строится вручную (не ``local_prefetch``):
-                    # browser-guard/``active`` — оси локального краулера, а здесь
-                    # байты доставляет исполнитель; ``browser_blocked`` всегда False.
-                    desc = LocalFetch(
-                        pid=pid,
-                        wu=work_url,
-                        depth=depth,
-                        fetch_plan=replace(
-                            work_target.plan,
-                            max_response_bytes=limits.max_response_bytes,
-                        ),
-                        active=None,
-                        engine_value=work_target.engine,
-                        prior_item=prior_item,
-                        resume=resume,
-                        browser_blocked=False,
-                        poolable=False,
-                        host=(urlsplit(work_url).hostname or "").lower(),
-                        scope_host=frontier.root_host,
-                        enforce_redirect_scope=limits.max_depth > 0,
-                        reject=reject,
-                    )
-                    entries.append(
-                        _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
-                    )
-                    if resume is None and reject is None:
-                        # Только живой фетч подаётся исполнителю; resume минует submit.
-                        work.append(
-                            work_item(
-                                pid, work_url, work_target, robots=robots_enabled
-                            )
-                        )
-                # ``fetch_wait_s`` split-пути: ``submit_collect`` — это подача +
-                # опрос статуса + сбор результатов, то есть **ожидание** исполнителя
-                # (работу делает он, а не главный поток). Тот же бакет, что и у
-                # локального пула: «участок фетча» — одна стадия продукта.
-                _fetch_started = time.perf_counter()
-                try:
-                    collected = submit_collect(work)
-                finally:
-                    timings.fetch_wait_s += time.perf_counter() - _fetch_started
-                for entry in entries:
-                    if entry.kind == "blacklisted":
-                        errors.append(
-                            f"{entry.pid}/{entry.wu}: зачёркнут блэклистом "
-                            "перед фетчем — пропущен"
-                        )
-                        continue
-                    if entry.kind == "terminal_not_found":
-                        # Терминальный класс уже получен: повторного фетча не было,
-                        # элемент остаётся ``FAILED`` со своим ``error_kind``.
-                        prior_item = entry.prior_item
-                        kind = (
-                            terminal_failure_kind(prior_item)
-                            or FailureKind.NOT_FOUND
-                        )
-                        mark(
-                            entry.pid,
-                            entry.wu,
-                            CrawlItemStatus.FAILED,
-                            error_kind=kind.value,
-                            error=(
-                                prior_item.error
-                                if prior_item is not None and prior_item.error
-                                else f"{kind.value}: терминально, без повтора"
-                            ),
-                            depth=entry.depth,
-                        )
-                        emit()
-                        continue
-                    if entry.kind == "attempts":
-                        prior_item = entry.prior_item
-                        if prior_item is None:
-                            # См. инвариант ``_WaveEntry(kind="attempts")`` выше:
-                            # запись создаётся только по существующему элементу.
-                            raise AssertionError(
-                                f"{entry.pid}/{entry.wu}: attempts-запись "
-                                "без prior_item"
-                            )
-                        reason = (
-                            f"max_attempts exhausted "
-                            f"(attempts={prior_item.attempts} >= {max_attempts})"
-                        )
-                        errors.append(f"{entry.pid}/{entry.wu}: {reason}")
-                        mark(
-                            entry.pid,
-                            entry.wu,
-                            CrawlItemStatus.FAILED,
-                            error_kind=_MAX_ATTEMPTS_ERROR_KIND,
-                            error=reason,
-                            depth=entry.depth,
-                        )
-                        emit()
-                        continue
-                    desc = entry.desc
-                    if desc is None:
-                        # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись
-                        # несёт desc — иначе коммитить нечего.
-                        raise AssertionError(
-                            f"{entry.pid}/{entry.wu}: запись волны без desc"
-                        )
-                    if desc.resume is not None or desc.reject is not None:
-                        # Resume/reject: живого фетча нет — коммит локально без submit.
-                        outcome = commit_local(desc)
-                        _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
-                        continue
-                    result = collected.get((entry.pid, entry.wu))
-                    if result is None:
-                        errors.append(
-                            f"{entry.pid}/{entry.wu}: executor: результат не получен"
-                        )
-                        mark(
-                            entry.pid,
-                            entry.wu,
-                            CrawlItemStatus.FAILED,
-                            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                            error="executor: результат не получен",
-                            depth=entry.depth,
-                        )
-                        emit()
-                        continue
-                    if result.error or result.raw_bytes is None:
-                        reason = result.error or "executor: пустой raw_bytes"
-                        errors.append(f"{entry.pid}/{entry.wu}: executor: {reason}")
-                        # Наблюдаемость (тот же дефект, что и на локальном пути):
-                        # шов уже несёт ``http_status`` отказа — не теряем его.
-                        # Класс отказа не меняется (``source_unavailable``).
-                        mark(
-                            entry.pid,
-                            entry.wu,
-                            CrawlItemStatus.FAILED,
-                            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                            error=reason,
-                            depth=entry.depth,
-                            http_status=result.http_status,
-                        )
-                        emit()
-                        continue
-                    # S1: применяемый движок — фактический транспорт из результата шва.
-                    desc.engine_value = result.engine or desc.engine_value
-                    page = RawPage(
-                        url=result.final_url or result.url,
-                        content=result.raw_bytes,
-                        fetched_at=result.fetched_at or "",
-                        fetch_mode=desc.fetch_plan.fetch,
-                        lang=None,
-                        status_code=result.http_status,
-                        content_type=result.content_type,
-                        engine=result.engine,
-                        # 09 §6.3: валидаторы ответа и признак 304 переносятся в
-                        # ``RawPage`` (раньше молча терялись — реальный дефект):
-                        # без них ``url_state`` не сохранит ETag/Last-Modified, а
-                        # ``304`` не распознается как переиспользование.
-                        etag=result.etag,
-                        last_modified=result.last_modified,
-                        not_modified=result.not_modified,
-                    )
-                    outcome = commit_local(desc, page=page)
-                    _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
-                # M2: предохранитель — BFS-guard, поэтому чисто
-                # ревалидационная волна его не расходует.
-                if wave_has_discovery:
-                    waves += 1
-                continue
-            if pool is None:
-                # --- Последовательный путь (max_workers None/1): как прежде. --- #
-                # A2 (F3): бюджет изъятия проверяется **до** изъятия — узел,
-                # снятый с очереди и отвергнутый по ёмкости, выпал бы из счёта
-                # «в очереди осталось N». ``peek`` не изымает и о бюджете не решает.
-                head = frontier.peek()
-                if head is None:
-                    break
-                work_url, depth = head
-                # 09 §6.3: бюджет discovery исчерпан (с учётом окна экстракции), а
-                # голова очереди — не ревалидационный лист: останавливаем обход
-                # (ревалидация обрабатывается отдельно и бюджет не расходует).
-                if not _has_fetch_capacity() and not frontier.is_revalidation(
-                    work_url
-                ):
-                    frontier.mark_truncated("max_documents")
-                    break
-                if frontier.next() is None:
-                    # Ёмкость (``fetched``) исчерпана самим ``next``: он уже поставил
-                    # усечение ``max_documents``.
-                    break
-                # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
-                if frontier.blacklisted(work_url):
-                    errors.append(
-                        f"{pid}/{work_url}: зачёркнут блэклистом перед фетчем — пропущен"
-                    )
-                    continue
-                if _skip_document_prefetch(work_url):
-                    # P5: документ при ``off`` — pre-fetch-пропуск (виден; не в max_documents).
-                    emit()
-                    continue
-                prior_item = items.get((pid, work_url))
-                if (
-                    max_attempts is not None
-                    and prior_item is not None
-                    and prior_item.attempts >= max_attempts
-                    and terminal_failure_kind(prior_item) is None
-                ):
-                    reason = (
-                        f"max_attempts exhausted "
-                        f"(attempts={prior_item.attempts} >= {max_attempts})"
-                    )
-                    errors.append(f"{pid}/{work_url}: {reason}")
-                    mark(
-                        pid,
-                        work_url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=_MAX_ATTEMPTS_ERROR_KIND,
-                        error=reason,
-                        depth=depth,
-                    )
-                    emit()
-                    continue
-
-                work_target = resolve_target(pid, work_url)
-                # Последовательный путь (``max_workers in (None, 1)``): фетч inline на
-                # главном потоке, поэтому ``fetch_wait_s`` здесь — **работа**, а не
-                # ожидание (как и inline-ветка волны). Бакет общий: «участок фетча» —
-                # одна стадия продукта.
-                _fetch_started = time.perf_counter()
-                try:
-                    outcome = process_local(
-                        pid,
-                        work_url,
-                        work_target,
-                        depth=depth,
-                        scope_host=frontier.root_host,
-                        # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
-                        # на глубине 0 финальная страница ретейнится как прежде.
-                        enforce_redirect_scope=limits.max_depth > 0,
-                        robots=robots_enabled,
-                        max_response_bytes=limits.max_response_bytes,
-                        artifact_max_bytes=limits.max_artifact_bytes,
-                        attachment_formats=limits.attachment_formats,
-                    )
-                finally:
-                    timings.fetch_wait_s += time.perf_counter() - _fetch_started
-                _commit_or_defer(pid, work_url, depth, outcome)
-                continue
-
-            # --- D4: волна fetch-only. Размер волны = min(K, остаток ёмкости, длина
-            # очереди): пере-удержание ``max_documents`` структурно невозможно.
-            # Диспатч (prefetch + submit) и коммит — на главном потоке; off-thread
-            # идёт только ``limiter.wait`` + ``active.fetch``. --- #
-            remaining = (
-                None
-                if limits.max_documents is None
-                else limits.max_documents
-                - frontier.fetched
-                - _inflight_fresh()
-            )
-            # M2: та же формула, что в executor-ветке: непрерывный
-            # revalidation-блок + discovery-room, без роста batch.
-            reval_n = min(
-                frontier.revalidation_head_count(max_workers),
-                int(max_workers) // 2,
-            )
-            room = (
-                int(max_workers)
-                if remaining is None
-                else min(int(max_workers), max(0, remaining))
-            )
-            wave_size = min(
-                len(frontier),
-                int(max_workers),
-                max(reval_n, reval_n + room),
-            )
-            if wave_size <= 0:
-                # A2 (F3): та же видимость остановки по бюджету изъятия, что в
-                # executor-ветке: непустая очередь + исчерпанный ``fetched``.
-                if len(frontier) and not frontier.has_capacity:
-                    frontier.mark_truncated("max_documents")
-                break
-            entries: list[_WaveEntry] = []
-            for _ in range(wave_size):
-                node = frontier.next()
-                if node is None:
-                    break
-                work_url, depth = node
-                if frontier.blacklisted(work_url):
-                    entries.append(
-                        _WaveEntry(pid, work_url, depth, "blacklisted")
-                    )
-                    continue
-                if _skip_document_prefetch(work_url):
-                    # P5: документ при ``off`` — pre-fetch-пропуск (виден).
-                    emit()
-                    continue
-                prior_item = items.get((pid, work_url))
-                if (
-                    max_attempts is not None
-                    and prior_item is not None
-                    and prior_item.attempts >= max_attempts
-                    and terminal_failure_kind(prior_item) is None
-                ):
-                    entries.append(
-                        _WaveEntry(
-                            pid, work_url, depth, "attempts", prior_item=prior_item
-                        )
-                    )
-                    continue
-                work_target = resolve_target(pid, work_url)
-                desc = local_prefetch(
-                    pid,
-                    work_url,
-                    work_target,
-                    depth=depth,
-                    scope_host=frontier.root_host,
-                    enforce_redirect_scope=limits.max_depth > 0,
-                    robots=robots_enabled,
-                    max_response_bytes=limits.max_response_bytes,
-                    artifact_max_bytes=limits.max_artifact_bytes,
-                    attachment_formats=limits.attachment_formats,
-                )
-                # D2/e: browser-элементы НИКОГДА не пулятся (``BrowserCrawler`` водит
-                # единственную ``_page`` без лока) — идут inline на главном потоке;
-                # resume-элементы тоже минуют пул (живого фетча нет; ``poolable``).
-                future = None
-                if desc.poolable:
-                    if pool is None:
-                        # Инвариант ветки: ``poolable`` выставляется только когда
-                        # создан пул фетча этого корня (``executor is None`` путь
-                        # пула не имеет вовсе).
-                        raise AssertionError(
-                            f"{desc.pid}/{desc.wu}: poolable без пула фетча"
-                        )
-                    future = pool.submit(local_fetch, desc)
-                entries.append(
-                    _WaveEntry(
-                        pid, work_url, depth, "fetch", desc=desc, future=future
-                    )
-                )
-            _commit_wave(entries)
-        # P4/C1: хвост корня доводится здесь, только если он **может** расширить
-        # frontier (BFS-ссылки). Иначе он остаётся в фазовой очереди: пул общий,
-        # и фетч следующего корня не ждёт экстракции (провенанс корня посчитает
-        # финализатор — после доводки хвоста).
-        if root_drain.pending and (
-            not defer_tail or _tail_may_extend_frontier()
-        ):
-            while root_drain.pending:
-                finish_extract(extract_pending.popleft())
+            outcomes = _await_wave(request, timings=timings)
+            request = steps.send(outcomes)
+    except StopIteration as finished:
+        return finished.value
     finally:
+        # F4: приостановленный генератор не должен переживать драйвер. Если ожидание
+        # волны прервано (исключение, сигнал), ``close()`` исполняет его ``finally``
+        # **сейчас** — закрытие построенного конвертера, доводка хвоста, — а не при
+        # сборке мусора, где порядок уже не наш. На завершившемся генераторе — no-op.
+        steps.close()
         # C1: пул экстракции — фазовый (``shutdown`` в ``finally`` фазы), здесь
-        # закрывается только локальный пул фетча этого корня.
-        if pool is not None:
+        # закрываются только пулы полосы, созданные этим корнем.
+        if own_pool and pool is not None:
             pool.shutdown(wait=True)
-    return frontier, list(sitemap.skipped), root_drain
+        if own_non_poolable_pool and non_poolable_pool is not None:
+            non_poolable_pool.shutdown(wait=True)

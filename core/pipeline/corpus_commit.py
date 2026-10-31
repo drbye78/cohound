@@ -601,6 +601,43 @@ def tail_may_extend_frontier(
     return False
 
 
+def pending_count_for_root(
+    *,
+    extract_pending: Sequence[PendingExtract],
+    root_drain: RootDrain,
+) -> int:
+    """Сколько заданий **этого** корня ждёт доводки в фазовой очереди (F4).
+
+    Окно экстракции — свойство корня, а не общей очереди: ``len(extract_pending)``
+    считает и чужие задания, поэтому корень ждал бы окна, которого не использовал, а
+    окно памяти по корням подменялось бы максимумом. Пока полоса одна, в очереди лежат
+    задания только текущего корня — число совпадает с прежним.
+    """
+    return sum(1 for item in extract_pending if item.root is root_drain)
+
+
+def popleft_for_root(
+    *,
+    extract_pending: deque[PendingExtract],
+    root_drain: RootDrain,
+) -> PendingExtract:
+    """Изъять самое старое задание **этого** корня (FIFO корня — инвариант).
+
+    ``deque.popleft()`` берёт голову **общей** очереди, то есть при нескольких корнях —
+    чужое задание: корень A доводил бы хвост B и переставал быть хозяином своего
+    порядка. Порядок изъятия внутри корня не меняется — меняется только чьё задание
+    берётся, поэтому при одной полосе поведение прежнее (F4: чистый перенос).
+    """
+    for index, item in enumerate(extract_pending):
+        if item.root is root_drain:
+            del extract_pending[index]
+            return item
+    raise AssertionError(
+        "очередь доводки: у корня нет своих заданий — счётчик pending расходится "
+        "с очередью"
+    )
+
+
 def drain_for_window(
     *,
     extract_pending: deque[PendingExtract],
@@ -614,9 +651,16 @@ def drain_for_window(
     extract_timeout: float,
     extract_finalizers: deque[RootDrain],
 ) -> None:
-    """Доводит oldest, пока окно полно или ёмкость исчерпана (с in-flight)."""
-    while extract_pending and (
-        len(extract_pending) >= extract_window
+    """Доводит oldest **своего** корня, пока окно полно или ёмкость исчерпана.
+
+    ``own`` — задания этого корня: окно считается по ним, а не по длине общей очереди
+    (F4: у каждого корня своё окно; пул экстракции при этом остаётся фазовым).
+    """
+    own = pending_count_for_root(
+        extract_pending=extract_pending, root_drain=root_drain
+    )
+    while own and (
+        own >= extract_window
         or not has_fetch_capacity(
             frontier=frontier,
             limits=limits,
@@ -625,13 +669,18 @@ def drain_for_window(
         )
     ):
         finish_extract(
-            extract_pending.popleft(),
+            popleft_for_root(
+                extract_pending=extract_pending, root_drain=root_drain
+            ),
             pools=pools,
             errors=errors,
             timings=timings,
             extract_timeout=extract_timeout,
             extract_pending=extract_pending,
             extract_finalizers=extract_finalizers,
+        )
+        own = pending_count_for_root(
+            extract_pending=extract_pending, root_drain=root_drain
         )
 
 

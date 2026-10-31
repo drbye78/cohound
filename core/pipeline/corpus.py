@@ -2156,7 +2156,6 @@ def _build_corpus(
         mark=_mark,
         commit_local=_commit_local,
         local_fetch=_local_fetch,
-        fetch_and_commit=_fetch_and_commit,
         local_prefetch=_local_prefetch,
         process_local=_process_local,
         submit_collect=_submit_collect,
@@ -2468,7 +2467,15 @@ def _build_corpus(
                 # depth-0 seeds того же корня уже внутри ``_drain_root`` — там есть frontier,
                 # чей scope фильтрует ``<loc>`` (дефект B/I17). Без sitemap — путь не
                 # исполняется (поведение неизменно).
-                roots: list[tuple[str, Any, bool]] = [(url, target, True)]
+                roots: list[corpus_drain.RootPlan] = [
+                    corpus_drain.RootPlan(
+                        root_url=url,
+                        target=target,
+                        sitemap_seeds=True,
+                        known_urls=revalidation_groups.get(url, ()),
+                        serp_seeds=serp_seeds_by_root.get(url, ()),
+                    )
+                ]
             else:
                 roots = []
                 for entry_url in entry_urls:
@@ -2484,24 +2491,36 @@ def _build_corpus(
                     targets[(product_id, entry_url)] = entry_target
                     # Запись каталога — самостоятельный корень без sitemap-аугментации
                     # (развёртка sitemap — свойство seed оператора, не записей каталога).
-                    roots.append((entry_url, entry_target, False))
+                    roots.append(
+                        corpus_drain.RootPlan(
+                            root_url=entry_url,
+                            target=entry_target,
+                            sitemap_seeds=False,
+                            known_urls=revalidation_groups.get(entry_url, ()),
+                            serp_seeds=serp_seeds_by_root.get(entry_url, ()),
+                        )
+                    )
 
             # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
             # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
             # 09 §6.3: известные URL этого корня — в его же дренаж (после seed, до BFS),
             # а не отдельными frontier'ами: одна запись усечения на корень, один бюджет.
-            for root_url, root_target, sitemap_seeds in roots:
+            # F4: корень описан значением (``RootPlan``), а не пятью аргументами вызова —
+            # драйверу полос (F4b) этот список нужен целиком, а порядок корней прежний.
+            for root in roots:
+                root_url = root.root_url
+                root_target = root.target
                 drained_roots.add(root_url)
-                known_urls = revalidation_groups.get(root_url, ())
+                known_urls = root.known_urls
                 frontier, sitemap_skips, root_drain = _drain_root(
                     product_id,
                     root_url,
                     root_target,
-                    sitemap_seeds=sitemap_seeds,
+                    sitemap_seeds=root.sitemap_seeds,
                     revalidate=known_urls,
                     # SERP-находки этого корня: depth-0 seeds под тем же блэклистом
                     # и ``max_documents``, что и авторские/`<loc>` seeds.
-                    serp_seeds=serp_seeds_by_root.get(root_url, ()),
+                    serp_seeds=root.serp_seeds,
                 )
 
                 # L5 шаг 2: ``finalize_root`` вынесен в ``corpus_commit``; ``partial``
