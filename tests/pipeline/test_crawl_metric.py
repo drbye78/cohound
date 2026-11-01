@@ -281,6 +281,52 @@ def test_politeness_violation_is_named_when_ratio_below_one() -> None:
     assert row["politeness_violation"] is True
 
 
+def test_outlier_interval_does_not_read_as_systematic_breach() -> None:
+    """Минимум на 101 интервале публикуется вместе с масштабом (замер F8, 01.11).
+
+    Живой прогон дал ``ratio≈0.007`` на host'е, где медиана была 3.26 s: два коротких
+    интервала из 801. Минимум сам по себе читается как систематический обгон, поэтому
+    рядом обязаны стоять число коротких, доля и медиана — иначе «нарушение» выводится из
+    случайной пары соседних попыток.
+    """
+    base = _dt.datetime(2026, 1, 1, tzinfo=_dt.UTC)
+    # 99 интервалов по 3 с, затем два коротких (0.007 и 0.013) — как в живом прогоне.
+    offsets = [i * 3.0 for i in range(100)]
+    offsets = [*offsets[:99], offsets[98] + 0.007, offsets[98] + 0.02]
+    items = [
+        _item(f"https://a.test/{i}", started=(base + _dt.timedelta(seconds=s)).isoformat())
+        for i, s in enumerate(offsets)
+    ]
+    metric = build_crawl_metric(
+        session=_session(), items=items, provenance=_provenance(("https://a.test/", 1.0))
+    )
+    row = metric["per_host"][0]
+    assert row["observed_min_interval_s"] == 0.007
+    assert row["ratio"] == 0.007
+    assert row["politeness_violation"] is True
+    # Масштаб: два коротких из 100 интервалов, доля 2 %, медиана — 3 s (не 0.007).
+    assert row["intervals_total"] == 100
+    assert row["intervals_below_declared"] == 2
+    assert row["share_below_declared_pct"] == 2.0
+    assert row["median_interval_s"] == 3.0
+
+
+def test_no_declared_throttling_leaves_scale_unmeasured() -> None:
+    """``min_s=0`` — обещания нет: и флаг ``false``, и масштаб ``null`` (не ноль)."""
+    metric = build_crawl_metric(
+        session=_session(),
+        items=[
+            _item("https://a.test/1", started="2026-01-01T00:00:00+00:00"),
+            _item("https://a.test/2", started="2026-01-01T00:00:00.100000+00:00"),
+        ],
+        provenance=_provenance(("https://a.test/", 0.0)),
+    )
+    row = metric["per_host"][0]
+    assert row["politeness_violation"] is False
+    assert row["intervals_below_declared"] is None
+    assert row["share_below_declared_pct"] is None
+
+
 def test_conflicting_declarations_yield_null_and_variants() -> None:
     """Корни одного host'а объявили разные минимумы → одного числа нет: ``None`` + варианты."""
     prov = {

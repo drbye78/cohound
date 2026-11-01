@@ -723,9 +723,9 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
     """Человекочитаемая форма метрики краула (§7.2): шапка + выровненная таблица по host'ам.
 
     Таблица выравнивается по ширине host'а: числа только наблюдённые, неизмеренное — ``—``.
-    Нарушение вежливости печатается отдельной строкой ``politeness:``, а не прячется в
-    колонке: это проверка приёмки, и «ratio 0.42» без слова «нарушение» читалось бы как
-    обычное число.
+    Вежливость печатается отдельной строкой ``politeness:`` с **масштабом** (сколько
+    интервалов короче объявленного из скольких) и медианой: минимум без них читается как
+    систематический обгон, даже когда коротких интервалов единицы.
     """
     wall = metric.get("crawl_only_wall") or {}
     seconds = wall.get("seconds")
@@ -770,17 +770,20 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
     rows = metric.get("per_host") or []
     if rows:
         header = (
-            f"{'host':<28} {'items':>6} {'requests':>9} {'min_ivl_s':>10} {'declared_s':>11} "
-            f"{'ratio':>7} {'p50_ms':>7} {'p95_ms':>7} {'unknown':>8}"
+            f"{'host':<28} {'items':>6} {'requests':>9} {'min_ivl_s':>10} {'med_ivl_s':>10} "
+            f"{'declared_s':>11} {'short':>11} {'p50_ms':>7} {'p95_ms':>7} {'unknown':>8}"
         )
         lines.append("  " + header)
         for row in rows:
+            short = row.get("intervals_below_declared")
+            total = row.get("intervals_total") or 0
             lines.append(
                 "  "
                 + f"{row['host']:<28} {row['items']:>6} {row['requests']:>9} "
                 f"{_fmt_metric(row.get('observed_min_interval_s')):>10} "
+                f"{_fmt_metric(row.get('median_interval_s')):>10} "
                 f"{_fmt_metric(row.get('declared_min_interval_s')):>11} "
-                f"{_fmt_metric(row.get('ratio')):>7} "
+                f"{(f'{short}/{total}' if short is not None else '—'):>11} "
                 f"{_fmt_metric((row.get('fetch_ms') or {}).get('p50'), 0):>7} "
                 f"{_fmt_metric((row.get('fetch_ms') or {}).get('p95'), 0):>7} "
                 f"{row.get('fetch_ms_unknown', 0):>8}"
@@ -788,12 +791,24 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
     else:
         lines.append("hosts: — (элементов нет)")
     for row in rows:
-        if row.get("politeness_violation"):
+        short = row.get("intervals_below_declared")
+        if short is None:
+            continue
+        declared = _fmt_metric(row.get("declared_min_interval_s"))
+        if short:
+            # Назван масштаб, а не только минимум: два коротких интервала из 801 и
+            # систематический обгон — разные факты, и «НАРУШЕНИЕ» без числа стирало разницу.
             lines.append(
-                f"politeness: {row['host']} — НАРУШЕНИЕ (observed_min_interval_s="
-                f"{_fmt_metric(row.get('observed_min_interval_s'))} < declared_min_interval_s="
-                f"{_fmt_metric(row.get('declared_min_interval_s'))}, ratio="
-                f"{_fmt_metric(row.get('ratio'))})"
+                f"politeness: {row['host']} — {short} из {row.get('intervals_total', 0)} "
+                f"интервалов короче объявленного ({_fmt_metric(row.get('share_below_declared_pct'))}%; "
+                f"минимум {_fmt_metric(row.get('observed_min_interval_s'))} s, медиана "
+                f"{_fmt_metric(row.get('median_interval_s'))} s, объявлено {declared} s)"
+            )
+        else:
+            lines.append(
+                f"politeness: {row['host']} — интервалов короче объявленного нет "
+                f"(минимум {_fmt_metric(row.get('observed_min_interval_s'))} s, медиана "
+                f"{_fmt_metric(row.get('median_interval_s'))} s, объявлено {declared} s)"
             )
     for note in metric.get("notes", ()):
         lines.append(f"note: {note}")

@@ -184,11 +184,14 @@ def test_per_host_names_politeness_violation(
     assert row["declared_min_interval_s"] == 2.0
     assert row["ratio"] == 0.2
     assert row["politeness_violation"] is True
+    # Масштаб нарушения — не только минимум: единственный интервал из одного короткий.
+    assert row["intervals_total"] == 1
+    assert row["intervals_below_declared"] == 1
+    assert row["share_below_declared_pct"] == 100.0
 
     assert main(_argv(db, "--per-host", json_mode=False)) == EXIT_OK
     out = capsys.readouterr().out
-    assert "politeness: a.test — НАРУШЕНИЕ" in out
-    assert "ratio=0.200" in out
+    assert "politeness: a.test — 1 из 1 интервалов короче объявленного" in out
 
 
 def test_per_host_human_table_is_aligned_and_named(

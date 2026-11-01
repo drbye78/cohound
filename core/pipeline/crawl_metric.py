@@ -10,9 +10,13 @@
 1. ``hosts``, ``urls``, ``crawl_only_wall`` — из сеансовой строки
    (``finished_at - started_at``). Сеанс ещё идёт (``finished_at is None``) → печатается
    прошедшее время и флаг ``running``: незавершённое окно **не** выдаётся за итог.
-2. На host — ``requests`` и ``observed_min_interval_s`` + отношение к **объявленному**
-   минимуму (``ratio``): ``ratio >= 1`` — вежливость соблюдена, ``ratio < 1`` — нарушение,
-   и оно печатается явно (``politeness_violation: true``), а не замалчивается.
+2. На host — ``requests`` и **распределение** интервалов: ``observed_min_interval_s``,
+   ``median_interval_s`` и число интервалов короче объявленного
+   (``intervals_below_declared`` из ``intervals_total``, доля ``share_below_declared_pct``).
+   Минимум сам по себе вердиктом не является: на 801 интервале два коротких дают
+   ``ratio≈0.007`` при медиане 3.3 s, и «систематическое нарушение» из этого числа —
+   чтение, которого в данных нет. Нарушением называется **факт** хотя бы одного интервала
+   короче объявленного (``politeness_violation``), а его масштаб публикуется числом.
 3. ``fetch_ms`` p50/p95 — на host и по сеансу; ``None`` (resume из retained-байтов, ``304``,
    отказ до сети) в выборку не входит, его число публикуется отдельно
    (``fetch_ms_unknown``). Пустая выборка → ``null``, а не ``0``.
@@ -29,6 +33,13 @@
   ``fetch_started_at`` одного host'а после сортировки по возрастанию. Меньше двух попыток →
   ``None``: интервала нет, и ни ``0`` (он означал бы «склеены»), ни «бесконечно» (он означал
   бы «не наблюдалось»).
+* ``median_interval_s`` — медиана того же ряда интервалов по правилу nearest-rank (см. ниже):
+  число, которое говорит, **как часто** хост видел запросы, тогда как минимум говорит лишь
+  «был ли хоть один короткий». Оба публикуются рядом; одно без другого допускает неверное
+  чтение в обе стороны.
+* ``intervals_below_declared`` / ``share_below_declared_pct`` — сколько интервалов строго
+  короче объявленного минимума и какая это доля. Считаются только при объявленном
+  ``min_s > 0``: «троттлинга нет» — обещания нет, нарушать нечего (``null``, не ``0``).
 * перцентиль — **nearest-rank**: для выборки ``v[0..n-1]`` (отсортирована по возрастанию) и
   целого ``p`` ранг ``= ceil(p*n/100)`` (1-based, целочисленно: ``(p*n + 99)//100``), ответ
   ``v[ранг-1]``. Никакой интерполяции и никакого усреднения соседей: значение — всегда один
@@ -67,6 +78,7 @@ __all__ = [
     "build_crawl_metric",
     "declared_min_intervals",
     "nearest_rank",
+    "observed_intervals_s",
     "observed_min_interval_s",
 ]
 
@@ -123,6 +135,17 @@ def nearest_rank(values: Sequence[float], percentile: int) -> float | None:
     return ordered[min(max(rank, 1), n) - 1]
 
 
+def observed_intervals_s(timestamps: Iterable[str | None]) -> list[float]:
+    """Ряд интервалов между соседними попытками (сек), по возрастанию моментов.
+
+    Один ряд на все производные величины host'а (минимум, медиана, число коротких):
+    второй проход по моментам разошёлся бы с первым на неразбираемом значении. Меньше
+    двух наблюдаемых моментов → пустой список (интервалов нет).
+    """
+    moments = sorted(m for m in (_parse_iso(value) for value in timestamps) if m is not None)
+    return [(later - earlier).total_seconds() for earlier, later in itertools.pairwise(moments)]
+
+
 def observed_min_interval_s(timestamps: Iterable[str | None]) -> float | None:
     """Минимальный интервал между соседними попытками (сек) из ``fetch_started_at``.
 
@@ -130,13 +153,10 @@ def observed_min_interval_s(timestamps: Iterable[str | None]) -> float | None:
     наблюдаемых моментов → ``None`` (интервала нет). Неразбираемые значения пропускаются:
     они не «нулевой интервал», а отсутствие наблюдения.
     """
-    moments = sorted(m for m in (_parse_iso(value) for value in timestamps) if m is not None)
-    if len(moments) < 2:
+    intervals = observed_intervals_s(timestamps)
+    if not intervals:
         return None
-    return min(
-        (later - earlier).total_seconds()
-        for earlier, later in itertools.pairwise(moments)
-    )
+    return min(intervals)
 
 
 def _min_s(spec: Any) -> float | None:
@@ -250,7 +270,8 @@ def _host_row(
     (``fetch_started_at is None``): разница между двумя числами — видимая доля «не начались».
     """
     timestamps = [getattr(item, "fetch_started_at", None) for item in items]
-    observed = observed_min_interval_s(timestamps)
+    intervals = observed_intervals_s(timestamps)
+    observed = min(intervals) if intervals else None
     attempts = sum(1 for value in timestamps if value)
     fetch_values = [
         int(value)
@@ -263,6 +284,8 @@ def _host_row(
         declared = variants[0]
     ratio: float | None = None
     violation: bool | None = None
+    below: int | None = None
+    share: float | None = None
     if declared is not None and declared <= 0.0:
         # Объявлено «без троттлинга» (``min_s=0``): отношения не существует, нарушать
         # нечего — и при отсутствии наблюдения тоже (``false``, а не ``null``: это не
@@ -271,11 +294,20 @@ def _host_row(
     elif observed is not None and declared is not None:
         ratio = observed / declared
         violation = ratio < 1.0
+        # Масштаб нарушения: сколько интервалов короче обещанного. Пустой ряд интервалов
+        # сюда не доходит (``observed`` был бы ``None``), поэтому деление определено.
+        below = sum(1 for value in intervals if value < declared)
+        if intervals:
+            share = round(100.0 * below / len(intervals), 2)
     return {
         "host": host,
         "items": len(items),
         "requests": attempts,
         "observed_min_interval_s": observed,
+        "median_interval_s": nearest_rank(intervals, 50),
+        "intervals_total": len(intervals),
+        "intervals_below_declared": below,
+        "share_below_declared_pct": share,
         "declared_min_interval_s": declared,
         "declared_min_interval_variants": conflict,
         "ratio": ratio,
