@@ -304,7 +304,7 @@ embed:
 объявлено ни в `.env.example`, ни в `03`, правило 6 (дефолт `local`) держится **побочно** —
 дефолт и есть единственная реализация. Единственное, что действует уже сейчас: кэш векторов
 по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash, embed_model_id)`), подключён в
-`core/cli/context.py:2423-2433` и в раскладку `core/config/paths.py:79`.
+`core/cli/context.py:2750-2760` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -489,7 +489,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
    от переиспользования, а не тихой подменой прибора.
 
 Отдельно, не в этой правке: `corpus_chunks.embedded_at` пишется `None` всегда
-(`core/pipeline/corpus_drain.py:459`, `core/pipeline/corpus_ingest.py:1320`) — колонка без писателя, и «не эмбеддилось» по ней
+(`core/pipeline/corpus_drain.py:490`, `core/pipeline/corpus_ingest.py:1320`) — колонка без писателя, и «не эмбеддилось» по ней
 не читается; фактический признак — `vectors.fp16.npy` в партиции.
 
 ## 6. Порядок работ

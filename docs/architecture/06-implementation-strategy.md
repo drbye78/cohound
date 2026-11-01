@@ -425,7 +425,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W7 — Корпус — ✅ done по коду; ⚠️ под `split` — с расхождениями
 
-✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:830` (`host_in_scope`), `:821`/`:826`
+✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:1172` (`host_in_scope`), `:1149`/`:1154`
 (`out_of_scope_subdomains`/`accepted_foreign_hosts`), `core/pipeline/archive_descent.py:110-112`
 (`archive_cycle`/`archive_budget_exhausted` — исчерпание видимо), цепочка 5000 архивов —
 `tests/pipeline/test_corpus_descent.py`.
@@ -554,7 +554,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:701-829` вызывает `_run_serp_contour`
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:835-963` вызывает `_run_serp_contour`
 (поиск → допуск → расширение seed-набора **до** дренажа, одна сборка), `core/pipeline/search_log.py`
 (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1549`)
@@ -723,7 +723,7 @@ P5), но строка помечена здесь как неактуальна
 
   ➖ снято — утверждение выше, что `extract_workers` входит в `crawl_config_digest` и класс
   `execution_change`, **неверно на `f6100c7`** (F0): параллелизм извлечения в `as_dict()` не входит,
-  иначе `run_id` стал бы функцией хоста — `core/pipeline/crawl_frontier.py:201-206`.
+  иначе `run_id` стал бы функцией хоста — `core/pipeline/crawl_frontier.py:211-214`.
 
 - **Уровни извлечения документов (P5, as-built).** Ось `crawl.document_level`
   (`off`|`text`|`layout`|`layout_tables`|`full`; app < run < site, per seed-root,

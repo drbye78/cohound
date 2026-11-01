@@ -166,7 +166,7 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`_resume_page`, `core/pipeline/corpus.py:822-875`) — `reused`. Resume перечитывает и те документы, которые
+(`_resume_page`, `core/pipeline/corpus.py:826-879`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -217,7 +217,7 @@ CREATE INDEX IF NOT EXISTS idx_corpus_doc_version_doc
 
 **Почему таблица, а не колонка `corpus_docs.doc_version_id`.** `doc_id` дедуплицируется по
 `content_hash`, который **не включает уровень извлечения**, а `document_level` объявлен
-per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня одного текста в одном прогоне
+per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня одного текста в одном прогоне
 законны. Колонка держит одну версию на строку, то есть теряет вторую молча. Воспроизведение
 и цена — §10 п. 8.
 
@@ -243,15 +243,15 @@ per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня о�
   `core/domain/models.py:491`), дефолт `None` — по той же причине, что у `pdf_device`
   (`:543-549`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
-  что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:332-342`).
+  что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:457-467`).
 - Резолвер: `resolve_embed_device(app, run)` — копия `resolve_pdf_device` без site-слагаемого.
   Дефолт `cpu`, значения только `cpu|cuda`, `auto` **нет** (R5: объявленная ось обязана
   действовать). Enum `EmbedDevice` — в `core/domain/enums.py` рядом с `PdfDevice` (`:531-552`).
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1239` → `core/pipeline/corpus.py:860`/`:2601`/`:2699`, там же, где уже
-  идёт `embed_model_id` (`core/pipeline/corpus.py:1217` — единственный источник этого значения).
+  **явным параметром**: `core/pipeline/phases.py:1239` → `core/pipeline/corpus.py:864`/`:2601`/`:2699`, там же, где уже
+  идёт `embed_model_id` (`core/pipeline/corpus.py:1221` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
@@ -552,7 +552,7 @@ per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня о�
    - **словарь**: `core/domain/dictionary.py` + `docs/status-dictionary.yaml`
      (`embed_device`, статусы продукта прогона);
    - **дефекты краула 1 и 3 — одна правка, не две.** Зарядка бюджета на resume
-     (`core/pipeline/corpus.py:3234`) и дренаж уже добытого расцеплены: URL
+     (`core/pipeline/corpus.py:3245`) и дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed`, чей work-set гейтится режимом продукта
      (`_revalidation_items`, `:6612-6624`). Правило: **заряженный URL обязан быть и
@@ -708,7 +708,7 @@ per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня о�
 
    Причина не в реализации, а в схеме: `doc_id = product:content_hash` **не различает
    уровень извлечения**, а `dv` различает — и `document_level` объявлен **per-site**
-   (`core/pipeline/crawl_frontier.py:604-609`), то есть два уровня в одном прогоне законны.
+   (`core/pipeline/crawl_frontier.py:605-610`), то есть два уровня в одном прогоне законны.
    Вторая версия терялась бы молча, и evidence, цитирующий её, получал бы «наблюдение не
    записано» — ложное утверждение о прогоне. Носитель — производная таблица
    `corpus_doc_version(doc_version_id PK, product_id, doc_id)`: одна версия → один документ,

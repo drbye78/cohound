@@ -364,7 +364,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 
 > ✅ **сделано** — формула `min(floor((budget − parent_floor) / peak(level)), cpu_cap)`
 > (`core/pipeline/resources.py:542-614`), ось `extract_workers_derived`
-> (`core/pipeline/crawl_frontier.py:180`, `:497-507`), отказ при `workers=0` с называнием
+> (`core/pipeline/crawl_frontier.py:181`, `:497-507`), отказ при `workers=0` с называнием
 > пика и пола (`core/cli/wiring.py:2457-2465`). Явно объявленная
 > `crawl.extract_workers` сильнее бюджета — это оставлено намеренно.
 > ✅ **расширено (2026-10-28, P9):** под `crawl.pdf_device: cuda` добавляется второе
@@ -477,7 +477,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 
 > ⬜ **не сделано** — ось `extract_window` есть только как число воркеров
 > (`crawl.extract_workers`, `core/domain/models.py:533`, выводится в
-> `core/pipeline/crawl_frontier.py:497-507`); `chunk_window` и `retrieval_window` в коде
+> `core/pipeline/crawl_frontier.py:498-508`); `chunk_window` и `retrieval_window` в коде
 > отсутствуют (`grep -rn "chunk_window\|retrieval_window" core/` — пусто).
 
 Окно — **объявленная ось**, а не скрытая константа, и оно задаётся в артефактах, а не в
@@ -590,7 +590,7 @@ R2 выполняется, когда у каждого артефакта ес�
 
 > ✅ **сделано** — формула реализована в `core/pipeline/resources.py:542-614`
 > (`workers_from_budget`, `peak_mb`, `parent_floor_mb` публикуются в сообщении/метриках), ось
-> `extract_workers_derived` в `core/pipeline/crawl_frontier.py:180`, `:497-507`;
+> `extract_workers_derived` в `core/pipeline/crawl_frontier.py:249`, `:702`;
 > `workers=0` — ошибка конфигурации (`core/cli/wiring.py:2457-2465`). `pooled`-часть
 > (число как свойство пула) не реализована — пула как размещения нет.
 > ✅ **сделано (2026-10-28): второе ограничение — VRAM** (ось `crawl.pdf_device`, P9);
@@ -806,7 +806,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 > ✅ **A5 сделан** (write-through): наблюдение контейнера и строка члена пишутся сразу
 > за появлением (`core/pipeline/extract_consume.py:126-178` — синки
 > `persist_observation_sync`/`persist_member_sync`, подключены в `:1041-1042`), а блок в
-> конце фазы (`core/pipeline/corpus.py:3678-3689`) — идемпотентная **страховка**, не
+> конце фазы (`core/pipeline/corpus.py:3689-3700`) — идемпотентная **страховка**, не
 > единственная запись. Приёмка — `tests/pipeline/test_corpus_descent.py:1502`
 > (`test_kill_mid_descent_keeps_settled_member_rows`: `KeyboardInterrupt` на третьем
 > члене оставляет строки двух доведённых), `:1551` (повторный спуск не плодит строки),
@@ -984,11 +984,11 @@ B1 включает B2 (без идентичности нет паритета)
 > не содержит `extract/*`; модели M2/M3 остаются отклонёнными (➖).
 > ✅ **8.3 сделано** (под `local`) — профиль домена читается резолвером
 > (`core/config/domain_profiles.py:100`; цепочка app < run < site в
-> `core/pipeline/crawl_frontier.py:411-417`), `document_level` входит в `CrawlLimits.as_dict`
-> (`:289`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
+> `core/pipeline/crawl_frontier.py:672-680`), `document_level` входит в `CrawlLimits.as_dict`
+> (`:379`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
 > ключ профиля плюс `__default__` (`core/pipeline/report.py:676-681`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
-> (`core/pipeline/corpus.py:2201,6575,7021`). Открытым остаётся **другой** пункт: под `split`
+> (`core/pipeline/corpus.py:2205,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.
 > ➖ **8.4 снято** — `11` §3.1 отменяет две фазы; реализация любого варианта отсутствует.
 

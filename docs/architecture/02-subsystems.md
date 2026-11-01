@@ -221,7 +221,7 @@ plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для
   `errors`), а не тихо. При её наличии экстракция идёт пулом даже при `extract_workers == 1`
   (окно = 1).
 - **Браузерный фетч в пул фетча не идёт никогда** — у не-poolable маршрута **свой
-  однопоточный** пул (`phase.browser_pool`, `core/pipeline/corpus_drain.py:1598`):
+  однопоточный** пул (`phase.browser_pool`, `core/pipeline/corpus_drain.py:1201`):
   `BrowserCrawler` водит единственную страницу без лока, поэтому маршрут остаётся одним
   потоком и `max_workers` его не параллелит.
 - **`document_level`** применяется только к документным форматам (PDF/Office); HTML не

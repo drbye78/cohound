@@ -168,7 +168,7 @@
 | §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:2826`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
-| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus_drain.py:1070`; зонд — `corpus_drain.py:1203`), семейство чанкеров — `chunker_family` |
+| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus_drain.py:1172`; зонд — `corpus_drain.py:1203`), семейство чанкеров — `chunker_family` |
 | §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1529`), waiver-след (`core/pipeline/runner.py:467`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/store/backup.py:687`; вызов — `core/cli/package/commands.py:2394`) |
@@ -653,7 +653,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
     `http_status IS NULL`, `fetched_at IS NULL`, экстрактор и чанкер **не вызываются**.
     Исполнение — отдельный проход `offline_reuse_product`
     (`core/pipeline/corpus_ingest.py:3051`), вызываемый **до** дренажа и вместо него
-    (`core/pipeline/corpus.py:2152`): в код, единственное назначение которого сеть, политика
+    (`core/pipeline/corpus.py:2156`): в код, единственное назначение которого сеть, политика
     не заходит вовсе. Поэтому группировка ревалидации и дренаж корней под `offline` не
     исполняются, а SERP-контур не запускается (`rounds.not_executed_reason =
     offline_refresh_policy`). Авторский корень, известный состоянию, тоже переиспользуется;
@@ -2151,7 +2151,7 @@ RAM-потолка пишется в staging-файл и публикуется 
 > **Подключено срезом B3 — читать вместе с §6.7.1.** Прежняя редакция этой секции
 > утверждала, что спуск «не подключён к `pipeline`» и является «следующим шагом». Это
 > описание состояния до B3 и коду больше не соответствует: `ArchiveDescentWalker`
-> вызывается из фазы корпуса (`core/pipeline/corpus_drain.py:1070`), зонд артефакта —
+> вызывается из фазы корпуса (`core/pipeline/corpus_drain.py:1172`), зонд артефакта —
 > `corpus_drain.py:1203`; отказ читателя контейнера виден как
 > `archive_observations.status = unreadable` / `container_reader_unavailable`, а не как
 > тихое «не развернули». Подключение — инъекция `container_for` через `Ports.container`,
@@ -2836,8 +2836,8 @@ class CompositionView:
   `core/pipeline/embed_cache.py:133`); при хите вектор берётся из кэша, эмбеддится только
   новый текст. **Кэш реализован и подключён** (`core/pipeline/embed_cache.py`;
   инстанцируется в composition root — `EmbedCache(str(paths.embed_cache))`,
-  `core/cli/context.py:2320`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
-  параметр `cache` у `build_corpus`/`_embed_product`, `core/pipeline/corpus.py:286`).
+  `core/cli/context.py:2759`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
+  параметр `embed_cache` у `_build_corpus`, `core/pipeline/corpus.py:1192`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
   до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и в
   итоговой строке продукта (`core/pipeline/corpus_index.py:441-479`) — «кэш включён» не
@@ -4233,7 +4233,7 @@ state/state.db                                 # durable-состояние па
    приоритет `--urls > seeds.yaml > corpus_urls.yaml` (`urls_override` заменяет набор
    целиком, `:167-198`; `seeds.yaml` — `:201-206`; legacy `corpus_urls.yaml` — `:203`).
    Вызывается из `run`/`plan`/`crawl` (`core/cli/commands/run.py:629`,
-   `core/cli/commands/plan.py:220`, `core/cli/commands/crawl.py:323`). Прежняя редакция
+   `core/cli/commands/plan.py:220`, `core/cli/commands/crawl.py:326`). Прежняя редакция
    называла это design-only и указывала `core/cli/context.py` — неверно по обоим пунктам.
 6. `NpyVectorIndex` (`core/adapters/vector_npy.py:213`) — ✅ **реализовано**:
    `CompositionViewPort` принимается как `view`, `build_id` композиции сверяется с

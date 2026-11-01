@@ -15,8 +15,8 @@ RSS 2.8 GB, `corpus_docs` = 56 (только первый продукт), `corp
 Точка в коде:
 
 ```python
-# core/pipeline/corpus.py:437
-vectors = embedder.embed([c.text for c in chunks])
+# core/pipeline/corpus_index.py:547 (на момент замера — `corpus.py`, строка 437)
+vectors = embedder.embed([c.text for c in batch])
 ```
 
 Один вызов на **все** чанки продукта: ни батча на уровне фазы, ни прогресса, ни
@@ -60,7 +60,7 @@ vectors = embedder.embed([c.text for c in chunks])
 
 `crawl product end: jatoba` напечатано, дренаж завершён, начался эмбеддинг — а сеанс
 остался `running` и heartbeat замер. `finalize_session` вызывается в обёртке
-`build_corpus` (`core/pipeline/corpus.py:3452-3480`) после **всей** фазы, включая эмбеддинг. Значит
+`build_corpus` (`core/pipeline/corpus.py:3463-3491`) после **всей** фазы, включая эмбеддинг. Значит
 терминальный статус краула зависит от пост-краульной работы, которая к краулу отношения
 не имеет. Ложный `stale` — прямое следствие.
 
