@@ -234,8 +234,9 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
         ("https://tantorlabs.ru/", 3, 300),
         # 2 URL (1 PDF) ⇒ 50 покрывает сайт.
         ("https://jatoba.ru/", 2, 50),
-        # sitemap 404, крупный docs-хост ⇒ 800 — потолок против усечения.
-        ("https://docs.tantorlabs.ru/", 8, 2000),
+        # sitemap 404, крупный docs-хост: 800 было измеренным усечением (22.10 — ровно
+        # 800 при потолке 800), 5000 — проба размера (решение владельца 01.11).
+        ("https://docs.tantorlabs.ru/", 8, 5000),
         # Host-root общего справочного центра Astra — не продуктовый корень (I17).
         ("https://wiki.astralinux.ru/", 0, 10),
         # Тантор-контент — Confluence-пространство TANDOCS (стабильный префикс /tandocs).
