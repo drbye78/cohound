@@ -147,6 +147,7 @@ dev = [
     "hypothesis>=6.168,<7",
     "respx>=0.23,<0.24",
     "pytest-cov>=7.1,<8",
+    "jsonschema>=4.26,<5",
     # Линтер и type-checker — гейты `scripts/ci.sh`. Проверяют класс дефектов, который
     # runtime-валидация (Pydantic) и selfcheck не видят: мёртвый код, тихое проглатывание
     # исключения, undefined-name в аннотации. Реестр решений — 05-dependency-stack §2.7.

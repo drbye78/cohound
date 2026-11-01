@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 
 from core.adapters.remote_crawl_executor import (
@@ -255,7 +256,6 @@ def _submit_request_schema() -> dict[str, Any]:
 
 def test_submit_emits_user_agent_when_set() -> None:
     """§6b: ``user_agent`` — request-level поле, схемо-валидное, вне элемента items."""
-    jsonschema = pytest.importorskip("jsonschema")
     gateway = _FakeGateway({"crawl/submit": {"job_id": "job-ua"}})
     executor = EdgeCrawlExecutor(gateway, user_agent="ua/9")
 
@@ -280,7 +280,6 @@ def test_submit_emits_user_agent_when_set() -> None:
 
 def test_submit_omits_user_agent_when_unset() -> None:
     """§6b: без ``user_agent`` ключ отсутствует (не ``null``) и payload схемо-валиден."""
-    jsonschema = pytest.importorskip("jsonschema")
     gateway = _FakeGateway({"crawl/submit": {"job_id": "job-no-ua"}})
     executor = EdgeCrawlExecutor(gateway)  # user_agent не задан
 

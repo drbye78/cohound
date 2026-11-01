@@ -471,7 +471,7 @@ bash scripts/ci.sh                               # всё вместе: ruff →
 | `httpx` | **a** | клиент remote-прокси (core→edge); уже в стеке |
 | stdlib `http.server` / ASGI-микрофреймворк | **a** | сервер gateway в `edge/`; для MVP достаточно stdlib/`uvicorn`+`Starlette`(опц.) |
 | TLS/mTLS | stdlib `ssl` | взаимная аутентификация ядра↔edge (сертификаты вне git); **без certificate pinning** — чтобы не блокировать корп. TLS-инспекцию (07 §8.1) |
-| `jsonschema` | **b** | валидация запроса/ответа шва по опубликованной JSON-Schema (07 §8.3); можно stdlib-руками |
+| `jsonschema` | **a (dev)** | валидация запросов/ответов шва по опубликованной JSON-Schema (07 §8.3); обязателен в dev-тестах, не runtime-зависимость |
 | `pyjwt` / `authlib` | **b** | OIDC/JWT-идентичность шва, если корп. IDP требует bearer-токены вместо mTLS (07 §8.2) |
 
 `edge/` — отдельное окружение (тот же `crawl`+`extract` extras), сетевая изоляция — на уровне L7-фаервола
@@ -578,7 +578,7 @@ copyright, перечень изменений. Такой реестр нель
 - **Опц. CPU-инференс:** ~~`llama-cpp-python` (GGUF) для тестов порта~~ — **снято** (не реализовано;
   вытеснено [OI]-совместимым клиентом внутреннего периметра, см. `06` §5.W9/§5.13).
 
-**Dev (`a`):** `pytest` · `pytest-xdist` · `hypothesis` · `respx` · `pytest-cov`.
+**Dev (`a`):** `pytest` · `pytest-xdist` · `hypothesis` · `respx` · `pytest-cov` · `jsonschema` (контрактные тесты шва).
 
 **Опционально (`b`):** `faiss-cpu`/`usearch` (ANN при росте), `model2vec` (лёгкая эмбеддинг-ветка),
 `markitdown`/`pypdf`/`pdfplumber` (fallback-экстракция — extra объявлен, **в коде не подключён**,
