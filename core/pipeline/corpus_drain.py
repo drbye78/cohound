@@ -59,6 +59,7 @@ from core.domain import (
     FailureKind,
     ReuseKind,
 )
+from core.domain.models import RateLimitSpec
 from core.pipeline.corpus_index import _CorpusStageTimings
 from core.pipeline.corpus_ingest import (
     LocalFetch,
@@ -73,7 +74,12 @@ from core.pipeline.corpus_ingest import (
 from core.pipeline.corpus_persist import _now_iso
 from core.pipeline.corpus_state import CorpusCounters
 from core.pipeline.crawl_frontier import SCOPE_OUT, CrawlLimits, Frontier
-from core.pipeline.extract_queue import BackpressureEvent, wait_for_backlog
+from core.pipeline.extract_queue import (
+    DISK_LOW_HEADROOM_REASON,
+    BackpressureEvent,
+    DiskHeadroomReport,
+    wait_for_backlog,
+)
 from core.pipeline.extraction_runtime import (
     _as_text,
 )
@@ -398,6 +404,30 @@ def _commit_wave_results(
         commit(entry.pid, entry.wu, entry.depth, outcome)
 
 
+def disk_headroom_line(report: DiskHeadroomReport) -> str:
+    """Строка ``crawl_disk_headroom`` для ``errors`` фазы: числа, а не «стало тесно».
+
+    Публикуется **одна** на прогон (см. :class:`core.pipeline.extract_queue.
+    DiskHeadroomGuard`): ``waves_blocked`` — счётчик отказанных волн в той же записи, а не
+    сотня одинаковых строк. ``applied=false`` означает «сторож не применён» (свободное
+    место носителя неизвестно) — это исход наблюдения, и он назван, а не выдан за «места
+    хватает». ``backlog_bytes``/``queue_rows`` — ``None``/``0``, если числа не наблюдались
+    (неблокирующее наблюдение не платит прогулкой по строкам очереди).
+    """
+    payload = report.as_dict()
+    rows: dict[str, int] = payload["queue_rows"]
+    return (
+        "crawl_disk_headroom: "
+        f"applied={str(payload['applied']).lower()} "
+        f"blocked={str(payload['blocked']).lower()} "
+        f"free_bytes={payload['free_bytes']} "
+        f"reserve_bytes={payload['reserve_bytes']} "
+        f"backlog_bytes={payload['backlog_bytes']} "
+        f"queue_rows={sum(rows.values())} "
+        f"waves_blocked={payload['waves_blocked']}"
+    )
+
+
 def _backpressure_line(event: BackpressureEvent) -> str:
     """Строка ``crawl_backpressure`` для ``errors`` фазы: числа, а не «стало тесно».
 
@@ -452,6 +482,7 @@ def root_steps(
     _has_fetch_capacity: Callable[[], bool],
     _skip_document_prefetch: Callable[[str], bool],
     _commit: Callable[..., None],
+    _await_disk: Callable[[], bool],
     _await_backlog: Callable[[], str | None],
 ) -> Generator[WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]]]]:
     """Шаги дренажа одного seed-root: волновой цикл, frontier, коммит исходов (F4).
@@ -488,9 +519,22 @@ def root_steps(
     wait_for_backlog` вызывается ровно там). Ожидание исполняется на главном потоке
     драйвера: бэклог лежит на общем носителе, поэтому пауза приёма — фазовая, а не
     корневая.
+
+    **Жёсткий сторож свободного места (решение владельца 01.11).** ``_await_disk`` стоит
+    **перед** ``_await_backlog``, и порядок здесь — смысл, а не вкус: ожидание бэклога
+    освобождает носитель только в учёте (``corpus_raw`` хранится бессрочно, I19), поэтому
+    при нехватке места ждать бессмысленно — сначала надо узнать, что места нет. ``True``
+    означает «приём остановлен»: корень усечён причиной ``disk_low_headroom`` и выходит из
+    цикла, а новые волны прогона не отправляются вовсе (сторож — фазовый, остановка
+    окончательная). Исключения нет: остановка — исход прогона, а не сбой (I4).
     """
     waves = 0
     while True:
+        # Жёсткий сторож свободного места — до изъятия работы и до ожидания бэклога:
+        # места нет ⇒ приём останавливается, а причина называется усечением корня.
+        if _await_disk():
+            frontier.mark_truncated(DISK_LOW_HEADROOM_REASON)
+            break
         # F6 (§4.3): перед изъятием новой работы — наблюдение бэклога. Предел объявлен
         # осью, и его достижение останавливает **приём**, а не вежливость: причина
         # называется усечением корня (``partial``), а не тишиной.
@@ -654,6 +698,12 @@ def root_steps(
                             pid, work_url, work_target, robots=robots_enabled
                         )
                     )
+            # F8 (17 §7.2 п.2): объявленная вежливость host'ов этой волны — из
+            # дескрипторов, то есть из тех планов, что уходят исполнителю (резолв
+            # профиля сайта уже сделан). Пишется до подачи: отказ исполнителя — тоже
+            # попытка (сеть трогалась), а пропущенный host сделал бы §7.2 №1
+            # непроверяемым.
+            _note_wave_attempts(frontier, entries)
             # ``fetch_wait_s`` split-пути: ``submit_collect`` — это подача +
             # опрос статуса + сбор результатов, то есть **ожидание** исполнителя
             # (работу делает он, а не главный поток). Тот же бакет, что и у
@@ -842,6 +892,16 @@ def root_steps(
                 continue
 
             work_target = resolve_target(pid, work_url)
+            # F8 (17 §7.2 п.2): последовательный путь не строит ``LocalFetch`` в этой
+            # области видимости (его собирает ``process_local``), поэтому берётся **тот
+            # же** резолвнутый план цели, который уходит в фетч: ``local_prefetch``
+            # внутри заменяет только ``max_response_bytes``, ``rate_limit`` не трогая.
+            # Второго резолва профиля здесь нет.
+            _note_attempt_rate(
+                frontier,
+                (urlsplit(work_url).hostname or "").lower(),
+                work_target.plan.rate_limit,
+            )
             # Последовательный путь (``max_workers in (None, 1)``): фетч inline на
             # главном потоке, поэтому ``fetch_wait_s`` здесь — **работа**, а не
             # ожидание (как и inline-ветка волны). Бакет общий: «участок фетча» —
@@ -952,6 +1012,9 @@ def root_steps(
             entries.append(
                 _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
             )
+        # F8 (17 §7.2 п.2): та же карта для пул-волны — до выдачи плана драйверу,
+        # чтобы объявленная вежливость не зависела от того, дошёл ли исход.
+        _note_wave_attempts(frontier, entries)
         # Точка плана волны (F4b): корень отдаёт готовые записи **до** отправки, драйвер
         # решает допуск (право на host'ы), отправляет и ждёт. Коммит ниже остаётся
         # FIFO-порядком этого корня и исполняется на главном потоке сразу после того, как
@@ -968,6 +1031,45 @@ def root_steps(
             max_attempts=max_attempts,
         )
     return frontier, list(sitemap_skips)
+
+
+def _note_attempt_rate(
+    frontier: Frontier, host: str | None, spec: RateLimitSpec | None
+) -> None:
+    """F8 (17 §7.2 п.2): записать объявленную вежливость живой попытки корня.
+
+    Значение — из **того плана**, которым пойдёт запрос (``desc.fetch_plan`` уже прошёл
+    резолв профиля сайта), а не из конфига: второй резолв разошёлся бы с фактическим
+    пейсингом, и провенанс стал бы ложью о вежливости. Пишется по host'у, потому что один
+    корень штатно фетчит несколько host'ов с разными минимумами.
+
+    Пишется один раз на host (первое значение побеждает) и **до** исхода: отказ фетча —
+    тоже попытка (сеть трогалась, ``fetch_started_at`` записан), а пропущенный host сделал
+    бы критерий §7.2 №1 непроверяемым.
+    """
+    frontier.note_rate_limit(host, spec)
+
+
+def _note_wave_attempts(frontier: Frontier, entries: Sequence[_WaveEntry]) -> None:
+    """То же для готовых записей волны — по дескрипторам, которые уйдут в работу.
+
+    Попыткой считается только **живой** фетч: ``resume`` (retained-байты), ``reject``
+    (отказ до сети), ``terminal`` (известный терминальный класс) и ``browser_blocked``
+    сеть не трогают, поэтому их host в карту не попадает — иначе провенанс называл бы
+    вежливость host'а, к которому корень не обращался.
+    """
+    for entry in entries:
+        desc = entry.desc
+        if entry.kind != "fetch" or desc is None:
+            continue
+        if (
+            desc.resume is not None
+            or desc.reject is not None
+            or desc.terminal
+            or desc.browser_blocked
+        ):
+            continue
+        _note_attempt_rate(frontier, desc.host, desc.fetch_plan.rate_limit)
 
 
 def lane_width(limits: CrawlLimits, *, executor: CrawlExecutorPort | None) -> int | None:
@@ -1087,6 +1189,12 @@ class PhaseDrainScope:
     #: ``free_bytes`` рядом с ``backlog_bytes``; ``None`` — носитель неизвестен, и тогда
     #: число не выдумывается (предел по-прежнему применяется к байтам очереди).
     raw_root: str | None = None
+    #: Жёсткий сторож свободного места (решение владельца 01.11): **один на фазу**, потому
+    #: что свободное место принадлежит носителю фазы, а не корню. ``None`` — сторож не
+    #: подключён (прямой вызов дренажа): приём не останавливается, и числа о месте никто
+    #: не публикует. Тип — :class:`core.pipeline.extract_queue.DiskHeadroomGuard`; поле
+    #: ``Any`` намеренно, потому что ``corpus_drain`` не владеет этим контрактом.
+    disk_guard: Any = None
     #: F4b: пул фетча **полосы** (создаёт драйвер, см. :func:`lane_width`).
     fetch_pool: Executor | None = None
     #: F4b: пул не-poolable маршрута (браузер) — один поток на полосу.
@@ -1672,6 +1780,31 @@ def root_lifecycle(
             f"{product.pid}/{root_url}: полоса без пула фетча при max_workers="
             f"{max_workers} — пул обязан создать драйвер"
         )
+
+    def _await_disk() -> bool:
+        """Жёсткий сторож свободного места носителя retention (решение владельца 01.11).
+
+        Резерв — **объявленный** ``crawl.max_artifact_bytes``: самый крупный единственный
+        объект, который краул пишет. Нового числа здесь нет, поэтому смена оси сдвигает
+        порог, а не прячется за константой в коде.
+
+        ``True`` — приём остановлен. Сторож фазовый: первая же нехватка останавливает
+        приём до конца прогона, а не только этот корень; повторного замера после остановки
+        нет намеренно — ожидание носитель не освобождает (``corpus_raw`` бессрочен, I19).
+        Строку ``crawl_disk_headroom`` (одну на прогон, с числами и ``waves_blocked``)
+        публикует фаза из записи сторожа, а не этот вызов: иначе счётчик волн пришлось бы
+        править в уже опубликованной строке.
+        """
+        guard = phase.disk_guard
+        if guard is None:
+            return False
+        report = guard.observe(
+            phase.queue,
+            reserve_bytes=limits.max_artifact_bytes,
+            raw_root=phase.raw_root,
+        )
+        return bool(report.blocked)
+
     def _await_backlog() -> str | None:
         """F6 (§4.3): наблюдение бэклога конверсии и видимая запись ``crawl_backpressure``.
 
@@ -1732,5 +1865,6 @@ def root_lifecycle(
         _has_fetch_capacity=_has_fetch_capacity,
         _skip_document_prefetch=_skip_document_prefetch,
         _commit=_commit_outcome,
+        _await_disk=_await_disk,
         _await_backlog=_await_backlog,
     ))

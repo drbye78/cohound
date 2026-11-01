@@ -74,6 +74,13 @@ EXTRACT_BACKLOG_WAIT_S = 300.0
 #: Шаг опроса backlog во время ожидания, секунды (операционная константа).
 EXTRACT_BACKLOG_POLL_S = 5.0
 
+#: Публикуемое имя наблюдения свободного места носителя retention (одна запись на прогон).
+DISK_HEADROOM_EVENT = "crawl_disk_headroom"
+
+#: Причина остановки приёма сторожевым предикатом: места на носителе retention меньше, чем
+#: самый крупный объект, который краул пишет (``reason`` усечения корня и строка фазы).
+DISK_LOW_HEADROOM_REASON = "disk_low_headroom"
+
 
 @dataclasses.dataclass(frozen=True)
 class BacklogReport:
@@ -112,14 +119,27 @@ class BacklogReport:
 
 
 def _dir_free_bytes(root: str | Path | None) -> int | None:
-    """Свободное место на носителе retention; ``None`` — носитель неизвестен."""
+    """Свободное место на носителе retention; ``None`` — носитель неизвестен.
+
+    Каталог retention может ещё **не существовать** (первая запись впереди): место всё
+    равно измеримо — оно принадлежит файловой системе ближайшего **существующего**
+    предка. Точка монтирования — существующий каталог, поэтому предок лежит на том же
+    носителе, и «каталог не создан» перестаёт быть поводом объявить носитель неизвестным
+    (иначе первый же прогон на чистом хосте молчал бы о свободном месте). ``None``
+    остаётся за настоящей неизвестностью: корень не объявлен вовсе либо не читается.
+    """
     if root is None:
         return None
+    path = Path(root)
     try:
-        return int(shutil.disk_usage(str(root)).free)
+        while not path.exists():
+            if path == path.parent:
+                return None
+            path = path.parent
+        return int(shutil.disk_usage(str(path)).free)
     except OSError:
-        # Каталог ещё не создан/недоступен — «неизвестно», а не «ноль свободного»: ноль
-        # остановил бы приём по выдуманной причине.
+        # Каталог недоступен — «неизвестно», а не «ноль свободного»: ноль остановил бы
+        # приём по выдуманной причине.
         return None
 
 
@@ -603,7 +623,155 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+@dataclasses.dataclass(frozen=True)
+class DiskHeadroomReport:
+    """Наблюдение свободного места носителя retention против **объявленного** резерва.
+
+    **Резерв — не выдуман.** ``reserve_bytes`` — это ``crawl.max_artifact_bytes``
+    (:class:`core.pipeline.crawl_frontier.CrawlLimits`): самый крупный **единственный**
+    объект, который краул пишет (страница ограничена ``max_response_bytes``, 20 MiB по
+    умолчанию; артефакт — 250 MiB). Сторож не вводит нового числа: он читает уже
+    объявленную ось, поэтому смена оси сдвигает порог.
+
+    **Почему не ждём.** Сконвертированная строка **не освобождает** носитель:
+    ``corpus_raw`` хранится бессрочно (I19; ось ``retention_days`` отвергнута 29.10,
+    ``docs/reports/measurements/2026-10-29-corpus-retention-footprint.md``). Значит
+    ``backlog_bytes`` убывает только в учёте, а ``free_bytes`` от ожидания не растёт:
+    «подождём, пока место освободится» — театр, а не измерение. Поэтому предикат
+    называется числом и останавливает приём.
+
+    ``blocked`` — свободного места меньше резерва. ``applied=False`` — свободное место
+    **неизвестно** (носитель retention не определён/не измерен): сторож не применён, и это
+    названо, а не выдано за «места хватает». ``backlog_bytes``/``queue_rows`` —
+    ``None``, пока они не наблюдены: заполняются при блокировке (прогулка по строкам
+    очереди — O(строк), её незачем платить на каждой волне), и ноль вместо них читался бы
+    как измеренный факт. ``waves_blocked`` — сколько волн отказано **этим** сторожем
+    (счётчик в одной записи вместо сотни одинаковых строк).
+    """
+
+    free_bytes: int | None = None
+    reserve_bytes: int = 0
+    backlog_bytes: int | None = None
+    queue_rows: dict[str, int] | None = None
+    blocked: bool = False
+    applied: bool = False
+    waves_blocked: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        """Машинная форма записи (стабильные ключи; ``event`` — её маркер)."""
+        return {
+            "event": DISK_HEADROOM_EVENT,
+            "free_bytes": self.free_bytes,
+            "reserve_bytes": self.reserve_bytes,
+            "backlog_bytes": self.backlog_bytes,
+            "queue_rows": dict(sorted(self.queue_rows.items()))
+            if self.queue_rows
+            else {},
+            "blocked": self.blocked,
+            "applied": self.applied,
+            "waves_blocked": self.waves_blocked,
+        }
+
+
+def disk_headroom(
+    queue: ExtractQueue,
+    *,
+    reserve_bytes: int,
+    raw_root: str | Path | None,
+    free_bytes: int | None = None,
+) -> DiskHeadroomReport:
+    """Наблюдение: свободное место против объявленного резерва (**без** ожидания).
+
+    ``free_bytes`` — инъекция размера носителя (тест сторожа не обязан заполнять диск);
+    ``None`` — мерить настоящий носитель ``raw_root``. Блокировка снимает ещё и числа
+    очереди (:meth:`ExtractQueue.backlog`): публикуемая запись обязана отвечать не только
+    «мало места», но и «сколько строк и байтов ждёт конверсии».
+    """
+    reserve = int(reserve_bytes)
+    observed = free_bytes if free_bytes is not None else _dir_free_bytes(raw_root)
+    if observed is None:
+        # Неизвестно — значит не применён. Это исход наблюдения, а не сбой инструмента.
+        return DiskHeadroomReport(reserve_bytes=reserve, applied=False)
+    free = int(observed)
+    if free >= reserve:
+        return DiskHeadroomReport(
+            free_bytes=free, reserve_bytes=reserve, applied=True
+        )
+    backlog = queue.backlog(raw_root=raw_root)
+    return DiskHeadroomReport(
+        free_bytes=free,
+        reserve_bytes=reserve,
+        backlog_bytes=backlog.bytes,
+        queue_rows=dict(sorted(backlog.rows.items())),
+        blocked=True,
+        applied=True,
+    )
+
+
+class DiskHeadroomGuard:
+    """Сторож свободного места: **один** на прогон (фазу), остановка — окончательная.
+
+    Свободное место принадлежит носителю фазы, а не корню: поэтому сторож живёт на фазе и
+    общий всем продуктам и корням. Первая блокировка останавливает приём до конца прогона
+    (``blocked=True`` на каждом следующем наблюдении **без** повторного замера): «ещё раз
+    проверим и снова отправим» снова упёрлось бы в то же место, потому что ожидание его не
+    освобождает. Каждое последующее наблюдение лишь увеличивает ``waves_blocked``.
+
+    ``notice()`` отдаёт **одну** запись на прогон: числа берутся с момента остановки
+    (сколько байтов и строк ждало конверсии), счётчик волн — итоговый. Публикует её фаза
+    в конце (``core.pipeline.corpus``): так счётчик честный, а строка одна.
+    """
+
+    def __init__(self) -> None:
+        #: Первый названный факт: остановка либо «сторож не применён» (``applied=False``).
+        self._first: DiskHeadroomReport | None = None
+        self._waves_blocked = 0
+
+    @property
+    def stopped(self) -> bool:
+        """``True`` — приём остановлен; новых волн в этом прогоне больше не будет."""
+        return self._first is not None and self._first.blocked
+
+    def observe(
+        self,
+        queue: ExtractQueue,
+        *,
+        reserve_bytes: int,
+        raw_root: str | Path | None,
+        free_bytes: int | None = None,
+    ) -> DiskHeadroomReport:
+        """Наблюдение волны; после первой блокировки — отказ без повторного замера."""
+        if self.stopped:
+            self._waves_blocked += 1
+            first = self._first
+            if first is None:  # pragma: no cover - недостижимо: ``stopped`` это исключает
+                raise AssertionError("disk_guard: stopped без записи")
+            return dataclasses.replace(first, waves_blocked=self._waves_blocked)
+        report = disk_headroom(
+            queue,
+            reserve_bytes=reserve_bytes,
+            raw_root=raw_root,
+            free_bytes=free_bytes,
+        )
+        if report.blocked:
+            self._waves_blocked += 1
+            self._first = report
+        elif not report.applied and self._first is None:
+            # «Сторож не применён» — наблюдение, о котором нельзя молчать; но блокировка
+            # (если она случится позже) важнее и заменит эту запись.
+            self._first = report
+        return report
+
+    def notice(self) -> DiskHeadroomReport | None:
+        """Единственная публикуемая запись прогона (``None`` — наблюдать было нечего)."""
+        if self._first is None:
+            return None
+        return dataclasses.replace(self._first, waves_blocked=self._waves_blocked)
+
+
 __all__ = [
+    "DISK_HEADROOM_EVENT",
+    "DISK_LOW_HEADROOM_REASON",
     "EXTRACT_ATTEMPTS_ERROR_KIND",
     "EXTRACT_BACKLOG_POLL_S",
     "EXTRACT_BACKLOG_WAIT_S",
@@ -613,7 +781,10 @@ __all__ = [
     "TERMINAL_QUEUE_STATES",
     "BacklogReport",
     "BackpressureEvent",
+    "DiskHeadroomGuard",
+    "DiskHeadroomReport",
     "ExtractQueue",
+    "disk_headroom",
     "queue_key",
     "wait_for_backlog",
 ]

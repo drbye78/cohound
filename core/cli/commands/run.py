@@ -1568,8 +1568,14 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
             + int(crawl_counts.get(CrawlItemStatus.CANCELLED.value, 0))
         )
         if truncation_only:
+            # Причина называется та, что записана в провенансе корня, а не список политик:
+            # усечение бывает не только по max_documents/max_depth — F6/F8 добавили
+            # extract_backlog_full и disk_low_headroom, 09 §6.3 — revalidate_max_documents.
+            # «Лимит достигнут (какой-то)» оператору не помогает.
             warning = (
-                "краул усечён политикой (max_documents/max_depth): корпус неполон; "
+                "краул усечён политикой "
+                f"({truncation.get('truncated_reason') or 'причина не записана'}): "
+                "корпус неполон; "
                 f"продукты={truncation.get('truncated_products')}; "
                 f"страниц={truncation.get('pages_fetched')}; "
                 f"ревалидация={truncation.get('revalidation_fetched')}"

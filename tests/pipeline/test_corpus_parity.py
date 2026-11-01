@@ -355,6 +355,24 @@ def _snapshot(result: Any, store: SqliteStore) -> dict[str, Any]:
     }
 
 
+def _without_rate_limits(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Снимок без объявленной вежливости корней (``effective_limits.roots[*].rate_limits``).
+
+    ``rate_limits`` (F8, 17 §7.2 п.2) — **объявленный** вход измерения: прогон с непустым
+    ``rate_limit`` обязан его назвать, прогон без него — нет. Контент-паритет paced/plain
+    сравнивает результаты, поэтому этот ключ из сравнения исключается, а его наличие
+    проверяется отдельным утверждением (иначе исключение скрыло бы пропажу записи).
+    """
+    clone = dict(snapshot)
+    limits = dict(clone.get("session_effective_limits") or {})
+    roots = [dict(record) for record in (limits.get("roots") or [])]
+    for record in roots:
+        record.pop("rate_limits", None)
+    limits["roots"] = roots
+    clone["session_effective_limits"] = limits
+    return clone
+
+
 def _assert_parity(local: dict[str, Any], split: dict[str, Any]) -> None:
     for key in local:
         assert local[key] == split[key], (
@@ -666,12 +684,23 @@ def test_parity_pacing_content_neutral(tmp_path: Path) -> None:
     assert sleeps and all(delay == 0.5 for delay in sleeps)
 
     # Контент-нейтральность: paced local ≡ plain local (только тайминг отличается).
-    _assert_parity(paced_local, plain_local)
+    #
+    # Исключение ровно одно и оно объявленное: ``rate_limits`` в записи корня (F8, 17 §7.2
+    # п.2) называет **объявленную** вежливость по host'ам, поэтому у paced-прогона ключ
+    # есть, у plain — нет. Это вход измерения, а не результат: сравнивать его как контент
+    # значило бы требовать, чтобы провенанс молчал о политике прогона. Остальные поля
+    # (включая ``limits``/усечение/счётчики) обязаны совпасть, и это проверяется ниже.
+    _assert_parity(_without_rate_limits(paced_local), _without_rate_limits(plain_local))
+    assert paced_local["session_effective_limits"]["roots"][0]["rate_limits"] == {
+        "parity.test": {"min_s": 0.5, "max_s": 0.5}
+    }
+    assert "rate_limits" not in plain_local["session_effective_limits"]["roots"][0]
     assert _build_of(paced_local_result).index_build_id == _build_of(
         plain_local_result
     ).index_build_id
 
-    # Паритет транспортов сохраняется и при непустом rate_limit.
+    # Паритет транспортов сохраняется и при непустом rate_limit — включая запись
+    # объявленной вежливости: она обязана быть одинаковой у local и split.
     _assert_parity(paced_local, paced_split)
 
 

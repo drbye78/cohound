@@ -132,6 +132,11 @@ def record_root_outcome(
     корней запись приходит в порядке завершения, а артефакт манифеста
     (``effective_limits.roots``) обязан остаться авторским. ``None`` — слота нет
     (synthetic-бакеты, repair-пути): запись добавляется в конец, как прежде.
+
+    ``rate_limits`` (F8, 17 §7.2 п.2) — объявленная вежливость по host'ам живых попыток
+    корня (``frontier.rate_limits``, писатель — драйвер, источник — план, которым
+    фетчили). Пишется, только если корень действительно обращался к host'ам: у корня без
+    живых попыток ключа нет, и его запись остаётся байт-в-байт прежней.
     """
     counters.pages_fetched_total += frontier.fetched
     counters.revalidation_fetched_total += frontier.revalidation_fetched
@@ -221,6 +226,21 @@ def record_root_outcome(
         record["skipped_out_of_scope"] = [dict(skip) for skip in sitemap_skips]
     if revalidation is not None:
         record["revalidation"] = dict(revalidation)
+    # 17 §7.2 (F8): объявленная вежливость **по host'ам**, к которым этот корень делал
+    # живые попытки: ``{host: {"min_s": …, "max_s": …}}``. Источник — план, которым
+    # фетчили (``LocalFetch.fetch_plan.rate_limit``), записанный драйвером на frontier
+    # (:meth:`Frontier.note_rate_limit`): второй резолв профиля дал бы объявленное число,
+    # которое расходится с фактическим пейсингом.
+    #
+    # Почему НЕ в ``limits``: ``CrawlLimits.as_dict()`` — вход ``crawl_config_digest``, то
+    # есть ``run_id``; вежливость туда не входит и входить не должна (она не меняет состав
+    # корпуса), поэтому ключ живёт в провенансе и ``run_id`` от него не сдвигается.
+    # Ключ появляется только у корня, который действительно фетчил: записи остальных
+    # байт-в-байт прежние (пин порядка записи не двигается).
+    if frontier.rate_limits:
+        record["rate_limits"] = {
+            host: dict(spec) for host, spec in sorted(frontier.rate_limits.items())
+        }
     if record_slot is None or record_slot >= len(truncation_records):
         truncation_records.append(record)
     else:

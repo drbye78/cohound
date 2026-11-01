@@ -12,8 +12,9 @@
 Семантика подкоманд:
 
 * ``run``     — запустить сеанс краула (фаза корпуса); ``--reset`` очищает сеанс до старта.
-* ``status``  — сеанс и счётчики (``--per-url`` — построчно). Сеанса нет → ``EXIT_OK`` с
-  ``status: null`` (пустой, но валидный машинночитаемый ответ).
+* ``status``  — сеанс и счётчики (``--per-url`` — построчно, ``--per-host`` — метрика
+  §7.2: host'ы/интервалы/тайминги/backlog; флаги независимы и складываются). Сеанса нет →
+  ``EXIT_OK`` с ``status: null`` (пустой, но валидный машинночитаемый ответ).
 * ``list``    — перечислить сеансы в БД прогона (со свидетельством живости, F1).
 * ``resume``  — продолжить прерванный сеанс: та же ``session_id``, уже ``FETCHED``-элементы
   не пере-фетчатся (recovery-on-open + retained raw); идемпотентно.
@@ -89,12 +90,14 @@ from core.domain import (
     RefreshPolicy,
 )
 from core.pipeline import PHASES
+from core.pipeline.crawl_metric import build_crawl_metric
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
     truncation_summary,
 )
 from core.pipeline.digests import cohort_digest, seeds_digest
+from core.pipeline.extract_queue import ExtractQueue
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.liveness import interrupt_session, stale_reason
 from core.pipeline.normalize import load_inputs
@@ -637,8 +640,11 @@ def _execute_crawl_locked(
         + int(final_counts.get(CrawlItemStatus.CANCELLED.value, 0))
     )
     if truncation_only:
+        # Причина — из провенанса корня (см. `run.py`): политик усечения больше двух.
         warning = (
-            "краул усечён политикой (max_documents/max_depth): корпус неполон; "
+            "краул усечён политикой "
+            f"({truncation.get('truncated_reason') or 'причина не записана'}): "
+            "корпус неполон; "
             f"продукты={truncation.get('truncated_products')}; "
             f"страниц={truncation.get('pages_fetched')}; "
             f"ревалидация={truncation.get('revalidation_fetched')}"
@@ -702,17 +708,116 @@ def restart(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _fmt_metric(value: Any, digits: int = 3) -> str:
+    """Число для таблицы метрики; ``None`` → ``—`` (измерять нечего, а не ноль)."""
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "да" if value else "нет"
+    if isinstance(value, int):
+        return str(value)
+    return f"{float(value):.{digits}f}"
+
+
+def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
+    """Человекочитаемая форма метрики краула (§7.2): шапка + выровненная таблица по host'ам.
+
+    Таблица выравнивается по ширине host'а: числа только наблюдённые, неизмеренное — ``—``.
+    Нарушение вежливости печатается отдельной строкой ``politeness:``, а не прячется в
+    колонке: это проверка приёмки, и «ratio 0.42» без слова «нарушение» читалось бы как
+    обычное число.
+    """
+    wall = metric.get("crawl_only_wall") or {}
+    seconds = wall.get("seconds")
+    lines = [
+        "crawl_only_wall: "
+        + (
+            _fmt_metric(seconds) + " s"
+            if seconds is not None
+            else "— (окна нет: started_at не записан)"
+        )
+        + (
+            " (running — окно не завершено, время прошедшее)"
+            if wall.get("running")
+            else " (итог: started_at → finished_at)"
+        ),
+        f"urls: {metric.get('urls', 0)}, hosts: {metric.get('hosts', 0)}",
+        "fetch_ms: p50={p50} p95={p95} n={n} unknown={unknown}".format(
+            p50=_fmt_metric((metric.get("fetch_ms") or {}).get("p50"), 0),
+            p95=_fmt_metric((metric.get("fetch_ms") or {}).get("p95"), 0),
+            n=(metric.get("fetch_ms") or {}).get("n", 0),
+            unknown=metric.get("fetch_ms_unknown", 0),
+        ),
+        "requests_by_state: "
+        + ", ".join(
+            f"{key}={value}" for key, value in sorted(metric.get("requests_by_state", {}).items())
+        ),
+        "backlog: bytes={bytes} files={files} missing={missing} queue_rows={rows}".format(
+            bytes=metric.get("backlog_bytes", 0),
+            files=metric.get("backlog_files", 0),
+            missing=metric.get("backlog_missing", 0),
+            rows=", ".join(
+                f"{key}={value}" for key, value in sorted(metric.get("queue_rows", {}).items())
+            )
+            or "—",
+        ),
+    ]
+    errors = metric.get("errors_by_kind") or {}
+    if errors:
+        lines.append(
+            "errors_by_kind: " + ", ".join(f"{key}={value}" for key, value in sorted(errors.items()))
+        )
+    rows = metric.get("per_host") or []
+    if rows:
+        header = (
+            f"{'host':<28} {'items':>6} {'requests':>9} {'min_ivl_s':>10} {'declared_s':>11} "
+            f"{'ratio':>7} {'p50_ms':>7} {'p95_ms':>7} {'unknown':>8}"
+        )
+        lines.append("  " + header)
+        for row in rows:
+            lines.append(
+                "  "
+                + f"{row['host']:<28} {row['items']:>6} {row['requests']:>9} "
+                f"{_fmt_metric(row.get('observed_min_interval_s')):>10} "
+                f"{_fmt_metric(row.get('declared_min_interval_s')):>11} "
+                f"{_fmt_metric(row.get('ratio')):>7} "
+                f"{_fmt_metric((row.get('fetch_ms') or {}).get('p50'), 0):>7} "
+                f"{_fmt_metric((row.get('fetch_ms') or {}).get('p95'), 0):>7} "
+                f"{row.get('fetch_ms_unknown', 0):>8}"
+            )
+    else:
+        lines.append("hosts: — (элементов нет)")
+    for row in rows:
+        if row.get("politeness_violation"):
+            lines.append(
+                f"politeness: {row['host']} — НАРУШЕНИЕ (observed_min_interval_s="
+                f"{_fmt_metric(row.get('observed_min_interval_s'))} < declared_min_interval_s="
+                f"{_fmt_metric(row.get('declared_min_interval_s'))}, ratio="
+                f"{_fmt_metric(row.get('ratio'))})"
+            )
+    for note in metric.get("notes", ()):
+        lines.append(f"note: {note}")
+    return lines
+
+
 def status(args: argparse.Namespace) -> int:
-    """``crawl status``: сеанс и счётчики; отсутствие сеанса → ``status: null`` (``EXIT_OK``)."""
+    """``crawl status``: сеанс и счётчики; отсутствие сеанса → ``status: null`` (``EXIT_OK``).
+
+    ``--per-host`` (F8, ``17`` §7.2) печатает **метрику краула** рядом с уже существующим
+    ``--per-url``: числа считаются из тех же durable-фактов (:mod:`core.pipeline.crawl_metric`),
+    второй носитель не заводится. Флаги независимы и складываются: ``--per-url --per-host``
+    даёт и построчный список, и агрегат в одном ответе (элементы читаются один раз).
+    """
     db_path = _crawl_db_path(args)
     run_id, session_id = _session_id_for(args)
     per_url = bool(getattr(args, "per_url", False))
+    per_host = bool(getattr(args, "per_host", False))
     with build_store(db_path, profile=args.profile, read_only=True) as store:
         session = store.get_crawl_session(session_id)
         counts = store.crawl_session_counts(session_id) if session is not None else {}
         items = (
             list(store.iter_crawl_session_items(session_id))
-            if session is not None and per_url
+            if session is not None and (per_url or per_host)
             else []
         )
         payload: dict[str, Any] = {
@@ -730,6 +835,16 @@ def status(args: argparse.Namespace) -> int:
         }
         if per_url:
             payload["items"] = [_item_row(item) for item in items]
+        if per_host and session is not None:
+            # §7.2 п.4: backlog — тот же расчёт, что у backpressure (``ExtractQueue.backlog``),
+            # иначе «байты в очереди» существовали бы в двух версиях. Сеанса нет — метрики
+            # нет вовсе (печатать нули за несуществующий сеанс значило бы выдумать факт).
+            payload["metric"] = build_crawl_metric(
+                session=session,
+                items=items,
+                provenance=read_provenance(session),
+                backlog=ExtractQueue(store=store, session_id=session_id).backlog(),
+            )
         if args.json:
             _print_json(payload)
         elif session is None:
@@ -758,6 +873,10 @@ def status(args: argparse.Namespace) -> int:
                 lines.append(f"stale: {payload['stale_reason']}")
             if payload.get("error"):
                 lines.append(f"error: {payload['error']}")
+            # F8 (17 §7.2): метрика краула — до построчного списка: агрегат отвечает на
+            # вопрос «быстро ли и вежливо ли», список — на «что именно».
+            if "metric" in payload:
+                lines.extend(_print_crawl_metric(payload["metric"]))
             for row in payload.get("items", ()):
                 lines.append(f"  {row['product_id']} {row['status']} {row['url']}")
             sys.stdout.write("\n".join(lines) + "\n")
@@ -1008,6 +1127,13 @@ def configure(sub: Any) -> None:
     _add_session_target_flags(p_status, require_run_id=True)
     p_status.add_argument(
         "--per-url", dest="per_url", action="store_true", help="построчно: элементы сеанса"
+    )
+    p_status.add_argument(
+        "--per-host",
+        dest="per_host",
+        action="store_true",
+        help="метрика краула (17 §7.2): host'ы, observed_min_interval_s и отношение к "
+        "объявленному минимуму, fetch_ms p50/p95, backlog_bytes; складывается с --per-url",
     )
     _add_common(p_status)
     p_status.set_defaults(handler=status)

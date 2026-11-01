@@ -301,7 +301,11 @@ from core.pipeline.extract_cache import ExtractionCache
 #: вызов обязан идти через атрибут **этого** модуля (параметр ``ingest_member_doc``
 #: читается из глобала в точке создания носителя).
 from core.pipeline.extract_consume import ingest_member_doc as _ingest_member_doc  # noqa: F401
-from core.pipeline.extract_queue import EXTRACT_HEARTBEAT_S, ExtractQueue
+from core.pipeline.extract_queue import (
+    EXTRACT_HEARTBEAT_S,
+    DiskHeadroomGuard,
+    ExtractQueue,
+)
 
 # L1: runtime экстракции вынесен в свой модуль. Здесь остаются имена, которые этот модуль
 # читает сам (``_EXTRACT_MAX_POOL_REBUILDS``, ``_ExtractPools``, ``ExtractionPool``), и
@@ -2285,6 +2289,11 @@ def _build_corpus(
     # продуктовый — на границе продукта. Так точка вызова называет владельца состояния, а
     # не перечисляет 60 kwargs трёх разных природ.
     #: Состояние и оси фазы (общее для всех продуктов и корней).
+    #: Жёсткий сторож свободного места — один на фазу (решение владельца 01.11):
+    #: свободное место принадлежит носителю фазы, поэтому и остановка приёма фазовая.
+    #: Строку ``crawl_disk_headroom`` публикуем **после** цикла продуктов: счётчик
+    #: отказанных волн тогда итоговый, а запись одна.
+    _disk_guard = DiskHeadroomGuard()
     _phase_scope = corpus_drain.PhaseDrainScope(
         errors=errors,
         store=store,
@@ -2309,6 +2318,8 @@ def _build_corpus(
         # F6 (§4.3): корень retention — для публикуемого ``free_bytes`` рядом с
         # ``backlog_bytes``. Предел берётся из тех же ``CrawlLimits``, что у корня.
         raw_root=str(raw_root),
+        # Жёсткий сторож свободного места: тот же фазовый носитель, что у очереди.
+        disk_guard=_disk_guard,
         # F7 (17 §2): шард узла — host'ы, которые этот процесс имеет право вести, и его
         # имя для провенанса. ``None``/``None`` — карты не объявлено (поведение прежнее).
         shard_hosts=shard_hosts,
@@ -3803,6 +3814,15 @@ def _build_corpus(
         entries.append(entry)
         if physically_ok.get(product_id, False):
             manifest_entries.append(entry)
+
+    # Жёсткий сторож свободного места (решение владельца 01.11): **одна** строка на прогон
+    # с числами. Публикуется здесь, а не в голове волны, по двум причинам: `waves_blocked`
+    # обязан быть итоговым (он растёт с каждой отказанной волной), а вторая такая же строка
+    # на каждый корень была бы шумом вместо наблюдения. Строки нет, когда приём не
+    # останавливался и место измерялось штатно: «места хватает» — не событие.
+    _disk_notice = _disk_guard.notice()
+    if _disk_notice is not None:
+        errors.append(corpus_drain.disk_headroom_line(_disk_notice))
 
     # Строки манифеста — после того, как композиция известна (PK включает
     # ``index_build_id``) и партиции уже на диске; чанки персистентны ещё с границы

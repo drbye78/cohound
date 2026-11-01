@@ -80,6 +80,7 @@ from core.domain.models import (
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_MAX_RESPONSE_BYTES,
     CrawlRunConfig,
+    RateLimitSpec,
 )
 from core.pipeline.fetch_plan import select_domain_profile
 from core.pipeline.resources import workers_from_budget
@@ -1159,6 +1160,12 @@ class Frontier:
         self.host_out_of_shard: dict[str, int] = {}
         self.host_out_of_shard_examples: dict[str, list[str]] = {}
         self._shard_reject_seen: set[str] = set()
+        #: F8 (17 §7.2 п.2): объявленная вежливость **по host'ам**, к которым этот корень
+        #: делал живые попытки: ``{host: {"min_s": …, "max_s": …}}``. Носитель — корень, а
+        #: не конфиг: один корень штатно фетчит несколько host'ов (``domain_profiles``), и
+        #: у них разные минимумы. Значение пишет драйвер (:func:`note_rate_limit`) из
+        #: **того** плана, которым пойдёт запрос, — второго резолва нет.
+        self.rate_limits: dict[str, dict[str, float]] = {}
 
     # -- scope -------------------------------------------------------------- #
 
@@ -1357,6 +1364,34 @@ class Frontier:
         потоке дренажа уникален (dedup frontier).
         """
         self.skipped_documents.append({"url": url, "reason": reason})
+
+    def note_rate_limit(self, host: str | None, spec: RateLimitSpec | None) -> None:
+        """F8 (17 §7.2 п.2): запомнить объявленную вежливость попытки этого корня.
+
+        ``host`` — ключ лимитера (``LocalFetch.host``); нормализуется тем же правилом
+        (:func:`core.util.rate_limit.normalize_host`), иначе в провенансе завелось бы два
+        ключа на один сайт и сравнение с наблюдённым интервалом шло бы не с тем числом.
+        ``spec`` — ``rate_limit`` **того плана, которым идёт запрос**
+        (``desc.fetch_plan.rate_limit`` после резолва профиля сайта): именно поэтому
+        значение не вычисляется вторым путём — второй резолв разошёлся бы с фактическим
+        пейсингом (тот же класс дефекта, что «второе вычисление ``route``» у потребителя
+        очереди).
+
+        Пишется **как объявлено**, включая ``min_s == 0`` («без троттлинга»): ноль —
+        объявленный факт, отсутствие ключа у host'а — «не объявлено». Разница решает,
+        можно ли вычислить ``ratio`` (§7.2 №3): ``null`` против ``1.0``.
+
+        Первое значение для host'а побеждает: объявленный минимум — свойство плана
+        (объявленный вход), а не наблюдение, и повторная попытка того же host'а не может
+        переписать вход измерения. Расхождение между **корнями** одного host'а читатель
+        обязан назвать (``declared_min_interval_variants``), а не усреднить.
+        """
+        key = normalize_host(host or "")
+        if not key or spec is None:
+            return
+        self.rate_limits.setdefault(
+            key, {"min_s": float(spec.min_s), "max_s": float(spec.max_s)}
+        )
 
     def note_consumed(self, count: int) -> None:
         """Учесть уже израсходованный бюджет корня (retained-страницы resume, B2).
@@ -1653,6 +1688,12 @@ class Frontier:
             host: list(urls) for host, urls in self.host_out_of_shard_examples.items()
         }
         clone._shard_reject_seen = set(self._shard_reject_seen)
+        # F8 (17 §7.2): карта объявленной вежливости — часть состояния корня, а не
+        # настроение момента: клон (``max_documents``-усечение/переигрывание) обязан
+        # видеть уже записанные host'ы, иначе провенанс клона потерял бы их.
+        clone.rate_limits = {
+            host: dict(spec) for host, spec in self.rate_limits.items()
+        }
         return clone
 
     # -- внутреннее --------------------------------------------------------- #

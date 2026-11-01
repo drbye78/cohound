@@ -629,6 +629,10 @@ def test_crawl_truncation_only_exits_ok_with_warning(
     assert payload["crawl_truncation"]["truncated"] is True
     assert payload["crawl_truncation"]["truncated_reason"] == "max_documents"
     assert any("усечён политикой" in note for note in payload["notes"])
+    # Причина в тексте — та, что записана: усечение бывает не только max_documents/max_depth
+    # (F6/F8 добавили extract_backlog_full и disk_low_headroom), и список политик в сообщении
+    # не отвечает на вопрос «какой лимит достигнут».
+    assert any("max_documents" in note for note in payload["notes"])
 
 
 def test_crawl_policy_truncation_with_failures_keeps_error(
