@@ -386,6 +386,14 @@ def _row_to_crawl_item(row: sqlite3.Row) -> CrawlSessionItem:
         error=row["error"],
         first_seen=row["first_seen"],
         last_attempt=row["last_attempt"],
+        # 17 §6 (F6): метки замера попытки. Отсутствие колонки — «не записано» (старый
+        # производитель), а не ноль: ``fetch_ms=0`` означал бы измеренный мгновенный фетч.
+        fetch_started_at=_row_optional(row, "fetch_started_at"),
+        fetch_ms=(
+            None
+            if (value := _row_optional(row, "fetch_ms")) is None
+            else int(value)
+        ),
     )
 
 
@@ -419,6 +427,10 @@ def _row_to_extract_queue_item(row: sqlite3.Row) -> ExtractQueueItem:
         enqueued_at=row["enqueued_at"],
         state_changed_at=row["state_changed_at"],
         claimed_by=row["claimed_by"],
+        # 17 §4.2 п.3–4 (F6): аренда строки. Отсутствие колонки — «аренды не было»
+        # (строка прежнего производителя), а не «аренда началась в эпоху».
+        claimed_at=_row_optional(row, "claimed_at"),
+        heartbeat_at=_row_optional(row, "heartbeat_at"),
         error_kind=row["error_kind"],
         error=row["error"],
     )

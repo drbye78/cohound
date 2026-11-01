@@ -536,6 +536,14 @@ class CrawlRunConfig(BaseModel):
     # Это не размер пула фетча: внутри одного host параллельность пропускной способности
     # не даёт (замер 2026-10-31), поэтому ось считает полосы, а не потоки.
     host_concurrency: int | None = Field(default=None, ge=1)
+    #: F6 (план 17, §4.3): watermark бэклога конверсии — ``crawl.extract_backlog_mb``,
+    #: мегабайты retained-файлов строк ``pending``+``claimed`` очереди. При достижении
+    #: приём приостанавливается **видимо** (``crawl_backpressure`` с числами, сеанс
+    #: ``partial``), а не молча. ``None`` — предел не объявлен: backpressure не
+    #: применяется, число всё равно публикуется. Ось не входит в дайджест, пока не
+    #: объявлена (обратная совместимость §13); при объявлении — входит, потому что
+    #: остановка приёма меняет **состав корпуса** (``execution_change``).
+    extract_backlog_mb: int | None = Field(default=None, gt=0)
     # P4: отдельная ось CPU-параллелизма экстракции (пул процессов/потоков). ``None``/``1``
     # = поведение байт-в-байт (inline); не смешивается с ``max_workers`` (сетевой fetch-пул).
     extract_workers: int | None = Field(default=None, ge=1)
@@ -2091,6 +2099,28 @@ class CrawlSessionItem(BaseModel):
     error: str | None = None
     first_seen: str | None = None
     last_attempt: str | None = None
+    #: 17 §6 (F6): момент начала **живого** фетча этой попытки (ISO-8601) и её
+    #: длительность в миллисекундах. Нужны критерию приёмки §7.2 №1
+    #: (``observed_min_interval_s`` на host): интервал между запросами из длительностей не
+    #: восстанавливается, а ``first_seen``/``last_attempt`` — операционные метки,
+    #: перезаписываемые, а не таймер. ``None`` — живого фетча не было по построению
+    #: (resume из retained-байтов, отказ до сети) либо запись прежнего производителя:
+    #: «не наблюдалось», а не «ноль».
+    fetch_started_at: str | None = None
+    fetch_ms: int | None = None
+
+    @field_validator("fetch_ms")
+    @classmethod
+    def _validate_fetch_ms(cls, value: int | None) -> int | None:
+        """``fetch_ms`` — длительность: отрицательное значение невозможно.
+
+        Проверка в домене, а не у производителя: колонка читается замером (§7.2), и
+        отрицательное число там означало бы дефект инструментирования, тихо попавший в
+        статистику.
+        """
+        if value is not None and value < 0:
+            raise ValueError(f"fetch_ms={value} < 0: длительность не может быть отрицательной")
+        return value
 
     @field_validator("error_kind")
     @classmethod
@@ -2171,6 +2201,13 @@ class ExtractQueueItem(BaseModel):
     state_changed_at: str | None = None
     #: Кто взял документ (``claimed``) — провенанс потребителя, а не блокировка.
     claimed_by: str | None = None
+    #: 17 §4.2 п.3–4 (F6): аренда строки. ``claimed_at`` — момент взятия, ``heartbeat_at`` —
+    #: последний признак жизни воркера по этой строке. Просроченная аренда (порог —
+    #: :data:`core.pipeline.extract_queue.EXTRACT_CLAIM_LEASE_S`) возвращается в ``pending``
+    #: с ``attempts += 1`` и видимой записью; живой воркер обязан обновлять heartbeat,
+    #: иначе долгий документ был бы сконвертирован дважды.
+    claimed_at: str | None = None
+    heartbeat_at: str | None = None
     error_kind: str | None = None
     error: str | None = None
 

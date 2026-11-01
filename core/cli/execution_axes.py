@@ -184,6 +184,7 @@ CRAWL_AXIS_DESTS: tuple[str, ...] = (
     "pdf_pipeline",
     "document_timeout_s",
     "host_concurrency",
+    "extract_backlog_mb",
 )
 
 
@@ -274,6 +275,20 @@ def add_crawl_axis_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "сколько host'ов процесс краула ведёт одновременно "
             "(дефолт: последовательно, как сегодня; ось входит в run_id при объявлении)"
+        ),
+    )
+    # F6 (план 17, §4.3): watermark бэклога конверсии. Не «для безопасности»: предел
+    # измеряет, сколько байтов ждёт конверсии, прежде чем приём приостановить видимо.
+    parser.add_argument(
+        "--extract-backlog",
+        dest="extract_backlog_mb",
+        type=_positive_int,
+        default=None,
+        metavar="MB",
+        help=(
+            "предел бэклога конверсии в МБ retained-файлов очереди: при достижении "
+            "приём приостанавливается и публикуется crawl_backpressure (дефолт: предел "
+            "не объявлен; ось входит в run_id при объявлении)"
         ),
     )
 

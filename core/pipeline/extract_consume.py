@@ -85,7 +85,13 @@ from core.pipeline.corpus_persist import DocReuse, _now_iso
 from core.pipeline.corpus_state import CorpusCounters
 from core.pipeline.crawl_frontier import CrawlLimits
 from core.pipeline.extract_cache import ExtractionCache
-from core.pipeline.extract_queue import ExtractQueue
+from core.pipeline.extract_queue import (
+    EXTRACT_CLAIM_LEASE_S,
+    EXTRACT_HEARTBEAT_S,
+    EXTRACT_MAX_ATTEMPTS,
+    TERMINAL_QUEUE_STATES,
+    ExtractQueue,
+)
 from core.pipeline.extraction_runtime import (
     _EXTRACT_DEAD_POOL_TIMEOUTS,
     _EXTRACT_MAX_POOL_REBUILDS,
@@ -474,6 +480,21 @@ class ConsumerScope:
     #: одна и та же строка повторилась бы на каждой строке очереди, и ``errors`` перестал
     #: бы читаться (тот же принцип, что у ``sorted_error_lines``: назвать, а не залить).
     window_notes: set[str] = field(default_factory=set)
+    #: F6: кто мы для аренды строки. Один потребитель — один идентификатор; он пишется в
+    #: ``claimed_by`` и по нему же проверяется, что аренда ещё наша. ``None`` — выводится
+    #: из процесса/потока (два потребителя в одном процессе обязаны различаться).
+    worker_id: str | None = None
+    #: F6: порог аренды (секунды) и период heartbeat. Инъецируемы, чтобы тест просрочки и
+    #: heartbeat не платил реальным временем; дефолты — опубликованные константы.
+    claim_lease_s: float = EXTRACT_CLAIM_LEASE_S
+    heartbeat_s: float = EXTRACT_HEARTBEAT_S
+    #: F6: сколько аренд строка переживает до терминального ``failed`` (§4.2 п.5).
+    max_claim_attempts: int = EXTRACT_MAX_ATTEMPTS
+    #: F6: корень retention — для публикуемого ``free_bytes`` рядом с ``backlog_bytes``
+    #: (§4.3). ``None`` — носитель неизвестен, и число не выдумывается. Предел здесь не
+    #: хранится: он объявленная ось и берётся из тех же ``CrawlLimits``, что у краула
+    #: (:func:`_backlog_limit_mb`) — второго носителя одного значения нет.
+    raw_root: str | None = None
 
 
 @dataclass(frozen=True)
@@ -538,6 +559,17 @@ class ConsumerReport:
     already: int = 0
     #: Строк, не перешедших состояние (забрал другой потребитель/закрыли).
     lost: int = 0
+    #: F6: строк, взятых в аренду этим потребителем.
+    claimed: int = 0
+    #: F6: просроченных аренд, возвращённых в ``pending`` перед проходом (§4.2 п.3).
+    reclaimed: int = 0
+    #: F6: сколько раз продлевалась аренда (живой потребитель на долгом документе).
+    heartbeats: int = 0
+    #: F6: факты восстановления аренд — «кто держал, какой URL, сколько раз» (§4.2 п.3:
+    #: молчаливое воскрешение запрещено).
+    reclaim_records: list[dict[str, Any]] = field(default_factory=list)
+    #: F6/§4.3: наблюдённый backlog в конце прохода (числа, не оценка).
+    backlog: dict[str, Any] = field(default_factory=dict)
     #: Строк, оставшихся незакрытыми после вызова.
     pending: int = 0
     #: Фактическое окно экстракции продукта (``None`` — экстракция inline).
@@ -820,6 +852,10 @@ class _RowJob:
     done: bool = False
     doc_id: str | None = None
     errors_before: int = 0
+    #: F6: строка взята **этим** потребителем в аренду (``pending → claimed``). ``False`` —
+    #: повтор терминальной строки (Pass B обязан получить документ заново): такая строка
+    #: закрывается тем же состоянием, а не через claim.
+    claimed: bool = False
 
 
 def _conversion_failure(
@@ -1070,6 +1106,7 @@ def _start_row(
     window: int | None,
     reuse_kind: ReuseKind,
     work_url: str,
+    claimed: bool = False,
 ) -> _RowJob:
     """Начать конверсию строки: зонд → спуск → переиспользование → отправка в пул.
 
@@ -1103,6 +1140,7 @@ def _start_row(
         reuse_kind=reuse_kind,
         work_url=work_url,
         errors_before=len(scope.errors),
+        claimed=claimed,
     )
     # B3: допущенный терминальный артефакт (документ **или** контейнер) проходит
     # **зонд** до экстракции: класс/формат/размер по байтам, ``page_count`` PDF по
@@ -1324,12 +1362,85 @@ def _finish_extracted(
     )
 
 
+@dataclass
+class _Lease:
+    """Аренда строки глазами потребителя (F6): очередь, воркер и счётчик heartbeat.
+
+    Счётчик нужен отчёту: «потребитель работал долго и продлевал аренду» — факт, без
+    которого нельзя отличить живой долгий документ от воскрешённого мёртвого.
+    """
+
+    queue: ExtractQueue
+    worker: str
+    heartbeats: int = 0
+
+    def touch(self, item: ExtractQueueItem) -> bool:
+        """Продлить аренду; ``False`` — она уже не наша (вернули/закрыли)."""
+        if not self.queue.heartbeat(item, self.worker):
+            return False
+        self.heartbeats += 1
+        return True
+
+
+def _default_worker_id() -> str:
+    """Идентификатор воркера по умолчанию: ``host/pid/поток``.
+
+    Два потребителя в одном процессе обязаны различаться — иначе проверка «аренда ещё
+    наша» (``expect_claimed_by``) не отличила бы их, и один закрывал бы работу другого.
+    Форма — та же, что у владельца сеанса (:func:`core.pipeline.liveness.owner_id`), а не
+    своя: ``claimed_by`` — тоже метка «кто именно», и разный формат в двух журналах
+    мешал бы читать их вместе. Разделитель ``/`` — тот же, поэтому метка разбирается
+    общим кодом (и нормируется в пинах порядка записи).
+    """
+    import os
+    import socket
+    import threading
+
+    return "/".join(
+        (
+            socket.gethostname() or "unknown",
+            str(os.getpid()),
+            str(threading.get_ident()),
+        )
+    )
+
+
+def _await_extraction(
+    job: _RowJob,
+    *,
+    scope: ConsumerScope,
+    lease: _Lease | None,
+) -> Any:
+    """Дождаться извлечения, **продлевая аренду** на каждом срезе ожидания (§4.2 п.3).
+
+    Один ``future.result(timeout=extract_timeout)`` на долгом документе означал бы молчание
+    дольше порога аренды: живой потребитель был бы признан мёртвым, и документ пошёл бы в
+    конвертацию повторно. Поэтому ожидание нарезано, и между срезами идёт heartbeat.
+
+    ``TimeoutError`` поднимается только когда истёк **общий** потолок документа
+    (``extract_timeout``); таймаут среза — не исход, а повод продлить аренду.
+    """
+    deadline = time.perf_counter() + scope.extract_timeout
+    slice_s = scope.heartbeat_s if scope.heartbeat_s > 0 else scope.extract_timeout
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError()
+        try:
+            return job.future.result(timeout=min(remaining, slice_s))  # type: ignore[union-attr]
+        except TimeoutError:
+            if job.claimed and lease is not None:
+                lease.touch(job.item)
+            continue
+
+
 def _settle_row(
     job: _RowJob,
     *,
     scope: ConsumerScope,
     operations: ConsumerOperations,
     product: ProductScope,
+    lease: _Lease | None = None,
 ) -> tuple[_RowJob, str | None, str | None, bool]:
     """Довести начатую строку: ``future.result`` → ``finish_one``.
 
@@ -1362,7 +1473,7 @@ def _settle_row(
     try:
         _wait_started = time.perf_counter()
         try:
-            extracted = job.future.result(timeout=scope.extract_timeout)
+            extracted = _await_extraction(job, scope=scope, lease=lease)
         finally:
             # ``extract_wait_s`` — **ожидание** экстракции на главном потоке (в т.ч. при
             # таймауте/сбое воркера). При окне > 1 включает ожидание чужих заданий:
@@ -1461,11 +1572,14 @@ def consume(
     :returns: сводка; ``pending > 0`` означает, что продукт **не** собран, и фаза не
         вправе объявить ``ok``.
 
-    **Состояние строки** переводится ``pending → done|failed`` **после** конверсии, с
-    ``expect=PENDING``: повторный вызов видит ``done`` и ничего не делает (идемпотентность),
-    а строку, закрытую другим потребителем, не считает своей работой. Промежуточный
-    ``claimed`` в F5 не ставится намеренно: прерывание оставляет строку ``pending``, и
-    повторный запуск дорабатывает её — «взял и умер» не должен требовать F6-восстановления.
+    **Состояние строки** меняется дважды: аренда ``pending → claimed`` (F6, §4.2 п.4) перед
+    работой и ``claimed → done|failed`` после конверсии — с ``expect=CLAIMED`` и
+    ``expect_claimed_by=<этот воркер>``. Чужая или просроченная аренда закрыть строку не даёт
+    (``False`` → ``lost``), иначе ``done`` описывал бы работу, которую делает кто-то другой.
+    Повторный вызов видит ``done`` и ничего не делает (идемпотентность). Аренда, чей владелец
+    замолчал, возвращается в ``pending`` в голове прохода (``reclaim_stale``) с
+    ``attempts += 1`` и видимой записью: «взял и умер» не теряет документ и не требует
+    ручного вмешательства.
 
     **Окно экстракции** резолвится по строке (:func:`_row_window`), а пул — фазовый по ключу
     ``(уровень, механизм PDF, окно)``. Ожидание — FIFO: ``future.result`` вызывается в
@@ -1473,16 +1587,39 @@ def consume(
     ответил первым.
     """
     reports: list[ConsumerReport] = []
+    #: F6/§4.3: строки, по которым берётся объявленный предел бэклога (ось у них одна).
+    scope_items: list[ExtractQueueItem] = []
+    worker = scope.worker_id or _default_worker_id()
     for product_id in product_ids:
         product = products[product_id]
         rows = list(queue.items(product_id))
         done = failed = already = lost = 0
+        claimed = 0
+        #: F6 (§4.2 п.3): просроченные аренды возвращаются в ``pending`` **до** чтения
+        #: списка и видимо: кто держал, какой URL, сколько раз. Мёртвый воркер не должен
+        #: оставлять документ вне корпуса, а живой — конвертировать его дважды.
+        stale = queue.reclaim_stale(
+            lease_s=scope.claim_lease_s,
+            max_attempts=scope.max_claim_attempts,
+        )
+        for record in stale:
+            scope.errors.append(
+                "extract_claim_reclaimed: "
+                f"{record['product_id']}/{record['url']}: attempts={record['attempts']}"
+                f" last_owner={record['claimed_by'] or '—'}"
+                f" exhausted={bool(record['exhausted'])}"
+            )
+        if stale:
+            rows = list(queue.items(product_id))
+        scope_items.extend(rows)
         docs_before = len(product.ingest.docs)
         extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort] = {}
         #: Ожидающие доводки строки **этого** продукта в порядке постановки (FIFO).
         pending: deque[_RowJob] = deque()
         window_seen: int | None = None
         dead_pool = False
+        #: F6: аренда глазами этого прохода — продлевается между срезами ожидания.
+        lease = _Lease(queue=queue, worker=worker)
         for item in rows:
             # Терминальное состояние строки — факт **прошлого** исполнения этой же
             # очереди (resume/``--reset`` того же ``run_id``), а не «уже сделано в этой
@@ -1499,6 +1636,22 @@ def consume(
                 # и resume обязан попробовать снова (09 §6.3).
                 already += 1
                 continue
+            # F6 (§4.2 п.4): claim — условный переход ``pending → claimed``. ``False``
+            # значит «строку уже взял/закрыл другой потребитель»: это **не** ошибка и не
+            # наша работа — идём дальше, документ не конвертируется дважды.
+            was_claimed = False
+            if item.state is ExtractQueueState.PENDING:
+                if not queue.claim(item, worker):
+                    lost += 1
+                    continue
+                claimed += 1
+                was_claimed = True
+            elif item.state is ExtractQueueState.CLAIMED:
+                if item.claimed_by != worker:
+                    # Чужая живая аренда: не трогаем. Если она просрочена, её вернёт
+                    # ``reclaim_stale`` следующего прохода — видимо, а не по-тихому.
+                    lost += 1
+                    continue
             limits = scope.limits_for(item.url)
             # Наблюдаемость расписания: ось объявлена, а окно — провенанс (не входит в
             # ``CrawlLimits.as_dict()``), поэтому публикуется, а не входит в ``run_id``.
@@ -1527,6 +1680,7 @@ def consume(
                     queue.cycle_reuse_kind(item) or _reuse_kind_for(item)
                 ),
                 work_url=queue.work_url(item),
+                claimed=was_claimed,
             )
             pending.append(job)
             # Окно: не более ``W`` экстракций этого продукта «в полёте» (доводка FIFO).
@@ -1536,9 +1690,17 @@ def consume(
                     scope=scope,
                     operations=operations,
                     product=product,
+                    lease=lease,
                 )
                 done, failed, lost = _record_outcome(
-                    queue, settled, doc_id, error, done=done, failed=failed, lost=lost
+                    queue,
+                    settled,
+                    doc_id,
+                    error,
+                    done=done,
+                    failed=failed,
+                    lost=lost,
+                    worker=worker,
                 )
                 if dead_pool:
                     done, failed, lost = _abort_pending(
@@ -1551,6 +1713,7 @@ def consume(
                         done=done,
                         failed=failed,
                         lost=lost,
+                        worker=worker,
                     )
         while pending:
             settled, doc_id, error, dead_pool = _settle_row(
@@ -1558,9 +1721,17 @@ def consume(
                 scope=scope,
                 operations=operations,
                 product=product,
+                lease=lease,
             )
             done, failed, lost = _record_outcome(
-                queue, settled, doc_id, error, done=done, failed=failed, lost=lost
+                queue,
+                settled,
+                doc_id,
+                error,
+                done=done,
+                failed=failed,
+                lost=lost,
+                worker=worker,
             )
             if dead_pool:
                 done, failed, lost = _abort_pending(
@@ -1573,6 +1744,7 @@ def consume(
                     done=done,
                     failed=failed,
                     lost=lost,
+                    worker=worker,
                 )
         left = queue.pending(product_id)
         report = ConsumerReport(
@@ -1581,6 +1753,10 @@ def consume(
             failed=failed,
             already=already,
             lost=lost,
+            claimed=claimed,
+            reclaimed=len(stale),
+            heartbeats=lease.heartbeats,
+            reclaim_records=list(stale),
             pending=left,
             extract_window=window_seen,
             docs=len(product.ingest.docs) - docs_before,
@@ -1592,6 +1768,11 @@ def consume(
             )
         reports.append(report)
     merged = _merge_reports(reports)
+    # F6/§4.3: backlog публикуется числом всегда (даже без объявленного предела): «сколько
+    # байтов ждёт конверсии» — факт прогона, а не только повод ждать.
+    merged.backlog = queue.backlog(
+        limit_mb=_backlog_limit_mb(scope, scope_items), raw_root=scope.raw_root
+    ).as_dict()
     if session_id is not None and merged.pending:
         scope.errors.append(
             f"extract_consume({session_id}): незакрытых строк очереди "
@@ -1609,6 +1790,7 @@ def _record_outcome(
     done: int,
     failed: int,
     lost: int,
+    worker: str | None = None,
 ) -> tuple[int, int, int]:
     """Перевести строку в терминальное состояние и посчитать исход.
 
@@ -1621,27 +1803,36 @@ def _record_outcome(
     ``done``/``failed``.
     """
     del doc_id  # исход документа уже записан операцией фазы; здесь — только состояние
-    #: ``expect=PENDING`` — только если строка **сейчас** ожидает (это и есть claim:
-    #: строку, забранную другим потребителем, не считаем своей работой). Строка,
-    #: оставшаяся терминальной с прошлого исполнения, переписывается без ``expect``: это
-    #: тот же факт о том же документе, а не гонка за работу.
-    expect = (
-        ExtractQueueState.PENDING
-        if job.item.state is ExtractQueueState.PENDING
-        else None
-    )
+    #: F6: строка, взятая в аренду **этим** потребителем, закрывается с ``expect=CLAIMED``
+    #: и проверкой владельца: просроченную аренду могли вернуть другому, и «закрытие задним
+    #: числом» объявило бы ``done`` о чужой работе. Строка, оставшаяся терминальной с
+    #: прошлого исполнения, переписывается с ``expect=`` тем же состоянием: это тот же факт
+    #: о том же документе, а не гонка за работу (иначе Pass B получил бы пустую партицию).
+    expect: ExtractQueueState | None
+    if job.claimed:
+        expect = ExtractQueueState.CLAIMED
+        expect_claimed_by: str | None = worker
+    else:
+        expect = job.item.state if job.item.state in TERMINAL_QUEUE_STATES else None
+        expect_claimed_by = None
     if error is not None:
         if queue.set_state(
             job.item,
             ExtractQueueState.FAILED,
             expect=expect,
+            expect_claimed_by=expect_claimed_by,
             error_kind=(job.error_kind or FailureKind.PARSER_FAILED).value,
             error=error,
         ):
             queue.mark_converted(job.item)
             return done, failed + 1, lost
         return done, failed, lost + 1
-    if queue.set_state(job.item, ExtractQueueState.DONE, expect=expect):
+    if queue.set_state(
+        job.item,
+        ExtractQueueState.DONE,
+        expect=expect,
+        expect_claimed_by=expect_claimed_by,
+    ):
         queue.mark_converted(job.item)
         return done + 1, failed, lost
     return done, failed, lost + 1
@@ -1658,6 +1849,7 @@ def _abort_pending(
     done: int,
     failed: int,
     lost: int,
+    worker: str | None = None,
 ) -> tuple[int, int, int]:
     """Остаток «в полёте» — терминальный отказ, **не** ``pending``: пул мёртв, ждать нечего.
 
@@ -1684,9 +1876,33 @@ def _abort_pending(
             failure_kind=FailureKind.PARSER_FAILED,
         )
         done, failed, lost = _record_outcome(
-            queue, job, doc_id, reason, done=done, failed=failed, lost=lost
+            queue,
+            job,
+            doc_id,
+            reason,
+            done=done,
+            failed=failed,
+            lost=lost,
+            worker=worker,
         )
     return done, failed, lost
+
+
+def _backlog_limit_mb(
+    scope: ConsumerScope, items: Sequence[ExtractQueueItem]
+) -> int | None:
+    """Объявленный предел бэклога (``crawl.extract_backlog_mb``) по осям строк (§4.3).
+
+    Ось резолвится той же цепочкой app < run, что у краула, поэтому значение одинаково
+    для всех строк прогона; перебор нужен лишь чтобы не заводить второй носитель
+    (``ConsumerScope`` не хранит ось, которую уже умеет резолвить). ``None`` — предел не
+    объявлен: число ``backlog_bytes`` публикуется, остановки приёма у потребителя нет.
+    """
+    for item in items:
+        value = scope.limits_for(item.url).extract_backlog_mb
+        if value is not None:
+            return int(value)
+    return None
 
 
 def _merge_reports(reports: Sequence[ConsumerReport]) -> ConsumerReport:
@@ -1699,6 +1915,10 @@ def _merge_reports(reports: Sequence[ConsumerReport]) -> ConsumerReport:
         merged.failed += report.failed
         merged.already += report.already
         merged.lost += report.lost
+        merged.claimed += report.claimed
+        merged.reclaimed += report.reclaimed
+        merged.heartbeats += report.heartbeats
+        merged.reclaim_records.extend(report.reclaim_records)
         merged.pending += report.pending
         merged.docs += report.docs
         if report.extract_window is not None and (

@@ -73,6 +73,7 @@ from core.pipeline.corpus_ingest import (
 from core.pipeline.corpus_persist import _now_iso
 from core.pipeline.corpus_state import CorpusCounters
 from core.pipeline.crawl_frontier import SCOPE_OUT, CrawlLimits, Frontier
+from core.pipeline.extract_queue import BackpressureEvent, wait_for_backlog
 from core.pipeline.extraction_runtime import (
     _as_text,
 )
@@ -397,6 +398,32 @@ def _commit_wave_results(
         commit(entry.pid, entry.wu, entry.depth, outcome)
 
 
+def _backpressure_line(event: BackpressureEvent) -> str:
+    """Строка ``crawl_backpressure`` для ``errors`` фазы: числа, а не «стало тесно».
+
+    Публикуются все три величины §4.3 (``backlog_bytes``/``free_bytes``/``waited_s``) плюс
+    предел и число файлов: без предела число байтов не с чем сравнить, а без файлов
+    непонятно, «много маленьких» это или «несколько гигабайтных». ``gave_up=true`` —
+    приём остановлен, и сеанс закрывается ``partial``.
+
+    ``missing`` печатается только когда он ненулевой: строка очереди, обещавшая байты,
+    которых нет, — нарушение I19, и молчать о нём нельзя.
+    """
+    payload = event.as_dict()
+    line = (
+        "crawl_backpressure: "
+        f"backlog_bytes={payload['backlog_bytes']} "
+        f"backlog_files={payload['backlog_files']} "
+        f"backlog_limit_bytes={payload['backlog_limit_bytes']} "
+        f"free_bytes={payload['free_bytes']} "
+        f"waited_s={payload['waited_s']} "
+        f"gave_up={str(payload['gave_up']).lower()}"
+    )
+    if payload["backlog_missing"]:
+        line += f" backlog_missing={payload['backlog_missing']} (I19: файла нет)"
+    return line
+
+
 def root_steps(
     pid: str,
     root_url: str,
@@ -425,6 +452,7 @@ def root_steps(
     _has_fetch_capacity: Callable[[], bool],
     _skip_document_prefetch: Callable[[str], bool],
     _commit: Callable[..., None],
+    _await_backlog: Callable[[], str | None],
 ) -> Generator[WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]]]]:
     """Шаги дренажа одного seed-root: волновой цикл, frontier, коммит исходов (F4).
 
@@ -452,9 +480,24 @@ def root_steps(
     корней одновременно живут не более ``host_concurrency`` пулов фетча (и столько же
     пулов браузерного маршрута), а не по пулу на корень. ``pool is None`` — прежний
     последовательный путь (``max_workers`` ``None``/``1``), байт-в-байт.
+
+    **Backpressure (F6, §4.3).** ``_await_backlog`` вызывается в голове каждой волны —
+    до изъятия узлов из frontier, то есть до того, как приём расширит бэклог. Возвращает
+    причину остановки приёма (``"extract_backlog_full"``) либо ``None``; саму запись
+    ``crawl_backpressure`` с числами публикует носитель (:func:`core.pipeline.extract_queue.
+    wait_for_backlog` вызывается ровно там). Ожидание исполняется на главном потоке
+    драйвера: бэклог лежит на общем носителе, поэтому пауза приёма — фазовая, а не
+    корневая.
     """
     waves = 0
     while True:
+        # F6 (§4.3): перед изъятием новой работы — наблюдение бэклога. Предел объявлен
+        # осью, и его достижение останавливает **приём**, а не вежливость: причина
+        # называется усечением корня (``partial``), а не тишиной.
+        backlog_stop = _await_backlog()
+        if backlog_stop is not None:
+            frontier.mark_truncated(backlog_stop)
+            break
         # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
         # ограничивать и их (не только обнаруженные ссылки). Без лимита —
         # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
@@ -1040,6 +1083,10 @@ class PhaseDrainScope:
     queue: Any
     #: Адрес сеанса краула (``None`` — durable-очередь не адресуема, очередь в памяти).
     session_id: str | None
+    #: F6 (17 §4.3): корень retention. Нужен только для одного — публиковать
+    #: ``free_bytes`` рядом с ``backlog_bytes``; ``None`` — носитель неизвестен, и тогда
+    #: число не выдумывается (предел по-прежнему применяется к байтам очереди).
+    raw_root: str | None = None
     #: F4b: пул фетча **полосы** (создаёт драйвер, см. :func:`lane_width`).
     fetch_pool: Executor | None = None
     #: F4b: пул не-poolable маршрута (браузер) — один поток на полосу.
@@ -1605,6 +1652,36 @@ def root_lifecycle(
             f"{product.pid}/{root_url}: полоса без пула фетча при max_workers="
             f"{max_workers} — пул обязан создать драйвер"
         )
+    def _await_backlog() -> str | None:
+        """F6 (§4.3): наблюдение бэклога конверсии и видимая запись ``crawl_backpressure``.
+
+        Предел — объявленная ось ``crawl.extract_backlog_mb`` (app < run). Не объявлена ⇒
+        предела нет: приём не останавливается, а ``backlog_bytes``/``free_bytes``
+        публикуются потребителем и ``hound crawl status``.
+
+        При достижении предела приём **ждёт** (ограничено ``EXTRACT_BACKLOG_WAIT_S``):
+        иначе «краул без потребителя» копил бы гигабайты. Ожидание идёт на главном потоке
+        драйвера намеренно — бэклог лежит на общем носителе фазы, поэтому пауза приёма
+        фазовая, а не корневая: ждать на одной полосе, пока другие пишут, значило бы
+        не остановить приём вовсе.
+
+        Возвращает причину остановки приёма (``extract_backlog_full``) только когда
+        ожидание исчерпано: сеанс закрывается ``partial`` (§4.3), а не притворяется
+        полным. Исключений нет — остановка это исход прогона, а не сбой.
+        """
+        limit_mb = limits.extract_backlog_mb
+        if limit_mb is None:
+            return None
+        event = wait_for_backlog(
+            phase.queue,
+            limit_mb=limit_mb,
+            raw_root=phase.raw_root,
+        )
+        if event is None:
+            return None
+        phase.errors.append(_backpressure_line(event))
+        return "extract_backlog_full" if event.gave_up else None
+
     # F4b: шаги корня — генератор. Отправку волны и ожидание исполняет драйвер
     # (:mod:`core.pipeline.corpus_driver`): «отправить и дождаться» не может быть
     # работой корня, потому что допуск волны (право на host'ы) решается до отправки.
@@ -1635,4 +1712,5 @@ def root_lifecycle(
         _has_fetch_capacity=_has_fetch_capacity,
         _skip_document_prefetch=_skip_document_prefetch,
         _commit=_commit_outcome,
+        _await_backlog=_await_backlog,
     ))

@@ -285,6 +285,7 @@ from core.pipeline.crawl_session import (
     open_session,
     prior_items,
     read_provenance,
+    truncation_summary,
 )
 from core.pipeline.crawl_sources import (
     CrawlTarget,
@@ -299,7 +300,7 @@ from core.pipeline.extract_cache import ExtractionCache
 #: вызов обязан идти через атрибут **этого** модуля (параметр ``ingest_member_doc``
 #: читается из глобала в точке создания носителя).
 from core.pipeline.extract_consume import ingest_member_doc as _ingest_member_doc  # noqa: F401
-from core.pipeline.extract_queue import ExtractQueue
+from core.pipeline.extract_queue import EXTRACT_HEARTBEAT_S, ExtractQueue
 
 # L1: runtime экстракции вынесен в свой модуль. Здесь остаются имена, которые этот модуль
 # читает сам (``_EXTRACT_MAX_POOL_REBUILDS``, ``_ExtractPools``, ``ExtractionPool``), и
@@ -1207,6 +1208,9 @@ def _build_corpus(
     product_names: Mapping[str, str] | None = None,
     manual_artifacts: ManualArtifacts | None = None,
     crawl_only: bool = False,
+    consume_only: bool = False,
+    consume_worker: str | None = None,
+    consume_heartbeat_s: float | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -1448,6 +1452,15 @@ def _build_corpus(
         полном прогоне: это тот же краул, а не другой. Требует активного сеанса
         (``store`` + ``run_id``) и **несовместим** с ``extraction_pool`` — извлечение в
         режиме «без извлечения» было бы молчаливым противоречием (:raises ValueError).
+    :param consume_only: F6 (17 §6) — **только конверсия**, без краула: та же фаза, но
+        сетевые/дренажные шаги не исполняются, а ``extract_consume.consume`` читает
+        durable-очередь ``extract_queue`` уже завершённого сеанса. Это вход
+        ``hound extract consume`` и **не второй потребитель**: логика конверсии — та же
+        функция ``consume``, отличается только тем, что корни не дренируются. Усечение
+        (``truncated``) восстанавливается из durable-провенанса сеанса, а не выводится
+        заново: прогон без краула не вправе объявить усечённый корпус полным (иначе
+        ``coverage.complete=True`` и ложный ``❌`` по I2/I2b). Сеанс здесь **не**
+        финализируется — его закрывает краул.
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild, ResourcesObservation]``
@@ -1462,6 +1475,11 @@ def _build_corpus(
     # 17 §4 (F2): режим «без извлечения» несовместим с исполнителем извлечения. Молча
     # проигнорировать пул нельзя: прогон объявил бы краул без конверсии, а исполнял
     # конверсию (или наоборот) — и это было бы неотличимо в артефактах.
+    if consume_only and crawl_only:
+        raise ValueError(
+            "consume_only и crawl_only взаимоисключающи: первый конвертирует очередь "
+            "завершённого сеанса, второй эту очередь только наполняет"
+        )
     if crawl_only and extraction_pool is not None:
         raise ValueError(
             "crawl_only несовместим с extraction_pool: режим «краул без конверсии» "
@@ -1536,6 +1554,12 @@ def _build_corpus(
         serp_observation["rounds"]["declared"] = int(serp_rounds)
         serp_observation["rounds"]["not_executed"] = int(serp_rounds)
         serp_observation["rounds"]["not_executed_reason"] = _SERP_OFFLINE_REASON
+    elif serp_rounds and consume_only:
+        # F6: конверсия чужой очереди — сетевой контур поиска не её работа. Объявленные
+        # раунды называются неисполненными: «не исполнено» ≠ «выключено оператором».
+        serp_observation["rounds"]["declared"] = int(serp_rounds)
+        serp_observation["rounds"]["not_executed"] = int(serp_rounds)
+        serp_observation["rounds"]["not_executed_reason"] = "consumer_only"
     elif serp_rounds:
         try:
             serp_observation, serp_seeds_by_product = _run_serp_contour(
@@ -1664,6 +1688,13 @@ def _build_corpus(
         raise ValueError(
             "crawl_only требует активного сеанса краула (store + run_id): "
             "без session_id durable-очередь extract_queue не адресуема"
+        )
+    # F6 (17 §6): конверсия чужой очереди без адреса сеанса — противоречие входа:
+    # читать нечего, и «0 документов» выглядело бы как пустой сеанс, а не как ошибка.
+    if consume_only and session is None:
+        raise ValueError(
+            "consume_only требует активного сеанса краула (store + run_id): "
+            "durable-очередь extract_queue адресуется только session_id"
         )
     #: Прерванная фаза обязана закрыть сеанс терминально (см. ``PhaseLifecycle``):
     #: адрес сеанса известен только здесь, а ``finally`` — в обёртке :func:`build_corpus`.
@@ -1934,6 +1965,40 @@ def _build_corpus(
     # ``(product, seed-root)``; флаг/продукты уходят в провенанс сеанса и ``IndexBuild``.
     truncation_records: list[dict[str, Any]] = []
     truncated_products: set[str] = set()
+    #: F6 (17 §6): конверсия не краулит, поэтому собственного усечения у неё нет.
+    #: Усечение — durable-факт **сеанса** (``provenance_json``: ``truncated``/
+    #: ``truncated_products``/``effective_limits.roots``). Восстанавливаем его, а не
+    #: выводим заново: иначе прогон без краула объявил бы усечённый корпус полным
+    #: (``coverage.complete=True``), и ``❌`` на нём стал бы ложным (I2/I2b).
+    if consume_only and store is not None and session is not None:
+        try:
+            prior_session = store.get_crawl_session(session)
+            prior_truncation = (
+                truncation_summary(read_provenance(prior_session))
+                if prior_session is not None
+                else {}
+            )
+            if prior_truncation.get("truncated"):
+                truncated_products.update(
+                    str(pid)
+                    for pid in prior_truncation.get("truncated_products") or ()
+                )
+                roots = (prior_truncation.get("effective_limits") or {}).get(
+                    "roots"
+                ) or ()
+                truncation_records.extend(
+                    dict(record) for record in roots if isinstance(record, Mapping)
+                )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость best-effort
+            errors.append(
+                "consume_only: провенанс усечения сеанса не прочитан: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    #: F6 (17 §6): отчёты потребителя по продуктам — машинный факт вызова ``consume``
+    #: (``done/failed/skipped/claimed/reclaimed/heartbeats/pending/backlog``). Публикуются
+    #: в ``log_entries``: без них ``hound extract consume`` печатал бы догадку, а не то,
+    #: что действительно произошло с очередью.
+    consumer_reports: list[Any] = []
     #: F5: продукты, у которых очередь конверсии осталась незакрытой. Это не «изолированная
     #: ошибка»: корпус продукта не полон, и фаза обязана вернуть ``failed`` (иначе
     #: ``evaluate`` пошёл бы по неполному предмету, а гейтовый ``subject_digest`` был бы
@@ -2143,6 +2208,9 @@ def _build_corpus(
         document_skips=document_skips,
         queue=conversion_queue,
         session_id=session,
+        # F6 (§4.3): корень retention — для публикуемого ``free_bytes`` рядом с
+        # ``backlog_bytes``. Предел берётся из тех же ``CrawlLimits``, что у корня.
+        raw_root=str(raw_root),
     )
     #: Замкнутые операции фазы (их сигнатуры держат этот модуль и тесты — носитель их
     #: не переписывает, только называет владельца).
@@ -2179,6 +2247,16 @@ def _build_corpus(
         archive_observations=archive_observations,
         corpus_member_rows=corpus_member_rows,
         limits_for=_limits_for_url,
+        # F6 (§4.3): потребитель публикует ``backlog_bytes``/``free_bytes`` числом, но
+        # не ждёт: потребление — это и есть уменьшение бэклога.
+        raw_root=str(raw_root),
+        # F6 (§4.2): кто мы для аренды и как часто продлеваем её. ``None`` — имя
+        # выводится из процесса/потока, период — опубликованная константа; явные
+        # значения нужны внешнему потребителю и тестам (не более того).
+        worker_id=consume_worker,
+        heartbeat_s=(
+            EXTRACT_HEARTBEAT_S if consume_heartbeat_s is None else consume_heartbeat_s
+        ),
     )
     _consume_operations = extract_consume.ConsumerOperations(
         mark=_mark,
@@ -2567,6 +2645,11 @@ def _build_corpus(
             )
         else:
             all_revalidation_groups, all_orphan_buckets = {}, {}
+        if consume_only:
+            # F6 (17 §6): ревалидация известных URL — сетевой вызов. Конверсия чужой
+            # очереди не наблюдает ничего: бакеты не строятся, иначе они дренировались
+            # бы (в том числе orphan-бакеты, куда при пустом списке корней попало бы всё).
+            all_revalidation_groups, all_orphan_buckets = {}, {}
 
         #: Ops-ось «не ограничивать, а измерять» (default-off): потолок ревалидации
         #: **на продукт**. Отсутствие оси — все известные URL, без записи ``stale`` и
@@ -2707,8 +2790,12 @@ def _build_corpus(
                     f" — полос {lane_axis} (значение первого корня)"
                 )
 
+        # F6 (17 §6): конверсия не краулит — планов корней ноль, поэтому драйвер не
+        # делает ни одного вызова и не пишет записей усечения поверх durable-фактов
+        # сеанса. Пустой ``drive_roots`` (а не ветка «пропустить целиком») выбран
+        # намеренно: остальные шаги продукта остаются байт-идентичными.
         corpus_driver.drive_roots(
-            _author_root_plans(
+            () if consume_only else _author_root_plans(
                 product_id,
                 author_urls=(
                     () if (repair_urls or offline) else url_map.get(product_id, [])
@@ -2878,6 +2965,8 @@ def _build_corpus(
                 products={product_id: _consume_product},
             )
         )
+        if conversion is not None:
+            consumer_reports.append(conversion)
         if conversion is not None and conversion.pending:
             errors.append(
                 f"{product_id}: конверсия очереди не завершена — строк без терминального "
@@ -3135,7 +3224,10 @@ def _build_corpus(
         # статус краула не должен от неё зависеть (иначе ``stale_reason`` врёт). Продукты идут
         # строго последовательно (Pass A каждого предшествует его Pass B), поэтому дренаж
         # всех продуктов закончен ровно на границе последнего.
-        if product_id == products[-1]:
+        if product_id == products[-1] and not consume_only:
+            # F6: сеанс закрывает краул, а не конверсия чужой очереди. Повторная
+            # финализация перезаписала бы ``pages_fetched`` нулём счётчиков этой фазы —
+            # то есть сделала бы провенанс краула ложным.
             _finalize_crawl_session()
 
         # --- Pass B (index) **этого** продукта (09 §8.1) ---------------------- #
@@ -3442,7 +3534,9 @@ def _build_corpus(
     # продукта (``_finalize_crawl_session`` идемпотентен). Здесь вызов нужен только для
     # пустого ``products``: фазы без продуктов, где дренажа нет вовсе. Пост-краульная
     # работа (манифест, композиция) ниже на терминальный статус уже не влияет.
-    _finalize_crawl_session()
+    # F6: конверсия чужой очереди сеанс не закрывает (см. границу продукта).
+    if not consume_only:
+        _finalize_crawl_session()
 
     # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
     # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
@@ -3777,6 +3871,27 @@ def _build_corpus(
         # на продукт, чтобы ни один провал не исчез молча.
         *repair_notes,
     ]
+    # F6 (17 §6): отчёт потребителя — по записи на продукт. Печатаемые CLI числа берутся
+    # отсюда, а не считаются второй раз в команде: «сколько взято в аренду» и «сколько
+    # восстановлено после просрочки» знает только сам проход по очереди.
+    for report in consumer_reports:
+        log_entries.append(
+            {
+                "event": "extract_consume",
+                "product_id": report.product_id,
+                "done": report.done,
+                "failed": report.failed,
+                "already": report.already,
+                "lost": report.lost,
+                "claimed": report.claimed,
+                "reclaimed": report.reclaimed,
+                "heartbeats": report.heartbeats,
+                "reclaim_records": list(report.reclaim_records),
+                "pending": report.pending,
+                "docs": report.docs,
+                "backlog": dict(report.backlog),
+            }
+        )
     # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
     # ``archive_observations``/``corpus_members``). Запись есть даже при нулевом выходе.
     for observation in archive_observations:

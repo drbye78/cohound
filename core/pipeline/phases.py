@@ -930,6 +930,7 @@ def build_phases(
     run_scope: str | None = None,
     product_plan: Mapping[str, Any] | None = None,
     crawl_only: bool = False,
+    consume_only: bool = False,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -1287,6 +1288,10 @@ def build_phases(
             # 17 §4 (F2): «краул без конверсии» — публикация durable-очереди
             # ``extract_queue`` вместо сборки корпуса. ``False`` ⇒ байт-в-байт прежнее.
             crawl_only=crawl_only,
+            # F6 (17 §6): «только конверсия» — та же фаза без дренажа корней: вход
+            # ``hound extract consume``. Логика та же (``extract_consume.consume``),
+            # отличается только отсутствием сетевых шагов.
+            consume_only=consume_only,
         )
         _capture_index_build(holder, result)
         # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).

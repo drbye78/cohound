@@ -619,6 +619,13 @@ class LocalFetch:
     #: пост-фазе для допуска/размера; ``None``/пусто — наследовать поведение страницы).
     max_artifact_bytes: int | None = None
     attachment_formats: tuple[str, ...] | None = None
+    #: 17 §6 (F6): замер попытки — момент начала живого фетча и его длительность. Пишет
+    #: fetch-фаза (``local_fetch``/``fetch_and_commit``), читает коммит: интервал между
+    #: запросами одного host'а из длительностей не восстанавливается (§7.2 №1), поэтому
+    #: момент начала — отдельная величина. ``None`` — живого фетча не было (resume/reject/
+    #: терминальный класс): «не наблюдалось», а не «ноль».
+    fetch_started_at: str | None = None
+    fetch_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -948,6 +955,8 @@ def retain(
     raw_root_path: Path,
     depth: int | None = None,
     origin: str = ORIGIN_CRAWL,
+    fetch_started_at: str | None = None,
+    fetch_ms: int | None = None,
 ) -> Path | None:
     """Retention сырых байтов (I19) + durable-элемент ``FETCHED``; ``None`` при сбое.
 
@@ -1025,6 +1034,11 @@ def retain(
         # только в ``finish_one`` значило бы потерять ``etag``/``last_modified`` на каждом
         # документе — и следующий инкрементальный план пошёл бы без условного GET, то есть
         # без 304 (``09`` §6.3), молча.
+        # 17 §6 (F6): замер попытки — часть факта получения, а не отдельная запись.
+        # ``None`` — живого фетча не было (resume использовать не может: он сюда не
+        # доходит), значит это «не наблюдалось по построению».
+        fetch_started_at=fetch_started_at,
+        fetch_ms=fetch_ms,
         state_fields={
             "etag": page.etag,
             "last_modified": page.last_modified,
@@ -2464,7 +2478,15 @@ def local_fetch(desc: LocalFetch, *, limiter: RateLimiter) -> RawPage:
     процесса; при пуле процессов состояние не разделяется (см. ``util/rate_limit``).
     """
     limiter.wait(desc.host, desc.fetch_plan.rate_limit)
-    return desc.active.fetch(desc.wu, desc.fetch_plan)
+    # 17 §6 (F6): момент начала и длительность попытки. Меряется здесь, а не в коммите:
+    # коммит идёт FIFO-порядком и ждёт чужих исходов — его время было бы расписанием
+    # пула, а не фетчем (``fetch_ms`` стал бы неправдой).
+    desc.fetch_started_at = _now_iso()
+    _started = time.perf_counter()
+    try:
+        return desc.active.fetch(desc.wu, desc.fetch_plan)
+    finally:
+        desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
 
 
 def fetch_and_commit(
@@ -2480,10 +2502,14 @@ def fetch_and_commit(
     ``try`` (как в прежнем ``process_local``): его сбой — не сбой источника.
     """
     limiter.wait(desc.host, desc.fetch_plan.rate_limit)
+    desc.fetch_started_at = _now_iso()
+    _started = time.perf_counter()
     try:
         page = desc.active.fetch(desc.wu, desc.fetch_plan)
     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+        desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
         return commit_local(desc, exc=exc)
+    desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
     return commit_local(desc, page=page)
 
 
@@ -2644,6 +2670,10 @@ def commit_local(
             error=reason,
             depth=desc.depth,
             http_status=getattr(exc, "http_status", None),
+            # 17 §6 (F6): попытка состоялась (сеть) — её время записано; отказ не делает
+            # замер несуществующим, иначе p50/p95 теряли бы все неудачные запросы.
+            fetch_started_at=desc.fetch_started_at,
+            fetch_ms=desc.fetch_ms,
         )
         return None
     if page is None:
@@ -2744,8 +2774,18 @@ def commit_local(
         )
         return None
 
-    # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг).
-    raw_path = retain(pid, wu, page, fetch_plan, depth=desc.depth)
+    # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг). Замер попытки
+    # (F6) едет тем же вызовом: ``FETCHED``-элемент обязан нести момент начала и
+    # длительность, иначе §7.2 №1 (`observed_min_interval_s`) не посчитать.
+    raw_path = retain(
+        pid,
+        wu,
+        page,
+        fetch_plan,
+        depth=desc.depth,
+        fetch_started_at=desc.fetch_started_at,
+        fetch_ms=desc.fetch_ms,
+    )
     if raw_path is None:
         return None
     return page, raw_path, fetch_plan, True

@@ -220,6 +220,15 @@ class CrawlLimits:
     #: отмечает объявление на app/run слое: только тогда ключ попадает в ``as_dict``.
     host_concurrency: int | None = None
     host_concurrency_explicit: bool = False
+    #: F6 (план 17, §4.3): watermark бэклога конверсии, МБ retained-файлов строк
+    #: ``pending``+``claimed``. ``None`` — предел не объявлен (приём не приостанавливается,
+    #: ``backlog_bytes`` всё равно публикуется числом). Это **условие измерения**, а не
+    #: рычаг расписания: достижение предела останавливает приём, то есть меняет состав
+    #: корпуса (какие документы успели попасть в очередь). Поэтому ось входит в
+    #: ``as_dict()`` при объявлении и объявление — ``execution_change`` (§13).
+    #: ``extract_backlog_mb_explicit`` отмечает объявление на app/run слое.
+    extract_backlog_mb: int | None = None
+    extract_backlog_mb_explicit: bool = False
     extract_workers: int | None = None
     #: F0: ``True`` — ``extract_workers`` выведен из бюджета памяти
     #: (:func:`core.pipeline.resources.workers_from_budget`), а не объявлен на слое
@@ -391,6 +400,11 @@ class CrawlLimits:
         # ``crawl_config_digest`` безусловно.
         if self.host_concurrency_explicit:
             payload["host_concurrency"] = self.host_concurrency
+        # F6 (план 17, §4.3): watermark бэклога. Только при объявлении — иначе дайджест
+        # прогонов без оси не меняется. При объявлении ключ честно меняет ``run_id``:
+        # остановка приёма по бэклогу меняет состав корпуса, то есть измерение.
+        if self.extract_backlog_mb_explicit and self.extract_backlog_mb is not None:
+            payload["extract_backlog_mb"] = self.extract_backlog_mb
         if self.revalidate_max_documents is not None:
             payload["revalidate_max_documents"] = self.revalidate_max_documents
         if self.max_response_bytes_explicit:
@@ -555,6 +569,13 @@ def resolve_crawl_limits(
     run_extract_workers = (
         getattr(run, "extract_workers", None) if run is not None else None
     )
+    # F6 (план 17, §4.3): watermark бэклога — app < run, без per-site слоя (бэклог — это
+    # диск и потребитель узла, а не свойство сайта).
+    app_extract_backlog_mb = getattr(app, "extract_backlog_mb", None)
+    run_extract_backlog_mb = (
+        getattr(run, "extract_backlog_mb", None) if run is not None else None
+    )
+    extract_backlog_mb = _pick(app_extract_backlog_mb, run_extract_backlog_mb, None)
     run_extract_max_tasks = (
         getattr(run, "extract_max_tasks_per_child", None) if run is not None else None
     )
@@ -774,6 +795,14 @@ def resolve_crawl_limits(
         ),
         host_concurrency_explicit=_axis_explicit(
             app, "host_concurrency", run_host_concurrency, None
+        ),
+        extract_backlog_mb=(
+            None
+            if extract_backlog_mb is None
+            else int(extract_backlog_mb)  # type: ignore[call-overload]
+        ),
+        extract_backlog_mb_explicit=_axis_explicit(
+            app, "extract_backlog_mb", run_extract_backlog_mb, None
         ),
         extract_workers=(
             None if extract_workers is None else int(extract_workers)  # type: ignore[arg-type]

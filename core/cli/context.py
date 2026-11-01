@@ -2433,6 +2433,7 @@ def _resolve_phases(
     change_class: str | None = None,
     cycle_id: str | None = None,
     crawl_only: bool = False,
+    consume_only: bool = False,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -2624,6 +2625,9 @@ def _resolve_phases(
         "product_plan": product_plan,
         # 17 §4 (F2): «краул без конверсии» — вход Ш5; полный ``run`` его не выставляет.
         "crawl_only": crawl_only,
+        # F6 (17 §6): «только конверсия» — вход ``hound extract consume``: та же фаза,
+        # без дренажа корней и без сетевых вызовов.
+        "consume_only": consume_only,
         # 09 §13.6/16 §3.1: срез прогона — та же величина, что вошла в ``run_id``
         # (``resolve_run_scope``); без неё ``runs.run_scope`` остаётся NULL и срез
         # неотличим от полного измерения.
@@ -3176,6 +3180,19 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "сколько host'ов процесс краула ведёт одновременно "
             "(дефолт: последовательно, как сегодня; ось входит в run_id при объявлении)"
+        ),
+    )
+    # F6 (план 17, §4.3): watermark бэклога конверсии (run-слой поверх run.yaml).
+    parser.add_argument(
+        "--extract-backlog",
+        dest="extract_backlog_mb",
+        type=_positive_int,
+        default=None,
+        metavar="MB",
+        help=(
+            "предел бэклога конверсии в МБ retained-файлов очереди: при достижении "
+            "приём приостанавливается и публикуется crawl_backpressure (дефолт: предел "
+            "не объявлен; ось входит в run_id при объявлении)"
         ),
     )
     parser.add_argument(

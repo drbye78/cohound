@@ -5447,8 +5447,20 @@ def test_state_revalidated_304_reuses_document_without_extract(tmp_path: Path) -
                 run_id="run-2",
             )
             coverage = run_store.read_corpus_coverage("run-2", "p1")
+            # F6 §7.2 №1: 304 — живой условный GET, значит замер попытки обязан быть.
+            # ``first_seen``/``last_attempt`` — операционные метки, по ним
+            # ``observed_min_interval_s`` не считается; нужен таймер фетча.
+            item_304 = next(
+                item
+                for item in run_store.iter_crawl_session_items(
+                    default_session_id("run-2")
+                )
+                if item.url == URL_P1_A
+            )
         finally:
             run_store.close()
+        assert item_304.fetch_started_at
+        assert item_304.fetch_ms is not None and item_304.fetch_ms >= 0
         build2 = _build_of(second)
 
         assert _validators_sent(crawler2, URL_P1_A) == (

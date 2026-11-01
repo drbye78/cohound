@@ -49,6 +49,17 @@ _OWNER = re.compile(r"'[A-Za-z0-9_.\-]+/\d+/\d+'")
 #: писателей, которое сводка «BEGIN/INSERT …» не покажет. Это и есть claim модуля: порядок
 #: побочных эффектов не изменился.
 #:
+#: **Пересобран 2026-11-01 осознанно** (F6 плана ``17``, §4.2 п.3-4), по двум причинам и
+#: ни по какой другой:
+#:   1. переход ``pending → claimed`` стал **отдельным** ``UPDATE extract_queue``
+#:      (``expect=PENDING`` + ``claimed_at``/``heartbeat_at``): аренда — это запись, и
+#:      конвертация больше не закрывает строку «одним махом»;
+#:   2. перед проходом читается ``SELECT session_id, … FROM extract_queue`` — просроченные
+#:      аренды (``heartbeat_at`` старше порога) возвращаются в ``pending`` до чтения списка.
+#: Операторов стало 195 против 178, записей 162 против 147: ровно по ``UPDATE`` на
+#: сконвертированную строку плюс чтение восстановления. Порядок остальных писателей не
+#: изменился — блоки ``INSERT corpus_docs``/``corpus_chunks`` идут там же, где были.
+#:
 #: **Пересобран 2026-11-01 осознанно** (F5 плана ``17``, слаг семантики ``crawl-3``), по
 #: трём названным причинам и ни по какой другой:
 #:   1. краул больше **не конвертирует**: на каждый добытый документ он пишет
@@ -69,14 +80,14 @@ _OWNER = re.compile(r"'[A-Za-z0-9_.\-]+/\d+/\d+'")
 #: стал ключом ``(depth, url)`` (два документа ингестились в обратном порядке), и
 #: аддитивная колонка ``crawl_session_items.doc_hash`` изменила текст каждого ``INSERT``
 #: этой таблицы.
-EXPECTED_WRITE_DIGEST = "d8f1d8b8cca170def97f412a0980cdd424a4d9aa8222ae61b4faf16fddd0862e"
+EXPECTED_WRITE_DIGEST = "fadd988c828c99f06447887ad4d71053243ac8a917871cd5b76e25e0360be71e"
 
 #: Дайджест **полного** трассированного следа, включая ``SELECT``. Второй пин, а не первый:
 #: он видит то, чего пин записей не видит по построению, — появление нового чтения (N+1) и
 #: смену текста read-проекции. Смена **только** этого дайджеста при неизменном
 #: ``EXPECTED_WRITE_DIGEST`` означает «запись не тронута, чтение изменилось» — другой
 #: диагноз и другая реакция, чем «поехал порядок записи».
-EXPECTED_TRACE_DIGEST = "71379e2a776f18fc6a034442f736afda3cdebc9624d6608d93d52d59a35bd093"
+EXPECTED_TRACE_DIGEST = "9fab97202954ca3424b6416f841ed2566192eadd2d064d82df93d7569a168c31"
 
 #: Глаголы, меняющие данные или схему. Транзакционные границы входят в пин записей: без них
 #: «две записи в одной транзакции» и «две записи в разных» дали бы один дайджест.
@@ -160,14 +171,9 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'UPDATE crawl_sessions'),
     (1, 'COMMIT'),
     (1, 'SELECT *'),
+    (1, 'SELECT session_id,'),
     (1, 'BEGIN'),
-    (1, 'INSERT corpus_docs'),
-    (1, 'INSERT corpus_doc_version'),
-    (1, 'COMMIT'),
-    (1, 'BEGIN'),
-    (1, 'INSERT crawl_session_items'),
-    (1, 'SELECT status,'),
-    (1, 'UPDATE crawl_sessions'),
+    (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'INSERT corpus_docs'),
@@ -179,13 +185,7 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'UPDATE crawl_sessions'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
-    (1, 'INSERT corpus_docs'),
-    (1, 'INSERT corpus_doc_version'),
-    (1, 'COMMIT'),
-    (1, 'BEGIN'),
-    (1, 'INSERT crawl_session_items'),
-    (1, 'SELECT status,'),
-    (1, 'UPDATE crawl_sessions'),
+    (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'INSERT corpus_docs'),
@@ -195,6 +195,33 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'INSERT crawl_session_items'),
     (1, 'SELECT status,'),
     (1, 'UPDATE crawl_sessions'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'UPDATE extract_queue'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'INSERT corpus_docs'),
+    (1, 'INSERT corpus_doc_version'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'INSERT crawl_session_items'),
+    (1, 'SELECT status,'),
+    (1, 'UPDATE crawl_sessions'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'UPDATE extract_queue'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'INSERT corpus_docs'),
+    (1, 'INSERT corpus_doc_version'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'INSERT crawl_session_items'),
+    (1, 'SELECT status,'),
+    (1, 'UPDATE crawl_sessions'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'INSERT corpus_docs'),
@@ -220,7 +247,7 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'BEGIN'),
     (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
-    (1, 'SELECT *'),
+    (2, 'SELECT *'),
     (1, 'SELECT status,'),
     (1, 'BEGIN'),
     (1, 'UPDATE crawl_sessions'),

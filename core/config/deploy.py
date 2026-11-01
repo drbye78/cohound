@@ -397,6 +397,11 @@ class CrawlConfig(BaseModel):
     # одновременно». ``None``/``1`` = сегодняшнее поведение. Per-site слоя у оси нет:
     # число полос — свойство узла, а не сайта (как у ``pdf_device``).
     host_concurrency: int | None = Field(default=None, ge=1)
+    # F6 (план 17, §4.3): application-слой watermark бэклога конверсии
+    # (``crawl.extract_backlog_mb``, МБ retained-файлов очереди). ``None`` — предел не
+    # объявлен. Per-site слоя нет: бэклог — свойство узла (диск и потребитель), а не
+    # сайта, как у ``host_concurrency``.
+    extract_backlog_mb: int | None = Field(default=None, gt=0)
     # P4: отдельная ось CPU-параллелизма **экстракции** (пул процессов локального пути /
     # потоков split). ``None``/``1`` = сегодняшнее поведение (inline, байт-в-байт); не
     # смешивается с ``max_workers`` (осью сетевого fetch-пула). Резолв — та же цепочка

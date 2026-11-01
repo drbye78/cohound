@@ -383,6 +383,7 @@ class StorePort(Protocol):
         state: ExtractQueueState,
         *,
         expect: ExtractQueueState | None = None,
+        expect_claimed_by: str | None = None,
         claimed_by: str | None = None,
         error_kind: str | None = None,
         error: str | None = None,
@@ -408,6 +409,54 @@ class StorePort(Protocol):
         ``claimed_by`` пишется через ``COALESCE``: вызов без него не снимает прежний claim
         (F6: один и тот же метод даёт claim ``expect=PENDING, claimed_by=<worker>`` и
         последующее закрытие ``expect=CLAIMED`` без повторного имени воркера).
+
+        ``expect_claimed_by`` (F6) — закрывать строку вправе только владелец живой аренды:
+        просроченная аренда возвращается в ``pending`` другому воркеру, и «закрытие задним
+        числом» объявило бы ``done`` о работе, которую делает кто-то другой.
+
+        Переход **в** ``claimed`` ставит ``claimed_at``/``heartbeat_at`` — это и есть
+        аренда; долгий документ обязан продлевать её
+        (:meth:`touch_extract_claim`), иначе живой потребитель был бы признан мёртвым.
+        """
+        ...
+
+    def touch_extract_claim(
+        self,
+        session_id: str,
+        product_id: str,
+        url: str,
+        *,
+        claimed_by: str,
+        at: str | None = None,
+    ) -> bool:
+        """Продлевает живую аренду строки: ``heartbeat_at = now`` (F6, §4.2 п.3).
+
+        Узкая запись heartbeat, а не смена состояния: ``state_changed_at`` не трогается,
+        потому что строка никуда не перешла. Продлевается только **своя** аренда
+        (``state='claimed' AND claimed_by=?``); ``False`` — аренда потеряна (истекла и
+        возвращена другому либо строка закрыта), и воркер не вправе считать документ своим.
+        """
+        ...
+
+    def reclaim_stale_extract_claims(
+        self,
+        session_id: str,
+        *,
+        older_than: str,
+        now: str,
+        max_attempts: int,
+        error_kind: str,
+    ) -> list[dict[str, Any]]:
+        """Возвращает просроченные аренды в ``pending``, называя каждый факт (§4.2 п.3).
+
+        Просрочка — ``heartbeat_at`` (``claimed_at``, если heartbeat не было) старше
+        ``older_than``. Каждая восстановленная строка получает ``attempts += 1``; при
+        исчерпании ``max_attempts`` — терминальный ``failed`` с ``error_kind`` (§4.2 п.5),
+        и строка больше не воскресает.
+
+        Возвращает список фактов (``product_id``/``url``/``attempts``/``claimed_by``/
+        ``exhausted``): молчаливое воскрешение запрещено, поэтому вызывающий обязан
+        назвать число восстановленных и кто держал аренду.
         """
         ...
 

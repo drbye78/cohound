@@ -64,8 +64,13 @@ def _observation(**overrides: object) -> ArchiveObservation:
 
 
 def test_schema_version_is_additive_bump() -> None:
-    """Новые таблицы объявлены в ``DDL``; версия схемы пинуется (3.14.0 — свёртка шимов)."""
-    assert SCHEMA_VERSION == "3.14.0"
+    """Новые таблицы объявлены в ``DDL``; версия схемы пинуется.
+
+    3.15.0 — F6 (план ``17`` §4.2/§7.2): аренда строки очереди (``claimed_at``/
+    ``heartbeat_at``) и замер попытки (``fetch_started_at``/``fetch_ms``) одним bump'ом;
+    шимов нет, старые файлы отвергаются гейтом версии.
+    """
+    assert SCHEMA_VERSION == "3.15.0"
     conn = connect(":memory:")
     try:
         tables = {

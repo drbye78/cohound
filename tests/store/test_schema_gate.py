@@ -242,8 +242,13 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     Случайный bump здесь так же опасен, как случайное отсутствие bump: и то и другое
     меняет множество читаемых прогонов, поэтому пин — единственный способ увидеть это в
     ревью, а не в живом чтении.
+
+    3.15.0 (F6, план ``17`` §4.2/§7.2) — **один** bump на четыре колонки замера и аренды:
+    ``crawl_session_items.fetch_started_at/fetch_ms`` и ``extract_queue.claimed_at/
+    heartbeat_at``. Шимов нет (``ALTER TABLE ... ADD COLUMN`` при открытии запрещены),
+    поэтому прогоны ≤ 3.14.0 отвергаются гейтом, а не досоздаются молча.
     """
-    assert SCHEMA_VERSION == "3.14.0"
+    assert SCHEMA_VERSION == "3.15.0"
 
     conn = connect(":memory:")
     try:

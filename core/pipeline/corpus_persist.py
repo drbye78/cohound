@@ -516,6 +516,29 @@ def mark_session(
         "error": base.error if base is not None else None,
         "first_seen": (base.first_seen if base is not None and base.first_seen else now),
         "last_attempt": now,
+        # 17 §6 (F6): замер попытки переносится, пока это **та же** попытка получения
+        # (повторная пометка того же исхода: ``retain`` → ``finish_one`` с ``doc_hash``)
+        # либо исход — отказ **извлечения** на уже добытых байтах. Новая попытка (статус
+        # сменился) замер не наследует: чужое время под своей меткой — ложь о приборе.
+        # Явно переданные значения перекрывают перенос (``fields`` ниже).
+        "fetch_started_at": (
+            base.fetch_started_at
+            if base is not None
+            and (
+                base.status is status
+                or base.status is CrawlItemStatus.FETCHED
+            )
+            else None
+        ),
+        "fetch_ms": (
+            base.fetch_ms
+            if base is not None
+            and (
+                base.status is status
+                or base.status is CrawlItemStatus.FETCHED
+            )
+            else None
+        ),
     }
     for name, value in fields.items():
         if value is CLEAR_SESSION_FIELD:

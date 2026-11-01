@@ -1600,6 +1600,9 @@ class SqliteStore:
         "error",
         "first_seen",
         "last_attempt",
+        # 17 §6 (F6): метки замера попытки — часть той же строки, а не отдельная запись.
+        "fetch_started_at",
+        "fetch_ms",
     )
 
     @staticmethod
@@ -1764,6 +1767,8 @@ class SqliteStore:
             item.error,
             item.first_seen,
             item.last_attempt,
+            item.fetch_started_at,
+            item.fetch_ms,
         )
         with self.conn:
             self.conn.execute(
@@ -1966,6 +1971,8 @@ class SqliteStore:
                 "  enqueued_at = excluded.enqueued_at,"
                 "  state_changed_at = NULL,"
                 "  claimed_by = NULL,"
+                "  claimed_at = NULL,"
+                "  heartbeat_at = NULL,"
                 "  error_kind = NULL,"
                 "  error = NULL"
                 " WHERE extract_queue.content_hash <> excluded.content_hash",
@@ -2002,6 +2009,7 @@ class SqliteStore:
         state: ExtractQueueState,
         *,
         expect: ExtractQueueState | None = None,
+        expect_claimed_by: str | None = None,
         claimed_by: str | None = None,
         error_kind: str | None = None,
         error: str | None = None,
@@ -2009,28 +2017,46 @@ class SqliteStore:
         """Условный переход состояния строки ``extract_queue`` (targeted ``UPDATE``).
 
         Меняются только поля потребителя: ``state``/``state_changed_at``/``claimed_by``/
-        ``error_kind``/``error``. Поля краула (``content_hash``/``raw_path``/провенанс
-        получения) не трогаются ни при каком переходе — иначе потребитель переписывал бы
-        факт, которым не владеет, а ``done`` можно было бы вернуть в ``pending``.
+        ``claimed_at``/``heartbeat_at``/``error_kind``/``error``. Поля краула
+        (``content_hash``/``raw_path``/провенанс получения) не трогаются ни при каком
+        переходе — иначе потребитель переписывал бы факт, которым не владеет, а ``done``
+        можно было бы вернуть в ``pending``.
 
         ``expect`` (когда задан) добавляет ``AND state = ?``: это и есть claim, а не «взял
         и надеюсь» — при гонке двух потребителей строку забирает ровно один, второй
-        получает ``False`` и не считает работу сделанной. ``state_changed_at`` ставится
-        здесь (единственный источник времени).
+        получает ``False`` и не считает работу сделанной. ``expect_claimed_by`` (F6)
+        добавляет ``AND claimed_by = ?``: закрывать строку вправе только тот воркер, чья
+        аренда ещё жива. Без этого условия просроченный (и уже возвращённый другому)
+        документ закрывался бы «задним числом», и ``done`` описывал бы работу, которую
+        делает кто-то другой.
+
+        Переход **в** ``claimed`` ставит ``claimed_at`` и ``heartbeat_at`` (момент взятия —
+        единственное «сейчас» стора); переход в терминальное состояние сохраняет
+        ``claimed_at`` как провенанс аренды, но ``heartbeat_at`` больше не обновляет:
+        строка уже не в работе. ``state_changed_at`` ставится здесь (единственный
+        источник времени).
 
         :returns: ``rowcount > 0`` — переход состоялся.
         """
+        now = _now_iso()
+        claiming = state is ExtractQueueState.CLAIMED
         sql = (
             "UPDATE extract_queue SET state = ?, state_changed_at = ?,"
-            " claimed_by = COALESCE(?, claimed_by), error_kind = ?, error = ?"
+            " claimed_by = COALESCE(?, claimed_by), error_kind = ?, error = ?,"
+            " claimed_at = CASE WHEN ? THEN ? ELSE claimed_at END,"
+            " heartbeat_at = CASE WHEN ? THEN ? ELSE heartbeat_at END"
             " WHERE session_id = ? AND product_id = ? AND url = ?"
         )
         params: list[Any] = [
             _as_text(state),
-            _now_iso(),
+            now,
             claimed_by,
             error_kind,
             error,
+            int(claiming),
+            now,
+            int(claiming),
+            now,
             session_id,
             product_id,
             url,
@@ -2038,9 +2064,136 @@ class SqliteStore:
         if expect is not None:
             sql += " AND state = ?"
             params.append(_as_text(expect))
+        if expect_claimed_by is not None:
+            sql += " AND claimed_by = ?"
+            params.append(expect_claimed_by)
         with self.conn:
             cursor = self.conn.execute(sql, tuple(params))
         return int(cursor.rowcount or 0) > 0
+
+    def touch_extract_claim(
+        self,
+        session_id: str,
+        product_id: str,
+        url: str,
+        *,
+        claimed_by: str,
+        at: str | None = None,
+    ) -> bool:
+        """Продлевает **живую** аренду строки (F6): ``heartbeat_at = now``.
+
+        Отдельный узкий ``UPDATE``, а не ``set_extract_state(CLAIMED, expect=CLAIMED)``:
+        heartbeat — не смена состояния, и писать его через переход значило бы менять
+        ``state_changed_at`` у строки, которая никуда не перешла (эта колонка отвечает на
+        «когда состояние изменилось», и подмена ответа сделала бы провенанс ложным).
+
+        ``AND state='claimed' AND claimed_by=?`` — продлевается только **своя** аренда:
+        если строку успели вернуть в ``pending`` (аренда истекла) или закрыть, воркер узнаёт
+        об этом (``False``) и не считает документ своим.
+
+        :returns: ``True`` — аренда продлена; ``False`` — строку уже не удерживаем.
+        """
+        with self.conn:
+            cursor = self.conn.execute(
+                "UPDATE extract_queue SET heartbeat_at = ?"
+                " WHERE session_id = ? AND product_id = ? AND url = ?"
+                " AND state = ? AND claimed_by = ?",
+                (
+                    at or _now_iso(),
+                    session_id,
+                    product_id,
+                    url,
+                    ExtractQueueState.CLAIMED.value,
+                    claimed_by,
+                ),
+            )
+        return int(cursor.rowcount or 0) > 0
+
+    def reclaim_stale_extract_claims(
+        self,
+        session_id: str,
+        *,
+        older_than: str,
+        now: str,
+        max_attempts: int,
+        error_kind: str,
+    ) -> list[dict[str, Any]]:
+        """Возвращает просроченные аренды в ``pending`` (F6, §4.2 п.3).
+
+        Просрочка — ``heartbeat_at`` (а если его нет — ``claimed_at``) старше
+        ``older_than``: живой воркер обязан продлевать heartbeat, поэтому молчащий дольше
+        порога считается мёртвым. Возврат — **не** тихое воскрешение: каждая строка
+        получает ``attempts += 1``, а вызывающий получает список фактов
+        (``product_id``/``url``/``attempts``/``claimed_by``), чтобы назвать их в отчёте
+        (число восстановленных, кто держал, сколько раз).
+
+        Исчерпание ``max_attempts`` — терминальный ``failed`` с названным ``error_kind``
+        (§4.2 п.5): строка, которая пережила N аренд, не должна возвращаться в очередь
+        вечно — повтор тогда только явной командой.
+
+        Время передаётся явно (``now``/``older_than``), а не читается здесь: иначе тест
+        просрочки платил бы реальным ожиданием, а логика зависела бы от часов хоста.
+        """
+        rows = list(
+            self.conn.execute(
+                "SELECT session_id, product_id, url, attempts, claimed_by,"
+                " claimed_at, heartbeat_at FROM extract_queue"
+                " WHERE session_id = ? AND state = ?"
+                " AND COALESCE(heartbeat_at, claimed_at) < ?"
+                " ORDER BY product_id, url",
+                (session_id, ExtractQueueState.CLAIMED.value, older_than),
+            )
+        )
+        reclaimed: list[dict[str, Any]] = []
+        for row in rows:
+            attempts = int(row["attempts"] or 0) + 1
+            if attempts >= max_attempts:
+                new_state = ExtractQueueState.FAILED
+                note = (
+                    f"claim expired {attempts} time(s) (max_attempts={max_attempts}): "
+                    f"last owner {row['claimed_by'] or '—'} stopped heartbeating"
+                )
+                kind: str | None = error_kind
+            else:
+                new_state = ExtractQueueState.PENDING
+                note = (
+                    f"claim expired after {attempts} attempt(s): last owner "
+                    f"{row['claimed_by'] or '—'} stopped heartbeating"
+                )
+                kind = None
+            with self.conn:
+                cursor = self.conn.execute(
+                    "UPDATE extract_queue SET state = ?, state_changed_at = ?,"
+                    " attempts = ?, claimed_by = NULL, claimed_at = NULL,"
+                    " heartbeat_at = NULL, error_kind = ?, error = ?"
+                    " WHERE session_id = ? AND product_id = ? AND url = ?"
+                    " AND state = ? AND attempts = ?",
+                    (
+                        new_state.value,
+                        now,
+                        attempts,
+                        kind,
+                        note,
+                        row["session_id"],
+                        row["product_id"],
+                        row["url"],
+                        ExtractQueueState.CLAIMED.value,
+                        int(row["attempts"] or 0),
+                    ),
+                )
+            if int(cursor.rowcount or 0) == 0:
+                # Строку успели закрыть/продлить между чтением и записью — не наша работа.
+                continue
+            reclaimed.append(
+                {
+                    "product_id": str(row["product_id"]),
+                    "url": str(row["url"]),
+                    "attempts": attempts,
+                    "claimed_by": row["claimed_by"],
+                    "exhausted": new_state is ExtractQueueState.FAILED,
+                }
+            )
+        return reclaimed
 
     def count_extract_queue(self, session_id: str) -> dict[str, int]:
         """Число строк очереди сеанса по состояниям (непустые состояния только)."""

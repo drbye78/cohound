@@ -32,7 +32,15 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: ``ALTER TABLE ... ADD COLUMN`` в штатном открытии не осталось ни одного. Цена названа
 #: прямо: существующие ``runs/*/cohound.db`` версий ≤ 3.13.0 отвергаются — прогон
 #: переносится пересозданием (новый каталог/``run_id``), а не тихим догоном схемы.
-SCHEMA_VERSION = "3.14.0"
+#:
+#: 3.15.0 (F6 плана ``17``, **один** bump на четыре колонки замера и claim):
+#: ``crawl_session_items.fetch_started_at``/``fetch_ms`` (момент начала попытки и её
+#: длительность — без второго интервал между запросами одного host'а не восстановить, а
+#: это критерий приёмки §7.2 №1) и ``extract_queue.claimed_at``/``heartbeat_at``
+#: (claim/lease §4.2 п.3–4). Колонка без производителя не заводится: обе пары пишутся
+#: тем же коммитом, что и сам факт (``commit_local``/``set_extract_state``). Цена названа:
+#: все ранее записанные ``runs/*/cohound.db`` отвергаются гейтом — это ожидаемо.
+SCHEMA_VERSION = "3.15.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -407,6 +415,16 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
     error         TEXT,
     first_seen    TEXT,
     last_attempt  TEXT,
+    -- 17 §6 (F6, schema 3.15.0): замер попытки получения. ``fetch_started_at`` — момент
+    -- начала **живого** фетча (не ``first_seen``/``last_attempt``: те операционные метки и
+    -- перезаписываются), ``fetch_ms`` — длительность этого фетча. Обе пишет fetch-коммит
+    -- (``core.pipeline.corpus_ingest.retain`` → ``mark``); ``NULL`` — живого фетча не было
+    -- по построению (resume из retained-байтов, отказ до сети) либо запись прежнего
+    -- производителя. Интервал между запросами одного host'а из длительностей не
+    -- восстанавливается, поэтому момент начала — отдельная колонка, а не вывод из
+    -- ``last_attempt``.
+    fetch_started_at TEXT,
+    fetch_ms      INTEGER,
     PRIMARY KEY (session_id, product_id, url),
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id)
 );
@@ -447,6 +465,14 @@ CREATE TABLE IF NOT EXISTS extract_queue (
     enqueued_at     TEXT NOT NULL,
     state_changed_at TEXT,
     claimed_by      TEXT,                    -- кто взял (провенанс, не блокировка)
+    -- 17 §4.2 п.3–4 / §6 F6 (schema 3.15.0): claim — это **аренда**, а не пометка.
+    -- ``claimed_at`` — момент взятия строки воркером, ``heartbeat_at`` — последний признак
+    -- жизни этого воркера по этой строке. Живой потребитель обязан обновлять heartbeat,
+    -- пока строка в работе: иначе долгий документ был бы признан брошенным и сконвертирован
+    -- дважды. Просроченная аренда возвращается в ``pending`` с ``attempts += 1`` и видимой
+    -- записью (молчаливое воскрешение запрещено — §4.2 п.3).
+    claimed_at      TEXT,
+    heartbeat_at    TEXT,
     error_kind      TEXT,
     error           TEXT,
     PRIMARY KEY (session_id, product_id, url)
