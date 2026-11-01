@@ -216,10 +216,14 @@ def truncation_summary(provenance: Mapping[str, Any] | None) -> dict[str, Any]:
 
     Форма — стабильная: ``truncated``/``truncated_reason``/``truncated_products``/
     ``pages_fetched``/``revalidation_fetched``/``effective_limits``.
-    ``truncated_reason`` — первая crawl-причина
-    (``max_documents``/``max_depth``/``round_budget``) среди записей
-    ``effective_limits.roots``. Отсутствие провенанса → нейтральный «не усечён» (не
-    выдумываем усечение).
+    ``truncated_reason`` — первая crawl-причина среди записей ``effective_limits.roots``.
+    Список причин **не** закрыт двумя: ``max_documents``/``max_depth``/``round_budget`` —
+    операторские потолки, ``extract_backlog_full`` (F6) — остановка приёма по объявленному
+    watermark'у бэклога, ``disk_low_headroom`` (F8) — остановка сторожем места,
+    ``host_out_of_shard`` (F7) — корень принадлежит чужому узлу. Все они приходят одним
+    механизмом (``Frontier.mark_truncated``), поэтому перечисление здесь — пояснение, а не
+    проверка; подставлять «известную» причину вместо записанной нельзя.
+    Отсутствие провенанса → нейтральный «не усечён» (не выдумываем усечение).
 
     09 §6.3: ревалидация известных URL сама по себе **не** расходует ``max_documents``
     и не расширяет BFS. Операторский потолок ``revalidate_max_documents`` — отдельная,
