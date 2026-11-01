@@ -186,9 +186,10 @@ claim (`expect=PENDING, claimed_by=<worker>`), без второго метод�
 ### 4.3 Backpressure по диску, с числом
 
 Публикуются `backlog_bytes` (Σ размера файлов `pending`+`claimed`), `free_bytes` и `waited_s`.
-Watermark объявлен (`crawl.extract_backlog_mb`), его дефолт выводится из свободного места минус
-измеренный резерв, а не назначается «на глаз»; при достижении краул **останавливает волну** и пишет
-видимую запись `crawl_backpressure` с этими числами. Это не потолок параллельности: останавливается
+Watermark объявлен (`crawl.extract_backlog_mb`); при достижении краул **останавливает приём** и пишет
+видимую запись `crawl_backpressure` с этими числами. Дефолт «из свободного места минус измеренный
+резерв» в F6 **не** реализован, и это открытый вопрос, а не забытая ветка: без объявленного предела
+приём не останавливается, хотя числа публикуются всегда — почему именно так, сказано в §6 (F6). Это не потолок параллельности: останавливается
 **приём**, а не вежливость, и причина названа.
 
 Почему байты, а не число элементов: сырые байты — доминирующая статья раскладки и они же дороже
@@ -252,7 +253,7 @@ edge не примет её как `workers`.
 
 * **F1. Ось без поведения.** Поле + условный ключ в `as_dict()` + `CRAWL_AXIS_DESTS`
   (`core/cli/execution_axes.py:178`) + флаги. Проверка: пин `run_id` без флага;
-  `tests/cli/test_plan_crawl_axes.py:198` зелёный; `tests/pipeline/test_corpus_write_order.py:293`
+  `tests/cli/test_plan_crawl_axes.py:198` зелёный; `tests/pipeline/test_corpus_write_order.py:320`
   не сдвинулся.
 * **F2. Краул как отдельный вход.** `hound crawl run --crawl-only`: frontier + фетч + retention +
   `FETCHED`, **без** конверсии, с публикацией `extract_queue`. Проверка: сессия `completed`,
@@ -260,7 +261,7 @@ edge не примет её как `workers`.
   (пин `corpus_write_order`).
 * **F3. Порядко-независимые артефакты — сделана, двумя полосами.**
   **A — порядок и бюджет.** `Frontier` стал двоичной кучей с ключом `(depth, url)`
-  (`core/pipeline/crawl_frontier.py:948`), а ревалидация известных URL — **отдельной** кучей:
+  (`core/pipeline/crawl_frontier.py:977`), а ревалидация известных URL — **отдельной** кучей:
   в общей при исчерпанном бюджете узел discovery с меньшим ключом навсегда закрыл бы её голову,
   хотя ревалидация бюджет не расходует (09 §6.3). Бюджет `max_documents` решается **на изъятии**,
   а не на постановке: `discover`/`add_seed` ставят всё, что проходит scope/блэклист/глубину/дедуп
@@ -272,7 +273,7 @@ edge не примет её как `workers`.
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:537`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:538`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:166`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,
@@ -414,6 +415,67 @@ edge не примет её как `workers`.
   Проверка: T7, T8 + «W=1 и W=4 дают одинаковый корпус» (расширение T3). Не измерено до F8:
   память Pass B при W>1 — `ProductIngest` держит продукт целиком, пик растёт с числом
   продуктов в полёте, а не документов.
+  **Сделана.** Аренда — `core/pipeline/extract_queue.py`: `claim` (`pending → claimed`
+  условным `UPDATE` с `expect=PENDING`, `False` — работу забрал другой, и это не ошибка),
+  `heartbeat` (узкий `UPDATE` `heartbeat_at`, не трогающий `state_changed_at` — иначе колонка
+  «когда состояние изменилось» отвечала бы неправду), `reclaim_stale` (просроченные аренды
+  → `pending`, `attempts += 1`, каждая названа: `product/url`, кто держал, исчерпано ли).
+  Потребитель (`core/pipeline/extract_consume.py`) берёт аренду перед работой, продлевает её
+  между срезами ожидания (`_Lease` ← `future.result(timeout=срез)`), а закрывает строку
+  `expect=CLAIMED` + `expect_claimed_by=<воркер>`: просроченную и уже отданную другому аренду
+  закрыть нельзя, иначе `done` описывал бы чужую работу.
+
+  Операционные константы опубликованы и выведены из замера, а не назначены: аренда **3600 с**
+  (вдвое больше самого дорогого измеренного документа — 1200 страниц по 1.49 с/стр
+  `layout_tables` на CPU, `docs/reports/measurements/2026-10-28-gpu-vs-cpu-extraction.md`),
+  heartbeat **1200 с** (втрое чаще аренды: один пропущенный tick не делает живого мёртвым),
+  попыток **3** (исчерпание — терминальный `failed` + `error_kind=attempts_exhausted`, повтор
+  только явной командой), ожидание backpressure **300 с** с опросом **5 с**. Ни одна из них не
+  входит в `CrawlLimits.as_dict()`: они решают, **кто** доработает строку, а не **что**
+  попадёт в корпус.
+
+  CLI — `core/cli/commands/extract.py`: `hound extract consume --session|--run-id [--product]
+  [--json]` запускает **ту же** фазу корпуса в режиме `consume_only` (сеть не трогается: планов
+  корней ноль, SERP/ревалидация выключены) и печатает **её** отчёт; второй реализации
+  конверсии нет. Частичный исход (строки остались незакрытыми или легли `failed`) —
+  `EXIT_ERROR`, а не «ok»; нет сеанса или очередь пуста — `EXIT_OK` с честным текстом.
+
+  Backpressure — `extract_queue.wait_for_backlog` в голове каждой волны
+  (`corpus_drain._await_backlog`): пауза **фазовая**, а не корневая, потому что бэклог общий
+  для продуктива и корневая пауза ждала бы не тот бэклог. Публикуются числа: `backlog_bytes`
+  (Σ размеров retained-файлов строк `pending`+`claimed`), `backlog_files`, `backlog_missing`
+  (строки, чей файл не найден — нарушение I19, печатается только при ≠0), `queue_rows`,
+  `free_bytes` (`shutil.disk_usage` носителя retention), `backlog_limit_bytes`, `waited_s`,
+  `gave_up`. По истечении терпения приём останавливается **видимо**:
+  `frontier.mark_truncated("extract_backlog_full")`, строка `crawl_backpressure: …` в
+  `phase.errors`, сеанс `partial` — без исключения.
+
+  **Дефолта у watermark'а нет — это открытый вопрос, а не забытая ветка.** §4.3 требует
+  «дефолт из свободного места минус измеренный резерв»; реализация объявляет только ось
+  (`--extract-backlog` / `crawl.extract_backlog_mb`, входит в digest при объявлении: якорь
+  `2396d2a57455` не сдвигается, `--extract-backlog 512` даёт `3b8033921847`), и без
+  объявления приём не останавливается, хотя `backlog_bytes`/`free_bytes` публикуются всегда.
+  Причина расхождения названа прямо: дефолт из свободного места — это условие измерения,
+  выведенное из хоста (§9, A3), если он входит в `as_dict()`, и потолок «на глаз», если
+  резерв назван без замера. Решение — за владельцем: либо объявленный резерв (тогда число
+  публикуется рядом с `free_bytes` и остаётся операционным, как окно воркеров), либо
+  отсутствие дефолта, как сейчас.
+
+  Замер попытки: `crawl_session_items.fetch_started_at`/`fetch_ms` пишет fetch-коммит
+  (`local_fetch`/`fetch_and_commit`), а не коммит результата — коммит идёт FIFO и ждёт чужих
+  исходов, его время было бы расписанием пула, а не фетчем. На resume/`304`/отказе до сети —
+  `None` («не наблюдалось», а не «ноль»); перенос значения разрешён только той же попытке,
+  поэтому `hound extract consume` таймер фетча не обнуляет.
+
+  Тесты: T11 `test_claim_is_exclusive`, T7 `test_crawl_completes_while_consumer_is_slow`,
+  T8 `test_backpressure_is_visible_not_silent` (запись + `extract_backlog_full` + сеанс
+  `partial`), `test_second_consumer_does_not_convert_claimed_rows`,
+  `test_stale_claim_is_reclaimed_with_visible_record`, `test_exhausted_attempts_are_terminal`,
+  `test_heartbeat_keeps_a_long_document_alive`, `test_window_size_does_not_change_the_corpus`
+  (W=1 vs W=4 — тот же корпус), `tests/cli/test_extract_consume.py` (CLI = фаза: те же
+  `(url, content_hash)` и тот же `partition_build_id`, что у полного `run`). Колонки легли
+  одним bump'ем `SCHEMA_VERSION` 3.14.0 → **3.15.0**; старые run-DB отвергаются гейтом
+  `SchemaVersionMismatch` (`EXIT_USAGE`) — ожидаемо, шимов нет.
 * **F7. Шарды и узлы.** `host_shard` в провенансе; реестр шардов — объявленный
   `deploy.yaml: crawl.shards` (§2); disjoint-проверка при старте (пересечение
   шардов — `EXIT_USAGE`, иначе два узла стучатся в один host). Проверка: T9, T10.

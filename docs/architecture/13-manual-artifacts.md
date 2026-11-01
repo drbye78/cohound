@@ -197,7 +197,7 @@ robots остаётся в аудите.
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **Сегодня его нет.** Провалы фетчей попадают в отчёт только агрегатами
-(`core/domain/models.py:1502` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1252-1257`
+(`core/domain/models.py:1510` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1252-1257`
 — движки в шапке; `core/pipeline/report.py:1684-1724` — `blocked = {error_kind: count}` и
 `unreadable_origins` от `derive_corpus_coverage`). Ни URL, ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через

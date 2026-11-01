@@ -15,7 +15,7 @@ RSS 2.8 GB, `corpus_docs` = 56 (только первый продукт), `corp
 Точка в коде:
 
 ```python
-# core/pipeline/corpus.py:436
+# core/pipeline/corpus.py:437
 vectors = embedder.embed([c.text for c in chunks])
 ```
 

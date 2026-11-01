@@ -243,7 +243,7 @@ per-site (`core/pipeline/crawl_frontier.py:604-609`) — два уровня о�
   `core/domain/models.py:491`), дефолт `None` — по той же причине, что у `pdf_device`
   (`:543-549`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
-  что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:323-342`).
+  что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:332-342`).
 - Резолвер: `resolve_embed_device(app, run)` — копия `resolve_pdf_device` без site-слагаемого.
   Дефолт `cpu`, значения только `cpu|cuda`, `auto` **нет** (R5: объявленная ось обязана
   действовать). Enum `EmbedDevice` — в `core/domain/enums.py` рядом с `PdfDevice` (`:531-552`).
