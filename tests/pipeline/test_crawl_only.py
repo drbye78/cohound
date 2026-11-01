@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import pathlib
 from pathlib import Path
 from typing import Any
 
@@ -160,8 +161,8 @@ class _Extractor:
     ) -> ExtractedDoc:
         self.calls += 1
         return ExtractedDoc(
-            text=page.content.decode("utf-8", errors="replace"),
-            content_hash=content_hash(page.content),
+            text=_page_bytes(page).decode("utf-8", errors="replace"),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=1,
         )
@@ -370,9 +371,17 @@ def test_full_run_still_builds_corpus(tmp_path: Path) -> None:
         assert len(list(store.iter_corpus_docs(RUN_ID))) > 0
         assert build.doc_count > 0
         assert extractor.calls > 0
-        # Полный прогон обязан остаться прежним: очередь конверсии — предмет F5,
-        # а не побочный эффект обычной сборки.
-        assert store.count_extract_queue(SESSION_ID) == {}
+        # F5: очередь — не побочный эффект, а **единственный** путь конверсии, поэтому
+        # после полного прогона она существует и пуста по работе: каждая строка
+        # терминальна (``done``), и её число — число добытых документов.
+        counts = store.count_extract_queue(SESSION_ID)
+        assert set(counts) == {"done"}, counts
+        assert counts["done"] == len(list(store.iter_crawl_session_items(SESSION_ID)))
+        rows = list(store.iter_extract_queue(SESSION_ID))
+        docs = {doc.url for doc in store.iter_corpus_docs(RUN_ID)}
+        # Документ корпуса есть по каждому адресу строки: «done» не врёт (F5, §4.1).
+        assert {row.url for row in rows} <= docs
+        assert all(row.content_hash and row.raw_path for row in rows)
     finally:
         store.close()
 
@@ -426,3 +435,136 @@ def test_crawl_only_requires_session(tmp_path: Path) -> None:
             )
     finally:
         store.close()
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""
+
+
+# --------------------------------------------------------------------------- #
+# (5) T6 (17 §7.1): crawl-only и полный прогон дают один и тот же краул
+# --------------------------------------------------------------------------- #
+
+
+def test_crawl_only_equals_full_run_crawl_part(tmp_path: Path) -> None:
+    """Краул-часть полного прогона совпадает с ``crawl_only`` — по содержимому.
+
+    F5 сделал очередь **единственным** hand-off'ом: ``crawl_only`` — это тот же путь
+    без вызова потребителя. Поэтому сравниваются наблюдаемые факты краула: элементы
+    сеанса, строки очереди и retained-байты (плюс состав корпуса, который из них
+    следует), а не физическая раскладка партиции — её порядок задаёт расписание
+    потребителя, и он проверяется отдельно (``test_extract_consumer.py``).
+
+    Идентичность сборки (``index_build_id``/``partition_build_id``) — функция этого же
+    краул-набора: второй полный прогон на тех же страницах обязан дать её же.
+    """
+    stores = {"crawl": SqliteStore(":memory:"), "full": SqliteStore(":memory:"), "again": SqliteStore(":memory:")}
+    try:
+        crawl_result = _build(
+            tmp_path / "crawl",
+            stores["crawl"],
+            _Crawler(_two_host_pages()),
+            _Extractor(),
+            _Chunker(),
+            crawl_only=True,
+        )
+        full_result = _build(
+            tmp_path / "full",
+            stores["full"],
+            _Crawler(_two_host_pages()),
+            _Extractor(),
+            _Chunker(),
+            crawl_only=False,
+        )
+        again_result = _build(
+            tmp_path / "again",
+            stores["again"],
+            _Crawler(_two_host_pages()),
+            _Extractor(),
+            _Chunker(),
+            crawl_only=False,
+        )
+
+        def crawl_part(store: SqliteStore) -> dict[str, Any]:
+            # ``doc_hash`` намеренно **не** входит: это носитель ключа дедупа, который
+            # пишет конверсия (``ingest_one``), а не краул. T6 сравнивает краул-часть
+            # ``(url, content_hash, raw_path)``; ключ дедупа — свойство корпуса и
+            # проверяется ниже, в сравнении ``docs``/``queued``.
+            items = [
+                (
+                    item.product_id,
+                    item.url,
+                    item.status,
+                    item.content_hash,
+                    pathlib.Path(item.raw_path or "").name,
+                    item.fetch_mode,
+                    item.extract_route,
+                    item.content_type,
+                    item.engine,
+                )
+                for item in store.iter_crawl_session_items(SESSION_ID)
+            ]
+            rows = [
+                (
+                    row.product_id,
+                    row.url,
+                    row.content_hash,
+                    pathlib.Path(row.raw_path or "").name,
+                    row.fetch_mode,
+                    row.extract_route,
+                    row.content_type,
+                    row.engine,
+                    row.level,
+                    row.pdf_pipeline,
+                )
+                for row in store.iter_extract_queue(SESSION_ID)
+            ]
+            return {"items": items, "rows": rows}
+
+        crawl_only_part = crawl_part(stores["crawl"])
+        full_part = crawl_part(stores["full"])
+        # Краул-часть одна и та же: очередь — передача, а не второй краул.
+        assert crawl_only_part["items"] == full_part["items"]
+        assert crawl_only_part["rows"] == full_part["rows"]
+        # В crawl_only очередь не терминальна (конверсии не было), в полном — терминальна.
+        assert {row.state for row in stores["crawl"].iter_extract_queue(SESSION_ID)} == {
+            ExtractQueueState.PENDING
+        }
+        assert {row.state for row in stores["full"].iter_extract_queue(SESSION_ID)} == {
+            ExtractQueueState.DONE
+        }
+        assert crawl_result.errors == [] and full_result.errors == []
+
+        # Содержимое корпуса = содержимое очереди: done не врёт.
+        docs = {
+            (doc.url, doc.content_hash)
+            for doc in stores["full"].iter_corpus_docs(RUN_ID)
+        }
+        queued = {(url, content_hash) for _p, url, content_hash, *_rest in full_part["rows"]}
+        assert docs == queued
+
+        # Идентичность сборки зависит от этого краул-набора, а не от прогона.
+        first_build = _build_of(full_result)
+        again_build = _build_of(again_result)
+        assert again_build.index_build_id == first_build.index_build_id
+        assert [
+            (entry.product_id, entry.partition_build_id) for entry in again_build.entries
+        ] == [
+            (entry.product_id, entry.partition_build_id) for entry in first_build.entries
+        ]
+        assert again_build.doc_count == first_build.doc_count
+        assert again_build.chunk_count == first_build.chunk_count
+    finally:
+        for store in stores.values():
+            store.close()

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1059,7 +1060,7 @@ def test_build_extraction_pool_split_thread_pool(tmp_path: Path) -> None:
             self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
         ) -> ExtractedDoc:
             # Контракт порта: байты — либо в content, либо по source_path (retained-файл).
-            data = page.content or Path(page.source_path or "").read_bytes()
+            data = _page_bytes(page) or Path(page.source_path or "").read_bytes()
             return ExtractedDoc(
                 text=data.decode("utf-8", errors="replace"),
                 content_hash=content_hash(data),
@@ -1239,7 +1240,7 @@ class _PidExtractor:
 
         return ExtractedDoc(
             text=str(os.getpid()),
-            content_hash=content_hash(page.content),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=1,
         )
@@ -1397,3 +1398,18 @@ def test_engine_log_reports_default_fallback(
     assert event["ctx"]["sources"] == ["default"]
     assert "http" in event["message"]
     assert "default" in event["message"]
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

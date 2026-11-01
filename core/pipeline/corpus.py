@@ -158,7 +158,6 @@ import contextlib
 import datetime as _dt
 import json
 import time
-from collections import deque
 from collections.abc import (
     Callable,
     Generator,
@@ -196,7 +195,13 @@ from core.domain import (
     RunProductStatus,
     RunScope,
 )
-from core.pipeline import corpus_commit, corpus_drain, corpus_driver, corpus_ingest
+from core.pipeline import (
+    corpus_commit,
+    corpus_drain,
+    corpus_driver,
+    corpus_ingest,
+    extract_consume,
+)
 from core.pipeline.artifacts_gap import write_artifacts_gap
 from core.pipeline.composition import (
     CompositionView,
@@ -213,7 +218,7 @@ from core.pipeline.composition import (
 # имя через границу модуля — дефект (L1, ``wiring.py``). Оба модуля — листья (``corpus`` они
 # не импортируют), поэтому цикла нет: ``corpus_commit`` импортирует ``corpus_ingest``, но не
 # наоборот.
-from core.pipeline.corpus_commit import PendingExtract, PhaseLifecycle, RootDrain
+from core.pipeline.corpus_commit import PhaseLifecycle
 
 # L2: расчёт/персистенция покрытия и статуса продукта вынесены в свой модуль. Здесь
 # остаются имена, которые этот модуль читает сам, и публичный ``derive_corpus_coverage``
@@ -229,14 +234,8 @@ from core.pipeline.corpus_coverage import (  # noqa: F401
     derive_corpus_coverage,
 )
 
-#: L5 шаг 3: доводка члена контейнера и класс терминального отказа попыток вынесены в
-#: ``corpus_drain``. Алиасы — не удобство: ``tests/pipeline/test_corpus_descent.py``
-#: подменяет ``corpus._ingest_member_doc``, и вызов обязан идти через атрибут **этого**
-#: модуля (параметр ``ingest_member_doc`` читается из глобала в точке вызова).
+#: L5 шаг 3: класс терминального отказа попыток вынесен в ``corpus_drain``.
 from core.pipeline.corpus_drain import _MAX_ATTEMPTS_ERROR_KIND  # noqa: F401
-from core.pipeline.corpus_drain import (  # noqa: F401
-    ingest_member_doc as _ingest_member_doc,
-)
 
 # L3: идентичность сборки и эмбеддинг продукт-партиции вынесены в свой модуль.
 # ``EMBED_BATCH_CHUNKS`` остаётся реэкспортом: это **публичное** имя модуля-владельца, и
@@ -294,6 +293,14 @@ from core.pipeline.crawl_sources import (
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
 
+#: F5 (17 §4.1): конверсия — работа потребителя очереди, а не краула. Доводка члена
+#: контейнера живёт в ``extract_consume``; алиас — не удобство:
+#: ``tests/pipeline/test_corpus_descent.py`` подменяет ``corpus._ingest_member_doc``, и
+#: вызов обязан идти через атрибут **этого** модуля (параметр ``ingest_member_doc``
+#: читается из глобала в точке создания носителя).
+from core.pipeline.extract_consume import ingest_member_doc as _ingest_member_doc  # noqa: F401
+from core.pipeline.extract_queue import ExtractQueue
+
 # L1: runtime экстракции вынесен в свой модуль. Здесь остаются имена, которые этот модуль
 # читает сам (``_EXTRACT_MAX_POOL_REBUILDS``, ``_ExtractPools``, ``ExtractionPool``), и
 # публичный ``set_worker_extractor``: его адресуют тесты по ``corpus`` (``noqa: F401``).
@@ -309,7 +316,7 @@ from core.pipeline.manual_artifacts import (
     ManualArtifacts,
 )
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
-from core.pipeline.runner import PhaseResult, sorted_error_lines
+from core.pipeline.runner import PhaseResult, PhaseStatus, sorted_error_lines
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_executor import (
@@ -1884,41 +1891,18 @@ def _build_corpus(
 
     emit()
 
-    # --- C1/L1: фазовый пул и FIFO-очередь экстракции ------------------------- #
-    # Пул создаётся лениво на ключ ``(level, window)`` и живёт до ``finally`` фазы
-    # (обёртка :func:`build_corpus`), а не на seed-root. Очередь доводки — тоже фазовая:
-    # хвост корня, не способный расширить свой frontier, доводится во время фетча
-    # следующего корня, а не блокирует его.
-    extract_pending: deque[PendingExtract] = deque()
-    #: Корни с недоведённым хвостом — в порядке дренажа (порядок провенанса сохраняется).
-    extract_finalizers: deque[RootDrain] = deque()
+    # --- F5 (17 §4.1): очередь конверсии ------------------------------------- #
+    # Краул больше не конвертирует: документ становится строкой очереди, а зонд/спуск/
+    # извлечение/нарезка — работа :func:`core.pipeline.extract_consume.consume` на границе
+    # продукта (после дренажа всех его корней, до Pass B). При активном сеансе очередь
+    # durable (``extract_queue``), без сеанса — в памяти процесса; носитель один и тот же.
+    conversion_queue = ExtractQueue(store=store, session_id=session)
+    #: Пул экстракции создаётся лениво на ключ ``(level, pdf_pipeline, window)`` и живёт до
+    #: ``finally`` фазы (обёртка :func:`build_corpus`), а не на seed-root.
     #: Бакеты стадий **текущего** продукта (наблюдаемость, не контракт). Объявлены здесь, а
-    #: не в цикле продуктов, потому что closures ниже (``_submit_collect``/``_finish_extract``)
-    #: видят переменную ячейкой; цикл обнуляет тот же объект (:meth:`_CorpusStageTimings.reset`).
+    #: не в цикле продуктов, потому что closures ниже видят переменную ячейкой; цикл
+    #: обнуляет тот же объект (:meth:`_CorpusStageTimings.reset`).
     timings = _CorpusStageTimings()
-    _finish_extract = partial(
-        corpus_commit.finish_extract,
-        pools=pools,
-        errors=errors,
-        timings=timings,
-        extract_timeout=_extract_timeout,
-        extract_pending=extract_pending,
-        extract_finalizers=extract_finalizers,
-    )
-    _finalize_ready_roots = partial(
-        corpus_commit.finalize_ready_roots,
-        extract_finalizers=extract_finalizers,
-    )
-    _recover_extract_pool = partial(
-        corpus_commit.recover_extract_pool,
-        pools=pools,
-        errors=errors,
-    )
-    _abort_extract_pending = partial(
-        corpus_commit.abort_extract_pending,
-        extract_pending=extract_pending,
-        extract_finalizers=extract_finalizers,
-    )
 
 
     # D3: sitemap разворачивается через ``PollPort(kind="sitemap")`` (local in-process ‖
@@ -1950,6 +1934,11 @@ def _build_corpus(
     # ``(product, seed-root)``; флаг/продукты уходят в провенанс сеанса и ``IndexBuild``.
     truncation_records: list[dict[str, Any]] = []
     truncated_products: set[str] = set()
+    #: F5: продукты, у которых очередь конверсии осталась незакрытой. Это не «изолированная
+    #: ошибка»: корпус продукта не полон, и фаза обязана вернуть ``failed`` (иначе
+    #: ``evaluate`` пошёл бы по неполному предмету, а гейтовый ``subject_digest`` был бы
+    #: снят с незрелого корпуса).
+    corpus_not_converted: set[str] = set()
     # L5: мутабельное состояние фазы — ровно те имена, что раньше текли через
     # ``nonlocal`` (накопители и флаги шага; смысл каждого поля — в
     # :class:`core.pipeline.corpus_state.CorpusCounters`). Один экземпляр на вызов:
@@ -2146,26 +2135,13 @@ def _build_corpus(
         # тест ``test_split_round_budget_valve_truncates`` подменяет его атрибутом
         # ``corpus``, и подмена обязана попасть в носитель.
         max_waves=_EXECUTOR_MAX_WAVES_PER_ROOT,
-        worker_rss_dir=worker_rss_dir,
-        extraction_pool=extraction_pool,
-        extract_cache=extract_cache,
-        extractor=extractor,
-        extractor_factory=extractor_factory,
         executor=executor,
-        pools=pools,
-        extract_pending=extract_pending,
-        extract_finalizers=extract_finalizers,
-        extract_timeout=_extract_timeout,
         counters=counters,
         timings=timings,
         scope_hosts_by_product=scope_hosts_by_product,
         sitemap_seed_used=sitemap_seed_used,
         document_skips=document_skips,
-        artifact_probes=artifact_probes,
-        archive_observations=archive_observations,
-        corpus_member_rows=corpus_member_rows,
-        # 17 §4 (F2): режим «краул без конверсии» + адрес durable-очереди.
-        crawl_only=crawl_only,
+        queue=conversion_queue,
         session_id=session,
     )
     #: Замкнутые операции фазы (их сигнатуры держат этот модуль и тесты — носитель их
@@ -2179,15 +2155,39 @@ def _build_corpus(
         submit_collect=_submit_collect,
         work_item=_work_item,
         resolve_target=_resolve_target,
+        fresh_sitemap_seeds=_fresh_sitemap_seeds,
+        limits_for=_limits_for_url,
+    )
+    #: F5: фазовый носитель потребителя очереди. Пул/кэш/экстрактор — те же объекты, что
+    #: у фазы: второй экземпляр конвертера означал бы второй ``extractor_version``.
+    _consume_scope = extract_consume.ConsumerScope(
+        errors=errors,
+        store=store,
+        run_id=run_id,
+        chunker=chunker,
+        container_for=container_for,
+        extractor=extractor,
+        extractor_factory=extractor_factory,
+        extraction_pool=extraction_pool,
+        extract_cache=extract_cache,
+        pools=pools,
+        extract_timeout=_extract_timeout,
+        worker_rss_dir=worker_rss_dir,
+        counters=counters,
+        timings=timings,
+        artifact_probes=artifact_probes,
+        archive_observations=archive_observations,
+        corpus_member_rows=corpus_member_rows,
+        limits_for=_limits_for_url,
+    )
+    _consume_operations = extract_consume.ConsumerOperations(
+        mark=_mark,
         reuse_for_page=_reuse_for_page,
         ingest_one=_ingest_one,
         finish_one=_finish_one,
-        finish_extract=_finish_extract,
-        fresh_sitemap_seeds=_fresh_sitemap_seeds,
-        limits_for=_limits_for_url,
-        note_scheduling=_note_scheduling,
         ingest_member_doc=_ingest_member_doc,
         persist_docs=_persist_docs,
+        note_scheduling=_note_scheduling,
     )
 
     def _begin_root(
@@ -2250,7 +2250,6 @@ def _build_corpus(
         store: Any,
         session: str | None,
         errors: list[str],
-        extract_finalizers: deque[RootDrain],
     ) -> None:
         """Провенанс завершённого корня — в **свой** слот, а не в конец списка (F4b).
 
@@ -2263,19 +2262,15 @@ def _build_corpus(
 
         **Почему параметры, а не замыкание.** Функция объявлена один раз на фазу, а
         продуктные значения приходят ``partial``-ом, собранным в итерации продукта:
-        захват переменных цикла сделал бы отложенный финализатор (он живёт в
-        ``extract_finalizers`` и вызывается **позже** — после доводки хвоста) читателем
-        чужого продукта.
+        захват переменных цикла сделал бы отложенный вызов читателем чужого продукта.
         """
         root = outcome.plan
-        _finalize_root = partial(
-            corpus_commit.finalize_root,
-            pid=product_id,
-            root_url=root.root_url,
-            frontier=outcome.frontier,
-            sitemap_skips=outcome.sitemap_skips,
-            record_slot=root.record_slot,
-            known_urls=root.known_urls,
+        corpus_commit.finalize_root(
+            product_id,
+            root.root_url,
+            outcome.frontier,
+            outcome.sitemap_skips,
+            root.known_urls,
             all_revalidation_groups=all_revalidation_groups,
             cap_fired=cap_fired,
             deferred_by_root=deferred_by_root,
@@ -2286,15 +2281,8 @@ def _build_corpus(
             store=store,
             session=session,
             errors=errors,
+            record_slot=root.record_slot,
         )
-
-        if outcome.drain.pending:
-            # C1: хвост отложен в фазовую очередь — провенанс посчитается, когда
-            # он будет доведён (фетч следующего корня уже не ждёт экстракции).
-            outcome.drain.finalize = _finalize_root
-            extract_finalizers.append(outcome.drain)
-        else:
-            _finalize_root()
 
 
     def _author_root_plans(
@@ -2667,6 +2655,15 @@ def _build_corpus(
             phase=_phase_scope,
             operations=_phase_operations,
         )
+        #: F5: тот же накопитель и те же дедуп-множества — но для потребителя очереди.
+        #: Два объекта с разными списками означали бы «краул писал в один, конверсия в
+        #: другой», то есть пустой корпус при непустой очереди.
+        _consume_product = extract_consume.ProductScope(
+            pid=product_id,
+            ingest=ingest,
+            seen_docs=seen_docs,
+            seen_chunk_ids=seen_chunk_ids,
+        )
 
         #: Корни, реально дренированные в этом продукте (для leftover-групп каталогов).
         drained_roots: set[str] = set()
@@ -2749,11 +2746,12 @@ def _build_corpus(
                 store=store,
                 session=session,
                 errors=errors,
-                extract_finalizers=extract_finalizers,
             ),
-            # Teardown: очередь экстракции отбрасывается штатным путём фазы — in-flight
-            # задания получают видимый ``FAILED``, а не теряются вместе с исключением.
-            abort=_abort_extract_pending,
+            # Teardown: durable-факт «документ добыт» не отбрасывается — прерывание краула
+            # называет, сколько строк очереди конверсии осталось ``pending``.
+            abort=partial(
+                _note_interrupted_queue, queue=conversion_queue, errors=errors
+            ),
             label=f" {product_id}",
         )
 
@@ -2766,8 +2764,8 @@ def _build_corpus(
                 continue
             frontier: Frontier | None = None
             if known_urls:
-                # C1: synthetic-бакет — вызывающий читает счётчики frontier сразу,
-                # поэтому хвост доводится здесь же (``defer_tail=False``).
+                # synthetic-бакет: вызывающий читает счётчики frontier сразу, а
+                # хвоста конверсии у корня больше нет (F5) — доводить нечего.
                 frontier = corpus_driver.drain_one(
                     corpus_drain.RootPlan(
                         root_url=group_root,
@@ -2775,7 +2773,6 @@ def _build_corpus(
                         sitemap_seeds=False,
                         known_urls=known_urls,
                         seed=False,
-                        defer_tail=False,
                     ),
                     begin=_root_begin,
                     lane_width=_lane_width,
@@ -2819,7 +2816,7 @@ def _build_corpus(
             selected_urls = orphan_buckets.get(origin, ())
             frontier: Frontier | None = None
             if selected_urls:
-                # C1: synthetic-бакет — хвост доводится здесь же (``defer_tail=False``).
+                # synthetic-бакет: хвоста конверсии у корня больше нет (F5).
                 frontier = corpus_driver.drain_one(
                     corpus_drain.RootPlan(
                         root_url=origin,
@@ -2827,7 +2824,6 @@ def _build_corpus(
                         sitemap_seeds=False,
                         known_urls=selected_urls,
                         seed=False,
-                        defer_tail=False,
                     ),
                     begin=_root_begin,
                     lane_width=_lane_width,
@@ -2861,15 +2857,34 @@ def _build_corpus(
             revalidation_orphan_total += len(all_known_urls)
             if frontier is not None:
                 counters.revalidation_fetched_total += frontier.revalidation_fetched
-            # Targets известных URL резолвятся лениво в ``_drain_root``
+            # Targets известных URL резолвятся лениво в корневом цикле
             # (``_resolve_target``) — предварительная резолюция не нужна.
 
-        # C1: хвосты экстракции продукта обязаны быть доведены до расчёта провенанса
-        # (``truncation_records``/``counters.pages_fetched_total``/финализаторы корней). Пул —
-        # фазовый, поэтому здесь же доводятся хвосты всех корней продукта (FIFO).
-        while extract_pending:
-            _finish_extract(extract_pending.popleft())
-        _finalize_ready_roots()
+        # F5 (17 §4.1): конверсия продукта — работа потребителя очереди, и она идёт
+        # **после** дренажа всех корней продукта (краул и конверсия разведены по
+        # владельцу) и **до** Pass B (документы входят в ту же сборку, I19). Продукт
+        # закрывается целиком: незакрытая строка очереди означает недостроенный корпус, и
+        # фаза не вправе объявить ``ok`` (иначе ``evaluate`` пошёл бы по неполному
+        # предмету).
+        conversion = (
+            None
+            if crawl_only
+            else extract_consume.consume(
+                session,
+                [product_id],
+                queue=conversion_queue,
+                scope=_consume_scope,
+                operations=_consume_operations,
+                products={product_id: _consume_product},
+            )
+        )
+        if conversion is not None and conversion.pending:
+            errors.append(
+                f"{product_id}: конверсия очереди не завершена — строк без терминального "
+                f"состояния {conversion.pending} (done={conversion.done}, "
+                f"failed={conversion.failed}); корпус продукта не полон"
+            )
+            corpus_not_converted.add(product_id)
         # -- 13-manual-artifacts §3: подача объявленных файлов оператора ---------- #
         # Порядок важен: **после** дренажа (отказы краула уже в элементах сеанса —
         # иначе аннотировать нечего) и **до** Pass B (документы входят в ту же сборку,
@@ -3131,7 +3146,16 @@ def _build_corpus(
         # этого** продукта (``pb`` продукт-скоупед, I17), поэтому перенос в цикл не
         # меняет ни один ``pb``; ``composition_id`` по-прежнему выводится после всех
         # продуктов (он зависит от состава когорты).
-        product_chunks = ingest.chunks
+        # F5: вход Pass B приводится к каноническому порядку ``(product_id, url,
+        # chunk_no)``. Очередь отдаёт строки в этом порядке, но **расписание** доводки
+        # оконное: чанки попадают в ``ingest.chunks`` по мере того, как их документы
+        # доходят. Порядок обязан быть функцией **содержимого**, иначе два прогона с
+        # одинаковым составом дали бы разный порядок сборки, и сравнение артефактов
+        # показывало бы расписание (та же причина, что у ``canonicalize_doc_urls`` F3).
+        product_chunks = sorted(
+            ingest.chunks,
+            key=lambda chunk: (chunk.product_id, chunk.url, chunk.chunk_no),
+        )
         # F0: распределение чанков на документ — из **уже посчитанных** данных продукта
         # (``ingest.docs``/``ingest.chunks``). Никаких SQL-запросов на документ: чанки и
         # документы в памяти именно на этой границе, дальше они уходят в персистенцию.
@@ -3813,8 +3837,12 @@ def _build_corpus(
             stage_timings=_stage_timings_aggregate(stage_timings_rows),
         )
     )
+    # F5: незакрытая очередь конверсии — это не «изолированная ошибка», а неполный
+    # корпус: ``evaluate`` по такому предмету дал бы ложные ``❌``. ``failed`` останавливает
+    # прогон (``Runner``), и это намеренно: «не прошло» — валидный исход.
+    corpus_status: PhaseStatus = "failed" if corpus_not_converted else "ok"
     return PhaseResult(
-        status="ok",
+        status=corpus_status,
         phase="corpus",
         cells=[],
         log_entries=log_entries,
@@ -3830,6 +3858,30 @@ def _build_corpus(
         # (запись конца фазы несёт ``pending``/``pending_items``).
         pending=zero_source_pending,
     )
+
+
+def _note_interrupted_queue(
+    reason: str, *, queue: ExtractQueue, errors: list[str]
+) -> None:
+    """Teardown прерванного краула: назвать, сколько строк конверсии осталось ``pending``.
+
+    **Почему не «отбросить очередь».** Строка очереди — durable-факт «документ добыт»
+    (I19: байты уже в ``corpus_raw``), а не эфемерное задание. Прерывание прогона его не
+    отменяет: следующий запуск доработает строку по тому же адресу. Поэтому teardown
+    обязан **назвать число**, а не притвориться, что работы не было: иначе «краул
+    прерван» читалось бы как «конверсия закончена».
+
+    Собственных ошибок хук не пишет: причина прерывания уже названа драйвером
+    (``crawl-драйвер: … — прервано корней без исхода N``), а число — факт очереди,
+    который публикуется здесь же.
+    """
+    pending = queue.pending()
+    if pending:
+        errors.append(
+            f"extract_queue: crawl прерван ({reason}); строк очереди конверсии без "
+            f"терминального состояния: {pending} — следующий запуск доработает их "
+            "по тому же адресу"
+        )
 
 
 def _finalize_interrupted_session(

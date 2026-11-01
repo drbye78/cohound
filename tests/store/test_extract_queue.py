@@ -77,28 +77,142 @@ def _item(url: str, **overrides: object) -> ExtractQueueItem:
 
 
 def test_enqueue_is_idempotent_and_keeps_consumer_state(store: SqliteStore) -> None:
-    """Повторная запись того же URL не дублирует строку и не сбрасывает состояние.
+    """Тот же факт не дублируется и не сбрасывает состояние потребителя.
 
     Иначе краул, продолживший сеанс, вернул бы ``done`` в ``pending`` и заставил
     конверсию перечитать уже собранный документ (17 §4.2).
     """
     url = "https://docs.test/a"
     store.enqueue_extract_item(_item(url))
-    store.enqueue_extract_item(_item(url, content_hash="hash-2", raw_path="other.bin"))
 
     rows = list(store.iter_extract_queue(SESSION_ID))
     assert len(rows) == 1
-    # Первая запись побеждает: адрес факта принадлежит краулу и не переписывается.
     assert rows[0].content_hash == f"hash-{url}"
     assert rows[0].state is ExtractQueueState.PENDING
 
-    # Состояние потребителя не затирается повторной записью краула.
-    store.conn.execute(
-        "UPDATE extract_queue SET state = ? WHERE session_id = ? AND url = ?",
-        (ExtractQueueState.DONE.value, SESSION_ID, url),
+    # Состояние потребителя не затирается повторной записью того же факта.
+    assert store.set_extract_state(
+        SESSION_ID, "p1", url, ExtractQueueState.DONE, expect=ExtractQueueState.PENDING
     )
     store.enqueue_extract_item(_item(url))
-    assert next(iter(store.iter_extract_queue(SESSION_ID))).state is ExtractQueueState.DONE
+    row = next(iter(store.iter_extract_queue(SESSION_ID)))
+    assert row.state is ExtractQueueState.DONE
+    assert row.content_hash == f"hash-{url}"
+
+
+def test_enqueue_with_new_bytes_replaces_address_and_reopens_row(
+    store: SqliteStore,
+) -> None:
+    """Другой ``content_hash`` того же URL — другой факт: адрес переписывается, строка снова ``pending``.
+
+    Пересобрано в F5 (17 §4.1), причина названа: потребитель строит запрос конверсии
+    **только из строки**, поэтому прежний адрес был бы единственным источником байтов.
+    Оставленный адрес означал бы «новый документ добыт, но в корпус не попадёт», а
+    ``state=done`` утверждал бы, что документ с этим ``content_hash`` в корпусе есть.
+    Инвариант прежнего теста сохранён отдельно: тот же факт состояние не сбрасывает.
+    """
+    url = "https://docs.test/a"
+    store.enqueue_extract_item(_item(url))
+    assert store.set_extract_state(
+        SESSION_ID, "p1", url, ExtractQueueState.DONE, expect=ExtractQueueState.PENDING
+    )
+
+    store.enqueue_extract_item(_item(url, content_hash="hash-2", raw_path="other.bin"))
+
+    rows = list(store.iter_extract_queue(SESSION_ID))
+    assert len(rows) == 1  # строка одна: ключ тот же
+    assert rows[0].content_hash == "hash-2"
+    assert rows[0].raw_path == "other.bin"
+    # Работа новая: строка снова ожидает потребителя, след прошлого исполнения снят.
+    assert rows[0].state is ExtractQueueState.PENDING
+    assert rows[0].claimed_by is None
+    assert rows[0].error_kind is None
+    assert rows[0].error is None
+
+
+# --------------------------------------------------------------------------- #
+# (1b) условный переход состояния (контракт потребителя)
+# --------------------------------------------------------------------------- #
+
+
+def test_set_extract_state_moves_pending_to_done(store: SqliteStore) -> None:
+    """``pending → done`` с ``expect=PENDING``: строка переходит, поля краула целы.
+
+    Переход — единственный способ, которым потребитель объявляет работу сделанной
+    (17 §4.1). Проверяется и то, чего он **не** делает: адрес retained-байтов и хеш
+    остаются фактами краула, а не переписываются потребителем.
+    """
+    url = "https://docs.test/a"
+    store.enqueue_extract_item(_item(url))
+
+    assert store.set_extract_state(
+        SESSION_ID, "p1", url, ExtractQueueState.DONE, expect=ExtractQueueState.PENDING
+    )
+
+    row = next(iter(store.iter_extract_queue(SESSION_ID)))
+    assert row.state is ExtractQueueState.DONE
+    assert row.state_changed_at is not None
+    assert row.content_hash == f"hash-{url}"
+    assert row.raw_path == "corpus_raw/p1/a.bin"
+    assert row.error_kind is None and row.error is None
+
+
+def test_set_extract_state_refuses_done_to_pending(store: SqliteStore) -> None:
+    """Возврат ``done → pending`` отвергается: ``expect=PENDING`` не совпал.
+
+    Без условия потребитель мог бы переоткрыть собранную работу (и повторно записать
+    документ), то есть переписать факт, которым не владеет. Отказ виден вызывающему:
+    ``False``, строка и метка времени не изменены.
+    """
+    url = "https://docs.test/a"
+    store.enqueue_extract_item(_item(url))
+    assert store.set_extract_state(
+        SESSION_ID, "p1", url, ExtractQueueState.DONE, expect=ExtractQueueState.PENDING
+    )
+    done = next(iter(store.iter_extract_queue(SESSION_ID)))
+    assert done.state is ExtractQueueState.DONE
+
+    assert not store.set_extract_state(
+        SESSION_ID,
+        "p1",
+        url,
+        ExtractQueueState.PENDING,
+        expect=ExtractQueueState.PENDING,
+    )
+
+    after = next(iter(store.iter_extract_queue(SESSION_ID)))
+    assert after.state is ExtractQueueState.DONE
+    assert after.state_changed_at == done.state_changed_at
+
+
+def test_set_extract_state_expect_mismatch_leaves_row_untouched(
+    store: SqliteStore,
+) -> None:
+    """Гонка двух потребителей: claim проигран — ``False`` и ни одного изменения.
+
+    ``expect=CLAIMED`` на ``pending``-строке — это claim, который не состоялся.
+    Проверяются все поля потребителя, а не только ``state``: частичная запись
+    (например, ``claimed_by`` при отказе перехода) сделала бы строку «чужой».
+    """
+    url = "https://docs.test/a"
+    store.enqueue_extract_item(_item(url))
+
+    assert not store.set_extract_state(
+        SESSION_ID,
+        "p1",
+        url,
+        ExtractQueueState.CLAIMED,
+        expect=ExtractQueueState.CLAIMED,
+        claimed_by="worker-1",
+        error_kind="parser_failed",
+        error="should not be written",
+    )
+
+    row = next(iter(store.iter_extract_queue(SESSION_ID)))
+    assert row.state is ExtractQueueState.PENDING
+    assert row.state_changed_at is None
+    assert row.claimed_by is None
+    assert row.error_kind is None and row.error is None
 
 
 # --------------------------------------------------------------------------- #
@@ -113,9 +227,13 @@ def test_count_extract_queue_reports_only_non_empty_states(
 
     store.enqueue_extract_item(_item("https://docs.test/a"))
     store.enqueue_extract_item(_item("https://docs.test/b"))
-    store.conn.execute(
-        "UPDATE extract_queue SET state = ? WHERE session_id = ? AND url = ?",
-        (ExtractQueueState.CLAIMED.value, SESSION_ID, "https://docs.test/b"),
+    assert store.set_extract_state(
+        SESSION_ID,
+        "p1",
+        "https://docs.test/b",
+        ExtractQueueState.CLAIMED,
+        expect=ExtractQueueState.PENDING,
+        claimed_by="worker-1",
     )
 
     assert store.count_extract_queue(SESSION_ID) == {"pending": 1, "claimed": 1}

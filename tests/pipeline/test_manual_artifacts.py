@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import pathlib
 from pathlib import Path
 from typing import Any
 
@@ -173,10 +174,10 @@ class _Extractor:
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
-        text = page.content.decode("utf-8", errors="replace")
+        text = _page_bytes(page).decode("utf-8", errors="replace")
         return ExtractedDoc(
             text=text,
-            content_hash=content_hash(page.content),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=1,
         )
@@ -736,3 +737,18 @@ def test_manifest_summary_without_provisions_is_empty() -> None:
         assert manual_artifacts_summary(None, RUN_ID, products=["p1"])["count"] == 0
     finally:
         store.close()
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

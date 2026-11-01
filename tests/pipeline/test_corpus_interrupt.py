@@ -23,8 +23,10 @@ per-product, чанков — нет.
 from __future__ import annotations
 
 import datetime as _dt
+import pathlib
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -148,8 +150,8 @@ class _Extractor:
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
         return ExtractedDoc(
-            text=page.content.decode("utf-8", errors="replace"),
-            content_hash=content_hash(page.content),
+            text=_page_bytes(page).decode("utf-8", errors="replace"),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=1,
         )
@@ -318,3 +320,18 @@ def test_normal_finish_is_not_overwritten_by_the_interrupt_handler(
         assert len(list(store.conn.execute("SELECT 1 FROM index_manifest"))) == 3
     finally:
         store.close()
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

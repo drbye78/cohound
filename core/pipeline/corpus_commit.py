@@ -11,8 +11,8 @@ bounded-пересборка пула. Их порядок и есть набл�
 
 **Границы.** Модуль импортирует :mod:`core.pipeline.corpus_ingest` (одно направление), но
 не ``corpus``: обратный импорт дал бы цикл. Всё, что зависит от конкретного корня
-(``frontier``, ``limits``, окно экстракции), приходит параметром — эти значения живут в
-``_drain_root`` и остаются там до шага 3.
+(``frontier``, ``limits``), приходит параметром — эти значения живут в корневом цикле и
+остаются там до шага 3.
 
 **Порядок записи не меняется.** Тела перенесены дословно; изменились только способы
 получить то, что раньше было свободной переменной замыкания. Оракул —
@@ -21,31 +21,18 @@ bounded-пересборка пула. Их порядок и есть набл�
 
 from __future__ import annotations
 
-import contextlib
 import json
-import time
-from collections import deque
-from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures.process import BrokenProcessPool
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from core.config.crawl_sources import CrawlSourcesConfig
-from core.domain import CrawlSessionItem, FailureKind
-from core.pipeline.corpus_index import _CorpusStageTimings
-from core.pipeline.corpus_ingest import looks_like_html
+from core.domain import CrawlSessionItem
 from core.pipeline.corpus_persist import _now_iso
 from core.pipeline.corpus_state import CorpusCounters
-from core.pipeline.crawl_frontier import CrawlLimits, Frontier
+from core.pipeline.crawl_frontier import Frontier
 from core.pipeline.crawl_session import finalize_session
 from core.pipeline.crawl_sources import crawl_sources_digest
-from core.pipeline.extraction_runtime import (
-    _EXTRACT_MAX_POOL_REBUILDS,
-    _ExtractPoolKey,
-    _ExtractPools,
-)
-from core.ports.types import FetchPlan, RawPage
 
 
 @dataclass
@@ -73,51 +60,6 @@ class PhaseLifecycle:
     store: Any = None
     session_id: str | None = None
     completed: bool = False
-
-
-@dataclass
-class RootDrain:
-    """C1: хвост экстракции одного seed-root в **фазовой** очереди доводки.
-
-    Пул и FIFO-очередь экстракции живут в области фазы (:func:`build_corpus`), поэтому
-    задание может быть доведено уже после возврата своего корня. ``pending`` — число
-    недоведённых заданий корня; ``finalize`` — замыкание вызывающего, которое считает
-    провенанс корня (``revalidation``/``truncation``) **после** доводки хвоста; оно
-    вызывается ровно один раз (:func:`finalize_ready_roots`), в порядке корней.
-    """
-
-    pending: int = 0
-    finalize: Callable[[], None] | None = None
-    finalized: bool = False
-
-
-@dataclass
-class PendingExtract:
-    """P4: отложенная экстракция (главный поток, FIFO-очередь доводки).
-
-    Несёт всё, что нужно финишу: реконструированный ``RawPage``, ``raw_path`` (перечитывается
-    воркером, I19), ``fetch_plan`` (ось ``extract``), флаг свежести (для ``note_fetched`` и
-    учёта ёмкости с in-flight) и ``future`` пула. Мутаций состояния сеанса/корпуса здесь нет.
-
-    C1: очередь — **фазовая**, поэтому задание несёт ``root`` (свой корень: фильтр ёмкости,
-    учёт хвоста) и ``commit`` — замыкание ``_commit_outcome`` именно своего корня. Это
-    позволяет доводить хвост корня A во время фетча корня B без потери провенанса.
-    """
-
-    pid: str
-    url: str
-    depth: int | None
-    page: RawPage
-    raw_path: Path
-    fetch_plan: FetchPlan
-    freshly_fetched: bool
-    future: Any
-    #: C1: корень задания (хвост/финализация провенанса).
-    root: RootDrain
-    #: C1: доводка исхода — ``(extracted, extract_error, failure_kind) → None``.
-    commit: Callable[[Any, str | None, FailureKind | None], None]
-    #: C1: ключ фазового пула ``(level, window)`` — учёт завершений/таймаутов и пересборка.
-    pool_key: _ExtractPoolKey
 
 
 def persist_partial_crawl_provenance(
@@ -281,136 +223,6 @@ def record_root_outcome(
     )
 
 
-def finalize_ready_roots(*, extract_finalizers: deque[RootDrain]) -> None:
-    """Вызывает финализаторы корней, чьи хвосты доведены, — строго в порядке корней."""
-    while extract_finalizers and extract_finalizers[0].pending == 0:
-        drain = extract_finalizers.popleft()
-        finalize = drain.finalize
-        if finalize is not None and not drain.finalized:
-            drain.finalized = True
-            finalize()
-
-
-def recover_extract_pool(
-    pool_key: _ExtractPoolKey,
-    label: str,
-    *,
-    pools: _ExtractPools,
-    errors: list[str],
-) -> None:
-    """Отравленный пул: discard + bounded rebuild; исчерпание — терминальный отказ.
-
-    Повторное использование мёртвого пула запрещено; авто-ретрая нет. Inline после
-    исчерпания не включается: на memory-constrained хосте docling в родителе — худший
-    режим, а тихая деградация скрыла бы дефект.
-    """
-    if pools.rebuild(pool_key):
-        return
-    errors.append(
-        f"{label}: пул экстракции {pool_key[0].value}/{pool_key[1].value}"
-        f"/W={pool_key[2]} исчерпал "
-        f"пересборки ({_EXTRACT_MAX_POOL_REBUILDS}) — остаток прогона терминально "
-        "FAILED (parser_failed), без inline-экстракции"
-    )
-
-
-def abort_extract_pending(
-    reason: str,
-    *,
-    extract_pending: deque[PendingExtract],
-    extract_finalizers: deque[RootDrain],
-) -> None:
-    """Помечает все in-flight задания (все корни) ``FAILED`` — пул мёртв.
-
-    Хвосты уже отложенных корней тоже принадлежат этому пулу, поэтому отказ получают
-    все: исход видим, а не потерян вместе с пересборкой.
-    """
-    while extract_pending:
-        item = extract_pending.popleft()
-        item.commit(None, reason, None)
-        item.root.pending -= 1
-    finalize_ready_roots(extract_finalizers=extract_finalizers)
-
-
-def finish_extract(
-    item: PendingExtract,
-    *,
-    pools: _ExtractPools,
-    errors: list[str],
-    timings: _CorpusStageTimings,
-    extract_timeout: float,
-    extract_pending: deque[PendingExtract],
-    extract_finalizers: deque[RootDrain],
-) -> None:
-    """Доводит oldest задание фазовой очереди: ``future.result`` → доводка корня (FIFO).
-
-    P4/C1: ``BrokenProcessPool`` — воркер умер (краш/OOM): все in-flight → ``FAILED``,
-    пул discard+rebuild (bounded) либо терминальный отказ. Таймаут — **per-artifact**:
-    терминально помечается только это задание (``extraction_timeout``), пул продолжает
-    работу; пересборка — только если пул не дал ни одного завершения за ``2 × timeout``
-    (:meth:`_ExtractPools.note_timeout`).
-
-    Наблюдаемость: время ``future.result()`` (включая таймаут и смерть воркера) идёт в
-    ``timings.extract_wait_s`` — это **ожидание** главного потока, а не работа: при окне
-    ``extract_workers > 1`` оно включает и чужие задания, поэтому окно публикуется рядом.
-    """
-    try:
-        _wait_started = time.perf_counter()
-        try:
-            extracted = item.future.result(timeout=extract_timeout)
-        finally:
-            # ``extract_wait_s`` — **ожидание** экстракции на главном потоке (в т.ч. при
-            # таймауте/сбое воркера). При окне > 1 включает ожидание чужих заданий:
-            # рядом публикуется фактическое окно (``extract_workers``).
-            timings.extract_wait_s += time.perf_counter() - _wait_started
-    except TimeoutError:
-        # C1: зависший артефакт инвалидируется точечно; пул (и его здоровые воркеры)
-        # продолжает работу. ``cancel`` на уже исполняемом future — no-op.
-        cancel = getattr(item.future, "cancel", None)
-        if cancel is not None:
-            # Инвалидация best-effort: задание всё равно коммитится как
-            # ``extraction_timeout`` ниже, поэтому оператор видит исход артефакта
-            # независимо от того, удалось ли отменить future.
-            with contextlib.suppress(Exception):
-                cancel()
-        item.commit(None, "extraction timeout", FailureKind.EXTRACTION_TIMEOUT)
-        if pools.note_timeout(item.pool_key):
-            # ``2 × timeout`` без единого завершения: пул мёртв — reap + bounded rebuild.
-            pools.terminate(item.pool_key)
-            abort_extract_pending(
-                "extraction pool terminated after timeout",
-                extract_pending=extract_pending,
-                extract_finalizers=extract_finalizers,
-            )
-            recover_extract_pool(
-                item.pool_key,
-                f"{item.pid}/{item.url}",
-                pools=pools,
-                errors=errors,
-            )
-    except BrokenProcessPool:
-        item.commit(None, "extraction worker died", None)
-        abort_extract_pending(
-            "extraction worker died",
-            extract_pending=extract_pending,
-            extract_finalizers=extract_finalizers,
-        )
-        recover_extract_pool(
-            item.pool_key,
-            f"{item.pid}/{item.url}",
-            pools=pools,
-            errors=errors,
-        )
-    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-        item.commit(None, f"{type(exc).__name__}: {exc}", None)
-    else:
-        pools.note_completion(item.pool_key)
-        item.commit(extracted, None, None)
-    finally:
-        item.root.pending -= 1
-        finalize_ready_roots(extract_finalizers=extract_finalizers)
-
-
 def finalize_crawl_session(
     *,
     session: str | None,
@@ -500,14 +312,14 @@ def finalize_root(
     errors: list[str],
     record_slot: int | None = None,
 ) -> None:
-    """Провенанс корня после доводки его экстракционного хвоста (C1).
+    """Провенанс корня: итоги обхода, записанные на его слот (C1/F4b).
 
-    Счётчики frontier (``fetched``/``revalidation_fetched``/усечение)
-    меняются доводкой отложенных заданий, поэтому запись откладывается
-    до момента, когда хвост корня доведён (:func:`finalize_ready_roots`).
-    Порядок записей — порядок корней (FIFO финализаторов); ``record_slot`` (F4b)
-    закрепляет за корнем слот, занятый при его планировании, поэтому при чередовании
-    корней записи всё равно выходят в авторском порядке.
+    Счётчики frontier (``fetched``/``revalidation_fetched``/усечение) окончательны к
+    моменту, когда корень завершён: с F5 (плана ``17``) краул не конвертирует вовсе, поэтому
+    «хвоста экстракции», который мог бы дозреть позже, у корня больше нет — конверсия идёт
+    отдельным проходом по durable-очереди. ``record_slot`` (F4b) закрепляет за корнем слот,
+    занятый при его планировании, поэтому при чередовании корней записи выходят в авторском
+    порядке, а не в порядке завершения.
     """
     #: Наблюдаемость в любом режиме: ключ есть ровно у корня, который имел
     #: известные URL (даже если cap отложил все — ``selected=0``). У корня
@@ -544,158 +356,3 @@ def finalize_root(
         revalidation=revalidation_info,
         record_slot=record_slot,
     )
-
-
-def inflight_fresh(
-    *,
-    extract_pending: Sequence[PendingExtract],
-    frontier: Frontier,
-    root_drain: RootDrain,
-) -> int:
-    """Свеже-добытые страницы **этого корня** «в полёте» (ёмкость с окном, P4/§3).
-
-    Очередь экстракции — фазовая (C1), поэтому фильтр по ``item.root``: хвосты
-    других корней не отнимают ёмкость у этого. Ревалидация исключена: она не
-    расходует ``max_documents`` и не должна отнимать ёмкость у discovery.
-    """
-    return sum(
-        1
-        for item in extract_pending
-        if item.root is root_drain
-        and item.freshly_fetched
-        and not frontier.is_revalidation(item.url)
-    )
-
-
-def has_fetch_capacity(
-    *,
-    frontier: Frontier,
-    limits: CrawlLimits,
-    extract_pending: Sequence[PendingExtract],
-    root_drain: RootDrain,
-) -> bool:
-    """Ёмкость корня с учётом in-flight: ``max_documents − fetched − inflight``."""
-    if limits.max_documents is None:
-        return True
-    return (
-        limits.max_documents
-        - frontier.fetched
-        - inflight_fresh(
-            extract_pending=extract_pending,
-            frontier=frontier,
-            root_drain=root_drain,
-        )
-        > 0
-    )
-
-
-def tail_may_extend_frontier(
-    *,
-    extract_pending: Sequence[PendingExtract],
-    frontier: Frontier,
-    limits: CrawlLimits,
-    root_drain: RootDrain,
-) -> bool:
-    """Может ли хвост **этого** корня расширить его frontier (BFS-ссылки)?
-
-    ``_commit_outcome`` предлагает исходящие ссылки только для не-ревалидационной
-    HTML-страницы при ``max_depth > 0``. Если ни одно задание хвоста этого не
-    может, доводка безопасна после возврата корня: BFS от её момента не зависит,
-    а фетч следующего корня не ждёт экстракции (C1). Иначе хвост доводится здесь
-    же — прежний порядок байт-в-байт.
-    """
-    if limits.max_depth <= 0:
-        return False
-    for item in extract_pending:
-        if item.root is not root_drain:
-            continue
-        if frontier.is_revalidation(item.url):
-            continue
-        if looks_like_html(item.page):
-            return True
-    return False
-
-
-def pending_count_for_root(
-    *,
-    extract_pending: Sequence[PendingExtract],
-    root_drain: RootDrain,
-) -> int:
-    """Сколько заданий **этого** корня ждёт доводки в фазовой очереди (F4).
-
-    Окно экстракции — свойство корня, а не общей очереди: ``len(extract_pending)``
-    считает и чужие задания, поэтому корень ждал бы окна, которого не использовал, а
-    окно памяти по корням подменялось бы максимумом. Пока полоса одна, в очереди лежат
-    задания только текущего корня — число совпадает с прежним.
-    """
-    return sum(1 for item in extract_pending if item.root is root_drain)
-
-
-def popleft_for_root(
-    *,
-    extract_pending: deque[PendingExtract],
-    root_drain: RootDrain,
-) -> PendingExtract:
-    """Изъять самое старое задание **этого** корня (FIFO корня — инвариант).
-
-    ``deque.popleft()`` берёт голову **общей** очереди, то есть при нескольких корнях —
-    чужое задание: корень A доводил бы хвост B и переставал быть хозяином своего
-    порядка. Порядок изъятия внутри корня не меняется — меняется только чьё задание
-    берётся, поэтому при одной полосе поведение прежнее (F4: чистый перенос).
-    """
-    for index, item in enumerate(extract_pending):
-        if item.root is root_drain:
-            del extract_pending[index]
-            return item
-    raise AssertionError(
-        "очередь доводки: у корня нет своих заданий — счётчик pending расходится "
-        "с очередью"
-    )
-
-
-def drain_for_window(
-    *,
-    extract_pending: deque[PendingExtract],
-    extract_window: int | None,
-    frontier: Frontier,
-    limits: CrawlLimits,
-    root_drain: RootDrain,
-    pools: _ExtractPools,
-    errors: list[str],
-    timings: _CorpusStageTimings,
-    extract_timeout: float,
-    extract_finalizers: deque[RootDrain],
-) -> None:
-    """Доводит oldest **своего** корня, пока окно полно или ёмкость исчерпана.
-
-    ``own`` — задания этого корня: окно считается по ним, а не по длине общей очереди
-    (F4: у каждого корня своё окно; пул экстракции при этом остаётся фазовым).
-    """
-    own = pending_count_for_root(
-        extract_pending=extract_pending, root_drain=root_drain
-    )
-    while own and (
-        own >= extract_window
-        or not has_fetch_capacity(
-            frontier=frontier,
-            limits=limits,
-            extract_pending=extract_pending,
-            root_drain=root_drain,
-        )
-    ):
-        finish_extract(
-            popleft_for_root(
-                extract_pending=extract_pending, root_drain=root_drain
-            ),
-            pools=pools,
-            errors=errors,
-            timings=timings,
-            extract_timeout=extract_timeout,
-            extract_pending=extract_pending,
-            extract_finalizers=extract_finalizers,
-        )
-        own = pending_count_for_root(
-            extract_pending=extract_pending, root_drain=root_drain
-        )
-
-

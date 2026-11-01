@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as _dt
 import inspect
 import json
+import pathlib
 import random
 from pathlib import Path
 from typing import Any
@@ -298,14 +299,14 @@ class _Extractor:
         if page.url in self.error_urls:
             return ExtractedDoc(
                 text="",
-                content_hash=content_hash(page.content),
+                content_hash=content_hash(_page_bytes(page)),
                 extractor_version=self.version,
                 error="extraction failed",
             )
-        text = page.content.decode("utf-8", errors="replace")
+        text = _page_bytes(page).decode("utf-8", errors="replace")
         return ExtractedDoc(
             text=text,
-            content_hash=content_hash(page.content),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=1,
         )
@@ -1272,14 +1273,23 @@ class _FlakyDocStore(SqliteStore):
         super().upsert_corpus_doc(doc, **kwargs)
 
 
-def test_docs_persisted_mid_product_survive_abort(tmp_path: Path) -> None:
-    """Жёсткое прерывание посреди продукта не теряет уже закоммиченные ``corpus_docs``.
+def test_fetched_document_survives_abort_as_queue_row(tmp_path: Path) -> None:
+    """Жёсткое прерывание посреди продукта не теряет уже добытый документ.
 
-    Первый seed-root продукта коммитится и персистится сразу; на втором краулер
-    «убивает» прогон. Строка первого документа обязана уже быть в БД вместе с полным
-    retention-провенансом — иначе resume после OOM повторно извлекал бы весь продукт.
+    До F5 первый seed-root конвертировался внутри краула, и ``corpus_docs`` писался на
+    каждом коммите. Теперь конверсия — работа потребителя очереди и идёт **после** дренажа
+    продукта, поэтому прерывание на втором корне оставляет добытое **строкой
+    ``extract_queue``**: байты в ``corpus_raw`` (I19), адрес (``content_hash``/``raw_path``)
+    и провенанс получения уже durable. Следующий запуск конвертирует строку, а не
+    пере-добывает её — ровно то свойство, которое проверял прежний тест.
+
+    Проверяется носитель, а не расписание: «документ добыт» переживает SIGKILL/OOM, а
+    «документ сконвертирован» — нет, и это видно по ``state='pending'``.
     """
     store = SqliteStore(":memory:")
+    # Durable-очередь адресуется сеансу, а элемент сеанса ссылается на прогон:
+    # без строки ``runs`` ``open_session`` упрётся в FK, и очередь окажется в памяти.
+    _make_run(store)
     payload = b"committed before abort"
     crawler = _AbortOnUrlCrawler({URL_P1_A: payload}, abort_url=URL_P1_B)
     try:
@@ -1289,24 +1299,27 @@ def test_docs_persisted_mid_product_survive_abort(tmp_path: Path) -> None:
                 pages={},
                 urls={"p1": [URL_P1_A, URL_P1_B]},
                 store=store,
+                run_id=RUN_ID,
                 crawler=crawler,
             )
 
-        rows = list(store.conn.execute("SELECT * FROM corpus_docs"))
+        session_id = default_session_id(RUN_ID)
+        rows = list(store.iter_extract_queue(session_id))
         assert len(rows) == 1
         row = rows[0]
-        expected_id = f"p1:{content_hash(payload)}"
-        assert row["doc_id"] == expected_id
-        assert row["product_id"] == "p1"
-        assert row["url"] == URL_P1_A
-        assert row["fetched_at"] == TS
-        assert row["content_hash"] == content_hash(payload)
-        assert row["extractor_version"] == "extractor-1"
-        assert row["render_mode"] == "http"
-        assert row["lang"] == "en"
-        raw_path = Path(row["raw_path"])
+        assert row.product_id == "p1"
+        assert row.url == URL_P1_A
+        assert row.state.value == "pending"
+        assert row.content_hash == content_hash(payload)
+        assert row.fetched_at == TS
+        assert row.fetch_mode == "http"
+        assert row.lang == "en"
+        assert row.extract_route == "auto"
+        raw_path = Path(row.raw_path)
         assert raw_path.is_file()
         assert raw_path.read_bytes() == payload
+        # Конверсии не было: корпус пуст, строка ждёт потребителя.
+        assert list(store.conn.execute("SELECT * FROM corpus_docs")) == []
         # Второй корень не обработан — прерывание действительно посреди продукта.
         assert [url for url, _ in crawler.calls] == [URL_P1_A]
     finally:
@@ -7524,8 +7537,8 @@ class _PartialExtractor(_Extractor):
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
         return ExtractedDoc(
-            text=page.content.decode("utf-8", errors="replace"),
-            content_hash=content_hash(page.content),
+            text=_page_bytes(page).decode("utf-8", errors="replace"),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=2763,
             partial=True,
@@ -7540,8 +7553,8 @@ class _SameEngineFullExtractor(_PartialExtractor):
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
         return ExtractedDoc(
-            text=page.content.decode("utf-8", errors="replace"),
-            content_hash=content_hash(page.content),
+            text=_page_bytes(page).decode("utf-8", errors="replace"),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=1,
         )
@@ -7840,3 +7853,18 @@ def test_serp_disabled_observation_has_the_same_shape_as_enabled() -> None:
     assert "контур выключен" in note
     assert "сбоев" not in note
     assert "доходность" not in note
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

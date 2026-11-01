@@ -7,7 +7,7 @@
 #
 # Перегенерация — только осознанно и с объяснением в сообщении коммита:
 #   python3 scripts/mypy_gate.py --update
-# Записей: 117
+# Записей: 115
 
 core/adapters/container_any.py: Dict entry 0 has incompatible type "str": "ZipContainer"; expected "str": "ContainerPort"  [dict-item]
 core/adapters/container_any.py: Dict entry 1 has incompatible type "str": "SevenZipContainer"; expected "str": "ContainerPort"  [dict-item]
@@ -65,7 +65,6 @@ core/pipeline/corpus.py: Argument 2 to "_persist_corpus_coverage" has incompatib
 core/pipeline/corpus.py: Incompatible types in assignment (expression has type "IndexManifestEntry", variable has type "ManualArtifact")  [assignment]
 core/pipeline/corpus.py: Name "frontier" already defined on line <N>  [no-redef]
 core/pipeline/corpus.py: Name "info" already defined on line <N>  [no-redef]
-core/pipeline/corpus_commit.py: Unsupported operand types for >= ("int" and "None")  [operator]
 core/pipeline/corpus_drain.py: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex"  [arg-type]
 core/pipeline/corpus_drain.py: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex"  [arg-type]
 core/pipeline/corpus_drain.py: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex"  [arg-type]
@@ -74,7 +73,6 @@ core/pipeline/corpus_drain.py: Argument 1 to "revalidation_head_count" of "Front
 core/pipeline/corpus_drain.py: Argument 2 to "offer" of "Frontier" has incompatible type "int | None"; expected "int"  [arg-type]
 core/pipeline/corpus_drain.py: Incompatible types in assignment (expression has type "LocalFetch | None", variable has type "LocalFetch")  [assignment]
 core/pipeline/corpus_drain.py: Name "entries" already defined on line <N>  [no-redef]
-core/pipeline/corpus_drain.py: Unsupported operand types for >= ("int" and "None")  [operator]
 core/pipeline/corpus_index.py: Argument 1 to "index" has incompatible type "Any | None"; expected "SupportsIndex"  [arg-type]
 core/pipeline/corpus_ingest.py: Incompatible types in assignment (expression has type "Path | None", variable has type "Path")  [assignment]
 core/pipeline/crawl_frontier.py: Argument 1 to "ArchiveDescent" has incompatible type "object"; expected "str"  [arg-type]

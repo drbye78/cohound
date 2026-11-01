@@ -31,6 +31,7 @@ import dataclasses
 import datetime as _dt
 import io
 import json
+import pathlib
 import tempfile
 import threading
 import time
@@ -176,7 +177,7 @@ class _FileExtractor:
         data = (
             Path(page.source_path).read_bytes()
             if page.source_path
-            else page.content
+            else _page_bytes(page)
         )
         self.source_sizes.append(len(data))
         return ExtractedDoc(
@@ -1157,9 +1158,13 @@ def test_pooled_members_are_byte_identical_to_inline(tmp_path: Path) -> None:
     assert routes["a/first.pdf"] is ExtractionRoute.DOCUMENT
     assert routes["b/readme.md"] is ExtractionRoute.AUTO
 
-    # Операторская строка: члены считаются доведёнными заданиями пула (архив + члены).
+    # Операторская строка: доведённые задания пула = **члены** (7), без самой страницы
+    # архива. До F5 архив тоже уходил в пул (и его «извлечение» выбрасывалось), поэтому
+    # счётчик был 8; теперь зонд артефакта идёт до submit (``_start_row``), и за контейнер
+    # воркер не платит. Это уменьшение работы при том же наблюдаемом корпусе — и оно
+    # запинено здесь именно как число.
     assert any(
-        isinstance(entry, str) and "документов через пул: 8" in entry
+        isinstance(entry, str) and "документов через пул: 7" in entry
         for entry in pooled_result.log_entries
     ), pooled_result.log_entries
 
@@ -1217,11 +1222,13 @@ def test_pooled_commit_order_is_walk_order_not_completion_order(
     inline = _build(tmp_path / "inline")
 
     created: list[_ThreadPool] = []
-    # Первый член — самый медленный: порядок завершения обратен порядку обхода.
+    # Первый **член** — самый медленный: порядок завершения обратен порядку обхода.
+    # До F5 первым в пул уходила страница архива (слот 0 задержек), поэтому задержка
+    # стояла на индексе 1; теперь контейнер в пул не попадает, и слот 0 — это ``m1``.
     pooled = _build(
         tmp_path / "pooled",
         crawl_defaults=CrawlRunConfig(extract_workers=2),
-        extraction_pool=_pool(created, delays=(0.0, 0.12, 0.0, 0.0, 0.0)),
+        extraction_pool=_pool(created, delays=(0.12, 0.0, 0.0, 0.0)),
     )
 
     members = [url for url in created[0].submitted if "!/" in url]
@@ -1386,8 +1393,10 @@ def test_pooled_split_capitulation_stays_parent_side(tmp_path: Path) -> None:
         extraction_pool=_pool(created),
     ) as (store, _result, extractor):
         assert extractor.calls == []  # шов не вызывается на локальных байтах
-        # В пул ушёл только сам архив: члены отклонены **в родителе** до submit.
-        assert [url for url in created[0].submitted if "!/" in url] == []
+        # Члены отклонены **в родителе** до submit, поэтому пул не создан вовсе: до F5
+        # в него уходила страница архива (и это был единственный submit), теперь зонд
+        # артефакта идёт раньше submit — капитуляция не стоит ни одного воркера.
+        assert created == []
         observation = _observations(store)[0]
         assert observation.outcome["skipped"]["extract_unavailable"]["count"] == 2
         assert all(row.skip_reason == "extract_unavailable" for row in _members(store))
@@ -1744,3 +1753,18 @@ def test_partial_member_is_visible_in_corpus_and_observation(tmp_path: Path) -> 
         assert coverage is not None
         assert coverage.complete is False
         assert coverage.blocked == {"partial_extraction": 1}
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

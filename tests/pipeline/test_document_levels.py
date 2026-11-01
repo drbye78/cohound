@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import pathlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -180,19 +181,19 @@ class _LevelExtractor:
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
-        if _is_document(page.content, page.content_type):
+        if _is_document(_page_bytes(page), page.content_type):
             # Текст намеренно НЕ зависит от уровня (уровни могут дать один текст), но
             # ``extractor_version`` кодирует уровень — именно это различает сборки (§5).
-            text = page.content.decode("utf-8", errors="replace")
+            text = _page_bytes(page).decode("utf-8", errors="replace")
             return ExtractedDoc(
                 text=text,
-                content_hash=content_hash(page.content),
+                content_hash=content_hash(_page_bytes(page)),
                 extractor_version=f"docling-doc-3:{self.level.value}",
                 page_count=1,
             )
         return ExtractedDoc(
-            text=page.content.decode("utf-8", errors="replace"),
-            content_hash=content_hash(page.content),
+            text=_page_bytes(page).decode("utf-8", errors="replace"),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version="trafilatura-html-2",
             page_count=1,
         )
@@ -997,3 +998,18 @@ def test_docling_full_has_working_ocr_engine() -> None:
     assert doc.extractor_version == extractor.version
     assert "SCANNED" in doc.text.upper(), doc.text
     assert "12345" in doc.text, doc.text
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

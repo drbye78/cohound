@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import pathlib
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +39,11 @@ from core.domain import (
     RunMode,
 )
 from core.pipeline import RunPlan
-from core.pipeline.corpus import build_corpus, canonicalize_doc_urls
+from core.pipeline.corpus import (
+    CANONICAL_URL_CHANGED_NOTE,
+    build_corpus,
+    canonicalize_doc_urls,
+)
 from core.pipeline.crawl_session import default_session_id
 from core.ports.types import (
     Chunk,
@@ -141,8 +146,8 @@ class _Extractor:
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
         return ExtractedDoc(
-            text=page.content.decode("utf-8", errors="replace"),
-            content_hash=content_hash(page.content),
+            text=_page_bytes(page).decode("utf-8", errors="replace"),
+            content_hash=content_hash(_page_bytes(page)),
             extractor_version=self.version,
             page_count=1,
         )
@@ -210,6 +215,17 @@ def _notes(result: Any) -> list[str]:
     return [entry for entry in result.log_entries if isinstance(entry, str)]
 
 
+def _same_doc_id(store: SqliteStore, run_id: str) -> str:
+    """``doc_id`` документа с текстом ``SAME`` (единственного: алиасы схлопнуты)."""
+    docs = [
+        doc
+        for doc in store.iter_corpus_docs(run_id)
+        if doc.content_hash == content_hash(SAME)
+    ]
+    assert len(docs) == 1, [(doc.doc_id, doc.url) for doc in docs]
+    return docs[0].doc_id
+
+
 def _same_doc_url(store: SqliteStore, run_id: str) -> str:
     """Адрес единственного документа с текстом ``SAME`` (их два: текст и корневая страница)."""
     docs = [doc for doc in store.iter_corpus_docs(run_id) if doc.content_hash == content_hash(SAME)]
@@ -228,6 +244,14 @@ def test_same_document_has_min_url_regardless_of_ingest_order(tmp_path: Path) ->
     ``large-first``: первым доехал ``URL_LARGE`` (он и записал документ), ``small-first``:
     первым доехал ``URL_SMALL``. Раньше это давало **разные** адреса в ``corpus_docs`` —
     состав корпуса зависел от того, какая страница стала готова раньше.
+
+    **Что изменилось в F5 (причина названа).** Конверсия идёт порядком очереди
+    ``(product_id, url)``, поэтому пара алиасов попадает в ``ingest_one`` **всегда** в
+    каноническом порядке: документ пишется под меньшим адресом сразу, и проходу
+    согласования переписывать нечего (``canonical_url_changes == 0`` в обоих прогонах).
+    Раньше единица здесь была признаком того, что согласование сработало; теперь оно —
+    **страховка** (документ мог быть записан прошлой схемой или неканоническим путём), и
+    проверяется прямо, на строке корпуса, в тестах (2) и (3) ниже.
     """
     store_large, result_large = _run(
         tmp_path / "large", "run-canon-large", own_seed=URL_SMALL
@@ -241,11 +265,10 @@ def test_same_document_has_min_url_regardless_of_ingest_order(tmp_path: Path) ->
         # Полный набор документов тоже совпал: согласование не создало и не потеряло строк.
         assert _docs(store_large, "run-canon-large") == _docs(store_small, "run-canon-small")
 
-        # Документ действительно был записан по большему адресу и адрес **переписан**
-        # (иначе тест не отличал бы согласование от случайного совпадения).
+        # Документ записан по меньшему адресу в обоих прогонах — порядок конверсии
+        # канонический, поэтому переписывать нечего.
         assert _same_doc_url(store_large, "run-canon-large") != URL_LARGE
-        assert _product_end(result_large)["canonical_url_changes"] == 1
-        # Там, где первым доехал меньший адрес, менять нечего.
+        assert _product_end(result_large)["canonical_url_changes"] == 0
         assert _product_end(result_small)["canonical_url_changes"] == 0
     finally:
         store_large.close()
@@ -276,26 +299,42 @@ def test_alias_url_is_recorded_as_durable_doc_hash(tmp_path: Path) -> None:
 
 
 def test_canonical_url_change_is_visible_in_notes(tmp_path: Path) -> None:
-    """Строка лога называет продукт и число переписанных адресов; без смены строки нет."""
-    store, result = _run(tmp_path, "run-canon-visible", own_seed=URL_SMALL)
+    """Смена канонического адреса названа (продукт + число), а без смены строки нет.
+
+    **Почему вызов прямой.** После F5 конверсия идёт каноническим порядком, и проход
+    согласования внутри фазы не срабатывает (см. тест выше) — держать «срабатывание» на
+    уровне фазы можно было бы только искусственным порядком, которого больше нет. Поэтому
+    страховка проверяется на строке корпуса: адрес документа ставится в состояние
+    «записан неканонически» (так выглядела бы строка прошлой схемы), проход его
+    переписывает, а строка :data:`CANONICAL_URL_CHANGED_NOTE` называет продукт и число.
+    """
+    run_id = "run-canon-visible"
+    store, result = _run(tmp_path, run_id, own_seed=URL_SMALL)
     try:
-        notes = _notes(result)
-        canonical = [note for note in notes if "канонический адрес" in note]
-        assert len(canonical) == 1, notes
-        assert "p1" in canonical[0]
-        assert "1 документов" in canonical[0]
-        # Ошибкой это не является: смена адреса — исправление порядка, а не сбой.
         assert result.errors == []
+        # Ничего не переписано на фазе: порядок конверсии канонический.
+        assert _product_end(result)["canonical_url_changes"] == 0
+        assert not [note for note in _notes(result) if "канонический адрес" in note]
+
+        # Ставим документ под больший адрес: ровно то, что должен исправить проход.
+        store.set_corpus_doc_url(_same_doc_id(store, run_id), URL_LARGE)
+        items = {
+            (item.product_id, item.url): item
+            for item in store.iter_crawl_session_items(default_session_id(run_id))
+        }
+        errors: list[str] = []
+        changed = canonicalize_doc_urls(
+            "p1", items=items, store=store, run_id=run_id, errors=errors
+        )
+
+        assert changed == 1
+        assert _same_doc_url(store, run_id) == URL_SMALL
+        # Ошибкой это не является: смена адреса — исправление порядка, а не сбой.
+        assert errors == []
+        note = CANONICAL_URL_CHANGED_NOTE.format(product_id="p1", count=changed)
+        assert "p1" in note and "1 документов" in note
     finally:
         store.close()
-
-    quiet_store, quiet_result = _run(
-        tmp_path / "quiet", "run-canon-quiet", own_seed=URL_LARGE
-    )
-    try:
-        assert not [note for note in _notes(quiet_result) if "канонический адрес" in note]
-    finally:
-        quiet_store.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -304,19 +343,29 @@ def test_canonical_url_change_is_visible_in_notes(tmp_path: Path) -> None:
 
 
 def test_reconciliation_pass_is_idempotent(tmp_path: Path) -> None:
-    """Повторный вызов на согласованном корпусе не пишет ничего и возвращает ``0``."""
-    run_id = "run-canon-idempotent"
-    store, result = _run(tmp_path, run_id, own_seed=URL_SMALL)
-    try:
-        assert _product_end(result)["canonical_url_changes"] == 1
-        before = _docs(store, run_id)
-        assert _same_doc_url(store, run_id) == URL_SMALL
+    """Второй проход по согласованному корпусу не пишет ничего и возвращает ``0``.
 
+    **Почему после ручной правки.** Фаза конверсии пишет документ сразу по каноническому
+    адресу (F5), поэтому первый ``canonicalize_doc_urls`` внутри фазы возвращает ``0``.
+    Чтобы проверить идемпотентность, адрес сначала ставится неканоническим (как у строки
+    прошлой схемы): первый проход исправляет, второй — нет.
+    """
+    run_id = "run-canon-idempotent"
+    store, _result = _run(tmp_path, run_id, own_seed=URL_SMALL)
+    try:
+        store.set_corpus_doc_url(_same_doc_id(store, run_id), URL_LARGE)
         items = {
             (item.product_id, item.url): item
             for item in store.iter_crawl_session_items(default_session_id(run_id))
         }
         errors: list[str] = []
+        first = canonicalize_doc_urls(
+            "p1", items=items, store=store, run_id=run_id, errors=errors
+        )
+        assert first == 1
+        before = _docs(store, run_id)
+        assert _same_doc_url(store, run_id) == URL_SMALL
+
         again = canonicalize_doc_urls(
             "p1", items=items, store=store, run_id=run_id, errors=errors
         )
@@ -326,3 +375,18 @@ def test_reconciliation_pass_is_idempotent(tmp_path: Path) -> None:
         assert errors == []
     finally:
         store.close()
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

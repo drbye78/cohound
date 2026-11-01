@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import base64
 import json
+import pathlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -51,7 +53,7 @@ class FakeExtractor:
 
     def extract(self, page: RawPage) -> ExtractedDoc:
         case_id = page.url.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        self.calls.append((case_id, page.content, page.content_type))
+        self.calls.append((case_id, _page_bytes(page), page.content_type))
         if case_id in self._raises:
             raise RuntimeError(f"boom:{case_id}")
         if case_id in self._errors:
@@ -324,3 +326,18 @@ def test_to_manifest_json_structure() -> None:
     assert data["pass_rate"] == pytest.approx(0.5)
     assert [row["case_id"] for row in data["results"]] == ["case_a", "case_b"]
     assert data["results"][1]["missing"] == ["Missing"]
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

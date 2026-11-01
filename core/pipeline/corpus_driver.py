@@ -34,8 +34,8 @@ FIFO по записям волны).
 
 **Teardown.** Каждый допущенный корень обязан либо завершиться, либо быть **названным** в
 ``errors``: при исключении живые генераторы закрываются (их ``finally`` исполняются
-сейчас, а не при сборке мусора), очередь экстракции отбрасывается через ``abort`` —
-штатный путь фазы (``corpus_commit.abort_extract_pending``), а не молчаливое выпадение.
+сейчас, а не при сборке мусора), а ``abort`` называет, сколько строк очереди конверсии
+осталось ``pending`` — durable-факт «документ добыт» не отбрасывается и не теряется молча.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ from concurrent.futures import FIRST_COMPLETED, Executor, ThreadPoolExecutor, wa
 from dataclasses import dataclass
 from typing import Any
 
-from core.pipeline.corpus_commit import RootDrain
 from core.pipeline.corpus_drain import (
     RootPlan,
     WaveOutcomes,
@@ -65,15 +64,18 @@ from core.ports.types import RawPage
 #: полоса, чей future уже отменён снаружи, иначе оставили бы драйвер в вечном ``wait``.
 _LANE_WAIT_TIMEOUT_S = 0.25
 
-#: Исход корня: провенанс усечения, отказы scope у ``<loc>`` и хвост экстракции (C1).
+#: Исход корня: провенанс усечения и отказы scope у ``<loc>``.
 @dataclass(frozen=True)
 class RootOutcome:
-    """Всё, что корень отдаёт фазе после завершения (значение ``StopIteration``)."""
+    """Всё, что корень отдаёт фазе после завершения (значение ``StopIteration``).
+
+    Хвоста экстракции здесь нет (F5): краул не конвертирует, поэтому после корня
+    доводить нечего — документы уже строки очереди конверсии.
+    """
 
     plan: RootPlan
     frontier: Frontier
     sitemap_skips: list[dict[str, Any]]
-    drain: RootDrain
 
 
 @dataclass
@@ -86,8 +88,7 @@ class _Lane:
 
     plan: RootPlan
     steps: (
-        Generator[WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]], RootDrain]]
-        | None
+        Generator[WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]]]] | None
     )
     fetch_pool: Executor | None = None
     browser_pool: Executor | None = None
@@ -103,8 +104,8 @@ class _Lane:
     started: bool = False
     #: Момент, с которого драйвер ждёт эту волну (бакет ``fetch_wait_s``).
     wait_started: float | None = None
-    #: Исход завершившегося корня (``(frontier, sitemap_skips, RootDrain)``).
-    outcome: tuple[Frontier, list[dict[str, Any]], RootDrain] | None = None
+    #: Исход завершившегося корня (``(frontier, sitemap_skips)``).
+    outcome: tuple[Frontier, list[dict[str, Any]]] | None = None
     #: Корень завершился на этом продвижении.
     done: bool = False
 
@@ -143,8 +144,9 @@ def drive_roots(
         ``ThreadPoolExecutor``.
     :param on_root_done: вызывается **на главном потоке** сразу по завершении корня —
         здесь фаза строит финализатор провенанса и регистрирует хвост (C1).
-    :param abort: отбросить очередь экстракции на teardown
-        (``corpus_commit.abort_extract_pending``), назвав причину.
+    :param abort: teardown-хук фазы: вызывается при исключении и **называет** число
+        строк очереди конверсии, оставшихся ``pending`` (durable-очередь переживает
+        прерывание; «сколько не сконвертировано» обязано быть видно).
     :param label: префикс строк ``errors`` (обычно ``f" {product_id}"``).
     :param errors: канал видимости фазы: прерванный корень обязан быть назван.
     :returns: исходы в порядке завершения корней.
@@ -301,7 +303,6 @@ def drive_roots(
             plan=lane.plan,
             frontier=outcome[0],
             sitemap_skips=outcome[1],
-            drain=outcome[2],
         )
         done.append(root)
         if on_root_done is not None:

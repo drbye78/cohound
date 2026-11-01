@@ -37,6 +37,7 @@ from core.domain import (
     EndpointKind,
     EvidenceType,
     ExtractQueueItem,
+    ExtractQueueState,
     Gate,
     GateDecision,
     IndexManifestEntry,
@@ -1911,11 +1912,23 @@ class SqliteStore:
         return _row_to_extract_queue_item(row)
 
     def enqueue_extract_item(self, item: ExtractQueueItem) -> None:
-        """Идемпотентная запись строки ``extract_queue`` (``ON CONFLICT DO NOTHING``).
+        """Идемпотентная запись строки ``extract_queue``: тот же факт не переписывается.
 
-        Повтор того же ``(session_id, product_id, url)`` — не ошибка и не перезапись:
-        состояние строки принадлежит потребителю, и краул, продолживший сеанс, не имеет
-        права вернуть ``done`` в ``pending`` (иначе конверсия перечитала бы собранное).
+        **Идемпотентность — по факту, а не по ключу.** Тот же ``(session_id, product_id,
+        url)`` с тем же ``content_hash`` — не ошибка и не перезапись: состояние строки
+        принадлежит потребителю, и краул, продолживший сеанс, не имеет права вернуть
+        ``done`` в ``pending`` (иначе конверсия перечитала бы собранное).
+
+        **Разные байты — другой факт.** Повторный фетч того же URL может дать другой
+        ``content_hash`` (страница изменилась, retained-файл подменён — тогда краул
+        ре-фетчит, ``09`` §6.3). Оставить старую строку нельзя: потребитель F5 собирает
+        ``_ExtractRequest`` **только из строки**, поэтому после перехода на очередь
+        прежний адрес стал бы единственным источником байтов — новый документ не попал бы
+        в корпус, а строка ``done`` утверждала бы обратное («``state=done`` ⇒ в
+        ``corpus_docs`` есть документ с этим ``content_hash``»). Поэтому при расхождении
+        хеша адрес и провенанс получения переписываются, а строка возвращается в
+        ``pending``: это новая работа для того же адреса URL.
+
         Доменная модель уже проверила инвариант «``pending``/``claimed`` несут адрес
         retained-байтов и хеш» (I19).
 
@@ -1933,7 +1946,29 @@ class SqliteStore:
                 "  extract_route, fetched_at, state, attempts, enqueued_at,"
                 "  state_changed_at, claimed_by, error_kind, error)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(session_id, product_id, url) DO NOTHING",
+                # Перезапись — только при смене байтов (комментарий в docstring).
+                # Поля потребителя сбрасываются, потому что работа новая: ``done``
+                # прошлого исполнения не описывает этот адрес.
+                " ON CONFLICT(session_id, product_id, url) DO UPDATE SET"
+                "  content_hash = excluded.content_hash,"
+                "  raw_path = excluded.raw_path,"
+                "  level = excluded.level,"
+                "  pdf_pipeline = excluded.pdf_pipeline,"
+                "  fetch_mode = excluded.fetch_mode,"
+                "  status_code = excluded.status_code,"
+                "  content_type = excluded.content_type,"
+                "  lang = excluded.lang,"
+                "  engine = excluded.engine,"
+                "  extract_route = excluded.extract_route,"
+                "  fetched_at = excluded.fetched_at,"
+                "  state = excluded.state,"
+                "  attempts = excluded.attempts,"
+                "  enqueued_at = excluded.enqueued_at,"
+                "  state_changed_at = NULL,"
+                "  claimed_by = NULL,"
+                "  error_kind = NULL,"
+                "  error = NULL"
+                " WHERE extract_queue.content_hash <> excluded.content_hash",
                 (
                     item.session_id,
                     item.product_id,
@@ -1958,6 +1993,54 @@ class SqliteStore:
                     item.error,
                 ),
             )
+
+    def set_extract_state(
+        self,
+        session_id: str,
+        product_id: str,
+        url: str,
+        state: ExtractQueueState,
+        *,
+        expect: ExtractQueueState | None = None,
+        claimed_by: str | None = None,
+        error_kind: str | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Условный переход состояния строки ``extract_queue`` (targeted ``UPDATE``).
+
+        Меняются только поля потребителя: ``state``/``state_changed_at``/``claimed_by``/
+        ``error_kind``/``error``. Поля краула (``content_hash``/``raw_path``/провенанс
+        получения) не трогаются ни при каком переходе — иначе потребитель переписывал бы
+        факт, которым не владеет, а ``done`` можно было бы вернуть в ``pending``.
+
+        ``expect`` (когда задан) добавляет ``AND state = ?``: это и есть claim, а не «взял
+        и надеюсь» — при гонке двух потребителей строку забирает ровно один, второй
+        получает ``False`` и не считает работу сделанной. ``state_changed_at`` ставится
+        здесь (единственный источник времени).
+
+        :returns: ``rowcount > 0`` — переход состоялся.
+        """
+        sql = (
+            "UPDATE extract_queue SET state = ?, state_changed_at = ?,"
+            " claimed_by = COALESCE(?, claimed_by), error_kind = ?, error = ?"
+            " WHERE session_id = ? AND product_id = ? AND url = ?"
+        )
+        params: list[Any] = [
+            _as_text(state),
+            _now_iso(),
+            claimed_by,
+            error_kind,
+            error,
+            session_id,
+            product_id,
+            url,
+        ]
+        if expect is not None:
+            sql += " AND state = ?"
+            params.append(_as_text(expect))
+        with self.conn:
+            cursor = self.conn.execute(sql, tuple(params))
+        return int(cursor.rowcount or 0) > 0
 
     def count_extract_queue(self, session_id: str) -> dict[str, int]:
         """Число строк очереди сеанса по состояниям (непустые состояния только)."""

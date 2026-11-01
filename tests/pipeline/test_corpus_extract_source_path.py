@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+import pathlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,7 +60,11 @@ class _PageRecordingExtractor:
     ) -> ExtractedDoc:
         self.pages.append(page)
         self.routes.append(route)
-        size = Path(page.source_path).stat().st_size if page.source_path else len(page.content)
+        size = (
+            Path(page.source_path).stat().st_size
+            if page.source_path
+            else len(page.content)
+        )
         text = f"size={size}"
         return ExtractedDoc(
             text=text,
@@ -191,3 +197,18 @@ def test_raw_page_without_source_path_is_unchanged() -> None:
 
     assert page.source_path is None
     assert page.content == b"<html>x</html>"
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return pathlib.Path(path).read_bytes() if path else b""

@@ -14,6 +14,7 @@ import datetime as dt
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -2822,7 +2823,7 @@ def _extraction_golden() -> None:
         version = "ext-1"
 
         def extract(self, page, route=None):
-            text = page.content.decode("utf-8")
+            text = _page_bytes(page).decode("utf-8")
             return ExtractedDoc(text=text, content_hash="h", extractor_version=self.version, page_count=1)
 
     cases = [
@@ -4729,6 +4730,21 @@ def _publishability_profile_check() -> None:
         raise AssertionError(f"A1: ожидался ANALYTICAL_ONLY, получено {profile.klass}")
     if profile.dominant_cause not in profile.banner:
         raise AssertionError("A1: баннер обязан называть доминирующую причину")
+
+
+def _page_bytes(page: Any) -> bytes:
+    """Байты страницы: тело или retained-файл (потребитель очереди не держит тело в RAM).
+
+    До F5 конверсия шла внутри краула, и ``RawPage.content`` страницы был непуст. Теперь
+    документ конвертируется из строки очереди: ``content`` пуст, тело лежит по
+    ``source_path`` (I19, ``corpus_raw/{hash}.bin``) — ровно так его получает воркер пула.
+    Фейковый экстрактор обязан читать тот же носитель, что и адаптер, иначе он проверял бы
+    не контракт порта, а прежний способ доставки байтов.
+    """
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return Path(path).read_bytes() if path else b""
 
 
 if __name__ == "__main__":

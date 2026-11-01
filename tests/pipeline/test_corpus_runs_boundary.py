@@ -208,14 +208,20 @@ def test_chunk_id_addresses_the_document_version_not_the_bytes(tmp_path: Path) -
         ids: dict[str, list[str]] = {}
         versions: dict[str, str] = {}
         for level in (DocumentLevel.TEXT, DocumentLevel.FULL):
-            _make_run(store)
+            # Смена ``document_level`` — ``execution_change`` (§9), то есть **другой**
+            # ``run_id`` и другой сеанс. Один ``run_id`` на два уровня был бы двумя
+            # условиями измерения под одной идентичностью; после F5 это ещё и делит
+            # durable-строку очереди (её ``level`` — условие корня), поэтому уровни
+            # разводятся так же, как в реальном прогоне.
+            level_run_id = f"{RUN_ID}-{level.value}"
+            _make_run(store, level_run_id)
             result = _build(
                 tmp_path / level.value,
                 pages={URL_P1_A: b"same bytes"},
                 urls={"p1": [URL_P1_A]},
                 store=store,
                 state=state,
-                run_id=RUN_ID,
+                run_id=level_run_id,
                 crawl_defaults=CrawlRunConfig(document_level=level),
             )
             assert result.errors == []
