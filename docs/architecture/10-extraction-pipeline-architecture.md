@@ -193,7 +193,7 @@ R5 — не эстетика. `run_id` — утверждение «вот пр�
 **3.5. `num_threads` — объявленное значение, а не переменная окружения.** `AcceleratorOptions`
 docling — `BaseSettings` с префиксом `DOCLING_`, поэтому без явного аргумента число потоков
 приходит из окружения (`DOCLING_NUM_THREADS`/`OMP_NUM_THREADS`). Константа
-`ACCELERATOR_NUM_THREADS = 4` (`core/adapters/extract_document.py:444`) равна дефолту docling
+`ACCELERATOR_NUM_THREADS = 4` (`core/adapters/extract_document.py:477`) равна дефолту docling
 2.135 (проверено вызовом: `AcceleratorOptions()` → `num_threads=4`) и передаётся **явно**:
 при `DOCLING_NUM_THREADS=11 OMP_NUM_THREADS=11` пустой конструктор даёт **11**, а явный
 аргумент — **4** (проверено вызовом, не по документации). Мотив — тот же, что у устройства:
@@ -379,8 +379,8 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 
 > ✅ **сделано** — сборка движка входит в `extractor_version`:
 > `docling-doc-3:<level>/<device>/docling-<build>`, единственный источник —
-> `docling_engine_build()` (`core/adapters/extract_document.py:202-240`); тот же вызов питает
-> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:631-653`, `:938`).
+> `docling_engine_build()` (`core/adapters/extract_document.py:216-242`); тот же вызов питает
+> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:632-654`, `:985`).
 > ✅ **расширено (2026-10-28, P9):** ключ различает **устройство** — без сегмента
 > `cpu`/`cuda` CUDA-прогон нашёл бы в `extract_cache` CPU-текст под тем же ключом (Д-8 в
 > новом виде). Смена устройства — `execution_change`: `run_id` меняется один раз, кэш один
@@ -725,9 +725,9 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 
 ### 5.8. Идентичность экстрактора (Д-8) — предпосылка любого переиспользования
 
-> ✅ **сделано** — `docling_engine_build()` (`core/adapters/extract_document.py:191-199`),
+> ✅ **сделано** — `docling_engine_build()` (`core/adapters/extract_document.py:205-213`),
 > `docling_extractor_version()` (`:202-228`), один и тот же вызов в `extractor_stack`
-> (`core/cli/execution_axes.py:624-647`).
+> (`core/cli/execution_axes.py:625-648`).
 
 Пока `extractor_version` не несёт сборку движка, `extract_cache` отдаёт текст, произведённый
 другим движком, и `run_id` об этом лжёт. Два варианта, различающиеся ценой:
@@ -778,7 +778,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 | 0.2 | Решение: сборка движка в `extractor_version` или только в ключе | Д-8 | зафиксировано в `05`/`09`; инвалидация описана явно |
 
 > ✅ **0.1 и 0.2 сделаны** — сборка едет в `extractor_version`
-> (`core/adapters/extract_document.py:202-228`), решение зафиксировано в §5.8 и `05` §5.
+> (`core/adapters/extract_document.py:216-242`), решение зафиксировано в §5.8 и `05` §5.
 
 ### Группа A — память и запись, нейтрально к качеству и скорости
 

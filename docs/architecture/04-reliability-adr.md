@@ -296,7 +296,7 @@ tests/
 растёт храповиком до OOM-kill. Ниже — рычаги as-built и их замеры. Провенанс цифр —
 докстринг `core/util/memory.py` и комментарии `packages/ru-pg-dbms/run.yaml` (§`crawl`).
 
-**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`adapters/extract_document.py:424`,
+**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`adapters/extract_document.py:457`,
 `_PDF_QUEUE_MAX_SIZE_BY_LEVEL`: `layout`/`layout_tables`/`full` → 1, `text` → `None` — у
 `NativePdfPipeline` этого механизма нет.) Причина — не «PDF целиком», а **число страниц в
 полёте**. Замер при дефолтном `queue_max_size=100` (пики воркера): `text` 1191 MiB,

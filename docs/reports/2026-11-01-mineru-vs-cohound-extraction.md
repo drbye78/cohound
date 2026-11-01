@@ -37,7 +37,7 @@
 |---|---|---|
 | Маршрут формата | `core/cli/wiring.py:1958` | суффикс → Content-Type → магия байтов; `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
 | PDF `text_layer` | `core/adapters/extract_pdf_text.py:197` | pypdfium2, постранично, плоский текст; пустая страница → `error="no_text_layer"` (183 из 16 073 стр., 1.14 %) |
-| PDF `structured` | `core/adapters/extract_document.py:604` | docling; выход — **markdown-строка** (`:894`); уровни меняют опции конвейера |
+| PDF `structured` | `core/adapters/extract_document.py:637` | docling; выход — **markdown-строка** (`:927`); уровни меняют опции конвейера |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** (`:788`) |
 | HTML | `core/adapters/extract_html.py:76` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
 | Санитайз | `core/util/sanitize.py:133,188,233` | `nh3` → trafilatura → `strip_control_chars` → `neutralize_prompt_injection_marks`; **документный путь его не вызывает** (§10) |
@@ -52,7 +52,7 @@
 | pdfium, весь PDF-корпус 240 док / 15 929 стр. | 134 MB пик, 26.8 с, 0 ошибок | `docs/reports/measurements/2026-10-25-pdf-backend-alternatives.md:19-23` |
 | docling `layout_tables` | 1.49 с/стр CPU, пик до 3.7 GB | `2026-10-24-docling-peaks-real-corpus.md` |
 | docling на 2763 стр. | таймаут 2700 с → `PARTIAL_SUCCESS` → ноль символов | там же |
-| `queue_max_size=1` | −44…−49 % RAM, markdown **байт-в-байт** тот же | `extract_document.py:610-624` |
+| `queue_max_size=1` | −44…−49 % RAM, markdown **байт-в-байт** тот же | `extract_document.py:643-657` |
 | большая книга, 665 стр. | символов 88.5 % от docling; идентификаторов «потеряно» 147 из 2 204 | `2026-10-28-hybrid-quality-gate.md:50-53` |
 
 ## 3. MinerU на 01.11.2026: это уже не тот проект, что в обзорах
@@ -219,7 +219,7 @@ y-кластеризация и склейка строк внутри блок�
    Применение меняет `text` → `content_hash` → доказательства, поэтому это `execution_change` и
    отдельный акт, а не побочная правка.
 2. **Per-level таймауты docling вне дайджеста.** `_LEVEL_DOCUMENT_TIMEOUT_S`
-   (`core/adapters/extract_document.py:411-417`) — константа кода: 900/1800/2700/None по уровням.
+   (`core/adapters/extract_document.py:444-450`) — константа кода: 900/1800/2700/None по уровням.
    В `as_dict()` попадает только **явно объявленная** ось `document_timeout_s`
    (`crawl_frontier.py:400`). Значит смена уровня-дефолта меняет, какие документы успевают
    дочитаться (и попадают в корпус), **не меняя `run_id`**. Это ровно тот класс, который §9

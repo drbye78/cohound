@@ -221,7 +221,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 ### F1 — Первый полный прогон (M0.5)
 
 > ⬜ не сделано как фаза (5 из 6 пунктов закрыты, Exit достигнут; открыт один пункт).
-> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:202`
+> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:216`
 >   (`docling_extractor_version`), живое значение в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0,trafilatura-html-2` (сегмент
 >   `cpu`/`cuda` — ось `crawl.pdf_device`, P9).

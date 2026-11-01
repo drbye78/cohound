@@ -308,7 +308,7 @@ class CrawlLimits:
     #: исполнения**, а не сайта, поэтому per-site слоя у оси нет.
     #:
     #: В :meth:`as_dict` **не** входит: устройство уже названо ``extractor_stack``
-    #: (``docling-doc-3/<device>/docling-<build>``) и ``extractor_version`` документа, то
+    #: (``docling-doc-3/<device>/docling-<build>/<policy>``) и ``extractor_version`` документа, то
     #: есть входит в ``run_id`` и в ключ ``extract_cache``. Второй раз в
     #: ``crawl_config_digest`` это был бы второй носитель одного материала: расхождение
     #: прогонов нельзя было бы разобрать по полям.

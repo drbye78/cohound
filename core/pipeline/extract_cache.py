@@ -27,7 +27,7 @@
 (считается в :meth:`ExtractionCache.stats`), но не исключение.
 
 **Ключ не может соврать о движке (Д-8).** ``extractor_version`` — не константа формата:
-у документного извлечения это ``docling-doc-3:<level>/docling-<build>``, где ``<build>`` —
+у документного извлечения это ``docling-doc-3:<level>/<device>/docling-<build>/<policy>``, где ``<build>`` —
 версия установленной библиотеки (``core/adapters/extract_document.py``,
 :func:`~core.adapters.extract_document.docling_extractor_version`). Поэтому апгрейд парсера
 меняет ключ: конверт прежней сборки не находится, документ переизвлекается. Записи с

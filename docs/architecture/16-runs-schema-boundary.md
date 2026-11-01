@@ -259,7 +259,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 `EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:80-181`):
 добавляется `embed_device` рядом с `extractor_stack` (та же природа: устройство как условие
 измерения). Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:237`)
-из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:569-628`).
+из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:570-629`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
 (`core/pipeline/digests.py:394-416`) требует точного набора ключей, но вызывается ровно из

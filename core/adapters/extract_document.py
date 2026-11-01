@@ -8,7 +8,7 @@
 **P5 — уровень извлечения.** Качество PDF-экстракции задаётся осью
 ``crawl.document_level`` (:class:`~core.domain.enums.DocumentLevel`), а не «случайным»
 дефолтом пустого ``DocumentConverter()``. Уровень входит в ``version`` экстрактора
-(``docling-doc-3:<level>/docling-<build>``) и тем самым — в ``index_build_id``
+(``docling-doc-3:<level>/<device>/docling-<build>/<policy>``) и тем самым — в ``index_build_id``
 иммутабельной сборки (§13): смена уровня не может молча дать ту же сборку.
 
 **Сборка движка в версии экстрактора (Д-8).** ``<build>`` — версия установленной
@@ -131,6 +131,20 @@ DOCLING_ADAPTER_FAMILY = "docling-doc-3"
 #: (ключ ``extract_cache``/``pb``) и на ``extractor_stack`` (``run_id``).
 _DOCLING_BUILD_PREFIX = "docling-"
 
+#: Политика экспорта markdown — **слагаемое идентичности** текста, а не оформление.
+#:
+#: Замер 2026-11-01 (`docs/reports/measurements/2026-11-01-pdf-identifier-loss.md`):
+#: ``export_to_markdown()`` по умолчанию экранирует подчёркивания (``_`` → ``\_``), и на
+#: живом PDF это 1470 вхождений, из которых 26 уникальных имён параметров пришли в корпус
+#: искажёнными (``plantuner.disable\_index``). Текст документа меняется ⇒ обязан меняться
+#: ключ ``extract_cache`` и объявленный ``extractor_stack``, иначе два разных корпуса жили
+#: бы под одним ``run_id`` (Д-8: ``run_id`` не вправе называть движок, которого не было).
+#:
+#: Значение читают **оба** носителя: :func:`docling_extractor_version` (провенанс + ключ
+#: кэша) и :func:`core.cli.execution_axes.extractor_stack_version` (объявленное поле
+#: контракта). Одна константа — потому что две независимые формулы разошлись бы молча.
+DOCLING_MARKDOWN_POLICY = "md-plain-underscore"
+
 #: Имена дистрибутивов, под которыми ставится одна и та же библиотека: полный ``docling``
 #: (с torch) и лёгкий ``docling-slim`` (тот же код без torch; 05-dependency-stack).
 _DOCLING_DISTRIBUTIONS: tuple[str, ...] = ("docling", "docling-slim")
@@ -202,14 +216,14 @@ def docling_engine_build() -> str:
 def docling_extractor_version(
     level: DocumentLevel | str, pdf_device: PdfDevice | str = PdfDevice.CPU
 ) -> str:
-    """``extractor_version`` документа: ``docling-doc-3:<level>/<device>/docling-<build>``.
+    """``extractor_version`` документа: ``docling-doc-3:<level>/<device>/docling-<build>/<policy>``.
 
-    Пример: ``docling-doc-3:full/cuda/docling-2.135.0``. Уровень кодирует ось
-    ``crawl.document_level`` (P5), устройство — ``crawl.pdf_device`` (P9), сборка —
-    фактически установленную библиотеку. Все три слагаемых входят в ключ
-    ``extract_cache`` (``(content_hash, extractor_version, level)``): после апгрейда
-    docling **или** смены устройства старый текст получается только под **старым**
-    ключом и потому не находится.
+    Пример: ``docling-doc-3:full/cuda/docling-2.135.0/md-plain-underscore``. Уровень кодирует
+    ось ``crawl.document_level`` (P5), устройство — ``crawl.pdf_device`` (P9), сборка —
+    фактически установленную библиотеку, политика — :data:`DOCLING_MARKDOWN_POLICY`. Все
+    слагаемые входят в ключ ``extract_cache`` (``(content_hash, extractor_version, level)``):
+    после апгрейда docling, смены устройства **или политики экспорта** старый текст
+    получается только под **старым** ключом и потому не находится.
 
     Почему устройство обязательно в ключе (Д-8 в новом виде). Текст документа не
     бит-в-бит независим от устройства: layout/таблицы считаются тензорными ядрами, и
@@ -224,8 +238,27 @@ def docling_extractor_version(
     device = PdfDevice(pdf_device)
     return (
         f"{DOCLING_ADAPTER_FAMILY}:{DocumentLevel(level).value}/"
-        f"{device.value}/{docling_engine_build()}"
+        f"{device.value}/{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}"
     )
+
+
+def _export_markdown(document: object) -> str:
+    """Текст документа в markdown — **через объявленную политику экспорта**.
+
+    Экранирование подчёркиваний снято (``escape_underscores=False``): иначе ``_`` в именах
+    параметров приходит как ``\\_`` и доходит до чанков и ``citation_quote`` (I22 требует
+    непустую цитату, а точное сопоставление термина с цитатой на ``\\_`` ломается).
+    Замер и разбор — :data:`DOCLING_MARKDOWN_POLICY`.
+
+    ``escape_html`` намеренно оставлен дефолтным: его искажения (``&amp;``) на замере дали
+    два токена, отдельного решения по ним нет, а менять поведение «заодно» — это менять
+    текст корпуса без измерения.
+
+    Обе точки извлечения (полный успех и ``PARTIAL_SUCCESS``) ходят **сюда**: политика
+    экспорта обязана быть одна, иначе частичный документ описан другой версией адаптера,
+    чем целый.
+    """
+    return document.export_to_markdown(escape_underscores=False)  # type: ignore[attr-defined]
 
 
 def _resolve_docling() -> bool:
@@ -535,7 +568,7 @@ class DoclingDocumentExtractor:
     """Документ (PDF/DOCX/PPTX/XLSX) → markdown через docling. Реализация ``ExtractorPort``.
 
     ``level`` задаёт уровень извлечения PDF (P5), ``pdf_device`` — устройство моделей (P9).
-    ``version`` — инстансный и кодирует уровень, устройство и сборку движка
+    ``version`` — инстансный и кодирует уровень, устройство, сборку движка и политику экспорта
     (``docling-doc-3:<level>/<device>/docling-<build>``,
     :func:`docling_extractor_version`), чтобы смена уровня, устройства или апгрейд docling
     была видна и в ``index_build_id``, и в ключе ``extract_cache``. Классовый ``version`` —
@@ -891,7 +924,7 @@ class DoclingDocumentExtractor:
                 return doc
             if status != "SUCCESS":
                 return self._error(f"docling: статус конвертации {status}")
-            text = result.document.export_to_markdown()
+            text = _export_markdown(result.document)
             pages = _page_count(result)
             return ExtractedDoc(
                 text=text,
@@ -920,7 +953,7 @@ class DoclingDocumentExtractor:
         в результате, не дали ничего. Тогда — прежняя строка ``_error``, чтобы «прочитали
         частично» не стало способом вернуть пустой документ в корпус.
         """
-        text = result.document.export_to_markdown()
+        text = _export_markdown(result.document)
         if not text.strip():
             return self._error(f"docling: статус конвертации {status} без текста")
         total = _page_count(result)

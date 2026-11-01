@@ -294,7 +294,7 @@ edge не примет её как `workers`.
 ## 6. Фазы
 
 * **F1. Ось без поведения — сделана (`a50be3e`).** Поле + условный ключ в `as_dict()` + `CRAWL_AXIS_DESTS`
-  (`core/cli/execution_axes.py:178`) + флаги. Проверка: пин `run_id` без флага;
+  (`core/cli/execution_axes.py:179`) + флаги. Проверка: пин `run_id` без флага;
   `tests/cli/test_plan_crawl_axes.py:198` зелёный; `tests/pipeline/test_corpus_write_order.py:320`
   не сдвинулся.
 * **F2. Краул как отдельный вход — сделана (`f932271`).** `hound crawl run --crawl-only`: frontier + фетч + retention +

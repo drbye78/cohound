@@ -25,6 +25,7 @@ from core.adapters.extract_document import (
     _page_count,
     _probe_ocr_engine,
 )
+from core.cli.execution_axes import extractor_stack_version
 from core.domain.enums import DocumentLevel, PdfDevice
 from core.util.hashing import content_hash
 
@@ -256,7 +257,7 @@ class _FakeConvertResult:
 
     def __init__(self, *, total_pages: int | None, converted_pages: int) -> None:
         self.status = SimpleNamespace(name="SUCCESS")
-        self.document = SimpleNamespace(export_to_markdown=lambda: "# текст")
+        self.document = SimpleNamespace(export_to_markdown=lambda **_kw: "# текст")
         self.pages = [object() for _ in range(converted_pages)]
         if total_pages is None:
             self.input = None
@@ -310,6 +311,46 @@ def test_extract_bytes_uses_document_page_count(monkeypatch: pytest.MonkeyPatch)
     assert doc.page_count == 665
 
 
+def test_markdown_export_disables_underscore_escaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Оба пути извлечения просят markdown **без** экранирования ``_``.
+
+    Замер 2026-11-01 (`docs/reports/measurements/2026-11-01-pdf-identifier-loss.md`):
+    ``export_to_markdown()`` по умолчанию отдаёт ``plantuner.disable\\_index``, и этот
+    обратный слэш доходит до чанков и ``citation_quote`` (I22 — точное сопоставление
+    термина с цитатой). Политика обязана быть одна на полный успех и на частичный:
+    иначе частичный документ описан другим экспортом, чем целый.
+    """
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(extract_document, "_DOCLING_AVAILABLE", True)
+    kwargs_seen: list[dict[str, object]] = []
+
+    def export(**kwargs: object) -> str:
+        kwargs_seen.append(kwargs)
+        return "# текст"
+
+    def result(status: str, pages: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            status=SimpleNamespace(name=status),
+            document=SimpleNamespace(export_to_markdown=export),
+            pages=[object()],
+            input=SimpleNamespace(page_count=pages),
+        )
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.LAYOUT_TABLES)
+    extractor._converter = _ConvertOnlyConverter(result("SUCCESS", 1))
+    assert extractor.extract_bytes(b"%PDF-1.7", "doc.pdf").error is None
+
+    extractor._converter = _ConvertOnlyConverter(result("PARTIAL_SUCCESS", 2))
+    partial = extractor.extract_bytes(b"%PDF-1.7", "doc.pdf")
+    assert partial.error is None and partial.partial is True
+
+    assert len(kwargs_seen) == 2
+    for kwargs in kwargs_seen:
+        assert kwargs.get("escape_underscores") is False
+
+
 # --------------------------------------------------------------------------- #
 # Путь к retained-файлу: ``extract_path`` без копии тела vs ``extract_bytes``
 # --------------------------------------------------------------------------- #
@@ -340,7 +381,7 @@ class _PathReadingConverter:
         markdown = f"# документ\n\n{len(data)} байт: {data[:16].decode('utf-8', 'replace')}"
         return SimpleNamespace(
             status=SimpleNamespace(name="SUCCESS"),
-            document=SimpleNamespace(export_to_markdown=lambda: markdown),
+            document=SimpleNamespace(export_to_markdown=lambda **_kw: markdown),
             pages=[object()],
             input=SimpleNamespace(page_count=7),
         )
@@ -370,7 +411,8 @@ def test_extract_path_matches_extract_bytes_byte_for_byte(
     assert by_path.extractor_version == by_bytes.extractor_version
     assert by_path.extractor_version == (
         "docling-doc-3:layout_tables/cpu/"
-        f"docling-{extract_document.docling_library_version()}"
+        f"docling-{extract_document.docling_library_version()}/"
+        f"{extract_document.DOCLING_MARKDOWN_POLICY}"
     )
     # Оба пути отдали конвертеру одни и те же байты.
     assert [entry["data"] for entry in converter.seen] == [data, data]
@@ -425,7 +467,8 @@ def test_extract_path_missing_file_is_graceful(tmp_path: Path) -> None:
     assert doc.text == ""
     assert doc.extractor_version == (
         "docling-doc-3:layout_tables/cpu/"
-        f"docling-{extract_document.docling_library_version()}"
+        f"docling-{extract_document.docling_library_version()}/"
+        f"{extract_document.DOCLING_MARKDOWN_POLICY}"
     )
 
 def test_extract_path_full_pdf_keeps_ocr_guard(
@@ -580,6 +623,7 @@ def test_extractor_version_names_level_and_engine_build() -> None:
     новом виде).
     """
     build = f"docling-{extract_document.docling_library_version()}"
+    policy = extract_document.DOCLING_MARKDOWN_POLICY
     for level in (
         DocumentLevel.OFF,
         DocumentLevel.TEXT,
@@ -588,9 +632,9 @@ def test_extractor_version_names_level_and_engine_build() -> None:
         DocumentLevel.FULL,
     ):
         version = DoclingDocumentExtractor(level).version
-        assert version == f"docling-doc-3:{level.value}/cpu/{build}"
+        assert version == f"docling-doc-3:{level.value}/cpu/{build}/{policy}"
         assert version.startswith(f"docling-doc-3:{level.value}/cpu/")
-        assert version.endswith(f"/{build}")
+        assert version.endswith(f"/{build}/{policy}")
 
 
 def test_extractor_version_differs_by_device() -> None:
@@ -606,7 +650,7 @@ def test_extractor_version_differs_by_device() -> None:
         assert cpu != cuda, level
         assert "/cpu/" in cpu and "/cuda/" in cuda, level
         # Сборка движка у обоих одна: устройство не подменяет версию библиотеки.
-        assert cpu.rsplit("/", 1)[-1] == cuda.rsplit("/", 1)[-1]
+        assert cpu.split("/")[2] == cuda.split("/")[2]
 
 
 def test_engine_build_reflects_installed_library_version(
@@ -618,8 +662,26 @@ def test_engine_build_reflects_installed_library_version(
     assert extract_document.docling_engine_build() == "docling-2.140.1"
     assert (
         DoclingDocumentExtractor(DocumentLevel.FULL).version
-        == "docling-doc-3:full/cpu/docling-2.140.1"
+        == "docling-doc-3:full/cpu/docling-2.140.1/md-plain-underscore"
     )
+
+
+def test_markdown_policy_is_the_same_in_version_and_stack() -> None:
+    """Политика экспорта названа **одной** константой в обоих носителях.
+
+    ``extractor_version`` — провенанс и ключ ``extract_cache``; ``extractor_stack`` —
+    объявленное поле контракта (``run_id``). Если сегмент политики появится только в
+    одном, правка экспорта либо не найдёт старый кэш, либо изменит корпус под прежним
+    ``run_id`` — ровно тот класс дефекта, ради которого заведён Д-8.
+    """
+    version = DoclingDocumentExtractor(DocumentLevel.FULL).version
+    stack = extractor_stack_version(PdfDevice.CPU)
+
+    assert version.endswith(f"/{extract_document.DOCLING_MARKDOWN_POLICY}")
+    assert stack.endswith(f"/{extract_document.DOCLING_MARKDOWN_POLICY}")
+    # Сборка движка — тоже одна и та же строка в обоих носителях (Д-8).
+    assert version.split("/")[2] == stack.split("/")[2]
+    assert version.split("/")[2] == extract_document.docling_engine_build()
 
 
 def test_missing_library_does_not_invent_a_build(
@@ -631,7 +693,7 @@ def test_missing_library_does_not_invent_a_build(
     assert extract_document.docling_library_version() == "unknown"
     assert (
         DoclingDocumentExtractor(DocumentLevel.FULL).version
-        == "docling-doc-3:full/cpu/docling-unknown"
+        == "docling-doc-3:full/cpu/docling-unknown/md-plain-underscore"
     )
 
 
@@ -658,7 +720,7 @@ class _StatusConvertResult:
         converted_pages: int,
     ) -> None:
         self.status = SimpleNamespace(name=status)
-        self.document = SimpleNamespace(export_to_markdown=lambda: markdown)
+        self.document = SimpleNamespace(export_to_markdown=lambda **_kw: markdown)
         self.pages = [object() for _ in range(converted_pages)]
         self.input = None if total_pages is None else SimpleNamespace(page_count=total_pages)
 

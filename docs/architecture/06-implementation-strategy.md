@@ -829,14 +829,14 @@ golden-full, adversarial как приёмочный прогон) — **хар�
 (`uv sync --frozen --extra <name>`; `uv lock --check` проходит). Тяжёлые контуры (`pdf`/`index`) —
 в изолированных venv/образах, ядро их не тянет (P7/A1). Полный список extras:
 `retrieval`, `crawl`, `extract`, **`extract-archives`**, `extract-pdf`, `safety`, `ops`, `embed`,
-`embed-lite`, `ann`, `fallback`, `dev`.
+`embed-lite`, `ann`, `pdf-measure`, `dev`.
 
 ```bash
 # cli-light — рабочее окружение: ядро + retrieval + crawl + extract(office/html/text/epub) + safety + ops
 uv sync --frozen --extra retrieval --extra crawl --extra extract --extra safety --extra ops
 
 # контейнеры/архивы: zip читается stdlib; 7z/rar — extra extract-archives
-# (py7zr/rarfile; сжатые члены rar требуют внешнего bsdtar/unrar/7z, AES-zip — pyzipper).
+# (py7zr/rarfile; сжатые члены rar требуют внешнего bsdtar/unrar/7z; AES-zip не поддерживается).
 # Без бэкенда контейнер не разворачивается видимо: backend_unavailable /
 # container_reader_unavailable, а не «тихо пусто».
 uv sync --frozen --extra extract --extra extract-archives
@@ -994,7 +994,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   materialize core/` даёт только локальную переменную `core/pipeline/report.py:1909-1915`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `_template`), паритет реестров под `split`
   (`core/cli/context.py:1674` против `core/edge/server.py:1104`), R3 (ревизия весов моделей не
-  входит в `extractor_version`, `core/adapters/extract_document.py:205-207`), E1 follow-up
+  входит в `extractor_version`, `core/adapters/extract_document.py:221-226`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`), A1 follow-up (мультиплексирование
   root/product **закрыто** F4a/F4b — `core/pipeline/corpus_driver.py`; открыт нит
   `limiter.wait` внутри/вне `try`, `core/pipeline/corpus_ingest.py:2466`).
@@ -1011,7 +1011,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   ➖ **снято как пункт, но не как факт:** под `split` процессной экстракции нет — это устройство
   зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2345`), а не недоделка.
   Так же снят прежний остаток «`use_ocr=False` — мёртвый код»: решением P5 `full` несёт OCR,
-  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:660-690`),
+  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:693-723`),
   и документированное прежде «сканы дают пустой текст» было неверным.
 
 ---

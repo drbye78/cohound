@@ -431,7 +431,8 @@ def test_docling_version_uses_installed_distribution() -> None:
             continue
     library = extract_document.docling_library_version()
     assert library in (expected or ["unknown"])
-    assert execution_axes.extractor_stack_version().endswith(f"/docling-{library}")
+    stack = execution_axes.extractor_stack_version()
+    assert stack.split("/")[-2] == f"docling-{library}"
 
 
 def test_status_dict_version_comes_from_dictionary() -> None:
@@ -536,11 +537,13 @@ def test_extractor_stack_names_the_declared_device(
     cpu = execution_axes.extractor_stack_version(PdfDevice.CPU)
     cuda = execution_axes.extractor_stack_version(PdfDevice.CUDA)
 
-    assert cpu.endswith("+docling-doc-3/cpu/docling-9.9.9")
-    assert cuda.endswith("+docling-doc-3/cuda/docling-9.9.9")
+    policy = execution_axes.DOCLING_MARKDOWN_POLICY
+    assert cpu.split("/")[-2:] == ["docling-9.9.9", policy]
+    assert cuda.split("/")[-2:] == ["docling-9.9.9", policy]
+    assert "+docling-doc-3/cpu/" in cpu and "+docling-doc-3/cuda/" in cuda
     assert cpu != cuda
-    # Устройство и сборка не смешиваются: последний сегмент у обоих один.
-    assert cpu.rsplit("/", 1)[1] == cuda.rsplit("/", 1)[1]
+    # Устройство и сборка не смешиваются: сборка у обоих одна, политика — тоже.
+    assert cpu.split("/")[-2] == cuda.split("/")[-2]
 
 
 def test_extractor_stack_and_extractor_version_share_the_engine_build(
@@ -559,10 +562,11 @@ def test_extractor_stack_and_extractor_version_share_the_engine_build(
     stack = execution_axes.extractor_stack_version()
     version = DoclingDocumentExtractor(DocumentLevel.FULL).version
 
-    assert stack.endswith("/docling-9.9.9")
-    assert version == "docling-doc-3:full/cpu/docling-9.9.9"
-    # Одна и та же строка сборки в обоих идентификаторах.
-    assert stack.rsplit("/", 1)[1] == version.rsplit("/", 1)[1]
+    assert stack.split("/")[-2] == "docling-9.9.9"
+    assert version == "docling-doc-3:full/cpu/docling-9.9.9/md-plain-underscore"
+    # Одна и та же строка сборки в обоих идентификаторах (политика — тоже одна).
+    assert stack.split("/")[-2] == version.split("/")[-2]
+    assert stack.split("/")[-1] == version.split("/")[-1]
 
 
 def test_engine_build_does_not_enter_execution_contract() -> None:

@@ -27,7 +27,7 @@
 (HTML-адаптер + семейство docling-адаптера + фактическая версия установленной
 библиотеки ``docling``). Сборка движка (``docling-<version>``) берётся из
 :func:`core.adapters.extract_document.docling_engine_build` — **того же** вызова, из
-которого строится ``extractor_version`` документа (``docling-doc-3:<level>/docling-<build>``,
+которого строится ``extractor_version`` документа (``docling-doc-3:<level>/<device>/docling-<build>/<policy>``,
 ключ ``extract_cache`` и слагаемое ``pb``). Две независимые формулы разошлись бы, и
 ``run_id`` объявлял бы движок, которого не было (Д-8, §2.5). ``extractor_version`` при
 этом остаётся наблюдаемой величиной и в контракт не входит: в ``run_id`` едет только
@@ -89,6 +89,7 @@ from core.adapters.chunker_family import (
 )
 from core.adapters.extract_document import (
     DOCLING_ADAPTER_FAMILY,
+    DOCLING_MARKDOWN_POLICY,
     docling_engine_build,
 )
 from core.adapters.extract_html import HtmlExtractor
@@ -658,13 +659,19 @@ class DeclaredExecutionAxes:
 def extractor_stack_version(
     pdf_device: PdfDevice | str = PdfDevice.CPU,
 ) -> str:
-    """Декларированный стек извлечения: ``<html>+<docling-family>/<device>/<build>``.
+    """Декларированный стек извлечения: ``<html>+<docling-family>/<device>/<build>/<policy>``.
 
-    Пример: ``trafilatura-html-2+docling-doc-3/cuda/docling-2.135.0`` (при отсутствии
-    библиотеки — ``.../docling-unknown``). ``<build>`` — **тот же** вызов
-    (:func:`core.adapters.extract_document.docling_engine_build`), что даёт сборку в
+    Пример: ``trafilatura-html-2+docling-doc-3/cuda/docling-2.135.0/md-plain-underscore``
+    (при отсутствии библиотеки — ``.../docling-unknown/<policy>``). ``<build>`` — **тот же**
+    вызов (:func:`core.adapters.extract_document.docling_engine_build`), что даёт сборку в
     ``extractor_version`` документа, поэтому стек и ключ ``extract_cache`` называют одну
     и ту же версию библиотеки (Д-8).
+
+    ``<policy>`` — политика экспорта текста
+    (:data:`core.adapters.extract_document.DOCLING_MARKDOWN_POLICY`). Она здесь по той же
+    причине, что и сборка: текст документа от неё зависит (замер 2026-11-01: экранирование
+    ``_`` давало 26 искажённых имён на одном PDF), а ``extractor_version`` в контракт не
+    входит. Без этого сегмента правка политики меняла бы корпус под прежним ``run_id``.
 
     ``<device>`` — объявленная ось ``crawl.pdf_device`` (P9). Она здесь потому, что
     ``extractor_version`` **наблюдаем** и в контракт не входит (методология 2.4.0: он
@@ -676,7 +683,7 @@ def extractor_stack_version(
     device = PdfDevice(pdf_device)
     return (
         f"{HtmlExtractor.version}+{DOCLING_ADAPTER_FAMILY}/{device.value}/"
-        f"{docling_engine_build()}"
+        f"{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}"
     )
 
 

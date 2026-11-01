@@ -54,7 +54,7 @@
    решение) не работает: остаётся максимум по корпусу.
 
 4. **Крупнейший документ корпуса не извлекается никогда.** `document_timeout` для
-   `layout_tables` — 2700 s (`core/adapters/extract_document.py:354`), документ израсходовал
+   `layout_tables` — 2700 s (`core/adapters/extract_document.py:444`), документ израсходовал
    2784 s. Это не тихая потеря: docling вернул `PARTIAL_SUCCESS`, адаптер отдал
    `ExtractedDoc.error`, фаза пометила `parser_failed` — то есть дефекта в проводке нет,
    **проверено** (воспроизведение с `document_timeout=5 s` даёт тот же `PARTIAL_SUCCESS`).
@@ -85,7 +85,7 @@
 
 ## Открытый дефект, найденный замером
 
-`document_timeout` (`core/adapters/extract_document.py:354`) — константа по уровню, которая
+`document_timeout` (`core/adapters/extract_document.py:444`) — константа по уровню, которая
 **меняет состав корпуса**: с таймаутом 2700 s документ на 2763 страницы попадает в
 `parser_failed`, с 5400 s — возможно, в корпус. Проверено AST: `document_timeout` не
 встречается ни в `digests.py`, ни в `crawl_frontier.py`, то есть в

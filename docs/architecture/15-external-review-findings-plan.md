@@ -137,7 +137,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3245`), синхронно в фазе | только корректность (`tests/selfcheck.py:3989-3996`) | Д/Г | P4 |
 | F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:613-614`, `:621`; сравнить `container_policy.py:286` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
-| F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `extract_document.py:416` (`FULL: None`), `core/cli/wiring.py:2186`,`:2252`, `edge/__main__.py:134` — без `document_timeout`; guard только родительский (`core/pipeline/corpus.py:2469`: `extract_timeout=_extract_timeout`); `core/cli/wiring.py:2226` recycle=None | частично, только родительская сторона (`tests/pipeline/test_corpus_extract_pool.py:865-932`) | Д/М | P4 |
+| F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `extract_document.py:449` (`FULL: None`), `core/cli/wiring.py:2186`,`:2252`, `edge/__main__.py:134` — без `document_timeout`; guard только родительский (`core/pipeline/corpus.py:2469`: `extract_timeout=_extract_timeout`); `core/cli/wiring.py:2226` recycle=None | частично, только родительская сторона (`tests/pipeline/test_corpus_extract_pool.py:865-932`) | Д/М | P4 |
 | F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:87`,`:203`,`:461-462`, `core/pipeline/corpus_ingest.py:1787-1794` (`probe_artifact`) | нет: все тесты кладут маркер в голову | М | P4 |
 
 **Статус на 2026-10-28.** ✅ F1–F8 (пакет P4 закрыт по всем строкам).
@@ -152,7 +152,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ F5 — единая точка разбора XML + hostile-тесты (`0c683f0`), сверено по `core/util/feed.py`.
 - ✅ F6 — предикат «ось не задана» — `is not None`: `core/util/container_policy.py:292,301`.
 - ✅ F7 — ось `crawl.document_timeout_s` доходит до docling: `core/cli/wiring.py:2071`, `:2418`,
-  `:2785`; ось объявлена в аргументах — `core/cli/execution_axes.py:184`.
+  `:2785`; ось объявлена в аргументах — `core/cli/execution_axes.py:185`.
 - ✅ F8 — OOXML по **центральному каталогу** zip, неузнанный OOXML остаётся `document`:
   `core/util/document_probe.py:8`, `core/util/document_formats.py:461-462`.
 
@@ -526,7 +526,7 @@ absence-модель, scoring и определения Coverage/Comparability �
    `llm_scenarios` = `(evaluator, deepseek-v4.1-flash:purple, api, decoder=json_object,
    seed=NULL, temperature=NULL, constrained_decoding=NULL)` — три последние колонки объявлены
    в схеме (`core/domain/models.py:1158-1173`) и обещаны §7.1/`02:488` («фиксируется в `run_manifest.yaml`
-   (R7)»), но `_resolve_llm_scenarios` (`core/cli/execution_axes.py:677-743`) их не пишет вообще.
+   (R7)»), но `_resolve_llm_scenarios` (`core/cli/execution_axes.py:684-750`) их не пишет вообще.
    Проверено чтением БД. То есть V6/V4/V3 складываются в одно: **условия измерения не
    записаны**, а не «записаны неверно».
 3. **`base_url` не входит в идентичность ни в каком виде** — только `endpoint_kind: api`.
@@ -544,10 +544,10 @@ absence-модель, scoring и определения Coverage/Comparability �
 - ✅ 1 — guidance вошёл в идентичность через композит: `prompt_template` =
   `имя@hash(шаблон + ABSENCE_GUIDANCE + JSON-схема)` (`core/pipeline/run_identity.py:218-247`).
 - ✅ 2 — условия генерации записываются: `seed`/`temperature`/`constrained_decoding`/
-  `endpoint_host`/`max_tokens` в строке сценария (`core/cli/execution_axes.py:699-720`),
+  `endpoint_host`/`max_tokens` в строке сценария (`core/cli/execution_axes.py:706-727`),
   фактические значения — из тех же констант, что уходят в адаптер.
 - ✅ 3 — `base_url` вошёл в идентичность как **хост**: `llm_scenarios.endpoint_host`
-  (`core/cli/execution_axes.py:719`), а `llm_scenarios` — поле контракта
+  (`core/cli/execution_axes.py:726`), а `llm_scenarios` — поле контракта
   (`core/pipeline/digests.py:88`). Схема/путь/секрет не пишутся намеренно.
 - ✅ 4 — benchmark читает `golden_status`: `core/pipeline/evaluator_benchmark.py:115,361,494`.
 - ✅ 5 — класс назван: `prompt_template` отнесён к `execution_versions`
@@ -655,7 +655,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 - 1 ➖ снято — решением §10 п. 1: все правки до прогона, `run_id` меняется один раз. Исполнено:
   P2/P6/P7 сведены в `f6100c7`.
 - 2 ✅ отвечен кодом — ось доходит до docling (`core/cli/wiring.py:2071,2418,2785`,
-  `core/cli/execution_axes.py:184`), т.е. выбран первый вариант.
+  `core/cli/execution_axes.py:185`), т.е. выбран первый вариант.
 - 3 ✅ отвечен кодом — политика переехала в ядро (`core/util/robots.py:72,483`), одна для
   транспортов; per-request ось осталась свойством адаптера (`core/adapters/crawl_scrapy.py:422`).
 - 4 ⬜ **не отвечен и не сделан** — post-resolve проверки нет (`grep getaddrinfo core/` пуст),
@@ -664,7 +664,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 - 5 ➖ снято — extra остаётся необязательным, тесты инъектируют отсутствие бэкенда
   (`tests/adapters/test_container_7z.py:38`), поэтому установка extra их не красит.
 - 6 ➖ снято — решением §10 п. 2: правило ограничено production, стенд RnD объявлен; код пишет
-  `endpoint_host` (`core/cli/execution_axes.py:719`) и признак `rnd_endpoint`
+  `endpoint_host` (`core/cli/execution_axes.py:726`) и признак `rnd_endpoint`
   (`core/domain/scoring.py:956`).
 - 7 ✅ названо — регламент отнёс `prompt_template` к `execution_versions`
   (`cohound-spec-v2.md:861,880`). ❔ отчёт замера (`2026-10-27-support-not-about-subject.md:84`)
@@ -784,7 +784,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 | Паритет `split`: члены архивов через шов, `document_level`/`pdf_pipeline` в edge, двойной фетч, дыра покрытия (архив скачан, члены не извлечены ⇒ `complete=True` на пустом корпусе) | профиль `split` — опция MVP (M1), а не паритетен; дыра покрытия даёт ложную уверенность в полноте | архитектура шва | 4 → ⬜ **не сделано** (волна 4 не начата; ограничение записано как причина `deploy_profile` в контракте — `core/pipeline/digests.py:109-118`) |
 | Лексический индекс: одно поле вместо четырёх (C8), персист либо явная запись «время жизни процесса» | 4× работы анализаторов и объёма индекса ради 3 профилей, которые прогон не запрашивает; пересборка каждый прогон в temp | архитектура | 3 → **сделано** (`1e7fad9`: одно поле + `lexical_spec` в контракте) |
 | Таксономия `CrawlError` из адаптера в порт/домен (R5) | десяток модулей ядра импортировали таксономию из реализации; место было зафиксировано компромиссом в `ports/crawler.py:20` | архитектура | 3 → **сделано** (`dfa428d`) |
-| `document_timeout_s` как настоящая ось `CrawlLimits` + проводка в docling (F7) | ось объявлена, до docling не доходит; `FULL: None` означает «слот занят до конца прогона» | код + контракт | 2 → ✅ **сделано**: ось в аргументах (`core/cli/execution_axes.py:184`), до docling (`core/cli/wiring.py:2071,2418,2785`) |
+| `document_timeout_s` как настоящая ось `CrawlLimits` + проводка в docling (F7) | ось объявлена, до docling не доходит; `FULL: None` означает «слот занят до конца прогона» | код + контракт | 2 → ✅ **сделано**: ось в аргументах (`core/cli/execution_axes.py:185`), до docling (`core/cli/wiring.py:2071,2418,2785`) |
 | `extract_cache`: частичность при 304-reuse | переиспользование полного результата для частично извлечённого документа скрывает деградацию | схема state.db | 3 → **сделано** (`8d55b6a`, схема состояния 5) |
 | `PARTIAL_SUCCESS`/`SKIP_READ_FAILED` (без `corpus_members`) | отказ, который сейчас теряется, — это невидимая потеря, а не типизация | код | 3 → **сделано** (`8d55b6a`: `MemberOutcome.partial` с инвариантом, `PARTIAL_EXTRACTION` в блокирующих классах) |
 
