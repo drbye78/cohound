@@ -36,8 +36,10 @@ from core.domain import (
     RunConfig,
     RunMode,
 )
-from core.pipeline import RunPlan
+from core.pipeline import RunPlan, corpus_drain, corpus_driver
 from core.pipeline.corpus import IndexBuild, build_corpus
+from core.pipeline.corpus_index import _CorpusStageTimings
+from core.pipeline.corpus_ingest import LocalFetch
 from core.pipeline.crawl_session import default_session_id
 from core.ports.state import UrlStateRow
 from core.ports.types import (
@@ -1056,3 +1058,329 @@ def _page_bytes(page: Any) -> bytes:
         return page.content
     path = getattr(page, "source_path", None)
     return pathlib.Path(path).read_bytes() if path else b""
+
+
+# --------------------------------------------------------------------------- #
+# F9 (план 17): когорта — продукт как граница **коммита**, а не взаимного исключения
+# --------------------------------------------------------------------------- #
+
+#: Два продукта когорты: по одному корню с одним ребёнком. Корни — на разных host'ах
+#: (волны могут идти вместе) или на одном (право на host держится).
+_COHORT_ROOTS_SHARED = ("https://same.docs.test/one", "https://same.docs.test/two")
+_COHORT_ROOTS_DISTINCT = ("https://p1.docs.test/", "https://p2.docs.test/")
+
+
+def _cohort_pages(roots: tuple[str, str]) -> dict[str, bytes]:
+    """Страницы двух продуктов: корень со ссылкой на ребёнка **внутри** своего корня."""
+    pages: dict[str, bytes] = {}
+    for index, root in enumerate(roots):
+        child = f"{root.rstrip('/')}/child{index}"
+        pages[root] = f'<html><a href="{child}">c</a></html>'.encode()
+        pages[child] = f"<html>child-{index}</html>".encode()
+    return pages
+
+
+def _cohort_build(
+    tmp_path: Path,
+    *,
+    roots: tuple[str, str],
+    crawler: _TimedCrawler,
+    host_concurrency: int | None,
+) -> Any:
+    """Сборка корпуса когорты из двух продуктов (план и строка прогона — из ``test_corpus``).
+
+    Идентификатор прогона берётся **тот же**, что у плана: строка ``runs`` обязана
+    существовать до открытия сеанса (FK), иначе фаза сообщит ``IntegrityError`` вместо
+    корпуса — и тест проверял бы не то, что назвал.
+    """
+    from test_corpus import RUN_ID as RUN_ID_TWO
+    from test_corpus import _build as _build_two
+    from test_corpus import _make_run as _make_run_two
+
+    store = SqliteStore(":memory:")
+    _make_run_two(store, RUN_ID_TWO)
+    try:
+        result = _build_two(
+            tmp_path,
+            pages=_cohort_pages(roots),
+            crawler=crawler,
+            urls={"p1": [roots[0]], "p2": [roots[1]]},
+            store=store,
+            run_id=RUN_ID_TWO,
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1, max_workers=2, host_concurrency=host_concurrency
+            ),
+        )
+    finally:
+        store.close()
+    return result
+
+
+def _product_events(result: Any) -> list[tuple[str, str]]:
+    """Границы продуктов в порядке появления: ``(event, product_id)``."""
+    return [
+        (str(entry["event"]), str(entry["product_id"]))
+        for entry in result.log_entries
+        if isinstance(entry, dict)
+        and entry.get("event") in {"product_start", "product_end"}
+    ]
+
+
+def test_cohort_waves_of_two_products_overlap_on_distinct_hosts(tmp_path: Path) -> None:
+    """F9: два продукта идут полосами **одновременно**, если их host'ы разные.
+
+    Это и есть цель когортного планирования: до F9 ``drive_roots`` вызывался внутри цикла
+    продуктов, поэтому волна не могла содержать корень другого продукта и окна
+    ``fetch_started_at`` продуктов не пересекались ни при какой оси. Здесь гейт отпускает
+    фетч только при **двух** одновременных, и гейтованы ровно корни разных продуктов —
+    значит корни двух продуктов были в сети вместе.
+
+    Второй половиной проверяется новый контракт границ: ``start``/``end`` продукта больше
+    не обязаны быть вложенными парами — продукт ``p2`` начинается, пока ``p1`` не закрыт
+    (закрытие — граница коммита, а не запрет на работу соседа).
+    """
+    roots = _COHORT_ROOTS_DISTINCT
+    crawler = _TimedCrawler(
+        _cohort_pages(roots), gate_to=2, gate_timeout=0.25, gate_urls=set(roots)
+    )
+
+    result = _cohort_build(
+        tmp_path, roots=roots, crawler=crawler, host_concurrency=2
+    )
+
+    assert result.errors == []
+    assert result.status == "ok"
+    # Предусловие теста: оба корня действительно фетчились (иначе «пересечение» ложно).
+    assert set(roots) <= set(crawler.calls)
+    # Пик одновременных фетчей ≥ 2 при гейте на двух корнях разных продуктов ⇒
+    # волны обоих продуктов были в полёте одновременно.
+    assert crawler.max_active >= 2
+
+    events = _product_events(result)
+    assert ("product_start", "p2") in events and ("product_end", "p1") in events
+    # Новый контракт: p2 открыт до того, как p1 закрыт.
+    assert events.index(("product_start", "p2")) < events.index(("product_end", "p1"))
+    # При этом у каждого продукта его собственный start предшествует его end.
+    for product_id in ("p1", "p2"):
+        assert events.index(("product_start", product_id)) < events.index(
+            ("product_end", product_id)
+        )
+
+
+def test_cohort_keeps_host_claim_across_products(tmp_path: Path) -> None:
+    """F9: общий host у двух продуктов — право на host держится и между продуктами.
+
+    Ось объявлена (``host_concurrency=2``), но host один: волна второго продукта
+    припаркована до коммита первой. Гейт на двух одновременных фетчах при этом не
+    открывается вовсе, поэтому наблюдённый пик — 1. Без общего реестра права (если бы
+    каждый продукт вёл свой) гейт открылся бы сразу: это и есть проверяемый дефект.
+    """
+    roots = _COHORT_ROOTS_SHARED
+    crawler = _TimedCrawler(
+        _cohort_pages(roots), gate_to=2, gate_timeout=0.2, gate_urls=set(roots)
+    )
+
+    result = _cohort_build(
+        tmp_path, roots=roots, crawler=crawler, host_concurrency=2
+    )
+
+    assert result.errors == []
+    assert result.status == "ok"
+    assert set(roots) <= set(crawler.calls)
+    assert crawler.host_max_active["same.docs.test"] == 1
+    assert crawler.max_active == 1
+
+
+def test_cohort_without_axis_stays_sequential(tmp_path: Path) -> None:
+    """F9: ``crawl.host_concurrency`` не объявлена ⇒ последовательность прежняя.
+
+    Предохранитель когортного планирования: без оси один вызов драйвера обязан вести себя
+    как прежний цикл — продукт целиком, затем следующий. Проверяется наблюдаемое: границы
+    продуктов идут парами, корни не встречаются, пик фетчей — 1.
+    """
+    roots = _COHORT_ROOTS_DISTINCT
+    crawler = _TimedCrawler(
+        _cohort_pages(roots), gate_to=2, gate_timeout=0.2, gate_urls=set(roots)
+    )
+
+    result = _cohort_build(tmp_path, roots=roots, crawler=crawler, host_concurrency=None)
+
+    assert result.errors == []
+    assert result.status == "ok"
+    assert crawler.max_active == 1
+    assert _product_events(result) == [
+        ("product_start", "p1"),
+        ("product_end", "p1"),
+        ("product_start", "p2"),
+        ("product_end", "p2"),
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# F9: потолок полос — продуктовый, когортный потолок не выдаётся «за компанию»
+# --------------------------------------------------------------------------- #
+
+#: Два продукта когорты разной ширины: узкому объявлена одна полоса, широкому — три.
+#: Когортный потолок (три) принадлежит **когорте**; продуктовый приходит из
+#: ``lane_limit_for``, потому что ось объявлена на корень (``app < run < site``).
+_COHORT_NARROW = "p-narrow"
+_COHORT_WIDE = "p-wide"
+
+
+class _ProductGate:
+    """``local_fetch`` с гейтом: держит вызовы до ``to`` одновременных и считает пик по продукту.
+
+    Гейт делает одновременность наблюдаемой без сверки последовательностей задержек:
+    вызов не возвращается, пока активных не станет ``to`` (или не истечёт ``timeout`` —
+    тогда одинокая полоса просто едет дальше), и держится ещё ``hold`` секунд, чтобы
+    третья волна успела войти **до** выхода второй: иначе пик мерил бы порядок
+    планировщика потоков, а не допуск драйвера. Пик считается **раздельно по**
+    ``desc.pid``: вопрос теста — «сколько полос держал продукт», а не «сколько было в
+    когорте», и общий пик это второй, отдельный факт.
+    """
+
+    def __init__(self, *, to: int, timeout: float, hold: float = 0.05) -> None:
+        self._to = to
+        self._timeout = timeout
+        self._hold = hold
+        self._lock = threading.Lock()
+        self._active = 0
+        self._active_by_pid: dict[str, int] = {}
+        self.max_active = 0
+        self.max_active_by_pid: dict[str, int] = {}
+        self.calls: list[str] = []
+
+    def __call__(self, desc: Any) -> RawPage:
+        pid = str(desc.pid)
+        with self._lock:
+            self.calls.append(desc.wu)
+            self._active += 1
+            self._active_by_pid[pid] = self._active_by_pid.get(pid, 0) + 1
+            self.max_active = max(self.max_active, self._active)
+            self.max_active_by_pid[pid] = max(
+                self.max_active_by_pid.get(pid, 0), self._active_by_pid[pid]
+            )
+        try:
+            deadline = time.monotonic() + self._timeout
+            while time.monotonic() < deadline:
+                with self._lock:
+                    if self._active >= self._to:
+                        break
+                time.sleep(0.001)
+            # Держим окно открытым: пик по продукту — это «сколько волн допущено
+            # одновременно», и мгновенный выход сделал бы его функцией планировщика.
+            time.sleep(self._hold)
+            return RawPage(
+                url=f"https://{desc.host}/",
+                content=b"x",
+                fetched_at=TS,
+                fetch_mode=desc.fetch_plan.fetch,
+                lang="en",
+            )
+        finally:
+            with self._lock:
+                self._active -= 1
+                self._active_by_pid[pid] -= 1
+
+
+def _lane_plan(root_url: str, product_id: str) -> corpus_drain.RootPlan:
+    """План корня для драйвера: цель и sitemap не нужны — волну строит фейковый ``begin``."""
+    return corpus_drain.RootPlan(
+        root_url=root_url, target=None, sitemap_seeds=False, product_id=product_id
+    )
+
+
+def _one_host_begin(
+    hosts_by_root: dict[str, str],
+) -> Any:
+    """``begin=`` драйвера: корень — **одна** волна из одного фетча, затем конец.
+
+    Настоящий ``root_lifecycle`` здесь не нужен: драйвер спрашивается только о том,
+    сколько волн **продукта** он допустил одновременно, а не о том, что сделал корень.
+    """
+
+    def begin(plan: Any, *, fetch_pool: Any = None, browser_pool: Any = None) -> Any:
+        host = hosts_by_root[plan.root_url]
+        url = f"https://{host}/"
+        entry = corpus_drain._WaveEntry(
+            pid=str(plan.product_id),
+            wu=url,
+            depth=0,
+            kind="fetch",
+            desc=LocalFetch(
+                pid=str(plan.product_id),
+                wu=url,
+                depth=0,
+                fetch_plan=FetchPlan(),
+                active=None,
+                engine_value=None,
+                prior_item=None,
+                resume=None,
+                browser_blocked=False,
+                poolable=True,
+                host=host,
+                scope_host=None,
+                enforce_redirect_scope=False,
+            ),
+        )
+        yield corpus_drain.WavePlan(entries=[entry], hosts=frozenset({host}))
+        return (None, [])
+
+    return begin
+
+
+def test_cohort_product_lane_limits_are_not_shared() -> None:
+    """F9: потолок полос — **продуктовый**; когортный потолок не выдаётся «за компанию».
+
+    Ось объявлена на корень, поэтому у продукта со строгим объявлением полос меньше, чем
+    у когорты; ``lane_limit_for`` обязан вернуть потолок **этого** продукта. Проверяются
+    обе стороны одной ошибки: узкий продукт не расширяется до когортного потолка
+    (иначе лимит продукта игнорируется) и широкий не душится до узкого (иначе
+    продуктовый потолок стал бы общим). Наблюдаемое — пик одновременных фетчей **по
+    продукту**; общий пик — отдельное утверждение о потолке когорты.
+    """
+    narrow_roots = ("https://n1.test/", "https://n2.test/")
+    wide_roots = ("https://w1.test/", "https://w2.test/", "https://w3.test/")
+    hosts = {
+        narrow_roots[0]: "n1.test",
+        narrow_roots[1]: "n2.test",
+        wide_roots[0]: "w1.test",
+        wide_roots[1]: "w2.test",
+        wide_roots[2]: "w3.test",
+    }
+    # Узкие корни идут **подряд и первыми**: это ставит их в одну волну допуска, поэтому
+    # испорченный лимит («всем потолок когорты») сразу даёт узкому продукту пик 2. Широкие
+    # идут следом: их пик достижим, только если продуктовый лимит не стал общим.
+    plans = [
+        _lane_plan(narrow_roots[0], _COHORT_NARROW),
+        _lane_plan(narrow_roots[1], _COHORT_NARROW),
+        _lane_plan(wide_roots[0], _COHORT_WIDE),
+        _lane_plan(wide_roots[1], _COHORT_WIDE),
+        _lane_plan(wide_roots[2], _COHORT_WIDE),
+    ]
+    gate = _ProductGate(to=2, timeout=0.25)
+    timings: dict[str, Any] = {}
+    errors: list[str] = []
+
+    outcomes = corpus_driver.drive_roots(
+        plans,
+        host_concurrency=3,
+        begin=_one_host_begin(hosts),
+        lane_width=lambda plan: 2,
+        local_fetch=gate,
+        timings_for=lambda pid: timings.setdefault(str(pid), _CorpusStageTimings()),
+        errors=errors,
+        lane_limit_for=lambda plan: 1 if plan.product_id == _COHORT_NARROW else 3,
+        label=" теста",
+    )
+
+    # Предусловие: работа дошла до конца — иначе пики объяснялись бы незавершённостью.
+    assert errors == []
+    assert len(outcomes) == len(plans)
+    assert len(gate.calls) == len(plans)
+    # Узкий продукт держал ровно одну полосу из трёх возможных у когорты.
+    assert gate.max_active_by_pid[_COHORT_NARROW] == 1
+    # Широкий не душится до узкого значения: две полосы наблюдались одновременно.
+    assert gate.max_active_by_pid[_COHORT_WIDE] >= 2
+    # И потолок когорты при этом не превышен: он — третье, отдельное число.
+    assert gate.max_active <= 3

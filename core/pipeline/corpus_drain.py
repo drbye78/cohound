@@ -126,6 +126,13 @@ class RootPlan:
     70-параметровой — то есть перестала бы называть, что она читает. ``known_urls`` и
     ``serp_seeds`` зависят от корня, поэтому резолвятся в точке построения плана
     (``corpus._build_corpus``), а не внутри дренажа: корень их только потребляет.
+
+    ``product_id`` — **продукт-владелец корня** (F9 плана 17). Драйвер ведёт корни всей
+    когорты одним потоком планов, поэтому «чей это корень» обязано быть в самом плане:
+    по нему драйвер находит продуктовый носитель (``begin``), бакеты стадий, лимит полос
+    продукта и момент закрытия продукта. ``None`` — корень без продукта: фаза таких не
+    строит (когортный дренаж ведёт только корни с продуктом), но тип обязан допускать
+    значение — одиночные проверки дренажа обходятся без продуктового контекста.
     """
 
     root_url: str
@@ -137,6 +144,15 @@ class RootPlan:
     serp_seeds: Sequence[str] = ()
     #: ``False`` — synthetic-бакет (orphan): авторского seed нет, только ревалидация.
     seed: bool = True
+    #: Вид synthetic-бакета: ``"catalog"`` (leftover-группа каталога) ‖ ``"orphan"``
+    #: (scope-drift по origin). Нужен ключу наблюдения в хвосте продукта: адрес бакета
+    #: сам по себе не различает эти два вида, а один и тот же URL может встретиться в
+    #: обоих (тогда общий ключ подменил бы frontier одного наблюдения другим).
+    #: ``None`` — авторский корень.
+    synthetic_kind: str | None = None
+    #: Продукт-владелец корня (F9 плана 17). ``None`` — корень вне когорты: драйвер
+    #: ведёт его как одиночный (границ продукта у него нет).
+    product_id: str | None = None
     #: Слот записи провенанса в ``truncation_records`` (F4b). Занимается **в момент
     #: планирования**, то есть в авторском порядке корней, а не в порядке их завершения:
     #: при чередовании корней порядок завершения другой, а артефакт манифеста
@@ -1090,6 +1106,24 @@ def lane_width(limits: CrawlLimits, *, executor: CrawlExecutorPort | None) -> in
     return int(limits.max_workers)
 
 
+@dataclass
+class SeedTally:
+    """Счётчик поставленных seed'ов **одного продукта** (мутабельный носитель).
+
+    Почему отдельный мутабельный объект, а не поле ``CorpusCounters``. Фазовый счётчик
+    ``product_seeds_enqueued`` обнулялся на каждом продукте, то есть был продуктовым
+    значением с фазовым временем жизни; при когортном дренаже (F9 плана 17) продукты
+    идут одновременно, и общий счётчик приписал бы посадки одного продукта другому —
+    ``zero_source`` получил бы чужую причину. Носитель лежит **внутри** продуктового
+    скоупа (``frozen`` запрещает подменить поле, но не запрещает писать в содержимое),
+    поэтому корень пишет ровно в счётчик своего продукта, а фаза читает его на границе
+    этого продукта. Поведения у объекта нет: поле и всё.
+    """
+
+    #: Сколько seed'ов (авторских + sitemap + SERP) поставлено в очередь продукта.
+    enqueued: int = 0
+
+
 @dataclass(frozen=True)
 class ProductDrainScope:
     """Продуктовый скоуп дренажа: состояние, живущее весь продукт и общее корням.
@@ -1126,6 +1160,9 @@ class ProductDrainScope:
     #: Самый специфичный корень-владелец URL (тот же предикат, что у группировки
     #: ревалидации); ``None`` — URL не принадлежит ни одному авторскому корню.
     owner_root: Callable[[str], str | None]
+    #: Сколько seed'ов поставлено в очередь **этого** продукта (авторские + sitemap +
+    #: SERP). Растёт в :func:`root_lifecycle`; нужен честной причине ``zero_source``.
+    seeds: SeedTally
 
 
 @dataclass(frozen=True)
@@ -1171,8 +1208,12 @@ class PhaseDrainScope:
     executor: CrawlExecutorPort | None
     #: Накопители фазы (наблюдённые объёмы, а не лимиты).
     counters: CorpusCounters
-    #: Бакеты стадий продукта: ожидание фетча, нарезка, эмбеддинг.
-    timings: _CorpusStageTimings
+    #: Бакеты стадий **продукта** (ожидание фетча, нарезка, эмбеддинг): резолвер, а не
+    #: один объект. Когортный дренаж (F9 плана 17) ведёт корни нескольких продуктов
+    #: одновременно, и общий объект приписал бы ожидание одного продукта другому —
+    #: строка продукта отвечала бы за чужую работу. Резолвер принимает ``product_id``
+    #: (``None`` — корень вне когорты) и возвращает носитель этого продукта.
+    timings_for: Callable[[str | None], _CorpusStageTimings]
     #: Объявленные host'ы по продуктам (scope корня, §6).
     scope_hosts_by_product: Mapping[str, frozenset[str]]
     #: F12: ``(pid, loc)`` sitemap, уже принятые в очередь: один loc — один фетч.
@@ -1456,7 +1497,7 @@ def root_lifecycle(
     else:
         seed_status = frontier.add_seed(root_url) if seed else "synthetic"
     if seed_status == "queued":
-        phase.counters.product_seeds_enqueued += 1
+        product.seeds.enqueued += 1
     seed_blacklisted = seed_status == "blacklisted"
     if seed_blacklisted:
         phase.errors.append(
@@ -1542,7 +1583,7 @@ def root_lifecycle(
         if extra_status in ("queued", "dup"):
             phase.sitemap_seed_used.add((product.pid, extra))
             if extra_status == "queued":
-                phase.counters.product_seeds_enqueued += 1
+                product.seeds.enqueued += 1
         elif extra_status == "blacklisted":
             phase.errors.append(
                 f"{product.pid}/{extra}: sitemap-seed зачёркнут блэклистом "
@@ -1559,7 +1600,7 @@ def root_lifecycle(
     for found in serp_seeds:
         found_status = frontier.add_seed(found)
         if found_status == "queued":
-            phase.counters.product_seeds_enqueued += 1
+            product.seeds.enqueued += 1
             product.serp_ingest["enqueued"] += 1
         elif found_status == "dup":
             product.serp_ingest["dup"] += 1
@@ -1857,7 +1898,7 @@ def root_lifecycle(
         max_waves=phase.max_waves,
         wave_items=phase.wave_items,
         robots_enabled=robots_enabled,
-        timings=phase.timings,
+        timings=phase.timings_for(product.pid),
         executor=phase.executor,
         pool=pool,
         max_workers=max_workers,

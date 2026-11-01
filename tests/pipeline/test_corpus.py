@@ -6402,30 +6402,46 @@ def test_revalidated_page_is_leaf_and_does_not_expand_discovery(
 def test_revalidation_orphans_are_observation_only(tmp_path: Path) -> None:
     """Известный URL вне всех авторских корней: один origin-бакет, без truncation/errors."""
     orphan = "https://other.test/legacy/page"
-    with SqliteStateStore(":memory:") as state:
-        _seed_known_urls(state, [orphan])
-        pages = _rg_pages(RG_PATH_ROOT, orphan, body=b"orphan page")
-        crawler = _StatefulCrawler(pages)
-        result = _state_run(
-            tmp_path,
-            state,
-            pages=pages,
-            urls={"p1": [RG_PATH_ROOT]},
-            crawler=crawler,
-        )
-        build = _build_of(result)
-        assert build.revalidation_orphans == {
-            "p1:https://other.test": {"selected": 1, "fetched": 1}
-        }
-        # Никакой synthetic-записи усечения: запись ровно одна — авторский корень.
-        assert len(build.truncation) == 1
-        assert build.truncation[0]["root"] == RG_PATH_ROOT
-        assert build.truncated is False
-        assert orphan in {url for url, _p in crawler.calls}
-        assert "https://other.test" not in {url for url, _p in crawler.calls}
-        assert not any("orphan" in err for err in result.errors)
-        notes = [entry for entry in result.log_entries if isinstance(entry, str)]
-        assert any("author-scope drift" in note for note in notes)
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        with SqliteStateStore(":memory:") as state:
+            _seed_known_urls(state, [orphan])
+            pages = _rg_pages(RG_PATH_ROOT, orphan, body=b"orphan page")
+            crawler = _StatefulCrawler(pages)
+            result = _state_run(
+                tmp_path,
+                state,
+                pages=pages,
+                urls={"p1": [RG_PATH_ROOT]},
+                crawler=crawler,
+                store=store,
+                run_id=RUN_ID,
+            )
+            build = _build_of(result)
+            assert build.revalidation_orphans == {
+                "p1:https://other.test": {"selected": 1, "fetched": 1}
+            }
+            # Никакой synthetic-записи усечения: запись ровно одна — авторский корень.
+            assert len(build.truncation) == 1
+            assert build.truncation[0]["root"] == RG_PATH_ROOT
+            assert build.truncated is False
+            assert orphan in {url for url, _p in crawler.calls}
+            assert "https://other.test" not in {url for url, _p in crawler.calls}
+            assert not any("orphan" in err for err in result.errors)
+            notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+            assert any("author-scope drift" in note for note in notes)
+            # S1/F9: ревалидационный трафик synthetic-бакета входит в провенанс сеанса
+            # **один** раз — там, где коммитится исход его корня (``_root_done``).
+            # Наблюдение в хвосте продукта читает frontier и не пересчитывает уже
+            # учтённое: иначе число удваивалось бы, а «сколько переобходов» — величина,
+            # которую публикуют как факт.
+            session = store.get_crawl_session(SESSION_ID)
+            assert session is not None
+            provenance = json.loads(session.provenance_json or "{}")
+            assert provenance["revalidation_fetched"] == 1
+    finally:
+        store.close()
 
 
 def test_revalidation_groups_survive_resume_without_truncation(

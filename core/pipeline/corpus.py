@@ -167,7 +167,7 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import Executor
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -316,6 +316,7 @@ from core.pipeline.extraction_runtime import (  # noqa: F401
     _ExtractPools,
     set_worker_extractor,
 )
+from core.pipeline.incremental import IncrementalItem
 from core.pipeline.index_build import IndexBuild
 from core.pipeline.liveness import Heartbeat
 from core.pipeline.manual_artifacts import (
@@ -717,6 +718,109 @@ def _entry_chunks(entry: IndexManifestEntry) -> int:
     return int(value) if isinstance(value, int) else 0
 
 
+@dataclass
+class ProductContext:
+    """Контекст продукта когорты: всё, что живёт от планирования до закрытия (F9).
+
+    **Зачем объект.** Продукт был итерацией цикла: его состояние (накопитель ингеста,
+    дедуп-множества, счётчик seed'ов, бакеты стадий, ревалидационные группы) рождалось и
+    умирало внутри одной итерации. Когортный дренаж (F9 плана 17) разрывает итерацию на
+    две половины: **планирование** (без сети, все продукты сразу) и **закрытие** (хвост
+    продукта в момент завершения его последнего корня). Между ними состояние обязано
+    жить, и владельцем его полей становится продукт, а не переменная цикла: иначе
+    поздний хвост читал бы чужой продукт (ровно тот дефект, от которого защищали
+    B023-дефолты, когда половин было две).
+
+    **Почему не frozen.** Поля-контейнеры мутируются корнями продукта (это общее
+    состояние, а не копия), а поля-значения (результаты предпрохода, ``started_at``)
+    заполняются по ходу: объект живёт дольше одного шага. Границу владения держит не
+    ``frozen``, а то, что предпроход пишет поля **один раз**, до первого корня.
+
+    **Что здесь продуктовое, а что фазовое.** Фазовое (склад, сеанс, ошибки, очередь
+    конверсии, очереди экстракции) остаётся в фазовых носителях и не копируется; здесь
+    только то, у чего цена ошибки — атрибуция: чьи это документы, чей бюджет, чьё время.
+    """
+
+    #: Идентификатор продукта (`param_id`-независимый slug продукта).
+    product_id: str
+    #: Авторские корни продукта (``url_map[product_id]``) в авторском порядке.
+    roots: Sequence[str]
+    #: Корни, которые продукт реально обойдёт (пусто у ``offline``/ремонта/``consume_only``).
+    author_urls: Sequence[str]
+    #: Накопитель продукта (документы/чанки/счётчики ингеста).
+    ingest: ProductIngest
+    #: I17: дедуп ``content_hash → doc_id`` в пределах продукт-партиции.
+    seen_docs: dict[str, str]
+    #: I17: дедуп ``chunk_id`` в пределах продукт-партиции.
+    seen_chunk_ids: set[str]
+    #: F13: durable-URL, уже заряженные в resume-бюджет **продукта**.
+    resume_counted: set[str]
+    #: 09 §6.3: ``(корень, frontier)`` — владелец известного URL считается один раз.
+    owner_scopes: list[tuple[str, Any]]
+    #: Кэш владельца URL (самый специфичный корень-претендент).
+    owner_cache: dict[str, str | None]
+    #: I3/§5: наблюдённая судьба SERP-находок продукта.
+    serp_ingest: dict[str, Any]
+    #: Находки, разложенные по корням продукта :func:`assign_serp_seeds`.
+    serp_seeds_by_root: Mapping[str, Sequence[str]]
+    #: Корни, реально дренированные в этом продукте (leftover-группы каталогов).
+    drained_roots: set[str]
+    #: Сколько seed'ов поставлено в очередь **этого** продукта (носитель — в скоупе).
+    seeds: corpus_drain.SeedTally
+    #: Бакеты стадий продукта (наблюдаемость; носитель — этот продукт, а не фаза).
+    timings: _CorpusStageTimings
+    #: Продуктовый скоуп дренажа (разделяется корнями продукта, не копируется).
+    scope: corpus_drain.ProductDrainScope
+    #: Продуктовый скоуп потребителя очереди (тот же накопитель, те же дедуп-множества).
+    consume: extract_consume.ProductScope
+    #: Фазовый скоуп потребителя с бакетами **этого** продукта (копия ссылок, не состояния).
+    consume_scope: extract_consume.ConsumerScope
+    #: Момент границы продукта (``start``), ``None`` — продукт ещё не открыт.
+    started_at: float | None = None
+    #: 09 §6.3: итог оффлайн-прохода по продукту (``None`` — политика не ``offline``).
+    offline_report: Any = None
+    #: Группы ревалидации: до применения операторского потолка и после.
+    all_revalidation_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    revalidation_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    all_orphan_buckets: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    orphan_buckets: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    #: Отложенные/пропущенные потолком ревалидации URL — по корню и по origin.
+    deferred_by_root: Mapping[str, int] = field(default_factory=dict)
+    deferred_by_origin: Mapping[str, int] = field(default_factory=dict)
+    skipped_by_root: Mapping[str, int] = field(default_factory=dict)
+    skipped_by_origin: Mapping[str, int] = field(default_factory=dict)
+    #: Наблюдения потолка ревалидации (факт, а не ошибка).
+    revalidation_deferred_total: int = 0
+    revalidation_cap_fired: bool = False
+    #: Объявленная ось полос продукта (``crawl.host_concurrency``).
+    lane_axis: int | None = None
+    #: Frontiers synthetic-бакетов продукта, дождавшиеся хвоста. Ключ — ``(вид, адрес)``:
+    #: адрес один не различает catalog-leftover и orphan-бакет, а совпадение адресов
+    #: подменило бы frontier одного наблюдения другим. Synthetic-корни идут тем же потоком
+    #: планов (F9), поэтому их итог приходит в ``on_root_done`` раньше хвоста, а
+    #: использовать его можно только там.
+    synthetic: dict[tuple[str, str], Frontier] = field(default_factory=dict)
+    #: Планированный work-set продукта (инкремент ‖ ремонт). Нужен оффлайн-проходу: он
+    #: исполняется на **границе** продукта, а не в предпроходе, — иначе документы всех
+    #: продуктов когорты лежали бы в памяти одновременно (``offline_reuse_product``
+    #: наполняет ``ingest.docs``), и пик памяти рос бы с числом продуктов, а не с числом
+    #: полос.
+    incremental_items: Sequence[IncrementalItem] = field(default_factory=tuple)
+    #: Хвост продукта уже исполнен (конверсия → Pass B → покрытие → строка продукта).
+    #: Нужен одному решению: «краул когорты закончен» — это «закрыты **все** продукты»,
+    #: а не «закрыт последний по порядку»: при объявленной оси последний по порядку
+    #: продукт может закрыться, пока корни соседа ещё в полёте.
+    closed: bool = False
+
+
+#: Вид synthetic-бакета ревалидации: leftover-группа каталога (feed/channel раскрылся в
+#: **другие** корни, и привязка к авторскому URL каталога не совпала ни с одним drain'ом)
+#: ‖ orphan-бакет (известные URL продукта вне scope всех авторских корней, 09 §6.3).
+#: Вид входит в ключ наблюдения: один и тот же адрес может встретиться в обоих.
+_SYNTHETIC_CATALOG = "catalog"
+_SYNTHETIC_ORPHAN = "orphan"
+
+
 def _stage_timings_aggregate(
     rows: Sequence[tuple[str, float, _CorpusStageTimings]],
 ) -> dict[str, Any]:
@@ -732,8 +836,10 @@ def _stage_timings_aggregate(
     names = ("fetch_wait_s", "extract_wait_s", "chunk_s", "embed_s", "build_s")
     buckets = dict.fromkeys(names, 0.0)
     workers: int | None = None
+    tail_total = 0.0
     for product_id, elapsed_s, timings in rows:
         elapsed_total += elapsed_s
+        tail_total += timings.product_tail_s
         for name in names:
             buckets[name] += getattr(timings, name)
         if timings.extract_workers is not None and (
@@ -744,12 +850,17 @@ def _stage_timings_aggregate(
             "elapsed_seconds": round(elapsed_s, 3),
             **{name: round(getattr(timings, name), 3) for name in names},
             "extract_workers": timings.extract_workers,
+            # F9 плана 17: сколько главный поток провёл в хвосте продукта (выдача новых
+            # волн на это время стояла). Публикуется **рядом**, а не бакетом: интервал
+            # пересекается с Pass B, и включение в сумму сделало бы остаток окна ложным.
+            "product_tail_s": round(timings.product_tail_s, 3),
             "overhead_s": round(elapsed_s - timings.stage_sum(), 3),
         }
     total = {
         "elapsed_seconds": round(elapsed_total, 3),
         **{name: round(buckets[name], 3) for name in names},
         "extract_workers": workers,
+        "product_tail_s": round(tail_total, 3),
         "overhead_s": round(elapsed_total - sum(buckets.values()), 3),
     }
     return {"products": products, "total": total}
@@ -1717,7 +1828,6 @@ def _build_corpus(
     document_skips: list[dict[str, Any]] = []
     #: 09 §6.3: известные URL вне scope авторских корней — наблюдение по (продукт, origin).
     revalidation_orphans: dict[str, dict[str, Any]] = {}
-    revalidation_orphan_total = 0
     #: 09 §6.3: честные счётчики документов по продукту (``total``/``new``/``reused``).
     #: Заполняются только при наличии durable-субстрата (``state``), иначе карта пуста.
     doc_counters: dict[str, dict[str, int]] = {}
@@ -2008,10 +2118,25 @@ def _build_corpus(
     conversion_queue = ExtractQueue(store=store, session_id=session)
     #: Пул экстракции создаётся лениво на ключ ``(level, pdf_pipeline, window)`` и живёт до
     #: ``finally`` фазы (обёртка :func:`build_corpus`), а не на seed-root.
-    #: Бакеты стадий **текущего** продукта (наблюдаемость, не контракт). Объявлены здесь, а
-    #: не в цикле продуктов, потому что closures ниже видят переменную ячейкой; цикл
-    #: обнуляет тот же объект (:meth:`_CorpusStageTimings.reset`).
-    timings = _CorpusStageTimings()
+    #: Бакеты стадий — **по продукту** (F9 плана 17): когортный дренаж ведёт корни
+    #: нескольких продуктов одновременно, и общий носитель приписал бы ожидание одного
+    #: продукта строке другого. Резолвер (``_timings_for``) — единственная точка, где
+    #: продукт превращается в его бакеты; корень без продукта получает ``_loose_timings``
+    #: и в публикацию фазовых строк не попадает.
+    product_timings: dict[str, _CorpusStageTimings] = {}
+    _loose_timings = _CorpusStageTimings()
+
+    def _timings_for(product_id: str | None) -> _CorpusStageTimings:
+        """Бакеты стадий продукта; корень вне когорты — общий носитель без публикации.
+
+        ``None``/неизвестный продукт не поднимают исключение намеренно: резолвер
+        спрашивается драйвером **до** ``begin`` (бакеты нужны уже при открытии полосы),
+        а бакет — наблюдаемость: отказ из-за неё уронил бы измерение. Плана без продукта
+        фаза не строит — дефект плана назовёт ``_begin_root``.
+        """
+        if product_id is None:
+            return _loose_timings
+        return product_timings.get(str(product_id), _loose_timings)
 
 
     # D3: sitemap разворачивается через ``PollPort(kind="sitemap")`` (local in-process ‖
@@ -2159,7 +2284,7 @@ def _build_corpus(
         errors=errors,
         store=store,
         chunker=chunker,
-        timings=timings,
+        timings_for=_timings_for,
         state=state,
         duplicates=duplicates,
         doc_counters=doc_counters,
@@ -2239,10 +2364,6 @@ def _build_corpus(
     #: per-product, здесь — только то, что видит вызывающий по завершении фазы.
     #: Документы **не** накапливаются: их носитель — ``corpus_docs`` (Д-2/A4), а фазе нужен
     #: только счётчик прошедших документов.
-    doc_count = 0
-    chunk_count = 0
-    partitions_reused = 0
-    all_physical_ok = True
     #: ``product_id -> True``, если партиция продукта физически зафиксирована
     #: (``build``/переиспользование). Строка ``index_manifest`` пишется только для них.
     physically_ok: dict[str, bool] = {}
@@ -2309,7 +2430,7 @@ def _build_corpus(
         max_waves=_EXECUTOR_MAX_WAVES_PER_ROOT,
         executor=executor,
         counters=counters,
-        timings=timings,
+        timings_for=_timings_for,
         scope_hosts_by_product=scope_hosts_by_product,
         sitemap_seed_used=sitemap_seed_used,
         document_skips=document_skips,
@@ -2355,7 +2476,10 @@ def _build_corpus(
         extract_timeout=_extract_timeout,
         worker_rss_dir=worker_rss_dir,
         counters=counters,
-        timings=timings,
+        # F9: бакеты продукта резолвятся по ``product_id`` на границе продукта
+        # (:func:`dataclasses.replace` в предпроходе) — общий носитель фазы приписал бы
+        # ожидание экстракции одного продукта строке другого.
+        timings=_loose_timings,
         artifact_probes=artifact_probes,
         archive_observations=archive_observations,
         corpus_member_rows=corpus_member_rows,
@@ -2384,24 +2508,35 @@ def _build_corpus(
     def _begin_root(
         plan: corpus_drain.RootPlan,
         *,
-        product: corpus_drain.ProductDrainScope,
-        phase: corpus_drain.PhaseDrainScope,
-        operations: corpus_drain.PhaseDrainOperations,
         fetch_pool: Executor | None = None,
         browser_pool: Executor | None = None,
     ) -> Generator[corpus_drain.WavePlan, corpus_drain.WaveOutcomes, Any]:
-        """``begin=`` драйвера полос (F4b): генератор корня с его носителями.
+        """``begin=`` драйвера: генератор корня с носителями **его продукта** (F9).
+
+        Продукт берётся из плана (``plan.product_id``), а не из ``partial``-а вокруг вызова:
+        один поток планов ведёт корни всей когорты, поэтому «чей это корень» обязан быть в
+        самом значении — иначе закрытие одного продукта подсунуло бы другому чужой скоуп.
 
         Пулы фетча создаёт **драйвер** на полосу (``lane_width``), поэтому фазовый
         носитель копируется на корень через :func:`dataclasses.replace`: контейнеры
         внутри копии остаются общими (копия — не новое состояние), меняются только две
         ссылки на пулы.
         """
+        product_id = plan.product_id
+        ctx = contexts.get(str(product_id)) if product_id is not None else None
+        if ctx is None:
+            # Корень без продукта в когортном потоке — дефект плана, а не режим: у него
+            # нет ни продуктового скоупа, ни счётчика seed'ов, ни места в отчёте.
+            raise AssertionError(
+                f"{plan.root_url}: план без продукта в когортном дренаже"
+            )
         return corpus_drain.root_lifecycle(
             plan,
-            product=product,
-            phase=replace(phase, fetch_pool=fetch_pool, browser_pool=browser_pool),
-            operations=operations,
+            product=ctx.scope,
+            phase=replace(
+                _phase_scope, fetch_pool=fetch_pool, browser_pool=browser_pool
+            ),
+            operations=_phase_operations,
         )
 
     def _lane_width(root: corpus_drain.RootPlan) -> int | None:
@@ -2427,22 +2562,8 @@ def _build_corpus(
         )
         return len(truncation_records) - 1
 
-    def _save_root(
-        outcome: corpus_driver.RootOutcome,
-        *,
-        product_id: str,
-        all_revalidation_groups: Mapping[str, Sequence[str]],
-        cap_fired: bool,
-        deferred_by_root: Mapping[str, int],
-        skipped_by_root: Mapping[str, int],
-        counters: CorpusCounters,
-        truncated_products: set[str],
-        truncation_records: list[dict[str, Any]],
-        store: Any,
-        session: str | None,
-        errors: list[str],
-    ) -> None:
-        """Провенанс завершённого корня — в **свой** слот, а не в конец списка (F4b).
+    def _root_done(outcome: corpus_driver.RootOutcome) -> None:
+        """Исход завершённого корня: провенанс в **свой** слот ‖ сбор synthetic-бакета.
 
         Слот занят при планировании корня (``RootPlan.record_slot``), то есть в
         авторском порядке, поэтому ``truncation_records`` — артефакт манифеста
@@ -2451,29 +2572,92 @@ def _build_corpus(
         бы как порядок работы. Прецедент — ``sorted_error_lines`` (F3): артефакт
         приводится к авторскому порядку, а не к наблюдаемому.
 
-        **Почему параметры, а не замыкание.** Функция объявлена один раз на фазу, а
-        продуктные значения приходят ``partial``-ом, собранным в итерации продукта:
-        захват переменных цикла сделал бы отложенный вызов читателем чужого продукта.
+        **Продукт берётся из плана.** Один поток планов ведёт корни всей когорты, поэтому
+        продуктовые значения (группы ревалидации, потолок, слоты) приходят из контекста,
+        названного планом, — ``partial`` вокруг вызова был бы читателем переменной цикла.
+
+        **Synthetic-бакет отдаёт только frontier.** У него нет авторского seed'а, поэтому
+        записи усечения он не пишет (``finalize_root`` не вызывается — как и раньше, когда
+        его дренировали отдельным вызовом); но ``revalidation_fetched`` он вносит в
+        фазовый счётчик и отдаёт frontier хвосту продукта — тот строит по нему наблюдение
+        ``revalidation_orphans``. Без этого переноса число ревалидации потерялось бы вместе
+        с полосой.
         """
-        root = outcome.plan
+        plan = outcome.plan
+        product_id = plan.product_id
+        ctx = contexts.get(str(product_id)) if product_id is not None else None
+        if ctx is None:
+            raise AssertionError(f"{plan.root_url}: исход корня без продукта")
+        if not plan.seed:
+            # Ключ наблюдения — ``(вид, адрес)``: адрес сам по себе не различает
+            # catalog-leftover и orphan (см. ``ProductContext.synthetic``).
+            kind = plan.synthetic_kind or "synthetic"
+            ctx.synthetic[(kind, plan.root_url)] = outcome.frontier
+            counters.revalidation_fetched_total += outcome.frontier.revalidation_fetched
+            return
         corpus_commit.finalize_root(
-            product_id,
-            root.root_url,
+            ctx.product_id,
+            plan.root_url,
             outcome.frontier,
             outcome.sitemap_skips,
-            root.known_urls,
-            all_revalidation_groups=all_revalidation_groups,
-            cap_fired=cap_fired,
-            deferred_by_root=deferred_by_root,
-            skipped_by_root=skipped_by_root,
+            plan.known_urls,
+            all_revalidation_groups=ctx.all_revalidation_groups,
+            cap_fired=ctx.revalidation_cap_fired,
+            deferred_by_root=ctx.deferred_by_root,
+            skipped_by_root=ctx.skipped_by_root,
             counters=counters,
             truncated_products=truncated_products,
             truncation_records=truncation_records,
             store=store,
             session=session,
             errors=errors,
-            record_slot=root.record_slot,
+            record_slot=plan.record_slot,
         )
+
+    def _synthetic_root_plans(
+        ctx: ProductContext,
+    ) -> Iterator[corpus_drain.RootPlan]:
+        """Synthetic-бакеты ревалидации продукта — тем же потоком планов, что авторские.
+
+        Зачем в поток, а не одиночным дренированием в хвосте. Хвост продукта исполняется
+        **на главном потоке**, и одиночный дренаж внутри него открыл бы второй реестр
+        права на host'ы: волна бакета могла бы уйти на host, который уже держит полоса
+        другого продукта, — то есть нарушила бы «право на host» ровно там, где его
+        вводили. В потоке планов claim общий, а итог бакета приходит в ``_root_done``
+        раньше, чем хвост его прочитает.
+
+        Состав и порядок прежние: leftover-группы каталогов (в порядке групп), затем
+        orphan-бакеты (в порядке origin'ов). Пустая группа в поток не попадает — как и
+        раньше, когда пустую группу не дренировали, а наблюдение писали с нулями.
+        """
+        for group_root, known_urls in ctx.revalidation_groups.items():
+            if group_root in ctx.drained_roots:
+                continue
+            if not ctx.all_revalidation_groups.get(group_root):
+                continue
+            if not known_urls:
+                continue
+            yield corpus_drain.RootPlan(
+                root_url=group_root,
+                target=None,
+                sitemap_seeds=False,
+                known_urls=known_urls,
+                seed=False,
+                product_id=ctx.product_id,
+                synthetic_kind=_SYNTHETIC_CATALOG,
+            )
+        for origin, selected_urls in ctx.orphan_buckets.items():
+            if not selected_urls:
+                continue
+            yield corpus_drain.RootPlan(
+                root_url=origin,
+                target=None,
+                sitemap_seeds=False,
+                known_urls=selected_urls,
+                seed=False,
+                product_id=ctx.product_id,
+                synthetic_kind=_SYNTHETIC_ORPHAN,
+            )
 
 
     def _author_root_plans(
@@ -2556,6 +2740,7 @@ def _build_corpus(
                         sitemap_seeds=True,
                         known_urls=revalidation_groups.get(url, ()),
                         serp_seeds=serp_seeds_by_root.get(url, ()),
+                        product_id=product_id,
                     )
                 ]
             else:
@@ -2580,6 +2765,7 @@ def _build_corpus(
                             sitemap_seeds=False,
                             known_urls=revalidation_groups.get(entry_url, ()),
                             serp_seeds=serp_seeds_by_root.get(entry_url, ()),
+                            product_id=product_id,
                         )
                     )
 
@@ -2598,12 +2784,19 @@ def _build_corpus(
                 )
 
 
+    # --- Когорта: предпроход без сети ---------------------------------------- #
+    # F9 плана 17: планирование продуктов отделено от их закрытия. Предпроход не трогает
+    # сеть (планирование инкрементальных/ремонтных элементов, владельцы URL, ось полос,
+    # группы ревалидации, SERP-находки), поэтому его можно исполнить для **всех** продуктов
+    # до первого корня: когортный драйвер обязан иметь носитель каждого продукта уже
+    # наготове, иначе корень второго продукта некуда положить.
+    contexts: dict[str, ProductContext] = {}
     for product_id in products:
-        product_started = time.perf_counter()
         #: Бакеты стадий этого продукта: Pass A (краул+нарезка) и Pass B (эмбеддинг+сборка).
-        #: Объект один на фазу и обнуляется здесь — closures фазы видят его ячейкой, и
-        #: переприсваивание внутри цикла было бы захватом переменной цикла.
-        timings.reset()
+        #: Носитель — продуктовый (``ProductContext.timings``): когортный дренаж ведёт
+        #: корни нескольких продуктов одновременно, поэтому общий объект приписал бы
+        #: ожидание одного продукта строке другого.
+        product_timings[product_id] = _CorpusStageTimings()
         ingest = ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
@@ -2654,34 +2847,11 @@ def _build_corpus(
         }
         #: Находки, разложенные по корням этого продукта (:func:`assign_serp_seeds`).
         serp_seeds_by_root = dict(serp_seeds_by_product.get(str(product_id), {}))
-        #: Граница продукта (start): до первого дренажа — «продукт начат», а не «потерян».
-        product_events.append(
-            {
-                "event": "product_start",
-                "product_id": product_id,
-                "roots": len(product_roots),
-                "seeds_declared": len(product_roots),
-            }
-        )
-        #: Сколько seed'ов фактически поставлено в очередь (авторские + sitemap). Растёт
-        #: в :func:`root_lifecycle`; нужен для честной причины zero-source. Сбрасывается на
-        #: каждом продукте — поле общего состояния, а не локальная переменная.
-        counters.product_seeds_enqueued = 0
-        #: Живая граница продукта: до первого дренажа (продукт может идти часами).
-        emit_product("start", product_id, on_product=on_product)
-        # 16 §3.2: граница продукта — строка ``run_product`` в статусе ``running``. Пишется
-        # до Pass A, потому что «продукт начат» и «продукт потерян» должны различаться
-        # запросом, а не догадкой; финальный статус перезапишет её после Pass B.
-        save_run_product(
-            product_id,
-            store=store,
-            run_id=run_id,
-            run_scope=run_scope,
-            product_modes=product_modes,
-            run_products_written=run_products_written,
-            errors=errors,
-            status=RunProductStatus.RUNNING,
-        )
+        #: Сколько seed'ов фактически поставлено в очередь (авторские + sitemap + SERP).
+        #: Растёт в :func:`root_lifecycle`; нужен честной причине zero-source. Носитель —
+        #: продуктовый (``SeedTally``): общий фазовый счётчик приписал бы посадки одного
+        #: продукта другому, когда продукты идут одновременно.
+        seeds = corpus_drain.SeedTally()
         #: ``--only-failed``: разрешённое множество ремонта для этого продукта
         #: (``None``/пусто — обычный путь). Ремонт — **не** вопрос режима продукта, поэтому
         #: он выбирает планировщик ниже, а не гейт ``ProductMode`` в
@@ -2729,31 +2899,17 @@ def _build_corpus(
             # consume_only: причина восстановлена из провенанса сеанса (см. выше) — та
             # же честность без краула в этом исполнении.
             coverage_incomplete[product_id] = HOST_OUT_OF_SHARD_REASON
-        #: 09 §6.3: ``offline`` — корпус из durable-субстрата **до** дренажа и вместо него.
-        #: Отдельный проход, а не дренаж с ревалидационными seed'ами: у оффлайн-элемента
-        #: нет ни фетча, ни sitemap/feed-развёртки, ни BFS, поэтому проход не заходит в
-        #: код, единственное назначение которого — сеть. Корни продукта разрешаются в
+        #: 09 §6.3: ``offline`` — корпус из durable-субстрата **вместо** дренажа. Отдельный
+        #: проход, а не дренаж с ревалидационными seed'ами: у оффлайн-элемента нет ни
+        #: фетча, ни sitemap/feed-развёртки, ни BFS, поэтому проход не заходит в код,
+        #: единственное назначение которого — сеть. Корни продукта разрешаются в
         #: состоянии (корень, которого там нет, — видимая ошибка, а не GET).
-        offline_report = None
-        if offline:
-            offline_report = _offline_reuse_product(
-                product_id,
-                product_roots,
-                incremental_items,
-                state=state,
-                errors=errors,
-                chunker_version=resolved_chunker_version,
-                embed_model_id=embed_model_id,
-                store=store,
-                ingest=ingest,
-                seen_docs=seen_docs,
-                seen_chunk_ids=seen_chunk_ids,
-                duplicates=duplicates,
-                doc_counters=doc_counters,
-                partial_unknown_products=partial_unknown_products,
-                persist_docs=_persist_docs,
-            )
-            offline_notes.append(offline_report.note(product_id))
+        #:
+        #: **Исполняется не здесь, а на границе продукта** (``_open_product``): проход
+        #: наполняет ``ingest.docs``, а продуктовый носитель обязан жить до своего
+        #: закрытия. В предпроходе (он идёт для **всех** продуктов до первого корня) это
+        #: удержало бы документы всей когорты сразу, и пик памяти рос бы с числом
+        #: продуктов вместо числа полос.
         #: 09 §6.3: группировка **всех** известных URL по авторским корням (scope
         #: inference) до применения операторского потолка. ``state is None``/
         #: не-incremental/``offline`` ⇒ пусто: grouping — no-op (байт-в-байт). Под
@@ -2853,12 +3009,7 @@ def _build_corpus(
             resume_counted=resume_counted,
             revalidation_url_set=revalidation_url_set,
             owner_root=_owner_root,
-        )
-        _root_begin = partial(
-            _begin_root,
-            product=_product_scope,
-            phase=_phase_scope,
-            operations=_phase_operations,
+            seeds=seeds,
         )
         #: F5: тот же накопитель и те же дедуп-множества — но для потребителя очереди.
         #: Два объекта с разными списками означали бы «краул писал в один, конверсия в
@@ -2871,6 +3022,7 @@ def _build_corpus(
         )
 
         #: Корни, реально дренированные в этом продукте (для leftover-групп каталогов).
+        #: Заполняется в авторском планировании, читается synthetic-планами и хвостом.
         drained_roots: set[str] = set()
 
         # 17 §6 (F4b): число полос — **объявленный** вход продукта. Ось описывает процесс
@@ -2912,16 +3064,132 @@ def _build_corpus(
                     f" — полос {lane_axis} (значение первого корня)"
                 )
 
-        # F6 (17 §6): конверсия не краулит — планов корней ноль, поэтому драйвер не
-        # делает ни одного вызова и не пишет записей усечения поверх durable-фактов
-        # сеанса. Пустой ``drive_roots`` (а не ветка «пропустить целиком») выбран
-        # намеренно: остальные шаги продукта остаются байт-идентичными.
-        corpus_driver.drive_roots(
-            () if consume_only else _author_root_plans(
-                product_id,
-                author_urls=(
-                    () if (repair_urls or offline) else url_map.get(product_id, [])
-                ),
+        #: F9 плана 17: продуктовый контекст. Он живёт дольше итерации: планирование
+        #: (здесь) и закрытие (хвост, когда завершён последний корень продукта) — две
+        #: половины одного продукта, и состояние между ними принадлежит продукту.
+        contexts[str(product_id)] = ProductContext(
+            product_id=str(product_id),
+            roots=product_roots,
+            author_urls=(
+                () if (repair_urls or offline or consume_only) else url_map.get(product_id, [])
+            ),
+            ingest=ingest,
+            seen_docs=seen_docs,
+            seen_chunk_ids=seen_chunk_ids,
+            resume_counted=resume_counted,
+            owner_scopes=owner_scopes,
+            owner_cache=owner_cache,
+            serp_ingest=serp_ingest,
+            serp_seeds_by_root=serp_seeds_by_root,
+            drained_roots=drained_roots,
+            seeds=seeds,
+            timings=product_timings[str(product_id)],
+            scope=_product_scope,
+            consume=_consume_product,
+            #: Тот же фазовый носитель потребителя, но с бакетами **этого** продукта:
+            #: конверсия идёт в хвосте продукта и мерит его ожидание экстракции.
+            consume_scope=replace(
+                _consume_scope, timings=product_timings[str(product_id)]
+            ),
+            incremental_items=incremental_items,
+            all_revalidation_groups=all_revalidation_groups,
+            revalidation_groups=revalidation_groups,
+            all_orphan_buckets=all_orphan_buckets,
+            orphan_buckets=orphan_buckets,
+            deferred_by_root=deferred_by_root,
+            deferred_by_origin=deferred_by_origin,
+            skipped_by_root=skipped_by_root,
+            skipped_by_origin=skipped_by_origin,
+            revalidation_deferred_total=revalidation_deferred_total,
+            revalidation_cap_fired=revalidation_cap_fired,
+            lane_axis=lane_axis,
+        )
+
+    # --- Когортный дренаж: один поток планов на всю когорту ------------------ #
+    def _open_product(ctx: ProductContext) -> None:
+        """Граница продукта (start): «продукт начат», а не «потерян» (16 §3.2).
+
+        Вызывается из потока планов в момент, когда драйвер доходит до первого корня
+        продукта, — то есть при ``host_concurrency`` ``None``/``1`` ровно там же, где
+        раньше стояла граница итерации: продукт N+1 не начинается, пока не закрыт N.
+        При объявленной оси продукты открываются по мере хода очереди, и это видимо:
+        ``start``/``end`` перестают быть строго вложенными парами (см. контракт
+        ``test_run_product_is_written_at_the_product_boundary``).
+
+        Строка ``run_product`` в статусе ``running`` пишется **до** Pass A: «продукт
+        начат» и «продукт потерян» должны различаться запросом, а не догадкой; финальный
+        статус перезапишет её после Pass B.
+        """
+        ctx.started_at = time.perf_counter()
+        product_events.append(
+            {
+                "event": "product_start",
+                "product_id": ctx.product_id,
+                "roots": len(ctx.roots),
+                "seeds_declared": len(ctx.roots),
+            }
+        )
+        #: Живая граница продукта: до первого дренажа (продукт может идти часами).
+        emit_product("start", ctx.product_id, on_product=on_product)
+        save_run_product(
+            ctx.product_id,
+            store=store,
+            run_id=run_id,
+            run_scope=run_scope,
+            product_modes=product_modes,
+            run_products_written=run_products_written,
+            errors=errors,
+            status=RunProductStatus.RUNNING,
+        )
+        # 09 §6.3: оффлайн-корпус продукта — работа **его** границы, а не предпрохода.
+        # Проход наполняет ``ingest.docs`` и персистит документы: держать его результат
+        # до закрытия продукта — это и есть продуктовый носитель, а не общий склад.
+        # Порядок прежний: после ``start`` и строки ``running``, до работы над корпусом.
+        if offline:
+            ctx.offline_report = _offline_reuse_product(
+                ctx.product_id,
+                ctx.roots,
+                ctx.incremental_items,
+                state=state,
+                errors=errors,
+                chunker_version=resolved_chunker_version,
+                embed_model_id=embed_model_id,
+                store=store,
+                ingest=ctx.ingest,
+                seen_docs=ctx.seen_docs,
+                seen_chunk_ids=ctx.seen_chunk_ids,
+                duplicates=duplicates,
+                doc_counters=doc_counters,
+                partial_unknown_products=partial_unknown_products,
+                persist_docs=_persist_docs,
+            )
+            offline_notes.append(ctx.offline_report.note(ctx.product_id))
+
+    def _cohort_root_plans() -> Iterator[
+        corpus_drain.RootPlan | corpus_driver.ProductBoundary
+    ]:
+        """Корни всей когорты: продукты в авторском порядке, граница — маркер (F9).
+
+        **Ленивый.** Тело исполняется по одному продукту и по одному корню, в момент
+        допуска драйвером: резолв цели, развёртка каталога и ``max_attempts`` — побочные
+        эффекты (``errors``/``mark``/``emit``), и при ``host_concurrency`` ``None``/``1``
+        их порядок прежний — корень N+1 не планируется, пока корень N не дренирован.
+
+        **Граница продукта — маркер, а не «смена pid».** Продукт без корней и последний
+        продукт потока иначе не закрылись бы вовсе: смена ``product_id`` у них не
+        наступает. Маркер называет факт прямо, и хвост продукта исполняется драйвером
+        на главном потоке ровно тогда, когда он обязан был бы исполниться.
+
+        **``consume_only`` и ``offline``** дают продукт без корней (``author_urls`` пуст),
+        но с маркером: хвост (конверсия чужой очереди ‖ переиспользование субстрата,
+        Pass B, покрытие) обязан исполниться, как и прежде.
+        """
+        for product_id in products:
+            ctx = contexts[str(product_id)]
+            _open_product(ctx)
+            yield from _author_root_plans(
+                ctx.product_id,
+                author_urls=ctx.author_urls,
                 items=items,
                 max_attempts=max_attempts,
                 errors=errors,
@@ -2930,66 +3198,85 @@ def _build_corpus(
                 crawl_target=_crawl_target,
                 expand_directory=_expand_directory,
                 targets=targets,
-                revalidation_groups=revalidation_groups,
-                serp_seeds_by_root=serp_seeds_by_root,
-                drained_roots=drained_roots,
+                revalidation_groups=ctx.revalidation_groups,
+                serp_seeds_by_root=ctx.serp_seeds_by_root,
+                drained_roots=ctx.drained_roots,
                 truncation_records=truncation_records,
-            ),
-            host_concurrency=lane_axis,
-            begin=_root_begin,
-            lane_width=_lane_width,
-            local_fetch=_local_fetch,
-            timings=timings,
-            errors=errors,
-            pool_factory=pool_factory,
-            on_root_done=partial(
-                _save_root,
-                product_id=product_id,
-                all_revalidation_groups=all_revalidation_groups,
-                cap_fired=revalidation_cap_fired,
-                deferred_by_root=deferred_by_root,
-                skipped_by_root=skipped_by_root,
-                counters=counters,
-                truncated_products=truncated_products,
-                truncation_records=truncation_records,
-                store=store,
-                session=session,
-                errors=errors,
-            ),
-            # Teardown: durable-факт «документ добыт» не отбрасывается — прерывание краула
-            # называет, сколько строк очереди конверсии осталось ``pending``.
-            abort=partial(
-                _note_interrupted_queue, queue=conversion_queue, errors=errors
-            ),
-            label=f" {product_id}",
+            )
+            yield from _synthetic_root_plans(ctx)
+            yield corpus_driver.ProductBoundary(ctx.product_id)
+
+    def _crawl_finished() -> bool:
+        """Краул когорты закончен: **все** объявленные продукты закрыты.
+
+        Не «закрыт последний по авторскому порядку»: при объявленной оси
+        ``crawl.host_concurrency`` продукты закрываются в порядке готовности, и
+        последний по порядку может закрыться первым. «Краул закончен» — утверждение о
+        полном наборе продуктов, поэтому и спрашивается о нём.
+        """
+        return all(ctx.closed for ctx in contexts.values())
+
+    def _close_product(product_id: str) -> None:
+        """Хвост продукта на главном потоке: конверсия → Pass B → покрытие → строка.
+
+        Что здесь и почему именно здесь. Хвост исполняет драйвер, когда завершён
+        последний корень продукта (``corpus_driver._close_product``): до этого момента
+        ни один шаг хвоста не наблюдал бы полного набора документов продукта. Порядок
+        шагов прежний (F5): конверсия очереди → подача объявленных артефактов → потолок
+        ревалидации → ``product_end`` → Pass B → ``corpus_coverage`` → финальная строка
+        ``run_product``.
+
+        **Цена компромисса.** Пока исполняется хвост, драйвер не выдаёт новых волн:
+        отправленные доживают в пулах. Так пик памяти ограничен числом полос, а не
+        числом продуктов в полёте; цена видна в ``product_tail_s`` (её пишет драйвер).
+
+        **Имена ниже — поля контекста продукта**, привязанные один раз в начале тела:
+        хвост — это хвост **одного** продукта, и повторять ``ctx.`` в 500 строках значило
+        бы прятать это за шумом. Владелец имени назван здесь, а не у каждого чтения.
+        """
+        ctx = contexts[str(product_id)]
+        #: Продукт закрывается ровно один раз (гарантия драйвера: по счётчику корней).
+        #: Отметка нужна вопросу «краул когорты закончен?» — см. ``_crawl_finished``.
+        ctx.closed = True
+        #: Граница продукта (start); ``None`` — продукт открыт не был (обрыв до него).
+        product_started = (
+            ctx.started_at if ctx.started_at is not None else time.perf_counter()
         )
+        ingest = ctx.ingest
+        seen_docs = ctx.seen_docs
+        seen_chunk_ids = ctx.seen_chunk_ids
+        product_roots = ctx.roots
+        drained_roots = ctx.drained_roots
+        all_revalidation_groups = ctx.all_revalidation_groups
+        revalidation_groups = ctx.revalidation_groups
+        orphan_buckets = ctx.orphan_buckets
+        all_orphan_buckets = ctx.all_orphan_buckets
+        deferred_by_root = ctx.deferred_by_root
+        deferred_by_origin = ctx.deferred_by_origin
+        skipped_by_root = ctx.skipped_by_root
+        skipped_by_origin = ctx.skipped_by_origin
+        revalidation_cap_fired = ctx.revalidation_cap_fired
+        revalidation_deferred_total = ctx.revalidation_deferred_total
+        offline_report = ctx.offline_report
+        serp_ingest = ctx.serp_ingest
+        serp_seeds_by_root = ctx.serp_seeds_by_root
+        _consume_product = ctx.consume
+        #: Бакеты стадий **этого** продукта (ожидание фетча/экстракции, нарезка, Pass B).
+        timings = ctx.timings
 
         # Каталог (feed/channel) разворачивается в **другие** корни, поэтому группа,
         # привязанная к авторскому URL каталога, может не совпасть ни с одним drain'ом.
         # Не теряем ревалидацию: синтетический бакет без seed (без записи усечения).
+        # Бакет уже дренирован полосой (``_synthetic_root_plans``): здесь только его
+        # наблюдение. Пустой бакет в поток не попадал, поэтому ``frontier is None`` — это
+        # «дренажа не было», а не «дренаж потерялся».
         for group_root, known_urls in revalidation_groups.items():
             pre_cap_urls = all_revalidation_groups.get(group_root) or ()
             if group_root in drained_roots or not pre_cap_urls:
                 continue
-            frontier: Frontier | None = None
-            if known_urls:
-                # synthetic-бакет: вызывающий читает счётчики frontier сразу, а
-                # хвоста конверсии у корня больше нет (F5) — доводить нечего.
-                frontier = corpus_driver.drain_one(
-                    corpus_drain.RootPlan(
-                        root_url=group_root,
-                        target=None,
-                        sitemap_seeds=False,
-                        known_urls=known_urls,
-                        seed=False,
-                    ),
-                    begin=_root_begin,
-                    lane_width=_lane_width,
-                    local_fetch=_local_fetch,
-                    timings=timings,
-                    errors=errors,
-                    pool_factory=pool_factory,
-                ).frontier
+            frontier: Frontier | None = ctx.synthetic.get(
+                (_SYNTHETIC_CATALOG, group_root)
+            )
             # S2: leftover-группа каталога — тоже видимый бакет, а не потерянный frontier.
             info: dict[str, Any] = {
                 "selected": (
@@ -3013,8 +3300,6 @@ def _build_corpus(
                     "examples": list(frontier.artifacts_outside_prefix),
                 }
             revalidation_orphans[f"{product_id}:catalog:{group_root}"] = info
-            if frontier is not None:
-                counters.revalidation_fetched_total += frontier.revalidation_fetched
 
         # 09 §6.3: известные URL вне scope **всех** авторских корней (author-scope
         # drift: корень удалён/ключ пути сужен). Один synthetic-бакет на (продукт,
@@ -3023,24 +3308,8 @@ def _build_corpus(
         # ``IndexBuild.revalidation_orphans`` + заметка фазы. I12: статус не меняется.
         for origin, all_known_urls in all_orphan_buckets.items():
             selected_urls = orphan_buckets.get(origin, ())
-            frontier: Frontier | None = None
-            if selected_urls:
-                # synthetic-бакет: хвоста конверсии у корня больше нет (F5).
-                frontier = corpus_driver.drain_one(
-                    corpus_drain.RootPlan(
-                        root_url=origin,
-                        target=None,
-                        sitemap_seeds=False,
-                        known_urls=selected_urls,
-                        seed=False,
-                    ),
-                    begin=_root_begin,
-                    lane_width=_lane_width,
-                    local_fetch=_local_fetch,
-                    timings=timings,
-                    errors=errors,
-                    pool_factory=pool_factory,
-                ).frontier
+            # Бакет уже дренирован полосой (``_synthetic_root_plans``): наблюдение — здесь.
+            frontier: Frontier | None = ctx.synthetic.get((_SYNTHETIC_ORPHAN, origin))
             info: dict[str, Any] = {
                 "selected": (
                     sum(1 for url in selected_urls if frontier.is_revalidation(url))
@@ -3063,9 +3332,7 @@ def _build_corpus(
                     "examples": list(frontier.artifacts_outside_prefix),
                 }
             revalidation_orphans[f"{product_id}:{origin}"] = info
-            revalidation_orphan_total += len(all_known_urls)
-            if frontier is not None:
-                counters.revalidation_fetched_total += frontier.revalidation_fetched
+            counters.revalidation_orphan_total += len(all_known_urls)
             # Targets известных URL резолвятся лениво в корневом цикле
             # (``_resolve_target``) — предварительная резолюция не нужна.
 
@@ -3082,7 +3349,9 @@ def _build_corpus(
                 session,
                 [product_id],
                 queue=conversion_queue,
-                scope=_consume_scope,
+                # Бакеты стадий — **этого** продукта: конверсия идёт в его хвосте, и её
+                # ожидание экстракции принадлежит его строке, а не соседнему продукту.
+                scope=ctx.consume_scope,
                 operations=_consume_operations,
                 products={product_id: _consume_product},
             )
@@ -3230,7 +3499,7 @@ def _build_corpus(
                 product_reason = ZERO_SOURCE_NO_URLS_ENTRY
             elif not product_roots:
                 product_reason = ZERO_SOURCE_NO_SEEDS
-            elif counters.product_seeds_enqueued == 0:
+            elif ctx.seeds.enqueued == 0:
                 product_reason = (
                     # F7: ни один seed не поставлен **из-за шарда** — причина называется
                     # своим токеном, а не общим ``all_seeds_rejected`` (материал есть, он
@@ -3253,7 +3522,7 @@ def _build_corpus(
                 f"{product_id}: zero-source corpus "
                 f"({product_reason or 'no session items'}): "
                 f"roots={len(product_roots)}, "
-                f"seeds_enqueued={counters.product_seeds_enqueued} — ячейки будут failed, не ❌"
+                f"seeds_enqueued={ctx.seeds.enqueued} — ячейки будут failed, не ❌"
             )
         # 17 §6 (F3): канонический адрес документа — **запрос**, а не гонка. После персиста
         # документов продукта адрес согласуется по durable-носителю
@@ -3293,7 +3562,7 @@ def _build_corpus(
                 "product_id": product_id,
                 "roots": len(drained_roots),
                 "seeds_declared": len(product_roots),
-                "seeds_enqueued": counters.product_seeds_enqueued,
+                "seeds_enqueued": ctx.seeds.enqueued,
                 "session_items": len(product_items),
                 "fetched": product_fetched,
                 "failed": product_failed,
@@ -3348,12 +3617,16 @@ def _build_corpus(
         #: (именно этот случай раньше был немым до конца фазы).
         emit_product("end", product_id, on_product=on_product)
 
-        # Наблюдаемость: последний продукт — конец **краула**. Сеанс закрывается здесь,
-        # до Pass B этого продукта: эмбеддинг/сборка индекса — работа фазы, и терминальный
-        # статус краула не должен от неё зависеть (иначе ``stale_reason`` врёт). Продукты идут
-        # строго последовательно (Pass A каждого предшествует его Pass B), поэтому дренаж
-        # всех продуктов закончен ровно на границе последнего.
-        if product_id == products[-1] and not consume_only:
+        # Наблюдаемость: здесь закрывается **краул**, а не «последний продукт». Сеанс
+        # закрывается до Pass B: эмбеддинг/сборка индекса — работа фазы, и терминальный
+        # статус краула не должен от неё зависеть (иначе ``stale_reason`` врёт).
+        # Условие — «закрыты **все** продукты когорты», а не «это последний по порядку»:
+        # при объявленной оси ``crawl.host_concurrency`` последний по порядку продукт может
+        # закрыться, пока корни соседа ещё в полёте, и терминальный статус сеанса описал бы
+        # незавершённый краул. При ``None``/``1`` эти условия совпадают, поэтому порядок
+        # записи прежний байт-в-байт. Если краул ещё не закончен, сеанс закроет вызов сразу
+        # после прохода когорты (:func:`corpus_commit.finalize_crawl_session` идемпотентен).
+        if not consume_only and _crawl_finished():
             # F6: сеанс закрывает краул, а не конверсия чужой очереди. Повторная
             # финализация перезаписала бы ``pages_fetched`` нулём счётчиков этой фазы —
             # то есть сделала бы провенанс краула ложным.
@@ -3391,7 +3664,7 @@ def _build_corpus(
             )
         physical_ok = True
         if product_chunks:
-            chunk_count += len(product_chunks)
+            counters.chunk_count += len(product_chunks)
             product_token = _product_content_token(product_chunks)
             extractor_token = (
                 _product_extractor_token(ingest.docs) or declared_extractor_version
@@ -3442,7 +3715,7 @@ def _build_corpus(
                         vector_store=vector_store,
                     )
                 if reuse_reason is None:
-                    partitions_reused += 1
+                    counters.partitions_reused += 1
                 else:
                     # «Нет каталога» — нормальный первый прогон, не ошибка. Существующий,
                     # но непригодный каталог — видимая причина пересборки (не тихо).
@@ -3515,9 +3788,9 @@ def _build_corpus(
             # для продуктов с ``physically_ok=True``.
             if physical_ok:
                 if not _persist_chunks(store, product_chunks, errors):
-                    all_physical_ok = False
+                    counters.all_physical_ok = False
             else:
-                all_physical_ok = False
+                counters.all_physical_ok = False
                 errors.append(
                     f"{product_id}: физическая сборка индекса не зафиксирована — "
                     "corpus_chunks/index_manifest не записаны (K2/§13); "
@@ -3531,7 +3804,7 @@ def _build_corpus(
         # документы и чанки дальше существуют только в БД. ``product_chunks`` отсоединяется
         # от объекта, а затем и локальная ссылка снимается: иначе список чанков прожил бы
         # до следующей итерации, то есть ровно тот пик, который снимается.
-        doc_count += len(ingest.docs)
+        counters.doc_count += len(ingest.docs)
         ingest.chunk_count = len(product_chunks)
         ingest.distinct_docs = len(product_chunk_counts)
         ingest.docs = []
@@ -3559,9 +3832,10 @@ def _build_corpus(
         )
 
         # Ф0/O3: покрытие продукта пишется на его границе, а не только в конце фазы.
-        # Элементы сеанса продукта **финальны** (продукт-цикл строго последователен),
-        # поэтому строка честна уже здесь: продукт, дошедший до ``product_end``,
-        # сохраняет покрытие, даже если следующий продукт убьёт прогон. Конец фазы
+        # Элементы сеанса **этого** продукта финальны (его корни завершены — драйвер
+        # зовёт хвост только после последнего корня), поэтому строка честна уже здесь:
+        # продукт, дошедший до ``product_end``, сохраняет покрытие, даже если следующий
+        # продукт убьёт прогон. Конец фазы
         # перезаписывает строки (``INSERT OR REPLACE``) и остаётся авторитетным — он же
         # закрывает продукты, вообще не вошедшие в цикл (zero-source/coverage_missing).
         product_coverage: CorpusCoverage | None = None
@@ -3636,6 +3910,48 @@ def _build_corpus(
                 "blacklisted": list(serp_ingest["blacklisted"]),
             }
 
+    # --- Один вызов драйвера на всю когорту (F9 плана 17) -------------------- #
+    # Продукт — граница **коммита**, а не граница взаимного исключения: поток планов
+    # содержит корни всех продуктов, право на host'ы — один реестр на когорту, а хвост
+    # продукта исполняется драйвером, когда завершён его последний корень. До F9 вызов
+    # стоял внутри цикла продуктов, и волна не могла содержать корни двух продуктов —
+    # окна ``fetch_started_at`` продуктов не пересекались ни при какой оси
+    # ``crawl.host_concurrency`` (измерено: продукты когорты шли строго последовательно).
+    #
+    # Потолок полос когорты — максимум объявленных продуктовых значений (``None`` — ось не
+    # объявлена, одна полоса). Потолок **продукта** приходит из ``lane_limit_for``: ось
+    # объявлена на корень (``app < run < site``), и продукт со строгим объявлением не
+    # получает полос «за компанию» с соседом.
+    _cohort_lane_axis = max(
+        (int(ctx.lane_axis or 1) for ctx in contexts.values()), default=1
+    )
+    corpus_driver.drive_roots(
+        _cohort_root_plans(),
+        host_concurrency=None if _cohort_lane_axis <= 1 else _cohort_lane_axis,
+        begin=_begin_root,
+        lane_width=_lane_width,
+        local_fetch=_local_fetch,
+        timings_for=_timings_for,
+        errors=errors,
+        pool_factory=pool_factory,
+        on_root_done=_root_done,
+        on_product_done=_close_product,
+        lane_limit_for=lambda plan: contexts[str(plan.product_id)].lane_axis or 1,
+        # Teardown: durable-факт «документ добыт» не отбрасывается — прерывание краула
+        # называет, сколько строк очереди конверсии осталось ``pending``.
+        abort=partial(_note_interrupted_queue, queue=conversion_queue, errors=errors),
+        label=" когорты",
+    )
+
+    # Конец прохода когорты: если краул закончился не в хвосте продукта (при объявленной
+    # оси последний по авторскому порядку продукт закрывается раньше соседей), сеанс
+    # закрывается здесь — до оставшейся работы фазы (состав когорты, композиция). Этот же
+    # вызов закрывает сеанс у **пустой когорты** (``products == []``): дренажа нет, а
+    # сеанс, открытый фазой, обязан получить терминальный статус. Идемпотентно: в обычном
+    # случае ``session_finalized`` уже стоит из хвоста.
+    if not consume_only:
+        _finalize_crawl_session()
+
     # Продукт плана **без записи** в непустом ``urls``: в цикл он не попал (``products``
     # выводится из ``url_map``), поэтому молча не краулится и получает строку покрытия
     # только как ``coverage_missing`` в Ш6. Наблюдаемость называет причину здесь, до
@@ -3659,13 +3975,10 @@ def _build_corpus(
                 }
             )
 
-    # Наблюдаемость: сеанс краула уже закрыт на границе краула — на ``product_end`` последнего
-    # продукта (``_finalize_crawl_session`` идемпотентен). Здесь вызов нужен только для
-    # пустого ``products``: фазы без продуктов, где дренажа нет вовсе. Пост-краульная
-    # работа (манифест, композиция) ниже на терминальный статус уже не влияет.
+    # Наблюдаемость: сеанс краула закрыт выше — в хвосте последнего закрытого продукта
+    # либо (у пустой когорты) концом прохода когорты. Пост-краульная работа (манифест,
+    # композиция) ниже на терминальный статус уже не влияет.
     # F6: конверсия чужой очереди сеанс не закрывает (см. границу продукта).
-    if not consume_only:
-        _finalize_crawl_session()
 
     # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
     # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
@@ -3829,7 +4142,7 @@ def _build_corpus(
     # продукта. Сбой записи снимает композицию (она не должна ссылаться на партицию,
     # которой нет в реестре прогона).
     if not _persist_manifest(store, manifest_entries, errors):
-        all_physical_ok = False
+        counters.all_physical_ok = False
 
     # K2/§13: ячейки, привязанные к **прошлой** сборке этого же прогона, помечаются
     # устаревшими. Живой случай — повтор фазы на существующем прогоне (``--reset``/
@@ -3853,7 +4166,7 @@ def _build_corpus(
         # DB-строк. Частичный сбой члена/коммита ⇒ композиции нет (иначе она ссылалась
         # бы на несуществующую партицию). Иммутабельность: другой состав при том же id —
         # ``ImmutableCompositionError`` в ``errors``, не падение фазы.
-        if index_root is not None and all_physical_ok and commit_ok:
+        if index_root is not None and counters.all_physical_ok and commit_ok:
             created_at = str(snapshot) if snapshot else _now_iso()
             try:
                 write_composition(
@@ -3934,8 +4247,8 @@ def _build_corpus(
     build = IndexBuild(
         index_build_id=index_build_id,
         entries=entries,
-        doc_count=doc_count,
-        chunk_count=chunk_count,
+        doc_count=counters.doc_count,
+        chunk_count=counters.chunk_count,
         crawl_pending=crawl_pending,
         crawl_fetched=crawl_fetched,
         crawl_done=crawl_fetched,
@@ -3947,7 +4260,7 @@ def _build_corpus(
         doc_counters=dict(doc_counters),
         duplicates=dict(duplicates),
         duplicate_count=sum(duplicates.values()),
-        partitions_reused=partitions_reused,
+        partitions_reused=counters.partitions_reused,
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
     # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild (``doc_counters``,
@@ -4050,11 +4363,11 @@ def _build_corpus(
         )
     # B3: зонд артефактов (класс/формат/размер/``page_count``/листинг) — до экстракции.
     log_entries.extend(artifact_probes)
-    if revalidation_orphan_total:
+    if counters.revalidation_orphan_total:
         # Наблюдение, не ошибка и не смена статуса (I12): авторский scope разошёлся с
         # тем, что реально накопилось в ``url_state``.
         log_entries.append(
-            f"corpus: {revalidation_orphan_total} known URLs are outside every authored "
+            f"corpus: {counters.revalidation_orphan_total} known URLs are outside every authored "
             "root — author-scope drift (revalidated as orphans; observation only)"
         )
     if pools.completed:
@@ -4074,7 +4387,7 @@ def _build_corpus(
         ResourcesObservation(
             chunks_per_doc=summarize_chunks_per_doc(observed_documents),
             documents=len(observed_documents),
-            chunks=chunk_count,
+            chunks=counters.chunk_count,
             extract_workers=counters.observed_extract_workers,
             extract_max_tasks_per_child=counters.observed_extract_max_tasks,
             scheduling_source=(

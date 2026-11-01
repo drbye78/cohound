@@ -1365,7 +1365,7 @@ def finish_one(
     errors: list[str],
     store: Any,
     chunker: ChunkerPort,
-    timings: _CorpusStageTimings,
+    timings_for: Callable[[str], _CorpusStageTimings],
     state: ProductStatePort | None,
     duplicates: dict[str, int],
     doc_counters: dict[str, dict[str, int]],
@@ -1610,7 +1610,9 @@ def finish_one(
                 chunks = chunker.chunk(extracted, document_id)
             finally:
                 # ``chunk_s`` — работа главного потока; считается и при отказе нарезки.
-                timings.chunk_s += time.perf_counter() - _chunk_started
+                timings_for(product_id).chunk_s += (
+                    time.perf_counter() - _chunk_started
+                )
         except Exception as exc:  # noqa: BLE001
             # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
             # повторный resume сможет ре-извлечь без ре-фетча.
