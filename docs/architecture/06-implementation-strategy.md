@@ -574,7 +574,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173/211/300` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:2922`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:2936`),
 но приёмочный контур не пройден: golden-full дал 6.8 % (`2026-10-27-golden-reference-set-unusable.md`),
 §11.5-baseline и кейсы 2–5 не делались.
 
@@ -702,8 +702,9 @@ P5), но строка помечена здесь как неактуальна
   `crawl_sources.py` (см. выше).
 - **Параллельная экстракция (P4, as-built).** Ось `crawl.extract_workers` (app < run < site,
   `CrawlLimits.extract_workers`, `crawl_config_digest`/манифест-поле `crawl_extract_workers`) —
-  пул экстракции в `core/pipeline/corpus.py` (`ExtractionPool`: фабрика исполнителя + воркер
-  от composition root). `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
+  пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:120`), фабрика
+  `new_extract_pool` в `core/pipeline/corpus_ingest.py:3581`, воркер
+  от composition root. `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
   воркер через `core/cli/wiring.py`), `split` — потоки поверх `RemoteExtractor`; шов
   (`/v1/*`, `SEAM_SCHEMA_VERSION`) **не** менялся. Воркер читает retained-`raw_path` (I19;
   байты не пиклятся), «в полёте» ≤ `W` экстракций, доводка FIFO, `note_fetched` остаётся в
@@ -994,8 +995,9 @@ DLP, набор IDS-правил) — design-требования зафикси
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `_template`), паритет реестров под `split`
   (`core/cli/context.py:1674` против `core/edge/server.py:1104`), R3 (ревизия весов моделей не
   входит в `extractor_version`, `core/adapters/extract_document.py:205-207`), E1 follow-up
-  (`experiment.py` не сбрасывает фазу `evaluate`), A1 follow-up (root/product-мультиплексирование;
-  нит `limiter.wait` внутри/вне `try`, `core/pipeline/corpus_drain.py:1893`).
+  (`experiment.py` не сбрасывает фазу `evaluate`), A1 follow-up (мультиплексирование
+  root/product **закрыто** F4a/F4b — `core/pipeline/corpus_driver.py`; открыт нит
+  `limiter.wait` внутри/вне `try`, `core/pipeline/corpus_ingest.py:2466`).
   ➖ **E2 follow-up закрыт 31.10.2026:** вестигиальное `Ports.registry`/`DEFAULT_REGISTRY_ID` и
   параметры `registry`/`registry_id` у `build_adapters` сняты (читателей не было — Ш3 берёт только
   `registry_fetchers`); `_load_registry_specs` при `--package` без входов теперь отказывает

@@ -126,11 +126,24 @@ Pass B продукта (`core/pipeline/corpus_ingest.py:555`).
 
 ### 4.1 Очередь
 
-Новая таблица (аддитивная DDL, `_ensure_columns`-совместимая): `extract_queue(session_id,
-product_id, url, content_hash, raw_path, level, pdf_pipeline, state, claimed_by, claimed_at,
-attempts, published_at)`, `state ∈ pending|claimed|done|failed|skipped`, PK
-`(session_id, product_id, url)`. Строки пишет **только** краул, меняют состояние **только**
-потребитель — это и есть разделение владения по данным, а не по коду.
+Таблица `extract_queue(session_id, product_id, url, content_hash, raw_path, level,
+pdf_pipeline, fetched_at, fetch_mode, lang, status_code, content_type, engine, extract_route,
+state, claimed_by, attempts, enqueued_at, state_changed_at, error_kind, error)`, `state ∈
+pending|claimed|done|failed|skipped`, PK `(session_id, product_id, url)`. Строки пишет **только**
+краул, меняют состояние **только** потребитель — это и есть разделение владения по данным, а не
+по коду. Семь колонок провенанса получения (`fetched_at`, `fetch_mode`, `lang`, `status_code`,
+`content_type`, `engine`, `extract_route`) — не украшение: потребитель строит из строки
+`_ExtractRequest` и не вправе вывести маршрут заново (иначе другой `extractor_version` и другой
+корпус при тех же объявленных входах).
+
+**Смена состояния — один метод порта, а не SQL в потребителе.** `set_extract_state(session_id,
+product_id, url, state, *, expect: ExtractQueueState | None, claimed_by, error_kind, error) -> bool`:
+`UPDATE ... WHERE <PK> [AND state = expect]`, `state_changed_at` ставит **стор** (один источник
+времени), возврат `rowcount > 0`. Три причины: pipeline знает только порты (иначе SQL живёт в двух
+местах и `error_kind`/`state_changed_at` начинают писаться по-разному); `expect` — это и есть
+claim (`expect=PENDING, claimed_by=<worker>`), без второго метода и второго пути записи; `False`
+означает «строку уже закрыли» — потребитель не считает работу сделанной. Upsert здесь запрещён:
+он затёр бы поля краула и позволил бы вернуть `done` в `pending`.
 
 **Очередь принадлежит производителю, доставка — потребителю.** Это главное следствие требования
 «краул эффективен безотносительно конверсии», и оно снимает вопрос «где очередь при `cluster`».
@@ -166,6 +179,9 @@ attempts, published_at)`, `state ∈ pending|claimed|done|failed|skipped`, PK
 4. Переход в `claimed` — conditional `UPDATE ... WHERE state='pending'` (образец
    `core/edge/scheduler.py:1070`): два потребителя не берут один документ.
 5. `failed` терминален и перечисляет `error_kind`; повтор — только явной командой.
+6. Состояние меняется **только** через `StorePort.set_extract_state` (`rowcount == 0` ⇒ переход
+   не состоялся: строку закрыли или увели). SQL по `extract_queue` вне стора — дефект слоя, а не
+   оптимизация: `state_changed_at`/`claimed_by` обязаны иметь один источник.
 
 ### 4.3 Backpressure по диску, с числом
 
@@ -256,7 +272,7 @@ edge не примет её как `workers`.
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:530`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:537`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:166`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,
@@ -375,6 +391,24 @@ edge не примет её как `workers`.
   Проверка: T6 на якоре — «тот же набор документов/чанков, тот же `product_token`/`pb`/
   `index_build_id`», а не «байт-идентичная физическая раскладка» (критерий несовместим с
   параллельным потребителем).
+  **Сделана.** Носители: `core/pipeline/extract_consume.py` (`consume` — проход по очереди
+  продукта: `_row_request` строит `_ExtractRequest` **только** из строки, спуск в контейнеры и
+  `304`-reuse переехали сюда), `core/pipeline/extract_queue.py` (`ExtractQueue`: `pending()`,
+  переходы), `StorePort.set_extract_state` (§4.1). Краул не конвертирует: `_commit_outcome`
+  пишет строку очереди и `_extend_links`/`note_fetched`, inline-путь удалён целиком (~600 строк
+  в `corpus_commit.py`/`corpus_drain.py`), вместе с ним ушли `extract_pending`, `PendingExtract`,
+  `defer_extract`/`member_pool_dead`, `inflight_fresh` (ёмкость `max_documents` теперь без
+  вычитания in-flight — то есть окно впервые **не** влияет на `truncated`). Фаза отдаёт
+  `status="failed"`, если у продукта остались строки без терминального состояния
+  (`corpus_not_converted`), и называет число — «корпус собран» при непустой очереди не
+  печатается. `CRAWL_SEMANTICS = "crawl-3"`, `run_id` якоря сдвинулся
+  `6f31dce1a5ba` → `2396d2a57455` (один раз, execution_change). Пин порядка записи пересобран
+  осознанно: **146 → 178** операторов и **117 → 147** записей (строка очереди — отдельный
+  `INSERT` на документ плюс `UPDATE extract_queue` на каждую сконвертированную строку); три
+  причины названы у констант.
+  **Чего F5 не делает:** claim/lease/retry/backpressure (это F6), поэтому потребитель в фазе —
+  последовательный проход по продукту; `split`/кластерный паритет не измерялся; пропускная
+  способность потребителя и память Pass B при нескольких продуктах в полёте — не измерены.
 * **F6. Consumer: claim → extract → chunk → done** с инвариантами §4.2 и `hound extract
   consume --session … [--product …]` — тот же вход, что у фазы, иначе появится второй код.
   Проверка: T7, T8 + «W=1 и W=4 дают одинаковый корпус» (расширение T3). Не измерено до F8:
@@ -406,8 +440,8 @@ edge не примет её как `workers`.
 | **T12** `test_outbox_delivery_is_idempotent_by_content_hash` | повторная доставка артефакта (обрыв после `uploaded`, до `submitted`) не создаёт вторую конверсию: seam адресует по `content_hash` (`contracts/seam/extract.schema.json`), outbox догоняет до `collected` |
 
 Обвязка многохостовых фейков и два пина поведения под конкурентностью уже есть
-(`tests/pipeline/test_corpus_concurrency.py:381` — `_multi_host_pages`, `:390` —
-`_declared_multi_host_profiles`; пины T1/T2 — `:911`, `:949`); пин `run_id` —
+(`tests/pipeline/test_corpus_concurrency.py:382` — `_multi_host_pages`, `:391` —
+`_declared_multi_host_profiles`; пины T1/T2 — `:912`, `:950`); пин `run_id` —
 `tests/cli/test_plan_crawl_axes.py:236`.
 
 ### 7.2 Метрика краула и протокол
@@ -421,6 +455,14 @@ edge не примет её как `workers`.
 
 Протокол: `./hound.py crawl run --crawl-only --host-concurrency 11 --package packages/ru-pg-dbms
 --urls packages/ru-pg-dbms/sources/corpus_urls.yaml`, затем `hound crawl status --per-url`.
+
+**Где числа берутся и где публикуются.** Источник — сами элементы сеанса и сама сеансовая
+строка, без второй БД и без «снимка метрик»: `crawl_sessions.started_at/finished_at` дают
+`crawl_only_wall`, элементы дают `requests` и `fetch_ms` по host'у, а `observed_min_interval_s`
+считается по `fetch_started_at` соседних попыток **одного** host'а. Печать — `hound crawl status
+--per-host` (агрегат рядом с уже существующим `--per-url`). Это не экономия: второй носитель тех
+же чисел разошёлся бы с элементами при первом же `resume`, а метрика, которую нельзя пересчитать
+из durable-фактов, — не метрика.
 
 **Ожидаемое число — и оно опровергаемо.** Критический путь якоря задаёт `postgrespro.ru`
 (2 400 URL), то есть ≈**2.0 ч** пейсинга против 8.73 ч корень-за-корнем
@@ -439,6 +481,18 @@ edge не примет её как `workers`.
 Замер «до» на этом же дереве не проводится: 8.73 ч — арифметика пейсинга, а прогон на 8.7 ч
 покупает только подтверждение арифметики. Если измеренное «после» окажется хуже 2.0 ч, разница
 и есть стоимость накладных — её и публикуем.
+
+**Цена колонок: батчим по фазе, а не по удобству.** Замеру нужны `crawl_session_items.fetch_ms`
+(длительность) **и** `fetch_started_at` (момент начала попытки), а claim (F6, §4.2 п.3) —
+`extract_queue.claimed_at`/`heartbeat_at`. Почему одного `fetch_ms` мало: критерий приёмки №1 —
+`observed_min_interval_s ≥ объявленного минимума` на каждом host, то есть проверка вежливости, без
+которой быстрое число не имеет права существовать; интервал между запросами из длительностей не
+выводится, а `first_seen`/`last_attempt` — операционные метки, которые перезаписываются и таймером
+не являются. Все четыре колонки — **одна** версия схемы: каждый bump отвергает гейтом все ранее
+записанные run-DB, то есть закрывает `report`/`review` по прошлым прогонам, и платить это дважды
+незачем. Колонка без производителя не заводится (`corpus_chunks.embedded_at` — стоячий пример
+такого дефекта): обе колонки приезжают вместе с записью в fetch-коммите, а не «вперёд под будущий
+замер».
 
 **Не измерено и подлежит замеру:** реальная латентность host'ов (2.0 ч — из объявленных бюджетов
 и вежливости, не из наблюдения), стоимость retention-I/O на 10 480 документах, поведение 11

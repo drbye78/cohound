@@ -448,7 +448,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
 (`core/pipeline/corpus_index.py:125-138` — `embed_model_id` в материале хеша).
 
 **Дефект 2 — переиспользование не проверяет векторы.** `_partition_reuse_reason`
-(`core/pipeline/corpus_index.py:713-792`) сверяет шесть объявленных полей манифеста:
+(`core/pipeline/corpus_index.py:714-793`) сверяет шесть объявленных полей манифеста:
 `content_digest`, `chunker_version`, `embed_model_id`, `extractor_version`,
 `lexical_engine_version`, `vector_store`. `vector_digest` — полный отпечаток, включающий
 **байты векторов** (`core/adapters/index_npy.py:275`) — в этом списке отсутствует, хотя

@@ -152,7 +152,7 @@
 | §1 | ✅ сделано | исторический контекст: все четыре дефекта закрыты MVP-1/2; секция читается в прошедшем времени |
 | §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1472`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1586`; формула — `next_cohort_ref:1566`). Повтор с тем же составом — no-op. Остаётся колонка `runs.cohort_ref`, которая хранит другое поле (§12.2) |
 | §2.3 | ✅ сделано | подкоманды `hound package seeds list/add/disable/enable/export` (`core/cli/package/parser.py:482`, слой — `core/pipeline/package_seeds.py`); `sources/seeds.yaml` в `ARTIFACT_FILES`; ложные подсказки в `context.py`/`corpus.py` стали правдой |
-| §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:2869`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`:3034`), ноль сетевых вызовов (`tests/pipeline/test_corpus_offline.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
+| §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:2886`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`:3051`), ноль сетевых вызовов (`tests/pipeline/test_corpus_offline.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
 | §3.1 | ✅ сделано | `RunProductStatus` — ✅ есть (`core/domain/enums.py`) и сверен со словарём (`run_product_status`). `CoverageFreshness` — **➖ снято**: её роль исполняет `corpus_docs.reuse_kind`, вторая ось свежести была бы вторым носителем одной величины. `MeasurementOrigin` — ✅ волна 2: `observed\|carried`, сверен со словарём (`docs/status-dictionary.yaml:measurement_origin`, `core/domain/dictionary.py`) и несётся ячейкой (`Cell.measurement_origin`) |
 | §3.2 | ➖ снято решением (30.10.2026) | модели живут как `*Row` в `core/ports/state.py`, и это **и есть** их форма; `CellMeasurement`/`RunProduct`/`CompositionMember` как отдельные Pydantic-модели не заводятся — они были бы вторым носителем той же формы (обоснование — §3.2) |
 | §3.3 | ✅ сделано | O1/O2/O3/O12 as-built; **O4 ✅** (run-level `chunk_id` = `product:doc_version_id:chunk_no`, `core/pipeline/corpus_index.py:169`); **O5 ✅** — колонка `cell_evidence.doc_version_id` есть (аддитивно), адрес пишет `evaluate._with_doc_versions` из `chunk_id` (`core/util/ids.py:98` `doc_version_of`), перенос проверяет его **дополнительно** к `content_hash` (`carry_forward._evidence_chain_valid`); остаток — `registry`/`inheritance`-evidence идут с `NULL` (у них нет чанка-версии: `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` читается как «не записано», а не «любая версия»; **O6 ✅** (`carry_forward_cell`), **O13 ✅** в доступной части: перенос инвалидируется сменой `scope_acceptance` через `attestation_digest`, `reviewed`/`N/A` едут только как `carried` с провенансом |
@@ -161,7 +161,7 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:463`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:470`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277,304`), вызов — `preflight` из `core/cli/commands/run.py:712,774` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
@@ -652,7 +652,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
     URL (`url_state` + `document_version` + chunk-set) переиспользуется: `reuse_kind=reused`,
     `http_status IS NULL`, `fetched_at IS NULL`, экстрактор и чанкер **не вызываются**.
     Исполнение — отдельный проход `offline_reuse_product`
-    (`core/pipeline/corpus_ingest.py:3034`), вызываемый **до** дренажа и вместо него
+    (`core/pipeline/corpus_ingest.py:3051`), вызываемый **до** дренажа и вместо него
     (`core/pipeline/corpus.py:2152`): в код, единственное назначение которого сеть, политика
     не заходит вовсе. Поэтому группировка ревалидации и дренаж корней под `offline` не
     исполняются, а SERP-контур не запускается (`rounds.not_executed_reason =
@@ -674,7 +674,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
   сеансовым фильтром были не видны. Какой источник сработал и сколько URL он дал — в
   `notes`, молчаливого выбора нет.
   Ремонт идёт **известными** depth-0 URL (`plan_repair_items`,
-  `core/pipeline/corpus_ingest.py:2869` → `Frontier.add_revalidate_seed`), а не BFS-корнями:
+  `core/pipeline/corpus_ingest.py:2886` → `Frontier.add_revalidate_seed`), а не BFS-корнями:
   провал глубокой страницы не становится seed-корнем и не тратит бюджет чужого корня;
   авторские корни под ремонтом **не дренятся**. Набор берётся ровно из переданного
   множества и **независимо от `ProductMode`**: у продукта, который сейчас `new`/`full`,
@@ -1863,7 +1863,8 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
 - **`max_documents` — только discovery, не ревалидация.** `add_revalidate_seed` не
   проверяет `has_capacity`; `_commit_outcome` вызывает `note_fetched` только для
   `freshly_fetched and not is_revalidation`, а ревалидационный fetch учитывает отдельно
-  в `Frontier.revalidation_fetched`; `_inflight_fresh` ревалидацию исключает. Потолок
+  в `Frontier.revalidation_fetched`; отдельного счётчика «в полёте» больше нет — ёмкость
+  проверяется на **изъятии** очереди корня (`queue_remaining` в провенансе). Потолок
   означает «документы, которые обход этого корня **добавляет**», а не повторную проверку
   уже установленных документов. 304 идёт через resume-path
   (`_reuse_for_page`/`_finish_one`) и не считается новым fetch; изменённый 200
@@ -2310,15 +2311,18 @@ RAM), поэтому адаптер извлекает **один** член в�
 → `crawl_control_digest` → `EXECUTION_CONTRACT_FIELDS` и форкнула бы `run_id` ради чистого
 рычага пропускной способности — §13, это не смена условий измерения).
 
-При `K = 1` (рециклинг воркеров) и при отсутствии пула (`split`, `defer_extract=False`)
+При `K = 1` (рециклинг воркеров) и без фазового пула (окно `None` → `window=1`)
 путь тождествен прежнему inline — наблюдаемые артефакты совпадают байт-в-байт. Члены
 получают trim арен glibc в `finally` воркера (`_extract_worker`) и входят в операторский
 счётчик «документов через пул»; отказ извлечения члена — по-прежнему видимый
 `extract_failed`, соседи не страдают, а отказ пула на `submit` деградирует до inline с
-явной записью (как у страницы), не теряя членов. Отказ пула посреди спуска пересобирается
-**страничным** путём (`_finish_extract`): спуск исполняется внутри `item.commit`, где
-счётчик `pending` корня ещё включает сам архив, поэтому рекурсивная доводка той же фазовой
-очереди запрещена.
+явной записью в `errors` (`_defer_broken`, `core/pipeline/archive_descent.py:968`), не
+теряя членов. Отказ воркера посреди спуска (`2 × timeout` без завершений) закрывает
+доводку **видимо**: остаток получает пропуск `extract_failed`
+(`state["dead"]`, `core/pipeline/extract_consume.py:961-963`), а пул пересобирается
+ограниченно (`recover_extract_pool`). Страничным путём это больше не пересобирается:
+конверсию исполняет потребитель очереди, доводящий строки FIFO из одной точки
+(`_settle_row`), поэтому рекурсивная доводка той же фазовой очереди запрещена.
 
 **Покрытие — честная граница.** Нечитаемый контейнер (индекс не прочитан) — это
 ненаблюдённое содержимое, поэтому элемент помечается `FAILED` существующим классом
@@ -2835,9 +2839,9 @@ class CompositionView:
   `core/cli/context.py:2320`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
   параметр `cache` у `build_corpus`/`_embed_product`, `core/pipeline/corpus.py:286`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
-  до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и
-  `metrics.json` (`core/pipeline/corpus_index.py:335-373`) — «кэш включён» не доказывается
-  фактом инициализации. Он по-прежнему **не** условие измерения: кэш — про стоимость, а не
+  до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и в
+  итоговой строке продукта (`core/pipeline/corpus_index.py:441-479`) — «кэш включён» не
+  доказывается фактом инициализации. Он по-прежнему **не** условие измерения: кэш — про стоимость, а не
   про провенанс; промах/хит не меняет ни `pb`, ни `run_id`. `embed_cache is None` —
   прежнее поведение байт-в-байт.
 - `embed_model_id` обязан включать ревизию/снапшот модели; иначе смена весов при том же
