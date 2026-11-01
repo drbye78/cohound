@@ -1353,11 +1353,11 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 - `py7zr` + `rarfile` (extra `extract-archives`) — читатели контейнеров 7z/rar. **Без этого
   extra спуск в 7z/rar невозможен**: контейнер остаётся нераскрытым с видимой причиной
   (`container_reader_unavailable` / `backend_unavailable: py7zr не установлен`), а не с
-  тихим «пустым архивом». `zip` работает всегда (stdlib). `pyzipper` (AES-zip) в коде **не
-  подключён**. Установка: `uv pip install -e '.[extract-archives]'`.
+  тихим «пустым архивом». `zip` работает всегда (stdlib); AES-zip не поддерживается.
+  Установка: `uv pip install -e '.[extract-archives]'`.
 
 Проверка состава extras — `hound doctor` (группы `core`/`retrieval`/`crawl`/`extract`/
-`safety`/`ops`/`embed`/`embed-lite`/`dev`).
+`extract-pdf`/`extract-archives`/`safety`/`ops`/`embed`/`embed-lite`/`ann`/`pdf-measure`/`dev`).
 
 ---
 

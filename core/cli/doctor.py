@@ -117,19 +117,25 @@ DEPENDENCY_GROUPS: tuple[tuple[str, bool, tuple[str, ...]], ...] = (
     # а не в `deps:extract`: его отсутствие означает сломанную установку, а не пропущенный extra.
     ("deps:core", True, ("pydantic", "yaml", "pypdfium2")),
     ("deps:retrieval", False, ("numpy", "tantivy")),
-    ("deps:crawl", False, ("scrapy", "playwright")),
+    ("deps:crawl", False, ("scrapy", "scrapy_playwright", "playwright", "httpx")),
     ("deps:extract", False, ("trafilatura", "docling", "openpyxl", "rtree")),
+    ("deps:extract-pdf", False, ("rapidocr", "torch", "torchvision")),
+    ("deps:extract-archives", False, ("py7zr", "rarfile")),
     ("deps:safety", False, ("nh3", "defusedxml")),
-    ("deps:ops", False, ("tenacity", "structlog")),
+    ("deps:ops", False, ("structlog",)),
     ("deps:embed", False, ("sentence_transformers",)),
-    ("deps:embed-lite", False, ("model2vec",)),
-    ("deps:dev", False, ("pytest",)),
+    ("deps:embed-lite", False, ("model2vec", "huggingface_hub")),
+    ("deps:ann", False, ("faiss",)),
+    ("deps:pdf-measure", False, ("pypdf", "pdfplumber")),
+    ("deps:dev", False, ("pytest", "pytest_cov", "jsonschema")),
 )
 
 #: Имя модуля → имя дистрибутива (для ``importlib.metadata.version``), где расходятся.
 _DIST_NAMES: dict[str, str] = {
     "yaml": "PyYAML",
     "sentence_transformers": "sentence-transformers",
+    "pytest_cov": "pytest-cov",
+    "faiss": "faiss-cpu",
 }
 
 

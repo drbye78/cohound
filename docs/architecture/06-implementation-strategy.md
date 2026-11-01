@@ -453,8 +453,8 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
   (дефолт 1 GiB, `execution_change`). Потолка **глубины** нет: конечность дают цикл по хешу
   содержимого (`archive_cycle`) и бюджет корня (`archive_budget_exhausted` — видимая запись).
   Требуется читатель контейнера: `zip` — stdlib, `7z`/`rar` — extra **`extract-archives`**
-  (`py7zr`/`rarfile`; сжатые члены `rar` требуют внешнего `bsdtar`/`unrar`/`7z`, AES-zip —
-  `pyzipper`). Без бэкенда контейнер **не разворачивается видимо** (`available() = False`,
+  (`py7zr`/`rarfile`; сжатые члены `rar` требуют внешнего `bsdtar`/`unrar`/`7z`, AES-zip не
+  поддержан). Без бэкенда контейнер **не разворачивается видимо** (`available() = False`,
   `backend_unavailable` / `container_reader_unavailable`), а не «тихо пусто». Члены извлекаются
   в фазовом пуле
   (`ExtractionPool`) с окном `extract_window` и строгой FIFO-доводкой (порядок вставки входит в

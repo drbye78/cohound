@@ -256,7 +256,7 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
 - **Crawl axes:** `crawl_strategy`, `crawl.rate_limit` and `crawl_config_digest` are contract
   fields; `max_depth`/`max_documents`/`exclude_*`/`robots`/`document_level`/`pdf_pipeline`
   enter through `crawl_config_digest` (`CrawlLimits.as_dict()`). Add a new operator axis to
-  the single inventory `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:178`) so `plan` and
+  the single inventory `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:179`) so `plan` and
   `run` pick it up together — flag parity is tested. Changing an axis gives a **new `run_id`**
   (`execution_change`), not an edit of the current run; otherwise two different corpora become
   one measurement.
@@ -333,7 +333,7 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
   (`archive_max_total_uncompressed_bytes`; the `archive_max_*` axes bound **one** container).
   Exhaustion is a visible `archive_budget_exhausted` record, never a quiet stop. Backends:
   `zip` via stdlib; `7z`/`rar` via the `extract-archives` extra (`py7zr`/`rarfile`, compressed
-  rar members need an external `bsdtar`/`unrar`/`7z`, AES-zip needs `pyzipper`). Without a
+  rar members need an external `bsdtar`/`unrar`/`7z`; AES-zip is unsupported). Without a
   backend a container does **not** open visibly (`available()=False`,
   `backend_unavailable`, `container_reader_unavailable`) — never "silently empty". Regression
   test for the measured failure: `tests/pipeline/test_corpus_descent.py::test_chain_of_5000_distinct_archives_reaches_the_end`
@@ -434,7 +434,7 @@ deps ship cp314/abi3 wheels — `05-dependency-stack.md` §1), `pydantic>=2`, `p
 uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract --extra extract-pdf
 #   + --extra extract-archives for 7z/rar, --extra embed / embed-lite for embeddings,
 #     --extra safety (prompt-injection guards), --extra ops (retry/structured logs).
-./hound.py doctor      # groups: core/retrieval/crawl/extract/safety/ops/embed/embed-lite/dev + env/config/layout/dirs/cli
+./hound.py doctor      # groups: core/retrieval/crawl/extract/extract-pdf/extract-archives/safety/ops/embed/embed-lite/ann/pdf-measure/dev + env/config/layout/dirs/cli
 ```
 
 `uv lock --check` passes; if you change dependencies, update the lock in the same commit or

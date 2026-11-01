@@ -38,9 +38,6 @@ crawl = [
     "scrapy-playwright>=0.0.48",
     "playwright>=1.63,<2",
     "httpx>=0.28,<0.29",
-    # «Дешёвый первый ярус» для антибот-доменов без JS (TLS/JA3-имитация);
-    # не замена браузеру, только опциональный fetcher перед playwright.
-    "curl_cffi>=0.16,<0.17",
 ]
 
 # Экстракция HTML + Office (лёгкая, БЕЗ torch).
@@ -87,23 +84,20 @@ safety = [
 ]
 
 # Спуск в контейнеры-артефакты (zip/7z/rar) — следующий слой после допуска/retention.
-# Extra — заявка: ни один модуль пока не импортирует эти пакеты (базовый `extract` не
-# меняется). Лицензии/заменяемость — docs/architecture/05-dependency-stack.md.
+# Ленивые бэкенды контейнеров (базовый `extract` не меняется).
+# Лицензии/заменяемость — docs/architecture/05-dependency-stack.md.
 #   * py7zr — LGPL-2.1-or-later: исключение зафиксировано (unmodified wheel, отдельный
 #     extra, swap-able; копирование кода в репозиторий запрещено);
 #   * rarfile — ISC; сжатые члены требуют внешнего bsdtar/unrar/7z (в образ не тащим:
 #     отсутствие утилиты — видимый attachment_skip(extractor_unavailable));
-#   * pyzipper — MIT; нужен только для AES-zip; pin >=0.4.0 (CVE-2026-44722);
 #   * zipfile (stdlib) — ZipCrypto read-only, bomb-guard нет (границы — archive_* оси).
 extract-archives = [
     "py7zr>=1.1.4",
     "rarfile>=4.5",
-    "pyzipper>=0.4.0",
 ]
 
-# Надёжность и наблюдаемость (retry §7, структурные логи манифеста).
+# Надёжность и наблюдаемость (структурные логи манифеста; ретраи реализованы вручную).
 ops = [
-    "tenacity>=9.2,<10",
     "structlog>=26.1,<27",
 ]
 
@@ -128,18 +122,15 @@ ann = [
     "faiss-cpu>=1.15,<2",
 ]
 
-# Опциональные fallback-экстракторы и утилиты (b-вердикты реестра).
-fallback = [
-    "markitdown>=0.1,<0.2",
+# Дополнительные PDF-библиотеки для измерительного скрипта
+# `scripts/measure_pdf_backends.py`; не являются runtime fallback-экстракторами.
+pdf-measure = [
     "pypdf>=6.19,<7",
     "pdfplumber>=0.11,<0.12",
-    "selectolax>=1.0,<2",
-    "beautifulsoup4>=4.15,<5",
-    "markdownify>=1.2,<2",
 ]
 
-# Dev/CI (§11.6): pytest пока не установлен — нужен для CI.
-# pytest-xdist — параллельный прогон (`-n auto`); CI включает его автоматически,
+# Dev/CI (§11.6).
+# pytest-xdist — параллельный прогон; CI включает его автоматически,
 # если модуль `xdist` доступен (иначе — последовательный graceful-fallback).
 dev = [
     "pytest>=9.1,<10",

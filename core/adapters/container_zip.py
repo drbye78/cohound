@@ -1,9 +1,9 @@
 """ZIP-контейнер на stdlib ``zipfile`` — реализация ``ContainerPort`` (спуск, B2).
 
 Почему stdlib, а не ``pyzipper``: обычный zip (deflate/stored) читается ``zipfile``
-полностью, внешних бинарей не нужно, лицензия — PSF. ``pyzipper`` заявлен в extra
-``extract-archives`` только ради **AES**-zip (WinZip AE-1/AE-2); до его подключения
-AES-члены деградируют **видимо** — ``open_member`` поднимает ``RuntimeError`` от
+полностью, внешних бинарей не нужно, лицензия — PSF. ``pyzipper`` не входит ни в один
+extra: **AES**-zip (WinZip AE-1/AE-2) сознательно не поддержан (CVE-2026-44722 к тому же
+запретил бы старые версии). AES-члены деградируют **видимо** — ``open_member`` поднимает ``RuntimeError`` от
 ``zipfile`` («encrypted, password required»), а ``list_members`` честно ставит
 ``ContainerEncryption.ENCRYPTED`` (флаг ``0x1`` в общем бите). Предикат у ZIP
 **определённый**: флаг есть в central directory у каждого члена, поэтому незнание
