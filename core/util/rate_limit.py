@@ -32,7 +32,7 @@ from urllib.parse import urlsplit
 
 from core.domain.models import RateLimitSpec  # frozen value-объект: поля min_s/max_s
 
-__all__ = ["RateLimiter", "jittered_backoff"]
+__all__ = ["RateLimiter", "jittered_backoff", "normalize_host"]
 
 #: Порог, после которого ``RateLimiter`` вычищает заведомо инертные записи.
 #: Это **не** сброс интервала: удаляются только записи, чей резерв уже в прошлом
@@ -50,7 +50,7 @@ def _uniform(rng: random.Random | None, low: float, high: float) -> float:
     return generator.uniform(low, high)
 
 
-def _normalize_host(host: str) -> str:
+def normalize_host(host: str) -> str:
     """Ключ origin для пейсинга: нижний регистр, без порта, без завершающей точки.
 
     Штатные вызывающие передают ``urlsplit(url).hostname.lower()`` — уже без схемы и
@@ -63,6 +63,12 @@ def _normalize_host(host: str) -> str:
 
     IPv6-литерал (``[::1]:443``) приводится к ``::1``; пустая строка остаётся пустой
     (неразбираемый URL — одна «безымянная» группа, консервативно).
+
+    **Одна формула на два потребителя.** Функция публичная, потому что тем же правилом
+    нормализуется **ключ шарда** (:mod:`core.config.deploy`): шард — множество host'ов, и
+    если реестр нормализует ``Example.COM`` иначе, чем лимитер/frontier, «disjoint по
+    построению» становится ложью (`docs/architecture/17-crawl-host-scheduler-plan.md` §2).
+    Вторая копия правила разошлась бы молча — ровно тот класс, что «два ключа на один сайт».
     """
     value = (host or "").strip().lower()
     if not value:
@@ -174,7 +180,7 @@ class RateLimiter:
         """
         if spec is None:
             return 0.0
-        origin = _normalize_host(host)
+        origin = normalize_host(host)
         with self._lock:
             now = self._clock()
             delay = _uniform(self._rng, spec.min_s, spec.max_s)

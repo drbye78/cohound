@@ -568,6 +568,13 @@ def _crawl_provenance(
                     truncated_products=sorted(
                         {str(p) for p in (prov.get("truncated_products") or [])}
                     ),
+                    # F7: узел шарда — провенанс развёртывания (не ``run_id``). Читается
+                    # из того же durable-блока, что писал ``finalize_session``.
+                    node_id=(
+                        str((prov.get("shard") or {}).get("node") or "") or None
+                        if isinstance(prov.get("shard"), dict)
+                        else None
+                    ),
                 )
             )
             engines |= set(session_engines)
@@ -911,6 +918,7 @@ def build_phases(
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
     crawl_app: CrawlConfig | None = None,
+    node_id: str | None = None,
     document_level: DocumentLevel | None = None,
     pdf_pipeline: PdfPipeline | None = None,
     document_timeout_s: float | None = None,
@@ -1242,6 +1250,10 @@ def build_phases(
             ),
             # D1/D2: application-слой осей краула (deploy.yaml:crawl) — низший приоритет.
             crawl_app=crawl_app,
+            # F7 (17 §2): узел шарда. Резолвится composition root'ом (``--node``/
+            # ``COHOUND_NODE``): фаза окружение не читает, а узел — операционный выбор,
+            # а не измерение (в ``run_id`` не входит).
+            node_id=node_id,
             # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
             run_id=getattr(plan, "run_id", None),
             # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).

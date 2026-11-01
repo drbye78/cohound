@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import os
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -66,7 +67,13 @@ from core.config import (
     passport_content_digests,
     passport_urls,
 )
-from core.config.deploy import LLM_SLOTS, DeployConfig, profile_notices
+from core.config.deploy import (
+    ENV_NODE,
+    LLM_SLOTS,
+    DeployConfig,
+    profile_notices,
+    resolve_host_shard,
+)
 from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
@@ -2402,6 +2409,38 @@ def _worker_extractor_factory(
     return partial(build_worker_extractor, **kwargs)
 
 
+def _node_id(
+    args: argparse.Namespace,
+    deploy_config: DeployConfig | None,
+    *,
+    required: bool,
+) -> str | None:
+    """F7 (17 §2): **какой узел я** — операционный выбор, а не измерение.
+
+    Приоритет ``--node`` > ``COHOUND_NODE`` (оба — операционные: это свойство
+    развёртывания, поэтому env здесь читается так же, как ``COHOUND_SERP``, и так же
+    уезжает в провенанс, а не в ``run_id``).
+
+    Если карта ``crawl.shards`` объявлена, узел **обязан** быть выбран и объявлен в ней:
+    «взял все host'ы молча» дало бы два процесса на одних host'ах (политика вежливости
+    §10 нарушилась бы без единой ошибки), а опечатка в имени узла не должна означать
+    «все host'ы». Оба случая — ``ValueError`` (→ ``EXIT_USAGE`` у CLI).
+    ``required=False`` (режим ``consume_only``: краула нет) — узел не нужен и не
+    проверяется.
+
+    :raises ValueError: карта объявлена, а узел не выбран/не объявлен.
+    """
+    if not required:
+        return None
+    raw = getattr(args, "node", None) or os.environ.get(ENV_NODE)
+    node = str(raw).strip() if raw is not None else ""
+    shards = getattr(getattr(deploy_config, "crawl", None), "shards", None)
+    if shards is None:
+        return node or None
+    shard = resolve_host_shard(shards, node or None)
+    return shard.node if shard is not None else None
+
+
 def _resolve_phases(
     args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports,
     deploy_config: DeployConfig | None = None,
@@ -2655,6 +2694,11 @@ def _resolve_phases(
         "axes": axes,
         "declared_status_dict_version": declared_status_dict_version,
         "crawl_app": deploy_config.crawl if deploy_config is not None else None,
+        # F7 (17 §2): узел шарда — операционный выбор (``--node``/``COHOUND_NODE``).
+        # При объявленной карте ``crawl.shards`` отсутствие узла — отказ ``EXIT_USAGE``
+        # (:func:`_node_id`): «взял все host'ы молча» недопустимо. В режиме
+        # ``consume_only`` краула нет, поэтому узел не требуется и не проверяется.
+        "node_id": _node_id(args, deploy_config, required=not consume_only),
         # P8: та же ось, что видит исполнение (``corpus_phase`` резолвит app < run).
         "document_timeout_s": getattr(args, "document_timeout_s", None),
         # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
@@ -3201,6 +3245,17 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         dest="follow",
         action="store_true",
         help="печатать прогресс сеанса до терминального статуса",
+    )
+    # F7 (17 §2): **какой узел я** — операционный выбор развёртывания, а не ось
+    # измерения: в ``run_id`` не входит (в кластере все узлы объявляют одну карту и
+    # должны получить один ``run_id``), но durable-провенансом записывается.
+    parser.add_argument(
+        "--node",
+        dest="node",
+        default=None,
+        metavar="ID",
+        help="узел кластера краула из deploy.yaml: crawl.shards[].node "
+        "(дефолт: COHOUND_NODE; обязателен, если карта шардов объявлена)",
     )
     parser.add_argument(
         "--interval",

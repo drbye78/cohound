@@ -1514,6 +1514,12 @@ class CrawlSessionProvenance(BaseModel):
     truncated: bool = False
     #: D1/G: продукты с усечённым краулом (для аномалии ``exhaustive``-absence по продукту).
     truncated_products: list[str] = Field(default_factory=list)
+    #: F7 (17 §2): узел краула, исполнивший сеанс (``deploy.yaml: crawl.shards[].node``,
+    #: выбор оператора ``--node``/``COHOUND_NODE``). Это **deployment provenance**, а не
+    #: условие измерения: в ``run_id`` узел не входит (иначе один прогон, нарезанный на
+    #: шарды, стал бы N разными измерениями), но артефакт обязан знать, **кто** его снял.
+    #: ``None`` — шардов не объявлено (один процесс, поведение прежнее).
+    node_id: str | None = None
 
 
 class CrawlProvenance(BaseModel):

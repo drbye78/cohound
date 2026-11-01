@@ -69,7 +69,7 @@ from core.cli.execution_axes import (
     resolve_declared_axes,
 )
 from core.cli.wiring import llm_env_notices, serp_env_notices
-from core.config.deploy import load_deploy_config, profile_notices
+from core.config.deploy import load_deploy_config, profile_notices, shard_notices
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
@@ -168,7 +168,13 @@ def run(args: argparse.Namespace) -> int:
     # ``split-hardened`` (принимается, но ничего не добавляет сверх ``split``) должно быть
     # видно всегда, когда этот профиль активен, а не только при выводе ``run_id``.
     deploy_config = load_deploy_config(None)
-    notices: list[str] = list(profile_notices(deploy_config))
+    notices: list[str] = [
+        *profile_notices(deploy_config),
+        # F7 (17 §2): пустой шард — объявленный узел без host'ов. Это не ошибка конфига,
+        # но и не тишина: «host'ов ноль и работы ноль» оператор обязан увидеть **до**
+        # старта, а не выяснять из отсутствия артефактов.
+        *shard_notices(getattr(deploy_config.crawl, "shards", None)),
+    ]
     declared: DeclaredExecutionAxes | None = None
     contract: str | None = None
     # §13/I16/I20: профиль ретривала и ``cutoff_K`` — слагаемые контракта, значит и

@@ -174,7 +174,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from core.config.crawl_sources import CrawlSourcesConfig
-from core.config.deploy import CrawlConfig
+from core.config.deploy import CrawlConfig, resolve_host_shard
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     ArchiveObservation,
@@ -224,6 +224,7 @@ from core.pipeline.corpus_commit import PhaseLifecycle
 # остаются имена, которые этот модуль читает сам, и публичный ``derive_corpus_coverage``
 # (``__all__``; тесты и ``selfcheck`` адресуют его по ``corpus`` — ``noqa: F401``).
 from core.pipeline.corpus_coverage import (  # noqa: F401
+    HOST_OUT_OF_SHARD_REASON,
     ONLY_FAILED_REPAIR_REASON,
     ZERO_SOURCE_ALL_SEEDS_REJECTED,
     ZERO_SOURCE_NO_SEEDS,
@@ -337,7 +338,7 @@ from core.ports.types import (
     FetchMode,
 )
 from core.util.index_partition import build_root as _partition_root
-from core.util.rate_limit import RateLimiter
+from core.util.rate_limit import RateLimiter, normalize_host
 
 __all__ = [
     "ExtractionPool",
@@ -1211,6 +1212,7 @@ def _build_corpus(
     consume_only: bool = False,
     consume_worker: str | None = None,
     consume_heartbeat_s: float | None = None,
+    node_id: str | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -1461,6 +1463,16 @@ def _build_corpus(
         заново: прогон без краула не вправе объявить усечённый корпус полным (иначе
         ``coverage.complete=True`` и ложный ``❌`` по I2/I2b). Сеанс здесь **не**
         финализируется — его закрывает краул.
+    :param node_id: F7 (17 §2) — **какой узел я**: имя из объявленной карты
+        ``deploy.yaml: crawl.shards`` (выбор оператора ``--node``/``COHOUND_NODE``,
+        резолвится composition root; фаза окружение не читает). При объявленной карте
+        crawler берёт **только** host'ы своего шарда, отказ чужому host'у виден счётчиком
+        ``host_out_of_shard``. Шардированный узел видит **часть** корпуса, поэтому сеанс
+        закрывается ``partial`` с названной причиной, а покрытие продуктов, чьи host'ы
+        покрыты не полностью, — не ``complete``: иначе непокрытый host читался бы как
+        ``exhaustive`` и ``❌`` публиковался бы из неполного корпуса (I2b/I2c).
+        ``None`` — узел не выбран (при объявленной карте это отказ ещё на входе CLI, в
+        фазе — «шардов нет»).
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild, ResourcesObservation]``
@@ -1526,6 +1538,68 @@ def _build_corpus(
     declared = sorted({str(p) for p in (getattr(plan, "products", None) or [])})
 
     errors: list[str] = []
+
+    # ------------------------------------------------------------------ #
+    # F7 (17 §2): шард узла — фильтр «какие host'ы мои» и честность корпуса
+    # ------------------------------------------------------------------ #
+    # Карта шардов объявлена в ``deploy.yaml: crawl.shards``; **какой узел я** —
+    # операционный выбор (резолвится composition root'ом), поэтому сюда приходит уже
+    # значение, а не окружение. Фильтр не подменяет scope (``Frontier.host_in_scope``):
+    # он спрашивает «моё ли это железо», а scope — «принадлежит ли URL этому корню».
+    #
+    # В режиме ``consume_only`` краула нет вовсе, поэтому фильтр шарда не применяется и
+    # узел не требуется: очередь уже durable, а конверсия права на host не спрашивает.
+    # Честность при этом **не** теряется — она восстанавливается из провенанса сеанса
+    # (``truncated_products``/``shard.filtered_products``) ниже, а не выводится заново.
+    declared_shards = None if consume_only else getattr(crawl_app, "shards", None)
+    host_shard = resolve_host_shard(declared_shards, node_id)
+    shard_hosts = None if host_shard is None else host_shard.hosts
+    #: Продукты, чьи **объявленные** host'ы покрыты шардом не полностью: их корпус этим
+    #: узлом заведомо не собран целиком (часть host'ов принадлежит другому узлу).
+    #: Вычисляется из объявленного входа (seed-корни + объявленные поддомены), то есть
+    #: до фетча — поэтому «шардированный узел видит часть корпуса» честно читается даже
+    #: тогда, когда чужой host так и не встретился в ссылках.
+    shard_filtered_products: set[str] = set()
+    shard_block: dict[str, Any] | None = None
+    if host_shard is not None:
+        for product_id, product_urls in url_map.items():
+            product_declared = {
+                normalize_host(urlsplit(str(url)).hostname or "")
+                for url in product_urls
+            } | {
+                normalize_host(host)
+                for host in scope_hosts_by_product.get(product_id, frozenset())
+            }
+            if product_declared - set(shard_hosts or ()):
+                shard_filtered_products.add(product_id)
+        shard_block = {
+            "node": host_shard.node,
+            "hosts": sorted(shard_hosts or ()),
+            "declared_nodes": sorted(
+                str(getattr(shard, "node", "")) for shard in (declared_shards or ())
+            ),
+            "filtered_products": sorted(shard_filtered_products),
+            # ``filtered`` — «этот узел видит не весь объявленный корпус». Тогда сеанс
+            # закрывается ``partial``, а покрытие продукта — не ``complete``: иначе
+            # непокрытый host читался бы как ``exhaustive``, и ``❌`` получил бы право
+            # на публикацию по I2b/I2c (вердикт из неполного корпуса — недопустим).
+            "filtered": bool(shard_filtered_products),
+            "reason": HOST_OUT_OF_SHARD_REASON if shard_filtered_products else None,
+        }
+        if host_shard.empty:
+            # Пустой шард — объявленное «узел ничего не ведёт». Не ошибка конфига, но и
+            # не тишина: строка видна в артефакте фазы (``errors``), а не только в логе.
+            errors.append(
+                f"shards: узел «{host_shard.node}» объявлен без host'ов — этот узел "
+                "не будет краулить (видимый простой, а не тихий: 17 §2)"
+            )
+    elif node_id:
+        # Обратный случай: узел задан, карты нет. Это не ошибка (env может стоять на
+        # хосте целиком), но и не «взял все host'ы молча» — факт назван строкой.
+        errors.append(
+            f"shards: узел «{node_id}» задан, но crawl.shards не объявлены — "
+            "фильтра по шарду нет, краул ведёт все host'ы"
+        )
 
     # 09 §6.3/§9 (MVP-3b): политика наблюдения и режимы продуктов. ``state is None`` —
     # legacy-путь: все три аргумента игнорируются целиком (поведение байт-в-байт).
@@ -1965,6 +2039,13 @@ def _build_corpus(
     # ``(product, seed-root)``; флаг/продукты уходят в провенанс сеанса и ``IndexBuild``.
     truncation_records: list[dict[str, Any]] = []
     truncated_products: set[str] = set()
+    # F7 (17 §2): продукт, чьи объявленные host'ы покрыты шардом не полностью, этим
+    # узлом **не** собран целиком. Это известный заранее (из объявленного входа) факт, а
+    # не вывод из усечения: он входит в тот же канал честности, что ``max_documents``/
+    # ``document_level`` — иначе ``coverage`` объявил бы полный охват на части корпуса.
+    shard_reason_products: set[str] = set(shard_filtered_products)
+    if shard_filtered_products:
+        truncated_products |= shard_filtered_products
     #: F6 (17 §6): конверсия не краулит, поэтому собственного усечения у неё нет.
     #: Усечение — durable-факт **сеанса** (``provenance_json``: ``truncated``/
     #: ``truncated_products``/``effective_limits.roots``). Восстанавливаем его, а не
@@ -1988,6 +2069,20 @@ def _build_corpus(
                 ) or ()
                 truncation_records.extend(
                     dict(record) for record in roots if isinstance(record, Mapping)
+                )
+            # F7 (17 §2): причина неполноты по шарду — durable-факт **сеанса**, а не
+            # вывод этой фазы: конверсия не краулит и не знает, какие host'ы были на
+            # другом узле. Восстанавливаем названный токен (`host_out_of_shard`), иначе
+            # покрытие продукта осталось бы `complete=False` без причины и читалось бы
+            # как «объясняется счётчиками» — то есть как обычное усечение.
+            prior_shard = (
+                read_provenance(prior_session).get("shard")
+                if prior_session is not None
+                else None
+            )
+            if isinstance(prior_shard, Mapping):
+                shard_reason_products.update(
+                    str(pid) for pid in prior_shard.get("filtered_products") or ()
                 )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость best-effort
             errors.append(
@@ -2037,6 +2132,9 @@ def _build_corpus(
         truncation_records=truncation_records,
         errors=errors,
         lifecycle=lifecycle,
+        # F7 (17 §2): шард узла — провенанс развёртывания. ``None`` у прогонов без
+        # объявленной карты, поэтому их провенанс/статус не меняется.
+        shard=shard_block,
     )
 
 
@@ -2211,6 +2309,10 @@ def _build_corpus(
         # F6 (§4.3): корень retention — для публикуемого ``free_bytes`` рядом с
         # ``backlog_bytes``. Предел берётся из тех же ``CrawlLimits``, что у корня.
         raw_root=str(raw_root),
+        # F7 (17 §2): шард узла — host'ы, которые этот процесс имеет право вести, и его
+        # имя для провенанса. ``None``/``None`` — карты не объявлено (поведение прежнее).
+        shard_hosts=shard_hosts,
+        node_id=node_id,
     )
     #: Замкнутые операции фазы (их сигнатуры держат этот модуль и тесты — носитель их
     #: не переписывает, только называет владельца).
@@ -2607,6 +2709,15 @@ def _build_corpus(
             # Честность покрытия (I2/I2c): ремонт наблюдал только проваленные URL —
             # «complete» на нём означало бы «сайт прочитан», а не «ремонт выполнен».
             coverage_incomplete[product_id] = ONLY_FAILED_REPAIR_REASON
+        if product_id in shard_filtered_products:
+            # F7 (17 §2): узел видит не все объявленные host'ы продукта. Причина сильнее
+            # ремонта: она про **развёртывание**, а не про объём этого прогона, и верна
+            # всегда, пока шард не покрывает продукт целиком.
+            coverage_incomplete[product_id] = HOST_OUT_OF_SHARD_REASON
+        elif product_id in shard_reason_products:
+            # consume_only: причина восстановлена из провенанса сеанса (см. выше) — та
+            # же честность без краула в этом исполнении.
+            coverage_incomplete[product_id] = HOST_OUT_OF_SHARD_REASON
         #: 09 §6.3: ``offline`` — корпус из durable-субстрата **до** дренажа и вместо него.
         #: Отдельный проход, а не дренаж с ревалидационными seed'ами: у оффлайн-элемента
         #: нет ни фетча, ни sitemap/feed-развёртки, ни BFS, поэтому проход не заходит в
@@ -3109,7 +3220,14 @@ def _build_corpus(
             elif not product_roots:
                 product_reason = ZERO_SOURCE_NO_SEEDS
             elif counters.product_seeds_enqueued == 0:
-                product_reason = ZERO_SOURCE_ALL_SEEDS_REJECTED
+                product_reason = (
+                    # F7: ни один seed не поставлен **из-за шарда** — причина называется
+                    # своим токеном, а не общим ``all_seeds_rejected`` (материал есть, он
+                    # на другом узле).
+                    HOST_OUT_OF_SHARD_REASON
+                    if product_id in shard_filtered_products
+                    else ZERO_SOURCE_ALL_SEEDS_REJECTED
+                )
             # Иначе seed'ы поставлены, но исходов нет — причину называют ``errors``
             # (сбои исполнителя/экстракции); выдумывать четвёртую причину не нужно.
             zero_source_reasons[product_id] = product_reason

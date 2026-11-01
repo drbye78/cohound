@@ -85,6 +85,7 @@ from core.config.deploy import (
     is_split,
     load_deploy_config,
     profile_notices,
+    shard_notices,
 )
 from core.domain import (
     CrawlItemStatus,
@@ -681,6 +682,9 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         ),
         *llm_env_texts,
         *profile_notices(deploy_config),
+        # F7 (17 §2): пустой шард виден до старта: «узел объявлен, host'ов ноль» —
+        # объявленный простой, а не тишина (видно и в `plan`, и в `run --json`).
+        *shard_notices(getattr(deploy_config.crawl, "shards", None)),
         # I3/§5: env-троттл SERP-контура виден, как и LLM-расхождения: он меняет корпус,
         # а значит и ``run_id`` — молчаливая подмена здесь была бы подменой измерения.
         *serp_env_notices(

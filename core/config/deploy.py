@@ -24,6 +24,7 @@ OI-совместимым API корпоративного облака — эт
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -49,10 +50,12 @@ from core.util.document_formats import (
     SUPPORTED_ARCHIVE_FORMATS,
     normalize_attachment_formats,
 )
+from core.util.rate_limit import normalize_host
 
 __all__ = [
     "DEFAULT_LLM_MODEL_ID",
     "DEFAULT_LLM_SLOT",
+    "ENV_NODE",
     "ENV_SERP",
     "LLM_SLOTS",
     "SPLIT_HARDENED_WARNING",
@@ -60,9 +63,11 @@ __all__ = [
     "AuthConfig",
     "CrawlBrowserConfig",
     "CrawlConfig",
+    "CrawlShardConfig",
     "DeployConfig",
     "EdgeConfig",
     "EmbedConfig",
+    "HostShard",
     "LLMDeployConfig",
     "LLMSlotConfig",
     "OIDCConfig",
@@ -73,9 +78,11 @@ __all__ = [
     "load_deploy_config",
     "parse_serp_switch",
     "profile_notices",
+    "resolve_host_shard",
     "resolve_llm_slot",
     "resolve_search_provider",
     "resolve_serp_rounds",
+    "shard_notices",
 ]
 
 # Канонические допустимые значения (ЗЕРКАЛО 07 §7 / 03 D.5). Не выносим в доменные
@@ -369,6 +376,68 @@ class CrawlBrowserConfig(BaseModel):
         return self
 
 
+class CrawlShardConfig(BaseModel):
+    """Один узел кластера краула и его **host'ы** (17 §2, F7 плана).
+
+    Единица шардирования — **host**, и он же ключ вежливости
+    (:func:`core.util.rate_limit.normalize_host`): если host'ы разъезжаются по узлам
+    произвольно, два процесса получат по независимому бюджету на один сайт, и политика
+    §10 нарушится без единой ошибки в коде. Поэтому каждый host принадлежит **ровно
+    одному** узлу (дизъюнктность проверяет :class:`CrawlConfig`).
+
+    Host'ы нормализуются **тем же правилом, что лимитер** (нижний регистр, без схемы,
+    порта и завершающей точки): иначе ``Example.COM`` в шарде и ``example.com`` во
+    frontier — разные ключи, и «дизъюнктно по построению» было бы ложью. ``node`` —
+    операционный идентификатор процесса (не измерение): он попадает в провенанс сеанса,
+    но **не** в ``run_id``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: str
+    hosts: list[str] = Field(default_factory=list)
+
+    @field_validator("node")
+    @classmethod
+    def _check_node(cls, value: str) -> str:
+        """Идентификатор узла — непустая строка без пробелов по краям."""
+        node = str(value).strip()
+        if not node:
+            raise ValueError("crawl.shards: пустой идентификатор узла (node)")
+        return node
+
+    @field_validator("hosts", mode="before")
+    @classmethod
+    def _check_hosts(cls, value: object) -> list[str]:
+        """Нормализует host'ы правилом лимитера и отвергает пустые/повторные.
+
+        Пустой шард (``hosts: []``) допустим как **объявление** «узел ничего не ведёт»:
+        это видимая запись (``shard_notices``/провенанс), а не ошибка конфига. Пустая
+        строка в списке — ошибка: она не host и молча ничего не значит.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(
+                "crawl.shards[].hosts: ожидался список host'ов"
+            )
+        hosts: list[str] = []
+        for item in value:
+            host = normalize_host(str(item))
+            if not host:
+                raise ValueError(
+                    f"crawl.shards[].hosts: пустой host в {list(value)!r}"
+                )
+            if host in hosts:
+                raise ValueError(
+                    f"crawl.shards[].hosts: host «{host}» объявлен дважды в одном шарде"
+                )
+            hosts.append(host)
+        return hosts
+
+
 class CrawlConfig(BaseModel):
     """Операционная политика краулинга корпуса (03 D.5/D.6).
 
@@ -402,6 +471,15 @@ class CrawlConfig(BaseModel):
     # объявлен. Per-site слоя нет: бэклог — свойство узла (диск и потребитель), а не
     # сайта, как у ``host_concurrency``.
     extract_backlog_mb: int | None = Field(default=None, gt=0)
+    #: F7 (17 §2, «Эксклюзивность host'а — статическим шардом»): реестр узлов кластера
+    #: краула — **объявленный конфиг развёртывания**, а не сервис. ``None`` — шардов нет
+    #: (один процесс ведёт все host'ы, поведение байт-в-байт прежнее). Объявленная карта
+    #: входит в ``crawl_config_digest`` (``CrawlLimits.as_dict``): она меняет состав
+    #: корпуса, значит обязана менять ``run_id``. **Какой узел я** — операционный выбор
+    #: (``--node``/``COHOUND_NODE``) и в дайджест **не** входит: это deployment
+    #: provenance, как ``owner``/``host`` сеанса. В кластере все узлы объявляют одну и ту
+    #: же карту, поэтому ``run_id`` у них один — один прогон, нарезанный на шарды.
+    shards: list[CrawlShardConfig] | None = None
     # P4: отдельная ось CPU-параллелизма **экстракции** (пул процессов локального пути /
     # потоков split). ``None``/``1`` = сегодняшнее поведение (inline, байт-в-байт); не
     # смешивается с ``max_workers`` (осью сетевого fetch-пула). Резолв — та же цепочка
@@ -514,6 +592,52 @@ class CrawlConfig(BaseModel):
             return normalize_attachment_formats(value)  # type: ignore[arg-type]
         except ValueError as exc:
             raise ValueError(f"crawl.attachment_formats: {exc}") from exc
+
+    @model_validator(mode="after")
+    def _check_shards_disjoint(self) -> CrawlConfig:
+        """Реестр шардов: уникальные узлы и **дизъюнктные** host'ы (T9, 17 §2).
+
+        Пересечение host'ов между шардами — **отказ** (``EXIT_USAGE`` у CLI), а не
+        предупреждение: два узла на одном host'е ломают политику вежливости §10 без
+        единой ошибки в коде — каждый получит свой бюджет, и суммарная частота к сайту
+        удвоится. Ошибка называет **и host'ы, и узлы**: «где именно» — часть сообщения,
+        иначе оператор ищет пересечение руками.
+
+        Дубликат ``node`` — тот же класс: два объявления одного узла означают, что карта
+        описывает не то, что исполняется. Пустой шард ошибкой **не** является: это
+        объявленное «узел ничего не ведёт», и он виден через :func:`shard_notices`.
+        """
+        if self.shards is None:
+            return self
+        owner: dict[str, str] = {}
+        for shard in self.shards:
+            if shard.node in owner:
+                raise ValueError(
+                    "shards: узел "
+                    f"«{shard.node}» объявлен дважды (уникальность node обязательна: "
+                    "иначе карта описывает не то, что исполняется)"
+                )
+            owner[shard.node] = shard.node
+        seen: dict[str, str] = {}
+        overlaps: dict[str, list[str]] = {}
+        for shard in self.shards:
+            for host in shard.hosts:
+                previous = seen.get(host)
+                if previous is not None and previous != shard.node:
+                    overlaps.setdefault(host, sorted({previous, shard.node}))
+                else:
+                    seen[host] = shard.node
+        if overlaps:
+            detail = "; ".join(
+                f"host «{host}» — узлы {', '.join(nodes)}"
+                for host, nodes in sorted(overlaps.items())
+            )
+            raise ValueError(
+                "shards: host'ы шардов пересекаются — два узла на одном host'е ломают "
+                f"политику вежливости: {detail}. Каждый host принадлежит ровно одному "
+                "узлу (17 §2)"
+            )
+        return self
 
 
 class EmbedConfig(BaseModel):
@@ -705,6 +829,87 @@ def profile_notices(config: DeployConfig) -> tuple[str, ...]:
     if config.profile == "split-hardened":
         return (SPLIT_HARDENED_WARNING,)
     return ()
+
+
+# ---------------------------------------------------------------------------
+# Шарды узлов краула (17 §2, F7)
+# ---------------------------------------------------------------------------
+
+#: Имя env-переменной с идентификатором узла краула (``--node`` её перекрывает).
+#: Операционный выбор, а не измерение: узел записывается в провенанс сеанса, но в
+#: ``run_id`` не входит (иначе один прогон, нарезанный на шарды, стал бы N измерениями).
+ENV_NODE = "COHOUND_NODE"
+
+
+@dataclass(frozen=True)
+class HostShard:
+    """Разрешённый шард **этого** узла: ``node`` + нормализованные host'ы.
+
+    ``hosts`` — то, что узел имеет право вести; пустое множество означает «узел ничего
+    не ведёт» и обязано быть видимым (:func:`shard_notices`), а не тихим простоем.
+    Отдельный value-объект, а не пара аргументов: у него два потребителя (фильтр
+    frontier'а и провенанс сеанса), и разъехаться им нельзя.
+    """
+
+    node: str
+    hosts: frozenset[str] = frozenset()
+
+    @property
+    def empty(self) -> bool:
+        """Узел объявлен без host'ов (видимый простой, а не ошибка конфига)."""
+        return not self.hosts
+
+
+def resolve_host_shard(
+    shards: list[CrawlShardConfig] | None, node: str | None
+) -> HostShard | None:
+    """Выбирает шард узла из объявленной карты (``deploy.yaml: crawl.shards``).
+
+    Правила (каждое — отказ или видимая запись, третьего нет):
+
+    * карты нет (``None``) — шардов нет: ``None`` значит «весь мир мой», фильтра нет;
+    * карта есть, узел **не выбран** — :class:`ValueError`: «взял все host'ы молча» было
+      бы ложью о развёртывании, а кластер без выбора узла не исполняется;
+    * узел выбран, но его нет в карте — :class:`ValueError`: опечатка в имени узла не
+      должна молча превращаться в «все host'ы» (это дало бы два узла на одних host'ах);
+    * узел найден — :class:`HostShard` (возможно пустой, см. :attr:`HostShard.empty`).
+
+    :raises ValueError: карта объявлена, а узел не выбран или не объявлен в ней.
+    """
+    if shards is None:
+        return None
+    known = [shard.node for shard in shards]
+    name = str(node or "").strip()
+    if not name:
+        raise ValueError(
+            "shards: crawl.shards объявлены, но узел не выбран — укажите --node или "
+            f"{ENV_NODE}; объявленные узлы: {', '.join(known) or '—'}"
+        )
+    for shard in shards:
+        if shard.node == name:
+            return HostShard(node=shard.node, hosts=frozenset(shard.hosts))
+    raise ValueError(
+        f"shards: узел «{name}» не объявлен в crawl.shards — объявленные узлы: "
+        f"{', '.join(known) or '—'} (опечатка не должна означать «все host'ы»)"
+    )
+
+
+def shard_notices(shards: list[CrawlShardConfig] | None) -> tuple[str, ...]:
+    """Видимые записи о **пустых** шардах объявленной карты (17 §2).
+
+    Пустой шард — не ошибка конфига (узел может быть объявлен заранее), но и не тишина:
+    «host'ов ноль и работы ноль» оператор обязан увидеть строкой, а не выяснять из
+    отсутствия артефактов. Формулировка одна на все потребители (payload/лог/``errors``
+    фазы) — как у :func:`profile_notices`.
+    """
+    if not shards:
+        return ()
+    return tuple(
+        f"shards: узел «{shard.node}» объявлен без host'ов — этот узел не будет "
+        "краулить (видимый простой, а не тихий: 17 §2)"
+        for shard in shards
+        if not shard.hosts
+    )
 
 
 # ---------------------------------------------------------------------------

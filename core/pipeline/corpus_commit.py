@@ -200,6 +200,20 @@ def record_root_outcome(
         record["accepted_foreign_hosts"] = dict(
             sorted(frontier.accepted_foreign_hosts.items())
         )
+    # F7 (17 §2): host'ы **чужого шарда** — видимый отказ, а не молчаливый пропуск.
+    # Точный счётчик по host'ам + ограниченные примеры (форма та же, что у
+    # ``out_of_scope_subdomains``: «сколько дали host'ы другого узла» — число). Ключ
+    # появляется только при наличии отказов: запись корня без шарда остаётся
+    # байт-в-байт прежней (пин порядка записи не двигается).
+    if frontier.host_out_of_shard:
+        record["host_out_of_shard"] = {
+            "count": sum(frontier.host_out_of_shard.values()),
+            "by_host": dict(sorted(frontier.host_out_of_shard.items())),
+            "examples": {
+                host: list(urls)
+                for host, urls in sorted(frontier.host_out_of_shard_examples.items())
+            },
+        }
     # D3/F10: отказы scope у ``<loc>`` sitemap — провенанс, не ``errors``.
     # Ключ появляется только при наличии отказов: без sitemap запись байт-в-байт
     # прежняя. Классы ``host``/``path`` раздельны (F6).
@@ -234,6 +248,7 @@ def finalize_crawl_session(
     truncation_records: list[dict[str, Any]],
     errors: list[str],
     lifecycle: PhaseLifecycle | None,
+    shard: dict[str, Any] | None = None,
 ) -> None:
     """L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``).
 
@@ -249,6 +264,11 @@ def finalize_crawl_session(
     штатной финализации. Исключение до неё оставляет ``False``, и обёртка закрывает
     сеанс терминально (:func:`_finalize_interrupted_session`); исключение после неё
     (эмбеддинг/сборка/композиция) легитимный ``completed``/``partial`` не переписывает.
+
+    ``shard`` (F7) — блок провенанса развёртывания: он же решает, что шардированный узел
+    **не** закрывает сеанс ``completed`` (узел видел часть корпуса, см.
+    :func:`core.pipeline.crawl_session.finalize_session`). ``None`` — шардов нет, и
+    артефакт прогона не меняется.
     """
     if session is None or counters.session_finalized:
         return
@@ -283,6 +303,10 @@ def finalize_crawl_session(
             pages_fetched=counters.pages_fetched_total,
             revalidation_fetched=counters.revalidation_fetched_total,
             truncated_products=sorted(truncated_products),
+            # F7 (17 §2): шард узла — провенанс развёртывания (``node_id`` durable,
+            # принадлежность host'а выводима из карты в ``effective_limits``). При
+            # ``filtered=True`` сеанс станет ``partial``: узел видел часть корпуса.
+            shard=shard,
         )
     except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
         errors.append(f"finalize_session({session}): {type(exc).__name__}: {exc}")

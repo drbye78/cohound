@@ -21,6 +21,7 @@ from core.config.deploy import (
     SPLIT_HARDENED_WARNING,
     CrawlBrowserConfig,
     CrawlConfig,
+    CrawlShardConfig,
     DeployConfig,
     EmbedConfig,
     LLMDeployConfig,
@@ -30,13 +31,15 @@ from core.config.deploy import (
     load_deploy_config,
     parse_serp_switch,
     profile_notices,
+    resolve_host_shard,
     resolve_llm_slot,
     resolve_search_provider,
     resolve_serp_rounds,
+    shard_notices,
 )
 from core.domain.enums import EmbedDevice
 from core.domain.models import EmbedRunConfig
-from core.pipeline.crawl_frontier import resolve_embed_device
+from core.pipeline.crawl_frontier import resolve_crawl_limits, resolve_embed_device
 
 FIXTURES = Path(__file__).parent / "fixtures"
 # ---------------------------------------------------------------------------
@@ -952,3 +955,139 @@ def test_embed_device_has_no_site_layer() -> None:
     assert not hasattr(DomainProfile(), "embed_device")
     with pytest.raises(ValidationError):
         DomainProfile(embed_device="cuda")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# F7 (17 §2): реестр шардов узлов краула — ``crawl.shards``
+# ---------------------------------------------------------------------------
+
+
+def test_overlapping_host_shards_are_refused() -> None:
+    """T9 (17 §7.1): пересечение host'ов между шардами — отказ, называющий host и узлы.
+
+    Два узла на одном host'е ломают политику вежливости §10 **без единой ошибки в коде**:
+    каждый получит свой бюджет, и частота к сайту удвоится. Поэтому пересечение — ошибка
+    входа (у CLI — ``EXIT_USAGE``), а сообщение обязано назвать **и host, и узлы**: иначе
+    оператор ищет пересечение руками.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        CrawlConfig(
+            shards=[
+                CrawlShardConfig(node="node-a", hosts=["docs.test"]),
+                CrawlShardConfig(node="node-b", hosts=["other.test", "docs.test"]),
+            ]
+        )
+    message = str(excinfo.value)
+    assert "docs.test" in message
+    assert "node-a" in message and "node-b" in message
+    assert "пересекаются" in message
+
+
+def test_shard_disjointness_is_case_insensitive_by_limiter_rule() -> None:
+    """``Example.COM`` и ``example.com`` — **один** ключ, значит пересечение (T9).
+
+    Host'ы нормализуются тем же правилом, что ключ лимитера
+    (:func:`core.util.rate_limit.normalize_host`): иначе «дизъюнктно по построению»
+    было бы ложью, и два узла получили бы независимые бюджеты на один сайт.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        CrawlConfig(
+            shards=[
+                CrawlShardConfig(node="node-a", hosts=["Example.COM"]),
+                CrawlShardConfig(node="node-b", hosts=["example.com"]),
+            ]
+        )
+    assert "example.com" in str(excinfo.value)
+
+
+def test_shard_hosts_are_normalized_by_the_limiter_rule() -> None:
+    """Шард хранит ключ лимитера: нижний регистр, без схемы/порта/хвостовой точки."""
+    config = CrawlConfig(
+        shards=[
+            CrawlShardConfig(
+                node=" node-a ",
+                hosts=["Example.COM", "https://Docs.Test/path", "other.test.:8443"],
+            )
+        ]
+    )
+    assert config.shards is not None
+    shard = config.shards[0]
+    assert shard.node == "node-a"
+    assert shard.hosts == ["example.com", "docs.test", "other.test"]
+
+
+def test_duplicate_shard_node_is_refused() -> None:
+    """Дубликат ``node`` — отказ: карта обязана описывать то, что исполняется."""
+    with pytest.raises(ValidationError) as excinfo:
+        CrawlConfig(
+            shards=[
+                CrawlShardConfig(node="node-a", hosts=["docs.test"]),
+                CrawlShardConfig(node="node-a", hosts=["other.test"]),
+            ]
+        )
+    assert "node-a" in str(excinfo.value)
+    assert "дважды" in str(excinfo.value)
+
+
+def test_empty_shard_is_a_declaration_not_an_error() -> None:
+    """Пустой шард допустим как объявление «узел ничего не ведёт» — но он **видим**.
+
+    Ошибки конфига здесь нет (узел может быть объявлен заранее), тишины — тоже:
+    «host'ов ноль и работы ноль» оператор обязан увидеть строкой, а не выяснять из
+    отсутствия артефактов.
+    """
+    config = CrawlConfig(shards=[CrawlShardConfig(node="node-idle", hosts=[])])
+    assert shard_notices(config.shards) == (
+        "shards: узел «node-idle» объявлен без host'ов — этот узел не будет краулить "
+        "(видимый простой, а не тихий: 17 §2)",
+    )
+    shard = resolve_host_shard(config.shards, "node-idle")
+    assert shard is not None and shard.empty is True
+
+
+def test_resolve_host_shard_refuses_missing_and_unknown_node() -> None:
+    """Карта есть, узел не выбран/не объявлен — ``ValueError`` (у CLI ``EXIT_USAGE``).
+
+    «Взял все host'ы молча» дало бы два процесса на одних host'ах, а опечатка в имени
+    узла не должна означать «все host'ы».
+    """
+    shards = [
+        CrawlShardConfig(node="node-a", hosts=["docs.test"]),
+        CrawlShardConfig(node="node-b", hosts=["other.test"]),
+    ]
+    with pytest.raises(ValueError, match="узел не выбран") as missing:
+        resolve_host_shard(shards, None)
+    assert "node-a" in str(missing.value) and "node-b" in str(missing.value)
+
+    with pytest.raises(ValueError, match="не объявлен") as unknown:
+        resolve_host_shard(shards, "node-typo")
+    assert "node-typo" in str(unknown.value)
+
+    # Без карты фильтра нет: ``None`` — «весь мир мой» (поведение прежнее).
+    assert resolve_host_shard(None, None) is None
+    assert resolve_host_shard(None, "node-a") is None
+
+
+def test_shard_map_is_absent_from_digest_until_declared() -> None:
+    """Карта шардов входит в ``CrawlLimits.as_dict`` **только при объявлении**.
+
+    Иначе прогон без шардов сдвинул бы ``run_id`` у всех существующих пакетов — то есть
+    объявил бы ``execution_change`` там, где измерение не менялось (A3/§13).
+    """
+    plain = resolve_crawl_limits("https://docs.test/", app=CrawlConfig())
+    assert "host_shards" not in plain.as_dict()
+
+    declared = resolve_crawl_limits(
+        "https://docs.test/",
+        app=CrawlConfig(
+            shards=[
+                CrawlShardConfig(node="node-b", hosts=["other.test", "docs.test"]),
+                CrawlShardConfig(node="node-a", hosts=["third.test"]),
+            ]
+        ),
+    )
+    payload = declared.as_dict()
+    assert payload["host_shards"] == [
+        {"node": "node-a", "hosts": ["third.test"]},
+        {"node": "node-b", "hosts": ["docs.test", "other.test"]},
+    ]

@@ -81,7 +81,7 @@ from core.cli.wiring import (
     preflight_extraction_budget,
     resolve_extraction_budget,
 )
-from core.config.deploy import load_deploy_config, profile_notices
+from core.config.deploy import load_deploy_config, profile_notices, shard_notices
 from core.domain import (
     CrawlItemStatus,
     CrawlRunConfig,
@@ -448,6 +448,8 @@ def _execute_crawl_locked(
     # D-8: профиль ``split-hardened`` принимается, но ничего не добавляет сверх ``split`` —
     # это видимое предупреждение, а не молчаливое обещание хардненинга.
     notes.extend(profile_notices(deploy_config))
+    # F7 (17 §2): пустой шард — видимый простой, а не тишина.
+    notes.extend(shard_notices(getattr(deploy_config.crawl, "shards", None)))
 
     store = build_store(db_path, profile=args.profile)
     ports: Any = None

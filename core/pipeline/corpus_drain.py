@@ -1091,6 +1091,13 @@ class PhaseDrainScope:
     fetch_pool: Executor | None = None
     #: F4b: пул не-poolable маршрута (браузер) — один поток на полосу.
     browser_pool: Executor | None = None
+    #: F7 (17 §2): host'ы **своего шарда** (``None`` — шардов нет, фильтра нет). Фильтр
+    #: стоит рядом со scope-предикатом и не подменяет его: scope отвечает «этот URL
+    #: принадлежит корню», шард — «это моё железо». Отказ виден счётчиком
+    #: ``host_out_of_shard`` в провенансе корня.
+    shard_hosts: frozenset[str] | None = None
+    #: F7: узел, исполнивший сеанс (провенанс развёртывания; в ``run_id`` не входит).
+    node_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1206,6 +1213,8 @@ def root_lifecycle(
         root_url,
         limits,
         scope_hosts=phase.scope_hosts_by_product.get(product.pid, frozenset()),
+        # F7 (17 §2): host'ы своего шарда. ``None`` — карты нет, поведение байт-в-байт.
+        shard_hosts=phase.shard_hosts,
     )
     # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
     # применяется до дедупа ``(pid, loc)``. Дедуп-пометка — не здесь, а по факту
@@ -1346,6 +1355,17 @@ def root_lifecycle(
             f"{product.pid}/{root_url}: seed зачёркнут блэклистом "
             "(exclude_paths/exclude_documents) — не enqueued"
         )
+    # F7 (17 §2): корень принадлежит **чужому** шарду — этот узел его не краулит, и это
+    # названо (счётчик ``host_out_of_shard`` в провенансе корня уже поставлен
+    # ``Frontier.shard_admission``; здесь — строка, чтобы причина была в ``errors``, а не
+    # только в структурном поле).
+    seed_shard_blocked = seed_status == "host_out_of_shard"
+    if seed_shard_blocked:
+        phase.errors.append(
+            f"{product.pid}/{root_url}: корень на host'е чужого шарда — не enqueued "
+            f"(мой шард: {sorted(phase.shard_hosts or ()) or '—'}; "
+            f"корпус этого host'а снимает другой узел)"
+        )
     # A2 (F3 плана 17): бюджет ``max_documents`` решается **на изъятии**, поэтому
     # ``add_seed`` его больше не проверяет и статуса ``truncated`` не возвращает.
     # Но корень, чей бюджет уже израсходован (resume-зарядка ``note_consumed``), не
@@ -1392,7 +1412,7 @@ def root_lifecycle(
     # (``charged_queued``) считаются наравне с ревалидацией известных URL, иначе
     # усечённый корень терял бы уже добытое дерево.
     if (
-        (seed_blacklisted or budget_closed)
+        (seed_blacklisted or budget_closed or seed_shard_blocked)
         and revalidation_queued == 0
         and charged_queued == 0
     ):

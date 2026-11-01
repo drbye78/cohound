@@ -115,6 +115,7 @@ def finalize_session(
     pages_fetched: int | None = None,
     revalidation_fetched: int | None = None,
     truncated_products: Sequence[str] | None = None,
+    shard: Mapping[str, Any] | None = None,
 ) -> CrawlSessionStatus:
     """Финализирует сеанс: ``COMPLETED`` (нет сбоев) либо ``PARTIAL`` (есть failed/cancelled).
 
@@ -132,14 +133,24 @@ def finalize_session(
     pages_fetched, revalidation_fetched}``. Персистенция — через
     :meth:`StorePort.set_crawl_session_provenance`
     (targeted ``UPDATE``).
+
+    **F7 (17 §2): шард узла.** ``shard`` — провенанс развёртывания
+    ``{node, hosts, declared, filtered, reason}``. Блок пишется, только когда шард
+    объявлен/выбран (иначе артефакт прогона без шардов не меняется). Если узел видел
+    **не все** объявленные host'ы (``filtered``), сеанс закрывается ``PARTIAL`` даже
+    при нуле сбоев: часть корпуса принадлежит другим узлам, и «всё, что мы пытались,
+    добыто» — не то же самое, что «корпус собран». ``completed`` здесь был бы
+    утверждением о полноте, которого шардированный узел сделать не может.
     """
     counts = store.crawl_session_counts(session_id)
     defects = counts.get(CrawlItemStatus.FAILED.value, 0) + counts.get(
         CrawlItemStatus.CANCELLED.value, 0
     )
+    shard_block = dict(shard) if shard is not None else None
+    shard_filtered = bool(shard_block and shard_block.get("filtered"))
     status = (
         CrawlSessionStatus.PARTIAL
-        if truncated or defects > 0
+        if truncated or defects > 0 or shard_filtered
         else CrawlSessionStatus.COMPLETED
     )
     store.update_crawl_session_status(session_id, status, finished_at=finished_at)
@@ -157,6 +168,11 @@ def finalize_session(
         # D1/G: продукты, чей краул усечён (для аномалии exhaustive-absence в отчёте).
         "truncated_products": sorted({str(p) for p in (truncated_products or []) if p}),
     }
+    # F7: шард узла — deployment provenance. Ключ появляется только у шардированного
+    # прогона: ``node_id`` durable, а принадлежность host'а шарду выводима из карты,
+    # которая уже лежит в ``effective_limits.roots[*].limits.host_shards``.
+    if shard_block is not None:
+        provenance["shard"] = shard_block
     store.set_crawl_session_provenance(
         session_id,
         json.dumps(provenance, ensure_ascii=False, sort_keys=True),

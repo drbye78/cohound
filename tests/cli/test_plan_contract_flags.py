@@ -82,6 +82,10 @@ _OPERATIONAL_RUN_ONLY: frozenset[str] = frozenset(
         "from_scratch",  # обход R7-кэша
         "interval",  # период прогресса
         "max_attempts",  # потолок попыток по URL
+        # F7 (17 §2): узел шарда — deployment provenance («кто снял артефакт»), не
+        # измерение: в кластере все узлы объявляют одну карту и обязаны получить один
+        # run_id, поэтому идентичность от --node не зависит (см. _KNOWN_IDENTITY_GAPS).
+        "node",
         "passports_dir",  # каталог паспортов (вход корпуса, не контракта)
         "render_modes",  # per-URL режим рендера
         "reset",  # форсировать перезапуск

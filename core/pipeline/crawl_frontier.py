@@ -88,6 +88,7 @@ from core.util.document_formats import (
     is_terminal_artifact_url,
     normalize_attachment_formats,
 )
+from core.util.rate_limit import normalize_host
 from core.util.security import validate_url
 
 __all__ = [
@@ -229,6 +230,17 @@ class CrawlLimits:
     #: ``extract_backlog_mb_explicit`` отмечает объявление на app/run слое.
     extract_backlog_mb: int | None = None
     extract_backlog_mb_explicit: bool = False
+    #: F7 (17 §2): **объявленная карта шардов** — ``((node, (host, …)), …)`` в
+    #: канонической форме (узлы и host'ы отсортированы, host'ы уникальны). ``None`` —
+    #: шардов нет. Ключ в :meth:`as_dict` появляется **только при объявлении** (как
+    #: ``host_concurrency``): карта меняет состав корпуса, значит обязана менять
+    #: ``run_id``, но прогон без неё не должен сдвигаться.
+    #:
+    #: Почему карта целиком, а не «мой шард»: в кластере все узлы объявляют одну и ту же
+    #: карту, и ``run_id`` у них обязан быть **один** — это один прогон, нарезанный на
+    #: шарды, а не N разных измерений. Идентификатор узла в дайджест **не** входит (это
+    #: deployment provenance, как ``owner`` сеанса) и живёт в провенансе сеанса.
+    host_shards: tuple[tuple[str, tuple[str, ...]], ...] | None = None
     extract_workers: int | None = None
     #: F0: ``True`` — ``extract_workers`` выведен из бюджета памяти
     #: (:func:`core.pipeline.resources.workers_from_budget`), а не объявлен на слое
@@ -405,6 +417,16 @@ class CrawlLimits:
         # остановка приёма по бэклогу меняет состав корпуса, то есть измерение.
         if self.extract_backlog_mb_explicit and self.extract_backlog_mb is not None:
             payload["extract_backlog_mb"] = self.extract_backlog_mb
+        # F7 (17 §2): объявленная карта шардов — **только при объявлении**. Она входит
+        # безусловно в собственной форме (узлы/host'ы отсортированы): карта решает, какие
+        # host'ы попадут в корпус, то есть является условием измерения. Идентификатор
+        # узла сюда не входит намеренно — иначе узлы одного кластера получили бы разные
+        # ``run_id`` на одном прогоне.
+        if self.host_shards is not None:
+            payload["host_shards"] = [
+                {"node": node, "hosts": sorted(hosts)}
+                for node, hosts in sorted(self.host_shards, key=lambda entry: entry[0])
+            ]
         if self.revalidate_max_documents is not None:
             payload["revalidate_max_documents"] = self.revalidate_max_documents
         if self.max_response_bytes_explicit:
@@ -491,6 +513,29 @@ def _pick(app: object, run: object, site: object) -> object:
     if run is not None:
         return run
     return app
+
+
+def _declared_host_shards(
+    app: object,
+) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    """Объявленная карта шардов app-слоя в канонической форме (17 §2, F7).
+
+    Источник — ``deploy.yaml: crawl.shards`` (единственный слой: шард — свойство
+    развёртывания, а не прогона и не сайта). ``None`` — карты нет (поведение прежнее).
+
+    Канон здесь, а не в конфиге: ``as_dict``/``run_id`` обязаны быть независимы от
+    порядка объявления (два узла с одной картой дают **один** ``run_id``), а сам
+    ``CrawlConfig`` остаётся формой ввода (порядок узлов — операторский, для чтения).
+    Host'ы уже нормализованы правилом лимитера
+    (:func:`core.util.rate_limit.normalize_host`) валидатором конфига.
+    """
+    shards = getattr(app, "shards", None)
+    if not shards:
+        return None
+    return tuple(
+        (str(shard.node), tuple(sorted(shard.hosts)))
+        for shard in sorted(shards, key=lambda entry: str(entry.node))
+    )
 
 
 def _app_explicit(app: object, name: str) -> bool:
@@ -804,6 +849,9 @@ def resolve_crawl_limits(
         extract_backlog_mb_explicit=_axis_explicit(
             app, "extract_backlog_mb", run_extract_backlog_mb, None
         ),
+        # F7 (17 §2): карта шардов — app-слой без run/site: шард принадлежит
+        # развёртыванию. ``None`` — не объявлена (дайджест и ``run_id`` прежние).
+        host_shards=_declared_host_shards(app),
         extract_workers=(
             None if extract_workers is None else int(extract_workers)  # type: ignore[arg-type]
         ),
@@ -1011,6 +1059,7 @@ class Frontier:
         limits: CrawlLimits,
         *,
         scope_hosts: Iterable[str] | None = None,
+        shard_hosts: Iterable[str] | None = None,
     ) -> None:
         self.root_url = root_url
         parsed = urlsplit(root_url)
@@ -1028,6 +1077,26 @@ class Frontier:
             host
             for host in (normalize_scope_host(raw) for raw in (scope_hosts or ()))
             if host
+        )
+        #: F7 (17 §2): host'ы **своего шарда** (``None`` — шардов нет, фильтра нет).
+        #: Это **не** scope-предикат и он не подменяет :meth:`host_in_scope`: scope
+        #: отвечает «принадлежит ли URL этому корню», шард — «моё ли это железо».
+        #: Порядок проверок поэтому жёсткий: сперва scope, затем шард (см.
+        #: :meth:`scope_admission`/`shard_admission`). Смешать их значило бы объявить
+        #: чужой host «вне scope» — ложное утверждение о продукте, а не о развёртывании.
+        #: Нормализация здесь та же, что у лимитера
+        #: (:func:`core.util.rate_limit.normalize_host`): ключ вежливости — это и есть
+        #: ключ шарда. Поэтому ``www.example.com`` и
+        #: ``example.com`` — **разные** ключи (у лимитера на них разные бюджеты), тогда
+        #: как scope считает их одним сайтом. Оператор объявляет в шарде те host'ы,
+        #: которые реально фетчатся; несовпадение видно счётчиком ``host_out_of_shard``,
+        #: а не молчаливым дропом.
+        self.shard_hosts = (
+            None
+            if shard_hosts is None
+            else frozenset(
+                host for host in (normalize_host(raw) for raw in shard_hosts) if host
+            )
         )
         #: Очередь **discovery** — двоичная куча с ключом ``(depth, url)`` (F3 плана 17).
         #: Кортеж именно в этом порядке полей: сравнение идёт по глубине, затем по URL,
@@ -1082,6 +1151,14 @@ class Frontier:
         #: Принятые элементы с хоста, отличного от хоста корня (объявленный поддомен):
         #: сколько бюджета корня ушло «не на свой хост» — видно по корню.
         self.accepted_foreign_hosts: dict[str, int] = {}
+        #: F7 (17 §2): host'ы **чужого шарда**, не поставленные в очередь: точный счётчик
+        #: по host'ам + ограниченные примеры URL. Причина `host_out_of_shard` — не
+        #: «нет доступа» и не «вне scope»: материал принадлежит другому узлу, и этот узел
+        #: его не видел. Публикуется числом (по образцу ``out_of_scope_subdomains``) —
+        #: иначе шардированный узел молча отдавал бы часть корпуса за целый.
+        self.host_out_of_shard: dict[str, int] = {}
+        self.host_out_of_shard_examples: dict[str, list[str]] = {}
+        self._shard_reject_seen: set[str] = set()
 
     # -- scope -------------------------------------------------------------- #
 
@@ -1197,6 +1274,46 @@ class Frontier:
             return
         self.accepted_foreign_hosts[host] = self.accepted_foreign_hosts.get(host, 0) + 1
 
+    # -- шард узла (F7) ------------------------------------------------------ #
+
+    def host_in_shard(self, host: str) -> bool:
+        """Принадлежит ли ``host`` **моему** шарду (``True``, если шардов нет).
+
+        Ключ — тот же, что у лимитера (:func:`core.util.rate_limit.normalize_host`):
+        шардирование единицы вежливости не вводит второй ключ. Предикат отдельный от
+        :meth:`host_in_scope` намеренно: scope отвечает на вопрос о **продукте** («этот
+        URL принадлежит корню»), шард — о **развёртывании** («это моё железо»). Отказ по
+        шарду, записанный как «вне scope», был бы ложным утверждением о продукте.
+        """
+        if self.shard_hosts is None:
+            return True
+        return normalize_host(host) in self.shard_hosts
+
+    def shard_admission(self, url: str) -> bool:
+        """Допускает ли мой шард ``url``; при отказе пишет видимую запись.
+
+        Вызывается **рядом** со scope-проверкой и только после неё (иначе чужой host
+        считался бы «вне scope»). Отказ виден счётчиком по host'ам + примерами
+        (:data:`SUBDOMAIN_REJECT_EXAMPLES_MAX` на host) — «пропустили host» никогда не
+        бывает молчаливым.
+        """
+        if self.shard_hosts is None:
+            return True
+        host = normalize_host(urlsplit(url).hostname or "")
+        if host in self.shard_hosts:
+            return True
+        if url not in self._shard_reject_seen:
+            self._shard_reject_seen.add(url)
+            self.host_out_of_shard[host] = self.host_out_of_shard.get(host, 0) + 1
+            examples = self.host_out_of_shard_examples.setdefault(host, [])
+            if len(examples) < SUBDOMAIN_REJECT_EXAMPLES_MAX:
+                examples.append(url)
+        # Материал этого корня лежит на другом узле ⇒ корпус **не** полон по
+        # построению. Это усечение, а не отказ доступа: причина названа, а не
+        # спрятана (иначе coverage объявил бы полный охват на части корпуса — I2/I2c).
+        self._mark_truncated("host_out_of_shard")
+        return False
+
     def note_artifact_bypass(self, url: str) -> None:
         """Записать видимый обход path-prefix терминальным артефактом (P6b).
 
@@ -1261,7 +1378,9 @@ class Frontier:
         """Ставит seed (глубина 0); seed **задаёт** scope, поэтому scope-чек опущен.
 
         Блэклист применяется и к seeds (D1/H: отфильтрованы seeds, записи каталогов и
-        обнаруженные URL). Возвращает статус: ``"queued"`` | ``"blacklisted"`` | ``"dup"``.
+        обнаруженные URL). Возвращает статус: ``"queued"`` | ``"blacklisted"`` | ``"dup"``
+        | ``"host_out_of_shard"`` (F7: seed принадлежит чужому узлу — отказ видим,
+        счётчиком ``host_out_of_shard``, и он же ставит усечение корня).
 
         Дедуп seed'а — **только по точной форме**: ``p`` и ``p/`` остаются разными
         утверждениями автора, потому что seed задаёт path-prefix корня (``09`` §7.2).
@@ -1275,6 +1394,8 @@ class Frontier:
         """
         if url in self._seen:
             return "dup"
+        if not self.shard_admission(url):
+            return "host_out_of_shard"
         if self.blacklisted(url):
             self.skipped_blacklisted.append(url)
             return "blacklisted"
@@ -1305,13 +1426,19 @@ class Frontier:
           (304-экономия); форма, отличающаяся хвостовым ``/``, считается тем же URL и
           схлопывается **видимо** (:attr:`duplicate_form_count`).
 
-        Возвращает ``"queued"`` | ``"blacklisted"`` | ``"out_of_scope"`` | ``"dup"``.
+        Возвращает ``"queued"`` | ``"blacklisted"`` | ``"out_of_scope"`` | ``"dup"``
+        | ``"host_out_of_shard"`` (F7: известный URL принадлежит чужому узлу — отказ
+        видим и ставит усечение корня, а не молча выпадает из корпуса).
         """
         if self._known_in_any_form(url):
             return "dup"
         admission = self.scope_admission(url)
         if admission == SCOPE_OUT:
             return "out_of_scope"
+        # F7: шард проверяется **после** scope и до блэклиста — «чужое железо» не
+        # расходует запись ``skipped_blacklisted`` и не притворяется scope-отказом.
+        if not self.shard_admission(url):
+            return "host_out_of_shard"
         if self.blacklisted(url):
             self.skipped_blacklisted.append(url)
             return "blacklisted"
@@ -1382,6 +1509,8 @@ class Frontier:
         admission = self.scope_admission(url)
         if admission == SCOPE_OUT:
             return False
+        if not self.shard_admission(url):
+            return False
         if self.blacklisted(url):
             self.skipped_blacklisted.append(url)
             return False
@@ -1404,10 +1533,13 @@ class Frontier:
         """
         if parent_depth >= self.limits.max_depth:
             for url in links:
-                if (
-                    self.scope_admission(url) != SCOPE_OUT
-                    and not self.blacklisted(url)
-                ):
+                if self.scope_admission(url) == SCOPE_OUT:
+                    continue
+                # F7: ссылка на host чужого шарда — не «глубина кончилась»: она
+                # принадлежит другому узлу, и это уже названо ``host_out_of_shard``.
+                if not self.shard_admission(url):
+                    continue
+                if not self.blacklisted(url):
                     self._mark_truncated("max_depth")
                     break
             return
@@ -1483,8 +1615,18 @@ class Frontier:
         return len(self._queue) + len(self._revalidation_queue)
 
     def with_limits(self, limits: CrawlLimits) -> Frontier:
-        """Копия frontier с урезанными лимитами (seam для D4/D3 без мутации)."""
-        clone = Frontier(self.root_url, limits, scope_hosts=self.scope_hosts)
+        """Копия frontier с урезанными лимитами (seam для D4/D3 без мутации).
+
+        Шард узла (``shard_hosts``, F7) переносится **как есть**: это свойство
+        развёртывания, а не лимит корня — копия с урезанными осями не должна внезапно
+        начинать брать host'ы чужого узла.
+        """
+        clone = Frontier(
+            self.root_url,
+            limits,
+            scope_hosts=self.scope_hosts,
+            shard_hosts=self.shard_hosts,
+        )
         clone._seen = set(self._seen)
         clone._seen_forms = set(self._seen_forms)
         clone.duplicate_form_count = self.duplicate_form_count
@@ -1506,6 +1648,11 @@ class Frontier:
         }
         clone._subdomain_reject_seen = set(self._subdomain_reject_seen)
         clone.accepted_foreign_hosts = dict(self.accepted_foreign_hosts)
+        clone.host_out_of_shard = dict(self.host_out_of_shard)
+        clone.host_out_of_shard_examples = {
+            host: list(urls) for host, urls in self.host_out_of_shard_examples.items()
+        }
+        clone._shard_reject_seen = set(self._shard_reject_seen)
         return clone
 
     # -- внутреннее --------------------------------------------------------- #
