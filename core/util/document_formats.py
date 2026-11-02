@@ -113,7 +113,24 @@ DOCUMENT_SUFFIXES: tuple[str, ...] = (PDF_SUFFIX, ".docx", ".pptx", ".xlsx")
 #: Суффиксы markdown-разметки (нижний регистр). Отдельная группа нужна не для допуска
 #: (допуск текста общий), а для выбора чанкера: разметка режется по заголовкам
 #: (:class:`core.adapters.chunker_markdown.MarkdownChunker`).
-MARKDOWN_SUFFIXES: tuple[str, ...] = (".md", ".markdown", ".mdown", ".mkd")
+#:
+#: ``.mdx``/``.mdc``/``.qmd``/``.rmd`` — markdown-семейства (MDX, Nuxt Content, Quarto,
+#: R Markdown): базовая разметка у них общая, расширения диалекта остаются текстом
+#: (полной грамматики этих диалектов у нас нет). Без этих суффиксов такие документы не
+#: классифицировались вовсе и уходили в неопределённый маршрут: страница — в trafilatura,
+#: артефакт — в docling, либо отказ. ``.adoc``/``.asciidoc`` здесь **нет** намеренно:
+#: AsciiDoc — другая грамматика, и разбор его разметки markdown-чанкером был бы подменой
+#: (отказ остаётся явным, а не тихим).
+MARKDOWN_SUFFIXES: tuple[str, ...] = (
+    ".md",
+    ".markdown",
+    ".mdown",
+    ".mkd",
+    ".mdx",
+    ".mdc",
+    ".qmd",
+    ".rmd",
+)
 
 #: Суффиксы plain text (нижний регистр) — текст **без** разметки, режется по абзацам
 #: (:class:`core.adapters.chunker_text.TextChunker`). ``.log`` и ``.sql`` здесь

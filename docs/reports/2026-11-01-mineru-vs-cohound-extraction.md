@@ -36,7 +36,7 @@
 
 | Стадия | Где | Существенное |
 |---|---|---|
-| Маршрут формата | `core/cli/wiring.py:1960` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:440`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
+| Маршрут формата | `core/cli/wiring.py:1960` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:457`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
 | PDF `text_layer` | `core/adapters/extract_pdf_text.py:203` | pypdfium2, постранично, плоский текст; пустая страница → `error="no_text_layer"` (`:267`; 183 из 16 073 стр., 1.14 %) |
 | PDF `structured` | `core/adapters/extract_document.py:849` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |

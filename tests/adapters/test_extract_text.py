@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.adapters.extract_text import (
     TEXT_EXTRACTOR_VERSION,
     TextExtractor,
@@ -78,6 +80,41 @@ def test_markdown_family_is_reported_for_md() -> None:
     assert doc.family == "markdown"
     # Разметка не интерпретируется читателем: это дело чанкера.
     assert doc.text == "# Title\n\nBody"
+
+
+@pytest.mark.parametrize("suffix", [".mdx", ".mdc", ".qmd", ".rmd"])
+def test_markdown_dialect_suffix_is_reported_as_markdown_family(suffix: str) -> None:
+    """Семейство берётся из реестра :mod:`core.util.document_formats`, не из своего списка.
+
+    ``.mdx``/``.mdc``/``.qmd``/``.rmd`` — markdown-семейства: без классификации такой
+    документ уходил бы в трафилатуру (страница) или в docling (артефакт).
+    """
+    doc = TextExtractor().extract(
+        _page(
+            b"# Title\n\nBody",
+            url=f"https://x.test/docs/guide{suffix}",
+            # Заголовок не обязан быть markdown-MIME: решает суффикс (pre-fetch-сигнал).
+            content_type="application/octet-stream",
+        )
+    )
+
+    assert doc.error is None
+    assert doc.family == "markdown"
+    assert doc.text == "# Title\n\nBody"
+
+
+def test_rst_is_reported_as_text_family() -> None:
+    """``.rst`` остаётся plain text: заголовки разметки не дают ``heading_path``."""
+    doc = TextExtractor().extract(
+        _page(
+            b"Title\n=====\n\nBody",
+            url="https://x.test/docs/guide.rst",
+            content_type="text/x-rst",
+        )
+    )
+
+    assert doc.error is None
+    assert doc.family == "text"
 
 
 # ---------------------------------------------------------------------------

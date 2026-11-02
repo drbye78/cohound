@@ -201,6 +201,65 @@ def test_textual_registry_covers_every_variant() -> None:
         assert suffix in TEXTUAL_SUFFIXES
 
 
+_MARKDOWN_DIALECT_SUFFIXES = (".mdx", ".mdc", ".qmd", ".rmd")
+
+
+@pytest.mark.parametrize("suffix", _MARKDOWN_DIALECT_SUFFIXES)
+def test_markdown_dialect_suffix_maps_to_markdown_family(suffix: str) -> None:
+    """MDX/Nuxt Content/Quarto/R Markdown — markdown-семейство, а не неопределённый маршрут.
+
+    Расширения диалекта не парсятся как отдельная грамматика, поэтому семейство — то же,
+    что у ``.md``: чанкер выбирается по разметке, а не по вендорному расширению.
+    """
+    assert suffix in MARKDOWN_SUFFIXES
+    url = f"https://x.test/docs/guide{suffix.upper()}?v=1#top"
+    assert textual_suffix(url) == suffix
+    assert textual_family(url) == "markdown"
+    # Суффикс — pre-fetch-сигнал и сильнее заголовка: даже ``octet-stream`` не превращает
+    # markdown в бинарь.
+    assert textual_family(url, "application/octet-stream") == "markdown"
+
+
+def test_percent_encoded_markdown_dialect_name_is_decoded() -> None:
+    assert textual_family("https://x.test/files/%D0%BE%D1%82%D1%87%D1%91%D1%82.mdx") == "markdown"
+    assert textual_suffix("https://x.test/files/%D0%BE%D1%82%D1%87%D1%91%D1%82.qmd") == ".qmd"
+
+
+def test_asciidoc_suffixes_are_not_classified() -> None:
+    """AsciiDoc — другая грамматика: отказ **явный**, а не выдача за markdown/plain text.
+
+    Отсутствие суффикса в реестре оставляет документ в прежнем (не текстовом) маршруте:
+    это видимый отказ, а не тихая подмена семейства.
+    """
+    for suffix in (".adoc", ".asciidoc"):
+        assert suffix not in MARKDOWN_SUFFIXES
+        assert suffix not in PLAIN_TEXT_SUFFIXES
+        assert suffix not in TEXTUAL_SUFFIXES
+        assert suffix not in DOCUMENT_SUFFIXES
+        url = f"https://x.test/docs/guide{suffix}"
+        assert textual_suffix(url) is None
+        assert textual_family(url) is None
+        # Неизвестный текстоподобный MIME тоже не классифицируется: реестр не угадывает.
+        assert textual_family(url, f"text/x-{suffix.lstrip('.')}") is None
+        # И терминальным артефактом AsciiDoc не становится: маршрут не переворачивается.
+        assert is_terminal_artifact_url(url) is False
+
+
+def test_rst_stays_plain_text_by_decision() -> None:
+    """``.rst`` — plain text (решение L1c), а не markdown.
+
+    Следствие решения: семейство ``text`` выбирает абзацный чанкер, поэтому заголовки
+    reStructuredText **не** дают ``heading_path`` (Sphinx-документация читается как проза).
+    Pin фиксирует именно решение вместе с его следствием: смена семейства — отдельное
+    решение, а не «заодно».
+    """
+    assert ".rst" in PLAIN_TEXT_SUFFIXES
+    assert ".rst" not in MARKDOWN_SUFFIXES
+    assert textual_suffix("https://x.test/docs/guide.rst") == ".rst"
+    assert textual_family("https://x.test/docs/guide.rst") == "text"
+    assert textual_family("https://x.test/docs/guide.rst", "text/x-rst") == "text"
+
+
 def test_percent_encoded_textual_name_is_decoded() -> None:
     assert textual_family("https://x.test/files/%D0%BE%D1%82%D1%87%D1%91%D1%82.txt") == "text"
     assert textual_suffix("https://x.test/files/%D0%BE%D1%82%D1%87%D1%91%D1%82.md") == ".md"

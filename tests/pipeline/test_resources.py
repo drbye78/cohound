@@ -506,6 +506,9 @@ def test_mem_budget_provenance_publishes_every_peak() -> None:
         ("https://example.test/sheet.xlsx", resources.FAMILY_OFFICE),
         ("https://example.test/book.epub", resources.FAMILY_EPUB),
         ("https://example.test/notes.md", resources.FAMILY_TEXT),
+        # markdown-семейства (.mdx/.qmd): реестр решает, а не список в pipeline.
+        ("https://example.test/docs/guide.mdx", resources.FAMILY_TEXT),
+        ("https://example.test/docs/report.qmd", resources.FAMILY_TEXT),
         ("https://example.test/readme.txt", resources.FAMILY_TEXT),
         ("https://example.test/docs/guide", resources.FAMILY_HTML),
         ("https://example.test", resources.FAMILY_HTML),

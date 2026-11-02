@@ -35,6 +35,7 @@ from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
     DOCUMENT_SUFFIXES,
     OOXML_MARKER_NAME,
+    TEXTUAL_SUFFIXES,
     classify_archive_bytes,
     document_suffix,
     is_textual_content_type,
@@ -88,8 +89,14 @@ _PAGE_OBJECT_RE = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
 _PAGES_COUNT_RE = re.compile(rb"/Type\s*/Pages\b[^\n\r]{0,200}?/Count\s+(\d+)")
 
 #: Суффиксы, которые спуск/экстрактор считают текстовой разметкой (маршрут ``auto``).
-_TEXT_SUFFIXES: frozenset[str] = frozenset(
-    {".md", ".markdown", ".txt", ".html", ".htm", ".xml", ".json", ".csv"}
+#:
+#: Реестр чанкеров (:data:`core.util.document_formats.TEXTUAL_SUFFIXES`) берётся **целиком**:
+#: собственный список здесь расходился с ним и записывал ``.mdx``/``.qmd``/``.rst``/``.log``/
+#: ``.sql`` в ``binary`` — семейство для маршрутизации оставалось верным (там решает
+#: ``textual_family``), а наблюдение артефакта лгало. Дополнительно — форматы страниц и
+#: данных, которые чанкер как разметку не читает, но и бинарём не являются.
+_TEXT_SUFFIXES: frozenset[str] = frozenset(TEXTUAL_SUFFIXES) | frozenset(
+    {".html", ".htm", ".xml", ".json", ".csv"}
 )
 
 

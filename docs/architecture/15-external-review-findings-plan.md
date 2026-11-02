@@ -138,7 +138,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:613-614`, `:621`; сравнить `container_policy.py:286` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
 | F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `extract_document.py:623` (`FULL: None`), `core/cli/wiring.py:2203` (`initargs` воркера — без `document_timeout`), `core/edge/__main__.py:135` — без `document_timeout`; guard только родительский (`core/pipeline/corpus.py:2469`: `extract_timeout=_extract_timeout`); `core/cli/wiring.py:2227` recycle=None | частично, только родительская сторона (`tests/pipeline/test_corpus_extract_pool.py:865-932`) | Д/М | P4 |
-| F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:87`,`:203`,`:461-462`, `core/pipeline/corpus_ingest.py:1787-1794` (`probe_artifact`) | нет: все тесты кладут маркер в голову | М | P4 |
+| F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:87`,`:220`,`:478-479`, `core/pipeline/corpus_ingest.py:1787-1794` (`probe_artifact`) | нет: все тесты кладут маркер в голову | М | P4 |
 
 **Статус на 2026-10-28.** ✅ F1–F8 (пакет P4 закрыт по всем строкам).
 
@@ -154,7 +154,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ F7 — ось `crawl.document_timeout_s` доходит до docling: `core/cli/wiring.py:2073`, `:2122`,
   `:3068`; ось объявлена в аргументах — `core/cli/execution_axes.py:191`.
 - ✅ F8 — OOXML по **центральному каталогу** zip, неузнанный OOXML остаётся `document`:
-  `core/util/document_probe.py:8`, `core/util/document_formats.py:461-462`.
+  `core/util/document_probe.py:8`, `core/util/document_formats.py:478-479`.
 
 ### 3.3. Чанкинг и индекс (C1–C11)
 

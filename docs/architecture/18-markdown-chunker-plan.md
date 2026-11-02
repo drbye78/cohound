@@ -36,7 +36,7 @@ indented code, HTML-блоки, сноски, fenced div, line blocks, grid/mult
 `text` (`.txt/.log/.sql/.rst`), структурный провенанс до оценщика.
 
 **Вне области (явно):** AsciiDoc, RST-директивы (RST остаётся plain text **до** отдельного
-решения, `core/util/document_formats.py:116`), MyST, MDX/JSX-исполнение, Hugo/Jekyll
+решения, `core/util/document_formats.py:140`), MyST, MDX/JSX-исполнение, Hugo/Jekyll
 shortcodes. Это не «никогда»: нет грамматики — нет приёмки — нет кода.
 
 ## 3. Инварианты

@@ -24,8 +24,10 @@ import pytest
 
 from core.util.document_formats import OOXML_MARKER_NAME, classify_archive_bytes
 from core.util.document_probe import (
+    CLASS_BINARY,
     CLASS_CONTAINER,
     CLASS_DOCUMENT,
+    CLASS_PAGE,
     classify_artifact,
     ooxml_content_types,
     pdf_page_count,
@@ -112,6 +114,37 @@ def test_plain_zip_stays_a_container(tmp_path: Path) -> None:
 
     assert probe.kind == CLASS_CONTAINER
     assert probe.format == "zip"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["guide.mdx", "report.qmd", "notes.mdc", "analysis.rmd", "manual.rst", "schema.sql", "run.log"],
+)
+def test_textual_registry_suffix_is_a_page_not_binary(tmp_path: Path, name: str) -> None:
+    """Суффикс из реестра чанкеров ⇒ ``page``: наблюдение не лжёт про ``binary``.
+
+    Список текстовых суффиксов здесь больше не свой: он целиком берётся из
+    :data:`core.util.document_formats.TEXTUAL_SUFFIXES`. До сведения ``.mdx``/``.qmd``
+    попадали в ``binary`` — маршрут оставался верным (там решает ``textual_family``), а
+    провенанс артефакта расходился с тем, что делает экстрактор.
+    """
+    path = tmp_path / name
+    path.write_bytes(b"# Title\n\nBody\n")
+
+    probe = classify_artifact(path)
+
+    assert probe.kind == CLASS_PAGE
+    assert probe.format == name.rsplit(".", 1)[-1]
+
+
+def test_asciidoc_stays_binary_by_decision(tmp_path: Path) -> None:
+    """AsciiDoc вне реестра ⇒ ``binary`` (видимый отказ), а не мнимая страница."""
+    path = tmp_path / "guide.adoc"
+    path.write_bytes(b"= Title\n\nBody\n")
+
+    probe = classify_artifact(path)
+
+    assert probe.kind == CLASS_BINARY
 
 
 # ---------------------------------------------------------------------------
