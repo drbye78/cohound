@@ -16,6 +16,8 @@ authors = [{ name = "Marusin Dmitry", email = "drbye@mail.ru" }]
 # Базлайн — Python 3.14 (greenfield, контролируемое развёртывание; все зависимости стека
 # имеют cp314/abi3/py3-колёса — см. 05 §1). Тяжёлые контуры — в extras.
 dependencies = [
+    "markdown-it-py>=4.2,<5",
+    "mdit-py-plugins>=0.6,<0.7",
     "pydantic>=2.13,<3",
     # Механизм `text_layer` (ось `crawl.pdf_pipeline`): текстовый слой PDF без моделей,
     # колесо без torch/transformers. Объявленная ось обязана быть исполнимой без установки

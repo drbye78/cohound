@@ -515,6 +515,8 @@ name = "cohound"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "markdown-it-py" },
+    { name = "mdit-py-plugins" },
     { name = "pydantic" },
     { name = "pypdfium2" },
     { name = "pyyaml" },
@@ -592,6 +594,8 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'embed-lite'", specifier = ">=1,<2" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.168,<7" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.26,<5" },
+    { name = "markdown-it-py", specifier = ">=4.2,<5" },
+    { name = "mdit-py-plugins", specifier = ">=0.6,<0.7" },
     { name = "model2vec", marker = "extra == 'embed-lite'", specifier = ">=0.9,<0.10" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.4,<3" },
     { name = "nh3", marker = "extra == 'safety'", specifier = ">=0.3,<0.4" },
@@ -1849,6 +1853,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/81/99/157e10966b033b363aeda5263e82596ee232a0b1d082fdbf90aa417ff083/markupsafe-3.0.4-cp315-cp315t-win32.whl", hash = "sha256:e49fb0d1ce92cfa0cb198cc5b1b11cdf9d0638658e2a2db2687e39db7c87fc78", size = 14300, upload-time = "2026-10-02T23:06:53.241Z" },
     { url = "https://files.pythonhosted.org/packages/33/05/55884815414c9706a23deca150b72c25a62109e65b0b6ce232077802c719/markupsafe-3.0.4-cp315-cp315t-win_amd64.whl", hash = "sha256:4f6e0852a0283b1b1fd776eeb7b766a5f440b3e2bd31ab51af3b400585f3965c", size = 14522, upload-time = "2026-10-02T23:06:54.729Z" },
     { url = "https://files.pythonhosted.org/packages/92/f9/ecbde7149e95b8a0f18e16d5d747f7dc06049d5da2e4f77f6f5e4a1f46a8/markupsafe-3.0.4-cp315-cp315t-win_arm64.whl", hash = "sha256:39dbacefc411633db5b4378b066a9aca70a3d7e2922c9e578d825f844026eeba", size = 14417, upload-time = "2026-10-02T23:06:56.246Z" },
+]
+
+[[package]]
+name = "mdit-py-plugins"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markdown-it-py" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/59/fc/f8d0863f8862f25602c0404d75568e89fb6b4109804645e5cdfb1be5cf56/mdit_py_plugins-0.6.1.tar.gz", hash = "sha256:a2bca0f039f39dbd35fb74ae1b5f998608c437463371f0ff7f49a19a17a114d0", size = 56114, upload-time = "2026-05-13T09:03:38.91Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/69/6da5581c6a7fede7dc261bf4e67d6adca4196f176b43288b55b3db395b6e/mdit_py_plugins-0.6.1-py3-none-any.whl", hash = "sha256:214c82fb2ac524472ab6a5bcab1de80f73b50443e187f401bfd77efbc7c6481d", size = 66663, upload-time = "2026-05-13T09:03:37.76Z" },
 ]
 
 [[package]]
