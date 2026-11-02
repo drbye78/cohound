@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import random
 import threading
 from itertools import pairwise
@@ -338,3 +339,97 @@ def test_jittered_backoff_non_positive_cap_rejected() -> None:
         jittered_backoff(0, cap_s=0.0)
     with pytest.raises(ValueError, match="cap_s"):
         jittered_backoff(0, cap_s=-0.5)
+
+
+# --- RateLimiter: wait_reserved — разрешённый момент, а не момент пробуждения ----
+
+
+class _OversleepingClock(_FakeClock):
+    """``sleep`` двигает часы на проспанное **плюс** задержку возврата (передача GIL)."""
+
+    def sleep(self, seconds: float) -> None:
+        self.advance(seconds + self.oversleep_s)
+
+    def __init__(self, now: float = 0.0, oversleep_s: float = 0.007) -> None:
+        super().__init__(now)
+        self.oversleep_s = oversleep_s
+
+
+class _JitteryWall:
+    """Стенные часы, рассогласованные с монотонными на 40 мкс (период 13 мс).
+
+    Ровно тот дефект, из-за которого интервал «нарушался» (замер 02.11.2026: 19 975 мкс
+    при объявленных 20 000): метка, выведенная из отдельного чтения стенных часов плюс
+    остаток по монотонным, впитывала рассогласование ``ε`` между часами.
+
+    Смещение — функция **времени**, а не числа чтений: реализация вправе читать стенные
+    часы лишний раз, и это не должно ни маскировать дефект, ни создавать его.
+    """
+
+    def __init__(
+        self,
+        clock: _FakeClock,
+        base: float = 1_700_000_000.0,
+        period_s: float = 0.013,
+        skew_s: float = 0.000_040,
+    ) -> None:
+        self._clock = clock
+        self._base = base
+        self._period_s = period_s
+        self._skew_s = skew_s
+
+    def __call__(self) -> float:
+        phase = int(self._clock() / self._period_s) % 2 == 0
+        return self._base + self._clock() + (self._skew_s if phase else 0.0)
+
+
+def _iso(seconds_from_epoch: float) -> str:
+    return _dt.datetime.fromtimestamp(seconds_from_epoch, _dt.UTC).isoformat()
+
+
+def test_wait_reserved_returns_reserved_moment_not_wake_moment() -> None:
+    """Метка — момент резерва: пересыпание потока в неё не попадает (прежний дефект)."""
+    clock = _OversleepingClock(oversleep_s=0.007)
+    limiter = RateLimiter(sleep=clock.sleep, clock=clock, wall=lambda: 1_700_000_000.0 + clock.now)
+    spec = RateLimitSpec(min_s=1.0, max_s=1.0)
+
+    first = limiter.wait_reserved("h.test", spec)
+    # Резерв — база + 1.0 с; пробуждение случилось на 7 мс позже и в метку не входит.
+    assert first == _iso(1_700_000_001.0)
+    assert clock.now == pytest.approx(1.007)
+
+    second = limiter.wait_reserved("h.test", spec)
+    # Host простаивал (пробуждение уже за прежним резервом) ⇒ якорь — текущий момент,
+    # но метка всё равно «момент + задержка»: 2.007, а не 2.014 (момент пробуждения).
+    assert second == _iso(1_700_000_002.007)
+
+
+def test_wait_reserved_interval_exactly_matches_declared_under_wall_jitter() -> None:
+    """Шаг метки равен объявленному **ровно**: дрожание чтения часов не впитывается.
+
+    На прежнем коде (метка = ``wall() + remaining``) первое чтение стенных часов
+    отставало/опережало на 40 мкс, и интервал выходил 19 960 мкс — короче объявленных
+    20 000. Цепь в целых микросекундах такой интервал даёт только при реальном опоздании
+    (тогда он **длиннее** обещанного, что и есть правда).
+    """
+    clock = _FakeClock()
+    limiter = RateLimiter(
+        sleep=_AdvancingSleep(clock), clock=clock, wall=_JitteryWall(clock)
+    )
+    spec = RateLimitSpec(min_s=0.02, max_s=0.02)
+
+    first = _dt.datetime.fromisoformat(limiter.wait_reserved("h.test", spec))
+    second = _dt.datetime.fromisoformat(limiter.wait_reserved("h.test", spec))
+
+    assert (second - first) == _dt.timedelta(microseconds=20_000)
+    assert (second - first).total_seconds() == 0.02
+
+
+def test_wait_reserved_without_spec_is_now() -> None:
+    """``spec is None`` — пейсинга нет: метка равна текущему стенному времени, сна нет."""
+    recorder = _SleepRecorder()
+    limiter = RateLimiter(
+        sleep=recorder, clock=_FakeClock(), wall=lambda: 1_700_000_000.5
+    )
+    assert limiter.wait_reserved("h.test", None) == _iso(1_700_000_000.5)
+    assert recorder.calls == []

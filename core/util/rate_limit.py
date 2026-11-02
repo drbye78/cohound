@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import random
 import threading
 import time
@@ -114,6 +115,20 @@ def jittered_backoff(
     return _uniform(rng, 0.0, min(cap_s, ceiling))
 
 
+def _iso_utc_us(micros: int) -> str:
+    """ISO-8601 (UTC) из **целых** микросекунд — без повторного округления.
+
+    ``datetime.fromtimestamp(micros / 1e6)`` округлил бы ещё раз (float на эпохе ~1.7e9
+    уже не точен до микросекунды), поэтому секунды и микросекунды разделяются целочисленно.
+    """
+    seconds, rest = divmod(micros, 1_000_000)
+    return (
+        _dt.datetime.fromtimestamp(seconds, _dt.UTC)
+        .replace(microsecond=rest)
+        .isoformat()
+    )
+
+
 class RateLimiter:
     """Межзапросный интервал **по origin** с резервированием времени (не сон под локом).
 
@@ -130,9 +145,28 @@ class RateLimiter:
     корректный интервал для одного origin'а и параллельность для разных. **Не
     «упрощать»** обратно в сон под локом.
 
-    ``spec is None`` → ``0.0`` без сна и без записи состояния. Иначе возвращается
-    фактически проспанное число секунд (``target - now``; при конкуренции оно может
-    превышать сэмплированную задержку — это и есть ожидание своей очереди к origin'у).
+    ``spec is None`` → ``0.0`` без сна и без записи состояния. Иначе :meth:`wait`
+    возвращает фактически проспанное число секунд (``target - now``; при конкуренции оно
+    может превышать сэмплированную задержку — это и есть ожидание своей очереди к origin'у).
+
+    **Разрешённый момент, а не момент пробуждения.** :meth:`wait_reserved` делает то же
+    самое, но возвращает **момент резерва** в ISO-8601 (UTC). Это нужно там, где метка
+    попытки пишется в провенанс: метка, снятая после пробуждения, несёт задержку передачи
+    GIL, и интервал между двумя такими метками оказывался **короче** объявленного на
+    25 мкс…9 мс (замер 02.11.2026: 3 интервала из 10 715 в пробе когорты «нарушали»
+    вежливость, хотя ``time.sleep`` здесь не возвращается раньше запрошенного — min
+    50.089 мс на 300 пробах). Проверка вежливости мерила планировщик потоков, а не наш
+    пейсинг; резерв — это то, чем мы вправду управляем.
+
+    **Метка ведётся в целых микросекундах отдельной цепью.** Метка — то, что читает
+    метрика вежливости (`crawl_metric.observed_intervals_s`), а её носитель — ISO-8601 с
+    микросекундным разрешением. Если считать ISO из двух чтений часов на вызов
+    (``wall + (target - now)``), дрожание между чтениями (замер: 19 993…20 024 мкс при
+    объявленных 20 000) и **квантование самой метки ±1 мкс** делают строгое
+    ``observed < declared`` подбрасыванием монеты. Поэтому цепь метки строится в целых
+    микросекундах: ``label = max(wall_us, last_label) + delay_us``. Тогда разность двух
+    соседних меток равна ``delay`` **по построению**, а не «примерно»; шаг пейсинга —
+    ровно тот, что объявлен, и никакого допуска в проверке не нужно.
 
     Состояние ограничено: при ``len(state) >= _PRUNE_AT`` удаляются записи с
     ``last <= now`` — их резерв уже в прошлом, поэтому ``max(now, last) == now`` и на
@@ -149,27 +183,56 @@ class RateLimiter:
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
     ) -> None:
         self._sleep = sleep
         self._rng = rng
         self._clock = clock
+        #: Стенное время для :meth:`wait_reserved` (монотонные часы в ISO не переводятся).
+        self._wall = wall
         #: Резерв отправки по origin: ``last[origin]`` — момент, раньше которого
         #: следующий запрос к этому origin'у уходить не должен.
         self._last: dict[str, float] = {}
+        #: Та же цепь в **стенных** микросекундах (int): только для :meth:`wait_reserved`.
+        #: Шаг этой цепи равен ``delay`` ровно, поэтому интервал между публикуемыми
+        #: метками не несёт ни дрожания часов, ни квантования ISO.
+        self._last_label: dict[str, int] = {}
         #: Лок защищает **только** чтение/запись ``_last`` и сэмплирование ``rng``
         #: (``random.Random`` не потокобезопасен). Сон — строго вне лока.
         self._lock = threading.Lock()
 
-    def _prune(self, now: float) -> None:
+    def _prune(self, now: float, wall_us: int) -> None:
         """Удаляет записи с резервом в прошлом; вызывается под локом.
 
         ``last <= now`` ⇒ для будущего вызова ``max(now, last) == now``, т.е. запись
         инертна и её удаление не меняет ни один интервал. Записи в будущем (в т.ч.
-        только что зарезервированная этим потоком) сохраняются.
+        только что зарезервированная этим потоком) сохраняются. Цепь меток чистится по
+        тому же правилу, но по **стенному** времени (``max(wall_us, label)``).
         """
-        if len(self._last) < _PRUNE_AT:
+        if len(self._last) < _PRUNE_AT and len(self._last_label) < _PRUNE_AT:
             return
         self._last = {key: target for key, target in self._last.items() if target > now}
+        self._last_label = {
+            key: label for key, label in self._last_label.items() if label > wall_us
+        }
+
+    def _reserve(self, host: str, spec: RateLimitSpec) -> tuple[float, int]:
+        """Резервирует слот под локом: проспанные секунды и метку (стенные микросекунды)."""
+        origin = normalize_host(host)
+        with self._lock:
+            now = self._clock()
+            delay = _uniform(self._rng, spec.min_s, spec.max_s)
+            target = max(now, self._last.get(origin, now)) + delay
+            self._last[origin] = target
+            # Метка — своя цепь в целых микросекундах, шаг которой равен ``delay`` ровно
+            # (см. docstring класса). Округление одно, на входе в цепь.
+            wall_us = round(self._wall() * 1_000_000)
+            label_us = max(wall_us, self._last_label.get(origin, wall_us)) + round(
+                delay * 1_000_000
+            )
+            self._last_label[origin] = label_us
+            self._prune(now, wall_us)
+        return target - now, label_us
 
     def wait(self, host: str, spec: RateLimitSpec | None) -> float:
         """Резервирует слот для ``host`` и спит до него; возвращает проспанные секунды.
@@ -180,13 +243,22 @@ class RateLimiter:
         """
         if spec is None:
             return 0.0
-        origin = normalize_host(host)
-        with self._lock:
-            now = self._clock()
-            delay = _uniform(self._rng, spec.min_s, spec.max_s)
-            target = max(now, self._last.get(origin, now)) + delay
-            self._last[origin] = target
-            self._prune(now)
-        remaining = target - now
+        remaining, _label = self._reserve(host, spec)
         self._sleep(remaining)
         return remaining
+
+    def wait_reserved(self, host: str, spec: RateLimitSpec | None) -> str:
+        """Резервирует слот, спит до него и возвращает **разрешённый** момент (ISO-8601 UTC).
+
+        Сон и резерв — тот же контракт, что у :meth:`wait`; разница в возвращаемом
+        значении. Им пользуется провенанс попытки (``fetch_started_at``): метка должна
+        означать «с этого момента запросу разрешено уйти», а не «когда поток проснулся» —
+        иначе измеренный интервал между попытками несёт задержку передачи GIL, и проверка
+        вежливости меряет планировщик потоков вместо нашего пейсинга. ``spec is None`` —
+        пейсинга нет, разрешённый момент равен текущему.
+        """
+        if spec is None:
+            return _iso_utc_us(round(self._wall() * 1_000_000))
+        remaining, label_us = self._reserve(host, spec)
+        self._sleep(remaining)
+        return _iso_utc_us(label_us)

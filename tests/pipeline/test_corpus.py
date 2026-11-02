@@ -2448,17 +2448,27 @@ def test_session_finalized_partial_on_failure(tmp_path: Path) -> None:
 
 
 class _RecordingLimiter(RateLimiter):
-    """Пейсинг-шпион: пишет ``(host, spec)`` в ``wait``; ``slept`` — фактические задержки.
+    """Пейсинг-шпион: пишет ``(host, spec)`` в ``wait``/``wait_reserved``; ``slept`` — задержки.
 
     ``sleep`` двигает фейковые часы на проспанное время (как реальный ``time.sleep``),
     поэтому последовательные резервы не накапливаются и сон равен сэмплированной
-    задержке — без wall-clock.
+    задержке — без wall-clock; стенные часы привязаны к тем же фейковым, иначе метка
+    попытки была бы настоящей.
+
+    Обе точки записи нужны, потому что живой фетч идёт через ``wait_reserved`` (метка
+    попытки — разрешённый момент резерва, 17 §7.2), а ``wait`` остаётся контрактом для
+    путей без провенанса. Вызов ровно один на фетч: ``wait_reserved`` не зовёт ``wait``.
     """
 
     def __init__(self, *, rng: random.Random | None = None) -> None:
         self.slept: list[float] = []
         self._now = 0.0
-        super().__init__(sleep=self._fake_sleep, rng=rng, clock=lambda: self._now)
+        super().__init__(
+            sleep=self._fake_sleep,
+            rng=rng,
+            clock=lambda: self._now,
+            wall=lambda: 1_700_000_000.0 + self._now,
+        )
         self.calls: list[tuple[str, RateLimitSpec | None]] = []
 
     def _fake_sleep(self, seconds: float) -> None:
@@ -2468,6 +2478,10 @@ class _RecordingLimiter(RateLimiter):
     def wait(self, host: str, spec: RateLimitSpec | None) -> float:
         self.calls.append((host, spec))
         return super().wait(host, spec)
+
+    def wait_reserved(self, host: str, spec: RateLimitSpec | None) -> str:
+        self.calls.append((host, spec))
+        return super().wait_reserved(host, spec)
 
 
 def test_corpus_paces_live_fetch_per_url(tmp_path: Path) -> None:

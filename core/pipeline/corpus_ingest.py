@@ -2480,10 +2480,12 @@ def local_fetch(desc: LocalFetch, *, limiter: RateLimiter) -> RawPage:
     процесса; при пуле процессов состояние не разделяется (см. ``util/rate_limit``).
     """
     limiter.wait(desc.host, desc.fetch_plan.rate_limit)
-    # 17 §6 (F6): момент начала и длительность попытки. Меряется здесь, а не в коммите:
-    # коммит идёт FIFO-порядком и ждёт чужих исходов — его время было бы расписанием
-    # пула, а не фетчем (``fetch_ms`` стал бы неправдой).
-    desc.fetch_started_at = _now_iso()
+    # 17 §6 (F6): метка попытки — **разрешённый** момент резерва, а не момент
+    # пробуждения. Пробудившаяся метка несла задержку передачи GIL, и интервал между
+    # двумя попытками одного host'а выходил короче объявленного на 25 мкс…9 мс — проверка
+    # вежливости мерила планировщик потоков. Длительность — отдельно, ниже: её время
+    # берётся ``perf_counter`` вокруг живого вызова.
+    desc.fetch_started_at = limiter.wait_reserved(desc.host, desc.fetch_plan.rate_limit)
     _started = time.perf_counter()
     try:
         return desc.active.fetch(desc.wu, desc.fetch_plan)
@@ -2500,11 +2502,11 @@ def fetch_and_commit(
     """Inline-фетч на главном потоке + коммит (последовательный путь и browser-режим D4).
 
     Используется, когда фетч **не** уходит в пул: ``max_workers in (None, 1)`` либо
-    browser-элемент (``BrowserCrawler`` не потокобезопасен). ``limiter.wait`` — вне
-    ``try`` (как в прежнем ``process_local``): его сбой — не сбой источника.
+    browser-элемент (``BrowserCrawler`` не потокобезопасен). pacing — вне ``try`` (как в
+    прежнем ``process_local``): его сбой — не сбой источника. Метка ``fetch_started_at``
+    берётся из резерва лимитера — по той же причине, что в :func:`local_fetch`.
     """
-    limiter.wait(desc.host, desc.fetch_plan.rate_limit)
-    desc.fetch_started_at = _now_iso()
+    desc.fetch_started_at = limiter.wait_reserved(desc.host, desc.fetch_plan.rate_limit)
     _started = time.perf_counter()
     try:
         page = desc.active.fetch(desc.wu, desc.fetch_plan)

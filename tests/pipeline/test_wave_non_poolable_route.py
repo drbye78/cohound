@@ -168,3 +168,59 @@ def test_poolable_route_does_not_mark_the_wave_and_bypasses_resume() -> None:
     assert outcomes.fetch[0] is not None
     # У записи без фетча исхода нет — коммит применит её локально (fresh-фетча не было).
     assert outcomes.fetch[1] is None
+
+# --------------------------------------------------------------------------- #
+# Метка попытки берётся из резерва лимитера, а не из системных часов
+# --------------------------------------------------------------------------- #
+
+#: Резерв, который вернёт лимитер в этих пинах: 2000-01-01T00:00:02.5Z.
+_RESERVED = "2000-01-01T00:00:02.500000+00:00"
+
+
+class _ReservationOnly:
+    """Лимитер-заглушка: ``wait_reserved`` — единственный источник метки.
+
+    ``wait`` намеренно падает: метка обязана приходить из резерва. Так пин ловит возврат
+    к ``_now_iso()`` после ``limiter.wait`` — тогда ``fetch_started_at`` был бы моментом
+    пробуждения (и метрика вежливости мерила бы планировщик потоков, а не пейсинг).
+    """
+
+    def wait(self, host: str, spec: Any) -> float:
+        if spec is not None:
+            raise AssertionError("метка должна приходить из wait_reserved, а не из wait")
+        return 0.0
+
+    def wait_reserved(self, host: str, spec: Any) -> str:
+        return _RESERVED
+
+
+def test_local_fetch_takes_start_label_from_limiter_reservation() -> None:
+    """``local_fetch``: ``fetch_started_at`` — разрешённый момент лимитера."""
+    crawler = _ThreadRecordingCrawler()
+    desc = _desc(crawler, "https://browser.test/a", poolable=True)
+
+    local_fetch(desc, limiter=_ReservationOnly())  # type: ignore[arg-type]
+
+    assert desc.fetch_started_at == _RESERVED
+    assert desc.fetch_ms is not None
+
+
+def test_fetch_and_commit_takes_start_label_from_limiter_reservation() -> None:
+    """``fetch_and_commit`` (последовательный и браузерный путь) — тот же источник метки."""
+    from core.pipeline.corpus_ingest import fetch_and_commit
+
+    crawler = _ThreadRecordingCrawler()
+    desc = _desc(crawler, "https://browser.test/b", poolable=False)
+    committed: list[Any] = []
+
+    def commit_local(desc: Any, **kwargs: Any) -> None:
+        committed.append(kwargs)
+
+    assert (
+        fetch_and_commit(
+            desc, limiter=_ReservationOnly(), commit_local=commit_local  # type: ignore[arg-type]
+        )
+        is None
+    )
+    assert desc.fetch_started_at == _RESERVED
+    assert len(committed) == 1 and "page" in committed[0]
