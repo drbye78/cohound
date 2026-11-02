@@ -130,11 +130,16 @@ def test_setext_h1_and_h2() -> None:
     assert _chunk_with(chunks, "тело2").heading_path == "Title > Sub"
 
 
-def test_setext_heading_text_not_in_content() -> None:
+def test_setext_heading_line_is_part_of_section_text() -> None:
+    """Строка заголовка входит в ``text`` своей секции (P1).
+
+    ``md-heading-4`` её выбрасывала: заголовок жил только в ``heading_path``, и
+    конкатенация чанков не воспроизводила вход. Теперь ``text`` — точный срез.
+    """
     md = "Title\n=====\n\nтело\n"
     chunks = _chunk(md)
-    assert chunks[0].text == "тело"
-    assert "Title" not in chunks[0].text
+    assert chunks[0].heading_path == "Title"
+    assert chunks[0].text == "Title\n=====\n\nтело\n"
 
 
 def test_thematic_break_is_not_heading() -> None:
@@ -246,7 +251,8 @@ def test_dashes_without_front_matter_body_keep_commonmark_behaviour() -> None:
     md = "---\nSome text\n---\n\nтело\n"
     chunks = _chunk(md)
     assert chunks[-1].heading_path == "Some text"
-    assert chunks[-1].text == "тело"
+    # Строка заголовка теперь в тексте (P1): секция — точный срез источника.
+    assert chunks[-1].text == "Some text\n---\n\nтело\n"
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +260,10 @@ def test_dashes_without_front_matter_body_keep_commonmark_behaviour() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_version_is_md_heading_4() -> None:
-    assert MarkdownChunker.version == "md-heading-4"
+def test_version_is_md_heading_5() -> None:
+    """Нарезка по AST — другая версия правил (``execution_versions``, §13)."""
+    assert MarkdownChunker.version == "md-heading-5"
+    assert MarkdownChunker().chunk_overlap == 0
 
 
 def test_chunking_is_deterministic() -> None:
@@ -263,8 +271,8 @@ def test_chunking_is_deterministic() -> None:
         "# H1\n\n```bash\n# comment\n```\n\nTitle\n=====\n\n"
         "## H2\n\nтекст " * 20
     )
-    first = _chunk(md, chunk_size=120, chunk_overlap=20)
-    second = _chunk(md, chunk_size=120, chunk_overlap=20)
+    first = _chunk(md, chunk_size=120)
+    second = _chunk(md, chunk_size=120)
     assert [(c.chunk_id, c.content_hash) for c in first] == [
         (c.chunk_id, c.content_hash) for c in second
     ]
@@ -272,7 +280,7 @@ def test_chunking_is_deterministic() -> None:
 
 
 # ---------------------------------------------------------------------------
-# границы куска: слово и перекрытие (C4)
+# P1: дословность и отсутствие перекрытия
 # ---------------------------------------------------------------------------
 
 
@@ -281,58 +289,136 @@ def _words_text(n: int = 400) -> str:
     return " ".join(f"слово{index}" for index in range(n))
 
 
-def _common_overlap(left: str, right: str) -> int:
-    """Длина фактического перекрытия: суффикс левого = префикс правого."""
-    for size in range(min(len(left), len(right)), 0, -1):
-        if left.endswith(right[:size]):
-            return size
-    return 0
+def _assert_exact_join(text: str, chunks) -> None:
+    """Куски покрывают нормализованный вход байт-в-байт (P1)."""
+    from core.adapters.md_ast import parse_markdown
+
+    assert "".join(chunk.text for chunk in chunks) == parse_markdown(text).text
+
+
+def test_chunks_join_into_the_whole_document() -> None:
+    """Конкатенация текстов всех чанков равна входу — ни символ не потерян (P1)."""
+    md = (
+        "# Раздел\n\nАбзац с `кодом` и [ссылкой](http://example.com).\n\n"
+        "| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+        "```sql\nSELECT 1;\n```\n\n- пункт\n- второй\n\n"
+        "> цитата\n\n---\n\n<ta"
+        "ble><tr><td>x</td></tr></table>\n\n[ref]: http://example.com\n"
+    )
+    _assert_exact_join(md, MarkdownChunker(chunk_size=80).chunk("doc", md))
+
+
+def test_adjacent_chunks_do_not_overlap() -> None:
+    """Перекрытия нет: соседние чанки не делят текст (P1 против ``chunk_overlap``)."""
+    text = _words_text()
+    chunks = MarkdownChunker(chunk_size=120).chunk("doc", text)
+
+    assert len(chunks) > 10
+    for previous, current in itertools.pairwise(chunks):
+        assert not previous.text.endswith(current.text[:1])
 
 
 def test_split_does_not_break_words() -> None:
     """Куски режутся по пробелам: ни один кусок не содержит обрывка слова (C4)."""
     text = _words_text()
     words = set(text.split())
-    chunks = MarkdownChunker(chunk_size=120, chunk_overlap=30).chunk("doc", text)
+    chunks = MarkdownChunker(chunk_size=120).chunk("doc", text)
 
     assert len(chunks) > 10
     for chunk in chunks:
         assert chunk.text.split()
         assert set(chunk.text.split()) <= words, chunk.text
-        assert len(chunk.text) <= 120
-
-
-def test_overlap_never_exceeds_chunk_overlap() -> None:
-    """Фактическое перекрытие ≤ ``chunk_overlap``: 30 — потолок, а не обещание (C4)."""
-    text = _words_text()
-    chunks = MarkdownChunker(chunk_size=120, chunk_overlap=30).chunk("doc", text)
-
-    overlaps = [
-        _common_overlap(previous.text, current.text)
-        for previous, current in itertools.pairwise(chunks)
-    ]
-    assert overlaps and all(0 < overlap <= 30 for overlap in overlaps)
 
 
 def test_cut_prefers_line_boundary() -> None:
-    """Строки без пробелов: конец куска и начало следующего — на переводе строки."""
+    """Строки без пробелов: границы кусков — на переводах строк."""
     lines = [f"строка{index:03d}" for index in range(200)]
     text = "\n".join(lines)
-    chunks = MarkdownChunker(chunk_size=50, chunk_overlap=10).chunk("doc", text)
+    chunks = MarkdownChunker(chunk_size=50).chunk("doc", text)
 
     assert len(chunks) > 10
     for chunk in chunks:
-        assert set(chunk.text.split("\n")) <= set(lines), chunk.text
-        assert len(chunk.text) <= 50
+        body = chunk.text.strip("\n")
+        assert set(body.split("\n")) <= set(lines), chunk.text
 
 
 def test_split_is_deterministic_for_long_text() -> None:
-    """Снап к границам слова не вносит недетерминизма (R7)."""
-    first = MarkdownChunker(chunk_size=120, chunk_overlap=30).chunk("doc", _words_text())
-    second = MarkdownChunker(chunk_size=120, chunk_overlap=30).chunk("doc", _words_text())
+    """Границы кусков не вносят недетерминизма (R7)."""
+    first = MarkdownChunker(chunk_size=120).chunk("doc", _words_text())
+    second = MarkdownChunker(chunk_size=120).chunk("doc", _words_text())
     assert [(c.chunk_id, c.content_hash) for c in first] == [
         (c.chunk_id, c.content_hash) for c in second
     ]
+
+
+def test_cjk_paragraph_is_cut_at_sentence_end_not_mid_phrase() -> None:
+    """Иероглифы без пробелов: рез — по ``。``, а не по номеру символа (китайский)."""
+    sentence = "数据库配置管理工具提供了备份功能。"
+    text = "# 配置\n\n" + sentence * 40
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", text)
+
+    assert len(chunks) > 3
+    for chunk in chunks[1:]:
+        assert chunk.text.startswith("数据库") or chunk.text.startswith("配置"), chunk.text
+    for chunk in chunks[:-1]:
+        assert chunk.text.rstrip().endswith("。"), chunk.text
+
+
+# ---------------------------------------------------------------------------
+# атомарность конструкций (P2/P9/P10)
+# ---------------------------------------------------------------------------
+
+
+def test_table_continuation_carries_header_and_alignment() -> None:
+    """Чанк, начавшийся внутри таблицы, несёт шапку с разделителем (P9)."""
+    rows = "".join(f"| {index} | значение-{index} плюс текст |\n" for index in range(60))
+    md = "# Таблица\n\n| id | смысл |\n|:--|--:|\n" + rows
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert len(chunks) > 3
+    for chunk in chunks[1:]:
+        assert "| id | смысл |" in chunk.context_prefix
+        assert "|:--|--:|" in chunk.context_prefix
+        assert chunk.heading_path == "Таблица"
+        assert chunk.text.startswith("| ")
+
+
+def test_fence_continuation_carries_info_string() -> None:
+    """Продолжение fence несёт маркер и info string (P10)."""
+    md = "# Код\n\n```sql\n" + "SELECT 1;\n" * 60 + "```\n"
+    chunks = MarkdownChunker(chunk_size=100).chunk("doc", md)
+
+    assert len(chunks) > 3
+    for chunk in chunks[1:]:
+        assert chunk.context_prefix == "Код\n```sql"
+
+
+def test_list_item_is_not_split_when_it_fits() -> None:
+    """Элемент списка — минимальная единица: рез только между элементами (P2)."""
+    items = "".join(f"- пункт {index} с текстом и хвостом\n" for index in range(40))
+    chunks = MarkdownChunker(chunk_size=150).chunk("doc", "# Список\n\n" + items)
+
+    assert len(chunks) > 2
+    for chunk in chunks:
+        for line in chunk.text.splitlines():
+            assert line.startswith(("# Список", "- ", "\n")) or not line, chunk.text
+
+
+def test_heading_is_not_orphaned_from_its_first_paragraph() -> None:
+    """Заголовок не отрывается от первой фразы: кусок короче половины бюджета — потеря."""
+    md = "# Заголовок\n\n" + "слово " * 300
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert chunks[0].text.startswith("# Заголовок\n\nслово")
+
+
+def test_blockquote_continuation_carries_marker() -> None:
+    """Продолжение цитаты несёт ``> ``: одиночный абзац не читается как обычный текст."""
+    md = "# Цитата\n\n> начало\n>\n" + "> строка текста\n" * 60
+    chunks = MarkdownChunker(chunk_size=150).chunk("doc", md)
+
+    assert len(chunks) > 2
+    assert all(chunk.context_prefix == "Цитата\n> " for chunk in chunks[1:])
 
 
 # ---------------------------------------------------------------------------
@@ -346,20 +432,25 @@ def test_min_chunk_size_default_is_declared() -> None:
     assert MarkdownChunker().min_chunk_size == MIN_CHUNK_SIZE
 
 
-def test_fragment_below_min_chunk_size_is_not_indexed() -> None:
-    """Обломок разметки не попадает в индекс: он не может быть цитатой (C6/I22)."""
-    assert MarkdownChunker().chunk("doc", "# H1\n|") == []
-    assert MarkdownChunker().chunk("doc", "# H1\nЛистов 81") == []
-    # Осмысленная строка порог проходит (и становится единственным чанком секции).
-    chunks = MarkdownChunker().chunk("doc", "# H1\nВерсия для работы в Docker")
-    assert [c.text for c in chunks] == ["Версия для работы в Docker"]
+def test_short_tail_is_absorbed_into_previous_chunk() -> None:
+    """Хвост короче порога приклеивается к предыдущему куску той же секции (P1/C6).
+
+    В индекс он не попадает отдельным ``source_id`` цитаты, но и не выбрасывается:
+    иначе конкатенация перестала бы равняться входу.
+    """
+    rows = "".join(f"| {index} | значение-{index} |\n" for index in range(30))
+    md = "| id | смысл |\n|---|---|\n" + rows
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert all(len(chunk.text.strip()) >= MIN_CHUNK_SIZE for chunk in chunks)
+    _assert_exact_join(md, chunks)
 
 
 def test_min_chunk_size_must_fit_chunk_size() -> None:
     with pytest.raises(ValueError):
         MarkdownChunker(chunk_size=40, min_chunk_size=40)
     with pytest.raises(ValueError):
-        MarkdownChunker(chunk_overlap=-1)
+        MarkdownChunker(min_chunk_size=-1)
 
 
 # ---------------------------------------------------------------------------

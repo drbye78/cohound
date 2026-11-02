@@ -53,10 +53,12 @@ from mdit_py_plugins.tasklists import tasklists_plugin
 __all__ = [
     "GAP_KIND",
     "PROFILES",
+    "SENTENCE_END_CHARS",
     "LineIndex",
     "MdBlock",
     "MdDocument",
     "MdSpan",
+    "is_cut_boundary",
     "normalize_text",
     "parse_markdown",
     "safe_cut_offsets",
@@ -79,8 +81,10 @@ _FOOTNOTE_LABEL_RE: Final = re.compile(r"^ {0,3}\[\^([^\]\n]+)\]:\s*$")
 #: Символы, которые не могут открывать чанк (P8).
 CLOSING_CHARS: Final = frozenset(")]}»”」』>，、：；。！？")
 
-#: Концы предложений для кандидатов разреза (P3-совместимые, т.е. только в прозе).
-_SENTENCE_END: Final = frozenset(".!?;…。！？；")
+#: Концы предложений: позиция сразу после такого символа — предпочтительный разрез.
+#: Полноширинные знаки обязательны: без них китайский абзац режется по любому пробелу, а
+#: в CJK-тексте пробелов почти нет — рез уходит в середину фразы.
+SENTENCE_END_CHARS: Final = frozenset(".!?;…。！？；")
 
 #: Символы, разрывающие графемный кластер: после них разрез запрещён.
 _JOINERS: Final = frozenset("\u200d\ufe0e\ufe0f\u200b\u0301")
@@ -267,33 +271,40 @@ class _Frame:
 # Парсеры по профилям
 # ---------------------------------------------------------------------------
 
-_PARSERS: dict[str, MarkdownIt] = {}
+_PARSERS: dict[tuple[str, bool], MarkdownIt] = {}
 
 
-def _parser(profile: str) -> MarkdownIt:
-    """Разборщик объявленного профиля (кэш на профиль, разбор детерминирован)."""
+def _parser(profile: str, *, front_matter: bool) -> MarkdownIt:
+    """Разборщик объявленного профиля (кэш на профиль, разбор детерминирован).
+
+    ``front_matter=False`` — вариант без YAML-метаданных: нужен, когда блок ``---…---``
+    в начале документа не является YAML-отображением, и по CommonMark это setext-заголовок
+    или тематический разрыв (см. :func:`parse_markdown`).
+    """
     if profile not in PROFILES:
         raise ValueError(f"неизвестный профиль markdown: {profile!r}; объявлены {PROFILES}")
-    cached = _PARSERS.get(profile)
+    key = (profile, front_matter)
+    cached = _PARSERS.get(key)
     if cached is not None:
         return cached
     md = MarkdownIt("commonmark")
     if profile in ("gfm", "pandoc"):
         md = md.enable("table").enable("strikethrough")
         md = md.use(gfm_autolink_plugin).use(tasklists_plugin)
+    if front_matter and profile != "commonmark":
+        md = md.use(front_matter_plugin)
     if profile == "pandoc":
         # ``dollarmath`` — только здесь: в профилях страниц ``$$`` это SQL, а не формула.
         md = (
             md.use(footnote_plugin)
             .use(deflist_plugin)
-            .use(front_matter_plugin)
             .use(attrs_plugin)
             .use(container_plugin, name="div")
             .use(colon_fence_plugin)
             .use(superscript_plugin)
             .use(dollarmath_plugin)
         )
-    _PARSERS[profile] = md
+    _PARSERS[key] = md
     return md
 
 
@@ -332,6 +343,8 @@ def _leaf_block(token: Token, kind: str, index: LineIndex) -> MdBlock | None:
         info["raw"] = True
     elif kind == "math":
         info["delimiter"] = token.markup or "$$"
+    elif kind == "front_matter":
+        info["content"] = token.content or ""
     return MdBlock(kind=kind, span=index.span(*lines), info=info)
 
 
@@ -423,6 +436,18 @@ def _build_blocks(tokens: list[Token], index: LineIndex) -> list[MdBlock]:
                         frame.info.setdefault("align", []).append(align)
                     elif "align" in frame.info:
                         frame.info["align"].append("")
+                    break
+            continue
+
+        if kind == "inline":
+            # Заголовку нужен его текст: ``heading_open`` его не несёт, а ``heading_path``
+            # строится именно по нему (P11). Инлайновый токен идёт сразу за открытием.
+            for frame in reversed(stack):
+                if frame.kind != "heading":
+                    break
+                if "text" not in frame.info:
+                    frame.info["text"] = token.content
+                    frame.info["attrs"] = dict(token.attrs or {})
                     break
             continue
 
@@ -520,17 +545,43 @@ def _find_gaps(blocks: list[MdBlock], index: LineIndex) -> list[tuple[int, int]]
 # ---------------------------------------------------------------------------
 
 
+def _is_mapping(content: str) -> bool:
+    """Есть ли в теле YAML-метаданных запись-отображение (``ключ: значение``)."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" in stripped:
+            return True
+    return False
+
+
 def parse_markdown(text: str, profile: str = "gfm") -> MdDocument:
     """Разбирает markdown объявленного профиля в блоки со спанами.
 
     ``MdDocument.text`` — **нормализованный** текст (без BOM, ``\\n``), и все спаны
     относятся к нему. Если нормализация что-то изменила, ``normalized=True``: срез
     обязан браться из ``MdDocument.text``, а не из переданной строки.
+
+    **YAML-метаданные — только когда это отображение.** Блок ``--- … ---`` в начале
+    документа по Pandoc — метаданные, по CommonMark/GFM — setext-заголовок или разрыв.
+    Профиль решает не всё: страница, начинающаяся с горизонтальной черты и закрывающей
+    черты ниже, иначе теряла бы заголовок, а её текст уезжал бы в «front matter». Поэтому
+    блок принимается только при наличии записи-отображения (строка с ``:``) — ровно то
+    правило, что раньше стояло в строчной эвристике чанкера. Если отображения нет,
+    документ разбирается без плагина, то есть по CommonMark.
     """
     normalized_text, changed = normalize_text(text)
     index = LineIndex(normalized_text)
-    tokens = _parser(profile).parse(normalized_text)
-    blocks = _build_blocks(tokens, index)
+    blocks = _build_blocks(
+        _parser(profile, front_matter=True).parse(normalized_text), index
+    )
+    if blocks and blocks[0].kind == "front_matter" and not _is_mapping(
+        blocks[0].info.get("content", "")
+    ):
+        blocks = _build_blocks(
+            _parser(profile, front_matter=False).parse(normalized_text), index
+        )
 
     extras, unknown, unknown_lines = _gap_blocks(index, _find_gaps(blocks, index))
     if extras:
@@ -671,11 +722,21 @@ def safe_cut_offsets(text: str, start: int, end: int, *, math: bool = False) -> 
         left, right = text[position - 1], text[position]
         # Граница — после пробела или после конца предложения; сам разделитель остаётся
         # в предыдущем куске, поэтому ``join`` кусков равен входу без потери символов.
-        if not (left.isspace() or left in _SENTENCE_END):
+        if not (left.isspace() or left in SENTENCE_END_CHARS):
             continue
-        if right.isspace() or right in _SENTENCE_END:
+        if right.isspace() or right in SENTENCE_END_CHARS:
             continue
         if inside(position) or not _is_grapheme_break(text, position):
             continue
         cuts.append(position)
     return tuple(cuts)
+
+
+def is_cut_boundary(text: str, position: int) -> bool:
+    """Безопасна ли граница разреза: не кластер, не висячая пунктуация (P3/P8).
+
+    Нужна там, где безопасных позиций нет вовсе (конструкция больше бюджета): жёсткий
+    разрез обязан хотя бы не разрывать графемный кластер и не начинать кусок с
+    закрывающего символа.
+    """
+    return _is_grapheme_break(text, position)

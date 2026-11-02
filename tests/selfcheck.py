@@ -553,15 +553,16 @@ def _chunker() -> None:
         "## H2\nтело второго раздела документа\n\n"
         "### H3\nтело третьего раздела документа\n"
     )
-    chunks = MarkdownChunker(chunk_size=100, chunk_overlap=20).chunk("doc1", md)
+    chunks = MarkdownChunker(chunk_size=100).chunk("doc1", md)
     _assert(chunks[0].heading_path == "H1")
     _assert(chunks[1].heading_path == "H1 > H2")
     _assert(chunks[2].heading_path == "H1 > H2 > H3")
     _assert([c.chunk_id for c in chunks] == ["doc1#0", "doc1#1", "doc1#2"])
     _assert(all(c.context_prefix == c.heading_path for c in chunks))
     _assert(all(len(c.content_hash) == 16 for c in chunks))
-    # Обломок разметки чанком не становится (C6): односимвольная секция отброшена.
-    _assert(MarkdownChunker().chunk("doc2", "# H1\n|") == [])
+    # P1: текст не выбрасывается — короткая секция остаётся чанком целиком, включая
+    # строку заголовка (md-heading-5), а не отбрасывается порогом фрагмента.
+    _assert([c.text for c in MarkdownChunker().chunk("doc2", "# H1\n|")] == ["# H1\n|"])
 
 
 def _pdf_extractor() -> None:

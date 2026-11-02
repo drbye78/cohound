@@ -2379,7 +2379,7 @@ URL синтетический, фетчить его нельзя, а файл 
 | Семейство / формат | Сигнал | Читатель | Чанкер |
 |---|---|---|---|
 | HTML (страница) | остальное (по умолчанию) | `HtmlExtractor` (trafilatura) | `MarkdownChunker` |
-| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-heading-4`) |
+| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-heading-5`) |
 | plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-2`) | `TextChunker` (`text-para-2`) |
 | документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
 | EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-2`) | `MarkdownChunker` |
@@ -2427,7 +2427,7 @@ CRLF/CR → LF, удаление NUL/управляющих символов (т
 себя HTML и docling).
 
 **Контрактная граница.** `chunker_version` — поле `EXECUTION_CONTRACT_FIELDS`, поэтому с
-двумя чанкерами оно стало **композитом** `"md-heading-4+text-para-2"`
+двумя чанкерами оно стало **композитом** `"md-heading-5+text-para-2"`
 (`chunker_family.composite_chunker_version`, тот же источник у декларации и у собранного
 порта). Это версионная граница класса `execution_versions` (`execution_change`, §13):
 меняется `run_id`, `METHODOLOGY_VERSION` — нет.
