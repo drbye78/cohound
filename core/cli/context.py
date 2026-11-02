@@ -2652,6 +2652,12 @@ def _resolve_phases(
         "max_documents": max_documents,
         "exclude_paths": list(exclude_paths) if exclude_paths else None,
         "exclude_documents": list(exclude_documents) if exclude_documents else None,
+        # F1/F6 (17 §4, §4.3): оси краула, объявленные оператором, обязаны доезжать до Ш5
+        # тем же путём, что ``--max-depth``: дайджест уже считается с ними
+        # (``_crawl_axis_overrides``), и без проводки ``run_id`` описывал бы полосы и
+        # дроссель, которых в исполнении не было.
+        "host_concurrency": getattr(args, "host_concurrency", None),
+        "extract_backlog_mb": getattr(args, "extract_backlog_mb", None),
         # P5: CLI-уточнение run-слоя уровня извлечения документов (--document-level).
         "document_level": document_level,
         # P7: CLI-уточнение run-слоя механизма извлечения PDF (--pdf-pipeline).

@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -36,12 +38,14 @@ from core.config.deploy import CrawlConfig, DeployConfig
 from core.domain.enums import ChangeClass, DocumentLevel, PdfPipeline
 from core.domain.models import CrawlRunConfig
 from core.pipeline import corpus as corpus_mod
+from core.pipeline import phases as phases
 from core.pipeline.crawl_frontier import (
     DEFAULT_DOCUMENT_TIMEOUT_S,
     CrawlLimits,
     resolve_crawl_limits,
 )
 from core.pipeline.normalize import load_inputs
+from core.pipeline.phases import build_phases
 from core.pipeline.report import crawl_control_digest
 from core.pipeline.run_identity import classify_change, golden_required_for
 from tests.helpers.packages import valid_package
@@ -204,6 +208,41 @@ def test_crawl_flag_inventory_matches_run() -> None:
         assert dest in run_args, f"run перестал принимать ось краула {dest}"
         assert plan_args[dest].default is None
         assert run_args[dest].default is None
+
+
+def test_every_crawl_axis_reaches_the_corpus_phase() -> None:
+    """Ось краула объявлена в ``run_id`` ⇒ обязана доезжать до Ш5.
+
+    Две половины одной проводки: параметр у :func:`build_phases` (иначе ось некуда
+    передать) и запись в ``override`` внутри ``build_phases`` (иначе параметр молча
+    игнорируется). Вторая половина проверяется по AST, а не по тексту: правится
+    ``override[...]``, и именно её отсутствие означало, что ``--host-concurrency 11``
+    менял ``run_id``, а краул шёл одной полосой — ложь о условиях измерения.
+    """
+    params = inspect.signature(build_phases).parameters
+    missing_params = [dest for dest in CRAWL_AXIS_DESTS if dest not in params]
+    assert not missing_params, (
+        f"оси объявлены в контракте, но у build_phases их нет: {missing_params}"
+    )
+    tree = ast.parse(Path(phases.__file__).read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "build_phases"
+    )
+    forwarded = {
+        node.slice.value
+        for node in ast.walk(function)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "override"
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    }
+    missing_forwarding = [dest for dest in CRAWL_AXIS_DESTS if dest not in forwarded]
+    assert not missing_forwarding, (
+        f"оси меняют run_id, но в run-слой фазы не попадают: {missing_forwarding}"
+    )
 
 
 def test_serp_rounds_flag_matches_run() -> None:

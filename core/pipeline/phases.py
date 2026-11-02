@@ -922,6 +922,8 @@ def build_phases(
     document_level: DocumentLevel | None = None,
     pdf_pipeline: PdfPipeline | None = None,
     document_timeout_s: float | None = None,
+    host_concurrency: int | None = None,
+    extract_backlog_mb: int | None = None,
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
@@ -1174,6 +1176,14 @@ def build_phases(
             override["pdf_pipeline"] = pdf_pipeline
         if document_timeout_s is not None:
             override["document_timeout_s"] = document_timeout_s
+        # F1/F6 (17 §4, §4.3): оси параллельности и бэклога — такие же оси краула, как
+        # ``max_depth``. Без этой проводки они попадали в ``crawl_config_digest`` (то есть
+        # в ``run_id``) и не доезжали до Ш5: прогон объявлял 11 полос, а исполнял одну —
+        # ложь о условиях измерения того же класса, что env-модель оценщика (§7.4).
+        if host_concurrency is not None:
+            override["host_concurrency"] = host_concurrency
+        if extract_backlog_mb is not None:
+            override["extract_backlog_mb"] = extract_backlog_mb
         if override:
             base = run_crawl if run_crawl is not None else CrawlRunConfig()
             run_crawl = base.model_copy(update=override)
