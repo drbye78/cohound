@@ -3,9 +3,12 @@
 Отдельный от документного контура (``extract_document.py``, docling) HTML-адаптер:
 формат выводится из ``RawPage`` (url/content-type), реестр поддерживаемых форматов
 остаётся единым в ``extract_document.SUPPORTED_FORMATS`` (архитектура 01 §3.5, дрейф
-контракта). Санитайзинг — на границе экстракции (T7.5, 02 §C.2): опасная HTML-структура
-вырезается до trafilatura, а извлечённый текст освобождается от управляющих символов и
-каркаса промпт-инъекций.
+контракта). Санитайзинг — на границе экстракции (T7.5, 02 §C.2): **структура
+сохраняется, удаляется только активное** — входной пре-клин
+(:func:`core.util.sanitize.strip_active_html`) вырезает ``script``/``style``/``iframe``,
+обработчики ``on*`` и опасные URL-схемы, но оставляет ``class``/``id``/``role``, по
+которым ``trafilatura`` отличает статью от chrome (решение владельца D1, 02.11.2026).
+Извлечённый текст освобождается от управляющих символов и каркаса промпт-инъекций.
 
 Грациозная деградация (как у ``DoclingDocumentExtractor``): отсутствие ``trafilatura``
 или ошибка разбора возвращают ``ExtractedDoc`` с пустым ``text`` и заполненным ``error``,
@@ -22,7 +25,7 @@ from pathlib import Path
 
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 from core.util.hashing import content_hash
-from core.util.sanitize import finalize_extracted_text, sanitize_html
+from core.util.sanitize import finalize_extracted_text, strip_active_html
 
 try:  # необязательная зависимость
     import trafilatura  # type: ignore[import-not-found]
@@ -148,9 +151,16 @@ def _default_extract(html: str) -> str | None:
 
 
 class HtmlExtractor:
-    """HTML → markdown (trafilatura). Реализация ``ExtractorPort`` (Ш5)."""
+    """HTML → markdown (trafilatura). Реализация ``ExtractorPort`` (Ш5).
 
-    version = "trafilatura-html-3"
+    Входной пре-клин — :func:`core.util.sanitize.strip_active_html`: структура
+    (``class``/``id``/``role``) доходит до ``trafilatura``, поэтому main-content
+    отличается от chrome; удаляется только активное. Прежний allow-list
+    (:func:`core.util.sanitize.sanitize_html`) снимал структуру и тянул cookie-баннер
+    в текст (замер 02.11.2026: 400/400 страниц против 99/400 без чистки).
+    """
+
+    version = "trafilatura-html-4"
 
     #: B3: адаптер читает байты **локального** файла (``page.source_path``), поэтому годится
     #: для членов контейнеров (спуск). Шов ``split`` этого не умеет — см. ``RemoteExtractor``.
@@ -160,8 +170,9 @@ class HtmlExtractor:
         """``extract_fn`` — внедряемая функция извлечения (для тестов/AB).
 
         Если не задана — используется обёртка над ``trafilatura`` (ленивая
-        необязательная зависимость). ``sanitize=False`` отключает только чистку
-        **HTML-структуры** (``sanitize_html``) — финальная очистка текста
+        необязательная зависимость). ``sanitize=False`` отключает чистку входа **целиком**
+        (нужна для замеров «что даёт пре-клин»); семантика флага одна — чистить вход или
+        нет. Финальная очистка текста
         (:func:`core.util.sanitize.finalize_extracted_text`) выполняется всегда:
         это граница evidence, а не опция удобства.
         """
@@ -188,9 +199,10 @@ class HtmlExtractor:
 
         if self._sanitize:
             try:
-                html = sanitize_html(html)
+                # D1: пре-клин структуры, не allow-list — trafilatura нужны class/id/role.
+                html = strip_active_html(html)
             except Exception as exc:  # noqa: BLE001
-                return self._error(f"санитизация: {exc}")
+                return self._error(f"пре-клин HTML: {exc}")
 
         try:
             extracted = self._extract_fn(html)

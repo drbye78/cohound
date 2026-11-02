@@ -292,6 +292,19 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
   first-class, with their own readers (`extract_text`, `extract_epub`) and chunkers — not
   docling. **Office** (docx/pptx/xlsx) goes through docling; **PDF** goes through whichever
   mechanism the `crawl.pdf_pipeline` axis declares.
+- **The HTML input is pre-cleaned, not allow-listed.** `strip_active_html`
+  (`core/util/sanitize.py:290`) removes active content (`script`/`style`/`noscript`/`iframe`/
+  `object`/`embed`/`svg`/`template`), `on*` handlers and `javascript:`/`vbscript:`/
+  `data:text/html` URLs **together with their bodies**, but keeps `class`/`id`/`role` — the
+  attributes `trafilatura` uses to tell an article from chrome. The `nh3` allow-list
+  (`sanitize_html`) stripped exactly those, so the input reached the library as undifferentiated
+  text: measured 02.11.2026 on 500 saved pages, text ×1.75 on one host (`chrome_share` 0.284
+  vs 0.010) and **all** ATX headings lost on another (0.000 vs 0.727). The allow-list survives
+  only on the seam validator (`gateway_validate.py:300`), where the question is "is this safe
+  to forward", not "what is the article". Pre-clean output is byte-identical to not cleaning
+  at all (500/500 pages), so the cost of the old path is a measured number, not a guess:
+  `docs/reports/measurements/2026-11-02-html-preclean-vs-allowlist.md`. Reader version is
+  `trafilatura-html-4`; the change is `execution_change` because the corpus text changes.
 - PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
   **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:505`).
   - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The

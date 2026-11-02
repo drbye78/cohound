@@ -41,7 +41,7 @@
 | PDF `structured` | `core/adapters/extract_document.py:849` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
 | HTML | `core/adapters/extract_html.py:138` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
-| Санитайз | `core/util/sanitize.py:134,189,234` | `nh3` → trafilatura → `strip_control_chars` → `neutralize_prompt_injection_marks`; с 02.11.2026 ту же границу вызывает и документный путь (`finalize_extracted_text`, `:259`; §10) |
+| Санитайз | `core/util/sanitize.py:145,290,423` | вход HTML: структурный пре-клин `strip_active_html` (`:290`) — удаляется только активное, `class`/`id`/`role` остаются для `trafilatura`; allow-list `sanitize_html` (`:145`) — только на шве валидации (`gateway_validate.py:300`). Выход: `strip_control_chars` → `neutralize_prompt_injection_marks` в одной границе `finalize_extracted_text` (`:423`), её же вызывает документный путь (§10) |
 | Нарезка | `core/adapters/chunker_markdown.py:170` | 1500/200 символов, ATX/setext/fence-aware; заголовки считаются **относительно самого мелкого** уровня документа (`md-heading-4`, `:272`), `heading_path` из заголовков |
 | Кэш | `core/pipeline/extract_cache.py:113,343` | ключ `(sha256 байтов, extractor_version, level)`; кэшируются **только полные успехи** |
 | Порт | `core/ports/extractor.py:23` | `version` + `extract(page, route) -> ExtractedDoc`; механизм — значение оси `crawl.pdf_pipeline` |
@@ -214,11 +214,11 @@ y-кластеризация и склейка строк внутри блок�
 
 1. **Граница санитайза была не одна — исправлено 02.11.2026.** `neutralize_prompt_injection_marks`
    вызывался в `extract_text.py:64` и `extract_html.py:219`, но **не** в `extract_document.py`
-   (PDF и Office) и **не** в `extract_pdf_text.py` (там только `strip_control_characters`, `:89`).
-   Инвариант «одна граница до чанкинга/хеширования» (`core/util/sanitize.py:20-26`) на деле не
+   (PDF и Office) и **не** в `extract_pdf_text.py` (там была только своя чистка управляющих
+   символов). Инвариант «одна граница до чанкинга/хеширования» (`core/util/sanitize.py:31`) на деле не
    был выполнен для двух путей из четырёх: один и тот же текст доходил до оценщика помеченным
    из `.txt` и дословным из `.docx`. Чинили не по одному пути, а одной границей —
-   `core/util/sanitize.finalize_extracted_text` (`:259`; вызовы — `extract_document.py:370`,
+   `core/util/sanitize.finalize_extracted_text` (`:423`; вызовы — `extract_document.py:359`,
    `extract_pdf_text.py:247`), и её версия вошла в провенанс: `docling-doc-3:…/<policy>/finalize-1`
    и `docling-office-1:<policy>/<build>/finalize-1`. Любой третий механизм теперь получает ту же
    границу, а не четвёртую дыру. Это меняет `text` → `content_hash` → доказательства, поэтому

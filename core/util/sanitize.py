@@ -1,7 +1,15 @@
 """Санитизация контента на границе экстракции (T7.5, §10 / 02 §C.2).
 
-Три независимые чистые функции:
+Четыре независимые чистые функции:
 
+- :func:`strip_active_html` — **пре-клин структуры** для HTML-экстрактора (решение
+  владельца D1, 02.11.2026): удаляет активный контент (``script``/``style``/``noscript``/
+  ``iframe``/``frame``/``frameset``/``object``/``embed``/``applet``/``svg``/``template``)
+  вместе с содержимым, event-handler'ы ``on*`` и опасные URL-схемы, **сохраняя**
+  ``class``/``id``/``role`` и оболочку документа. Это вход ``trafilatura``: эвристики
+  main-content различают статью и chrome именно по классам/ролям, а allow-list
+  :func:`sanitize_html` их снимал — замер 02.11.2026: cookie-баннер попадал в текст у
+  **400 из 400** страниц, без санитайза — у 99 из 400, объём ×1.12 медиана / ×2.63 p90.
 - :func:`sanitize_html` — удаляет активный/опасный HTML (``<script>``/``<style>``,
   event-handler'ы ``on*``, опасные URL-схемы ``javascript:``/``vbscript:``/``data:text/html``,
   комментарии). Основной путь — ``nh3`` (Rust/ammonia, MIT); при отсутствии ``nh3`` (или
@@ -26,18 +34,21 @@
    переписывают предложения — изменяются только распознанные фрагменты каркаса.
 
 Все функции детерминированы, без побочных эффектов и **без обязательных зависимостей**:
-``nh3`` и ``defusedxml`` — опциональны. Нейтрален (§1.3).
+``nh3``, ``lxml`` и ``defusedxml`` — опциональны (``lxml`` приходит жёсткой
+зависимостью ``trafilatura``, своей не вводится). Нейтрален (§1.3).
 """
 
 from __future__ import annotations
 
 import re
 import warnings
+from typing import Any
 
 __all__ = [
     "finalize_extracted_text",
     "neutralize_prompt_injection_marks",
     "sanitize_html",
+    "strip_active_html",
     "strip_control_chars",
 ]
 
@@ -176,6 +187,159 @@ def sanitize_html(html: str) -> str:
                 stacklevel=2,
             )
     return _stdlib_sanitize_html(html)
+
+
+# ---------------------------------------------------------------------------
+# Пре-клин активного HTML с сохранением структуры (D1, решение владельца 02.11.2026)
+# ---------------------------------------------------------------------------
+
+try:  # pragma: no cover - зависит от окружения (приходит зависимостью trafilatura)
+    from lxml import etree as _lxml_etree
+    from lxml import html as _lxml_html
+except ImportError:  # pragma: no cover
+    _lxml_etree = None  # type: ignore[assignment]
+    _lxml_html = None  # type: ignore[assignment]
+
+# Активный контент: удаляется **вместе с содержимым** — это не проза-evidence,
+# а исполняемый код либо встроенный документ.
+_STRIP_TAGS: frozenset[str] = frozenset(
+    {
+        "applet",
+        "embed",
+        "frame",
+        "frameset",
+        "iframe",
+        "noscript",
+        "object",
+        "script",
+        "style",
+        "svg",
+        "template",
+    }
+)
+
+# Атрибуты-URL: опасное значение снимается (атрибут остаётся инертным).
+_URL_ATTRS: frozenset[str] = frozenset({"action", "formaction", "href", "src"})
+
+# Опасная схема = исполняемый код (``javascript:``/``vbscript:``) либо активный документ
+# (``data:text/html``). Прочие схемы и относительные URL остаются как есть.
+_DANGEROUS_URL_PREFIXES: tuple[str, ...] = ("javascript:", "vbscript:", "data:text/html")
+
+# Браузер игнорирует управляющие символы и пробелы внутри схемы, поэтому
+# ``java&#9;script:`` — тот же ``javascript:``. Нормализация повторяет это правило.
+_URL_NOISE_RE = re.compile(r"[\x00-\x20\x7f]")
+
+
+def _local_name(name: str) -> str:
+    """Локальное имя тега/атрибута в нижнем регистре (``{ns}script`` → ``script``)."""
+    return name.rpartition("}")[2].lower()
+
+
+def _is_dangerous_url(value: str) -> bool:
+    """True, если значение атрибута-URL начинается с опасной схемы."""
+    return _URL_NOISE_RE.sub("", value).lower().startswith(_DANGEROUS_URL_PREFIXES)
+
+
+def _strip_active_tree(root: Any) -> None:
+    """Вырезает активные элементы и атрибуты из разобранного дерева (in place).
+
+    Удаление идёт по списку, снятому до мутации: обход живого дерева при удалении
+    узлов пропускал бы соседей. Хвостовой текст удаляемого блока сохраняется
+    (``drop_tree``), чтобы проза вокруг ``<script>`` не склеивалась.
+    """
+    for element in list(root.iter()):
+        tag = element.tag
+        if not isinstance(tag, str):  # комментарии и processing instructions — не теги
+            continue
+        if _local_name(tag) in _STRIP_TAGS:
+            drop_tree = getattr(element, "drop_tree", None)
+            if drop_tree is not None:
+                drop_tree()
+            else:  # pragma: no cover - все элементы lxml.html умеют drop_tree
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+            continue
+        for name in list(element.attrib):
+            local = _local_name(name)
+            if local.startswith("on"):
+                del element.attrib[name]
+            elif local in _URL_ATTRS and _is_dangerous_url(element.attrib[name]):
+                element.attrib[name] = ""
+
+
+def _serialize_html(root: Any) -> str:
+    """Сериализует разобранное дерево обратно в юникод-HTML.
+
+    Основной путь — XML-сериализатор: он **закрывает каждый тег**, поэтому результат
+    остаётся неподвижной точкой. HTML-сериализатор опускает необязательные закрывающие
+    теги: пустой ``<li>`` при повторном проходе получал ``</li>``, и второй вызов
+    возвращал уже другой текст (замер 02.11.2026: 1 страница из 300 на sbertech).
+    Текст извлечения от выбора сериализатора не зависит — 300/300 страниц дали
+    одинаковый результат ``trafilatura`` обоими путями.
+
+    На имени тега, недопустимом для XML, — HTML-сериализатор (дерево то же, поэтому
+    это не смена качества пре-клина).
+    """
+    try:
+        return _lxml_etree.tostring(root, encoding="unicode", method="xml")
+    except (ValueError, TypeError):  # pragma: no cover - редкие имена тегов
+        return _lxml_etree.tostring(root, encoding="unicode", method="html")
+
+
+def strip_active_html(html: str) -> str:
+    """Удаляет активный HTML, **сохраняя структуру документа** (пре-клин для trafilatura).
+
+    **Зачем не** :func:`sanitize_html`. Allow-list ``nh3`` снимает ``class``/``id``/``role``
+    целиком, а ``trafilatura`` (следующий шаг, ``core/adapters/extract_html.py``) отличает
+    статью от chrome именно по ним. Замер 02.11.2026 на 400 страницах: после allow-list
+    cookie-баннер попадал в извлечённый текст у **400 из 400** страниц, без чистки —
+    у 99 из 400; объём текста ×1.12 медиана / ×2.63 p90 относительно режима без чистки.
+    Структура — вход эвристики, поэтому её нельзя снимать «на всякий случай»: цена
+    измерима и она уже заплачена.
+
+    Удаляется **вместе с содержимым**: ``script``, ``style``, ``noscript``, ``iframe``,
+    ``frame``, ``frameset``, ``object``, ``embed``, ``applet``, ``svg``, ``template``.
+    Снимаются: event-handler'ы ``on*`` и значения ``href``/``action``/``formaction``/
+    ``src`` с опасными схемами (``javascript:``/``vbscript:``/``data:text/html``, включая
+    замаскированные управляющими символами). Сохраняются: ``class``, ``id``, ``role``,
+    все текстовые узлы и оболочка документа ``html``/``head``/``title``/``body`` —
+    снятый ``<title>`` уже был замеренной регрессией, и повторять её нельзя.
+
+    Разбор — ``lxml.html`` (жёсткая зависимость ``trafilatura``; новых зависимостей не
+    вводится), сериализация обратно в юникод (:func:`_serialize_html` — XML-метод, чтобы
+    закрытые теги делали результат неподвижной точкой). Функция **идемпотентна**, пустая
+    строка возвращается как есть.
+
+    **Откат видим.** Без ``lxml`` (или при ошибке разбора) функция возвращает результат
+    :func:`sanitize_html` и поднимает ``RuntimeWarning``: два пути дают **разное качество
+    извлечения** (allow-list теряет структуру и тянет chrome в текст), поэтому молчаливая
+    подмена запрещена — деградация обязана быть видна в логе прогона.
+    """
+    if not html.strip():
+        return html
+    if _lxml_html is None or _lxml_etree is None:
+        warnings.warn(
+            "lxml недоступен: пре-клин HTML деградировал к allow-list sanitize_html "
+            "(структура class/id/role будет потеряна, chrome может попасть в текст)",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return sanitize_html(html)
+    try:
+        root = _lxml_html.document_fromstring(html)
+        _strip_active_tree(root)
+        return _serialize_html(root)
+    except Exception as exc:  # noqa: BLE001 - деградация к allow-list, но видимая
+        warnings.warn(
+            "lxml не смог разобрать HTML "
+            f"({type(exc).__name__}: {exc}); "
+            "пре-клин деградировал к allow-list sanitize_html "
+            "(структура class/id/role будет потеряна)",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return sanitize_html(html)
 
 
 # ---------------------------------------------------------------------------

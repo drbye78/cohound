@@ -56,9 +56,10 @@ def test_extract_returns_extracted_doc() -> None:
 
 
 def test_extractor_version_is_stable() -> None:
-    # Версия сменилась 02.11.2026: текст зависит от объявленной кодировки (BOM/meta) —
-    # значит изменился объявленный стек (``extractor_stack``), а не только реализация.
-    assert HtmlExtractor.version == "trafilatura-html-3"
+    # Версия сменилась 02.11.2026 (D1): входной пре-клин заменён allow-list на
+    # структуросохраняющий (``trafilatura-html-4``) — изменился объявленный стек
+    # (``extractor_stack``), а не только реализация.
+    assert HtmlExtractor.version == "trafilatura-html-4"
 
 
 def test_extract_passes_decoded_html_to_fn() -> None:
@@ -79,6 +80,39 @@ def test_extract_strips_dangerous_html_before_fn() -> None:
     assert "script" not in sent.lower()
     assert "onclick" not in sent.lower()
     assert "javascript:" not in sent.lower()
+
+
+def test_extract_preserves_structure_for_trafilatura() -> None:
+    """D1: до ``trafilatura`` доходит структура (``class``/``id``/``role``), не allow-list.
+
+    Именно по ней эвристика main-content отличает статью от chrome; прежний allow-list
+    снимал все ``class``/``id``, и cookie-баннер попадал в текст у 400 из 400 страниц
+    (замер 02.11.2026).
+    """
+    fn, calls = _capturing("ok")
+    page = _page(
+        (
+            '<html><head><title>Документ: главная</title></head>'
+            '<body><div id="content" class="article-body" role="main">'
+            "<p>main-content-marker</p></div>"
+            '<div class="cookie-banner">файлы cookie</div></body></html>'
+        ).encode()
+    )
+    HtmlExtractor(extract_fn=fn).extract(page)
+    sent = calls[0]
+    assert 'class="article-body"' in sent
+    assert 'id="content"' in sent
+    assert 'role="main"' in sent
+    assert 'class="cookie-banner"' in sent  # chrome тоже доходит: его отсекает trafilatura
+    assert "<title>Документ: главная</title>" in sent
+
+
+def test_sanitize_false_passes_input_untouched() -> None:
+    """``sanitize=False`` — вход не чистится вовсе (нужно для замеров)."""
+    fn, calls = _capturing("ok")
+    html = b'<html><body><script>alert(1)</script><p class="a">keep</p></body></html>'
+    HtmlExtractor(extract_fn=fn, sanitize=False).extract(_page(html))
+    assert calls[0] == html.decode()
 
 
 def test_sanitize_can_be_disabled() -> None:

@@ -5,7 +5,8 @@
 
 * **D1 — входной санитайз.** ``sanitize_html`` до ``trafilatura`` может снять разметку
   (``class``), от которой зависит выделение основного блока. Сравнение политик —
-  ``--extractor current`` против ``--extractor nosanitize`` на одних и тех же страницах.
+  ``--extractor current`` против ``--extractor nosanitize`` (и ``allowlist`` — поведение
+  до D1) на одних и тех же страницах.
 * **D2 — восстановление заголовков.** Сколько ``<h1..h6>`` документа доживает до
   извлечения как ATX-заголовок (``headings_kept``).
 * **SPA — объявлять ли ``fetch: browser``.** Страница-оболочка (меню/баннеры) даёт
@@ -97,6 +98,7 @@ import lxml.html  # noqa: E402  (зависимость trafilatura; см. до�
 from core.adapters.extract_html import HtmlExtractor  # noqa: E402
 from core.config.paths import resolve_paths  # noqa: E402
 from core.ports.types import RawPage  # noqa: E402
+from core.util.sanitize import sanitize_html  # noqa: E402
 
 #: Токен — непрерывная последовательность букв (``\w`` без цифр и ``_``) длиной ≥6.
 _TOKEN_RE = re.compile(r"[^\W\d_]{6,}")
@@ -376,8 +378,16 @@ def _empty_result(item: Item) -> PageResult:
     )
 
 
-def _measure_page(item: Item, path: Path, extractor: HtmlExtractor) -> PageResult:
-    """Считает метрики одной страницы; сбой страницы — ``error``, а не исключение."""
+def _measure_page(
+    item: Item, path: Path, extractor: HtmlExtractor, policy: str = "current"
+) -> PageResult:
+    """Считает метрики одной страницы; сбой страницы — ``error``, а не исключение.
+
+    ``policy="allowlist"`` воспроизводит поведение **до D1**: декодированный HTML проходит
+    allow-list :func:`core.util.sanitize.sanitize_html` и отдаётся экстрактору без его
+    собственного пре-клина. Это одна и та же страница и одна и та же ``trafilatura`` —
+    меняется только вход, иначе «до/после» сравнивало бы разные выборки.
+    """
     empty = _empty_result(item)
     try:
         content = path.read_bytes()
@@ -389,8 +399,14 @@ def _measure_page(item: Item, path: Path, extractor: HtmlExtractor) -> PageResul
     except Exception as exc:  # noqa: BLE001 - битые байты не должны валить замер
         return _with_error(empty, f"декодирование: {exc}")
 
+    if policy == "allowlist":
+        content = sanitize_html(html).encode("utf-8")
+        content_type = "text/html; charset=utf-8"
+    else:
+        content_type = item.content_type
+
     doc = extractor.extract(
-        RawPage(url=item.url, content=content, fetched_at="", content_type=item.content_type)
+        RawPage(url=item.url, content=content, fetched_at="", content_type=content_type)
     )
     text = doc.text
 
@@ -600,6 +616,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "      --host example.org --host docs.example.org --limit 100\n"
             "  python3 scripts/measure_html_extraction.py --db runs/{run_id}/cohound.db \\\n"
             "      --host example.org --extractor nosanitize --out-json /tmp/m.json\n"
+            "      --host example.org --extractor allowlist   # как было до D1\n"
             "\n"
             "Без --host измеряются все хосты БД (по --limit страниц на хост).\n"
             "БД не изменяется: соединение открывается в режиме mode=ro."
@@ -626,9 +643,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--extractor",
-        choices=("current", "nosanitize"),
+        choices=("current", "nosanitize", "allowlist"),
         default="current",
-        help="политика извлечения: current — как в прогоне; nosanitize — без sanitize_html",
+        help=(
+            "политика извлечения: current — как в прогоне (пре-клин структуры); "
+            "nosanitize — вход не чистится вовсе; allowlist — как было до D1 "
+            "(allow-list sanitize_html перед trafilatura)"
+        ),
     )
     parser.add_argument("--out-json", metavar="PATH", help="куда записать машинный отчёт")
     parser.add_argument(
@@ -672,7 +693,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if path is None:
             pages.append(_with_error(_empty_result(item), f"нет файла по raw_path: {item.raw_path}"))
             continue
-        pages.append(_measure_page(item, path, extractor))
+        pages.append(_measure_page(item, path, extractor, args.extractor))
 
     grouped: dict[str, list[PageResult]] = {}
     for page in pages:
