@@ -4234,7 +4234,7 @@ state/state.db                                 # durable-состояние па
    приоритет `--urls > seeds.yaml > corpus_urls.yaml` (`urls_override` заменяет набор
    целиком, `:167-198`; `seeds.yaml` — `:201-206`; legacy `corpus_urls.yaml` — `:203`).
    Вызывается из `run`/`plan`/`crawl` (`core/cli/commands/run.py:629`,
-   `core/cli/commands/plan.py:220`, `core/cli/commands/crawl.py:326`). Прежняя редакция
+   `core/cli/commands/plan.py:220`, `core/cli/commands/crawl.py:391`). Прежняя редакция
    называла это design-only и указывала `core/cli/context.py` — неверно по обоим пунктам.
 6. `NpyVectorIndex` (`core/adapters/vector_npy.py:213`) — ✅ **реализовано**:
    `CompositionViewPort` принимается как `view`, `build_id` композиции сверяется с

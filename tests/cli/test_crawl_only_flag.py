@@ -136,6 +136,45 @@ def test_crawl_run_crawl_only_publishes_queue(
     assert _corpus_docs(db) == 0
 
 
+def test_crawl_run_publishes_phase_notes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Заметки фазы корпуса доходят до payload ``crawl run`` (17 §7.2).
+
+    Регресс: в полном ``run`` строки ``log_entries`` видны как ``results[].notes``, а
+    ``crawl run`` собирал свой payload и их терял — то есть измерительный протокол
+    публиковал числа без того, чем они получены. Строка о полосе берётся настоящая:
+    ось объявлена (3), host в продукте один ⇒ фаза пишет «полос не больше 1».
+    """
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages())
+
+    code = main(
+        _argv(
+            package,
+            action="run",
+            run_id="cr3",
+            db=tmp_path / "cr3.db",
+            urls=_urls_file(tmp_path),
+            extra=("--crawl-only", "--host-concurrency", "3"),
+        ),
+        ports=_ports(crawler),
+    )
+
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    lane = [
+        note
+        for note in payload["notes"]
+        if note.startswith("crawl: продукт p1: host_concurrency=3 объявлен")
+    ]
+    assert lane, payload["notes"]
+    assert "host'ов в продукте 1" in lane[0]
+    # Строки фазы — наблюдения, а не сбои: в errors их нет.
+    assert not any("host_concurrency" in error for error in payload["errors"])
+
+
 def test_crawl_run_crawl_only_prints_human_line(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

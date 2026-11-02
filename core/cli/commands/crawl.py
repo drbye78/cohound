@@ -190,6 +190,24 @@ def _crawl_counts(result: Any) -> dict[str, int]:
     return {}
 
 
+def _phase_notes(result: Any) -> list[str]:
+    """Строковые заметки фазы корпуса (``log_entries``) для payload ``crawl run``.
+
+    В полном ``run`` эти строки уходят в ``results[].notes``; ``hound crawl run``
+    собирает свой payload и до правки их **терял** — а именно в этом режиме оператор
+    читает факты краула (полосы, браузерную очередь, границы продуктов) и именно им
+    идёт измерительный протокол 17 §7.2. Строки не ``errors``: это наблюдения, а не
+    сбои, поэтому они и попадают в ``notes``.
+
+    Только ``str``: структурные записи ``log_entries`` (``IndexBuild`` с
+    ``crawl_*``-счётчиками) в текст не превращаются — у них свой потребитель
+    (:func:`_crawl_counts`). Порядок — как у ``errors``: он зависит от порядка
+    завершения корней, то есть от планировщика, и в артефакт попадать не должен.
+    """
+    entries = getattr(result, "log_entries", None) or ()
+    return sorted(str(entry) for entry in entries if isinstance(entry, str))
+
+
 def _item_row(item: Any) -> dict[str, Any]:
     """JSON-совместимая строка элемента сеанса (``crawl status --per-url``)."""
     status = item.status
@@ -625,7 +643,10 @@ def _execute_crawl_locked(
         "follow": follow,
         "crawl": _crawl_counts(result),
         "errors": phase_errors,
-        "notes": notes,
+        # 17 §7.2/§4: заметки фазы (полосы, браузерная очередь, границы продуктов) —
+        # в том же payload, что и счётчики: иначе `crawl run` публикует числа, но не
+        # называет, чем они получены.
+        "notes": [*notes, *_phase_notes(result)],
         # F2 (17 §4): режим «краул без конверсии» и содержимое durable-очереди.
         # ``crawl_only=false`` в полном крауле — не украшение: по этому полю видно,
         # что корпус собирался, а не только добывался.
