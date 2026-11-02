@@ -221,12 +221,13 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 ### F1 — Первый полный прогон (M0.5)
 
 > ⬜ не сделано как фаза (5 из 6 пунктов закрыты, Exit достигнут; открыт один пункт).
-> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:216`
->   (`docling_extractor_version`), живое значение в манифесте —
->   `docling-doc-3:layout_tables/cpu/docling-2.135.0,trafilatura-html-2` (сегмент
->   `cpu`/`cuda` — ось `crawl.pdf_device`, P9).
-> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2506` (`workers_from_budget`),
->   preflight `core/cli/wiring.py:2448` (`preflight_extraction_budget`, `EXIT_USAGE`).
+> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:252`
+>   (`docling_extractor_version`), вид значения в манифесте —
+>   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
+>   контракте — `trafilatura-html-3+text-plain-2+epub-2+pdfium-text-2+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
+>   (сегмент `cpu`/`cuda` — ось `crawl.pdf_device`, P9).
+> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2511` (`workers_from_budget`),
+>   preflight `core/cli/wiring.py:2453` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
 >   `core/pipeline/corpus.py:3245`; видимая строка пропуска по бюджету —
@@ -315,7 +316,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `_run_serp_contour` (`core/pipeline/corpus.py:835-963`), вызов внутри фазы корпуса **до**
 >   дренажа — `core/pipeline/corpus.py:835-963`; `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1549` и реэкспорт).
->   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:100`), значение из
+>   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:117`), значение из
 >   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1095`).
 >   Оговорка: контур исполняется только при объявленных `rounds > 0` **и** бюджете
 >   (`core/pipeline/corpus.py:835-963`); на прогоне `ru-pg-dbms-3edf2b06097c` он не исполнялся.
@@ -389,7 +390,7 @@ retrieval-тесты байт-идентичны прежним при том ж
 > `crawl/{submit,status,cancel,collect,poll}`), передача артефакта чанками не реализована
 > (только inline-base64, `core/edge/server.py:591`), ось уровня в запросе edge игнорирует.
 > Текущий `split` работает, но **не паритетен** `local`: игнор `document_level`/`pdf_pipeline`,
-> двойной фетч, потеря членов контейнеров (`core/pipeline/digests.py:112-115`;
+> двойной фетч, потеря членов контейнеров (`core/pipeline/digests.py:129-132`;
 > `core/adapters/remote_extractor.py:42` — `supports_source_path = False`). Зависимость от F3
 > соблюдена: F3 не начата ⇒ F4 законно не начата.
 

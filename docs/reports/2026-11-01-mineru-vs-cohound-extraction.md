@@ -17,9 +17,10 @@
 3. **Переиспользовать стоит идеи, а не обвязку:** блочное представление с bbox (цитата «страница +
    блок»), layout-роли как отдельная стадия, и — если понадобится — **DocVortex (MIT)** вместо
    своего клея, а не MinerU поверх него.
-4. **Два независимых дефекта найдены по дороге** (§10): документный путь не санитизируется (и
-   `text_layer` тоже — только control-символы), а per-level таймауты docling живут в коде, вне
-   дайджеста, то есть меняют корпус при неизменном `run_id`.
+4. **Два независимых дефекта найдены по дороге** (§10): документный путь не санитизировался (и
+   `text_layer` — только control-символы) — **исправлено 02.11.2026** одной границей
+   `finalize_extracted_text`; per-level таймауты docling живут в коде, вне дайджеста, то есть
+   меняют корпус при неизменном `run_id` — открыто.
 
 ## 1. Рамка: что именно сравниваем
 
@@ -35,13 +36,13 @@
 
 | Стадия | Где | Существенное |
 |---|---|---|
-| Маршрут формата | `core/cli/wiring.py:1958` | суффикс → Content-Type → магия байтов; `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
-| PDF `text_layer` | `core/adapters/extract_pdf_text.py:197` | pypdfium2, постранично, плоский текст; пустая страница → `error="no_text_layer"` (183 из 16 073 стр., 1.14 %) |
-| PDF `structured` | `core/adapters/extract_document.py:637` | docling; выход — **markdown-строка** (`:927`); уровни меняют опции конвейера |
-| Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** (`:788`) |
-| HTML | `core/adapters/extract_html.py:76` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
-| Санитайз | `core/util/sanitize.py:133,188,233` | `nh3` → trafilatura → `strip_control_chars` → `neutralize_prompt_injection_marks`; **документный путь его не вызывает** (§10) |
-| Нарезка | `core/adapters/chunker_markdown.py:164` | 1500/200 символов, ATX/setext/fence-aware; `heading_path` из заголовков |
+| Маршрут формата | `core/cli/wiring.py:1960` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:440`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
+| PDF `text_layer` | `core/adapters/extract_pdf_text.py:203` | pypdfium2, постранично, плоский текст; пустая страница → `error="no_text_layer"` (`:267`; 183 из 16 073 стр., 1.14 %) |
+| PDF `structured` | `core/adapters/extract_document.py:849` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
+| Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
+| HTML | `core/adapters/extract_html.py:138` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
+| Санитайз | `core/util/sanitize.py:134,189,234` | `nh3` → trafilatura → `strip_control_chars` → `neutralize_prompt_injection_marks`; с 02.11.2026 ту же границу вызывает и документный путь (`finalize_extracted_text`, `:259`; §10) |
+| Нарезка | `core/adapters/chunker_markdown.py:170` | 1500/200 символов, ATX/setext/fence-aware; заголовки считаются **относительно самого мелкого** уровня документа (`md-heading-4`, `:272`), `heading_path` из заголовков |
 | Кэш | `core/pipeline/extract_cache.py:113,343` | ключ `(sha256 байтов, extractor_version, level)`; кэшируются **только полные успехи** |
 | Порт | `core/ports/extractor.py:23` | `version` + `extract(page, route) -> ExtractedDoc`; механизм — значение оси `crawl.pdf_pipeline` |
 
@@ -52,7 +53,7 @@
 | pdfium, весь PDF-корпус 240 док / 15 929 стр. | 134 MB пик, 26.8 с, 0 ошибок | `docs/reports/measurements/2026-10-25-pdf-backend-alternatives.md:19-23` |
 | docling `layout_tables` | 1.49 с/стр CPU, пик до 3.7 GB | `2026-10-24-docling-peaks-real-corpus.md` |
 | docling на 2763 стр. | таймаут 2700 с → `PARTIAL_SUCCESS` → ноль символов | там же |
-| `queue_max_size=1` | −44…−49 % RAM, markdown **байт-в-байт** тот же | `extract_document.py:643-657` |
+| `queue_max_size=1` | −44…−49 % RAM, markdown **байт-в-байт** тот же | `extract_document.py:626-631` |
 | большая книга, 665 стр. | символов 88.5 % от docling; идентификаторов «потеряно» 147 из 2 204 | `2026-10-28-hybrid-quality-gate.md:50-53` |
 
 ## 3. MinerU на 01.11.2026: это уже не тот проект, что в обзорах
@@ -118,8 +119,8 @@ PP-FormulaNet, SLANet-plus, MinerU2.5-Pro — **Apache-2.0** (проверено
    этого не перебьёт — она решает другую задачу.
 2. **Цепочка доказательности**: чанк → `content_hash` → индекс → `citation_quote`. Конвертер
    об этой цепочке не знает.
-3. **Граница санитайза** (пусть и с дырой, §10): у MinerU её нет вовсе, потому что он не работает
-   с промптами.
+3. **Граница санитайза** (дыра на документном пути закрыта 02.11.2026, §10): у MinerU её нет
+   вовсе, потому что он не работает с промптами.
 4. **Нейтральность `core/` и отсутствие внешних сервисов** — свойство архитектуры.
 
 ## 7. Варианты адаптации
@@ -211,15 +212,19 @@ y-кластеризация и склейка строк внутри блок�
 
 ## 10. Дефекты, найденные по дороге (не про MinerU)
 
-1. **Граница санитайза не одна.** `neutralize_prompt_injection_marks` вызывается в
-   `extract_text.py:57` и `extract_html.py:148`, но **не** в `extract_document.py` (PDF и Office)
-   и **не** в `extract_pdf_text.py` (там только `strip_control_characters`, `:82`). Инвариант
-   «одна граница до чанкинга/хеширования» (`core/util/sanitize.py:20-26`) на деле не выполнен для
-   двух путей из четырёх. Любой третий механизм утроил бы дыру, если чинить по одному пути.
-   Применение меняет `text` → `content_hash` → доказательства, поэтому это `execution_change` и
-   отдельный акт, а не побочная правка.
+1. **Граница санитайза была не одна — исправлено 02.11.2026.** `neutralize_prompt_injection_marks`
+   вызывался в `extract_text.py:64` и `extract_html.py:219`, но **не** в `extract_document.py`
+   (PDF и Office) и **не** в `extract_pdf_text.py` (там только `strip_control_characters`, `:89`).
+   Инвариант «одна граница до чанкинга/хеширования» (`core/util/sanitize.py:20-26`) на деле не
+   был выполнен для двух путей из четырёх: один и тот же текст доходил до оценщика помеченным
+   из `.txt` и дословным из `.docx`. Чинили не по одному пути, а одной границей —
+   `core/util/sanitize.finalize_extracted_text` (`:259`; вызовы — `extract_document.py:370`,
+   `extract_pdf_text.py:247`), и её версия вошла в провенанс: `docling-doc-3:…/<policy>/finalize-1`
+   и `docling-office-1:<policy>/<build>/finalize-1`. Любой третий механизм теперь получает ту же
+   границу, а не четвёртую дыру. Это меняет `text` → `content_hash` → доказательства, поэтому
+   смена версий — `execution_change` и отдельный акт, а не побочная правка.
 2. **Per-level таймауты docling вне дайджеста.** `_LEVEL_DOCUMENT_TIMEOUT_S`
-   (`core/adapters/extract_document.py:444-450`) — константа кода: 900/1800/2700/None по уровням.
+   (`core/adapters/extract_document.py:618-624`) — константа кода: 900/1800/2700/None по уровням.
    В `as_dict()` попадает только **явно объявленная** ось `document_timeout_s`
    (`crawl_frontier.py:400`). Значит смена уровня-дефолта меняет, какие документы успевают
    дочитаться (и попадают в корпус), **не меняя `run_id`**. Это ровно тот класс, который §9

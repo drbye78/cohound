@@ -193,7 +193,7 @@ R5 — не эстетика. `run_id` — утверждение «вот пр�
 **3.5. `num_threads` — объявленное значение, а не переменная окружения.** `AcceleratorOptions`
 docling — `BaseSettings` с префиксом `DOCLING_`, поэтому без явного аргумента число потоков
 приходит из окружения (`DOCLING_NUM_THREADS`/`OMP_NUM_THREADS`). Константа
-`ACCELERATOR_NUM_THREADS = 4` (`core/adapters/extract_document.py:477`) равна дефолту docling
+`ACCELERATOR_NUM_THREADS = 4` (`core/adapters/extract_document.py:651`) равна дефолту docling
 2.135 (проверено вызовом: `AcceleratorOptions()` → `num_threads=4`) и передаётся **явно**:
 при `DOCLING_NUM_THREADS=11 OMP_NUM_THREADS=11` пустой конструктор даёт **11**, а явный
 аргумент — **4** (проверено вызовом, не по документации). Мотив — тот же, что у устройства:
@@ -365,7 +365,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** — формула `min(floor((budget − parent_floor) / peak(level)), cpu_cap)`
 > (`core/pipeline/resources.py:542-614`), ось `extract_workers_derived`
 > (`core/pipeline/crawl_frontier.py:181`, `:497-507`), отказ при `workers=0` с называнием
-> пика и пола (`core/cli/wiring.py:2457-2465`). Явно объявленная
+> пика и пола (`core/cli/wiring.py:2511-2537`). Явно объявленная
 > `crawl.extract_workers` сильнее бюджета — это оставлено намеренно.
 > ✅ **расширено (2026-10-28, P9):** под `crawl.pdf_device: cuda` добавляется второе
 > слагаемое по видеопамяти — см. §5.5 и §3.4–3.6.
@@ -379,8 +379,8 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 
 > ✅ **сделано** — сборка движка входит в `extractor_version`:
 > `docling-doc-3:<level>/<device>/docling-<build>`, единственный источник —
-> `docling_engine_build()` (`core/adapters/extract_document.py:216-242`); тот же вызов питает
-> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:632-654`, `:985`).
+> `docling_engine_build()` (`core/adapters/extract_document.py:241-250`); тот же вызов питает
+> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:664-712`, `:1015`).
 > ✅ **расширено (2026-10-28, P9):** ключ различает **устройство** — без сегмента
 > `cpu`/`cuda` CUDA-прогон нашёл бы в `extract_cache` CPU-текст под тем же ключом (Д-8 в
 > новом виде). Смена устройства — `execution_change`: `run_id` меняется один раз, кэш один
@@ -388,7 +388,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > Кэш ключуется через `extractor_version`, поэтому апгрейд даёт промах, а не старый текст.
 > Ниже — история дефекта и обоснование цены (оставлено как провенанс решения).
 
-`extractor_stack` — `trafilatura-html-2+docling-doc-3/docling-2.135.0` — **входит** в
+`extractor_stack` — `trafilatura-html-3+text-plain-2+epub-2+pdfium-text-2+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1` — **входит** в
 `EXECUTION_CONTRACT_FIELDS` (`core/cli/execution_axes.py`), то есть в `run_id`. Значит
 обновление docling меняет `run_id`: контракт честно объявляет новый движок.
 
@@ -499,7 +499,7 @@ R2 выполняется, когда у каждого артефакта ес�
 
 > ⚠️ **сделано по форме, с названным остатком** — `extract` больше не ветка кода:
 > `RemoteExtractor` принимает `RawPage` с локальными байтами и передаёт артефакт, уровень и
-> устройство едут в запросе (`core/adapters/remote_extractor.py`, `core/cli/wiring.py:2983-3045`).
+> устройство едут в запросе (`core/adapters/remote_extractor.py`, `core/cli/wiring.py:3143-3155`).
 > Остаток: per-site слой уровня под `split` не резолвится (порты собираются до per-root
 > резолва) — это различие в **данных** размещения, а не в контракте порта.
 
@@ -591,7 +591,7 @@ R2 выполняется, когда у каждого артефакта ес�
 > ✅ **сделано** — формула реализована в `core/pipeline/resources.py:542-614`
 > (`workers_from_budget`, `peak_mb`, `parent_floor_mb` публикуются в сообщении/метриках), ось
 > `extract_workers_derived` в `core/pipeline/crawl_frontier.py:249`, `:702`;
-> `workers=0` — ошибка конфигурации (`core/cli/wiring.py:2457-2465`). `pooled`-часть
+> `workers=0` — ошибка конфигурации (`core/cli/wiring.py:2511-2537`). `pooled`-часть
 > (число как свойство пула) не реализована — пула как размещения нет.
 > ✅ **сделано (2026-10-28): второе ограничение — VRAM** (ось `crawl.pdf_device`, P9);
 > ⬜ VRAM-пик уровня `full` не измерен — см. ниже.
@@ -725,9 +725,9 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 
 ### 5.8. Идентичность экстрактора (Д-8) — предпосылка любого переиспользования
 
-> ✅ **сделано** — `docling_engine_build()` (`core/adapters/extract_document.py:205-213`),
-> `docling_extractor_version()` (`:202-228`), один и тот же вызов в `extractor_stack`
-> (`core/cli/execution_axes.py:625-648`).
+> ✅ **сделано** — `docling_engine_build()` (`core/adapters/extract_document.py:241-250`),
+> `docling_extractor_version()` (`:252-284`), один и тот же вызов в `extractor_stack`
+> (`core/cli/execution_axes.py:664-712`).
 
 Пока `extractor_version` не несёт сборку движка, `extract_cache` отдаёт текст, произведённый
 другим движком, и `run_id` об этом лжёт. Два варианта, различающиеся ценой:
@@ -778,7 +778,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 | 0.2 | Решение: сборка движка в `extractor_version` или только в ключе | Д-8 | зафиксировано в `05`/`09`; инвалидация описана явно |
 
 > ✅ **0.1 и 0.2 сделаны** — сборка едет в `extractor_version`
-> (`core/adapters/extract_document.py:216-242`), решение зафиксировано в §5.8 и `05` §5.
+> (`core/adapters/extract_document.py:241-250`), решение зафиксировано в §5.8 и `05` §5.
 
 ### Группа A — память и запись, нейтрально к качеству и скорости
 
@@ -905,7 +905,7 @@ SQLite-запросов, но **не** убирает O(N) чтения: `read_p
 > `split`» требует прогона одного корпуса двумя профилями. Механизм есть, паритет не
 > измерен — и это не то же самое.
 > ✅ **B3 сделано по объявленному слою** — `level` и `device` едут в `submit` из резолва
-> app < run (`core/cli/wiring.py:2983-3045`), edge строит экстрактор по ним.
+> app < run (`core/cli/wiring.py:3143-3155`), edge строит экстрактор по ним.
 > ⚠️ **Остаток B3:** per-site слой уровня (ключ `domain_profiles.yaml`) под `split` **не
 > действует** — порты собираются до per-root резолва, а фабрика прокси не знает ключа
 > пула. То же ограничение, что у `pdf_pipeline`. Честный фикс — фабрика прокси по ключу

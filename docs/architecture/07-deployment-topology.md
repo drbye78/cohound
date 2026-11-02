@@ -93,7 +93,7 @@ application-layer firewall (L7). Функционал, которому нуже
 >
 > ⬜ **не сделано (2026-10-28), подтверждено кодом:** `grep -rn extractor_zone core/` даёт только
 > `core/config/deploy.py:592` и валидатор `:607`; сборка экстрактора (
-> `core/cli/wiring.py:2065-2137` `build_worker_extractor`) на поле не смотрит.
+> `core/cli/wiring.py:2070-2138` `build_worker_extractor`) на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из
 > интернета — это основная поверхность атаки (парсеры/шрифты/архивы). Идея «вынести её в edge»
@@ -357,7 +357,7 @@ LLM-endpoint корп. облака — только в Z0.
    сделано: `core/edge/scheduler.py:163` (`_COLLECT_MAX_BYTES = 8 MiB`),
    `core/adapters/gateway_validate.py:53` (`MAX_RESPONSE_BYTES = 52_428_800`)
 3. **`crawl.document_level` под `split` не действует** — конвертеры строит edge сам, ось ядра
-   на них не влияет. — ⬜ не сделано: `core/cli/wiring.py:2215` (явный комментарий «ось здесь не
+   на них не влияет. — ⬜ не сделано: `core/cli/wiring.py:2294` (явный комментарий «ось здесь не
    действует»)
 
 Поэтому `split` — не «та же функциональность за швом»: по корпусу он **уже** `local`. Это

@@ -256,13 +256,13 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
 ### 4.2. Контракт (**✅ as-built**)
 
-`EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:80-181`):
+`EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:88-197`):
 добавляется `embed_device` рядом с `extractor_stack` (та же природа: устройство как условие
 измерения). Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:237`)
-из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:570-629`).
+из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:602-662`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
-(`core/pipeline/digests.py:394-416`) требует точного набора ключей, но вызывается ровно из
+(`core/pipeline/digests.py:400-442`) требует точного набора ключей, но вызывается ровно из
 одного места — `run_identity.py:321`, внутри `build_execution_contract`, то есть только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
 строки (`core/pipeline/report.py:2054-2078`), а отсутствующее на манифесте поле уходит в
@@ -284,7 +284,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено»
 
-`_resolve_embedder` (`core/cli/wiring.py:2728-2775`) сегодня выбирает по факту установки:
+`_resolve_embedder` (`core/cli/wiring.py:2731-2778`) сегодня выбирает по факту установки:
 `model2vec` → `LocalEmbedder` → `None`. `LiteEmbedder` — NumPy/CPU by design
 (`core/adapters/embed_model2vec.py:4`), и `device` он игнорировать обязан.
 
@@ -334,7 +334,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 (`tests/pipeline/test_corpus_stage_timings.py:64`, сверка `:399`) — меняются неизбежно.
 
 Почему **не** в `embed_model_id`: он описывает **веса**, а не место счёта, и классифицируется
-как `content_change` (`core/pipeline/digests.py:68-79`). Положив устройство туда, мы
+как `content_change` (`core/pipeline/digests.py:79-88`). Положив устройство туда, мы
 прочитали бы смену прибора как смену содержимого — то, от чего `pdf_device` ушёл через
 `extractor_stack`.
 

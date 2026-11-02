@@ -8,12 +8,14 @@ Plain text и markdown — **первый класс** наравне с HTML и
 
 Что делает читатель (и только это — разметку он **не** интерпретирует):
 
-* декодирует байты с charset из ``Content-Type`` (fallback — UTF-8 с ``errors="replace"``;
-  битые байты не роняют документ, но и не прячутся — замена видна в тексте);
-* снимает UTF-8 BOM, приводит CRLF/CR к LF;
-* вычищает NUL/управляющие символы, сохраняя ``\\t`` (та же гигиена evidence, что на
-  HTML-границе, T7.5: :func:`core.util.sanitize.strip_control_chars` +
-  :func:`core.util.sanitize.neutralize_prompt_injection_marks`);
+* декодирует байты: BOM (UTF-8/UTF-16 LE/BE) → charset из ``Content-Type`` →
+  UTF-8 с ``errors="replace"`` (у плоского текста нет разметки, поэтому ``<meta charset>``
+  не читается; кодировка не угадывается — битые байты не роняют документ, но и не
+  прячутся: замена видна в тексте);
+* снимает BOM, приводит CRLF/CR к LF;
+* вычищает NUL/управляющие символы, сохраняя ``\\t``, и каркас промпт-инъекций — единой
+  границей evidence :func:`core.util.sanitize.finalize_extracted_text` (та же, что на
+  HTML-границе, T7.5);
 * схлопывает серии пустых строк (>2 подряд) до одной — plain text из CMS часто несёт
   хвосты форматирования, а чанкер абзацев считает пустую строку границей блока;
 * пустой/пробельный результат — **видимая** ошибка ``"текст пуст"``, а не пустой
@@ -28,17 +30,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from core.adapters.extract_html import _charset_from_content_type
+from core.adapters.extract_html import (
+    _bom_charset,
+    _charset_from_content_type,
+    _decode_bytes,
+)
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 from core.util.document_formats import FAMILY_TEXT, textual_family
 from core.util.hashing import content_hash
-from core.util.sanitize import neutralize_prompt_injection_marks, strip_control_chars
+from core.util.sanitize import finalize_extracted_text
 
 __all__ = ["TEXT_EXTRACTOR_VERSION", "TextExtractor", "normalize_text"]
 
 #: Стабильная версия читателя (провенанс/``execution_contract``): меняется только при
 #: изменении нормализации текста — это меняет chunk-set и обязано быть видно (§13).
-TEXT_EXTRACTOR_VERSION = "text-plain-1"
+TEXT_EXTRACTOR_VERSION = "text-plain-2"
 
 #: Серия пустых (в т.ч. из одних пробелов) строк длиннее одной → ровно одна пустая.
 _BLANK_RUN_RE = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
@@ -48,31 +54,30 @@ def normalize_text(text: str) -> str:
     """Нормализует плоский текст: BOM/переводы строк/управляющие символы/пустые строки.
 
     Порядок важен: сначала переводы строк (CRLF/CR → LF — до схлопывания пустых строк,
-    иначе ``\\r\\n\\r\\n`` не считалось бы пустой строкой), затем управляющие символы
-    (``\\r`` к этому моменту уже переведён в ``\\n`` и сохраняется как граница строки),
-    затем каркас промпт-инъекций, затем пустые строки и обрезка краёв.
+    иначе ``\\r\\n\\r\\n`` не считалось бы пустой строкой), затем единая граница очистки
+    текста (:func:`core.util.sanitize.finalize_extracted_text`: управляющие символы, затем
+    каркас промпт-инъекций — тот же порядок, что у остальных читателей), затем пустые
+    строки и обрезка краёв.
     """
     text = text.removeprefix("\ufeff")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = strip_control_chars(text)
-    text = neutralize_prompt_injection_marks(text)
+    text = finalize_extracted_text(text)
     text = _BLANK_RUN_RE.sub("\n\n", text)
     return text.strip()
 
 
 def _decode(content: bytes, content_type: str | None) -> str:
-    """Декодирует байты: charset из ``Content-Type``, иначе UTF-8 с заменой.
+    """Декодирует байты: BOM → ``Content-Type`` → UTF-8 с заменой.
+
+    У плоского текста **нет** разметки, поэтому ``<meta charset>`` не существует: читатель
+    не выдумывает объявление, которого в формате не бывает, и не угадывает кодировку.
+    BOM — сильнее заголовка (он часть байтов), заголовок — сильнее догадки.
 
     Неизвестный/битый charset — fallback на UTF-8 (не исключение): заголовок сервера не
     повод потерять документ, а замена символов честно видна в тексте.
     """
-    charset = _charset_from_content_type(content_type)
-    if charset:
-        try:
-            return content.decode(charset, errors="replace")
-        except (LookupError, UnicodeError):
-            pass
-    return content.decode("utf-8", errors="replace")
+    charset = _bom_charset(content) or _charset_from_content_type(content_type)
+    return _decode_bytes(content, charset)
 
 
 class TextExtractor:

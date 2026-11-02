@@ -2379,10 +2379,10 @@ URL синтетический, фетчить его нельзя, а файл 
 | Семейство / формат | Сигнал | Читатель | Чанкер |
 |---|---|---|---|
 | HTML (страница) | остальное (по умолчанию) | `HtmlExtractor` (trafilatura) | `MarkdownChunker` |
-| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-1`) | `MarkdownChunker` (`md-heading-3`) |
-| plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-1`) | `TextChunker` (`text-para-2`) |
+| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-heading-4`) |
+| plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-2`) | `TextChunker` (`text-para-2`) |
 | документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
-| EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-1`) | `MarkdownChunker` |
+| EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-2`) | `MarkdownChunker` |
 
 **Маршрут в композите** (`core/cli/wiring._LocalExtractor`, `core/edge/__main__._EdgeExtractor`):
 явный `HTML` → явный `DOCUMENT` → текстовое семейство (суффикс, затем `Content-Type`) →
@@ -2393,13 +2393,13 @@ EPUB → документный суффикс/тип → HTML. Новое зн�
 docling): текстовый и EPUB-пути от docling не зависят, а возврат «голого» `HtmlExtractor`
 вернул бы `.txt`/`.epub` в trafilatura.
 
-**Текстовый читатель** (`core/adapters/extract_text.py`, `text-plain-1`) не интерпретирует
+**Текстовый читатель** (`core/adapters/extract_text.py`, `text-plain-2`) не интерпретирует
 разметку: charset из `Content-Type` (fallback UTF-8 `errors="replace"`), снятие BOM,
 CRLF/CR → LF, удаление NUL/управляющих символов (таб сохраняется), нейтрализация каркаса
 промпт-инъекций, схлопывание >2 пустых строк до одной. Пустой/пробельный результат —
 видимая ошибка `"текст пуст"`, а не пустой успех. `page_count=None`.
 
-**EPUB через контейнерный субстрат** (`core/adapters/extract_epub.py`, `epub-1`; stdlib
+**EPUB через контейнерный субстрат** (`core/adapters/extract_epub.py`, `epub-2`; stdlib
 `zipfile` + `xml.etree`, без новых зависимостей): `META-INF/container.xml` → rootfile
 `full-path` → OPF → `manifest` (id → href, media-type) → `spine` (упорядоченные idref).
 Главы склеиваются **в порядке spine** (порядок чтения; `manifest` — инвентарь ресурсов),
@@ -2427,7 +2427,7 @@ CRLF/CR → LF, удаление NUL/управляющих символов (т
 себя HTML и docling).
 
 **Контрактная граница.** `chunker_version` — поле `EXECUTION_CONTRACT_FIELDS`, поэтому с
-двумя чанкерами оно стало **композитом** `"md-heading-3+text-para-2"`
+двумя чанкерами оно стало **композитом** `"md-heading-4+text-para-2"`
 (`chunker_family.composite_chunker_version`, тот же источник у декларации и у собранного
 порта). Это версионная граница класса `execution_versions` (`execution_change`, §13):
 меняется `run_id`, `METHODOLOGY_VERSION` — нет.
@@ -2709,7 +2709,8 @@ products:
 (`core/pipeline/corpus.py`): sorted `(chunk_id, content_hash)`.
 
 **`extractor_version` — не константа: в неё входит устройство (P9).** Строка имеет вид
-`docling-doc-3:<level>/<device>/docling-<build>` (`core/cli/execution_axes.py:624-644`), где
+`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`
+(`core/adapters/extract_document.py:252-284`), где
 `<device>` — объявленная ось `crawl.pdf_device` (`cpu|cuda`, `core/domain/enums.py:531`,
 резолв — `resolve_pdf_device` в `core/pipeline/crawl_frontier.py`). Поэтому `pb` различает
 `cpu` и `cuda` **явно**, а не через «повезло/не повезло с железом»; сама ось входит в
@@ -2815,7 +2816,7 @@ class CompositionView:
 
 - записи идут **генератором** из `store.iter_chunks(partition_build_id, product_id=…)`
   прямо в `index.index(records, …)` — ни список записей, ни их текст не живут в памяти
-  (`core/cli/wiring.py:427-495`, докстринг `seed_lexical_index`);
+  (`core/cli/wiring.py:418-488`, докстринг `seed_lexical_index`);
 - при поиске текст догружается **из store пачкой** — `StorePort.get_chunks(chunk_ids)`
   (`core/store/sqlite_store.py`, `SqliteStore.get_chunks`, шаг `_CHUNK_ID_BATCH = 500`),
   передаётся адаптеру как провайдер гидртации, поэтому адаптер не знает ни SQL, ни
@@ -4075,7 +4076,7 @@ class ProductStatePort(Protocol):
 | `iter_chunks` | `iter_doc_chunks` | `iter_chunks` в коде занято run-DB-методом (чанки сборки); durable-чанки версии — это `iter_doc_chunks` |
 | `set_onboarding_state`, `set_last_corpus_run_id`, `set_last_evaluated`, `set_last_completed` | нет сеттеров вовсе | Рубежи двигает **один** владелец — `state_sync.record_run_outcome` (O10), и он пишет их вместе со снимком в одной транзакции. Отдельные сеттеры позволили бы сдвинуть рубеж без снимка — то есть объявить baseline, которого не было |
 | `get_attestation` | нет | Таблица `attestation` без писателя по решению (§4.2): действующая аттестация охвата живёт в `packages/{case}/scope_attestation.yaml` + `cell_evidence.scope_acceptance` (§11.5), а durable-аттестация профиля — в `profile_attestation` (§6.9). Третий носитель аттестации не заводится |
-| `iter_chunks_by_composition` | не нужен | Композиция читается по членам: `iter_chunks(partition_build_id, product_id=…)` в цикле по `view.members` — так делает `seed_lexical_index` (`core/cli/wiring.py:427-495`) |
+| `iter_chunks_by_composition` | не нужен | Композиция читается по членам: `iter_chunks(partition_build_id, product_id=…)` в цикле по `view.members` — так делает `seed_lexical_index` (`core/cli/wiring.py:418-488`) |
 
 Методы пер-ячеечного измерения **есть в порте** (`core/ports/state.py`): пишет Ш6
 (`record_cell_measurements`, пачка на продукт), читает перенос (`get_cell_measurement`,
@@ -4239,7 +4240,7 @@ state/state.db                                 # durable-состояние па
    `CompositionViewPort` принимается как `view`, `build_id` композиции сверяется с
    `view.composition_id` и расхождение отвергается (`:219-226`), каждая партиция читается
    по своей карте.
-7. `seed_lexical_index` (`core/cli/wiring.py:427-495`) — ✅ **реализовано**: итерация по
+7. `seed_lexical_index` (`core/cli/wiring.py:418-488`) — ✅ **реализовано**: итерация по
    `view.members` через `store.iter_chunks(partition_build_id, product_id=…)`, потоково
    (генератор, без списка записей), с гидртацией текста из store через `get_chunks`.
 8. `--only-failed` — ✅ **сделано 30.10.2026, межпрогонный.** Резолвер
@@ -4256,7 +4257,7 @@ state/state.db                                 # durable-состояние па
     **✅ сделано**: `eval_echo` расширен объявленным методологическим контекстом,
     `EVAL_CACHE_FORMAT` поднят до `2`, конверт формата 1 читается как промах (§10.5).
     Ключ **переноса ячеек** — отдельная величина и тоже существует:
-    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:436`,
+    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:438`,
     §10.1); прежняя редакция называла его несуществующим.
 11. `_chunk_id` (`core/pipeline/corpus_index.py:169`) — ✅ **сделано**: форма
     `f"{product_id}:{doc_version_id}:{chunk_no}"` (вызовы — `corpus_ingest.py:1322`,
@@ -4323,7 +4324,7 @@ state/state.db                                 # durable-состояние па
 | T13 | `--only-failed` после T9 | повторяются только failed URL/продукты; успешные не фетчатся; провал **прошлого** прогона тоже виден | as-built с 30.10.2026: межпрогонный, источник 2 — `url_state.consecutive_failures > 0` (§2.4); ремонт идёт depth-0 известными URL, авторские корни не дренятся. Приёмка — `tests/pipeline/test_only_failed_work_set.py`, `tests/cli/test_only_failed_interrun.py` |
 | T14 | Пустые seed'ы, preflight обойдён (unit) | coverage `expected=0, complete=False, reason=no_seeds`; cells `failed`; нет «тихого ok» | as-built |
 | T15 | Продукт retired, затем re-add | режим `new`; полный краул; старые партиции сохранены, но не в композиции | as-built с 30.10.2026: retirement — авторское `state: retired` в `sources/seeds.yaml` (отдельной команды нет), прогон отражает его в durable `product_state` **до** выхода на блокировку (`_reconcile_declared_retirements`, `core/cli/commands/run.py`), а возврат активного seed'а выставляет `re_added_at` в той же сверке (`reconcile_seed_set`, `core/store/state_store.py`). Приёмка — `tests/cli/test_run_retirement.py` (3), `tests/pipeline/test_re_added_at.py` (10; 7 падают без писателя) |
-| T16 | Переименование `canonical_name` | режим `incremental`; краул не запускается; меняется только `product_state` | as-built: `canonical_name` **не входит** ни в `cohort_digest` (`core/pipeline/digests.py:209-236`), ни в `seeds_digest` (`:238-…`), поэтому `run_id` не меняется и прогон резюмируется, а не краулит заново |
+| T16 | Переименование `canonical_name` | режим `incremental`; краул не запускается; меняется только `product_state` | as-built: `canonical_name` **не входит** ни в `cohort_digest` (`core/pipeline/digests.py:211-238`), ни в `seeds_digest` (`:240-…`), поэтому `run_id` не меняется и прогон резюмируется, а не краулит заново |
 | T17 | Смена `cutoff_K` | `cell_reuse_key` не совпал; все ячейки переоценены (I20) | as-built на уровне ключа: `test_cell_reuse_key_changes_with_any_condition` (`cutoff_k`, `retrieval_profile`, `retrieval_params_json`) |
 | T17b | Изменён документ вне top-K ячейки | ячейка **перенесена**, LLM не вызван (per-cell) | as-built: `test_new_document_outside_top_k_does_not_block_carry` |
 | T18 | Смена `methodology_version` | carry-forward запрещён; eval cache miss; golden-full требуется | as-built в части переноса/кэша: версия входит в оба ключа (`test_cell_reuse_key_changes_with_any_condition`, `EVAL_CACHE_FORMAT = 2`); требование golden-full — процесс §13, тестом не покрыто |

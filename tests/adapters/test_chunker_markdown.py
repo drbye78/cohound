@@ -1,11 +1,14 @@
-"""Тесты распознавания заголовков markdown-чанкера (``md-heading-3``).
+"""Тесты распознавания заголовков markdown-чанкера (``md-heading-4``).
 
-Проверяются два исправленных дефекта ``_extract_sections``:
+Проверяются исправленные дефекты ``_extract_sections``:
 
 * **fence-aware** — заголовки внутри ``` ```/~~~ ``` блоков кода не распознаются и
   не обрезают стек заголовков; незакрытый fence не теряет текст;
 * **setext** — ``Title`` + ``=====``/``-----`` даёт непустой ``heading_path``,
   а ``---`` как тематический разрыв заголовком не становится.
+* **относительные уровни** — ATX-уровни считаются от самого мелкого уровня документа,
+  поэтому документ без ``#`` (trafilatura, docling для Office) не получает ложную
+  вложенность из двух соседних ``##``.
 
 Плюс регрессия детерминизма (одинаковый вход → одинаковые ``chunk_id``/``content_hash``)
 и фиксация версии чанкера.
@@ -165,6 +168,65 @@ def test_setext_after_atx_heading_is_not_heading() -> None:
 
 
 # ---------------------------------------------------------------------------
+# относительные уровни: документ без `#` не получает вложенность из ничего
+# ---------------------------------------------------------------------------
+
+
+def test_adjacent_h2_without_h1_are_siblings() -> None:
+    """Два соседних ``##`` — два независимых раздела, а не родитель и ребёнок.
+
+    Так выглядят заголовки из trafilatura (первый заголовок страницы — h2) и из
+    docling для DOCX/XLSX: ``#`` в тексте отсутствует. ``heading_path`` — привязка
+    цитаты к разделу, поэтому «РАЗДЕЛ 1 > РАЗДЕЛ 2» была ложью в провенансе.
+    """
+    md = "## РАЗДЕЛ 1\n\nтело1\n\n## РАЗДЕЛ 2\n\nтело2\n"
+    chunks = _chunk(md)
+    assert _chunk_with(chunks, "тело1").heading_path == "РАЗДЕЛ 1"
+    assert _chunk_with(chunks, "тело2").heading_path == "РАЗДЕЛ 2"
+
+
+def test_h3_nests_under_h2_when_h1_is_absent() -> None:
+    """Относительность не отменяет иерархию: ``###`` под ``##`` — ребёнок."""
+    md = (
+        "## РАЗДЕЛ 1\n\nтело1\n\n### ПОДРАЗДЕЛ\n\nтело2\n\n"
+        "## РАЗДЕЛ 2\n\nтело3\n"
+    )
+    chunks = _chunk(md)
+    assert _chunk_with(chunks, "тело1").heading_path == "РАЗДЕЛ 1"
+    assert _chunk_with(chunks, "тело2").heading_path == "РАЗДЕЛ 1 > ПОДРАЗДЕЛ"
+    assert _chunk_with(chunks, "тело3").heading_path == "РАЗДЕЛ 2"
+
+
+def test_document_starting_with_h1_keeps_absolute_structure() -> None:
+    """Документ с ``#`` режется как прежде: корень = 1, пути абсолютны."""
+    md = (
+        "# РАЗДЕЛ 1\n\nтело1\n\n## ПОДРАЗДЕЛ\n\nтело2\n\n"
+        "## РАЗДЕЛ 2\n\nтело3\n"
+    )
+    chunks = _chunk(md)
+    assert _chunk_with(chunks, "тело1").heading_path == "РАЗДЕЛ 1"
+    assert _chunk_with(chunks, "тело2").heading_path == "РАЗДЕЛ 1 > ПОДРАЗДЕЛ"
+    assert _chunk_with(chunks, "тело3").heading_path == "РАЗДЕЛ 1 > РАЗДЕЛ 2"
+
+
+def test_shallower_heading_lowers_root_for_following_headings() -> None:
+    """`#` после `##` понижает корень; уже выданные чанки не переписываются."""
+    md = "## ЧАСТЬ\n\nтело1\n\n# ГЛАВА\n\nтело2\n\n## РАЗДЕЛ\n\nтело3\n"
+    chunks = _chunk(md)
+    assert _chunk_with(chunks, "тело1").heading_path == "ЧАСТЬ"
+    assert _chunk_with(chunks, "тело2").heading_path == "ГЛАВА"
+    assert _chunk_with(chunks, "тело3").heading_path == "ГЛАВА > РАЗДЕЛ"
+
+
+def test_setext_h1_keeps_nesting_for_following_h2() -> None:
+    """setext вносит свой уровень (1/2) в корень: ``Title`` + ``##`` остаётся вложением."""
+    md = "Title\n=====\n\nтело\n\n## Sub\n\nтело2\n"
+    chunks = _chunk(md)
+    assert _chunk_with(chunks, "тело").heading_path == "Title"
+    assert _chunk_with(chunks, "тело2").heading_path == "Title > Sub"
+
+
+# ---------------------------------------------------------------------------
 # YAML-front-matter (консервативно: только в начале документа и с телом-отображением)
 # ---------------------------------------------------------------------------
 
@@ -192,8 +254,8 @@ def test_dashes_without_front_matter_body_keep_commonmark_behaviour() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_version_is_md_heading_2() -> None:
-    assert MarkdownChunker.version == "md-heading-3"
+def test_version_is_md_heading_4() -> None:
+    assert MarkdownChunker.version == "md-heading-4"
 
 
 def test_chunking_is_deterministic() -> None:

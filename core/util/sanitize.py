@@ -35,6 +35,7 @@ import re
 import warnings
 
 __all__ = [
+    "finalize_extracted_text",
     "neutralize_prompt_injection_marks",
     "sanitize_html",
     "strip_control_chars",
@@ -253,3 +254,29 @@ def neutralize_prompt_injection_marks(text: str) -> str:
     for pattern in _INJECTION_PATTERNS:
         result = pattern.sub(_INJECTION_MARKER, result)
     return result
+
+
+def finalize_extracted_text(text: str) -> str:
+    """Единая граница очистки текста экстракции — **обязательна для каждого читателя**.
+
+    **Зачем одна функция, а не «каждый адаптер сам».** До 02.11.2026 очистка жила в двух
+    местах (``extract_html._postprocess`` и ``extract_text``), а документный путь
+    (docling: PDF и Office) и механизм ``text_layer`` не вызывали её вовсе. Разница была
+    невидимой: HTML-страница с фразой-переопределением доходила до оценщика помеченной,
+    а тот же текст в DOCX — дословно (замер 02.11.2026: ``.txt`` →
+    ``[injection-scaffold-removed]``, ``.docx`` → фраза целиком). Граница одна, вызов —
+    в каждом читателе: адаптер возвращает текст, который уже нельзя «забыть очистить».
+
+    **Порядок фиксирован.** Сначала :func:`strip_control_chars` — управляющие символы
+    рвут и лексический индекс, и сверку цитаты с чанком (I22). Затем
+    :func:`neutralize_prompt_injection_marks` — узкие структурные шаблоны; прозу она не
+    переписывает. Обратный порядок оставил бы управляющие символы внутри уже помеченного
+    текста и дал бы другой ``content_hash`` при том же смысле.
+
+    **Идемпотентна**: у метки замены нет шаблонов, повторный вызов текст не меняет.
+
+    **Вызывается до** ``content_hash``: цитата и чанк обязаны считаться по одному и тому
+    же тексту. Текст, изменённый здесь, обязан изменить версию читателя — версии
+    читателей входят в ``extractor_stack`` (объявленный вход ``run_id``, §9).
+    """
+    return neutralize_prompt_injection_marks(strip_control_chars(text))

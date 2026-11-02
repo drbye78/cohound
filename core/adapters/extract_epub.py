@@ -26,12 +26,19 @@ EPUB — это OCF-контейнер (ZIP) с OPF-пакетом и XHTML-гл
 на своём месте в порядке чтения как **видимая заметка** с заголовком — тихий пропуск
 сделал бы «главу не прочитали» неотличимым от «главы нет в книге».
 
+**Иерархия заголовков.** Заголовок главы ставится на уровень ``#``, а ATX-заголовки,
+пришедшие из XHTML главы, сдвигаются на +1 (:func:`_shift_chapter_headings`): иерархия
+становится «глава → раздел → подраздел», и ``heading_path`` markdown-чанкера не теряет
+главу. Сдвиг не трогает код в fenced-блоках, строки таблиц, тематические разрывы и
+строки с отступом; ``######`` не переполняется.
+
 Нейтрален (§1.3).
 """
 
 from __future__ import annotations
 
 import posixpath
+import re
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -56,7 +63,12 @@ from core.util.hashing import content_hash
 __all__ = ["EPUB_READER_VERSION", "EpubExtractor"]
 
 #: Стабильная версия читателя (провенанс/``extractor_version`` документа).
-EPUB_READER_VERSION = "epub-1"
+#:
+#: ``epub-2`` (было ``epub-1``): заголовок главы опущен на уровень ``#``, а внутренние
+#: ATX-заголовки главы сдвинуты на +1 (:func:`_shift_chapter_headings`). Текст книги
+#: изменился ⇒ обязан измениться объявленный стек читателя, иначе ``extractor_version``
+#: описывал бы прежнюю разметку.
+EPUB_READER_VERSION = "epub-2"
 
 #: Путь контейнерного манифеста OCF — фиксирован стандартом (EPUB OCF §2.5.1).
 CONTAINER_XML = "META-INF/container.xml"
@@ -64,9 +76,34 @@ CONTAINER_XML = "META-INF/container.xml"
 #: Media-type OPF-пакета (rootfile ``media-type``).
 _OPF_MEDIA_TYPE = "application/oebps-package+xml"
 
-#: Уровень заголовка главы в собранном markdown: ``##`` оставляет место заголовку
-#: документа и даёт непустой ``heading_path`` в markdown-чанкере.
-_CHAPTER_HEADING = "## "
+#: Уровень заголовка главы в собранном markdown — ``#``.
+#:
+#: Глава — вершина иерархии **документа**: markdown-чанкер сбрасывает стек заголовков
+#: под уровень нового заголовка (``MarkdownChunker._extract_sections``), поэтому заголовок
+#: главы обязан быть выше любого внутреннего. При ``##`` внутренний ``#`` (trafilatura
+#: отдаёт ``<h1>`` глав как ``#``) сбрасывал стек и ``heading_path`` терял главу; с ``#``
+#: путь получается «глава → раздел → подраздел».
+_CHAPTER_HEADING = "# "
+
+#: ATX-заголовок ровно в той форме, в какой его видит markdown-чанкер
+#: (``MarkdownChunker._HEADING_RE``): ``#`` в начале строки, затем пробел и текст.
+#: Ведущий отступ не допускается намеренно: чанкер такой строки заголовком не считает,
+#: и сдвигать то, что структурой не является, нельзя.
+_ATX_HEADING_RE = re.compile(r"^(#{1,6})([ \t]+)(\S.*)$")
+
+#: Открывающий/закрывающий ограждённый блок кода — правила CommonMark, те же, что у
+#: markdown-чанкера (``md-heading-4``): до 3 пробелов отступа, маркер ` или ~ длиной ≥3.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+#: Строка-разделитель pipe-таблицы GFM (``--- | ---``, ``|:--|:-:|``): минимум два
+#: дефиса в ячейке. Требуется хотя бы один ``|`` — иначе ``---`` (тематический разрыв)
+#: стал бы началом таблицы.
+_TABLE_DELIMITER_RE = re.compile(
+    r"^ {0,3}\|?[ \t]*:?-{2,}:?[ \t]*(?:\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$"
+)
+
+#: Максимальный уровень ATX-заголовка markdown.
+_MAX_HEADING_LEVEL = 6
 
 
 class _MemberUnreadable(RuntimeError):
@@ -226,6 +263,109 @@ def _chapter_title(data: bytes, fallback: str) -> str:
     return fallback
 
 
+def _fence_open(line: str) -> tuple[str, int] | None:
+    """``(символ, длина)`` открывающего ограждённого блока либо ``None``.
+
+    Info-string обратной кавычки не может содержать обратную кавычку (CommonMark):
+    такая строка — обычный текст, а не начало блока.
+    """
+    match = _FENCE_RE.match(line)
+    if not match:
+        return None
+    marker = match.group(1)
+    if marker[0] == "`" and "`" in match.group(2):
+        return None
+    return marker[0], len(marker)
+
+
+def _fence_closes(line: str, char: str, length: int) -> bool:
+    """Закрывает ли строка открытый блок: тот же символ, длина ≥, без info-string."""
+    match = _FENCE_RE.match(line)
+    if not match:
+        return False
+    marker = match.group(1)
+    return marker[0] == char and len(marker) >= length and not match.group(2).strip()
+
+
+def _is_table_delimiter(line: str) -> bool:
+    """Строка-разделитель pipe-таблицы GFM.
+
+    Обязателен ``|``: иначе ``---`` (тематический разрыв) и ``___``/``***`` выглядели бы
+    началом таблицы, а таблица — это не заголовок, но и не разрыв.
+    """
+    return "|" in line and _TABLE_DELIMITER_RE.match(line) is not None
+
+
+def _table_rows(lines: list[str]) -> list[bool]:
+    """Маска: какие строки принадлежат pipe-таблицам.
+
+    Таблица — заголовочная строка, разделитель и строки данных до пустой строки.
+    Скан идёт по **сырым** строкам, не разбирая fence: лишняя пометка внутри блока кода
+    безвредна (fence проверяется первым и строку всё равно не сдвигает), а пропущенной
+    пометки у настоящей таблицы не бывает.
+    """
+    mask = [False] * len(lines)
+    for index, line in enumerate(lines):
+        if not _is_table_delimiter(line):
+            continue
+        mask[index] = True
+        if index > 0:
+            mask[index - 1] = True  # заголовочная строка таблицы
+        for row in range(index + 1, len(lines)):
+            if not lines[row].strip() or "|" not in lines[row]:
+                break
+            mask[row] = True
+    return mask
+
+
+def _shift_chapter_headings(text: str) -> str:
+    """Сдвигает ATX-заголовки главы на +1: «глава → раздел → подраздел».
+
+    Заголовок главы ставит читатель на уровень ``#`` (:data:`_CHAPTER_HEADING`), поэтому
+    внутренние заголовки, пришедшие от HTML-экстрактора (trafilatura: ``<h1>`` → ``#``,
+    ``<h2>`` → ``##``), обязаны лежать на уровень глубже. Без сдвига ``#`` главы и ``#``
+    раздела стоят на одном уровне, ``MarkdownChunker`` сбрасывает стек на каждом из них,
+    и ``heading_path`` теряет главу — ровно то, ради чего ``heading_path`` существует.
+
+    Что **не** сдвигается:
+
+    * строки внутри ограждённых блоков кода (````` ``` `````/``~~~``, в том числе примеры
+      ``# comment``): это код, а не структура документа;
+    * строки pipe-таблиц, включая таблицы без ведущего ``|`` (``# значение | x`` —
+      ячейка, а не заголовок);
+    * тематические разрывы ``---``/``***``/``___`` — они не ATX и под шаблон не попадают;
+    * строки с ведущим отступом — чанкер их заголовками не считает.
+
+    Уровень выше :data:`_MAX_HEADING_LEVEL` не создаётся: ``######`` остаётся ``######``
+    (седьмого уровня в markdown нет — ``#######`` перестало бы быть заголовком вовсе).
+    """
+    lines = text.split("\n")
+    table = _table_rows(lines)
+    shifted: list[str] = []
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        if fence is not None:
+            if _fence_closes(line, *fence):
+                fence = None
+            shifted.append(line)
+            continue
+        opened = _fence_open(line)
+        if opened is not None:
+            fence = opened
+            shifted.append(line)
+            continue
+        if table[index]:
+            shifted.append(line)
+            continue
+        match = _ATX_HEADING_RE.match(line)
+        if match is None:
+            shifted.append(line)
+            continue
+        level = min(len(match.group(1)) + 1, _MAX_HEADING_LEVEL)
+        shifted.append(f"{'#' * level}{match.group(2)}{match.group(3)}")
+    return "\n".join(shifted)
+
+
 class EpubExtractor:
     """EPUB → markdown. Реализация ``ExtractorPort`` (отдельный читатель, не docling).
 
@@ -364,7 +504,10 @@ class EpubExtractor:
                 )
                 continue
             read_any = True
-            blocks.append(f"{_CHAPTER_HEADING}{_chapter_title(data, fallback)}\n\n{text}")
+            blocks.append(
+                f"{_CHAPTER_HEADING}{_chapter_title(data, fallback)}\n\n"
+                f"{_shift_chapter_headings(text)}"
+            )
 
         if not read_any:
             # Причины первых отказов — в тексте ошибки: иначе «ни одна глава» не отличима

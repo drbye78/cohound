@@ -332,10 +332,10 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 объявленной, ни отказа на пустой пин (правило 1 §5.0).
 Нормативная часть (смена `embed_model_id` классифицируется как `content_change`, а не
 `execution_change`) держится: `embed_model_id` в `EXECUTION_CONTRACT_FIELDS` не входит
-(`core/pipeline/digests.py:71`), то есть для внешнего инстанса дефект Д-8 остаётся
+(`core/pipeline/digests.py:79-81`), то есть для внешнего инстанса дефект Д-8 остаётся
 **открытым по построению** — закрыть его можно только пином, а пина нет.
 
-`digests.py:68-76` фиксирует решение: `embed_model_id` **не** входит в
+`digests.py:79-88` фиксирует решение: `embed_model_id` **не** входит в
 `EXECUTION_CONTRACT_FIELDS` — «смена видна через `pb`/`index_build_id` и попадает в класс
 `content_change`». Для локальной модели это защитимо: модель поставили вы, она не меняется.
 
@@ -347,7 +347,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:237-240`).
+(`core/cli/wiring.py:281-292`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
@@ -433,7 +433,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 **Факт.** `LocalEmbedder` не передаёт `device` в загрузчик: `SentenceTransformer(self._repo_id,
 revision=…, local_files_only=…)` (`core/adapters/embed_local.py:176`). Устройство выбирает
 torch по умолчанию, то есть `cuda`, если она доступна. В этом окружении
-`torch 2.14.1+cu130`, `cuda_available=True`, `_resolve_embedder()` (`core/cli/wiring.py:2728-2775`)
+`torch 2.14.1+cu130`, `cuda_available=True`, `_resolve_embedder()` (`core/cli/wiring.py:2731-2778`)
 выбрал `LocalEmbedder` (bge-m3, dim 1024) — значит эмбеддинг исполнялся **на карте**, и это
 видно не по декларации, а по факту `nvidia-smi --query-compute-apps`. Состав процессов
 меняется по фазе, и это как раз доказательство: в docling-фазе на карте **два** процесса
@@ -482,7 +482,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
    устройство, на котором прогон не исполнялся);
 2. ось входит в `EXECUTION_CONTRACT_FIELDS`, а не в `embed_model_id`. Соблазн положить
    устройство в `embed_model_id` надо отклонить: `embed_model_id` классифицируется как
-   `content_change` (`core/pipeline/digests.py:68-76`), то есть смена прибора прочиталась бы
+   `content_change` (`core/pipeline/digests.py:79-88`), то есть смена прибора прочиталась бы
    как смена содержимого. У `pdf_device` прецедент верный — он входит в контракт через
    `extractor_stack`, то есть даёт `execution_change`;
 3. `vector_digest` в `_partition_reuse_reason` — «чужие векторы» становятся видимым отказом
@@ -547,7 +547,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
    (решение владельца 29.10.2026, `09` §14.1); делать после отчёта текущего прогона.
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`core/cli/wiring.py:2670-2687` — `model2vec_available()` → `_module_installed("sentence_transformers")`
+установки** (`core/cli/wiring.py:2756-2776` — `model2vec_available()` → `_module_installed("sentence_transformers")`
 → `None`). При появлении `deploy.embed` приоритет становится объявленным:
 `backend` из конфига, а наличие библиотек — предпосылка, а не решение.
 **Проверено на 2026-10-28: не сделано** (строки 2274-2295 → 2510-2527, логика прежняя).

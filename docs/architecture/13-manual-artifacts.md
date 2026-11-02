@@ -122,7 +122,7 @@ provide:
 Новое поле в `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py`, сейчас 19 полей):
 `manual_artifacts_digest`.
 
-Материал — по образцу `seeds_digest` (`digests.py:139-172`): отсортированные
+Материал — по образцу `seeds_digest` (`digests.py:240-274`): отсортированные
 `(product_id, url, sha256)`. **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
 это провенанс записи, а не измерение (прецедент: `seeds_digest` исключает `source`/`added_*`;
 `scope_attested_by` не входит в контракт вовсе). Пустой набор даёт стабильный дайджест
@@ -308,7 +308,7 @@ gaps:
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
    `core/pipeline/corpus.py:2119`; `origin` — `core/store/sqlite.py:118`;
    `resolved_manually` — `core/domain/models.py:2207` + `core/pipeline/corpus_coverage.py:118`;
-   доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:339`).
+   доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:345`).
    As-built и расхождения — §10.
 3. ⬜ не сделано — `parent_run_id` прогона-продолжения в коде отсутствует
    (`grep -rn "parent_run_id" core/` — 0 совпадений), `hound diff` показывает дельту через
@@ -406,8 +406,8 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   `:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:132`); подача
   живёт внутри `corpus` (`core/pipeline/corpus.py:3245`), т.е. §5 исполнен буквально.
-- ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:131`,
-  материал `(product_id, url, sha256)` — `:260`), считается даже при пустом наборе.
+- ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:148`,
+  материал `(product_id, url, sha256)` — `:361`), считается даже при пустом наборе.
 - ⬜ **Связность (`parent_run_id`)** — не сделана: см. §8 п. 3.
 - ⬜ **F3** — не начат: см. §8 п. 4.
 - ➖ **Поле `source: file|well-known`** — снято в §7 (это решение, а не пропуск).

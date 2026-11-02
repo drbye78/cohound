@@ -1,4 +1,4 @@
-"""Тесты EPUB-читателя ``EpubExtractor`` (``epub-1``) — stdlib, без сети и трафилатуры.
+"""Тесты EPUB-читателя ``EpubExtractor`` (``epub-2``) — stdlib, без сети и трафилатуры.
 
 Строится **настоящий** EPUB (``zipfile``): ``mimetype``, ``META-INF/container.xml``,
 OPF с перемешанным ``manifest`` и упорядоченным ``spine``, XHTML-главы. Проверяются
@@ -9,6 +9,9 @@ OPF с перемешанным ``manifest`` и упорядоченным ``spi
   отвергается (``normalize_member_path``);
 * у каждой главы есть заголовок (``<title>`` либо имя файла) — иначе ``heading_path``
   markdown-чанкера был бы пустым;
+* заголовок главы — уровень ``#``, внутренние ATX-заголовки главы — на +1, поэтому
+  ``heading_path`` читается как «глава → раздел → подраздел»; сдвиг не трогает код в
+  fenced-блоках, строки таблиц и тематические разрывы, а ``######`` не переполняется;
 * отсутствующая/нечитаемая глава — **видимая заметка**, а не тихий пропуск;
 * нет ``container.xml``/OPF/spine или архив не ZIP — видимая ошибка, не исключение.
 
@@ -22,6 +25,7 @@ import re
 import zipfile
 from pathlib import Path
 
+from core.adapters.chunker_markdown import MarkdownChunker
 from core.adapters.extract_epub import EPUB_READER_VERSION, EpubExtractor
 from core.adapters.extract_html import HtmlExtractor
 from core.ports.types import ExtractedDoc, RawPage
@@ -112,6 +116,22 @@ def _fake_html(*, fail_on: str | None = None) -> HtmlExtractor:
     return HtmlExtractor(extract_fn=fn)
 
 
+def _markdown_html(markdown: str) -> HtmlExtractor:
+    """HTML-экстрактор, отдающий заданный markdown: проверяется пост-обработка глав."""
+
+    return HtmlExtractor(extract_fn=lambda _html: markdown)
+
+
+def _markdown_book(tmp_path: Path, *, title: str = "Глава 1") -> Path:
+    """EPUB из одной главы; её markdown задаёт внедрённый ``_markdown_html``."""
+    return _build_epub(
+        tmp_path / "book.epub",
+        items=[("c1", "text/1.xhtml", "application/xhtml+xml")],
+        spine=["c1"],
+        chapters={"text/1.xhtml": _chapter("one", title)},
+    )
+
+
 def _page(content: bytes, *, source_path: str | None = None) -> RawPage:
     return RawPage(
         url="https://repo.example.test/books/guide.epub",
@@ -157,7 +177,7 @@ def test_every_spine_item_gets_a_heading(tmp_path: Path) -> None:
 
     doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
 
-    for title in ("## Chapter One", "## Chapter Two", "## Chapter Three"):
+    for title in ("# Chapter One", "# Chapter Two", "# Chapter Three"):
         assert title in doc.text
 
 
@@ -171,7 +191,7 @@ def test_heading_falls_back_to_filename_without_title(tmp_path: Path) -> None:
 
     doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
 
-    assert "## 1.xhtml" in doc.text
+    assert "# 1.xhtml" in doc.text
     assert "BODY[body]" in doc.text
 
 
@@ -181,7 +201,7 @@ def test_result_contract(tmp_path: Path) -> None:
     doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
 
     assert isinstance(doc, ExtractedDoc)
-    assert doc.extractor_version == EPUB_READER_VERSION == "epub-1"
+    assert doc.extractor_version == EPUB_READER_VERSION == "epub-2"
     assert doc.page_count is None
     assert doc.family == "epub"
     assert doc.content_hash == content_hash(doc.text)
@@ -197,6 +217,118 @@ def test_retained_file_is_read_instead_of_bytes(tmp_path: Path) -> None:
 
     assert doc.error is None
     assert "BODY[two]" in doc.text
+
+
+# ---------------------------------------------------------------------------
+# Иерархия заголовков главы (``epub-2``): глава → раздел → подраздел
+# ---------------------------------------------------------------------------
+
+
+def test_inner_headings_nest_under_the_chapter_heading(tmp_path: Path) -> None:
+    """Регресс 02.11: ``##`` главы + ``#`` раздела сбрасывали стек — глава терялась.
+
+    Проверка идёт через **настоящий** ``MarkdownChunker``: утверждение — про
+    ``heading_path``, а не про вид строки, поэтому ``doc.text`` для него не годится.
+    """
+    markdown = (
+        "# Настоящий заголовок главы\n\n"
+        "Текст раздела книги, достаточно длинный для чанкера.\n\n"
+        "## Подраздел\n\n"
+        "Текст подраздела книги, тоже достаточно длинный для чанкера.\n"
+    )
+    epub = _markdown_book(tmp_path)
+
+    doc = EpubExtractor(html=_markdown_html(markdown)).extract(_page(epub.read_bytes()))
+
+    assert doc.error is None
+    chunks = MarkdownChunker(chunk_size=500, chunk_overlap=50).chunk("doc", doc.text)
+    paths = [chunk.heading_path for chunk in chunks]
+    assert "Глава 1 > Настоящий заголовок главы" in paths
+    assert "Глава 1 > Настоящий заголовок главы > Подраздел" in paths
+
+
+def test_hash_comment_inside_fences_is_not_shifted(tmp_path: Path) -> None:
+    """Код в ```` ``` ````/``~~~`` — не структура: ``# comment`` остаётся как есть."""
+    markdown = (
+        "# Установка\n\n"
+        "```bash\n"
+        "# comment\n"
+        "apt-get install -y pkg\n"
+        "```\n\n"
+        "~~~text\n"
+        "# тоже комментарий\n"
+        "~~~\n"
+    )
+    epub = _markdown_book(tmp_path)
+
+    doc = EpubExtractor(html=_markdown_html(markdown)).extract(_page(epub.read_bytes()))
+
+    assert doc.error is None
+    assert "## Установка" in doc.text
+    assert "```bash\n# comment" in doc.text
+    assert "~~~text\n# тоже комментарий" in doc.text
+    assert "## comment" not in doc.text
+    assert "## тоже комментарий" not in doc.text
+
+
+def test_deepest_heading_does_not_overflow_the_level(tmp_path: Path) -> None:
+    """``######`` остаётся ``######``: седьмого уровня в markdown нет."""
+    markdown = "###### Глубочайший раздел\n\nТекст подраздела книги для чанкера.\n"
+    epub = _markdown_book(tmp_path)
+
+    doc = EpubExtractor(html=_markdown_html(markdown)).extract(_page(epub.read_bytes()))
+
+    assert doc.error is None
+    assert "###### Глубочайший раздел" in doc.text
+    assert "#######" not in doc.text
+
+
+def test_table_rows_and_thematic_breaks_are_not_headings(tmp_path: Path) -> None:
+    """Таблица (в том числе без ведущего ``|``) и разрыв — не заголовки, их не сдвигают."""
+    markdown = (
+        "# Раздел\n\n"
+        "колонка | вторая\n"
+        "--- | ---\n"
+        "# значение | ячейка\n\n"
+        "---\n\n"
+        "| # | x |\n"
+        "| --- | --- |\n"
+    )
+    epub = _markdown_book(tmp_path)
+
+    doc = EpubExtractor(html=_markdown_html(markdown)).extract(_page(epub.read_bytes()))
+
+    assert doc.error is None
+    assert "## Раздел" in doc.text
+    assert "# значение | ячейка" in doc.text
+    assert "## значение | ячейка" not in doc.text
+    assert "| # | x |" in doc.text
+    assert "\n---\n" in doc.text
+
+
+def test_visible_note_keeps_chapter_heading_level(tmp_path: Path) -> None:
+    """Заметка ``> epub: …`` под главой: заголовок главы ``#``, сама заметка не тронута."""
+    epub = _build_epub(
+        tmp_path / "book.epub",
+        items=[
+            ("c1", "text/1.xhtml", "application/xhtml+xml"),
+            ("c2", "text/2.xhtml", "application/xhtml+xml"),
+        ],
+        spine=["c1", "c2"],
+        chapters={
+            "text/1.xhtml": _chapter("one", "One"),
+            "text/2.xhtml": _chapter("broken", "Two"),
+        },
+    )
+
+    doc = EpubExtractor(html=_fake_html(fail_on="BODY[broken]")).extract(
+        _page(epub.read_bytes())
+    )
+
+    assert doc.error is None
+    assert "BODY[one]" in doc.text
+    assert "# Two\n\n> epub: глава «OEBPS/text/2.xhtml» не извлечена" in doc.text
+    assert "## Two" not in doc.text
 
 
 # ---------------------------------------------------------------------------

@@ -126,7 +126,8 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     second = _resolve(package)
     assert first == second
     assert first.extractor_stack.startswith(
-        "trafilatura-html-2+docling-doc-3/cpu/docling-"
+        "trafilatura-html-3+text-plain-2+epub-2+pdfium-text-2+docling-office-1"
+        "+docling-doc-3/cpu/docling-"
     )
     # Объявленные оси — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего поиска
     # меняет состав корпуса, то есть условие измерения; + ``manual_artifacts_digest``:
@@ -233,7 +234,7 @@ def test_chunker_version_is_a_composite_of_both_chunkers(tmp_path: Path) -> None
     declared = _resolve(_package(tmp_path))
 
     assert declared.chunker_version == f"{MarkdownChunker.version}+{TextChunker.version}"
-    assert declared.chunker_version == "md-heading-3+text-para-2"
+    assert declared.chunker_version == "md-heading-4+text-para-2"
     assert MarkdownChunker.version in declared.chunker_version
     assert TextChunker.version in declared.chunker_version
 
@@ -432,7 +433,8 @@ def test_docling_version_uses_installed_distribution() -> None:
     library = extract_document.docling_library_version()
     assert library in (expected or ["unknown"])
     stack = execution_axes.extractor_stack_version()
-    assert stack.split("/")[-2] == f"docling-{library}"
+    # Хвост стека: ``/<build>/<policy>/<finalize>`` — сборка стоит третьей от конца.
+    assert stack.split("/")[-3] == f"docling-{library}"
 
 
 def test_status_dict_version_comes_from_dictionary() -> None:
@@ -538,12 +540,13 @@ def test_extractor_stack_names_the_declared_device(
     cuda = execution_axes.extractor_stack_version(PdfDevice.CUDA)
 
     policy = execution_axes.DOCLING_MARKDOWN_POLICY
-    assert cpu.split("/")[-2:] == ["docling-9.9.9", policy]
-    assert cuda.split("/")[-2:] == ["docling-9.9.9", policy]
+    finalize = extract_document.DOCLING_TEXT_FINALIZE
+    assert cpu.split("/")[-3:] == ["docling-9.9.9", policy, finalize]
+    assert cuda.split("/")[-3:] == ["docling-9.9.9", policy, finalize]
     assert "+docling-doc-3/cpu/" in cpu and "+docling-doc-3/cuda/" in cuda
     assert cpu != cuda
     # Устройство и сборка не смешиваются: сборка у обоих одна, политика — тоже.
-    assert cpu.split("/")[-2] == cuda.split("/")[-2]
+    assert cpu.split("/")[-3] == cuda.split("/")[-3]
 
 
 def test_extractor_stack_and_extractor_version_share_the_engine_build(
@@ -562,9 +565,13 @@ def test_extractor_stack_and_extractor_version_share_the_engine_build(
     stack = execution_axes.extractor_stack_version()
     version = DoclingDocumentExtractor(DocumentLevel.FULL).version
 
-    assert stack.split("/")[-2] == "docling-9.9.9"
-    assert version == "docling-doc-3:full/cpu/docling-9.9.9/md-plain-underscore"
-    # Одна и та же строка сборки в обоих идентификаторах (политика — тоже одна).
+    assert stack.split("/")[-3] == "docling-9.9.9"
+    assert (
+        version
+        == "docling-doc-3:full/cpu/docling-9.9.9/md-plain-underscore/finalize-1"
+    )
+    # Одна и та же строка сборки в обоих идентификаторах (политика и финализация — тоже).
+    assert stack.split("/")[-3] == version.split("/")[-3]
     assert stack.split("/")[-2] == version.split("/")[-2]
     assert stack.split("/")[-1] == version.split("/")[-1]
 

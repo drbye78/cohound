@@ -245,7 +245,7 @@ min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` 
 
 **`extractor_zone` объявлено, но не действует (D-9).** Значения `edge|core|separate`
 (`core/config/deploy.py:86`, поле `:592`) валидируются, но выбора реализации не делают:
-`RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3033`), а не по этой оси.
+`RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3143`), а не по этой оси.
 Экстрактор всегда в ядре; в `split` ядро получает байты через шов `extract/{upload,submit,collect,abort}`.
 Ось оставлена как объявление намерения — описывать её как работающий механизм нельзя.
 
@@ -453,7 +453,7 @@ per-host диапазон `rate_limit`. Резолвится в pipeline (`pipel
 документ; `error` — грациозная деградация адаптера (пустой `text` вместо исключения).
 `family: str | None` (`"markdown"` / `"text"` / `"epub"`) — аддитивное поле: по нему
 `adapters/chunker_family.py` выбирает чанкер (композитная версия правил нарезки —
-`md-heading-3+text-para-2`, `composite_chunker_version`); `None` — HTML/документный путь.
+`md-heading-4+text-para-2`, `composite_chunker_version`); `None` — HTML/документный путь.
 `Chunk(chunk_no, text, heading_path, context_prefix, content_hash)`.
 
 **Экстрактор — as-built (три семейства + EPUB, один реестр форматов).** Порт приведён к

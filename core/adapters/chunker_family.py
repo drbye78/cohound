@@ -12,7 +12,7 @@
 ``chunker_version`` входит в ``EXECUTION_CONTRACT_FIELDS``
 (:mod:`core.pipeline.digests`) и в ``partition_build_id``/``index_build_id``: с появлением
 второго чанкера набор чанков определяется **парой** правил, поэтому объявленная версия —
-``"md-heading-2+text-para-1"`` (:func:`composite_chunker_version`). Это версионная
+``"md-heading-4+text-para-2"`` (:func:`composite_chunker_version`). Это версионная
 граница класса ``execution_versions`` (``execution_change``, §13): меняется ``run_id``,
 методология (``METHODOLOGY_VERSION``) — нет.
 
@@ -45,7 +45,7 @@ def composite_chunking_spec() -> dict[str, object]:
     """Геометрия нарезки и состав входа эмбеддера — объявленная часть контракта (C3).
 
     **Зачем это отдельно от ``chunker_version``.** ``chunker_version`` — метка-строка
-    (``"md-heading-2+text-para-1"``), а не вывод из геометрии. Правка ``chunk_size`` на
+    (``"md-heading-4+text-para-2"``), а не из геометрии. Правка ``chunk_size`` на
     другое число давала другой корпус чанков при том же ``run_id``: тот же класс дефекта,
     за который проект ругает себя в ``embed_model_id``. Здесь геометрия **читается из
     самих чанкеров** (не из копии констант), поэтому разъехаться с фактической нарезкой

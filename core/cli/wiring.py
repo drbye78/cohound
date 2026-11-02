@@ -1922,10 +1922,11 @@ class _LocalExtractor:
         self._pdf = pdf if pdf is not None else documents
         self._pdf_required = pdf_required
         html_version = str(getattr(self._html, "version", "") or "")
-        # Версия экстрактора: HTML-версия, дополненная документной при наличии docling и
+        # Версия композита: HTML-версия, дополненная документной при наличии docling и
         # PDF-механизмом (P7), если он — отдельный адаптер. Текстовый/EPUB-читатели сюда
-        # **не** добавлены: они видны в per-document ``extractor_version``
-        # (``text-plain-1``/``epub-1``) и в провенансе продукта.
+        # **не** добавлены: это не ключ документа (его штампует сам адаптер —
+        # ``text-plain-2``/``epub-2``), а объявленный стек, где каждый читатель назван
+        # отдельно (:func:`core.cli.execution_axes.extractor_stack_version`).
         parts = [html_version]
         if documents is not None:
             parts.append(str(getattr(documents, "version", "")))
@@ -1964,8 +1965,8 @@ class _LocalExtractor:
         местах: чтобы извлечь документ и чтобы **заранее** назвать движок, который это
         сделает (ключ ``extract_cache``). Пока правило жило только внутри ``extract``,
         вызывающий мог лишь догадываться о движке — и догадывался неверно: брал
-        композитную версию (``trafilatura-html-2+docling-doc-3:full/…``), тогда как
-        документ штампуется версией **своего** адаптера (``trafilatura-html-2`` для
+        композитную версию (``trafilatura-html-3+docling-doc-3:full/…``), тогда как
+        документ штампуется версией **своего** адаптера (``trafilatura-html-3`` для
         страницы, ``docling-doc-3:full/…`` для PDF). Кэш от такого ключа не давал ни
         одного попадания: он был write-only. Один диспетчер исключает расхождение по
         построению, а не по дисциплине.
@@ -1973,7 +1974,8 @@ class _LocalExtractor:
         **P7: PDF — отдельный механизм.** Внутри документной ветви PDF-суффикс уходит в
         выбранный ``pdf_pipeline`` (:meth:`_document_backend`), остальное — в docling.
         Поэтому версия для ключа ``extract_cache`` — версия реально работающего
-        адаптера (``pdfium-text-1`` либо ``docling-doc-3:<level>/…``), а не композита.
+        адаптера (``pdfium-text-2``, ``docling-doc-3:<level>/…`` для PDF либо
+        ``docling-office-1:…`` для DOCX/PPTX/XLSX), а не композита.
 
         Порядок ветвей — контракт поведения (``.txt``/``.epub`` проверяются до фолбэка в
         HTML, см. докстринг класса): перестановка вернула бы ``.txt`` в ``parser_failed``.
@@ -2009,10 +2011,22 @@ class _LocalExtractor:
         и кэш попадает. Композитная ``.version`` для этого не годится: она описывает
         набор движков всего композита, а не движок конкретного документа.
 
+        **Версия зависит от формата.** У docling две ветви провенанса: PDF штампуется
+        уровнем и устройством (``docling-doc-3:<level>/<device>/…``), офисный документ —
+        отдельной строкой без них (``docling-office-1:…``): у DOCX/PPTX/XLSX нет ни
+        ``document_level``, ни ``pdf_device``. Поэтому адаптер, умеющий ответить по имени
+        файла (:meth:`core.adapters.extract_document.DoclingDocumentExtractor.version_for`),
+        спрашивается именно так. Иначе офисный документ получил бы ключ с условиями,
+        которых не было, а запись под своей (офисной) версией никогда не находилась бы:
+        кэш стал бы write-only — тот же дефект, что был до появления этого метода.
+
         Без docling (``off`` или пакет недоступен) документная ветвь недостижима, поэтому
         строка всегда принадлежит реально исполняемому адаптеру.
         """
-        _, adapter, _ = self._resolve_target(page, route)
+        _, adapter, filename = self._resolve_target(page, route)
+        version_for = getattr(adapter, "version_for", None)
+        if filename is not None and callable(version_for):
+            return str(version_for(filename) or "")
         return str(getattr(adapter, "version", "") or "")
 
     def extract(

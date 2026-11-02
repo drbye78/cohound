@@ -520,10 +520,10 @@ def test_worker_extractor_selects_pdfium_for_text_layer(monkeypatch: pytest.Monk
 
     composite = build_worker_extractor(DocumentLevel.FULL, PdfPipeline.TEXT_LAYER)
 
-    assert composite.extractor_version_for(_page()) == "pdfium-text-1"
-    assert composite.version.endswith("+pdfium-text-1")
+    assert composite.extractor_version_for(_page()) == "pdfium-text-2"
+    assert composite.version.endswith("+pdfium-text-2")
     # Дефолтная сборка — прежний docling (проверка в тестах версии композита).
-    assert build_worker_extractor().extractor_version_for(_page()) != "pdfium-text-1"
+    assert build_worker_extractor().extractor_version_for(_page()) != "pdfium-text-2"
 
 
 def test_worker_extractor_fails_visibly_without_pdfium(
@@ -552,8 +552,8 @@ def test_build_adapters_honours_explicit_pdf_pipeline() -> None:
     ports = build_adapters(profile="local", pdf_pipeline=PdfPipeline.TEXT_LAYER)
 
     assert ports.extractor is not None
-    assert ports.extractor.extractor_version_for(_page()) == "pdfium-text-1"
+    assert ports.extractor.extractor_version_for(_page()) == "pdfium-text-2"
     # Без явной оси — прежний docling (дефолт ``structured``).
     default = build_adapters(profile="local")
     assert default.extractor is not None
-    assert default.extractor.extractor_version_for(_page()) != "pdfium-text-1"
+    assert default.extractor.extractor_version_for(_page()) != "pdfium-text-2"

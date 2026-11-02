@@ -32,7 +32,9 @@
 
 **Граница этого утверждения (Д-8).** «Видна через ``pb``» верно только для того, что
 действительно входит в наблюдаемые величины. Для сборки движка извлечения это
-обеспечено явно: ``extractor_version`` документа — ``docling-doc-3:<level>/<device>/docling-<build>/<policy>``
+обеспечено явно: ``extractor_version`` документа —
+``docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`` для PDF и
+``docling-office-1:<policy>/docling-<build>/<finalize>`` для Office
 (:func:`core.adapters.extract_document.docling_extractor_version`), то есть та же сборка,
 что объявлена в контракте полем ``extractor_stack``. Отсюда два следствия, и оба
 обязательны: апгрейд библиотеки меняет ``run_id`` (объявленная ось изменилась) **и**

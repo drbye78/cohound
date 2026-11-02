@@ -8,8 +8,16 @@
 **P5 — уровень извлечения.** Качество PDF-экстракции задаётся осью
 ``crawl.document_level`` (:class:`~core.domain.enums.DocumentLevel`), а не «случайным»
 дефолтом пустого ``DocumentConverter()``. Уровень входит в ``version`` экстрактора
-(``docling-doc-3:<level>/<device>/docling-<build>/<policy>``) и тем самым — в ``index_build_id``
-иммутабельной сборки (§13): смена уровня не может молча дать ту же сборку.
+(``docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>``) и тем самым — в
+``index_build_id`` иммутабельной сборки (§13): смена уровня не может молча дать ту же сборку.
+
+**Офисная ветвь провенанса.** DOCX/PPTX/XLSX читает ``SimplePipeline``: ни уровня
+(``document_level`` — лестница PDF-конвейера), ни устройства (``pdf_device`` — место
+вычисления моделей) у него нет. Поэтому офисный документ штампуется отдельной строкой
+(``docling-office-1:<policy>/<build>/<finalize>``,
+:func:`docling_office_version`), а версия конкретного файла берётся :meth:`version_for`.
+До 02.11.2026 DOCX объявлялся как ``docling-doc-3:layout_tables/cpu/…`` — условие
+измерения, которого не было.
 
 **Сборка движка в версии экстрактора (Д-8).** ``<build>`` — версия установленной
 библиотеки ``docling``, полученная :func:`docling_engine_build` (единственный источник;
@@ -78,7 +86,8 @@ from typing import Any
 
 from core.domain.enums import DocumentLevel, PdfDevice
 from core.ports.types import ExtractedDoc
-from core.util.document_formats import DOCUMENT_SUFFIXES
+from core.util.document_formats import DOCUMENT_SUFFIXES, PDF_SUFFIX
+from core.util.sanitize import finalize_extracted_text
 
 #: docling-символы как модульные атрибуты (публичная поверхность адаптера).
 #:
@@ -127,6 +136,19 @@ _DOCLING_SYMBOLS: tuple[str, ...] = (
 #: ``crawl.document_level``, уже входящая в ``crawl_config_digest``.
 DOCLING_ADAPTER_FAMILY = "docling-doc-3"
 
+#: Семейство **офисной** ветви docling (docx/pptx/xlsx) — отдельное от PDF.
+#:
+#: Почему отдельное, а не «то же с другим уровнем». Офисный документ идёт через
+#: ``SimplePipeline``: у него **нет** ни оси ``crawl.document_level`` (нет layout-модели,
+#: таблиц-моделей и OCR — структуру даёт сам файл), ни оси ``crawl.pdf_device``
+#: (моделей, которым нужен тензорный ускоритель, нет вовсе). Штамповать офисному
+#: документу ``docling-doc-3:layout_tables/cpu/…`` значило бы **объявить условие
+#: измерения, которого не было**: уровень ``layout_tables`` обещает восстановление
+#: структуры моделями, а устройство — место их вычисления. Провенанс не вправе называть
+#: исполнение, которого не было (A3), поэтому у офисной ветви своё семейство и своя
+#: формула (:func:`docling_office_version`).
+DOCLING_OFFICE_ADAPTER_FAMILY = "docling-office-1"
+
 #: Префикс «сборки движка» в идентификаторах версии. Один на ``extractor_version``
 #: (ключ ``extract_cache``/``pb``) и на ``extractor_stack`` (``run_id``).
 _DOCLING_BUILD_PREFIX = "docling-"
@@ -144,6 +166,20 @@ _DOCLING_BUILD_PREFIX = "docling-"
 #: кэша) и :func:`core.cli.execution_axes.extractor_stack_version` (объявленное поле
 #: контракта). Одна константа — потому что две независимые формулы разошлись бы молча.
 DOCLING_MARKDOWN_POLICY = "md-plain-underscore"
+
+#: Политика **очистки текста** на границе экстракции — отдельное слагаемое идентичности.
+#:
+#: Зачем отдельно от :data:`DOCLING_MARKDOWN_POLICY`. Экспортное экранирование
+#: (``escape_underscores``) и пост-очистка текста (:func:`~core.util.sanitize.
+#: finalize_extracted_text`: управляющие символы + нейтрализация каркаса промпт-инъекций)
+#: — разные ручки с разными причинами. Слить их в одну строку значило бы, что смена одной
+#: выглядит как смена другой, и разбор замера не смог бы назвать виновника.
+#:
+#: Сегмент входит в версию **обеих** ветвей (PDF и Office): очистка меняет ``content_hash``
+#: ровно так же, как экспорт, поэтому текст, произведённый прежней очисткой, не должен
+#: находиться под новым ключом ``extract_cache`` (02.11.2026: очистка не применялась на
+#: документном пути вовсе — до правки версии отличать было нечего).
+DOCLING_TEXT_FINALIZE = "finalize-1"
 
 #: Имена дистрибутивов, под которыми ставится одна и та же библиотека: полный ``docling``
 #: (с torch) и лёгкий ``docling-slim`` (тот же код без torch; 05-dependency-stack).
@@ -216,14 +252,17 @@ def docling_engine_build() -> str:
 def docling_extractor_version(
     level: DocumentLevel | str, pdf_device: PdfDevice | str = PdfDevice.CPU
 ) -> str:
-    """``extractor_version`` документа: ``docling-doc-3:<level>/<device>/docling-<build>/<policy>``.
+    """``extractor_version`` **PDF**-документа:
+    ``docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>``.
 
-    Пример: ``docling-doc-3:full/cuda/docling-2.135.0/md-plain-underscore``. Уровень кодирует
-    ось ``crawl.document_level`` (P5), устройство — ``crawl.pdf_device`` (P9), сборка —
-    фактически установленную библиотеку, политика — :data:`DOCLING_MARKDOWN_POLICY`. Все
-    слагаемые входят в ключ ``extract_cache`` (``(content_hash, extractor_version, level)``):
-    после апгрейда docling, смены устройства **или политики экспорта** старый текст
-    получается только под **старым** ключом и потому не находится.
+    Пример: ``docling-doc-3:full/cuda/docling-2.135.0/md-plain-underscore/finalize-1``.
+    Уровень кодирует ось ``crawl.document_level`` (P5), устройство — ``crawl.pdf_device``
+    (P9), сборка — фактически установленную библиотеку, политика — экспорт
+    (:data:`DOCLING_MARKDOWN_POLICY`), финализация — очистку текста
+    (:data:`DOCLING_TEXT_FINALIZE`). Все слагаемые входят в ключ ``extract_cache``
+    (``(content_hash, extractor_version, level)``): после апгрейда docling, смены
+    устройства, политики экспорта **или очистки** старый текст получается только под
+    **старым** ключом и потому не находится.
 
     Почему устройство обязательно в ключе (Д-8 в новом виде). Текст документа не
     бит-в-бит независим от устройства: layout/таблицы считаются тензорными ядрами, и
@@ -232,33 +271,168 @@ def docling_extractor_version(
     текст, которого объявленное устройство не производило. Это ровно тот класс, ради
     которого в ключе лежит сборка движка.
 
+    **Офисные документы этой версией не штампуются** (у них нет ни уровня, ни
+    устройства): см. :func:`docling_office_version`.
+
     ``pdf_device`` принимает и ``str`` (значение оси из конфига) — нормализуется через
     :class:`PdfDevice`, поэтому два пути не могут дать разные строки для одного входа.
     """
     device = PdfDevice(pdf_device)
     return (
         f"{DOCLING_ADAPTER_FAMILY}:{DocumentLevel(level).value}/"
-        f"{device.value}/{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}"
+        f"{device.value}/{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}/"
+        f"{DOCLING_TEXT_FINALIZE}"
     )
 
 
-def _export_markdown(document: object) -> str:
-    """Текст документа в markdown — **через объявленную политику экспорта**.
+def docling_office_version() -> str:
+    """``extractor_version`` **офисного** документа: ``docling-office-1:<policy>/<build>/<finalize>``.
 
-    Экранирование подчёркиваний снято (``escape_underscores=False``): иначе ``_`` в именах
-    параметров приходит как ``\\_`` и доходит до чанков и ``citation_quote`` (I22 требует
-    непустую цитату, а точное сопоставление термина с цитатой на ``\\_`` ломается).
-    Замер и разбор — :data:`DOCLING_MARKDOWN_POLICY`.
+    Пример: ``docling-office-1:md-plain-underscore/docling-2.135.0/finalize-1``.
+
+    **Почему в строке нет уровня и устройства.** DOCX/PPTX/XLSX читает офисный бэкенд
+    docling (python-docx/python-pptx/openpyxl) через ``SimplePipeline``: структуру
+    (заголовки, таблицы, списки) отдаёт сам файл, моделей нет. Следовательно:
+
+    * ``crawl.document_level`` (``off|text|layout|layout_tables|full``) — лестница
+      качества **PDF**-конвейера: layout-модель, таблицы TableFormer, OCR. Ни одна из
+      этих ступеней офисного документа не касается, и повторять их в штампе значило бы
+      объявить измерение, которого не проводилось (живой дефект: до 02.11.2026 DOCX
+      штамповался как ``docling-doc-3:layout_tables/cpu/…``);
+    * ``crawl.pdf_device`` — место вычисления моделей. Моделей нет, считать нечего:
+      сегмент ``cpu``/``cuda`` описывал бы устройство, которое не участвовало.
+
+    Остаются слагаемые, которые действительно влияют на текст: сборка движка
+    (:func:`docling_engine_build` — версия установленной библиотеки), политика экспорта
+    (:data:`DOCLING_MARKDOWN_POLICY`) и финализация (:data:`DOCLING_TEXT_FINALIZE`).
+    Семейство ``docling-office-1`` само по себе — версия схемы штампа: если офисный путь
+    когда-нибудь обзаведётся своими осями, штамм сменит семейство, а не притворится PDF.
+
+    Функция не принимает аргументов намеренно: осей нет, а «необязательный» аргумент
+    уровня приглашал бы передать его и тем вернуть ложь в провенанс.
+    """
+    return (
+        f"{DOCLING_OFFICE_ADAPTER_FAMILY}:{DOCLING_MARKDOWN_POLICY}/"
+        f"{docling_engine_build()}/{DOCLING_TEXT_FINALIZE}"
+    )
+
+
+def _document_text(document: object) -> str:
+    """Текст документа: markdown **через объявленные политики** — экспорт и очистку.
+
+    **Экспорт.** Экранирование подчёркиваний снято (``escape_underscores=False``): иначе
+    ``_`` в именах параметров приходит как ``\\_`` и доходит до чанков и ``citation_quote``
+    (I22 требует непустую цитату, а точное сопоставление термина с цитатой на ``\\_``
+    ломается). Замер и разбор — :data:`DOCLING_MARKDOWN_POLICY`.
 
     ``escape_html`` намеренно оставлен дефолтным: его искажения (``&amp;``) на замере дали
     два токена, отдельного решения по ним нет, а менять поведение «заодно» — это менять
     текст корпуса без измерения.
 
-    Обе точки извлечения (полный успех и ``PARTIAL_SUCCESS``) ходят **сюда**: политика
-    экспорта обязана быть одна, иначе частичный документ описан другой версией адаптера,
-    чем целый.
+    **Очистка** (:func:`~core.util.sanitize.finalize_extracted_text`,
+    :data:`DOCLING_TEXT_FINALIZE`) — та же единая граница, что у HTML/текстового путей:
+    управляющие символы снимаются, каркас промпт-инъекций нейтрализуется. До 02.11.2026
+    документный путь её не вызывал, и один и тот же текст доходил до оценщика помеченным
+    из ``.txt`` и дословным из ``.docx`` (замер 02.11.2026).
+
+    Обе точки извлечения (полный успех и ``PARTIAL_SUCCESS``) ходят **сюда**: политики
+    экспорта и очистки обязаны быть одни, иначе частичный документ описан другим текстом,
+    чем целый, и ``content_hash`` у них несоизмерим.
+
+    **Имена листов книги (XLSX).** docling кладёт имя листа в ``doc.groups``
+    (``GroupLabel.SHEET``, по группе на лист), но в markdown оно **не попадает**:
+    у таблицы нет ни caption, ни SectionHeader. Поэтому имя листа — знание, которое
+    адаптер обязан либо сохранить, либо не выдумывать. Сохраняется оно как заголовок
+    ``## <лист>`` перед содержимым листа (:func:`_sheet_markdown`): так оно входит в
+    ``heading_path`` чанкера, то есть становится видимой частью корпуса, а не теряется.
+    Раскладка берётся экспортом **по странице** (``page_no=``: у XLSX страница = лист,
+    у PPTX — слайд), а не нарезкой готового markdown по строкам: строковая хирургия
+    разошлась бы с раскладкой движка при первом же изменении рендера. Если раскладку
+    сопоставить не удалось, имена остаются видимой записью ``> sheet: <имя>`` в тексте
+    и предупреждением в журнале — догадка вместо факта запрещена (A3).
     """
-    return document.export_to_markdown(escape_underscores=False)  # type: ignore[attr-defined]
+    markdown = document.export_to_markdown(escape_underscores=False)  # type: ignore[attr-defined]
+    sections = _sheet_sections(document)
+    if sections is not None:
+        layered = _sheet_markdown(document, sections, markdown)
+        if layered is not None:
+            return finalize_extracted_text(layered)
+        # Раскладка по листам не сошлась с целым текстом (или движок перестал понимать
+        # ``page_no``): содержимое отдаём целиком, а имена листов — видимой записью, а не
+        # догадкой о том, какой кусок какому листу принадлежит.
+        _log.warning(
+            "xlsx: имена листов не разложены по разделам (%s) — записаны в текст как "
+            "«> sheet:» без привязки к фрагментам",
+            ", ".join(name for _, name in sections),
+        )
+        listing = "\n".join(f"> sheet: {name}" for _, name in sections)
+        return finalize_extracted_text(f"{listing}\n\n{markdown}")
+    return finalize_extracted_text(markdown)
+
+
+#: Имя ``GroupLabel``, которым офисный бэкенд помечает группу листа книги (XLSX).
+_SHEET_GROUP_LABEL = "sheet"
+
+
+def _sheet_sections(document: object) -> list[tuple[int, str]] | None:
+    """Листы книги как ``[(номер страницы, имя)]`` либо ``None`` (не книга/не сошлось).
+
+    Контракт с docling 2.135 (замер 02.11.2026): группа листа — ``GroupItem`` с
+    ``label=GroupLabel.SHEET`` и ``name``; **порядок групп совпадает с порядком страниц**
+    (лист — страница: ``doc.pages`` = ``{1: …, 2: …}``). Условия, при которых имена
+    берутся: лист = страница (количество групп равно количеству страниц) и у каждого листа
+    есть непустое имя. Иначе ``None`` — имена не раздаются догадкой по позиции.
+    """
+    pages = getattr(document, "pages", None)
+    groups = getattr(document, "groups", None)
+    if not pages or not groups:
+        return None
+    sheets = [
+        group
+        for group in groups
+        if getattr(getattr(group, "label", None), "value", None) == _SHEET_GROUP_LABEL
+    ]
+    if not sheets or len(sheets) != len(pages):
+        return None
+    page_numbers = sorted(pages)
+    sections: list[tuple[int, str]] = []
+    for page_no, group in zip(page_numbers, sheets, strict=True):
+        name = " ".join(str(getattr(group, "name", "") or "").split())
+        if not name:
+            return None
+        sections.append((page_no, name))
+    return sections
+
+
+def _sheet_markdown(
+    document: object, sections: list[tuple[int, str]], whole: str
+) -> str | None:
+    """Markdown книги с заголовком ``## <лист>`` на каждый лист; ``None`` — не сошлось.
+
+    Каждый лист экспортируется **своей страницей** (``page_no=``) — это тот же
+    ``export_to_markdown`` docling, а не разбор готового текста. Затем проверяется, что
+    посимвольный состав (без пробелов) совпадает с экспортом целиком: если постраничный
+    экспорт что-то потерял (элемент без ``prov``/страницы), ``None`` — вызывающий отдаст
+    целый текст с видимой записью имён. Потерять содержание ради заголовков нельзя:
+    корпус — доказательство (I1/I19), а имя листа — провенанс.
+    """
+    try:
+        bodies = [
+            str(
+                document.export_to_markdown(  # type: ignore[attr-defined]
+                    escape_underscores=False, page_no=page_no
+                )
+            )
+            for page_no, _name in sections
+        ]
+    except Exception:  # noqa: BLE001 — раскладка по страницам не обязана поддерживаться
+        return None
+    if "".join("".join(body.split()) for body in bodies) != "".join(whole.split()):
+        return None
+    return "\n\n".join(
+        f"## {name}\n\n{body.strip()}" if body.strip() else f"## {name}"
+        for (_page_no, name), body in zip(sections, bodies, strict=True)
+    )
 
 
 def _resolve_docling() -> bool:
@@ -538,13 +712,23 @@ def _page_count(result: object) -> int | None:
     берём его. Fallback — ``len(result.pages)``: у ``InputDocument`` поле имеет дефолт
     ``0`` (и в старых версиях/для не-PDF бэкендов может быть незаполненным), а ``0``
     страниц у успешно извлечённого документа — заведомо неверный счётчик.
+
+    **Ноль — не измерение** (замер 02.11.2026). Офисный DOCX-бэкенд не вызывает
+    ``add_page``: у него ``len(doc.pages) == 0`` и ``input.page_count == 0``, то есть
+    «страниц нет» — не факт о документе, а отсутствие понятия страницы у формата.
+    Возвращать в этом случае ``0`` значило бы объявить замер, которого не было: отчёт
+    показал бы «0 страниц» у прочитанного документа. Поэтому «ни одного наблюдения» →
+    :data:`None` («не измерено»), а не ноль. У XLSX/PPTX счётчик реальный: лист/слайд —
+    страница (``input.page_count`` = 2/1 на замере), у PDF — число страниц PDF.
     """
     input_doc = getattr(result, "input", None)
     total = getattr(input_doc, "page_count", None)
     if isinstance(total, int) and not isinstance(total, bool) and total > 0:
         return total
     pages = getattr(result, "pages", None)
-    return len(pages) if pages is not None else None
+    if pages:
+        return len(pages)
+    return None
 
 
 def _converted_page_count(result: object) -> int | None:
@@ -567,12 +751,18 @@ def _converted_page_count(result: object) -> int | None:
 class DoclingDocumentExtractor:
     """Документ (PDF/DOCX/PPTX/XLSX) → markdown через docling. Реализация ``ExtractorPort``.
 
-    ``level`` задаёт уровень извлечения PDF (P5), ``pdf_device`` — устройство моделей (P9).
-    ``version`` — инстансный и кодирует уровень, устройство, сборку движка и политику экспорта
-    (``docling-doc-3:<level>/<device>/docling-<build>``,
+    ``level`` задаёт уровень извлечения **PDF** (P5), ``pdf_device`` — устройство моделей
+    PDF (P9). ``version`` — инстансный и кодирует уровень, устройство, сборку движка,
+    политику экспорта и очистку текста
+    (``docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>``,
     :func:`docling_extractor_version`), чтобы смена уровня, устройства или апгрейд docling
     была видна и в ``index_build_id``, и в ключе ``extract_cache``. Классовый ``version`` —
     дефолт ``full``/``cpu`` (обратная совместимость по атрибуту).
+
+    **Офисный документ ``version`` не использует** (см. :meth:`version_for`): у DOCX/PPTX/
+    XLSX нет ни уровня, ни устройства — их штамп строит :func:`docling_office_version`.
+    Поэтому провенанс конкретного файла берётся :meth:`version_for`, а ``version`` остаётся
+    штампом PDF-ветви.
     """
 
     #: Классовый дефолт = уровень ``full``, вычисленный при импорте
@@ -601,6 +791,28 @@ class DoclingDocumentExtractor:
         self._converter = None
         #: OCR проверен (``full``): повторные PDF не пере-строят auto-OCR.
         self._ocr_checked = False
+
+    def version_for(self, filename: str) -> str:
+        """Версия **фактического** документа: PDF и Office штампуются по-разному.
+
+        ``self.version`` описывает PDF-ветвь (уровень + устройство). Офисный документ идёт
+        через ``SimplePipeline`` без уровня и без моделей, поэтому его версия — отдельная
+        (:func:`docling_office_version`). Выбор — по суффиксу файла, тому же, по которому
+        docling выводит формат: другого входа у решения нет, а догадка о формате по
+        содержимому была бы вторым, расходящимся с docling классификатором.
+
+        Метод нужен composition root'у: ключ ``extract_cache`` спрашивается **до**
+        извлечения (``_LocalExtractor.extractor_version_for``), и он обязан совпасть со
+        штампом адаптера. Без него офисный документ получал бы PDF-ключ с уровнем и
+        устройством, которых не было (и кэш был бы write-only).
+
+        :param filename: имя файла с расширением (``document.docx``/``report.pdf``).
+        """
+        return self._version_for_suffix(Path(filename).suffix.lower())
+
+    def _version_for_suffix(self, suffix: str) -> str:
+        """Версия по суффиксу: только ``.pdf`` — PDF-ветвь, остальное — Office."""
+        return self.version if suffix == PDF_SUFFIX else docling_office_version()
 
     @property
     def level(self) -> DocumentLevel:
@@ -816,6 +1028,9 @@ class DoclingDocumentExtractor:
         error = self._precheck(suffix)
         if error is not None:
             return error
+        # Штамп провенанса — версия **фактической** ветви (PDF или Office): офисному
+        # документу нельзя приписать уровень/устройство PDF-конвейера (см. ``version_for``).
+        version = self._version_for_suffix(suffix)
         # Сборка конвертера — вне ``try``: ``OcrEngineUnavailableError`` обязан дойти до
         # фазы как ошибка конфигурации, а не превратиться в ``docling: ...``.
         converter = self._converter or self._build_converter(pdf=suffix == ".pdf")
@@ -825,9 +1040,11 @@ class DoclingDocumentExtractor:
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(content)
                 tmp_path = tmp.name
-            return self._convert(converter, tmp_path)
+            return self._convert(
+                converter, tmp_path, version=version, office=suffix != PDF_SUFFIX
+            )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
-            return self._error(f"docling: {exc}")
+            return self._error(f"docling: {exc}", version)
         finally:
             if tmp_path is not None:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -846,7 +1063,8 @@ class DoclingDocumentExtractor:
 
         Семантика извлечения та же, что у :meth:`extract_bytes`: тот же уровень
         (``document_level``), та же OCR-проверка, те же строки ошибок, тот же
-        ``ExtractedDoc`` и тот же ``version``.
+        ``ExtractedDoc`` и та же версия — :meth:`version_for` (PDF и Office штампуются
+        разными строками).
         """
         source = Path(path)
         suffix = (
@@ -857,18 +1075,21 @@ class DoclingDocumentExtractor:
         error = self._precheck(suffix)
         if error is not None:
             return error
+        version = self._version_for_suffix(suffix)
         if not source.is_file():
             # Видимая ошибка, а не падение: файл мог исчезнуть между retention и извлечением.
-            return self._error(f"retained-файл не найден: {source}")
+            return self._error(f"retained-файл не найден: {source}", version)
         converter = self._converter or self._build_converter(pdf=suffix == ".pdf")
         self._converter = converter
         try:
             with tempfile.TemporaryDirectory(prefix="cohound-extract-") as staging:
                 staged = Path(staging) / f"document{suffix}"
                 _stage_by_reference(source, staged)
-                return self._convert(converter, str(staged))
+                return self._convert(
+                    converter, str(staged), version=version, office=suffix != PDF_SUFFIX
+                )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
-            return self._error(f"docling: {exc}")
+            return self._error(f"docling: {exc}", version)
 
     def _precheck(self, suffix: str) -> ExtractedDoc | None:
         """Общие проверки обоих входов; ``None`` — можно конвертировать.
@@ -878,25 +1099,39 @@ class DoclingDocumentExtractor:
         (байты/путь) не меняют семантику извлечения.
         """
         if suffix not in SUPPORTED_FORMATS:
+            # Провал формата — не ветвь провенанса: обработчика нет вовсе, поэтому штамп
+            # остаётся инстансным (PDF-версия описывает сам адаптер, а не документ).
             return self._error(f"формат не поддерживается: {suffix}")
         if self._level is DocumentLevel.OFF:
             # ``off`` — решение pipeline пропустить документ, а не задача адаптера; прямой
             # вызов честно ошибается (никогда не пустой текст «молча»).
-            return self._error("document_level=off: документы не извлекаются")
+            return self._error(
+                "document_level=off: документы не извлекаются",
+                self._version_for_suffix(suffix),
+            )
         # Ленивый импорт docling: ``available`` отвечает по ``find_spec`` (без импорта),
         # фактическое разрешение символов — здесь, на первом реальном документе. Строка
         # ошибки прежняя: «пакет есть, но не импортируется» и «пакета нет» для вызывающего
         # неразличимы — извлекать нечем в обоих случаях.
         if not _resolve_docling():
-            return self._error("docling не установлен")
+            return self._error(
+                "docling не установлен", self._version_for_suffix(suffix)
+            )
         # ``full`` обещает OCR именно для PDF; офисный документ OCR не использует, поэтому
         # проверка выполняется только на PDF-пути (окружение ``extract`` без OCR остаётся
         # рабочим). Ошибка — до конвертации: никакой текст без OCR не помечается ``full``.
-        if suffix == ".pdf" and self._level is DocumentLevel.FULL:
+        if suffix == PDF_SUFFIX and self._level is DocumentLevel.FULL:
             self._require_working_ocr(self._pdf_options())
         return None
 
-    def _convert(self, converter: object, path: str) -> ExtractedDoc:
+    def _convert(
+        self,
+        converter: object,
+        path: str,
+        *,
+        version: str | None = None,
+        office: bool = False,
+    ) -> ExtractedDoc:
         """Общий хвост обоих входов: ``convert`` → markdown → ``ExtractedDoc``.
 
         Статус конвертации разбирается на три исхода, а не на два:
@@ -909,12 +1144,19 @@ class DoclingDocumentExtractor:
 
         Любой сбой конвертации — грациозная деградация ``docling: <причина>`` (прежняя
         строка ошибки), а не исключение.
+
+        ``version`` — штамп **фактической** ветви (PDF или Office): его считает вызывающий
+        вход (:meth:`extract_bytes`/`extract_path`) по суффиксу, потому что вывести ветвь
+        из результата docling нельзя — формат знает вход, а не результат.
+        ``office`` — та же ветвь в булевом виде: причина частичности не должна называть
+        уровень, которого у офисного пути нет.
         """
+        stamp = self.version if version is None else version
         try:
             result = converter.convert(path)
             status = getattr(result.status, "name", str(result.status))
             if status == PARTIAL_SUCCESS_STATUS:
-                doc = self._partial(result, status)
+                doc = self._partial(result, status, version=stamp, office=office)
                 if doc.error is None:
                     # Операционная видимость: артефакт прогона признак частичности пока не
                     # несёт (его место — ``corpus_docs``/манифест), поэтому факт «документ
@@ -923,19 +1165,21 @@ class DoclingDocumentExtractor:
                     _log.warning("частичное извлечение %s: %s", path, doc.partial_reason)
                 return doc
             if status != "SUCCESS":
-                return self._error(f"docling: статус конвертации {status}")
-            text = _export_markdown(result.document)
+                return self._error(f"docling: статус конвертации {status}", stamp)
+            text = _document_text(result.document)
             pages = _page_count(result)
             return ExtractedDoc(
                 text=text,
                 content_hash=_sha256(text),
-                extractor_version=self.version,
+                extractor_version=stamp,
                 page_count=pages,
             )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
-            return self._error(f"docling: {exc}")
+            return self._error(f"docling: {exc}", stamp)
 
-    def _partial(self, result: object, status: str) -> ExtractedDoc:
+    def _partial(
+        self, result: object, status: str, *, version: str | None = None, office: bool = False
+    ) -> ExtractedDoc:
         """``PARTIAL_SUCCESS`` → документ с текстом **части** и видимой причиной.
 
         Частичность не выдаётся за полный успех по двум признакам сразу:
@@ -952,10 +1196,17 @@ class DoclingDocumentExtractor:
         Пустой текст при частичном статусе — это не частичный успех: страницы, которых нет
         в результате, не дали ничего. Тогда — прежняя строка ``_error``, чтобы «прочитали
         частично» не стало способом вернуть пустой документ в корпус.
+
+        ``office=True`` — офисный документ: у него нет уровня (``SimplePipeline``), поэтому
+        причина частичности не называет ни уровня, ни обещания структуры. Иначе DOCX
+        получил бы в провенанс ``full``-обещание, которого никто не давал.
         """
-        text = _export_markdown(result.document)
+        text = _document_text(result.document)
         if not text.strip():
-            return self._error(f"docling: статус конвертации {status} без текста")
+            return self._error(
+                f"docling: статус конвертации {status} без текста",
+                self.version if version is None else version,
+            )
         total = _page_count(result)
         converted = _converted_page_count(result)
         pages_note = ""
@@ -963,34 +1214,48 @@ class DoclingDocumentExtractor:
             pages_note = f", получено страниц {converted} из {total}"
         elif converted is not None:
             pages_note = f", получено страниц {converted}"
-        # Формулировка зависит от уровня: ``layout``/``layout_tables``/``full`` обещают
-        # **структуру целого** документа (заголовки, таблицы, reading order), поэтому их
-        # частичный результат не вправе читаться как обещанное; ``text`` структуры не
-        # обещает вовсе — там частичность означает только «часть страниц не прочитана».
-        claim = (
-            "обещана структура целого документа — получен текст части"
-            if self._level in _STRUCTURED_LEVELS
-            else "получен текст части документа"
-        )
-        reason = (
-            f"docling: статус конвертации {status}{pages_note}; "
-            f"уровень {self._level.value}: {claim}"
-        )
+        if office:
+            # Офисный документ идёт без уровня и без моделей: приписывать ему обещание
+            # структуры «уровня full» значило бы вернуть в провенанс ту самую ложь, ради
+            # которой у Office отдельная версия (:func:`docling_office_version`).
+            reason = (
+                f"docling: статус конвертации {status}{pages_note}; "
+                f"офисный документ прочитан не целиком"
+            )
+        else:
+            # Формулировка зависит от уровня: ``layout``/``layout_tables``/``full`` обещают
+            # **структуру целого** документа (заголовки, таблицы, reading order), поэтому их
+            # частичный результат не вправе читаться как обещанное; ``text`` структуры не
+            # обещает вовсе — там частичность означает только «часть страниц не прочитана».
+            claim = (
+                "обещана структура целого документа — получен текст части"
+                if self._level in _STRUCTURED_LEVELS
+                else "получен текст части документа"
+            )
+            reason = (
+                f"docling: статус конвертации {status}{pages_note}; "
+                f"уровень {self._level.value}: {claim}"
+            )
         return ExtractedDoc(
             text=text,
             content_hash=_sha256(text),
-            extractor_version=self.version,
+            extractor_version=self.version if version is None else version,
             page_count=total,
             partial=True,
             partial_reason=reason,
             pages_converted=converted,
         )
 
-    def _error(self, message: str) -> ExtractedDoc:
+    def _error(self, message: str, version: str | None = None) -> ExtractedDoc:
+        """Грациозная деградация: пустой текст, хеш пустой строки, ``error``.
+
+        ``version`` — штамп фактической ветви (PDF/Office); по умолчанию PDF-версия
+        инстанса (прямые вызовы и тесты).
+        """
         return ExtractedDoc(
             text="",
             content_hash=_sha256(""),
-            extractor_version=self.version,
+            extractor_version=self.version if version is None else version,
             error=message,
         )
 

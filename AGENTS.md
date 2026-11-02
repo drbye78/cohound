@@ -247,7 +247,7 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
 ## 9. Run identity, declared axes, versioning
 
 - `run_id` is a function of **declared inputs only**: 29 fields in
-  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:86`). Host-observed values
+  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:88`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
 - **Anything that changes the corpus or the verdicts must be a declared input.** Precedents
@@ -256,7 +256,7 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
 - **Crawl axes:** `crawl_strategy`, `crawl.rate_limit` and `crawl_config_digest` are contract
   fields; `max_depth`/`max_documents`/`exclude_*`/`robots`/`document_level`/`pdf_pipeline`
   enter through `crawl_config_digest` (`CrawlLimits.as_dict()`). Add a new operator axis to
-  the single inventory `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:179`) so `plan` and
+  the single inventory `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:184`) so `plan` and
   `run` pick it up together — flag parity is tested. Changing an axis gives a **new `run_id`**
   (`execution_change`), not an edit of the current run; otherwise two different corpora become
   one measurement.
@@ -320,7 +320,8 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
   Materials and detectors are preserved there for further experiments; the revision condition
   is labelled pages, or a recall-1.0 classifier with real savings.
 - **`crawl.pdf_device`** (`cpu|cuda`, no `auto`): device is part of `extractor_version`
-  (`docling-doc-3:<level>/<device>/docling-<build>`) and `extractor_stack`, so it changes the
+  (`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`; Office carries no
+  level/device at all — `docling-office-1:<policy>/docling-<build>/<finalize>`) and `extractor_stack`, so it changes the
   `extract_cache` key and `run_id` once, explicitly. `cuda` with no usable device is
   `EXIT_USAGE` with numbers, **never** a silent CPU fallback. Measured 8–12× on document
   extraction (`docs/reports/measurements/2026-10-28-gpu-vs-cpu-extraction.md`); a second

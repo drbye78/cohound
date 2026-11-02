@@ -193,7 +193,7 @@ staging крупных артефактов отсутствует; (3) ось `
 извлекаются — `core/adapters/remote_extractor.py:42` (`supports_source_path = False`);
 (2) страница `collect` ограничена 8 MiB — `core/edge/scheduler.py:163` (`_COLLECT_MAX_BYTES`),
 файлового staging крупных артефактов через шов нет; (3) ось `crawl.document_level` под `split`
-принимается и игнорируется — `core/cli/wiring.py:2215`.
+принимается и игнорируется — `core/cli/wiring.py:2294`.
 
 ---
 
@@ -240,7 +240,7 @@ staging крупных артефактов отсутствует; (3) ось `
 (`cohound-spec-v2.md` §3.2/§15, `05-dependency-stack.md` §7). Блокер именно **отсутствие фикстур и
 приёмки**, а не отсутствие контура: docling работает на реальных данных — `corpus_docs.extractor_version`
 в живых прогонах показывает `docling-doc-3:layout_tables` для сотен документов наряду с
-`trafilatura-html-2` и `text-plain-1`. Поэтому M0 не закрыт целиком: каркас и детерминированные
+`trafilatura-html-3` и `text-plain-2`. Поэтому M0 не закрыт целиком: каркас и детерминированные
 волны готовы, воспроизводимой приёмки экстракции нет.
 
 ⬜ не сделано — приёмка экстракции: PDF/Office-фикстур в дереве нет (`find tests -name '*.pdf'` →
@@ -994,7 +994,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   materialize core/` даёт только локальную переменную `core/pipeline/report.py:1909-1915`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `_template`), паритет реестров под `split`
   (`core/cli/context.py:1674` против `core/edge/server.py:1104`), R3 (ревизия весов моделей не
-  входит в `extractor_version`, `core/adapters/extract_document.py:221-226`), E1 follow-up
+  входит в `extractor_version`, `core/adapters/extract_document.py:252-284`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`), A1 follow-up (мультиплексирование
   root/product **закрыто** F4a/F4b — `core/pipeline/corpus_driver.py`; открыт нит
   `limiter.wait` внутри/вне `try`, `core/pipeline/corpus_ingest.py:2466`).
@@ -1009,9 +1009,9 @@ DLP, набор IDS-правил) — design-требования зафикси
   local/split (§2.3): одна процедура — «один вход, два профиля, сравнить `index_build_id` и
   `registry_spec_digest`», — а не две.
   ➖ **снято как пункт, но не как факт:** под `split` процессной экстракции нет — это устройство
-  зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2345`), а не недоделка.
+  зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2350`), а не недоделка.
   Так же снят прежний остаток «`use_ocr=False` — мёртвый код»: решением P5 `full` несёт OCR,
-  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:693-723`),
+  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:909-926`),
   и документированное прежде «сканы дают пустой текст» было неверным.
 
 ---

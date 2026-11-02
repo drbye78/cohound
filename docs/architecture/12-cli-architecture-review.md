@@ -379,7 +379,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 «это меняет run_id».
 **Уточнение 2026-10-28:** `--extract-workers` и `--crawl-strategy` флагами **не** являются и
 не были — обе оси живут в `run.yaml`/`deploy.yaml` (`crawl.extract_workers`,
-`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:678-681` через
+`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:735-739` через
 `_crawl_strategy(run_crawl)`). Флаговые контрактные оси сейчас: `--document-level`,
 `--pdf-pipeline`, `--document-timeout`, `--llm-model`, `--llm-slot`, `--retrieval-profile`,
 `--cutoff-k`, `--max-depth`, `--max-documents`, `--serp-rounds`. Пример в тексте был неточен

@@ -40,7 +40,7 @@
 
 ``chunker_version`` — **композит** правил нарезки, а не версия одного чанкера: у plain text
 свой абзацный чанкер, у markdown/HTML/EPUB — заголовочный, поэтому значение —
-``"md-heading-2+text-para-1"`` (:func:`core.adapters.chunker_family.composite_chunker_version`).
+``"md-heading-4+text-para-2"`` (:func:`core.adapters.chunker_family.composite_chunker_version`).
 Формула одна на декларацию и на собранный порт: разойдись они — ``execution_contract_digest``
 описывал бы не ту нарезку, которой получен корпус (R7 §11.7). Смена строки — версионная
 граница класса ``execution_versions`` (``execution_change``, §13): меняется ``run_id``,
@@ -90,9 +90,14 @@ from core.adapters.chunker_family import (
 from core.adapters.extract_document import (
     DOCLING_ADAPTER_FAMILY,
     DOCLING_MARKDOWN_POLICY,
+    DOCLING_OFFICE_ADAPTER_FAMILY,
+    DOCLING_TEXT_FINALIZE,
     docling_engine_build,
 )
+from core.adapters.extract_epub import EPUB_READER_VERSION
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.extract_pdf_text import PDFIUM_ADAPTER_VERSION
+from core.adapters.extract_text import TextExtractor
 from core.adapters.lexical_tantivy import lexical_schema_spec
 from core.adapters.llm_local import (
     EVALUATOR_DEFAULT_SEED,
@@ -659,13 +664,20 @@ class DeclaredExecutionAxes:
 def extractor_stack_version(
     pdf_device: PdfDevice | str = PdfDevice.CPU,
 ) -> str:
-    """Декларированный стек извлечения: ``<html>+<docling-family>/<device>/<build>/<policy>``.
+    """Декларированный стек извлечения — **все читатели**, производящие текст корпуса.
 
-    Пример: ``trafilatura-html-2+docling-doc-3/cuda/docling-2.135.0/md-plain-underscore``
-    (при отсутствии библиотеки — ``.../docling-unknown/<policy>``). ``<build>`` — **тот же**
-    вызов (:func:`core.adapters.extract_document.docling_engine_build`), что даёт сборку в
-    ``extractor_version`` документа, поэтому стек и ключ ``extract_cache`` называют одну
-    и ту же версию библиотеки (Д-8).
+    Формат: ``<html>+<text>+<epub>+<pdfium>+<office>+<docling>/<device>/<build>/<policy>/<finalize>``.
+
+    Пример: ``trafilatura-html-3+text-plain-2+epub-2+pdfium-text-2+docling-office-1+
+    docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1``.
+
+    **Почему здесь все читатели, а не только HTML и docling.** Поле объявлено ради
+    одного: смена текста не имеет права пройти под прежним ``run_id`` (Д-8, A3). До
+    02.11.2026 в строке были только HTML-читатель и docling, поэтому правка текстового
+    читателя, читателя EPUB или механизма ``text_layer`` меняла корпус, не меняя
+    идентичности прогона: два разных корпуса жили бы под одним ``run_id``. Каждый
+    читатель назван здесь своим ``version`` — той же константой, что штампует документ
+    и ключ ``extract_cache``, иначе две формулы разошлись бы молча (Д-8).
 
     ``<policy>`` — политика экспорта текста
     (:data:`core.adapters.extract_document.DOCLING_MARKDOWN_POLICY`). Она здесь по той же
@@ -673,17 +685,35 @@ def extractor_stack_version(
     ``_`` давало 26 искажённых имён на одном PDF), а ``extractor_version`` в контракт не
     входит. Без этого сегмента правка политики меняла бы корпус под прежним ``run_id``.
 
+    ``<finalize>`` — очистка текста после чтения
+    (:data:`core.adapters.extract_document.DOCLING_TEXT_FINALIZE`): удаление управляющих
+    символов и нейтрализация каркаса промпт-инъекций. Это та же граница, что и у
+    HTML/текстового читателей (``core.util.sanitize.finalize_extracted_text``), поэтому
+    её версия обязана быть в стеке: иначе документный путь менял бы корпус молча
+    (дефект 02.11.2026: очистка не вызывалась на docling/``text_layer`` вовсе).
+
     ``<device>`` — объявленная ось ``crawl.pdf_device`` (P9). Она здесь потому, что
     ``extractor_version`` **наблюдаем** и в контракт не входит (методология 2.4.0: он
     остаётся провенансом), а устройство — условие измерения: текст документа от него
     зависит, и без сегмента ``cpu``/``cuda`` два прогона с разным устройством имели бы
     один ``run_id``. Поле контракта при этом не новое: ``extractor_stack`` и есть
     объявленный аналог ``extractor_version``.
+
+    **Оба механизма PDF названы, хотя в прогоне работает один.** Выбор механизма —
+    объявленная ось (``crawl.pdf_pipeline``, входит в ``crawl_config_digest``), а версия
+    читателя — нет. Можно было бы включать ``pdfium`` только при ``text_layer``, но тогда
+    функция стала бы зависеть от резолва оси (второй формулы), а лишнее изменение
+    ``run_id`` при правке неиспользуемого читателя безопаснее молчаливой смены корпуса.
+    У офисной ветви своего ``device``/``level`` нет вовсе — ``SimplePipeline`` не считает
+    моделями; поэтому она названа одним семейством без хвоста
+    (:func:`core.adapters.extract_document.docling_office_version`).
     """
     device = PdfDevice(pdf_device)
     return (
-        f"{HtmlExtractor.version}+{DOCLING_ADAPTER_FAMILY}/{device.value}/"
-        f"{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}"
+        f"{HtmlExtractor.version}+{TextExtractor.version}+{EPUB_READER_VERSION}"
+        f"+{PDFIUM_ADAPTER_VERSION}+{DOCLING_OFFICE_ADAPTER_FAMILY}"
+        f"+{DOCLING_ADAPTER_FAMILY}/{device.value}/"
+        f"{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}/{DOCLING_TEXT_FINALIZE}"
     )
 
 
