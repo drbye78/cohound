@@ -49,6 +49,17 @@ FIFO по записям волны).
 ``product_tail_s`` бакетов продукта, то есть видно в ``metrics.json`` —
 ``resources.stage_timings``.
 
+**Браузерный маршрут — один поток на всю когорту.** Playwright sync-API привязан к потоку,
+создавшему движок: обращение к контексту из другого потока — отказ
+(``cannot switch to a different thread``). Поэтому не-poolable (браузерные) элементы всех
+полос идут в **один** пул из одного потока (:func:`_dispatch_wave`,
+``non_poolable_pool``), который приходит извне (``browser_pool``) и переживает полосу:
+пул — владелец движка, а не корень. Драйвер такой пул не закрывает (у полосы
+``_Lane.owns_browser_pool`` ``False``: чужое не закрываем) — его закрывает тот, кто создал
+(фаза — в своём ``finally``, а если пул создан здесь, то ``drive_roots`` в своём).
+Браузерные фетчи когорты при этом **сериализуются**, и это публикуемый факт, а не потолок:
+число фетчей и суммарное ожидание волн с браузерным элементом уходят строкой в ``notes``.
+
 **Teardown.** Каждый допущенный корень обязан либо завершиться, либо быть **названным** в
 ``errors``: при исключении живые генераторы закрываются (их ``finally`` исполняются
 сейчас, а не при сборке мусора), а ``abort`` называет, сколько строк очереди конверсии
@@ -124,7 +135,21 @@ class _Lane:
     #: Бакеты стадий **продукта** этого корня (F9: у продукта свой носитель).
     timings: _CorpusStageTimings
     fetch_pool: Executor | None = None
+    #: Пул браузерного (не-poolable) маршрута. Он **общий на когорту**: в нём живёт
+    #: движок Playwright, привязанный к своему потоку, поэтому полоса им не владеет.
     browser_pool: Executor | None = None
+    #: Владеет ли полоса своим браузерным пулом. ``False`` — пул чужой (фазы или
+    #: ``drive_roots``), закрывать его полосе нельзя: закрытие пула убило бы поток
+    #: владельца движка для всех остальных корней.
+    owns_browser_pool: bool = False
+    #: Сколько элементов ушло в браузерный поток за корень (видимость сериализации).
+    browser_entries: int = 0
+    #: Суммарное ожидание волн, в которых был браузерный элемент, секунды.
+    browser_wait_s: float = 0.0
+    #: Отправленная волна содержит браузерный элемент: её ожидание идёт в
+    #: ``browser_wait_s`` (ожидание относится к волне, а не к её отдельным записям —
+    #: записи волны ждут одну и ту же браузерную очередь и не суммируются дважды).
+    browser_wave: bool = False
     #: План волны, ещё не отправленный (``None`` — волна отправлена или корень завершён).
     wave: WavePlan | None = None
     #: Отправленная волна (``None`` — нечего ждать).
@@ -160,6 +185,8 @@ def drive_roots(
     timings_for: Callable[[str | None], _CorpusStageTimings],
     errors: list[str],
     pool_factory: Callable[[int], Executor] | None = None,
+    browser_pool: Executor | None = None,
+    notes: list[str] | None = None,
     on_root_done: Callable[[RootOutcome], None] | None = None,
     on_product_done: Callable[[str], None] | None = None,
     lane_limit_for: Callable[[RootPlan], int | None] | None = None,
@@ -185,6 +212,16 @@ def drive_roots(
         продукта не имеет права попасть в строку другого продукта.
     :param pool_factory: фабрика пула фетча (D4, инжектится тестами); ``None`` —
         ``ThreadPoolExecutor``.
+    :param browser_pool: пул браузерного маршрута **от владельца фазы**: один поток на всю
+        когорту, в нём же создаётся и живёт движок Playwright. Драйвер его не закрывает
+        (``_Lane.owns_browser_pool`` ```False```) — закрывает создатель, и закрывает
+        **на этом потоке**. ``None`` — пул создаёт сам драйвер на время вызова (тогда
+        он же его и останавливает): прямой вызов без пула не должен рассылать браузерные
+        фетчи по разным потокам. Поток обязан быть именованным — иначе его не опознать
+        в ``py-spy``/логах.
+    :param notes: канал наблюдений фазы (``results[].notes``). Сюда уходит одна строка о
+        браузерном маршруте, если он был: сколько фетчей прошло через один поток и
+        сколько полоса на них ждала. Это **факт** сериализации, а не потолок.
     :param on_root_done: вызывается **на главном потоке** сразу по завершении корня —
         здесь фаза строит финализатор провенанса и регистрирует хвост (C1).
     :param on_product_done: вызывается **на главном потоке**, когда завершён последний
@@ -209,6 +246,15 @@ def drive_roots(
     queue = iter(plans)
     queue_open = True
     lanes: list[_Lane] = []
+    #: Пул браузерного маршрута: чужой (фазы) или созданный здесь на время вызова.
+    #: Второй случай — только прямой вызов драйвера; фаза всегда передаёт свой, потому
+    #: что движок браузера обязан быть закрыт **на этом потоке** после конца когорты, а
+    #: знать про движок (``CrawlerPort``) драйвер не должен.
+    owned_browser_pool = browser_pool is None
+    if browser_pool is None:
+        browser_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cohound-browser"
+        )
     #: Занятые host'ы: держит только отправленная волна (снимается на её коммите).
     claimed: set[str] = set()
     done: list[RootOutcome] = []
@@ -217,6 +263,19 @@ def drive_roots(
     finished: dict[str, int] = {}
     planning_closed: set[str] = set()
     closed: set[str] = set()
+    #: Итоги браузерного маршрута по когорте: фетчи и ожидание их волн (для строки в
+    #: ``notes``). Считаются по завершённым и по прерванным полосам: факт сериализации
+    #: не отменяется тем, что прогон прервали.
+    browser_entries_total = 0
+    browser_wait_total = 0.0
+
+    def _account_browser(lane: _Lane) -> None:
+        """Перенести браузерные числа полосы в итог когорты ровно один раз."""
+        nonlocal browser_entries_total, browser_wait_total
+        browser_entries_total += lane.browser_entries
+        browser_wait_total += lane.browser_wait_s
+        lane.browser_entries = 0
+        lane.browser_wait_s = 0.0
 
     def _note_product(plan: RootPlan) -> None:
         """Учесть корень продукта (``None`` — корень вне когорты: границ у него нет)."""
@@ -254,7 +313,7 @@ def drive_roots(
         _maybe_close(product_id)
 
     def _close(lane: _Lane) -> None:
-        """Закрыть генератор корня и его пулы. Сбой закрытия виден, но не маскирует исход."""
+        """Закрыть генератор корня и **его** пулы. Сбой закрытия виден, но не маскирует исход."""
         if lane.steps is not None:
             try:
                 lane.steps.close()
@@ -264,7 +323,13 @@ def drive_roots(
                     f"{type(exc).__name__}: {exc}"
                 )
             lane.steps = None
-        for pool in (lane.fetch_pool, lane.browser_pool):
+        pools = [lane.fetch_pool]
+        # Браузерный пул обычно чужой (фазы или ``drive_roots``): закрывать его здесь
+        # нельзя — в его потоке живёт движок Playwright, общий на всю когорту. Закрытие
+        # чужого пула убило бы поток владельца первому же завершившемуся корню.
+        if lane.owns_browser_pool:
+            pools.append(lane.browser_pool)
+        for pool in pools:
             if pool is None:
                 continue
             try:
@@ -276,6 +341,7 @@ def drive_roots(
                 )
         lane.fetch_pool = None
         lane.browser_pool = None
+        lane.owns_browser_pool = False
 
     def _release(lane: _Lane) -> None:
         """Снять право корня на host'ы (только после коммита волны)."""
@@ -295,11 +361,14 @@ def drive_roots(
                     if pool_factory is not None
                     else ThreadPoolExecutor(max_workers=width)
                 )
-                # Не-poolable маршрут (browser) — свой пул из **одного** потока:
-                # ``BrowserCrawler`` водит единственную ``_page`` без лока, а исполнение
-                # на потоке драйвера остановило бы все полосы. Пустой пул потоки не
-                # запускает, поэтому он не стоит ничего, пока браузерной волны нет.
-                lane.browser_pool = ThreadPoolExecutor(max_workers=1)
+                # Не-poolable маршрут (browser) — **общий** пул из одного потока:
+                # ``BrowserCrawler`` водит единственную ``_page`` без лока, а движок
+                # Playwright привязан к потоку-создателю, поэтому поток обязан быть один
+                # на когорту и жить дольше корня. Исполнение на потоке драйвера
+                # остановило бы все полосы — поэтому не инлайн, а пул. Пустой пул
+                # потоков не запускает: он не стоит ничего, пока браузерной волны нет.
+                lane.browser_pool = browser_pool
+                lane.owns_browser_pool = False
             lane.steps = begin(
                 plan, fetch_pool=lane.fetch_pool, browser_pool=lane.browser_pool
             )
@@ -359,6 +428,8 @@ def drive_roots(
             non_poolable_pool=lane.browser_pool,
             local_fetch=local_fetch,
         )
+        lane.browser_wave = wave.non_poolable
+        lane.browser_entries += _browser_submissions(lane.request)
         lane.wait_started = time.perf_counter()
 
     def _settle(lane: _Lane) -> None:
@@ -378,7 +449,15 @@ def drive_roots(
         # вызовы ``result`` внутри ``_await_wave`` уже не спят. При полосах это сумма
         # ожиданий корней, а не wall time продукта (он публикуется строкой продукта) —
         # иначе «ожидание» читалось бы как работа. Бакет — **своего** продукта (F9).
-        lane.timings.fetch_wait_s += time.perf_counter() - started
+        _waited = time.perf_counter() - started
+        lane.timings.fetch_wait_s += _waited
+        if lane.browser_wave:
+            # Ожидание браузерной волны — отдельным числом: сериализация браузерных
+            # фетчей в одном потоке и есть её цена. Считается по волне (записи волны
+            # ждут одну и ту же очередь — суммировать их ожидания значило бы посчитать
+            # очередь N раз).
+            lane.browser_wait_s += _waited
+            lane.browser_wave = False
         lane.done = not _pump(lane)
         # Право снимается **после** коммита: коммит исполняется внутри ``_pump``
         # (генератор применяет ``_commit_wave_results`` сразу после получения исходов).
@@ -386,6 +465,7 @@ def drive_roots(
 
     def _finish(lane: _Lane) -> None:
         """Завершённый корень: закрыть пулы, отдать исход фазе, освободить полосу."""
+        _account_browser(lane)
         lanes.remove(lane)
         _close(lane)
         outcome = lane.outcome
@@ -514,8 +594,21 @@ def drive_roots(
         raise
     finally:
         for lane in list(lanes):
+            _account_browser(lane)
             _close(lane)
         lanes.clear()
+        if browser_entries_total > 0 and notes is not None:
+            # «Не ограничивать, а измерять»: браузерная очередь — один поток на когорту,
+            # поэтому её цена публикуется числом, а не прячется в «работало медленнее».
+            notes.append(
+                f"crawl{label}: браузер: {browser_entries_total} фетчей через один поток, "
+                f"суммарное ожидание {browser_wait_total:.1f} с "
+                "(полоса не блокируется)"
+            )
+        if owned_browser_pool:
+            # Пул создан здесь — здесь и останавливается. Чужой (фазы) не трогаем: закрытие
+            # движка на его потоке — работа владельца, и она идёт до этого shutdown.
+            browser_pool.shutdown(wait=True)
     return done
 
 
@@ -525,3 +618,21 @@ def _futures(request: Any) -> list[Any]:
     return [
         entry.future for entry in entries if getattr(entry, "future", None) is not None
     ]
+
+
+def _browser_submissions(request: Any) -> int:
+    """Сколько записей волны ушло в браузерный пул (не-poolable маршрут).
+
+    Признак тот же, по которому :func:`core.pipeline.corpus_drain._dispatch_wave`
+    выбирает ветку: у записи есть живой ``future`` и её дескриптор **не** poolable
+    (poolable уходят в пул фетча). Число нужно только для наблюдаемости: сериализация
+    браузерных фетчей — факт, который публикуется, а не ограничение.
+    """
+    count = 0
+    for entry in getattr(request, "entries", ()):
+        if getattr(entry, "future", None) is None:
+            continue
+        desc = getattr(entry, "desc", None)
+        if desc is not None and not desc.poolable:
+            count += 1
+    return count

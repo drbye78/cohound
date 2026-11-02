@@ -86,6 +86,7 @@ import contextlib
 import importlib.util
 import shutil
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -321,6 +322,12 @@ class _PlaywrightBackend:
     automation-сигнала: persistent-запуск идёт с ``_IGNORE_DEFAULT_ARGS``/``_LAUNCH_ARGS``
     (см. докстринг модуля). Ошибка запуска (нет бинарей и т.п.) →
     :class:`CrawlUnavailable` с понятным текстом.
+
+    **Один поток-владелец.** Движок создаётся в том потоке, который первым позвал
+    ``open``, и живёт только в нём: Playwright sync-API не переносим между потоками.
+    Обращение из другого потока получает ``CrawlError`` с обоими идентификаторами —
+    это вызывающий дефект (браузерный фетч ушёл мимо выделенного потока фазы), а не
+    недоступность браузера.
     """
 
     def __init__(
@@ -342,15 +349,41 @@ class _PlaywrightBackend:
         self._context: Any = None
         self._temp_dir: str | None = None
         self._closed = False
+        #: Поток, создавший движок. Playwright sync-API привязан к нему: обращение к
+        #: контексту из другого потока движок отвергает. Хранится **объект** потока, а не
+        #: идентификатор: идентификатор вышедшего потока достаётся следующему, и проверка
+        #: по числу пропустила бы именно тот случай, ради которого написана.
+        self._owner_thread: threading.Thread | None = None
 
     def open(self) -> BrowserSession:
         """Открывает новую страницу в общем контексте (контекст поднимается лениво)."""
         context = self._ensure_context()
         return _PlaywrightSession(context.new_page(), context, self._timeout_ms)
 
+    def _assert_owner_thread(self) -> None:
+        """Движок трогает только поток-создатель; иначе — внятный отказ.
+
+        Это не ограничение, а форма контракта Playwright: sync-API не переносим между
+        потоками. Владелец движка в pipeline — один выделенный поток фазы корпуса
+        (``browser_pool``); обращение мимо него означает, что браузерный фетч ушёл не
+        туда, и любой ответ движка был бы недействителен.
+        """
+        owner = self._owner_thread
+        if owner is None:
+            return
+        current = threading.current_thread()
+        if owner is not current:
+            raise CrawlError(
+                f"браузерный движок принадлежит потоку {owner.name} ({owner.ident}), "
+                f"обращение из потока {current.name} ({current.ident}): Playwright "
+                "sync-API не переносится между потоками (браузерные фетчи обязаны "
+                "идти в один выделенный поток)"
+            )
+
     def _ensure_context(self) -> Any:
         """Ленивый запуск движка и контекста; идемпотентно."""
         if self._context is not None:
+            self._assert_owner_thread()
             return self._context
         if not _playwright_available():
             raise CrawlUnavailable(
@@ -363,6 +396,8 @@ class _PlaywrightBackend:
             )
 
             self._playwright = sync_playwright().start()
+            # Движок запущен: этот поток и есть владелец — и только он им останется.
+            self._owner_thread = threading.current_thread()
             chromium = self._playwright.chromium
             if self._cdp_url:
                 # Взаимоисключимость: при CDP persistent-context не создаётся.
@@ -418,6 +453,7 @@ class _PlaywrightBackend:
         self._context = None
         self._browser = None
         self._playwright = None
+        self._owner_thread = None
         if self._temp_dir is not None:
             shutil.rmtree(self._temp_dir, ignore_errors=True)
             self._temp_dir = None

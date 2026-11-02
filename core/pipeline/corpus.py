@@ -166,7 +166,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from concurrent.futures import Executor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -3925,23 +3925,47 @@ def _build_corpus(
     _cohort_lane_axis = max(
         (int(ctx.lane_axis or 1) for ctx in contexts.values()), default=1
     )
-    corpus_driver.drive_roots(
-        _cohort_root_plans(),
-        host_concurrency=None if _cohort_lane_axis <= 1 else _cohort_lane_axis,
-        begin=_begin_root,
-        lane_width=_lane_width,
-        local_fetch=_local_fetch,
-        timings_for=_timings_for,
-        errors=errors,
-        pool_factory=pool_factory,
-        on_root_done=_root_done,
-        on_product_done=_close_product,
-        lane_limit_for=lambda plan: contexts[str(plan.product_id)].lane_axis or 1,
-        # Teardown: durable-факт «документ добыт» не отбрасывается — прерывание краула
-        # называет, сколько строк очереди конверсии осталось ``pending``.
-        abort=partial(_note_interrupted_queue, queue=conversion_queue, errors=errors),
-        label=" когорты",
+    # Владелец браузерного движка — **один поток на фазу**. Playwright sync-API привязан к
+    # потоку, создавшему движок: контекст, открытый в потоке одной полосы, ломается в
+    # следующей (``cannot switch to a different thread``), а движок при этом общий на
+    # когорту (``ports.crawler``). Поэтому пул создаётся здесь, отдаётся драйверу как
+    # общий и закрывается здесь же: движок закрывается **на своём потоке**, затем поток
+    # останавливается. Иначе браузерный процесс висел бы до конца фазы (на хосте 6.9 GiB
+    # это удерживаемые ~300 MB). Фаза без браузерного движка пул не заводит вовсе: потоку
+    # нечего было бы владеть, а браузерный фетч без движка невозможен.
+    _browsers = _browser_engine_crawlers([crawler, *(crawlers or {}).values()])
+    browser_pool = (
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="cohound-browser")
+        if _browsers
+        else None
     )
+    try:
+        corpus_driver.drive_roots(
+            _cohort_root_plans(),
+            host_concurrency=None if _cohort_lane_axis <= 1 else _cohort_lane_axis,
+            begin=_begin_root,
+            lane_width=_lane_width,
+            local_fetch=_local_fetch,
+            timings_for=_timings_for,
+            errors=errors,
+            pool_factory=pool_factory,
+            browser_pool=browser_pool,
+            notes=lane_notes,
+            on_root_done=_root_done,
+            on_product_done=_close_product,
+            lane_limit_for=lambda plan: contexts[str(plan.product_id)].lane_axis or 1,
+            # Teardown: durable-факт «документ добыт» не отбрасывается — прерывание краула
+            # называет, сколько строк очереди конверсии осталось ``pending``.
+            abort=partial(
+                _note_interrupted_queue, queue=conversion_queue, errors=errors
+            ),
+            label=" когорты",
+        )
+    finally:
+        if browser_pool is not None:
+            _shutdown_browser_owner(
+                browser_pool, _browsers, errors=errors, label=" когорты"
+            )
 
     # Конец прохода когорты: если краул закончился не в хвосте продукта (при объявленной
     # оси последний по авторскому порядку продукт закрывается раньше соседей), сеанс
@@ -4519,3 +4543,74 @@ def build_corpus(*args: Any, **kwargs: Any) -> PhaseResult:
     finally:
         pools.shutdown()
 
+
+#: Ключ движка браузерного рендера. Тот же литерал, по которому pipeline маршрутизирует
+#: ``fetch: browser`` (``corpus_ingest.local_prefetch``) и который кладёт в карту
+#: composition root. Импорт CLI-константы нарушил бы слой ``pipeline ↛ cli``.
+_BROWSER_ENGINE = "browser"
+
+
+def _browser_engine_crawlers(crawlers: Iterable[Any]) -> list[Any]:
+    """Краулеры, владеющие браузерным движком **в этом процессе**.
+
+    Признак — тот же литерал ``engine``, по которому pipeline маршрутизирует
+    ``fetch: browser``. Транспорты без него (``remote`` — рендер на edge) и без ``close``
+    (внедрённые заглушки) сюда не попадают: закрывать в браузерном потоке нечего.
+    """
+    seen: dict[int, Any] = {}
+    for active in crawlers:
+        if active is None:
+            continue
+        if getattr(active, "engine", None) != _BROWSER_ENGINE:
+            continue
+        if not callable(getattr(active, "close", None)):
+            continue
+        seen.setdefault(id(active), active)
+    return list(seen.values())
+
+
+def _shutdown_browser_owner(
+    pool: ThreadPoolExecutor,
+    targets: list[Any],
+    *,
+    errors: list[str],
+    label: str = "",
+) -> None:
+    """Закрыть браузерный движок **на его потоке** и остановить поток фазы.
+
+    Зачем отдельный шаг, а не ``crawler.close()`` на главном потоке. Playwright sync-API
+    привязан к потоку, создавшему движок: закрытие из чужого потока — не «почти работает»,
+    а отказ (``cannot switch to a different thread``), который ``BrowserCrawler.close``
+    гасит best-effort. Тогда браузерный процесс и временный профиль остались бы
+    незакрытыми до конца процесса — на 6.9 GiB хоста это удерживаемые сотни мегабайт на
+    всю оставшуюся фазу.
+
+    Поэтому закрытие подаётся **в тот же пул**, который исполнял браузерные фетчи: там
+    поток-владелец, и там движок закрывается штатно. ``close`` идемпотентен, поэтому
+    повторный вызов безопасен. Ошибки закрытия не поднимаются: они называются в
+    ``errors`` — teardown не имеет права подменить исход фазы, но и молчать о незакрытом
+    движке не должен.
+
+    ``targets`` — уже отобранные :func:`_browser_engine_crawlers`: чужие транспорты из
+    этого пула не трогаются (у Scrapy своё владение потоком).
+    """
+    def _close_engines() -> list[str]:
+        """Исполнить закрытие на потоке-владельце; вернуть строки сбоев (не бросать)."""
+        failures: list[str] = []
+        for active in targets:
+            try:
+                active.close()
+            except Exception as exc:  # noqa: BLE001 — teardown не подменяет исход
+                failures.append(f"{type(exc).__name__}: {exc}")
+        return failures
+
+    try:
+        failures = pool.submit(_close_engines).result()
+    except Exception as exc:  # noqa: BLE001 — пул мог не запустить поток
+        errors.append(
+            f"crawl{label}: закрытие браузерного движка: {type(exc).__name__}: {exc}"
+        )
+    else:
+        errors.extend(f"crawl{label}: close(браузер): {failure}" for failure in failures)
+    finally:
+        pool.shutdown(wait=True)
