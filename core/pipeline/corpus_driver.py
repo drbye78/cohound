@@ -558,16 +558,25 @@ def drive_roots(
                 if not queue_open:
                     break
                 continue
+            # Ждём **только незавершённые** future'ы. ``wait`` с ``FIRST_COMPLETED``
+            # возвращается немедленно, если в наборе есть готовый future, а волна
+            # сбрасывается лишь когда готовы **все** её записи: набор без этого фильтра
+            # оставлял цикл горячим простоем на всё окно между первым и последним
+            # завершением записи волны. Измерено профилем py-spy 02.11.2026: 97 % одного
+            # ядра внутри этого цикла при темпе, который задавал пейсинг, — то есть CPU
+            # жгло ожидание, а не работа.
             futures = {
                 future
                 for lane in in_flight
                 for future in _futures(lane.request)
+                if not future.done()
             }
-            wait(
-                futures,
-                timeout=_LANE_WAIT_TIMEOUT_S,
-                return_when=FIRST_COMPLETED,
-            )
+            if futures:
+                wait(
+                    futures,
+                    timeout=_LANE_WAIT_TIMEOUT_S,
+                    return_when=FIRST_COMPLETED,
+                )
             for lane in in_flight:
                 waiting = _futures(lane.request)
                 if waiting and not all(future.done() for future in waiting):

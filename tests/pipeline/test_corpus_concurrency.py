@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import pytest
+
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     AnchorRelation,
@@ -1384,3 +1386,96 @@ def test_cohort_product_lane_limits_are_not_shared() -> None:
     assert gate.max_active_by_pid[_COHORT_WIDE] >= 2
     # И потолок когорты при этом не превышен: он — третье, отдельное число.
     assert gate.max_active <= 3
+
+
+# --------------------------------------------------------------------------- #
+# F4b: цикл ожидания не крутится на уже готовых future'ах
+# --------------------------------------------------------------------------- #
+
+
+def test_wait_receives_only_pending_futures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Регресс: в ``wait`` не попадают уже завершённые future'ы.
+
+    ``concurrent.futures.wait(..., FIRST_COMPLETED)`` возвращается немедленно, если в
+    наборе есть готовый future, а волна сбрасывается только когда готовы **все** её
+    записи. Пока одна запись волны завершилась, а другая ещё в полёте, набор оставался
+    непустым и «готовым», и драйвер крутился в цикле без сна. Профиль py-spy на живом
+    прогоне 02.11.2026: 97 % одного ядра внутри этого цикла при темпе, который задавал
+    пейсинг (0.9 с CPU на документ при работе, которая стоит миллисекунды).
+
+    Проверяется наблюдаемое самого цикла: набор, переданный в ``wait``, обязан состоять
+    только из незавершённых future'ов, а число вызовов — не расти с длиной окна
+    рассинхронизации записей волны.
+    """
+    hosts = {"https://slow.test/": "slow.test"}
+
+    def begin(plan: Any, *, fetch_pool: Any = None, browser_pool: Any = None) -> Any:
+        host = hosts[plan.root_url]
+        entries = [
+            corpus_drain._WaveEntry(
+                pid="p1",
+                wu=f"https://{host}/{kind}",
+                depth=0,
+                kind="fetch",
+                desc=LocalFetch(
+                    pid="p1",
+                    wu=f"https://{host}/{kind}",
+                    depth=0,
+                    fetch_plan=FetchPlan(),
+                    active=None,
+                    engine_value=None,
+                    prior_item=None,
+                    resume=None,
+                    browser_blocked=False,
+                    poolable=True,
+                    host=host,
+                    scope_host=None,
+                    enforce_redirect_scope=False,
+                ),
+            )
+            for kind in ("fast", "slow")
+        ]
+        yield corpus_drain.WavePlan(entries=entries, hosts=frozenset({host}))
+        return (None, [])
+
+    window = 0.05
+
+    def fetch(desc: Any) -> RawPage:
+        # Рассинхронизация внутри одной волны: первая запись готова сразу, вторая —
+        # через ``window``. Именно этот зазор старый цикл прожигал.
+        if desc.wu.endswith("/slow"):
+            time.sleep(window)
+        return RawPage(url=desc.wu, content=b"x", fetched_at=TS)
+
+    real_wait = corpus_driver.wait
+    passed_done: list[int] = []
+
+    def spy(futures_to_wait: Any, **kwargs: Any) -> Any:
+        items = list(futures_to_wait)
+        passed_done.append(sum(1 for future in items if future.done()))
+        return real_wait(items, **kwargs)
+
+    monkeypatch.setattr(corpus_driver, "wait", spy)
+
+    errors: list[str] = []
+    timings: dict[str, Any] = {}
+    outcomes = corpus_driver.drive_roots(
+        [_lane_plan("https://slow.test/", "p1")],
+        host_concurrency=1,
+        begin=begin,
+        lane_width=lambda plan: 2,
+        local_fetch=fetch,
+        timings_for=lambda pid: timings.setdefault(str(pid), _CorpusStageTimings()),
+        errors=errors,
+        label=" теста",
+    )
+
+    assert errors == []
+    assert len(outcomes) == 1
+    # Ни одного вызова с готовым future'ом: иначе ожидание — горячий простой.
+    assert passed_done, "драйвер ни разу не ждал — сценарий не воспроизвёл окно"
+    assert passed_done == [0] * len(passed_done), passed_done
+    # И число вызовов не растёт с длиной окна (при 5 с — сотни итераций).
+    assert len(passed_done) <= 5, len(passed_done)
