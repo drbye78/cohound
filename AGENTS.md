@@ -303,8 +303,18 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
   only on the seam validator (`gateway_validate.py:300`), where the question is "is this safe
   to forward", not "what is the article". Pre-clean output is byte-identical to not cleaning
   at all (500/500 pages), so the cost of the old path is a measured number, not a guess:
-  `docs/reports/measurements/2026-11-02-html-preclean-vs-allowlist.md`. Reader version is
-  `trafilatura-html-4`; the change is `execution_change` because the corpus text changes.
+  `docs/reports/measurements/2026-11-02-html-preclean-vs-allowlist.md`.
+- **The page, not the reader, declares the main region.** `trafilatura` finds the article by
+  container (`article`/`main`/`role=main`/`#content`/`itemprop=articleBody`). DocBook layouts
+  (headings live in `div.refsect1 > h2`, content in `div.container`) have no such container, so
+  the rule path is skipped, extraction goes flat, and `<h2>` arrives as plain text while chrome
+  arrives as text too. `_declare_main_region` (`core/adapters/extract_html.py`) wraps the body
+  in `<main>` **only when** the page declares no marker; marked pages pass through byte for
+  byte. Measured 02.11.2026, 40 pages per host: heading retention `database.diasoft.ru`
+  0.000 → 0.845, `edu.postgrespro.ru` 0.024 → 0.939, `tantorlabs.ru` 0.000 → 0.782; five
+  marker-bearing hosts unchanged to the last digit
+  (`docs/reports/measurements/2026-11-02-html-headings-main-region.md`). Reader version is
+  `trafilatura-html-5`; both changes are `execution_change` because the corpus text changes.
 - PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
   **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:505`).
   - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The

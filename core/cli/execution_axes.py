@@ -668,7 +668,7 @@ def extractor_stack_version(
 
     Формат: ``<html>+<text>+<epub>+<pdfium>+<office>+<docling>/<device>/<build>/<policy>/<finalize>``.
 
-    Пример: ``trafilatura-html-4+text-plain-2+epub-2+pdfium-text-2+docling-office-1+
+    Пример: ``trafilatura-html-5+text-plain-2+epub-2+pdfium-text-2+docling-office-1+
     docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1``.
 
     **Почему здесь все читатели, а не только HTML и docling.** Поле объявлено ради

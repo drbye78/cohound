@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.adapters.extract_html import HtmlExtractor
 from core.ports.types import ExtractedDoc, RawPage
 from core.util.hashing import content_hash
@@ -56,10 +58,11 @@ def test_extract_returns_extracted_doc() -> None:
 
 
 def test_extractor_version_is_stable() -> None:
-    # Версия сменилась 02.11.2026 (D1): входной пре-клин заменён allow-list на
-    # структуросохраняющий (``trafilatura-html-4``) — изменился объявленный стек
-    # (``extractor_stack``), а не только реализация.
-    assert HtmlExtractor.version == "trafilatura-html-4"
+    # Версия менялась дважды 02.11.2026: D1 — входной пре-клин заменён allow-list на
+    # структуросохраняющий (``trafilatura-html-4``); D2 — страница без объявленного
+    # основного блока получает ``<main>`` (``trafilatura-html-5``). Каждый раз меняется
+    # объявленный стек (``extractor_stack``), а не только реализация.
+    assert HtmlExtractor.version == "trafilatura-html-5"
 
 
 def test_extract_passes_decoded_html_to_fn() -> None:
@@ -107,12 +110,19 @@ def test_extract_preserves_structure_for_trafilatura() -> None:
     assert "<title>Документ: главная</title>" in sent
 
 
-def test_sanitize_false_passes_input_untouched() -> None:
-    """``sanitize=False`` — вход не чистится вовсе (нужно для замеров)."""
+def test_sanitize_false_passes_input_untouched_apart_from_main_declaration() -> None:
+    """``sanitize=False`` — вход не чистится (нужно для замеров).
+
+    Единственное отличие от байт-в-байт — объявление основного блока (D2): оно не чистка,
+    а структура, и в замерах присутствует во всех политиках, иначе колонки несравнимы.
+    Пин держит обе половины: активное содержимое и ``class`` на месте, обёртка — ровно одна.
+    """
     fn, calls = _capturing("ok")
-    html = b'<html><body><script>alert(1)</script><p class="a">keep</p></body></html>'
-    HtmlExtractor(extract_fn=fn, sanitize=False).extract(_page(html))
-    assert calls[0] == html.decode()
+    html = '<html><body><script>alert(1)</script><p class="a">keep</p></body></html>'
+    HtmlExtractor(extract_fn=fn, sanitize=False).extract(_page(html.encode()))
+    assert "<script>alert(1)</script>" in calls[0]
+    assert 'class="a"' in calls[0]
+    assert calls[0] == html.replace("<body>", "<body><main>").replace("</body>", "</main></body>")
 
 
 def test_sanitize_can_be_disabled() -> None:
@@ -309,6 +319,84 @@ def test_available_reflects_injected_fn_and_dependency() -> None:
     assert module.HtmlExtractor(extract_fn=lambda _h: "x").available is True
     # Без внедрённой функции доступность определяется наличием trafilatura.
     assert module.HtmlExtractor().available is module._TRAFILATURA_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# D2: объявление основного блока (``<main>``) для страниц, которые его не объявили
+# ---------------------------------------------------------------------------
+
+#: DocBook-подобная страница: ``<h2>`` живут в ``div.refsect1``, контейнера статьи нет.
+_DOCBOOK_PAGE = (
+    "<html><body><div class='container'><div class='doscList'><div class='refentry'>"
+    "<div class='refnamediv'><h2>6.1.130. DROP SCHEMA</h2>"
+    "<p>Удаление схемы из базы данных.</p></div>"
+    "<div class='refsect1'><h2>Описание</h2><p>" + "текст " * 60 + "</p></div>"
+    "<div class='refsect1'><h2>Параметры</h2><p>" + "параметр " * 60 + "</p></div>"
+    "</div></div></div></body></html>"
+)
+
+
+def test_absent_marker_wraps_body_in_main() -> None:
+    """Страница без маркера основного блока получает ``<main>`` вокруг тела."""
+    fn, calls = _capturing("ok")
+    page = (
+        "<html><body><div class='container'><h2>Описание</h2>"
+        "<p>текст статьи</p></div></body></html>"
+    )
+    HtmlExtractor(extract_fn=fn).extract(_page(page.encode()))
+
+    sent = calls[0]
+    assert "<main>" in sent
+    # Текст статьи оказался **внутри** объявленного блока, а не рядом с ним.
+    assert sent.index("<main>") < sent.index("Описание")
+
+
+def test_existing_marker_is_passed_bytes_unchanged() -> None:
+    """Маркер есть — вход не меняется: извлечение не должно зависеть от нашей догадки."""
+    for page in (
+        "<html><body><article><h1>Т</h1><p>текст</p></article></body></html>",
+        "<html><body><main><h1>Т</h1><p>текст</p></main></body></html>",
+        "<html><body><div role='main'><h1>Т</h1><p>текст</p></div></body></html>",
+        "<html><body><div itemprop='articleBody'><h1>Т</h1><p>текст</p></div></body></html>",
+    ):
+        fn, calls = _capturing("ok")
+        HtmlExtractor(extract_fn=fn).extract(_page(page.encode()))
+        assert "<main>" not in calls[0] or calls[0].count("<main") == page.count("<main")
+
+
+def test_existing_main_is_not_double_wrapped() -> None:
+    """``<main>`` уже есть — второй не добавляется."""
+    fn, calls = _capturing("ok")
+    HtmlExtractor(extract_fn=fn).extract(
+        _page(b"<html><body><main><p>k</p></main></body></html>")
+    )
+    assert calls[0].count("<main") == 1
+
+
+def test_page_without_body_is_passed_unchanged() -> None:
+    """Тела нет — объявлять нечего: вход остаётся прежним (без выдуманной обёртки)."""
+    fn, calls = _capturing("ok")
+    HtmlExtractor(extract_fn=fn).extract(_page(b"<html><head><title>t</title></head></html>"))
+    assert "<main>" not in calls[0]
+
+
+def test_d2_keeps_atx_headings_on_a_page_without_marker() -> None:
+    """Приёмка D2: плоский DocBook-документ сохраняет заголовки как ATX.
+
+    На прежнем коде (``trafilatura-html-4``) этот текст не содержал ни одной строки,
+    начинающейся с ``#``: ``trafilatura`` находила контейнер статьи, не находила — и
+    уходила плоским путём, где ``<h2>`` остаются просто текстом.
+    """
+    import core.adapters.extract_html as module
+
+    if not module._TRAFILATURA_AVAILABLE:
+        pytest.skip("trafilatura не установлена (extra extract)")
+
+    doc = HtmlExtractor().extract(_page(_DOCBOOK_PAGE.encode()))
+    assert doc.error is None
+    atx = [line for line in doc.text.splitlines() if line.lstrip().startswith("#")]
+    assert any("Описание" in line for line in atx), doc.text[:400]
+    assert any("Параметры" in line for line in atx), doc.text[:400]
 
 
 # ---------------------------------------------------------------------------

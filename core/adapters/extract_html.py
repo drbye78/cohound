@@ -150,6 +150,53 @@ def _default_extract(html: str) -> str | None:
     )
 
 
+#: Семантические маркеры основного блока: страница **сама** объявляет, где её статья.
+#: ``article``/``main``/``role``/``itemprop`` — HTML-семантика, ``id`` — распространённая
+#: конвенция CMS. Список намеренно узкий: это не попытка воспроизвести ``BODY_XPATH``
+#: ``trafilatura`` (её конвенция — её дело), а проверка «страница что-то объявила».
+_MAIN_MARKER_XPATH = (
+    "//article | //main | //*[@role='main'] | //*[@role='article'] | "
+    "//*[@itemprop='articleBody'] | //*[@id='content'] | //*[@id='articleContent']"
+)
+
+
+def _declare_main_region(html: str) -> str:
+    """Оборачивает тело в ``<main>``, если страница не объявила основной блок сама.
+
+    Зачем. ``trafilatura`` выделяет статью по контейнеру (``article``/``main``/
+    ``role=main``/``#content``…). Если контейнера нет — а так устроен DocBook
+    (``div.container > div.doscList > div.refentry > div.refsect1``), — правило не
+    срабатывает, извлечение уходит плоским путём: ``<h2>Описание</h2>`` остаётся текстом
+    без ATX-маркера, а каркас попадает в текст. Замер 02.11.2026 (40 страниц на host):
+    сохранность заголовков `database.diasoft.ru` 0.000 → 0.845, `edu.postgrespro.ru`
+    0.024 → 0.939, `tantorlabs.ru` 0.000 → 0.782; хосты, где маркер есть, не изменились
+    ни на один знак. Отчёт: `docs/reports/measurements/2026-11-02-html-headings-main-region.md`.
+
+    Это не чистка и не догадка «где статья»: страница **молчит** о своём основном блоке,
+    поэтому объявляется тело документа. Если маркер есть, строка возвращается **байт в
+    байт** — иначе извлечение на этих страницах изменилось бы от нашей догадки. Ошибка
+    разбора — тоже байт в байт: объявление не имеет права быть гейтом извлечения.
+    """
+    try:
+        import lxml.html
+    except ImportError:  # pragma: no cover - lxml приходит вместе с trafilatura (extra extract)
+        return html
+    try:
+        tree = lxml.html.document_fromstring(html)
+    except Exception:  # noqa: BLE001 - битый HTML: объявление не наша забота
+        return html
+    if tree.xpath(_MAIN_MARKER_XPATH):
+        return html
+    body = tree.find("body")
+    if body is None or not len(body):
+        return html
+    main = lxml.html.Element("main")
+    for child in list(body):
+        main.append(child)
+    body.append(main)
+    return lxml.html.tostring(tree, encoding="unicode")
+
+
 class HtmlExtractor:
     """HTML → markdown (trafilatura). Реализация ``ExtractorPort`` (Ш5).
 
@@ -160,7 +207,7 @@ class HtmlExtractor:
     в текст (замер 02.11.2026: 400/400 страниц против 99/400 без чистки).
     """
 
-    version = "trafilatura-html-4"
+    version = "trafilatura-html-5"
 
     #: B3: адаптер читает байты **локального** файла (``page.source_path``), поэтому годится
     #: для членов контейнеров (спуск). Шов ``split`` этого не умеет — см. ``RemoteExtractor``.
@@ -203,6 +250,11 @@ class HtmlExtractor:
                 html = strip_active_html(html)
             except Exception as exc:  # noqa: BLE001
                 return self._error(f"пре-клин HTML: {exc}")
+
+        # D2: страница, не объявившая основной блок, получает его от нас — иначе
+        # ``trafilatura`` теряет заголовки (ATX-маркеры) и тянет каркас. Маркированные
+        # страницы проходят байт в байт.
+        html = _declare_main_region(html)
 
         try:
             extracted = self._extract_fn(html)

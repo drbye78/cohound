@@ -388,7 +388,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > Кэш ключуется через `extractor_version`, поэтому апгрейд даёт промах, а не старый текст.
 > Ниже — история дефекта и обоснование цены (оставлено как провенанс решения).
 
-`extractor_stack` — `trafilatura-html-4+text-plain-2+epub-2+pdfium-text-2+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1` — **входит** в
+`extractor_stack` — `trafilatura-html-5+text-plain-2+epub-2+pdfium-text-2+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1` — **входит** в
 `EXECUTION_CONTRACT_FIELDS` (`core/cli/execution_axes.py`), то есть в `run_id`. Значит
 обновление docling меняет `run_id`: контракт честно объявляет новый движок.
 
