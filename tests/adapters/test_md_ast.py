@@ -125,6 +125,91 @@ def test_reference_definition_is_a_named_block_not_a_gap() -> None:
     assert doc.text[reference.span.start_char : reference.span.end_char].startswith("[ref]:")
 
 
+def test_reference_definition_may_span_lines() -> None:
+    """Метка, назначение и заголовок могут стоять на разных строках (CommonMark §4.7).
+
+    Парсер таких определений не отдаёт токеном, и прежняя однострочная эвристика
+    считала их разрывом покрытия: текст оставался вне блоков (P13), а значит и вне
+    чанков. Примеры — CommonMark 193, 195, 198, 208, 541.
+    """
+    cases = [
+        "   [foo]: \n      /url  \n           'the title'  \n\n[foo]\n",
+        "[Foo bar]:\n<my url>\n'title'\n\n[Foo bar]\n",
+        "[foo]:\n/url\n\n[foo]\n",
+        "[\nfoo\n]: /url\nbar\n",
+        "[Foo\n  bar]: /url\n\n[Baz][Foo bar]\n",
+    ]
+    for text in cases:
+        doc = parse_markdown(text, profile="commonmark")
+        assert doc.counts["unknown_lines"] == 0, text
+        assert doc.counts["reference"] == 1, text
+        assert doc.gaps == (), text
+
+
+def test_reference_definition_label_may_be_escaped() -> None:
+    """Экранированная скобка в метке — часть метки, а не её конец (CommonMark 194)."""
+    doc = parse_markdown("[Foo*bar\\]]:my_(url) 'title (with parens)'\n\n[Foo*bar\\]]\n")
+
+    assert doc.counts["reference"] == 1
+    assert doc.counts["unknown_lines"] == 0
+
+
+def test_consecutive_reference_definitions_are_one_gap() -> None:
+    """Несколько определений подряд целиком занимают разрыв (CommonMark 204, 217, 565)."""
+    doc = parse_markdown("[foo]: /url1\n[bar]: /url2\n\n[foo][bar]\n")
+
+    assert doc.counts["reference"] == 1
+    assert doc.counts["unknown_lines"] == 0
+    assert len(doc.of_kind("paragraph")) == 1
+
+
+def test_definition_like_text_outside_the_rule_stays_a_gap() -> None:
+    """Строка, не являющаяся определением, не «съедается»: P13 остаётся сигналом.
+
+    Правило разрешает только то, что разрешает грамматика: иначе молчаливое вычёркивание
+    текста из покрытия выдало бы себя за корректный разбор. Отступ в четыре пробела —
+    уже блок кода, а `[foo]` без `:` — обычный абзац; неизвестных строк быть не должно,
+    но и `reference` тоже.
+    """
+    code = parse_markdown("    [foo]: /url\n")
+    assert code.counts.get("reference", 0) == 0
+    assert code.of_kind("code") and code.counts["unknown_lines"] == 0
+
+    plain = parse_markdown("[foo]\n")
+    assert plain.counts.get("reference", 0) == 0
+    assert plain.of_kind("paragraph")
+
+
+def test_colon_fence_is_a_container_block() -> None:
+    """``::: {.cls}`` в профиле ``pandoc`` — блок, а не разрыв покрытия.
+
+    Токен ``colon_fence`` не был отображён, и весь текст div уходил в ``unknown_lines``:
+    чанкер его не видел вовсе. Содержимое при этом не разбирается на блоки — div остаётся
+    одной единицей, и это объявленная граница, а не догадка о структуре.
+    """
+    for text in ("::: {.note}\nтекст div\n:::\n", "::: note\n- пункт\n:::\n"):
+        doc = parse_markdown(text, profile="pandoc")
+        assert doc.counts["unknown_lines"] == 0, text
+        containers = doc.of_kind("container")
+        assert len(containers) == 1, text
+        assert containers[0].span.start_line == 0
+        assert containers[0].span.end_line == 3, "закрывающая строка входит в спан"
+
+
+def test_container_closing_line_is_covered_and_not_invented() -> None:
+    """Строка ``:::`` принадлежит контейнеру; текст после него — нет.
+
+    Расширение спана на закрывающую строку не должно «съедать» следующую: иначе P13
+    перестал бы быть сигналом о непокрытом тексте.
+    """
+    doc = parse_markdown("::: div\nтекст\n:::\n\nобычный абзац\n", profile="pandoc")
+
+    assert doc.counts["unknown_lines"] == 0
+    container = doc.of_kind("container")[0]
+    assert doc.text[container.span.start_char : container.span.end_char].endswith(":::\n")
+    assert [block.kind for block in doc.blocks] == ["container", "paragraph"]
+
+
 def test_footnote_definition_covers_its_label_line() -> None:
     doc = parse_markdown("См. [^1].\n\n[^1]:\n    Тело сноски.\n", profile="pandoc")
     definitions = doc.of_kind("footnote_def")

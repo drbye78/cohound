@@ -4,8 +4,10 @@
 ``heading_path`` и ``context_prefix``. Соответствует §3.2/§5 регламента («чанкер с
 heading_path»), порт — ``core/ports/chunker.py`` (архитектура 01 §3.5).
 
-Версия ``md-heading-5`` — переход с построчного конечного автомата на AST. Что изменилось
-и почему (замеры и разбор — ``docs/architecture/18-markdown-chunker-plan.md``):
+Текущая версия — стек ``md-ast-1:<спека CommonMark>+<профили>/<движок>/policy-2``
+(грамматика, движок разбора и политика версионируются независимо). Переход с построчного
+конечного автомата на AST и последующие правки политики: что изменилось и почему (замеры и
+разбор — ``docs/architecture/18-markdown-chunker-plan.md``):
 
 * **Куски — точные срезы источника.** ``chunk.text`` больше не ``strip()``: конкатенация
   текстов всех чанков равна нормализованному входу байт-в-байт (P1). Иначе нельзя ни
@@ -20,7 +22,9 @@ heading_path»), порт — ``core/ports/chunker.py`` (архитектура 
   (код-спаны, ссылки, inline-html, формулы, графемы — ``md_ast.safe_cut_offsets``).
 * **Продолжение несёт контекст.** Чанк, начавшийся внутри таблицы, получает шапку с
   разделителем и выравниванием, continuation fence — открывающую строку с info string
-  (P9/P10); промпт печатает ``context``, когда он отличается от ``heading_path``.
+  (P9/P10), а продолжение пункта списка — его маркер и отступ (``- ``, ``3. ``,
+  ``   - ``; отметка задачи ``[ ]``/``[x]`` входит в маркер). Промпт печатает
+  ``context``, когда он отличается от ``heading_path``.
 * **Относительные уровни сохранены.** ATX-уровни трактуются от самого мелкого уровня,
   реально присутствующего в документе: trafilatura отдаёт ``##``, если первый заголовок
   страницы был h2, docling — ``##`` для DOCX/XLSX, и абсолютная трактовка превращала
@@ -68,6 +72,13 @@ from core.util.text_utils import SENTENCE_END_CHARS
 
 #: Атрибуты заголовка Pandoc (``{#id .cls}``): в ``heading_path`` не входят (P11).
 _HEADING_ATTRS_RE = re.compile(r"\s*\{(?:[#.][^{}]*)\}\s*$")
+
+#: Маркер пункта списка в начале сырой строки: ``-``, ``*``, ``+``, ``1.``, ``1)`` —
+#: вместе с префиксом цитаты и отметкой задачи (``> - [x] ``). Отступ перед маркером
+#: сохраняется как есть: он и есть объявленная вложенность пункта.
+_LIST_MARKER_RE = re.compile(
+    r"^(?:[ \t]*>[ \t]?)*[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+\[[ xX]\])?"
+)
 
 #: Минимальная длина куска (символы). Порог **не выбрасывает** текст: хвост разреза
 #: приклеивается к предыдущему куску той же секции, а объявленная единица документа
@@ -139,8 +150,8 @@ class MarkdownChunker:
     """Реализация ``ChunkerPort``: markdown → структурные чанки с ``heading_path``.
 
     ``version`` входит в ``partition_build_id``/ключи кэша и в
-    ``execution_contract_digest``: смена правил нарезки меняет chunk-set, поэтому версия
-    поднята ``md-heading-4`` → ``md-heading-5`` (класс ``execution_versions``, §13).
+    ``execution_contract_digest``: смена правил нарезки меняет chunk-set, поэтому строка
+    версии — стек, а не метка файла (класс ``execution_versions``, §13).
     """
 
     #: Версия правил нарезки — ** стек**, а не метка файла: грамматика, движок разбора и
@@ -149,7 +160,7 @@ class MarkdownChunker:
     #: (другой chunk-set: другие границы, другой ``text``, другой ``context_prefix``).
     #: Какой именно профиль грамматики применён — объявляет ``chunking_spec``
     #: (``md_ast.PROFILES``; страницы и офисные документы идут в ``gfm``).
-    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-1"
+    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-2"
 
     #: Объявленный (и снятый) размер перекрытия: контракт продолжает его публиковать
     #: (:func:`core.adapters.chunker_family.composite_chunking_spec`), а значение 0 —
@@ -307,13 +318,20 @@ class MarkdownChunker:
         return cuts
 
     def _block_cuts(
-        self, block: MdBlock, source: str, index: LineIndex, prefix: str = ""
+        self,
+        block: MdBlock,
+        source: str,
+        index: LineIndex,
+        prefix: str = "",
+        container: str = "",
     ) -> list[_Cut]:
         """Границы внутри блока: атомарные конструкции не режутся вовсе.
 
-        ``prefix`` — контекст вложенности (``> `` для цитаты, ``::: {.cls}`` для div):
-        кусок, начавшийся внутри контейнера, обязан нести его маркер, иначе одиночный
-        абзац цитаты читается как обычный текст.
+        ``prefix`` — полный контекст вложенности (``> `` для цитаты, ``::: {.cls}`` для
+        div, маркер пункта для его содержимого): кусок, начавшийся внутри контейнера,
+        обязан нести его маркер, иначе одиночный абзац цитаты или продолжение пункта
+        читается как обычный текст. ``container`` — то же без маркеров списка; из него
+        строится маркер вложенного пункта, чтобы отступ не складывался с родительским.
         """
         if block.kind in ("heading", "math", "footnote_def", "reference", "front_matter"):
             return []
@@ -333,23 +351,86 @@ class MarkdownChunker:
                 )
             ]
         if block.kind in ("fence", "code", "html"):
-            context = self._fence_opening(block, source) if block.kind == "fence" else None
-            if prefix:
-                context = f"{prefix}{context}" if context else prefix
+            opening = self._fence_opening(block, source) if block.kind == "fence" else ""
+            context = self._with_prefix(opening, prefix, container) or None
             return [
                 _Cut(index.offset(line), structural=False, context=context)
                 for line in range(block.span.start_line + 1, block.span.end_line)
             ]
         if block.kind == "table":
-            return self._table_cuts(block, source, index, prefix=prefix)
+            return self._table_cuts(block, source, index, prefix=prefix, container=container)
+        if block.kind == "list":
+            return self._list_cuts(block, source, index, container=container)
 
         inner = self._child_prefix(block, source, prefix)
+        inner_container = self._container_prefix(block, source, container)
         cuts: list[_Cut] = []
         for child in block.children:
             if child.span.start_char > block.span.start_char:
                 cuts.append(_Cut(child.span.start_char, structural=True, context=inner or None))
-            cuts.extend(self._block_cuts(child, source, index, prefix=inner))
+            cuts.extend(
+                self._block_cuts(
+                    child, source, index, prefix=inner, container=inner_container
+                )
+            )
         return cuts
+
+    def _list_cuts(
+        self, block: MdBlock, source: str, index: LineIndex, container: str = ""
+    ) -> list[_Cut]:
+        """Границы списка: между пунктами и внутри пункта, маркер — в контексте.
+
+        Пункт — минимальная единица (P2): граница ставится перед его маркером, и текст
+        куска начинается с маркера, поэтому контекст на этой границе не дублирует его.
+        Внутри пункта контекст несёт маркер и отступ (``- ``, ``3. ``, ``   - ``): без
+        этого второй кусок длинного пункта читается как обычный абзац, а нумерованный —
+        теряет номер.
+        """
+        cuts: list[_Cut] = []
+        for item in block.children:
+            if item.kind != "list_item":
+                continue
+            marker = self._item_prefix(item, source, container)
+            if item.span.start_char > block.span.start_char:
+                # Маркер пункта — первый символ куска: дублировать его в контексте незачем.
+                cuts.append(_Cut(item.span.start_char, structural=True))
+            cuts.extend(self._block_cuts(item, source, index, prefix=marker, container=container))
+        return cuts
+
+    @staticmethod
+    def _item_prefix(block: MdBlock, source: str, container: str) -> str:
+        """Маркер пункта из сырой строки: отступ, маркер и отметка задачи.
+
+        Возвращается ровно то, что стоит в источнике до текста пункта: ``"- "``,
+        ``"3. "``, ``"   - "`` (вложенный), ``"> - [x] "`` (пункт в цитате с задачей).
+        Вложенность — это отступ источника, а не придуманный счётчик уровней; потолка
+        глубины нет, потому что отступ берётся как есть. Нераспознанная строка даёт
+        контейнер: контекст не выдумывается.
+        """
+        start = block.span.start_char
+        newline = source.find("\n", start)
+        line = source[start : newline if newline != -1 else len(source)]
+        match = _LIST_MARKER_RE.match(line)
+        if match is None:
+            return container
+        end = match.end()
+        prefix = line[:end]
+        if end < len(line) and line[end].isspace():
+            prefix += " "
+        if not container or prefix.startswith(container):
+            return prefix
+        # Обёртка (``::: {.cls}``) не видна в сырой строке пункта: её маркер относится к
+        # внешнему слою и потому печатается отдельной строкой контекста.
+        return f"{container}\n{prefix}"
+
+    @staticmethod
+    def _container_prefix(block: MdBlock, source: str, container: str) -> str:
+        """Префикс контейнеров без маркеров списка (из него строится маркер пункта)."""
+        if block.kind == "blockquote":
+            return f"{container}> " if container else "> "
+        if block.kind == "container":
+            return container or MarkdownChunker._fence_opening(block, source)
+        return container
 
     @staticmethod
     def _child_prefix(block: MdBlock, source: str, prefix: str) -> str:
@@ -360,21 +441,39 @@ class MarkdownChunker:
             return prefix or MarkdownChunker._fence_opening(block, source)
         return prefix
 
-    @staticmethod
     def _table_cuts(
-        block: MdBlock, source: str, index: LineIndex, prefix: str = ""
+        self, block: MdBlock, source: str, index: LineIndex, prefix: str = "", container: str = ""
     ) -> list[_Cut]:
         """Резать таблицу можно только между строками; продолжение несёт шапку (P9)."""
         header_rows = int(block.info.get("header_rows") or 1)
         header_end = min(index.offset(block.span.start_line + header_rows + 1), block.span.end_char)
         header = source[block.span.start_char : header_end].rstrip("\n")
-        context = f"{prefix}{header}" if prefix else header
+        context = self._with_prefix(header, prefix, container)
         rows = [item for item in block.walk() if item.kind == "table_row"]
         return [
             _Cut(row.span.start_char, structural=True, context=context)
             for row in rows[header_rows:]
             if block.span.start_char < row.span.start_char < block.span.end_char
         ]
+
+    @staticmethod
+    def _with_prefix(raw: str, prefix: str, container: str) -> str:
+        """Контекст продолжения из сырой строки и объявленной вложенности.
+
+        Сырая строка (``> ```sql``, ``>   | a | b |``, ``  ```sql``) **уже** содержит
+        префикс контейнера — он часть текста. Поэтому контейнер никогда не доклеивается
+        к ней: сравнение идёт с ``container``, а маркер пункта (``> - ``) печатается
+        **отдельной строкой**. Склейка ``prefix + raw`` давала ``> - >   ```sql`` и
+        съедала отступ (``-   ```sql``), то есть показывала не тот контекст, в котором
+        кусок лежит.
+        """
+        if not raw:
+            return prefix
+        if not prefix:
+            return raw
+        if raw.startswith(prefix):
+            return raw  # маркер вложенности уже в сырой строке
+        return f"{prefix}\n{raw}"
 
     @staticmethod
     def _fence_opening(block: MdBlock, source: str) -> str:

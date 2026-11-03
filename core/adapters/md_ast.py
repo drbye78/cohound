@@ -72,8 +72,11 @@ PROFILES: Final[tuple[str, ...]] = ("commonmark", "gfm", "pandoc")
 
 _BOM: Final = "\ufeff"
 
-#: Определение ссылки (``[label]: url``) — парсер вырезает его молча, токена нет.
-_REFERENCE_RE: Final = re.compile(r"^ {0,3}\[([^\]\n]+)\]:\s*\S")
+#: Предел длины метки определения ссылки (CommonMark §4.7: не более 999 символов).
+_LABEL_MAX: Final = 999
+
+#: Открывающие кавычки заголовка определения и их закрывающие пары (§4.7).
+_TITLE_CLOSERS: Final = {'"': '"', "'": "'", "(": ")"}
 
 #: Метка тела сноски в начале строки (``[^1]:``).
 _FOOTNOTE_LABEL_RE: Final = re.compile(r"^ {0,3}\[\^([^\]\n]+)\]:\s*$")
@@ -97,6 +100,11 @@ _CONTAINER_OPEN: Final[dict[str, str]] = {
 
 _LEAF_BLOCKS: Final[dict[str, str]] = {
     "fence": "fence",
+    # ``::: {.cls} … :::`` — div в профиле ``pandoc``. Токен ``colon_fence`` несёт
+    # ``map`` на весь блок, включая закрывающую строку, и **не** разбирает содержимое
+    # на блоки: без этого отображения весь текст div уходил в разрыв покрытия (P13), а
+    # чанкер его вовсе не видел.
+    "colon_fence": "container",
     "code_block": "code",
     "hr": "thematic_break",
     "html_block": "html",
@@ -337,6 +345,23 @@ def _leaf_block(token: Token, kind: str, index: LineIndex) -> MdBlock | None:
     return MdBlock(kind=kind, span=index.span(*lines), info=info)
 
 
+def _container_span(lines: tuple[int, int], index: LineIndex) -> tuple[int, int]:
+    """Спан контейнера вместе с закрывающей строкой (``:::``).
+
+    ``map`` токена открытия оканчивается **перед** закрывающей строкой: у ``container``
+    закрытие не отдаётся токеном с картой, и строка ``:::`` оставалась разрывом покрытия.
+    Расширяем спан на строку закрытия, только если она действительно маркер (``:`` в
+    начале строки, отступ ≤ 3): иначе разрыв — не закрытие, и он обязан остаться видимым.
+    """
+    start, end = lines
+    if end >= index.line_count:
+        return lines
+    closing = index.line_text(end).lstrip(" ")
+    if len(index.line_text(end)) - len(closing) > 3 or not closing.startswith(":"):
+        return lines
+    return start, end + 1
+
+
 def _finalize(frame: _Frame, index: LineIndex, label: Any = None) -> MdBlock | None:
     """Закрывает кадр: спан из токена открытия либо из детей (плагины без ``map``)."""
     lines = frame.lines
@@ -450,6 +475,8 @@ def _build_blocks(tokens: list[Token], index: LineIndex) -> list[MdBlock]:
                 # не трогают стек: иначе ячейка таблицы закрывала бы строку.
                 continue
             frame = stack.pop()
+            if frame.kind == "container" and frame.lines is not None:
+                frame.lines = _container_span(frame.lines, index)
             label = footnote_labels.pop(id(frame), None)
             block = _finalize(frame, index, label)
             if block is not None and block.kind == "table_head":
@@ -484,6 +511,130 @@ def _covered_lines(blocks: list[MdBlock]) -> set[int]:
     return covered
 
 
+def _skip_spaces(text: str, position: int) -> int:
+    """Пропускает пробелы и табы (перевод строки — уже граница)."""
+    while position < len(text) and text[position] in " \t":
+        position += 1
+    return position
+
+
+def _at_line_end(text: str, position: int) -> bool:
+    return position >= len(text) or text[position] == "\n"
+
+
+def _reference_definition_end(text: str, position: int) -> int | None:
+    """Конец одного определения ссылки от ``position`` или ``None`` (§4.7 CommonMark).
+
+    Парсер таких определений **не отдаёт токеном** (они уходят в ``env.references``), и
+    их приходится распознавать по исходнику. Одной регулярки здесь мало: метка может
+    переноситься на следующие строки (``[Foo\n  bar]: /url``) и содержать экранированную
+    скобку (``[Foo*bar\\]]: /url``), назначение и заголовок — тоже стоять на отдельных
+    строках. Не распознанные определения не исчезают молча: они остаются разрывом
+    покрытия (P13), поэтому «съесть» текст можно только по правилу, а не по догадке.
+    """
+    length = len(text)
+    index = position
+    while index < length and text[index] == " " and index - position < 3:
+        index += 1
+    if index < length and text[index] == " ":
+        return None  # отступ ≥ 4 пробелов — блок кода, а не определение
+    if index >= length or text[index] != "[":
+        return None
+    label_start = index + 1
+    index = label_start
+    label_length = 0
+    while index < length:
+        char = text[index]
+        if char == "\\" and index + 1 < length:
+            index += 2
+            label_length += 2
+            continue
+        if char == "[":
+            return None  # незакрытая квадратная скобка внутри метки
+        if char == "]":
+            break
+        # Пустая строка внутри метки — метка закончилась, определения нет.
+        if char == "\n" and _at_line_end(text, _skip_spaces(text, index + 1)):
+            return None
+        index += 1
+        label_length += 1
+        if label_length > _LABEL_MAX:
+            return None
+    if index >= length or text[index] != "]" or label_length == 0:
+        return None
+    if not text[label_start:index].strip():
+        return None
+    if index + 1 >= length or text[index + 1] != ":":
+        return None
+    index = _skip_spaces(text, index + 2)
+
+    # Назначение: на этой строке либо на следующей (но не через пустую строку).
+    if _at_line_end(text, index):
+        index += 1
+        index = _skip_spaces(text, index)
+        if _at_line_end(text, index):
+            return None
+    if index >= length:
+        return None
+    if text[index] == "<":
+        close = text.find(">", index + 1)
+        if close < 0 or "\n" in text[index + 1 : close]:
+            return None
+        index = close + 1
+    else:
+        start = index
+        while index < length and not text[index].isspace():
+            index += 1
+        if index == start:
+            return None
+    index = _skip_spaces(text, index)
+
+    # Заголовок: необязателен, может начинаться на следующей строке.
+    title_index = index
+    if _at_line_end(text, title_index) and title_index < length:
+        title_index = _skip_spaces(text, title_index + 1)
+    if title_index < length and text[title_index] in _TITLE_CLOSERS:
+        opener = text[title_index]
+        closer = _TITLE_CLOSERS[opener]
+        cursor = title_index + 1
+        while cursor < length:
+            char = text[cursor]
+            if char == "\\" and cursor + 1 < length:
+                cursor += 2
+                continue
+            if char == closer:
+                break
+            cursor += 1
+        if cursor >= length:
+            return None
+        index = _skip_spaces(text, cursor + 1)
+    # Определение занимает целые строки: мусор после назначения/заголовка — уже не
+    # определение, и «съесть» эту строку значило бы потерять текст молча (P13).
+    if not _at_line_end(text, index):
+        return None
+    return index + 1 if index < length else index
+
+
+def _is_reference_gap(texts: list[str]) -> bool:
+    """Состоит ли разрыв целиком из определений ссылок (возможно, нескольких).
+
+    Частичное совпадение определением **не** считается: иначе правило съело бы строку,
+    которую парсер считает содержанием, и P13 перестал бы быть сигналом.
+    """
+    # ``LineIndex.line_text`` отдаёт строку вместе с переводом строки: без снятия хвоста
+    # ``join`` дал бы пустую строку между определениями, а она по правилу рвёт метку.
+    text = "\n".join(line.rstrip("\n") for line in texts)
+    position = 0
+    found = 0
+    while position < len(text):
+        end = _reference_definition_end(text, position)
+        if end is None or end <= position:
+            return False
+        position = end
+        found += 1
+    return found > 0
+
+
 def _gap_blocks(
     index: LineIndex, gaps: list[tuple[int, int]]
 ) -> tuple[list[MdBlock], list[MdSpan], int]:
@@ -499,7 +650,7 @@ def _gap_blocks(
     unknown_lines = 0
     for start, end in gaps:
         texts = [index.line_text(line) for line in range(start, end)]
-        is_reference = bool(texts) and _REFERENCE_RE.match(texts[0]) is not None
+        is_reference = _is_reference_gap(texts)
         is_label = len(texts) == 1 and _FOOTNOTE_LABEL_RE.match(texts[0]) is not None
         if is_reference or is_label:
             kind = "reference" if is_reference else "footnote_label"

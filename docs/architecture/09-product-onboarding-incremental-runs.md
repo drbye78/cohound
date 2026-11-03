@@ -2379,7 +2379,7 @@ URL синтетический, фетчить его нельзя, а файл 
 | Семейство / формат | Сигнал | Читатель | Чанкер |
 |---|---|---|---|
 | HTML (страница) | остальное (по умолчанию) | `HtmlExtractor` (trafilatura) | `MarkdownChunker` |
-| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-ast-1:…/policy-1`) |
+| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-ast-1:…/policy-2`) |
 | plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-2`) | `TextChunker` (`text-para-3`) |
 | документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
 | EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-2`) | `MarkdownChunker` |

@@ -42,7 +42,7 @@
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
 | HTML | `core/adapters/extract_html.py:138` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
 | Санитайз | `core/util/sanitize.py:145,290,423` | вход HTML: структурный пре-клин `strip_active_html` (`:290`) — удаляется только активное, `class`/`id`/`role` остаются для `trafilatura`; allow-list `sanitize_html` (`:145`) — только на шве валидации (`gateway_validate.py:300`). Выход: `strip_control_chars` → `neutralize_prompt_injection_marks` в одной границе `finalize_extracted_text` (`:423`), её же вызывает документный путь (§10) |
-| Нарезка | `core/adapters/chunker_markdown.py:213` | 1500 символов без перекрытия, разрез по AST (CommonMark/GFM); заголовки считаются **относительно самого мелкого** уровня документа (`md-heading-5`, `:126`), `heading_path` из заголовков |
+| Нарезка | `core/adapters/chunker_markdown.py:248` | 1500 символов без перекрытия, разрез по AST (CommonMark/GFM); заголовки считаются **относительно самого мелкого** уровня документа (`md-heading-5`, `:126`), `heading_path` из заголовков |
 | Кэш | `core/pipeline/extract_cache.py:113,343` | ключ `(sha256 байтов, extractor_version, level)`; кэшируются **только полные успехи** |
 | Порт | `core/ports/extractor.py:23` | `version` + `extract(page, route) -> ExtractedDoc`; механизм — значение оси `crawl.pdf_pipeline` |
 

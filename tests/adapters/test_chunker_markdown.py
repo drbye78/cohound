@@ -35,6 +35,7 @@ from core.adapters.chunker_markdown import (
 )
 from core.ports.chunker import ChunkerPort
 from core.ports.types import ExtractedDoc
+from core.util.text_utils import CLOSING_CHARS
 
 
 def _chunk(md: str, **kwargs: int):
@@ -260,6 +261,24 @@ def test_dashes_without_front_matter_body_keep_commonmark_behaviour() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_pandoc_div_with_list_is_visible_and_exact() -> None:
+    """``:::``-div со списком (профиль ``pandoc``): текст виден, P1 держится.
+
+    До правки ``md_ast`` токен ``colon_fence`` не отображался, и весь div уходил в
+    разрыв покрытия — чанкер отдавал пустой набор. Проверяется не «div поддержан», а
+    факт: текст внутри div доезжает до чанков без потерь и без выдуманного контекста.
+    """
+    body = "\n".join(f"- пункт {n} с достаточно длинным содержимым" for n in range(30))
+    document = f"::: {{.note}}\n{body}\n:::\n"
+    chunker = MarkdownChunker(chunk_size=200, profile="pandoc")
+
+    chunks = chunker.chunk("doc", document)
+
+    assert chunks
+    assert "".join(chunk.text for chunk in chunks) == document
+    assert sum(chunk.text.count("- пункт") for chunk in chunks) == 30
+
+
 def test_version_is_a_stack_of_grammar_engine_and_policy() -> None:
     """Версия правил — стек, а не метка файла (``execution_versions``, §13).
 
@@ -269,7 +288,7 @@ def test_version_is_a_stack_of_grammar_engine_and_policy() -> None:
     """
     version = MarkdownChunker.version
     assert version.startswith("md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-")
-    assert "/policy-1" in version
+    assert "/policy-2" in version
     assert "mdit-unknown" not in version, "версия движка должна читаться из метаданных"
     assert MarkdownChunker().chunk_overlap == 0
 
@@ -302,6 +321,16 @@ def _assert_exact_join(text: str, chunks) -> None:
     from core.adapters.md_ast import parse_markdown
 
     assert "".join(chunk.text for chunk in chunks) == parse_markdown(text).text
+
+
+def _assert_starts_cleanly(chunk) -> None:
+    """Кусок не открывается закрывающей пунктуацией (P8).
+
+    Маркер цитаты ``>`` снимается первым: это контейнер, а не знак из текста (в замере
+    такой чанк на границе блока относится к ``source_punct``, а не к P8).
+    """
+    body = chunk.text.lstrip("> ")
+    assert body and body[0] not in CLOSING_CHARS, chunk.text[:40]
 
 
 def test_chunks_join_into_the_whole_document() -> None:
@@ -427,6 +456,131 @@ def test_blockquote_continuation_carries_marker() -> None:
 
     assert len(chunks) > 2
     assert all(chunk.context_prefix == "Цитата\n> " for chunk in chunks[1:])
+
+
+def test_list_item_continuation_carries_marker() -> None:
+    """Продолжение длинного пункта несёт ``- ``: иначе это читается как абзац."""
+    items = "".join(f"- пункт {index} " + "слово " * 40 + "\n" for index in range(3))
+    md = "# Список\n\n" + items
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert len(chunks) > 4
+    continuations = [chunk for chunk in chunks if chunk.text.startswith("слово")]
+    assert continuations, [chunk.text[:40] for chunk in chunks]
+    for chunk in continuations:
+        assert chunk.context_prefix == "Список\n- "
+        _assert_starts_cleanly(chunk)
+    # Кусок, начавшийся с маркера, уже содержит его в тексте: контекст не дублирует.
+    for chunk in chunks:
+        if chunk.text.startswith("- "):
+            assert chunk.context_prefix == "Список"
+    _assert_exact_join(md, chunks)
+
+
+def test_ordered_list_continuation_keeps_declared_number() -> None:
+    """Нумерованный список с ``start``≠1: продолжение несёт свой номер, а не ``1.``."""
+    items = "".join(f"{index + 3}. пункт " + "слово " * 40 + "\n" for index in range(3))
+    md = "# Нумерация\n\n" + items
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    contexts = {chunk.context_prefix for chunk in chunks if chunk.text.startswith("слово")}
+    assert "Нумерация\n3. " in contexts
+    assert "Нумерация\n4. " in contexts
+    assert "Нумерация\n1. " not in contexts
+    for chunk in chunks:
+        _assert_starts_cleanly(chunk)
+    _assert_exact_join(md, chunks)
+
+
+def test_nested_list_continuation_keeps_indent_and_marker() -> None:
+    """Вложенный пункт: в контексте отступ источника, а не сложенный маркер родителя."""
+    md = (
+        "# Вложенность\n\n"
+        "- родитель " + "слово " * 60 + "\n"
+        "  - вложенный " + "слово " * 60 + "\n"
+        "  - второй " + "слово " * 40 + "\n"
+    )
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    contexts = {chunk.context_prefix for chunk in chunks}
+    assert "Вложенность\n- " in contexts
+    assert "Вложенность\n  - " in contexts
+    assert all("-   -" not in chunk.context_prefix for chunk in chunks)
+    for chunk in chunks:
+        _assert_starts_cleanly(chunk)
+    _assert_exact_join(md, chunks)
+
+
+def test_task_list_continuation_keeps_checkbox_without_touching_heading_path() -> None:
+    """Task list: отметка ``[ ]``/``[x]`` остаётся в контексте, ``heading_path`` — нет."""
+    items = "".join(
+        f"- [{'x' if index % 2 else ' '}] задача {index} " + "слово " * 40 + "\n"
+        for index in range(3)
+    )
+    md = "# Задачи\n\n" + items
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert all(chunk.heading_path == "Задачи" for chunk in chunks)
+    continuations = [chunk for chunk in chunks if chunk.text.startswith("слово")]
+    contexts = {chunk.context_prefix for chunk in continuations}
+    assert "Задачи\n- [ ] " in contexts
+    assert "Задачи\n- [x] " in contexts
+    for chunk in continuations:
+        _assert_starts_cleanly(chunk)
+    _assert_exact_join(md, chunks)
+
+
+def test_nested_blockquote_continuation_carries_each_marker() -> None:
+    """Вложенная цитата: продолжение несёт всю цепочку ``> > ``."""
+    md = "# Цитата\n\n> > вложенная цитата " + "слово " * 80 + "\n"
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert len(chunks) > 2
+    for chunk in chunks[1:]:
+        assert chunk.context_prefix == "Цитата\n> > "
+        _assert_starts_cleanly(chunk)
+    _assert_exact_join(md, chunks)
+
+
+def test_table_continuation_keeps_header_separator_and_column_count() -> None:
+    """Продолжение таблицы несёт шапку с разделителем и тем же числом колонок (P9)."""
+    rows = "".join(f"| {index} | значение-{index} плюс текст |\n" for index in range(60))
+    md = "# Таблица\n\n| id | смысл |\n|:--|--:|\n" + rows
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert len(chunks) > 3
+    for chunk in chunks[1:]:
+        header, separator = chunk.context_prefix.split("\n", 1)[1].splitlines()
+        assert header.count("|") == 3
+        assert separator.count("|") == 3
+        assert separator.startswith("|:--|") and separator.endswith("--:|")
+        _assert_starts_cleanly(chunk)
+    _assert_exact_join(md, chunks)
+
+
+def test_blockquoted_table_continuation_does_not_double_quote_marker() -> None:
+    """Шапка таблицы уже несёт ``> `` в сыром виде: контекст не печатает ``> > ``."""
+    rows = "".join(f"> | {index} | значение {index} плюс текст |\n" for index in range(30))
+    md = "# Таблица\n\n> | a | b |\n> |:--|--:|\n" + rows
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert len(chunks) > 2
+    for chunk in chunks[1:]:
+        assert chunk.context_prefix == "Таблица\n> | a | b |\n> |:--|--:|"
+        _assert_starts_cleanly(chunk)
+    _assert_exact_join(md, chunks)
+
+
+def test_blockquoted_fence_continuation_does_not_double_quote_marker() -> None:
+    """Открывающая строка fence уже несёт ``> ``: контекст не печатает ``> > ```sql``."""
+    md = "# Код\n\n> ```sql\n> " + "SELECT 1;\n> " * 60 + "```\n"
+    chunks = MarkdownChunker(chunk_size=100).chunk("doc", md)
+
+    assert len(chunks) > 3
+    for chunk in chunks[1:]:
+        assert chunk.context_prefix == "Код\n> ```sql"
+        _assert_starts_cleanly(chunk)
+    _assert_exact_join(md, chunks)
 
 
 # ---------------------------------------------------------------------------
