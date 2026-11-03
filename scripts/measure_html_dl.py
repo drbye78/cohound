@@ -558,10 +558,14 @@ def _print_report(summary: dict[str, Any], results: Sequence[DocResult]) -> None
         f"ошибок {documents['errors']}; трансформация применилась к "
         f"{documents['transform_applied']}"
     )
-    print(
-        f"страниц с <dl: {documents['with_dl']}; копия правила разошлась с боевой "
-        f"функцией: {documents['copy_mismatches']}"
+    # В режиме ``all`` сверять нечего: боевой политики «все <dl>» не существует, и печатать
+    # там «разошлась: 0» значило бы показывать вакуумный ноль как пройденную проверку.
+    checked = (
+        f"копия правила разошлась с боевой функцией: {documents['copy_mismatches']}"
+        if summary["params"]["policy"] != "all"
+        else "копия правила не сверялась (в режиме all боевой функции нет)"
     )
+    print(f"страниц с <dl: {documents['with_dl']}; {checked}")
     print(f"затронуто документов: {documents['affected']}")
     print("")
     print("строки с ATX-маркером ВНУТРИ строки (дефект <item>-склейки):")

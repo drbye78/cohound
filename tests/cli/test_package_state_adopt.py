@@ -1108,3 +1108,78 @@ def test_plan_adoption_without_runs_says_why(
     assert plan.run_id is None
     assert plan.reasons == ("no_completed_run",)
     assert plan.candidates == ()
+
+
+# --------------------------------------------------------------------------- #
+# L1b-2b: смещения куска при adoption
+# --------------------------------------------------------------------------- #
+
+
+def _span_pair(
+    start: Any, end: Any, text: str
+) -> tuple[int | None, int | None] | None:
+    """Обёртка над одноимённой функцией модуля (импорт внутри: не расширяем шапку)."""
+    from core.pipeline.state_adopt import _span_pair as pair
+
+    return pair(start, end, text)
+
+
+def test_span_pair_accepts_absent_and_exact_only() -> None:
+    """Пара смещений: либо оба ``NULL``, либо точный диапазон; рваная/кривая — отказ.
+
+    ``None`` здесь означает «не принимать строку», а не «смещений нет»: последнее —
+    законный исход и выражается парой ``(None, None)``. Иначе `0`/`0` или половина пары
+    доехали бы до ``chunk_meta`` и всплыли бы только на ``CorpusChunk`` (или на цитате).
+    """
+    text = "кусок\n\n"
+    assert _span_pair(None, None, text) == (None, None)
+    assert _span_pair(0, len(text), text) == (0, len(text))
+    # Рваная пара, перевёрнутый диапазон, длина не сходится, мусор — всё отказ.
+    assert _span_pair(0, None, text) is None
+    assert _span_pair(None, 5, text) is None
+    assert _span_pair(5, 3, text) is None
+    assert _span_pair(0, 5, text) is None
+    assert _span_pair("ноль", "пять", text) is None
+
+
+def test_adopt_rejects_chunk_with_inconsistent_span(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Несогласованный диапазон не переносится в ``chunk_meta``, и причина видна.
+
+    Проверка стоит там же, где сверка хеша (I19): адрес текста — его хеш, а позиция текста
+    в документе — его смещения. Принимать строку с рваной парой значило бы отложить отказ
+    до ``CorpusChunk``, где причина уже не видна.
+    """
+    package, runs_dir, index_root = _setup(tmp_path, monkeypatch)
+    run_dir = _write_run(
+        runs_dir,
+        index_root,
+        "run-1",
+        package_id="case_x",
+        products=[_product_spec("p1")],
+    )
+    # Прогон схемы 3.16: колонки есть, у второго куска диапазон не сходится с длиной текста.
+    run_db = run_dir / "cohound.db"
+    with sqlite3.connect(run_db) as conn:
+        conn.execute("ALTER TABLE corpus_chunks ADD COLUMN char_start INTEGER")
+        conn.execute("ALTER TABLE corpus_chunks ADD COLUMN char_end INTEGER")
+        conn.execute(
+            "UPDATE corpus_chunks SET char_start = 0, char_end = ? WHERE chunk_no = 0",
+            (len(_chunk_text("p1", 0)),),
+        )
+        conn.execute("UPDATE corpus_chunks SET char_start = 0, char_end = 3 WHERE chunk_no = 1")
+
+    code, out, _ = _run(capsys, _adopt_argv(package, runs_dir, index_root))
+
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    product = payload["plan"]["products"][0]
+    assert "chunk_span_mismatch:1" in product["reasons"], product["reasons"]
+    # Продукт-атомарность: несогласованная строка отклоняет продукт целиком, а не тихо
+    # укорачивает его корпус (тот же исход, что у расхождения хеша, I19).
+    assert payload["plan"]["accepted"] == []
+    assert payload["plan"]["skipped"] == ["p1"]
+    assert _counts(_state_db(tmp_path))["chunk_meta"] == 0

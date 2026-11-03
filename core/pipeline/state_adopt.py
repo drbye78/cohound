@@ -1025,6 +1025,7 @@ def _plan_product(
     incomplete = 0
     without_chunks = 0
     hash_mismatch = 0
+    span_mismatch = 0
     for doc in docs:
         doc_id = str(doc["doc_id"])
         doc_hash = _as_text(_get(doc, "content_hash"))
@@ -1048,6 +1049,18 @@ def _plan_product(
                 # строку; принимать её значило бы импортировать неверную адресацию.
                 hash_mismatch += 1
                 continue
+            # L1b-2b: смещения куска — из ``corpus_chunks`` источника как есть
+            # (``_get`` терпит прогон старой схемы: колонки нет ⇒ None). Пара проверяется
+            # здесь же, по тому же принципу, что и хеш: рваная пара или диапазон, не
+            # совпадающий с длиной текста, — признак несогласованной строки, и принимать
+            # её значило бы отложить отказ до ``CorpusChunk`` (или, хуже, до цитаты).
+            pair = _span_pair(
+                _get(chunk, "char_start"), _get(chunk, "char_end"), text
+            )
+            if pair is None:
+                span_mismatch += 1
+                continue
+            char_start, char_end = pair
             doc_chunks.append(
                 (
                     ChunkRow(
@@ -1060,10 +1073,8 @@ def _plan_product(
                         heading_path=_as_text(_get(chunk, "heading_path")),
                         context_prefix=_as_text(_get(chunk, "context_prefix")),
                         lang=_as_text(_get(chunk, "lang")),
-                        # L1b-2b: смещения куска — из ``corpus_chunks`` источника как
-                        # есть (``_get`` терпит прогон старой схемы: колонки нет ⇒ None).
-                        char_start=_as_int(_get(chunk, "char_start")),
-                        char_end=_as_int(_get(chunk, "char_end")),
+                        char_start=char_start,
+                        char_end=char_end,
                     ),
                     text,
                 )
@@ -1133,6 +1144,8 @@ def _plan_product(
         reasons.append(f"documents_without_chunks:{without_chunks}")
     if hash_mismatch:
         reasons.append(f"chunk_hash_mismatch:{hash_mismatch}")
+    if span_mismatch:
+        reasons.append(f"chunk_span_mismatch:{span_mismatch}")
 
     cells_adoption = _cells_adoption(
         product_id=product_id,
@@ -1423,6 +1436,28 @@ def _normalize(url: str) -> str | None:
         return normalize_seed_url(url)
     except ValueError:
         return None
+
+
+def _span_pair(
+    start: Any, end: Any, text: str
+) -> tuple[int | None, int | None] | None:
+    """Смещения куска из источника: пара целиком и по длине текста, иначе ``None``.
+
+    Два допустимых исхода: оба ``NULL`` (старая схема или абзацный чанкер — кусок не
+    является точным срезом) и корректная пара (``0 <= start < end`` и
+    ``end - start == len(text)``). ``None`` — отказ: рваная пара, перевёрнутый или
+    несовпадающий по длине диапазон — признак несогласованной строки, и принимать её
+    значило бы отложить отказ до ``CorpusChunk`` (а с ним — до цитаты, I22), то есть туда,
+    где причина уже не видна.
+    """
+    if start is None and end is None:
+        return (None, None)
+    first, second = _as_int(start), _as_int(end)
+    if first is None or second is None:
+        return None
+    if not 0 <= first < second or second - first != len(text):
+        return None
+    return (first, second)
 
 
 def _as_int(value: Any) -> int | None:
