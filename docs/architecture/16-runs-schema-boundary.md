@@ -507,8 +507,8 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
   `_derive_partition_build_id(**явные kwargs)`; новый обязательный аргумент → `TypeError`.
 - `tests/pipeline/test_corpus.py:933-947` — перечень вариантов чувствительности `pb`
   (подмножество параметров проходит, но перечень вариантов надо расширить).
-- `tests/selfcheck.py:782-790` (список обязательных таблиц — `run_product` в него),
-  `:800-826` (ассерты по колонкам `runs`/`corpus_docs`), `:1487-1490` (round-trip
+- `tests/selfcheck.py:783-791` (список обязательных таблиц — `run_product` в него),
+  `:801-827` (ассерты по колонкам `runs`/`corpus_docs`), `:1524-1527` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml`: `reuse_kind` (`:651`), `run_scope` (`:670`), `pdf_device`
   (`:437`) есть, `embed_device` **нет**, перечня статусов продукта прогона **нет**.

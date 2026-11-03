@@ -362,6 +362,7 @@ def main() -> int:
     check("инварианты домена возвращают Violation (I1/I4/I13/I7)", lambda: _domain_invariants())
     check("Ф0: ❌ при неполном корпусе требует аттестации (I2c)", lambda: _corpus_coverage_invariant())
     check("частичное извлечение делает охват неполным (I2/I2c)", lambda: _partial_extraction())
+    check("смещения куска: пара целиком и по длине text (L1b-2b)", lambda: _corpus_chunk_span())
     check("derived-evidence требует hash/резолв (I1/I10/I15/I19, K5)", lambda: _domain_derived())
     check("source_id round-trip + резолв с hash (I10/I15/I19)", lambda: _domain_anchors())
     check("content_hash/prompt_hash детерминированы (§5/I19)", lambda: _util_hashing())
@@ -1279,6 +1280,42 @@ def _partial_extraction() -> None:
     )
     if not isinstance(full, CorpusCoverage) or not full.complete:
         raise AssertionError("полный корпус без частичных документов перестал быть полным")
+
+
+def _corpus_chunk_span() -> None:
+    """L1b-2b: смещения куска — либо полная пара по длине ``text``, либо ``None``.
+
+    Проверяются три ложные провенанс-записи (половина пары, пустой/перевёрнутый диапазон,
+    длина не по ``text``) и одно законное состояние (``None``/``None`` — кусок не срез).
+    """
+    from core.domain.models import CorpusChunk
+
+    def make(**overrides: object) -> CorpusChunk:
+        base: dict[str, object] = {
+            "chunk_id": "p:dv#0",
+            "doc_id": "p:doc",
+            "product_id": "p",
+            "text": "кусок",
+        }
+        base.update(overrides)
+        return CorpusChunk(**base)  # type: ignore[arg-type]
+
+    if make().char_start is not None:
+        raise AssertionError("CorpusChunk: смещения появились по умолчанию")
+    for bad in (
+        {"char_start": 1},
+        {"char_end": 5},
+        {"char_start": 3, "char_end": 3},
+        {"char_start": 4, "char_end": 1},
+        {"char_start": 0, "char_end": 4},
+    ):
+        try:
+            make(**bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"CorpusChunk: ложные смещения приняты: {bad!r}")
+    if make(char_start=0, char_end=5).char_end != 5:
+        raise AssertionError("CorpusChunk: валидная пара смещений не сохранилась")
 
 
 def _corpus_coverage_invariant() -> None:

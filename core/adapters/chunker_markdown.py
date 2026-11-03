@@ -189,6 +189,10 @@ class MarkdownChunker:
         Инвариант проверяем: ``"".join(c.text for c in chunks)`` равно
         ``parse_markdown(text).text`` (нормализованному входу). Документ без единого
         непробельного символа даёт ноль чанков — терять в нём нечего.
+
+        Смещения куска (``char_start``/``char_end``) — **те же**, из которых взят ``text``:
+        ``document.text[start:end]``. Это провенанс для сверки цитаты с местом в документе;
+        нарезку он не меняет.
         """
         document = parse_markdown(text, self.profile)
         index = LineIndex(document.text)
@@ -207,6 +211,8 @@ class MarkdownChunker:
                         heading_path=section.heading_path,
                         context_prefix=self._context_prefix(section.heading_path, context),
                         content_hash=_sha256_16(body),
+                        char_start=start,
+                        char_end=end,
                     )
                 )
         return chunks

@@ -679,6 +679,41 @@ def test_iter_chunks_deterministic_order_and_port_type(store: SqliteStore) -> No
     assert not hasattr(first, "url")
 
 
+def test_chunk_offsets_round_trip_through_store(store: SqliteStore) -> None:
+    """Смещения куска — durable провенанс: записал ``CorpusChunk`` → прочитал ``Chunk``.
+
+    Числа обязаны совпасть буквально, а ``NULL``/``NULL`` (абзацный чанкер) — читаться как
+    ``None``, а не как смещение ``0``: ноль — валидное начало первого куска.
+    """
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    # Смещения передаются как есть; длина ``text`` держится инвариантом модели.
+    store.add_chunk(
+        CorpusChunk(
+            chunk_id="p1-span",
+            doc_id="doc-1",
+            product_id="p1",
+            chunk_no=0,
+            text="кусок\n\n",
+            content_hash="hash-span",
+            build_id="build-1",
+            char_start=40,
+            char_end=47,
+        )
+    )
+    store.add_chunk(_chunk("p1-nospan", chunk_no=1))
+
+    got = store.get_chunk("p1-span")
+    assert got is not None
+    assert (got.char_start, got.char_end) == (40, 47)
+    assert got.text == "кусок\n\n"
+    assert got.char_end - got.char_start == len(got.text)
+
+    plain = store.get_chunk("p1-nospan")
+    assert plain is not None
+    assert plain.char_start is None
+    assert plain.char_end is None
+
+
 def test_iter_chunks_product_filter(store: SqliteStore) -> None:
     store.upsert_corpus_doc(_doc("doc-1", "p1"))
     store.upsert_corpus_doc(_doc("doc-2", "p2"))

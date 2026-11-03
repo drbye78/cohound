@@ -642,3 +642,88 @@ def test_markdown_chunker_port_conformance() -> None:
     assert [chunk.chunk_id for chunk in chunks] == ["doc1#0"]
     assert [chunk.chunk_no for chunk in chunks] == [0]
     assert chunks[0].heading_path == "H1"
+
+
+# ---------------------------------------------------------------------------
+# Смещения куска (L1b-2b): провенанс, а не ось нарезки
+# ---------------------------------------------------------------------------
+
+
+def _assert_spans_are_exact(text: str, chunks) -> None:
+    """Каждый кусок — точный срез нормализованного документа, без перекрытий (L1b-2b).
+
+    Проверяется буквально: ``doc_text[char_start:char_end] == text`` и
+    ``char_end - char_start == len(text)``. Плюс покрытие: сумма длин диапазонов равна
+    длине документа — смещения описывают ту же нарезку, что и P1, а не похожую.
+    """
+    from core.adapters.md_ast import parse_markdown
+
+    doc_text = parse_markdown(text).text
+    for chunk in chunks:
+        assert chunk.char_start is not None and chunk.char_end is not None
+        assert doc_text[chunk.char_start : chunk.char_end] == chunk.text
+        assert chunk.char_end - chunk.char_start == len(chunk.text)
+    # Наложений нет и дыр нет: куски идут подряд в порядке документа.
+    assert sum(chunk.char_end - chunk.char_start for chunk in chunks) == len(doc_text)
+    assert [chunk.char_start for chunk in chunks] == sorted(
+        chunk.char_start for chunk in chunks
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "md"),
+    [
+        (
+            "абзац",
+            "# Раздел\n\n" + " ".join(f"слово{index}" for index in range(200)) + "\n",
+        ),
+        (
+            "таблица",
+            "# Таблица\n\n| id | смысл |\n|---|---|\n"
+            + "".join(f"| {index} | значение-{index} |\n" for index in range(40)),
+        ),
+        (
+            "fence",
+            "# Код\n\n```sql\n" + "SELECT 1;\n" * 40 + "```\n",
+        ),
+        (
+            "пункт списка",
+            "# Список\n\n- " + "\n- ".join(f"пункт номер {index}" for index in range(40))
+            + "\n",
+        ),
+        (
+            "цитата",
+            "# Цитата\n\n> " + "\n> ".join(f"строка цитаты {index}" for index in range(40))
+            + "\n",
+        ),
+    ],
+)
+def test_chunk_offsets_are_exact_slices(name: str, md: str) -> None:
+    """Куски любой конструкции несут смещения, и срез по ним равен тексту (L1b-2b)."""
+    chunks = MarkdownChunker(chunk_size=120).chunk("doc", md)
+
+    assert len(chunks) > 2, f"{name}: конструкция должна разрезаться, иначе тест пуст"
+    _assert_spans_are_exact(md, chunks)
+
+
+def test_offsets_do_not_change_the_chunk_set() -> None:
+    """Смещения — провенанс: текст, ``chunk_id`` и ``content_hash`` от них не зависят."""
+    md = "# H1\n\n" + " ".join(f"слово{index}" for index in range(300)) + "\n\n```sql\nSELECT 1;\n```\n"
+    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+
+    assert [chunk.text for chunk in chunks] == [
+        chunk.text for chunk in MarkdownChunker(chunk_size=200).chunk("doc", md)
+    ]
+    _assert_exact_join(md, chunks)
+    _assert_spans_are_exact(md, chunks)
+
+
+def test_single_chunk_document_has_offsets() -> None:
+    """Документ из одного куска тоже несёт диапазон — ``None`` здесь не «дефолт»."""
+    md = "# H1\n\nкороткий текст раздела\n"
+    chunks = MarkdownChunker().chunk("doc", md)
+
+    assert len(chunks) == 1
+    assert chunks[0].char_start == 0
+    assert chunks[0].char_end == len(chunks[0].text)
+    assert chunks[0].text == md

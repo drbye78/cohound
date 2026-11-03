@@ -211,3 +211,51 @@ def test_line_block_needs_two_consecutive_lines() -> None:
     pair = "| первая\n| вторая\n"
     assert MEASURE._census_hits("line_block", single) == []  # type: ignore[attr-defined]
     assert len(MEASURE._census_hits("line_block", pair)) == 2  # type: ignore[attr-defined]
+
+# -- P14: смещения чанка срезают ровно свой текст (L1b-2b) --------------------
+
+
+def _chunk(text: str, *, start: int | None = None, end: int | None = None) -> object:
+    from core.ports.types import Chunk
+
+    return Chunk(
+        chunk_id=f"d#{start}",
+        chunk_no=0,
+        text=text,
+        heading_path="",
+        context_prefix="",
+        content_hash="0" * 16,
+        char_start=start,
+        char_end=end,
+    )
+
+
+def test_span_check_accepts_exact_slice_including_trailing_newlines() -> None:
+    """Срез с краевыми переводами строки — точный: P1 их не срезает, и P14 тоже.
+
+    Это тот случай, из-за которого `CorpusChunk` перестал стрипать текст: ``\n\n``
+    принадлежат срезу, и без них длина диапазона не сошлась бы с ``len(text)``.
+    """
+    document = "первый абзац\n\nвторой абзац\n\n"
+    violations, without = MEASURE._span_violations(
+        document, [_chunk("первый абзац\n\n", start=0, end=14)]
+    )
+
+    assert (violations, without) == (0, 0)
+
+
+def test_span_check_counts_mismatched_slice_as_violation() -> None:
+    """Смещения, которые не срезают свой текст, — нарушение, а не «почти верно»."""
+    document = "первый абзац\n\nвторой абзац\n\n"
+    violations, without = MEASURE._span_violations(
+        document, [_chunk("второй абзац", start=0, end=14)]
+    )
+
+    assert (violations, without) == (1, 0)
+
+
+def test_span_check_separates_chunks_without_offsets() -> None:
+    """Чанк без смещений — не нарушение, но считается отдельно (абзацный чанкер)."""
+    violations, without = MEASURE._span_violations("текст документа\n\n", [_chunk("текст")])
+
+    assert (violations, without) == (0, 1)

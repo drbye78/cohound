@@ -1480,8 +1480,8 @@ class SqliteStore:
             "INSERT OR REPLACE INTO corpus_chunks"
             " (chunk_id, doc_id, product_id, url, heading_path, lang, chunk_no, text,"
             "  context_prefix, content_hash, extractor_version, build_id, embed_model_id,"
-            "  embedded_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "  embedded_at, char_start, char_end)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         rows = [
             (
@@ -1499,6 +1499,8 @@ class SqliteStore:
                 c.build_id,
                 c.embed_model_id,
                 c.embedded_at,
+                c.char_start,
+                c.char_end,
             )
             for c in chunks
         ]
@@ -2873,6 +2875,8 @@ class SqliteStore:
         "heading_path",
         "context_prefix",
         "content_hash",
+        "char_start",
+        "char_end",
     )
 
     @staticmethod

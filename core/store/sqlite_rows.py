@@ -491,7 +491,9 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
     """Восстанавливает порт-тип ``Chunk`` из строки ``corpus_chunks``.
 
     Единая точка конверсии для ``get_chunk``/``iter_chunks``: ``chunk_no=None``
-    читается как ``0``, ``NULL`` в текстовых полях — как пустая строка.
+    читается как ``0``, ``NULL`` в текстовых полях — как пустая строка. ``NULL`` в
+    ``char_start``/``char_end`` читается как ``None`` — «кусок не срез» (абзацный
+    чанкер), а не как смещение ``0``: ноль — валидное начало первого куска.
     """
     return Chunk(
         chunk_id=row["chunk_id"],
@@ -500,6 +502,8 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
         heading_path=row["heading_path"] or "",
         context_prefix=row["context_prefix"] or "",
         content_hash=row["content_hash"] or "",
+        char_start=row["char_start"],
+        char_end=row["char_end"],
     )
 
 

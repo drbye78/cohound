@@ -167,6 +167,10 @@ class DocResult:
     p4_violation: bool
     prose_p8: int = 0
     source_punct: int = 0
+    #: P14: чанк со смещениями, которые не срезают ровно его ``text``. Инвариант: 0.
+    span_violations: int = 0
+    #: Чанки без смещений (кусок не является точным срезом — объявленная граница семейства).
+    without_span: int = 0
     examples: list[str] = field(default_factory=list)
     constructions: dict[str, int] = field(default_factory=dict)
 
@@ -213,12 +217,33 @@ def _is_cjk(char: str) -> bool:
     )
 
 
+def _span_violations(document_text: str, chunks: Sequence[Chunk]) -> tuple[int, int]:
+    """``(нарушения смещений, чанки без смещений)`` — провенанс L1b-2b.
+
+    Инвариант: если смещения заданы, ``document_text[char_start:char_end]`` **равен**
+    ``chunk.text`` (без ``strip()``: P1). Смещения — провенанс, и провенанс, который
+    не срезает свой текст, хуже отсутствующего: он выглядит проверенным.
+    ``None``/``None`` нарушением не считается — так живёт абзацный чанкер, чьи куски
+    обрезаются и склеиваются; такие чанки считаются отдельно, чтобы число было видно.
+    """
+    violations = 0
+    without = 0
+    for chunk in chunks:
+        if chunk.char_start is None or chunk.char_end is None:
+            without += 1
+            continue
+        if document_text[chunk.char_start : chunk.char_end] != chunk.text:
+            violations += 1
+    return violations, without
+
+
 def _measure(url: str, text: str, chunker: MarkdownChunker) -> DocResult:
     document = parse_markdown(text, chunker.profile)
     chunks = chunker.chunk(url, text)
     spans = _Spans.of(document)
     joined = "".join(chunk.text for chunk in chunks)
     breaks, boundaries = _mid_sentence_breaks(chunks, spans)
+    span_violations, without_span = _span_violations(document.text, chunks)
     examples: list[str] = []
     prose_p8 = 0
     source_punct = 0
@@ -248,6 +273,8 @@ def _measure(url: str, text: str, chunker: MarkdownChunker) -> DocResult:
         p4_violation=any(chunk.text not in document.text for chunk in chunks),
         prose_p8=prose_p8,
         source_punct=source_punct,
+        span_violations=span_violations,
+        without_span=without_span,
         examples=examples,
         constructions={
             key: int(document.counts.get(key) or 0)
@@ -871,6 +898,8 @@ class Totals:
     unknown_lines: int = 0
     boundaries: int = 0
     mid_sentence: int = 0
+    span_violations: int = 0
+    without_span: int = 0
     constructions: dict[str, int] = field(default_factory=dict)
     worst: list[tuple[int, str]] = field(default_factory=list)
 
@@ -881,6 +910,8 @@ class Totals:
         self.p1_violations += int(result.p1_violation)
         self.p4_violations += int(result.p4_violation)
         self.unknown_lines += result.unknown_lines
+        self.span_violations += result.span_violations
+        self.without_span += result.without_span
         self.boundaries += result.boundaries
         self.mid_sentence += result.mid_sentence
         for key, value in result.constructions.items():
@@ -928,12 +959,19 @@ def _print_report(
     print(f"  P8  чанк начинается с пунктуации из-за реза : {totals.p8_violations}")
     print(f"  (источник сам начинается со знака — P1 : {totals.source_punct})")
     print(f"  P13 строки вне блоков         : {totals.unknown_lines}")
+    print(f"  P14 смещения ≠ срез чанка     : {totals.span_violations}")
     print("")
     print("геометрия (число чанков и доля):")
     print(f"  длиннее бюджета      : {totals.over_budget} ({share['over_budget']:.3%})")
     print(f"  короче порога        : {totals.tiny} ({share['tiny']:.3%})")
     print(f"  без heading_path     : {totals.without_heading} ({share['without_heading']:.3%})")
     print(f"  с контекстом продолж.: {totals.with_context} ({share['with_context']:.3%})")
+    print(
+        f"  без смещений (не срез): {totals.without_span} "
+        f"({totals.without_span / totals.chunks:.3%})"
+        if totals.chunks
+        else "  без смещений (не срез): 0"
+    )
     print(
         f"  обрыв предложения    : {totals.mid_sentence} из {totals.boundaries} границ "
         f"({share['mid_sentence']:.3%})"
@@ -1266,6 +1304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "p8_violations": totals.p8_violations,
                 "source_punct": totals.source_punct,
                 "unknown_lines": totals.unknown_lines,
+                "span_violations": totals.span_violations,
             },
             "geometry": {
                 "over_budget": totals.over_budget,
@@ -1274,6 +1313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "with_context": totals.with_context,
                 "mid_sentence": totals.mid_sentence,
                 "boundaries": totals.boundaries,
+                "without_span": totals.without_span,
             },
             "share": totals.share,
             "constructions": totals.constructions,

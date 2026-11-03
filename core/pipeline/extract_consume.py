@@ -409,6 +409,11 @@ def ingest_member_doc(
                 build_id=None,
                 embed_model_id=None,
                 embedded_at=None,
+                # L1b-2b: провенанс куска — смещения в нормализованном тексте документа.
+                # Переносятся как есть; ``None`` у абзацного чанкера — объявленная граница,
+                # а не потеря: ``CorpusChunk`` принимает либо пару, либо ``None``/``None``.
+                char_start=getattr(chunk, "char_start", None),
+                char_end=getattr(chunk, "char_end", None),
             )
         )
     return MemberOutcome(

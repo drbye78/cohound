@@ -247,8 +247,13 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     ``crawl_session_items.fetch_started_at/fetch_ms`` и ``extract_queue.claimed_at/
     heartbeat_at``. Шимов нет (``ALTER TABLE ... ADD COLUMN`` при открытии запрещены),
     поэтому прогоны ≤ 3.14.0 отвергаются гейтом, а не досоздаются молча.
+
+    3.16.0 (L1b-2b, план ``18``) — **один** bump на две колонки провенанса врезки:
+    ``corpus_chunks.char_start/char_end`` (смещения куска в тексте документа). Тот же
+    запрет на шимы: прогоны ≤ 3.15.0 отвергаются гейтом версии, старые ``runs/*/
+    cohound.db`` переносятся пересозданием, а не тихим догоном схемы.
     """
-    assert SCHEMA_VERSION == "3.15.0"
+    assert SCHEMA_VERSION == "3.16.0"
 
     conn = connect(":memory:")
     try:
@@ -257,6 +262,9 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
 
         docs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_docs)")}
         assert {"http_status", "reuse_kind"} <= docs_cols
+
+        chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
+        assert {"char_start", "char_end"} <= chunk_cols
 
         tables = {
             r["name"]

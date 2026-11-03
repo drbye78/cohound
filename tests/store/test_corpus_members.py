@@ -69,8 +69,12 @@ def test_schema_version_is_additive_bump() -> None:
     3.15.0 — F6 (план ``17`` §4.2/§7.2): аренда строки очереди (``claimed_at``/
     ``heartbeat_at``) и замер попытки (``fetch_started_at``/``fetch_ms``) одним bump'ом;
     шимов нет, старые файлы отвергаются гейтом версии.
+
+    3.16.0 — L1b-2b (план ``18``): ``corpus_chunks.char_start``/``char_end`` — смещения
+    куска в тексте документа. Тот же принцип: одна пара колонок провенанса, один bump,
+    никаких ``ALTER`` при открытии; файлы ≤ 3.15.0 отвергаются гейтом.
     """
-    assert SCHEMA_VERSION == "3.15.0"
+    assert SCHEMA_VERSION == "3.16.0"
     conn = connect(":memory:")
     try:
         tables = {

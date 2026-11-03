@@ -1965,9 +1965,21 @@ class CorpusChunk(BaseModel):
 
     ``context_prefix`` не входит в валидацию цитат (§4.4) — цитата обязана быть
     подстрокой ``text``. ``build_id`` привязывает чанк к индексной сборке (S5/I19).
+
+    ``char_start``/``char_end`` — смещения куска в нормализованном тексте документа
+    (провенанс, ``core.ports.types.Chunk``). Инвариант проверяется здесь, а не в
+    потребителе: половина пары, пустой/перевёрнутый диапазон или диапазон, не совпадающий
+    с длиной ``text``, — ложная провенанс-запись, и она обязана быть отказом модели, а не
+    тихим ``None``.
+
+    ``str_strip_whitespace=False`` — осознанное отличие от ``_BASE``. Кусок — **точный
+    срез** документа, и его краевые переводы строки принадлежат срезу: стрип сделал бы
+    ``len(text)`` меньше длины диапазона (инвариант перестал бы выполняться) и разошёлся
+    бы с ``content_hash``, посчитанным по необрезанному тексту. Это не смена нарезки, а
+    отказ терять два символа на границе куска.
     """
 
-    model_config = _BASE
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
 
     chunk_id: str
     doc_id: str
@@ -1984,6 +1996,41 @@ class CorpusChunk(BaseModel):
     build_id: str | None = None
     embed_model_id: str | None = None
     embedded_at: str | None = None
+    #: Начало куска в нормализованном тексте документа (``ExtractedDoc.text``). ``None``
+    #: вместе с ``char_end`` — кусок не является точным срезом (абзацный чанкер).
+    char_start: int | None = None
+    #: Конец куска (исключающий): ``doc_text[char_start:char_end] == text``.
+    char_end: int | None = None
+
+    @model_validator(mode="after")
+    def _check_char_span(self) -> CorpusChunk:
+        """Держит инвариант смещений: пара целиком и ровно по длине ``text``.
+
+        Три отказа: задана только половина пары (диапазон без границы — не провенанс),
+        пустой/перевёрнутый диапазон (``0 <= start < end``) и диапазон, длина которого не
+        равна ``len(text)`` (смещения указывают не на этот текст). ``None``/``None`` —
+        законное состояние, а не ошибка: так живёт абзацный чанкер.
+        """
+        if self.char_start is None and self.char_end is None:
+            return self
+        if self.char_start is None or self.char_end is None:
+            raise ValueError(
+                "CorpusChunk: задана только одна граница смещений "
+                f"(char_start={self.char_start!r}, char_end={self.char_end!r}) — "
+                "диапазон провенанса задаётся парой"
+            )
+        if not 0 <= self.char_start < self.char_end:
+            raise ValueError(
+                "CorpusChunk: пустой или перевёрнутый диапазон смещений "
+                f"[{self.char_start}; {self.char_end}) — нужен 0 <= char_start < char_end"
+            )
+        span = self.char_end - self.char_start
+        if span != len(self.text):
+            raise ValueError(
+                "CorpusChunk: длина диапазона смещений не равна длине text "
+                f"({span} != {len(self.text)}) — смещения указывают не на этот текст"
+            )
+        return self
 
 
 class IndexManifestEntry(BaseModel):

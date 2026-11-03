@@ -220,3 +220,16 @@ def test_hard_cut_keeps_grapheme_clusters_whole() -> None:
 
     assert "".join(chunk.text for chunk in chunks) == blob
     assert all(len(chunk.text) <= 100 for chunk in chunks)
+
+
+def test_offsets_are_none_for_every_piece() -> None:
+    """Смещений в документе нет — объявленная граница правил ``text-para-3``.
+
+    Куски обрезаются ``.strip()`` и склеиваются из предложений, поэтому ``text`` не
+    является точным срезом входа. Выдумывать смещения нельзя (A3): ``None`` — честный
+    ответ «кусок не срез», а не забытое поле.
+    """
+    chunks = TextChunker(chunk_size=60).chunk("doc", _LONG + "\n\n" + "Ещё абзац. " * 30)
+
+    assert chunks
+    assert all(chunk.char_start is None and chunk.char_end is None for chunk in chunks)
