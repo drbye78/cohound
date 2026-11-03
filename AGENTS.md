@@ -314,7 +314,19 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
   0.000 → 0.845, `edu.postgrespro.ru` 0.024 → 0.939, `tantorlabs.ru` 0.000 → 0.782; five
   marker-bearing hosts unchanged to the last digit
   (`docs/reports/measurements/2026-11-02-html-headings-main-region.md`). Reader version is
-  `trafilatura-html-5`; both changes are `execution_change` because the corpus text changes.
+  `trafilatura-html-6`; D1/D2/D3 are all `execution_change` because the corpus text changes.
+- **A definition list is not a section.** `trafilatura` 2.3.1 rewrites `<dl>/<ol>/<ul>` into
+  its own `<list>` and `dt`/`dd`/`li` into `<item>`, which the markdown serializer prints as
+  **one line**: a `<h3>` inside a `<dd>` arrives as `- текст ### Примечание текст`, so the
+  heading stops being a heading and `heading_path` carries a whole paragraph.
+  `_neutralize_definition_lists` (`core/adapters/extract_html.py`) turns `dl`→`div`,
+  `dt`→`p` (the term stays a paragraph, never a section), `dd`→`div` — but only
+  for lists that contain a heading (46 of 2 379 HTML pages; replacing every `<dl>` touches
+  809 and breaks main-region selection on 29) and unwrapping their `<a>` so link-density
+  pruning does not eat definition text (measured −61 % on the postgrespro acronyms page
+  without it). Measured 03.11.2026 on 2 379 pages: defect lines 88 → 59, headings +47 with
+  zero losses, longest heading 1 076 → 381 characters, characters +406
+  (`docs/reports/measurements/2026-11-03-html-definition-lists.md`).
 - PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
   **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:505`).
   - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The

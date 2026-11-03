@@ -40,7 +40,7 @@
 | PDF `text_layer` | `core/adapters/extract_pdf_text.py:203` | pypdfium2, постранично, плоский текст; пустая страница → `error="no_text_layer"` (`:267`; 183 из 16 073 стр., 1.14 %) |
 | PDF `structured` | `core/adapters/extract_document.py:849` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
-| HTML | `core/adapters/extract_html.py:138` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
+| HTML | `core/adapters/extract_html.py:147` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
 | Санитайз | `core/util/sanitize.py:145,290,423` | вход HTML: структурный пре-клин `strip_active_html` (`:290`) — удаляется только активное, `class`/`id`/`role` остаются для `trafilatura`; allow-list `sanitize_html` (`:145`) — только на шве валидации (`gateway_validate.py:300`). Выход: `strip_control_chars` → `neutralize_prompt_injection_marks` в одной границе `finalize_extracted_text` (`:423`), её же вызывает документный путь (§10) |
 | Нарезка | `core/adapters/chunker_markdown.py:248` | 1500 символов без перекрытия, разрез по AST (CommonMark/GFM); заголовки считаются **относительно самого мелкого** уровня документа (`md-heading-5`, `:126`), `heading_path` из заголовков |
 | Кэш | `core/pipeline/extract_cache.py:113,343` | ключ `(sha256 байтов, extractor_version, level)`; кэшируются **только полные успехи** |
@@ -213,7 +213,7 @@ y-кластеризация и склейка строк внутри блок�
 ## 10. Дефекты, найденные по дороге (не про MinerU)
 
 1. **Граница санитайза была не одна — исправлено 02.11.2026.** `neutralize_prompt_injection_marks`
-   вызывался в `extract_text.py:64` и `extract_html.py:219`, но **не** в `extract_document.py`
+   вызывался в `extract_text.py:64` и `extract_html.py:377`, но **не** в `extract_document.py`
    (PDF и Office) и **не** в `extract_pdf_text.py` (там была только своя чистка управляющих
    символов). Инвариант «одна граница до чанкинга/хеширования» (`core/util/sanitize.py:31`) на деле не
    был выполнен для двух путей из четырёх: один и тот же текст доходил до оценщика помеченным

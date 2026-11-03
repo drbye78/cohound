@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -58,11 +59,12 @@ def test_extract_returns_extracted_doc() -> None:
 
 
 def test_extractor_version_is_stable() -> None:
-    # Версия менялась дважды 02.11.2026: D1 — входной пре-клин заменён allow-list на
+    # Версия менялась трижды: 02.11.2026 D1 — входной пре-клин заменён allow-list на
     # структуросохраняющий (``trafilatura-html-4``); D2 — страница без объявленного
-    # основного блока получает ``<main>`` (``trafilatura-html-5``). Каждый раз меняется
-    # объявленный стек (``extractor_stack``), а не только реализация.
-    assert HtmlExtractor.version == "trafilatura-html-5"
+    # основного блока получает ``<main>`` (``trafilatura-html-5``); 03.11.2026 D3 —
+    # списки определений разворачиваются до ``trafilatura`` (``trafilatura-html-6``).
+    # Каждый раз меняется объявленный стек (``extractor_stack``), а не только реализация.
+    assert HtmlExtractor.version == "trafilatura-html-6"
 
 
 def test_extract_passes_decoded_html_to_fn() -> None:
@@ -397,6 +399,184 @@ def test_d2_keeps_atx_headings_on_a_page_without_marker() -> None:
     atx = [line for line in doc.text.splitlines() if line.lstrip().startswith("#")]
     assert any("Описание" in line for line in atx), doc.text[:400]
     assert any("Параметры" in line for line in atx), doc.text[:400]
+
+
+# ---------------------------------------------------------------------------
+# D3: списки определений (<dl>/<dt>/<dd>) разворачиваются до извлечения
+# ---------------------------------------------------------------------------
+
+#: Страница как у postgrespro: термин ``<dt>`` и ``<dd>`` с абзацами и врезкой
+#: ``<div class="note"><h3>Примечание</h3>…</div>`` внутри.
+_DEFINITION_PAGE = (
+    "<html><body><div class='refentry'>"
+    "<h2>Параметры конфигурации</h2>"
+    "<dl class='variablelist'>"
+    "<dt><code>log_destination</code> (string)</dt>"
+    "<dd><p>Задаёт способ протоколирования сообщений сервера.</p>"
+    "<div class='note'><h3>Примечание</h3>"
+    "<p>Сборщик сообщений не теряет сообщения при сбое.</p></div>"
+    "</dd></dl></div></body></html>"
+)
+
+
+def _inline_heading_markers(text: str) -> list[str]:
+    """Строки, где ATX-маркер стоит **внутри** строки, а не в её начале.
+
+    Ровно дефект ``<item>``-склейки: ``- текст ### Примечание текст``. Ведущие маркеры
+    снимаются, поэтому настоящий заголовок (``### Примечание``) сюда не попадает.
+    """
+    bad: list[str] = []
+    for line in text.splitlines():
+        body = line.strip().lstrip("#")
+        if re.search(r"#{1,6}[ \t]+\S", body):
+            bad.append(line.strip())
+    return bad
+
+
+def test_d3_note_heading_inside_definition_list_is_a_separate_line() -> None:
+    """Приёмка D3: ``<h3>`` внутри ``<dd>`` — заголовок, а не кусок абзаца.
+
+    На прежнем коде (``trafilatura-html-5``) ``convert_lists`` переписывал ``dl/dt/dd``
+    в ``<list>/<item>``, markdown-сериализатор печатал ``<item>`` одной строкой, и
+    ``### Примечание`` приезжал внутри строки: заголовок переставал быть заголовком,
+    границы секций терялись (замер 03.11.2026 на postgrespro: 16 заголовков, самый
+    длинный 966 символов, 5 строк с маркером внутри строки).
+    """
+    import core.adapters.extract_html as module
+
+    if not module._TRAFILATURA_AVAILABLE:
+        pytest.skip("trafilatura не установлена (extra extract)")
+
+    doc = HtmlExtractor().extract(_page(_DEFINITION_PAGE.encode()))
+    assert doc.error is None
+    lines = [line.strip() for line in doc.text.splitlines()]
+    assert any(line.startswith("#") and "Примечание" in line for line in lines), doc.text
+    assert _inline_heading_markers(doc.text) == [], doc.text
+    # Термин и оба абзаца на месте: структура переставлена, текст не потерян.
+    assert "log_destination" in doc.text
+    assert "Задаёт способ протоколирования сообщений сервера." in doc.text
+    assert "Сборщик сообщений не теряет сообщения при сбое." in doc.text
+
+
+def test_d3_plain_definition_list_keeps_terms_and_text() -> None:
+    """Список определений без вложенных заголовков: термины и значения не потеряны."""
+    import core.adapters.extract_html as module
+
+    if not module._TRAFILATURA_AVAILABLE:
+        pytest.skip("trafilatura не установлена (extra extract)")
+
+    page = (
+        "<html><body><div class='refentry'><h2>Параметры</h2>"
+        "<dl><dt>параметр-один</dt><dd>значение-один</dd>"
+        "<dt>параметр-два</dt><dd>значение-два</dd></dl>"
+        "</div></body></html>"
+    )
+    doc = HtmlExtractor().extract(_page(page.encode()))
+    assert doc.error is None
+    for token in ("параметр-один", "значение-один", "параметр-два", "значение-два"):
+        assert token in doc.text
+
+
+def test_d3_definition_list_without_heading_is_not_touched() -> None:
+    """Список без заголовка дефекта не несёт — документ возвращается байт в байт.
+
+    Замена всех ``<dl>`` подряд (замер 03.11.2026, 2 379 страниц) задевала 809 документов
+    и ломала выбор основного блока у 29 из них: у ``sql-rollback`` пропадали все десять
+    заголовков, страницы-указатели теряли по два. Тот же эффект по строкам-дефектам даёт
+    замена только списков **с** заголовком.
+    """
+    from core.adapters.extract_html import _neutralize_definition_lists
+
+    html = (
+        "<html><body><h2>Параметры</h2>"
+        "<dl><dt>термин</dt><dd>определение</dd></dl></body></html>"
+    )
+    assert _neutralize_definition_lists(html) == html
+
+
+def test_d3_term_becomes_a_paragraph_not_a_heading() -> None:
+    """``<dt>`` — абзац, а не заголовок: термин не придумывает раздел документа."""
+    fn, calls = _capturing("ok")
+    page = (
+        b"<html><body><dl><dt>term</dt>"
+        b"<dd><p>value</p><div class='note'><h3>Note</h3><p>n</p></div></dd>"
+        b"</dl></body></html>"
+    )
+    HtmlExtractor(extract_fn=fn).extract(_page(page))
+    sent = calls[0]
+    assert "<dl" not in sent and "<dt" not in sent and "<dd" not in sent
+    assert "<p>term</p>" in sent
+
+
+def test_d3_definitions_whose_text_is_one_link_survive() -> None:
+    """Текст определения-ссылки не вырезается: ``<a>`` снимается внутри заменяемых списков.
+
+    ``delete_by_link_density`` защищает ``<p>`` только под ``item``/``td``/``th``
+    (GH #788). После замены ``<dd>`` защита исчезает, и абзац из одной длинной ссылки
+    вырезался бы как навигация: на странице сокращений postgrespro извлечение падало
+    с 6 101 до 2 390 символов (−61 %). Ссылки и раньше не попадали в markdown
+    (``include_links=False``), поэтому текст обязан остаться.
+    """
+    import core.adapters.extract_html as module
+
+    if not module._TRAFILATURA_AVAILABLE:
+        pytest.skip("trafilatura не установлена (extra extract)")
+
+    definition = "https://ru.wikipedia.org/wiki/" + "Очень_длинное_название_" * 5
+    page = (
+        "<html><body><h2>Сокращения</h2><dl class='variablelist'>"
+        "<dt><acronym>ANSI</acronym></dt>"
+        f"<dd><p><a href='{definition}'>Американский национальный институт стандартов, "
+        "American National Standards Institute</a></p>"
+        "<div class='note'><h3>Примечание</h3><p>хвост</p></div></dd>"
+        "</dl></body></html>"
+    )
+    doc = HtmlExtractor().extract(_page(page.encode()))
+    assert doc.error is None
+    assert "Американский национальный институт стандартов" in doc.text
+
+
+def test_d3_page_without_definition_list_is_returned_unchanged() -> None:
+    """Нет ``<dl>`` — вход возвращается байт в байт (``<ul>``/``<ol>`` не трогаются)."""
+    from core.adapters.extract_html import _neutralize_definition_lists
+
+    html = (
+        "<html><body><ul><li>один</li></ul><ol><li>два</li></ol>"
+        "<p>текст</p></body></html>"
+    )
+    assert _neutralize_definition_lists(html) == html
+
+
+def test_d3_is_idempotent() -> None:
+    """Повторный вызов ничего не меняет: после первого ``<dl>`` в документе нет."""
+    from core.adapters.extract_html import _neutralize_definition_lists
+
+    once = _neutralize_definition_lists(_DEFINITION_PAGE)
+    assert "<dl" not in once.lower()
+    assert _neutralize_definition_lists(once) == once
+
+
+def test_d3_broken_markup_does_not_raise() -> None:
+    """Незакрытые теги — обычный HTML: разбор не падает, текст доходит до извлечения."""
+    fn, calls = _capturing("ok")
+    doc = HtmlExtractor(extract_fn=fn).extract(_page(b"<html><body><dl><dt>t<dd>d</dl>"))
+    assert doc.error is None
+    assert "t" in calls[0]
+
+
+def test_d3_transform_failure_degrades_to_error(monkeypatch) -> None:
+    """Исключение трансформации → ``error``, а не падение (как у пре-клина)."""
+    import core.adapters.extract_html as module
+
+    def boom(_html: str) -> str:
+        raise ValueError("битый html")
+
+    monkeypatch.setattr(module, "_neutralize_definition_lists", boom)
+    fn, calls = _capturing("ok")
+    doc = HtmlExtractor(extract_fn=fn).extract(_page(b"<html><body><dl><dt>t</dt></dl>"))
+    assert doc.text == ""
+    assert doc.error is not None and "битый html" in doc.error
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------
