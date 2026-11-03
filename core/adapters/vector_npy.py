@@ -508,6 +508,7 @@ def _to_chunks(
             heading_path=meta.heading_path,
             build_id=partition_build_id,
             score=score,
+            context_prefix=meta.context_prefix,
         )
         for score, chunk_id, product_id, meta, partition_build_id in ordered[:top_k]
     ]

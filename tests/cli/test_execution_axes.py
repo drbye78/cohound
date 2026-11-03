@@ -234,7 +234,6 @@ def test_chunker_version_is_a_composite_of_both_chunkers(tmp_path: Path) -> None
     declared = _resolve(_package(tmp_path))
 
     assert declared.chunker_version == f"{MarkdownChunker.version}+{TextChunker.version}"
-    assert declared.chunker_version == "md-heading-5+text-para-2"
     assert MarkdownChunker.version in declared.chunker_version
     assert TextChunker.version in declared.chunker_version
 

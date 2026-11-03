@@ -648,7 +648,9 @@ class TantivyLexicalIndex:
             value = hydrated.get(chunk_id)
             if value is None:
                 continue
-            text, heading_path, content_hash, record_build_id = _hydrated_fields(value)
+            text, heading_path, content_hash, record_build_id, context_prefix = (
+                _hydrated_fields(value)
+            )
             build_id = (
                 self._partition_build_id(product_id, partition_build_ids)
                 or record_build_id
@@ -663,6 +665,7 @@ class TantivyLexicalIndex:
                     heading_path=heading_path,
                     build_id=build_id,
                     score=score,
+                    context_prefix=context_prefix,
                 )
             )
         return out
@@ -761,8 +764,8 @@ class TantivyLexicalIndex:
         self.close()
 
 
-def _hydrated_fields(value: object) -> tuple[str, str, str, str]:
-    """Достаёт ``(text, heading_path, content_hash, build_id)`` из записи store.
+def _hydrated_fields(value: object) -> tuple[str, str, str, str, str]:
+    """Достаёт ``(text, heading_path, content_hash, build_id, context_prefix)`` из store.
 
     Принимает ``Mapping`` и объекты с атрибутами (``ports.types.Chunk`` подходит как
     есть; ``LexicalChunk`` — тоже, тогда ``build_id`` записи участвует в провенансе).
@@ -774,12 +777,20 @@ def _hydrated_fields(value: object) -> tuple[str, str, str, str]:
         heading_path = value.get("heading_path") or ""
         content_hash = value.get("content_hash") or ""
         build_id = value.get("build_id") or ""
+        context_prefix = value.get("context_prefix") or ""
     else:
         text = getattr(value, "text", "") or ""
         heading_path = getattr(value, "heading_path", "") or ""
         content_hash = getattr(value, "content_hash", "") or ""
         build_id = getattr(value, "build_id", "") or ""
-    return str(text), str(heading_path), str(content_hash), str(build_id)
+        context_prefix = getattr(value, "context_prefix", "") or ""
+    return (
+        str(text),
+        str(heading_path),
+        str(content_hash),
+        str(build_id),
+        str(context_prefix),
+    )
 
 
 def _stem_analyzer(tantivy: Any) -> Any:

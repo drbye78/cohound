@@ -52,6 +52,8 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 
 from core.adapters.md_ast import (
     SENTENCE_END_CHARS,
@@ -76,6 +78,27 @@ _HEADING_ATTRS_RE = re.compile(r"\s*\{(?:[#.][^{}]*)\}\s*$")
 #: утверждения начинаются сразу выше. При ``md-heading-5`` порог действует только на
 #: хвосты разреза, поэтому от него больше не зависит, попадёт ли короткая секция в индекс.
 MIN_CHUNK_SIZE = 20
+
+#: Версия спецификации CommonMark, которую реализует движок разбора.
+COMMONMARK_SPEC_VERSION = "commonmark-0.31.2"
+
+
+def _engine_version() -> str:
+    """Версия движка грамматики **из метаданных пакета**, а не из константы.
+
+    Обновление зависимости меняет правила разбора, поэтому ``chunker_version`` обязан это
+    показать: иначе два прогона с разными движками получили бы один ``run_id``. Это тот же
+    класс, что ``extractor_stack`` (AGENTS §9): версия библиотеки — часть условий измерения.
+    Неизвестная версия пишется как ``unknown``, а не выдумывается.
+    """
+
+    def one(name: str) -> str:
+        try:
+            return _dist_version(name)
+        except PackageNotFoundError:
+            return "unknown"
+
+    return f"mdit-{one('markdown-it-py')}/plugins-{one('mdit-py-plugins')}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,10 +143,13 @@ class MarkdownChunker:
     поднята ``md-heading-4`` → ``md-heading-5`` (класс ``execution_versions``, §13).
     """
 
-    #: ``md-heading-5`` (было ``md-heading-4``): нарезка по AST вместо строчного
-    #: автомата — другой chunk-set (другие границы, другой ``text``, другой
-    #: ``context_prefix``), то есть другие условия измерения.
-    version = "md-heading-5"
+    #: Версия правил нарезки — ** стек**, а не метка файла: грамматика, движок разбора и
+    #: политика нарезки меняются независимо, и ``run_id`` обязан различить любое из трёх.
+    #: ``md-heading-4`` → ``md-heading-5`` был переходом с построчного автомата на AST
+    #: (другой chunk-set: другие границы, другой ``text``, другой ``context_prefix``).
+    #: Какой именно профиль грамматики применён — объявляет ``chunking_spec``
+    #: (``md_ast.PROFILES``; страницы и офисные документы идут в ``gfm``).
+    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-1"
 
     #: Объявленный (и снятый) размер перекрытия: контракт продолжает его публиковать
     #: (:func:`core.adapters.chunker_family.composite_chunking_spec`), а значение 0 —

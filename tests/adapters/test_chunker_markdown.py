@@ -260,9 +260,17 @@ def test_dashes_without_front_matter_body_keep_commonmark_behaviour() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_version_is_md_heading_5() -> None:
-    """Нарезка по AST — другая версия правил (``execution_versions``, §13)."""
-    assert MarkdownChunker.version == "md-heading-5"
+def test_version_is_a_stack_of_grammar_engine_and_policy() -> None:
+    """Версия правил — стек, а не метка файла (``execution_versions``, §13).
+
+    Грамматика, движок разбора и политика нарезки меняются независимо; один ``run_id``
+    на два разных движка был бы ложью в провенансе. Версия движка берётся из метаданных
+    пакета, поэтому подмена зависимости обязана изменить строку.
+    """
+    version = MarkdownChunker.version
+    assert version.startswith("md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-")
+    assert "/policy-1" in version
+    assert "mdit-unknown" not in version, "версия движка должна читаться из метаданных"
     assert MarkdownChunker().chunk_overlap == 0
 
 

@@ -32,7 +32,13 @@ class VectorQuery:
 
 @dataclass(frozen=True)
 class RetrievedChunk:
-    """Чанк, возвращённый ретривалом, с полным провенансом (S4/S5)."""
+    """Чанк, возвращённый ретривалом, с полным провенансом (S4/S5).
+
+    ``context_prefix`` — контекст продолжения: шапка таблицы с разделителем, info string
+    fence, маркер цитаты. Он **не** входит в валидацию цитат (I22 сверяет ``text``), но
+    без него оценщик видит строку таблицы без имён столбцов и продолжение листинга без
+    языка. Поэтому поле доезжает до промпта, а не остаётся только в хранилище.
+    """
 
     chunk_id: str
     product_id: str
@@ -41,6 +47,7 @@ class RetrievedChunk:
     heading_path: str
     build_id: str
     score: float
+    context_prefix: str = ""
 
 
 @dataclass(frozen=True)

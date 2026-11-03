@@ -482,7 +482,7 @@ def test_hydration_accepts_port_chunk_and_keeps_full_provenance() -> None:
         chunk_no=0,
         text="экспорт данных",
         heading_path="H",
-        context_prefix="",
+        context_prefix="H\n| id | смысл |\n|---|---|",
         content_hash="hash-c1",
     )
     view = _View({PRODUCT_A: "pb_a"})
@@ -501,6 +501,8 @@ def test_hydration_accepts_port_chunk_and_keeps_full_provenance() -> None:
         hit.content_hash,
         hit.build_id,
     ) == ("c1", PRODUCT_A, "экспорт данных", "H", "hash-c1", "pb_a")
+    # L1b-2: контекст продолжения доезжает до выдачи, а не остаётся в хранилище.
+    assert hit.context_prefix == "H\n| id | смысл |\n|---|---|"
     assert hit.score > 0.0
 
 

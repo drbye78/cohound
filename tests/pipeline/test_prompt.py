@@ -247,30 +247,31 @@ def test_empty_heading_document_and_context_render_no_garbage() -> None:
     assert "[]" not in data
 
 
-def test_retrieved_chunk_has_no_context_line_but_keeps_header() -> None:
-    """Граница порта видна: у ``RetrievedChunk`` нет ``context_prefix``.
+def test_retrieved_chunk_carries_context_prefix_to_the_prompt() -> None:
+    """``RetrievedChunk`` несёт ``context_prefix``: шапка таблицы видна оценщику.
 
-    ``RetrievedChunk`` (``core/ports/vector_index.py``) не несёт ``context_prefix``,
-    поэтому на retrieval-пути строка ``context:`` отсутствует. Тест пинит **факт**, а не
-    желаемое: когда порт получит поле, здесь появится ``context:``, и это будет
-    осознанное расширение провенанса, а не тихая подмена.
+    Порт получил поле в L1b-2 плана 18: строка таблицы без имён столбцов и продолжение
+    листинга без языка — это фрагменты, которые оценщик не может прочитать по смыслу.
+    ``text`` при этом остаётся дословным: контекст печатается отдельной строкой шапки
+    (I22 сверяет цитату с ``text``, а не с шапкой).
     """
     rc = RetrievedChunk(
         chunk_id="prod:aa11:0",
         product_id="prod",
-        text="Векторный текст.",
+        text="| 1 | значение |",
         content_hash="h1",
         heading_path="Раздел",
         build_id="b1",
         score=0.9,
+        context_prefix="Раздел\n| id | смысл |\n|---|---|",
     )
     compiled = compile_prompt(param=_param(), product_id="prod", chunks=[rc])
     data = _data_section(compiled.text)
     assert "source_id: prod:aa11:0\n" in data
     assert "document: prod:aa11\n" in data
     assert "heading: Раздел\n" in data
-    assert "context:" not in data
-    assert "текст:\nВекторный текст." in data
+    assert "context: Раздел\n| id | смысл |\n|---|---|\n" in data
+    assert "текст:\n| 1 | значение |" in data
 
 
 def test_chunks_ordered_by_chunk_id() -> None:

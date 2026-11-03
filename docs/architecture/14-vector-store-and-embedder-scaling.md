@@ -152,7 +152,7 @@ top-10 из 600** у близких соседей. Замер при едино
 («brute-force косинус… ANN (faiss/Qdrant)» — про будущее, не про код); в реестре зависимостей
 `docs/architecture/05-dependency-stack.md:114` `qdrant-client` стоит с вердиктом **c**
 («только идея», легенда `:13`) и обоснованием «требует сервиса; отложено по §14». Порт
-`VectorIndexPort` (`core/ports/vector_index.py:74-86`) по-прежнему без пути к файлу и без
+`VectorIndexPort` (`core/ports/vector_index.py:81-93`) по-прежнему без пути к файлу и без
 `numpy` — замена реализации не тронет ни `pipeline`, ни домен, как и обещано ниже.
 
 Этот раздел — **носитель решения**, а не отчёт о работе: «Qdrant не нужен при таком масштабе»
@@ -198,7 +198,7 @@ top-10 из 600** у близких соседей. Замер при едино
 1–2 и не проверено по 3.
 
 **Что сделать вместо Qdrant — и это дешевле.** Порт уже правильной формы:
-`core/ports/vector_index.py:74-86` — `build_id`, `dim`, `search(q)`, `search_many`,
+`core/ports/vector_index.py:81-93` — `build_id`, `dim`, `search(q)`, `search_many`,
 `shard_ids(product_id)`.
 Ни одного пути к файлу, ни `numpy`, ни формата. Значит решение откладывается **без цены**:
 замена `NpyVectorIndex` на `QdrantVectorIndex` не тронет ни `pipeline`, ни домен. Это важно

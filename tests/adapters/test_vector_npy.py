@@ -59,6 +59,31 @@ def _lookup(chunk_ids) -> dict[str, Chunk]:
     return {chunk_id: _chunk(chunk_id, heading_path=f"H-{chunk_id}") for chunk_id in chunk_ids}
 
 
+def test_retrieved_chunk_carries_context_prefix(tmp_path: Path) -> None:
+    """Контекст продолжения едет из метаданных чанка в выдачу (L1b-2 плана 18).
+
+    Без него чанк-продолжение таблицы приходит к оценщику строкой без имён столбцов:
+    текст дословен, но нечитаем.
+    """
+    chunk_ids = ["c1"]
+    lookup = {
+        "c1": Chunk(
+            chunk_id="c1",
+            chunk_no=0,
+            text="| 1 | значение |",
+            heading_path="H",
+            context_prefix="H\n| id | смысл |\n|---|---|",
+            content_hash="hash-c1",
+        )
+    }
+    _write(tmp_path, PRODUCT_A, [[1.0, 0.0]], chunk_ids)
+    index = NpyVectorIndex(tmp_path, PACKAGE, BUILD, 2, lookup)
+    hits = index.search(VectorQuery(vector=[1.0, 0.0], top_k=1, product_ids=[PRODUCT_A]))
+
+    assert len(hits) == 1
+    assert hits[0].context_prefix == "H\n| id | смысл |\n|---|---|"
+
+
 # ---------------------------------------------------------------------------
 # Атрибуты и контракт порта
 # ---------------------------------------------------------------------------

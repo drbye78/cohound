@@ -135,6 +135,7 @@ def rrf_fuse_chunks(
             heading_path=provenance[cid].heading_path,
             build_id=provenance[cid].build_id,
             score=scores[cid],
+            context_prefix=provenance[cid].context_prefix,
         )
         for cid in ordered
     ]

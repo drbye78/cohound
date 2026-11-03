@@ -66,6 +66,9 @@ def composite_chunking_spec() -> dict[str, object]:
             "chunk_size": getattr(markdown, "chunk_size", None),
             "chunk_overlap": getattr(markdown, "chunk_overlap", None),
             "min_chunk_size": getattr(markdown, "min_chunk_size", None),
+            # Профиль грамматики — условие измерения, а не деталь реализации: ``gfm`` и
+            # ``pandoc`` дают разные блоки на одном тексте (таблицы, сноски, формулы).
+            "profile": getattr(markdown, "profile", None),
         },
         "text": {
             "chunk_size": getattr(text, "chunk_size", None),

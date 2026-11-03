@@ -61,15 +61,12 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
    Дополнение, которого в ревью нет: `serp_key` **не содержит языка**, а
    `build_serp_queries` строит запросы по двум языкам (`core/pipeline/serp_loop.py:913-945`) — наивный кэш
    вернёт выдачу не того языка.
-2. **Оценщик не видит заголовков (C7).** В промпт уходит
-   `f"[source: {chunk.chunk_id}]\n{chunk.text}"` (`prompt.py:290-314`);
-   `RetrievedChunk.heading_path` заполняется (`retrieve.py:135`) и не доходит;
-   `context_prefix` генерируется, хранится и **не потребляется нигде** — эмбеддится
-   `[c.text for c in batch]` (`core/pipeline/corpus_index.py:324`), а докстринг `chunker_text.py:17-18`
-   обещает, что «контекст нужен для эмбеддинга». Регламент при этом не нарушен: §7.1
-   фиксирует `[source: chunk_id]` без заголовка. То есть решение **незаявленное**, и оно
-   прямо бьёт по качеству вердиктов: модель видит 1500 символов без пути заголовков и без
-   имени документа.
+2. ~~**Оценщик не видит заголовков (C7).**~~ **ЗАКРЫТО** (L1b-2a плана 18): заголовок,
+   документ и контекст продолжения печатаются шапкой фрагмента (`prompt.py:299-317`), а
+   `RetrievedChunk` несёт `context_prefix` (`core/ports/vector_index.py:34`), который до
+   этого терялся на обоих плечах ретривала — и markdown-, и абзацный чанкер генерировали
+   его впустую. Состав входа **эмбеддера** по-прежнему `text` и объявлен
+   (`chunking_spec.embed_input`), а не подразумевается.
 3. **Геометрия чанка вне контракта (C3).** В `EXECUTION_CONTRACT_FIELDS` (22 поля) из
    «чанкового» только `chunker_version`, а это метка-строка `"md-heading-2+text-para-1"`
    (`chunker_family.py:15`), не вывод из `chunk_size`/`min_chunk_size`/`overlap`. Правка
@@ -166,7 +163,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:213` (`_pieces`), `:255` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
 | C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | ПОДТВЕРЖДЕНО, компенсация найдена | `chunker_text.py:99-110`; нормализация `validate.py:332` | сверка цитат покрыта (`test_validate.py:116-118`) | Г | — |
 | C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:78`,`:141`, `chunker_text.py:59` | нет | М | P4 |
-| C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | ПОДТВЕРЖДЕНО | `prompt.py:290-314`, `core/pipeline/corpus_index.py:324`, `retrieve.py:135`; ложный докстринг `chunker_text.py:17-18` | `test_prompt.py:68`,`:167` молча пинят отсутствие | М | **P2** |
+| C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | **ЗАКРЫТО** (L1b-2a плана 18): шапка фрагмента + `RetrievedChunk.context_prefix` | `prompt.py:299-317`, `core/ports/vector_index.py:34`, `retrieve.py:130` | `test_prompt.py` пинит **наличие** `heading:`/`context:`, `test_vector_npy.py`/`test_lexical_tantivy.py` — доезд контекста | М | **P2** |
 | C8 | лексический индекс: 4 поля с одним текстом, пересборка каждый прогон в temp, запрашивается только `stemmed` | ПОДТВЕРЖДЕНО → **закрыто** (`1e7fad9`: одно поле + `lexical_spec` в контракте) | `lexical_tantivy.py`, `core/pipeline/digests.py` (`lexical_spec`) | `test_lexical_tantivy.py`, `test_digests.py` | Д | P5 |
 | C9 | `index_npy` склеивает поля тем же разделителем, что и группы (латентно) | ПОДТВЕРЖДЕНО формально; сейчас не эксплуатируемо | `index_npy.py:122-131` vs `_GROUP_SEP` `:76` | нет | Г | P5 |
 | C10 | `index_format` не атомарен: окно между `rmtree` и `replace` | ПОДТВЕРЖДЕНО | `index_format.py:119-121` (докстринг `:90` обещает атомарность) | нет | Г | P5 |
@@ -299,8 +296,8 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 `context_prefix`, состав входа эмбеддера станет таким же необъявленным входом, как сейчас
 `chunk_size`.
 
-- `prompt.py:290-314` — в блок чанка добавить путь заголовков (и идентификатор документа), а не
-  только `chunk_id`.
+- ✅ `prompt.py:299-317` — в блок чанка печатаются путь заголовков, документ и контекст
+  продолжения (C7 закрыт в L1b-2a плана 18).
 - `core/pipeline/corpus_index.py:324`,`:2510` — эмбеддить `context_prefix + text` (или осознанно решить
   обратное и исправить докстринг `chunker_text.py:17-18` — сейчас он врёт в любом случае).
 - В `EXECUTION_CONTRACT_FIELDS` добавить **геометрию и состав входа эмбеддера**
