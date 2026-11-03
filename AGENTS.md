@@ -17,6 +17,35 @@ is provable under a fixed protocol.
 - "Passport" here always means a **product passport** (`passports/{product_id}/`), never the
   regulation itself.
 
+### 1.1 Target scale — and why a pilot corpus is not a constraint
+
+The only profile with a real corpus today is `ru-pg-dbms` (`packages/ru-pg-dbms/`), and it is
+a **pilot**. Until the owner says otherwise, no design decision may take its corpus as an
+absolute input or as a bound: numbers measured on it are prices, not ceilings.
+
+Target shape (owner, 03.11.2026):
+
+| | target |
+|---|---|
+| refresh | **weekly**, per profile |
+| profiles | **≥ 100**, each with its own corpus |
+| cohort | **10–15 products** per profile, compared over **100–200 parameters** |
+| hosts per product | **3–5** |
+| content languages | **English, Russian, Chinese** |
+| markdown dialects | **CommonMark, GFM, Pandoc Markdown** — all three, professionally |
+
+Two consequences that are easy to forget: a rule that works for one product on one host is
+not yet a rule (per-product, per-host and per-language behaviour is the default assumption),
+and "no such construct in the corpus" is a statement about the pilot slice, not about the
+target — which is exactly why a construct is declared out of scope only after a census with a
+named instrument (`18-markdown-chunker-plan.md` §census), never because one regex found nothing.
+
+**Refactoring is open.** Until the owner revisits it, architecture may be reworked wherever
+that is reasonable, and backward compatibility is not required: the DB schema gate rejects
+foreign versions visibly (`SchemaVersionMismatch`), packages/formats may be re-shaped. What is
+**not** negotiable is the methodology (axioms §2), `run_id = f(declared inputs)`, I1–I23, and
+category neutrality of `core/`.
+
 ## 2. Axioms (spec §0) — do not violate
 
 | | Axiom |
@@ -321,12 +350,14 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
   heading stops being a heading and `heading_path` carries a whole paragraph.
   `_neutralize_definition_lists` (`core/adapters/extract_html.py`) turns `dl`→`div`,
   `dt`→`p` (the term stays a paragraph, never a section), `dd`→`div` — but only
-  for lists that contain a heading (46 of 2 379 HTML pages; replacing every `<dl>` touches
-  809 and breaks main-region selection on 29) and unwrapping their `<a>` so link-density
-  pruning does not eat definition text (measured −61 % on the postgrespro acronyms page
-  without it). Measured 03.11.2026 on 2 379 pages: defect lines 88 → 59, headings +47 with
-  zero losses, longest heading 1 076 → 381 characters, characters +406
-  (`docs/reports/measurements/2026-11-03-html-definition-lists.md`).
+  for lists that contain a heading (46 of 2 379 HTML pages). Replacing **every** `<dl>`
+  touches 809 pages, drops headings on **7** of them (29 heading lines; all seven lose every
+  heading) and adds **+258 787** characters instead of +406 — navigation `<dl>`s stop being
+  pruned by link density once their `<a>` is unwrapped. The narrow rule is also applied to
+  unwrapping `<a>` so link-density pruning does not eat definition text (measured −61 % on
+  the postgrespro acronyms page without it). Measured 03.11.2026 on 2 379 pages: defect lines
+  88 → 59, headings +47 with zero losses, longest heading 1 076 → 381 characters, characters
+  +406 (`docs/reports/measurements/2026-11-03-html-definition-lists.md`).
 - PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
   **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:505`).
   - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The

@@ -311,6 +311,17 @@ CJK_SHARE_THRESHOLD = 0.20
 #: Доля контекста в тексте чанка, выше которой чанк считается контекст-тяжёлым.
 CONTEXT_SHARE_LIMIT = 0.25
 
+#: Пороги «хвоста» `heading_path` в символах. Заведены потому, что публикуемое число
+#: «чанков с heading_path длиннее 500» нельзя было воспроизвести: harness печатал только
+#: p50/p90/p99/max, а хвост живёт за p99 и в перцентили не виден.
+HEADING_CHAR_BUCKETS: tuple[int, ...] = (200, 500)
+
+#: Сколько документов показывать в каждом бакете: хвост может быть одним файлом, и это
+#: видно только по составу, а не по «сколько документов вообще задето». Десять — потому что
+#: хвост за порогом мал по определению, и «остальные» без имён и есть тот пересказ,
+#: который нельзя воспроизвести.
+HEADING_BUCKET_TOP = 10
+
 
 class TokenizerUnavailable(RuntimeError):
     """Токенизатор недоступен; символьный прокси вместо токенов не подставляется."""
@@ -532,8 +543,12 @@ class TokenGeometry:
     max_cjk_share: float = 0.0
     chunks_with_cjk: int = 0
     context_heavy: int = 0
+    #: Порог в символах → по документам (URL) ``(число чанков, самый длинный heading_path)``.
+    #: Состав нужен потому, что публикуется «чанков на документах»: без него хвост не
+    #: отличить от одного файла, а без длины — не назвать, какой документ его держит.
+    heading_over: dict[int, dict[str, tuple[int, int]]] = field(default_factory=dict)
 
-    def add(self, chunk: Chunk, count: Callable[[str], int]) -> None:
+    def add(self, chunk: Chunk, count: Callable[[str], int], document: str = "") -> None:
         """Добавляет чанк: токены текста, промпта, контекста и класс письменности."""
         heading = chunk.heading_path or ""
         prefix = chunk.context_prefix or ""
@@ -551,6 +566,12 @@ class TokenGeometry:
         self.heading_tokens.append(heading_tokens)
         self.prefix_chars.append(len(prefix))
         self.prefix_tokens.append(prefix_tokens)
+        for threshold in HEADING_CHAR_BUCKETS:
+            if len(heading) > threshold:
+                per_document = self.heading_over.setdefault(threshold, {})
+                key = document or chunk.chunk_id
+                chunks, longest = per_document.get(key, (0, 0))
+                per_document[key] = (chunks + 1, max(longest, len(heading)))
         if text_tokens:
             self.chars_per_token.append(len(chunk.text) / text_tokens)
         if context_tokens > CONTEXT_SHARE_LIMIT * text_tokens:
@@ -619,6 +640,25 @@ class TokenGeometry:
                 "heavy_chunks": self.context_heavy,
                 "heavy_share": self.context_heavy / (chunks or 1),
                 "heavy_limit": CONTEXT_SHARE_LIMIT,
+                "heading_over": {
+                    str(threshold): {
+                        "chunks": sum(chunks for chunks, _longest in per_document.values()),
+                        "documents": len(per_document),
+                        # Детерминированно: при равном числе чанков порядок задаёт URL.
+                        "top": [
+                            {
+                                "document": document,
+                                "chunks": chunks,
+                                "max_heading_chars": longest,
+                            }
+                            for document, (chunks, longest) in sorted(
+                                per_document.items(), key=lambda pair: (-pair[1][0], pair[0])
+                            )[:HEADING_BUCKET_TOP]
+                        ],
+                    }
+                    for threshold in HEADING_CHAR_BUCKETS
+                    for per_document in (self.heading_over.get(threshold, {}),)
+                },
             },
         }
 
@@ -1076,6 +1116,18 @@ def _print_token_report(
     print(f"    context_prefix: симв {_fmt_dist(context['prefix_chars'])}")
     print(f"                    токенов {_fmt_dist(context['prefix_tokens'])}")
     print(f"    heading+context токенов {_fmt_dist(context['context_tokens'])}")
+    for threshold, bucket in context["heading_over"].items():
+        head = bucket["top"][0] if bucket["top"] else None
+        tail = (
+            f"; больше всего у {head['document']} — {head['chunks']} чанков, "
+            f"самый длинный {head['max_heading_chars']} символов"
+            if head
+            else ""
+        )
+        print(
+            f"    heading_path > {threshold} символов: {bucket['chunks']} чанков "
+            f"на {bucket['documents']} документах{tail}"
+        )
     print(
         f"    токены(heading+context) > {context['heavy_limit']:.0%} токенов текста: "
         f"{context['heavy_chunks']} ({context['heavy_share']:.3%})"
@@ -1262,7 +1314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             census.add(item.url, extracted.text)
         if geometry is not None and counter is not None:
             for chunk in result.chunks:
-                geometry.add(chunk, counter)
+                geometry.add(chunk, counter, document=result.url)
         if args.skeleton:
             for chunk in result.chunks:
                 skeletons.add(chunk.text)

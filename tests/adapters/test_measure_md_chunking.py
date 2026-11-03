@@ -259,3 +259,55 @@ def test_span_check_separates_chunks_without_offsets() -> None:
     violations, without = MEASURE._span_violations("текст документа\n\n", [_chunk("текст")])
 
     assert (violations, without) == (0, 1)
+
+
+# -- хвост heading_path: пороги >200 и >500 символов --------------------------
+
+
+def _heading_chunk(heading: str) -> object:
+    from core.ports.types import Chunk
+
+    return Chunk(
+        chunk_id=f"d#{len(heading)}",
+        chunk_no=0,
+        text="текст",
+        heading_path=heading,
+        context_prefix="",
+        content_hash="0" * 16,
+    )
+
+
+def test_heading_path_buckets_count_chunks_and_documents_separately() -> None:
+    """Порог ``> N`` — строгое неравенство; чанки и документы считаются раздельно.
+
+    Именно этого не хватало опубликованному числу «156 чанков на 7 документах»: перцентили
+    хвост не показывают, а «на документах» без множества URL не отличить от одного файла.
+    """
+    geometry = MEASURE.TokenGeometry(model_id="fake")  # type: ignore[attr-defined]
+    counts = lambda _text: 1  # noqa: E731 - токены здесь не измеряются
+    geometry.add(_heading_chunk("к" * 200), counts, document="a")  # ровно порог — не входит
+    geometry.add(_heading_chunk("к" * 201), counts, document="a")
+    geometry.add(_heading_chunk("к" * 600), counts, document="a")
+    geometry.add(_heading_chunk("к" * 700), counts, document="b")
+    geometry.add(_heading_chunk(""), counts, document="c")
+
+    buckets = geometry.summary()["context"]["heading_over"]
+    assert (buckets["200"]["chunks"], buckets["200"]["documents"]) == (3, 2)
+    assert (buckets["500"]["chunks"], buckets["500"]["documents"]) == (2, 2)
+    # Состав хвоста: при равном числе чанков порядок задаёт URL (детерминированно).
+    assert buckets["500"]["top"] == [
+        {"document": "a", "chunks": 1, "max_heading_chars": 600},
+        {"document": "b", "chunks": 1, "max_heading_chars": 700},
+    ]
+
+
+def test_heading_path_buckets_are_zero_not_missing() -> None:
+    """Нет чанков за порогом — опубликованный ноль, а не отсутствующий ключ."""
+    geometry = MEASURE.TokenGeometry(model_id="fake")  # type: ignore[attr-defined]
+    geometry.add(_heading_chunk("короткий"), lambda _text: 1, document="a")
+
+    buckets = geometry.summary()["context"]["heading_over"]
+    assert buckets == {
+        "200": {"chunks": 0, "documents": 0, "top": []},
+        "500": {"chunks": 0, "documents": 0, "top": []},
+    }

@@ -275,13 +275,39 @@ DATABASE LINK  3 0 9 Database links will be exported as SQL/MED …
 другой механизм: не список определений, а потеря границы `pre`; правкой D3 он не лечится
 (её область — `<dl>` с заголовком внутри, 46 страниц).
 
-Измерено на том же срезе под `html-6` (скретч, без чана): чанков с `heading_path` длиннее
-500 символов — **156 на 7 документах**, длиннее 200 — **1 191** (4.5 % всех чанков). Хвост
-сосредоточен: 112 из 156 — одна страница с консольным отчётом; остальные шесть —
-`plpgsql_check` (978 симв.), `plpgsql-trigger` (821), `pg-pathman` (629), `proxima`
-(556/522), `orafce` (533). Лечится в читателе (отдавать `pre` как fenced-блок), это
-`execution_change` и отдельный замер; **потолок контекста по-прежнему не вводится** —
-он обрезал бы отчёт в заголовке, а не починил чтение (A2).
+Измерено на том же срезе под `html-6` тем же харнессом, что и весь раздел, — числа
+печатаются в блоке «геометрия контекста» и лежат в `--out-json` под
+`tokens.context.heading_over`:
+
+```bash
+.venv/bin/python scripts/measure_md_chunking.py \
+  --db ~/.cohound/data/runs/ru-pg-dbms-1e0b04d6d83a/cohound.db \
+  --limit 400 --tokens --out-json /tmp/opencode/md-current-tokens.json
+# гейт самого инструмента:
+.venv/bin/python -m pytest -q tests/adapters/test_measure_md_chunking.py
+```
+
+| порог `heading_path` | чанков | документов |
+|---|---|---|
+| > 200 символов | **1 191** (4.499 % из 26 475) | **77** |
+| > 500 символов | **156** | **7** |
+
+Хвост сосредоточен, и состав всего хвоста печатается целиком (все 7 документов выше
+порога 500, чанков на документ и самый длинный `heading_path` в нём):
+
+| документ | чанков | самый длинный `heading_path` |
+|---|---|---|
+| `postgrespro.ru/docs/ora2pgpro/23/ch01?lang=ru-en` | **112** | 3 668 |
+| `postgrespro.ru/docs/enterprise/16/pg-pathman` | 28 | 629 |
+| `platformv.sbertech.ru/…/extensions/plpgsql_check.html` | 11 | 978 |
+| `docs.tantorlabs.ru/…/16_15/certified/orafce.html` | 2 | 533 |
+| `docs.tantorlabs.ru/…/18_6/be/plpgsql-trigger.html` | 1 | 821 |
+| `postgrespro.ru/docs/enterprise/17/proxima` | 1 | 522 |
+| `postgrespro.ru/docs/enterprise/current/proxima` | 1 | 556 |
+
+112 из 156 — одна страница с консольным отчётом. Лечится в читателе (отдавать `pre` как
+fenced-блок), это `execution_change` и отдельный замер; **потолок контекста по-прежнему не
+вводится** — он обрезал бы отчёт в заголовке, а не починил чтение (A2).
 
 ## Перепись кандидатов pandoc-конструкций
 
