@@ -15,8 +15,9 @@ chunk-set, терял провенанс куска. Юнит-round-trip сто�
   тексту документа, а не по «похожему»;
 * reuse: второй прогон переиспользует chunk-set (``304``), экстрактор и чанкер не
   вызываются, числа те же — и в ``corpus_chunks``, и в ``state.db`` (``chunk_meta``);
-* абзацный чанкер смещений не даёт: в БД ``NULL``/``NULL``, а не ``0``/``0`` (``0`` —
-  настоящая позиция, и подменять ею «не срез» запрещено).
+* абзацный чанкер (``text-para-4``) несёт **точные** смещения: ``doc_text[start:end] ==
+  text`` для каждой строки, а не ``NULL`` (``NULL`` вернулся бы к состоянию «кусок не
+  срез» и потерял бы провенанс, который теперь есть).
 
 Нейтральные данные (§1.3): ``p1``, ``docs.test``, локальные ``:memory:``-БД.
 """
@@ -24,6 +25,7 @@ chunk-set, терял провенанс куска. Юнит-round-trip сто�
 from __future__ import annotations
 
 import datetime as _dt
+import itertools
 import json
 from pathlib import Path
 from typing import Any
@@ -343,16 +345,17 @@ def test_reused_chunk_set_keeps_offsets_in_run_db_and_state(
 
 
 # --------------------------------------------------------------------------- #
-# 3. Абзацный чанкер: NULL, а не 0
+# 3. Абзацный чанкер: точные срезы доезжают до БД
 # --------------------------------------------------------------------------- #
 
 
-def test_paragraph_chunker_offsets_are_null_not_zero(tmp_path: Path) -> None:
-    """Куски без точного среза несут ``NULL``/``NULL`` — «не измерено», а не «начало в 0».
+def test_paragraph_chunker_offsets_are_exact_slices(tmp_path: Path) -> None:
+    """``text-para-4``: кусок — точный срез, и это видно в ``corpus_chunks``.
 
-    ``text-para-3`` обрезает края и склеивает предложения, поэтому точного среза у него
-    нет. ``0``/``0`` было бы утверждением о позиции, которого чанкер не делал (A3), и
-    сломало бы инвариант ``char_end - char_start == len(text)``.
+    Прежняя политика (``text-para-3``) обрезала края и склеивала предложения, поэтому
+    смещения были ``NULL``. Точный срез без ``strip()`` снимает это ограничение: ``NULL``
+    теперь означал бы потерю провенанса, а неверное смещение — ложь. Проверяется и
+    провенанс строки (``doc_text[start:end] == text``), и покрытие без дыр.
     """
     plain = "\n\n".join(f"Абзац {index}. " + "слово " * 30 for index in range(6))
     with SqliteStateStore(":memory:") as state:
@@ -377,10 +380,18 @@ def test_paragraph_chunker_offsets_are_null_not_zero(tmp_path: Path) -> None:
         meta = state.iter_doc_chunks(versions[0].doc_version_id)
 
     assert rows, "абзацный чанкер не дал чанков — кейс пуст"
+    assert "".join(row["text"] for row in rows) == plain, "P1: склейка ≠ вход"
     for row in rows:
-        assert row["char_start"] is None and row["char_end"] is None, row
+        start, end = row["char_start"], row["char_end"]
+        assert start is not None and end is not None, row
+        assert end - start == len(row["text"])
+        assert plain[start:end] == row["text"], "P4: text ≠ срез"
+    assert rows[0]["char_start"] == 0
+    assert rows[-1]["char_end"] == len(plain)
+    for previous, following in itertools.pairwise(rows):
+        assert previous["char_end"] == following["char_start"], "покрытие с дырой"
     assert meta and all(
-        row.char_start is None and row.char_end is None for row in meta
+        row.char_start is not None and row.char_end is not None for row in meta
     )
 
 

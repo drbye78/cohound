@@ -161,8 +161,8 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | C2 | `core/util/fusion.py` — мёртвый дубль, докстринг и `06` врут о подключении | ПОДТВЕРЖДЕНО (покрытие 52 %) | импортов в `core/` нет; `06-implementation-strategy.md:32` «обёрнуто в ретривал W8» | единственный тест — `tests/selfcheck.py:336` | Г | P5 |
 | C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:15` | нет | М | **P2** |
 | C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:248` (`_pieces`), `:290` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
-| C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | ПОДТВЕРЖДЕНО, компенсация найдена | `chunker_text.py:99-110`; нормализация `validate.py:332` | сверка цитат покрыта (`test_validate.py:116-118`) | Г | — |
-| C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:89`,`:176`, `chunker_text.py:59` | нет | М | P4 |
+| C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | **ЗАКРЫТО `text-para-4`**: кусок — точный срез, `citation_quote` — подстрока документа | `chunker_text.py:248` (`TextChunker.chunk`), `:268` (`char_start`/`char_end`); P1/P4 = 0 на 194 документах (`2026-11-04-text-chunker-exact-slices.md`) | `test_chunker_text.py` (P1/P4), `test_corpus_chunk_offsets.py` | Г | — |
+| C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:89`,`:176`, `chunker_text.py:98` | нет | М | P4 |
 | C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | **ЗАКРЫТО** (L1b-2a плана 18): шапка фрагмента + `RetrievedChunk.context_prefix` | `prompt.py:299-317`, `core/ports/vector_index.py:34`, `retrieve.py:130` | `test_prompt.py` пинит **наличие** `heading:`/`context:`, `test_vector_npy.py`/`test_lexical_tantivy.py` — доезд контекста | М | **P2** |
 | C8 | лексический индекс: 4 поля с одним текстом, пересборка каждый прогон в temp, запрашивается только `stemmed` | ПОДТВЕРЖДЕНО → **закрыто** (`1e7fad9`: одно поле + `lexical_spec` в контракте) | `lexical_tantivy.py`, `core/pipeline/digests.py` (`lexical_spec`) | `test_lexical_tantivy.py`, `test_digests.py` | Д | P5 |
 | C9 | `index_npy` склеивает поля тем же разделителем, что и группы (латентно) | ПОДТВЕРЖДЕНО формально; сейчас не эксплуатируемо | `index_npy.py:122-131` vs `_GROUP_SEP` `:76` | нет | Г | P5 |
@@ -177,10 +177,12 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   (28 полей, `_prompt_template_identity`-подобный композит из чанкеров).
 - ✅ C4 — граница реза по переводу строки, не по середине слова: `core/adapters/chunker_markdown.py:485`
   (`_hard_cut`), `core/adapters/md_ast.py:824` (`safe_cut_offsets`).
-- ➖ C5 — **снято компенсацией**: сверка цитаты идёт по нормализованным пробелам
-  (`core/pipeline/validate.py:326`), поэтому склейка абзацев не ломает I22. Правило не менялось.
+- ➖ C5 → ✅ **закрыто `text-para-4`**: кусок plain text — точный срез нормализованного
+  входа (`P1`/`P4` = 0 на 194 документах), поэтому `citation_quote` — подстрока документа;
+  нормализация пробелов в `core/pipeline/validate.py:326` остаётся, но больше не несёт
+  компенсирующей роли. Правило не менялось.
 - ✅ C6 — `MIN_CHUNK_SIZE = 20` в обоих чанкерах: `core/adapters/chunker_markdown.py:89`,
-  `core/adapters/chunker_text.py:59`; конструктор требует `min_chunk_size < chunk_size` (`:176`).
+  `core/adapters/chunker_text.py:98`; конструктор требует `min_chunk_size < chunk_size` (`:234`).
   В `md-heading-5` порог больше **не выбрасывает** текст: он приклеивает хвост разреза к
   предыдущему куску, а объявленная единица документа остаётся чанком (P1 плана 18).
 - ✅ C7 — структурная шапка фрагмента в промпте (`source_id`/`document`/`heading`/`context`):
@@ -298,13 +300,14 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 - ✅ `prompt.py:299-317` — в блок чанка печатаются путь заголовков, документ и контекст
   продолжения (C7 закрыт в L1b-2a плана 18).
-- `core/pipeline/corpus_index.py:324`,`:2510` — эмбеддить `context_prefix + text` (или осознанно решить
-  обратное и исправить докстринг `chunker_text.py:17-18` — сейчас он врёт в любом случае).
+- `core/pipeline/corpus_index.py:324`,`:2510` — эмбеддить `context_prefix + text` или
+  осознанно оставить `EMBED_INPUT_FIELDS=("text",)`; докстринг `chunker_text.py:17-22`
+  теперь говорит правду: кусок — точный срез, `context_prefix` в эмбеддинг не входит.
 - В `EXECUTION_CONTRACT_FIELDS` добавить **геометрию и состав входа эмбеддера**
   (`chunk_size`, `chunk_overlap`, `min_chunk_size`, состав текста для эмбеддинга) — либо
   одним полем `chunking_spec_digest`, выводимым из кода, а не из константы-метки.
-- Снять ложный докстринг `chunker_text.py:17-18`; обновить `test_prompt.py` так, чтобы он
-  пинил **наличие** заголовка, а не отсутствие.
+- Ложный докстринг `chunker_text.py:17-22` снят в `text-para-4` (кусок — точный срез);
+  `test_prompt.py` должен пинить **наличие** заголовка, а не отсутствие.
 
 **Приёмка:** правка `chunk_size` без правки метки меняет `run_id` (тест); промпт содержит
 заголовок (рендер-тест); `index_build_id` меняется при смене состава входа эмбеддера.
