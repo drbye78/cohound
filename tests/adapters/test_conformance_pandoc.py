@@ -98,7 +98,13 @@ def test_footnote_definition_is_inline_in_pandoc() -> None:
 # -- расхождения: конструкция названа, а не «совпала» ------------------------
 
 
-def test_grid_table_is_unparsed_construct() -> None:
+def test_grid_table_matches_after_dialect_rules() -> None:
+    """Grid-таблица разбирается правилом ``md_dialect``: расхождения больше нет.
+
+    До второй половины L3 инструмент называл её ``unparsed_construct:grid_table``.
+    Пин держит связь между правилом и канонизацией оракула: если правило отключат,
+    тест снова увидит неразобранную конструкцию.
+    """
     text = (
         "+---+---+\n"
         "| a | b |\n"
@@ -107,9 +113,7 @@ def test_grid_table_is_unparsed_construct() -> None:
         "+---+---+\n"
     )
     outcome = _compare(text, [{"t": "Table", "c": []}])
-    assert [(diff.cls, diff.construct) for diff in outcome.diffs] == [
-        ("unparsed_construct", "grid_table")
-    ]
+    assert outcome.diffs == []
 
 
 def test_fancy_list_matches_block_level_after_dialect_rules() -> None:
@@ -135,11 +139,16 @@ def test_list_without_blank_line_is_a_paragraph_in_pandoc() -> None:
 
 
 def test_unparsed_construct_never_counts_as_match() -> None:
-    # Таблица-сетка даёт совпадающий канонический класс только после нормализации,
-    # и всё равно обязана быть расхождением, а не «совпало».
-    text = "+---+\n| a |\n+---+\n"
-    outcome = _compare(text, [{"t": "Table", "c": []}])
-    assert outcome.ok is False
+    # Принцип: пара с совпавшим каноническим классом, но помеченная ``unparsed``,
+    # обязана быть расхождением, а не «совпало». Носитель — ``BlockView``: сейчас все
+    # сгенерированные формы разобраны, поэтому проверяется сама классификация.
+    pandoc = CONFORMANCE.BlockView(canonical="list", raw="OrderedList")  # type: ignore[attr-defined]
+    mdast = CONFORMANCE.BlockView(  # type: ignore[attr-defined]
+        canonical="list", raw="list", unparsed="fancy_list"
+    )
+    diff = CONFORMANCE._classify_pair(pandoc, mdast)  # type: ignore[attr-defined]
+    assert diff is not None
+    assert (diff.cls, diff.construct) == ("unparsed_construct", "fancy_list")
 
 
 # -- видимый пропуск и сквозной прогон ---------------------------------------
@@ -163,8 +172,8 @@ def test_end_to_end_clean_document_exits_zero(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("pandoc") is None, reason="pandoc — оракул только на хосте замера/в CI")
-def test_end_to_end_grid_table_exits_one(tmp_path: Path) -> None:
+def test_end_to_end_grid_table_exits_zero(tmp_path: Path) -> None:
     path = tmp_path / "grid.md"
     path.write_text("+---+\n| a |\n+---+\n", encoding="utf-8")
     code = CONFORMANCE.main([str(path)])  # type: ignore[attr-defined]
-    assert code == 1
+    assert code == 0

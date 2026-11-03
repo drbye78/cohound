@@ -169,6 +169,7 @@ _MDAST_KINDS: Final[dict[str, str]] = {
     "definition_list": "deflist",
     "container": "container",
     "html": "raw",
+    "raw": "raw",
     "math": "math",
     "line_block": "line_block",
     "thematic_break": "thematic_break",

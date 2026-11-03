@@ -4,11 +4,17 @@
 ``heading_path`` и ``context_prefix``. Соответствует §3.2/§5 регламента («чанкер с
 heading_path»), порт — ``core/ports/chunker.py`` (архитектура 01 §3.5).
 
-Текущая версия — стек ``md-ast-1:<спека CommonMark>+<профили>/<движок>/policy-4``
+Текущая версия — стек ``md-ast-1:<спека CommonMark>+<профили>/<движок>/policy-5``
 (грамматика, движок разбора и политика версионируются независимо). Переход с построчного
 конечного автомата на AST и последующие правки политики: что изменилось и почему (замеры и
 разбор — ``docs/architecture/18-markdown-chunker-plan.md``):
 
+* **``policy-5``: вторая половина правил Pandoc.** Grid/multiline/simple таблицы и
+  подпись ``Table:``/``:`` разбираются в ``table`` со строками-детьми и шапкой в
+  pipe-виде для контекста; raw TeX — в блок ``raw``; нативный ``<div>`` — в контейнер с
+  разобранным содержимым. В профиле ``pandoc`` это меняет набор блоков и границы чанков,
+  то есть ``execution_change`` и новый ``run_id``; ``commonmark``/``gfm`` правила не
+  исполняют вовсе (пин в ``tests/adapters/test_md_ast.py``).
 * **``policy-4``: блоки профиля ``pandoc`` разбираются по семантике Pandoc.** Список и
   цитата сразу после строки абзаца — продолжение абзаца (``lists_without_preceding_blankline``
   и ``blank_before_blockquote`` в Pandoc markdown выключены), ``| строка`` — line block,
@@ -182,7 +188,10 @@ class MarkdownChunker:
     #: ``policy-4`` — правила блоков Pandoc (``md_dialect``): меняют набор блоков в
     #: профиле ``pandoc``, поэтому это ``execution_change``, а не косметика. В
     #: ``gfm``/``commonmark`` правила не исполняются, и нарезка там прежняя.
-    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-4"
+    #: ``policy-5`` — вторая половина правил Pandoc (таблицы grid/multiline/simple и
+    #: подпись, raw TeX, нативный ``Div``): набор блоков и границы чанков в профиле
+    #: ``pandoc`` меняются ещё раз; ``gfm``/``commonmark`` по-прежнему не затронуты.
+    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-5"
 
     #: Объявленный (и снятый) размер перекрытия: контракт продолжает его публиковать
     #: (:func:`core.adapters.chunker_family.composite_chunking_spec`), а значение 0 —
@@ -378,8 +387,15 @@ class MarkdownChunker:
                     math=self.profile == "pandoc",
                 )
             ]
-        if block.kind in ("fence", "code", "html"):
-            opening = self._fence_opening(block, source) if block.kind == "fence" else ""
+        if block.kind in ("fence", "code", "html", "raw"):
+            if block.kind == "fence":
+                opening = self._fence_opening(block, source)
+            elif block.kind == "raw":
+                # Маркер raw-блока: ``\begin{env}`` или команда. Иначе продолжение
+                # читается как обычный текст и теряет то, что делает блок блоком.
+                opening = str(block.info.get("marker") or "")
+            else:
+                opening = ""
             context = self._with_prefix(opening, prefix, container) or None
             return [
                 _Cut(index.offset(line), structural=False, context=context)
@@ -499,14 +515,42 @@ class MarkdownChunker:
         self, block: MdBlock, source: str, index: LineIndex, prefix: str = "", container: str = ""
     ) -> list[_Cut]:
         """Резать таблицу можно только между строками; продолжение несёт шапку (P9)."""
+        if block.info.get("dialect") in ("grid", "multiline", "simple"):
+            return self._pandoc_table_cuts(block, prefix=prefix, container=container)
         header_rows = int(block.info.get("header_rows") or 1)
-        header_end = min(index.offset(block.span.start_line + header_rows + 1), block.span.end_char)
+        header_start = int(block.info.get("header_start_line", block.span.start_line))
+        header_end = min(index.offset(header_start + header_rows + 1), block.span.end_char)
         header = source[block.span.start_char : header_end].rstrip("\n")
         context = self._with_prefix(header, prefix, container)
         rows = [item for item in block.walk() if item.kind == "table_row"]
         return [
             _Cut(row.span.start_char, structural=True, context=context)
             for row in rows[header_rows:]
+            if block.span.start_char < row.span.start_char < block.span.end_char
+        ]
+
+    def _pandoc_table_cuts(
+        self, block: MdBlock, prefix: str = "", container: str = ""
+    ) -> list[_Cut]:
+        """Строка Pandoc-таблицы — минимальная единица; шапка синтезирована в pipe-виде.
+
+        ``info["header_pipe"]`` — **представление контекста**, а не текст куска: шапка
+        grid/multiline/simple таблицы в источнике не является pipe-таблицей, а модели
+        нужны имена столбцов и выравнивание. Подпись входит в контекст целиком: она
+        прикреплена к таблице, и чанк-продолжение обязан её не потерять.
+        """
+        header_pipe = str(block.info.get("header_pipe") or "")
+        caption_text = str(block.info.get("caption_text") or "")
+        context_text = "\n".join(part for part in (caption_text, header_pipe) if part)
+        context = self._with_prefix(context_text, prefix, container) if context_text else None
+        rows = [
+            row
+            for row in block.walk()
+            if row.kind == "table_row" and not row.info.get("header")
+        ]
+        return [
+            _Cut(row.span.start_char, structural=True, context=context)
+            for row in rows
             if block.span.start_char < row.span.start_char < block.span.end_char
         ]
 

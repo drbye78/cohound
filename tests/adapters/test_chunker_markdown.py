@@ -289,7 +289,7 @@ def test_version_is_a_stack_of_grammar_engine_and_policy() -> None:
     """
     version = MarkdownChunker.version
     assert version.startswith("md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-")
-    assert "/policy-4" in version
+    assert "/policy-5" in version
     assert "mdit-unknown" not in version, "версия движка должна читаться из метаданных"
     assert MarkdownChunker().chunk_overlap == 0
 
@@ -646,6 +646,84 @@ def test_example_list_item_is_a_unit_and_label_stays_in_context() -> None:
     contexts = {chunk.context_prefix for chunk in continuations}
     assert "Примеры\n(@item0) " in contexts
     assert "Примеры\n(@item1) " in contexts
+
+
+def test_grid_table_is_cut_between_rows_with_pipe_header_in_context() -> None:
+    """Grid-таблица режется только между строками; продолжение несёт pipe-шапку (§5)."""
+
+    def row(left: str, right: str) -> str:
+        return f"| {left:<5} | {right:<5} |\n"
+
+    header = (
+        "+-------+-------+\n" + row("name", "val") + "+=======+=======+\n"
+    )
+    rows = "".join(
+        row(f"row{index:02d}", f"v{index}") + "+-------+-------+\n"
+        for index in range(25)
+    )
+    md = "# Таблица\n\n" + header + rows
+    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk("doc", md)
+
+    assert len(chunks) > 3
+    _assert_exact_join(md, chunks)
+    for chunk in chunks[1:]:
+        assert chunk.text.startswith("| row"), chunk.text[:40]
+        assert chunk.context_prefix == "Таблица\n| name | val |\n|---|---|"
+        assert md[chunk.char_start : chunk.char_end] == chunk.text
+
+
+def test_table_caption_stays_attached_and_reaches_the_context() -> None:
+    """Подпись таблицы не отрывается: она в спане таблицы и в контексте продолжений."""
+
+    def row(left: str, right: str) -> str:
+        return f"| {left:<5} | {right:<5} |\n"
+
+    header = (
+        "+-------+-------+\n" + row("name", "val") + "+=======+=======+\n"
+    )
+    rows = "".join(
+        row(f"row{index:02d}", f"v{index}") + "+-------+-------+\n"
+        for index in range(25)
+    )
+    md = "# Таблица\n\n" + header + rows + "\nTable: подпись таблицы\n"
+    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk("doc", md)
+
+    assert len(chunks) > 3
+    _assert_exact_join(md, chunks)
+    assert any("Table: подпись таблицы" in chunk.text for chunk in chunks)
+    assert any("Table: подпись таблицы" in chunk.context_prefix for chunk in chunks)
+    # Ни один кусок не состоит из одной подписи: она всегда уезжает вместе со строками.
+    assert all(chunk.text.strip() != "Table: подпись таблицы" for chunk in chunks)
+
+
+def test_raw_tex_is_cut_by_lines_and_continuation_carries_marker() -> None:
+    """Raw TeX: единица — блок, при переполнении рез по строкам, маркер в контексте."""
+    body = "\n".join(f"строка {index} с содержимым" for index in range(20))
+    md = "# Раздел\n\n\\begin{verbatim}\n" + body + "\n\\end{verbatim}\n"
+    chunks = MarkdownChunker(chunk_size=100, profile="pandoc").chunk("doc", md)
+
+    assert len(chunks) > 3
+    _assert_exact_join(md, chunks)
+    for chunk in chunks[1:]:
+        assert chunk.context_prefix == "Раздел\n\\begin{verbatim}"
+        # Рез стоит на границе строки: обрывков слов нет.
+        assert chunk.text.startswith(("строка", "\\end{verbatim}")), chunk.text[:40]
+        assert md[chunk.char_start : chunk.char_end] == chunk.text
+
+
+def test_native_div_continuation_carries_opening_tag() -> None:
+    """Нативный div: продолжение внутри контейнера несёт открывающий тег."""
+    words = " ".join(f"слово{index}" for index in range(200))
+    md = '<div class="x">\n\n' + words + "\n\n</div>\n"
+    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk("doc", md)
+
+    assert len(chunks) > 2
+    _assert_exact_join(md, chunks)
+    continuations = [chunk for chunk in chunks if chunk.text.startswith("слово")]
+    assert continuations
+    for chunk in continuations:
+        assert chunk.context_prefix == '<div class="x">'
+        assert md[chunk.char_start : chunk.char_end] == chunk.text
 
 
 def test_new_pandoc_blocks_keep_p1_p4_p8_p13_on_a_mixed_document() -> None:

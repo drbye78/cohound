@@ -423,6 +423,149 @@ def test_fancy_lists_merge_across_a_blank_line_only_when_style_fits() -> None:
     ]
 
 
+def test_pandoc_grid_table_has_real_rows_and_pipe_header() -> None:
+    """Grid-таблица: рамка, шапка ``+===+``, строки-дети и шапка в pipe-виде.
+
+    Строка — объявленная единица нарезки (§5); шапка синтезируется для
+    ``context_prefix``, потому что в источнике она не pipe-таблица.
+    """
+    source = "+---+---+\n| a | b |\n+===+===+\n| 1 | 2 |\n+---+---+\n| 3 | 4 |\n+---+---+\n"
+    doc = parse_markdown(source, profile="pandoc")
+
+    tables = doc.of_kind("table")
+    assert len(tables) == 1
+    table = tables[0]
+    assert table.info["dialect"] == "grid"
+    assert table.info["header_rows"] == 1
+    assert table.info["columns"] == 2
+    assert table.info["header_pipe"] == "| a | b |\n|---|---|"
+    rows = [child for child in table.children if child.kind == "table_row"]
+    assert [row.info["header"] for row in rows] == [True, False, False]
+    assert doc.text[rows[1].span.start_char : rows[1].span.end_char] == "| 1 | 2 |\n"
+    assert doc.gaps == ()
+    assert doc.counts["unknown_lines"] == 0
+
+
+def test_pandoc_grid_alignment_comes_from_the_header_separator() -> None:
+    """Выравнивание grid-таблицы — двоеточия ``+===+``; двоеточия верхней рамки не в счёт.
+
+    Измерено оракулом: ``+:--+--:+`` даёт ``AlignDefault``, а ``+:==+==:+`` — левое и
+    правое; поэтому правило читает разделитель шапки, а не верхнюю рамку.
+    """
+    source = "+---+---+\n| a | b |\n+:==+==:+\n| 1 | 2 |\n+---+---+\n"
+    table = parse_markdown(source, profile="pandoc").of_kind("table")[0]
+    assert table.info["align"] == ["left", "right"]
+    assert table.info["header_pipe"] == "| a | b |\n|:---|---:|"
+
+
+def test_pandoc_multiline_and_simple_tables_are_tables_with_captions() -> None:
+    """Multiline/simple: строки-дети, подпись в метаданных и в pipe-шапке."""
+    multiline = (
+        "-----------\n A    B\n---- ----\n 1    2\n 3    4\n-----------\n\nTable: cap\n"
+    )
+    document = parse_markdown(multiline, profile="pandoc")
+    table = document.of_kind("table")[0]
+    assert table.info["dialect"] == "multiline"
+    assert table.info["header_pipe"] == "| A | B |\n|---|---|"
+    assert table.info["caption"] == "cap"
+    assert table.info["caption_text"] == "Table: cap"
+    assert document.text[table.span.start_char : table.span.end_char].endswith("Table: cap\n")
+    assert document.gaps == ()
+
+    simple = "  A     B\n----- -----\n  1     2\n\n: cap\n"
+    document = parse_markdown(simple, profile="pandoc")
+    table = document.of_kind("table")[0]
+    assert table.info["dialect"] == "simple"
+    assert table.info["header_pipe"] == "| A | B |\n|---|---|"
+    assert table.info["caption"] == "cap"
+    assert table.info["caption_text"] == ": cap"
+    assert document.counts["unknown_lines"] == 0
+
+
+def test_gfm_and_commonmark_do_not_see_pandoc_tables() -> None:
+    """Развилка профиля: в ``gfm``/``commonmark`` grid-таблица — обычный абзац."""
+    source = "+---+---+\n| a | b |\n+===+===+\n| 1 | 2 |\n+---+---+\n"
+    for profile in ("commonmark", "gfm"):
+        doc = parse_markdown(source, profile=profile)
+        assert doc.of_kind("table") == (), profile
+        assert [block.kind for block in doc.blocks] == ["paragraph"], profile
+
+
+def test_pandoc_pipe_table_stops_where_pandoc_stops() -> None:
+    """GFM-ячейка не переносится на строку без ``|``: Pandoc кончает таблицу раньше."""
+    source = "| a | b |\n|---|---|\n| 1 | 2 |\ncontinuation\n| 3 | 4 |\n\nпосле\n"
+    doc = parse_markdown(source, profile="pandoc")
+
+    assert [block.kind for block in doc.blocks] == ["table", "paragraph", "paragraph"]
+    assert doc.blocks[0].span.end_line == 3
+    assert doc.text[doc.blocks[1].span.start_char : doc.blocks[1].span.end_char] == (
+        "continuation\n| 3 | 4 |\n"
+    )
+    assert doc.counts["unknown_lines"] == 0
+
+
+def test_pandoc_raw_tex_block_and_its_measured_boundaries() -> None:
+    """Raw TeX: окружение и команда — блок ``raw``; границы взяты из оракула.
+
+    ``\\alpha beta`` — уже не raw (хвост той же строки), ``\\alpha\\nbeta`` — raw + абзац,
+    ``\\%`` — экранированная пунктуация, математическое окружение — абзац.
+    """
+    document = parse_markdown(
+        "\\begin{quote}\ntext\n\\end{quote}\n\nпосле\n", profile="pandoc"
+    )
+    blocks = document.blocks
+    assert [block.kind for block in blocks] == ["raw", "paragraph"]
+    raw = blocks[0]
+    assert raw.info["raw_format"] == "tex"
+    assert raw.info["marker"] == "\\begin{quote}"
+    assert document.text[raw.span.start_char : raw.span.end_char] == (
+        "\\begin{quote}\ntext\n\\end{quote}\n"
+    )
+    assert document.counts["unknown_lines"] == 0
+
+    assert _layout(parse_markdown("\\alpha beta\n", profile="pandoc")) == [
+        ("paragraph", 0, 1)
+    ]
+    assert _layout(parse_markdown("\\alpha\nbeta\n", profile="pandoc")) == [
+        ("raw", 0, 1),
+        ("paragraph", 1, 2),
+    ]
+    assert _layout(parse_markdown("\\% 50\n", profile="pandoc")) == [("paragraph", 0, 1)]
+    assert _layout(parse_markdown("\\begin{align}\nx\n\\end{align}\n", profile="pandoc")) == [
+        ("paragraph", 0, 3)
+    ]
+
+
+def test_pandoc_native_div_is_a_container_with_parsed_children() -> None:
+    """Нативный ``<div>`` — контейнер; дети разобраны из внутреннего среза со сдвигом."""
+    source = '<div class="x">\n\nhi\n\n</div>\n\nпосле\n'
+    doc = parse_markdown(source, profile="pandoc")
+
+    assert [block.kind for block in doc.blocks] == ["container", "paragraph"]
+    container = doc.blocks[0]
+    assert container.info["name"] == "div"
+    assert doc.text[container.span.start_char : container.span.end_char] == (
+        '<div class="x">\n\nhi\n\n</div>\n'
+    )
+    assert [child.kind for child in container.children] == ["paragraph"]
+    child = container.children[0]
+    assert doc.text[child.span.start_char : child.span.end_char] == "hi\n"
+    assert child.span.start_char == source.index("hi")
+    assert doc.counts["unknown_lines"] == 0
+
+
+def test_pandoc_div_children_keep_markdown_structure() -> None:
+    """Внутренний срез разбирается профилем: список внутри div остаётся списком."""
+    doc = parse_markdown('<div class="x">\n\n- a\n- b\n\n</div>\n', profile="pandoc")
+
+    assert doc.gaps == ()
+    container = doc.of_kind("container")[0]
+    assert [child.kind for child in container.children] == ["list"]
+    assert doc.text[container.children[0].span.start_char : container.children[0].span.end_char].startswith(
+        "- a"
+    )
+
+
 def test_commonmark_and_gfm_structure_is_unchanged() -> None:
     """Пин: в ``commonmark``/``gfm`` правила Pandoc не исполняются вовсе.
 

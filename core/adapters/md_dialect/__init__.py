@@ -1,7 +1,7 @@
 """Правила блочного разбора Pandoc markdown, которых нет в CommonMark/GFM (L3).
 
 **Зачем отдельные правила.** ``markdown-it-py`` реализует CommonMark и GFM; Pandoc
-markdown — надмножество с собственной семантикой блоков. Три расхождения измерены
+markdown — надмножество с собственной семантикой блоков. Расхождения измерены
 дифференциальным оракулом (``scripts/conformance_pandoc.py``, оракул ``pandoc 2.17.1.1``):
 
 1. **Пустая строка.** Pandoc не начинает список и цитату сразу после строки абзаца
@@ -11,18 +11,22 @@ markdown — надмножество с собственной семантик
 2. **Line block** (``| строка``) — блок из строк, минимальная единица — строка.
 3. **Fancy lists** (``a)``, ``A)``, ``i.``, ``iv.``, ``#.``) и **example lists**
    (``(@)``, ``(@label)``) — списки с маркером, которого нет в CommonMark.
+4. **Таблицы Pandoc** (grid ``+---+---+``, multiline, simple) и **подпись таблицы**
+   (``Table: …``/``: …``): строка — минимальная единица, шапка и выравнивание уходят в
+   ``context_prefix`` в pipe-виде.
+5. **Raw TeX** (``\\begin{env}…\\end{env}``, ``\\newcommand``, …) — блок ``raw`` с
+   ``raw_format="tex"``; при переполнении режется по строкам.
+6. **Нативный HTML ``Div``** — контейнер со спаном на весь элемент и детьми из
+   внутреннего среза; если внутренний разбор даёт разрывы, остаётся raw-представление.
 
 **Порядок правил объявлен явно** (:data:`RULES`), потому что он наблюдаем: сначала
-склеиваются «прерванные» абзацы, затем уже готовые абзацы делятся на line block и
-списки. Обратный порядок дал бы другой блок на том же входе.
+склеиваются «прерванные» абзацы, затем уже готовые абзацы делятся на line block, списки,
+таблицы, raw TeX и div. Обратный порядок дал бы другой блок на том же входе.
 
 **Почему это безопасно для P1/P4/P13.** Правила не двигают текст и не меняют разметку:
 они только перекладывают уже разобранные блоки в другую форму, а спаны остаются
 отрезками тех же строк источника. Объединение спанов уровня не меняется, поэтому
 покрытие (P13) и точность срезов (P1/P4) сохраняются по построению, а не по обещанию.
-
-**Что здесь не реализовано и остаётся видимым в счётчике оракула:** grid/multiline/
-simple tables и подпись таблицы, raw TeX, нативный HTML ``Div`` — вторая половина L3.
 
 Нейтрален (§1.3): грамматика markdown — не предметная область.
 """
@@ -36,19 +40,34 @@ from core.adapters.md_ast import LineIndex, MdBlock
 
 from .blank_lines import merge_paragraph_interruptions
 from .fancy_list import split_fancy_lists
+from .html_div import split_html_divs
 from .line_block import split_line_blocks
+from .raw_tex import split_raw_tex
+from .tables import attach_captions, recognize_tables, trim_pipe_tables
 
 __all__ = ["RULES", "apply_rules"]
 
 #: Порядок правил Pandoc-профиля. Список — не украшение: он и есть precedence.
-RULES: Final[tuple[str, ...]] = ("blank_lines", "line_block", "fancy_list")
+RULES: Final[tuple[str, ...]] = (
+    "blank_lines",
+    "line_block",
+    "fancy_list",
+    "tables",
+    "raw_tex",
+    "html_div",
+)
 
 
 def _apply_level(blocks: list[MdBlock], index: LineIndex, *, quoted: bool) -> list[MdBlock]:
     """Правила на одном уровне вложенности, в объявленном порядке."""
     merged = merge_paragraph_interruptions(blocks, index)
     line_blocks = split_line_blocks(merged, index, quoted=quoted)
-    return split_fancy_lists(line_blocks, index, quoted=quoted)
+    fancy = split_fancy_lists(line_blocks, index, quoted=quoted)
+    tables = recognize_tables(fancy, index, quoted=quoted)
+    trimmed = trim_pipe_tables(tables, index, quoted=quoted)
+    captioned = attach_captions(trimmed, index)
+    raw = split_raw_tex(captioned, index, quoted=quoted)
+    return split_html_divs(raw, index, quoted=quoted)
 
 
 def _with_children(block: MdBlock, index: LineIndex) -> MdBlock:

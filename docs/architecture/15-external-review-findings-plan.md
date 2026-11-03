@@ -176,7 +176,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ C3 — геометрия чанка в контракте: `chunking_spec` — `core/pipeline/digests.py:162`
   (28 полей, `_prompt_template_identity`-подобный композит из чанкеров).
 - ✅ C4 — граница реза по переводу строки, не по середине слова: `core/adapters/chunker_markdown.py:485`
-  (`_hard_cut`), `core/adapters/md_ast.py:824` (`safe_cut_offsets`).
+  (`_hard_cut`), `core/adapters/md_ast.py:841` (`safe_cut_offsets`).
 - ➖ C5 → ✅ **закрыто `text-para-4`**: кусок plain text — точный срез нормализованного
   входа (`P1`/`P4` = 0 на 194 документах), поэтому `citation_quote` — подстрока документа;
   нормализация пробелов в `core/pipeline/validate.py:326` остаётся, но больше не несёт
