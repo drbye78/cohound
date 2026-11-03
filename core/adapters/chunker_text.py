@@ -9,16 +9,17 @@
 * текст делится на блоки по пустым строкам (абзац = блок);
 * блоки **сливаются** до ``chunk_size``; блок, который помещается, не режется никогда;
 * блок больше ``chunk_size`` режется по границам предложений (``.``/``!``/``?``/``;`` и
-  многоточие, за которыми пробел), и только предложение, само превышающее ``chunk_size``,
-  режется жёстко (по возможности по пробелу, а не по букве).
+  многоточие — а также полноширинные ``。！？；``, которые **не требуют пробела** после
+  себя, иначе в китайском тексте не находится ни одной границы), затем по границам
+  клауз (``，``/``、``/``：``), и только клауза, сама превышающая ``chunk_size``, режется
+  жёстко — по безопасной границе символа, а не по номеру байта.
 
 ``heading_path`` — всегда ``""``: заголовков в плоском тексте нет, и выдумывать их нельзя
 (anchor-blind/честность структуры). ``context_prefix`` — первое предложение первого абзаца
 чанка, ограниченное :data:`CONTEXT_PREFIX_MAX` символами. Контекст идёт в промпт оценщика
 шапкой фрагмента (``context:``, ``core.pipeline.prompt``) и **в эмбеддинг не входит**:
-эмбеддится чистый ``text``, поэтому правка контекста не меняет ``index_build_id``. На
-retrieval-пути поле пока теряется: ``RetrievedChunk`` его не несёт, и до оценщика строка
-``context:`` доходит только там, где передан ``Chunk``.
+эмбеддится чистый ``text``, поэтому правка контекста не меняет ``index_build_id``.
+Retrieval-путь поле больше не теряет (L1b-2a плана 18): ``RetrievedChunk`` его несёт.
 
 ``version`` = ``text-para-1``: входит в ``chunker_version`` → ``partition_build_id``/
 ``index_build_id``, поэтому смена правил нарезки обязана поднять версию (§13).
@@ -35,6 +36,7 @@ import hashlib
 import re
 
 from core.ports.types import Chunk, ExtractedDoc
+from core.util.text_utils import hard_cut
 
 __all__ = [
     "CONTEXT_PREFIX_MAX",
@@ -45,9 +47,12 @@ __all__ = [
 ]
 
 #: Версия правил нарезки (провенанс/``chunker_version``).
-#: ``text-para-2`` (было ``text-para-1``): введён порог фрагмента (1 → 20). Порог меняет
-#: набор чанков, то есть условие измерения: ``execution_versions`` (§13), не методология.
-TEXT_CHUNKER_VERSION = "text-para-2"
+#: ``text-para-3`` (было ``text-para-2``): границы предложений понимают полноширинные
+#: ``。！？；`` (в CJK пробела после терминатора нет), добавлен второй уровень — клаузы
+#: (``，、：``), а жёсткий разрез не рвёт графемный кластер. Меняет chunk-set ⇒
+#: ``execution_versions`` (§13), не методология.
+#: ``text-para-2`` (было ``text-para-1``): введён порог фрагмента (1 → 20).
+TEXT_CHUNKER_VERSION = "text-para-3"
 
 #: Минимальная длина чанка (символы): кусок короче в индекс не попадает.
 #:
@@ -67,10 +72,21 @@ CONTEXT_PREFIX_MAX = 200
 #: хвостовые пробелы в «пустых» строках).
 _BLOCK_SEP_RE = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)*")
 
-#: Граница предложения: терминатор + пробел/перевод строки. ``…`` — тот же терминатор для
-#: русских текстов; ``;`` включён осознанно (владелец: перечисление — тоже смысловая
-#: граница, а склейка длинного перечня в один кусок хуже для цитат).
-_SENTENCE_SEP_RE = re.compile(r"(?<=[.!?;…])\s+")
+#: Граница предложения. Западная — терминатор + пробел (``…`` и ``;`` включены осознанно:
+#: многоточие — тот же терминатор, а перечисление тоже смысловая граница). Полноширинная —
+#: терминатор **без** обязательного пробела: в китайском/японском тексте его нет, и
+#: правило «терминатор + пробел» не находит там ни одной границы (замер: 2 000 иероглифов
+#: резались жёстко посреди фразы). Закрывающая кавычка сразу после терминатора относится к
+#: предложению и остаётся в нём.
+_SENTENCE_SEP_RE = re.compile(
+    r"(?<=[.!?;…])\s+"                # западный терминатор + пробел
+    r"|(?<=[。！？；])(?![」』”》])"     # полноширинный терминатор, кавычка — не за ним
+    r"|(?<=[。！？；][」』”》])\s*"      # терминатор + закрывающая кавычка
+)
+
+#: Граница клаузы — второй уровень, когда предложение само больше бюджета:
+#: полноширинные ``，``/``、``/``：`` и западные запятая/двоеточие с пробелом.
+_CLAUSE_SEP_RE = re.compile(r"(?<=[，、：])\s*|(?<=[,:])\s+")
 
 #: Схлопывание пробелов в ``context_prefix``.
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -85,13 +101,46 @@ def _blocks(text: str) -> list[str]:
     return [block.strip() for block in _BLOCK_SEP_RE.split(text) if block.strip()]
 
 
-def _sentences(text: str) -> list[str]:
-    """Предложения блока (непустые, без краевых пробелов)."""
-    return [piece.strip() for piece in _SENTENCE_SEP_RE.split(text) if piece.strip()]
+def _split_keep(text: str, pattern: re.Pattern[str]) -> list[tuple[str, str]]:
+    """Куски с разделителем, который их завершал: ``(кусок, разделитель)``.
+
+    Разделитель сохраняется, потому что он **часть текста**: у западной границы это
+    пробел, у полноширинной — ничего. Склейка ``кусок + разделитель + кусок`` возвращает
+    вход без потерь; альтернатива («склеивать всегда пробелом») дописывала бы в китайский
+    текст пробелы, которых в нём не было, и меняла бы ``content_hash`` относительно
+    источника.
+    """
+    pieces: list[tuple[str, str]] = []
+    position = 0
+    for match in pattern.finditer(text):
+        if match.start() < position:
+            continue
+        piece = text[position : match.start()]
+        if piece.strip():
+            pieces.append((piece.strip(), text[match.start() : match.end()]))
+        position = match.end()
+    tail = text[position:]
+    if tail.strip():
+        pieces.append((tail.strip(), ""))
+    return pieces
+
+
+def _sentences(text: str) -> list[tuple[str, str]]:
+    """Предложения блока с разделителем после каждого (непустые, без краевых пробелов)."""
+    return _split_keep(text, _SENTENCE_SEP_RE)
+
+
+def _clauses(text: str) -> list[tuple[str, str]]:
+    """Клаузы предложения с разделителем — второй уровень, когда предложение не влезло."""
+    return _split_keep(text, _CLAUSE_SEP_RE)
 
 
 def _hard_split(text: str, size: int) -> list[str]:
-    """Жёсткий разрез по ``size`` с предпочтением пробела во второй половине окна."""
+    """Жёсткий разрез по ``size``: пробел во второй половине окна, иначе безопасная граница.
+
+    ``hard_cut`` не рвёт графемный кластер и не начинает кусок с закрывающей пунктуации:
+    иначе цитата открывалась бы знаком, который относится к предыдущей фразе.
+    """
     pieces: list[str] = []
     position = 0
     length = len(text)
@@ -99,12 +148,11 @@ def _hard_split(text: str, size: int) -> list[str]:
         end = min(position + size, length)
         if end < length:
             space = text.rfind(" ", position + size // 2, end)
-            if space > position:
-                end = space
+            end = space if space > position else hard_cut(text, position, end)
         piece = text[position:end].strip()
         if piece:
             pieces.append(piece)
-        position = end
+        position = max(end, position + 1)
     return pieces
 
 
@@ -115,31 +163,59 @@ def _split_block(block: str, size: int) -> list[str]:
     абзац (лог без точек) вернул бы чанк сверх ``chunk_size``.
     """
     pieces: list[str] = []
-    buffer: list[str] = []
-    length = 0
-    for sentence in _sentences(block):
+    current = ""
+    pending_sep = ""
+    for sentence, sep in _sentences(block):
         if len(sentence) > size:
-            if buffer:
-                pieces.append(" ".join(buffer))
-                buffer, length = [], 0
-            pieces.extend(_hard_split(sentence, size))
+            if current:
+                pieces.append(current)
+            current, pending_sep = "", ""
+            pieces.extend(_split_sentence(sentence, size))
             continue
-        extra = len(sentence) + (1 if buffer else 0)
-        if buffer and length + extra > size:
-            pieces.append(" ".join(buffer))
-            buffer, length = [], 0
-        buffer.append(sentence)
-        length += len(sentence) + (1 if len(buffer) > 1 else 0)
-    if buffer:
-        pieces.append(" ".join(buffer))
+        candidate = f"{current}{pending_sep}{sentence}" if current else sentence
+        if current and len(candidate) > size:
+            pieces.append(current)
+            candidate = sentence
+        current = candidate
+        pending_sep = sep
+    if current:
+        pieces.append(current)
     return pieces
+
+
+def _split_sentence(sentence: str, size: int) -> list[str]:
+    """Предложение больше бюджета: сначала клаузы, потом жёсткий разрез.
+
+    Клауза — это уже осмысленная единица (перечисление, придаточное), поэтому она
+    предпочтительнее разреза по номеру символа; каждая клауза, которая сама не влезает,
+    режется жёстко.
+    """
+    pieces: list[str] = []
+    current = ""
+    pending_sep = ""
+    for clause, sep in _clauses(sentence):
+        if len(clause) > size:
+            if current:
+                pieces.append(current)
+            current, pending_sep = "", ""
+            pieces.extend(_hard_split(clause, size))
+            continue
+        candidate = f"{current}{pending_sep}{clause}" if current else clause
+        if current and len(candidate) > size:
+            pieces.append(current)
+            candidate = clause
+        current = candidate
+        pending_sep = sep
+    if current:
+        pieces.append(current)
+    return pieces or [sentence]
 
 
 def _context_prefix(text: str) -> str:
     """Первое предложение первого абзаца чанка, схлопнутое и ограниченное по длине."""
     first_block = text.split("\n", 1)[0].strip()
     sentences = _sentences(first_block)
-    prefix = sentences[0] if sentences else first_block
+    prefix = sentences[0][0] if sentences else first_block
     prefix = _WHITESPACE_RE.sub(" ", prefix).strip()
     if len(prefix) > CONTEXT_PREFIX_MAX:
         prefix = prefix[:CONTEXT_PREFIX_MAX].rstrip()

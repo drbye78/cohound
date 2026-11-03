@@ -32,7 +32,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -50,10 +49,11 @@ from mdit_py_plugins.gfm_autolink import gfm_autolink_plugin
 from mdit_py_plugins.superscript import superscript_plugin
 from mdit_py_plugins.tasklists import tasklists_plugin
 
+from core.util.text_utils import SENTENCE_END_CHARS, is_cut_boundary
+
 __all__ = [
     "GAP_KIND",
     "PROFILES",
-    "SENTENCE_END_CHARS",
     "LineIndex",
     "MdBlock",
     "MdDocument",
@@ -77,17 +77,6 @@ _REFERENCE_RE: Final = re.compile(r"^ {0,3}\[([^\]\n]+)\]:\s*\S")
 
 #: Метка тела сноски в начале строки (``[^1]:``).
 _FOOTNOTE_LABEL_RE: Final = re.compile(r"^ {0,3}\[\^([^\]\n]+)\]:\s*$")
-
-#: Символы, которые не могут открывать чанк (P8).
-CLOSING_CHARS: Final = frozenset(")]}»”」』>，、：；。！？")
-
-#: Концы предложений: позиция сразу после такого символа — предпочтительный разрез.
-#: Полноширинные знаки обязательны: без них китайский абзац режется по любому пробелу, а
-#: в CJK-тексте пробелов почти нет — рез уходит в середину фразы.
-SENTENCE_END_CHARS: Final = frozenset(".!?;…。！？；")
-
-#: Символы, разрывающие графемный кластер: после них разрез запрещён.
-_JOINERS: Final = frozenset("\u200d\ufe0e\ufe0f\u200b\u0301")
 
 _CONTAINER_OPEN: Final[dict[str, str]] = {
     "heading_open": "heading",
@@ -613,25 +602,6 @@ def parse_markdown(text: str, profile: str = "gfm") -> MdDocument:
 # ---------------------------------------------------------------------------
 
 
-def _is_grapheme_break(text: str, position: int) -> bool:
-    """Можно ли начинать чанк с ``position``: не висячая пунктуация и не разрыв кластера.
-
-    ``position`` — начало следующего чанка, поэтому проверяется именно символ справа:
-    чанк не начинается с закрывающей пунктуации (P8) и не начинается с комбинирующего
-    знака или вариационного селектора — иначе первый символ нового чанка приклеится к
-    невидимому предку и цитата перестанет быть подстрокой осмысленного текста.
-    """
-    if position <= 0 or position >= len(text):
-        return False
-    previous = text[position - 1]
-    following = text[position]
-    if following in CLOSING_CHARS:
-        return False
-    if previous in _JOINERS or following in _JOINERS:
-        return False
-    return not (unicodedata.combining(following) or unicodedata.combining(previous))
-
-
 def _protected_ranges(text: str, start: int, end: int, *, math: bool) -> list[tuple[int, int]]:
     """Диапазоны, внутри которых разрез запрещён: код, ссылки, теги, формулы, сноски.
 
@@ -726,17 +696,7 @@ def safe_cut_offsets(text: str, start: int, end: int, *, math: bool = False) -> 
             continue
         if right.isspace() or right in SENTENCE_END_CHARS:
             continue
-        if inside(position) or not _is_grapheme_break(text, position):
+        if inside(position) or not is_cut_boundary(text, position):
             continue
         cuts.append(position)
     return tuple(cuts)
-
-
-def is_cut_boundary(text: str, position: int) -> bool:
-    """Безопасна ли граница разреза: не кластер, не висячая пунктуация (P3/P8).
-
-    Нужна там, где безопасных позиций нет вовсе (конструкция больше бюджета): жёсткий
-    разрез обязан хотя бы не разрывать графемный кластер и не начинать кусок с
-    закрывающего символа.
-    """
-    return _is_grapheme_break(text, position)

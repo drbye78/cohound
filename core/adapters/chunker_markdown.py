@@ -56,7 +56,6 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 
 from core.adapters.md_ast import (
-    SENTENCE_END_CHARS,
     LineIndex,
     MdBlock,
     MdDocument,
@@ -65,6 +64,7 @@ from core.adapters.md_ast import (
     safe_cut_offsets,
 )
 from core.ports.types import Chunk, ExtractedDoc
+from core.util.text_utils import SENTENCE_END_CHARS
 
 #: Атрибуты заголовка Pandoc (``{#id .cls}``): в ``heading_path`` не входят (P11).
 _HEADING_ATTRS_RE = re.compile(r"\s*\{(?:[#.][^{}]*)\}\s*$")

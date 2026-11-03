@@ -452,8 +452,10 @@ per-host диапазон `rate_limit`. Резолвится в pipeline (`pipel
 `ExtractedDoc(text, content_hash, extractor_version, page_count, error, family)` — нормализованный
 документ; `error` — грациозная деградация адаптера (пустой `text` вместо исключения).
 `family: str | None` (`"markdown"` / `"text"` / `"epub"`) — аддитивное поле: по нему
-`adapters/chunker_family.py` выбирает чанкер (композитная версия правил нарезки —
-`md-heading-5+text-para-2`, `composite_chunker_version`); `None` — HTML/документный путь.
+`adapters/chunker_family.py` выбирает чанкер; объявленная версия правил —
+композит (`MarkdownChunker.version + "+" + TextChunker.version`,
+`composite_chunker_version`), где markdown-компонент — стек «грамматика + движок +
+политика»; `None` — HTML/документный путь, то есть markdown-совместимое семейство.
 `Chunk(chunk_no, text, heading_path, context_prefix, content_hash)`.
 
 **Экстрактор — as-built (три семейства + EPUB, один реестр форматов).** Порт приведён к

@@ -2379,8 +2379,8 @@ URL синтетический, фетчить его нельзя, а файл 
 | Семейство / формат | Сигнал | Читатель | Чанкер |
 |---|---|---|---|
 | HTML (страница) | остальное (по умолчанию) | `HtmlExtractor` (trafilatura) | `MarkdownChunker` |
-| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-heading-5`) |
-| plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-2`) | `TextChunker` (`text-para-2`) |
+| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-ast-1:…/policy-1`) |
+| plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-2`) | `TextChunker` (`text-para-3`) |
 | документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
 | EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-2`) | `MarkdownChunker` |
 
@@ -2413,10 +2413,14 @@ CRLF/CR → LF, удаление NUL/управляющих символов (т
 `container.xml`/OPF/spine или архив не ZIP — видимая ошибка, не исключение. Байты читателя
 не пишутся в `corpus_raw` отдельно: ретейленится исходный `.epub` (I19).
 
-**Чанкеры.** Абзацный чанкер `core/adapters/chunker_text.py` (`text-para-2`): блоки по
+**Чанкеры.** Абзацный чанкер `core/adapters/chunker_text.py` (`text-para-3`): блоки по
 пустым строкам, слияние до `chunk_size`, блок, который помещается, не режется, блок сверх
-`chunk_size` режется по границам предложений (`. ! ? ;` и `…`), и только «бесконечное»
-предложение — жёстко (по возможности по пробелу). Порог фрагмента — `MIN_CHUNK_SIZE = 20`
+`chunk_size` режется по границам предложений (`. ! ? ;` и `…`, а также полноширинные
+`。！？；`, которые не требуют пробела после себя — иначе в CJK-тексте не находится ни одной
+границы), затем по границам клауз (`，`/`、`/`：`), и только клауза, сама превышающая
+`chunk_size`, режется жёстко — по безопасной границе символа (`is_cut_boundary`), а не по
+номеру байта. Разделитель между предложениями сохраняется: склейка кусков возвращает вход,
+поэтому китайский текст не получает дописанных пробелов. Порог фрагмента — `MIN_CHUNK_SIZE = 20`
 символов (замер распределения: полоса `<20` — 0.76 % чанков, и в ней 1 «фразовый» кусок из
 71, остальное `|`, номера страниц, пути); ниже порога кусок в индекс не попадает.
 `heading_path=""` всегда,
@@ -2427,9 +2431,10 @@ CRLF/CR → LF, удаление NUL/управляющих символов (т
 себя HTML и docling).
 
 **Контрактная граница.** `chunker_version` — поле `EXECUTION_CONTRACT_FIELDS`, поэтому с
-двумя чанкерами оно стало **композитом** `"md-heading-5+text-para-2"`
-(`chunker_family.composite_chunker_version`, тот же источник у декларации и у собранного
-порта). Это версионная граница класса `execution_versions` (`execution_change`, §13):
+двумя чанкерами оно стало **композитом** (`MarkdownChunker.version + "+" +
+TextChunker.version`, `chunker_family.composite_chunker_version` — тот же источник у
+декларации и у собранного порта). Markdown-компонент — стек «грамматика + движок разбора +
+политика», поэтому подмена зависимости меняет `run_id`, а не остаётся невидимой. Это версионная граница класса `execution_versions` (`execution_change`, §13):
 меняется `run_id`, `METHODOLOGY_VERSION` — нет.
 
 **Семейство живёт и в конверте `extract_cache` — не только в `ExtractedDoc`.** Ключ кэша —

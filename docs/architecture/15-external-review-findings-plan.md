@@ -526,7 +526,7 @@ absence-модель, scoring и определения Coverage/Comparability �
    `llm_scenarios` = `(evaluator, deepseek-v4.1-flash:purple, api, decoder=json_object,
    seed=NULL, temperature=NULL, constrained_decoding=NULL)` — три последние колонки объявлены
    в схеме (`core/domain/models.py:1158-1173`) и обещаны §7.1/`02:488` («фиксируется в `run_manifest.yaml`
-   (R7)»), но `_resolve_llm_scenarios` (`core/cli/execution_axes.py:741-809`) их не пишет вообще.
+   (R7)»), но `_resolve_llm_scenarios` (`core/cli/execution_axes.py:742-808`) их не пишет вообще.
    Проверено чтением БД. То есть V6/V4/V3 складываются в одно: **условия измерения не
    записаны**, а не «записаны неверно».
 3. **`base_url` не входит в идентичность ни в каком виде** — только `endpoint_kind: api`.

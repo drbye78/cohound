@@ -134,7 +134,7 @@ pdfium (механизм `text_layer`) терял **6.7 %** идентифика
    markdown как есть (`core/adapters/extract_document.py:354`, `:422`), поэтому `\_` попадал
    в чанки и в `citation_quote` (I22 требует непустую цитату; любое точное сопоставление
    термина с цитатой споткнётся о `plantuner.disable\_index`). Лексический токенизатор этого
-   не замечает (`core/util/text_utils.py:243` режет и `_`, и `\`), поэтому дефект тихий.
+   не замечает (`core/util/text_utils.py:306` режет и `_`, и `\`), поэтому дефект тихий.
    Лечение — `export_to_markdown(escape_underscores=False)`: таблицы (в ячейках экранирования
    и не было) и `#`-заголовки (из них `chunker_markdown` строит `heading_path`) не
    затрагиваются. Цена: ключ `extract_cache` = `(content_hash, extractor_version, level)`,

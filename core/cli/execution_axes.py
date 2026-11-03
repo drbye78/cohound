@@ -40,7 +40,8 @@
 
 ``chunker_version`` — **композит** правил нарезки, а не версия одного чанкера: у plain text
 свой абзацный чанкер, у markdown/HTML/EPUB — заголовочный, поэтому значение —
-``"md-heading-5+text-para-2"`` (:func:`core.adapters.chunker_family.composite_chunker_version`).
+``MarkdownChunker.version + "+" + TextChunker.version`` (у markdown это стек: грамматика,
+движок разбора и политика; :func:`core.adapters.chunker_family.composite_chunker_version`).
 Формула одна на декларацию и на собранный порт: разойдись они — ``execution_contract_digest``
 описывал бы не ту нарезку, которой получен корпус (R7 §11.7). Смена строки — версионная
 граница класса ``execution_versions`` (``execution_change``, §13): меняется ``run_id``,

@@ -30,11 +30,15 @@ except ImportError:  # pragma: no cover - зависит от окружения
 
 
 __all__ = [
+    "CLOSING_CHARS",
     "ENGLISH_STOP_WORDS",
     "RUSSIAN_STOP_WORDS",
+    "SENTENCE_END_CHARS",
     "TextLanguage",
     "clean_whitespace",
     "detect_language",
+    "hard_cut",
+    "is_cut_boundary",
     "is_cyrillic",
     "is_latin",
     "is_stop_word",
@@ -42,6 +46,7 @@ __all__ = [
     "normalize_ru_token",
     "normalize_text",
     "remove_diacritics",
+    "sentence_terminated",
     "split_sentences",
     "tokenize_lexical",
     "transliterate",
@@ -200,6 +205,64 @@ def normalize_text(
     result = unicodedata.normalize("NFKC", result)
     result = re.sub(r"\s+", " ", result)
     return result.strip()
+
+
+#: Знаки конца предложения: западные и **полноширинные**. Вторые обязательны: в
+#: китайском/японском тексте между предложениями пробела нет, и правило «терминатор +
+#: пробел» не находит там ни одной границы — абзац режется по номеру символа.
+SENTENCE_END_CHARS: frozenset[str] = frozenset(".!?;…。！？；")
+
+#: Символы, с которых фрагмент начинаться не может: закрывающая пунктуация, знаки конца
+#: предложения и закрывающие скобки. Иначе кусок открывается знаком, который относится к
+#: предыдущей фразе, и цитата читается как обрывок. Западные ``,.!?;:`` здесь наравне с
+#: полноширинными: жёсткий разрез иначе начинал бы чанк с запятой (замерено на
+#: ``is_cut_boundary("фраза, другая", 5)`` — свободная позиция ровно перед запятой).
+#: Кавычки **не** входят: ``«``/``"`` законно открывают цитату с начала фрагмента.
+CLOSING_CHARS: frozenset[str] = frozenset(")]}»”」』>，、：；。！？,.!?;:")
+
+#: Соединители и модификаторы, разрывать перед которыми нельзя (графемный кластер).
+_JOINERS: frozenset[str] = frozenset("\u200d\ufe0e\ufe0f\u200b\u0301")
+
+
+def is_cut_boundary(text: str, position: int) -> bool:
+    """Можно ли начинать фрагмент с ``position``: не висячая пунктуация, не кластер.
+
+    Проверяется символ справа: фрагмент не начинается с закрывающего знака (иначе он
+    открывается чужим хвостом) и не начинается с комбинирующего знака или вариационного
+    селектора (иначе первый символ приклеится к невидимому предку).
+    """
+    if position <= 0 or position >= len(text):
+        return False
+    if text[position] in CLOSING_CHARS:
+        return False
+    if text[position - 1] in _JOINERS or text[position] in _JOINERS:
+        return False
+    return not (
+        unicodedata.combining(text[position]) or unicodedata.combining(text[position - 1])
+    )
+
+
+def hard_cut(text: str, start: int, limit: int) -> int:
+    """Конец жёсткого разреза, когда безопасных границ нет: не рвёт графемный кластер.
+
+    ``start`` — начало куска (дальше него не отступаем: кусок не должен стать пустым).
+    """
+    end = min(limit, len(text))
+    while end > start + 1 and not is_cut_boundary(text, end):
+        end -= 1
+    return end
+
+
+def sentence_terminated(text: str) -> bool:
+    """Кончается ли фрагмент концом предложения.
+
+    Пробелы справа не считаются, как и закрывающая кавычка/скобка сразу после
+    терминатора: ``«цитата.»`` — конец предложения, а не обрывок.
+    """
+    stripped = text.rstrip()
+    while stripped and stripped[-1] in CLOSING_CHARS - SENTENCE_END_CHARS:
+        stripped = stripped[:-1].rstrip()
+    return bool(stripped) and stripped[-1] in SENTENCE_END_CHARS
 
 
 _SENTENCE_ENDINGS = re.compile(r"(?<=[.!?])\s+")

@@ -9,10 +9,15 @@ BM25-baseline. Эталон семантики — ``tests/selfcheck.py::_util_t
 from __future__ import annotations
 
 from core.util.text_utils import (
+    CLOSING_CHARS,
+    SENTENCE_END_CHARS,
     TextLanguage,
     detect_language,
+    hard_cut,
+    is_cut_boundary,
     normalize_cyrillic,
     normalize_ru_token,
+    sentence_terminated,
     split_sentences,
     tokenize_lexical,
 )
@@ -54,3 +59,45 @@ def test_tokenize_lexical_lowercases_and_drops_stopwords() -> None:
     assert "data" in tokens
     assert all(token == token.lower() for token in tokens)
     assert not _STOP_WORDS.intersection(tokens)
+
+
+# ---------------------------------------------------------------------------
+# Границы разреза (общие для markdown- и абзацного чанкера)
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_rejects_leading_closing_punctuation() -> None:
+    """Кусок не начинается с закрывающего знака: иначе он открывается чужим хвостом."""
+    assert is_cut_boundary("фраза. Другая", 7) is True
+    assert is_cut_boundary("фраза, другая", 5) is False  # начинается с «,»
+    assert is_cut_boundary("(сноска) текст", 8) is True
+    assert is_cut_boundary("итог」дальше", 4) is False
+    assert is_cut_boundary("абв", 0) is False
+    assert is_cut_boundary("абв", 3) is False
+
+
+def test_boundary_keeps_grapheme_cluster_together() -> None:
+    """Комбинирующий знак и эмодзи-модификатор не отрываются от своего предка."""
+    text = "и\u0301тог"  # «и» + комбинирующее ударение
+    assert is_cut_boundary(text, 1) is False
+    # ZWJ стоит на позиции 5, эмодзи — на 6: разрезать между ними нельзя.
+    assert is_cut_boundary("семья\u200d👨 дальше", 6) is False
+    assert is_cut_boundary("семья\u200d👨 дальше", 8) is True
+
+
+def test_hard_cut_does_not_start_a_piece_with_closing_punctuation() -> None:
+    """Жёсткий разрез отступает назад, но не делает кусок пустым."""
+    text = "слово, другое"
+    assert text[hard_cut(text, 0, 6)] != ","
+    assert hard_cut(text, 0, 1) == 1
+
+
+def test_sentence_terminated_accepts_trailing_closing_quote() -> None:
+    """``«цитата.»`` — конец предложения, а не обрывок: кавычка не отменяет терминатор."""
+    assert sentence_terminated("Привет.")
+    assert sentence_terminated("Привет.  ")
+    assert sentence_terminated("他说「你好。」")
+    assert not sentence_terminated("обрывок")
+    assert not sentence_terminated("список，")  # запятая — не терминатор
+    assert all(char in SENTENCE_END_CHARS for char in ".!?;…。！？；")
+    assert "」" in CLOSING_CHARS

@@ -1,4 +1,4 @@
-"""Тесты абзацного чанкера plain text (``text-para-2``).
+"""Тесты абзацного чанкера plain text (``text-para-3``).
 
 Ключевое отличие от markdown-чанкера: у плоского текста нет заголовков, поэтому единица
 нарезки — **абзац**, а не «единственный раздел, порезанный по размеру». Проверяется:
@@ -28,6 +28,7 @@ from core.adapters.chunker_text import (
 )
 from core.ports.chunker import ChunkerPort
 from core.ports.types import ExtractedDoc
+from core.util.text_utils import sentence_terminated
 
 _LONG = (
     "Первый абзац про установку. Он состоит из двух предложений.\n\n"
@@ -37,7 +38,7 @@ _LONG = (
 
 
 def test_version_and_port_contract() -> None:
-    assert TextChunker.version == TEXT_CHUNKER_VERSION == "text-para-2"
+    assert TextChunker.version == TEXT_CHUNKER_VERSION == "text-para-3"
     assert isinstance(TextChunkerPort(), ChunkerPort)
 
 
@@ -165,3 +166,57 @@ def test_min_chunk_size_must_fit_chunk_size() -> None:
         TextChunker(chunk_size=20, min_chunk_size=20)
     with pytest.raises(ValueError):
         TextChunker(min_chunk_size=-1)
+
+
+# ---------------------------------------------------------------------------
+# CJK: границы без пробелов и сохранение разделителей (P1 абзацного чанкера)
+# ---------------------------------------------------------------------------
+
+
+def test_cjk_sentences_are_cut_without_whitespace() -> None:
+    """Полноширинный терминатор — граница сам по себе: в CJK после него пробела нет.
+
+    Правило «терминатор + пробел» не находило здесь ни одной границы, и абзац резался
+    по номеру символа: чанк кончался посреди фразы, а цитата — посреди слова.
+    """
+    text = "".join(f"第{i}句话说明这个功能的行为与限制。" for i in range(40))
+    chunks = TextChunker(chunk_size=200).chunk("doc", text)
+
+    assert len(chunks) > 1
+    assert "".join(chunk.text for chunk in chunks) == text
+    assert all(sentence_terminated(chunk.text) for chunk in chunks)
+    assert max(len(chunk.text) for chunk in chunks) <= 200
+
+
+def test_separators_are_preserved_exactly() -> None:
+    """Склейка чанков возвращает вход: разделитель принадлежит тексту, а не склейке.
+
+    Иначе чанкер дописывал бы в китайский текст пробелы, которых в нём не было (и
+    ``content_hash`` переставал бы соответствовать источнику).
+    """
+    zh = "他说「你好。」然后走了。第二句在这里。" * 12
+    ru = "Первое предложение тут. Второе предложение тоже. Третье." * 8
+
+    assert "".join(c.text for c in TextChunker(chunk_size=120).chunk("d", zh)) == zh
+    chunks = TextChunker(chunk_size=100).chunk("d", ru)
+    assert " ".join(c.text for c in chunks) == " ".join(ru.split())
+    assert all(sentence_terminated(c.text) for c in chunks)
+    assert not any(c.text[0] in "」』，、：。！？；" for c in chunks)
+
+
+def test_clause_boundaries_are_the_second_level() -> None:
+    """Предложение больше бюджета режется по клаузам, а не по номеру символа."""
+    text = "这个功能提供了一个非常好的接口，" * 20 + "并且没有任何问题。"
+    chunks = TextChunker(chunk_size=80).chunk("doc", text)
+
+    assert max(len(chunk.text) for chunk in chunks) <= 80
+    assert all(chunk.text.endswith("，") or chunk.text.endswith("。") for chunk in chunks)
+
+
+def test_hard_cut_keeps_grapheme_clusters_whole() -> None:
+    """Нет пунктуации вовсе — жёсткий разрез, но не внутри графемного кластера."""
+    blob = "汉" * 500
+    chunks = TextChunker(chunk_size=100).chunk("doc", blob)
+
+    assert "".join(chunk.text for chunk in chunks) == blob
+    assert all(len(chunk.text) <= 100 for chunk in chunks)

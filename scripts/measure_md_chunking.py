@@ -16,7 +16,11 @@
 ``p4_violations``
     Документы, где текст чанка не является подстрокой входа. Инвариант: **0**.
 ``p8_violations``
-    Чанки, начинающиеся с закрывающей пунктуации (``) ] } » ” 」 』``). Инвариант: **0**.
+    Чанки, начинающиеся с закрывающей пунктуации **из-за реза**. Инвариант: **0**.
+    Начало на границе блока не считается: если абзац источника сам начинается с точки
+    (``<p>. Согласно стандарту…</p>``), чанкер по P1 не имеет права эту точку сдвинуть.
+    Такие случаи считаются отдельно (``source_punct``) — метрика не прячет их, а
+    отделяет причину.
 ``over_budget``
     Чанки длиннее ``chunk_size``. Ноль — цель; ненулевое значение означает, что хвост
     приклеен к предыдущему куску (объявленный компромисс, см. ``_absorb_tail``).
@@ -51,9 +55,10 @@ from pathlib import Path
 
 from core.adapters.chunker_markdown import MIN_CHUNK_SIZE, MarkdownChunker
 from core.adapters.extract_html import HtmlExtractor
-from core.adapters.md_ast import CLOSING_CHARS, MdDocument, parse_markdown
+from core.adapters.md_ast import MdDocument, parse_markdown
 from core.ports.types import Chunk, RawPage
 from core.util.document_formats import FAMILY_TEXT
+from core.util.text_utils import CLOSING_CHARS
 
 
 def _load_sibling(name: str):
@@ -94,6 +99,10 @@ class _Spans:
             ]
         )
 
+    def starts_block(self, offset: int) -> bool:
+        """Начинается ли в ``offset`` блок документа (то есть рез не создал эту границу)."""
+        return any(start == offset for start, _end, _kind in self.spans)
+
     def kind_at(self, offset: int) -> str | None:
         """Вид самого глубокого блока, содержащего смещение."""
         best: tuple[int, str] | None = None
@@ -127,6 +136,7 @@ class DocResult:
     p1_violation: bool
     p4_violation: bool
     prose_p8: int = 0
+    source_punct: int = 0
     examples: list[str] = field(default_factory=list)
     constructions: dict[str, int] = field(default_factory=dict)
 
@@ -181,14 +191,21 @@ def _measure(url: str, text: str, chunker: MarkdownChunker) -> DocResult:
     breaks, boundaries = _mid_sentence_breaks(chunks, spans)
     examples: list[str] = []
     prose_p8 = 0
+    source_punct = 0
     position = 0
     for chunk in chunks:
         kind = spans.kind_at(position)
+        at_block_start = spans.starts_block(position)
         position += len(chunk.text)
-        if chunk.text[:1] in CLOSING_CHARS and kind not in _NON_PROSE:
-            prose_p8 += 1
-            if len(examples) < 3:
-                examples.append(f"P8 [{kind}]: {url} :: {chunk.text[:60]!r}")
+        if chunk.text[:1] not in CLOSING_CHARS or kind in _NON_PROSE:
+            continue
+        if at_block_start:
+            # Знак пришёл из источника: по P1 чанкер его не двигает. Не дефект реза.
+            source_punct += 1
+            continue
+        prose_p8 += 1
+        if len(examples) < 3:
+            examples.append(f"P8 [{kind}]: {url} :: {chunk.text[:60]!r}")
     return DocResult(
         host=_host_of(url),
         url=url,
@@ -200,6 +217,7 @@ def _measure(url: str, text: str, chunker: MarkdownChunker) -> DocResult:
         p1_violation=joined != document.text,
         p4_violation=any(chunk.text not in document.text for chunk in chunks),
         prose_p8=prose_p8,
+        source_punct=source_punct,
         examples=examples,
         constructions={
             key: int(document.counts.get(key) or 0)
@@ -218,6 +236,7 @@ class Totals:
     p1_violations: int = 0
     p4_violations: int = 0
     p8_violations: int = 0
+    source_punct: int = 0
     over_budget: int = 0
     tiny: int = 0
     without_heading: int = 0
@@ -240,6 +259,7 @@ class Totals:
         for key, value in result.constructions.items():
             self.constructions[key] = self.constructions.get(key, 0) + value
         self.p8_violations += result.prose_p8
+        self.source_punct += result.source_punct
         for chunk in result.chunks:
             self.over_budget += int(len(chunk.text) > chunk_size)
             self.tiny += int(len(chunk.text.strip()) < min_chunk_size)
@@ -278,7 +298,8 @@ def _print_report(
     print("инварианты (цель — 0):")
     print(f"  P1  конкатенация ≠ вход      : {totals.p1_violations}")
     print(f"  P4  чанк не подстрока входа   : {totals.p4_violations}")
-    print(f"  P8  чанк начинается с ')'/']' : {totals.p8_violations}")
+    print(f"  P8  чанк начинается с пунктуации из-за реза : {totals.p8_violations}")
+    print(f"  (источник сам начинается со знака — P1 : {totals.source_punct})")
     print(f"  P13 строки вне блоков         : {totals.unknown_lines}")
     print("")
     print("геометрия (число чанков и доля):")
@@ -400,6 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "p1_violations": totals.p1_violations,
                 "p4_violations": totals.p4_violations,
                 "p8_violations": totals.p8_violations,
+                "source_punct": totals.source_punct,
                 "unknown_lines": totals.unknown_lines,
             },
             "geometry": {

@@ -380,7 +380,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** — сборка движка входит в `extractor_version`:
 > `docling-doc-3:<level>/<device>/docling-<build>`, единственный источник —
 > `docling_engine_build()` (`core/adapters/extract_document.py:241-250`); тот же вызов питает
-> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:664-712`, `:1015`).
+> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:665-716`, `:1016`).
 > ✅ **расширено (2026-10-28, P9):** ключ различает **устройство** — без сегмента
 > `cpu`/`cuda` CUDA-прогон нашёл бы в `extract_cache` CPU-текст под тем же ключом (Д-8 в
 > новом виде). Смена устройства — `execution_change`: `run_id` меняется один раз, кэш один
@@ -727,7 +727,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 
 > ✅ **сделано** — `docling_engine_build()` (`core/adapters/extract_document.py:241-250`),
 > `docling_extractor_version()` (`:252-284`), один и тот же вызов в `extractor_stack`
-> (`core/cli/execution_axes.py:664-712`).
+> (`core/cli/execution_axes.py:665-716`).
 
 Пока `extractor_version` не несёт сборку движка, `extract_cache` отдаёт текст, произведённый
 другим движком, и `run_id` об этом лжёт. Два варианта, различающиеся ценой:
