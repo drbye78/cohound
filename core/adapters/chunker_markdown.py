@@ -4,10 +4,18 @@
 ``heading_path`` и ``context_prefix``. Соответствует §3.2/§5 регламента («чанкер с
 heading_path»), порт — ``core/ports/chunker.py`` (архитектура 01 §3.5).
 
-Текущая версия — стек ``md-ast-1:<спека CommonMark>+<профили>/<движок>/policy-3``
+Текущая версия — стек ``md-ast-1:<спека CommonMark>+<профили>/<движок>/policy-4``
 (грамматика, движок разбора и политика версионируются независимо). Переход с построчного
 конечного автомата на AST и последующие правки политики: что изменилось и почему (замеры и
 разбор — ``docs/architecture/18-markdown-chunker-plan.md``):
+
+* **``policy-4``: блоки профиля ``pandoc`` разбираются по семантике Pandoc.** Список и
+  цитата сразу после строки абзаца — продолжение абзаца (``lists_without_preceding_blankline``
+  и ``blank_before_blockquote`` в Pandoc markdown выключены), ``| строка`` — line block,
+  ``a)``/``iv.``/``#.``/``(@)`` — списки (``core.adapters.md_dialect``). Это меняет
+  **набор блоков** в профиле ``pandoc``, то есть и границы чанков, поэтому
+  ``execution_change`` и новый ``run_id``; ``commonmark``/``gfm`` не затронуты —
+  правила к ним не применяются (пин в ``tests/adapters/test_md_ast.py``).
 
 * **Куски — точные срезы источника.** ``chunk.text`` больше не ``strip()``: конкатенация
   текстов всех чанков равна нормализованному входу байт-в-байт (P1). Иначе нельзя ни
@@ -78,11 +86,14 @@ from core.util.text_utils import SENTENCE_END_CHARS
 #: Атрибуты заголовка Pandoc (``{#id .cls}``): в ``heading_path`` не входят (P11).
 _HEADING_ATTRS_RE = re.compile(r"\s*\{(?:[#.][^{}]*)\}\s*$")
 
-#: Маркер пункта списка в начале сырой строки: ``-``, ``*``, ``+``, ``1.``, ``1)`` —
+#: Маркер пункта списка в начале сырой строки: ``-``, ``*``, ``+``, ``1.``, ``1)``,
+#: ``a)``/``iv.``/``#.`` (fancy lists Pandoc) и ``(@)``/``(@label)`` (example lists) —
 #: вместе с префиксом цитаты и отметкой задачи (``> - [x] ``). Отступ перед маркером
 #: сохраняется как есть: он и есть объявленная вложенность пункта.
 _LIST_MARKER_RE = re.compile(
-    r"^(?:[ \t]*>[ \t]?)*[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+\[[ xX]\])?"
+    r"^(?:[ \t]*>[ \t]?)*[ \t]*"
+    r"(?:[-+*]|\d{1,9}[.)]|(?:[A-Za-z]|[ivxlcdmIVXLCDM]{2,}|#)[.)]|\(@[A-Za-z0-9_-]*\))"
+    r"(?:[ \t]+\[[ xX]\])?"
 )
 
 #: Минимальная длина куска (символы). Порог **не выбрасывает** текст: хвост разреза
@@ -168,7 +179,10 @@ class MarkdownChunker:
     #: ``prompt_sha256``, поэтому это ``execution_change``.
     #: Какой именно профиль грамматики применён — объявляет ``chunking_spec``
     #: (``md_ast.PROFILES``; страницы и офисные документы идут в ``gfm``).
-    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-3"
+    #: ``policy-4`` — правила блоков Pandoc (``md_dialect``): меняют набор блоков в
+    #: профиле ``pandoc``, поэтому это ``execution_change``, а не косметика. В
+    #: ``gfm``/``commonmark`` правила не исполняются, и нарезка там прежняя.
+    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-4"
 
     #: Объявленный (и снятый) размер перекрытия: контракт продолжает его публиковать
     #: (:func:`core.adapters.chunker_family.composite_chunking_spec`), а значение 0 —
@@ -373,6 +387,8 @@ class MarkdownChunker:
             ]
         if block.kind == "table":
             return self._table_cuts(block, source, index, prefix=prefix, container=container)
+        if block.kind == "line_block":
+            return self._line_block_cuts(block, index, prefix=prefix, container=container)
         if block.kind == "list":
             return self._list_cuts(block, source, index, container=container)
 
@@ -454,6 +470,30 @@ class MarkdownChunker:
         if block.kind == "container":
             return prefix or MarkdownChunker._fence_opening(block, source)
         return prefix
+
+    @staticmethod
+    def _line_block_cuts(
+        block: MdBlock, index: LineIndex, prefix: str = "", container: str = ""
+    ) -> list[_Cut]:
+        """Line block режется по строкам: строка — объявленная единица (§5).
+
+        Продолжение несёт ``| `` — иначе строка стихотворения/адреса читается как
+        обычный абзац. Отдельного правила для детей ``line`` нет: границы заданы
+        спанами строк, а не вложенным деревом.
+        """
+        marker = "| "
+        if not prefix:
+            context = marker
+        elif prefix.endswith((" ", "\t")):
+            # Префикс-контейнер (``> `` цитаты, ``- `` пункта) уже оканчивается
+            # разделителем: строка line block в источнике выглядит как ``> | …``.
+            context = f"{prefix}{marker}"
+        else:
+            context = MarkdownChunker._with_prefix(marker, prefix, container)
+        return [
+            _Cut(index.offset(line), structural=True, context=context)
+            for line in range(block.span.start_line + 1, block.span.end_line)
+        ]
 
     def _table_cuts(
         self, block: MdBlock, source: str, index: LineIndex, prefix: str = "", container: str = ""

@@ -112,21 +112,26 @@ def test_grid_table_is_unparsed_construct() -> None:
     ]
 
 
-def test_fancy_list_is_unparsed_construct() -> None:
+def test_fancy_list_matches_block_level_after_dialect_rules() -> None:
+    """Fancy list ``a)`` разбирается как список: до L3 это был ``unparsed_construct``.
+
+    Пин держит связь между правилом ``md_dialect`` и канонизацией оракула: если правило
+    отключат или сломают, инструмент снова назовёт конструкцию неразобранной.
+    """
     text = "a)  First\nb)  Second\n"
     outcome = _compare(text, [{"t": "OrderedList", "c": []}])
-    assert [(diff.cls, diff.construct) for diff in outcome.diffs] == [
-        ("unparsed_construct", "fancy_list")
-    ]
+    assert outcome.diffs == []
 
 
-def test_list_without_blank_line_is_named() -> None:
-    # Pandoc по умолчанию требует пустую строку перед списком, markdown-it — нет.
+def test_list_without_blank_line_is_a_paragraph_in_pandoc() -> None:
+    """Список без пустой строки перед ним — продолжение абзаца (правило профиля).
+
+    До L3 инструмент называл это ``mdast_only:list_without_blank_line``; теперь обе
+    стороны дают абзац, и расхождения нет. Тест фиксирует именно новый носитель.
+    """
     text = "intro text:\n- a\n- b\n"
     outcome = _compare(text, [{"t": "Para", "c": []}])
-    assert [(diff.cls, diff.construct) for diff in outcome.diffs] == [
-        ("sequence_length", "mdast_only:list_without_blank_line")
-    ]
+    assert outcome.diffs == []
 
 
 def test_unparsed_construct_never_counts_as_match() -> None:

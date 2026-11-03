@@ -32,7 +32,7 @@ Pandoc ``t``                  канонический класс           ``md
 ``DefinitionList``            ``deflist``                  ``definition_list``
 ``Div``                       ``container``                ``container``
 ``RawBlock``                  ``raw``                      ``html``
-``LineBlock``                 ``line_block``               — (не разбирается)
+``LineBlock``                 ``line_block``               ``line_block``
 ``HorizontalRule``            ``thematic_break``           ``thematic_break``
 ``Figure``                    ``figure``                   — (в 2.17 его нет в JSON)
 ============================  ==========================  ==========================
@@ -170,6 +170,7 @@ _MDAST_KINDS: Final[dict[str, str]] = {
     "container": "container",
     "html": "raw",
     "math": "math",
+    "line_block": "line_block",
     "thematic_break": "thematic_break",
 }
 

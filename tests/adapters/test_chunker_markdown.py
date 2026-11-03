@@ -33,6 +33,7 @@ from core.adapters.chunker_markdown import (
     MarkdownChunker,
     MarkdownChunkerPort,
 )
+from core.adapters.md_ast import parse_markdown
 from core.ports.chunker import ChunkerPort
 from core.ports.types import ExtractedDoc
 from core.util.text_utils import CLOSING_CHARS
@@ -288,7 +289,7 @@ def test_version_is_a_stack_of_grammar_engine_and_policy() -> None:
     """
     version = MarkdownChunker.version
     assert version.startswith("md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-")
-    assert "/policy-3" in version
+    assert "/policy-4" in version
     assert "mdit-unknown" not in version, "версия движка должна читаться из метаданных"
     assert MarkdownChunker().chunk_overlap == 0
 
@@ -581,6 +582,109 @@ def test_blockquoted_fence_continuation_does_not_double_quote_marker() -> None:
         assert chunk.context_prefix == "Код\n> ```sql"
         _assert_starts_cleanly(chunk)
     _assert_exact_join(md, chunks)
+
+
+def test_line_block_is_cut_by_lines_and_continuation_carries_marker() -> None:
+    """Line block режется по строкам, продолжение несёт ``| `` (профиль ``pandoc``).
+
+    Строка — объявленная единица (§5), поэтому граница стоит между строками и внутри
+    строки текст не рвётся. ``context_prefix`` продолжения — ``| ``: иначе строка
+    стихотворения/адреса читается как обычный абзац.
+    """
+    lines = [
+        f"| строка номер {index:02d} с достаточно длинным содержимым" for index in range(12)
+    ]
+    md = "# Стихи\n\n" + "\n".join(lines) + "\n"
+    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk("doc", md)
+
+    assert len(chunks) > 2
+    _assert_exact_join(md, chunks)
+    for chunk in chunks[1:]:
+        assert chunk.context_prefix == "Стихи\n| ", chunk.context_prefix
+        assert chunk.text.startswith("| "), chunk.text[:40]
+        # Кусок кончается на границе строки: последняя строка не обрезана.
+        assert chunk.text.endswith("\n") or chunk is chunks[-1], chunk.text[-40:]
+    assert chunks[0].text.startswith("# Стихи")
+    for chunk in chunks:
+        assert md[chunk.char_start : chunk.char_end] == chunk.text
+
+
+def test_fancy_list_item_is_a_unit_and_marker_stays_in_context() -> None:
+    """Fancy list: пункт — минимальная единица, продолжение пункта несёт ``a) ``."""
+    items = "".join(
+        f"{chr(ord('a') + index)}) пункт {index} " + "слово " * 40 + "\n" for index in range(3)
+    )
+    md = "# Список\n\n" + items
+    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk("doc", md)
+
+    assert len(chunks) > 3
+    _assert_exact_join(md, chunks)
+    continuations = [chunk for chunk in chunks if chunk.text.startswith("слово")]
+    assert continuations, [chunk.text[:40] for chunk in chunks]
+    contexts = {chunk.context_prefix for chunk in continuations}
+    assert "Список\na) " in contexts
+    assert "Список\nb) " in contexts
+    # Кусок, начавшийся с маркера, уже содержит его в тексте: контекст не дублирует.
+    for chunk in chunks:
+        if chunk.text[:2] in {"a)", "b)", "c)"}:
+            assert chunk.context_prefix == "Список"
+        assert md[chunk.char_start : chunk.char_end] == chunk.text
+
+
+def test_example_list_item_is_a_unit_and_label_stays_in_context() -> None:
+    """Example list: пункт — единица, метка ``(@label)`` продолжает пункт в контексте."""
+    items = "".join(
+        f"(@item{index}) пример {index} " + "слово " * 40 + "\n" for index in range(3)
+    )
+    md = "# Примеры\n\n" + items
+    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk("doc", md)
+
+    assert len(chunks) > 3
+    _assert_exact_join(md, chunks)
+    continuations = [chunk for chunk in chunks if chunk.text.startswith("слово")]
+    assert continuations
+    contexts = {chunk.context_prefix for chunk in continuations}
+    assert "Примеры\n(@item0) " in contexts
+    assert "Примеры\n(@item1) " in contexts
+
+
+def test_new_pandoc_blocks_keep_p1_p4_p8_p13_on_a_mixed_document() -> None:
+    """Смешанный документ: правила блоков не ломают точность срезов и покрытие.
+
+    P1 — конкатенация равна входу; P4 — каждый ``text`` равен срезу по собственным
+    смещениям; P8 — кусок не открывается закрывающей пунктуацией; P13 — ни одной строки
+    вне блоков.
+    """
+    md = (
+        "# Документ\n\n"
+        "вступление без пустой строки:\n"
+        "- пункт\n"
+        "- второй\n\n"
+        "| строка line block\n"
+        "| вторая строка line block\n\n"
+        "a) первый пункт с текстом и хвостом\n"
+        "b) второй пункт с текстом и хвостом\n\n"
+        "(@) пример с меткой\n"
+        "(@label) второй пример\n\n"
+        "заключительный абзац\n"
+    )
+    document = parse_markdown(md, profile="pandoc")
+    assert document.gaps == ()
+    assert document.counts["unknown_lines"] == 0
+    assert [block.kind for block in document.blocks] == [
+        "heading",
+        "paragraph",
+        "line_block",
+        "list",
+        "list",
+        "paragraph",
+    ]
+
+    chunks = MarkdownChunker(chunk_size=80, profile="pandoc").chunk("doc", md)
+    assert "".join(chunk.text for chunk in chunks) == document.text
+    for chunk in chunks:
+        assert document.text[chunk.char_start : chunk.char_end] == chunk.text
+        _assert_starts_cleanly(chunk)
 
 
 # ---------------------------------------------------------------------------

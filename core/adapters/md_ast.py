@@ -25,6 +25,13 @@
 строить карту «content → источник», которую проще обойти: сканер работает по **сырому
 срезу** исходника и потому точен по построению.
 
+**Профиль ``pandoc`` — не только плагины, но и правила блоков.** ``markdown-it-py`` не
+знает семантики пустой строки Pandoc (список/цитата не прерывают абзац), line block'ов и
+fancy/example-списков. Эти правила живут в :mod:`core.adapters.md_dialect` и применяются
+**только** к профилю ``pandoc``; в ``commonmark``/``gfm`` структура блоков остаётся
+байт-в-байт прежней (это запиновано тестами). Правила не двигают текст: спаны остаются
+отрезками тех же строк, поэтому P1/P4/P13 сохраняются.
+
 Слой **аддитивен**: он не меняет поведение чанкера, пока чанкер не переведён на него
 (L1b). Нейтрален (§1.3): грамматика markdown — не предметная область.
 """
@@ -710,6 +717,11 @@ def parse_markdown(text: str, profile: str = "gfm") -> MdDocument:
     блок принимается только при наличии записи-отображения (строка с ``:``) — ровно то
     правило, что раньше стояло в строчной эвристике чанкера. Если отображения нет,
     документ разбирается без плагина, то есть по CommonMark.
+
+    **Правила профиля ``pandoc``** (семантика пустой строки, line block, fancy/example
+    списки) применяются после разбора и до поиска разрывов покрытия: они меняют вид
+    блоков, но не текст и не объединение спанов, поэтому P13 считается по ним же.
+    Импорт ленивый — иначе ``md_dialect`` и ``md_ast`` образовали бы цикл.
     """
     normalized_text, changed = normalize_text(text)
     index = LineIndex(normalized_text)
@@ -722,6 +734,10 @@ def parse_markdown(text: str, profile: str = "gfm") -> MdDocument:
         blocks = _build_blocks(
             _parser(profile, front_matter=False).parse(normalized_text), index
         )
+    if profile == "pandoc":
+        from core.adapters.md_dialect import apply_rules  # noqa: PLC0415
+
+        blocks = apply_rules(blocks, index)
 
     extras, unknown, unknown_lines = _gap_blocks(index, _find_gaps(blocks, index))
     if extras:

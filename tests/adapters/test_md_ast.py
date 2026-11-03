@@ -273,6 +273,175 @@ def test_gfm_table_is_not_a_table_in_commonmark() -> None:
     assert len(parse_markdown(source, profile="gfm").of_kind("table")) == 1
 
 
+# -- профиль pandoc: правила блоков (L3, первая половина) --------------------
+
+
+def _layout(document: object) -> list[tuple[str, int, int]]:
+    """(вид, начало, конец) блоков верхнего уровня — компактный пин структуры."""
+    return [
+        (block.kind, block.span.start_line, block.span.end_line)
+        for block in document.blocks  # type: ignore[attr-defined]
+    ]
+
+
+def test_pandoc_list_does_not_interrupt_a_paragraph() -> None:
+    """В Pandoc список сразу после строки абзаца — продолжение абзаца (§L3).
+
+    Измерено оракулом (``pandoc 2.17.1.1``): ``текст\\n- a\\n- b`` — один ``Para``,
+    потому что ``lists_without_preceding_blankline`` выключено. CommonMark/GFM начинают
+    список; профильная развилка и есть предмет теста.
+    """
+    source = "вступление:\n- пункт\n- второй\n"
+
+    assert _layout(parse_markdown(source, profile="pandoc")) == [("paragraph", 0, 3)]
+    for profile in ("commonmark", "gfm"):
+        assert _layout(parse_markdown(source, profile=profile)) == [
+            ("paragraph", 0, 1),
+            ("list", 1, 3),
+        ], profile
+
+
+def test_pandoc_blockquote_does_not_interrupt_a_paragraph() -> None:
+    """Цитата без пустой строки перед ней — тоже продолжение абзаца.
+
+    ``blank_before_blockquote`` в Pandoc markdown включено: ``text\\n> q`` — один
+    ``Para`` (измерено), а не абзац и цитата.
+    """
+    source = "текст\n> цитата\n"
+
+    assert _layout(parse_markdown(source, profile="pandoc")) == [("paragraph", 0, 2)]
+    for profile in ("commonmark", "gfm"):
+        assert _layout(parse_markdown(source, profile=profile)) == [
+            ("paragraph", 0, 1),
+            ("blockquote", 1, 2),
+        ], profile
+
+
+def test_pandoc_paragraph_keeps_absorbing_until_blank_line() -> None:
+    """Абзац тянется до пустой строки: заголовок и разрыв его не прерывают.
+
+    Измерено: ``text\\n- a\\n# H`` и ``text\\n- a\\n---`` — по одному ``Para``. Fenced
+    code, наоборот, прерывает — он в :data:`ABSORBABLE` не входит.
+    """
+    plain = "текст\n- пункт\n# Заголовок\n---\n"
+    assert _layout(parse_markdown(plain, profile="pandoc")) == [("paragraph", 0, 4)]
+
+    fenced = "текст\n- пункт\n```\nкод\n```\n"
+    assert _layout(parse_markdown(fenced, profile="pandoc")) == [
+        ("paragraph", 0, 2),
+        ("fence", 2, 5),
+    ]
+
+
+def test_pandoc_line_block_is_one_block_of_lines() -> None:
+    """``| строка`` — line block: блок со спаном на все строки и ребёнком на каждую.
+
+    Единица нарезки объявлена структурой (§5), а не соглашением чанкера.
+    """
+    source = "| Первая строка\n| Вторая строка\n|    Третья с отступом\n"
+    doc = parse_markdown(source, profile="pandoc")
+
+    blocks = doc.blocks
+    assert [block.kind for block in blocks] == ["line_block"]
+    block = blocks[0]
+    assert (block.span.start_line, block.span.end_line) == (0, 3)
+    assert [child.kind for child in block.children] == ["line", "line", "line"]
+    assert [doc.text[child.span.start_char : child.span.end_char] for child in block.children] == [
+        "| Первая строка\n",
+        "| Вторая строка\n",
+        "|    Третья с отступом\n",
+    ]
+    assert doc.gaps == ()
+    assert doc.counts["unknown_lines"] == 0
+
+
+def test_line_block_requires_a_block_start_and_a_space() -> None:
+    """Не всякая строка с ``|`` — line block: измеренные границы оракула.
+
+    ``|a`` (без пробела) — текст; отступ на верхнем уровне — текст; строка после
+    абзаца без пустой строки — тоже текст (Pandoc не прерывает абзац line block'ом).
+    """
+    cases = ("|a\n|b\n", "  | отступ\n  | второй\n", "текст\n| строка\n")
+    for source in cases:
+        doc = parse_markdown(source, profile="pandoc")
+        assert doc.of_kind("line_block") == (), source
+        assert doc.counts["unknown_lines"] == 0, source
+
+
+def test_line_block_tail_becomes_a_paragraph() -> None:
+    """Блок кончается на первой строке без ``| ``; остаток — обычный абзац."""
+    source = "| стих\nобычный текст\n| снова стих\n"
+    doc = parse_markdown(source, profile="pandoc")
+
+    assert [(block.kind, block.span.start_line, block.span.end_line) for block in doc.blocks] == [
+        ("line_block", 0, 1),
+        ("paragraph", 1, 3),
+    ]
+    assert doc.gaps == ()
+
+
+def test_pandoc_fancy_and_example_lists_are_lists() -> None:
+    """``a)``/``iv.``/``#.``/``(@)`` — списки: маркер, пункты, точные спаны.
+
+    В CommonMark/GFM эти строки — абзац (запиновано ниже в
+    ``test_commonmark_and_gfm_structure_is_unchanged``).
+    """
+    cases = (
+        "a) первый\nb) второй\n",
+        "A) первый\nB) второй\n",
+        "i. первый\nii. второй\n",
+        "iv. четвёртый\nv. пятый\n",
+        "#. первый\n#. второй\n",
+        "(@) первый\n(@label) второй\n",
+    )
+    for source in cases:
+        doc = parse_markdown(source, profile="pandoc")
+        lists = doc.of_kind("list")
+        assert len(lists) == 1, source
+        assert lists[0].info["ordered"] is True, source
+        assert lists[0].info["dialect"] == "fancy", source
+        assert [child.kind for child in lists[0].children] == ["list_item", "list_item"], source
+        assert doc.gaps == (), source
+        assert doc.counts["unknown_lines"] == 0, source
+
+
+def test_uppercase_single_letter_with_period_is_not_a_marker() -> None:
+    """Измерено: ``A. текст`` — не список (оракул отдаёт ``Para``), ``A)`` — список."""
+    assert _layout(parse_markdown("A. текст\n", profile="pandoc")) == [("paragraph", 0, 1)]
+    assert _layout(parse_markdown("A) текст\n", profile="pandoc")) == [("list", 0, 1)]
+
+
+def test_fancy_lists_merge_across_a_blank_line_only_when_style_fits() -> None:
+    """Оракул сливает ``a.``/``b.`` через пустую строку, но не ``a)``/``iv.``."""
+    same = "a) первый\n\nb) второй\n"
+    assert _layout(parse_markdown(same, profile="pandoc")) == [("list", 0, 3)]
+
+    different = "a) первый\n\niv. второй\n"
+    assert _layout(parse_markdown(different, profile="pandoc")) == [
+        ("list", 0, 1),
+        ("list", 2, 3),
+    ]
+
+
+def test_commonmark_and_gfm_structure_is_unchanged() -> None:
+    """Пин: в ``commonmark``/``gfm`` правила Pandoc не исполняются вовсе.
+
+    Ожидания — дословно то, что отдавал разбор до L3 (абзац/список/цитата по
+    CommonMark). Тест существует потому, что «мы не трогали другой профиль» — обещание,
+    а структура блоков — проверяемый факт.
+    """
+    expected = {
+        "вступление:\n- пункт\n- второй\n": [("paragraph", 0, 1), ("list", 1, 3)],
+        "текст\n> цитата\n": [("paragraph", 0, 1), ("blockquote", 1, 2)],
+        "a) первый\nb) второй\n": [("paragraph", 0, 2)],
+        "| строка\n| вторая\n": [("paragraph", 0, 2)],
+        "(@) первый\n(@label) второй\n": [("paragraph", 0, 2)],
+    }
+    for source, layout in expected.items():
+        for profile in ("commonmark", "gfm"):
+            assert _layout(parse_markdown(source, profile=profile)) == layout, (profile, source)
+
+
 # -- безопасные позиции разреза ---------------------------------------------
 
 
