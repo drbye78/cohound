@@ -3,6 +3,7 @@
 __all__ = [
     "agreement",
     "cache",
+    "cjk_lexical",
     "hashing",
     "ids",
     "logging",

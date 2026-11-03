@@ -22,6 +22,28 @@ tantivy 0.26).
   ``max_gram=3``) по lowercase-тексту, для подстрочного совпадения по фрагменту
   идентификатора (``"2024"`` находит ``API-2024_X``).
 
+**CJK-сегментация профиля ``stemmed`` (``schema-...-zh-2``).** ``Tokenizer.simple``
+считает словом непрерывную серию алфавитно-цифровых символов, поэтому китайская фраза без
+пробелов — **один** терм: документ «…数据库配置管理工具…» не находился запросом
+«配置管理» (замер 03.11.2026 на реальной цепочке: 0 хитов, английский контроль — 1).
+Перед индексацией и разбором запроса текст проходит
+:func:`core.util.cjk_lexical.segment_cjk`: прогоны Han/каны/хангыля разворачиваются в
+перекрывающиеся **биграммы** (прогон длиной 1 — сам символ), остальные символы копируются
+как есть. Это стандартный для BM25 приём без словаря и без новых зависимостей
+(ICU/jieba не входят в стек). Границы прогонов — пунктуация ``。！？；，、：``,
+полноширинные формы и пробелы; текст **не нормализуется**.
+
+Что это меняет и что нет (граница названа, а не подразумевается): меняется терм-сет поля
+``body`` и разбор запроса для CJK — поэтому ``LEXICAL_SCHEMA_VERSION`` поднят до
+``single-body-stem-ru-en-zh-2`` (``lexical_spec`` → новый ``run_id``; наблюдаемая строка
+``lexical_engine_version`` → новый ``pb_``). Не меняется: тело чанка, ``content_hash``,
+смещения и список токенов латиницы/кириллицы (``segment_cjk`` для текста без CJK
+возвращает тот же объект строки; пин — ``test_tokenize_lexical_without_cjk_is_byte_identical_to_legacy``).
+Профили ``identifier``/``ngram`` сегментацию не получают: первый обязан сохранять точный
+токен, второй уже даёт подстрочный матч. Цена: биграммы внутри прогона перекрываются,
+поэтому позиции термов синтетические; для BM25 (без фразовых запросов по CJK) это не
+влияет на скоринг.
+
 **Почему одно поле (замер, а не вкус).** До C8 схема держала **четыре** текстовых поля
 с одним и тем же текстом (``body_stem_ru``, ``body_stem_en``, ``body_identifier``,
 ``body_ngram``), чтобы один индекс отвечал на все профили сразу. Прогон запрашивает
@@ -151,6 +173,7 @@ from pathlib import Path
 from typing import Any
 
 from core.ports.vector_index import CompositionViewPort, RetrievedChunk
+from core.util.cjk_lexical import segment_cjk
 
 __all__ = [
     "LEXICAL_SCHEMA_VERSION",
@@ -176,7 +199,26 @@ __all__ = [
 #: ``lang=None`` (единственный продовый путь) прежняя схема складывала баллы двух полей с
 #: одним текстом и держала русские стоп-слова термами (средний Jaccard top-10 0.56 против
 #: 0.94 при явном языке). Значит это условие измерения и требует новой версии.
-LEXICAL_SCHEMA_VERSION = "single-body-stem-ru-en-v1"
+#:
+#: ``single-body-stem-ru-en-zh-2`` — **CJK-сегментация** того же единственного поля.
+#: Текст для ``body`` и текст запроса проходят через ``core.util.cjk_lexical.segment_cjk``:
+#: прогоны Han/каны/хангыля разворачиваются в перекрывающиеся биграммы (прогон длиной 1 —
+#: сам символ), остальные символы копируются как есть. Причина — измеренная, а не
+#: предполагаемая: до правки документ «数据库配置管理工具提供了备份功能。» и запросы
+#: «配置管理»/«备份功能» давали **0 хитов**, английский контроль — 1; после — оба находят
+#: (``docs/reports/measurements/2026-11-04-cjk-lexical-segmentation.md``).
+#:
+#: Почему это версионная граница, а не косметика: меняется **терм-сет индекса и разбор
+#: запроса**, то есть выдача на любом CJK-материале. Не меняется: тело чанка,
+#: ``content_hash``, ``char_start``/``char_end`` и позиции в хранимом тексте — сегментация
+#: применяется только к представлению поля ``body`` (тело в индексе не хранится). EN/RU
+#: не меняется побайтно: ``segment_cjk`` возвращает тот же объект строки, когда CJK нет,
+#: а список токенов латиницы/кириллицы закреплён пином
+#: ``tests/util/test_text_utils.py::test_tokenize_lexical_without_cjk_is_byte_identical_to_legacy``.
+#: Версия входит в ``lexical_spec`` (``EXECUTION_CONTRACT_FIELDS``) ⇒ новый ``run_id``, и в
+#: наблюдаемую строку ``lexical_engine_version`` (``tantivy-<ver>+schema-<v>``) ⇒ новый
+#: ``pb_``/``index_build_id``; пере-краул не нужен, пере-индексация — часть нового прогона.
+LEXICAL_SCHEMA_VERSION = "single-body-stem-ru-en-zh-2"
 
 def lexical_schema_spec() -> dict[str, object]:
     """Объявленная схема лексического индекса — значение поля контракта ``lexical_spec``.
@@ -206,9 +248,13 @@ def lexical_schema_spec() -> dict[str, object]:
         "indexed_fields": [FIELD_BODY],
         #: Фильтр-поля (не участвуют в скоринге, но входят в схему).
         "filter_fields": [FIELD_PRODUCT],
-        #: Цепочка анализатора ``stemmed`` — порядок значим (lowercase до стеммеров,
-        #: стоп-слова после), поэтому перечисление, а не множество.
+        #: Цепочка анализатора ``stemmed`` — порядок значим (сегментация до токенайзера,
+        #: lowercase до стеммеров, стоп-слова после), поэтому перечисление, а не множество.
+        #: ``pre:segment:cjk-bigrams`` — не фильтр tantivy, а предварительное разворачивание
+        #: CJK-прогонов в биграммы (``core.util.cjk_lexical``); в списке он потому, что
+        #: определяет терм-сет поля так же, как остальные шаги, и обязан попадать в дайджест.
         "stemmed_analyzer": [
+            "pre:segment:cjk-bigrams(han,kana,hangul)",
             "tokenizer:simple",
             "filter:lowercase",
             "filter:stemmer:russian",
@@ -314,6 +360,27 @@ class LexicalChunk:
     heading_path: str = ""
     content_hash: str = ""
     build_id: str = ""
+
+
+def _index_body_text(text: str) -> str:
+    """Текст для индексируемого поля ``body``: CJK-прогоны развёрнуты в биграммы.
+
+    Обёртка над :func:`core.util.cjk_lexical.segment_cjk` держит одну точку решения:
+    сегментация применяется **только** к представлению поля, которое не хранится
+    (``body`` без ``stored``), поэтому тело чанка, его ``content_hash`` и смещения
+    остаются нетронутыми. Для текста без CJK возвращается тот же объект строки, то есть
+    EN/RU индексируются ровно так же, как до правки.
+    """
+    return segment_cjk(text)
+
+
+def _query_text(query: str) -> str:
+    """Текст запроса в том же представлении, что и поле ``body`` (симметрия обязательна).
+
+    Без этого CJK-биграммы документа и целый CJK-терм запроса не совпали бы: анализатор
+    поля на запросе применяет ту же цепочку, но не то же предварительное разворачивание.
+    """
+    return segment_cjk(query)
 
 
 def _coerce_record(record: Any) -> LexicalChunk:
@@ -447,7 +514,7 @@ class TantivyLexicalIndex:
                     **{
                         FIELD_CHUNK_ID: entry.chunk_id,
                         FIELD_PRODUCT: entry.product_id,
-                        FIELD_BODY: entry.text,
+                        FIELD_BODY: _index_body_text(entry.text),
                     }
                 )
             )
@@ -702,9 +769,11 @@ class TantivyLexicalIndex:
             return self._ngram_query(query)
         if not query or not query.strip():
             return None
+        # Сегментация та же, что при индексации (``_index_body_text``): иначе CJK-биграммы
+        # документа не совпадут с целым CJK-термом запроса.
         # lenient: невалидные фрагменты превращаются в match-nothing, а не в исключение.
         parsed, _errors = self._index.parse_query_lenient(
-            query, default_field_names=[FIELD_BODY]
+            _query_text(query), default_field_names=[FIELD_BODY]
         )
         return parsed
 

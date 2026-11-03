@@ -1,7 +1,9 @@
-"""Многоязычные текстовые утилиты (RU/EN) для корпуса coHound.
+"""Многоязычные текстовые утилиты (RU/EN/CJK) для корпуса coHound.
 
 Используется при подготовке корпуса (§3.2: языки, tantivy RU/EN), нормализации
-для лексического контура и детекции языка документов/чанков.
+для лексического контура и детекции языка документов/чанков. CJK-сегментация для
+лексического контура живёт в ``core.util.cjk_lexical`` (словарей и ICU нет:
+биграммы прогонов — стандартный приём BM25).
 
 Происхождение: адаптировано из проекта gag5 (`core/text_utils.py`, MIT License,
 Copyright (c) 2024). Изменения: нейтрализация под
@@ -17,6 +19,8 @@ import re
 import unicodedata
 from enum import StrEnum
 from functools import lru_cache
+
+from core.util.cjk_lexical import cjk_terms, iter_cjk_runs
 
 try:  # необязательная зависимость: при отсутствии — эвристика по алфавиту
     from langdetect import LangDetectException  # type: ignore[import-not-found]
@@ -329,12 +333,43 @@ def normalize_ru_token(token: str) -> str:
     return t
 
 
-def tokenize_lexical(text: str) -> list[str]:
-    """Токенизация для лексического поиска: нижний регистр, нормализация, стоп-слова."""
+def _latin_lexical_tokens(chunk: str) -> list[str]:
+    """Прежняя токенизация латиницы/кириллицы — ровно та же, что до CJK-сегментации.
+
+    Вынесена отдельно, чтобы CJK-ветка не могла изменить EN/RU-поведение: для текста
+    без CJK этот помощник вызывается один раз на весь вход и даёт тот же список, что
+    давала прежняя реализация ``tokenize_lexical`` (пин —
+    ``tests/util/test_text_utils.py::test_tokenize_lexical_without_cjk_is_byte_identical_to_legacy``).
+    """
     out: list[str] = []
-    for match in _TOKEN_RE.findall(text or ""):
+    for match in _TOKEN_RE.findall(chunk):
         token = match.lower()
         if token in _ALL_STOP_WORDS or len(token) < 2:
             continue
         out.append(normalize_ru_token(token))
+    return out
+
+
+def tokenize_lexical(text: str) -> list[str]:
+    """Токенизация для лексического поиска: регистр, нормализация, стоп-слова, CJK.
+
+    Латиница и кириллица режутся как раньше (``[а-яёa-z0-9]+``, нижний регистр,
+    эвристический RU-стемминг, стоп-слова). Добавлена только CJK-ветка: прогоны Han,
+    хираганы, катаканы и хангыля дают **перекрывающиеся биграммы** (для прогона длиной 1 —
+    сам символ), потому что иначе вся серия без пробелов становится одним термом и
+    запрос-подстрока внутри неё не находит ничего (``core.util.cjk_lexical``).
+
+    Порядок токенов — порядок текста: латинские/кириллические фрагменты между CJK-прогонами
+    обрабатываются прежней функцией, поэтому для текста без CJK результат **не меняется**
+    ни на один токен. Одиночный CJK-символ не отбрасывается фильтром ``len(token) < 2``:
+    это терм, а не однобуквенный шум, и он должен находиться (и индексироваться).
+    """
+    text = text or ""
+    out: list[str] = []
+    position = 0
+    for start, end in iter_cjk_runs(text):
+        out.extend(_latin_lexical_tokens(text[position:start]))
+        out.extend(cjk_terms(text[start:end]))
+        position = end
+    out.extend(_latin_lexical_tokens(text[position:]))
     return out

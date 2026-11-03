@@ -70,3 +70,47 @@ def test_search_before_index_raises() -> None:
     """Поиск до ``index()`` — ``RuntimeError``, а не пустой результат."""
     with pytest.raises(RuntimeError, match="index"):
         Bm25Index().search("резервное копирование")
+
+
+# ---------------------------------------------------------------------------
+# CJK-биграммы (план 18, «Сопутствующая работа»)
+# ---------------------------------------------------------------------------
+
+
+def test_bm25_cjk_query_inside_unspaced_run_finds_the_document() -> None:
+    """Точный кейс плана: «配置管理» и «备份功能» находят CJK-документ, EN — свой.
+
+    До правки CJK-серия была одним токеном, и оба запроса давали 0 хитов. Тест держит
+    три числа кейса одновременно: два CJK-запроса и английский контроль.
+    """
+    index = Bm25Index()
+    index.index(
+        [
+            LexicalDoc("zh", "p", "数据库配置管理工具提供了备份功能。"),
+            LexicalDoc("en", "p", "config management tool provides backup"),
+        ]
+    )
+
+    assert [hit.chunk_id for hit in index.search("配置管理", top_k=5)] == ["zh"]
+    assert [hit.chunk_id for hit in index.search("备份功能", top_k=5)] == ["zh"]
+    assert [hit.chunk_id for hit in index.search("config management", top_k=5)] == ["en"]
+
+
+def test_bm25_cjk_single_character_and_mixed_script() -> None:
+    """Одиночный иероглиф индексируется; смешанный текст находится с обеих сторон."""
+    index = Bm25Index()
+    index.index(
+        [
+            LexicalDoc("one", "p", "配"),
+            LexicalDoc("mix", "p", "PostgreSQL 配置管理"),
+        ]
+    )
+
+    assert [hit.chunk_id for hit in index.search("配", top_k=5)] == ["one"]
+    assert "mix" in {hit.chunk_id for hit in index.search("配置管理", top_k=5)}
+    assert "mix" in {hit.chunk_id for hit in index.search("PostgreSQL", top_k=5)}
+
+
+def test_bm25_engine_version_reflects_the_tokenization_change() -> None:
+    """Версия правил токенизации поднята: индекс того же текста даёт другую выдачу."""
+    assert Bm25Index.engine_version == "bm25-py-2"

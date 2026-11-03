@@ -38,9 +38,16 @@ class LexicalHit:
 
 
 class Bm25Index:
-    """In-process BM25 (k1=1.5, b=0.75) с фильтром по продукт-партициям (I17)."""
+    """In-process BM25 (k1=1.5, b=0.75) с фильтром по продукт-партициям (I17).
 
-    engine_version = "bm25-py-1"
+    ``engine_version`` — версия **правил токенизации**, а не только кода BM25:
+    ``bm25-py-2`` добавил CJK-биграммы (``core.util.cjk_lexical``), поэтому индекс того
+    же текста даёт другую выдачу. Для EN/RU список токенов не изменился (пин в
+    ``tests/util/test_text_utils.py``), но версия обязана двигаться: контракт
+    лексического плеча — это то, что попадает в индекс.
+    """
+
+    engine_version = "bm25-py-2"
 
     def __init__(self, k1: float = 1.5, b: float = 0.75) -> None:
         self.k1 = k1

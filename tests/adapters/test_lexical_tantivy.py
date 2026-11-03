@@ -805,6 +805,86 @@ def test_ngram_missing_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 # ---------------------------------------------------------------------------
+# CJK-сегментация (schema ``single-body-stem-ru-en-zh-2``)
+# ---------------------------------------------------------------------------
+
+#: Документы точного кейса из плана 18: CJK-фраза без пробелов + английский контроль.
+_CJK_DOCS = [
+    LexicalChunk("zh", PRODUCT_A, "数据库配置管理工具提供了备份功能。"),
+    LexicalChunk("en", PRODUCT_A, "config management tool provides backup"),
+]
+
+
+@requires_tantivy
+def test_cjk_query_inside_unspaced_run_finds_the_document() -> None:
+    """Точный кейс плана 18: запрос-подстрока внутри CJK-серии находит документ.
+
+    До правки (``single-body-stem-ru-en-v1``) обе серии были **одним** термом:
+    «配置管理» и «备份功能» давали 0 хитов, английский контроль — 1. Здесь проверяются
+    все три числа сразу, чтобы «починили CJK» не означало «сломали EN».
+    """
+    with _index(_CJK_DOCS) as index:
+        config = index.search("配置管理", [PRODUCT_A], top_k=5)
+        backup = index.search("备份功能", [PRODUCT_A], top_k=5)
+        english = index.search("config management", [PRODUCT_A], top_k=5)
+    assert [c.chunk_id for c in config] == ["zh"]
+    assert [c.chunk_id for c in backup] == ["zh"]
+    assert [c.chunk_id for c in english] == ["en"]
+
+
+@requires_tantivy
+def test_cjk_single_character_run_is_indexed_and_found() -> None:
+    """Прогон длиной 1 даёт терм-символ: он индексируется и находится запросом."""
+    records = [LexicalChunk("one", PRODUCT_A, "配")]
+    with _index(records) as index:
+        hits = index.search("配", [PRODUCT_A], top_k=5)
+    assert [c.chunk_id for c in hits] == ["one"]
+
+
+@requires_tantivy
+def test_cjk_mixed_script_finds_both_parts() -> None:
+    """«PostgreSQL 配置管理»: находятся и латинская, и CJK-часть одного чанка."""
+    records = [LexicalChunk("mix", PRODUCT_A, "PostgreSQL 配置管理")]
+    with _index(records) as index:
+        by_latin = index.search("PostgreSQL", [PRODUCT_A], top_k=5)
+        by_cjk = index.search("配置管理", [PRODUCT_A], top_k=5)
+    assert [c.chunk_id for c in by_latin] == ["mix"]
+    assert [c.chunk_id for c in by_cjk] == ["mix"]
+
+
+@requires_tantivy
+def test_cjk_query_is_deterministic() -> None:
+    """Один и тот же CJK-запрос дважды даёт ту же выдачу и те же баллы (R7)."""
+    with _index(_CJK_DOCS) as index:
+        first = index.search("配置管理", [PRODUCT_A], top_k=5)
+        second = index.search("配置管理", [PRODUCT_A], top_k=5)
+    assert [(c.chunk_id, c.score) for c in first] == [(c.chunk_id, c.score) for c in second]
+
+
+def test_index_body_view_is_identity_without_cjk() -> None:
+    """Пин EN/RU-плеча: представление поля для текста без CJK — тот же объект строки.
+
+    Анализатор получает ровно ту же строку, что и до правки, поэтому список токенов
+    латиницы/кириллицы не может измениться (список термов дополнительно запинен в
+    ``tests/util/test_text_utils.py``).
+    """
+    text = "Экспорт данных во внешний файл; endpoint API-2024_X."
+    assert lexical_tantivy._index_body_text(text) is text
+    assert lexical_tantivy._query_text(text) is text
+
+
+def test_lexical_schema_declares_the_cjk_version_boundary() -> None:
+    """Схема (``lexical_spec``) объявляет и версию, и шаг сегментации.
+
+    Версия — не комментарий: она входит в ``execution_contract_digest`` и в
+    ``lexical_engine_version``, поэтому пин держит обе адресные строки.
+    """
+    spec = lexical_tantivy.lexical_schema_spec()
+    assert spec["version"] == "single-body-stem-ru-en-zh-2"
+    assert spec["stemmed_analyzer"][0] == "pre:segment:cjk-bigrams(han,kana,hangul)"
+
+
+# ---------------------------------------------------------------------------
 # Нейтральность (§1.3)
 # ---------------------------------------------------------------------------
 

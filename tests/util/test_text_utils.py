@@ -8,6 +8,7 @@ BM25-baseline. Эталон семантики — ``tests/selfcheck.py::_util_t
 
 from __future__ import annotations
 
+from core.util.cjk_lexical import segment_cjk
 from core.util.text_utils import (
     CLOSING_CHARS,
     SENTENCE_END_CHARS,
@@ -59,6 +60,111 @@ def test_tokenize_lexical_lowercases_and_drops_stopwords() -> None:
     assert "data" in tokens
     assert all(token == token.lower() for token in tokens)
     assert not _STOP_WORDS.intersection(tokens)
+
+
+# ---------------------------------------------------------------------------
+# CJK-лексика (план 18, «Сопутствующая работа»): биграммы прогонов и границы
+# ---------------------------------------------------------------------------
+
+
+def test_tokenize_lexical_without_cjk_is_byte_identical_to_legacy() -> None:
+    """Прямой пин: для EN/RU-текста список токенов — **ровно** прежний, по порядку.
+
+    Ожидаемые списки сняты с реализации до CJK-правки
+    (``git show HEAD:core/util/text_utils.py``), а не записаны «по памяти»: сравнение
+    поштучное, поэтому любое изменение порядка, нормализации или фильтра падает.
+    """
+    cases = {
+        "Инспекция трафика и в сети, the of data": ["инспекци", "трафик", "сети", "data"],
+        "PostgreSQL 15 экспортирует данные в файл; API-2024_X — endpoint.": [
+            "postgresql",
+            "15",
+            "экспортирует",
+            "данные",
+            "файл",
+            "api",
+            "2024",
+            "endpoint",
+        ],
+        (
+            "Экспорт данных во внешний файл. Перехват сетевого трафика, "
+            "резервное копирование."
+        ): [
+            "экспорт",
+            "данных",
+            "внешн",
+            "файл",
+            "перехват",
+            "сетев",
+            "трафик",
+            "резервно",
+            "копирован",
+        ],
+        "инспекция инспекции инспекцией a ab abc 42": [
+            "инспекци",
+            "инспекци",
+            "инспекцие",
+            "ab",
+            "abc",
+            "42",
+        ],
+    }
+    for text, expected in cases.items():
+        assert tokenize_lexical(text) == expected
+
+
+def test_segment_cjk_is_identity_for_text_without_cjk() -> None:
+    """Текст без CJK не переписывается: тот же объект строки, а не эквивалент.
+
+    На этом держится неизменность EN/RU-токенизации: путь обёртки — «верни вход».
+    """
+    text = "Экспорт данных во внешний файл; endpoint API-2024_X."
+    assert segment_cjk(text) is text
+    assert segment_cjk("") is not None and segment_cjk("") == ""
+
+
+def test_tokenize_lexical_cjk_run_is_overlapping_bigrams() -> None:
+    """Прогон без пробелов режется на перекрывающиеся биграммы (длина 1 — символ)."""
+    assert tokenize_lexical("配置管理") == ["配置", "置管", "管理"]
+    assert tokenize_lexical("数据库配置管理工具提供了备份功能。") == [
+        "数据", "据库", "库配", "配置", "置管", "管理", "理工", "工具",
+        "具提", "提供", "供了", "了备", "备份", "份功", "功能",
+    ]
+    assert tokenize_lexical("配") == ["配"]
+    assert tokenize_lexical("配。") == ["配"]
+
+
+def test_tokenize_lexical_cjk_punctuation_and_fullwidth_are_boundaries() -> None:
+    """``。！？；，、：``, ``・`` и полноширинные формы — границы прогонов, не текст."""
+    assert tokenize_lexical("配置，管理") == ["配置", "管理"]
+    assert tokenize_lexical("配！置？管；理") == ["配", "置", "管", "理"]
+    assert tokenize_lexical("データ・ベース") == ["デー", "ータ", "ベー", "ース"]
+    # Полноширинная латиница/цифры не становятся CJK-термами и не склеиваются с ними.
+    assert tokenize_lexical("配Ａ置") == ["配", "置"]
+    assert tokenize_lexical("配置　管理") == ["配置", "管理"]  # U+3000 ideographic space
+
+
+def test_tokenize_lexical_mixed_script_keeps_both_parts() -> None:
+    """«PostgreSQL 配置管理» находит и латиницу, и обе части CJK-запроса."""
+    assert tokenize_lexical("PostgreSQL 配置管理") == [
+        "postgresql",
+        "配置",
+        "置管",
+        "管理",
+    ]
+    assert tokenize_lexical("配置管理PostgreSQL") == [
+        "配置",
+        "置管",
+        "管理",
+        "postgresql",
+    ]
+
+
+def test_tokenize_lexical_cjk_is_deterministic() -> None:
+    """Один и тот же текст → один и тот же список токенов (два вызова, два процесса не тут)."""
+    text = "データベース 配置管理 데이터베이스"
+    assert tokenize_lexical(text) == tokenize_lexical(text)
+    assert tokenize_lexical("配置管理") == ["配置", "置管", "管理"]
 
 
 # ---------------------------------------------------------------------------
