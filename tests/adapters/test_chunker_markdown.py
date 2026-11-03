@@ -288,7 +288,7 @@ def test_version_is_a_stack_of_grammar_engine_and_policy() -> None:
     """
     version = MarkdownChunker.version
     assert version.startswith("md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-")
-    assert "/policy-2" in version
+    assert "/policy-3" in version
     assert "mdit-unknown" not in version, "версия движка должна читаться из метаданных"
     assert MarkdownChunker().chunk_overlap == 0
 
@@ -727,3 +727,35 @@ def test_single_chunk_document_has_offsets() -> None:
     assert chunks[0].char_start == 0
     assert chunks[0].char_end == len(chunks[0].text)
     assert chunks[0].text == md
+
+
+def test_offsets_are_against_normalized_text_not_the_raw_input() -> None:
+    """Смещения посчитаны по **нормализованному** тексту, а не по сырому входу.
+
+    ``md_ast`` снимает BOM и приводит ``\\r\\n``/``\\r`` к ``\\n`` до разбора. Если бы
+    ``char_start`` считался по исходной строке (или ``text`` брался из неё), срез в
+    документе разошёлся бы с куском: документ стал бы короче ровно на снятые символы.
+    Проверяется буквально — ``doc_text[char_start:char_end] == text``, и первым делом
+    подтверждается, что нормализованный текст **действительно** не равен входу (иначе
+    тест не про эту дыру).
+    """
+    from core.adapters.md_ast import parse_markdown
+
+    md = (
+        "\ufeff# Раздел\r\n\r\n"
+        + " ".join(f"слово{index}" for index in range(200))
+        + "\r\n"
+    )
+    doc_text = parse_markdown(md).text
+    assert doc_text != md, "вход обязан нормализоваться, иначе кейс не проверяет смещения"
+    assert "\r" not in doc_text and not doc_text.startswith("\ufeff")
+
+    chunks = MarkdownChunker(chunk_size=120).chunk("doc", md)
+
+    assert len(chunks) > 2
+    for chunk in chunks:
+        assert chunk.char_start is not None and chunk.char_end is not None
+        assert doc_text[chunk.char_start : chunk.char_end] == chunk.text
+    # Покрытие — по нормализованному тексту: снятые BOM/CR не оставили «дыры».
+    assert sum(chunk.char_end - chunk.char_start for chunk in chunks) == len(doc_text)
+    assert "".join(chunk.text for chunk in chunks) == doc_text

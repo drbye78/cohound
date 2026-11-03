@@ -152,7 +152,7 @@
 | §1 | ✅ сделано | исторический контекст: все четыре дефекта закрыты MVP-1/2; секция читается в прошедшем времени |
 | §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1472`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1586`; формула — `next_cohort_ref:1566`). Повтор с тем же составом — no-op. Остаётся колонка `runs.cohort_ref`, которая хранит другое поле (§12.2) |
 | §2.3 | ✅ сделано | подкоманды `hound package seeds list/add/disable/enable/export` (`core/cli/package/parser.py:482`, слой — `core/pipeline/package_seeds.py`); `sources/seeds.yaml` в `ARTIFACT_FILES`; ложные подсказки в `context.py`/`corpus.py` стали правдой |
-| §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:2886`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`:3051`), ноль сетевых вызовов (`tests/pipeline/test_corpus_offline.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
+| §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:2959`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`:3124`), ноль сетевых вызовов (`tests/pipeline/test_corpus_offline.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
 | §3.1 | ✅ сделано | `RunProductStatus` — ✅ есть (`core/domain/enums.py`) и сверен со словарём (`run_product_status`). `CoverageFreshness` — **➖ снято**: её роль исполняет `corpus_docs.reuse_kind`, вторая ось свежести была бы вторым носителем одной величины. `MeasurementOrigin` — ✅ волна 2: `observed\|carried`, сверен со словарём (`docs/status-dictionary.yaml:measurement_origin`, `core/domain/dictionary.py`) и несётся ячейкой (`Cell.measurement_origin`) |
 | §3.2 | ➖ снято решением (30.10.2026) | модели живут как `*Row` в `core/ports/state.py`, и это **и есть** их форма; `CellMeasurement`/`RunProduct`/`CompositionMember` как отдельные Pydantic-модели не заводятся — они были бы вторым носителем той же формы (обоснование — §3.2) |
 | §3.3 | ✅ сделано | O1/O2/O3/O12 as-built; **O4 ✅** (run-level `chunk_id` = `product:doc_version_id:chunk_no`, `core/pipeline/corpus_index.py:169`); **O5 ✅** — колонка `cell_evidence.doc_version_id` есть (аддитивно), адрес пишет `evaluate._with_doc_versions` из `chunk_id` (`core/util/ids.py:98` `doc_version_of`), перенос проверяет его **дополнительно** к `content_hash` (`carry_forward._evidence_chain_valid`); остаток — `registry`/`inheritance`-evidence идут с `NULL` (у них нет чанка-версии: `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` читается как «не записано», а не «любая версия»; **O6 ✅** (`carry_forward_cell`), **O13 ✅** в доступной части: перенос инвалидируется сменой `scope_acceptance` через `attestation_digest`, `reviewed`/`N/A` едут только как `carried` с провенансом |
@@ -165,7 +165,7 @@
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277,304`), вызов — `preflight` из `core/cli/commands/run.py:712,774` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
-| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:2826`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
+| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:2875`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
 | §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus_drain.py:1172`; зонд — `corpus_drain.py:1203`), семейство чанкеров — `chunker_family` |
@@ -674,7 +674,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
   сеансовым фильтром были не видны. Какой источник сработал и сколько URL он дал — в
   `notes`, молчаливого выбора нет.
   Ремонт идёт **известными** depth-0 URL (`plan_repair_items`,
-  `core/pipeline/corpus_ingest.py:2886` → `Frontier.add_revalidate_seed`), а не BFS-корнями:
+  `core/pipeline/corpus_ingest.py:2959` → `Frontier.add_revalidate_seed`), а не BFS-корнями:
   провал глубокой страницы не становится seed-корнем и не тратит бюджет чужого корня;
   авторские корни под ремонтом **не дренятся**. Набор берётся ровно из переданного
   множества и **независимо от `ProductMode`**: у продукта, который сейчас `new`/`full`,
@@ -884,7 +884,9 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 (`core/store/state_sqlite.py`); копия ниже — для чтения, и она **не** является
 контрактом. `profile_attestation` появилась в v4 вместе с полосой гейтов; **v5** добавила
 частичность извлечения в `document_version` (`extract_partial`/`extract_partial_reason`/
-`extract_pages_converted`/`extract_page_count` — `core/store/state_sqlite.py:113-138`).
+`extract_pages_converted`/`extract_page_count` — `core/store/state_sqlite.py:145-150`);
+**v7** добавила смещения куска в `chunk_meta` (`char_start`/`char_end` — провенанс
+врезки, без которого переиспользованный chunk-set терял место куска в документе).
 
 > **Дрейф-оговорка.** DDL-копия ниже однажды уже разошлась с кодом (в `run_lineage` не
 > хватало двух аддитивных колонок). Сверять нужно с `STATE_DDL`, а не с этим блоком.
@@ -1005,7 +1007,10 @@ CREATE TABLE chunk_meta (
     chunker_version  TEXT NOT NULL,
     heading_path     TEXT,
     context_prefix   TEXT,
-    lang             TEXT
+    lang             TEXT,
+    -- v7: смещения куска в тексте документа; NULL — кусок не точный срез.
+    char_start       INTEGER,
+    char_end         INTEGER
 );
 
 -- 6. Снимок продукта за прогон (только после eval/coverage).
@@ -2379,7 +2384,7 @@ URL синтетический, фетчить его нельзя, а файл 
 | Семейство / формат | Сигнал | Читатель | Чанкер |
 |---|---|---|---|
 | HTML (страница) | остальное (по умолчанию) | `HtmlExtractor` (trafilatura) | `MarkdownChunker` |
-| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-ast-1:…/policy-2`) |
+| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-ast-1:…/policy-3`) |
 | plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-2`) | `TextChunker` (`text-para-3`) |
 | документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
 | EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-2`) | `MarkdownChunker` |

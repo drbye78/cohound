@@ -127,6 +127,27 @@ def test_sanitize_false_passes_input_untouched_apart_from_main_declaration() -> 
     assert calls[0] == html.replace("<body>", "<body><main>").replace("</body>", "</main></body>")
 
 
+def test_sanitize_false_still_applies_structural_fixes() -> None:
+    """``sanitize=False`` не отключает D2/D3 — они вне пре-клина, и это пин.
+
+    Обещание «флага одна семантика — чистить вход или нет» было ложным с D2:
+    объявление основного блока и нейтрализация списков определений — правки
+    **структуры**, а не удаление активного содержимого. В замерах они обязаны
+    присутствовать во всех колонках, иначе сравнивались бы разные разборы.
+    """
+    fn, calls = _capturing("ok")
+    html = (
+        '<html><body><dl><dt>термин</dt><dd><h3>Примечание</h3>'
+        "<p>текст</p></dd></dl></body></html>"
+    )
+    HtmlExtractor(extract_fn=fn, sanitize=False).extract(_page(html.encode()))
+    sent = calls[0]
+    assert "<dl" not in sent, "D3 не применилась при sanitize=False"
+    assert "<dt" not in sent and "<dd" not in sent
+    assert "<h3>Примечание</h3>" in sent
+    assert "<main>" in sent  # D2 тоже на месте
+
+
 def test_sanitize_can_be_disabled() -> None:
     fn, calls = _capturing("ok")
     HtmlExtractor(extract_fn=fn, sanitize=False).extract(

@@ -1060,6 +1060,10 @@ def _plan_product(
                         heading_path=_as_text(_get(chunk, "heading_path")),
                         context_prefix=_as_text(_get(chunk, "context_prefix")),
                         lang=_as_text(_get(chunk, "lang")),
+                        # L1b-2b: смещения куска — из ``corpus_chunks`` источника как
+                        # есть (``_get`` терпит прогон старой схемы: колонки нет ⇒ None).
+                        char_start=_as_int(_get(chunk, "char_start")),
+                        char_end=_as_int(_get(chunk, "char_end")),
                     ),
                     text,
                 )

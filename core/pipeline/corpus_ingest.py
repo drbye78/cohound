@@ -1287,7 +1287,7 @@ def _accept_chunk_candidates(
     product_id: str,
     document_id: str,
     dv_id: str,
-    candidates: Iterable[tuple[int, str, str, str, str]],
+    candidates: Iterable[tuple[int, str, str, str, str, int | None, int | None]],
     *,
     ingest: ProductIngest,
     seen_chunk_ids: set[str],
@@ -1295,22 +1295,34 @@ def _accept_chunk_candidates(
     url: str,
     lang: str | None,
     embed_model_id: str,
-) -> list[tuple[int, str, str, str]]:
+) -> list[tuple[int, str, str, str, int | None, int | None]]:
     """Допускает чанк-кандидаты в корпус — **единственная** точка I19-гейта чанка.
 
-    Кандидат приходит ``(chunk_no, text, heading_path, context_prefix, provided_hash)``:
-    так выглядит и результат чанкера, и переиспользованный chunk-set. Один гейт на оба
-    пути — иначе «нарезка» и «переиспользование» разошлись бы в проверках, а
-    переиспользование как раз и есть место, где текст не пере-наблюдается.
+    Кандидат приходит ``(chunk_no, text, heading_path, context_prefix, provided_hash,
+    char_start, char_end)``: так выглядит и результат чанкера, и переиспользованный
+    chunk-set. Один гейт на оба пути — иначе «нарезка» и «переиспользование» разошлись бы
+    в проверках, а переиспользование как раз и есть место, где текст не пере-наблюдается.
+
+    Смещения проходят насквозь: гейт их не считает и не выводит из текста — он лишь
+    обязан не терять провенанс, объявленный чанкером (``None``/``None`` у абзацного
+    чанкера — законное значение, а не «нули»).
 
     Отклонение видно (``errors``) и не тихо: чанк без ``content_hash``, чанк с пустым
     текстом и дублирующийся ``chunk_id`` не попадают в корпус, но и не исчезают молча.
 
-    :returns: принятые ``(chunk_no, text, heading_path, context_prefix)`` — вход
-        durable-записи ``chunk_meta``/``chunk_store`` (09 §4.2/§9).
+    :returns: принятые ``(chunk_no, text, heading_path, context_prefix, char_start,
+        char_end)`` — вход durable-записи ``chunk_meta``/``chunk_store`` (09 §4.2/§9).
     """
-    accepted: list[tuple[int, str, str, str]] = []
-    for chunk_no, text, heading_path, context_prefix, provided_hash in candidates:
+    accepted: list[tuple[int, str, str, str, int | None, int | None]] = []
+    for (
+        chunk_no,
+        text,
+        heading_path,
+        context_prefix,
+        provided_hash,
+        char_start,
+        char_end,
+    ) in candidates:
         # I19: у каждого индексируемого чанка обязан быть непустой hash.
         if not provided_hash:
             errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
@@ -1336,6 +1348,10 @@ def _accept_chunk_candidates(
                 chunk_no=chunk_no,
                 text=text,
                 context_prefix=context_prefix,
+                # L1b-2b: смещения куска — провенанс из чанкера (или из
+                # переиспользованного chunk-set), а не вычисленное здесь значение.
+                char_start=char_start,
+                char_end=char_end,
                 # Авторитетный хеш — от чистого текста (I19/§10).
                 content_hash=content_hash(text),
                 # build_id проставляется в Pass B после фиксации id сборки.
@@ -1344,7 +1360,9 @@ def _accept_chunk_candidates(
                 embedded_at=None,
             )
         )
-        accepted.append((chunk_no, text, heading_path, context_prefix))
+        accepted.append(
+            (chunk_no, text, heading_path, context_prefix, char_start, char_end)
+        )
     return accepted
 
 
@@ -1589,9 +1607,12 @@ def finish_one(
         store, [doc], errors, origin=origin, versions_by_doc={document_id: dv_id}
     )
 
-    #: ``(chunk_no, text, heading_path, context_prefix, provided_hash)`` — общая форма
-    #: для чанкера и переиспользованного набора (I19-проверки ниже одинаковы).
-    candidates: list[tuple[int, str, str, str, str]] = []
+    #: ``(chunk_no, text, heading_path, context_prefix, provided_hash, char_start,
+    #: char_end)`` — общая форма для чанкера и переиспользованного набора (I19-проверки
+    #: ниже одинаковы). Смещения входят в кандидат, потому что это провенанс куска:
+    #: без них штатный путь ингеста писал бы ``NULL`` в ``corpus_chunks.char_start``
+    #: (``ingest_member_doc`` — не единственный производитель чанка).
+    candidates: list[tuple[int, str, str, str, str, int | None, int | None]] = []
     if active_reuse is not None:
         candidates = [
             (
@@ -1600,6 +1621,8 @@ def finish_one(
                 chunk.heading_path,
                 chunk.context_prefix,
                 chunk.content_hash,
+                chunk.char_start,
+                chunk.char_end,
             )
             for chunk in active_reuse.chunks
         ]
@@ -1625,23 +1648,29 @@ def finish_one(
                 getattr(chunk, "heading_path", "") or "",
                 getattr(chunk, "context_prefix", "") or "",
                 str(getattr(chunk, "content_hash", "") or "").strip(),
+                # L1b-2b: смещения — как их объявил чанкер; ``None`` у абзацного
+                # чанкера означает «кусок не срез», а не «начало в нуле».
+                getattr(chunk, "char_start", None),
+                getattr(chunk, "char_end", None),
             )
             for chunk in sorted(
                 chunks or [], key=lambda c: getattr(c, "chunk_no", 0)
             )
         ]
 
-    accepted: list[tuple[int, str, str, str]] = _accept_chunk_candidates(
-        product_id,
-        document_id,
-        dv_id,
-        candidates,
-        ingest=ingest,
-        seen_chunk_ids=seen_chunk_ids,
-        errors=errors,
-        url=page.url,
-        lang=page.lang,
-        embed_model_id=embed_model_id,
+    accepted: list[tuple[int, str, str, str, int | None, int | None]] = (
+        _accept_chunk_candidates(
+            product_id,
+            document_id,
+            dv_id,
+            candidates,
+            ingest=ingest,
+            seen_chunk_ids=seen_chunk_ids,
+            errors=errors,
+            url=page.url,
+            lang=page.lang,
+            embed_model_id=embed_model_id,
+        )
     )
 
     # 09 §6.3/§9: версия документа + chunk-set в durable-субстрате. Идентификатор
@@ -3261,6 +3290,8 @@ def offline_reuse_product(
                     chunk.heading_path,
                     chunk.context_prefix,
                     chunk.content_hash,
+                    chunk.char_start,
+                    chunk.char_end,
                 )
                 for chunk in reuse.chunks
             ],

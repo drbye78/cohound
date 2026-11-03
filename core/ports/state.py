@@ -232,6 +232,12 @@ class ChunkRow:
     heading_path: str | None = None
     context_prefix: str | None = None
     lang: str | None = None
+    #: Смещения куска в тексте документа (``corpus_chunks.char_start``/``char_end``).
+    #: ``None``/``None`` — кусок не является точным срезом (абзацный чанкер); ``0``
+    #: здесь недопустим как замена: это было бы утверждением о позиции, которого
+    #: чанкер не делал.
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 @dataclass(frozen=True)

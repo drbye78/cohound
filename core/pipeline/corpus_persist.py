@@ -121,6 +121,12 @@ class ReusedChunk:
     content_hash: str
     heading_path: str
     context_prefix: str
+    #: Смещения куска в тексте документа (L1b-2b). ``None``/``None`` — кусок не является
+    #: точным срезом (абзацный чанкер). Переиспользование обязано вернуть провенанс
+    #: ровно тем, чем он был записан: ``0``/``0`` здесь означало бы «кусок документа
+    #: нулевой длины в начале», то есть выдуманный факт.
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 @dataclass(frozen=True)
@@ -207,6 +213,9 @@ def load_reused_chunks(
                 content_hash=row.content_hash,
                 heading_path=row.heading_path or "",
                 context_prefix=row.context_prefix or "",
+                # Смещения — из durable-записи как есть; ``None`` остаётся ``None``.
+                char_start=row.char_start,
+                char_end=row.char_end,
             )
         )
     return tuple(reused)
@@ -317,7 +326,7 @@ def write_document_state(
     extractor_token: str,
     level_text: str,
     raw_path: Path,
-    chunks: Sequence[tuple[int, str, str, str]],
+    chunks: Sequence[tuple[int, str, str, str, int | None, int | None]],
     partial_fields: Mapping[str, Any],
     partial_known: bool,
     state: ProductStatePort | None,
@@ -350,7 +359,10 @@ def write_document_state(
     ``(байты, движок, уровень)`` дал другой объём работы (пере-извлечение, смена
     окружения), и молчать об этом значило бы терять деградацию так же, как её потерю.
 
-    :param chunks: ``(chunk_no, text, heading_path, context_prefix)`` принятых чанков.
+    :param chunks: ``(chunk_no, text, heading_path, context_prefix, char_start,
+        char_end)`` принятых чанков. Смещения пишутся в ``chunk_meta`` как есть:
+        переиспользование chunk-set обязано вернуть тот же провенанс, иначе документ
+        из повторного прогона потерял бы связь куска с его местом в тексте.
     """
     if state is None:
         return
@@ -385,7 +397,14 @@ def write_document_state(
             )
         run_token = str(run_id or "")
         rows: list[tuple[ChunkRow, str]] = []
-        for chunk_no, text, heading_path, context_prefix in chunks:
+        for (
+            chunk_no,
+            text,
+            heading_path,
+            context_prefix,
+            char_start,
+            char_end,
+        ) in chunks:
             row = ChunkRow(
                 chunk_id=chunk_row_id(dv_id, chunker_version, chunk_no),
                 doc_version_id=dv_id,
@@ -396,6 +415,8 @@ def write_document_state(
                 heading_path=heading_path or None,
                 context_prefix=context_prefix or None,
                 lang=page.lang,
+                char_start=char_start,
+                char_end=char_end,
             )
             rows.append((row, text))
         digest = short_hash(

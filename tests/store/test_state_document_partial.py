@@ -95,9 +95,19 @@ def _build_v4(db_path: Path) -> None:
         conn.close()
 
 
-def test_state_schema_version_is_six() -> None:
-    """v6 — гейт версии вместо миграции: частичность (v5) уже в объявленном DDL."""
-    assert STATE_SCHEMA_VERSION == "6"
+def test_state_schema_version_is_seven() -> None:
+    """v7 — ``chunk_meta.char_start``/``char_end`` в объявленном DDL (без ``ALTER``)."""
+    assert STATE_SCHEMA_VERSION == "7"
+
+
+def test_chunk_meta_carries_chunk_offsets() -> None:
+    """Свежая БД объявляет смещения куска: без них reuse терял провенанс (L1b-2b)."""
+    conn = connect_state(":memory:")
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(chunk_meta)")}
+    finally:
+        conn.close()
+    assert {"char_start", "char_end"} <= columns
 
 
 def test_document_version_carries_partiality_columns() -> None:

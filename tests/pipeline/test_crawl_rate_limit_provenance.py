@@ -52,6 +52,7 @@ from core.ports.types import (
     RawPage,
 )
 from core.store.sqlite_store import SqliteStore
+from core.util.hashing import content_hash
 
 RUN_ID = "run-rate-provenance"
 SESSION_ID = default_session_id(RUN_ID)
@@ -115,31 +116,59 @@ class _Crawler:
 
 
 class _Extractor:
-    """Детерминированный экстрактор: тело страницы как есть."""
+    """Детерминированный экстрактор: тело страницы как есть.
+
+    ``ExtractedDoc`` — доменный тип с обязательными ``text``/``content_hash``/
+    ``extractor_version``: поля ``url``/``title``/``lang`` у него нет, и конструктор с
+    ними падал ``TypeError`` внутри извлечения. Пайплайн ловит сбой экстрактора как
+    грациозную деградацию, поэтому тест оставался зелёным, не доходя ни до чанкера,
+    ни до корпуса.
+
+    Байты берутся **тем же носителем, что у адаптера**: конверсия идёт из строки
+    очереди (F5), ``RawPage.content`` там пуст, тело лежит по ``source_path``. Чтение
+    только ``content`` давало пустой текст — и документ с нулевой длиной.
+    """
 
     version = "extractor-1"
 
     def extract(self, page: RawPage, route: Any = None) -> ExtractedDoc:
-        text = page.content.decode("utf-8", errors="replace")
+        text = _page_bytes(page).decode("utf-8", errors="replace")
         return ExtractedDoc(
-            url=page.url,
             text=text,
-            title=None,
-            lang=None,
-            content_hash="0" * 64,
+            content_hash=content_hash(text),
+            extractor_version=self.version,
         )
 
 
+def _page_bytes(page: RawPage) -> bytes:
+    """Байты страницы: тело или retained-файл (``content`` у строки очереди пуст)."""
+    if page.content:
+        return page.content
+    path = getattr(page, "source_path", None)
+    return Path(path).read_bytes() if path else b""
+
+
 class _Chunker:
-    """Детерминированный чанкер: один чанк на документ."""
+    """Детерминированный чанкер: один чанк на документ (кусок — весь текст, срез).
+
+    Сигнатура — порт ``Chunk(document_id, text)``… точнее, порт-путь
+    ``chunk(doc, document_id)``: прежняя версия принимала второй аргумент только
+    ключевым (``**kwargs``), пайплайн звал позиционно, ``TypeError`` глотался
+    ``try`` вокруг нарезки — тест был зелёным, ни разу не проверив чанк.
+    """
 
     version = "chunker-1"
 
-    def chunk(self, doc: ExtractedDoc, **_: Any) -> list[Chunk]:
+    def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:
         return [
             Chunk(
-                chunk_id=f"{doc.url}#0",
+                chunk_id=f"{document_id}#0",
+                chunk_no=0,
                 text=doc.text,
+                heading_path="",
+                context_prefix="",
+                content_hash=content_hash(doc.text),
+                # Кусок — весь документ, срез честный: смещения не выдуманы.
                 char_start=0,
                 char_end=len(doc.text),
             )
@@ -243,6 +272,12 @@ def test_root_record_carries_rate_limits_per_host_and_metric_uses_them(
         # Пишется туда же, где живёт политика усечения, — в запись корня, не в ``limits``:
         # вежливость не входит в ``crawl_config_digest`` и ``run_id`` не сдвигает.
         assert "rate_limits" not in record["limits"]
+        # Пин антидефекта: чанкер обязан быть вызван по порту, иначе ``TypeError``
+        # глотается ``try`` вокруг нарезки и тест проверяет всё, кроме чанков.
+        chunked = store.conn.execute(
+            "SELECT COUNT(*) AS n FROM corpus_chunks"
+        ).fetchone()["n"]
+        assert chunked > 0, "нарезка не дошла до corpus_chunks"
 
         session = store.get_crawl_session(SESSION_ID)
         metric = build_crawl_metric(
