@@ -4416,7 +4416,7 @@ state/state.db                                 # durable-состояние па
 | **3. Incremental corpus (MVP-3)** | `url_state`/`document_version`; conditional GET; reuse doc/chunks; per-product doc-set | средний | экономия сети/экстракции | ✅ сделано; чанки durable в run DB на границе продукта (§4.7) |
 | **4. Partitions + composition (MVP-4)** | `partition_build_id`; `composition_id`; `CompositionView`; retrieval/lexical | высокий (индексный контур) | добавление продукта не пересобирает старые | ✅ сделано (шаг 1 и шаг 2) |
 | **5. Carry-forward + coverage honesty (MVP-5)** | `cell_reuse_key`; `measurement_origin`; eval cache key; tests | высокий (методология) | экономия LLM + честный отчёт | ✅ **сделано**: перенос ячеек (§10, `tests/pipeline/test_carry_forward.py`), `cells_carried` в снимке/отчёте (§11.4), eval cache key (§10.5, `EVAL_CACHE_FORMAT = 2`). `coverage freshness` — ➖ снят: её роль исполняет `corpus_docs.reuse_kind` |
-| **Later** | per-cell invalidation, sitemap `lastmod`, `seeds` UX, state GC, **измерение** паритета `pb` local/split (шов `/v1/extract/*` и идентичность экстрактора в пространстве ядра — ✅ есть; паритет не измерен), embed cache — ✅ уже есть (`core/cli/context.py:2320`) | — | оптимизация | ⬜ не начато |
+| **Later** | per-cell invalidation, sitemap `lastmod`, `seeds` UX, state GC, **измерение** паритета `pb` local/split (шов `/v1/extract/*` и идентичность экстрактора в пространстве ядра — ✅ есть; паритет не измерен), embed cache — ✅ уже есть (`core/cli/context.py:2827`) | — | оптимизация | ⬜ не начато |
 
 ### 16.2. MVP (3–5 шагов)
 

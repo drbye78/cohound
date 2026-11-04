@@ -99,7 +99,6 @@ from core.domain import (
     CrawlPolicyScopeKind,
     CrawlRunConfig,
     CrawlSessionStatus,
-    RefreshPolicy,
 )
 from core.pipeline import PHASES
 from core.pipeline.crawl_metric import build_crawl_metric
@@ -124,6 +123,7 @@ from core.pipeline.plan import derive_run_id
 from core.pipeline.run_identity import (
     build_execution_contract,
     resolve_cycle_id,
+    resolve_refresh_policy,
     resolve_run_scope,
 )
 from core.pipeline.runner import RunContext
@@ -427,6 +427,10 @@ def _execute_crawl_locked(
         policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
     except CrawlPolicyConflict as exc:
         raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
+    except ValueError as exc:
+        # План 19 §5: неразбираемый ``--refresh-scope`` — отказ использования, а не
+        # «запрос не совпал»: иначе оператор считает, что обновление запрошено.
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     # §13 (2.4.0): декларированные оси — тот же резолвер и deploy-конфиг, что у ``run``
     # (иначе crawl адресовал бы другой ``run_id``/сеанс).
     # P5/P7: операторские оси краула (``--document-level``/``--pdf-pipeline``) входят в
@@ -445,6 +449,16 @@ def _execute_crawl_locked(
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,
     )
+    # План 19 §6.4: ``crawl run`` больше не хардкодит ``AUTO`` — иначе ``run`` и
+    # ``crawl run`` адресовали бы разные сеансы при одном объявленном входе. Политика
+    # наблюдения резолвится той же функцией, что у ``run`` (``--refresh`` > ``run.yaml``
+    # > ``auto``), и уходит **и** в ``run_id``, **и** в исполнение Ш5.
+    try:
+        refresh_policy = resolve_refresh_policy(
+            cli=getattr(args, "refresh", None), run_config=inputs.run
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     run_id = args.run_id or derive_run_id(
         inputs,
         cycle_id=cycle_id,
@@ -452,7 +466,7 @@ def _execute_crawl_locked(
         seeds_digest=seeds_d,
         execution_contract_digest=contract_d,
         run_scope=run_scope,
-        refresh_policy=RefreshPolicy.AUTO.value,
+        refresh_policy=refresh_policy.value,
     )
     # ``_resolve_db_path`` требует явный ``--run-id`` при ``--runs-dir``; выведенный
     # идентификатор фиксируем в args, чтобы crawl адресовал тот же прогон, что run.
@@ -599,6 +613,11 @@ def _execute_crawl_locked(
             # §13 (2.4.0): те же декларированные оси, что у контракта.
             axes=declared,
             declared_status_dict_version=status_dict_version,
+            # План 19 §5/§6.4: политика наблюдения и политика краула — те же значения,
+            # что дали ``run_id``. Иначе ``crawl run`` исполнял бы ``auto`` под чужим
+            # идентификатором.
+            refresh_policy=refresh_policy.value,
+            crawl_policy=policy_resolution,
             # F0: бюджет/окно экстракции — явные входы Ш5 (тот же резолв, что у preflight).
             mem_budget_mb=mem_budget_mb,
             derive_extract_workers=derive_extract_workers,

@@ -153,19 +153,19 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
    `policy_id`, `interval_hours` в материал **не входят** (режим и решение — входят); несовпавшие
    строки — тоже. Отдельного поля для `--refresh-scope` нет: это тот же материал (правило
    «одно поле — один материал», `digests.py:178-188`).
-2. Поле входит в `EXECUTION_CONTRACT_FIELDS` (`digests.py:88`), 29 → **30**. Это объявленная
+2. Поле входит в `EXECUTION_CONTRACT_FIELDS` (`digests.py:89`), 29 → **30**. Это объявленная
    версионная граница: переснять `PINNED_EXECUTION_CONTRACT_DIGEST`
-   (`tests/pipeline/test_corpus_stage_timings.py:74`) и обновить литералы «29 полей»
+   (`tests/pipeline/test_corpus_stage_timings.py:78`) и обновить литералы «29 полей»
    (`AGENTS.md:278`, `09…:3656`, `16-runs-schema-boundary.md:475`, `14…:424`,
    `docs/status-dictionary.yaml:446`).
 3. **`refresh_policy`** уже в `run_id` отдельным слагаемым (`plan.py:112`); `frozen` — новое
    значение. **`frozen_source` канонизируется**: в материал входит только при
    `refresh_policy=frozen`, иначе `n/a` (иначе объявленная, но не действующая ось даёт ложный
    `execution_change`).
-4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`crawl.py:427`): иначе `run` и `crawl run`
-   адресуют разные сеансы при одном объявленном входе.
+4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:457`): иначе
+   `run` и `crawl run` адресуют разные сеансы при одном объявленном входе.
 5. **Неизвестное значение политики — `EXIT_USAGE`, не `auto`.** Тихий fallback
-   (`corpus.py:395-400`) — это сеть по опечатке (AGENTS §2).
+   (`corpus.py:401`) — это сеть по опечатке (AGENTS §2).
 6. Время снятия (`captured_at`) — **провенанс**, не идентичность (как `extractor_version`).
 7. Честная граница: резолв ветки «discovery vs update» читает `url_state`, поэтому **те же
    объявленные входы при сдвинутом `state.db` дают другой корпус** — так уже живёт `auto`
@@ -173,57 +173,59 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 ## 7. Слои работ
 
-### P1 — хранилище, разрешение, CLI, дайджест (сеть не трогается)
+### P1 — хранилище, разрешение, CLI, дайджест (сеть не трогается) — ✅ сделано (`1c42b84`)
 
-- ⬜ Таблица `crawl_policy` (STATE 8), `StorePort`-методы, append-only через `superseded_by`.
-- ⬜ `crawl_policy.yaml` в пакете + загрузчик рядом с `crawl_sources.yaml`.
-- ⬜ Матчер и `resolve_crawl_policy`: приоритет, дефолты, **конфликт равной специфичности**,
-  `crawl_policy_unmatched`, разрешение `scheduled` в `refresh|reuse` по `now - observed_at`
-  (часы — параметр, а не `datetime.now()` внутри: иначе тест на due недетерминирован);
-  тест-матрица «область × специфичность × источник» + «due/не due».
-- ⬜ `hound crawl policy set|list|clear --package … --actor … [--mode …] [--interval-hours N]
-  [--dry-run]` по образцу `hound package profile attest` (lock, append-only,
-  идемпотентность, `--dry-run` не пишет).
-- ⬜ `crawl_policy_digest` в контракте + переснятые пины и литералы §6.2.
-- ⬜ `plan` **печатает** резолв («что было бы запрещено»), но не исполняет — разница `run_id`
-  видна до включения исполнения.
-- ⬜ `_as_refresh_policy` на неизвестном значении — `EXIT_USAGE`.
+- ✅ Таблица `crawl_policy` (STATE 8), `StorePort`-методы, append-only через `superseded_by`
+  (отзыв — самоссылка: tombstone-режима в схеме §4 нет).
+- ✅ `crawl_policy.yaml` в пакете + загрузчик рядом с `crawl_sources.yaml`
+  (`core/config/crawl_policy.py`).
+- ✅ Матчер и `resolve_crawl_policy` (`core/pipeline/crawl_policy.py`): приоритет, дефолты,
+  **конфликт равной специфичности**, `crawl_policy_unmatched`, разрешение `scheduled` в
+  `refresh|reuse` по `now - observed_at` (часы — параметр, а не `datetime.now()` внутри).
+- ✅ `hound crawl policy set|list|clear` по образцу `hound package profile attest`
+  (lock, append-only, идемпотентность, `--dry-run` не пишет).
+- ✅ `crawl_policy_digest` в контракте + переснятые пины и литералы §6.2.
+- ✅ `plan` **печатает** резолв, но не исполняет.
+- ✅ `_as_refresh_policy` на неизвестном значении — `ValueError` → `EXIT_USAGE`.
 
-**Приёмка P1:** две политики с разными режимами дают разные `plan`-`run_id` при прочих равных;
-`--dry-run` не меняет БД (`schema_version`, `count(*)`); конфликт равной специфичности даёт
-`EXIT_USAGE` с токеном и обеими записями.
+**Приёмка P1:** принята — `tests/pipeline/test_crawl_policy.py`
+(`test_digest_ignores_order_and_note_actor_but_tracks_mode`,
+`test_scheduled_due_is_a_decision_and_enters_digest_by_clock`,
+`test_unmatched_is_visible_and_does_not_change_digest`), `tests/cli/test_crawl_policy_cli.py`,
+`tests/store/test_state_schema_gate.py` (v7 отвергается, файл не меняется).
 
-### P2 — исполнение: `on_request` и `network_denied`
+### P2 — исполнение: `on_request` и `network_denied` — ✅ сделано
 
-- ⬜ **Гейт выше первого сетевого вызова**: в начале `_author_root_plans` — **до**
-  `crawl_target`/`expand_directory` (`corpus.py:2733`, регистрация `:2096`), — и до сборки
-  синтетических корней (`:2617`). Гейт во фронтьере (`crawl_frontier.py:1412,1443,1523`)
-  недостаточен: он ниже feed/sitemap-разворота.
-- ⬜ **SERP-контур** глушится политикой с собственным `not_executed_reason` (сейчас только по
-  `OFFLINE`, `corpus.py:1742`); находки фильтруются по корню.
-- ⬜ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks|bytes`
-  (`corpus_drain.py:120`), а не один enum: «разрешена ли сеть» и «откуда корпус» — разные
-  вопросы. `network_denied` = `network_mode=deny`.
-- ⬜ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3124`, «продукт →
-  корень»), а не второй проход; `url_state`/`document_version` не переписываются
-  (`:3173-3177`).
-- ⬜ **Пропуск по политике делает покрытие неполным**: `incomplete_reasons` +
-  `truncated_products` с токеном `crawl_policy_skipped` — тем же каналом, что
-  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1701,2175`). `expected_sources` не имеет права молча
-  уменьшаться: иначе продукт «1 живой + 1 запрещённый корень» получит `complete=True`, а
-  пропуск станет ложным `❌`.
-- ⬜ Политический пропуск **не** идёт через zero-source (`corpus.py:3502`): тот ставит
-  `RunProductStatus.BLOCKED` («несостоявшееся измерение»), то есть ровно противоположное.
-- ⬜ `--refresh-scope`: флаг прогона, паритет `plan`/`run`/`crawl run`, тест инвентаря флагов;
-  значение входит в `crawl_policy_digest`.
-- ⬜ Наблюдаемость: `crawl_network_denied`, `crawl_on_request_not_requested`,
-  `crawl_policy_skipped`, `policy_scope` рядом с `out_of_scope_subdomains`; строки в
-  `results[].notes`.
+- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`corpus.py:2875`) — **до**
+  `crawl_target` (`:2951`) и `expand_directory` (`:2957`), — и до сборки синтетических корней
+  (`_synthetic_root_plans`, `:2801`). Гейт во фронтьере (`crawl_frontier.py:1412,1443,1523`)
+  недостаточен: он ниже feed/sitemap-разворота. Порядок закреплён **AST-тестом**
+  (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
+  вызовов в теле генератора: генератор — это порядок исполнения, текст комментария — нет.
+- ✅ **SERP-контур** глушится политикой с `not_executed_reason=crawl_policy_skipped`
+  (`corpus.py:1836`), находки фильтруются по корню.
+- ✅ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks`
+  (`corpus_drain.py:168,171`), а не один enum. `bytes` появится в P3 — объявлять значение без
+  исполнения значило бы обещать режим, которого нет.
+- ✅ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3128`, «продукт →
+  корень»), а не второй проход; `url_state`/`document_version` не переписываются.
+- ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
+  `incomplete_reasons` + `truncated_products` (`corpus_commit.py:105`) — тем же каналом, что
+  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1736,3136`). `expected_sources` не уменьшается молча.
+- ✅ Политический пропуск **не** идёт через zero-source: ветка `:3742` его исключает, поэтому
+  `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
+- ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
+  (`core/cli/execution_axes.py:199`), паритет `plan`/`run`/`crawl run` по построению; значение
+  входит в `crawl_policy_digest` через оси исполнения (7-кортеж решения), отдельного поля нет.
+- ✅ Наблюдаемость: `crawl_network_denied`, `crawl_on_request_not_requested`,
+  `crawl_policy_skipped`, `policy_scope` (+ `policy_skips` в `product_end`) и строки в
+  `results[].notes` (`corpus_coverage.py:_product_notes`).
 
-**Приёмка P2:** фейковый crawler/search/poller/sitemap **бросает** на любом вызове — в
-`network_denied` и в `on_request` без `--refresh-scope` вызовов ноль; с `--refresh-scope` —
-только названные корни; продукт «1 живой + 1 пропущенный» получает `complete=False`, названный
-токен, `partial`-сеанс и запись в `notes`.
+**Приёмка P2:** принята — `tests/pipeline/test_corpus_crawl_policy.py` (фейковый
+crawler/search/poller/sitemap бросает на любом вызове; в `network_denied` и в `on_request` без
+`--refresh-scope` вызовов ноль, `expand_directory`-шпион не позван), `tests/cli/test_refresh_scope_cli.py`
+(паритет флагов, влияние на `run_id`, `unmatched_requested`, `EXIT_USAGE`). Живого прогона нет —
+это названная граница, а не проверка.
 
 ### P3 — `frozen`: корпус из сохранённых байтов
 

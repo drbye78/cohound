@@ -17,7 +17,9 @@ from core.domain.enums import (
     CapabilityPolicy,
     ChangeClass,
     ContainerEncryption,
+    CrawlCorpusSource,
     CrawlItemStatus,
+    CrawlNetworkMode,
     CrawlPolicyMode,
     CrawlPolicyScopeKind,
     CrawlSessionStatus,
@@ -215,6 +217,11 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # словаря и enum'а молча меняло бы поверхность решений.
         "crawl_policy_mode": {v.value for v in CrawlPolicyMode},
         "crawl_policy_scope": {v.value for v in CrawlPolicyScopeKind},
+        # P2 плана 19: две оси исполнения политики. Они не входят в ``crawl_policy_digest``
+        # напрямую (материал — решение), но являются машинными токенами провенанса корня:
+        # расхождение словаря и enum'а скрыло бы, почему корень не трогал сеть.
+        "crawl_network_mode": {v.value for v in CrawlNetworkMode},
+        "crawl_corpus_source": {v.value for v in CrawlCorpusSource},
         # 17 §4.1: состояние durable-очереди конверсии. Производитель есть — краул
         # (``crawl run --crawl-only``) пишет строки; словарь и enum сверяются, чтобы
         # «краул выполнен» и «корпус собран» не разъехались молча.

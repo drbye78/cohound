@@ -252,14 +252,14 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
   **явным параметром**: `core/pipeline/phases.py:1248` → `core/pipeline/corpus.py:1270` (объявление оси) и
   `:3648`/`:3682` (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
-  (`core/pipeline/corpus.py:1789` — единственный источник этого значения).
+  (`core/pipeline/corpus.py:1914` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
 `EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:88-197`):
 добавляется `embed_device` рядом с `extractor_stack` (та же природа: устройство как условие
 измерения). Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:237`)
-из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:602-662`).
+из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:627-686`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
 (`core/pipeline/digests.py:400-442`) требует точного набора ключей, но вызывается ровно из
@@ -512,7 +512,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
   `source_id`).
 - `docs/status-dictionary.yaml`: `reuse_kind` (`:651`), `run_scope` (`:670`), `pdf_device`
   (`:437`) есть, `embed_device` **нет**, перечня статусов продукта прогона **нет**.
-  Синхронизация обязательна: `core/domain/dictionary.py:76` `assert_dictionary_integrity`,
+  Синхронизация обязательна: `core/domain/dictionary.py:78` `assert_dictionary_integrity`,
   `required`-список (`:144` `reuse_kind`), `checks`-таблица (`:162`); словарь грузится
   selfcheck'ом.
 

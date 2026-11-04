@@ -102,6 +102,47 @@ def persist_partial_crawl_provenance(
         errors.append(f"crawl_provenance(partial): {type(exc).__name__}: {exc}")
 
 
+def record_policy_skip(
+    *,
+    product_id: str,
+    root_url: str,
+    scope: str | None,
+    reasons: Sequence[str],
+    network_mode: str,
+    corpus_source: str,
+    truncation_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Провенанс корня, которому политика запретила сеть (план 19 §P2).
+
+    Форма — та же, что у :func:`record_root_outcome` (``effective_limits.roots`` читает
+    один потребитель), поэтому пропуск виден в том же артефакте, что усечение: корень
+    назван, ``truncated=True``, ``truncated_reason=crawl_policy_skipped``. Сеть при этом
+    не трогалась, поэтому ``pages_fetched=0`` и пустые ``limits`` — измеренный факт, а не
+    «не собрали».
+
+    ``scope`` — машинная метка записи политики (``path:prod@host/docs``); ``reasons`` —
+    токены (``crawl_policy_skipped`` + причина отказа сети). Запись добавляется **в
+    авторском порядке планирования** (слот не занимается: у пропущенного корня нет
+    drain'а, который перезаписал бы слот).
+    """
+    record: dict[str, Any] = {
+        "product_id": product_id,
+        "root": root_url,
+        "pages_fetched": 0,
+        "truncated": True,
+        "truncated_reason": reasons[0] if reasons else "crawl_policy_skipped",
+        "limits": {},
+        "skipped_blacklisted": [],
+        "skipped_documents": [],
+        "policy_scope": scope,
+        "policy_reasons": list(reasons),
+        "network_mode": network_mode,
+        "corpus_source": corpus_source,
+    }
+    truncation_records.append(record)
+    return record
+
+
 def record_root_outcome(
     product_id: str,
     root_url: str,

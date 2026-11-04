@@ -406,14 +406,16 @@ def passports_digest(digests: Mapping[str, str | None]) -> str:
     )
 
 def crawl_policy_digest(
-    decisions: Iterable[tuple[str, str, str | None, str | None, str]],
+    decisions: Iterable[tuple[str, str, str | None, str | None, str, str, str]],
 ) -> str:
     """Дайджест эффективной поверхности решений политики краула (план 19 §6.1), 24 hex.
 
-    Материал — отсортированные кортежи ``(product_id, scope_kind, host, path, decision)``.
-    ``decision`` — **эффективное** решение, а не намерение: для ``scheduled`` это
-    ``refresh``/``reuse``, разрешённое по часам, поэтому два прогона в разные дни не могут
-    получить разные корпуса под одним ``run_id``.
+    Материал — отсортированные кортежи ``(product_id, scope_kind, host, path, decision,
+    network_mode, corpus_source)``. ``decision`` — **эффективное** решение, а не намерение:
+    для ``scheduled`` это ``refresh``/``reuse``, разрешённое по часам, поэтому два прогона в
+    разные дни не могут получить разные корпуса под одним ``run_id``. Две оси исполнения
+    входят в материал потому, что ``--refresh-scope`` меняет их, а не режим: без них запрос
+    обновления менял бы корпус, не меняя ``run_id`` (план 19 §6.1).
 
     **Не** входят: ``note``/``actor``/``created_at``/``policy_id``/``interval_hours`` —
     провенанс записи решения, а не измерение; и строки, не совпавшие ни с одним
@@ -431,8 +433,10 @@ def crawl_policy_digest(
                 None if host is None else str(host),
                 None if path is None else str(path),
                 str(decision),
+                str(network_mode),
+                str(corpus_source),
             )
-            for product_id, scope_kind, host, path, decision in decisions
+            for product_id, scope_kind, host, path, decision, network_mode, corpus_source in decisions
         }
     )
     return short_hash(

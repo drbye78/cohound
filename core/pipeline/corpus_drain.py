@@ -51,7 +51,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from core.domain import (
+    CrawlCorpusSource,
     CrawlItemStatus,
+    CrawlNetworkMode,
     CrawlSessionItem,
     DocumentLevel,
     ExtractQueueItem,
@@ -159,6 +161,20 @@ class RootPlan:
     #: (``effective_limits.roots``) обязан остаться авторским. ``None`` — корень, у
     #: которого слота нет (synthetic-бакеты): запись добавляется в конец.
     record_slot: int | None = None
+    #: План 19 §5/P2: **разрешена ли сеть** для этого корня. ``deny`` — ни одного
+    #: сетевого вызова (ни seed-фетча, ни sitemap/feed-развёртки, ни условного GET).
+    #: Ось независима от ``corpus_source``: «разрешена ли сеть» и «откуда корпус» —
+    #: разные вопросы, и один enum склеил бы их.
+    network_mode: CrawlNetworkMode = CrawlNetworkMode.FETCH
+    #: План 19 §5/P2: откуда берётся корпус — из сети этого прогона либо из
+    #: durable-субстрата пакета (``chunks``).
+    corpus_source: CrawlCorpusSource = CrawlCorpusSource.NETWORK
+    #: Машинная метка области политики (``path:prod@host/docs``), назвавшей это решение.
+    #: ``None`` — политика корень не называла (сеть разрешена, поведение прежнее).
+    policy_scope: str | None = None
+    #: Машинные причины отказа сети (``crawl_network_denied`` ‖
+    #: ``crawl_on_request_not_requested``); идут в провенанс корня и ``notes``.
+    policy_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1353,6 +1369,15 @@ def root_lifecycle(
     inline-фетч на главном потоке схлопнул бы полосы.
     """
     root_url = root.root_url
+    if root.network_mode is CrawlNetworkMode.DENY:
+        # План 19 §P2: гейт политики стоит **выше** этого места (в ``_author_root_plans``
+        # до резолва цели/развёртки каталога). ``deny``-план здесь означает, что гейт
+        # обойдён: молча дренировать его значило бы нарушить запрет сети на первом же
+        # sitemap/GET. Это дефект проводки, а не исход.
+        raise AssertionError(
+            f"{root.root_url}: network_mode=deny дошёл до дренажа — гейт политики краула "
+            "обязан стоять выше первого сетевого вызова (план 19 §P2)"
+        )
     sitemap_seeds = root.sitemap_seeds
     revalidate = root.known_urls
     serp_seeds = root.serp_seeds

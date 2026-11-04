@@ -63,6 +63,7 @@ from core.cli.execution_axes import (
     IdentityFlags,
     add_contract_flags,
     add_crawl_axis_flags,
+    add_refresh_scope_flag,
     add_serp_rounds_flag,
     contract_flag_values,
     declared_status_dict_version,
@@ -147,7 +148,13 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
         policy_lines.append(
             f"crawl policy: {decision['product_id']} [{decision['scope_kind']}] {scope} "
             f"mode={decision['mode']} decision={decision['decision']} "
-            f"source={decision['source']}"
+            f"network={decision.get('network_mode')} corpus={decision.get('corpus_source')} "
+            f"reason={decision.get('reason') or '—'} source={decision['source']}"
+        )
+    for item in policy.get("unmatched_requested") or ():
+        policy_lines.append(
+            f"crawl_policy_unmatched_requested: {item} "
+            "(запрос не совпал ни с одним объявленным корнем)"
         )
     for item in policy.get("unmatched") or ():
         policy_lines.append(
@@ -261,6 +268,10 @@ def run(args: argparse.Namespace) -> int:
         raise CliError(
             str(exc), code=exc.code, exit_code=EXIT_USAGE
         ) from exc
+    except ValueError as exc:
+        # План 19 §5: неразбираемый ``--refresh-scope`` — отказ использования, а не
+        # «запрос не совпал»: иначе оператор считает, что обновление запрошено.
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     if args.run_id is not None:
         result = build_plan(inputs, run_id=args.run_id)
     else:
@@ -365,6 +376,8 @@ def configure(sub: Any) -> None:
     # §13/AGENTS «не менять ось краула на месте»: у ``plan`` те же оси, что у ``run``, —
     # один инвентарь (``CRAWL_AXIS_DESTS``), а паритет флагов закреплён тестом.
     add_crawl_axis_flags(p_plan)
+    # План 19 §5: запрос обновления — тот же флаг и тот же резолв, что у ``run``.
+    add_refresh_scope_flag(p_plan)
     add_serp_rounds_flag(p_plan)
     # §13/I16/I20 + 09 §6.2: **весь** материал ``run_id``, который приходит флагами
     # (контракт, seed-набор, цикл, объём, политика наблюдения); флаги порождены инвентарём

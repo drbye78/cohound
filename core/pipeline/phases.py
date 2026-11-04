@@ -927,6 +927,7 @@ def build_phases(
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    crawl_policy: Any = None,
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     execution_contract_digest: str | None = None,
     axes: Any = None,
@@ -1013,6 +1014,10 @@ def build_phases(
         onboarding-плана; ``None`` ⇒ все продукты трактуются как ``new``.
     :param refresh_policy: политика наблюдения прогона (``auto``|``revalidate``|
         ``refresh``|``offline``) — влияет на условный GET и переиспользование в Ш5.
+    :param crawl_policy: разрешённая политика краула (:class:`CrawlPolicyResolution`,
+        план 19 §P2) — **та же**, что дала ``crawl_policy_digest`` для ``run_id``. Ш5
+        применяет её **до** первого сетевого вызова; ``None`` — поведение прежнее
+        (политики нет: ``fetch``+``network`` у каждого корня).
     :param only_failed_repairs: ``product_id → [url, ...]`` — work-set ремонта
         ``--only-failed`` (резолвится composition root'ом, ``core.cli.context``), идёт в
         Ш5 отдельным входом: ремонт — известные depth-0 URL, а не обход авторских корней,
@@ -1276,6 +1281,9 @@ def build_phases(
             state=state,
             product_modes=product_modes,
             refresh_policy=refresh_policy,
+            # План 19 §P2: гейт сети — вход Ш5, а не решение CLI: резолв уже вошёл в
+            # ``run_id``, и фаза обязана исполнить **тот же** объект.
+            crawl_policy=crawl_policy,
             # ``--only-failed`` (межпрогонный ремонт): разрешённое множество провалов по
             # продукту — depth-0 известные URL, авторские корни не обходятся. ``None`` ⇒
             # прежнее поведение байт-в-байт.

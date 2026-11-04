@@ -155,6 +155,7 @@ __all__ = [
     "IdentityFlags",
     "add_contract_flags",
     "add_crawl_axis_flags",
+    "add_refresh_scope_flag",
     "add_serp_rounds_flag",
     "contract_flag_values",
     "declared_status_dict_version",
@@ -193,6 +194,29 @@ CRAWL_AXIS_DESTS: tuple[str, ...] = (
     "host_concurrency",
     "extract_backlog_mb",
 )
+
+
+def add_refresh_scope_flag(parser: argparse.ArgumentParser) -> None:
+    """Регистрирует ``--refresh-scope`` (план 19 §5) — ручной запрос обновления.
+
+    Один регистратор на ``plan``/``run``/``crawl run``: значение входит в
+    ``crawl_policy_digest`` (то есть в ``run_id``), поэтому разъехавшиеся формы флагов
+    дали бы разные идентичности при одном объявленном входе. Повторяемый; вид значения
+    (product/host/url/mask) разбирает :func:`core.pipeline.crawl_policy.parse_requested_scopes`,
+    а не парсер: продукт опознаётся по пакету, которого парсер не видит.
+    """
+    parser.add_argument(
+        "--refresh-scope",
+        dest="refresh_scope",
+        action="append",
+        default=None,
+        metavar="SCOPE",
+        help=(
+            "ручной запрос обновления для области product|host|url|mask "
+            "(повторяемый); снимает запрет on_request/scheduled на названных корнях и "
+            "входит в crawl_policy_digest (run_id)"
+        ),
+    )
 
 
 def add_crawl_axis_flags(parser: argparse.ArgumentParser) -> None:

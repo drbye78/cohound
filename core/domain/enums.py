@@ -887,6 +887,33 @@ class CrawlPolicyScopeKind(StrEnum):
     PATH = "path"
 
 
+class CrawlNetworkMode(StrEnum):
+    """Разрешены ли сетевые запросы для корня (план 19 §5).
+
+    ``fetch`` — корень живёт обычным путём (фетч, sitemap/feed-развёртка, условный GET);
+    ``deny`` — **ни одного** сетевого вызова, включая развёртку каталогов и внешний поиск.
+    Ось независима от :class:`CrawlCorpusSource`: «разрешена ли сеть» и «откуда берётся
+    корпус» — разные вопросы, и один enum склеил бы их в ложную дихотомию.
+    """
+
+    FETCH = "fetch"
+    DENY = "deny"
+
+
+class CrawlCorpusSource(StrEnum):
+    """Откуда берётся корпус корня (план 19 §5).
+
+    ``network`` — из сети этого прогона; ``chunks`` — из durable-субстрата пакета
+    (``state.db``: ``url_state`` → ``document_version`` → сохранённые чанки), без единого
+    запроса. ``bytes`` (корпус из ``corpus_raw`` с пере-извлечением) появится в P3 —
+    здесь его нет намеренно: объявленная, но не исполняемая ось дала бы ложный
+    ``execution_change``.
+    """
+
+    NETWORK = "network"
+    CHUNKS = "chunks"
+
+
 class ProductScope(StrEnum):
     """Объём прогона по продукту (09 §6.2)."""
 

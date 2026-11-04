@@ -293,14 +293,26 @@ def _product_notes(events: Sequence[Mapping[str, Any]]) -> list[str]:
                 if changes
                 else ""
             )
+            # План 19 §P2: пропуск по политике краула назван **в строке продукта**:
+            # «корень не дал документов» и «сеть запретил режим» — разные факты, и
+            # второй не должен читаться как сбой (I4).
+            skips = [str(item) for item in (event.get("policy_skips") or [])]
+            policy_note = (
+                ", пропущено политикой краула корней "
+                f"{len(skips)}: "
+                + "; ".join(skips[:3])
+                + (f" и ещё {len(skips) - 3}" if len(skips) > 3 else "")
+                if skips
+                else ""
+            )
             notes.append(
                 f"corpus: продукт {event.get('product_id')} — "
                 f"корней {event.get('roots')}, seed'ов поставлено "
                 f"{event.get('seeds_enqueued')} из {event.get('seeds_declared')}, "
                 f"элементов {event.get('session_items')} "
                 f"(fetched {event.get('fetched')}, failed {event.get('failed')}), "
-                f"документов {event.get('docs')}{partial_note}{unknown_note}{changes_note}, "
-                f"{event.get('elapsed_seconds')} с{tail}"
+                f"документов {event.get('docs')}{partial_note}{unknown_note}{changes_note}"
+                f"{policy_note}, {event.get('elapsed_seconds')} с{tail}"
             )
     return notes
 

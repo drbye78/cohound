@@ -313,6 +313,7 @@ def _crawl_policy_resolution(
     from core.pipeline.crawl_policy import (
         declared_roots,
         observations_by_root,
+        parse_requested_scopes,
         resolve_crawl_policy,
     )
     from core.store.state_sqlite import state_db_path
@@ -320,6 +321,13 @@ def _crawl_policy_resolution(
 
     roots = declared_roots(seed_config)
     policy = getattr(inputs, "crawl_policy", None) or CrawlPolicyConfig()
+    # План 19 §5: ``--refresh-scope`` разбирается здесь — продукт опознаётся по
+    # **эффективному** seed-набору, а не по догадке парсера. Ошибка формы — ValueError
+    # (команда переведёт в EXIT_USAGE), а не «запрос не совпал молча».
+    product_ids = {str(pid) for pid in getattr(seed_config, "products", {})}
+    requested = parse_requested_scopes(
+        getattr(args, "refresh_scope", None) or (), product_ids=product_ids
+    )
     package = getattr(args, "package", None)
     rows: list[Any] = []
     observed: dict[tuple[str, str, str], _dt.datetime] = {}
@@ -336,6 +344,7 @@ def _crawl_policy_resolution(
         roots=roots,
         now=now or _dt.datetime.now(_dt.UTC),
         observed_at=observed,
+        requested=requested,
     )
 
 
@@ -2510,6 +2519,7 @@ def _resolve_phases(
     product_plan: Mapping[str, Any] | None = None,
     run_scope: str | None = None,
     refresh_policy: str = "auto",
+    crawl_policy: Any = None,
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     execution_contract_digest: str | None = None,
     axes: Any = None,
@@ -2727,6 +2737,9 @@ def _resolve_phases(
         # неотличим от полного измерения.
         "run_scope": run_scope,
         "refresh_policy": refresh_policy,
+        # План 19 §P2: исполнение политики краула — тем же объектом, что дал
+        # ``crawl_policy_digest`` для ``run_id``. Сеть решает Ш5, а не CLI.
+        "crawl_policy": crawl_policy,
         # ``--only-failed``: work-set ремонта (провалы из сеанса либо ``url_state``) —
         # отдельный вход Ш5: ремонт идёт известными depth-0 URL, а не обходом корней.
         "only_failed_repairs": only_failed_repairs,
@@ -3294,6 +3307,11 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
             "не объявлен; ось входит в run_id при объявлении)"
         ),
     )
+    # План 19 §5/P2: ручной запрос обновления — тот же регистратор, что у ``plan``:
+    # значение входит в ``crawl_policy_digest``, поэтому форма флага не может разъехаться.
+    from core.cli.execution_axes import add_refresh_scope_flag
+
+    add_refresh_scope_flag(parser)
     parser.add_argument(
         "--follow",
         "--watch",

@@ -648,6 +648,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
     except CrawlPolicyConflict as exc:
         raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
+    except ValueError as exc:
+        # План 19 §5: неразбираемый ``--refresh-scope`` — отказ использования, а не
+        # «запрос не совпал»: иначе оператор считает, что обновление запрошено.
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     # R7 (07 §7) + §13 (методология 2.4.0): деплой-конфиг и **декларированные** оси нужны
     # ДО контракта — они входят в него (deploy-профиль, версия seam-схемы, оси краула,
     # стек извлечения). Один резолвер на контракт и манифест: второй формулы нет.
@@ -714,6 +718,13 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         f"host={item.host or '—'} path={item.path or '—'} mode={item.mode.value} "
         f"source={item.source}"
         for item in policy_resolution.unmatched
+    )
+    # План 19 §5: запрос обновления, не совпавший ни с одним объявленным корнем, виден:
+    # иначе оператор считает, что обновил область, а прогон её не тронул.
+    config_notices.extend(
+        f"crawl_policy_unmatched_requested: {item.raw} — запрос не совпал ни с одним "
+        "объявленным корнем"
+        for item in policy_resolution.unmatched_requested
     )
     status_dict_version = declared_status_dict_version()
     contract_d = build_execution_contract(
@@ -1227,6 +1238,8 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 # отличает полное измерение от ``--only-product``/``--only-failed``.
                 run_scope=run_scope,
                 refresh_policy=refresh_policy.value,
+                # План 19 §P2: исполнение политики — тот же объект, что дал ``run_id``.
+                crawl_policy=policy_resolution,
                 # ``--only-failed``: work-set ремонта — отдельный вход Ш5 (не ``urls``:
                 # провал глубокой страницы не становится seed-корнем). Пусто ⇒ прежнее
                 # поведение; продукты без провалов в набор не попадают и не краулятся.

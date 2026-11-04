@@ -750,7 +750,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 - ➖ **A1-профиль публикуемости — реализован**, строка выше устарела: класс и разложение
   неизвестности считаются (`core/domain/scoring.py:1114`), классы
   `PUBLISHABLE`/`PUBLISHABLE_WITH_CAVEAT`/`ANALYTICAL_ONLY`/`NOT_COMPARABLE` объявлены
-  (`core/domain/enums.py:990-993`), причины `UnknownCause` — `core/domain/enums.py:996-1023`,
+  (`core/domain/enums.py:1066-1069`), причины `UnknownCause` — `core/domain/enums.py:1072-1099`,
   артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:2389`), в Ш8 —
   `core/pipeline/compute.py:337`.
 - ❔ **числа CI из абзаца выше не пере-проверялись** 2026-10-28: полный `pytest` не запускался

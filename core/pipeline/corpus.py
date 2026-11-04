@@ -182,6 +182,7 @@ from core.domain import (
     CorpusCoverage,
     CorpusDoc,
     CorpusMember,
+    CrawlCorpusSource,
     CrawlItemStatus,
     CrawlRunConfig,
     CrawlSessionItem,
@@ -280,6 +281,11 @@ from core.pipeline.crawl_frontier import (
     Frontier,
     normalize_scope_host,
     resolve_crawl_limits,
+)
+from core.pipeline.crawl_policy import (
+    CRAWL_POLICY_SKIPPED_REASON,
+    CrawlPolicyResolution,
+    PolicyExecution,
 )
 from core.pipeline.crawl_session import (
     default_session_id,
@@ -820,6 +826,10 @@ class ProductContext:
     #: а не «закрыт последний по порядку»: при объявленной оси последний по порядку
     #: продукт может закрыться, пока корни соседа ещё в полёте.
     closed: bool = False
+    #: План 19 §P2: корни продукта, которые политика запретила (сеть) — строки для
+    #: ``results[].notes``. Список — доказательство, что пропуск был **решением**, а не
+    #: «пустым корпусом»: продукт остаётся на карте (I4), покрытие делает неполным.
+    policy_skips: list[str] = field(default_factory=list)
 
 
 #: Вид synthetic-бакета ревалидации: leftover-группа каталога (feed/channel раскрылся в
@@ -969,6 +979,7 @@ def _run_serp_contour(
     store: Any,
     run_id: str | None,
     errors: list[str],
+    products: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, list[str]]]]:
     """Исполняет SERP-контур **до** дренажа: поиск → допуск → привязка к корням.
 
@@ -996,6 +1007,12 @@ def _run_serp_contour(
     :raises ValueError: ``rounds > 0`` без бюджета (безлимит запрещён выше по стеку; здесь
         — защита от прямого вызова модуля).
     """
+    # ``products`` — сужение по политике краула (план 19 §P2): продукт с полностью
+    # запрещённой сетью не спрашивается вовсе. ``None`` — все продукты ``url_map``
+    # (поведение прежнее).
+    products = sorted(str(pid) for pid in (products if products is not None else url_map))
+    if not products:
+        return _serp_disabled_observation(serp_source, serp_mode), {}
     # Локальный импорт: ``serp_loop`` импортирует ``IndexBuild`` из этого модуля, поэтому
     # модульный импорт дал бы цикл (та же причина, что у ``_worker_extractor_for``).
     from core.domain.enums import SearchPhase
@@ -1015,7 +1032,6 @@ def _run_serp_contour(
             "(run.yaml: serp.budget) — безлимит внешнего поиска запрещён"
         )
 
-    products = sorted(str(pid) for pid in url_map)
     own_hosts, declared_hosts = declared_serp_hosts(url_map, domain_profiles)
     param_rows = list(getattr(plan, "params", None) or [])
     langs = [str(lang) for lang in (serp_langs or ()) if str(lang).strip()]
@@ -1318,6 +1334,7 @@ def _build_corpus(
     state: ProductStatePort | None = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    crawl_policy: CrawlPolicyResolution | None = None,
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     container_for: Callable[[str | Path], ContainerPort | None] | None = None,
     pools: _ExtractPools,
@@ -1520,6 +1537,14 @@ def _build_corpus(
         в состоянии нет, — видимая ошибка (сеть в этой политике отсутствует). Покрытие
         такого прогона неполно по построению: наблюдений **этого** прогона нет
         (``observed_sources=0``, причина ``offline_no_network_observation``).
+    :param crawl_policy: разрешённая политика краула (:class:`CrawlPolicyResolution`,
+        план 19 §P2) — **тот же** объект, что дал ``crawl_policy_digest`` для ``run_id``.
+        Гейт стоит в начале ``_author_root_plans``, то есть **до** резолва цели,
+        развёртки каталога (feed/channel — сеть) и sitemap, и до сборки synthetic-корней.
+        ``deny``-корень не делает ни одного запроса; корпус ``chunks``-корня берётся тем
+        же generalized-проходом, что ``offline`` («продукт → корень»). Каждый пропуск
+        делает покрытие неполным и назван токеном ``crawl_policy_skipped``.
+        ``None`` — политики нет: каждый корень ``fetch``+``network`` (поведение прежнее).
     :param only_failed_repairs: ``product_id → [url, ...]`` — work-set **ремонта**
         (``--only-failed``, межпрогонный носитель ``url_state``; резолвится composition
         root'ом: ``core.cli.context._only_failed_work_set``). Для названного продукта
@@ -1734,6 +1759,34 @@ def _build_corpus(
     policy = _as_refresh_policy(refresh_policy)
     offline = policy is RefreshPolicy.OFFLINE
 
+    def _policy_execution(product_id: str, url: str) -> PolicyExecution:
+        """Исполнение политики для адреса (``fetch``+``network`` без политики).
+
+        Одна точка чтения: и SERP-фильтр, и авторские корни, и synthetic-бакеты
+        спрашивают **эту** функцию, а не пересобирают решение по-своему. Без политики —
+        ``fetch``+``network`` без области: «запретить по умолчанию» было бы решением,
+        которого оператор не принимал.
+        """
+        if crawl_policy is None:
+            return PolicyExecution()
+        return crawl_policy.execution_for(product_id, url)
+
+    def _policy_denied_products() -> set[str]:
+        """Продукты, у которых **все** авторские корни запрещены сетью.
+
+        Нужен SERP-контуру: поиск — сетевой вызов **продукта**, и продукт, у которого
+        сеть запрещена целиком, не спрашивается вовсе. Продукт с хотя бы одним живым
+        корнем остаётся в контуре (находки разложатся в его корни и будут отфильтрованы
+        по корню ниже).
+        """
+        denied: set[str] = set()
+        for pid, roots in url_map.items():
+            if roots and all(
+                _policy_execution(str(pid), str(root)).denied for root in roots
+            ):
+                denied.add(str(pid))
+        return denied
+
     # --- SERP-контур (I3/§5): поиск → допуск → расширение объявленного seed-набора --- #
     # Контур исполняется **внутри** фазы корпуса (не отдельной фазой ``PHASES``) и до
     # дренажа: найденные URL входят в тот же набор, что и авторские, поэтому проходят
@@ -1748,6 +1801,22 @@ def _build_corpus(
     #: 09 §6.3: ``offline`` — ноль сетевых вызовов, и внешний поиск тоже сеть. Контур не
     #: исполняется, но и не молчит: наблюдение называет причину (``not_executed_reason``),
     #: иначе «контур выключен» читалось бы как решение оператора, а не как политика прогона.
+    #: План 19 §P2: продукты, которым политика **разрешила** сеть. ``None`` — политики
+    #: нет: в контуре участвуют все продукты (поведение прежнее). Продукт, у которого
+    #: запрещены все авторские корни, не спрашивается вовсе: поиск — сетевой вызов
+    #: **продукта**, и «запрещённый» не должен платить за соседа.
+    serp_denied_products = (
+        _policy_denied_products() if crawl_policy is not None else set()
+    )
+    serp_allowed_products: list[str] | None = (
+        [pid for pid in sorted(url_map) if pid not in serp_denied_products]
+        if crawl_policy is not None
+        else None
+    )
+    #: План 19 §P2: строки о пропусках по политике (операторский канал). Живут рядом с
+    #: ``offline_notes``, потому что оба называют «почему корпуса этого прогона нет/мало».
+    policy_notes: list[str] = []
+
     if policy is RefreshPolicy.OFFLINE and serp_rounds:
         serp_observation["rounds"]["declared"] = int(serp_rounds)
         serp_observation["rounds"]["not_executed"] = int(serp_rounds)
@@ -1758,6 +1827,13 @@ def _build_corpus(
         serp_observation["rounds"]["declared"] = int(serp_rounds)
         serp_observation["rounds"]["not_executed"] = int(serp_rounds)
         serp_observation["rounds"]["not_executed_reason"] = "consumer_only"
+    elif serp_rounds and serp_allowed_products is not None and not serp_allowed_products:
+        # План 19 §P2: политика запретила сеть **всем** продуктам прогона — внешний
+        # поиск не исполняется. Причина — собственный токен: «контур выключен политикой»,
+        # а не «``offline``» и не «оператор выключил».
+        serp_observation["rounds"]["declared"] = int(serp_rounds)
+        serp_observation["rounds"]["not_executed"] = int(serp_rounds)
+        serp_observation["rounds"]["not_executed_reason"] = CRAWL_POLICY_SKIPPED_REASON
     elif serp_rounds:
         try:
             serp_observation, serp_seeds_by_product = _run_serp_contour(
@@ -1776,12 +1852,35 @@ def _build_corpus(
                 store=store,
                 run_id=run_id,
                 errors=errors,
+                # План 19 §P2: спрашиваются только продукты с разрешённой сетью.
+                products=serp_allowed_products,
             )
         except ValueError:
             # Безлимит/битый конфиг — не «частичный успех»: отказ обязан дойти до вызывающего.
             raise
         except Exception as exc:  # noqa: BLE001 — контур не роняет объявленную фазу
             errors.append(f"serp: проход не исполнен: {type(exc).__name__}: {exc}")
+        # План 19 §P2: находки фильтруются **по корню**: поиск продукта мог отработать
+        # (у него есть живой корень), но найденный URL принадлежит запрещённому корню —
+        # ставить его seed'ом значило бы сделать запрос под запретом.
+        dropped_serp = 0
+        for pid in list(serp_seeds_by_product):
+            by_root = serp_seeds_by_product[pid]
+            for root_url in list(by_root):
+                if _policy_execution(pid, root_url).denied:
+                    dropped_serp += len(by_root.pop(root_url))
+            if not by_root:
+                serp_seeds_by_product.pop(pid)
+        if dropped_serp:
+            policy_notes.append(
+                f"corpus: crawl_policy — находок SERP в запрещённых корнях "
+                f"отброшено {dropped_serp} (сеть корня запрещена политикой)"
+            )
+        if serp_denied_products:
+            policy_notes.append(
+                "corpus: crawl_policy — внешний поиск не исполнялся для продуктов "
+                f"с запрещённой сетью: {', '.join(sorted(serp_denied_products))}"
+            )
 
     # Объём корпуса = продукты **с эффективными seed'ами**, а не весь план: при
     # ``--only-product``/``--only-failed`` ``urls`` уже сужен фильтром, и запись
@@ -2353,6 +2452,11 @@ def _build_corpus(
     #: карта, потому что ``zero_source_reasons`` управляет статусом (``blocked``), а здесь
     #: речь о честности покрытия: наблюдений не было, даже если документы переиспользованы.
     offline_reasons: dict[str, str] = {}
+    #: План 19 §P2: ``product_id → crawl_policy_skipped`` для продуктов, у которых **нет
+    #: элементов сеанса** (все корни запрещены политикой). Отдельная карта от
+    #: ``incomplete_reasons``: та применяется, когда элементы есть, и иначе продукт без
+    #: единого элемента назвался бы ``no_seeds`` — «seed'ов нет» вместо «сеть запрещена».
+    policy_zero_reasons: dict[str, str] = {}
     #: Advisory-очередь «что осталось человеку» (``PhaseResult.pending``): zero-source
     #: продукты видны в конце фазы корпуса — **до** дорогой Ш6, а не только в отчёте.
     zero_source_pending: list[str] = []
@@ -2623,6 +2727,77 @@ def _build_corpus(
             record_slot=plan.record_slot,
         )
 
+    def _policy_skip(
+        product_id: str,
+        root_url: str,
+        execution: PolicyExecution,
+        *,
+        known_urls: Sequence[str] = (),
+        author_seed: bool = True,
+    ) -> None:
+        """Видимый пропуск корня политикой (план 19 §P2): провенанс, покрытие, субстрат.
+
+        Зовётся **из гейта планов** — до резолва цели, развёртки каталога (feed/channel)
+        и sitemap, — поэтому «ни одного запроса» здесь не обещание, а следствие места
+        вызова. Пропуск делает продукт неполным (``crawl_policy_skipped`` в
+        ``truncated_products`` и ``incomplete_reasons``) и **не** идёт через zero-source:
+        продукт остаётся на карте (I4), а не превращается в ``BLOCKED``
+        («несостоявшееся измерение» — это другой случай).
+
+        ``chunks``-корень берёт корпус тем же обобщённым проходом, что ``offline``
+        («продукт → корень»), а не вторым путём: ``url_state``/``document_version`` там
+        не переписываются, поэтому следующий живой прогон не примет переиспользованное
+        за наблюдённое.
+        """
+        reason = CRAWL_POLICY_SKIPPED_REASON
+        reasons = [reason, *([execution.reason] if execution.reason else [])]
+        if author_seed:
+            # Synthetic-бакет не пишет запись усечения (у него нет авторского seed'а —
+            # как и раньше: его дренаж не финализируется). Покрытие при этом не молчит.
+            corpus_commit.record_policy_skip(
+                product_id=product_id,
+                root_url=root_url,
+                scope=execution.scope,
+                reasons=reasons,
+                network_mode=execution.network_mode.value,
+                corpus_source=execution.corpus_source.value,
+                truncation_records=truncation_records,
+            )
+        truncated_products.add(product_id)
+        coverage_incomplete.setdefault(product_id, reason)
+        policy_zero_reasons.setdefault(product_id, reason)
+        ctx = contexts.get(str(product_id))
+        detail = ", ".join(reasons)
+        scope_text = execution.scope or "policy"
+        if ctx is not None:
+            ctx.policy_skips.append(f"{root_url} — {detail} ({scope_text})")
+        policy_notes.append(
+            f"corpus: crawl_policy {product_id} {root_url} — сеть запрещена "
+            f"({detail}; область {scope_text}); корпус: "
+            f"{execution.corpus_source.value}"
+        )
+        if execution.corpus_source is not CrawlCorpusSource.CHUNKS or ctx is None:
+            return
+        report = _offline_reuse_product(
+            product_id,
+            [*([root_url] if author_seed else []), *known_urls],
+            [],
+            state=state,
+            errors=errors,
+            chunker_version=resolved_chunker_version,
+            embed_model_id=embed_model_id,
+            store=store,
+            ingest=ctx.ingest,
+            seen_docs=ctx.seen_docs,
+            seen_chunk_ids=ctx.seen_chunk_ids,
+            duplicates=duplicates,
+            doc_counters=doc_counters,
+            partial_unknown_products=partial_unknown_products,
+            persist_docs=_persist_docs,
+            label="crawl_policy",
+        )
+        policy_notes.append(report.note(product_id))
+
     def _synthetic_root_plans(
         ctx: ProductContext,
     ) -> Iterator[corpus_drain.RootPlan]:
@@ -2646,6 +2821,18 @@ def _build_corpus(
                 continue
             if not known_urls:
                 continue
+            # План 19 §P2: synthetic-бакет ревалидации — сеть. Политика проверяется до
+            # постановки плана в поток, то есть до первого вызова.
+            bucket_execution = _policy_execution(ctx.product_id, group_root)
+            if bucket_execution.denied:
+                _policy_skip(
+                    ctx.product_id,
+                    group_root,
+                    bucket_execution,
+                    known_urls=known_urls,
+                    author_seed=False,
+                )
+                continue
             yield corpus_drain.RootPlan(
                 root_url=group_root,
                 target=None,
@@ -2654,9 +2841,22 @@ def _build_corpus(
                 seed=False,
                 product_id=ctx.product_id,
                 synthetic_kind=_SYNTHETIC_CATALOG,
+                network_mode=bucket_execution.network_mode,
+                corpus_source=bucket_execution.corpus_source,
+                policy_scope=bucket_execution.scope,
             )
         for origin, selected_urls in ctx.orphan_buckets.items():
             if not selected_urls:
+                continue
+            bucket_execution = _policy_execution(ctx.product_id, origin)
+            if bucket_execution.denied:
+                _policy_skip(
+                    ctx.product_id,
+                    origin,
+                    bucket_execution,
+                    known_urls=selected_urls,
+                    author_seed=False,
+                )
                 continue
             yield corpus_drain.RootPlan(
                 root_url=origin,
@@ -2666,6 +2866,9 @@ def _build_corpus(
                 seed=False,
                 product_id=ctx.product_id,
                 synthetic_kind=_SYNTHETIC_ORPHAN,
+                network_mode=bucket_execution.network_mode,
+                corpus_source=bucket_execution.corpus_source,
+                policy_scope=bucket_execution.scope,
             )
 
 
@@ -2702,6 +2905,21 @@ def _build_corpus(
         сделал бы ленивый генератор читателем чужого продукта.
         """
         for url in author_urls:
+            # --- План 19 §P2: ГЕЙТ ПОЛИТИКИ — выше первого сетевого вызова. -------- #
+            # Здесь **до** резолва цели (``crawl_target``), развёртки каталога
+            # (``expand_directory``: feed/channel — сеть) и до постановки sitemap-корня
+            # (развёртка sitemap — тоже сеть, ниже в ``root_lifecycle``). Гейт во
+            # фронтьере недостаточен: он исполняется **после** этих вызовов, то есть
+            # запрет сети нарушался бы ещё до фронтьера.
+            execution = _policy_execution(product_id, url)
+            if execution.denied:
+                _policy_skip(
+                    product_id,
+                    url,
+                    execution,
+                    known_urls=revalidation_groups.get(url, ()),
+                )
+                continue
             prior_item = items.get((product_id, url))
 
             # Phase 4: потолок попыток (``--max-attempts``). URL, уже исчерпавший попытки,
@@ -2750,6 +2968,12 @@ def _build_corpus(
                         known_urls=revalidation_groups.get(url, ()),
                         serp_seeds=serp_seeds_by_root.get(url, ()),
                         product_id=product_id,
+                        # План 19 §P2: решение политики едет **значением** корня: драйвер
+                        # и дренаж видят его без повторного разрешения, а ``deny`` туда
+                        # попасть не может — гейт выше.
+                        network_mode=execution.network_mode,
+                        corpus_source=execution.corpus_source,
+                        policy_scope=execution.scope,
                     )
                 ]
             else:
@@ -2775,6 +2999,12 @@ def _build_corpus(
                             known_urls=revalidation_groups.get(entry_url, ()),
                             serp_seeds=serp_seeds_by_root.get(entry_url, ()),
                             product_id=product_id,
+                            # Запись каталога наследует решение **источника**: политика
+                            # назвала корень-каталог, а записи — его раскрытие, а не
+                            # самостоятельные объявленные корни.
+                            network_mode=execution.network_mode,
+                            corpus_source=execution.corpus_source,
+                            policy_scope=execution.scope,
                         )
                     )
 
@@ -3501,7 +3731,16 @@ def _build_corpus(
         # ``and not manual_resolved``: продукт, чей материал предъявлен объявленным
         # артефактом, без источников **не** остался — иначе ошибка утверждала бы
         # пустой корпус при непустом.
-        elif session is not None and not product_items and not manual_resolved:
+        elif (
+            session is not None
+            and not product_items
+            and not manual_resolved
+            # План 19 §P2: пустой сеанс из-за политики — не zero-source. Здесь
+            # ``BLOCKED`` означал бы «измерение не состоялось», а политический пропуск —
+            # решение с известной причиной: продукт остаётся на карте (I4), покрытие
+            # неполно и названо токеном ``crawl_policy_skipped``.
+            and not ctx.policy_skips
+        ):
             # Истинная причина вместо единой константы ``no_seeds``: пустой seed-набор,
             # полностью отклонённые seed'ы и отсутствие записи в ``urls`` — разные пути.
             if product_id not in url_map:
@@ -3585,6 +3824,9 @@ def _build_corpus(
                 # Строка версии могла быть записана до v5 (признак не сохранялся), и
                 # переиспользование такой версии не вправе молчать об этом.
                 "partial_unknown": len(partial_unknown_products.get(product_id, [])),
+                # План 19 §P2: корни, пропущенные политикой (сеть запрещена). Поле есть
+                # всегда: пустой список — «политика никого не запретила», а не «не считали».
+                "policy_skips": list(ctx.policy_skips),
                 # v5: смены частичности (было частично → стало полное и обратно): тот же
                 # ключ дал другой объём работы. Не ошибка, но обязано быть видно.
                 "partiality_changes": [
@@ -3857,7 +4099,13 @@ def _build_corpus(
                     truncated_products,
                     _now_iso(),
                     products=[product_id],
-                    reasons={**zero_source_reasons, **offline_reasons},
+                    reasons={
+                        **zero_source_reasons,
+                        **offline_reasons,
+                        # План 19 §P2: у продукта не было ни одного элемента, потому
+                        # что политика запретила сеть, — причина называется ею.
+                        **policy_zero_reasons,
+                    },
                     resolved_manually=manual_urls_by_product,
                     partial_docs=partial_urls_by_product,
                     # ``--only-failed``: ремонт не наблюдал продукт целиком.
@@ -4027,7 +4275,13 @@ def _build_corpus(
                 truncated_products,
                 _now_iso(),
                 products=products,
-                reasons={**zero_source_reasons, **offline_reasons},
+                reasons={
+                        **zero_source_reasons,
+                        **offline_reasons,
+                        # План 19 §P2: у продукта не было ни одного элемента, потому
+                        # что политика запретила сеть, — причина называется ею.
+                        **policy_zero_reasons,
+                    },
                 resolved_manually=manual_urls_by_product,
                 # I2/I2c: та же карта, что на границе продукта — конец фазы
                 # перезаписывает строки покрытия и обязан сохранить причину.
@@ -4328,6 +4582,9 @@ def _build_corpus(
         # 09 §6.3: оффлайн-проход — по строке на продукт. Строка нужна оператору: без неё
         # «корпус собрался» читалось бы как «сайт прочитан», хотя сети не было вовсе.
         *offline_notes,
+        # План 19 §P2: пропуски по политике краула — по строке на корень. Без неё
+        # «корень не дал документов» читалось бы как сбой, хотя сеть запретил режим.
+        *policy_notes,
         # 17 §6 (F4b): факты о полосах — по строке на продукт, и только когда ось
         # ``crawl.host_concurrency`` объявлена. Тихая замена «полос N» на «работали
         # последовательно» была бы ровно тем дефектом, который ось обязана называть.

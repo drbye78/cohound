@@ -3110,12 +3110,16 @@ class OfflineReuseReport:
     no_version: tuple[str, ...] = ()
     unknown_roots: tuple[str, ...] = ()
     urls: tuple[str, ...] = ()
+    #: Метка политики в операторской строке: ``offline`` (прогон целиком) ‖
+    #: ``crawl_policy`` (корень, которому политика запретила сеть). Один проход —
+    #: два повода; читатель обязан их различать, не сравнивая корпуса.
+    label: str = "offline"
 
     def note(self, product_id: str) -> str:
-        """Операторская строка продукта: оффлайн-проход и его цена в наблюдении."""
+        """Операторская строка продукта: проход и его цена в наблюдении."""
         return (
-            f"corpus: offline {product_id} — переиспользовано документов {self.reused} "
-            f"(чанков {self.chunks}), переиспользовать нечего "
+            f"corpus: {self.label} {product_id} — переиспользовано документов "
+            f"{self.reused} (чанков {self.chunks}), переиспользовать нечего "
             f"{len(self.no_version)}, корней вне состояния {len(self.unknown_roots)}; "
             "сеть не трогалась, наблюдений этого прогона нет (❌ не публикуется)"
         )
@@ -3138,6 +3142,7 @@ def offline_reuse_product(
     doc_counters: dict[str, dict[str, int]],
     partial_unknown_products: dict[str, list[str]],
     persist_docs: Callable[..., None],
+    label: str = "offline",
 ) -> OfflineReuseReport:
     """Оффлайн-проход продукта: корпус из durable-субстрата, **ноль сетевых вызовов**.
 
@@ -3180,6 +3185,12 @@ def offline_reuse_product(
     документ честно называется переиспользованным, а не наблюдённым.
 
     :returns: :class:`OfflineReuseReport` — что переиспользовано и что не удалось.
+
+    ``label`` называет **повод** прохода: ``offline`` — политика наблюдения прогона
+    целиком; ``crawl_policy`` — корень, которому политика краула запретила сеть
+    (``network_denied`` ‖ ``on_request`` без запроса). Проход один и тот же («продукт →
+    корень»), различается провенанс: переиспользование по политике не означает, что
+    оператор просил ``offline``.
     """
     report_reused = 0
     report_chunks = 0
@@ -3192,11 +3203,20 @@ def offline_reuse_product(
     # Корни идут первыми, потому что они — авторское решение: если корень недоступен
     # оффлайн, это первое, что должен увидеть оператор.
     ordered: list[str] = [*roots, *(item.url for item in items)]
+
+    def _reason(text: str) -> str:
+        """Причина с меткой повода: ``offline`` (прогон) ‖ ``crawl_policy`` (корень).
+
+        Один проход — два повода; текст ошибки обязан называть тот, который случился,
+        иначе оператор искал бы «--refresh offline» там, где сеть запретил режим корня.
+        """
+        return text if label == "offline" else text.replace("offline:", f"{label}:", 1)
+
     for url in ordered:
         key = _state_url_key(url)
         if key is None:
             errors.append(
-                f"{product_id}/{url}: offline: URL не нормализуется — "
+                f"{product_id}/{url}: {label}: URL не нормализуется — "
                 "переиспользование невозможно (состояние по нему не ведётся)"
             )
             continue
@@ -3213,7 +3233,7 @@ def offline_reuse_product(
         prior = _prior_url_state(product_id, key, url, state=state, errors=errors)
         if prior is None:
             unknown_roots.append(url)
-            errors.append(f"{product_id}/{url}: {OFFLINE_UNKNOWN_ROOT_TEXT}")
+            errors.append(f"{product_id}/{url}: {_reason(OFFLINE_UNKNOWN_ROOT_TEXT)}")
             continue
         prior_doc = _prior_document_version(
             prior, product_id, url, state=state, errors=errors
@@ -3232,7 +3252,7 @@ def offline_reuse_product(
             # называется здесь: молча пропустить документ значило бы выдать пропуск за
             # переиспользование.
             no_version.append(url)
-            errors.append(f"{product_id}/{url}: {OFFLINE_NO_VERSION_TEXT}")
+            errors.append(f"{product_id}/{url}: {_reason(OFFLINE_NO_VERSION_TEXT)}")
             continue
 
         doc_hash = str(reuse.doc_version.content_hash or "")
@@ -3241,7 +3261,7 @@ def offline_reuse_product(
             # её значило бы выдумать идентичность контента.
             errors.append(
                 f"I19: {product_id}/{url}: durable-версия без content_hash — "
-                "переиспользование отклонено (offline)"
+                f"переиспользование отклонено ({label})"
             )
             no_version.append(url)
             continue
@@ -3312,6 +3332,7 @@ def offline_reuse_product(
         no_version=tuple(no_version),
         unknown_roots=tuple(unknown_roots),
         urls=tuple(touched),
+        label=label,
     )
 
 
