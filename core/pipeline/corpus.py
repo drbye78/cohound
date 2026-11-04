@@ -260,10 +260,12 @@ from core.pipeline.corpus_index import (  # noqa: F401
 #: Из ``corpus_ingest`` этот модуль читает ``ProductIngest``/``terminal_failure_kind`` сам;
 #: ``PARTIAL_REASON_UNSTATED`` адресуют тесты по ``corpus`` (``noqa: F401``).
 from core.pipeline.corpus_ingest import (  # noqa: F401
+    CAPTURE_OBSERVED_LIVE,
     PARTIAL_REASON_UNSTATED,
     ProductIngest,
     terminal_failure_kind,
 )
+from core.pipeline.corpus_ingest import capture_id_for as _capture_id_for
 from core.pipeline.corpus_ingest import frozen_bytes_product as _frozen_bytes_product
 from core.pipeline.corpus_ingest import offline_reuse_product as _offline_reuse_product
 from core.pipeline.corpus_ingest import persist_docs as _persist_docs
@@ -349,6 +351,7 @@ from core.ports.extractor import ExtractorPort
 from core.ports.index_builder import IndexBuilderPort
 from core.ports.poller import PollPort
 from core.ports.state import (
+    CaptureRow,
     CorpusCaptureRow,
     IndexCompositionRow,
     IndexPartitionRow,
@@ -2787,6 +2790,54 @@ def _build_corpus(
             errors=errors,
             record_slot=plan.record_slot,
         )
+        _record_root_capture(plan, outcome.frontier, ctx.product_id)
+
+    def _record_root_capture(
+        plan: corpus_drain.RootPlan,
+        frontier: Frontier,
+        product_id: str,
+    ) -> None:
+        """План 20 §3: записать снятие **живого** обхода корня на его границе.
+
+        Создаётся здесь, потому что только здесь известен исход дренажа: ``complete`` —
+        исчерпан ли обход (не усечён ``max_*``, не пропущены документы уровнем ``off``,
+        не отказано ``robots.txt``). Пропущенный политикой корень сюда не доходит вовсе
+        (гейт стоит до дренажа), synthetic-бакет — тоже (это не авторский корень).
+
+        Дайджесты здесь **не считаются**: на границе корня их ещё нет, а на границе
+        продукта они уже посчитаны (``coverage_digest(product_coverage)`` и
+        ``corpus_doc_set_digest(ingest.docs)``). Снятие сначала пишется без них и
+        догоняется той же строкой (``record_capture`` обновляет дайджесты, не трогая
+        ``started_at``): второй расчёт не появляется.
+
+        ``policy_digest`` — ``crawl_policy_digest`` прогона (тот же объект, что дал
+        ``run_id``): F3 сравнит его с объявленным, поэтому второй формулы нет.
+        """
+        if state is None or run_id is None:
+            return
+        complete = not (
+            frontier.truncated
+            or frontier.skipped_documents
+            or frontier.robots_refused
+        )
+        capture = CaptureRow(
+            capture_id=_capture_id_for(product_id, plan.root_url, run_id),
+            product_id=product_id,
+            run_id=run_id,
+            root_url=plan.root_url,
+            started_at=frontier.started_at or _now_iso(),
+            finished_at=_now_iso(),
+            complete=complete,
+            observed_how=CAPTURE_OBSERVED_LIVE,
+            policy_digest=None if crawl_policy is None else crawl_policy.digest,
+        )
+        try:
+            state.record_capture(capture)
+        except Exception as exc:  # noqa: BLE001 — снятие вторично к дренажу
+            errors.append(
+                f"{product_id}/{plan.root_url}: capture: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _policy_skip(
         product_id: str,
@@ -4247,12 +4298,17 @@ def _build_corpus(
         # документы и чанки дальше существуют только в БД. ``product_chunks`` отсоединяется
         # от объекта, а затем и локальная ссылка снимается: иначе список чанков прожил бы
         # до следующей итерации, то есть ровно тот пик, который снимается.
-        # План 19 §P3: отпечаток doc-set **этого** прогона считается до освобождения
-        # продукта из памяти. ``document_version`` в state пишется только живым путём:
-        # ``frozen`` его не пишет, поэтому state-субстрат описал бы не этот корпус.
-        frozen_doc_set_digest = (
-            corpus_doc_set_digest(ingest.docs) if frozen else None
+        # План 19 §P3 / план 20 §3: отпечаток doc-set **этого** прогона считается до
+        # освобождения продукта из памяти. ``document_version`` в state пишется только
+        # живым путём: ``frozen`` его не пишет, поэтому state-субстрат описал бы не этот
+        # корпус. Считается и для живого пути: снятие корня догоняется им на границе
+        # продукта (второго расчёта нет — та же функция на тех же документах).
+        product_doc_set_digest = (
+            corpus_doc_set_digest(ingest.docs)
+            if frozen or (state is not None and run_id is not None)
+            else None
         )
+        frozen_doc_set_digest = product_doc_set_digest if frozen else None
         counters.doc_count += len(ingest.docs)
         ingest.chunk_count = len(product_chunks)
         ingest.distinct_docs = len(product_chunk_counts)
@@ -4315,6 +4371,40 @@ def _build_corpus(
             except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
                 errors.append(
                     f"corpus_coverage({product_id}): {type(exc).__name__}: {exc}"
+                )
+
+        # План 20 §3: снятия живых корней догоняются дайджестами на границе продукта —
+        # здесь они уже посчитаны (``product_coverage`` + ``product_doc_set_digest``),
+        # второго расчёта нет. Строка узнаётся по ``run_id`` и ``observed_how='live'``:
+        # ``started_at``/``finished_at``/``complete`` уже записаны на границе корня.
+        if (
+            state is not None
+            and run_id is not None
+            and product_doc_set_digest is not None
+        ):
+            try:
+                live_coverage_digest = coverage_digest(product_coverage)
+                live_policy_digest = (
+                    None if crawl_policy is None else crawl_policy.digest
+                )
+                live_doc_set_digest = product_doc_set_digest
+                for capture in state.iter_captures(product_id):
+                    if (
+                        capture.run_id != run_id
+                        or capture.observed_how != CAPTURE_OBSERVED_LIVE
+                    ):
+                        continue
+                    state.record_capture(
+                        replace(
+                            capture,
+                            coverage_digest=live_coverage_digest,
+                            doc_set_digest=live_doc_set_digest,
+                            policy_digest=live_policy_digest,
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001 — снятие вторично к корпусу
+                errors.append(
+                    f"{product_id}: capture digests: {type(exc).__name__}: {exc}"
                 )
 
         # План 19 §P3: запись снятия корпуса — после покрытия (оно часть записи) и

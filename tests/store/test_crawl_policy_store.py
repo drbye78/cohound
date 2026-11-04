@@ -161,10 +161,10 @@ def test_read_observations_filters_without_last_checked(tmp_path: Path) -> None:
         store.close()
 
 
-def test_schema_version_is_ten_and_table_declared(tmp_path: Path) -> None:
+def test_schema_version_and_table_declared(tmp_path: Path) -> None:
     conn = connect_state(tmp_path / "state.db")
     try:
-        assert STATE_SCHEMA_VERSION == "10"
+        assert STATE_SCHEMA_VERSION == "11"
         columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(crawl_policy)")
         }

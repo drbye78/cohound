@@ -69,6 +69,7 @@ from core.pipeline.corpus_ingest import (
     RetainedRaw,
     RetainedReject,
     SitemapSeeds,
+    capture_id_for,
     looks_like_html,
     resume_retained,
     terminal_failure_kind,
@@ -516,6 +517,7 @@ def root_steps(
     _commit: Callable[..., None],
     _await_disk: Callable[[], bool],
     _await_backlog: Callable[[], str | None],
+    capture_id: str | None = None,
 ) -> Generator[WavePlan, WaveOutcomes, tuple[Frontier, list[dict[str, Any]]]]:
     """Шаги дренажа одного seed-root: волновой цикл, frontier, коммит исходов (F4).
 
@@ -953,6 +955,7 @@ def root_steps(
                     max_response_bytes=limits.max_response_bytes,
                     artifact_max_bytes=limits.max_artifact_bytes,
                     attachment_formats=limits.attachment_formats,
+                    capture_id=capture_id,
                 )
             finally:
                 timings.fetch_wait_s += time.perf_counter() - _fetch_started
@@ -1030,6 +1033,7 @@ def root_steps(
                 max_response_bytes=limits.max_response_bytes,
                 artifact_max_bytes=limits.max_artifact_bytes,
                 attachment_formats=limits.attachment_formats,
+                capture_id=capture_id,
             )
             # D2/e: browser-элементы НИКОГДА не пулятся (``BrowserCrawler`` водит
             # единственную ``_page`` без лока) — у них свой маршрут с одним потоком
@@ -1389,6 +1393,15 @@ def root_lifecycle(
         scope_hosts=phase.scope_hosts_by_product.get(product.pid, frozenset()),
         # F7 (17 §2): host'ы своего шарда. ``None`` — карты нет, поведение байт-в-байт.
         shard_hosts=phase.shard_hosts,
+    )
+    # План 20 §3: начало снятия — момент, когда корень **принят в дренаж** (а не когда
+    # составлен план: план мог ждать допуска полосы). Сам ``capture_id`` детерминирован,
+    # поэтому resume/``--reset`` обновит то же снятие, а не создаст второе.
+    frontier.started_at = _now_iso()
+    root_capture_id = (
+        None
+        if phase.run_id is None or not root.seed
+        else capture_id_for(product.pid, root_url, phase.run_id)
     )
     # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
     # применяется до дедупа ``(pid, loc)``. Дедуп-пометка — не здесь, а по факту
@@ -1786,6 +1799,17 @@ def root_lifecycle(
             # retained-файл, которого нет (``_close_refused_row``). Frontier от отказа не
             # расширяется — обход остаётся прежним.
             _close_refused_row(pid, work_url)
+            # План 20 §3: отказ роботов означает, что корень **не** исчерпан (часть
+            # материала сайт запретил), поэтому снятие не вправе назвать обход полным.
+            # Класс берётся из элемента сеанса — единственного носителя исхода; без
+            # сеанса (durable-краул выключен) отказ не атрибутируется и остаётся
+            # видимым в ``errors``/``url_state``, как прежде.
+            item = phase.items.get((pid, work_url))
+            if (
+                item is not None
+                and item.error_kind == FailureKind.ROBOTS_DISALLOW.value
+            ):
+                frontier.note_robots_refusal()
             return
         page, _raw_path, fetch_plan, freshly_fetched = outcome
         # 09 §6.3: ревалидация известного URL — depth-0 лист и **вне** бюджета
@@ -1933,4 +1957,5 @@ def root_lifecycle(
         _commit=_commit_outcome,
         _await_disk=_await_disk,
         _await_backlog=_await_backlog,
+        capture_id=root_capture_id,
     ))

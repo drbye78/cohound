@@ -16,7 +16,7 @@ from core.store.state_sqlite import (
     state_db_path,
 )
 
-#: Таблицы §4.2 (10 предметных + ``schema_meta``).
+#: Таблицы §4.2 (11 предметных + ``schema_meta``).
 EXPECTED_TABLES = {
     "schema_meta",
     "product_state",
@@ -33,6 +33,7 @@ EXPECTED_TABLES = {
     "index_partition",
     "index_composition",
     "attestation",
+    "capture",
 }
 
 
@@ -68,7 +69,7 @@ def test_schema_version(conn: sqlite3.Connection) -> None:
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     assert row is not None
-    assert row["value"] == STATE_SCHEMA_VERSION == "10"
+    assert row["value"] == STATE_SCHEMA_VERSION == "11"
 
 
 @pytest.mark.parametrize(
@@ -80,6 +81,7 @@ def test_schema_version(conn: sqlite3.Connection) -> None:
         ("product_snapshot", ["snapshot_id"]),
         ("cell_measurement", ["run_id", "product_id", "param_id"]),
         ("run_lineage", ["run_id"]),
+        ("capture", ["capture_id"]),
     ],
 )
 def test_primary_keys(
@@ -131,6 +133,47 @@ def test_reconnect_is_idempotent(tmp_path: Path) -> None:
         )
     finally:
         second.close()
+
+
+def test_url_state_observation_columns_declared(conn: sqlite3.Connection) -> None:
+    """План 20 §3: наблюдение артефакта объявлено в ``url_state`` (STATE 11).
+
+    ``last_checked_at`` для этой роли не переиспользуется: он пишется при любом исходе,
+    включая отказ, а отказ наблюдённой версией не является.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(url_state)")}
+    assert {
+        "observed_at",
+        "observed_how",
+        "capture_id",
+        "observed_actor",
+    } <= columns
+
+
+def test_capture_table_shape(conn: sqlite3.Connection) -> None:
+    """Снятие корня (STATE 11): обязательные колонки и CHECK ``observed_how``."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(capture)")}
+    assert {
+        "capture_id",
+        "product_id",
+        "run_id",
+        "root_url",
+        "started_at",
+        "finished_at",
+        "complete",
+        "coverage_digest",
+        "doc_set_digest",
+        "policy_digest",
+        "observed_how",
+        "actor",
+        "superseded_by",
+    } <= columns
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO capture (capture_id, product_id, root_url, started_at,"
+            " complete, observed_how) VALUES ('c1', 'p1', 'https://p1.test/',"
+            " '2026-01-01T00:00:00Z', 1, 'invented')"
+        )
 
 
 def test_fresh_db_declares_lineage_columns(conn: sqlite3.Connection) -> None:

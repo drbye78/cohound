@@ -636,6 +636,11 @@ class LocalFetch:
     #: терминальный класс): «не наблюдалось», а не «ноль».
     fetch_started_at: str | None = None
     fetch_ms: int | None = None
+    #: Снятие корня, в чьём обходе получен этот URL (план 20 §3). Нужен только писателю
+    #: ``url_state``: наблюдение артефакта обязано называть снятие, а вычислить его из
+    #: URL нельзя (один URL может принадлежать разным корням разных прогонов).
+    #: ``None`` — прогона нет либо корень не снимается (synthetic-бакет).
+    capture_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -819,6 +824,25 @@ def reuse_same_hash(
     )
 
 
+#: Виды наблюдения снятия корня (``capture.observed_how``, план 20 §3). CHECK живёт в
+#: DDL ``capture``; словарь статусов значения не дублирует (это провенанс, не статус).
+CAPTURE_OBSERVED_LIVE = "live"
+CAPTURE_OBSERVED_REVALIDATED = "revalidated"
+CAPTURE_OBSERVED_ADOPTED = "adopted"
+
+
+def capture_id_for(product_id: str, root_url: str, run_id: str | None) -> str:
+    """Детерминированный ``capture_id`` снятия: ``(product_id, root_url, run_id)``.
+
+    Детерминизм — требование, а не удобство: повторный вход в фазу (resume/``--reset``)
+    обязан обновить то же снятие, а не создать второе наблюдение того же обхода. Формула
+    не входит в ``run_id``: снятие — провенанс прогона, а не его объявленный вход.
+    """
+    return short_hash(
+        "\x1f".join((str(product_id), str(root_url), str(run_id or ""))), 24
+    )
+
+
 def record_url_state(
     pid: str,
     url: str,
@@ -828,8 +852,9 @@ def record_url_state(
     *,
     state: ProductStatePort | None,
     errors: list[str],
+    observation: Mapping[str, Any] | None = None,
 ) -> None:
-    """Пишет ``url_state`` по исходу одного URL (09 §6.3).
+    """Пишет ``url_state`` по исходу одного URL (09 §6.3) + наблюдение артефакта.
 
     Вызывается из :func:`mark` — единственной воронки терминальных исходов, поэтому
     покрывает **каждый** URL независимо от режима продукта (субстрат наполняется уже
@@ -844,6 +869,13 @@ def record_url_state(
     * прочие сбои (``robots_disallow``/``parser_failed``/``extraction_timeout``/
       ``attempts_exhausted``/…) → ``last_error_kind``, ``consecutive_failures += 1``,
       прежняя версия сохраняется.
+
+    ``observation`` (план 20 §3) — факт наблюдения **версии-артефакта**
+    (``observed_at``/``observed_how``/``capture_id``/``observed_actor``). Он пишется
+    только для ``FETCHED``: отказ не является наблюдённой версией, и его
+    ``last_checked_at``/``consecutive_failures`` пишутся как прежде. ``None`` в любой из
+    четырёх колонок означает «не передано» и сохраняет прежнее значение (COALESCE в
+    upsert): ``frozen``/``offline``/``stale`` не обнуляют наблюдение живого прогона.
 
     ``FETCHED`` без ``raw_path`` (каталог/sitemap — не контент, I19) в состояние не
     попадает: иначе следующий инкрементальный план принял бы их за документы.
@@ -894,6 +926,10 @@ def record_url_state(
                 current["doc_version_id"] = None
             else:
                 failures += 1
+        # Наблюдение — только состоявшееся получение версии. Наблюдение прежней версии
+        # отказом не стирается: ``None`` в колонке означает «писатель не передал», и
+        # upsert сохраняет прежнее значение (COALESCE).
+        received = observation if status is CrawlItemStatus.FETCHED else None
         state.upsert_url_state(
             UrlStateRow(
                 product_id=pid,
@@ -910,6 +946,14 @@ def record_url_state(
                 last_error_kind=error_kind,
                 reuse_kind=current["reuse_kind"],
                 seed_id=base.seed_id,
+                observed_at=None if received is None else received.get("observed_at"),
+                observed_how=(
+                    None if received is None else received.get("observed_how")
+                ),
+                capture_id=None if received is None else received.get("capture_id"),
+                observed_actor=(
+                    None if received is None else received.get("observed_actor")
+                ),
             )
         )
     except Exception as exc:  # noqa: BLE001 — изоляция state-записи
@@ -941,6 +985,14 @@ def mark(
     нельзя пронести через ``CrawlSessionItem`` (у него нет таких колонок).
     """
     state_fields = fields.pop("state_fields", None)
+    # Наблюдение артефакта (план 20 §3) — не поля элемента сеанса: вынимаются здесь,
+    # иначе ``mark_session`` получил бы неизвестные колонки.
+    observation = {
+        "observed_at": fields.pop("observed_at", None),
+        "observed_how": fields.pop("observed_how", None),
+        "capture_id": fields.pop("capture_id", None),
+        "observed_actor": fields.pop("observed_actor", None),
+    }
     mark_session(
         pid,
         u,
@@ -955,8 +1007,15 @@ def mark(
         **fields,
     )
     record_url_state(
-            pid, u, status, fields, state_fields, state=state, errors=errors
-        )
+        pid,
+        u,
+        status,
+        fields,
+        state_fields,
+        state=state,
+        errors=errors,
+        observation=observation,
+    )
 
 
 def retain(
@@ -972,6 +1031,7 @@ def retain(
     origin: str = ORIGIN_CRAWL,
     fetch_started_at: str | None = None,
     fetch_ms: int | None = None,
+    capture_id: str | None = None,
 ) -> Path | None:
     """Retention сырых байтов (I19) + durable-элемент ``FETCHED``; ``None`` при сбое.
 
@@ -1054,6 +1114,18 @@ def retain(
         # доходит), значит это «не наблюдалось по построению».
         fetch_started_at=fetch_started_at,
         fetch_ms=fetch_ms,
+        # План 20 §3: байты добыты **сейчас** — это и есть наблюдение артефакта.
+        # ``304`` — сервер подтвердил версию (момент подтверждения — сейчас); живой
+        # ответ — момент ответа сервера (``page.fetched_at``), а не момент записи.
+        # ``resume`` сюда не доходит (retained-байты коммитятся до retention) и
+        # наблюдения не создаёт.
+        observed_at=_now_iso() if page.not_modified else page.fetched_at,
+        observed_how=(
+            CAPTURE_OBSERVED_REVALIDATED
+            if page.not_modified
+            else CAPTURE_OBSERVED_LIVE
+        ),
+        capture_id=capture_id,
         state_fields={
             "etag": page.etag,
             "last_modified": page.last_modified,
@@ -2397,6 +2469,7 @@ def local_prefetch(
     max_response_bytes: int,
     artifact_max_bytes: int | None = None,
     attachment_formats: Sequence[str] | None = None,
+    capture_id: str | None = None,
 ) -> LocalFetch:
     """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
 
@@ -2511,6 +2584,9 @@ def local_prefetch(
         attachment_formats=(
             None if attachment_formats is None else tuple(attachment_formats)
         ),
+        # План 20 §3: снятие корня едет с дескриптором до писателя ``url_state`` —
+        # другой точки, где известны и корень, и исход этого URL, нет.
+        capture_id=capture_id,
     )
 
 
@@ -2833,6 +2909,7 @@ def commit_local(
         depth=desc.depth,
         fetch_started_at=desc.fetch_started_at,
         fetch_ms=desc.fetch_ms,
+        capture_id=desc.capture_id,
     )
     if raw_path is None:
         return None
@@ -2854,6 +2931,7 @@ def process_local(
     max_response_bytes: int,
     artifact_max_bytes: int | None = None,
     attachment_formats: Sequence[str] | None = None,
+    capture_id: str | None = None,
 ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
     """Локальный per-URL путь (последовательный): pre-fetch → fetch → post-fetch (D4).
 
@@ -2873,6 +2951,7 @@ def process_local(
         max_response_bytes=max_response_bytes,
         artifact_max_bytes=artifact_max_bytes,
         attachment_formats=attachment_formats,
+        capture_id=capture_id,
     )
     if (
         desc.resume is not None

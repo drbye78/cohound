@@ -30,6 +30,7 @@ from core.domain.enums import (
 from core.domain.models import ProfileAttestationRow, SeedEntry
 
 __all__ = [
+    "CaptureRow",
     "CellMeasurementRow",
     "ChunkRow",
     "ContainerStateRow",
@@ -149,6 +150,18 @@ class UrlStateRow:
     last_error_kind: str | None = None
     reuse_kind: str | None = None
     seed_id: str | None = None
+    #: Наблюдение артефакта (план 20 §3): когда версия этого URL наблюдалась и как.
+    #: ``last_checked_at`` для этой роли **не** переиспользуется: он пишется при любом
+    #: исходе, включая отказ, а отказ наблюдённой версией не является. ``None`` —
+    #: наблюдения не было (или писатель его не передал: см. COALESCE-семантику
+    #: :meth:`ProductStatePort.upsert_url_state`).
+    observed_at: str | None = None
+    #: ``live`` | ``revalidated`` | ``adopted`` | ``scheduled`` (CHECK в DDL ``capture``).
+    observed_how: str | None = None
+    #: Снятие, в котором наблюдение сделано (``capture.capture_id``).
+    capture_id: str | None = None
+    #: Кто предоставил артефакт (только ``observed_how='adopted'``); для сети — ``None``.
+    observed_actor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -376,6 +389,40 @@ class CrawlPolicyRow:
     interval_hours: int | None = None
     note: str | None = None
     superseded_by: int | None = None
+
+
+@dataclass(frozen=True)
+class CaptureRow:
+    """Строка ``capture``: **снятие** — один обход одного корня (план 20 §3/§4).
+
+    Отличие от :class:`CorpusCaptureRow` (план 19, ``corpus_capture``): та запись
+    фиксирует корпус **без наблюдения сети** (``frozen``: «вот что лежало в состоянии»),
+    а снятие описывает акт наблюдения корня — оно бывает живым (``live``),
+    ревалидационным (``revalidated``), принятым от человека (``adopted``) или сделанным
+    планировщиком (``scheduled``), и именно на него ссылается ``url_state.capture_id``.
+
+    ``capture_id`` детерминирован от ``(product_id, root_url, run_id)``: повторный вход в
+    фазу (resume/``--reset``) не плодит снятий. Append-only: ``superseded_by`` ставится
+    только явным :meth:`ProductStatePort.supersede_capture`. ``complete`` — исчерпан ли
+    обход корня **на дату снятия** (``False`` у adoption: предоставленный артефакт не
+    является обходом и не удостоверяет исчерпание). Дайджесты — провенанс: в ``run_id``
+    они не входят.
+    """
+
+    capture_id: str
+    product_id: str
+    root_url: str
+    started_at: str
+    complete: bool
+    #: ``live`` | ``revalidated`` | ``adopted`` | ``scheduled`` — CHECK в DDL ``capture``.
+    observed_how: str
+    run_id: str | None = None
+    finished_at: str | None = None
+    coverage_digest: str | None = None
+    doc_set_digest: str | None = None
+    policy_digest: str | None = None
+    actor: str | None = None
+    superseded_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -785,5 +832,35 @@ class ProductStatePort(Protocol):
         Нужно ``frozen``-прогону: он обязан видеть durable-группы дедупа прошлого снятия,
         потому что ``crawl_session_items`` (носитель канонического адреса в живом крауле)
         им не пишется.
+        """
+        ...
+
+    # -- снятие корня (план 20 §3/§4, STATE 11) --------------------------- #
+    def record_capture(self, row: CaptureRow) -> None:
+        """Создаёт/обновляет снятие корня (идемпотентно по ``capture_id``).
+
+        Повторный вход в фазу (resume/``--reset``) не плодит снятий: обновляются
+        ``finished_at``/``complete``/дайджесты, а ``started_at`` (и остальная
+        идентичность строки) не переписывается. ``superseded_by`` здесь не трогается —
+        только явным :meth:`supersede_capture`.
+        """
+        ...
+
+    def iter_captures(self, product_id: str) -> Iterable[CaptureRow]:
+        """Все снятия продукта в порядке ``(started_at, capture_id)``."""
+        ...
+
+    def get_capture(self, capture_id: str) -> CaptureRow | None:
+        """Снятие по идентификатору (``None`` — не записано)."""
+        ...
+
+    def supersede_capture(
+        self, capture_id: str, *, superseded_by: str | None = None
+    ) -> None:
+        """Помечает снятие заменённым (append-only, без удаления); идемпотентно.
+
+        ``None`` — отзыв без преемника (самоссылка, как у ``crawl_policy``): запись
+        выпадает из действующих, оставаясь в аудите. Повторный отзыв уже проставленную
+        ссылку не переписывает.
         """
         ...

@@ -75,7 +75,13 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: (``frozen``) воспроизводил лишь верхнеуровневые документы, теряя членов молча (план 19
 #: §E.7). Таблица объявлена в :data:`STATE_DDL`, шимов нет; файл версии ≤ 9 отвергается
 #: ``SchemaVersionMismatch``.
-STATE_SCHEMA_VERSION = "10"
+#: 11 — **наблюдение артефакта** и **снятие корня** (план 20 §3/§4): поля
+#: ``url_state.observed_at``/``observed_how``/``capture_id``/``observed_actor`` и таблица
+#: ``capture`` (один обход одного корня: даты, ``complete``, дайджесты, ``observed_how``,
+#: ``actor``, ``superseded_by``). ``last_checked_at`` роли наблюдения не несёт: он
+#: пишется при любом исходе, включая отказ. Шимов нет; файл версии ≤ 10 отвергается
+#: ``SchemaVersionMismatch``.
+STATE_SCHEMA_VERSION = "11"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -143,6 +149,13 @@ CREATE TABLE IF NOT EXISTS url_state (
     last_error_kind     TEXT,
     reuse_kind          TEXT,                   -- live|revalidated|reused|stale
     seed_id             TEXT,                   -- из какого seed'а обнаружен URL
+    -- v11 (план 20 §3): наблюдение артефакта. NULL — наблюдения не было либо писатель
+    -- не передал значение (upsert сохраняет прежнее: COALESCE). ``last_checked_at``
+    -- для этой роли не годится — он пишется и при отказе.
+    observed_at         TEXT,                   -- когда версия наблюдалась
+    observed_how        TEXT,                   -- live|revalidated|adopted|scheduled
+    capture_id          TEXT,                   -- снятие корня (capture.capture_id)
+    observed_actor      TEXT,                   -- кто предоставил (adopted), иначе NULL
     PRIMARY KEY (product_id, normalized_url)
 );
 
@@ -415,6 +428,36 @@ CREATE TABLE IF NOT EXISTS container_state (
 CREATE INDEX IF NOT EXISTS idx_container_state_product
     ON container_state(product_id, status);
 
+-- 16. Снятие корня (план 20 §3/§4, STATE 11): один обход одного корня. Отличие от
+-- ``corpus_capture`` (13): та фиксирует корпус **без наблюдения сети** (``frozen``), а
+-- снятие описывает акт наблюдения — живой обход, ревалидацию, ручное принятие или
+-- работу планировщика — и на него ссылается ``url_state.capture_id``. ``capture_id``
+-- детерминирован от ``(product_id, root_url, run_id)``: повторный вход в фазу не
+-- плодит снятий. Append-only: ``superseded_by`` ставится явным методом, не автоматически.
+-- ``complete`` — исчерпан ли корень **на дату снятия** (у adoption всегда 0: принятый
+-- артефакт не обход и исчерпания не удостоверяет). Даты/дайджесты — провенанс, в
+-- ``run_id`` не входят.
+CREATE TABLE IF NOT EXISTS capture (
+    capture_id      TEXT PRIMARY KEY,
+    product_id      TEXT NOT NULL,
+    run_id          TEXT,
+    root_url        TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    complete        INTEGER NOT NULL,            -- 1 — обход исчерпан, 0 — нет
+    coverage_digest TEXT,
+    doc_set_digest  TEXT,
+    policy_digest   TEXT,                        -- crawl_policy_digest прогона
+    observed_how    TEXT NOT NULL CHECK (
+        observed_how IN ('live','revalidated','adopted','scheduled')
+    ),
+    actor           TEXT,                        -- человек/планировщик (adopted/scheduled)
+    superseded_by   TEXT REFERENCES capture(capture_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_capture_product
+    ON capture(product_id, started_at, capture_id);
+
 CREATE INDEX IF NOT EXISTS idx_seed_product ON seed_set(product_id, state);
 CREATE INDEX IF NOT EXISTS idx_doc_product  ON document_version(product_id, status);
 CREATE INDEX IF NOT EXISTS idx_snapshot_product ON product_snapshot(product_id, created_at);
@@ -448,7 +491,7 @@ def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
        пишется ``schema_meta.schema_version``.
 
     Миграций нет ни одной: все колонки и индексы объявлены в :data:`STATE_DDL`. Старая БД
-    (версия ≤ 9, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
+    (версия ≤ 10, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
     пакета не переносится между версиями схемы, а тихий ``ALTER TABLE`` объявлял бы файл
     новой версии, не будучи им.
 

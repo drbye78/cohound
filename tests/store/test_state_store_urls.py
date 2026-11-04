@@ -105,6 +105,35 @@ def test_url_state_upsert_is_idempotent(store: SqliteStateStore) -> None:
     assert row.seed_id == "seed-1"
 
 
+def test_observation_survives_upsert_without_observation(
+    store: SqliteStateStore,
+) -> None:
+    """Наблюдение сохраняется, если писатель его не передал (план 20 §3).
+
+    Так ведёт себя проход без сети (``frozen``/``offline``), отказ и ``stale``-метка:
+    они пишут строку без наблюдения, и прежняя дата живого прогона не обнуляется
+    (COALESCE-семантика четырёх колонок).
+    """
+    store.upsert_url_state(
+        _url(
+            observed_at="2026-01-01T00:00:00Z",
+            observed_how="live",
+            capture_id="cap-1",
+        )
+    )
+    # Ровно то, что пишет проход без сети: та же строка, наблюдение не передано.
+    store.upsert_url_state(_url(etag='"v2"', reuse_kind="reused"))
+
+    row = store.get_url_state("p1", "https://p1.test/a")
+    assert row is not None
+    assert row.observed_at == "2026-01-01T00:00:00Z"
+    assert row.observed_how == "live"
+    assert row.capture_id == "cap-1"
+    # Не-наблюдательные колонки перезаписаны как прежде.
+    assert row.etag == '"v2"'
+    assert row.reuse_kind == "reused"
+
+
 def test_get_url_state_scoped_by_product(store: SqliteStateStore) -> None:
     store.upsert_url_state(_url("p1", "https://shared.test/a", etag='"p1"'))
     store.upsert_url_state(_url("p2", "https://shared.test/a", etag='"p2"'))

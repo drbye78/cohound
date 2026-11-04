@@ -40,6 +40,7 @@ from core.domain.enums import (
 from core.domain.models import ProfileAttestationRow, SeedEntry
 from core.ports.state import (
     CapturedDocRow,
+    CaptureRow,
     CellMeasurementRow,
     ChunkRow,
     ContainerStateRow,
@@ -258,6 +259,72 @@ _URL_STATE_COLUMNS = (
     "last_error_kind",
     "reuse_kind",
     "seed_id",
+    "observed_at",
+    "observed_how",
+    "capture_id",
+    "observed_actor",
+)
+
+#: Колонки наблюдения ``url_state`` (v11, план 20 §3). Upsert у них **COALESCE**-семантика:
+#: писатель без наблюдения (``frozen``/``offline``/отказ/``stale``) передаёт ``None``, и
+#: прежняя дата наблюдения обязана сохраниться — иначе проход без сети «обнулял» бы
+#: наблюдение живого прогона, то есть стирал провенанс фактом своего отсутствия.
+_URL_STATE_OBSERVATION_COLUMNS = (
+    "observed_at",
+    "observed_how",
+    "capture_id",
+    "observed_actor",
+)
+
+#: Upsert ``url_state``: наблюдение сохраняется при ``None`` (см.
+#: :data:`_URL_STATE_OBSERVATION_COLUMNS`), остальные колонки перезаписываются как прежде.
+_URL_STATE_UPSERT = (
+    "INSERT INTO url_state (product_id, normalized_url, "  # noqa: S608 - имена колонок из констант, значения — bind
+    + ", ".join(_URL_STATE_COLUMNS)
+    + ") VALUES (?, ?, "
+    + ", ".join("?" for _ in _URL_STATE_COLUMNS)
+    + ") ON CONFLICT(product_id, normalized_url) DO UPDATE SET "
+    + ", ".join(
+        (
+            f"{name} = COALESCE(excluded.{name}, url_state.{name})"
+            if name in _URL_STATE_OBSERVATION_COLUMNS
+            else f"{name} = excluded.{name}"
+        )
+        for name in _URL_STATE_COLUMNS
+    )
+)
+
+#: Upsert ``capture`` (план 20 §4): повторный вход в фазу обновляет **исход** снятия
+#: (``finished_at``/``complete``/дайджесты), но не его идентичность — ``started_at``,
+#: ``root_url``, ``run_id``, ``observed_how`` и ``actor`` остаются прежними. Дайджесты —
+#: через ``COALESCE``: снятие сначала пишется на границе корня, а дайджесты становятся
+#: известны на границе продукта, поэтому поздняя запись догоняет раннюю, а ранняя не
+#: стирает позднюю. ``superseded_by`` здесь не участвует — только явный метод.
+_CAPTURE_COLUMNS = (
+    "product_id",
+    "run_id",
+    "root_url",
+    "started_at",
+    "finished_at",
+    "complete",
+    "coverage_digest",
+    "doc_set_digest",
+    "policy_digest",
+    "observed_how",
+    "actor",
+)
+
+_CAPTURE_UPSERT = (
+    "INSERT INTO capture (capture_id, "  # noqa: S608 - имена колонок из константы, значения — bind
+    + ", ".join(_CAPTURE_COLUMNS)
+    + ") VALUES ("
+    + ", ".join("?" for _ in range(len(_CAPTURE_COLUMNS) + 1))
+    + ") ON CONFLICT(capture_id) DO UPDATE SET "
+    "finished_at = COALESCE(excluded.finished_at, capture.finished_at), "
+    "complete = excluded.complete, "
+    "coverage_digest = COALESCE(excluded.coverage_digest, capture.coverage_digest), "
+    "doc_set_digest = COALESCE(excluded.doc_set_digest, capture.doc_set_digest), "
+    "policy_digest = COALESCE(excluded.policy_digest, capture.policy_digest)"
 )
 
 #: Колонки ``container_state`` в порядке записи (кроме составного ключа
@@ -434,6 +501,8 @@ FORGET_PRODUCT_TABLES = (
     "corpus_capture",
     "container_state",
     "url_state",
+    # Снятие корня (план 20, STATE 11) — наблюдение продукта; удаляется вместе с ним.
+    "capture",
     "product_snapshot",
     "cell_measurement",
     "seed_set",
@@ -947,6 +1016,10 @@ class SqliteStateStore:
             last_error_kind=row["last_error_kind"],
             reuse_kind=row["reuse_kind"],
             seed_id=row["seed_id"],
+            observed_at=row["observed_at"],
+            observed_how=row["observed_how"],
+            capture_id=row["capture_id"],
+            observed_actor=row["observed_actor"],
         )
 
     def get_url_state(
@@ -966,14 +1039,17 @@ class SqliteStateStore:
         return [self._url_state_row(row) for row in rows]
 
     def upsert_url_state(self, row: UrlStateRow) -> None:
+        """Создаёт/обновляет состояние URL; наблюдение при ``None`` не стирается.
+
+        Колонки наблюдения (``observed_at``/``observed_how``/``capture_id``/
+        ``observed_actor``) пишутся COALESCE-семантикой: писатель без наблюдения
+        (``frozen``/``offline``/отказ/``stale``) передаёт ``None``, и прежняя дата
+        сохраняется — проход без сети не обнуляет наблюдение живого прогона.
+        """
         values = [getattr(row, name) for name in _URL_STATE_COLUMNS]
         with self._conn:
             self._conn.execute(
-                _upsert_sql(
-                    "url_state",
-                    ("product_id", "normalized_url"),
-                    _URL_STATE_COLUMNS,
-                ),
+                _URL_STATE_UPSERT,
                 (row.product_id, row.normalized_url, *values),
             )
 
@@ -1728,6 +1804,70 @@ class SqliteStateStore:
             doc_set_digest=str(head["doc_set_digest"]),
             docs=tuple(docs),
         )
+
+    # -- снятие корня (план 20 §3/§4, STATE 11) --------------------------- #
+    @staticmethod
+    def _capture_row(row: sqlite3.Row) -> CaptureRow:
+        """Строка SQLite ``capture`` → :class:`CaptureRow`."""
+        return CaptureRow(
+            capture_id=str(row["capture_id"]),
+            product_id=str(row["product_id"]),
+            run_id=row["run_id"],
+            root_url=str(row["root_url"]),
+            started_at=str(row["started_at"]),
+            finished_at=row["finished_at"],
+            complete=bool(row["complete"]),
+            coverage_digest=row["coverage_digest"],
+            doc_set_digest=row["doc_set_digest"],
+            policy_digest=row["policy_digest"],
+            observed_how=str(row["observed_how"]),
+            actor=row["actor"],
+            superseded_by=row["superseded_by"],
+        )
+
+    def record_capture(self, row: CaptureRow) -> None:
+        """Создаёт/обновляет снятие корня (идемпотентно по ``capture_id``).
+
+        Повторный вход в фазу (resume/``--reset``) обновляет исход (``finished_at``/
+        ``complete``/дайджесты), но **не** ``started_at`` и не идентичность строки:
+        снятие — наблюдение, а не настройка. ``superseded_by`` — только
+        :meth:`supersede_capture`.
+        """
+        values = [getattr(row, name) for name in _CAPTURE_COLUMNS]
+        with self._conn:
+            self._conn.execute(_CAPTURE_UPSERT, (row.capture_id, *values))
+
+    def iter_captures(self, product_id: str) -> list[CaptureRow]:
+        """Все снятия продукта в порядке ``(started_at, capture_id)``."""
+        rows = self._conn.execute(
+            "SELECT * FROM capture WHERE product_id = ?"
+            " ORDER BY started_at, capture_id",
+            (product_id,),
+        ).fetchall()
+        return [self._capture_row(row) for row in rows]
+
+    def get_capture(self, capture_id: str) -> CaptureRow | None:
+        """Снятие по идентификатору (``None`` — не записано)."""
+        row = self._conn.execute(
+            "SELECT * FROM capture WHERE capture_id = ?", (capture_id,)
+        ).fetchone()
+        return self._capture_row(row) if row is not None else None
+
+    def supersede_capture(
+        self, capture_id: str, *, superseded_by: str | None = None
+    ) -> None:
+        """Помечает снятие заменённым; ``None`` — отзыв без преемника (идемпотентно).
+
+        ``superseded_by = capture_id`` (самоссылка) — валидный FK и единственный способ
+        отозвать снятие, не выдумывая tombstone-режима: удаление нарушило бы append-only.
+        """
+        marker = capture_id if superseded_by is None else superseded_by
+        with self._conn:
+            self._conn.execute(
+                "UPDATE capture SET superseded_by = ?"
+                " WHERE capture_id = ? AND superseded_by IS NULL",
+                (marker, capture_id),
+            )
 
     def supersede_crawl_policy(
         self, policy_id: int, *, superseded_by: int | None = None

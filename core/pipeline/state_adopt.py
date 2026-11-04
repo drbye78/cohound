@@ -57,6 +57,8 @@ import yaml
 from core.config.seeds import normalize_seed_url
 from core.domain.enums import DocumentLevel, OnboardingState, ProductScope
 from core.domain.models import METHODOLOGY_VERSION, CorpusCoverage
+from core.pipeline.corpus_ingest import CAPTURE_OBSERVED_ADOPTED, capture_id_for
+from core.pipeline.corpus_persist import _now_iso
 from core.pipeline.incremental import chunk_row_id, doc_set_digest, doc_version_id
 from core.pipeline.package_admin import PackageAdminError
 from core.pipeline.run_identity import classify_change, previous_run_of
@@ -67,6 +69,7 @@ from core.pipeline.state_sync import (
     snapshot_id,
 )
 from core.ports.state import (
+    CaptureRow,
     CellMeasurementRow,
     ChunkRow,
     DocumentVersionRow,
@@ -1610,6 +1613,35 @@ def _apply_product(
             cells=len(measurements),
         )
     run_id = str(plan.run_id or "")
+    # План 20 §3/§4: принятие артефакта — тоже **снятие**, но `complete=False`: то, что
+    # артефакт предоставлен человеком, не является обходом корня и исчерпания не
+    # удостоверяет (это факт, а не осторожность). Корень такого снятия — URL артефакта:
+    # в adoption нет ни frontier, ни seed-корня, поэтому «корень» здесь — сам адрес
+    # (детерминированно ``min(url)``, чтобы повторный adoption дал тот же ``capture_id``).
+    adopted_at = _now_iso()
+    adoption_root = min((row.url for row in item.url_rows), default=None)
+    adoption_capture_id: str | None = None
+    if adoption_root is not None:
+        adoption_capture_id = capture_id_for(item.product_id, adoption_root, run_id)
+        store.record_capture(
+            CaptureRow(
+                capture_id=adoption_capture_id,
+                product_id=item.product_id,
+                run_id=run_id,
+                root_url=adoption_root,
+                started_at=adopted_at,
+                finished_at=adopted_at,
+                complete=False,
+                observed_how=CAPTURE_OBSERVED_ADOPTED,
+                coverage_digest=(
+                    None if item.snapshot is None else item.snapshot.coverage_digest
+                ),
+                doc_set_digest=(
+                    None if item.snapshot is None else item.snapshot.doc_set_digest
+                ),
+                actor=actor,
+            )
+        )
     for doc_row in item.document_rows:
         existing = store.get_document_version(doc_row.doc_version_id)
         if existing is not None:
@@ -1629,6 +1661,16 @@ def _apply_product(
     for dv_id, rows in by_doc.items():
         store.replace_doc_chunks(dv_id, rows)
     for url_row in item.url_rows:
+        if adoption_capture_id is not None:
+            # Наблюдение артефакта: время принятия и актор — провенанс человека, а не
+            # сети. ``observed_how='adopted'`` отличает его от ``live``/``revalidated``.
+            url_row = dataclasses.replace(
+                url_row,
+                observed_at=adopted_at,
+                observed_how=CAPTURE_OBSERVED_ADOPTED,
+                capture_id=adoption_capture_id,
+                observed_actor=actor,
+            )
         store.upsert_url_state(url_row)
     _write_snapshot(plan, item, store, cycle_id=cycle_id, run_id=run_id)
     _write_product_state(plan, item, store, actor=actor, cycle_id=cycle_id, run_id=run_id)

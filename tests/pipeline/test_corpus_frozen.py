@@ -351,6 +351,57 @@ def test_frozen_is_zero_network_and_reproducible_at_host_concurrency_two(
             store2.close()
 
 
+def test_live_run_records_observation_and_capture(tmp_path: Path) -> None:
+    """План 20 §3: живой обход записывает наблюдение и снятие корня.
+
+    ``observed_at`` — время ответа сервера (``fetched_at``), а не «сейчас»;
+    ``observed_how='live'``; ``capture_id`` ссылается на снятие этого корня, а дайджесты
+    снятия догоняются на границе продукта (не считаются второй раз).
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
+
+        row = state.get_url_state("p1", ROOT)
+        assert row is not None
+        assert row.observed_at == TS
+        assert row.observed_how == "live"
+        assert row.observed_actor is None
+        assert row.capture_id is not None
+
+        capture = state.get_capture(row.capture_id)
+        assert capture is not None
+        assert capture.root_url == ROOT
+        assert capture.observed_how == "live"
+        assert capture.complete is True
+        assert capture.run_id == RUN_ID
+        assert capture.doc_set_digest is not None
+
+
+def test_frozen_keeps_live_observation(tmp_path: Path) -> None:
+    """Проход без сети не обнуляет наблюдение живого прогона (план 20 §3).
+
+    ``frozen`` не пишет ``url_state`` и не передаёт наблюдение; прежние
+    ``observed_at``/``observed_how``/``capture_id`` обязаны сохраниться.
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
+        before = state.get_url_state("p1", ROOT)
+        assert before is not None and before.observed_at == TS
+
+        _result, store, crawler = _frozen_run(tmp_path, state, roots=[ROOT])
+        try:
+            assert crawler.calls == []
+            assert _docs(store), "frozen собрал корпус из сохранённых байтов"
+        finally:
+            store.close()
+
+        after = state.get_url_state("p1", ROOT)
+        assert after is not None
+        assert after.observed_at == before.observed_at
+        assert after.observed_how == before.observed_how
+        assert after.capture_id == before.capture_id
+
+
 def test_frozen_reextract_drift_is_a_named_token_not_a_new_document(
     tmp_path: Path,
 ) -> None:

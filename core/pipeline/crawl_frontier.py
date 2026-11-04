@@ -1132,6 +1132,13 @@ class Frontier:
         self.revalidation_fetched = 0
         self.truncated = False
         self.truncated_reason: str | None = None
+        #: План 20 §3: начало дренажа этого корня (ставит ``root_lifecycle``; ``None`` —
+        #: значение не проставлено, например в одиночных проверках фронтьера).
+        self.started_at: str | None = None
+        #: План 20 §3: сколько URL корня отказано **robots.txt**. Отказ не делает обход
+        #: неполным «по усечению», но часть материала сайт запретил — снятие не вправе
+        #: назвать корень исчерпанным. Счётчик ведёт дренаж (``_commit_outcome``).
+        self.robots_refused = 0
         #: Seeds/ссылки, отброшенные блэклистом (наблюдаемость: «не молчаливый дроп»).
         self.skipped_blacklisted: list[str] = []
         #: P6b: терминальные артефакты, допущенные **вне** path-prefix корня (точный счётчик
@@ -1355,6 +1362,10 @@ class Frontier:
     def note_fetched(self) -> None:
         """Учесть успешно добытую (retained) страницу этого корня."""
         self.fetched += 1
+
+    def note_robots_refusal(self) -> None:
+        """План 20 §3: учесть отказ ``robots.txt`` в этом корне (видимость неполноты)."""
+        self.robots_refused += 1
 
     def note_document_skip(self, url: str, reason: str) -> None:
         """P5: отметить пропуск документа уровнем ``off`` (видимость решения).
