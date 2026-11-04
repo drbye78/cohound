@@ -22,6 +22,7 @@ EXPECTED_TABLES = {
     "product_state",
     "seed_set",
     "url_state",
+    "container_state",
     "document_version",
     "chunk_store",
     "chunk_meta",
@@ -67,7 +68,7 @@ def test_schema_version(conn: sqlite3.Connection) -> None:
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     assert row is not None
-    assert row["value"] == STATE_SCHEMA_VERSION == "9"
+    assert row["value"] == STATE_SCHEMA_VERSION == "10"
 
 
 @pytest.mark.parametrize(

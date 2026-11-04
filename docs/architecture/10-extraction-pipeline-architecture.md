@@ -834,7 +834,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 > ✅ **A3 и A4 сделаны** (2026-10-28): граница фазы больше не пересекается в памяти.
 > На границе продукта `_ProductIngest` отпускает `docs`/`chunks`, оставляя сводку
 > (`chunk_count`/`distinct_docs`) для цикла манифеста
-> (`core/pipeline/corpus_ingest.py:1162-1185`); `IndexBuild.docs` заменён счётчиком
+> (`core/pipeline/corpus_ingest.py:565-588`); `IndexBuild.docs` заменён счётчиком
 > `doc_count` (`:1505`), и его единственный потребитель — перенормировка раунда
 > `serp_loop._normalize_build` — читал список вхолостую (`core/pipeline/serp_loop.py:444`).
 > Документы и чанки дальше живут в БД, а не в `PhaseResult`. Приёмка —

@@ -2665,6 +2665,9 @@ def _build_corpus(
         heartbeat_s=(
             EXTRACT_HEARTBEAT_S if consume_heartbeat_s is None else consume_heartbeat_s
         ),
+        # План 19 §E.7: состояние продукта — для write-through наблюдения контейнера
+        # (``container_state``). Без него ``frozen`` не найдёт байтов архива в состоянии.
+        state=state,
     )
     _consume_operations = extract_consume.ConsumerOperations(
         mark=_mark,
@@ -3482,6 +3485,40 @@ def _build_corpus(
                     """
                     return _crawl_target(ctx.product_id, url).plan
 
+                def _frozen_container_replay(
+                    url: str,
+                    raw_path: Path,
+                    *,
+                    level: DocumentLevel,
+                    pdf_pipeline: PdfPipeline,
+                    extractor: ExtractorPort,
+                    fetched_at: str,
+                    limits: Any,
+                ) -> Any:
+                    """Спуск в контейнер из сохранённых байтов (план 19 §E.7).
+
+                    Живой путь делает это в потребителе очереди (:func:`_descend_container`
+                    → пул ‖ inline). Здесь ни очереди, ни пула, ни сеансовых меток: прогон
+                    ничего не наблюдал. Поэтому — inline-спуск тем же
+                    :class:`ArchiveDescentWalker` и тем же per-URL экстрактором, а
+                    провенанс идёт в **продуктовый** скоуп потребителя (те же списки
+                    фазы, тот же store, та же запись ``container_state``).
+                    """
+                    return extract_consume.descend_frozen_container(
+                        product_id=ctx.product_id,
+                        archive_url=url,
+                        archive_path=Path(raw_path),
+                        archive_content_hash=Path(raw_path).stem,
+                        level=level,
+                        pdf_pipeline=pdf_pipeline,
+                        extractor=extractor,
+                        limits=limits,
+                        fetched_at=fetched_at,
+                        persist_docs=_persist_docs,
+                        scope=ctx.consume_scope,
+                        product=ctx.consume,
+                    )
+
                 ctx.frozen_report = _frozen_bytes_product(
                     ctx.product_id,
                     ctx.roots,
@@ -3507,6 +3544,8 @@ def _build_corpus(
                     # `frozen` обязан извлекать объявленным уровнем, иначе он штампует
                     # условие, которого измерение не объявляло (см. corpus_ingest).
                     extractor_factory=extractor_factory,
+                    # План 19 §E.7: члены контейнеров — из сохранённых байтов, без сети.
+                    container_replay=_frozen_container_replay,
                     label=pass_label,
                 )
                 offline_notes.append(ctx.frozen_report.note(ctx.product_id))
@@ -3997,6 +4036,15 @@ def _build_corpus(
                         "reextract_mismatch": list(
                             ctx.frozen_report.reextract_mismatch
                         ),
+                        # План 19 §E.7: контейнеры и их вклад в корпус — числа, а не
+                        # пересказ: члены входят в ``docs``/``chunks`` этого же события.
+                        "containers": ctx.frozen_report.containers,
+                        "container_docs": ctx.frozen_report.container_docs,
+                        "container_chunks": ctx.frozen_report.container_chunks,
+                        "container_unreadable": list(
+                            ctx.frozen_report.container_unreadable
+                        ),
+                        "container_empty": list(ctx.frozen_report.container_empty),
                     }
                 ),
                 "elapsed_seconds": round(product_crawl_elapsed, 3),

@@ -69,7 +69,13 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: выбирал бы канонический адрес наугад: ``crawl_session_items`` он не пишет. Таблицы
 #: объявлены в :data:`STATE_DDL`, шимов нет; файл версии ≤ 8 отвергается
 #: ``SchemaVersionMismatch`` (план 19 §P3).
-STATE_SCHEMA_VERSION = "9"
+#: 10 — состояние **контейнера** (``container_state``): URL → хеш ретейнённых байтов
+#: архива, путь, формат и исход спуска. Контейнер не имеет версии документа (членов он не
+#: несёт), поэтому путь и хеш его байтов жили только в БД прогона, и проход без сети
+#: (``frozen``) воспроизводил лишь верхнеуровневые документы, теряя членов молча (план 19
+#: §E.7). Таблица объявлена в :data:`STATE_DDL`, шимов нет; файл версии ≤ 9 отвергается
+#: ``SchemaVersionMismatch``.
+STATE_SCHEMA_VERSION = "10"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -381,6 +387,34 @@ CREATE INDEX IF NOT EXISTS idx_corpus_capture_product
 CREATE INDEX IF NOT EXISTS idx_corpus_capture_doc_hash
     ON corpus_capture_doc(product_id, doc_hash);
 
+-- 15. Состояние контейнера (план 19 §E.7, STATE 10): URL → последний ретейнённый архив.
+-- Контейнер **не** документ: версии документа у него нет (``document_version`` описывает
+-- извлечённый текст), поэтому путь и хеш его байтов прежде жили только в БД прогона
+-- (``archive_observations``/``corpus_members``), и проход без сети воспроизводил лишь
+-- верхнеуровневые документы — члены контейнера выпадали молча. ``archive_content_hash`` —
+-- хеш ретейнённых байтов (имя файла retention, I19), не хеш текста. ``status`` —
+-- :class:`~core.domain.enums.ArchiveDescentStatus` последнего спуска. Строка —
+-- провенанс, а не вход ``run_id``: наблюдение байтов не меняет условий измерения.
+CREATE TABLE IF NOT EXISTS container_state (
+    product_id           TEXT NOT NULL,
+    url                  TEXT NOT NULL,
+    normalized_url       TEXT NOT NULL,
+    archive_content_hash TEXT NOT NULL,
+    raw_path             TEXT NOT NULL,
+    format               TEXT,
+    status               TEXT NOT NULL CHECK (
+        status IN ('planned','descended','unreadable','budget_exhausted')
+    ),
+    first_seen_run_id    TEXT NOT NULL,
+    last_seen_run_id     TEXT NOT NULL,
+    first_seen_at        TEXT NOT NULL,
+    last_seen_at         TEXT NOT NULL,
+    PRIMARY KEY (product_id, normalized_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_container_state_product
+    ON container_state(product_id, status);
+
 CREATE INDEX IF NOT EXISTS idx_seed_product ON seed_set(product_id, state);
 CREATE INDEX IF NOT EXISTS idx_doc_product  ON document_version(product_id, status);
 CREATE INDEX IF NOT EXISTS idx_snapshot_product ON product_snapshot(product_id, created_at);
@@ -414,7 +448,7 @@ def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
        пишется ``schema_meta.schema_version``.
 
     Миграций нет ни одной: все колонки и индексы объявлены в :data:`STATE_DDL`. Старая БД
-    (версия ≤ 8, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
+    (версия ≤ 9, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
     пакета не переносится между версиями схемы, а тихий ``ALTER TABLE`` объявлял бы файл
     новой версии, не будучи им.
 

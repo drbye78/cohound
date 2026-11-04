@@ -78,6 +78,7 @@ from core.pipeline.corpus_ingest import (
     MEMBER_CONTENT_TYPES,
     ProductIngest,
     _partial_fields,
+    _state_url_key,
     artifact_is_terminal,
     new_extract_pool,
 )
@@ -107,6 +108,7 @@ from core.pipeline.incremental import doc_version_id
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.extractor import ExtractorPort
+from core.ports.state import ContainerStateRow, ProductStatePort
 from core.ports.types import ExtractionRoute, FetchMode, FetchPlan, RawPage
 from core.util.document_formats import DOCUMENT_SUFFIXES
 from core.util.hashing import content_hash
@@ -181,6 +183,67 @@ def persist_member_sync(
             )
 
     return _sync
+
+
+def write_container_state(
+    product_id: str,
+    url: str,
+    raw_path: Path,
+    observation: ArchiveObservation,
+    *,
+    archive_format: str | None,
+    state: ProductStatePort | None,
+    errors: list[str],
+    run_id: str | None,
+) -> None:
+    """Durable-наблюдение контейнера в ``state.db`` (план 19 §E.7, STATE 10).
+
+    Зачем: контейнер не имеет версии документа, поэтому путь и хеш его ретейнённых байтов
+    прежде жили только в БД прогона (``archive_observations``/``corpus_members``). Проход
+    без сети читает лишь ``state.db`` и воспроизводил верхнеуровневые документы, **молча**
+    теряя членов (замер стенда: ``auto`` 9 документов/597 чанков, ``frozen`` 7/326).
+
+    Пишется **нормализованный** URL (ключ, по которому ``frozen`` ищет строку) и хеш
+    ретейнённых байтов — ``raw_path.stem``: retention называет файл ``{sha256}.bin``,
+    поэтому имя и есть идентичность байтов (I19), а не хеш извлечённого текста.
+
+    Отказ записи изолируется в ``errors``: спуск уже состоялся, и его провенанс в списках
+    фазы не должен пропасть из-за недоступного состояния. ``state is None`` — прогон без
+    durable-состояния (прежнее поведение, ничего не пишется).
+    """
+    if state is None:
+        return
+    key = _state_url_key(url)
+    if key is None:
+        errors.append(
+            f"{product_id}/{url}: state: URL не нормализуется — container_state не записан"
+        )
+        return
+    now = _now_iso()
+    seen_run = run_id or ""
+    try:
+        state.record_container_state(
+            ContainerStateRow(
+                product_id=product_id,
+                url=url,
+                normalized_url=key,
+                archive_content_hash=raw_path.stem,
+                # Абсолютный путь: проход без сети может идти из другого CWD и в другом
+                # процессе — относительный путь retention там не разрешился бы.
+                raw_path=str(Path(raw_path).resolve()),
+                format=archive_format,
+                status=observation.status.value,
+                first_seen_run_id=seen_run,
+                last_seen_run_id=seen_run,
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+        errors.append(
+            f"{product_id}/{url}: state: record_container_state: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
 
 def member_extract_request(
@@ -500,6 +563,10 @@ class ConsumerScope:
     #: хранится: он объявленная ось и берётся из тех же ``CrawlLimits``, что у краула
     #: (:func:`_backlog_limit_mb`) — второго носителя одного значения нет.
     raw_root: str | None = None
+    #: Durable-состояние продукта (``state.db``): write-through наблюдения контейнера
+    #: (план 19 §E.7). ``None`` — прогон без состояния: провенанс остаётся только в списках
+    #: фазы, а проход без сети контейнер не воспроизведёт (видимая причина у него есть).
+    state: ProductStatePort | None = None
 
 
 @dataclass(frozen=True)
@@ -895,6 +962,7 @@ def _descend_container(
     pdf_pipeline: PdfPipeline,
     window: int | None,
     limits: CrawlLimits,
+    archive_format: str | None = None,
 ) -> str | None:
     """B3: спуск в ретейнённый контейнер (``plan`` — только листинг и прогноз).
 
@@ -1087,6 +1155,20 @@ def _descend_container(
         archive_url=archive_url,
         archive_content_hash=archive_hash,
     )
+    # План 19 §E.7: наблюдение контейнера durable — не только в списках фазы. Без строки
+    # проход без сети не знает ни пути байтов, ни их хеша (версии документа у контейнера
+    # нет) и молча теряет членов. Пишется и для ``UNREADABLE``: «контейнер не открылся» —
+    # тоже наблюдение, и следующий прогон обязан видеть, что URL был контейнером.
+    write_container_state(
+        pid,
+        archive_url,
+        raw_path,
+        observation,
+        archive_format=archive_format,
+        state=scope.state,
+        errors=scope.errors,
+        run_id=scope.run_id,
+    )
     if observation.status is ArchiveDescentStatus.UNREADABLE:
         reason = f"archive_unreadable: {observation.reason}"
         operations.mark(
@@ -1099,6 +1181,134 @@ def _descend_container(
         )
         return reason
     return None
+
+
+@dataclass(frozen=True)
+class FrozenDescentReport:
+    """Итог inline-спуска контейнера в проходе **без сети** (план 19 §E.7).
+
+    ``status`` — :class:`~core.domain.enums.ArchiveDescentStatus` текущего спуска
+    (значение строкой: он же пишется в ``container_state``). ``docs``/``chunks`` —
+    сколько членов вошло в корпус и сколько чанков принято; ``members`` — сколько строк
+    ``corpus_members`` добавилось (ингестнутые **и** видимо пропущенные). Пустой спуск
+    (``docs == 0``) — не ошибка прибора, но и не тишина: вызывающий называет его токеном.
+    """
+
+    status: str
+    docs: int = 0
+    chunks: int = 0
+    members: int = 0
+    reason: str | None = None
+
+
+def descend_frozen_container(
+    *,
+    product_id: str,
+    archive_url: str,
+    archive_path: Path,
+    archive_content_hash: str,
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline,
+    extractor: ExtractorPort,
+    limits: CrawlLimits,
+    fetched_at: str,
+    persist_docs: Callable[..., None],
+    scope: ConsumerScope,
+    product: ProductScope,
+) -> FrozenDescentReport:
+    """Спуск в контейнер из **сохранённых байтов** в проходе без сети (план 19 §E.7).
+
+    Живой путь разворачивает контейнер из очереди конверсии (:func:`_descend_container`):
+    там есть пул экстракции, окно упреждения и метки сеанса. Здесь ни того, ни другого, ни
+    третьего нет по существу: прогон не наблюдал ничего и не пишет ``crawl_session_items``
+    (``frozen`` — пере-извлечение прежних байтов, а не фетч). Поэтому:
+
+    * **inline** — ``defer_member=None``, ``window=1``: извлечение члена идёт на главном
+      потоке. Пул в этом проходе всё равно был бы объявлен относительно очереди, которой
+      нет; число членов контейнера ограничено осью ``archive_max_members``, и это цена
+      воспроизведения, а не деградация.
+    * **провенанс — тот же, что у живого пути**: наблюдения и строки членов идут в
+      списки фазы и в store (write-through синками). Без них «контейнер развернулся» было
+      бы утверждением, а не записью.
+    * **``fetched_at`` — прежнее наблюдение байтов**: нового получения не было, и
+      ``now`` здесь был бы ложной провенанс-меткой.
+    * **``lang=None``**: язык члена не выводится из архива; атрибуция «язык = язык
+      архива» была бы догадкой (A3).
+    * **``reuse_kind=REUSED``**: байты получены из состояния, а не с сервера.
+
+    Маршрут и уровень — **объявленные** (per-URL ``extractor_factory(level, pdf_pipeline)``
+    у вызывающего): иначе ``extractor_version`` назвал бы условие, которого в корпусе не
+    было (I21/A3). ``extract_cache`` здесь не используется: кэш живого пути ключуется
+    хешем байтов **верхнеуровневого** файла, а у членов его нет.
+
+    :returns: :class:`FrozenDescentReport` — статус и измеренные приросты корпуса.
+    """
+    docs_before = len(product.ingest.docs)
+    chunks_before = len(product.ingest.chunks)
+    members_before = len(scope.corpus_member_rows)
+    ingest_member = partial(ingest_member_doc, persist_docs=persist_docs)
+    walker = ArchiveDescentWalker(
+        product_id=product_id,
+        root_url=archive_url,
+        descent=limits.archive_descent,
+        budget=DescentBudget(
+            max_member_bytes=limits.archive_max_member_bytes,
+            max_uncompressed_bytes=limits.archive_max_uncompressed_bytes,
+            max_members=limits.archive_max_members,
+            max_total_uncompressed_bytes=(
+                limits.archive_max_total_uncompressed_bytes
+            ),
+        ),
+        container_for=scope.container_for,
+        ingest_member=lambda task: ingest_member(
+            task,
+            extractor=extractor,
+            chunker=scope.chunker,
+            ingest=product.ingest,
+            seen_docs=product.seen_docs,
+            seen_chunk_ids=product.seen_chunk_ids,
+            errors=scope.errors,
+            store=scope.store,
+            level=level,
+            fetched_at=fetched_at,
+            lang=None,
+            artifact_probes=scope.artifact_probes,
+            timings=scope.timings,
+            reuse_kind=ReuseKind.REUSED,
+        ),
+        observations=scope.archive_observations,
+        members=scope.corpus_member_rows,
+        errors=scope.errors,
+        run_id=scope.run_id,
+        created_at=_now_iso(),
+        # Ни пула, ни окна: доводить член отложенно некому и незачем.
+        defer_member=None,
+        window=1,
+        persist_observation=persist_observation_sync(scope.store, scope.errors),
+        persist_member=persist_member_sync(scope.store, scope.errors),
+    )
+    observation = walker.descend(
+        archive_path=archive_path,
+        archive_url=archive_url,
+        archive_content_hash=archive_content_hash,
+    )
+    write_container_state(
+        product_id,
+        archive_url,
+        archive_path,
+        observation,
+        archive_format=None,
+        state=scope.state,
+        errors=scope.errors,
+        run_id=scope.run_id,
+    )
+    return FrozenDescentReport(
+        status=observation.status.value,
+        docs=len(product.ingest.docs) - docs_before,
+        chunks=len(product.ingest.chunks) - chunks_before,
+        members=len(scope.corpus_member_rows) - members_before,
+        reason=observation.reason,
+    )
 
 
 def _start_row(
@@ -1180,6 +1390,7 @@ def _start_row(
                 pdf_pipeline=pdf_pipeline,
                 window=window,
                 limits=limits,
+                archive_format=probe.artifact.format,
             )
             job.done = True
             return job

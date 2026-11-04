@@ -490,7 +490,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
    от переиспользования, а не тихой подменой прибора.
 
 Отдельно, не в этой правке: `corpus_chunks.embedded_at` пишется `None` всегда
-(`core/pipeline/corpus_drain.py:490`, `core/pipeline/corpus_ingest.py:1320`) — колонка без писателя, и «не эмбеддилось» по ней
+(`core/pipeline/corpus_drain.py:490`, `core/pipeline/corpus_ingest.py:1375`) — колонка без писателя, и «не эмбеддилось» по ней
 не читается; фактический признак — `vectors.fp16.npy` в партиции.
 
 ## 6. Порядок работ

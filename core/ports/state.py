@@ -32,6 +32,7 @@ from core.domain.models import ProfileAttestationRow, SeedEntry
 __all__ = [
     "CellMeasurementRow",
     "ChunkRow",
+    "ContainerStateRow",
     "CrawlPolicyRow",
     "DocumentVersionRow",
     "ForgetProductResult",
@@ -148,6 +149,38 @@ class UrlStateRow:
     last_error_kind: str | None = None
     reuse_kind: str | None = None
     seed_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ContainerStateRow:
+    """Строка ``container_state``: последний ретейнённый контейнер URL (STATE 10).
+
+    Зачем отдельная строка, а не ``url_state``/``document_version``: контейнер **не
+    документ** (``document_version`` у него нет — версия описывает извлечённый текст, а
+    членов контейнер не несёт), поэтому путь и хеш его байтов жили только в БД прогона
+    (``archive_observations``/``corpus_members``). Проход без сети (``frozen``) не может
+    читать БД прошлого прогона, и члены контейнера молча выпадали из корпуса. Строка —
+    **провенанс**, а не вход ``run_id``: наблюдение байтов не меняет условий измерения.
+
+    ``archive_content_hash`` — хеш ретейнённых байтов (имя файла retention, I19), а не
+    хеш извлечённого текста. ``status`` — исход последнего спуска
+    (:class:`~core.domain.enums.ArchiveDescentStatus` в виде строки): по нему видно,
+    можно ли ждать членов. ``first_seen_*`` — первое наблюдение контейнера и **не
+    перезаписывается** повторной записью: «когда URL впервые оказался контейнером» —
+    факт истории, а не последнего прогона.
+    """
+
+    product_id: str
+    url: str
+    normalized_url: str
+    archive_content_hash: str
+    raw_path: str
+    status: str
+    first_seen_run_id: str
+    last_seen_run_id: str
+    first_seen_at: str
+    last_seen_at: str
+    format: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -495,6 +528,26 @@ class ProductStatePort(Protocol):
 
     def upsert_url_state(self, row: UrlStateRow) -> None:
         """Создаёт/обновляет состояние URL (идемпотентно по ``(product_id, normalized_url)``)."""
+        ...
+
+    # -- контейнеры (план 19 §E.7, STATE 10) ------------------------------ #
+    def record_container_state(self, row: ContainerStateRow) -> None:
+        """Создаёт/обновляет durable-наблюдение контейнера (идемпотентно по ключу).
+
+        Upsert по ``(product_id, normalized_url)``: повторное наблюдение обновляет
+        хеш/путь/формат/исход и ``last_seen_*``, но **не** трогает ``first_seen_*`` —
+        первое наблюдение контейнера остаётся фактом истории, а не последнего прогона.
+        """
+        ...
+
+    def get_container_state(
+        self, product_id: str, normalized_url: str
+    ) -> ContainerStateRow | None:
+        """Строка контейнера по нормализованному URL (``None`` — URL не был контейнером)."""
+        ...
+
+    def iter_container_state(self, product_id: str) -> Iterable[ContainerStateRow]:
+        """Все строки ``container_state`` продукта в порядке ``normalized_url``."""
         ...
 
     def get_document_version(self, doc_version_id: str) -> DocumentVersionRow | None:

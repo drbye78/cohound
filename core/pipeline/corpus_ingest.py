@@ -48,6 +48,7 @@ from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.config.seeds import normalize_seed_url
 from core.domain import (
+    ArchiveDescentStatus,
     CorpusChunk,
     CorpusDoc,
     CrawlItemStatus,
@@ -126,6 +127,7 @@ from core.ports.extractor import ExtractorPort
 from core.ports.poller import PollPort
 from core.ports.state import (
     CapturedDocRow,
+    ContainerStateRow,
     DocumentVersionRow,
     ProductStatePort,
     UrlStateRow,
@@ -3391,6 +3393,16 @@ FROZEN_UNKNOWN_ROOTS = "unknown_roots"
 #: ``doc_set_digest``, а причина выглядела бы наблюдением.
 FROZEN_REEXTRACT_MISMATCH = "frozen_reextract_mismatch"
 
+#: Токены воспроизведения **контейнеров** (план 19 §E.7). У контейнера нет версии
+#: документа, поэтому проход без сети находил его в ``no_version`` и молча терял членов.
+#: ``frozen_container_replayed:{n}`` — сколько контейнеров воспроизведено из сохранённых
+#: байтов; ``frozen_container_unreadable`` — байты есть, но индекс не прочитан;
+#: ``frozen_container_empty`` — спуск исполнен, а в корпус не дошёл ни один член. Все три —
+#: видимые причины/факты, а не ``failed`` (I4): прогон состоялся, корпус назван.
+FROZEN_CONTAINER_REPLAYED = "frozen_container_replayed"
+FROZEN_CONTAINER_UNREADABLE = "frozen_container_unreadable"
+FROZEN_CONTAINER_EMPTY = "frozen_container_empty"
+
 #: Пояснения к причинам ``frozen`` (операторский канал). Токен отдельно, текст отдельно:
 #: тесты и оператор читают токен, а формулировка не должна незаметно менять смысл.
 FROZEN_UNKNOWN_ROOT_TEXT = (
@@ -3429,6 +3441,12 @@ class FrozenBytesReport:
         ``(doc_hash, (url, ...))`` — кто был алиасом одного документа. Пишутся в запись
         снятия, чтобы следующий ``frozen`` выбрал тот же канонический адрес без
         ``crawl_session_items``.
+    :param containers: сколько контейнеров воспроизведено из сохранённых байтов (их
+        члены входят в ``docs``/``chunks``, а не считаются отдельным корпусом).
+    :param container_docs: документов пришло **из членов** контейнеров.
+    :param container_chunks: чанков пришло из членов контейнеров.
+    :param container_unreadable: URL контейнеров, чьи сохранённые байты не прочитаны.
+    :param container_empty: URL контейнеров, чей спуск не дал ни одного документа.
     :param urls: URL, для которых сеть не трогалась (порядок прохода).
     """
 
@@ -3440,6 +3458,11 @@ class FrozenBytesReport:
     stored_bytes_missing: tuple[str, ...] = ()
     no_version: tuple[str, ...] = ()
     reextract_mismatch: tuple[str, ...] = ()
+    containers: int = 0
+    container_docs: int = 0
+    container_chunks: int = 0
+    container_unreadable: tuple[str, ...] = ()
+    container_empty: tuple[str, ...] = ()
     groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
     urls: tuple[str, ...] = ()
     #: Плоские durable-группы для записи снятия: ``(doc_hash, url, normalized_url)``.
@@ -3457,9 +3480,13 @@ class FrozenBytesReport:
         return (
             f"corpus: {self.label} {product_id} — пере-извлечено документов {self.docs} "
             f"(чанков {self.chunks}, экстракций {self.reextracted}, из кэша "
-            f"{self.cache_hits}), нет байтов {len(self.stored_bytes_missing)}, корней вне "
-            f"состояния {len(self.unknown_roots)}, без версии {len(self.no_version)}, "
-            f"дрейф пере-извлечения {len(self.reextract_mismatch)}; "
+            f"{self.cache_hits}), контейнеров {self.containers} "
+            f"(из них документов {self.container_docs}, чанков {self.container_chunks}, "
+            f"не прочитано {len(self.container_unreadable)}, пусто "
+            f"{len(self.container_empty)}), нет байтов {len(self.stored_bytes_missing)}, "
+            f"корней вне состояния {len(self.unknown_roots)}, без версии "
+            f"{len(self.no_version)}, дрейф пере-извлечения "
+            f"{len(self.reextract_mismatch)}; "
             "сеть не трогалась, наблюдений этого прогона нет (❌ не публикуется)"
         )
 
@@ -3488,6 +3515,7 @@ def frozen_bytes_product(
     limits_for: Callable[[str], Any],
     extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort]
     | None = None,
+    container_replay: Callable[..., Any] | None = None,
     label: str = "frozen",
 ) -> FrozenBytesReport:
     """``frozen_source=bytes``: корпус из ``corpus_raw`` → **текущая** экстракция (P3).
@@ -3503,6 +3531,15 @@ def frozen_bytes_product(
     экстрактор вызывается, а расхождение его ``content_hash`` с записанным в
     ``document_version`` называется :data:`FROZEN_REEXTRACT_MISMATCH` (дрейф
     пере-извлечения), а **не** «контент изменился»: сети не было, наблюдения не было.
+
+    **Контейнеры воспроизводятся вместе с членами (план 19 §E.7).** У контейнера нет
+    версии документа (``document_version`` описывает извлечённый текст), поэтому URL
+    архива попадал в ``no_version``, а его члены приходили только из живого
+    ``ArchiveDescentWalker``. Теперь путь и хеш ретейнённых байтов durable
+    (``container_state``, STATE 10), и проход без сети исполняет **тот же** спуск из тех
+    же байтов: ``defer_member=None``/``window=1`` (пула и очереди здесь нет), провенанс —
+    в списки фазы и store, ``crawl_session_items`` не пишутся. Члены входят в ``docs``/
+    ``chunks`` отчёта: это документы корпуса, а не отдельная категория.
 
     **Durable-состояние не переписывается.** ``url_state``/``document_version`` не
     трогаются: ``frozen`` не наблюдал сервер, и объявить пере-извлечённую версию
@@ -3536,6 +3573,14 @@ def frozen_bytes_product(
     #: Экстракторы по ключу ``(уровень, механизм PDF)`` — один на условие прохода.
     level_extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort] = {}
     seen_urls: set[str] = set()
+    #: План 19 §E.7: контейнеры, воспроизведённые из сохранённых байтов, и их вклад в
+    #: корпус. Члены входят в ``docs``/``chunks`` отчёта — это документы корпуса, а не
+    #: отдельная категория.
+    containers_replayed = 0
+    container_docs = 0
+    container_chunks = 0
+    container_unreadable: list[str] = []
+    container_empty: list[str] = []
 
     #: Durable-группы прошлого снятия: ``doc_hash → urls``. Нужны ровно за тем, чтобы
     #: следующий ``frozen`` видел, кто был алиасом одного документа
@@ -3558,6 +3603,137 @@ def frozen_bytes_product(
         """Причина с меткой прохода: текст ``offline``-семейства получает свою метку."""
         return text if label == "offline" else text.replace("offline:", f"{label}:", 1)
 
+    def _extractor_at(
+        level: DocumentLevel, pdf_pipeline: PdfPipeline, url: str
+    ) -> ExtractorPort:
+        """Экстрактор **объявленного** уровня URL — тот же резолвер, что у живого пути.
+
+        Экземпляр строится один раз на ключ ``(уровень, механизм)`` — как пул живого
+        пути: построение docling заново на каждый документ стоило бы загрузки моделей по
+        числу PDF (замер: 5 перезагрузок подряд), а не по числу условий. Уровень
+        композиции (``full`` + ``structured``) — переданный экстрактор, без фабрики.
+        Отказ фабрики виден в ``errors`` и не подменяет уровень молча.
+        """
+        if extractor_factory is None or (
+            level is DocumentLevel.FULL
+            and pdf_pipeline is PdfPipeline.STRUCTURED
+        ):
+            return extractor
+        extractor_key = (level, pdf_pipeline)
+        cached = level_extractors.get(extractor_key)
+        if cached is not None:
+            return cached
+        try:
+            built = extractor_factory(level, pdf_pipeline)
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            errors.append(
+                f"{product_id}/{url}: {label}: extractor_factory({level.value}, "
+                f"{pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
+                "понижен до переданного экстрактора"
+            )
+            return extractor
+        level_extractors[extractor_key] = built
+        return built
+
+    def _replay_container(
+        container: ContainerStateRow, prior: UrlStateRow | None, url: str
+    ) -> None:
+        """Воспроизвести контейнер из сохранённых байтов (план 19 §E.7), inline.
+
+        Контейнер не имеет версии документа, поэтому до STATE 10 проход без сети видел
+        его только в ``no_version`` и молча терял членов (замер стенда: ``auto`` 9
+        документов/597 чанков, ``frozen`` 7/326 — не хватало 2 членов/271 чанка). Теперь
+        путь и хеш байтов durable (``container_state``), и спуск исполняется из **тех же**
+        байтов тем же обходом, что у живого пути: сеть не нужна, ``crawl_session_items``
+        не пишутся, провенанс идёт в списки фазы и в store.
+
+        Верификация — от содержимого файла (``_hash_file`` против записанного хеша
+        архива): подменённый/битый файл — ``stored_bytes_missing``, а не «контейнер без
+        членов». Нечитаемый индекс — токен ``frozen_container_unreadable``; исполненный
+        спуск без единого документа — ``frozen_container_empty``. Оба — видимые причины.
+        """
+        nonlocal containers_replayed, container_docs, container_chunks
+        raw_path = Path(container.raw_path) if container.raw_path else None
+        raw_key: str | None = None
+        if raw_path is not None and raw_path.is_file():
+            try:
+                raw_key = _hash_file(raw_path)
+            except OSError as exc:
+                errors.append(
+                    f"{product_id}/{url}: {label}: чтение retained-байтов контейнера "
+                    f"{raw_path}: {type(exc).__name__}: {exc}"
+                )
+            else:
+                if raw_key != container.archive_content_hash:
+                    raw_key = None
+        if raw_path is None or raw_key is None:
+            stored_bytes_missing.append(url)
+            errors.append(
+                f"{product_id}/{url}: {_reason(FROZEN_STORED_BYTES_MISSING_TEXT)}"
+            )
+            return
+        limits = limits_for(url)
+        level = limits.document_level
+        extractor_obj = _extractor_at(level, limits.pdf_pipeline, url)
+        # ``fetched_at`` — прежнее наблюдение байтов: нового получения не было.
+        fetched_at = str(
+            (prior.last_checked_at if prior is not None else None)
+            or container.last_seen_at
+            or ""
+        )
+        if container_replay is None:
+            container_unreadable.append(url)
+            errors.append(
+                f"{product_id}/{url}: {FROZEN_CONTAINER_UNREADABLE}: спуск в контейнер не "
+                "подключён фазой — члены сохранённых байтов не воспроизведены"
+            )
+            return
+        try:
+            outcome = container_replay(
+                url,
+                raw_path,
+                level=level,
+                pdf_pipeline=limits.pdf_pipeline,
+                extractor=extractor_obj,
+                fetched_at=fetched_at,
+                limits=limits,
+            )
+        except Exception as exc:  # noqa: BLE001 — отказ спуска не роняет продукт
+            container_unreadable.append(url)
+            errors.append(
+                f"{product_id}/{url}: {FROZEN_CONTAINER_UNREADABLE}: спуск из сохранённых "
+                f"байтов отказал: {type(exc).__name__}: {exc}"
+            )
+            return
+        status = str(getattr(outcome, "status", "") or "")
+        if status == ArchiveDescentStatus.UNREADABLE.value:
+            container_unreadable.append(url)
+            errors.append(
+                f"{product_id}/{url}: {FROZEN_CONTAINER_UNREADABLE}: сохранённые байты "
+                f"контейнера не прочитаны ({getattr(outcome, 'reason', None)}) — члены не "
+                "воспроизведены"
+            )
+            return
+        containers_replayed += 1
+        outcome_docs = int(getattr(outcome, "docs", 0) or 0)
+        container_docs += outcome_docs
+        container_chunks += int(getattr(outcome, "chunks", 0) or 0)
+        if status == ArchiveDescentStatus.PLANNED.value:
+            # Объявленная ось ``archive_descent=plan`` — не деградация, но и не тишина:
+            # членов в корпусе нет именно поэтому.
+            errors.append(
+                f"{product_id}/{url}: {label}: спуск объявлен листингом "
+                "(archive_descent=plan) — члены контейнера не воспроизведены"
+            )
+            return
+        if outcome_docs == 0:
+            container_empty.append(url)
+            errors.append(
+                f"{product_id}/{url}: {FROZEN_CONTAINER_EMPTY}: спуск исполнен "
+                f"({status}), но ни один член не дошёл до корпуса "
+                f"(строк членов {int(getattr(outcome, 'members', 0) or 0)})"
+            )
+
     # Порядок: авторские корни (авторский порядок) → известные URL (порядок планировщика).
     for url in [*roots, *(item.url for item in items)]:
         key = _state_url_key(url)
@@ -3573,6 +3749,15 @@ def frozen_bytes_product(
         touched.append(url)
 
         prior = _prior_url_state(product_id, key, url, state=state, errors=errors)
+        # План 19 §E.7: контейнер — **не** документ (версии документа у него нет), поэтому
+        # проверка идёт до ветки ``no_version``: иначе сохранённые члены архива навсегда
+        # оставались бы «URL без версии». Сеть не нужна: путь и хеш байтов durable.
+        container = _prior_container_state(
+            product_id, key, url, state=state, errors=errors
+        )
+        if container is not None:
+            _replay_container(container, prior, url)
+            continue
         if prior is None:
             unknown_roots.append(url)
             errors.append(f"{product_id}/{url}: {_reason(FROZEN_UNKNOWN_ROOT_TEXT)}")
@@ -3622,29 +3807,7 @@ def frozen_bytes_product(
         # записан объявленный (``layout_tables``): на стенде это дало дрейф
         # пере-извлечения у 4 из 5 PDF — «тот же файл, другой текст» — и второй
         # ``doc_version_id`` у выжившего. Отказ фабрики — видимая деградация, не тишина.
-        extractor_obj: ExtractorPort = extractor
-        if extractor_factory is not None and (
-            level is not DocumentLevel.FULL
-            or limits.pdf_pipeline is not PdfPipeline.STRUCTURED
-        ):
-            # Один экстрактор на ключ ``(уровень, механизм)`` — как пул живого пути:
-            # построение docling заново на каждый документ стоило бы загрузки моделей
-            # по числу PDF (замер: 5 перезагрузок подряд), а не по числу условий.
-            extractor_key = (level, limits.pdf_pipeline)
-            level_extractor = level_extractors.get(extractor_key)
-            if level_extractor is None:
-                try:
-                    level_extractor = extractor_factory(level, limits.pdf_pipeline)
-                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                    errors.append(
-                        f"{product_id}/{url}: frozen: extractor_factory({level.value}, "
-                        f"{limits.pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
-                        "понижен до переданного экстрактора"
-                    )
-                    level_extractor = extractor
-                else:
-                    level_extractors[extractor_key] = level_extractor
-            extractor_obj = level_extractor
+        extractor_obj = _extractor_at(level, limits.pdf_pipeline, url)
         # Маршрут — по **байтам** сохранённого файла, а не по URL/``Content-Type``: у
         # retained-файла суффикс ``.bin``, а заголовка ответа в этом прогоне нет. Иначе
         # PDF, отданный по бессуффиксному URL, ушёл бы в HTML-ветку и дал ложный дрейф.
@@ -3831,21 +3994,64 @@ def frozen_bytes_product(
             f"{len(stored_bytes_missing)} — сохранённых байтов нет у "
             f"{len(stored_bytes_missing)} известных URL ({label})"
         )
+    if containers_replayed:
+        # Тот же канал, но факт **положительный**: «контейнеры воспроизведены» — это
+        # ответ на вопрос «почему членов в корпусе столько же, сколько в живом прогоне».
+        errors.append(
+            f"{product_id}: {FROZEN_CONTAINER_REPLAYED}:{containers_replayed} — "
+            f"контейнеров воспроизведено из сохранённых байтов (документов "
+            f"{container_docs}, чанков {container_chunks}) ({label})"
+        )
 
     return FrozenBytesReport(
-        docs=report_docs,
-        chunks=report_chunks,
+        docs=report_docs + container_docs,
+        chunks=report_chunks + container_chunks,
         reextracted=reextracted,
         cache_hits=cache_hits,
         unknown_roots=tuple(unknown_roots),
         stored_bytes_missing=tuple(stored_bytes_missing),
         no_version=tuple(no_version),
         reextract_mismatch=tuple(reextract_mismatch),
+        containers=containers_replayed,
+        container_docs=container_docs,
+        container_chunks=container_chunks,
+        container_unreadable=tuple(container_unreadable),
+        container_empty=tuple(container_empty),
         groups=tuple(groups),
         urls=tuple(touched),
         capture_docs=tuple(capture_doc_map[key] for key in sorted(capture_doc_map)),
         label=label,
     )
+
+
+def _prior_container_state(
+    product_id: str,
+    key: str,
+    url: str,
+    *,
+    state: ProductStatePort | None,
+    errors: list[str],
+) -> ContainerStateRow | None:
+    """Durable-наблюдение контейнера по ключу URL (план 19 §E.7, STATE 10).
+
+    ``None`` — URL не был контейнером (обычный документ либо неизвестный URL): решение
+    «это контейнер» принимает запись, а не повторный зонд байтов. Зонд потребовал бы
+    читателя контейнеров **до** выбора маршрута, то есть второй путь распознавания рядом
+    с живым (A1: один носитель факта).
+
+    Отказ чтения изолируется в ``errors`` и означает «записи нет»: прогон продолжится
+    обычным путём документа, а причина останется видимой.
+    """
+    if state is None:
+        return None
+    try:
+        return state.get_container_state(product_id, key)
+    except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+        errors.append(
+            f"{product_id}/{url}: state: get_container_state: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
 
 
 def _prior_url_state(

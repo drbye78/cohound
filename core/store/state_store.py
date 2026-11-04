@@ -42,6 +42,7 @@ from core.ports.state import (
     CapturedDocRow,
     CellMeasurementRow,
     ChunkRow,
+    ContainerStateRow,
     CorpusCaptureRow,
     CrawlPolicyRow,
     DocumentVersionRow,
@@ -259,6 +260,42 @@ _URL_STATE_COLUMNS = (
     "seed_id",
 )
 
+#: Колонки ``container_state`` в порядке записи (кроме составного ключа
+#: ``(product_id, normalized_url)``). ``first_seen_*`` здесь **нет** намеренно: первое
+#: наблюдение контейнера не перезаписывается повторной записью.
+_CONTAINER_STATE_COLUMNS = (
+    "url",
+    "archive_content_hash",
+    "raw_path",
+    "format",
+    "status",
+    "last_seen_run_id",
+    "last_seen_at",
+)
+
+#: Upsert контейнера: обновляет всё, кроме ``first_seen_*`` — «когда URL впервые оказался
+#: контейнером» остаётся фактом истории (та же дисциплина, что у ``superseded_at``
+#: аттестации профиля).
+_CONTAINER_STATE_UPSERT = (
+    "INSERT INTO container_state (product_id, normalized_url, "  # noqa: S608 - имена колонок из константы, значения — bind
+    "first_seen_run_id, first_seen_at, "
+    + ", ".join(_CONTAINER_STATE_COLUMNS)
+    + ") VALUES (?, ?, ?, ?, "
+    + ", ".join("?" for _ in _CONTAINER_STATE_COLUMNS)
+    + ") ON CONFLICT(product_id, normalized_url) DO UPDATE SET "
+    + ", ".join(
+        # Формат, не названный повторным наблюдением (проход без сети не классифицирует
+        # байты заново), не стирает уже известный: COALESCE-семантика — та же дисциплина,
+        # что у валидаторов ``url_state``.
+        (
+            "format = COALESCE(excluded.format, container_state.format)"
+            if name == "format"
+            else f"{name} = excluded.{name}"
+        )
+        for name in _CONTAINER_STATE_COLUMNS
+    )
+)
+
 #: Колонки ``document_version`` в порядке записи (кроме ``doc_version_id`` — он ключ).
 _DOCUMENT_VERSION_COLUMNS = (
     "doc_id",
@@ -395,6 +432,7 @@ FORGET_PRODUCT_TABLES = (
     # ``corpus_capture`` при включённых FK отказало бы на существующих строках.
     "corpus_capture_doc",
     "corpus_capture",
+    "container_state",
     "url_state",
     "product_snapshot",
     "cell_measurement",
@@ -938,6 +976,61 @@ class SqliteStateStore:
                 ),
                 (row.product_id, row.normalized_url, *values),
             )
+
+    @staticmethod
+    def _container_state_row(row: sqlite3.Row) -> ContainerStateRow:
+        """Строка SQLite → :class:`ContainerStateRow` (поля — как объявлены в DDL)."""
+        return ContainerStateRow(
+            product_id=str(row["product_id"]),
+            url=str(row["url"]),
+            normalized_url=str(row["normalized_url"]),
+            archive_content_hash=str(row["archive_content_hash"]),
+            raw_path=str(row["raw_path"]),
+            format=row["format"],
+            status=str(row["status"]),
+            first_seen_run_id=str(row["first_seen_run_id"]),
+            last_seen_run_id=str(row["last_seen_run_id"]),
+            first_seen_at=str(row["first_seen_at"]),
+            last_seen_at=str(row["last_seen_at"]),
+        )
+
+    def record_container_state(self, row: ContainerStateRow) -> None:
+        """Пишет наблюдение контейнера; ``first_seen_*`` не перезаписывается.
+
+        Идемпотентно по ``(product_id, normalized_url)``: повторный спуск того же архива
+        обновляет хеш/путь/формат/исход и ``last_seen_*``, а первое наблюдение остаётся.
+        """
+        values = [getattr(row, name) for name in _CONTAINER_STATE_COLUMNS]
+        with self._conn:
+            self._conn.execute(
+                _CONTAINER_STATE_UPSERT,
+                (
+                    row.product_id,
+                    row.normalized_url,
+                    row.first_seen_run_id,
+                    row.first_seen_at,
+                    *values,
+                ),
+            )
+
+    def get_container_state(
+        self, product_id: str, normalized_url: str
+    ) -> ContainerStateRow | None:
+        """Строка контейнера по нормализованному URL (``None`` — URL не был контейнером)."""
+        row = self._conn.execute(
+            "SELECT * FROM container_state WHERE product_id = ? AND normalized_url = ?",
+            (product_id, normalized_url),
+        ).fetchone()
+        return self._container_state_row(row) if row is not None else None
+
+    def iter_container_state(self, product_id: str) -> list[ContainerStateRow]:
+        """Все строки ``container_state`` продукта в порядке ``normalized_url``."""
+        rows = self._conn.execute(
+            "SELECT * FROM container_state WHERE product_id = ?"
+            " ORDER BY normalized_url",
+            (product_id,),
+        ).fetchall()
+        return [self._container_state_row(row) for row in rows]
 
     @staticmethod
     def _document_version_row(row: sqlite3.Row) -> DocumentVersionRow:
