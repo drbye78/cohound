@@ -323,9 +323,9 @@ tests/
   (нарезка входа `batch_size`); цена в часах опубликована
   (`docs/reports/measurements/2026-10-25-embedding-throughput.md`: 8.2–9.4 ч на корпус).
 - массовая запись в SQLite — ✅ сделано — `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:21`)
-  и одна транзакция на пачку 200 (`core/store/sqlite_store.py:90`, `save_cells_batch` `:626`).
+  и одна транзакция на пачку 200 (`core/store/sqlite_store.py:92`, `save_cells_batch` `:602`).
 - search-адаптер latency/стоимость — ✅ сделано — бюджет фазы объявляется и проверяется
-  (`core/pipeline/corpus.py:1065`, безлимит запрещён `:1029`), кэш — `core/util/cache.py:133`.
+  (`core/pipeline/corpus.py:1170`, безлимит запрещён `:1234-1237`), кэш — `core/util/cache.py:133`.
 
 ### D.1. Память и OOM
 

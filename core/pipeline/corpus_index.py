@@ -620,6 +620,7 @@ def _embed_and_build(
     cache: EmbedCache | None = None,
     census: _EmbedCensus | None = None,
     timings: _CorpusStageTimings | None = None,
+    corpus_snapshot_id: str | None = None,
 ) -> bool:
     """Best-effort эмбеддинг и физическая сборка индекса продукт-партиции (K3, §B.1).
 
@@ -644,6 +645,11 @@ def _embed_and_build(
     :param timings: бакеты стадий продукта (наблюдаемость): сюда пишутся ``embed_s`` и
         ``build_s``. ``None`` — не измерять (юнит-путь). Оба бакета — **работа** главного
         потока: эмбеддер вызывается синхронно, ``build`` — тоже.
+    :param corpus_snapshot_id: снимок **продукта** (план 20 §4) — провенанс сборки. В
+        манифест партиции идёт как ``extra["corpus_snapshot_id"]``; в ``pb``
+        (:func:`_derive_partition_build_id`) **не** входит: иначе добавление снимка
+        сменило бы ``pb`` у всех партиций (``execution_change`` без причины). ``None`` —
+        снимок не записан (нет стора/прогона), значение не выдумывается.
     :param on_batch: ``(done, total, elapsed_s)`` — граница батча; ``None`` — без наблюдения
         (юнит-путь). Ошибка колбэка не должна выдавать себя за сбой сборки: наблюдение
         изолируется вызывающим.
@@ -702,6 +708,13 @@ def _embed_and_build(
                 # 16 §5.1: место счёта векторов. Сборщик уже пишет его из ``extra``;
                 # без записи CUDA-партиция была бы неотличима от CPU-партиции по манифесту.
                 "embed_device": embed_device,
+                # План 20 §4: снимок продукта — провенанс, не слагаемое ``pb``. Ключ не
+                # добавляется, когда снимка нет: ``None`` в ``extra`` был бы выдумкой.
+                **(
+                    {}
+                    if corpus_snapshot_id is None
+                    else {"corpus_snapshot_id": corpus_snapshot_id}
+                ),
             },
         )
         _build_started = time.perf_counter()

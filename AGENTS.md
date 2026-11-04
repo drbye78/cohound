@@ -334,6 +334,17 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   never in `run_id` — otherwise an operator's bookkeeping would rewrite identity. The digest
   is persisted (`runs.crawl_policy_digest`), so `hound diff` **names** it instead of printing
   "not recoverable from the manifest".
+- **Observation dates are provenance, not identity** (plan 20 §F1). Because parts of a
+  corpus refresh asynchronously, dates per artifact *are* different by definition. A
+  **capture** is one walk of one root (`state.db: capture`, STATE 11: `capture_id` from
+  `(product, root, run_id)`, `complete` = the walk was exhausted) and an **observation** is
+  `url_state.observed_at`/`observed_how`/`capture_id` (COALESCE-upsert: a pass without
+  network never erases a live observation). The run's **corpus snapshot**
+  (`corpus_snapshot_id`, `captures[]`, `corpus_as_of`) lands in `runs.corpus_snapshot_json`
+  and, for `pb`, in `IndexMeta.extra` — **never** in `_derive_partition_build_id` or
+  `run_id`: it is known only after the crawl, while `plan` must compute `run_id` first. Same
+  declared inputs over a shifted `state.db` therefore give a different snapshot; that is
+  the definition of asynchronous refresh, not a changed measurement condition.
 - `deploy_profile` is in the contract because `split` executes web work in the DMZ: it ignores
   `document_level`/`pdf_pipeline`, double-fetches (different observed URL set and `complete`),
   and does not extract container members. Same `run_id` over two executions would be a lie

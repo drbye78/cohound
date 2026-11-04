@@ -71,6 +71,7 @@ from core.domain.invariants import check_unknown_exhaustion
 from core.domain.models import (
     CatalogRow,
     CorpusCoverage,
+    CorpusSnapshot,
     CrawlProvenance,
     ProtocolExhaustion,
     RunManifest,
@@ -942,6 +943,7 @@ def build_manifest(
     refresh_policy: Any = None,
     frozen_source: str | None = None,
     policy_provenance: Mapping[str, Any] | None = None,
+    corpus_snapshot: CorpusSnapshot | Mapping[str, Any] | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -1005,6 +1007,10 @@ def build_manifest(
       прогон авторизовал ``❌``. Информационный провенанс того же класса, что
       ``reviewed_by``: в ``EXECUTION_CONTRACT_FIELDS`` **не входит** (авторизация, не
       измерение), поэтому смена подписанта не даёт новый ``run_id``.
+    * План 20 §5 — ``corpus_snapshot``: снимок корпуса (``corpus_snapshot_id``, снятия
+      прогона, ``corpus_as_of``). Провенанс, а не объявленный вход: в ``run_id`` не входит
+      (снимок известен только после краула). Приходит готовым из durable-носителя фазы
+      ``corpus`` — здесь содержание не пересчитывается.
     * 13-manual-artifacts §3.2/§3.4 — ``manual_artifacts_digest`` (отпечаток объявленных
       файлов оператора; поле контракта) и ``manual_artifacts`` (наблюдённая доля ручного:
       ``count``/``share_of_corpus``/``bytes``/``by_reason``/``by_product``). Первый —
@@ -1318,6 +1324,16 @@ def build_manifest(
     else:
         resolved_policy = {}
 
+    # План 20 §5: снимок принимается моделью или словарём (durable-носитель —
+    # ``runs.corpus_snapshot_json``), но на манифест уходит **моделью**: форма одна.
+    resolved_corpus_snapshot = (
+        None
+        if corpus_snapshot is None
+        else corpus_snapshot
+        if isinstance(corpus_snapshot, CorpusSnapshot)
+        else CorpusSnapshot.model_validate(corpus_snapshot)
+    )
+
     return RunManifest(
         run_id=str(getattr(plan, "run_id", "")),
         case_id=str(getattr(run, "case_id", "")),
@@ -1388,6 +1404,12 @@ def build_manifest(
         ),
         captured_at=resolved_policy.get("captured_at"),
         crawl_policy_roots=list(resolved_policy.get("roots") or []),
+        # План 20 §5: снимок корпуса — провенанс прогона, в ``run_id``/контракт не входит.
+        # Приходит готовым (из ``runs.corpus_snapshot_json``, куда его записала фаза
+        # ``corpus``): здесь содержание **не** пересчитывается, иначе у одной величины было
+        # бы два расчёта. ``None`` — снимок не записан (строка прошлой схемы/модульный
+        # вызов), а не «снимка нет».
+        corpus_snapshot=resolved_corpus_snapshot,
         focus_modules=focus_modules,
         index_build_id=resolved_index_build_id,
         embed_model_id=_first_present(

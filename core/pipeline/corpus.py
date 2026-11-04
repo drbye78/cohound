@@ -178,10 +178,12 @@ from core.config.deploy import CrawlConfig, resolve_host_shard
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     ArchiveObservation,
+    CorpusCaptureRef,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
     CorpusMember,
+    CorpusSnapshot,
     CrawlCorpusSource,
     CrawlItemStatus,
     CrawlNetworkMode,
@@ -305,7 +307,10 @@ from core.pipeline.crawl_sources import (
 from core.pipeline.digests import (
     corpus_capture_digest,
     corpus_doc_set_digest,
+    corpus_snapshot_id,
+    corpus_snapshot_product_id,
     coverage_digest,
+    snapshot_url_key,
 )
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
@@ -679,6 +684,177 @@ def canonicalize_doc_urls(
             f"canonical_url({product_id}): {type(exc).__name__}: {exc}"
         )
     return changed
+
+
+def _corpus_snapshot_artifacts(
+    store: Any,
+    run_id: str,
+    product_id: str,
+    errors: list[str],
+) -> list[tuple[str, str]]:
+    """Артефакты снимка продукта: ``(url, doc_version_id)`` документов этого прогона.
+
+    Источник — durable-корпус прогона, а не память фазы: ``corpus_docs`` даёт канонический
+    адрес документа, ``corpus_doc_version`` — адрес **версии** (``doc_id`` → ``dv_...``
+    неоднозначен, поэтому носитель — производная таблица, 16 §6). Память не годится:
+    при ремонте (``--only-failed``) ``ingest.docs`` содержит только ремонтируемые
+    документы, и снимок продукта описал бы срез работы, а не корпус прогона.
+
+    Документ без записанной версии входит с пустой строкой — это факт «версия не
+    записана» (legacy-путь), а не повод подставить ``content_hash``: тот описывает текст,
+    а версия различает ещё и уровень извлечения.
+
+    Адрес берётся из ``corpus_docs.url`` как есть, а в дайджест уходит канонической формой
+    (:func:`snapshot_url_key`, план 20 §F1): здесь он нужен ещё и для сопоставления со
+    строкой ``url_state`` при сборе снятий и дат, где сырое значение — первый кандидат.
+
+    Сбой чтения изолируется в ``errors``: снимок вторичен к корпусу (контракт фазы).
+    """
+    if store is None or run_id is None:
+        return []
+    try:
+        urls_by_doc = {
+            doc.doc_id: doc.url
+            for doc in store.iter_corpus_docs(run_id)
+            if doc.product_id == product_id
+        }
+        versions = store.iter_corpus_doc_versions(run_id, product_id)
+    except Exception as exc:  # noqa: BLE001 — снимок вторичен к корпусу
+        errors.append(
+            f"{product_id}: corpus snapshot: {type(exc).__name__}: {exc}"
+        )
+        return []
+    artifacts = [
+        (urls_by_doc[doc_id], doc_version_id)
+        for doc_version_id, doc_id in versions.items()
+        if doc_id in urls_by_doc
+    ]
+    verified = {doc_id for doc_id in versions.values() if doc_id in urls_by_doc}
+    artifacts.extend(
+        (url, "") for doc_id, url in urls_by_doc.items() if doc_id not in verified
+    )
+    return sorted(artifacts)
+
+
+def _product_observation_rows(
+    state: Any,
+    product_id: str,
+    errors: list[str],
+) -> list[Any]:
+    """Строки ``url_state`` продукта — **один** читатель на снимок продукта (план 20 §4).
+
+    Из этого чтения берутся и снятия, на которые опираются артефакты, и ``corpus_as_of``:
+    два отдельных чтения могли бы разойтись, а снимок обязан описывать одно наблюдаемое
+    состояние.
+
+    Сбой чтения изолируется в ``errors`` и даёт пустой набор: снимок вторичен к корпусу
+    (контракт фазы).
+    """
+    if state is None:
+        return []
+    try:
+        return list(state.iter_url_state(product_id))
+    except Exception as exc:  # noqa: BLE001 — снимок вторичен к корпусу
+        errors.append(
+            f"{product_id}: corpus snapshot state: {type(exc).__name__}: {exc}"
+        )
+        return []
+
+
+def _product_capture_refs(
+    state: Any,
+    product_id: str,
+    run_id: str | None,
+    artifact_urls: Iterable[str],
+    rows: Sequence[Any],
+    errors: list[str],
+) -> list[CorpusCaptureRef]:
+    """Снятия, на которые **опирается** снимок продукта (план 20 §4).
+
+    Множество — объединение двух: (1) снятия этого прогона (``capture.run_id == run_id``)
+    и (2) снятия, на которые опираются вошедшие артефакты (``url_state.capture_id`` их
+    адресов). У живого прогона множества совпадают, поэтому правило не меняет его снимок.
+    У прохода по сохранённым данным (``frozen``) снятий **нет** — он не наблюдает, — и
+    фильтр только по ``run_id`` оставлял снимок без единого снятия: манифест читался бы
+    как «корпус ничем не удостоверен», хотя его удостоверяют живые снятия прошлого
+    прогона. Провенанс наследуется вместе с наблюдением, а не переписывается.
+
+    Адреса сравниваются канонической формой (:func:`snapshot_url_key`): строка состояния и
+    ``corpus_docs.url`` могут не совпасть формой записи (измерено 05.11.2026 на стенде:
+    percent-encoded против декодированной).
+
+    Отозванные снятия (``superseded_by``) не отфильтровываются: отзыв — отдельный факт
+    снятия, а не повод вычеркнуть наблюдение из провенанса.
+    """
+    if state is None:
+        return []
+    keys = {snapshot_url_key(url) for url in artifact_urls}
+    relied_upon = {
+        str(row.capture_id)
+        for row in rows
+        if getattr(row, "capture_id", None)
+        and snapshot_url_key(getattr(row, "url", "")) in keys
+    }
+    try:
+        captures = state.iter_captures(product_id)
+    except Exception as exc:  # noqa: BLE001 — снимок вторичен к корпусу
+        errors.append(
+            f"{product_id}: corpus snapshot captures: {type(exc).__name__}: {exc}"
+        )
+        return []
+    return [
+        CorpusCaptureRef(
+            capture_id=capture.capture_id,
+            product_id=capture.product_id,
+            root_url=capture.root_url,
+            started_at=capture.started_at,
+            finished_at=capture.finished_at,
+            complete=bool(capture.complete),
+            observed_how=capture.observed_how,
+            coverage_digest=capture.coverage_digest,
+            doc_set_digest=capture.doc_set_digest,
+        )
+        for capture in captures
+        if capture.run_id == run_id or capture.capture_id in relied_upon
+    ]
+
+
+def _product_corpus_as_of(
+    urls: Iterable[str],
+    rows: Sequence[Any],
+) -> dict[str, str] | None:
+    """``corpus_as_of`` продукта по наблюдениям **вошедших** артефактов (план 20 §4).
+
+    Дата берётся из ``url_state.observed_at`` (наблюдение версии), а не из ``created_at``
+    прогона: у артефактов корпуса даты по определению разные (ручная подача, расписания,
+    разные режимы по областям), и «одна дата на прогон» была бы выдумкой.
+
+    Совпадение — по адресу строки состояния (он сырой, каким URL наблюдался), затем по
+    канонической форме (:func:`snapshot_url_key`): канонический адрес документа выбирается
+    ``min(url)`` запросом, а форма записи может отличаться от записанной в ``url_state``.
+    Наблюдение URL, не давшего документа, датой корпуса не является, поэтому берутся
+    только адреса документов.
+
+    ``None`` — наблюдений нет ни у одного артефакта (все ``reused``/``frozen`` без прежних
+    наблюдений): дата не подставляется. Одно наблюдение даёт ``from == to`` — это факт,
+    а не «одна дата у всех».
+    """
+    # Пустая строка — не дата: тестовые/частичные RawPage приходят без fetched_at, и
+    # выдать ``""`` за наблюдение значило бы объявить дату, которой нет (A3).
+    observed_by_url = {row.url: row.observed_at for row in rows if row.observed_at}
+    observed_by_key = {
+        snapshot_url_key(row.url): row.observed_at for row in rows if row.observed_at
+    }
+    dates: list[str] = []
+    for url in sorted({str(url) for url in urls}):
+        observed_at = observed_by_url.get(url) or observed_by_key.get(
+            snapshot_url_key(url)
+        )
+        if observed_at:
+            dates.append(observed_at)
+    if not dates:
+        return None
+    return {"from": min(dates), "to": max(dates)}
 
 
 def _register_composition_state(
@@ -2498,6 +2674,11 @@ def _build_corpus(
     #: (не на URL).
     product_events: list[dict[str, Any]] = []
 
+    #: План 20 §4: снимки продуктов **этого** прогона — провенанс, не объявленный вход.
+    #: Заполняется на границе продукта (снимок считается из durable-корпуса и наблюдений),
+    #: конец фазы собирает из него снимок прогона, не пересчитывая содержание.
+    product_snapshots: dict[str, dict[str, Any]] = {}
+
     #: Наблюдаемость эмбеддинга: измеренная пропускная способность — по строке на продукт
     #: (``N/M чанков, X чанк/с``). Это наблюдение о **цене** работы, а не о её составе:
     #: в ``run_id`` не входит (не измерение карты, A3), но оператор его видит.
@@ -4156,6 +4337,24 @@ def _build_corpus(
             observed_documents.append(
                 (doc.url, product_chunk_counts.get(doc.doc_id, 0))
             )
+        # План 20 §4: снимок продукта — **провенанс**, не вход. Считается здесь, на границе
+        # продукта, из durable-корпуса этого прогона (адрес + версия документа) и политики
+        # прогона. Идёт в ``pb``-манифест продукта (``IndexMeta.extra``) и в снимок прогона;
+        # в ``_derive_partition_build_id`` **не** входит: добавление снимка в формулу
+        # сменило бы ``pb`` у всех партиций (execution_change без причины).
+        snapshot_artifacts: list[tuple[str, str]] = []
+        snapshot_product_id: str | None = None
+        if store is not None and run_id is not None:
+            snapshot_artifacts = _corpus_snapshot_artifacts(
+                store, run_id, product_id, errors
+            )
+            snapshot_product_id = corpus_snapshot_product_id(
+                product_id=product_id,
+                artifacts=snapshot_artifacts,
+                crawl_policy_digest=(
+                    None if crawl_policy is None else crawl_policy.digest
+                ),
+            )
         physical_ok = True
         if product_chunks:
             counters.chunk_count += len(product_chunks)
@@ -4247,6 +4446,9 @@ def _build_corpus(
                         product_content_token=product_token,
                         snapshot_date=snapshot,
                         partition_build_id=partition_build_id,
+                        # План 20 §4: снимок продукта — провенанс сборки, **не** слагаемое
+                        # ``pb`` (``_PARTITION_SCHEMA`` остаётся ``partition-2``).
+                        corpus_snapshot_id=snapshot_product_id,
                         errors=errors,
                         on_batch=_make_embed_reporter(
                             heartbeat=heartbeat,
@@ -4450,6 +4652,31 @@ def _build_corpus(
                     f"{type(exc).__name__}: {exc}"
                 )
 
+        # План 20 §4: снимок продукта в манифест прогона — снятия, на которые
+        # **опираются** артефакты (``url_state.capture_id``), объединённые со снятиями
+        # этого прогона, и ``corpus_as_of`` по наблюдениям вошедших артефактов. Состояние
+        # читается **один** раз: снятия и дата описывают одно наблюдённое состояние.
+        # Считается после догона дайджестов снятий: до него
+        # ``coverage_digest``/``doc_set_digest`` живого снятия ещё пусты, и провенанс
+        # назвал бы несостоявшееся.
+        if snapshot_product_id is not None:
+            artifact_urls = [url for url, _version in snapshot_artifacts]
+            observation_rows = _product_observation_rows(state, product_id, errors)
+            product_snapshots[product_id] = {
+                "snapshot_product_id": snapshot_product_id,
+                "captures": _product_capture_refs(
+                    state,
+                    product_id,
+                    run_id,
+                    artifact_urls,
+                    observation_rows,
+                    errors,
+                ),
+                "corpus_as_of": _product_corpus_as_of(
+                    artifact_urls, observation_rows
+                ),
+            }
+
         # 16 §3.2: финальная строка продукта — после Pass B (там же, где ``corpus_coverage``).
         # Числа — уже посчитанные фазой величины: документы (``product_docs_total`` и
         # ``doc_counters``), полнота покрытия (``CorpusCoverage``), статус — из
@@ -4563,6 +4790,52 @@ def _build_corpus(
     # случае ``session_finalized`` уже стоит из хвоста.
     if not consume_only:
         _finalize_crawl_session()
+
+    # --- Снимок корпуса прогона (план 20 §4/§5) ------------------------------ #
+    # Провенанс, а не объявленный вход: собирается из **уже посчитанных** снимков
+    # продуктов (содержание не пересчитывается), а в ``run_id`` не входит — он известен
+    # только после краула. Пишется сразу, на выходе фазы: манифест строит Ш9, и durable
+    # носитель нужен ему (и пост-хок ``hound report``) без ``state.db``.
+    #
+    # ``corpus_as_of`` прогона — объединение дат артефактов по продуктам: минимум/максимум
+    # наблюдавшихся ``observed_at``, а не дата прогона. Порядок ``captures`` задаётся
+    # содержанием (``CorpusSnapshot`` сортирует), а не порядком завершения корней.
+    corpus_snapshot: CorpusSnapshot | None = None
+    if product_snapshots:
+        capture_refs = [
+            capture
+            for item in product_snapshots.values()
+            for capture in item["captures"]
+        ]
+        as_of_blocks = [
+            item["corpus_as_of"]
+            for item in product_snapshots.values()
+            if item["corpus_as_of"] is not None
+        ]
+        corpus_snapshot = CorpusSnapshot(
+            corpus_snapshot_id=corpus_snapshot_id(
+                (product_id, item["snapshot_product_id"])
+                for product_id, item in product_snapshots.items()
+            ),
+            captures=capture_refs,
+            corpus_as_of=(
+                None
+                if not as_of_blocks
+                else {
+                    "from": min(block["from"] for block in as_of_blocks),
+                    "to": max(block["to"] for block in as_of_blocks),
+                }
+            ),
+        )
+        if store is not None and run_id is not None:
+            writer = getattr(store, "set_run_corpus_snapshot", None)
+            if callable(writer):
+                try:
+                    writer(run_id, corpus_snapshot.model_dump(mode="json"))
+                except Exception as exc:  # noqa: BLE001 — снимок вторичен к корпусу
+                    errors.append(
+                        f"corpus snapshot: {type(exc).__name__}: {exc}"
+                    )
 
     # Продукт плана **без записи** в непустом ``urls``: в цикл он не попал (``products``
     # выводится из ``url_map``), поэтому молча не краулится и получает строку покрытия
@@ -4904,6 +5177,14 @@ def _build_corpus(
     )
     log_entries: list[Any] = [
         build,
+        # План 20 §4: снимок корпуса — структурная запись фазы (машинному потребителю).
+        # Даты наблюдений по артефактам разные по определению; строка в ``results[].notes``
+        # не нужна: «одна дата у всех» — именно то, что снимок опровергает.
+        *(
+            [{"event": "corpus_snapshot", **corpus_snapshot.model_dump(mode="json")}]
+            if corpus_snapshot is not None
+            else []
+        ),
         *product_events,
         *(_product_notes(product_events) if session is not None else []),
         # 13-manual-artifacts §4: «N документов недоступно: …» — одной строкой, чтобы

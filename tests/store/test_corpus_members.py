@@ -76,8 +76,11 @@ def test_schema_version_is_additive_bump() -> None:
 
     3.17.0 — P4 плана ``19``: ``runs.crawl_policy_digest``/``crawl_policy_json`` — ось
     политики краула и её провенанс; файлы ≤ 3.16.0 отвергаются гейтом.
+
+    3.18.0 — F1 плана ``20``: ``runs.corpus_snapshot_json`` — снимок корпуса прогона
+    (провенанс, а не объявленный вход); файлы ≤ 3.17.0 отвергаются гейтом.
     """
-    assert SCHEMA_VERSION == "3.17.0"
+    assert SCHEMA_VERSION == "3.18.0"
     conn = connect(":memory:")
     try:
         tables = {

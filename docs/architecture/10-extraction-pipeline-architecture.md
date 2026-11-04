@@ -986,7 +986,7 @@ B1 включает B2 (без идентичности нет паритета)
 > (`core/config/domain_profiles.py:100`; цепочка app < run < site в
 > `core/pipeline/crawl_frontier.py:672-680`), `document_level` входит в `CrawlLimits.as_dict`
 > (`:379`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
-> ключ профиля плюс `__default__` (`core/pipeline/report.py:680-684`), не по скаляру.
+> ключ профиля плюс `__default__` (`core/pipeline/report.py:688-693`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
 > (`core/pipeline/corpus.py:2205,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.

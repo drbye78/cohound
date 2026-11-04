@@ -210,6 +210,28 @@ class StorePort(Protocol):
         """
         ...
 
+    def set_run_corpus_snapshot(
+        self, run_id: str, snapshot: Mapping[str, Any]
+    ) -> None:
+        """Пишет снимок корпуса прогона в ``runs.corpus_snapshot_json`` (план 20 §F1).
+
+        Снимок известен уже на выходе фазы ``corpus``, а манифест (Ш9) собирается позже
+        и обязан прочитать его **отсюда**, а не пересчитывать: снимок — провенанс, и
+        второй расчёт содержания дал бы вторую величину. Идемпотентно: повторная запись
+        того же значения — no-op; неизвестный ``run_id`` — no-op (строку создаёт
+        :meth:`create_run`). В ``run_id`` снимок не входит.
+        """
+        ...
+
+    def read_corpus_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        """Читает снимок корпуса прогона; ``None`` — не записан/повреждён.
+
+        Носитель — ``runs.corpus_snapshot_json`` (план 20 §F1). Манифест строит Ш9, но
+        снимок обязан пережить resume и пост-хок ``hound report``, поэтому читается
+        отдельно от ``read_manifest`` (там он — проекция той же колонки).
+        """
+        ...
+
     def save_publishability(self, run_id: str, profile: Mapping[str, Any]) -> None:
         """Персистит блок профиля публикуемости в ``runs.publishability_json`` (A1/§6).
 

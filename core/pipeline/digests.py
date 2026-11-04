@@ -53,8 +53,10 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from core.config.seeds import normalize_seed_url
 from core.domain.models import CatalogRow, Cohort, SeedsConfig
 from core.util.hashing import short_hash
+from core.util.robots import url_canonical_form
 
 # ВАЖНО: срез только вычисляет дайджест; границы ``hound diff``/``content_change`` не меняются.
 __all__ = [
@@ -65,6 +67,8 @@ __all__ = [
     "cohort_digest",
     "corpus_capture_digest",
     "corpus_doc_set_digest",
+    "corpus_snapshot_id",
+    "corpus_snapshot_product_id",
     "coverage_digest",
     "crawl_policy_digest",
     "execution_contract_digest",
@@ -74,6 +78,7 @@ __all__ = [
     "retrieved_doc_set_digest",
     "scoring_policy_version",
     "seeds_digest",
+    "snapshot_url_key",
 ]
 
 #: Поля execution contract (§12.5, методология 2.4.0). Порядок — документационный; хеш
@@ -538,6 +543,88 @@ def corpus_capture_digest(
         ),
         _DIGEST_LEN,
     )
+
+
+def snapshot_url_key(url: str) -> str:
+    """Ключ адреса в материале снимка корпуса (план 20 §F1).
+
+    Один артефакт — один ключ, как бы адрес ни был записан. Измерено на стенде
+    (05.11.2026, ``ru-pg-dbms``/``jatoba``): живой путь записал адрес percent-encoded
+    (``…/%D0%9B%D0%B8%D1%86…1.pdf``), проход по сохранённым байтам — декодированным
+    (``…/ЛицензионноеСоглашение1.pdf``), при совпадающих ``doc_id``, ``content_hash`` и
+    ``doc_version_id``. То есть это один артефакт, и форма записи адреса не вправе менять
+    снимок (иначе снимок — функция записи, а не содержания).
+
+    Порядок нормализации: канонизация §7.2 (:func:`normalize_seed_url` — та же, что у
+    ключа ``url_state``), затем форма сравнения RFC 3986
+    (:func:`core.util.robots.url_canonical_form`): не-ASCII → percent-encoded, escape'ы
+    незарезервированных символов раскодируются, ``%2F`` остаётся ``%2F``. Одной
+    ``normalize_seed_url`` мало: path она не трогает, и измеренные две формы дают у неё
+    **разные** строки.
+
+    Ненормализуемый адрес (не ``http(s)``) возвращается как есть: снимок — провенанс, он
+    не вправе падать и не вправе выдумывать замену адреса.
+    """
+    text = str(url or "")
+    try:
+        canonical = normalize_seed_url(text)
+    except ValueError:
+        canonical = text
+    return url_canonical_form(canonical)
+
+
+def corpus_snapshot_product_id(
+    *,
+    product_id: str,
+    artifacts: Iterable[tuple[str, str]],
+    crawl_policy_digest: str | None,
+) -> str:
+    """Снимок **продукта** прогона (план 20 §4), 24 hex-символа.
+
+    Материал — отсортированное множество троек ``(product_id, url, doc_version_id)``
+    документов **этого** прогона **этого** продукта плюс ``crawl_policy_digest`` прогона:
+    политика — часть того, «на чём» считался корпус. Порядок входа не входит
+    (``sorted`` на множестве), а ``content_hash`` не подставляется вместо версии:
+    версия различает уровень извлечения, хеш — нет.
+
+    Адрес входит **канонической формой** (:func:`snapshot_url_key`), а не той записью,
+    какой он лёг в ``corpus_docs.url``: форма записи адреса — не свойство артефакта
+    (``corpus_docs.url`` при дедупе выбирается ``min(url)``, план 19 §8.3, и это отдельный
+    вопрос). Нормализуется **вход** формулы, вид дайджеста не меняется.
+
+    ``doc_version_id`` может быть пустым: это **факт** «версия не записана» (legacy-путь),
+    а не догадка о ней. Одна формула на величину: манифест и ``pb``-провенанс берут
+    отсюда, второго расчёта содержания нет.
+    """
+    material = sorted(
+        {
+            (str(product_id), snapshot_url_key(url), str(doc_version_id))
+            for url, doc_version_id in artifacts
+        }
+    )
+    return short_hash(
+        _canonical(
+            {
+                "artifacts": [list(row) for row in material],
+                "crawl_policy_digest": crawl_policy_digest,
+            }
+        ),
+        _DIGEST_LEN,
+    )
+
+
+def corpus_snapshot_id(products: Iterable[tuple[str, str]]) -> str:
+    """Снимок **прогона** (план 20 §4), 24 hex-символа.
+
+    Материал — отсортированные пары ``product_id:snapshot_product_id``. Содержание
+    продуктов здесь не пересчитывается: снимок прогона собирает уже посчитанные снимки.
+    Пустой набор даёт стабильный отпечаток пустого набора — прогон без продуктов это факт,
+    а не «снимка нет».
+    """
+    material = sorted(
+        {f"{product_id}:{snapshot}" for product_id, snapshot in products}
+    )
+    return short_hash(_canonical({"products": material}), _DIGEST_LEN)
 
 
 def retrieved_doc_set_digest(retrieved: Iterable[Any]) -> str:

@@ -89,7 +89,18 @@ _OWNER = re.compile(r"'[A-Za-z0-9_.\-]+/\d+/\d+'")
 #: стал ключом ``(depth, url)`` (два документа ингестились в обратном порядке), и
 #: аддитивная колонка ``crawl_session_items.doc_hash`` изменила текст каждого ``INSERT``
 #: этой таблицы.
-EXPECTED_WRITE_DIGEST = "060fbb5a8886394863c702fe16f8c08f4a8b7e5b63df0387ebb2b58d3fcb6c36"
+#:
+#: **Пересобран 2026-11-05 осознанно** (F1 плана ``20``), по трём названным причинам и ни по
+#: какой другой: фаза ``corpus`` теперь считает снимок корпуса (провенанс, не вход), поэтому
+#:   1. читает durable-корпус продукта — ``SELECT 1 FROM runs`` + ``SELECT * FROM corpus_docs``
+#:      (адрес документа) и ``PRAGMA``/``SELECT doc_version_id, doc_id FROM corpus_doc_version``
+#:      (адрес версии): без них ``snapshot_product_id`` пришлось бы выдумывать;
+#:   2. пишет снимок прогона в ``runs.corpus_snapshot_json`` — один ``UPDATE runs`` после
+#:      закрытия всех продуктов (манифест Ш9 читает его оттуда, а не пересчитывает);
+#:   3. не сдвигает ни одну прежнюю запись: порядок ``INSERT corpus_docs``/``corpus_chunks``/
+#:      ``corpus_coverage``/``run_product`` тот же. Операторов стало 203 против 195, записей
+#:      165 против 162 — ровно чтения снимка и один его ``UPDATE``.
+EXPECTED_WRITE_DIGEST = "89273ea2241ae92b21bb0ace61ade9cf5670e0c93d02cc6afedd2e8a33bb6ef5"
 
 #: Дайджест **полного** трассированного следа, включая ``SELECT``. Второй пин, а не первый:
 #: он видит то, чего пин записей не видит по построению, — появление нового чтения (N+1) и
@@ -100,7 +111,7 @@ EXPECTED_WRITE_DIGEST = "060fbb5a8886394863c702fe16f8c08f4a8b7e5b63df0387ebb2b58
 #: **Пересобран 2026-11-03** вместе с писательским пином и по той же причине: те же две
 #: колонки вошли в read-проекцию ``Chunk`` (``_CHUNK_COLUMNS``). Новых чтений нет — сдвинулся
 #: текст проекции, что и есть ожидаемая цена аддитивной колонки.
-EXPECTED_TRACE_DIGEST = "ee40fdcabc7d5e63e493775a21c5a61cf085f86b2525e5e70992ab9f22c05c09"
+EXPECTED_TRACE_DIGEST = "e4711c435017dc4d3a172673e90b9ef7bc75206665efa400796a5f87c90b8d9d"
 
 #: Глаголы, меняющие данные или схему. Транзакционные границы входят в пин записей: без них
 #: «две записи в одной транзакции» и «две записи в разных» дали бы один дайджест.
@@ -268,6 +279,11 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'BEGIN'),
     (1, 'UPDATE crawl_sessions'),
     (1, 'COMMIT'),
+    (1, 'SELECT 1'),
+    (1, 'SELECT *'),
+    (1, 'SELECT 1'),
+    (1, 'PRAGMA'),
+    (1, 'SELECT doc_version_id,'),
     (1, 'BEGIN'),
     (5, 'INSERT corpus_chunks'),
     (1, 'COMMIT'),
@@ -277,6 +293,9 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'INSERT run_product'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'UPDATE runs'),
     (1, 'COMMIT'),
     (1, 'SELECT *'),
     (1, 'BEGIN'),

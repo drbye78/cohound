@@ -1553,6 +1553,84 @@ class CrawlProvenance(BaseModel):
         return self
 
 
+class CorpusCaptureRef(BaseModel):
+    """Снятие корня в снимке корпуса прогона (план 20 §4): ссылка, а не второй носитель.
+
+    Durable-источник — таблица ``capture`` (state.db). Здесь снятие повторено потому, что
+    ``run_manifest.yaml`` обязан читаться **без** ``state.db``: манифест — самостоятельная
+    запись воспроизведения. ``complete`` — исчерпан ли обход **на дату снятия**;
+    у ``observed_how='adopted'`` всегда ``False``: предоставленный артефакт не является
+    обходом и исчерпания не удостоверяет. ``policy_digest`` не публикуется: политика
+    названа один раз на прогон (``crawl_policy_digest`` манифеста), а замысел снятия виден
+    по ``coverage_digest``/``doc_set_digest``.
+    """
+
+    model_config = _BASE
+
+    capture_id: str
+    product_id: str
+    root_url: str
+    started_at: str
+    finished_at: str | None = None
+    complete: bool
+    #: ``live`` | ``revalidated`` | ``adopted`` | ``scheduled``.
+    observed_how: str
+    coverage_digest: str | None = None
+    doc_set_digest: str | None = None
+
+
+class CorpusSnapshot(BaseModel):
+    """Снимок корпуса прогона (план 20 §3–§5): **провенанс**, а не объявленный вход.
+
+    В ``run_id`` снимок не входит ни одним слагаемым: он известен только **после** краула,
+    а ``plan`` обязан вычислить ``run_id`` до прогона. Поэтому те же объявленные входы при
+    сдвинутом ``state.db`` дают другой снимок — это определение асинхронного обновления, а
+    не смена условий измерения; различие видно здесь и в ``corpus_snapshot_id`` продукта
+    (``IndexMeta.extra``).
+
+    ``corpus_snapshot_id`` — ``short_hash`` от отсортированных пар
+    ``product_id:snapshot_product_id``: **одна** формула на прогон, содержание продукта в
+    ней не пересчитывается. ``captures`` — снятия **этого** прогона (совпал ``run_id``),
+    отсортированные по ``(product_id, root_url)``: порядок завершения корней — расписание,
+    а не содержание. ``corpus_as_of`` — ``{"from": min, "to": max}`` по
+    ``url_state.observed_at`` артефактов, вошедших в корпус продукта; ``None`` —
+    наблюдений нет ни у одного из них (``reused``/``frozen`` без прежних наблюдений):
+    дата не выдумывается. Ключ ``from`` — Python-keyword, поэтому носитель — словарь,
+    форма которого проверяется ниже: артефакт обязан нести именно ``from``/``to``.
+    """
+
+    model_config = _BASE
+
+    corpus_snapshot_id: str
+    captures: list[CorpusCaptureRef] = Field(default_factory=list)
+    corpus_as_of: dict[str, str] | None = None
+
+    @model_validator(mode="after")
+    def _canonicalize(self) -> CorpusSnapshot:
+        """Сортирует ``captures`` по содержанию и держит форму ``corpus_as_of``."""
+        object.__setattr__(
+            self,
+            "captures",
+            sorted(
+                self.captures,
+                key=lambda capture: (
+                    capture.product_id,
+                    capture.root_url,
+                    capture.capture_id,
+                ),
+            ),
+        )
+        if self.corpus_as_of is not None:
+            if set(self.corpus_as_of) != {"from", "to"}:
+                raise ValueError(
+                    "corpus_as_of: ровно ключи 'from'/'to', "
+                    f"получено {sorted(self.corpus_as_of)}"
+                )
+            if not self.corpus_as_of["from"] or not self.corpus_as_of["to"]:
+                raise ValueError("corpus_as_of: пустая дата наблюдения")
+        return self
+
+
 class RunManifest(BaseModel):
     """``run_manifest.yaml`` (§9, §13): агрегат всех версий и параметров прогона (R7).
 
@@ -1607,6 +1685,12 @@ class RunManifest(BaseModel):
     policy_zero_reasons: dict[str, str] = Field(default_factory=dict)
     captured_at: str | None = None
     crawl_policy_roots: list[dict[str, Any]] = Field(default_factory=list)
+    #: План 20 §5: **снимок корпуса** — провенанс прогона, а не объявленный вход (в
+    #: ``EXECUTION_CONTRACT_FIELDS`` не входит: он известен только после краула). Несёт
+    #: ``corpus_snapshot_id``, снятия прогона и ``corpus_as_of`` — даты артефактов, которые
+    #: по определению разные. ``None`` — не записано (строка прошлой схемы), а не «снимка
+    #: нет»: пустой прогон даёт свой снимок (пустой набор артефактов — тоже факт).
+    corpus_snapshot: CorpusSnapshot | None = None
     #: §13.6/09 §13.6: **срез** прогона — ``full`` | ``only_failed`` | ``product:<id>``.
     #: ``--only-product`` меняет смысл среза, поэтому без поля читатель отчёта не может
     #: отличить полное измерение от частичного, не заглядывая в ``state.db``. Провенанс,

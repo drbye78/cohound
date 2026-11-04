@@ -38,7 +38,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:110-119`).
 - Любой такой элемент **по построению** делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2096-2238`, `core/pipeline/corpus_coverage.py:119-131`, условие 2).
+  (`core/domain/models.py:2439-2612`, `core/pipeline/corpus_coverage.py:119-131`, условие 2).
 - Неполное покрытие ⇒ `❌` с `absence_rule=explicit` требует человеческой подписи
   `scope_attested_by` (I2c). Докстринг называет это прямо: **«человеческий escape hatch»**
   (`core/pipeline/corpus_coverage.py:104-107`).

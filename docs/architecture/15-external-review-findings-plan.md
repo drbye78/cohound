@@ -105,7 +105,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 **Статус на 2026-10-28.** ✅ R1, R2, R5, R6, R7, R9, R10 · ➖ R3, R4 · ⬜ R8.
 
 - ✅ R1 — ось `robots` реализована per-request (`core/adapters/crawl_scrapy.py:422`), политика
-  вынесена в ядро (`core/util/robots.py:72`).
+  вынесена в ядро (`core/util/robots.py:73`).
 - ✅ R2 — `RobotsFeedState` + отказ `robots_unavailable`: `core/util/robots.py:63,72,483`.
 - ➖ R3 (анти-автоматизационные флаги браузера) — **снято**: honest/hybrid-рендер штатного
   JS-challenge публичной страницы объявлен исполнением механизма самой страницы, а не обходом
@@ -659,7 +659,7 @@ absence-модель, scoring и определения Coverage/Comparability �
   P2/P6/P7 сведены в `f6100c7`.
 - 2 ✅ отвечен кодом — ось доходит до docling (`core/cli/wiring.py:2073,2122,3068`,
   `core/cli/execution_axes.py:191`), т.е. выбран первый вариант.
-- 3 ✅ отвечен кодом — политика переехала в ядро (`core/util/robots.py:72,483`), одна для
+- 3 ✅ отвечен кодом — политика переехала в ядро (`core/util/robots.py:73,483`), одна для
   транспортов; per-request ось осталась свойством адаптера (`core/adapters/crawl_scrapy.py:422`).
 - 4 ⬜ **не отвечен и не сделан** — post-resolve проверки нет (`grep getaddrinfo core/` пуст),
   «принятым риском» это не названо ни в документе, ни в коде (`core/util/security.py:36`,
@@ -751,7 +751,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
   неизвестности считаются (`core/domain/scoring.py:1114`), классы
   `PUBLISHABLE`/`PUBLISHABLE_WITH_CAVEAT`/`ANALYTICAL_ONLY`/`NOT_COMPARABLE` объявлены
   (`core/domain/enums.py:1068-1096`), причины `UnknownCause` — `core/domain/enums.py:1072-1099`,
-  артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:2389`), в Ш8 —
+  артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:2952`), в Ш8 —
   `core/pipeline/compute.py:337`.
 - ❔ **числа CI из абзаца выше не пере-проверялись** 2026-10-28: полный `pytest` не запускался
   (на машине идёт живой прогон, RAM общая). Сверено по коду только то, что от них зависит:

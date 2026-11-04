@@ -55,23 +55,23 @@ def test_older_schema_is_rejected_with_message(tmp_path: Path) -> None:
     assert "новом каталоге" in message or "удалите" in message
 
 
-def test_previous_schema_3_16_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
-    """P4 плана 19: файл 3.16.0 отвергается гейтом 3.17.0, не изменяя байты.
+def test_previous_schema_3_17_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
+    """F1 плана 20: файл 3.17.0 отвергается гейтом 3.18.0, не изменяя байты.
 
-    Новые колонки ``runs.crawl_policy_digest``/``crawl_policy_json`` объявлены только в
-    ``CREATE TABLE``; шимов ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем —
-    и проверка фиксирует это наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий
-    догон объявил бы чужую схему текущей).
+    Новая колонка ``runs.corpus_snapshot_json`` объявлена только в ``CREATE TABLE``;
+    шимов ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем — и проверка
+    фиксирует это наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий догон
+    объявил бы чужую схему текущей).
     """
-    db = _legacy_db(tmp_path / "cohound.db", "3.16.0")
+    db = _legacy_db(tmp_path / "cohound.db", "3.17.0")
     before = db.read_bytes()
 
     with pytest.raises(SchemaVersionMismatch) as excinfo:
         connect(db)
 
     message = str(excinfo.value)
-    assert "3.16.0" in message
     assert "3.17.0" in message
+    assert "3.18.0" in message
     assert db.read_bytes() == before
 
 
@@ -276,8 +276,13 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     3.17.0 (P4 плана ``19``) — ``runs.crawl_policy_digest`` (31-е поле контракта: ось
     политики краула, которую diff обязан назвать) и ``runs.crawl_policy_json`` (её
     провенанс). Шимов нет: прогоны ≤ 3.16.0 отвергаются гейтом, а не досоздаются.
+
+    3.18.0 (F1 плана ``20``) — ``runs.corpus_snapshot_json``: снимок корпуса прогона
+    (``corpus_snapshot_id``, снятия прогона, ``corpus_as_of``). Это **провенанс**, а не
+    объявленный вход: он известен только после краула и в ``run_id`` не входит. Шимов нет:
+    прогоны ≤ 3.17.0 отвергаются гейтом, а не досоздаются.
     """
-    assert SCHEMA_VERSION == "3.17.0"
+    assert SCHEMA_VERSION == "3.18.0"
 
     conn = connect(":memory:")
     try:
@@ -288,6 +293,7 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
             "embed_device",
             "crawl_policy_digest",
             "crawl_policy_json",
+            "corpus_snapshot_json",
         } <= runs_cols
 
         docs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_docs)")}

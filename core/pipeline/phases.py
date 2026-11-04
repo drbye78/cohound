@@ -1647,6 +1647,20 @@ def build_phases(
         # (``--until plan``), снимок записан без плана и перезаписаться не может; тогда
         # плана нет ни в одном носителе, а измерительных фаз до этого не исполнялось —
         # то есть план возобновлённого прохода и есть план исполненного прогона.
+        # План 20 §F1: снимок корпуса — durable-провенанс фазы ``corpus`` (снятия и даты
+        # артефактов). На resume ``holder`` пуст, а снимок обязан пережить его: читаем из
+        # ``runs.corpus_snapshot_json`` и передаём в манифест готовым — второго расчёта
+        # содержания нет. Отсутствие читателя (лёгкий тестовый стор) — не ошибка фазы:
+        # снимок вторичен к корпусу.
+        corpus_snapshot: dict[str, Any] | None = None
+        snapshot_reader = getattr(ctx.store, "read_corpus_snapshot", None)
+        if callable(snapshot_reader):
+            try:
+                corpus_snapshot = snapshot_reader(plan.run_id)
+            except Exception as exc:  # noqa: BLE001 — провенанс не роняет отчёт
+                provenance_notes.append(
+                    f"corpus_snapshot: {type(exc).__name__}: {exc}"
+                )
         product_plan_provenance = (
             _product_plan_provenance(ctx.store, plan.run_id, provenance_notes)
             or (dict(product_plan) if product_plan is not None else None)
@@ -1740,6 +1754,9 @@ def build_phases(
             search_effort=compact_search_effort(_serp_facts(ctx.store, plan.run_id)),
             # 16 §3.1: план продуктов — тот же JSON, что лёг в снимок входов (см. выше).
             product_plan=product_plan_provenance,
+            # План 20 §F1: снимок корпуса — из durable-носителя фазы ``corpus`` (см. выше),
+            # не пересчитывается здесь: одна формула на величину.
+            corpus_snapshot=corpus_snapshot,
         )
         # §13/точки интеграции: политика гейтов и waiver-строки — в манифест, чтобы
         # делегирование гейта наружу было видно в артефакте, а не подразумевалось.

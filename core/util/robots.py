@@ -53,6 +53,7 @@ __all__ = [
     "RobotsFeedState",
     "RobotsGate",
     "RobotsVerdict",
+    "url_canonical_form",
 ]
 
 #: Машинный код отказа «явный ``Disallow`` выиграл» (= ``FailureKind.ROBOTS_DISALLOW``).
@@ -122,13 +123,18 @@ _UNRESERVED = frozenset(
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
-def _normalize(value: str) -> str:
+def url_canonical_form(value: str) -> str:
     """Каноническая форма строки для сравнения: не-ASCII → percent-encoded.
 
     Декодируются только escape-последовательности незарезервированных символов (RFC 3986),
     остальные приводятся к верхнему регистру hex. Благодаря этому правило, записанное
     percent-encoded, и обычный URL сравниваются эквивалентно, а ``%2F`` не превращается
     в разделитель пути.
+
+    Публична не только ради правил ``robots.txt``: это и есть форма сравнения адреса
+    (план 20 §F1 — снимок корпуса не должен зависеть от того, записан адрес
+    percent-encoded или декодированным). Функция идемпотентна, поэтому применять её к уже
+    канонизированной строке безопасно.
     """
     out: list[str] = []
     index = 0
@@ -252,7 +258,7 @@ def _parse(text: str) -> list[_Group]:
             if not value:
                 # Пустой Disallow/Allow — «нет правила» (пустой Disallow = разрешено всё).
                 continue
-            normalized = _normalize(value)
+            normalized = url_canonical_form(value)
             anchored = normalized.endswith("$")
             body = normalized[:-1] if anchored else normalized
             group.rules.append(
@@ -474,7 +480,7 @@ class RobotsGate:
         target = parts.path or "/"
         if parts.query:
             target = f"{target}?{parts.query}"
-        return _normalize(target)
+        return url_canonical_form(target)
 
     def allowed(self, url: str) -> bool:
         """Разрешён ли ``url`` для нашего агента (``False`` — запрет **или** недоступная лента).

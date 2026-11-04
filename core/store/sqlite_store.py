@@ -29,6 +29,7 @@ from core.domain import (
     CorpusCoverage,
     CorpusDoc,
     CorpusMember,
+    CorpusSnapshot,
     CrawlItemStatus,
     CrawlProvenance,
     CrawlSession,
@@ -1148,7 +1149,9 @@ class SqliteStore:
         запросом, а не восстановлением из дайджеста), а также ``cohort_digest``/
         ``seeds_digest`` (09 §12.5 — слагаемые ``run_id`` и поля контракта: без них
         ``hound diff`` не мог назвать ось расхождения и печатал «предел диагностики»),
-        а также ``crawl_policy_digest`` и блок провенанса политики краула (план 19 §P4).
+        а также ``crawl_policy_digest`` и блок провенанса политики краула (план 19 §P4),
+        а также ``corpus_snapshot_json`` — снимок корпуса прогона (план 20 §F1: провенанс,
+        а не идентичность; ``COALESCE`` — манифест без снимка не стирает durable-факт).
         ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
@@ -1178,7 +1181,8 @@ class SqliteStore:
                 " run_scope = ?, product_plan_json = ?, embed_device = ?,"
                 " previous_run_id = ?, change_class = ?, cycle_id = ?,"
                 " cohort_digest = ?, seeds_digest = ?,"
-                " crawl_policy_digest = ?, crawl_policy_json = ?"
+                " crawl_policy_digest = ?, crawl_policy_json = ?,"
+                " corpus_snapshot_json = COALESCE(?, corpus_snapshot_json)"
                 " WHERE run_id = ?",
                 (
                     manifest.package_version,
@@ -1271,6 +1275,19 @@ class SqliteStore:
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
+                    # План 20 §F1: снимок корпуса — провенанс, записанный фазой
+                    # ``corpus``. ``COALESCE``: манифест без снимка (``None`` — строка
+                    # прошлой схемы/модульный вызов) не стирает durable-факт; пустой
+                    # прогон даёт снимок-объект и перезаписывает колонку честно.
+                    (
+                        None
+                        if manifest.corpus_snapshot is None
+                        else json.dumps(
+                            manifest.corpus_snapshot.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    ),
                     run_id,
                 ),
             )
@@ -1288,6 +1305,41 @@ class SqliteStore:
                 "UPDATE runs SET index_build_id = ? WHERE run_id = ?",
                 (index_build_id, run_id),
             )
+
+    def set_run_corpus_snapshot(
+        self, run_id: str, snapshot: Mapping[str, Any]
+    ) -> None:
+        """Пишет ``runs.corpus_snapshot_json`` (план 20 §F1) — снимок корпуса прогона.
+
+        Снимок известен уже на выходе фазы ``corpus``; Ш9 собирает манифест позже и
+        читает его отсюда (:meth:`read_corpus_snapshot`), а не пересчитывает. Каноническая
+        JSON-форма (``sort_keys``) — чтобы повторная запись того же снимка не меняла байты.
+        ``UPDATE`` по существующей строке: строку прогона создаёт :meth:`create_run`.
+        В ``run_id`` снимок не входит: это провенанс, а не объявленный вход.
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET corpus_snapshot_json = ? WHERE run_id = ?",
+                (
+                    json.dumps(dict(snapshot), ensure_ascii=False, sort_keys=True),
+                    run_id,
+                ),
+            )
+
+    def read_corpus_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        """Читает ``runs.corpus_snapshot_json``; ``None`` — не записан/повреждён.
+
+        Колонка аддитивная (3.18.0), поэтому читается через ``_row_optional``: у строки
+        прошлой схемы её нет, и отсутствие значит «снимок не записан», а не отказ чтения.
+        Не-JSON/не-словарь тоже ``None``: выдумывать снимок нельзя (A3).
+        """
+        row = self.conn.execute(
+            "SELECT * FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        parsed = _parse_json_text(_row_optional(row, "corpus_snapshot_json"))
+        return parsed if isinstance(parsed, dict) else None
 
     def save_publishability(self, run_id: str, profile: Mapping[str, Any]) -> None:
         """Пишет ``runs.publishability_json`` (A1/§6) — durable блок профиля публикуемости.
@@ -2785,6 +2837,14 @@ class SqliteStore:
         skips_block = crawl_policy_block.get("policy_skips")
         zero_block = crawl_policy_block.get("policy_zero_reasons")
         roots_block = crawl_policy_block.get("roots")
+        # План 20 §F1: снимок корпуса — провенанс (не идентичность). Колонка аддитивная
+        # ⇒ ``_row_optional``: отсутствие значит «не записано», а не «снимка нет».
+        corpus_snapshot_raw = _parse_json_text(
+            _row_optional(row, "corpus_snapshot_json")
+        )
+        corpus_snapshot_block = (
+            corpus_snapshot_raw if isinstance(corpus_snapshot_raw, dict) else None
+        )
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -2838,6 +2898,13 @@ class SqliteStore:
                 [dict(item) for item in roots_block if isinstance(item, dict)]
                 if isinstance(roots_block, list)
                 else []
+            ),
+            # План 20 §F1: снимок корпуса (провенанс). ``None`` — колонка не записана
+            # (строка прошлой схемы) — именно «не записано», а не «снимка нет».
+            corpus_snapshot=(
+                None
+                if corpus_snapshot_block is None
+                else CorpusSnapshot.model_validate(corpus_snapshot_block)
             ),
             focus_modules=focus_modules,
             index_build_id=row["index_build_id"],

@@ -250,9 +250,9 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1248` → `core/pipeline/corpus.py:1270` (объявление оси) и
-  `:3648`/`:3682` (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
-  (`core/pipeline/corpus.py:1914` — единственный источник этого значения).
+  **явным параметром**: `core/pipeline/phases.py:1248` → `core/pipeline/corpus.py:1482` (объявление оси) и
+  `:4336`/`:4370` (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
+  (`core/pipeline/corpus.py:2116` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
@@ -270,13 +270,13 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 `execution_change: embed_device`.
 
 `RunManifest` (`core/domain/models.py:1528-1740`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2346-2348`) сопоставляет имя
-поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS` (`:1960`)
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2507-2510`) сопоставляет имя
+поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS` (`:2490`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
 Строку манифеста в БД тоже надо дописать: `persist_manifest`
-(`core/store/sqlite_store.py:1132`) — **явный список** из 29 колонок, а не `SELECT *`.
+(`core/store/sqlite_store.py:1133`) — **явный список** из 29 колонок, а не `SELECT *`.
 Колонка, не вписанная туда, останется `NULL` навсегда: штатного `ALTER TABLE` больше нет
 (схема версионируется, старая БД отвергается), поэтому расхождение списка с `DDL` — дефект,
 а не «домигрируется». Чтение — `read_manifest` (`:2486-2665`), где необязательные поля идут
@@ -672,7 +672,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 Записаны здесь, чтобы вторая редакция не повторяла ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2468`, а не `:1970`; `reuse_kind` в `url_state` —
+`core/pipeline/report.py:2490`, а не `:1970`; `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:106`, а не `:93` (там комментарий); `_PARTITION_SCHEMA` —
 `core/pipeline/corpus_index.py:48`; `composition.py` исключён из состава (§8);
 «`embed_device` в `extra` **и** в корне» — одно место, а не два (§5.1); «геттер в
