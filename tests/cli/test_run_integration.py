@@ -1142,6 +1142,11 @@ def test_cmd_run_rerun_contract_carries_adopted_retrieval(tmp_path: Path) -> Non
     seeds, _ = load_effective_seeds(
         package, inputs.run.products, profiles=inputs.domain_profiles or {}
     )
+    from core.cli.context import _crawl_policy_resolution
+
+    policy_digest = _crawl_policy_resolution(
+        SimpleNamespace(package=str(package)), inputs, seeds
+    ).digest
     common = {
         "cohort_digest": cohort_digest(
             inputs.cohort,
@@ -1151,6 +1156,7 @@ def test_cmd_run_rerun_contract_carries_adopted_retrieval(tmp_path: Path) -> Non
         "seeds_digest": seeds_digest(seeds),
         "declared": declared,
         "status_dict_version": declared_status_dict_version(),
+        "crawl_policy_digest": policy_digest,
     }
     adopted = build_execution_contract(
         inputs, retrieval_profile="R2", cutoff_K=7, **common

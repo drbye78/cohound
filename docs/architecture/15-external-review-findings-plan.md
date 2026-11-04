@@ -279,7 +279,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 ### P1 — R7 на поисковом контуре (S1 + S5 + ось языка)
 
 - `wiring.build_search_adapter`/`resolve_and_build_search_adapter` — принимать `cache`
-  (объект уже есть в `core/cli/context.py:1583-1586` и уже доходит до краулеров).
+  (объект уже есть в `core/cli/context.py:1855` и уже доходит до краулеров).
 - Одна точка чтения/записи — `external_search` (`search_log.py:293+`): miss → вызов
   адаптера + `put_json`, hit → список без вызова. **При hit бюджет не списывается** (иначе
   меняется `search_log` и через него наблюдение).

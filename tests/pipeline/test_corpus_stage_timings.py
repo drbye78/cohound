@@ -68,10 +68,14 @@ CHILD_B = "https://docs.test/b"
 #: документа (``doc_version_id``), ``EXECUTION_CONTRACT_FIELDS`` вырос до 29 полей (ось
 #: ``embed_device``). ``content_digest``/``index_build_id`` следуют за ``chunk_id`` — это не
 #: дрейф инструментирования, а объявленная смена идентичности (``methodology_version``).
+#:
+#: Переснято ещё раз планом 19 (P1, 04.11.2026): в контракт вошёл
+#: ``crawl_policy_digest`` (эффективная поверхность решений политики краула), полей
+#: стало 30. Это та же природа: новый объявленный вход меняет ``run_id``.
 PINNED_PARTITION_BUILD_ID = "pb_73f6be9e1dd88a028814154a"
 PINNED_CONTENT_DIGEST = "f26d9da9face8cc0662b9b6d"
 PINNED_INDEX_BUILD_ID = "cb_2b5c9399f9e69bf2d08d092f"
-PINNED_EXECUTION_CONTRACT_DIGEST = "22f2846925f7380875a95385"
+PINNED_EXECUTION_CONTRACT_DIGEST = "ececac56de2c8ad272cdde5e"
 
 #: Поля, которые обязана нести строка продукта (``product_end``) и её Pass B-продолжение.
 CRAWL_BUCKETS = ("fetch_wait_s", "extract_wait_s", "chunk_s")

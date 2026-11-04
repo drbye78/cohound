@@ -2851,7 +2851,7 @@ class CompositionView:
   новый текст. **Кэш реализован и подключён** (`core/pipeline/embed_cache.py`;
   инстанцируется в composition root — `EmbedCache(str(paths.embed_cache))`,
   `core/cli/context.py:2759`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
-  параметр `embed_cache` у `_build_corpus`, `core/pipeline/corpus.py:1192`).
+  параметр `embed_cache` у `_build_corpus`, `core/pipeline/corpus.py:1312`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
   до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и в
   итоговой строке продукта (`core/pipeline/corpus_index.py:441-479`) — «кэш включён» не
@@ -3653,7 +3653,7 @@ diff — инкрементальность была полезна только
 **Реализовано (методология 2.3.0).**
 
 - `execution_contract_digest` — отпечаток **условий измерения**, без контента. Ровно
-  **29 полей** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
+  **30 полей** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
   механически (`len(EXECUTION_CONTRACT_FIELDS)`), а не по памяти:
 
   | Группа | Поля |
@@ -3663,7 +3663,7 @@ diff — инкрементальность была полезна только
   | LLM | `llm_scenarios`, `prompt_template`, `evaluation_policy` |
   | Ретривал | `retrieval_profile`, `cutoff_K`, `retrieval_params_json`, `chunking_spec`, `lexical_spec` |
   | Извлечение | `chunker_version`, `extractor_stack`, `embed_device` |
-  | Краул | `crawl_strategy`, `crawl_rate_limit`, `crawl_config_digest`, `render_modes_digest` |
+  | Краул | `crawl_strategy`, `crawl_rate_limit`, `crawl_config_digest`, `crawl_policy_digest`, `render_modes_digest` |
   | SERP | `serp_rounds`, `serp_mode` |
   | Реестры и входы | `registry_spec_digest`, `manual_artifacts_digest` |
   | Развёртывание | `deploy_profile`, `edge_schema_version` |
@@ -4247,7 +4247,7 @@ state/state.db                                 # durable-состояние па
    приоритет `--urls > seeds.yaml > corpus_urls.yaml` (`urls_override` заменяет набор
    целиком, `:167-198`; `seeds.yaml` — `:201-206`; legacy `corpus_urls.yaml` — `:203`).
    Вызывается из `run`/`plan`/`crawl` (`core/cli/commands/run.py:629`,
-   `core/cli/commands/plan.py:220`, `core/cli/commands/crawl.py:391`). Прежняя редакция
+   `core/cli/commands/plan.py:252`, `core/cli/commands/crawl.py:412`). Прежняя редакция
    называла это design-only и указывала `core/cli/context.py` — неверно по обоим пунктам.
 6. `NpyVectorIndex` (`core/adapters/vector_npy.py:213`) — ✅ **реализовано**:
    `CompositionViewPort` принимается как `view`, `build_id` композиции сверяется с
@@ -4337,7 +4337,7 @@ state/state.db                                 # durable-состояние па
 | T13 | `--only-failed` после T9 | повторяются только failed URL/продукты; успешные не фетчатся; провал **прошлого** прогона тоже виден | as-built с 30.10.2026: межпрогонный, источник 2 — `url_state.consecutive_failures > 0` (§2.4); ремонт идёт depth-0 известными URL, авторские корни не дренятся. Приёмка — `tests/pipeline/test_only_failed_work_set.py`, `tests/cli/test_only_failed_interrun.py` |
 | T14 | Пустые seed'ы, preflight обойдён (unit) | coverage `expected=0, complete=False, reason=no_seeds`; cells `failed`; нет «тихого ok» | as-built |
 | T15 | Продукт retired, затем re-add | режим `new`; полный краул; старые партиции сохранены, но не в композиции | as-built с 30.10.2026: retirement — авторское `state: retired` в `sources/seeds.yaml` (отдельной команды нет), прогон отражает его в durable `product_state` **до** выхода на блокировку (`_reconcile_declared_retirements`, `core/cli/commands/run.py`), а возврат активного seed'а выставляет `re_added_at` в той же сверке (`reconcile_seed_set`, `core/store/state_store.py`). Приёмка — `tests/cli/test_run_retirement.py` (3), `tests/pipeline/test_re_added_at.py` (10; 7 падают без писателя) |
-| T16 | Переименование `canonical_name` | режим `incremental`; краул не запускается; меняется только `product_state` | as-built: `canonical_name` **не входит** ни в `cohort_digest` (`core/pipeline/digests.py:211-238`), ни в `seeds_digest` (`:240-…`), поэтому `run_id` не меняется и прогон резюмируется, а не краулит заново |
+| T16 | Переименование `canonical_name` | режим `incremental`; краул не запускается; меняется только `product_state` | as-built: `canonical_name` **не входит** ни в `cohort_digest` (`core/pipeline/digests.py:219-245`), ни в `seeds_digest` (`:248-…`), поэтому `run_id` не меняется и прогон резюмируется, а не краулит заново |
 | T17 | Смена `cutoff_K` | `cell_reuse_key` не совпал; все ячейки переоценены (I20) | as-built на уровне ключа: `test_cell_reuse_key_changes_with_any_condition` (`cutoff_k`, `retrieval_profile`, `retrieval_params_json`) |
 | T17b | Изменён документ вне top-K ячейки | ячейка **перенесена**, LLM не вызван (per-cell) | as-built: `test_new_document_outside_top_k_does_not_block_carry` |
 | T18 | Смена `methodology_version` | carry-forward запрещён; eval cache miss; golden-full требуется | as-built в части переноса/кэша: версия входит в оба ключа (`test_cell_reuse_key_changes_with_any_condition`, `EVAL_CACHE_FORMAT = 2`); требование golden-full — процесс §13, тестом не покрыто |

@@ -30,6 +30,7 @@ from pathlib import Path
 
 import yaml
 
+from core.config.crawl_policy import CrawlPolicyConfig, load_crawl_policy
 from core.config.crawl_sources import CrawlSourcesConfig, load_crawl_sources
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
@@ -93,6 +94,10 @@ class RunInputs:
     golden: list[GoldenRow]
     domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
     crawl_sources: CrawlSourcesConfig = field(default_factory=CrawlSourcesConfig)
+    #: Дефолты политики краула из ``crawl_policy.yaml`` (план 19 §4). Пустой конфиг —
+    #: «пакет политики не объявлял»; эффективная политика всё равно резолвится (пакет +
+    #: ``state.db``), но без этого поля ``plan`` и ``run`` видели бы разные дефолты.
+    crawl_policy: CrawlPolicyConfig = field(default_factory=CrawlPolicyConfig)
     scope_attestation_procedure: str | None = None
     golden_status: GoldenStatus | None = None
 
@@ -220,8 +225,8 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
 
     Обязательны ``run.yaml`` и четыре артефакта пакета (``package.yaml``,
     ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``); ``domain_profiles.yaml``,
-    ``crawl_sources.yaml``, ``scope_attestation.yaml`` и ``sources/golden_status.yaml`` —
-    опциональны.
+    ``crawl_sources.yaml``, ``crawl_policy.yaml``, ``scope_attestation.yaml`` и
+    ``sources/golden_status.yaml`` — опциональны.
 
     ``golden.csv`` читается **только** если эталон объявлен действующим
     (``golden_status.state == present``, в т.ч. выведенным из наличия файла при
@@ -251,6 +256,11 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
     crawl_path = package_path / "crawl_sources.yaml"
     crawl_sources = load_crawl_sources(crawl_path) if crawl_path.exists() else CrawlSourcesConfig()
 
+    policy_path = package_path / "crawl_policy.yaml"
+    crawl_policy = (
+        load_crawl_policy(policy_path) if policy_path.exists() else CrawlPolicyConfig()
+    )
+
     return RunInputs(
         run=run,
         package=package,
@@ -260,6 +270,7 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
         golden=golden,
         domain_profiles=domain_profiles,
         crawl_sources=crawl_sources,
+        crawl_policy=crawl_policy,
         scope_attestation_procedure=load_scope_attestation(package_path),
         golden_status=golden_status,
     )

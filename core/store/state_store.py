@@ -28,11 +28,20 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from core.config.seeds import seed_id
-from core.domain.enums import Gate, OnboardingState, SeedRole, SeedSource, SeedState
+from core.domain.enums import (
+    CrawlPolicyMode,
+    CrawlPolicyScopeKind,
+    Gate,
+    OnboardingState,
+    SeedRole,
+    SeedSource,
+    SeedState,
+)
 from core.domain.models import ProfileAttestationRow, SeedEntry
 from core.ports.state import (
     CellMeasurementRow,
     ChunkRow,
+    CrawlPolicyRow,
     DocumentVersionRow,
     ForgetProductResult,
     IndexCompositionRow,
@@ -49,6 +58,8 @@ __all__ = [
     "FORGET_PRODUCT_TABLES",
     "SqliteStateStore",
     "backup_state_db",
+    "read_crawl_observations",
+    "read_crawl_policy_rows",
     "read_previous_cycle_id",
     "read_product_counts",
 ]
@@ -97,6 +108,79 @@ def read_previous_cycle_id(db_path: str | Path, package_id: str) -> str | None:
     finally:
         conn.close()
     return None if row is None else str(row["cycle_id"])
+
+
+def _crawl_policy_row(row: sqlite3.Row) -> CrawlPolicyRow:
+    """Строка SQLite ``crawl_policy`` → :class:`CrawlPolicyRow` (enum'ы — из строк)."""
+    return CrawlPolicyRow(
+        policy_id=int(row["policy_id"]),
+        product_id=str(row["product_id"]),
+        scope_kind=CrawlPolicyScopeKind(row["scope_kind"]),
+        host=row["host"],
+        path=row["path"],
+        mode=CrawlPolicyMode(row["mode"]),
+        interval_hours=row["interval_hours"],
+        note=row["note"],
+        actor=str(row["actor"]),
+        created_at=str(row["created_at"]),
+        superseded_by=row["superseded_by"],
+    )
+
+
+def read_crawl_policy_rows(
+    db_path: str | Path, *, include_superseded: bool = False
+) -> list[CrawlPolicyRow]:
+    """Действующие записи ``crawl_policy`` — **без записи** в ``state.db`` (``mode=ro``).
+
+    Нужен ``plan``/``list``: предсказание идентичности обещает «ничего не пишет», а
+    штатное открытие (:func:`connect_state`) пишет ``schema_meta.schema_version``.
+    Отсутствующий файл/таблица (и битый файл) — ``[]``: политика неизвестна, а не
+    «пустая и это факт»; отказ по версии всё равно виден на штатном открытии прогона.
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        sql = "SELECT * FROM crawl_policy"
+        if not include_superseded:
+            sql += " WHERE superseded_by IS NULL"
+        sql += " ORDER BY product_id, scope_kind, host, path, policy_id"
+        return [_crawl_policy_row(row) for row in conn.execute(sql)]
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
+
+
+def read_crawl_observations(db_path: str | Path) -> dict[tuple[str, str], str]:
+    """Наблюдения ``url_state`` продукта: ``{(product_id, url): last_checked_at}``.
+
+    Только читает (``mode=ro``). Используется разрешением ``scheduled``: «последнее
+    наблюдение корня» — это максимум по URL под ним, а не отметка самой записи политики
+    (у неё нет времени наблюдения, только ``interval_hours``).
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return {}
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT product_id, url, normalized_url, last_checked_at FROM url_state"
+            " WHERE last_checked_at IS NOT NULL"
+        )
+        return {
+            (str(row["product_id"]), str(row["normalized_url"] or row["url"])): str(
+                row["last_checked_at"]
+            )
+            for row in rows
+        }
+    except sqlite3.DatabaseError:
+        return {}
+    finally:
+        conn.close()
 
 #: Колонки ``product_state`` в порядке записи (кроме ``product_id`` — он ключ).
 _PRODUCT_STATE_COLUMNS = (
@@ -1416,4 +1500,67 @@ class SqliteStateStore:
                 "UPDATE profile_attestation SET superseded_at = ?"
                 " WHERE attestation_id = ? AND superseded_at IS NULL",
                 (superseded_at, attestation_id),
+            )
+
+    # -- политика краула по областям (план 19 §4, STATE 8) ---------------- #
+    def record_crawl_policy(self, row: CrawlPolicyRow) -> int:
+        """Вставляет запись политики, возвращает выданный ``policy_id`` (append-only)."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO crawl_policy (product_id, scope_kind, host, path, mode,"
+                " interval_hours, note, actor, created_at, superseded_by)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row.product_id,
+                    CrawlPolicyScopeKind(row.scope_kind).value,
+                    row.host,
+                    row.path,
+                    CrawlPolicyMode(row.mode).value,
+                    row.interval_hours,
+                    row.note,
+                    row.actor,
+                    row.created_at,
+                    row.superseded_by,
+                ),
+            )
+            last_id = cursor.lastrowid
+            if last_id is None:  # pragma: no cover — INSERT всегда даёт rowid
+                raise RuntimeError("crawl_policy: INSERT не вернул policy_id")
+            return int(last_id)
+
+    def list_crawl_policy(
+        self,
+        *,
+        product_id: str | None = None,
+        include_superseded: bool = False,
+    ) -> list[CrawlPolicyRow]:
+        """Записи политики в порядке ``(product_id, scope_kind, host, path, policy_id)``."""
+        sql = "SELECT * FROM crawl_policy"
+        clauses: list[str] = []
+        params: list[object] = []
+        if product_id is not None:
+            clauses.append("product_id = ?")
+            params.append(product_id)
+        if not include_superseded:
+            clauses.append("superseded_by IS NULL")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY product_id, scope_kind, host, path, policy_id"
+        return [_crawl_policy_row(row) for row in self._conn.execute(sql, params)]
+
+    def supersede_crawl_policy(
+        self, policy_id: int, *, superseded_by: int | None = None
+    ) -> None:
+        """Помечает запись заменённой; ``None`` — отзыв без преемника (идемпотентно).
+
+        ``superseded_by = policy_id`` (самоссылка) — валидный FK и единственный способ
+        отозвать запись, не выдумывая tombstone-режима: схема §4 не имеет значения
+        «наследовать», а удаление нарушило бы append-only.
+        """
+        marker = policy_id if superseded_by is None else superseded_by
+        with self._conn:
+            self._conn.execute(
+                "UPDATE crawl_policy SET superseded_by = ?"
+                " WHERE policy_id = ? AND superseded_by IS NULL",
+                (marker, policy_id),
             )

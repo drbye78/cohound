@@ -53,6 +53,7 @@ from typing import Any
 
 import pytest
 
+from core.cli.context import _crawl_policy_resolution
 from core.cli.execution_axes import (
     CONTRACT_FLAG_DESTS,
     CONTRACT_FLAGS,
@@ -514,6 +515,9 @@ def test_plan_absent_flags_do_not_change_contract(
         status_dict_version=declared_status_dict_version(),
         retrieval_profile=None,
         cutoff_K=None,
+        crawl_policy_digest=_crawl_policy_resolution(
+            args, inputs, seed_config
+        ).digest,
     )
     assert payload["execution_contract_digest"] == expected
 

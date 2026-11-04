@@ -393,11 +393,20 @@ _SERP_OFFLINE_REASON = "offline_refresh_policy"
 
 
 def _as_refresh_policy(value: str) -> RefreshPolicy:
-    """Приводит строку политики наблюдения к :class:`RefreshPolicy` (дефолт ``auto``)."""
+    """Приводит строку политики наблюдения к :class:`RefreshPolicy`.
+
+    Неизвестное значение — **ошибка**, не тихий ``auto``: опечатка в политике иначе
+    включала бы сеть (AGENTS §2, план 19 §6.5). Значение проверяется на входе; сюда
+    попадает уже разрешённая строка, поэтому ``ValueError`` — сигнал дефекта проводки,
+    а не пользовательского ввода.
+    """
     try:
         return RefreshPolicy(value)
-    except ValueError:
-        return RefreshPolicy.AUTO
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in RefreshPolicy)
+        raise ValueError(
+            f"неизвестная политика обновления {value!r}: допустимо {allowed}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #

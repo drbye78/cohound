@@ -59,7 +59,10 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: Колонки объявлены в ``CREATE TABLE``; ``ALTER TABLE`` при открытии нет, поэтому файл
 #: версии ≤ 6 отвергается ``SchemaVersionMismatch`` (путь файла в ошибке) и пересоздаётся
 #: оператором — тихий догон колонок объявил бы старый файл текущим, не будучи им.
-STATE_SCHEMA_VERSION = "7"
+#: 8 — политика краула по областям (``crawl_policy``): продукт/хост/корень/маска пути,
+#: append-only через ``superseded_by``. Таблица объявлена в :data:`STATE_DDL`, шимов нет;
+#: файл версии ≤ 7 отвергается ``SchemaVersionMismatch`` (план 19 §4).
+STATE_SCHEMA_VERSION = "8"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -312,6 +315,28 @@ CREATE TABLE IF NOT EXISTS profile_attestation (
 CREATE INDEX IF NOT EXISTS idx_profile_attest
     ON profile_attestation(case_id, package_id, anchor, gate, profile_digest);
 
+-- 12. Политика краула по областям (план 19 §4, STATE 8). Append-only: смена режима не
+-- правит строку, а вставляет новую и проставляет прежней ``superseded_by`` (аудит
+-- решений человека сохраняется). ``host``/``path`` — NULL только там, где область их не
+-- несёт; ``interval_hours`` обязателен при mode='scheduled' (проверяется писателем и
+-- резолвером: SQL CHECK не умеет «обязателен только для одного значения»).
+CREATE TABLE IF NOT EXISTS crawl_policy (
+    policy_id      INTEGER PRIMARY KEY,
+    product_id     TEXT NOT NULL,
+    scope_kind     TEXT NOT NULL CHECK (scope_kind IN ('product','host','root','path')),
+    host           TEXT,          -- NULL только при scope_kind='product'
+    path           TEXT,          -- NULL при 'product'/'host'; маска при 'path'
+    mode           TEXT NOT NULL CHECK (mode IN ('auto','on_request','scheduled','network_denied')),
+    interval_hours INTEGER,       -- обязателен при mode='scheduled', иначе NULL
+    note           TEXT,
+    actor          TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    superseded_by  INTEGER REFERENCES crawl_policy(policy_id)
+);
+
+CREATE INDEX IF NOT EXISTS crawl_policy_scope
+    ON crawl_policy (product_id, scope_kind, host, path);
+
 CREATE INDEX IF NOT EXISTS idx_seed_product ON seed_set(product_id, state);
 CREATE INDEX IF NOT EXISTS idx_doc_product  ON document_version(product_id, status);
 CREATE INDEX IF NOT EXISTS idx_snapshot_product ON product_snapshot(product_id, created_at);
@@ -345,7 +370,7 @@ def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
        пишется ``schema_meta.schema_version``.
 
     Миграций нет ни одной: все колонки и индексы объявлены в :data:`STATE_DDL`. Старая БД
-    (версия ≤ 6, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
+    (версия ≤ 7, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
     пакета не переносится между версиями схемы, а тихий ``ALTER TABLE`` объявлял бы файл
     новой версии, не будучи им.
 

@@ -18,12 +18,21 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from core.domain.enums import Gate, OnboardingState, SeedRole, SeedSource, SeedState
+from core.domain.enums import (
+    CrawlPolicyMode,
+    CrawlPolicyScopeKind,
+    Gate,
+    OnboardingState,
+    SeedRole,
+    SeedSource,
+    SeedState,
+)
 from core.domain.models import ProfileAttestationRow, SeedEntry
 
 __all__ = [
     "CellMeasurementRow",
     "ChunkRow",
+    "CrawlPolicyRow",
     "DocumentVersionRow",
     "ForgetProductResult",
     "IndexCompositionRow",
@@ -309,6 +318,31 @@ class ForgetProductResult:
             "total": self.total,
             "backup": self.backup_path,
         }
+
+
+@dataclass(frozen=True)
+class CrawlPolicyRow:
+    """Строка ``crawl_policy``: решение оператора о режиме краула по области (план 19 §4).
+
+    ``policy_id`` — ``None`` до записи (SQLite выдаёт его при вставке). ``scope_kind``
+    задаёт смысл ``host``/``path``: ``product`` — оба ``None``; ``host`` — только
+    ``host``; ``root``/``path`` — ``host`` и префикс ``path``. ``interval_hours``
+    обязателен только при ``mode='scheduled'``. ``superseded_by`` — ссылка на запись,
+    которая заменила эту; ``None`` — строка действует. Поля ``note``/``actor``/
+    ``created_at`` — провенанс решения, в материал идентичности прогона не входят.
+    """
+
+    product_id: str
+    scope_kind: CrawlPolicyScopeKind
+    mode: CrawlPolicyMode
+    actor: str
+    created_at: str
+    policy_id: int | None = None
+    host: str | None = None
+    path: str | None = None
+    interval_hours: int | None = None
+    note: str | None = None
+    superseded_by: int | None = None
 
 
 @dataclass(frozen=True)
@@ -601,5 +635,40 @@ class ProductStatePort(Protocol):
 
         Строка не удаляется: аудит-след решений человека сохраняется. Повторный отзыв
         не переписывает уже проставленную метку.
+        """
+        ...
+
+    # -- политика краула по областям (план 19 §4, STATE 8) ---------------- #
+    def record_crawl_policy(self, row: CrawlPolicyRow) -> int:
+        """Вставляет запись политики и возвращает выданный ``policy_id``.
+
+        Append-only: строка не обновляется. Смена режима — новая строка плюс
+        :meth:`supersede_crawl_policy` для прежней. ``row.policy_id`` при вставке
+        игнорируется (его выдаёт SQLite).
+        """
+        ...
+
+    def list_crawl_policy(
+        self,
+        *,
+        product_id: str | None = None,
+        include_superseded: bool = False,
+    ) -> list[CrawlPolicyRow]:
+        """Записи политики (по умолчанию только действующие), детерминированный порядок.
+
+        Порядок — ``(product_id, scope_kind, host, path, policy_id)``: он не зависит от
+        порядка вставки в пределах одной области и не используется как тай-брейк резолва.
+        """
+        ...
+
+    def supersede_crawl_policy(
+        self, policy_id: int, *, superseded_by: int | None = None
+    ) -> None:
+        """Помечает запись заменённой (append-only, без удаления); идемпотентно.
+
+        ``superseded_by`` — id записи-преемника. ``None`` — отзыв без преемника
+        (``hound crawl policy clear``): схема не имеет tombstone-режима, а удаление
+        запрещено, поэтому запись выпадает из действующих, оставаясь в аудите.
+        Повторный отзыв уже проставленную ссылку не переписывает.
         """
         ...

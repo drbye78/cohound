@@ -196,7 +196,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 ### P2 — исполнение: `on_request` и `network_denied`
 
 - ⬜ **Гейт выше первого сетевого вызова**: в начале `_author_root_plans` — **до**
-  `crawl_target`/`expand_directory` (`corpus.py:2730`, регистрация `:2087`), — и до сборки
+  `crawl_target`/`expand_directory` (`corpus.py:2733`, регистрация `:2096`), — и до сборки
   синтетических корней (`:2617`). Гейт во фронтьере (`crawl_frontier.py:1412,1443,1523`)
   недостаточен: он ниже feed/sitemap-разворота.
 - ⬜ **SERP-контур** глушится политикой с собственным `not_executed_reason` (сейчас только по
@@ -259,7 +259,10 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 - ⬜ AGENTS §6/§9: режимы, приоритет, `frozen`, `frozen_source`, что входит в `run_id`; запись,
   что `network_denied` — сетевая политика, а не исключение продукта.
 - ⬜ Манифест/отчёт: эффективная политика, `refresh_policy`, `frozen_source`, `captured_at`,
-  счётчики пропусков по политике, `crawl_policy_unmatched`.
+  счётчики пропусков по политике, `crawl_policy_unmatched`, и **`crawl_policy_digest` в строке
+  манифеста** (`runs`, как `cohort_digest`/`seeds_digest`): пока его там нет, кросс-цикловый
+  diff честно печатает «различающееся поле не восстановимо из манифеста» — то есть ось есть, а
+  назвать её нельзя. Это дефект диагностики, а не «предел».
 - ⬜ `docs/status-dictionary.yaml` — машинные токены причин (операционное перечисление).
 
 ### P5 — сквозная проверка

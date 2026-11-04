@@ -860,6 +860,33 @@ class RefreshPolicy(StrEnum):
     OFFLINE = "offline"
 
 
+class CrawlPolicyMode(StrEnum):
+    """Режим политики краула по области (план 19 §4).
+
+    ``auto`` — как раньше; ``on_request`` — первичный дискавери автоматический, обновление
+    по ручному запросу; ``scheduled`` — обновление по ``interval_hours`` от последнего
+    наблюдения; ``network_denied`` — сеть запрещена, продукт остаётся на карте.
+    """
+
+    AUTO = "auto"
+    ON_REQUEST = "on_request"
+    SCHEDULED = "scheduled"
+    NETWORK_DENIED = "network_denied"
+
+
+class CrawlPolicyScopeKind(StrEnum):
+    """Область действия записи политики краула (план 19 §4).
+
+    Приоритет разрешения — ``path`` > ``root`` > ``host`` > ``product``; внутри вида
+    побеждает самый длинный литеральный префикс пути.
+    """
+
+    PRODUCT = "product"
+    HOST = "host"
+    ROOT = "root"
+    PATH = "path"
+
+
 class ProductScope(StrEnum):
     """Объём прогона по продукту (09 §6.2)."""
 

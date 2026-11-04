@@ -26,6 +26,7 @@ from core.cli.context import (
     _add_llm_model_flag,
     _add_phase4_flags,
     _concise,
+    _crawl_policy_resolution,
     _ensure_run,
     _follow_session,
     _gate_runtime,
@@ -97,6 +98,7 @@ from core.domain import (
 from core.pipeline import GATE_PHASES, PHASES, Ports
 from core.pipeline.compute import bundle_for_run
 from core.pipeline.crawl_frontier import resolve_pdf_device
+from core.pipeline.crawl_policy import CrawlPolicyConflict
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
@@ -639,6 +641,13 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         cohort_ref=getattr(inputs.run, "cohort_ref", None),
     )
     seeds_d = seeds_digest(seed_config)
+    # План 19 §6.1: эффективная политика краула входит в ``run_id`` тем же резолвом, что
+    # у ``plan``/``crawl``. P1 её только разрешает: исполнение (network_mode/corpus_source)
+    # — отдельный слой, поэтому здесь нет ни одного сетевого решения по политике.
+    try:
+        policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
+    except CrawlPolicyConflict as exc:
+        raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
     # R7 (07 §7) + §13 (методология 2.4.0): деплой-конфиг и **декларированные** оси нужны
     # ДО контракта — они входят в него (deploy-профиль, версия seam-схемы, оси краула,
     # стек извлечения). Один резолвер на контракт и манифест: второй формулы нет.
@@ -697,6 +706,15 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
     ]
     if state_not_adopted is not None:
         config_notices.append(state_not_adopted)
+    # План 19 §4: несовпавшая запись видима и НЕ входит в дайджест. Молчать о ней нельзя:
+    # оператор считает, что запретил область, а запись не совпала ни с одним корнем.
+    config_notices.extend(
+        "crawl_policy_unmatched: "
+        f"{item.product_id} [{item.scope_kind.value}] "
+        f"host={item.host or '—'} path={item.path or '—'} mode={item.mode.value} "
+        f"source={item.source}"
+        for item in policy_resolution.unmatched
+    )
     status_dict_version = declared_status_dict_version()
     contract_d = build_execution_contract(
         inputs,
@@ -706,6 +724,7 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         retrieval_profile=getattr(args, "retrieval_profile", None),
         cutoff_K=getattr(args, "cutoff_k", None),
         status_dict_version=status_dict_version,
+        crawl_policy_digest=policy_resolution.digest,
     )
     run_id = args.run_id or derive_run_id(
         inputs,
@@ -748,6 +767,7 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 retrieval_profile=args.retrieval_profile,
                 cutoff_K=args.cutoff_k,
                 status_dict_version=status_dict_version,
+                crawl_policy_digest=policy_resolution.digest,
             )
 
     # 09 §12.3: предшественник — по **одной** формуле (:func:`previous_run_of`): явный

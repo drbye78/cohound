@@ -18,6 +18,8 @@ from core.domain.enums import (
     ChangeClass,
     ContainerEncryption,
     CrawlItemStatus,
+    CrawlPolicyMode,
+    CrawlPolicyScopeKind,
     CrawlSessionStatus,
     CrawlStrategy,
     Decoder,
@@ -128,6 +130,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
+        # План 19 §4: режим и область политики краула (операционные перечисления).
+        "crawl_policy_mode",
+        "crawl_policy_scope",
         # 17 §4.1: состояние durable-очереди передачи документа в конверсию.
         "extract_queue_state",
         # P2a: машинная причина пропуска фазы (PhaseStatus="skipped").
@@ -205,6 +210,11 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "search_mode": {v.value for v in SearchMode},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
+        # План 19 §4: политика краула — режим и область. Сверка нужна потому, что оба
+        # значения ходят в ``crawl_policy_digest`` (идентичность прогона): расхождение
+        # словаря и enum'а молча меняло бы поверхность решений.
+        "crawl_policy_mode": {v.value for v in CrawlPolicyMode},
+        "crawl_policy_scope": {v.value for v in CrawlPolicyScopeKind},
         # 17 §4.1: состояние durable-очереди конверсии. Производитель есть — краул
         # (``crawl run --crawl-only``) пишет строки; словарь и enum сверяются, чтобы
         # «краул выполнен» и «корпус собран» не разъехались молча.

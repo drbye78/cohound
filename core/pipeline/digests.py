@@ -64,6 +64,7 @@ __all__ = [
     "cell_reuse_key",
     "cohort_digest",
     "coverage_digest",
+    "crawl_policy_digest",
     "execution_contract_digest",
     "manual_artifacts_digest",
     "passports_digest",
@@ -111,6 +112,13 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     "crawl_strategy",
     "crawl_rate_limit",
     "crawl_config_digest",
+    # План 19 §6.1: отпечаток **эффективной поверхности решений** политики краула —
+    # разрешённая политика после приоритета областей, дефолтов пакета и разрешения
+    # ``scheduled`` в ``refresh|reuse`` по часам. Без этого поля смена режима области
+    # («этот корень не обновляем») меняла бы корпус, не меняя ``run_id``. В материал не
+    # входят ``note``/``actor``/``created_at``/``policy_id``/``interval_hours`` и
+    # несовпавшие строки: провенанс решения и «шум» оператора не являются измерением.
+    "crawl_policy_digest",
     # I3/§5: число объявленных раундов SERP-контура. Раунд добавляет документы корпуса,
     # то есть доказательства, поэтому это **условие измерения**, а не провенанс: если
     # спрятать его в ``settings_provenance``, корпус изменится, а ``run_id`` — нет.
@@ -396,6 +404,41 @@ def passports_digest(digests: Mapping[str, str | None]) -> str:
     return short_hash(
         _canonical({"passports": [list(row) for row in material]}), _DIGEST_LEN
     )
+
+def crawl_policy_digest(
+    decisions: Iterable[tuple[str, str, str | None, str | None, str]],
+) -> str:
+    """Дайджест эффективной поверхности решений политики краула (план 19 §6.1), 24 hex.
+
+    Материал — отсортированные кортежи ``(product_id, scope_kind, host, path, decision)``.
+    ``decision`` — **эффективное** решение, а не намерение: для ``scheduled`` это
+    ``refresh``/``reuse``, разрешённое по часам, поэтому два прогона в разные дни не могут
+    получить разные корпуса под одним ``run_id``.
+
+    **Не** входят: ``note``/``actor``/``created_at``/``policy_id``/``interval_hours`` —
+    провенанс записи решения, а не измерение; и строки, не совпавшие ни с одним
+    объявленным корнем (``crawl_policy_unmatched``): no-op правка оператора не должна
+    давать ``execution_change`` у всех.
+
+    ``None`` host/path сериализуются как ``null`` и отличимы от пустой строки. Пустая
+    поверхность — стабильный дайджест пустого множества, а не пустая строка.
+    """
+    rows = sorted(
+        {
+            (
+                str(product_id),
+                str(scope_kind),
+                None if host is None else str(host),
+                None if path is None else str(path),
+                str(decision),
+            )
+            for product_id, scope_kind, host, path, decision in decisions
+        }
+    )
+    return short_hash(
+        _canonical({"crawl_policy": [list(row) for row in rows]}), _DIGEST_LEN
+    )
+
 
 def execution_contract_digest(values: Mapping[str, Any]) -> str:
     """Дайджест условий измерения (09 §12.5), 24 hex-символа.

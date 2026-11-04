@@ -472,7 +472,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    новые колонки (иначе они `NULL` навсегда), `read_manifest` терпит необязательные колонки
    без `IndexError`.
 2. `tests/pipeline/test_run_identity.py` — `embed_device` в контракте: `cpu`→`cuda` даёт
-   другой `execution_contract_digest`; тот же — стабилен; `len(EXECUTION_CONTRACT_FIELDS) == 29`.
+   другой `execution_contract_digest`; тот же — стабилен; `len(EXECUTION_CONTRACT_FIELDS) == 30`.
 3. `tests/config/test_deploy.py` — `deploy.embed.device` объявлен; неизвестный ключ в
    `embed:` отвергается (`extra="forbid"`, там уже есть параметризация `:653-666`);
    `run.yaml:embed.device` резолвится app < run, site-слой отсутствует.
@@ -512,7 +512,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
   `source_id`).
 - `docs/status-dictionary.yaml`: `reuse_kind` (`:651`), `run_scope` (`:670`), `pdf_device`
   (`:437`) есть, `embed_device` **нет**, перечня статусов продукта прогона **нет**.
-  Синхронизация обязательна: `core/domain/dictionary.py:74` `assert_dictionary_integrity`,
+  Синхронизация обязательна: `core/domain/dictionary.py:76` `assert_dictionary_integrity`,
   `required`-список (`:144` `reuse_kind`), `checks`-таблица (`:162`); словарь грузится
   selfcheck'ом.
 

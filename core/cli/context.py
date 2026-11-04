@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as _dt
 import hashlib
 import json
 import os
@@ -186,6 +187,7 @@ __all__ = [
     "_add_llm_slot_flag",
     "_artifacts_payload",
     "_concise",
+    "_crawl_policy_resolution",
     "_diagnostic_gateway",
     "_discover_seed_queries",
     "_emit_deploy_check",
@@ -288,6 +290,53 @@ def _open_state_store(args: argparse.Namespace, *, create: bool = False) -> Any:
     if create:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     return SqliteStateStore(db_path)
+
+
+def _crawl_policy_resolution(
+    args: argparse.Namespace,
+    inputs: Any,
+    seed_config: Any,
+    *,
+    now: _dt.datetime | None = None,
+) -> Any:
+    """Разрешает политику краула для ``plan``/``run``/``crawl run`` (план 19 §6.1).
+
+    Одна формула на все три команды: дефолты пакета (``inputs.crawl_policy``) +
+    действующие записи ``state.db`` + объявленные корни (эффективные seeds) + последние
+    наблюдения ``url_state``. ``state.db`` читается **только** (``mode=ro``): ``plan``
+    обещает ничего не писать, а штатное открытие пишет ``schema_meta.schema_version``.
+
+    ``now`` — параметр: резолв ``scheduled`` зависит от часов, и тест обязан подменять их,
+    а не ждать сутки.
+    """
+    from core.config.crawl_policy import CrawlPolicyConfig
+    from core.pipeline.crawl_policy import (
+        declared_roots,
+        observations_by_root,
+        resolve_crawl_policy,
+    )
+    from core.store.state_sqlite import state_db_path
+    from core.store.state_store import read_crawl_observations, read_crawl_policy_rows
+
+    roots = declared_roots(seed_config)
+    policy = getattr(inputs, "crawl_policy", None) or CrawlPolicyConfig()
+    package = getattr(args, "package", None)
+    rows: list[Any] = []
+    observed: dict[tuple[str, str, str], _dt.datetime] = {}
+    if package and Path(package).is_dir():
+        paths = getattr(args, "paths", None)
+        if paths is None:
+            paths = _resolve_paths(args)
+        db_path = state_db_path(paths.state, Path(package).name)
+        rows = read_crawl_policy_rows(db_path)
+        observed = observations_by_root(read_crawl_observations(db_path), roots)
+    return resolve_crawl_policy(
+        package_policy=policy,
+        operator_rows=rows,
+        roots=roots,
+        now=now or _dt.datetime.now(_dt.UTC),
+        observed_at=observed,
+    )
 
 
 def _package_lock_handle(

@@ -443,7 +443,8 @@ pdf_device:
 # Значения только cpu | cuda — `auto` НЕ существует по той же причине, что у pdf_device
 # выше (R5): объявленная ось обязана действовать, а `auto` = «устройство выбрало
 # окружение», то есть тот же класс дефекта, что чтение модели оценщика из env (§7.4).
-# Ось входит в `EXECUTION_CONTRACT_FIELDS` (поле `embed_device`, 28 → 29), поэтому её
+# Ось входит в `EXECUTION_CONTRACT_FIELDS` (поле `embed_device`, 28 → 29; текущий размер
+# контракта — 30 полей после `crawl_policy_digest`, план 19), поэтому её
 # смена — `execution_change` (новый `run_id`); входит в материал `pb` и в ключ
 # `embed_cache` — иначе CPU-прогон получил бы CUDA-векторы под тем же ключом. Дефолт —
 # cpu (app-слой `deploy.yaml:embed.device`; run-слой `run.yaml:embed.device` его
@@ -666,6 +667,21 @@ refresh_policy:
 product_scope:
   - full
   - product_only
+
+# P1 плана 19. Режим политики краула по области (state.db:crawl_policy). Операционное
+# перечисление: значения не меняют семантику статусов, только разрешают/запрещают сеть.
+# scheduled разрешается в решение refresh|reuse по interval_hours от последнего наблюдения.
+crawl_policy_mode:
+  - auto
+  - on_request
+  - scheduled
+  - network_denied
+# P1 плана 19. Область записи политики; приоритет разрешения path > root > host > product.
+crawl_policy_scope:
+  - product
+  - host
+  - root
+  - path
 
 # 09 §6.3/§9. Тип элемента инкрементального work-set.
 # Операционное перечисление: описывает способ получения документа, не семантику правил.

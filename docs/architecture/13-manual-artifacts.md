@@ -306,7 +306,7 @@ gaps:
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
-   `core/pipeline/corpus.py:2119`; `origin` — `core/store/sqlite.py:118`;
+   `core/pipeline/corpus.py:3383`; `origin` — `core/store/sqlite.py:118`;
    `resolved_manually` — `core/domain/models.py:2207` + `core/pipeline/corpus_coverage.py:118`;
    доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:345`).
    As-built и расхождения — §10.

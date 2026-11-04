@@ -50,6 +50,7 @@ from core.cli.context import (
     _add_common,
     _add_llm_model_flag,
     _add_llm_slot_flag,
+    _crawl_policy_resolution,
     _load_corpus_urls,
     _plan_payload,
     _previous_cycle_id,
@@ -70,6 +71,7 @@ from core.cli.execution_axes import (
 )
 from core.cli.wiring import llm_env_notices, serp_env_notices
 from core.config.deploy import load_deploy_config, profile_notices, shard_notices
+from core.pipeline.crawl_policy import CrawlPolicyConflict
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
@@ -131,11 +133,37 @@ def _declared_payload(
 
 def _axis_lines(payload: dict[str, Any]) -> list[str]:
     """Человекочитаемые строки «какие оси вошли в ``run_id``» (после ``_print_plan``)."""
+    policy = payload.get("crawl_policy") or {}
+    policy_lines = [
+        f"crawl policy: digest={policy.get('digest') or '—'} "
+        f"decisions={len(policy.get('decisions') or ())} "
+        f"unmatched={len(policy.get('unmatched') or ())}",
+        f"crawl_policy_unmatched: {len(policy.get('unmatched') or ())}",
+    ]
+    for decision in policy.get("decisions") or ():
+        scope = decision.get("host") or "—"
+        if decision.get("path"):
+            scope += decision["path"]
+        policy_lines.append(
+            f"crawl policy: {decision['product_id']} [{decision['scope_kind']}] {scope} "
+            f"mode={decision['mode']} decision={decision['decision']} "
+            f"source={decision['source']}"
+        )
+    for item in policy.get("unmatched") or ():
+        policy_lines.append(
+            f"crawl_policy_unmatched: {item['product_id']} [{item['scope_kind']}] "
+            f"host={item['host'] or '—'} path={item['path'] or '—'} mode={item['mode']} "
+            f"source={item['source']}"
+        )
     digest = payload.get("execution_contract_digest")
     if digest is None:
         # ``--run-id``: идентичность задана оператором, контракт не считался — не выдумываем.
-        return ["contract: — (run_id задан явно, оси не считались)"]
+        return [
+            *policy_lines,
+            "contract: — (run_id задан явно, оси не считались)",
+        ]
     return [
+        *policy_lines,
         f"contract: {digest}",
         f"deploy: profile={payload.get('deploy_profile') or '—'}",
         f"crawl axes: digest={payload.get('crawl_config_digest') or '—'}",
@@ -217,18 +245,27 @@ def run(args: argparse.Namespace) -> int:
         if identity_flags.urls is not None
         else None
     )
+    # План 19 §6.1/P1: эффективная политика краула — часть ``run_id``. Резолв печатается
+    # всегда (в т.ч. при ``--run-id``), но ничего не исполняет: сеть на этом слое не
+    # трогается. Конфликт равной специфичности — ``EXIT_USAGE``, а не «первая запись».
+    profiles = getattr(inputs, "domain_profiles", None) or {}
+    seed_config, _ = load_effective_seeds(
+        args.package,
+        inputs.run.products,
+        profiles=profiles,
+        urls_override=operator_urls,
+    )
+    try:
+        policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
+    except CrawlPolicyConflict as exc:
+        raise CliError(
+            str(exc), code=exc.code, exit_code=EXIT_USAGE
+        ) from exc
     if args.run_id is not None:
         result = build_plan(inputs, run_id=args.run_id)
     else:
         # Та же идентичность, что у ``run`` с дефолтами (без --update/--refresh):
         # иначе ``plan`` показывал бы иной run_id, чем реальный прогон.
-        profiles = getattr(inputs, "domain_profiles", None) or {}
-        seed_config, _ = load_effective_seeds(
-            args.package,
-            inputs.run.products,
-            profiles=profiles,
-            urls_override=operator_urls,
-        )
         cohort = cohort_digest(
             inputs.cohort,
             case_id=inputs.run.case_id,
@@ -270,6 +307,8 @@ def run(args: argparse.Namespace) -> int:
             seeds_digest=seeds,
             declared=declared,
             status_dict_version=declared_status_dict_version(),
+            # План 19 §6.1: эффективная политика — то же значение, что у ``run``/``crawl``.
+            crawl_policy_digest=policy_resolution.digest,
             # I16/I20: те же аргументы, что передаёт ``run`` (``run.py``), из того же
             # инвентаря флагов. ``None`` — флаг не объявлен: контракт пишет ``null``,
             # а не дефолт Ш6 (``run_id`` описывает объявленное).
@@ -288,6 +327,11 @@ def run(args: argparse.Namespace) -> int:
             refresh_policy=refresh_policy.value,
         )
     payload = _plan_payload(result)
+    # План 19 §P1: план **печатает** резолв («что было бы запрещено/отложено»), но не
+    # исполняет его. Несовпавшие строки видимы токеном ``crawl_policy_unmatched`` и в
+    # дайджест не входят (no-op правка оператора не даёт ``execution_change``).
+    payload["crawl_policy"] = policy_resolution.as_dict()
+    payload["crawl_policy_unmatched"] = payload["crawl_policy"]["unmatched"]
     if declared is not None and contract is not None:
         payload.update(
             _declared_payload(

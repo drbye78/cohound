@@ -258,6 +258,7 @@ def build_execution_contract(
     status_dict_version: str | None = None,
     scoring_policy_version: str | None = None,
     catalog_version: str | None = None,
+    crawl_policy_digest: str | None = None,
 ) -> str:
     """Собирает execution contract из честно доступных значений и хеширует его.
 
@@ -332,6 +333,10 @@ def build_execution_contract(
         "crawl_strategy": _declared(declared, "crawl_strategy"),
         "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),
         "crawl_config_digest": _declared(declared, "crawl_config_digest"),
+        # План 19 §6.1: эффективная поверхность решений политики краула. Приходит
+        # аргументом от composition root (резолв требует объявленных корней и часов):
+        # ``None`` — «не разрешалась» (чистые вызовы), отличимо от пустой поверхности.
+        "crawl_policy_digest": crawl_policy_digest,
         # I3/§5: раунды SERP-контура — объявленный вход (``run.yaml: serp.rounds``,
         # переопределяемый ``--serp-rounds``/``COHOUND_SERP``/``deploy.search.serp``).
         # Идут в контракт: раунд меняет корпус, значит и ``run_id`` (execution_change).

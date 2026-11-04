@@ -46,11 +46,13 @@ from core.cli.context import (
     _add_llm_model_flag,
     _add_llm_slot_flag,
     _add_phase4_flags,
+    _crawl_policy_resolution,
     _ensure_run,
     _filter_corpus_urls,
     _follow_session,
     _load_corpus_urls,
     _load_render_modes,
+    _open_state_store,
     _package_lock,
     _persist_llm_scenarios,
     _phases_until,
@@ -58,6 +60,7 @@ from core.cli.context import (
     _product_callback,
     _progress_callback,
     _resolve_db_path,
+    _resolve_paths,
     _resolve_phases,
     _resolve_plan,
     _resolve_ports,
@@ -82,15 +85,30 @@ from core.cli.wiring import (
     preflight_extraction_budget,
     resolve_extraction_budget,
 )
+from core.config.crawl_policy import (
+    CRAWL_POLICY_FILENAME,
+    CrawlPolicyConfig,
+    load_crawl_policy,
+    parse_site_key,
+)
 from core.config.deploy import load_deploy_config, profile_notices, shard_notices
+from core.config.run_config import load_cohort
 from core.domain import (
     CrawlItemStatus,
+    CrawlPolicyMode,
+    CrawlPolicyScopeKind,
     CrawlRunConfig,
     CrawlSessionStatus,
     RefreshPolicy,
 )
 from core.pipeline import PHASES
 from core.pipeline.crawl_metric import build_crawl_metric
+from core.pipeline.crawl_policy import (
+    CrawlPolicyConflict,
+    declared_roots,
+    observations_by_root,
+    resolve_crawl_policy,
+)
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
@@ -109,6 +127,9 @@ from core.pipeline.run_identity import (
     resolve_run_scope,
 )
 from core.pipeline.runner import RunContext
+from core.ports.state import CrawlPolicyRow
+from core.store.state_sqlite import state_db_path
+from core.store.state_store import read_crawl_observations, read_crawl_policy_rows
 
 __all__ = [
     "cancel",
@@ -400,6 +421,12 @@ def _execute_crawl_locked(
         cohort_ref=getattr(inputs.run, "cohort_ref", None),
     )
     seeds_d = seeds_digest(seed_config)
+    # План 19 §6.1: политика краула — та же поверхность решений, что у ``plan``/``run``,
+    # иначе ``crawl run`` адресовал бы другой ``run_id``. P1 не исполняет политику.
+    try:
+        policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
+    except CrawlPolicyConflict as exc:
+        raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
     # §13 (2.4.0): декларированные оси — тот же резолвер и deploy-конфиг, что у ``run``
     # (иначе crawl адресовал бы другой ``run_id``/сеанс).
     # P5/P7: операторские оси краула (``--document-level``/``--pdf-pipeline``) входят в
@@ -416,6 +443,7 @@ def _execute_crawl_locked(
         seeds_digest=seeds_d,
         declared=declared,
         status_dict_version=status_dict_version,
+        crawl_policy_digest=policy_resolution.digest,
     )
     run_id = args.run_id or derive_run_id(
         inputs,
@@ -1047,6 +1075,484 @@ def cancel(args: argparse.Namespace) -> int:
         store.close()
 
 
+# ---------------------------------------------------------------------------
+# policy: операторская политика краула (план 19 §4, STATE 8)
+# ---------------------------------------------------------------------------
+
+
+def _policy_now() -> str:
+    """Метка решения оператора в ISO-8601 (UTC, ``Z``) — как остальные TEXT-колонки."""
+    return (
+        _dt.datetime.now(_dt.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _policy_package_dir(args: argparse.Namespace) -> str:
+    """``--package``: путь как есть либо ``case_id`` под каталогом пакетов."""
+    from core.cli.package.commands import _resolve_package_dir
+
+    package = _resolve_package_dir(args)
+    if not package or not Path(package).is_dir():
+        raise CliError(
+            f"пакет не найден: {getattr(args, 'package', None)!r}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    args.package = package
+    return package
+
+
+def _policy_scope_values(
+    args: argparse.Namespace,
+) -> tuple[str, CrawlPolicyScopeKind, str | None, str | None]:
+    """Разбирает ``--scope/--id`` в ``(product_id, kind, host, path)``.
+
+    ``product`` — ``--id`` product_id; ``host`` — host; ``root``/``path`` — ``host/path``.
+    Host нормализуется тем же правилом, что резолвер (``www.`` эквивалентен bare-host):
+    иначе запись оператора не совпала бы с корнем, и запрет сети молча не действовал бы.
+    """
+    raw_scope = str(getattr(args, "scope", None) or CrawlPolicyScopeKind.PRODUCT.value)
+    try:
+        kind = CrawlPolicyScopeKind(raw_scope)
+    except ValueError as exc:
+        raise CliError(
+            f"--scope: неизвестная область {raw_scope!r}; допустимо "
+            f"{', '.join(item.value for item in CrawlPolicyScopeKind)}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    ident = str(getattr(args, "id", None) or "").strip()
+    if not ident:
+        raise CliError(
+            "--id обязателен: он называет продукт, host или host/path области",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    if kind is CrawlPolicyScopeKind.PRODUCT:
+        return ident, kind, None, None
+    if "://" in ident:
+        raise CliError(
+            f"--id: ожидается host[+path] без схемы URL, получено {ident!r}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    from core.pipeline.crawl_policy import normalize_policy_host, normalize_policy_path
+
+    host, path = parse_site_key(ident)
+    return ident, kind, normalize_policy_host(host), normalize_policy_path(path)
+
+
+def _policy_scope_label(
+    product_id: str, kind: CrawlPolicyScopeKind, host: str | None, path: str | None
+) -> str:
+    """Человекочитаемая метка области."""
+    if kind is CrawlPolicyScopeKind.PRODUCT:
+        return f"{product_id} [product]"
+    target = host or "—"
+    if path:
+        target += path
+    return f"{product_id} [{kind.value}] {target}"
+
+
+def _policy_mode_values(args: argparse.Namespace) -> tuple[CrawlPolicyMode, int | None]:
+    """``--mode``/``--interval-hours`` с проверкой «интервал только у scheduled»."""
+    raw = getattr(args, "mode", None)
+    if not raw:
+        raise CliError("--mode обязателен для crawl policy set", code="usage", exit_code=EXIT_USAGE)
+    try:
+        mode = CrawlPolicyMode(raw)
+    except ValueError as exc:
+        raise CliError(
+            f"--mode: неизвестный режим {raw!r}; допустимо "
+            f"{', '.join(item.value for item in CrawlPolicyMode)}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    raw_interval = getattr(args, "interval_hours", None)
+    interval = int(raw_interval) if raw_interval is not None else None
+    if mode is CrawlPolicyMode.SCHEDULED:
+        if interval is None or interval <= 0:
+            raise CliError(
+                "--interval-hours обязателен и положителен при --mode scheduled",
+                code="usage",
+                exit_code=EXIT_USAGE,
+            )
+    elif interval is not None:
+        raise CliError(
+            "--interval-hours допустим только при --mode scheduled",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    return mode, interval
+
+
+def _same_policy_scope(
+    row: CrawlPolicyRow,
+    product_id: str,
+    kind: CrawlPolicyScopeKind,
+    host: str | None,
+    path: str | None,
+) -> bool:
+    """Строка описывает ровно ту же область (для идемпотентности и замены)."""
+    return (
+        row.product_id == product_id
+        and row.scope_kind is kind
+        and (row.host or None) == host
+        and (row.path or None) == (path or None)
+    )
+
+
+def _policy_row_payload(row: CrawlPolicyRow) -> dict[str, Any]:
+    """JSON-представление действующей записи ``crawl_policy``."""
+    return {
+        "policy_id": row.policy_id,
+        "product_id": row.product_id,
+        "scope_kind": row.scope_kind.value,
+        "host": row.host,
+        "path": row.path,
+        "mode": row.mode.value,
+        "interval_hours": row.interval_hours,
+        "note": row.note,
+        "actor": row.actor,
+        "created_at": row.created_at,
+    }
+
+
+def policy_set(args: argparse.Namespace) -> int:
+    """``hound crawl policy set`` — записать решение оператора (append-only, STATE 8).
+
+    Порядок как у ``hound package profile attest``: lock пакета → открыть ``state.db`` →
+    записать. ``--dry-run`` не пишет **ничего** и говорит об этом. Повтор с тем же
+    ``(mode, interval_hours)`` для той же области идемпотентен: новая строка не
+    появляется, ``created=false``; расхождение ``--note``/``--actor`` лишь предупреждает.
+    Смена режима — новая строка + ``superseded_by`` прежней (аудит не теряется).
+    """
+    package = _policy_package_dir(args)
+    actor = str(getattr(args, "actor", None) or "").strip()
+    if not actor:
+        raise CliError(
+            "--actor обязателен: политика — человеческое решение (аудит)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    product_id, kind, host, path = _policy_scope_values(args)
+    mode, interval = _policy_mode_values(args)
+    note = str(getattr(args, "note", None) or "").strip() or None
+    created_at = _policy_now()
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    def _body() -> int:
+        store = None if dry_run else _open_state_store(args, create=True)
+        if not dry_run and store is None:  # pragma: no cover — пакет уже проверен
+            raise CliError(
+                f"state.db пакета недоступен: {package}", code="state", exit_code=EXIT_USAGE
+            )
+        warnings: list[str] = []
+        created: bool | None = None
+        policy_id: int | None = None
+        superseded: list[int] = []
+        effective_at = created_at
+        try:
+            if store is not None:
+                active = store.list_crawl_policy(product_id=product_id)
+            else:
+                # ``--dry-run`` всё равно читает: иначе «created» было бы догадкой.
+                # Чтение — ``mode=ro``, схема не применяется, файл не меняется.
+                paths = getattr(args, "paths", None) or _resolve_paths(args)
+                db_path = state_db_path(paths.state, Path(package).name)
+                active = [
+                    row
+                    for row in read_crawl_policy_rows(db_path)
+                    if row.product_id == product_id
+                ]
+            exact = [
+                row for row in active if _same_policy_scope(row, product_id, kind, host, path)
+            ]
+            same = [
+                row
+                for row in exact
+                if row.mode is mode and row.interval_hours == interval
+            ]
+            if dry_run:
+                created = not same
+                policy_id = exact[0].policy_id if exact else None
+                if same:
+                    effective_at = same[0].created_at
+                warnings.append("dry-run: строка не записана — решение не действует")
+            elif same:
+                created = False
+                effective_at = same[0].created_at
+                policy_id = same[0].policy_id
+                if note is not None and note != same[0].note:
+                    warnings.append(
+                        "no-op: политика уже записана; --note не применялся"
+                    )
+                if actor != same[0].actor:
+                    warnings.append(
+                        f"no-op: политика уже записана actor={same[0].actor}; "
+                        "--actor не применялся"
+                    )
+            else:
+                assert store is not None  # noqa: S101 — сужение типа: выше проверено
+                row = CrawlPolicyRow(
+                    product_id=product_id,
+                    scope_kind=kind,
+                    mode=mode,
+                    actor=actor,
+                    created_at=created_at,
+                    host=host,
+                    path=path,
+                    interval_hours=interval,
+                    note=note,
+                )
+                policy_id = store.record_crawl_policy(row)
+                created = True
+                for old in exact:
+                    if old.policy_id is not None:
+                        store.supersede_crawl_policy(
+                            old.policy_id, superseded_by=policy_id
+                        )
+                        superseded.append(old.policy_id)
+            if store is not None:
+                active_after = store.list_crawl_policy(product_id=product_id)
+                stored = [row for row in active_after if row.policy_id == policy_id]
+                if stored and stored[0].created_at != effective_at:
+                    effective_at = stored[0].created_at
+        finally:
+            if store is not None:
+                store.close()
+        payload = {
+            "ok": True,
+            "dry_run": dry_run,
+            "created": created,
+            "policy_id": policy_id,
+            "product_id": product_id,
+            "scope_kind": kind.value,
+            "host": host,
+            "path": path,
+            "mode": mode.value,
+            "interval_hours": interval,
+            "note": note,
+            "actor": actor,
+            "created_at": effective_at,
+            "superseded": superseded,
+            "warnings": warnings,
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            lines = [
+                f"dry-run: {'yes' if dry_run else 'no'}",
+                f"created: {'yes' if created else 'no'}",
+                f"policy_id: {policy_id if policy_id is not None else '—'}",
+                f"scope: {_policy_scope_label(product_id, kind, host, path)}",
+                f"mode: {mode.value}",
+                f"interval_hours: {interval if interval is not None else '—'}",
+                f"actor: {actor}",
+                f"created_at: {effective_at}",
+            ]
+            for warning in warnings:
+                lines.append(f"warning: {warning}")
+            sys.stdout.write("\n".join(lines) + "\n")
+        return EXIT_OK
+
+    if dry_run:
+        return _body()
+    with _package_lock(args, command="crawl policy set"):
+        return _body()
+
+
+def policy_clear(args: argparse.Namespace) -> int:
+    """``hound crawl policy clear`` — отозвать решение оператора (append-only).
+
+    ``--scope``/``--id`` ограничивают область; без них отзываются все действующие
+    записи пакета. Отзыв — ``superseded_by = policy_id`` (схема §4 не имеет
+    tombstone-режима, а удаление нарушило бы append-only), запись остаётся в аудите и
+    выпадает из действующих: эффективная политика снова берётся из дефолтов пакета.
+    ``--dry-run`` не пишет и называет, сколько строк было бы отозвано.
+    """
+    package = _policy_package_dir(args)
+    actor = str(getattr(args, "actor", None) or "").strip()
+    if not actor:
+        raise CliError(
+            "--actor обязателен: отзыв политики — человеческое решение (аудит)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    scope = getattr(args, "scope", None)
+    target: tuple[str, CrawlPolicyScopeKind, str | None, str | None] | None = None
+    if scope is not None or getattr(args, "id", None) is not None:
+        target = _policy_scope_values(args)
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    def _body() -> int:
+        store = None if dry_run else _open_state_store(args, create=True)
+        warnings: list[str] = []
+        try:
+            if store is not None:
+                rows = store.list_crawl_policy(
+                    product_id=target[0] if target is not None else None
+                )
+            else:
+                paths = getattr(args, "paths", None) or _resolve_paths(args)
+                db_path = state_db_path(paths.state, Path(package).name)
+                rows = read_crawl_policy_rows(db_path)
+                if target is not None:
+                    rows = [row for row in rows if row.product_id == target[0]]
+            if target is not None:
+                product_id, kind, host, path = target
+                rows = [
+                    row
+                    for row in rows
+                    if _same_policy_scope(row, product_id, kind, host, path)
+                ]
+            cleared = [int(row.policy_id) for row in rows if row.policy_id is not None]
+            if dry_run:
+                warnings.append("dry-run: строки не отозваны — решение продолжает действовать")
+            else:
+                assert store is not None  # noqa: S101 — сужение типа: выше проверено
+                for row in rows:
+                    if row.policy_id is not None:
+                        store.supersede_crawl_policy(row.policy_id)
+        finally:
+            if store is not None:
+                store.close()
+        payload = {
+            "ok": True,
+            "dry_run": dry_run,
+            "clear_all": target is None,
+            "scope": (
+                _policy_scope_label(*target) if target is not None else None
+            ),
+            "actor": actor,
+            "cleared": cleared,
+            "count": len(cleared),
+            "warnings": warnings,
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            lines = [
+                f"dry-run: {'yes' if dry_run else 'no'}",
+                f"scope: {payload['scope'] or 'все записи пакета'}",
+                f"cleared: {len(cleared)}"
+                + (f" ({', '.join(str(item) for item in cleared)})" if cleared else ""),
+            ]
+            for warning in warnings:
+                lines.append(f"warning: {warning}")
+            sys.stdout.write("\n".join(lines) + "\n")
+        return EXIT_OK
+
+    if dry_run:
+        return _body()
+    with _package_lock(args, command="crawl policy clear"):
+        return _body()
+
+
+def policy_list(args: argparse.Namespace) -> int:
+    """``hound crawl policy list`` — эффективный режим и источник (пакет/оператор).
+
+    Read-only: ``state.db`` читается ``mode=ro`` (как ``plan``), схема не применяется и
+    ``schema_version`` не переписывается. Для объявленных корней печатается **решение**
+    (для ``scheduled`` — ``refresh``/``reuse``), а несовпавшие записи — отдельным
+    списком ``crawl_policy_unmatched``.
+    """
+    package = _policy_package_dir(args)
+    policy_path = Path(package) / CRAWL_POLICY_FILENAME
+    config = load_crawl_policy(policy_path) if policy_path.is_file() else CrawlPolicyConfig()
+    cohort = load_cohort(Path(package) / "cohort.yaml")
+    seed_config, _ = load_effective_seeds(
+        package, [entry.product_id for entry in cohort.entries]
+    )
+    roots = declared_roots(seed_config)
+    paths = getattr(args, "paths", None) or _resolve_paths(args)
+    db_path = state_db_path(paths.state, Path(package).name)
+    rows = read_crawl_policy_rows(db_path)
+    observed = observations_by_root(read_crawl_observations(db_path), roots)
+    try:
+        resolution = resolve_crawl_policy(
+            package_policy=config,
+            operator_rows=rows,
+            roots=roots,
+            now=_dt.datetime.now(_dt.UTC),
+            observed_at=observed,
+        )
+    except CrawlPolicyConflict as exc:
+        raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
+    payload = {
+        "ok": True,
+        "package": package,
+        "state_db": str(db_path),
+        "digest": resolution.digest,
+        "decisions": [item.as_dict() for item in resolution.decisions],
+        "unmatched": [
+            {
+                "product_id": item.product_id,
+                "scope_kind": item.scope_kind.value,
+                "host": item.host,
+                "path": item.path,
+                "mode": item.mode.value,
+                "interval_hours": item.interval_hours,
+                "source": item.source,
+                "policy_id": item.policy_id,
+            }
+            for item in resolution.unmatched
+        ],
+        "records": [_policy_row_payload(row) for row in rows],
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        lines = [
+            f"package: {package}",
+            f"state_db: {db_path}",
+            f"crawl_policy_digest: {resolution.digest}",
+            f"decisions: {len(resolution.decisions)}",
+        ]
+        for decision in resolution.decisions:
+            lines.append(
+                "  "
+                + _policy_scope_label(
+                    decision.product_id,
+                    decision.scope_kind,
+                    decision.host,
+                    decision.path,
+                )
+                + f" mode={decision.mode.value} decision={decision.decision} "
+                f"source={decision.source}"
+            )
+        lines.append(f"operator records: {len(rows)}")
+        for row in rows:
+            lines.append(
+                "  "
+                + _policy_scope_label(row.product_id, row.scope_kind, row.host, row.path)
+                + f" mode={row.mode.value} policy_id={row.policy_id} actor={row.actor}"
+            )
+        lines.append(f"crawl_policy_unmatched: {len(resolution.unmatched)}")
+        for item in resolution.unmatched:
+            lines.append(
+                "  "
+                + _policy_scope_label(
+                    item.product_id, item.scope_kind, item.host, item.path
+                )
+                + f" mode={item.mode.value} source={item.source}"
+            )
+        sys.stdout.write("\n".join(lines) + "\n")
+    return EXIT_OK
+
+
+def _no_policy_subcommand(args: argparse.Namespace) -> int:
+    """``hound crawl policy`` без подкоманды: явный отказ использования."""
+    raise CliError(
+        "не указана подкоманда crawl policy (set|list|clear)",
+        code="usage",
+        exit_code=EXIT_USAGE,
+    )
+
+
 def _no_subcommand(args: argparse.Namespace) -> int:
     """``hound crawl`` без подкоманды: понятная ошибка использования (``EXIT_USAGE``)."""
     raise CliError(
@@ -1133,6 +1639,43 @@ def _add_session_target_flags(
     parser.add_argument("--db", default=None, help="путь к БД прогона (приоритетнее --runs-dir)")
 
 
+def _add_policy_target_flags(
+    parser: argparse.ArgumentParser,
+    *,
+    require_scope: bool = True,
+    actor: bool = True,
+) -> None:
+    """Флаги области политики: ``--package``, ``--scope``, ``--id``, ``--actor``."""
+    parser.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+    )
+    parser.add_argument(
+        "--dir",
+        default=None,
+        help="каталог пакетов для резолва case_id (дефолт — resolved paths.packages)",
+    )
+    parser.add_argument(
+        "--scope",
+        default=None,
+        choices=[item.value for item in CrawlPolicyScopeKind],
+        help="область записи: product | host | root | path",
+    )
+    parser.add_argument(
+        "--id",
+        default=None,
+        help="product_id (scope=product), host (scope=host) или host/path (root/path)",
+    )
+    if actor:
+        parser.add_argument(
+            "--actor", default=None, help="человек, принявший решение (аудит)"
+        )
+    if require_scope:
+        return
+    # ``list``/``clear`` без области законны: list — все корни, clear — все записи.
+
+
 def configure(sub: Any) -> None:
     """Регистрирует группу ``crawl`` с подкомандами run/status/list/resume/restart/cancel."""
     p_crawl = sub.add_parser(
@@ -1203,5 +1746,54 @@ def configure(sub: Any) -> None:
     _add_session_target_flags(p_cancel, require_run_id=True)
     _add_common(p_cancel)
     p_cancel.set_defaults(handler=cancel)
+
+    # План 19 §P1: операторская политика краула (state.db, append-only). Только
+    # запись/чтение решений — исполнение политики (network_mode/corpus_source) отдельный
+    # слой; здесь ни один сетевой механизм не включается.
+    p_policy = crawl.add_parser(
+        "policy", help="политика краула по областям (state.db; set|list|clear)"
+    )
+    policy = p_policy.add_subparsers(dest="policy_command", metavar="ДЕЙСТВИЕ")
+
+    p_pol_set = policy.add_parser("set", help="записать режим области (append-only)")
+    _add_policy_target_flags(p_pol_set)
+    p_pol_set.add_argument(
+        "--mode",
+        required=True,
+        choices=[item.value for item in CrawlPolicyMode],
+        help="режим области: auto | on_request | scheduled | network_denied",
+    )
+    p_pol_set.add_argument(
+        "--interval-hours",
+        dest="interval_hours",
+        type=int,
+        default=None,
+        help="интервал обновления (обязателен и > 0 при --mode scheduled)",
+    )
+    p_pol_set.add_argument("--note", default=None, help="человеческая заметка (провенанс)")
+    p_pol_set.add_argument(
+        "--dry-run", action="store_true", help="показать решение без записи"
+    )
+    _add_common(p_pol_set)
+    p_pol_set.set_defaults(handler=policy_set)
+
+    p_pol_list = policy.add_parser(
+        "list", help="эффективный режим и источник по объявленным корням (read-only)"
+    )
+    _add_policy_target_flags(p_pol_list, require_scope=False, actor=False)
+    _add_common(p_pol_list)
+    p_pol_list.set_defaults(handler=policy_list)
+
+    p_pol_clear = policy.add_parser(
+        "clear", help="отозвать записи оператора (append-only, без удаления)"
+    )
+    _add_policy_target_flags(p_pol_clear, require_scope=False)
+    p_pol_clear.add_argument(
+        "--dry-run", action="store_true", help="показать, что было бы отозвано, без записи"
+    )
+    _add_common(p_pol_clear)
+    p_pol_clear.set_defaults(handler=policy_clear)
+
+    p_policy.set_defaults(handler=_no_policy_subcommand)
 
     p_crawl.set_defaults(handler=_no_subcommand)

@@ -365,7 +365,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ✅ сделано (проверено) — `core/pipeline/runner.py:167` (`PhaseResult` c
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
-`core/cli/context.py:1418` (`make_profile_gate` подключён в CLI).
+`core/cli/context.py:1612` (`make_profile_gate` подключён в CLI).
 ⬜ не сделано — durable-аттестация профиля: `save_profile_attestation` не вызывается ни из
 одного прод-пути (`grep -rn save_profile_attestation core` → только определение), строку пишут тесты.
 
