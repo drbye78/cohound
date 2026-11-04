@@ -230,6 +230,14 @@ digest), `network_denied` (**no** requests for that root). `refresh_policy` (run
 extraction/chunking and `frozen_source ∈ bytes|chunks` (canonicalised to `n/a` outside
 `frozen`).
 
+A no-network pass replays **durable known documents**, not just author roots: under `full`
+mode there is no BFS to discover them, so `url_state` *is* the work set (measured
+04.11.2026: roots-only lost 7 of 9 documents). It also extracts with the **declared**
+per-URL `document_level`/`pdf_pipeline` (`extractor_factory`), not the composition default —
+otherwise `extractor_version` names a condition the corpus never had. Container **members**
+are still not replayed (plan 19 §E.7): live members come from `ArchiveDescentWalker`, and a
+no-network pass replays top-level bytes only, naming the container as `no_version`.
+
 `network_denied` is a **network policy, not product exclusion**: the product stays on the
 map, the corpus comes from what is already stored (`chunks`/`bytes`), coverage is incomplete
 and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` and never

@@ -3231,10 +3231,14 @@ def _build_corpus(
         #: без усечения; задание — видимый defer хвоста. ``split`` — transport, который
         #: не исполняет локальную политику отбора: не притворяемся, что ось применена.
         revalidate_cap = _resolve_product_revalidate_cap(product_roots)
+        # План 19 §P5: под политикой без сети ревалидации нет вовсе — потолок нечего
+        # ограничивать, а его применение усекло бы work-set переиспользования и
+        # записало бы defer хвоста, которого не было.
         cap_applies = bool(
             revalidate_cap is not None
             and incremental_items
             and len(incremental_items) > revalidate_cap
+            and not no_network
         )
         # S3: split-ошибка — только когда потолку действительно есть что ограничивать.
         if cap_applies and executor is not None:
@@ -3499,6 +3503,10 @@ def _build_corpus(
                     extract_cache=extract_cache,
                     fetch_plan_for=_frozen_fetch_plan,
                     limits_for=_limits_for_url,
+                    # Тот же per-level резолвер, что у живого пути и ручных артефактов:
+                    # `frozen` обязан извлекать объявленным уровнем, иначе он штампует
+                    # условие, которого измерение не объявляло (см. corpus_ingest).
+                    extractor_factory=extractor_factory,
                     label=pass_label,
                 )
                 offline_notes.append(ctx.frozen_report.note(ctx.product_id))

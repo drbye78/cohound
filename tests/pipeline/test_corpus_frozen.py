@@ -30,6 +30,8 @@ from core.domain import (
     CohortEntry,
     CorpusDoc,
     CrawlRunConfig,
+    DocumentLevel,
+    PdfPipeline,
     RunConfig,
     RunMode,
 )
@@ -219,7 +221,12 @@ def _make_run(store: SqliteStore) -> None:
 
 
 def _seed_substrate(
-    tmp_path: Path, state: SqliteStateStore, *, pages: dict[str, bytes], roots: list[str]
+    tmp_path: Path,
+    state: SqliteStateStore,
+    *,
+    pages: dict[str, bytes],
+    roots: list[str],
+    crawl_defaults: CrawlRunConfig | None = None,
 ) -> None:
     """Наполняет ``state.db`` штатным путём: прогон ``auto`` с живым краулером."""
     store = SqliteStore(":memory:")
@@ -238,6 +245,7 @@ def _seed_substrate(
             state=state,
             product_modes={"p1": "incremental"},
             refresh_policy="auto",
+            crawl_defaults=crawl_defaults,
         )
     finally:
         store.close()
@@ -251,6 +259,7 @@ def _frozen_run(
     roots: list[str],
     extractor: _FrozenExtractor | None = None,
     host_concurrency: int | None = 2,
+    crawl_defaults: CrawlRunConfig | None = None,
     **kwargs: Any,
 ) -> tuple[Any, SqliteStore, _NoNetworkCrawler]:
     """``frozen``-прогон с краулером, падающим на любом вызове."""
@@ -270,9 +279,13 @@ def _frozen_run(
         product_modes={"p1": "incremental"},
         refresh_policy="frozen",
         crawl_defaults=(
-            None
-            if host_concurrency is None
-            else CrawlRunConfig(host_concurrency=host_concurrency)
+            crawl_defaults
+            if crawl_defaults is not None
+            else (
+                None
+                if host_concurrency is None
+                else CrawlRunConfig(host_concurrency=host_concurrency)
+            )
         ),
         **kwargs,
     )
@@ -448,5 +461,72 @@ def test_frozen_bytes_writes_no_session_items(tmp_path: Path) -> None:
         _result, store, _crawler = _frozen_run(tmp_path, state, roots=[ROOT])
         try:
             assert list(store.iter_crawl_session_items("crawl:" + RUN_ID)) == []
+        finally:
+            store.close()
+
+
+class _LevelExtractor:
+    """Экстрактор, который **называет** условие, которым его построили.
+
+    Штамп — тот же текст байтов, поэтому ``content_hash`` совпадает с записанным: тест
+    проверяет выбор условия, а не дрейф текста.
+    """
+
+    def __init__(self, version: str) -> None:
+        self.version = version
+        self.calls = 0
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        self.calls += 1
+        body = _page_bytes(page)
+        return ExtractedDoc(
+            text=body.decode("utf-8", errors="replace"),
+            content_hash=content_hash(body),
+            extractor_version=self.version,
+            page_count=1,
+        )
+
+
+def test_frozen_extracts_at_the_declared_level_not_the_composition_one(
+    tmp_path: Path,
+) -> None:
+    """``frozen`` выбирает экстрактор по объявленному уровню (зеркало живого пути).
+
+    Без этого пере-извлечение идёт уровнем композиции и штампует ``extractor_version``
+    условия, которого в корпусе не было: на стенде ``ru-pg-dbms`` это дало
+    ``frozen_reextract_mismatch`` у 4 из 5 PDF и второй ``doc_version_id`` у выжившего.
+    """
+    calls: list[tuple[DocumentLevel, PdfPipeline]] = []
+
+    def factory(level: DocumentLevel, pipeline: PdfPipeline) -> _LevelExtractor:
+        calls.append((level, pipeline))
+        return _LevelExtractor(f"docling-fake-{level.value}/{pipeline.value}")
+
+    defaults = CrawlRunConfig(document_level=DocumentLevel.LAYOUT_TABLES)
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(
+            tmp_path,
+            state,
+            pages={ROOT: BODY},
+            roots=[ROOT],
+            crawl_defaults=defaults,
+        )
+        _result, store, crawler = _frozen_run(
+            tmp_path,
+            state,
+            roots=[ROOT],
+            crawl_defaults=defaults,
+            extractor_factory=factory,
+        )
+        try:
+            assert crawler.calls == [], "frozen обязан не трогать сеть"
+            assert calls == [(DocumentLevel.LAYOUT_TABLES, PdfPipeline.STRUCTURED)]
+            docs = _docs(store)
+            assert len(docs) == 1
+            assert docs[0].extractor_version == (
+                "docling-fake-layout_tables/structured"
+            ), "условие замера — объявленный уровень, а не уровень композиции"
         finally:
             store.close()

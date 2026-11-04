@@ -2913,15 +2913,22 @@ def plan_incremental_items(
     это безусловный GET. Авторские корни сюда не входят, но и они под ``offline``
     разрешаются в состоянии, а не в сети — решает вызывающий (он знает корни).
 
-    ``new``/``full`` план не расширяют (прежний BFS/sitemap).
+    ``new``/``full`` план **под сетью** не расширяют (прежний BFS/sitemap обнаружит сам).
+    Под политикой без сети (``offline``/``frozen``) дело обратное: BFS-discovery не
+    бывает вовсе, поэтому единственный источник известных URL — ``url_state``, и режим
+    продукта (онбординг, полнота снимка) не должен его отменять. Иначе проход без сети
+    видит только авторские корни и **молча** теряет всё, что найдено прошлым краулом
+    (измерено на стенде плана 19 §P5: 2 документа из 9).
 
     Ремонт провалов (``--only-failed``) идёт **не** этим путём: он не зависит от режима
     продукта и не выводится из ``url_state`` целиком — см. :func:`plan_repair_items`.
     """
     if state is None:
         return []
+    no_network = not dispatch_refresh(policy).network
     if (
-        as_product_mode((product_modes or {}).get(product_id))
+        not no_network
+        and as_product_mode((product_modes or {}).get(product_id))
         is not ProductMode.INCREMENTAL
     ):
         return []
@@ -3479,6 +3486,8 @@ def frozen_bytes_product(
     extract_cache: ExtractionCache | None,
     fetch_plan_for: Callable[[str], FetchPlan],
     limits_for: Callable[[str], Any],
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort]
+    | None = None,
     label: str = "frozen",
 ) -> FrozenBytesReport:
     """``frozen_source=bytes``: корпус из ``corpus_raw`` → **текущая** экстракция (P3).
@@ -3502,6 +3511,12 @@ def frozen_bytes_product(
     ``crawl_session_items`` тоже не пишутся — поэтому дедуп опирается на durable-группы
     прошлой записи снятия, а не на ``min(url)`` по элементам сеанса.
 
+    **Уровень — условие измерения.** Экстрактор выбирается per-URL через
+    ``extractor_factory(level, pdf_pipeline)`` (тот же резолвер, что у живого пути):
+    иначе пере-извлечение идёт уровнем композиции, ``extractor_version`` называет
+    условие, которого в корпусе не было, а ``extract_cache`` получает второй ключ —
+    «дрейф» там, где движок был тот же, а настройка другая.
+
     **Порядок и адреса.** Все кандидаты известны до экстракции; документы группируются по
     ``content_hash``, канонический адрес группы — ``min(url)`` по всем URL группы (включая
     алиасы прошлого снятия). Поэтому результат не зависит от порядка готовности и от
@@ -3518,6 +3533,8 @@ def frozen_bytes_product(
     cache_hits = 0
     reextracted = 0
     touched: list[str] = []
+    #: Экстракторы по ключу ``(уровень, механизм PDF)`` — один на условие прохода.
+    level_extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort] = {}
     seen_urls: set[str] = set()
 
     #: Durable-группы прошлого снятия: ``doc_hash → urls``. Нужны ровно за тем, чтобы
@@ -3595,8 +3612,39 @@ def frozen_bytes_product(
             continue
 
         plan = fetch_plan_for(url)
-        level = limits_for(url).document_level
+        limits = limits_for(url)
+        level = limits.document_level
         level_text = _as_text(level)
+        # Зеркало живого пути корня (P5/P8): уровень и механизм PDF — **условие
+        # измерения**, а не свойство «какой экстрактор случайно передали». Без этой
+        # подмены ``frozen`` извлекал документ экстрактором композиции (уровень
+        # ``full``) и штамповал ``extractor_version`` этого уровня, хотя в корпусе
+        # записан объявленный (``layout_tables``): на стенде это дало дрейф
+        # пере-извлечения у 4 из 5 PDF — «тот же файл, другой текст» — и второй
+        # ``doc_version_id`` у выжившего. Отказ фабрики — видимая деградация, не тишина.
+        extractor_obj: ExtractorPort = extractor
+        if extractor_factory is not None and (
+            level is not DocumentLevel.FULL
+            or limits.pdf_pipeline is not PdfPipeline.STRUCTURED
+        ):
+            # Один экстрактор на ключ ``(уровень, механизм)`` — как пул живого пути:
+            # построение docling заново на каждый документ стоило бы загрузки моделей
+            # по числу PDF (замер: 5 перезагрузок подряд), а не по числу условий.
+            extractor_key = (level, limits.pdf_pipeline)
+            level_extractor = level_extractors.get(extractor_key)
+            if level_extractor is None:
+                try:
+                    level_extractor = extractor_factory(level, limits.pdf_pipeline)
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    errors.append(
+                        f"{product_id}/{url}: frozen: extractor_factory({level.value}, "
+                        f"{limits.pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
+                        "понижен до переданного экстрактора"
+                    )
+                    level_extractor = extractor
+                else:
+                    level_extractors[extractor_key] = level_extractor
+            extractor_obj = level_extractor
         # Маршрут — по **байтам** сохранённого файла, а не по URL/``Content-Type``: у
         # retained-файла суффикс ``.bin``, а заголовка ответа в этом прогоне нет. Иначе
         # PDF, отданный по бессуффиксному URL, ушёл бы в HTML-ветку и дал ложный дрейф.
@@ -3627,13 +3675,13 @@ def frozen_bytes_product(
         )
         extracted = None
         if extract_cache is not None:
-            version_token = _cache_extractor_version(extractor, page, route)
+            version_token = _cache_extractor_version(extractor_obj, page, route)
             extracted = extract_cache.get(raw_key, version_token, level_text)
             if extracted is not None:
                 cache_hits += 1
         if extracted is None:
             try:
-                extracted = extractor.extract(page, route)
+                extracted = extractor_obj.extract(page, route)
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(
                     f"{product_id}/{url}: frozen: extract: {type(exc).__name__}: {exc}"
