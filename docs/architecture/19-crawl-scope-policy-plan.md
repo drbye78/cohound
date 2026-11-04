@@ -11,9 +11,19 @@
 
 1. Для **продукта, хоста, корня или маски пути внутри корня** задать режим краулинга:
    `auto` (как сейчас), `on_request` (первичный дискавери — автоматический, обновление — по
-   ручному запросу через CLI), `network_denied` (ни дискавери, ни обновление).
+   ручному запросу через CLI), `scheduled` (обновление по расписанию), `network_denied`
+   (ни дискавери, ни обновление).
 2. Прогон может **считать ранее собранные данные краула неизменными** — все продукты когорты
    как будто в режиме «обновление по ручному запросу», включается флагом CLI.
+
+Владелец 04.11.2026 уточнил, что нужны **оба** такта: инженерный (прогоны для апробации
+решений, не связанных с краулом) и публикационный, где обновление корпуса **асинхронно**:
+у разных частей корпуса продукта разные правила актуализации. Плюс артефакты можно
+предоставлять **вручную, минуя прогон** (`hound package state adopt`). Отсюда следствие,
+которое определяет архитектуру: **даты актуальности артефактов корпуса гарантированно
+разные**, и карта обязана это не скрывать, а нести. Дата-модель артефактов и объявленный
+снимок корпуса — отдельный план `20-corpus-snapshot-freshness-plan.md`; этот план даёт
+**управление** обновлением, а не новую семантику вердиктов.
 
 Зачем это нужно по существу. Сегодня «обновлять/не обновлять» решается только глобально
 (`--refresh`), а отказ от обхода выражается лишь `exclude_paths` — это «не обходить», без
@@ -32,7 +42,7 @@ per-host статуса и без различения дискавери и о�
 | где живёт политика | **`state.db` оператора**, пакет задаёт дефолты | режим меняется без правки пакета; эффективная политика входит в идентичность |
 | что значит «данные неизменны» | **ни одного запроса; корпус из сохранённых байтов** | нужен режим, отличный от `offline` (тот переиспользует чанки и отказывает при смене версий) |
 | что блокирует `network_denied` | **только сеть**; продукт остаётся на карте | измеряется по сохранённым данным, в провенансе — `crawl_network_denied` |
-| `❌` в замороженном прогоне | **владелец выбрал «публиковать»** — ⚠️ это `methodology_change`, см. §E |
+| `❌` в замороженном прогоне | **владелец выбрал «публиковать»**; формально это правило о том, **какое наблюдение удостоверяет отсутствие**, и оно переносится в отдельный проход — план 20, фаза F3 (`methodology_change` + `golden-full`). Здесь `frozen` даёт механизм (ноль запросов, корпус из байтов), а не новую семантику `❌` |
 
 ## 3. Что уже есть (не изобретаем заново)
 
@@ -55,10 +65,16 @@ per-host статуса и без различения дискавери и о�
 
 ## 4. Модель данных
 
-**Имена.** Режимы — `auto | on_request | network_denied`. Термин `blocked` **не
+**Имена.** Режимы — `auto | on_request | scheduled | network_denied`. Термин `blocked` **не
 переиспользуется**: он занят трижды — `RunProductStatus.BLOCKED` (`enums.py:984`),
 `onboarding_state='blocked'` (`state_sqlite.py:81`), `inheritance_mode=blocked`
 (spec §…). В отчёте режим называется `network_denied`, токеном — `crawl_network_denied`.
+
+**`scheduled` — это «due», а не демон.** У записи есть `interval_hours`; при прогоне режим
+разрешается в решение `refresh`/`reuse` сравнением `now - observed_at` с интервалом. Так
+работает MVP без фонового процесса; серверный планировщик (`core/edge/`) позже читает тот же
+store. Решение «обновлять/не обновлять», принятое по часам, входит в поверхность решений
+(§6.1) — иначе два прогона в разные дни дадут разные корпуса под одним `run_id`.
 
 **Области и приоритет.** `product` | `host` | `root` (host + префикс пути) | `path` (host +
 маска внутри корня). Разрешение — **самое специфичное побеждает**: `path` > `root` > `host` >
@@ -84,7 +100,8 @@ CREATE TABLE crawl_policy (
     scope_kind     TEXT NOT NULL CHECK (scope_kind IN ('product','host','root','path')),
     host           TEXT,          -- NULL только при scope_kind='product'
     path           TEXT,          -- NULL при 'product'/'host'; маска при 'path'
-    mode           TEXT NOT NULL CHECK (mode IN ('auto','on_request','network_denied')),
+    mode           TEXT NOT NULL CHECK (mode IN ('auto','on_request','scheduled','network_denied')),
+    interval_hours INTEGER,       -- обязателен при mode='scheduled', иначе NULL
     note           TEXT,
     actor          TEXT NOT NULL,
     created_at     TEXT NOT NULL,
@@ -108,6 +125,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 |---|---|---|
 | `auto` | `network` + `fetch` | `network` + `fetch` (условный GET по политике прогона) |
 | `on_request` | `network` + `fetch` (первичный дискавери автоматический) | `chunks` (или `bytes` в `frozen`), `network_mode=deny` — **пока корень не назван `--refresh-scope`** |
+| `scheduled` | `network` + `fetch` (первое снятие — как дискавери) | `fetch`, если `now - observed_at >= interval_hours`; иначе как `on_request` без запроса |
 | `network_denied` | `deny` | `deny`; корпус — `chunks`/`bytes`, если есть сохранённое, иначе `no_sources` (видимая причина) |
 
 **Ручной запрос — флаг прогона, не отметка в БД.** `--refresh-scope <product|host|url|mask>`
@@ -128,11 +146,13 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 ## 6. Идентичность прогона
 
 1. **`crawl_policy_digest`** — отпечаток **эффективной поверхности решений**: разрешённая
-   политика после приоритета, дефолтов пакета **и per-run запросов `--refresh-scope`**;
-   сортировка `(product_id, scope_kind, host, path, mode)`. `note`, `actor`, `created_at`,
-   `policy_id` в материал **не входят**; несовпавшие строки — тоже. Отдельного поля для
-   `--refresh-scope` нет: это тот же материал (правило «одно поле — один материал»,
-   `digests.py:178-188`).
+   политика после приоритета, дефолтов пакета, **per-run запросов `--refresh-scope`** и
+   **разрешения `scheduled`-режимов в `refresh|reuse`** (due решается по часам, поэтому
+   входит в материал как решение, а не как намерение); сортировка
+   `(product_id, scope_kind, host, path, decision)`. `note`, `actor`, `created_at`,
+   `policy_id`, `interval_hours` в материал **не входят** (режим и решение — входят); несовпавшие
+   строки — тоже. Отдельного поля для `--refresh-scope` нет: это тот же материал (правило
+   «одно поле — один материал», `digests.py:178-188`).
 2. Поле входит в `EXECUTION_CONTRACT_FIELDS` (`digests.py:88`), 29 → **30**. Это объявленная
    версионная граница: переснять `PINNED_EXECUTION_CONTRACT_DIGEST`
    (`tests/pipeline/test_corpus_stage_timings.py:74`) и обновить литералы «29 полей»
@@ -158,9 +178,12 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 - ⬜ Таблица `crawl_policy` (STATE 8), `StorePort`-методы, append-only через `superseded_by`.
 - ⬜ `crawl_policy.yaml` в пакете + загрузчик рядом с `crawl_sources.yaml`.
 - ⬜ Матчер и `resolve_crawl_policy`: приоритет, дефолты, **конфликт равной специфичности**,
-  `crawl_policy_unmatched`; тест-матрица «область × специфичность × источник».
-- ⬜ `hound crawl policy set|list|clear --package … --actor … [--dry-run]` по образцу
-  `hound package profile attest` (lock, append-only, идемпотентность, `--dry-run` не пишет).
+  `crawl_policy_unmatched`, разрешение `scheduled` в `refresh|reuse` по `now - observed_at`
+  (часы — параметр, а не `datetime.now()` внутри: иначе тест на due недетерминирован);
+  тест-матрица «область × специфичность × источник» + «due/не due».
+- ⬜ `hound crawl policy set|list|clear --package … --actor … [--mode …] [--interval-hours N]
+  [--dry-run]` по образцу `hound package profile attest` (lock, append-only,
+  идемпотентность, `--dry-run` не пишет).
 - ⬜ `crawl_policy_digest` в контракте + переснятые пины и литералы §6.2.
 - ⬜ `plan` **печатает** резолв («что было бы запрещено»), но не исполняет — разница `run_id`
   видна до включения исполнения.
@@ -297,7 +320,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 | № | вопрос | почему это не деталь | статус |
 |---|---|---|---|
-| E.1 | **Публикация `❌` в `frozen`** | исполняемое правило «`❌` требует `live\|revalidated`» (`evaluate.py:221-223`) и условие `observed_sources>0` (`corpus_coverage.py:59`) — это методология; введение самого условия объявлено `methodology 2.3.0` с `golden-full` и пере-аннотацией (`spec:287`). Значит: либо `methodology_change` (bump + `golden-full` + пере-аннотация ячеек ❓→❌), либо `frozen` публикует `❓` | ⬜ **ждёт решения** |
+| E.1 | **Публикация `❌` при различающихся датах** | правило «`❌` требует ответа сервера в этом цикле» (`evaluate.py:221`, `:1946-2001`) и условие `observed_sources>0` (`corpus_coverage.py:59`) закрепляют допущение «цикл = одна дата»; владелец требует архитектуру с **разными** датами | ⬜ перенесено в план 20, фаза F3 (методология + golden) |
 | E.2 | право менять правило `live\|revalidated` | решение владельца 29.10.2026 (`09…:3403`), не следствие плана | ⬜ |
 | E.3 | носитель записи снятия (`STATE 8`) | необратимая схема-граница | ⬜ предложено в P3 |
 | E.4 | продукт без сохранённых байтов при `network_denied` | мерить нечем: `❓`/`no_sources` или продукт выпадает из отчёта | ⬜ **ждёт решения** |
