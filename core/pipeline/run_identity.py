@@ -41,6 +41,7 @@ from core.pipeline.digests import (
     scoring_policy_version as _scoring_policy_identity,
 )
 from core.pipeline.normalize import RunInputs
+from core.pipeline.refresh_modes import canonical_frozen_source
 from core.ports.state import RunLineageRow
 from core.util.hashing import content_hash
 
@@ -259,6 +260,8 @@ def build_execution_contract(
     scoring_policy_version: str | None = None,
     catalog_version: str | None = None,
     crawl_policy_digest: str | None = None,
+    frozen_source: str | None = None,
+    refresh_policy: RefreshPolicy | str | None = None,
 ) -> str:
     """Собирает execution contract из честно доступных значений и хеширует его.
 
@@ -337,6 +340,13 @@ def build_execution_contract(
         # аргументом от composition root (резолв требует объявленных корней и часов):
         # ``None`` — «не разрешалась» (чистые вызовы), отличимо от пустой поверхности.
         "crawl_policy_digest": crawl_policy_digest,
+        # План 19 §6.3: ось ``frozen_source`` входит в материал **только** при
+        # ``refresh_policy=frozen``; иначе канонизируется в ``n/a``. Без канонизации
+        # поданный, но не действующий флаг менял бы ``run_id`` (ложный execution_change).
+        "frozen_source": canonical_frozen_source(
+            RefreshPolicy.AUTO if refresh_policy is None else refresh_policy,
+            frozen_source,
+        ),
         # I3/§5: раунды SERP-контура — объявленный вход (``run.yaml: serp.rounds``,
         # переопределяемый ``--serp-rounds``/``COHOUND_SERP``/``deploy.search.serp``).
         # Идут в контракт: раунд меняет корпус, значит и ``run_id`` (execution_change).

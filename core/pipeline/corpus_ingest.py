@@ -54,6 +54,7 @@ from core.domain import (
     CrawlSessionItem,
     CrawlStrategy,
     DocumentLevel,
+    ExtractionRoute,
     FailureKind,
     IncrementalKind,
     PdfPipeline,
@@ -111,6 +112,7 @@ from core.pipeline.manual_artifacts import (
     ORIGIN_MANUAL,
     ManualArtifact,
 )
+from core.pipeline.refresh_modes import dispatch_refresh
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_executor import (
@@ -122,7 +124,12 @@ from core.ports.crawl_executor import (
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.poller import PollPort
-from core.ports.state import DocumentVersionRow, ProductStatePort, UrlStateRow
+from core.ports.state import (
+    CapturedDocRow,
+    DocumentVersionRow,
+    ProductStatePort,
+    UrlStateRow,
+)
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
@@ -130,6 +137,7 @@ from core.util.document_formats import (
     is_terminal_artifact,
     unsupported_binary_reason,
 )
+from core.util.document_probe import CLASS_DOCUMENT
 from core.util.hashing import content_hash, short_hash
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
@@ -668,7 +676,12 @@ def validators(
     Сбой чтения состояния изолируется в ``errors``: отсутствие валидатора деградирует
     запрос до безусловного GET (безопасно), а не роняет фазу.
     """
-    if state is None or policy in (RefreshPolicy.REFRESH, RefreshPolicy.OFFLINE):
+    if state is None:
+        return None, None
+    # План 19 §P3: отправка валидаторов — факт таблицы исполнения, а не набор
+    # `policy in (...)`-условий: `refresh` не отправляет (нужен свежий ответ),
+    # `offline`/`frozen` не отправляют (сети нет).
+    if not dispatch_refresh(policy).validators:
         return None, None
     key = _state_url_key(url)
     if key is None:
@@ -3027,6 +3040,9 @@ def plan_repair_items(
     items: list[IncrementalItem] = []
     dropped: list[tuple[str, str]] = []
     seen: set[str] = set()
+    # План 19 §P3: вид элемента и отправка валидаторов — из общей таблицы исполнения
+    # политики, а не из `is OFFLINE`-ветки (иначе `frozen` молча пошёл бы в сеть).
+    execution = dispatch_refresh(policy)
     for raw in urls:
         text = str(raw)
         normalized = _state_url_key(text)
@@ -3047,7 +3063,7 @@ def plan_repair_items(
         if not _host_declared(text, scopes):
             dropped.append((text, "out_of_declared_hosts"))
             continue
-        if policy is not RefreshPolicy.OFFLINE:
+        if execution.validators:
             # Валидаторы условного GET: ремонт — повторная проверка известного URL.
             planned_validators[(product_id, normalized)] = (
                 row.etag if row is not None else None,
@@ -3060,11 +3076,7 @@ def plan_repair_items(
                 # Происхождение в ``url_state`` не сохранено, а ремонт корней не обходит.
                 root_url=None,
                 depth=0,
-                kind=(
-                    IncrementalKind.REUSE
-                    if policy is RefreshPolicy.OFFLINE
-                    else IncrementalKind.REVALIDATE
-                ),
+                kind=execution.known_kind,
                 etag=row.etag if row is not None else None,
                 last_modified=row.last_modified if row is not None else None,
                 doc_version_id=row.doc_version_id if row is not None else None,
@@ -3110,6 +3122,10 @@ class OfflineReuseReport:
     no_version: tuple[str, ...] = ()
     unknown_roots: tuple[str, ...] = ()
     urls: tuple[str, ...] = ()
+    #: Durable-группы дедупа, которые использовал проход (план 19 §P3): пары
+    #: ``(doc_hash, url)``. Пишутся в запись снятия, чтобы следующий ``frozen`` выбрал
+    #: тот же канонический адрес, не обращаясь к ``crawl_session_items``.
+    capture_docs: tuple[CapturedDocRow, ...] = ()
     #: Метка политики в операторской строке: ``offline`` (прогон целиком) ‖
     #: ``crawl_policy`` (корень, которому политика запретила сеть). Один проход —
     #: два повода; читатель обязан их различать, не сравнивая корпуса.
@@ -3198,6 +3214,7 @@ def offline_reuse_product(
     unknown_roots: list[str] = []
     touched: list[str] = []
     seen_urls: set[str] = set()
+    capture_pairs: list[tuple[str, str, str]] = []
 
     # Порядок: авторские корни (порядок входа) → известные URL (порядок планировщика).
     # Корни идут первыми, потому что они — авторское решение: если корень недоступен
@@ -3266,6 +3283,9 @@ def offline_reuse_product(
             no_version.append(url)
             continue
         document_id = f"{product_id}:{doc_hash}"
+        # Durable-группа: алиас тоже участвует в дедупе, и запись снятия обязана знать,
+        # что этот URL — тот же документ (иначе ``frozen`` выбрал бы адрес наугад).
+        capture_pairs.append((doc_hash, url, key))
         if doc_hash in seen_docs:
             duplicates[product_id] = duplicates.get(product_id, 0) + 1
             continue
@@ -3332,6 +3352,450 @@ def offline_reuse_product(
         no_version=tuple(no_version),
         unknown_roots=tuple(unknown_roots),
         urls=tuple(touched),
+        capture_docs=tuple(
+            CapturedDocRow(
+                doc_hash=doc_hash,
+                url=url,
+                normalized_url=key,
+                reuse_kind=ReuseKind.REUSED.value,
+            )
+            for doc_hash, url, key in capture_pairs
+        ),
+        label=label,
+    )
+
+
+#: Статус версии документа, которую ``frozen`` вправе пере-извлечь: только ``active``.
+#: ``superseded`` — версия, которую живой прогон заменил; пере-извлекать её значило бы
+#: вернуть в корпус то, что уже вытеснено (та же дисциплина, что у ``offline``).
+_DOC_STATUS_ACTIVE = "active"
+
+#: Токен видимой причины: у известного URL нет сохранённых байтов (или они не те, что
+#: записаны версией). С числом — ``stored_bytes_missing:{n}``: «сколько» важнее «есть ли».
+FROZEN_STORED_BYTES_MISSING = "stored_bytes_missing"
+
+#: Токен видимой причины: авторский корень не наблюдался (нет строки ``url_state``).
+#: Тот же факт, что у ``offline``, но названный в провенансе ``frozen``.
+FROZEN_UNKNOWN_ROOTS = "unknown_roots"
+
+#: Токен дрейфа пере-извлечения: текущий движок дал **другой** ``content_hash`` на тех же
+#: байтах, чем записан в ``document_version``. Это не «контент изменился» (сети не было) —
+#: иначе новый ``doc_hash`` дал бы ложный ``document_id``, ложный дедуп и другой
+#: ``doc_set_digest``, а причина выглядела бы наблюдением.
+FROZEN_REEXTRACT_MISMATCH = "frozen_reextract_mismatch"
+
+#: Пояснения к причинам ``frozen`` (операторский канал). Токен отдельно, текст отдельно:
+#: тесты и оператор читают токен, а формулировка не должна незаметно менять смысл.
+FROZEN_UNKNOWN_ROOT_TEXT = (
+    "frozen: URL отсутствует в durable-состоянии (url_state) — сохранённых байтов нет, "
+    "а сети в этой политике нет. Прогоните --refresh auto/revalidate, чтобы получить "
+    "документ"
+)
+FROZEN_NO_VERSION_TEXT = (
+    "frozen: у URL нет активной версии документа — неизвестно, какие байты сохранены; "
+    "документ не вошёл в корпус (сеть не трогается)"
+)
+FROZEN_STORED_BYTES_MISSING_TEXT = (
+    "frozen: сохранённые сырые байты недоступны (нет файла retention либо его хеш не "
+    "совпал с записанным content_hash) — пере-извлечь нечего (сеть не трогается)"
+)
+
+
+@dataclass(frozen=True)
+class FrozenBytesReport:
+    """Итог ``frozen_source=bytes``: что пере-извлечено и что не удалось (план 19 §P3).
+
+    Все три «не удалось» — **видимые** причины, а не ``failed`` (I4): прогон состоялся,
+    корпус просто неполон, и это называется токеном причины.
+
+    :param docs: документов вошло в корпус.
+    :param chunks: чанков принято (сумма по документам).
+    :param reextracted: документов, для которых экстрактор **вызывался** (без кэша).
+    :param cache_hits: документов, взятых из ``extract_cache`` (повторный ``frozen`` в том
+        же окружении обязан попадать в кэш — ключ там хеш сырых байтов, I19).
+    :param unknown_roots: URL/корни, которых нет в ``url_state``.
+    :param stored_bytes_missing: известные URL без пригодных сохранённых байтов.
+    :param no_version: известные URL без активной версии документа.
+    :param reextract_mismatch: URL, чей пере-извлечённый ``content_hash`` не совпал с
+        записанным (дрейф пере-извлечения, а не смена контента).
+    :param groups: durable-группы дедупа, которые проход использовал:
+        ``(doc_hash, (url, ...))`` — кто был алиасом одного документа. Пишутся в запись
+        снятия, чтобы следующий ``frozen`` выбрал тот же канонический адрес без
+        ``crawl_session_items``.
+    :param urls: URL, для которых сеть не трогалась (порядок прохода).
+    """
+
+    docs: int = 0
+    chunks: int = 0
+    reextracted: int = 0
+    cache_hits: int = 0
+    unknown_roots: tuple[str, ...] = ()
+    stored_bytes_missing: tuple[str, ...] = ()
+    no_version: tuple[str, ...] = ()
+    reextract_mismatch: tuple[str, ...] = ()
+    groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    urls: tuple[str, ...] = ()
+    #: Плоские durable-группы для записи снятия: ``(doc_hash, url, normalized_url)``.
+    #: ``groups`` — вложенное представление для оператора; здесь — адреса строк таблицы.
+    capture_docs: tuple[CapturedDocRow, ...] = ()
+    label: str = "frozen"
+
+    @property
+    def stored_bytes_missing_token(self) -> str:
+        """Машинный токен причины с числом: ``stored_bytes_missing:{n}``."""
+        return f"{FROZEN_STORED_BYTES_MISSING}:{len(self.stored_bytes_missing)}"
+
+    def note(self, product_id: str) -> str:
+        """Операторская строка продукта: что снято и чего не хватило."""
+        return (
+            f"corpus: {self.label} {product_id} — пере-извлечено документов {self.docs} "
+            f"(чанков {self.chunks}, экстракций {self.reextracted}, из кэша "
+            f"{self.cache_hits}), нет байтов {len(self.stored_bytes_missing)}, корней вне "
+            f"состояния {len(self.unknown_roots)}, без версии {len(self.no_version)}, "
+            f"дрейф пере-извлечения {len(self.reextract_mismatch)}; "
+            "сеть не трогалась, наблюдений этого прогона нет (❌ не публикуется)"
+        )
+
+
+def frozen_bytes_product(
+    product_id: str,
+    roots: Sequence[str],
+    items: Sequence[IncrementalItem],
+    *,
+    state: ProductStatePort | None,
+    errors: list[str],
+    chunker_version: str,
+    embed_model_id: str,
+    store: Any,
+    ingest: ProductIngest,
+    seen_docs: dict[str, str],
+    seen_chunk_ids: set[str],
+    duplicates: dict[str, int],
+    doc_counters: dict[str, dict[str, int]],
+    partial_unknown_products: dict[str, list[str]],
+    persist_docs: Callable[..., None],
+    extractor: ExtractorPort,
+    chunker: ChunkerPort,
+    extract_cache: ExtractionCache | None,
+    fetch_plan_for: Callable[[str], FetchPlan],
+    limits_for: Callable[[str], Any],
+    label: str = "frozen",
+) -> FrozenBytesReport:
+    """``frozen_source=bytes``: корпус из ``corpus_raw`` → **текущая** экстракция (P3).
+
+    Чем отличается от ``offline`` (тот же ноль запросов): ``offline`` берёт готовый
+    chunk-set из ``state.db`` и отказывает при смене версии чанкера; здесь берутся
+    сохранённые **байты** и проходят текущий конвейер (экстрактор → чанкер). Поэтому
+    ``frozen`` измеряет новый стек на старом корпусе, а ``offline`` — нет.
+
+    **Ключ ``extract_cache`` — хеш сырых байтов** (``_hash_file`` = ``raw_path.stem``):
+    ключ не зависит от версии чанкера, поэтому повторный ``frozen`` в том же окружении
+    попадает в кэш и не платит экстракцией дважды. Промах кэша — не ошибка: текущий
+    экстрактор вызывается, а расхождение его ``content_hash`` с записанным в
+    ``document_version`` называется :data:`FROZEN_REEXTRACT_MISMATCH` (дрейф
+    пере-извлечения), а **не** «контент изменился»: сети не было, наблюдения не было.
+
+    **Durable-состояние не переписывается.** ``url_state``/``document_version`` не
+    трогаются: ``frozen`` не наблюдал сервер, и объявить пере-извлечённую версию
+    «последней» значило бы дать следующему живому прогону переиспользовать версию,
+    которую он не видел (та же дисциплина, что у ``offline``). Элементы
+    ``crawl_session_items`` тоже не пишутся — поэтому дедуп опирается на durable-группы
+    прошлой записи снятия, а не на ``min(url)`` по элементам сеанса.
+
+    **Порядок и адреса.** Все кандидаты известны до экстракции; документы группируются по
+    ``content_hash``, канонический адрес группы — ``min(url)`` по всем URL группы (включая
+    алиасы прошлого снятия). Поэтому результат не зависит от порядка готовности и от
+    ``host_concurrency``: проход последователен, а адрес выбирается запросом, а не гонкой.
+
+    :returns: :class:`FrozenBytesReport` — документы, чанки, причины и группы дедупа.
+    """
+    #: Накопленные кандидаты: один на URL, ещё без адреса документа.
+    collected: list[dict[str, Any]] = []
+    unknown_roots: list[str] = []
+    stored_bytes_missing: list[str] = []
+    no_version: list[str] = []
+    reextract_mismatch: list[str] = []
+    cache_hits = 0
+    reextracted = 0
+    touched: list[str] = []
+    seen_urls: set[str] = set()
+
+    #: Durable-группы прошлого снятия: ``doc_hash → urls``. Нужны ровно за тем, чтобы
+    #: следующий ``frozen`` видел, кто был алиасом одного документа
+    #: (``crawl_session_items`` им не пишется).
+    prior_urls_by_hash: dict[str, list[str]] = {}
+    if state is not None:
+        try:
+            prior_capture = state.last_corpus_capture(product_id)
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"{product_id}: frozen: last_corpus_capture: {type(exc).__name__}: {exc}"
+            )
+            prior_capture = None
+        for captured_doc in () if prior_capture is None else prior_capture.docs:
+            prior_urls_by_hash.setdefault(captured_doc.doc_hash, []).append(
+                captured_doc.url
+            )
+
+    def _reason(text: str) -> str:
+        """Причина с меткой прохода: текст ``offline``-семейства получает свою метку."""
+        return text if label == "offline" else text.replace("offline:", f"{label}:", 1)
+
+    # Порядок: авторские корни (авторский порядок) → известные URL (порядок планировщика).
+    for url in [*roots, *(item.url for item in items)]:
+        key = _state_url_key(url)
+        if key is None:
+            errors.append(
+                f"{product_id}/{url}: {label}: URL не нормализуется — пере-извлечение "
+                "невозможно (состояние по нему не ведётся)"
+            )
+            continue
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        touched.append(url)
+
+        prior = _prior_url_state(product_id, key, url, state=state, errors=errors)
+        if prior is None:
+            unknown_roots.append(url)
+            errors.append(f"{product_id}/{url}: {_reason(FROZEN_UNKNOWN_ROOT_TEXT)}")
+            continue
+        prior_doc = _prior_document_version(
+            prior, product_id, url, state=state, errors=errors
+        )
+        if prior_doc is None or prior_doc.status != _DOC_STATUS_ACTIVE:
+            no_version.append(url)
+            errors.append(f"{product_id}/{url}: {_reason(FROZEN_NO_VERSION_TEXT)}")
+            continue
+
+        raw_path = Path(prior_doc.raw_path) if prior_doc.raw_path else None
+        raw_key = None
+        if raw_path is not None and raw_path.is_file():
+            # I19: верификация от **содержимого** файла, а не от имени. Retention
+            # называет файл ``{sha256 сырых байтов}.bin``, поэтому ``raw_path.stem`` —
+            # ожидаемый ключ, а ``_hash_file`` — фактический. ``document_version.content_hash``
+            # здесь **не** ключ: это хеш извлечённого текста, а не байтов. Расхождение
+            # имени и содержимого означает «сохранённых байтов нет» (файл подменён/битый),
+            # а не «контент изменился».
+            try:
+                raw_key = _hash_file(raw_path)
+            except OSError as exc:
+                errors.append(
+                    f"{product_id}/{url}: {label}: чтение retained-байтов "
+                    f"{raw_path}: {type(exc).__name__}: {exc}"
+                )
+            else:
+                if raw_key != raw_path.stem:
+                    raw_key = None
+        if raw_key is None:
+            stored_bytes_missing.append(url)
+            errors.append(
+                f"{product_id}/{url}: {_reason(FROZEN_STORED_BYTES_MISSING_TEXT)}"
+            )
+            continue
+
+        plan = fetch_plan_for(url)
+        level = limits_for(url).document_level
+        level_text = _as_text(level)
+        # Маршрут — по **байтам** сохранённого файла, а не по URL/``Content-Type``: у
+        # retained-файла суффикс ``.bin``, а заголовка ответа в этом прогоне нет. Иначе
+        # PDF, отданный по бессуффиксному URL, ушёл бы в HTML-ветку и дал ложный дрейф.
+        try:
+            probe = probe_artifact(str(raw_path), product_id=product_id, url=url)
+            route = (
+                ExtractionRoute.DOCUMENT
+                if probe.artifact.kind == CLASS_DOCUMENT
+                else ExtractionRoute.AUTO
+            )
+        except Exception as exc:  # noqa: BLE001 — зонд не должен ронять продукт
+            errors.append(
+                f"{product_id}/{url}: frozen: probe: {type(exc).__name__}: {exc} — "
+                "маршрут по URL (байты не классифицированы)"
+            )
+            route = ExtractionRoute.AUTO
+        # ``fetched_at`` — **прежнее** наблюдение байтов, не «сейчас»: нового получения
+        # не было. ``status_code``/``render_mode``/``lang`` не выдумываются.
+        page = RawPage(
+            url=url,
+            content=b"",
+            source_path=str(raw_path),
+            fetched_at=str(prior.last_checked_at or prior_doc.first_seen_at),
+            fetch_mode=plan.fetch,
+            status_code=None,
+            content_type=None,
+            engine=None,
+        )
+        extracted = None
+        if extract_cache is not None:
+            version_token = _cache_extractor_version(extractor, page, route)
+            extracted = extract_cache.get(raw_key, version_token, level_text)
+            if extracted is not None:
+                cache_hits += 1
+        if extracted is None:
+            try:
+                extracted = extractor.extract(page, route)
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(
+                    f"{product_id}/{url}: frozen: extract: {type(exc).__name__}: {exc}"
+                )
+                continue
+            reextracted += 1
+            if extract_cache is not None:
+                extract_cache.put(extracted, level=level_text, content_hash=raw_key)
+        if getattr(extracted, "error", None):
+            errors.append(
+                f"{product_id}/{url}: frozen: extract: {extracted.error}"
+            )
+            continue
+        doc_hash = str(getattr(extracted, "content_hash", "") or "")
+        if not doc_hash:
+            errors.append(
+                f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён"
+            )
+            continue
+        if doc_hash != prior_doc.content_hash:
+            # Дрейф пере-извлечения: тот же файл, другой текст. Не «контент изменился»
+            # (наблюдения не было), поэтому причина — свой токен.
+            reextract_mismatch.append(url)
+            errors.append(
+                f"{product_id}/{url}: {FROZEN_REEXTRACT_MISMATCH}: content_hash "
+                f"пере-извлечения {doc_hash} != записанного {prior_doc.content_hash} — "
+                "тот же файл, другой текст текущего движка (смена контента не "
+                "наблюдалась)"
+            )
+            continue
+
+        try:
+            chunks = chunker.chunk(extracted, f"{product_id}:{doc_hash}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                f"{product_id}/{url}: frozen: chunk: {type(exc).__name__}: {exc}"
+            )
+            continue
+        partial_fields = _partial_fields(extracted)
+        collected.append(
+            {
+                "url": url,
+                "key": key,
+                "doc_hash": doc_hash,
+                "raw_path": raw_path,
+                "extractor_token": str(
+                    getattr(extracted, "extractor_version", None) or ""
+                ),
+                "level_text": level_text,
+                "partial_fields": partial_fields,
+                "chunks": sorted(
+                    chunks or [], key=lambda chunk: getattr(chunk, "chunk_no", 0)
+                ),
+            }
+        )
+
+    # --- дедуп и канонический адрес ------------------------------------------- #
+    # Группа — ``content_hash``: одинаковый текст двух URL — один документ. Группа
+    # расширяется алиасами прошлого снятия (durable), а адрес выбирается ``min(url)``:
+    # порядок прохода и host_concurrency на адрес не влияют.
+    by_hash: dict[str, list[dict[str, Any]]] = {}
+    for candidate in collected:
+        by_hash.setdefault(str(candidate["doc_hash"]), []).append(candidate)
+
+    report_docs = 0
+    report_chunks = 0
+    groups: list[tuple[str, tuple[str, ...]]] = []
+    capture_doc_map: dict[str, CapturedDocRow] = {}
+    for doc_hash in sorted(by_hash):
+        candidates = by_hash[doc_hash]
+        urls = {str(candidate["url"]) for candidate in candidates}
+        urls.update(prior_urls_by_hash.get(doc_hash, ()))
+        canonical_url = min(urls)
+        groups.append((doc_hash, tuple(sorted(urls))))
+        for group_url in sorted(urls):
+            group_key = _state_url_key(group_url)
+            if group_key is None:
+                continue
+            capture_doc_map[group_url] = CapturedDocRow(
+                doc_hash=doc_hash,
+                url=group_url,
+                normalized_url=group_key,
+                reuse_kind=ReuseKind.REUSED.value,
+            )
+
+        if doc_hash in seen_docs:
+            duplicates[product_id] = duplicates.get(product_id, 0) + 1
+            continue
+        seen_docs[doc_hash] = canonical_url
+
+        chosen = min(candidates, key=lambda candidate: str(candidate["url"]))
+        document_id = f"{product_id}:{doc_hash}"
+        extractor_token = str(chosen["extractor_token"] or "")
+        level_text = str(chosen["level_text"] or "")
+        dv_id = doc_version_id(product_id, doc_hash, extractor_token, level_text)
+        doc = CorpusDoc(
+            doc_id=document_id,
+            product_id=product_id,
+            url=canonical_url,
+            # Получения не было: ``fetched_at``/``render_mode``/``lang`` — NULL. Байты
+            # прежние, поэтому ``http_status`` — тоже NULL (ответа в этом прогоне нет).
+            fetched_at=None,
+            content_hash=doc_hash,
+            raw_path=str(chosen["raw_path"]),
+            extractor_version=extractor_token or None,
+            render_mode=None,
+            lang=None,
+            http_status=None,
+            reuse_kind=ReuseKind.REUSED,
+            **chosen["partial_fields"],
+        )
+        ingest.docs.append(doc)
+        persist_docs(store, [doc], errors, versions_by_doc={document_id: dv_id})
+        accepted = _accept_chunk_candidates(
+            product_id,
+            document_id,
+            dv_id,
+            [
+                (
+                    int(getattr(chunk, "chunk_no", 0)),
+                    getattr(chunk, "text", "") or "",
+                    getattr(chunk, "heading_path", "") or "",
+                    getattr(chunk, "context_prefix", "") or "",
+                    str(getattr(chunk, "content_hash", "") or "").strip(),
+                    getattr(chunk, "char_start", None),
+                    getattr(chunk, "char_end", None),
+                )
+                for chunk in chosen["chunks"]
+            ],
+            ingest=ingest,
+            seen_chunk_ids=seen_chunk_ids,
+            errors=errors,
+            url=canonical_url,
+            lang=None,
+            embed_model_id=embed_model_id,
+        )
+        count_doc(product_id, reused=True, state=state, doc_counters=doc_counters)
+        report_docs += 1
+        report_chunks += len(accepted)
+
+    if stored_bytes_missing:
+        # Машинный токен с числом — в тот же канал видимых причин, а не только в отчёт:
+        # «сколько байтов не нашлось» важнее «есть ли причина», а ``failed`` здесь нет
+        # (I4): прогон состоялся, корпус просто неполон.
+        errors.append(
+            f"{product_id}: {FROZEN_STORED_BYTES_MISSING}:"
+            f"{len(stored_bytes_missing)} — сохранённых байтов нет у "
+            f"{len(stored_bytes_missing)} известных URL ({label})"
+        )
+
+    return FrozenBytesReport(
+        docs=report_docs,
+        chunks=report_chunks,
+        reextracted=reextracted,
+        cache_hits=cache_hits,
+        unknown_roots=tuple(unknown_roots),
+        stored_bytes_missing=tuple(stored_bytes_missing),
+        no_version=tuple(no_version),
+        reextract_mismatch=tuple(reextract_mismatch),
+        groups=tuple(groups),
+        urls=tuple(touched),
+        capture_docs=tuple(capture_doc_map[key] for key in sorted(capture_doc_map)),
         label=label,
     )
 

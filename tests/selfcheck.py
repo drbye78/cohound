@@ -2691,7 +2691,7 @@ def _report_gates() -> None:
             "execution_change: execution_contract_digest: ec_1 → ec_2",
             "execution_change: execution_contract_digest: различающееся поле не "
             "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/crawl_policy_digest/"
-            "serp_rounds/serp_mode/prompt_template/chunking_spec/"
+            "serp_rounds/serp_mode/prompt_template/frozen_source/chunking_spec/"
             "evaluation_policy/lexical_spec/render_modes_digest/passports_digest "
             "либо иная ось)",
         ]

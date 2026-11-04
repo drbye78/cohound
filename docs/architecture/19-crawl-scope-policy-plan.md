@@ -48,7 +48,7 @@ per-host статуса и без различения дискавери и о�
 
 | механизм | где | чего не хватает |
 |---|---|---|
-| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:854`, `run_identity.py:208`, `plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падает в `auto` (`corpus.py:395-400`) |
+| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:854`, `run_identity.py:209`, `plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падает в `auto` (`corpus.py:395-400`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`state_sqlite.py:115`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3124` | переиспользует **чанки** ⇒ отказ при смене версий; не пишет `url_state`/`document_version` как «последнюю версию» (`:3173-3177`) — эту дисциплину обязан унаследовать `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
@@ -215,7 +215,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `:3742` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
-  (`core/cli/execution_axes.py:199`), паритет `plan`/`run`/`crawl run` по построению; значение
+  (`core/cli/execution_axes.py:200`), паритет `plan`/`run`/`crawl run` по построению; значение
   входит в `crawl_policy_digest` через оси исполнения (7-кортеж решения), отдельного поля нет.
 - ✅ Наблюдаемость: `crawl_network_denied`, `crawl_on_request_not_requested`,
   `crawl_policy_skipped`, `policy_scope` (+ `policy_skips` в `product_end`) и строки в
@@ -227,34 +227,47 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 (паритет флагов, влияние на `run_id`, `unmatched_requested`, `EXIT_USAGE`). Живого прогона нет —
 это названная граница, а не проверка.
 
-### P3 — `frozen`: корпус из сохранённых байтов
+### P3 — `frozen`: корпус из сохранённых байтов — ✅ сделано
 
-- ⬜ `RefreshPolicy.FROZEN` + `frozen_source ∈ bytes|chunks`, и **все** ветки `is OFFLINE`
-  (`corpus.py:1726,1742`; `incremental.py:197,225`; `corpus_ingest.py:671,3050,3065`) получают
-  явную ветку: статический тест «все значения политики диспетчеризуются из одной таблицы».
-- ⬜ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг. Ключ `extract_cache` —
-  хеш **сырых байтов** (`extract_cache.py:329-334`), иначе попаданий не будет.
-- ⬜ **Дрейф пере-извлечения виден**: если промах кэша даёт `content_hash`, отличный от
-  записанного `document_version.content_hash`, — токен `frozen_reextract_mismatch`, а не
-  «контент изменился» (новый `doc_hash` иначе даёт ложный `document_id`, ложный дедуп, другой
-  `doc_set_digest`).
-- ⬜ **Канонический адрес согласован и в `frozen`**: опора на `crawl_session_items.doc_hash`
-  (`corpus.py:599-603`) недопустима — `frozen` не пишет элементов сеанса, и `min(url)` молча
-  не применяется (`:623-627`). `frozen` хранит durable-группы дедупа, которые использовал.
-- ⬜ **Запись снятия** (новая таблица/колонки, STATE 8): `captured_at`, `capture_digest`
-  (набор корней + набор URL + `seeds_digest`), `coverage_complete`, `coverage_digest`,
-  `doc_set_digest`, `reuse_kind` документов на момент снятия.
-  `url_state.last_checked_at` для этого **не годится** (`corpus_ingest.py:882-899`: пишется при
-  любом исходе, включая отказ).
-- ⬜ Отсутствие байтов у известного URL — `stored_bytes_missing:{n}`; корень без записи в
-  `url_state` — `unknown_roots` (как в `offline`). Оба — видимые причины, не `failed` (I4).
-- ⬜ `frozen`/`network_denied` не объявляют новую версию документа «последней»: следующий живой
-  прогон не должен переиспользовать версию, которую не наблюдал.
+- ✅ `RefreshPolicy.FROZEN` + `frozen_source ∈ bytes|chunks`. **Одна таблица диспетчеризации**:
+  `core/pipeline/refresh_modes.py:83` (`_REFRESH_DISPATCH`, строка на каждое значение политики,
+  без `.get(..., default)`); `dispatch_refresh` (`:162`) — неизвестный enum → `AssertionError`,
+  неизвестная строка → `ValueError`. Прежние ветки `is OFFLINE` в `corpus`/`incremental`/
+  `corpus_ingest` заменены чтением таблицы. Статическое доказательство —
+  `tests/pipeline/test_refresh_modes.py::test_every_refresh_policy_value_has_an_explicit_row`
+  (сверяет множество значений enum с ключами таблицы) и
+  `test_dispatch_has_no_silent_default_for_unknown_policy`.
+- ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
+  (`corpus_ingest.py:3460`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
+  (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
+- ✅ **Дрейф пере-извлечения виден**: промах кэша с другим `content_hash` → токен
+  `frozen_reextract_mismatch` (`corpus_ingest.py:3385`), документ **не публикуется** и в
+  `document_version` не попадает: ложного `document_id`, ложного дедупа и другого
+  `doc_set_digest` не возникает.
+- ✅ **Канонический адрес согласован и в `frozen`**: `crawl_session_items` не пишутся, дедуп
+  идёт по durable-группам снятия (`corpus_capture_doc`, `doc_hash` → URL'ы), канонический
+  адрес — `min(url)` **запросом**, а не гонкой готовности; результат не зависит от
+  `host_concurrency`.
+- ✅ **Запись снятия** — таблицы `corpus_capture` (`state_sqlite.py:352`) и
+  `corpus_capture_doc` (`:369`): `captured_at`, `capture_digest`, `seeds_digest`,
+  `coverage_complete`, `coverage_digest`, `doc_set_digest`, `reuse_kind` документов.
+  `STATE_SCHEMA_VERSION` `8` → **`9`**. `url_state.last_checked_at` для этого **не годится**
+  (пишется при любом исходе, включая отказ) — сказано в докстринге.
+- ✅ Отсутствие байтов у известного URL — `stored_bytes_missing:{n}` (с числом),
+  `unknown_roots`, причина покрытия `frozen_no_network_observation`; все — видимые причины в
+  `product_end.frozen` и `results[].notes`, не `failed` (I4).
+- ✅ `frozen`/`network_denied` не объявляют новую версию документа «последней»:
+  `url_state`/`document_version` не переписываются (`test_frozen_bytes_writes_no_session_items`).
 
-**Приёмка P3 (без сети):** два `frozen`-прогона при `host_concurrency=2` дают одинаковые
-`doc_set_digest`, `corpus_docs.url` и текст чанков; промах кэша даёт `frozen_reextract_mismatch`;
-`plan`-`run_id` отличается от `auto` и от `offline`; `frozen_source=bytes` при `auto` не меняет
-`run_id` (канонизация §6.3).
+**Приёмка P3 (без сети):** принята — `tests/pipeline/test_corpus_frozen.py`
+(`test_frozen_is_zero_network_and_reproducible_at_host_concurrency_two`: фейки бросают на любом
+сетевом вызове, два прогона при `host_concurrency=2` дают равные `doc_set_digest`,
+`corpus_docs.url` и текст чанков), `tests/cli/test_refresh_frozen_cli.py` (`run_id` `frozen` ≠
+`auto`/`offline`, `frozen_source=bytes` при `auto` не меняет `run_id`, паритет флага),
+`tests/pipeline/test_refresh_modes.py`, `tests/store/test_state_schema_gate.py` (v8 отвергается).
+
+**Названная граница:** живой прогон на реальном `corpus_raw` не делался — проводка доказана на
+фейках; STATE 9 обкатан только тестами.
 
 ### P4 — документы и отчёт
 

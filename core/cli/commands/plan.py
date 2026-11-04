@@ -63,6 +63,7 @@ from core.cli.execution_axes import (
     IdentityFlags,
     add_contract_flags,
     add_crawl_axis_flags,
+    add_frozen_source_flag,
     add_refresh_scope_flag,
     add_serp_rounds_flag,
     contract_flag_values,
@@ -320,6 +321,10 @@ def run(args: argparse.Namespace) -> int:
             status_dict_version=declared_status_dict_version(),
             # План 19 §6.1: эффективная политика — то же значение, что у ``run``/``crawl``.
             crawl_policy_digest=policy_resolution.digest,
+            # План 19 §6.3: ось ``frozen_source`` канонизируется внутри контракта —
+            # ``n/a`` при политике, отличной от ``frozen``.
+            frozen_source=getattr(args, "frozen_source", None),
+            refresh_policy=refresh_policy,
             # I16/I20: те же аргументы, что передаёт ``run`` (``run.py``), из того же
             # инвентаря флагов. ``None`` — флаг не объявлен: контракт пишет ``null``,
             # а не дефолт Ш6 (``run_id`` описывает объявленное).
@@ -378,6 +383,9 @@ def configure(sub: Any) -> None:
     add_crawl_axis_flags(p_plan)
     # План 19 §5: запрос обновления — тот же флаг и тот же резолв, что у ``run``.
     add_refresh_scope_flag(p_plan)
+    # План 19 §P3: источник корпуса при ``frozen`` — тот же регистратор, что у
+    # ``run``/``crawl run``; значение входит в контракт (``frozen_source``).
+    add_frozen_source_flag(p_plan)
     add_serp_rounds_flag(p_plan)
     # §13/I16/I20 + 09 §6.2: **весь** материал ``run_id``, который приходит флагами
     # (контракт, seed-набор, цикл, объём, политика наблюдения); флаги порождены инвентарём

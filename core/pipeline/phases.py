@@ -48,6 +48,7 @@ from core.domain.enums import (
     DocumentLevel,
     EmbedDevice,
     PdfPipeline,
+    RefreshPolicy,
     SkipReason,
     TerminationReason,
 )
@@ -927,6 +928,7 @@ def build_phases(
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    frozen_source: str | None = None,
     crawl_policy: Any = None,
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     execution_contract_digest: str | None = None,
@@ -1192,6 +1194,17 @@ def build_phases(
         if override:
             base = run_crawl if run_crawl is not None else CrawlRunConfig()
             run_crawl = base.model_copy(update=override)
+        # План 19 §P3: запись снятия называет объявленный seed-набор, из которого
+        # собрано снятие. Считается только для ``frozen`` — та же функция и те же
+        # входы, что у манифеста (второй формулы нет).
+        capture_seeds_digest: str | None = None
+        if refresh_policy == RefreshPolicy.FROZEN.value:
+            _, capture_seeds_digest = declared_identity_digests(
+                inputs,
+                package_dir=package_dir,
+                urls=urls,
+                domain_profiles=domain_profiles,
+            )
         result = build_corpus(
             plan,
             getattr(ctx.ports, "crawler", None),  # type: ignore[arg-type]
@@ -1281,6 +1294,11 @@ def build_phases(
             state=state,
             product_modes=product_modes,
             refresh_policy=refresh_policy,
+            # План 19 §P3: источник корпуса при ``frozen`` (``bytes`` → пере-извлечение
+            # сохранённых байтов, ``chunks`` → поведение ``offline``).
+            frozen_source=frozen_source,
+            # План 19 §P3: объявленный seed-набор — в запись снятия (``capture_digest``).
+            seeds_digest=capture_seeds_digest,
             # План 19 §P2: гейт сети — вход Ш5, а не решение CLI: резолв уже вошёл в
             # ``run_id``, и фаза обязана исполнить **тот же** объект.
             crawl_policy=crawl_policy,

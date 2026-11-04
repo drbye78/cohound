@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from core.domain.enums import IncrementalKind, RefreshPolicy, ReuseKind
+from core.pipeline.refresh_modes import dispatch_refresh
 from core.ports.state import DocumentVersionRow, ProductStatePort, UrlStateRow
 from core.util.hashing import short_hash
 
@@ -165,6 +166,10 @@ def plan_incremental(
     :raises ValueError: некорректный URL во входе.
     """
     normalized_policy = RefreshPolicy(policy)
+    # План 19 §P3: решения (discovery-diff, вид элемента известного URL) берутся из
+    # **одной** таблицы, а не из `is OFFLINE`-ветки: иначе `frozen` молча получил бы
+    # сетевое поведение `auto`.
+    execution = dispatch_refresh(normalized_policy)
     excluded = {_normalize_url(url) for url in exclude_urls}
 
     items: list[IncrementalItem] = []
@@ -194,7 +199,7 @@ def plan_incremental(
 
     # 2. Discovery-diff вызывающего — fetch; известное состояние приоритетнее.
     known_items: list[IncrementalItem] = []
-    if normalized_policy is not RefreshPolicy.OFFLINE:
+    if execution.discovery:
         for raw in known_new_urls:
             normalized = _normalize_url(raw)
             if (
@@ -220,12 +225,7 @@ def plan_incremental(
         if row.normalized_url in excluded or row.normalized_url in seen:
             continue
         seen.add(row.normalized_url)
-        kind = (
-            IncrementalKind.REUSE
-            if normalized_policy is RefreshPolicy.OFFLINE
-            else IncrementalKind.REVALIDATE
-        )
-        state_items.append(_item_from_url_state(row, kind))
+        state_items.append(_item_from_url_state(row, execution.known_kind))
 
     return [*items, *known_items, *state_items]
 

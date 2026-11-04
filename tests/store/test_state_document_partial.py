@@ -95,9 +95,9 @@ def _build_v4(db_path: Path) -> None:
         conn.close()
 
 
-def test_state_schema_version_is_eight() -> None:
-    """v8 — ``crawl_policy`` (план 19 §4) в объявленном DDL (без ``ALTER``)."""
-    assert STATE_SCHEMA_VERSION == "8"
+def test_state_schema_version_is_nine() -> None:
+    """v9 — ``corpus_capture`` (план 19 §P3) в объявленном DDL (без ``ALTER``)."""
+    assert STATE_SCHEMA_VERSION == "9"
 
 
 def test_chunk_meta_carries_chunk_offsets() -> None:

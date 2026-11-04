@@ -184,6 +184,7 @@ from core.domain import (
     CorpusMember,
     CrawlCorpusSource,
     CrawlItemStatus,
+    CrawlNetworkMode,
     CrawlRunConfig,
     CrawlSessionItem,
     CrawlSessionStatus,
@@ -263,6 +264,7 @@ from core.pipeline.corpus_ingest import (  # noqa: F401
     ProductIngest,
     terminal_failure_kind,
 )
+from core.pipeline.corpus_ingest import frozen_bytes_product as _frozen_bytes_product
 from core.pipeline.corpus_ingest import offline_reuse_product as _offline_reuse_product
 from core.pipeline.corpus_ingest import persist_docs as _persist_docs
 from core.pipeline.corpus_persist import (
@@ -298,6 +300,11 @@ from core.pipeline.crawl_sources import (
     CrawlTarget,
     resolve_crawl_target,
 )
+from core.pipeline.digests import (
+    corpus_capture_digest,
+    corpus_doc_set_digest,
+    coverage_digest,
+)
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
 
@@ -328,6 +335,7 @@ from core.pipeline.liveness import Heartbeat
 from core.pipeline.manual_artifacts import (
     ManualArtifacts,
 )
+from core.pipeline.refresh_modes import dispatch_refresh
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
 from core.pipeline.runner import PhaseResult, PhaseStatus, sorted_error_lines
 from core.ports.chunker import ChunkerPort
@@ -341,12 +349,14 @@ from core.ports.extractor import ExtractorPort
 from core.ports.index_builder import IndexBuilderPort
 from core.ports.poller import PollPort
 from core.ports.state import (
+    CorpusCaptureRow,
     IndexCompositionRow,
     IndexPartitionRow,
     ProductStatePort,
 )
 from core.ports.types import (
     FetchMode,
+    FetchPlan,
 )
 from core.util.index_partition import build_root as _partition_root
 from core.util.rate_limit import RateLimiter, normalize_host
@@ -394,8 +404,19 @@ _EXTRACT_TASK_TIMEOUT_S = 1800.0
 #: не было, а они были.
 COVERAGE_OFFLINE_NO_OBSERVATION = "offline_no_network_observation"
 
+#: То же для ``frozen`` (план 19 §P3): корпус собран пере-извлечением сохранённых байтов,
+#: но наблюдений **этого** прогона нет (сети не было). Отдельный токен, потому что
+#: «заморожен корпус» и «оператор просил offline» — разные провенансы, и выводить один
+#: из другого читатель не должен.
+COVERAGE_FROZEN_NO_OBSERVATION = "frozen_no_network_observation"
+
 #: Причина неисполненных раундов SERP-контура при ``offline``: поиск — тоже сеть.
 _SERP_OFFLINE_REASON = "offline_refresh_policy"
+
+#: То же для ``frozen`` (план 19 §P3): ноль запросов — значит и внешний поиск не
+#: исполняется. Отдельный токен, потому что «заморожен корпус из байтов» — не «оператор
+#: просил offline»: читатель провенанса не должен выводить одно из другого.
+_SERP_FROZEN_REASON = "frozen_refresh_policy"
 
 
 def _as_refresh_policy(value: str) -> RefreshPolicy:
@@ -792,8 +813,13 @@ class ProductContext:
     consume_scope: extract_consume.ConsumerScope
     #: Момент границы продукта (``start``), ``None`` — продукт ещё не открыт.
     started_at: float | None = None
-    #: 09 §6.3: итог оффлайн-прохода по продукту (``None`` — политика не ``offline``).
+    #: 09 §6.3: итог оффлайн-прохода по продукту (``None`` — политика не ``offline``
+    #: и не ``frozen_source=chunks``).
     offline_report: Any = None
+    #: План 19 §P3: итог ``frozen_source=bytes`` (``None`` — иная политика/источник).
+    #: Нужен хвосту: запись снятия (``corpus_capture``) пишется после покрытия, а группы
+    #: дедупа и причины приходят из этого прохода.
+    frozen_report: Any = None
     #: Группы ревалидации: до применения операторского потолка и после.
     all_revalidation_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
     revalidation_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
@@ -1334,6 +1360,8 @@ def _build_corpus(
     state: ProductStatePort | None = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    frozen_source: str | None = None,
+    seeds_digest: str | None = None,
     crawl_policy: CrawlPolicyResolution | None = None,
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     container_for: Callable[[str | Path], ContainerPort | None] | None = None,
@@ -1752,12 +1780,26 @@ def _build_corpus(
 
     # 09 §6.3/§9 (MVP-3b): политика наблюдения и режимы продуктов. ``state is None`` —
     # legacy-путь: все три аргумента игнорируются целиком (поведение байт-в-байт).
-    # Резолвится **до** SERP-контура и дренажа: ``offline`` — «наблюдать нечем и не
-    # будем», то есть ни фетча, ни условного GET, ни sitemap/feed-развёртки, ни внешнего
-    # поиска. Корпус в этом случае собирается из durable-субстрата
-    # (:func:`core.pipeline.corpus_ingest.offline_reuse_product`).
+    # Резолвится **до** SERP-контура и дренажа: ``offline``/``frozen`` — «наблюдать
+    # нечем и не будем», то есть ни фетча, ни условного GET, ни sitemap/feed-развёртки,
+    # ни внешнего поиска. Корпус в этом случае собирается из durable-субстрата: ``offline``
+    # и ``frozen_source=chunks`` — из чанков
+    # (:func:`core.pipeline.corpus_ingest.offline_reuse_product`), ``frozen_source=bytes`` —
+    # пере-извлечением сохранённых байтов
+    # (:func:`core.pipeline.corpus_ingest.frozen_bytes_product`).
+    #
+    # План 19 §P3: решения берутся из **одной** таблицы (:func:`dispatch_refresh`), а не
+    # из `is OFFLINE`-веток: новое значение политики без строки таблицы падает, а не
+    # получает молча сетевое поведение.
     policy = _as_refresh_policy(refresh_policy)
+    execution = dispatch_refresh(policy, frozen_source=frozen_source)
     offline = policy is RefreshPolicy.OFFLINE
+    frozen = policy is RefreshPolicy.FROZEN
+    #: Ни одного сетевого вызова: и `offline`, и `frozen`. Имя говорит **факт**, а не
+    #: значение политики: от него зависят SERP-контур, авторские корни и покрытие.
+    no_network = not execution.network
+    #: Откуда корпус при отсутствии сети: `chunks` (offline) либо ось frozen.
+    corpus_source_no_network = execution.corpus_source
 
     def _policy_execution(product_id: str, url: str) -> PolicyExecution:
         """Исполнение политики для адреса (``fetch``+``network`` без политики).
@@ -1766,7 +1808,18 @@ def _build_corpus(
         спрашивают **эту** функцию, а не пересобирают решение по-своему. Без политики —
         ``fetch``+``network`` без области: «запретить по умолчанию» было бы решением,
         которого оператор не принимал.
+
+        ``frozen`` перекрывает политику **всех** корней (план 19 §5: сеть запрещена всем;
+        ``auto`` и ``on_request`` обрабатываются одинаково). Различие с ``network_denied``
+        — в провенансе, а не в запросах; здесь оно намеренно не различается: политика
+        поверхностей корней уже посчитана и в дайджест вошла, а запрет сети — условие
+        этого прогона.
         """
+        if frozen:
+            return PolicyExecution(
+                network_mode=CrawlNetworkMode.DENY,
+                corpus_source=corpus_source_no_network,
+            )
         if crawl_policy is None:
             return PolicyExecution()
         return crawl_policy.execution_for(product_id, url)
@@ -1817,10 +1870,15 @@ def _build_corpus(
     #: ``offline_notes``, потому что оба называют «почему корпуса этого прогона нет/мало».
     policy_notes: list[str] = []
 
-    if policy is RefreshPolicy.OFFLINE and serp_rounds:
+    if no_network and serp_rounds:
         serp_observation["rounds"]["declared"] = int(serp_rounds)
         serp_observation["rounds"]["not_executed"] = int(serp_rounds)
-        serp_observation["rounds"]["not_executed_reason"] = _SERP_OFFLINE_REASON
+        # Причина — политика прогона: ``offline`` и ``frozen`` различаются провенансом,
+        # а не наличием запросов, и «почему контур не исполнен» обязано называть ту,
+        # которая была объявлена.
+        serp_observation["rounds"]["not_executed_reason"] = (
+            _SERP_OFFLINE_REASON if offline else _SERP_FROZEN_REASON
+        )
     elif serp_rounds and consume_only:
         # F6: конверсия чужой очереди — сетевой контур поиска не её работа. Объявленные
         # раунды называются неисполненными: «не исполнено» ≠ «выключено оператором».
@@ -3154,7 +3212,7 @@ def _build_corpus(
         #: не-incremental/``offline`` ⇒ пусто: grouping — no-op (байт-в-байт). Под
         #: ``offline`` группировка не нужна: она адресует ревалидационные бакеты дренажа,
         #: а дренажа в этой политике нет — известные URL уже разрешены выше.
-        if incremental_items and not offline:
+        if incremental_items and not no_network:
             all_revalidation_groups, all_orphan_buckets = (
                 _group_revalidation_items(
                     product_id, product_roots, incremental_items
@@ -3310,7 +3368,7 @@ def _build_corpus(
             product_id=str(product_id),
             roots=product_roots,
             author_urls=(
-                () if (repair_urls or offline or consume_only) else url_map.get(product_id, [])
+                () if (repair_urls or no_network or consume_only) else url_map.get(product_id, [])
             ),
             ingest=ingest,
             seen_docs=seen_docs,
@@ -3380,29 +3438,70 @@ def _build_corpus(
             errors=errors,
             status=RunProductStatus.RUNNING,
         )
-        # 09 §6.3: оффлайн-корпус продукта — работа **его** границы, а не предпрохода.
-        # Проход наполняет ``ingest.docs`` и персистит документы: держать его результат
-        # до закрытия продукта — это и есть продуктовый носитель, а не общий склад.
-        # Порядок прежний: после ``start`` и строки ``running``, до работы над корпусом.
-        if offline:
-            ctx.offline_report = _offline_reuse_product(
-                ctx.product_id,
-                ctx.roots,
-                ctx.incremental_items,
-                state=state,
-                errors=errors,
-                chunker_version=resolved_chunker_version,
-                embed_model_id=embed_model_id,
-                store=store,
-                ingest=ctx.ingest,
-                seen_docs=ctx.seen_docs,
-                seen_chunk_ids=ctx.seen_chunk_ids,
-                duplicates=duplicates,
-                doc_counters=doc_counters,
-                partial_unknown_products=partial_unknown_products,
-                persist_docs=_persist_docs,
-            )
-            offline_notes.append(ctx.offline_report.note(ctx.product_id))
+        # 09 §6.3/план 19 §P3: корпус без сети — работа **границы продукта**, а не
+        # предпрохода. Проход наполняет ``ingest.docs`` и персистит документы: держать
+        # его результат до закрытия продукта — это и есть продуктовый носитель, а не
+        # общий склад. Порядок прежний: после ``start`` и строки ``running``, до работы
+        # над корпусом. Источник выбирает **таблица** политики (``execution.corpus_source``),
+        # а не ``is OFFLINE``: ``frozen_source=chunks`` — тот же проход переиспользования,
+        # ``frozen_source=bytes`` — пере-извлечение сохранённых байтов.
+        if no_network:
+            pass_label = "frozen" if frozen else "offline"
+            if corpus_source_no_network is CrawlCorpusSource.CHUNKS:
+                ctx.offline_report = _offline_reuse_product(
+                    ctx.product_id,
+                    ctx.roots,
+                    ctx.incremental_items,
+                    state=state,
+                    errors=errors,
+                    chunker_version=resolved_chunker_version,
+                    embed_model_id=embed_model_id,
+                    store=store,
+                    ingest=ctx.ingest,
+                    seen_docs=ctx.seen_docs,
+                    seen_chunk_ids=ctx.seen_chunk_ids,
+                    duplicates=duplicates,
+                    doc_counters=doc_counters,
+                    partial_unknown_products=partial_unknown_products,
+                    persist_docs=_persist_docs,
+                    label=pass_label,
+                )
+                offline_notes.append(ctx.offline_report.note(ctx.product_id))
+            else:
+
+                def _frozen_fetch_plan(url: str) -> FetchPlan:
+                    """План получения URL — тот же резолвер, что у живого дренажа.
+
+                    Нужен только для ``FetchPlan.fetch``/``extract`` (ось
+                    ``frozen_source=bytes`` не ходит в сеть): план описывает, **чем**
+                    извлекать, а не куда идти.
+                    """
+                    return _crawl_target(ctx.product_id, url).plan
+
+                ctx.frozen_report = _frozen_bytes_product(
+                    ctx.product_id,
+                    ctx.roots,
+                    ctx.incremental_items,
+                    state=state,
+                    errors=errors,
+                    chunker_version=resolved_chunker_version,
+                    embed_model_id=embed_model_id,
+                    store=store,
+                    ingest=ctx.ingest,
+                    seen_docs=ctx.seen_docs,
+                    seen_chunk_ids=ctx.seen_chunk_ids,
+                    duplicates=duplicates,
+                    doc_counters=doc_counters,
+                    partial_unknown_products=partial_unknown_products,
+                    persist_docs=_persist_docs,
+                    extractor=extractor,
+                    chunker=chunker,
+                    extract_cache=extract_cache,
+                    fetch_plan_for=_frozen_fetch_plan,
+                    limits_for=_limits_for_url,
+                    label=pass_label,
+                )
+                offline_notes.append(ctx.frozen_report.note(ctx.product_id))
 
     def _cohort_root_plans() -> Iterator[
         corpus_drain.RootPlan | corpus_driver.ProductBoundary
@@ -3699,31 +3798,45 @@ def _build_corpus(
             if item.status in (CrawlItemStatus.FAILED, CrawlItemStatus.CANCELLED)
         )
         product_reason: str | None = None
-        if offline:
-            # 09 §6.3: оффлайн-прогон **не наблюдал ничего** — ни одного сетевого вызова.
-            # Это не ``no_seeds`` (seed'ы есть) и не «продукт пуст» (документы могут быть
-            # переиспользованы из durable-субстрата). Причина называется в строке покрытия
-            # всегда: ``observed_sources`` — счётчик наблюдений **этого** прогона, и он
-            # нулевой, поэтому ``complete`` не может стать ``True`` (условие «ни одного
-            # наблюдения» в :func:`derive_corpus_coverage`). ``blocked`` ставится только
-            # когда переиспользовать было нечего: «материал есть, охват неполон» — это
-            # ``partial``, а не ``blocked``.
-            offline_reasons[product_id] = COVERAGE_OFFLINE_NO_OBSERVATION
+        if no_network:
+            # 09 §6.3/план 19 §P3: прогон **не наблюдал ничего** — ни одного сетевого
+            # вызова. Это не ``no_seeds`` (seed'ы есть) и не «продукт пуст» (документы
+            # могут быть переиспользованы/пере-извлечены из durable-субстрата). Причина
+            # называется в строке покрытия всегда: ``observed_sources`` — счётчик
+            # наблюдений **этого** прогона, и он нулевой, поэтому ``complete`` не может
+            # стать ``True``. ``blocked`` ставится только когда материала не осталось:
+            # «материал есть, охват неполон» — это ``partial``, а не ``blocked``.
+            no_network_label = "frozen" if frozen else "offline"
+            no_network_reason = (
+                COVERAGE_FROZEN_NO_OBSERVATION
+                if frozen
+                else COVERAGE_OFFLINE_NO_OBSERVATION
+            )
+            offline_reasons[product_id] = no_network_reason
+            no_version_count = 0
+            unknown_roots_count = 0
+            missing_bytes_count = 0
+            if ctx.frozen_report is not None:
+                no_version_count = len(ctx.frozen_report.no_version)
+                unknown_roots_count = len(ctx.frozen_report.unknown_roots)
+                missing_bytes_count = len(ctx.frozen_report.stored_bytes_missing)
+            elif offline_report is not None:
+                no_version_count = len(offline_report.no_version)
+                unknown_roots_count = len(offline_report.unknown_roots)
             if not ingest.docs and not manual_resolved:
-                product_reason = COVERAGE_OFFLINE_NO_OBSERVATION
+                product_reason = no_network_reason
                 zero_source_pending.append(
-                    f"{product_id}: offline — переиспользовать нечего и сеть не "
-                    "трогалась; корпус пуст, оценка отметит все ячейки failed, а не ❌. "
+                    f"{product_id}: {no_network_label} — материала нет и сеть не "
+                    "трогалась; "
+                    "корпус пуст, оценка отметит все ячейки failed, а не ❌. "
                     "Нужен прогон с --refresh auto/revalidate"
                 )
                 errors.append(
-                    f"{product_id}: offline corpus без единого документа "
-                    f"({COVERAGE_OFFLINE_NO_OBSERVATION}): "
-                    f"roots={len(product_roots)}, "
-                    f"reused=0, no_version="
-                    f"{len(offline_report.no_version) if offline_report else 0}, "
-                    f"unknown_roots="
-                    f"{len(offline_report.unknown_roots) if offline_report else 0} — "
+                    f"{product_id}: {no_network_label} corpus без единого документа "
+                    f"({no_network_reason}): roots={len(product_roots)}, "
+                    f"docs=0, no_version={no_version_count}, "
+                    f"unknown_roots={unknown_roots_count}, "
+                    f"stored_bytes_missing={missing_bytes_count} — "
                     "ячейки будут failed, не ❌"
                 )
         # Zero-source — утверждение о **сеансе**: без сеанса «нет элементов» не значит
@@ -3849,10 +3962,33 @@ def _build_corpus(
                     None
                     if offline_report is None
                     else {
+                        "label": offline_report.label,
                         "reused_docs": offline_report.reused,
                         "reused_chunks": offline_report.chunks,
                         "no_version": list(offline_report.no_version),
                         "unknown_roots": list(offline_report.unknown_roots),
+                    }
+                ),
+                # План 19 §P3: пере-извлечение сохранённых байтов — отдельный факт, а не
+                # пересказ ``offline``: «из состояния» и «из тех же байтов текущим стеком»
+                # дают разный текст корпуса и разные причины пропуска.
+                "frozen": (
+                    None
+                    if ctx.frozen_report is None
+                    else {
+                        "label": ctx.frozen_report.label,
+                        "docs": ctx.frozen_report.docs,
+                        "chunks": ctx.frozen_report.chunks,
+                        "reextracted": ctx.frozen_report.reextracted,
+                        "cache_hits": ctx.frozen_report.cache_hits,
+                        "no_version": list(ctx.frozen_report.no_version),
+                        "unknown_roots": list(ctx.frozen_report.unknown_roots),
+                        "stored_bytes_missing": list(
+                            ctx.frozen_report.stored_bytes_missing
+                        ),
+                        "reextract_mismatch": list(
+                            ctx.frozen_report.reextract_mismatch
+                        ),
                     }
                 ),
                 "elapsed_seconds": round(product_crawl_elapsed, 3),
@@ -4055,6 +4191,12 @@ def _build_corpus(
         # документы и чанки дальше существуют только в БД. ``product_chunks`` отсоединяется
         # от объекта, а затем и локальная ссылка снимается: иначе список чанков прожил бы
         # до следующей итерации, то есть ровно тот пик, который снимается.
+        # План 19 §P3: отпечаток doc-set **этого** прогона считается до освобождения
+        # продукта из памяти. ``document_version`` в state пишется только живым путём:
+        # ``frozen`` его не пишет, поэтому state-субстрат описал бы не этот корпус.
+        frozen_doc_set_digest = (
+            corpus_doc_set_digest(ingest.docs) if frozen else None
+        )
         counters.doc_count += len(ingest.docs)
         ingest.chunk_count = len(product_chunks)
         ingest.distinct_docs = len(product_chunk_counts)
@@ -4117,6 +4259,49 @@ def _build_corpus(
             except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
                 errors.append(
                     f"corpus_coverage({product_id}): {type(exc).__name__}: {exc}"
+                )
+
+        # План 19 §P3: запись снятия корпуса — после покрытия (оно часть записи) и
+        # **только** для ``frozen``: снятие описывает «что зафиксировано без сети».
+        # ``url_state.last_checked_at`` этой роли не годится — он пишется при любом
+        # исходе, включая отказ. Группы дедупа берутся из прохода, который их
+        # использовал; ``crawl_session_items`` ``frozen`` не пишет, поэтому это
+        # единственный durable-носитель канонического адреса.
+        if frozen and state is not None and run_id and frozen_doc_set_digest is not None:
+            capture_report = ctx.frozen_report or offline_report
+            try:
+                state.record_corpus_capture(
+                    CorpusCaptureRow(
+                        product_id=product_id,
+                        run_id=run_id,
+                        captured_at=_now_iso(),
+                        capture_digest=corpus_capture_digest(
+                            roots=product_roots,
+                            urls=(
+                                () if capture_report is None else capture_report.urls
+                            ),
+                            seeds_digest=seeds_digest or "",
+                        ),
+                        seeds_digest=seeds_digest or "",
+                        source=corpus_source_no_network.value,
+                        coverage_complete=(
+                            False
+                            if product_coverage is None
+                            else bool(product_coverage.complete)
+                        ),
+                        coverage_digest=coverage_digest(product_coverage),
+                        doc_set_digest=frozen_doc_set_digest,
+                        docs=(
+                            ()
+                            if capture_report is None
+                            else capture_report.capture_docs
+                        ),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — снятие вторично к корпусу
+                errors.append(
+                    f"{product_id}: frozen: corpus_capture: "
+                    f"{type(exc).__name__}: {exc}"
                 )
 
         # 16 §3.2: финальная строка продукта — после Pass B (там же, где ``corpus_coverage``).

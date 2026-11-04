@@ -2519,6 +2519,7 @@ def _resolve_phases(
     product_plan: Mapping[str, Any] | None = None,
     run_scope: str | None = None,
     refresh_policy: str = "auto",
+    frozen_source: str | None = None,
     crawl_policy: Any = None,
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     execution_contract_digest: str | None = None,
@@ -2737,6 +2738,8 @@ def _resolve_phases(
         # неотличим от полного измерения.
         "run_scope": run_scope,
         "refresh_policy": refresh_policy,
+        # План 19 §P3: источник корпуса при ``frozen`` — та же ось, что в контракте.
+        "frozen_source": frozen_source,
         # План 19 §P2: исполнение политики краула — тем же объектом, что дал
         # ``crawl_policy_digest`` для ``run_id``. Сеть решает Ш5, а не CLI.
         "crawl_policy": crawl_policy,
@@ -3309,9 +3312,12 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
     )
     # План 19 §5/P2: ручной запрос обновления — тот же регистратор, что у ``plan``:
     # значение входит в ``crawl_policy_digest``, поэтому форма флага не может разъехаться.
-    from core.cli.execution_axes import add_refresh_scope_flag
+    from core.cli.execution_axes import add_frozen_source_flag, add_refresh_scope_flag
 
     add_refresh_scope_flag(parser)
+    # План 19 §P3: источник корпуса при ``frozen`` — тот же регистратор, что у ``plan``:
+    # значение входит в контракт, поэтому форма флага не может разъехаться.
+    add_frozen_source_flag(parser)
     parser.add_argument(
         "--follow",
         "--watch",

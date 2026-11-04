@@ -1501,7 +1501,7 @@ def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
         "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/crawl_policy_digest/"
-        "serp_rounds/serp_mode/prompt_template/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
+        "serp_rounds/serp_mode/prompt_template/frozen_source/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
     ]
     assert not any("chunker_version" in reason for reason in reasons)
     assert not any("embed_model_id" in reason for reason in reasons)
@@ -1543,7 +1543,7 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
         "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/crawl_policy_digest/"
-        "serp_rounds/serp_mode/prompt_template/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
+        "serp_rounds/serp_mode/prompt_template/frozen_source/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
     ]
 
 

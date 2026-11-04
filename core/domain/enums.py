@@ -852,12 +852,38 @@ class ProductMode(StrEnum):
 
 
 class RefreshPolicy(StrEnum):
-    """Политика обновления корпуса (09 §2.4/§3.1)."""
+    """Политика обновления корпуса (09 §2.4/§3.1, план 19 §5).
+
+    ``auto``/``revalidate``/``refresh`` — сеть разрешена; ``offline`` — ноль запросов,
+    корпус из **чанков** ``state.db``; ``frozen`` — ноль запросов, корпус из сохранённых
+    **сырых байтов** (``corpus_raw``) с пере-извлечением текущими версиями. Источник
+    ``frozen`` объявляется осью :data:`~core.domain.enums.FrozenSource`.
+
+    Различие ``offline``/``frozen`` — не оттенок: ``offline`` переиспользует чанки и
+    отказывает при смене версии чанкера, поэтому новый стек извлечения на старом корпусе
+    им не измерить (план 19 §1).
+    """
 
     AUTO = "auto"
     REVALIDATE = "revalidate"
     REFRESH = "refresh"
     OFFLINE = "offline"
+    FROZEN = "frozen"
+
+
+class FrozenSource(StrEnum):
+    """Источник корпуса при ``refresh_policy=frozen`` (план 19 §5).
+
+    ``bytes`` — сохранённые сырые байты (``corpus_raw``) → **текущая** экстракция →
+    текущий чанкинг; ``chunks`` — поведение ``offline`` (уже нарезанный durable-субстрат).
+
+    Ось объявлена, но действует только при ``frozen``: при иной политике её значение
+    канонизируется в ``n/a`` (план 19 §6.3), иначе объявленная-но-недействующая ось давала
+    бы ложный ``execution_change``.
+    """
+
+    BYTES = "bytes"
+    CHUNKS = "chunks"
 
 
 class CrawlPolicyMode(StrEnum):
@@ -905,13 +931,14 @@ class CrawlCorpusSource(StrEnum):
 
     ``network`` — из сети этого прогона; ``chunks`` — из durable-субстрата пакета
     (``state.db``: ``url_state`` → ``document_version`` → сохранённые чанки), без единого
-    запроса. ``bytes`` (корпус из ``corpus_raw`` с пере-извлечением) появится в P3 —
-    здесь его нет намеренно: объявленная, но не исполняемая ось дала бы ложный
-    ``execution_change``.
+    запроса; ``bytes`` — из сохранённых сырых байтов (``corpus_raw``) с **текущим**
+    пере-извлечением и текущим чанкингом (план 19 §P3). ``bytes`` не объявлялся раньше
+    намеренно: объявленная, но не исполняемая ось дала бы ложный ``execution_change``.
     """
 
     NETWORK = "network"
     CHUNKS = "chunks"
+    BYTES = "bytes"
 
 
 class ProductScope(StrEnum):

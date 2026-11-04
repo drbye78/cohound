@@ -63,6 +63,8 @@ __all__ = [
     "catalog_digest",
     "cell_reuse_key",
     "cohort_digest",
+    "corpus_capture_digest",
+    "corpus_doc_set_digest",
     "coverage_digest",
     "crawl_policy_digest",
     "execution_contract_digest",
@@ -162,6 +164,13 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     # идентичность. Значение — имя шаблона (`TEMPLATE_VERSION`) и его хеш: имя без
     # содержимого позволило бы переписать текст, не сменив идентичность.
     "prompt_template",
+    # План 19 §6.3: источник корпуса при ``refresh_policy=frozen``
+    # (``bytes`` | ``chunks`` | ``n/a``). Объявленный вход, потому что он меняет текст
+    # корпуса: ``bytes`` пере-извлекает сохранённые байты текущими версиями, ``chunks``
+    # переиспользует уже нарезанное. Значение **канонизируется**: при политике, отличной
+    # от ``frozen``, в материал идёт ``n/a`` — иначе поданный, но не действующий флаг давал
+    # бы ложный ``execution_change`` (``refresh_modes.canonical_frozen_source``).
+    "frozen_source",
     # C3: геометрия нарезки чанков и состав входа эмбеддера. ``chunker_version`` — метка,
     # а не вывод из геометрии: правка ``chunk_size`` на другое число давала другой корпус
     # чанков при том же ``run_id`` (тот же класс, что ``embed_model_id`` до фикса этой
@@ -486,6 +495,49 @@ CELL_REUSE_SCHEMA = "cell-reuse-2"
 
 #: Длина ключа переноса ячейки (24 hex-символа — как у прочих дайджестов §12.2).
 _CELL_REUSE_LEN = 24
+
+
+def corpus_doc_set_digest(docs: Iterable[Any]) -> str:
+    """Отпечаток doc-set **этого прогона** (план 19 §P3), 24 hex-символа.
+
+    Материал — множество пар ``(product_id, content_hash)`` документов прогона: порядок
+    не входит, ``doc_id`` тоже (он выводится из тех же двух величин, и дублировать его
+    значило бы дать одной правке два имени). Нужен записи снятия: ``frozen`` не пишет
+    ``document_version``, поэтому ``doc_set_digest`` из state-субстрата описал бы **не
+    этот** корпус.
+    """
+    material = sorted(
+        {
+            (
+                str(getattr(doc, "product_id", "") or ""),
+                str(getattr(doc, "content_hash", "") or ""),
+            )
+            for doc in docs
+        }
+    )
+    return short_hash(_canonical({"docs": [list(row) for row in material]}), _DIGEST_LEN)
+
+
+def corpus_capture_digest(
+    *, roots: Iterable[str], urls: Iterable[str], seeds_digest: str
+) -> str:
+    """Отпечаток **объявленного входа** снятия корпуса (план 19 §P3), 24 hex-символа.
+
+    Материал: набор корней, набор URL и ``seeds_digest`` — то, «что просили снять».
+    Порядок не входит (множества сортируются). ``captured_at`` в материал **не** входит:
+    время снятия — провенанс, а не идентичность (как ``extractor_version``); иначе два
+    прогона над одним входом давали бы разные отпечатки по часам.
+    """
+    return short_hash(
+        _canonical(
+            {
+                "roots": sorted({str(root) for root in roots}),
+                "urls": sorted({str(url) for url in urls}),
+                "seeds_digest": seeds_digest,
+            }
+        ),
+        _DIGEST_LEN,
+    )
 
 
 def retrieved_doc_set_digest(retrieved: Iterable[Any]) -> str:

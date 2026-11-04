@@ -75,7 +75,7 @@ CHILD_B = "https://docs.test/b"
 PINNED_PARTITION_BUILD_ID = "pb_73f6be9e1dd88a028814154a"
 PINNED_CONTENT_DIGEST = "f26d9da9face8cc0662b9b6d"
 PINNED_INDEX_BUILD_ID = "cb_2b5c9399f9e69bf2d08d092f"
-PINNED_EXECUTION_CONTRACT_DIGEST = "ececac56de2c8ad272cdde5e"
+PINNED_EXECUTION_CONTRACT_DIGEST = "b8b831c8c06eb886c8d8df02"
 
 #: Поля, которые обязана нести строка продукта (``product_end``) и её Pass B-продолжение.
 CRAWL_BUCKETS = ("fetch_wait_s", "extract_wait_s", "chunk_s")

@@ -346,6 +346,49 @@ class CrawlPolicyRow:
 
 
 @dataclass(frozen=True)
+class CapturedDocRow:
+    """Документ записи снятия: ``doc_hash``, URL и как он вошёл в корпус.
+
+    ``url`` — адрес, под которым документ **участвовал** в дедупе (канонический либо
+    алиас). ``normalized_url`` — ключ ``url_state``: по нему следующий ``frozen``-прогон
+    узнаёт, что этот URL относится к тому же документу.
+    """
+
+    doc_hash: str
+    url: str
+    normalized_url: str
+    reuse_kind: str
+
+
+@dataclass(frozen=True)
+class CorpusCaptureRow:
+    """Запись снятия корпуса (план 19 §P3): «вот что было на момент ``captured_at``».
+
+    Зачем отдельная запись, а не ``url_state.last_checked_at``: последнее пишется при
+    **любом** исходе, включая отказ и 404, поэтому «когда последний раз смотрели» и
+    «какой корпус зафиксирован» — разные утверждения. ``captured_at`` — провенанс, а не
+    идентичность прогона (как ``extractor_version``): он не входит в ``run_id``.
+
+    ``capture_digest`` — отпечаток объявленного входа снятия (набор корней + набор URL +
+    ``seeds_digest``); ``coverage_digest``/``doc_set_digest`` — что именно было снято;
+    ``docs`` — durable-группы дедупа (кто был алиасом одного документа), чтобы следующий
+    ``frozen``-прогон выбрал тот же канонический адрес, не обращаясь к
+    ``crawl_session_items`` (``frozen`` их не пишет).
+    """
+
+    product_id: str
+    run_id: str
+    captured_at: str
+    capture_digest: str
+    seeds_digest: str
+    source: str
+    coverage_complete: bool
+    doc_set_digest: str
+    docs: tuple[CapturedDocRow, ...] = ()
+    coverage_digest: str | None = None
+
+
+@dataclass(frozen=True)
 class RunLineageRow:
     """Строка ``run_lineage``: провенанс прогона в цепочке циклов (§12.3).
 
@@ -670,5 +713,24 @@ class ProductStatePort(Protocol):
         (``hound crawl policy clear``): схема не имеет tombstone-режима, а удаление
         запрещено, поэтому запись выпадает из действующих, оставаясь в аудите.
         Повторный отзыв уже проставленную ссылку не переписывает.
+        """
+        ...
+
+    # -- запись снятия корпуса (план 19 §P3, STATE 9) --------------------- #
+    def record_corpus_capture(self, row: CorpusCaptureRow) -> int:
+        """Пишет запись снятия и её документы; возвращает ``capture_id``.
+
+        Запись **append-only**: снятие — наблюдение, а не настройка; новое снятие не
+        переписывает прежнее. Пара ``(capture_id, url)`` уникальна: один URL в одном
+        снятии назван один раз.
+        """
+        ...
+
+    def last_corpus_capture(self, product_id: str) -> CorpusCaptureRow | None:
+        """Последнее снятие продукта (по ``captured_at``, затем ``capture_id``).
+
+        Нужно ``frozen``-прогону: он обязан видеть durable-группы дедупа прошлого снятия,
+        потому что ``crawl_session_items`` (носитель канонического адреса в живом крауле)
+        им не пишется.
         """
         ...

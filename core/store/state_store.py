@@ -39,8 +39,10 @@ from core.domain.enums import (
 )
 from core.domain.models import ProfileAttestationRow, SeedEntry
 from core.ports.state import (
+    CapturedDocRow,
     CellMeasurementRow,
     ChunkRow,
+    CorpusCaptureRow,
     CrawlPolicyRow,
     DocumentVersionRow,
     ForgetProductResult,
@@ -389,6 +391,10 @@ def _upsert_sql(
 FORGET_PRODUCT_TABLES = (
     "chunk_meta",
     "document_version",
+    # Дочерняя таблица — раньше родительской: без ``ON DELETE CASCADE`` удаление
+    # ``corpus_capture`` при включённых FK отказало бы на существующих строках.
+    "corpus_capture_doc",
+    "corpus_capture",
     "url_state",
     "product_snapshot",
     "cell_measurement",
@@ -1547,6 +1553,88 @@ class SqliteStateStore:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY product_id, scope_kind, host, path, policy_id"
         return [_crawl_policy_row(row) for row in self._conn.execute(sql, params)]
+
+    def record_corpus_capture(self, row: CorpusCaptureRow) -> int:
+        """Пишет запись снятия корпуса и её документы; возвращает ``capture_id``.
+
+        Append-only: прежние снятия не переписываются. Документы пишутся той же
+        транзакцией, что и запись, — «снятие без групп дедупа» было бы записью, которую
+        следующий ``frozen`` не может прочитать (он не обращается к сеансу краула).
+        """
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO corpus_capture (product_id, run_id, captured_at,"
+                " capture_digest, seeds_digest, source, coverage_complete,"
+                " coverage_digest, doc_set_digest)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row.product_id,
+                    row.run_id,
+                    row.captured_at,
+                    row.capture_digest,
+                    row.seeds_digest,
+                    row.source,
+                    1 if row.coverage_complete else 0,
+                    row.coverage_digest,
+                    row.doc_set_digest,
+                ),
+            )
+            last_id = cursor.lastrowid
+            if last_id is None:  # pragma: no cover — INSERT всегда даёт rowid
+                raise RuntimeError("corpus_capture: INSERT не вернул capture_id")
+            capture_id = int(last_id)
+            self._conn.executemany(
+                "INSERT INTO corpus_capture_doc (capture_id, product_id, doc_hash,"
+                " url, normalized_url, reuse_kind) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        capture_id,
+                        row.product_id,
+                        doc.doc_hash,
+                        doc.url,
+                        doc.normalized_url,
+                        doc.reuse_kind,
+                    )
+                    for doc in row.docs
+                ],
+            )
+            return capture_id
+
+    def last_corpus_capture(self, product_id: str) -> CorpusCaptureRow | None:
+        """Последнее снятие продукта (``captured_at``, затем ``capture_id``) или ``None``."""
+        head = self._conn.execute(
+            "SELECT * FROM corpus_capture WHERE product_id = ?"
+            " ORDER BY captured_at DESC, capture_id DESC LIMIT 1",
+            (product_id,),
+        ).fetchone()
+        if head is None:
+            return None
+        docs = [
+            CapturedDocRow(
+                doc_hash=str(doc["doc_hash"]),
+                url=str(doc["url"]),
+                normalized_url=str(doc["normalized_url"]),
+                reuse_kind=str(doc["reuse_kind"]),
+            )
+            for doc in self._conn.execute(
+                "SELECT doc_hash, url, normalized_url, reuse_kind"
+                " FROM corpus_capture_doc WHERE capture_id = ?"
+                " ORDER BY doc_hash, url",
+                (int(head["capture_id"]),),
+            )
+        ]
+        return CorpusCaptureRow(
+            product_id=str(head["product_id"]),
+            run_id=str(head["run_id"]),
+            captured_at=str(head["captured_at"]),
+            capture_digest=str(head["capture_digest"]),
+            seeds_digest=str(head["seeds_digest"]),
+            source=str(head["source"]),
+            coverage_complete=bool(head["coverage_complete"]),
+            coverage_digest=head["coverage_digest"],
+            doc_set_digest=str(head["doc_set_digest"]),
+            docs=tuple(docs),
+        )
 
     def supersede_crawl_policy(
         self, policy_id: int, *, superseded_by: int | None = None

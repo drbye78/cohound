@@ -444,7 +444,7 @@ pdf_device:
 # выше (R5): объявленная ось обязана действовать, а `auto` = «устройство выбрало
 # окружение», то есть тот же класс дефекта, что чтение модели оценщика из env (§7.4).
 # Ось входит в `EXECUTION_CONTRACT_FIELDS` (поле `embed_device`, 28 → 29; текущий размер
-# контракта — 30 полей после `crawl_policy_digest`, план 19), поэтому её
+# контракта — 31 поле после `frozen_source`, план 19 §P3), поэтому её
 # смена — `execution_change` (новый `run_id`); входит в материал `pb` и в ключ
 # `embed_cache` — иначе CPU-прогон получил бы CUDA-векторы под тем же ключом. Дефолт —
 # cpu (app-слой `deploy.yaml:embed.device`; run-слой `run.yaml:embed.device` его
@@ -664,6 +664,9 @@ refresh_policy:
   - revalidate
   - refresh
   - offline
+  # План 19 §P3: ноль запросов, корпус из corpus_raw (bytes — пере-извлечение текущим
+  # стеком, chunks — поведение offline). Операционное перечисление.
+  - frozen
 product_scope:
   - full
   - product_only
@@ -692,6 +695,8 @@ crawl_network_mode:
 crawl_corpus_source:
   - network
   - chunks
+  # План 19 §P3: сохранённые байты → текущая экстракция и нарезка (frozen_source=bytes).
+  - bytes
 
 # 09 §6.3/§9. Тип элемента инкрементального work-set.
 # Операционное перечисление: описывает способ получения документа, не семантику правил.

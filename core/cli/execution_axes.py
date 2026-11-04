@@ -129,7 +129,7 @@ from core.config.deploy import (
 )
 from core.config.passports import passport_content_digests
 from core.domain.dictionary import load_dictionary
-from core.domain.enums import PdfDevice, RefreshPolicy, SearchMode
+from core.domain.enums import FrozenSource, PdfDevice, RefreshPolicy, SearchMode
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
 from core.pipeline.crawl_frontier import resolve_embed_device, resolve_pdf_device
 from core.pipeline.digests import passports_digest, render_modes_digest
@@ -155,6 +155,7 @@ __all__ = [
     "IdentityFlags",
     "add_contract_flags",
     "add_crawl_axis_flags",
+    "add_frozen_source_flag",
     "add_refresh_scope_flag",
     "add_serp_rounds_flag",
     "contract_flag_values",
@@ -215,6 +216,32 @@ def add_refresh_scope_flag(parser: argparse.ArgumentParser) -> None:
             "ручной запрос обновления для области product|host|url|mask "
             "(повторяемый); снимает запрет on_request/scheduled на названных корнях и "
             "входит в crawl_policy_digest (run_id)"
+        ),
+    )
+
+
+def add_frozen_source_flag(parser: argparse.ArgumentParser) -> None:
+    """Регистрирует ``--frozen-source`` (план 19 §P3) — источник корпуса при ``frozen``.
+
+    Один регистратор на ``plan``/``run``/``crawl run``: значение входит в execution
+    contract (``frozen_source`` → ``run_id``) и выбирает исполнение (``bytes`` —
+    пере-извлечение сохранённых байтов, ``chunks`` — поведение ``offline``). Разъехавшиеся
+    формы флага дали бы две разные идентичности при одном объявленном входе.
+
+    Ось **действует только при** ``--refresh frozen``: при иной политике её значение
+    канонизируется в ``n/a`` и ``run_id`` не меняет (план 19 §6.3). Дефолт ``None`` —
+    «не объявлена»: при ``frozen`` это эквивалентно объявленному ``bytes``.
+    """
+    parser.add_argument(
+        "--frozen-source",
+        dest="frozen_source",
+        choices=[source.value for source in FrozenSource],
+        default=None,
+        metavar="SOURCE",
+        help=(
+            "откуда брать корпус при --refresh frozen: bytes (сохранённые байты → "
+            "текущая экстракция и нарезка) | chunks (поведение offline); при иной "
+            "политике канонизируется в n/a и run_id не меняет"
         ),
     )
 
@@ -522,7 +549,7 @@ CONTRACT_FLAGS: tuple[ContractFlag, ...] = (
         flag="--refresh",
         material=MATERIAL_REFRESH,
         choices=tuple(policy.value for policy in RefreshPolicy),
-        help="политика обновления корпуса: auto|revalidate|refresh|offline (дефолт auto)",
+        help="политика обновления корпуса: auto|revalidate|refresh|offline|frozen (дефолт auto)",
     ),
 )
 

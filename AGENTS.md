@@ -275,7 +275,7 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
 
 ## 9. Run identity, declared axes, versioning
 
-- `run_id` is a function of **declared inputs only**: 30 fields in
+- `run_id` is a function of **declared inputs only**: 31 fields in
   `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:88`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.

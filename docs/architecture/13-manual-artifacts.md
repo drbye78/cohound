@@ -74,7 +74,7 @@
 ```
 RawPage (core/ports/types.py:91-121)
   → _retain (core/pipeline/corpus.py:666-687)   # сам хеширует байты, кладёт в corpus_raw
-    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus.py:921-941)
+    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus.py:1320-1340)
 ```
 
 `RawPage` уже умеет всё нужное: `content`/`staged_path` (файл вместо RAM), и докстринг

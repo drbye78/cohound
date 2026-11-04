@@ -545,7 +545,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 **Статус на 2026-10-28.**
 
 - ✅ 1 — guidance вошёл в идентичность через композит: `prompt_template` =
-  `имя@hash(шаблон + ABSENCE_GUIDANCE + JSON-схема)` (`core/pipeline/run_identity.py:218-247`).
+  `имя@hash(шаблон + ABSENCE_GUIDANCE + JSON-схема)` (`core/pipeline/run_identity.py:219-247`).
 - ✅ 2 — условия генерации записываются: `seed`/`temperature`/`constrained_decoding`/
   `endpoint_host`/`max_tokens` в строке сценария (`core/cli/execution_axes.py:799-805`),
   фактические значения — из тех же констант, что уходят в адаптер.
@@ -750,7 +750,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 - ➖ **A1-профиль публикуемости — реализован**, строка выше устарела: класс и разложение
   неизвестности считаются (`core/domain/scoring.py:1114`), классы
   `PUBLISHABLE`/`PUBLISHABLE_WITH_CAVEAT`/`ANALYTICAL_ONLY`/`NOT_COMPARABLE` объявлены
-  (`core/domain/enums.py:1066-1069`), причины `UnknownCause` — `core/domain/enums.py:1072-1099`,
+  (`core/domain/enums.py:1068-1096`), причины `UnknownCause` — `core/domain/enums.py:1072-1099`,
   артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:2389`), в Ш8 —
   `core/pipeline/compute.py:337`.
 - ❔ **числа CI из абзаца выше не пере-проверялись** 2026-10-28: полный `pytest` не запускался

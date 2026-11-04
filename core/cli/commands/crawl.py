@@ -431,6 +431,17 @@ def _execute_crawl_locked(
         # План 19 §5: неразбираемый ``--refresh-scope`` — отказ использования, а не
         # «запрос не совпал»: иначе оператор считает, что обновление запрошено.
         raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    # План 19 §6.4: ``crawl run`` больше не хардкодит ``AUTO`` — иначе ``run`` и
+    # ``crawl run`` адресовали бы разные сеансы при одном объявленном входе. Политика
+    # наблюдения резолвится той же функцией, что у ``run`` (``--refresh`` > ``run.yaml``
+    # > ``auto``), и уходит **и** в ``run_id``, **и** в исполнение Ш5. Резолвится **до**
+    # контракта: ось ``frozen_source`` канонизируется по этой политике (план 19 §6.3).
+    try:
+        refresh_policy = resolve_refresh_policy(
+            cli=getattr(args, "refresh", None), run_config=inputs.run
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     # §13 (2.4.0): декларированные оси — тот же резолвер и deploy-конфиг, что у ``run``
     # (иначе crawl адресовал бы другой ``run_id``/сеанс).
     # P5/P7: операторские оси краула (``--document-level``/``--pdf-pipeline``) входят в
@@ -448,17 +459,9 @@ def _execute_crawl_locked(
         declared=declared,
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,
+        frozen_source=getattr(args, "frozen_source", None),
+        refresh_policy=refresh_policy,
     )
-    # План 19 §6.4: ``crawl run`` больше не хардкодит ``AUTO`` — иначе ``run`` и
-    # ``crawl run`` адресовали бы разные сеансы при одном объявленном входе. Политика
-    # наблюдения резолвится той же функцией, что у ``run`` (``--refresh`` > ``run.yaml``
-    # > ``auto``), и уходит **и** в ``run_id``, **и** в исполнение Ш5.
-    try:
-        refresh_policy = resolve_refresh_policy(
-            cli=getattr(args, "refresh", None), run_config=inputs.run
-        )
-    except ValueError as exc:
-        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     run_id = args.run_id or derive_run_id(
         inputs,
         cycle_id=cycle_id,
@@ -617,6 +620,7 @@ def _execute_crawl_locked(
             # что дали ``run_id``. Иначе ``crawl run`` исполнял бы ``auto`` под чужим
             # идентификатором.
             refresh_policy=refresh_policy.value,
+            frozen_source=getattr(args, "frozen_source", None),
             crawl_policy=policy_resolution,
             # F0: бюджет/окно экстракции — явные входы Ш5 (тот же резолв, что у preflight).
             mem_budget_mb=mem_budget_mb,

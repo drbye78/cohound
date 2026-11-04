@@ -62,7 +62,14 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: 8 — политика краула по областям (``crawl_policy``): продукт/хост/корень/маска пути,
 #: append-only через ``superseded_by``. Таблица объявлена в :data:`STATE_DDL`, шимов нет;
 #: файл версии ≤ 7 отвергается ``SchemaVersionMismatch`` (план 19 §4).
-STATE_SCHEMA_VERSION = "8"
+#: 9 — запись снятия корпуса (``corpus_capture``/``corpus_capture_doc``): что именно было
+#: зафиксировано при ``frozen``-прогоне (``captured_at``, ``capture_digest``,
+#: ``coverage_complete``/``coverage_digest``, ``doc_set_digest``, ``reuse_kind`` документов)
+#: и durable-группы дедупа, которые использовались. Без них следующий ``frozen``-прогон
+#: выбирал бы канонический адрес наугад: ``crawl_session_items`` он не пишет. Таблицы
+#: объявлены в :data:`STATE_DDL`, шимов нет; файл версии ≤ 8 отвергается
+#: ``SchemaVersionMismatch`` (план 19 §P3).
+STATE_SCHEMA_VERSION = "9"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -337,6 +344,43 @@ CREATE TABLE IF NOT EXISTS crawl_policy (
 CREATE INDEX IF NOT EXISTS crawl_policy_scope
     ON crawl_policy (product_id, scope_kind, host, path);
 
+-- 13. Запись снятия корпуса (план 19 §P3, STATE 9). Append-only: снятие — наблюдение,
+-- а не настройка. ``captured_at`` — провенанс (в ``run_id`` не входит, как
+-- ``extractor_version``); ``capture_digest`` — отпечаток объявленного входа снятия.
+-- ``url_state.last_checked_at`` для этой роли не годится: он обновляется при **любом**
+-- исходе, включая отказ, и потому не отвечает на вопрос «какой корпус зафиксирован».
+CREATE TABLE IF NOT EXISTS corpus_capture (
+    capture_id        INTEGER PRIMARY KEY,
+    product_id        TEXT NOT NULL,
+    run_id            TEXT NOT NULL,
+    captured_at       TEXT NOT NULL,
+    capture_digest    TEXT NOT NULL,             -- набор корней + набор URL + seeds_digest
+    seeds_digest      TEXT NOT NULL,
+    source            TEXT NOT NULL CHECK (source IN ('bytes','chunks')),
+    coverage_complete INTEGER NOT NULL,
+    coverage_digest   TEXT,
+    doc_set_digest    TEXT NOT NULL
+);
+
+-- 14. Документы снятия и durable-группы дедупа: ``doc_hash`` → URL'ы одного документа.
+-- Группа читается как ``GROUP BY capture_id, doc_hash``; канонический адрес — ``min(url)``,
+-- поэтому ``frozen`` не зависит от порядка готовности и не обращается к
+-- ``crawl_session_items`` (он их не пишет).
+CREATE TABLE IF NOT EXISTS corpus_capture_doc (
+    capture_id     INTEGER NOT NULL REFERENCES corpus_capture(capture_id),
+    product_id     TEXT NOT NULL,
+    doc_hash       TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    reuse_kind     TEXT NOT NULL,
+    PRIMARY KEY (capture_id, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_corpus_capture_product
+    ON corpus_capture(product_id, captured_at, capture_id);
+CREATE INDEX IF NOT EXISTS idx_corpus_capture_doc_hash
+    ON corpus_capture_doc(product_id, doc_hash);
+
 CREATE INDEX IF NOT EXISTS idx_seed_product ON seed_set(product_id, state);
 CREATE INDEX IF NOT EXISTS idx_doc_product  ON document_version(product_id, status);
 CREATE INDEX IF NOT EXISTS idx_snapshot_product ON product_snapshot(product_id, created_at);
@@ -370,7 +414,7 @@ def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
        пишется ``schema_meta.schema_version``.
 
     Миграций нет ни одной: все колонки и индексы объявлены в :data:`STATE_DDL`. Старая БД
-    (версия ≤ 7, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
+    (версия ≤ 8, либо файл с таблицами без объявленной версии) отвергается — durable-состояние
     пакета не переносится между версиями схемы, а тихий ``ALTER TABLE`` объявлял бы файл
     новой версии, не будучи им.
 

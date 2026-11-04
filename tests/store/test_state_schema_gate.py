@@ -134,7 +134,7 @@ def test_fresh_db_declares_every_former_migration_index() -> None:
     assert set(FORMER_POST_MIGRATION_INDEXES) <= indexes
 
 
-@pytest.mark.parametrize("version", ["5", "4", "2", "0.9", "7", "99"])
+@pytest.mark.parametrize("version", ["8", "7", "5", "4", "2", "0.9", "99"])
 def test_previous_version_file_is_rejected_and_left_untouched(
     tmp_path: Path, version: str
 ) -> None:

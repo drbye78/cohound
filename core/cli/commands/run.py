@@ -736,6 +736,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         cutoff_K=getattr(args, "cutoff_k", None),
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,
+        # План 19 §6.3: ось ``frozen_source`` — объявленный вход, канонизируемый в ``n/a``
+        # при политике, отличной от ``frozen``.
+        frozen_source=getattr(args, "frozen_source", None),
+        refresh_policy=refresh_policy,
     )
     run_id = args.run_id or derive_run_id(
         inputs,
@@ -779,6 +783,8 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 cutoff_K=args.cutoff_k,
                 status_dict_version=status_dict_version,
                 crawl_policy_digest=policy_resolution.digest,
+                frozen_source=getattr(args, "frozen_source", None),
+                refresh_policy=refresh_policy,
             )
 
     # 09 §12.3: предшественник — по **одной** формуле (:func:`previous_run_of`): явный
@@ -1238,6 +1244,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 # отличает полное измерение от ``--only-product``/``--only-failed``.
                 run_scope=run_scope,
                 refresh_policy=refresh_policy.value,
+                # План 19 §P3: источник корпуса при ``frozen`` — та же ось, что вошла
+                # в контракт; ``None`` при иной политике (канонизация не нужна: фаза
+                # исполняет только ``frozen``).
+                frozen_source=getattr(args, "frozen_source", None),
                 # План 19 §P2: исполнение политики — тот же объект, что дал ``run_id``.
                 crawl_policy=policy_resolution,
                 # ``--only-failed``: work-set ремонта — отдельный вход Ш5 (не ``urls``:
@@ -1677,7 +1687,7 @@ def configure(sub: Any) -> None:
         "--refresh",
         choices=[policy.value for policy in RefreshPolicy],
         default=None,
-        help="политика обновления корпуса: auto|revalidate|refresh|offline (дефолт auto)",
+        help="политика обновления корпуса: auto|revalidate|refresh|offline|frozen (дефолт auto)",
     )
     p_run.add_argument(
         "--runs-dir",
