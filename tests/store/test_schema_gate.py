@@ -55,6 +55,26 @@ def test_older_schema_is_rejected_with_message(tmp_path: Path) -> None:
     assert "новом каталоге" in message or "удалите" in message
 
 
+def test_previous_schema_3_16_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
+    """P4 плана 19: файл 3.16.0 отвергается гейтом 3.17.0, не изменяя байты.
+
+    Новые колонки ``runs.crawl_policy_digest``/``crawl_policy_json`` объявлены только в
+    ``CREATE TABLE``; шимов ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем —
+    и проверка фиксирует это наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий
+    догон объявил бы чужую схему текущей).
+    """
+    db = _legacy_db(tmp_path / "cohound.db", "3.16.0")
+    before = db.read_bytes()
+
+    with pytest.raises(SchemaVersionMismatch) as excinfo:
+        connect(db)
+
+    message = str(excinfo.value)
+    assert "3.16.0" in message
+    assert "3.17.0" in message
+    assert db.read_bytes() == before
+
+
 def test_newer_schema_is_rejected_too(tmp_path: Path) -> None:
     """Симметрия: файл «из будущего» тоже чужой — читать его нельзя (нет гарантий формы)."""
     db = _legacy_db(tmp_path / "future.db", "99.0.0")
@@ -252,13 +272,23 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     ``corpus_chunks.char_start/char_end`` (смещения куска в тексте документа). Тот же
     запрет на шимы: прогоны ≤ 3.15.0 отвергаются гейтом версии, старые ``runs/*/
     cohound.db`` переносятся пересозданием, а не тихим догоном схемы.
+
+    3.17.0 (P4 плана ``19``) — ``runs.crawl_policy_digest`` (31-е поле контракта: ось
+    политики краула, которую diff обязан назвать) и ``runs.crawl_policy_json`` (её
+    провенанс). Шимов нет: прогоны ≤ 3.16.0 отвергаются гейтом, а не досоздаются.
     """
-    assert SCHEMA_VERSION == "3.16.0"
+    assert SCHEMA_VERSION == "3.17.0"
 
     conn = connect(":memory:")
     try:
         runs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
-        assert {"run_scope", "product_plan_json", "embed_device"} <= runs_cols
+        assert {
+            "run_scope",
+            "product_plan_json",
+            "embed_device",
+            "crawl_policy_digest",
+            "crawl_policy_json",
+        } <= runs_cols
 
         docs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_docs)")}
         assert {"http_status", "reuse_kind"} <= docs_cols

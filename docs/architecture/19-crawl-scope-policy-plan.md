@@ -52,7 +52,7 @@ per-host статуса и без различения дискавери и о�
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`state_sqlite.py:115`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3124` | переиспользует **чанки** ⇒ отказ при смене версий; не пишет `url_state`/`document_version` как «последнюю версию» (`:3173-3177`) — эту дисциплину обязан унаследовать `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
-| per-host[+path] оси и их digest в `run_id` | `domain_profiles.py:49`, `report.py:645` | **не знает продукта** |
+| per-host[+path] оси и их digest в `run_id` | `domain_profiles.py:49`, `report.py:647` | **не знает продукта** |
 | `product → host+path` слои | `crawl_sources.py:48,77,87` | digest информационный (`models.py:1533`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`package/commands.py:2994`) | — образец для CLI политики |
 | видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1149`), `product_skipped` (`corpus.py:3989`), `incomplete_reasons` (`corpus.py:3855`) | нет токена «запрещено политикой» |
@@ -156,7 +156,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 2. Поле входит в `EXECUTION_CONTRACT_FIELDS` (`digests.py:89`), 29 → **30**. Это объявленная
    версионная граница: переснять `PINNED_EXECUTION_CONTRACT_DIGEST`
    (`tests/pipeline/test_corpus_stage_timings.py:78`) и обновить литералы «29 полей»
-   (`AGENTS.md:278`, `09…:3656`, `16-runs-schema-boundary.md:475`, `14…:424`,
+   (`AGENTS.md:303`, `09…:3656`, `16-runs-schema-boundary.md:475`, `14…:424`,
    `docs/status-dictionary.yaml:446`).
 3. **`refresh_policy`** уже в `run_id` отдельным слагаемым (`plan.py:112`); `frozen` — новое
    значение. **`frozen_source` канонизируется**: в материал входит только при
@@ -269,16 +269,23 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 **Названная граница:** живой прогон на реальном `corpus_raw` не делался — проводка доказана на
 фейках; STATE 9 обкатан только тестами.
 
-### P4 — документы и отчёт
+### P4 — документы и отчёт — ✅ сделано
 
-- ⬜ AGENTS §6/§9: режимы, приоритет, `frozen`, `frozen_source`, что входит в `run_id`; запись,
-  что `network_denied` — сетевая политика, а не исключение продукта.
-- ⬜ Манифест/отчёт: эффективная политика, `refresh_policy`, `frozen_source`, `captured_at`,
-  счётчики пропусков по политике, `crawl_policy_unmatched`, и **`crawl_policy_digest` в строке
-  манифеста** (`runs`, как `cohort_digest`/`seeds_digest`): пока его там нет, кросс-цикловый
-  diff честно печатает «различающееся поле не восстановимо из манифеста» — то есть ось есть, а
-  назвать её нельзя. Это дефект диагностики, а не «предел».
-- ⬜ `docs/status-dictionary.yaml` — машинные токены причин (операционное перечисление).
+- ✅ AGENTS §6.1/§9: режимы (`auto|on_request|scheduled|network_denied`), приоритет
+  областей, конфликт вместо тай-брейка, `frozen`/`frozen_source`, что входит в `run_id`
+  (`refresh_policy`, канонизированный `frozen_source`, `crawl_policy_digest`), и отдельно —
+  `network_denied` как **сетевая политика**, а не исключение продукта из сравнения.
+- ✅ Манифест/отчёт: `crawl_policy_digest` — **колонка** `runs.crawl_policy_digest`
+  (SCHEMA `3.16.0` → `3.17.0`), поэтому `hound diff` **называет** ось, а не печатает
+  «различающееся поле не восстановимо из манифеста». Провенанс (`refresh_policy`,
+  канонизированный `frozen_source`, `crawl_policy_unmatched`, `policy_skips`,
+  `policy_zero_reasons`, `captured_at` только для `frozen`, оси `network_mode`/
+  `corpus_source` по различающимся корням) — блок `runs.crawl_policy_json` и поля
+  `RunManifest`; в `run_id` он **не** входит. Предел диагностики остаётся честным для осей,
+  которых на манифесте по-прежнему нет (`extractor_stack`/`prompt_template`/…).
+- ✅ `docs/status-dictionary.yaml` — машинные токены причин/осей (`crawl_policy_tokens`:
+  конфликт, несовпадение, пропуск, отказ сети, `stored_bytes_missing:{n}`,
+  `frozen_reextract_mismatch`, `unknown_roots`, `frozen_no_network_observation`).
 
 ### P5 — сквозная проверка
 

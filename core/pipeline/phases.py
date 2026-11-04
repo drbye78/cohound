@@ -61,6 +61,7 @@ from core.domain.models import (
 from core.pipeline.compute import bundle_for_run
 from core.pipeline.corpus import build_corpus
 from core.pipeline.crawl_frontier import resolve_crawl_limits
+from core.pipeline.crawl_policy import CRAWL_POLICY_SKIPPED_REASON
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
@@ -592,6 +593,90 @@ def _crawl_provenance(
         kinds=sorted(kinds),
         crawl_sources_digest=digest,
     )
+
+
+def _crawl_policy_provenance_facts(
+    store: Any,
+    state: Any,
+    *,
+    run_id: str,
+    products: Sequence[str],
+    refresh_policy: Any,
+) -> dict[str, Any]:
+    """Наблюдённые факты исполнения политики краула для манифеста (план 19 §P4).
+
+    Источники **durable**, а не пересказ состояния в памяти: ``crawl_sessions.provenance_json``
+    (записи корней с ``truncated_reason=crawl_policy_skipped``), ``corpus_coverage`` (причина
+    ``crawl_policy_skipped`` у продукта без источников) и ``corpus_capture`` (время снятия
+    для ``frozen``). Второй формулы нет: всё это уже записано исполнением.
+
+    ``captured_at`` возвращается **только** при ``refresh_policy=frozen``: при прочих
+    политиках снятия не было, и последнее известное чужое значение выдало бы чужое
+    наблюдение за это (A3). Нет записи — ``None``, а не выдуманное время. Значение —
+    **самое позднее** из записей снятия продуктов плана (снятие идёт по продуктам и
+    может разойтись на секунды); полные per-product записи остаются в ``state.db``.
+
+    Любая ошибка чтения изолируется: провенанс информационен и не роняет фазу отчёта.
+    """
+    frozen = str(refresh_policy) == RefreshPolicy.FROZEN.value
+
+    skips: list[dict[str, Any]] = []
+    try:
+        session = store.get_crawl_session(default_session_id(run_id))
+        if session is not None:
+            prov = _session_provenance_json(session)
+            roots = (prov.get("effective_limits") or {}).get("roots") or []
+            for record in roots:
+                if not isinstance(record, Mapping):
+                    continue
+                if str(record.get("truncated_reason")) != CRAWL_POLICY_SKIPPED_REASON:
+                    continue
+                skips.append(
+                    {
+                        "product_id": str(record.get("product_id") or ""),
+                        "root": str(record.get("root") or ""),
+                        "scope": record.get("policy_scope"),
+                        "reasons": [
+                            str(reason)
+                            for reason in (record.get("policy_reasons") or ())
+                        ],
+                        "network_mode": record.get("network_mode"),
+                        "corpus_source": record.get("corpus_source"),
+                    }
+                )
+    except Exception:  # noqa: BLE001, S110 — провенанс не роняет отчёт
+        pass
+    skips.sort(key=lambda item: (item["product_id"], item["root"]))
+
+    zero_reasons: dict[str, str] = {}
+    try:
+        for coverage in store.iter_corpus_coverage(run_id):
+            reason = getattr(coverage, "reason", None)
+            if str(reason) == CRAWL_POLICY_SKIPPED_REASON:
+                zero_reasons[str(coverage.product_id)] = str(reason)
+    except Exception:  # noqa: BLE001, S110 — провенанс не роняет отчёт
+        pass
+
+    captured_at: str | None = None
+    if frozen and state is not None:
+        reader = getattr(state, "last_corpus_capture", None)
+        if callable(reader):
+            values: list[str] = []
+            for product_id in products:
+                try:
+                    capture = reader(product_id)
+                except Exception:  # noqa: BLE001, S112 — провенанс не роняет отчёт
+                    continue
+                if capture is not None and getattr(capture, "captured_at", None):
+                    values.append(str(capture.captured_at))
+            if values:
+                captured_at = max(values)
+
+    return {
+        "captured_at": captured_at,
+        "policy_skips": skips,
+        "policy_zero_reasons": dict(sorted(zero_reasons.items())),
+    }
 
 
 def _preflight_noop(phase: str, reason: str) -> PhaseResult:
@@ -1538,6 +1623,17 @@ def build_phases(
             urls=urls,
             domain_profiles=domain_profiles,
         )
+        # План 19 §P4: провенанс исполнения политики краула — из durable-источников
+        # (сеанс/покрытие/снятие), а не из состояния памяти: resume обязан опубликовать
+        # тот же факт. Идентичность (digest/refresh/frozen) считается ниже тем же объектом,
+        # что дал ``run_id``.
+        policy_facts = _crawl_policy_provenance_facts(
+            ctx.store,
+            state,
+            run_id=plan.run_id,
+            products=plan.products,
+            refresh_policy=refresh_policy,
+        )
         # 16 §3.1: план продуктов — провенанс среза. Значение приходит от composition
         # root, а если его нет — читается из снимка входов плана, куда тот же
         # composition root положил ``onboarding.plan_set.model_dump(mode="json")``
@@ -1623,6 +1719,12 @@ def build_phases(
             # (проекция объявленного входа; см. helper выше).
             cohort_digest=identity_cohort,
             seeds_digest=identity_seeds,
+            # План 19 §P4: эффективная политика краула — тот же объект, что дал
+            # ``crawl_policy_digest`` для ``run_id``; провенанс исполнения — durable-факты.
+            crawl_policy=crawl_policy,
+            refresh_policy=refresh_policy,
+            frozen_source=frozen_source,
+            policy_provenance=policy_facts,
             # Вариант 2: принятия риска, которыми прогон достиг ❌ класса bounded
             # (product → actor). Только продукты плана: подпись продукта вне плана
             # прогоном не использовалась.

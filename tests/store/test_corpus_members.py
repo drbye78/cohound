@@ -73,8 +73,11 @@ def test_schema_version_is_additive_bump() -> None:
     3.16.0 — L1b-2b (план ``18``): ``corpus_chunks.char_start``/``char_end`` — смещения
     куска в тексте документа. Тот же принцип: одна пара колонок провенанса, один bump,
     никаких ``ALTER`` при открытии; файлы ≤ 3.15.0 отвергаются гейтом.
+
+    3.17.0 — P4 плана ``19``: ``runs.crawl_policy_digest``/``crawl_policy_json`` — ось
+    политики краула и её провенанс; файлы ≤ 3.16.0 отвергаются гейтом.
     """
-    assert SCHEMA_VERSION == "3.16.0"
+    assert SCHEMA_VERSION == "3.17.0"
     conn = connect(":memory:")
     try:
         tables = {

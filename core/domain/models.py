@@ -1584,6 +1584,29 @@ class RunManifest(BaseModel):
     #: контракта (``--urls`` полностью заменяет набор и входит сюда). ``None`` — не
     #: записано (legacy-строка), а не «набор пуст»: пустой набор даёт свой дайджест.
     seeds_digest: str | None = None
+    #: План 19 §6.1/§P4: **отпечаток эффективной поверхности решений** политики краула —
+    #: поле ``EXECUTION_CONTRACT_FIELDS``. Проекция того же значения, из которого
+    #: выведен ``run_id`` (второй формулы нет). Без поля на манифесте ``hound diff`` не мог
+    #: назвать ось и печатал «предел диагностики». ``None`` — не записано (строка прошлой
+    #: схемы), а не «политики нет»: пустая поверхность даёт стабильный дайджест.
+    crawl_policy_digest: str | None = None
+    #: План 19 §P4: **эффективная политика прогона** — провенанс, а не идентичность
+    #: (в ``run_id`` входят только ``refresh_policy``, канонизированный ``frozen_source`` и
+    #: ``crawl_policy_digest``). ``refresh_policy`` — исполненная политика наблюдения;
+    #: ``frozen_source`` — канонизированное значение (``n/a`` вне ``frozen``);
+    #: ``crawl_policy_unmatched`` — записи, не совпавшие ни с одним объявленным корнем
+    #: (видимы, но в дайджест не входят); ``policy_skips``/``policy_zero_reasons`` —
+    #: счётчики/продукты, у которых сеть запрещена политикой; ``captured_at`` — время
+    #: записи снятия для ``frozen`` (``None`` для прочих политик: не выдумывается);
+    #: ``crawl_policy_roots`` — корни, где ``network_mode``/``corpus_source`` отличаются от
+    #: ``fetch``/``network`` (только различия, чтобы шум не выдавался за решение).
+    refresh_policy: str | None = None
+    frozen_source: str | None = None
+    crawl_policy_unmatched: list[dict[str, Any]] = Field(default_factory=list)
+    policy_skips: list[dict[str, Any]] = Field(default_factory=list)
+    policy_zero_reasons: dict[str, str] = Field(default_factory=dict)
+    captured_at: str | None = None
+    crawl_policy_roots: list[dict[str, Any]] = Field(default_factory=list)
     #: §13.6/09 §13.6: **срез** прогона — ``full`` | ``only_failed`` | ``product:<id>``.
     #: ``--only-product`` меняет смысл среза, поэтому без поля читатель отчёта не может
     #: отличить полное измерение от частичного, не заглядывая в ``state.db``. Провенанс,

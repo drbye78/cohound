@@ -135,6 +135,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # План 19 §4: режим и область политики краула (операционные перечисления).
         "crawl_policy_mode",
         "crawl_policy_scope",
+        # P4 плана 19: машинные токены причин/осей политики и frozen. Секция — перечень
+        # строк (не enum), поэтому проверяется наличие, а не равенство со схемой.
+        "crawl_policy_tokens",
         # 17 §4.1: состояние durable-очереди передачи документа в конверсию.
         "extract_queue_state",
         # P2a: машинная причина пропуска фазы (PhaseStatus="skipped").

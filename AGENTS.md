@@ -210,6 +210,31 @@ Measured cost of getting this wrong: `edu.postgrespro.ru` produced 563 of 682 it
 that declared only the parent host, while the product documentation root got zero of its own
 items. Widening scope is an `execution_change` and a re-crawl, never a config tweak.
 
+### 6.1 Refresh policy (plan 19)
+
+Crawl policy is **per scope** — `product` | `host` | `root` | `path` (host + prefix inside a
+root) — stored in the operator `state.db` (`crawl_policy`, append-only via `superseded_by`),
+with package defaults in `crawl_policy.yaml`. Resolution is **most specific wins**
+(`path` > `root` > `host` > `product`; longest literal prefix inside a kind); equal
+specificity with different modes is a **conflict** (`crawl_policy_conflict`, `EXIT_USAGE`),
+never a tie-break by clock/insertion order. A record that matches no declared root is
+**visible** (`crawl_policy_unmatched`) and, like `note`/`actor`/`created_at`, does **not**
+enter the digest: a no-op edit must not give every product an `execution_change`.
+
+Modes: `auto` (as before), `on_request` (first discovery automatic, update only when the
+root is named by `--refresh-scope`), `scheduled` (update when `now - observed_at >=
+interval_hours`, resolved to `refresh`/`reuse` — the decision, not the intent, enters the
+digest), `network_denied` (**no** requests for that root). `refresh_policy` (run level:
+`auto|revalidate|refresh|offline|frozen`) composes **inside** the resolved policy:
+`offline` reuses chunks (no requests), `frozen` reuses `corpus_raw` bytes with current
+extraction/chunking and `frozen_source ∈ bytes|chunks` (canonicalised to `n/a` outside
+`frozen`).
+
+`network_denied` is a **network policy, not product exclusion**: the product stays on the
+map, the corpus comes from what is already stored (`chunks`/`bytes`), coverage is incomplete
+and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` and never
+"no seeds".
+
 ## 7. Gates G1–G4
 
 - **What blocks a run.** `NON_BLOCKING_GATES = {G1, G2, G3}` (`core/pipeline/gates.py:79`,
@@ -289,6 +314,15 @@ items. Widening scope is an `execution_change` and a re-crawl, never a config tw
   `run` pick it up together — flag parity is tested. Changing an axis gives a **new `run_id`**
   (`execution_change`), not an edit of the current run; otherwise two different corpora become
   one measurement.
+- **Crawl policy is identity, its execution is provenance.** `crawl_policy_digest`
+  (plan 19 §6.1) is in `EXECUTION_CONTRACT_FIELDS`; `refresh_policy` is a separate `run_id`
+  term and `frozen_source` enters canonicalised. Only those three describe the measurement
+  conditions. `crawl_policy_unmatched`, `policy_skips`, `policy_zero_reasons`, per-root
+  `network_mode`/`corpus_source` and `captured_at` (time of the capture record for `frozen`,
+  `None` otherwise) are **provenance**: visible in the manifest (`runs.crawl_policy_json`),
+  never in `run_id` — otherwise an operator's bookkeeping would rewrite identity. The digest
+  is persisted (`runs.crawl_policy_digest`), so `hound diff` **names** it instead of printing
+  "not recoverable from the manifest".
 - `deploy_profile` is in the contract because `split` executes web work in the DMZ: it ignores
   `document_level`/`pdf_pipeline`, double-fetches (different observed URL set and `complete`),
   and does not extract container members. Same `run_id` over two executions would be a lie

@@ -1147,7 +1147,8 @@ class SqliteStore:
         ``execution_contract_digest``; здесь — чтобы «на чём считались векторы» читалось
         запросом, а не восстановлением из дайджеста), а также ``cohort_digest``/
         ``seeds_digest`` (09 §12.5 — слагаемые ``run_id`` и поля контракта: без них
-        ``hound diff`` не мог назвать ось расхождения и печатал «предел диагностики»).
+        ``hound diff`` не мог назвать ось расхождения и печатал «предел диагностики»),
+        а также ``crawl_policy_digest`` и блок провенанса политики краула (план 19 §P4).
         ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
@@ -1176,7 +1177,8 @@ class SqliteStore:
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?,"
                 " run_scope = ?, product_plan_json = ?, embed_device = ?,"
                 " previous_run_id = ?, change_class = ?, cycle_id = ?,"
-                " cohort_digest = ?, seeds_digest = ?"
+                " cohort_digest = ?, seeds_digest = ?,"
+                " crawl_policy_digest = ?, crawl_policy_json = ?"
                 " WHERE run_id = ?",
                 (
                     manifest.package_version,
@@ -1247,6 +1249,28 @@ class SqliteStore:
                     # печатал «предел диагностики» вместо причины.
                     manifest.cohort_digest,
                     manifest.seeds_digest,
+                    # План 19 §P4: отпечаток политики краула — поле контракта. Пока
+                    # его не было в строке манифеста, ось существовала, но назвать её было
+                    # нельзя; теперь ``hound diff`` называет именно её.
+                    manifest.crawl_policy_digest,
+                    # Провенанс исполнения политики (не идентичность): ``refresh_policy``/
+                    # ``frozen_source``/несовпавшие записи/счётчики пропусков/``captured_at``
+                    # и оси по корням. ``None``-поля — «не записано», не выдумываются.
+                    json.dumps(
+                        {
+                            "refresh_policy": manifest.refresh_policy,
+                            "frozen_source": manifest.frozen_source,
+                            "unmatched": list(manifest.crawl_policy_unmatched),
+                            "policy_skips": list(manifest.policy_skips),
+                            "policy_zero_reasons": dict(
+                                manifest.policy_zero_reasons
+                            ),
+                            "captured_at": manifest.captured_at,
+                            "roots": list(manifest.crawl_policy_roots),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     run_id,
                 ),
             )
@@ -2749,6 +2773,18 @@ class SqliteStore:
         # значит «не записано», а не «когорта пуста».
         cohort_digest = _row_optional(row, "cohort_digest")
         seeds_digest = _row_optional(row, "seeds_digest")
+        # План 19 §P4: отпечаток политики краула (поле контракта) и блок её провенанса.
+        # Колонки аддитивные ⇒ ``_row_optional``: у строки прошлой схемы их нет, и
+        # отсутствие значит «не записано», а не «политики не было».
+        crawl_policy_digest = _row_optional(row, "crawl_policy_digest")
+        crawl_policy_raw = _parse_json_text(_row_optional(row, "crawl_policy_json"))
+        crawl_policy_block = (
+            crawl_policy_raw if isinstance(crawl_policy_raw, dict) else {}
+        )
+        unmatched_block = crawl_policy_block.get("unmatched")
+        skips_block = crawl_policy_block.get("policy_skips")
+        zero_block = crawl_policy_block.get("policy_zero_reasons")
+        roots_block = crawl_policy_block.get("roots")
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -2766,6 +2802,43 @@ class SqliteStore:
             # 09 §12.5: дайджесты, из которых выведен ``run_id`` (поля контракта).
             cohort_digest=cohort_digest,
             seeds_digest=seeds_digest,
+            # План 19 §P4: ось политики краула и её провенанс (не идентичность).
+            crawl_policy_digest=crawl_policy_digest,
+            refresh_policy=(
+                crawl_policy_block.get("refresh_policy")
+                if isinstance(crawl_policy_block.get("refresh_policy"), str)
+                else None
+            ),
+            frozen_source=(
+                crawl_policy_block.get("frozen_source")
+                if isinstance(crawl_policy_block.get("frozen_source"), str)
+                else None
+            ),
+            crawl_policy_unmatched=(
+                [dict(item) for item in unmatched_block if isinstance(item, dict)]
+                if isinstance(unmatched_block, list)
+                else []
+            ),
+            policy_skips=(
+                [dict(item) for item in skips_block if isinstance(item, dict)]
+                if isinstance(skips_block, list)
+                else []
+            ),
+            policy_zero_reasons=(
+                {str(key): str(value) for key, value in zero_block.items()}
+                if isinstance(zero_block, dict)
+                else {}
+            ),
+            captured_at=(
+                crawl_policy_block.get("captured_at")
+                if isinstance(crawl_policy_block.get("captured_at"), str)
+                else None
+            ),
+            crawl_policy_roots=(
+                [dict(item) for item in roots_block if isinstance(item, dict)]
+                if isinstance(roots_block, list)
+                else []
+            ),
             focus_modules=focus_modules,
             index_build_id=row["index_build_id"],
             embed_model_id=row["embed_model_id"],

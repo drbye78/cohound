@@ -106,6 +106,7 @@ from core.pipeline.partial_docs import (
     partial_docs_summary,
     write_partial_docs_artifact,
 )
+from core.pipeline.refresh_modes import canonical_frozen_source
 from core.pipeline.support_quality import (
     support_quality,
     write_support_quality_artifact,
@@ -142,6 +143,7 @@ __all__ = [
     "collect_run_products",
     "compact_search_effort",
     "crawl_control_digest",
+    "crawl_policy_provenance",
     "declared_identity_digests",
     "diff_boundary_violations",
     "manifest_payload",
@@ -804,6 +806,101 @@ def declared_identity_digests(
     return cohort, _seeds_digest(seeds_config)
 
 
+def crawl_policy_provenance(
+    *,
+    refresh_policy: Any,
+    frozen_source: str | None,
+    crawl_policy: Any = None,
+    captured_at: str | None = None,
+    policy_skips: Iterable[Mapping[str, Any]] = (),
+    policy_zero_reasons: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Провенанс эффективной политики краула для манифеста (план 19 §P4).
+
+    Возвращает **провенанс**, а не материал идентичности: в ``run_id`` входят только
+    ``refresh_policy``, канонизированный ``frozen_source`` и ``crawl_policy_digest``
+    (последний — отдельной колонкой ``runs.crawl_policy_digest``); всё остальное здесь
+    (несовпавшие записи, счётчики пропусков, ``captured_at``, оси по корням) описывает
+    исполнение и в отпечаток не входит.
+
+    ``crawl_policy`` — тот же объект :class:`~core.pipeline.crawl_policy.CrawlPolicyResolution`,
+    из которого выведен ``crawl_policy_digest``: второй формулы нет. ``captured_at``
+    берётся из записи снятия **только** при ``refresh_policy=frozen``; для прочих политик
+    возвращается ``None`` — время снятия там не наблюдено, и подставлять последнее
+    известное значило бы выдать чужое наблюдение за это.
+
+    ``crawl_policy_roots`` — только корни, где ``network_mode``/``corpus_source``
+    отличаются от ``fetch``/``network``: перечислять «как обычно» значило бы утопить
+    решение в шуме.
+    """
+    normalized = (
+        None if refresh_policy is None else str(refresh_policy)
+    )
+    if normalized is None:
+        frozen_value = None
+    else:
+        frozen_value = canonical_frozen_source(normalized, frozen_source)
+    decisions = tuple(getattr(crawl_policy, "decisions", ()) or ())
+    roots: list[dict[str, Any]] = []
+    for decision in decisions:
+        network_mode = getattr(getattr(decision, "network_mode", None), "value", None)
+        corpus_source = getattr(
+            getattr(decision, "corpus_source", None), "value", None
+        )
+        if network_mode == "fetch" and corpus_source == "network":
+            continue
+        roots.append(
+            {
+                "product_id": getattr(decision, "product_id", None),
+                "scope": getattr(decision, "scope", None),
+                "host": getattr(decision, "host", None),
+                "path": getattr(decision, "path", None),
+                "mode": getattr(getattr(decision, "mode", None), "value", None),
+                "decision": getattr(decision, "decision", None),
+                "network_mode": network_mode,
+                "corpus_source": corpus_source,
+                "requested": bool(getattr(decision, "requested", False)),
+                "reason": getattr(decision, "reason", None),
+            }
+        )
+    roots.sort(key=lambda item: (str(item["scope"]), str(item["decision"])))
+    unmatched = [
+        {
+            "product_id": getattr(record, "product_id", None),
+            "scope_kind": getattr(
+                getattr(record, "scope_kind", None), "value", None
+            ),
+            "host": getattr(record, "host", None),
+            "path": getattr(record, "path", None),
+            "mode": getattr(getattr(record, "mode", None), "value", None),
+            "source": getattr(record, "source", None),
+        }
+        for record in (getattr(crawl_policy, "unmatched", ()) or ())
+    ]
+    unmatched.sort(
+        key=lambda item: (
+            str(item["product_id"]),
+            str(item["scope_kind"]),
+            str(item["host"]),
+            str(item["path"]),
+        )
+    )
+    return {
+        # Идентичность (проекция объявленного входа, не второй расчёт).
+        "digest": getattr(crawl_policy, "digest", None),
+        "refresh_policy": normalized,
+        "frozen_source": frozen_value,
+        # Провенанс исполнения.
+        "unmatched": unmatched,
+        "policy_skips": [dict(item) for item in policy_skips],
+        "policy_zero_reasons": {
+            str(key): str(value) for key, value in (policy_zero_reasons or {}).items()
+        },
+        "captured_at": captured_at if normalized == "frozen" else None,
+        "roots": roots,
+    }
+
+
 def build_manifest(
     *,
     inputs: RunInputs,
@@ -841,6 +938,10 @@ def build_manifest(
     cycle_id: str | None = None,
     cohort_digest: str | None = None,
     seeds_digest: str | None = None,
+    crawl_policy: Any = None,
+    refresh_policy: Any = None,
+    frozen_source: str | None = None,
+    policy_provenance: Mapping[str, Any] | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -942,6 +1043,12 @@ def build_manifest(
       считает их теми же функциями и на тех же объявленных входах, что composition root для
       ``run_id``); здесь не пересчитываются — манифест публикует проекцию входа, а не второй
       расчёт. Без них ``hound diff`` не мог назвать ось расхождения контракта.
+    * План 19 §P4 — ``crawl_policy`` (тот же :class:`CrawlPolicyResolution`, что дал
+      ``crawl_policy_digest`` для ``run_id``), ``refresh_policy``/``frozen_source``
+      (исполненная политика и её канонизированное значение) и ``policy_provenance``
+      (наблюдённые ``captured_at``/``policy_skips``/``policy_zero_reasons``). Дайджест и
+      несовпавшие записи — проекция объекта; провенанс — отдельный блок манифеста и в
+      ``run_id`` не входит.
 
     Функция детерминирована: все встраиваемые JSON-фрагменты сериализуются
     ``sort_keys=True`` (R7/§13), списки нормализуются сортировкой; единственный
@@ -1191,6 +1298,26 @@ def build_manifest(
         if profile is not None:
             extra["publishability"] = asdict(profile)
 
+    # План 19 §P4: провенанс политики краула. ``crawl_policy`` — тот же объект, что дал
+    # ``crawl_policy_digest`` для ``run_id`` (второй формулы нет); ``policy_provenance``
+    # несёт **наблюдённые** факты исполнения (снятие/пропуски), собранные фазой отчёта из
+    # durable-источников. Идентичность (digest/refresh/frozen) и провенанс (unmatched/
+    # счётчики/оси) не смешиваются: в ``run_id`` входит только первое.
+    policy_block = dict(policy_provenance or {})
+    if crawl_policy is not None or refresh_policy is not None:
+        resolved_policy = crawl_policy_provenance(
+            refresh_policy=refresh_policy,
+            frozen_source=frozen_source,
+            crawl_policy=crawl_policy,
+            captured_at=policy_block.get("captured_at"),
+            policy_skips=policy_block.get("policy_skips") or (),
+            policy_zero_reasons=policy_block.get("policy_zero_reasons") or {},
+        )
+    elif policy_block:
+        resolved_policy = policy_block
+    else:
+        resolved_policy = {}
+
     return RunManifest(
         run_id=str(getattr(plan, "run_id", "")),
         case_id=str(getattr(run, "case_id", "")),
@@ -1249,6 +1376,18 @@ def build_manifest(
         # вызов): ``hound diff`` тогда честно называет ось недоступной, а не выдумывает.
         cohort_digest=cohort_digest,
         seeds_digest=seeds_digest,
+        # План 19 §P4: ось политики краула — проекция того же объекта, что дал ``run_id``;
+        # остальные поля — провенанс исполнения (в идентичность не входят).
+        crawl_policy_digest=resolved_policy.get("digest"),
+        refresh_policy=resolved_policy.get("refresh_policy"),
+        frozen_source=resolved_policy.get("frozen_source"),
+        crawl_policy_unmatched=list(resolved_policy.get("unmatched") or []),
+        policy_skips=list(resolved_policy.get("policy_skips") or []),
+        policy_zero_reasons=dict(
+            resolved_policy.get("policy_zero_reasons") or {}
+        ),
+        captured_at=resolved_policy.get("captured_at"),
+        crawl_policy_roots=list(resolved_policy.get("roots") or []),
         focus_modules=focus_modules,
         index_build_id=resolved_index_build_id,
         embed_model_id=_first_present(
@@ -2339,7 +2478,7 @@ _CONTRACT_FIELD_GETTERS: dict[str, Callable[[RunManifest], Any]] = {
 #: У остальных полей ``None`` — законное состояние (реестров нет, секции ``crawl`` нет), и
 #: переход ``None → значение`` там действительно означает смену условий измерения.
 _CONTRACT_FIELDS_ALWAYS_RECORDED: frozenset[str] = frozenset(
-    {"cohort_digest", "seeds_digest"}
+    {"cohort_digest", "seeds_digest", "crawl_policy_digest", "frozen_source"}
 )
 
 
@@ -2359,7 +2498,10 @@ def _contract_field_diagnostics(
     обеих сторон **и** значение записано. ``cohort_digest``/``seeds_digest`` теперь
     несутся манифестом (``runs.cohort_digest``/``runs.seeds_digest``), поэтому
     различаются наравне с прочими; недоступными они остаются только у строки прошлой
-    схемы, где колонки нет, — и это называется, а не выдумывается (A3).
+    схемы, где колонки нет, — и это называется, а не выдумывается (A3). То же у
+    ``crawl_policy_digest`` (план 19 §P4: колонка ``runs.crawl_policy_digest``) и
+    канонизированного ``frozen_source``: ось, записанная на манифесте, называется, а не
+    попадает в «предел диагностики».
 
     Сравнение значений — через :func:`_boundary_value` (та же нормализация
     ``llm_scenarios``, что и в legacy-ветке).

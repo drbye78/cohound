@@ -672,7 +672,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 Записаны здесь, чтобы вторая редакция не повторяла ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2038`, а не `:1970`; `reuse_kind` в `url_state` —
+`core/pipeline/report.py:2468`, а не `:1970`; `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:106`, а не `:93` (там комментарий); `_PARTITION_SCHEMA` —
 `core/pipeline/corpus_index.py:48`; `composition.py` исключён из состава (§8);
 «`embed_device` в `extra` **и** в корне» — одно место, а не два (§5.1); «геттер в

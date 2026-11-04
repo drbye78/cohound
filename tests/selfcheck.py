@@ -2680,9 +2680,10 @@ def _report_gates() -> None:
 
         # Расхождение контракта — причина ``execution_change`` по дайджесту + честная
         # детализация: доступные на манифесте поля совпадают, а ``cohort_digest``/
-        # ``seeds_digest``/``prompt_template`` на ``RunManifest`` отсутствуют — предел
-        # диагностики назван,
-        # причина не выдумывается (09 §12.5).
+        # ``seeds_digest``/``prompt_template``/``crawl_policy_digest``/``frozen_source``
+        # этой парой **не записаны** (строка прошлой схемы) — предел диагностики назван,
+        # причина не выдумывается (09 §12.5). Записанная ось политики называется —
+        # ``tests/pipeline/test_manifest_crawl_policy.py``.
         contract_reasons = diff_boundary_violations(
             _manifest("ib_a", execution_contract_digest="ec_1"),
             _manifest("ib_a", execution_contract_digest="ec_2"),

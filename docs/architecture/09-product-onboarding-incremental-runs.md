@@ -3509,7 +3509,7 @@ CREATE TABLE corpus_coverage (
   `core/pipeline/normalize.py:145` — имя сменилось вместе с `scope_attested_by` →
   `scope_acceptance`) и передаёт их в Ш6 как `scope_acceptance`
   **per product** (покрытие per product ⇒ подпись per product; чтение —
-  `core/pipeline/phases.py:987`, передача — `core/pipeline/phases.py:1235`). Продукт без подписи ведёт себя ровно как раньше: `❌` при
+  `core/pipeline/phases.py:1174`, передача — `core/pipeline/phases.py:1731`). Продукт без подписи ведёт себя ровно как раньше: `❌` при
   неполном корпусе не публикуется (ячейка остаётся `pending`-кандидатом с `review_reason`).
 - **Почему не `gate_decisions`:** гейт per-run, а профиль/аттестация квази-константны
   (недельные прогоны; смена когорты/ролевой матрицы — 2–5 раз в год). Переписывать подпись
