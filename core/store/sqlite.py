@@ -67,7 +67,15 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: нужна, потому что манифест (и ``hound report``) собирается позже фазы ``corpus`` и обязан
 #: читаться без ``state.db``. Шимов нет: файлы ≤ 3.17.0 отвергаются гейтом версии, прогон
 #: переносится пересозданием.
-SCHEMA_VERSION = "3.18.0"
+#:
+#: 3.19.0 (F2 плана ``20``, **один** bump на таблицу провенанса): ``corpus_artifact`` —
+#: даты наблюдений артефактов корпуса **в БД прогона**. Durable-источник наблюдений
+#: остаётся ``state.db`` (``capture``/``url_state``), но Ш9 и пост-хок ``hound report``
+#: открывают только ``runs/{run_id}/cohound.db``: без проекции дата артефакта была бы
+#: недоступна отчёту, а ``stale_roots`` (план 20 §6) требует ещё и связи артефакта с
+#: корнем, которой у ``corpus_docs`` нет. Шимов нет: файлы ≤ 3.18.0 отвергаются гейтом
+#: версии, прогон переносится пересозданием.
+SCHEMA_VERSION = "3.19.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -223,6 +231,27 @@ CREATE TABLE IF NOT EXISTS corpus_doc_version (
     doc_version_id TEXT PRIMARY KEY,
     product_id     TEXT NOT NULL,
     doc_id         TEXT NOT NULL
+);
+
+-- План 20 §F2: даты наблюдений артефактов корпуса в БД **прогона**. Durable-источник
+-- наблюдений — ``state.db`` (``capture``/``url_state``); здесь — его проекция, потому что
+-- Ш9 и пост-хок ``hound report`` открывают только эту БД (``report.py``: манифест читается
+-- «без заглядывания в state.db»). ``url_key`` — ключ адреса :func:`snapshot_url_key`, тот
+-- же, по которому адрес входит в снимок корпуса, поэтому строка и снимок не расходятся
+-- формой записи. ``root_url`` — корень снятия, на которое ссылается ``capture_id``: связь
+-- артефакта с корнем нужна ``stale_roots`` (§6) и у ``corpus_docs`` её нет.
+-- Все четыре «датных» поля NULL-able, и ``NULL`` = «наблюдения нет» (никогда ``''``).
+-- ``doc_version_id = ''`` — «версия не записана» (legacy-путь), это факт, а не пропуск.
+CREATE TABLE IF NOT EXISTS corpus_artifact (
+    run_id         TEXT NOT NULL,
+    product_id     TEXT NOT NULL,
+    url_key        TEXT NOT NULL,
+    doc_version_id TEXT,
+    observed_at    TEXT,
+    observed_how   TEXT,
+    capture_id     TEXT,
+    root_url       TEXT,
+    PRIMARY KEY (run_id, product_id, url_key)
 );
 
 CREATE TABLE IF NOT EXISTS corpus_chunks (
@@ -599,6 +628,9 @@ CREATE INDEX IF NOT EXISTS idx_corpus_members_doc     ON corpus_members(doc_id);
 -- при резолве ``source_id``, где второй сегмент несёт версию.
 CREATE INDEX IF NOT EXISTS idx_corpus_doc_version_doc
     ON corpus_doc_version(product_id, doc_id);
+-- План 20 §F2: даты артефактов читаются по продукту прогона (отчёт/``stale_roots``).
+CREATE INDEX IF NOT EXISTS idx_corpus_artifact_product
+    ON corpus_artifact(run_id, product_id);
 
 -- B3 (schema 3.10.0): наблюдения спуска — прогноз (до извлечения) + исход.
 -- Запись существует для **каждого** контейнера, включая пустой и нечитаемый: «спуск

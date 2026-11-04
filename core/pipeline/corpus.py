@@ -362,6 +362,7 @@ from core.ports.state import (
     IndexPartitionRow,
     ProductStatePort,
 )
+from core.ports.store import CorpusArtifactRow
 from core.ports.types import (
     FetchMode,
     FetchPlan,
@@ -855,6 +856,100 @@ def _product_corpus_as_of(
     if not dates:
         return None
     return {"from": min(dates), "to": max(dates)}
+
+
+def _corpus_artifact_rows(
+    run_id: str | None,
+    product_id: str,
+    artifacts: Sequence[tuple[str, str]],
+    observation_rows: Sequence[Any],
+    captures: Sequence[CorpusCaptureRef],
+) -> list[CorpusArtifactRow]:
+    """Строки ``corpus_artifact`` продукта: артефакт → его наблюдение (план 20 §F2).
+
+    Строится из **уже прочитанного** на границе продукта: ``snapshot_artifacts`` (адрес +
+    версия документа), строк ``url_state`` (наблюдение) и снятия продукта. Второго чтения
+    ``state.db`` и второго расчёта нет: отчёт обязан видеть те же величины, что и снимок.
+
+    Адрес строки — ``snapshot_url_key(url)``, тот же ключ, по которому адрес входит в
+    снимок: иначе ``corpus_docs.url`` (percent-encoded) и ``url_state.url`` (декодированный)
+    дали бы две строки на один артефакт (измерено 05.11.2026). Совпадение с наблюдением —
+    сначала по сырому адресу строки состояния, затем по канонической форме: канонический
+    адрес документа выбирается ``min(url)`` запросом и может отличаться формой записи.
+
+    Наблюдение — **кортеж** ``(observed_at, observed_how, capture_id)``: строка состояния
+    без ``observed_at`` наблюдением не является (отказ/запись до появления колонок), поэтому
+    все четыре датных поля остаются ``NULL``. Документ в корпусе — факт, и строка остаётся.
+
+    ``root_url`` — корень снятия, на которое ссылается ``capture_id``. Нет наблюдения или
+    снятия — ``NULL``: корень не выдумывается.
+
+    Одна строка на адрес (PK ``(run_id, product_id, url_key)``). Если у документа в этом
+    прогоне несколько версий (уровень извлечения входит в ``doc_version_id``), артефакты
+    отсортированы, и остаётся первая — выбор функции содержимого, а не порядка обхода.
+    """
+    if run_id is None:
+        # Идентичность строки — ``(run_id, product, адрес)``; без прогона писать некуда,
+        # а ``run_id`` здесь ``None`` только у вызова без стор-провенанса.
+        return []
+    observing = [row for row in observation_rows if getattr(row, "observed_at", None)]
+    by_url = {str(row.url): row for row in observing}
+    by_key = {snapshot_url_key(str(row.url)): row for row in observing}
+    root_by_capture = {capture.capture_id: capture.root_url for capture in captures}
+
+    rows: dict[str, CorpusArtifactRow] = {}
+    for url, doc_version_id in artifacts:
+        key = snapshot_url_key(url)
+        if key in rows:
+            continue
+        observed = by_url.get(url) or by_key.get(key)
+        if observed is None:
+            rows[key] = CorpusArtifactRow(
+                run_id=run_id,
+                product_id=product_id,
+                url_key=key,
+                doc_version_id=doc_version_id,
+            )
+            continue
+        capture_id = getattr(observed, "capture_id", None)
+        rows[key] = CorpusArtifactRow(
+            run_id=run_id,
+            product_id=product_id,
+            url_key=key,
+            doc_version_id=doc_version_id,
+            observed_at=str(observed.observed_at),
+            observed_how=getattr(observed, "observed_how", None),
+            capture_id=capture_id,
+            root_url=None if capture_id is None else root_by_capture.get(capture_id),
+        )
+    return sorted(rows.values(), key=lambda row: row.url_key)
+
+
+def _persist_corpus_artifacts(
+    store: Any,
+    run_id: str | None,
+    product_id: str,
+    rows: list[CorpusArtifactRow],
+    errors: list[str],
+) -> None:
+    """Пишет строки ``corpus_artifact`` продукта (план 20 §F2), изолируя сбой в ``errors``.
+
+    Носитель нужен Ш9 и пост-хоку ``hound report``: они открывают только БД прогона.
+    Сбой записи не роняет фазу — снимок и его даты вторичны к корпусу (тот же контракт
+    изоляции state-записей, что у ``corpus_capture``/``corpus_snapshot``). Метод читается
+    через ``getattr``: duck-typed стороны, не реализующие проекцию, не обязаны её иметь.
+    """
+    if store is None or run_id is None:
+        return
+    writer = getattr(store, "replace_corpus_artifacts", None)
+    if not callable(writer):
+        return
+    try:
+        writer(run_id, product_id, rows)
+    except Exception as exc:  # noqa: BLE001 — провенанс вторичен к корпусу
+        errors.append(
+            f"{product_id}: corpus_artifact: {type(exc).__name__}: {exc}"
+        )
 
 
 def _register_composition_state(
@@ -4662,20 +4757,39 @@ def _build_corpus(
         if snapshot_product_id is not None:
             artifact_urls = [url for url, _version in snapshot_artifacts]
             observation_rows = _product_observation_rows(state, product_id, errors)
+            capture_refs = _product_capture_refs(
+                state,
+                product_id,
+                run_id,
+                artifact_urls,
+                observation_rows,
+                errors,
+            )
             product_snapshots[product_id] = {
                 "snapshot_product_id": snapshot_product_id,
-                "captures": _product_capture_refs(
-                    state,
-                    product_id,
-                    run_id,
-                    artifact_urls,
-                    observation_rows,
-                    errors,
-                ),
+                "captures": capture_refs,
                 "corpus_as_of": _product_corpus_as_of(
                     artifact_urls, observation_rows
                 ),
             }
+            # План 20 §F2: те же наблюдения — в **БД прогона**, потому что Ш9 и пост-хок
+            # ``hound report`` открывают только её. Строится из уже прочитанного (второго
+            # чтения ``state.db`` и второго расчёта нет), пишется идемпотентной заменой
+            # набора продукта: resume/``--reset`` не плодит строк. Сбой изолирован в
+            # ``errors`` — провенанс вторичен к корпусу.
+            _persist_corpus_artifacts(
+                store,
+                run_id,
+                product_id,
+                _corpus_artifact_rows(
+                    run_id,
+                    product_id,
+                    snapshot_artifacts,
+                    observation_rows,
+                    capture_refs,
+                ),
+                errors,
+            )
 
         # 16 §3.2: финальная строка продукта — после Pass B (там же, где ``corpus_coverage``).
         # Числа — уже посчитанные фазой величины: документы (``product_docs_total`` и

@@ -79,8 +79,12 @@ def test_schema_version_is_additive_bump() -> None:
 
     3.18.0 — F1 плана ``20``: ``runs.corpus_snapshot_json`` — снимок корпуса прогона
     (провенанс, а не объявленный вход); файлы ≤ 3.17.0 отвергаются гейтом.
+
+    3.19.0 — F2 плана ``20``: таблица ``corpus_artifact`` — даты наблюдений артефактов в
+    БД прогона (проекция ``state.db`` для Ш9/``hound report``); файлы ≤ 3.18.0
+    отвергаются гейтом.
     """
-    assert SCHEMA_VERSION == "3.18.0"
+    assert SCHEMA_VERSION == "3.19.0"
     conn = connect(":memory:")
     try:
         tables = {

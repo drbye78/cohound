@@ -57,6 +57,34 @@ class RunIndexRef:
     index_build_id: str | None = None
 
 
+@dataclass(frozen=True)
+class CorpusArtifactRow:
+    """Строка ``corpus_artifact``: проекция наблюдения артефакта в БД прогона (план 20 §F2).
+
+    Зачем проекция, если наблюдение уже durable. Наблюдение живёт в ``state.db``
+    (``capture``/``url_state``), а Ш9 и пост-хок ``hound report`` открывают только
+    ``runs/{run_id}/cohound.db``. Без этой строки дата артефакта в отчёте либо
+    выдумывалась бы, либо требовала второго источника, которого у отчёта нет.
+
+    Поля-даты ``None`` — **наблюдения нет** (ровно ``None``, никогда ``''``):
+    артефакт мог войти в корпус без сетевого наблюдения (adoption, субстрат без
+    ``observed_at``). Документ в корпусе при этом — факт, поэтому строка существует и без
+    даты. ``doc_version_id == ''`` — «версия не записана» (legacy-путь), а не пропуск
+    строки. ``root_url`` — корень снятия, на которое ссылается ``capture_id`` (``None``,
+    если наблюдения/снятия нет): связь артефакта с корнем нужна ``stale_roots`` (§6).
+    """
+
+    run_id: str
+    product_id: str
+    #: Ключ адреса :func:`core.pipeline.digests.snapshot_url_key` — тот же, что в снимке.
+    url_key: str
+    doc_version_id: str | None = None
+    observed_at: str | None = None
+    observed_how: str | None = None
+    capture_id: str | None = None
+    root_url: str | None = None
+
+
 class PlanInputsConflict(ValueError):
     """Снимок ``run_inputs`` прогона уже записан с **другим** ``payload_sha256`` (O11).
 
@@ -276,6 +304,36 @@ class StorePort(Protocol):
 
     # -- корпус (Ш5, W7) -------------------------------------------------- #
     def upsert_corpus_doc(self, doc: CorpusDoc) -> None: ...
+
+    def replace_corpus_artifacts(
+        self,
+        run_id: str,
+        product_id: str,
+        rows: Iterable[CorpusArtifactRow],
+    ) -> None:
+        """Заменяет строки ``corpus_artifact`` продукта прогона (план 20 §F2).
+
+        **Замена, а не upsert:** набор артефактов продукта — функция его корпуса, и
+        повторный проход (resume/``--reset``) обязан дать тот же набор, а не накопить
+        прежний. Пустой ``rows`` — законный исход («в корпусе продукта нет документов»):
+        строки продукта удаляются, отказом это не является.
+
+        Сбой записи изолирует вызывающий (снимок и провенанс вторичны к корпусу): здесь
+        исключения не глотаются, а пробрасываются.
+        """
+        ...
+
+    def iter_corpus_artifacts(
+        self, run_id: str, product_id: str | None = None
+    ) -> Iterator[CorpusArtifactRow]:
+        """Итерирует строки ``corpus_artifact`` прогона (порядок ``product_id, url_key``).
+
+        Единственный источник дат артефактов для Ш9/``hound report``: ``state.db`` отчёт
+        не открывает. ``None``-даты читаются как «наблюдения нет» и не заменяются ничем;
+        пустой итератор — у прогона/продукта артефактов нет (в том числе у прогона,
+        записанного до 3.19.0: тогда таблица отсутствует и строк нет).
+        """
+        ...
 
     def set_corpus_doc_url(self, doc_id: str, url: str) -> bool:
         """Переписывает канонический адрес документа (17 §6, F3).

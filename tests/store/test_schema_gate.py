@@ -55,23 +55,23 @@ def test_older_schema_is_rejected_with_message(tmp_path: Path) -> None:
     assert "новом каталоге" in message or "удалите" in message
 
 
-def test_previous_schema_3_17_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
-    """F1 плана 20: файл 3.17.0 отвергается гейтом 3.18.0, не изменяя байты.
+def test_previous_schema_3_18_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
+    """F2 плана 20: файл 3.18.0 отвергается гейтом 3.19.0, не изменяя байты.
 
-    Новая колонка ``runs.corpus_snapshot_json`` объявлена только в ``CREATE TABLE``;
+    Таблица ``corpus_artifact`` объявлена только в ``CREATE TABLE``;
     шимов ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем — и проверка
     фиксирует это наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий догон
     объявил бы чужую схему текущей).
     """
-    db = _legacy_db(tmp_path / "cohound.db", "3.17.0")
+    db = _legacy_db(tmp_path / "cohound.db", "3.18.0")
     before = db.read_bytes()
 
     with pytest.raises(SchemaVersionMismatch) as excinfo:
         connect(db)
 
     message = str(excinfo.value)
-    assert "3.17.0" in message
     assert "3.18.0" in message
+    assert "3.19.0" in message
     assert db.read_bytes() == before
 
 
@@ -281,8 +281,12 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     (``corpus_snapshot_id``, снятия прогона, ``corpus_as_of``). Это **провенанс**, а не
     объявленный вход: он известен только после краула и в ``run_id`` не входит. Шимов нет:
     прогоны ≤ 3.17.0 отвергаются гейтом, а не досоздаются.
+
+    3.19.0 (F2 плана ``20``) — таблица ``corpus_artifact``: даты наблюдений артефактов в
+    БД **прогона** (проекция ``state.db``), потому что Ш9/``hound report`` открывают только
+    её. Тот же запрет на шимы: прогоны ≤ 3.18.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.18.0"
+    assert SCHEMA_VERSION == "3.19.0"
 
     conn = connect(":memory:")
     try:
@@ -307,6 +311,21 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert "run_product" in tables
+        # 3.19.0 (F2 плана 20): даты артефактов — в БД прогона, не только в ``state.db``.
+        assert "corpus_artifact" in tables
+        artifact_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(corpus_artifact)")
+        }
+        assert {
+            "run_id",
+            "product_id",
+            "url_key",
+            "doc_version_id",
+            "observed_at",
+            "observed_how",
+            "capture_id",
+            "root_url",
+        } <= artifact_cols
         product_cols = {
             r["name"] for r in conn.execute("PRAGMA table_info(run_product)")
         }

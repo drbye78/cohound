@@ -57,7 +57,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
-from core.ports.store import PlanInputsConflict, RunIndexRef
+from core.ports.store import CorpusArtifactRow, PlanInputsConflict, RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite import SchemaVersionMismatch, connect, connect_read_only
 from core.store.sqlite_rows import (
@@ -3240,6 +3240,91 @@ class SqliteStore:
                 (product_id,),
             )
         }
+
+    def replace_corpus_artifacts(
+        self,
+        run_id: str,
+        product_id: str,
+        rows: Iterable[CorpusArtifactRow],
+    ) -> None:
+        """Заменяет строки ``corpus_artifact`` продукта прогона (план 20 §F2).
+
+        **Замена, а не upsert.** Набор артефактов продукта — функция его корпуса, поэтому
+        повторный проход (resume/``--reset``) обязан дать тот же набор, а не накопить
+        прежний: upsert оставил бы строки артефактов, выпавших из корпуса, и отчёт назвал
+        бы дату того, чего в прогоне нет. ``DELETE`` и вставка — в одной транзакции: сбой
+        посередине не оставляет продукт без дат.
+
+        Пустой ``rows`` — законный исход («в корпусе продукта нет документов»): строки
+        продукта удаляются. ``None`` в датных полях пишется как ``NULL`` (наблюдения нет),
+        а не ``''``: пустая строка была бы датой, которой не существует (A3).
+        """
+        payload = [
+            (
+                row.run_id,
+                row.product_id,
+                row.url_key,
+                row.doc_version_id,
+                row.observed_at,
+                row.observed_how,
+                row.capture_id,
+                row.root_url,
+            )
+            for row in rows
+        ]
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM corpus_artifact WHERE run_id = ? AND product_id = ?",
+                (run_id, product_id),
+            )
+            if payload:
+                self.conn.executemany(
+                    "INSERT INTO corpus_artifact"
+                    " (run_id, product_id, url_key, doc_version_id, observed_at,"
+                    "  observed_how, capture_id, root_url)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT(run_id, product_id, url_key) DO UPDATE SET"
+                    "  doc_version_id = excluded.doc_version_id,"
+                    "  observed_at = excluded.observed_at,"
+                    "  observed_how = excluded.observed_how,"
+                    "  capture_id = excluded.capture_id,"
+                    "  root_url = excluded.root_url",
+                    payload,
+                )
+
+    def iter_corpus_artifacts(
+        self, run_id: str, product_id: str | None = None
+    ) -> Iterator[CorpusArtifactRow]:
+        """Строки ``corpus_artifact`` прогона (порядок ``product_id, url_key``).
+
+        Единственный источник дат артефактов для Ш9/``hound report``: ``state.db`` отчёт
+        не открывает (план 20 §F2). Читается через ``_table_columns``: в БД прошлой версии
+        таблицы нет, и «строк нет» — не отказ чтения, а честное «даты не записаны».
+        """
+        if "url_key" not in self._table_columns("corpus_artifact"):
+            return
+        clauses = ["run_id = ?"]
+        params: list[Any] = [run_id]
+        if product_id is not None:
+            clauses.append("product_id = ?")
+            params.append(product_id)
+        sql = (
+            "SELECT run_id, product_id, url_key, doc_version_id, observed_at,"  # noqa: S608
+            " observed_how, capture_id, root_url FROM corpus_artifact"
+            f" WHERE {' AND '.join(clauses)}"  # WHERE из литералов, значения — bind
+            " ORDER BY product_id, url_key"
+        )
+        for row in self.conn.execute(sql, tuple(params)):
+            yield CorpusArtifactRow(
+                run_id=str(row["run_id"]),
+                product_id=str(row["product_id"]),
+                url_key=str(row["url_key"]),
+                doc_version_id=row["doc_version_id"],
+                observed_at=row["observed_at"],
+                observed_how=row["observed_how"],
+                capture_id=row["capture_id"],
+                root_url=row["root_url"],
+            )
 
     @staticmethod
     def _row_to_resolved(row: sqlite3.Row) -> ResolvedSource:
