@@ -596,7 +596,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    может отличить полное измерение от среза, не заглянув в `state.db`. Сегодня
    `run_scope` не хранится нигде, кроме материала `run_id` (`core/pipeline/plan.py:94`;
    прямо зафиксировано в `core/pipeline/state_adopt.py:33`, `:117`), а `ProductPlanSet`
-   существует (`core/domain/models.py:2314`) и не персистится ни разу — единственное
+   существует (`core/domain/models.py:2758`) и не персистится ни разу — единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей.
 4. **Правило `❌` (часть той же полосы, `09` §11.2).** Проверка рядом с
