@@ -238,7 +238,7 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   (сверяет множество значений enum с ключами таблицы) и
   `test_dispatch_has_no_silent_default_for_unknown_policy`.
 - ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
-  (`corpus_ingest.py:3573`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
+  (`corpus_ingest.py:3575`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
   (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
 - ✅ **Дрейф пере-извлечения виден**: промах кэша с другим `content_hash` → токен
   `frozen_reextract_mismatch` (`corpus_ingest.py:3394`), документ **не публикуется** и в

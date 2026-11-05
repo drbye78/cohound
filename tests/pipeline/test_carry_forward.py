@@ -53,6 +53,7 @@ from core.pipeline.report import collect_cell_origins
 from core.pipeline.runner import Ports
 from core.pipeline.state_sync import record_run_outcome
 from core.ports.llm import LLMRequest, LLMResponse
+from core.ports.store import CorpusArtifactRow
 from core.ports.types import Chunk
 from core.ports.vector_index import RetrievalResult, RetrievedChunk
 from core.store.sqlite_store import SqliteStore
@@ -693,18 +694,46 @@ def test_without_state_carry_is_disabled(
     assert any("carry=—" in str(entry) for entry in second.log_entries)
 
 
-def test_absent_verdict_is_not_carried_on_reused_corpus(
+def test_absent_verdict_is_not_carried_without_dated_carrier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Перенесённый ``❌`` проходит **текущие** правила допуска (16 §8 п.4, I2c).
+    """Перенесённый ``❌`` проходит **текущий** инвариант I2d (план 20 §11.2).
 
-    Перенос — не обход инварианта: если в этом цикле документ взят из retained-байтов
-    (``reused``), ``❌`` не публикуется и ячейка измеряется заново — ровно как измеренная.
+    Прежняя редакция проверяла снятое решение 29.10.2026: документ, взятый из
+    retained-байтов (``reused``), снимал вердикт. Носитель теперь — **дата наблюдения**
+    (``corpus_artifact``), поэтому эквивалентная проверка такая: в прогоне-предшественнике
+    цитируемый документ датирован (``❌`` опубликован), а в текущем прогоне записи
+    наблюдения нет — перенос обязан отказать, иначе перенос стал бы обходом I2d. Ячейка
+    измеряется заново и понижается тем же инвариантом, что и живая.
     """
+    from core.domain import ABSENCE_UNDATED_REASON, CorpusDoc
+
     docs = [("hash_a", "Свойство Альфа не поддерживается в этой версии продукта.")]
     state = SqliteStateStore(":memory:")
     first_store = _store(RUN_1)
-    _run_phase(
+    first_store.upsert_corpus_doc(
+        CorpusDoc(
+            doc_id=f"{PRODUCT}:ch_hash_a",
+            product_id=PRODUCT,
+            url="https://p1.test/a",
+        ),
+        doc_version_id=_dv("hash_a"),
+    )
+    first_store.replace_corpus_artifacts(
+        RUN_1,
+        PRODUCT,
+        [
+            CorpusArtifactRow(
+                run_id=RUN_1,
+                product_id=PRODUCT,
+                url_key="https://p1.test/a",
+                doc_version_id=_dv("hash_a"),
+                observed_at="2026-10-01T00:00:00+00:00",
+                observed_how="live",
+            )
+        ],
+    )
+    first = _run_phase(
         run_id=RUN_1,
         store=first_store,
         evaluator=_ScriptedEvaluator(_absent(docs)),
@@ -713,19 +742,10 @@ def test_absent_verdict_is_not_carried_on_reused_corpus(
         state=state,
         monkeypatch=monkeypatch,
     )
+    assert first.cells[0].status is Status.ABSENT
 
-    from core.domain import CorpusDoc, ReuseKind
-
+    # Текущий прогон: ни строки ``corpus_artifact``, ни даты у документа — носителя нет.
     second_store = _store(RUN_2)
-    second_store.upsert_corpus_doc(
-        CorpusDoc(
-            doc_id=f"{PRODUCT}:ch_hash_a",
-            product_id=PRODUCT,
-            url="https://p1.test/a",
-            reuse_kind=ReuseKind.REUSED,
-        ),
-        doc_version_id=_dv("hash_a"),
-    )
     evaluator = _ScriptedEvaluator(_absent(docs))
     second = _run_phase(
         run_id=RUN_2,
@@ -742,10 +762,12 @@ def test_absent_verdict_is_not_carried_on_reused_corpus(
     assert len(evaluator.calls) == 1
     cell = second.cells[0]
     assert cell.measurement_origin is MeasurementOrigin.OBSERVED
-    # И правило сработало ровно как на живой ячейке: ``❌`` понижен до ``❓``.
+    # И инвариант сработал ровно как на живой ячейке: ``❌`` понижен до ``❓``.
     assert cell.status is Status.UNKNOWN
+    assert cell.absence_as_of is None
     assert cell.evidence_scope is not None
     assert cell.evidence_scope.denial_strength is DenialStrength.NOT_STATED
+    assert (cell.evidence_scope.reason or "").startswith(ABSENCE_UNDATED_REASON)
 
 
 def test_carry_forward_cell_refuses_without_previous_run() -> None:

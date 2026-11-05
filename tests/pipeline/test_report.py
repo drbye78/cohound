@@ -51,6 +51,7 @@ from core.domain.enums import (
     Status,
     TerminationReason,
 )
+from core.domain.invariants import ABSENCE_UNDATED_REASON
 from core.domain.models import (
     METHODOLOGY_VERSION,
     CatalogRow,
@@ -70,7 +71,6 @@ from core.domain.models import (
 )
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
 from core.pipeline.compute import ScoreBundle, compute, publish_warnings
-from core.pipeline.evaluate import REUSE_UNCONFIRMED_REASON
 from core.pipeline.normalize import load_inputs
 from core.pipeline.report import (
     DIFF_BOUNDARY_FIELDS,
@@ -83,9 +83,9 @@ from core.pipeline.report import (
     CrossCycleDiffError,
     PublishBlockedError,
     build_manifest,
+    collect_absence_undated_anomalies,
     collect_corpus_coverage_anomalies,
     collect_i3_anomalies,
-    collect_reuse_unconfirmed_anomalies,
     collect_run_products,
     compact_search_effort,
     diff_boundary_violations,
@@ -2127,20 +2127,26 @@ def test_registry_denial_is_not_a_truncation_anomaly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 16 §8 п.4: «❌ требует live|revalidated» — зеркало в отчёте
+# I2d: «у ❌ есть датированный носитель» — зеркало в отчёте
 # ---------------------------------------------------------------------------
 
 
-def _reuse_demoted_cell(
+def _absence_undated_cell(
     product_id: str = PRODUCT_A,
     param_id: str = "param.abs",
     *,
     reason: str | None = None,
 ) -> Cell:
-    """Ячейка, у которой ``❌`` снят правилом ``reuse_unconfirmed`` (как пишет Ш6)."""
+    """Ячейка, у которой ``❌`` снят инвариантом ``absence_undated`` (как пишет Ш6).
+
+    Правило ``reuse_unconfirmed`` (снятое решение 29.10.2026) заменено I2d; старый тест
+    переписан на новый токен, потому что проверяет **механизм зеркала** (отчёт читает
+    запись ячейки), а не формулировку правила.
+    """
     text = reason or (
-        f"{REUSE_UNCONFIRMED_REASON}: ❌ не публикуется — {product_id}/{param_id}: "
-        f"уровень evidence: документ {product_id}:hash_a: reuse_kind=reused"
+        f"{ABSENCE_UNDATED_REASON}: ❌ не публикуется — {product_id}/{param_id}: "
+        f"документ {product_id}:dv_hash_a отсутствует в corpus_artifact — "
+        "наблюдение не записано"
     )
     return Cell(
         run_id=RUN_ID,
@@ -2151,20 +2157,20 @@ def _reuse_demoted_cell(
         evidence_scope=EvidenceScope(
             denial_strength=DenialStrength.NOT_STATED,
             reason=text,
-            basis="evaluator:explicit->reuse_unconfirmed",
+            basis="evaluator:explicit->absence_undated",
         ),
         validation_notes=[
-            f"{REUSE_UNCONFIRMED_REASON}: {product_id}/{param_id}: "
-            f"evidence: документ {product_id}:hash_a: reuse_kind=reused"
+            f"{ABSENCE_UNDATED_REASON}: {product_id}/{param_id}: "
+            f"документ {product_id}:dv_hash_a отсутствует в corpus_artifact"
         ],
     )
 
 
-def test_reuse_unconfirmed_anomaly_is_visible_in_csv_and_artifacts(
+def test_absence_undated_anomaly_is_visible_in_csv_and_artifacts(
     store: SqliteStore, tmp_path: Path
 ) -> None:
-    """Снятый ``❌`` виден в отчёте: продукт/параметр и виновник — из записи ячейки."""
-    cell = _reuse_demoted_cell()
+    """Снятый ``❌`` виден в отчёте: продукт/параметр и носитель — из записи ячейки."""
+    cell = _absence_undated_cell()
     _save(store, [cell])
     bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
 
@@ -2177,23 +2183,25 @@ def test_reuse_unconfirmed_anomaly_is_visible_in_csv_and_artifacts(
         run_id=RUN_ID,
     )
 
-    anomalies = artifacts.reuse_unconfirmed_anomalies
+    anomalies = artifacts.absence_undated_anomalies
     assert len(anomalies) == 1
     assert anomalies[0]["product_id"] == PRODUCT_A
     assert anomalies[0]["param_id"] == "param.abs"
-    assert REUSE_UNCONFIRMED_REASON in anomalies[0]["reason"]
-    assert f"{PRODUCT_A}:hash_a" in anomalies[0]["reason"]
+    assert ABSENCE_UNDATED_REASON in anomalies[0]["reason"]
+    assert f"{PRODUCT_A}:dv_hash_a" in anomalies[0]["reason"]
 
     rows = _read_csv(artifacts.nda_questions)
-    reuse_rows = [r for r in rows if r.get("anomaly_kind") == "reuse_unconfirmed"]
-    assert reuse_rows
-    assert reuse_rows[0]["product_id"] == PRODUCT_A
-    assert "reused" in reuse_rows[0]["i3_anomaly"]
+    dated_rows = [r for r in rows if r.get("anomaly_kind") == "absence_undated"]
+    assert dated_rows
+    assert dated_rows[0]["product_id"] == PRODUCT_A
+    assert "corpus_artifact" in dated_rows[0]["i3_anomaly"]
+    # Прежний токен не выдаётся за новый: правило снято, а не переименовано молча.
+    assert not [r for r in rows if r.get("anomaly_kind") == "reuse_unconfirmed"]
     # I12: аномалия — наблюдение; она входит в общий список аномалий прогона.
     assert any(a.get("product_id") == PRODUCT_A for a in artifacts.i3_anomalies)
 
 
-def test_reuse_anomaly_reads_the_cell_record_not_a_second_computation() -> None:
+def test_absence_anomaly_reads_the_cell_record_not_a_second_computation() -> None:
     """Отчёт читает запись ячейки: токен только в ``validation_notes`` тоже виден."""
     only_notes = Cell(
         run_id=RUN_ID,
@@ -2205,13 +2213,14 @@ def test_reuse_anomaly_reads_the_cell_record_not_a_second_computation() -> None:
             denial_strength=DenialStrength.NOT_STATED, reason="просто не знаю"
         ),
         validation_notes=[
-            f"{REUSE_UNCONFIRMED_REASON}: {PRODUCT_B}/param.b: corpus: 2 из 3"
+            f"{ABSENCE_UNDATED_REASON}: {PRODUCT_B}/param.b: "
+            "корень https://b.test/: нет снятия с complete=1"
         ],
     )
-    anomalies = collect_reuse_unconfirmed_anomalies([only_notes])
+    anomalies = collect_absence_undated_anomalies([only_notes])
     assert len(anomalies) == 1
     assert anomalies[0]["product_id"] == PRODUCT_B
-    assert REUSE_UNCONFIRMED_REASON in anomalies[0]["reason"]
+    assert ABSENCE_UNDATED_REASON in anomalies[0]["reason"]
 
     # ❓ без токена — не аномалия правила: отчёт не догадывается о причине.
     plain = Cell(
@@ -2224,7 +2233,7 @@ def test_reuse_anomaly_reads_the_cell_record_not_a_second_computation() -> None:
             denial_strength=DenialStrength.NOT_STATED, reason="вендор молчит"
         ),
     )
-    assert collect_reuse_unconfirmed_anomalies([plain]) == []
+    assert collect_absence_undated_anomalies([plain]) == []
 
 
 # ---------------------------------------------------------------------------

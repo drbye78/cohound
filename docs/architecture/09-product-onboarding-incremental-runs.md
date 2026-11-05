@@ -20,7 +20,8 @@
 > (`16-runs-schema-boundary.md`, 29.10.2026): `run_product` и статус продукта в прогоне
 > (§4.3/§6.5), `run_scope` и `product_plan` в манифесте и `--json` (§13.6), ось
 > `embed_device` в контракте (28 → 29 полей), `corpus_docs.{http_status,reuse_kind,
-> doc_version_id}` и правило «`❌` только при `live|revalidated`» (§11.2), формат
+> doc_version_id}` и правило «`❌` только при `live|revalidated`» (§11.2, снято F3 плана 20:
+> I2d — датированный носитель), формат
 > партиции `partition-2`, `chunk_id` с `doc_version_id` (§14.6 п. 11), три дефекта
 > краула (§6.3). `METHODOLOGY_VERSION` — `0.2.0`. Прежняя редакция называла эти пункты
 > design-only: верно до 29.10.2026, неверно сейчас.
@@ -244,7 +245,7 @@
 > **Граница A применена 29.10.2026** (`16-runs-schema-boundary.md`). Состав: `run_product`
 > и статус продукта в прогоне (§4.3/§6.5/§13.1), `run_scope`/`product_plan` в манифесте
 > (§13.6), `corpus_docs.{http_status,reuse_kind,doc_version_id}` и правило «`❌` только
-> при `live|revalidated`» (§11.2), `chunk_id` с `doc_version_id` (§14.6 п. 11), формат
+> при `live|revalidated`» (§11.2, снято F3 плана 20: I2d — датированный носитель), `chunk_id` с `doc_version_id` (§14.6 п. 11), формат
 > партиции `partition-2`, ось `embed_device` (оговорка 5 `14`, 28 → 29 полей контракта),
 > `runs.cohort_ref` (§12.2). **`SCHEMA_VERSION` не поднят** — всё аддитивно
 > (`_ensure_columns` + `CREATE TABLE IF NOT EXISTS`); `_reject_foreign_schema` существует
@@ -2041,7 +2042,7 @@ def evaluate_phase(ctx):
 ### 6.5. Статус прогона и продукта (as-built)
 
 > **Статус: ✅ сделано (граница A).** Per-product статус **в прогоне** пишется строкой
-> `run_product` (`RunProductStatus`, DDL — `core/store/sqlite.py:412`; писатель — корпус,
+> `run_product` (`RunProductStatus`, DDL — `core/store/sqlite.py:591`; писатель — корпус,
 > `core/pipeline/corpus_persist.py:540`; читатель — отчёт), а итоговый статус измерения —
 > снимком `state.db.product_snapshot` (`record_run_outcome`). Это две разные величины, а не
 > дубль: строка `run_product` несёт статус на границе `corpus`, снимок — результат
@@ -3093,7 +3094,8 @@ Retrieval при этом выполняется **всегда** — он и т
 > изменение). Входят: `complete`, `expected`, `observed`, `blocked`, `unreadable_origins`,
 > `partial_blocks`, `truncated`, `reason`. Оси `freshness` нет: запрет переноса при
 > `stale` проверяется по `cells.stale_reason` прошлого прогона (`carry_forward_cell`), а
-> правило «``❌`` требует `live|revalidated`» — по `corpus_docs.reuse_kind` текущего (§11.2).
+> правило «``❌`` требует `live|revalidated`» — по `corpus_docs.reuse_kind` текущего (§11.2,
+> снято F3 плана 20: носитель — датированное наблюдение, I2d).
 > Тесты: `test_retrieved_doc_set_digest_is_order_independent`,
 > `test_cell_reuse_key_is_stable_for_identical_conditions`,
 > `test_cell_reuse_key_changes_with_any_condition`.
@@ -3400,7 +3402,22 @@ CREATE TABLE corpus_coverage (
 > ✅ **Сделано (граница A):** признак доехал до прогона —
 > `corpus_docs.{http_status,reuse_kind}`, писатель монотонен (см. ниже).
 
-**Решение владельца 29.10.2026: `❌` требует `live|revalidated`.** Правило исполняется на
+**Решение владельца 29.10.2026: `❌` требует `live|revalidated` (СНЯТО — см. врезку).**
+
+> **Снято (F3 плана 20 §11, методология 0.3.0).** Правило, описанное ниже, заменено
+> инвариантом **I2d** — «`❌` требует **датированного носителя**»: для
+> `explicit`/`authoritative` это запись наблюдения каждого цитируемого документа
+> (`corpus_artifact.observed_at`), для `bounded` — снятие каждого объявленного корня с
+> `complete=1` и датой, а `absence_as_of = min(дат)` публикуется в ячейке. Дата **не обязана**
+> быть в текущем цикле: «не смотрели» (записи нет) и «смотрели в марте» (запись есть, дата
+> старая) — разные факты, и F1 их различил. `_enforce_reuse_confirmed`,
+> `CorpusReuseObservation` и токен `reuse_unconfirmed` удалены (токен остаётся читаемым в
+> старых отчётах), вместо них `_enforce_dated_absence` + токен `absence_undated`.
+> `corpus_docs.reuse_kind` остаётся **провенансом строки корпуса**, а не условием публикации.
+> Текст ниже сохранён как история решения 29.10.2026 и как объяснение, почему носитель
+> `reuse_kind` был верен для своего времени.
+
+Правило исполняется на
 двух уровнях, потому что у двух групп классов разный носитель утверждения:
 
 1. **Уровень evidence** (`explicit`, `authoritative`). «Нет» здесь держится на конкретном
@@ -3448,7 +3465,7 @@ CREATE TABLE corpus_coverage (
 границы A» — это была бы вторая версионная граница и второй `golden-full`. Оно вошло **в ту
 же границу**, что `corpus_docs.reuse_kind`, и подняло класс всей границы до
 `methodology_version`; один прогон golden-full на обе правки.
-✅ **Реализовано:** `_enforce_reuse_confirmed` рядом с `_enforce_absence_coverage`
+✅ **Реализовано (правило снято F3 — см. врезку выше):** `_enforce_reuse_confirmed` рядом с `_enforce_absence_coverage`
 (`core/pipeline/evaluate.py`), наблюдение корпуса — один проход на продукт
 (`observe_corpus_reuse`), отчёт пишет аномалию `reuse_unconfirmed` строкой в
 `anomalies.csv`/`--json`. Документ ищется **в двух формах** — `product:content_hash`
@@ -3938,7 +3955,7 @@ golden**.
 
 | Поле | Почему не заводим |
 |---|---|
-| `corpus_docs.doc_version_id` | Связь «документ ↔ версия» уже есть таблицей `corpus_doc_version(doc_version_id, product_id, doc_id)` (`core/store/sqlite.py:230`). Колонка дублировала бы связь и могла бы с ней разойтись — в двух местах, молча |
+| `corpus_docs.doc_version_id` | Связь «документ ↔ версия» уже есть таблицей `corpus_doc_version(doc_version_id, product_id, doc_id)` (`core/store/sqlite.py:238`). Колонка дублировала бы связь и могла бы с ней разойтись — в двух местах, молча |
 | `corpus_docs.level` | `level` уже второй сегмент `extractor_version` (`docling-doc-3:<level>/<device>/<build>`) и входит слагаемым в `doc_version_id`. Отдельная колонка — третий носитель |
 | `corpus_docs.doc_status` | Run DB **иммутабельна на прогон**: строка корпуса прогона не меняет статус никогда. `active|superseded` живёт в `state.db.document_version` (там, где версии действительно сменяются), а `evicted` снят решением §4.5 вместе с retention-осью |
 | `corpus_docs.reused_from_run_id` | Переиспользование идёт из **durable-субстрата** (`url_state`/`document_version`/`chunk_store`), а не «из прогона»: у retained-байтов и переиспользованного чанка нет прогона-источника как свойства. `reuse_kind=reused` уже называет факт, `docs_reused` — считает |
@@ -4534,7 +4551,8 @@ state/state.db                                 # durable-состояние па
 ## 18. Открытые вопросы / риски для решения человека
 
 > **Статус раздела: ✅ все 10 вопросов закрыты.** П. 2 (правило `❌` только при
-> `live|revalidated` исполняется — `_enforce_reuse_confirmed`, `core/pipeline/evaluate.py:1936`)
+> `live|revalidated` исполнялось — `_enforce_reuse_confirmed`, `core/pipeline/evaluate.py:1936`;
+> **снято F3 плана 20**: `_enforce_dated_absence` + I2d)
 > и п. 6 (per-cell) закрыты решениями 29.10.2026; п. 10 — целиком 29.10.2026; п. 5 и 9 —
 > решениями владельца; п. 7 — механизмом waiver + линт. Открытых ⬜ нет.
 

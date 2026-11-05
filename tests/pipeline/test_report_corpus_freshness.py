@@ -262,6 +262,9 @@ def test_three_observation_dates_are_published_not_one(
             "param_id": "param_a",
             "evidence_as_of_from": D1,
             "evidence_as_of_to": D3,
+            # I2d: дата слабой опоры ``❌`` — у ячейки её нет (``None`` ⇒ пустое поле,
+            # не ``''`` как значение и не выдуманная дата).
+            "absence_as_of": "",
             "artifacts": "2",
         }
     ]

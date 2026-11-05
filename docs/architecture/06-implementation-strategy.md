@@ -542,7 +542,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:132-135` (`render_battle_card`,
+✅ сделано (проверено) — `core/pipeline/report.py:1752-1755` (`render_battle_card`,
 `render_nda_questions`, `render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, включая `battle_card.xlsx` и `diff.md`).
 
@@ -937,7 +937,7 @@ uv sync --frozen --extra dev
    ✅ проверено на `f6100c7`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
    канал в Ш6 — `core/pipeline/phases.py:1292`. Имя параметра сменилось: `scope_acceptance`
    (принятие риска) — `core/pipeline/evaluate.py:3060-3528`. Прежнее `scope_attested_by` живёт
-   **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:313-315`)
+   **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:324-326`)
    и как миграция колонки (`core/store/sqlite.py:317`); в сигнатуре оценщика алиаса нет —
    прежняя редакция выдавала желаемое за сделанное.
 
@@ -991,7 +991,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
   Открытыми остались **семь** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
-  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2070-2076`),
+  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2102-2108`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `_template`), паритет реестров под `split`
   (`core/cli/context.py:1674` против `core/edge/server.py:1104`), R3 (ревизия весов моделей не
   входит в `extractor_version`, `core/adapters/extract_document.py:252-284`), E1 follow-up

@@ -62,11 +62,19 @@ CORPUS_FRESHNESS_ARTIFACT = "corpus_freshness.yaml"
 CELL_FRESHNESS_ARTIFACT = "cell_freshness.csv"
 
 #: Колонки ``cell_freshness.csv`` — по строке на ячейку **с** датой.
+#:
+#: ``evidence_as_of_*`` — даты артефактов, на которые опираются цитаты ячейки (F2);
+#: ``absence_as_of`` — дата **слабой опоры** ``❌`` (I2d, план 20 §11.2), читается из
+#: самой ячейки (``cells.absence_as_of``), а не пересчитывается: конвейер пишет её на Ш6
+#: по носителю (наблюдение документа / снятие корня), и второй расчёт здесь разошёлся бы
+#: с вердиктом. Пустое поле — «даты нет» (ячейка наличия, ``❓``/``failed``, строка до F3),
+#: и это не ноль и не выдуманная дата.
 CELL_FRESHNESS_FIELDS: tuple[str, ...] = (
     "product_id",
     "param_id",
     "evidence_as_of_from",
     "evidence_as_of_to",
+    "absence_as_of",
     "artifacts",
 )
 
@@ -394,10 +402,14 @@ def build_corpus_freshness(
 
     # Ячейки по продуктам: полный набор ячеек прогона плюс ячейки, у которых есть evidence.
     cells_by_product: dict[str, set[str]] = {}
+    #: Дата слабой опоры ``❌`` (I2d) — из записи ячейки, без второго прохода по ``cells``
+    #: и без пересчёта: конвейер уже выбрал носитель, отчёт только публикует.
+    absence_as_of_by_cell: dict[tuple[str, str], str | None] = {}
     for cell in cell_list:
         key = _cell_key(cell)
         if key is not None:
             cells_by_product.setdefault(key[0], set()).add(key[1])
+            absence_as_of_by_cell.setdefault(key, getattr(cell, "absence_as_of", None))
     for link in refs:
         product_id = link.get("product_id")
         param_id = link.get("param_id")
@@ -472,6 +484,7 @@ def build_corpus_freshness(
                     "param_id": param_id,
                     "evidence_as_of_from": hit_earliest[1],
                     "evidence_as_of_to": hit_latest[1],
+                    "absence_as_of": absence_as_of_by_cell.get((product_id, param_id)),
                     "artifacts": len({hit[2] for hit in hits}),
                 }
             )

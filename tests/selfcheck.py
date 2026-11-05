@@ -361,6 +361,7 @@ def main() -> int:
     section("Домен (L0) — W2")
     check("инварианты домена возвращают Violation (I1/I4/I13/I7)", lambda: _domain_invariants())
     check("Ф0: ❌ при неполном корпусе требует аттестации (I2c)", lambda: _corpus_coverage_invariant())
+    check("F3: ❌ требует датированного носителя (I2d)", lambda: _absence_dated_invariant())
     check("частичное извлечение делает охват неполным (I2/I2c)", lambda: _partial_extraction())
     check("смещения куска: пара целиком и по длине text (L1b-2b)", lambda: _corpus_chunk_span())
     check("derived-evidence требует hash/резолв (I1/I10/I15/I19, K5)", lambda: _domain_derived())
@@ -1265,6 +1266,8 @@ def _partial_extraction() -> None:
         raise AssertionError("partial_extraction не в blocking_failures")
 
     # 3. Регресс-защита: без частичных документов корпус остаётся полным.
+    from core.ports.state import CaptureRow
+
     full = derive_corpus_coverage(
         product_id="p",
         items=[
@@ -1277,6 +1280,18 @@ def _partial_extraction() -> None:
         ],
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=["https://a.test/"],
+        captures=[
+            CaptureRow(
+                capture_id="c",
+                product_id="p",
+                root_url="https://a.test/",
+                started_at="2026-01-01T00:00:00+00:00",
+                finished_at="2026-01-01T00:10:00+00:00",
+                complete=True,
+                observed_how="live",
+            )
+        ],
     )
     if not isinstance(full, CorpusCoverage) or not full.complete:
         raise AssertionError("полный корпус без частичных документов перестал быть полным")
@@ -1423,7 +1438,20 @@ def _corpus_coverage_invariant() -> None:
 
     # Ф0/2.2.0: блокирующий in-scope сбой делает покрытие неполным даже на читаемом
     # origin'е; ``blocking_failures`` — производное представление для отчёта.
+    # F3: полнота — по снятиям, поэтому удостоверяющее снятие корня подаётся явно:
+    # проверяется именно блокирующий факт сеанса, а не отсутствие носителя.
     from core.pipeline.corpus import derive_corpus_coverage
+    from core.ports.state import CaptureRow
+
+    capture = CaptureRow(
+        capture_id="c",
+        product_id="p",
+        root_url="https://a.example/",
+        started_at="2026-01-01T00:00:00+00:00",
+        finished_at="2026-01-01T00:10:00+00:00",
+        complete=True,
+        observed_how="live",
+    )
 
     incomplete_blocking = derive_corpus_coverage(
         product_id="p",
@@ -1444,6 +1472,8 @@ def _corpus_coverage_invariant() -> None:
         ],
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=["https://a.example/"],
+        captures=[capture],
     )
     if incomplete_blocking.complete is not False:
         raise AssertionError("Ф0: robots_disallow на читаемом origin'е обязан давать complete=False")
@@ -1471,11 +1501,109 @@ def _corpus_coverage_invariant() -> None:
         ],
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=["https://a.example/"],
+        captures=[capture],
     )
     if nonblocking.complete is not True:
         raise AssertionError("Ф0: source_unavailable на читаемом origin'е не блокирует")
     if nonblocking.blocking_failures:
         raise AssertionError("Ф0: неблокирующий класс не должен попадать в blocking_failures")
+
+
+def _absence_dated_invariant() -> None:
+    """F3/I2d: ``❌`` без датированного носителя не публикуется; ``as_of`` — ``min``.
+
+    Проверяется чистый инвариант (``core.domain.invariants.check_absence_dated``) и то,
+    что носитель — снятие: ``adopted`` удостоверяет ``explicit``, но не ``bounded``
+    (предоставление — не обход), а два корня дают самую раннюю опору. Плюс модель
+    ``CorpusCoverage``: полнота без ``roots`` не объявляется, а ``frozen``-случай
+    (нулевой сеанс + ``complete``-снятие) — объявляется.
+    """
+    from core.domain.invariants import check_absence_dated
+    from core.domain.models import CorpusRootCoverage
+
+    ok, as_of, missing = check_absence_dated(
+        denial_strength="explicit",
+        cited_observations=[("https://a.example/doc", None)],
+        roots=[],
+    )
+    if ok or as_of is not None or not missing:
+        raise AssertionError("I2d: explicit без даты обязан быть undated")
+
+    ok, as_of, missing = check_absence_dated(
+        denial_strength="bounded",
+        cited_observations=[],
+        roots=[
+            CorpusRootCoverage(
+                root_url="https://a.example/root",
+                capture_id="c",
+                complete=True,
+                observed_how="adopted",
+                observed_at="2026-01-01T00:00:00+00:00",
+            )
+        ],
+    )
+    if ok or missing == []:
+        raise AssertionError("I2d: adopted-снятие не удостоверяет bounded")
+
+    ok, as_of, missing = check_absence_dated(
+        denial_strength="bounded",
+        cited_observations=[],
+        roots=[
+            CorpusRootCoverage(
+                root_url="https://a.example/root",
+                capture_id="a",
+                complete=True,
+                observed_how="live",
+                observed_at="2026-03-01T00:00:00+00:00",
+            ),
+            CorpusRootCoverage(
+                root_url="https://b.example/root",
+                capture_id="b",
+                complete=True,
+                observed_how="live",
+                observed_at="2026-01-01T00:00:00+00:00",
+            ),
+        ],
+    )
+    if not ok or missing or as_of != "2026-01-01T00:00:00+00:00":
+        raise AssertionError("I2d: as_of обязан быть самой ранней опорой")
+
+    # Полнота по снятиям: носителя нет — неполно; пустой сеанс со снятием — полно.
+    from core.pipeline.corpus import derive_corpus_coverage
+    from core.ports.state import CaptureRow
+
+    empty = derive_corpus_coverage(
+        product_id="p",
+        items=[],
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=["https://a.example/root"],
+    )
+    if empty.complete:
+        raise AssertionError("F3: корень без снятия не может быть полным")
+    complete = derive_corpus_coverage(
+        product_id="p",
+        items=[],
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=["https://a.example/root"],
+        captures=[
+            CaptureRow(
+                capture_id="c",
+                product_id="p",
+                root_url="https://a.example/root",
+                started_at="2026-01-01T00:00:00+00:00",
+                finished_at="2026-01-01T00:10:00+00:00",
+                complete=True,
+                observed_how="live",
+            )
+        ],
+    )
+    if not complete.complete:
+        raise AssertionError(
+            "F3: пустой сеанс при complete-снятии обязан быть полным (frozen)"
+        )
 
 
 def _domain_derived() -> None:

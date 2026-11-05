@@ -83,8 +83,12 @@ def test_schema_version_is_additive_bump() -> None:
     3.19.0 — F2 плана ``20``: таблица ``corpus_artifact`` — даты наблюдений артефактов в
     БД прогона (проекция ``state.db`` для Ш9/``hound report``); файлы ≤ 3.18.0
     отвергаются гейтом.
+
+    3.20.0 — F3 плана ``20``: ``corpus_coverage.roots_json`` (снятия объявленных корней —
+    по ним решается ``complete``) и ``cells.absence_as_of`` (дата слабой опоры ``❌``);
+    аддитивные колонки объявлены в ``CREATE TABLE``, файлы ≤ 3.19.0 отвергаются гейтом.
     """
-    assert SCHEMA_VERSION == "3.19.0"
+    assert SCHEMA_VERSION == "3.20.0"
     conn = connect(":memory:")
     try:
         tables = {

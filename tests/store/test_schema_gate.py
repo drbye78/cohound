@@ -55,23 +55,23 @@ def test_older_schema_is_rejected_with_message(tmp_path: Path) -> None:
     assert "новом каталоге" in message or "удалите" in message
 
 
-def test_previous_schema_3_18_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
-    """F2 плана 20: файл 3.18.0 отвергается гейтом 3.19.0, не изменяя байты.
+def test_previous_schema_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
+    """F3 плана 20: файл 3.19.0 отвергается гейтом 3.20.0, не изменяя байты.
 
-    Таблица ``corpus_artifact`` объявлена только в ``CREATE TABLE``;
-    шимов ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем — и проверка
-    фиксирует это наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий догон
-    объявил бы чужую схему текущей).
+    ``corpus_coverage.roots_json``/``cells.absence_as_of`` объявлены только в
+    ``CREATE TABLE``; шимов ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем — и
+    проверка фиксирует это наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий
+    догон объявил бы чужую схему текущей).
     """
-    db = _legacy_db(tmp_path / "cohound.db", "3.18.0")
+    db = _legacy_db(tmp_path / "cohound.db", "3.19.0")
     before = db.read_bytes()
 
     with pytest.raises(SchemaVersionMismatch) as excinfo:
         connect(db)
 
     message = str(excinfo.value)
-    assert "3.18.0" in message
     assert "3.19.0" in message
+    assert "3.20.0" in message
     assert db.read_bytes() == before
 
 
@@ -285,8 +285,13 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     3.19.0 (F2 плана ``20``) — таблица ``corpus_artifact``: даты наблюдений артефактов в
     БД **прогона** (проекция ``state.db``), потому что Ш9/``hound report`` открывают только
     её. Тот же запрет на шимы: прогоны ≤ 3.18.0 отвергаются гейтом версии.
+
+    3.20.0 (F3 плана ``20``) — носитель даты и полноты (§11.2): ``corpus_coverage.roots_json``
+    (снятия объявленных корней; ``complete`` решается по ним) и ``cells.absence_as_of``
+    (дата слабой опоры ``❌``). Обе — аддитивные колонки в ``CREATE TABLE``, шимов нет:
+    прогоны ≤ 3.19.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.19.0"
+    assert SCHEMA_VERSION == "3.20.0"
 
     conn = connect(":memory:")
     try:
@@ -305,6 +310,14 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
 
         chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
         assert {"char_start", "char_end"} <= chunk_cols
+
+        # 3.20.0 (F3 плана 20): носитель полноты — снятия корней — и дата слабой опоры ❌.
+        coverage_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")
+        }
+        assert "roots_json" in coverage_cols
+        cell_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cells)")}
+        assert "absence_as_of" in cell_cols
 
         tables = {
             r["name"]

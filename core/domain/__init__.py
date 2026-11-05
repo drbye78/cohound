@@ -93,9 +93,11 @@ from core.domain.enums import (
     UnknownPolicy,
 )
 from core.domain.invariants import (
+    ABSENCE_UNDATED_REASON,
     EXHAUSTION_CONTOURS,
     REQUIRED_EXHAUSTION_CONTOURS,
     check_absence_coverage,
+    check_absence_dated,
     check_cell,
     check_derived_evidence,
     check_evidence,
@@ -120,6 +122,7 @@ from core.domain.models import (
     CorpusCoverage,
     CorpusDoc,
     CorpusMember,
+    CorpusRootCoverage,
     CorpusSnapshot,
     CrawlProvenance,
     CrawlRunConfig,
@@ -285,6 +288,7 @@ __all__ = [  # noqa: RUF022
     "ArchiveObservation",
     "CorpusMember",
     "CorpusCaptureRef",
+    "CorpusRootCoverage",
     "CorpusSnapshot",
     "CrawlProvenance",
     "CrawlRunConfig",
@@ -331,7 +335,9 @@ __all__ = [  # noqa: RUF022
     # r2
     "apply_r2",
     # invariants (T2.2)
+    "ABSENCE_UNDATED_REASON",
     "check_absence_coverage",
+    "check_absence_dated",
     "check_cell",
     "check_evidence",
     "check_inheritance",

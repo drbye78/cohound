@@ -460,8 +460,16 @@ def test_frozen_missing_stored_bytes_is_visible_with_count(tmp_path: Path) -> No
             store.close()
 
 
-def test_frozen_coverage_names_its_own_reason(tmp_path: Path) -> None:
-    """Покрытие ``frozen`` — неполное и названо ``frozen_no_network_observation``."""
+def test_frozen_coverage_is_complete_by_capture_and_names_its_own_reason(
+    tmp_path: Path,
+) -> None:
+    """Покрытие ``frozen`` полно **по снятию** и названо ``frozen_no_network_observation``.
+
+    F3 (план 20 §11.2): полноту решает датированное снятие корня, а не элементы сеанса.
+    Это и есть замеренный дефект ``demo-absence``: ``frozen`` терял все ``❌``, потому что
+    ``observed_sources == 0`` читалось как «нет наблюдений». ``reason`` остаётся
+    провенансом прогона (сеть не трогалась), а ``complete`` — факт корпуса.
+    """
     with SqliteStateStore(":memory:") as state:
         _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
         result, store, crawler = _frozen_run(tmp_path, state, roots=[ROOT], search=_NoSearch(), serp_rounds=1, serp_source="declared")
@@ -470,7 +478,8 @@ def test_frozen_coverage_names_its_own_reason(tmp_path: Path) -> None:
             coverage = store.read_corpus_coverage(RUN_ID, "p1")
             assert coverage is not None
             assert coverage.observed_sources == 0
-            assert coverage.complete is False
+            assert coverage.complete is True
+            assert [root.complete for root in coverage.roots] == [True]
             assert coverage.reason == COVERAGE_FROZEN_NO_OBSERVATION
             events = [
                 entry
@@ -501,7 +510,11 @@ def test_frozen_report_note_names_the_source_and_the_price() -> None:
     assert "чанков 9" in note
     assert "нет байтов 1" in note
     assert "корней вне состояния 1" in note
-    assert "❌ не публикуется" in note
+    # F3: проход без сети больше не отменяет `❌` — он публикуется только с датой носителя
+    # (I2d). Строка обязана называть это, а не прежнее «❌ не публикуется».
+    assert "наблюдений этого прогона нет" in note
+    assert "только с датой носителя, I2d" in note
+    assert "❌ не публикуется" not in note
     assert report.stored_bytes_missing_token == "stored_bytes_missing:1"
 
 

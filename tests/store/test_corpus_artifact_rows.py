@@ -60,11 +60,12 @@ def _row(**overrides: object) -> CorpusArtifactRow:
 def test_schema_pins_the_table_shape() -> None:
     """Версия схемы и состав ``corpus_artifact`` запинены (как ``runs``/``corpus_docs``).
 
-    3.19.0 — F2 плана ``20``: таблица объявлена в ``CREATE TABLE``; шимов ``ALTER TABLE``
-    нет, поэтому файлы ≤ 3.18.0 отвергаются гейтом версии (:class:`SchemaVersionMismatch`),
-    а не досоздаются при открытии.
+    3.20.0 — F3 плана ``20`` (носитель даты и полноты, §11.2): таблица не менялась, версия
+    сдвинута вместе с ``corpus_coverage.roots_json``/``cells.absence_as_of``. Шимов
+    ``ALTER TABLE`` нет, поэтому файлы ≤ 3.19.0 отвергаются гейтом версии
+    (:class:`SchemaVersionMismatch`), а не досоздаются при открытии.
     """
-    assert SCHEMA_VERSION == "3.19.0"
+    assert SCHEMA_VERSION == "3.20.0"
 
     conn = connect(":memory:")
     try:

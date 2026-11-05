@@ -92,6 +92,11 @@ _BLOCKING_FAILURE_VALUES: frozenset[str] = frozenset(
     kind.value for kind in BLOCKING_FAILURE_KINDS
 )
 
+#: Способы наблюдения снятия — тот же набор, что CHECK в таблице ``capture`` (state.db).
+_CAPTURE_OBSERVED_HOW: frozenset[str] = frozenset(
+    {"live", "revalidated", "adopted", "scheduled"}
+)
+
 #: Неизменяемый конфиг для value-объектов, кладущихся в хешируемые frozen-контейнеры
 #: (``FetchPlan``): ``frozen=True`` делает модель хешируемой (value-семантика), а
 #: ``allow_inf_nan=False`` запрещает ``inf``/``nan`` в числовых полях.
@@ -144,7 +149,15 @@ _FROZEN = ConfigDict(
 #: вошли ось ``embed_device``, формат ``chunk_id``/партиции и дефекты краула: сам по себе
 #: каждый дал бы ``execution_change``/``content_change``, но самый сильный класс поглощает
 #: остальные, и объединение дешевле (одна пере-аннотация, а не две).
-METHODOLOGY_VERSION = "0.2.0"
+#: 0.3.0 — граница F3 плана 20 (§11.2): **условие публикации ``❌`` меняется** — у
+#: отрицания появляется **датированный носитель** (I2d): ``explicit``/``authoritative``
+#: требуют даты наблюдения каждого цитируемого документа, ``bounded`` — снятия
+#: ``complete=1`` каждого объявленного корня (``adopted`` не удостоверяет исчерпания), а
+#: ``absence_as_of = min`` публикуется в ячейке. Снимается решение 29.10.2026 «``❌``
+#: требует ``live|revalidated`` в этом цикле»; полнота покрытия (I2c) считается по
+#: снятиям, а не по элементам сеанса. Это absence/evidence-модель, поэтому класс границы
+#: — ``methodology_change`` с ``golden-full`` и пере-аннотацией golden (§13).
+METHODOLOGY_VERSION = "0.3.0"
 
 #: P0/OOM: дефолтный потолок одного HTTP-ответа/retained-файла — 20 MiB. Операционная
 #: ось исполнения (``crawl.max_response_bytes``), не методология; адаптеры используют
@@ -1125,6 +1138,11 @@ class Cell(BaseModel):
     #: Сила отрицания + вектор охвата. ``None`` — не заполнен (строки, записанные до
     #: варианта 2, и ячейки наличия: у ✅/⚠️ вопрос отсутствия не стоит).
     evidence_scope: EvidenceScope | None = None
+    #: План 20 §11.2 (I2d): дата **слабой опоры** ``❌`` — ``absence_as_of = min`` дат
+    #: носителей (наблюдений цитируемых документов либо снятий объявленных корней).
+    #: ``None`` — не записана (ячейка наличия, ``❓``/``failed`` или строка до F3).
+    #: Публикуется рядом с ``evidence_as_of``; в вердикт сама по себе не входит.
+    absence_as_of: str | None = None
     reviewed_by: str | None = None
     # Провенанс ячейки (R7/§13): смена сборки/профиля/промпта детектируется сравнением.
     index_build_id: str | None = None
@@ -2438,35 +2456,103 @@ class ExtractQueueItem(BaseModel):
         return self
 
 
-class CorpusCoverage(BaseModel):
-    """Покрытие корпуса продукта по исходам краула (Ф0, §2.3/§4.4).
+class CorpusRootCoverage(BaseModel):
+    """Снятие объявленного корня продукта: удостоверяет ли оно полноту и на какую дату.
 
-    Первоклассный факт, производный от **персистентных** элементов сеанса краула и
-    записей об усечении — не от wall-clock и не от порядка обхода. Нужен, чтобы
-    ``❌`` нельзя было опубликовать как доказательство отсутствия, когда часть
-    источников продукта нечитаема (robots/сеть/парсер/усечение).
+    Полнота покрытия (план 20 §11.2, I2d) — факт **корпуса**, а не сеанса текущего
+    прогона: корень, исчерпанный снятием от даты D, остаётся исчерпанным и в проходе,
+    который сети не трогал. Поэтому блок ``roots`` называет каждый объявленный корень
+    продукта и снятие, которым он удостоверён.
+
+    :param root_url: адрес объявленного корня (как объявлен); сравнение идёт канонической
+        формой (``snapshot_url_key``), но в записи остаётся авторская форма.
+    :param capture_id: снятие, выбранное для корня; ``None`` — снятия нет.
+    :param complete: исчерпан ли обход корня на дату снятия. ``False`` у корня без снятия,
+        у снятия ``observed_how='adopted'`` (предоставление — не обход) и у снятия,
+        чей ``policy_digest`` **разошёлся** с объявленным (обход шёл при другой
+        поверхности решений политики — это другое пространство).
+    :param observed_how: ``live`` | ``revalidated`` | ``adopted`` | ``scheduled``;
+        ``None`` — снятия нет.
+    :param observed_at: ``finished_at`` снятия (ISO-8601); ``None`` — даты нет.
+    :param policy_digest: отпечаток решения политики краула у выбранного снятия
+        (``capture.policy_digest``). Снятие описывает пространство при **той** поверхности
+        решений политики; смена политики — смена условий измерения, поэтому отпечаток
+        нужен, чтобы сверить снятие с **объявленным** ``crawl_policy_digest`` прогона.
+        ``None`` — снятие отпечатка не несёт (строка прежнего производителя): это
+        отсутствие данных, а не факт несовпадения.
+    :param policy_matched: результат сверки: ``True`` — отпечатки известны и равны,
+        ``False`` — известны и различаются (снятие удостоверяет другое пространство),
+        ``None`` — сверять не с чем (хотя бы одна сторона неизвестна). ``None`` —
+        законное значение: по отсутствию данных неполнота не объявляется (A3), решает
+        только наблюдённое несовпадение.
+    """
+
+    model_config = _BASE
+
+    root_url: str
+    capture_id: str | None = None
+    complete: bool
+    observed_how: str | None = None
+    observed_at: str | None = None
+    policy_digest: str | None = None
+    policy_matched: bool | None = None
+
+    @field_validator("root_url")
+    @classmethod
+    def _check_root_url(cls, value: str) -> str:
+        """Адрес корня — непустая строка; пустой адрес не называет корень."""
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("corpus_root_coverage.root_url: пустой адрес корня")
+        return text
+
+    @field_validator("observed_how")
+    @classmethod
+    def _check_observed_how(cls, value: str | None) -> str | None:
+        """Способ наблюдения — только объявленные значения (как CHECK в ``capture``)."""
+        if value is None:
+            return None
+        if value not in _CAPTURE_OBSERVED_HOW:
+            raise ValueError(
+                "corpus_root_coverage.observed_how: допустимо "
+                f"{', '.join(sorted(_CAPTURE_OBSERVED_HOW))}, получено {value!r}"
+            )
+        return value
+
+
+class CorpusCoverage(BaseModel):
+    """Покрытие корпуса продукта: **снятия объявленных корней** + диагностика сеанса.
+
+    ``complete`` — решение **по снятиям**, а не по элементам текущего сеанса (план 20
+    §11.2). Прежнее правило спрашивало «наблюдали ли мы сейчас», и проход без сети
+    (``frozen``/``offline``) на том же корпусе объявлялся неполным, потому что элементов
+    сеанса у него нет вовсе: «нет сети» читалось как «нет наблюдений». Теперь носитель —
+    датированное снятие корня, унаследованное вместе с наблюдением.
 
     :param product_id: продукт-партиция.
-    :param complete: ``False``, если краул усечён политикой, хотя бы один **origin**
-        нечитаем (из него не получено ни одного ``FETCHED``-элемента и был хотя бы один
-        недочёт, кроме ``not_found``), есть ``FAILED``-элемент с ``error_kind`` из
-        :data:`core.domain.enums.BLOCKING_FAILURE_KINDS`, **либо не прочитано ни одного
-        элемента** (``observed_sources == 0`` при ``expected_sources > 0``): корпус без
-        единого наблюдения не может доказывать отсутствие, а ``not_found`` на всех URL —
-        наблюдение отсутствия этих URL, не продукта (см.
-        :func:`core.pipeline.corpus_coverage.derive_corpus_coverage`).
-    :param expected_sources: всего элементов сеанса по продукту.
-    :param observed_sources: элементов, дошедших до ``FETCHED``.
+    :param complete: ``True`` только если (а) :attr:`roots` непусты и **у каждого**
+        ``complete=True``, и (б) в текущем сеансе нет неразрешённых блокирующих фактов:
+        усечения, нечитаемого origin'а, ``FAILED`` из
+        :data:`core.domain.enums.BLOCKING_FAILURE_KINDS` или частичного извлечения.
+        Условия (б) действуют **только при наличии сеанса** (есть элементы): у прохода
+        без сети их не с чем сверять, и «неизвестно» не выдаётся за «провалено».
+        ``observed_sources == 0`` больше не является самостоятельным условием неполноты:
+        его роль исполняет корень без снятия с ``complete=1``.
+    :param roots: объявленные корни продукта и их снятия (см.
+        :class:`CorpusRootCoverage`); пусто — ни один корень не удостоверён.
+    :param expected_sources: всего элементов сеанса по продукту (**диагностика**).
+    :param observed_sources: элементов, дошедших до ``FETCHED`` (**диагностика**).
     :param blocked: ``error_kind → count`` по ``FAILED``-элементам (канонические классы;
         аудит и объяснение причины неполноты через :attr:`blocking_failures`).
     :param unreadable_origins: origin'ы (``netloc``), от которых не получено ничего
         (отсортировано, детерминированно).
     :param partial_blocks: ``origin → {error_kind: count}`` — не-``not_found`` сбои по
         каждому origin (аудит частичных отказов; ключи отсортированы).
-    :param truncated: продукт попал в ``truncated_products`` сеанса.
+    :param truncated: продукт попал в ``truncated_products`` сеанса — решение прогона, а
+        не наблюдение элемента, поэтому действует и без элементов.
     :param resolved_manually: сколько блокирующих отказов закрыто объявленным ручным
-        артефактом (13-manual-artifacts §3.3): отказ остаётся в :attr:`blocked` как аудит,
-        но материал наблюдён, поэтому он не делает покрытие неполным.
+        артефактом (13-manual-artifacts §3.3): отказ остаётся в :attr:`blocked` как аудит.
+        Полноту это поле больше **не** решает: ``adopted``-снятие не удостоверяет обход.
     :param computed_at: момент вычисления (ISO-8601); детерминизм обеспечивает вызывающий.
     """
 
@@ -2474,6 +2560,7 @@ class CorpusCoverage(BaseModel):
 
     product_id: str
     complete: bool
+    roots: list[CorpusRootCoverage] = Field(default_factory=list)
     expected_sources: int = 0
     observed_sources: int = 0
     blocked: dict[str, int] = Field(default_factory=dict)
@@ -2490,6 +2577,10 @@ class CorpusCoverage(BaseModel):
     #: ``all_seeds_rejected``, ``no_urls_entry``, ``coverage_missing``). Наблюдательное
     #: поле: класс сбоя ячеек остаётся ``no_sources``, словарь §4.1 не расширяется.
     #: Аддитивное поле MVP-1: строка zero-source обязана назвать причину явно (O2/O3).
+    #: План 20 §11.2: причина описывает **прогон** (наблюдал ли он), а ``complete`` —
+    #: **корпус** (удостоверён ли снятием), поэтому ``reason`` может стоять и при
+    #: ``complete=True`` (``frozen``: сеть не трогалась, корпус удостоверён прошлым
+    #: снятием) — это провенанс исполнения, а не приговор покрытию.
     reason: str | None = None
 
     @property
@@ -2556,6 +2647,15 @@ class CorpusCoverage(BaseModel):
             }
         return canonical
 
+    @field_validator("roots")
+    @classmethod
+    def _validate_roots(
+        cls, value: list[CorpusRootCoverage]
+    ) -> list[CorpusRootCoverage]:
+        """Корни — по одному на адрес, порядок детерминирован (сортировка по адресу)."""
+        by_url = {root.root_url: root for root in value}
+        return [by_url[url] for url in sorted(by_url)]
+
     @model_validator(mode="after")
     def _check_consistency(self) -> CorpusCoverage:
         """``complete=True`` несовместимо с усечением и нечитаемыми origin'ами."""
@@ -2575,10 +2675,13 @@ class CorpusCoverage(BaseModel):
                 "corpus_coverage: complete=True требует отсутствия усечения и "
                 "нечитаемых origin'ов"
             )
-        if self.complete and self.expected_sources == 0:
+        if self.complete and self.expected_sources == 0 and not (
+            self.roots and all(root.complete for root in self.roots)
+        ):
             raise ValueError(
                 "corpus_coverage: complete=True требует expected_sources > 0 "
-                "(zero-source — failed, а не пустой ok; O2)"
+                "(zero-source — failed, а не пустой ok; O2) либо complete-снятия "
+                "каждого объявленного корня (план 20 §11.2)"
             )
         return self
 

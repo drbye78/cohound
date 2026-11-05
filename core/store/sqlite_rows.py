@@ -28,6 +28,7 @@ from core.domain import (
     CellEvidence,
     CellState,
     CorpusCoverage,
+    CorpusRootCoverage,
     CrawlItemStatus,
     CrawlSession,
     CrawlSessionItem,
@@ -198,6 +199,8 @@ def _cell_row(
         _as_text(cell.measurement_origin),
         cell.carried_from_run_id,
         cell.cell_reuse_key,
+        # План 20 §11.2 (F3): дата слабой опоры ❌ — провенанс вердикта, не его условие.
+        cell.absence_as_of,
     )
 
 
@@ -253,6 +256,9 @@ def _row_to_cell(row: sqlite3.Row) -> Cell:
         ),
         carried_from_run_id=_row_optional(row, "carried_from_run_id"),
         cell_reuse_key=_row_optional(row, "cell_reuse_key"),
+        # План 20 §11.2 (F3): аддитивная колонка; старая строка/read-only БД — «не
+        # записана» (``None``), а не выдуманная дата.
+        absence_as_of=_row_optional(row, "absence_as_of"),
     )
 
 
@@ -444,9 +450,19 @@ def _row_to_corpus_coverage(row: sqlite3.Row) -> CorpusCoverage:
     unreadable_origins = raw_origins if isinstance(raw_origins, list) else []
     raw_partial = _parse_json_text(row["partial_blocks_json"])
     partial_blocks = raw_partial if isinstance(raw_partial, dict) else {}
+    # План 20 §11.2 (F3): болезненный разбор, а не падение чтения прогона. Повреждённый
+    # ``roots_json`` — «корней не записано» (полнота не удостоверена), а не выдуманные
+    # снятия; строка при этом остаётся читаемой.
+    raw_roots = _parse_json_text(_row_optional(row, "roots_json") or "[]")
+    roots = [
+        CorpusRootCoverage.model_validate(item)
+        for item in (raw_roots if isinstance(raw_roots, list) else [])
+        if isinstance(item, dict)
+    ]
     return CorpusCoverage(
         product_id=row["product_id"],
         complete=bool(row["complete"]),
+        roots=roots,
         expected_sources=int(row["expected_sources"] or 0),
         observed_sources=int(row["observed_sources"] or 0),
         blocked={str(k): int(v) for k, v in blocked.items()},

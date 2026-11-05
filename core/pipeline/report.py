@@ -70,7 +70,10 @@ from core.domain.enums import (
     SourceScope,
     Status,
 )
-from core.domain.invariants import check_unknown_exhaustion
+from core.domain.invariants import (
+    ABSENCE_UNDATED_REASON,
+    check_unknown_exhaustion,
+)
 from core.domain.models import (
     CatalogRow,
     CorpusCoverage,
@@ -107,7 +110,6 @@ from core.pipeline.digests import (
 from core.pipeline.digests import (
     seeds_digest as _seeds_digest,
 )
-from core.pipeline.evaluate import REUSE_UNCONFIRMED_REASON
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
 from core.pipeline.onboarding import load_effective_seeds as _load_effective_seeds
@@ -144,11 +146,11 @@ __all__ = [
     "CrossCycleDiffError",
     "PublishBlockedError",
     "build_manifest",
+    "collect_absence_undated_anomalies",
     "collect_corpus_coverage_anomalies",
     "collect_crawl_truncation_anomalies",
     "collect_golden_exempt_anomalies",
     "collect_i3_anomalies",
-    "collect_reuse_unconfirmed_anomalies",
     "collect_run_products",
     "compact_search_effort",
     "crawl_control_digest",
@@ -299,11 +301,12 @@ class Artifacts:
     #: Продукты с объявленным waiver'ом эталона (``golden_exempt_product``), по
     #: ``product_id``; пусто — waiver'ов нет либо объявления не читали.
     golden_exempt_products: list[dict[str, Any]] = field(default_factory=list)
-    #: Ячейки, у которых ``❌`` **снят** правилом «``❌`` требует ``live|revalidated``»
-    #: (``reuse_unconfirmed``, 16 §8 п.4): продукт/параметр и названный виновник. Читается
+    #: Ячейки, у которых ``❌`` **снят** инвариантом I2d — у отрицания не оказалось
+    #: датированного носителя (``absence_undated``, план 20 §11.2): продукт/параметр и
+    #: названный виновник (документ без даты / корень без ``complete``-снятия). Читается
     #: из записи ячейки, а не пересчитывается — второй носитель правила разошёлся бы с
     #: первым. Входят и в ``i3_anomalies`` (обратная совместимость имени).
-    reuse_unconfirmed_anomalies: list[dict[str, Any]] = field(default_factory=list)
+    absence_undated_anomalies: list[dict[str, Any]] = field(default_factory=list)
     #: ``outputs/run_product.csv`` — статус продукта **в прогоне** (16 §3.2): mode/status/
     #: scope/счётчики документов и ячеек. ``None`` — строк нет (legacy-прогон без таблицы
     #: ``run_product``): файл не создаётся, «нет строк» не выдаётся за «всё complete».
@@ -1814,7 +1817,7 @@ def render_nda_questions(
     crawl_truncation_anomalies: Iterable[Mapping[str, Any]] | None = None,
     corpus_coverage_anomalies: Iterable[Mapping[str, Any]] | None = None,
     golden_exempt_anomalies: Iterable[Mapping[str, Any]] | None = None,
-    reuse_unconfirmed_anomalies: Iterable[Mapping[str, Any]] | None = None,
+    absence_undated_anomalies: Iterable[Mapping[str, Any]] | None = None,
 ) -> Path:
     """Пишет ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры).
 
@@ -1842,10 +1845,12 @@ def render_nda_questions(
     ``anomaly_kind="golden_exempt_product"`` называют продукт и причину из объявления.
     Это наблюдение об инструменте проверки, а не о ячейке: статусы не меняются.
 
-    **16 §8 п.4.** ``reuse_unconfirmed_anomalies`` — ячейки, у которых ``❌`` снят правилом
-    «``❌`` требует ``live|revalidated``» (:func:`collect_reuse_unconfirmed_anomalies`);
-    строки ``anomaly_kind="reuse_unconfirmed"`` называют продукт, параметр и виновника
-    (документ или корпус продукта). Как и остальные, это **наблюдение**: ячейка уже ``❓``.
+    **I2d (план 20 §11.2).** ``absence_undated_anomalies`` — ячейки, у которых ``❌`` снят
+    инвариантом «у ``❌`` есть датированный носитель» (:func:`collect_absence_undated_anomalies`);
+    строки ``anomaly_kind="absence_undated"`` называют продукт, параметр и **чего не
+    хватило** (документ без даты наблюдения / корень без ``complete``-снятия). Текст
+    берётся из причины ячейки как есть: отчёт не переписывает её в «устарело». Как и
+    остальные, это **наблюдение**: ячейка уже ``❓``.
     """
     rows: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
@@ -1901,16 +1906,16 @@ def render_nda_questions(
                 "anomaly_kind": "golden_exempt_product",
             }
         )
-    for anomaly in reuse_unconfirmed_anomalies or ():
+    for anomaly in absence_undated_anomalies or ():
         rows.append(
             {
                 "product_id": anomaly.get("product_id", ""),
                 "param_id": anomaly.get("param_id", ""),
-                "status": "reuse_unconfirmed",
+                "status": "absence_undated",
                 "exhausted_contours": "",
                 "protocol_status": "",
                 "i3_anomaly": anomaly.get("reason", ""),
-                "anomaly_kind": "reuse_unconfirmed",
+                "anomaly_kind": "absence_undated",
             }
         )
     return _write_csv(
@@ -1991,20 +1996,22 @@ def collect_i3_anomalies(
     return anomalies
 
 
-def collect_reuse_unconfirmed_anomalies(
+def collect_absence_undated_anomalies(
     cells: Iterable[Any],
 ) -> list[dict[str, Any]]:
-    """16 §8 п.4: ``❌`` снят, потому что наблюдение в этом цикле не подтверждено.
+    """I2d (план 20 §11.2): ``❌`` снят, потому что у отрицания нет датированного носителя.
 
-    Источник — **запись ячейки**, а не пересчёт правила: машинный токен
-    ``reuse_unconfirmed`` пишет конвейер в ``evidence_scope.reason`` и в
+    Источник — **запись ячейки**, а не пересчёт инварианта: машинный токен
+    ``absence_undated`` пишет конвейер в ``evidence_scope.reason`` и в
     ``cells.validation_notes``, и отчёт читает ровно то, что записано. Второе вычисление
     здесь разошлось бы с первым (та же дисциплина, что у ``run_product`` против
     ``results[].notes``): отчёт обязан объяснять опубликованную карту, а не строить свою.
 
-    Запись называет **виновника** — текст берётся из причины ячейки, где конвейер уже
-    указал ``{product_id}/{param_id}``, документ (или корпус продукта) и что именно не так.
-    Аномалия — наблюдение (I12): статус ячейки не меняется, она и так ``❓``.
+    Запись называет, **чего не хватило**: текст берётся из причины ячейки, где конвейер уже
+    указал ``{product_id}/{param_id}`` и виновника — документ без даты наблюдения или
+    корень без ``complete``-снятия. Переписывать это в «устарело» запрещено: причина —
+    факт о носителе, а не оценка возраста (порогов не вводим, A3). Аномалия — наблюдение
+    (I12): статус ячейки не меняется, она и так ``❓``.
     """
     anomalies: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
@@ -2013,17 +2020,21 @@ def collect_reuse_unconfirmed_anomalies(
         notes = [
             str(note) for note in (getattr(cell, "validation_notes", None) or [])
         ]
-        if REUSE_UNCONFIRMED_REASON not in reason and not any(
-            REUSE_UNCONFIRMED_REASON in note for note in notes
+        # Токен стоит **первым** в причине (``f"{ABSENCE_UNDATED_REASON}: …"``): сравнение
+        # по началу строки не ловит чужие причины, где он лишь упомянут.
+        starts = reason.startswith(ABSENCE_UNDATED_REASON)
+        if not starts and not any(
+            note.startswith(ABSENCE_UNDATED_REASON) for note in notes
         ):
             continue
-        # Причина ячейки несёт полный текст виновника; если токен есть только в заметке
-        # (строка, записанная до появления причины, либо причина перезаписана позже) —
-        # берётся заметка: отчёт называет то, что записано, и не дописывает своё.
         detail = (
             reason
-            if REUSE_UNCONFIRMED_REASON in reason
-            else next(note for note in notes if REUSE_UNCONFIRMED_REASON in note)
+            if starts
+            else next(
+                note
+                for note in notes
+                if note.startswith(ABSENCE_UNDATED_REASON)
+            )
         )
         anomalies.append(
             {
@@ -3308,9 +3319,9 @@ def write_reports(
     I3 (§5): strict-``❓`` без полного протокола исчерпания фиксируются как аномалии
     (:attr:`Artifacts.i3_anomalies`) — статус ячейки при этом не меняется.
 
-    16 §3.2/§8 п.4: пишет ``outputs/run_product.csv`` (статус продукта **в прогоне**, из
-    таблицы ``run_product``) и собирает аномалии ``reuse_unconfirmed`` (``❌`` снят
-    правилом «``❌`` требует ``live|revalidated``»). Оба — чтение уже записанного:
+    16 §3.2/I2d: пишет ``outputs/run_product.csv`` (статус продукта **в прогоне**, из
+    таблицы ``run_product``) и собирает аномалии ``absence_undated`` (``❌`` снят
+    инвариантом «у отрицания есть датированный носитель»). Оба — чтение уже записанного:
     отчёт не пересчитывает ни статус продукта, ни правило допуска ``❌``.
     """
     cell_list = _cell_list(cells)
@@ -3392,10 +3403,11 @@ def write_reports(
             resolved_golden_status = read_golden_status(package_dir)
     golden_exempt_anomalies = collect_golden_exempt_anomalies(resolved_golden_status)
 
-    # 16 §8 п.4: ячейки, у которых ``❌`` снят правилом «``❌`` требует ``live|revalidated``».
-    # Читается **из записи ячейки** (причина/заметки), а не пересчитывается: правило живёт
-    # в конвейере, отчёт обязан объяснять опубликованную карту, а не строить свою.
-    reuse_anomalies = collect_reuse_unconfirmed_anomalies(cell_list)
+    # I2d: ячейки, у которых ``❌`` снят инвариантом «у отрицания есть датированный
+    # носитель». Читается **из записи ячейки** (причина/заметки), а не пересчитывается:
+    # инвариант живёт в конвейере, отчёт обязан объяснять опубликованную карту, а не
+    # строить свою.
+    absence_undated_anomalies = collect_absence_undated_anomalies(cell_list)
 
     # 16 §3.2: статус продукта **в прогоне** — строки ``run_product`` (mode/status/scope/
     # счётчики). Носитель — таблица; ``results[].notes`` прогона остаётся операторским
@@ -3474,7 +3486,7 @@ def write_reports(
         crawl_truncation_anomalies=truncation_anomalies,
         corpus_coverage_anomalies=coverage_anomalies,
         golden_exempt_anomalies=golden_exempt_anomalies,
-        reuse_unconfirmed_anomalies=reuse_anomalies,
+        absence_undated_anomalies=absence_undated_anomalies,
     )
     preliminary = render_preliminary_findings(
         cell_list, outputs_dir / "preliminary_findings.xlsx"
@@ -3494,7 +3506,7 @@ def write_reports(
     anomalies.extend(truncation_anomalies)
     anomalies.extend(coverage_anomalies)
     anomalies.extend(golden_exempt_anomalies)
-    anomalies.extend(reuse_anomalies)
+    anomalies.extend(absence_undated_anomalies)
 
     # 13-manual-artifacts §4: тот же генератор, что у фазы ``corpus`` (один код — две
     # точки вызова), поэтому повторная выгрузка отчёта обновляет файл, а формы двух
@@ -3527,7 +3539,7 @@ def write_reports(
         crawl_truncation_anomalies=truncation_anomalies,
         corpus_coverage_anomalies=coverage_anomalies,
         golden_exempt_products=golden_exempt_anomalies,
-        reuse_unconfirmed_anomalies=reuse_anomalies,
+        absence_undated_anomalies=absence_undated_anomalies,
         run_product=run_product_path,
         run_products=run_product_rows,
         artifacts_gap=artifacts_gap,

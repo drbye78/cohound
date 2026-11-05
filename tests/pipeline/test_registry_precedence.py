@@ -44,16 +44,24 @@ from core.domain import (
     Upstream,
 )
 from core.pipeline import RunPlan
+from core.pipeline.corpus_index import _chunk_id
 from core.pipeline.evaluate import evaluate_phase
+from core.pipeline.incremental import doc_version_id
 from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.precedence import PRECEDENCE_REVIEW_REASON
 from core.pipeline.review import review_queue
 from core.ports.llm import LLMRequest, LLMResponse
+from core.ports.store import CorpusArtifactRow
 from core.ports.vector_index import RetrievedChunk
 from core.store.sqlite_store import SqliteStore
 
 RUN_ID = "run-precedence"
 FIXTURES = Path(__file__).parent / "fixtures"
+
+#: Версия документа и адрес чанка в форме прогона (16 §6): ``source_id`` цитаты обязан
+#: разбираться в документ, иначе I2d не может найти его дату наблюдения.
+DOC_VERSION = doc_version_id("p1", "hash-1", "", "")
+CHUNK_ID = _chunk_id("p1", DOC_VERSION, 0)
 
 #: Текст нейтрального чанка. Слово «Param» в нём — не украшение: замер
 #: ``support_subject_overlap`` сверяет цитату с предметом (``title`` каталога), и
@@ -134,12 +142,30 @@ def store():
                 computed_at="2026-01-01T00:00:00+00:00",
             ),
         )
+        # I2d (план 20 §11.2): опубликованный ``❌`` держится на датированном наблюдении
+        # цитируемого документа. Фикстура объявляет его явно: без даты ячейка понижается
+        # до ``❓`` (это верное поведение, но не предмет теста прецедента — конфликта
+        # с реестром тогда просто нет).
+        s.replace_corpus_artifacts(
+            RUN_ID,
+            "p1",
+            [
+                CorpusArtifactRow(
+                    run_id=RUN_ID,
+                    product_id="p1",
+                    url_key="https://p1.test/doc",
+                    doc_version_id=DOC_VERSION,
+                    observed_at="2026-01-01T00:00:00+00:00",
+                    observed_how="live",
+                )
+            ],
+        )
         yield s
 
 
 def _chunk() -> RetrievedChunk:
     return RetrievedChunk(
-        chunk_id="chunk_1",
+        chunk_id=CHUNK_ID,
         product_id="p1",
         text=CHUNK_TEXT,
         content_hash="hash-1",
@@ -192,7 +218,7 @@ def _ok_output() -> LLMCellOutput:
     return LLMCellOutput(
         status=Status.OK,
         justification="корпус подтверждает",
-        evidence=[LLMEvidence(source_id="chunk_1", quote="Param item: neutral corpus evidence")],
+        evidence=[LLMEvidence(source_id=CHUNK_ID, quote="Param item: neutral corpus evidence")],
     )
 
 
@@ -206,7 +232,7 @@ def _absent_output() -> LLMCellOutput:
         status=Status.ABSENT,
         justification="документация прямо отрицает поддержку",
         evidence=[
-            LLMEvidence(source_id="chunk_1", quote="Param item: neutral corpus evidence")
+            LLMEvidence(source_id=CHUNK_ID, quote="Param item: neutral corpus evidence")
         ],
         denial_strength=DenialClaim.EXPLICIT,
         denial_reason="прямое отрицание в документации",
@@ -217,7 +243,7 @@ def _unknown_output() -> LLMCellOutput:
     return LLMCellOutput(
         status=Status.UNKNOWN,
         justification="недостаточно свидетельств",
-        evidence=[LLMEvidence(source_id="chunk_1", quote="Param item: neutral corpus evidence")],
+        evidence=[LLMEvidence(source_id=CHUNK_ID, quote="Param item: neutral corpus evidence")],
     )
 
 

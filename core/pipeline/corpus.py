@@ -4192,8 +4192,10 @@ def _build_corpus(
             # вызова. Это не ``no_seeds`` (seed'ы есть) и не «продукт пуст» (документы
             # могут быть переиспользованы/пере-извлечены из durable-субстрата). Причина
             # называется в строке покрытия всегда: ``observed_sources`` — счётчик
-            # наблюдений **этого** прогона, и он нулевой, поэтому ``complete`` не может
-            # стать ``True``. ``blocked`` ставится только когда материала не осталось:
+            # наблюдений **этого** прогона, и он нулевой. План 20 §11.2: ``complete``
+            # решают **снятия** корней, а не элементы сеанса, поэтому отсутствие сети само
+            # по себе полноту не отменяет — корпус удостоверен датированным обходом
+            # прошлого прогона. ``blocked`` ставится только когда материала не осталось:
             # «материал есть, охват неполон» — это ``partial``, а не ``blocked``.
             no_network_label = "frozen" if frozen else "offline"
             no_network_reason = (
@@ -4656,6 +4658,18 @@ def _build_corpus(
         # перезаписывает строки (``INSERT OR REPLACE``) и остаётся авторитетным — он же
         # закрывает продукты, вообще не вошедшие в цикл (zero-source/coverage_missing).
         product_coverage: CorpusCoverage | None = None
+        # План 20 §11.2: носитель полноты — снятия объявленных корней. Читаются один
+        # раз: тот же список даёт ``complete`` и догон дайджестов ниже (второго
+        # чтения нет — иначе два представления одного состояния могли разойтись).
+        product_captures: list[CaptureRow] = []
+        if state is not None:
+            try:
+                product_captures = list(state.iter_captures(product_id))
+            except Exception as exc:  # noqa: BLE001 — покрытие важнее снятий
+                errors.append(
+                    f"{product_id}: coverage captures: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         if session is not None:
             try:
                 written_coverage = _persist_corpus_coverage(
@@ -4676,6 +4690,14 @@ def _build_corpus(
                     partial_docs=partial_urls_by_product,
                     # ``--only-failed``: ремонт не наблюдал продукт целиком.
                     incomplete_reasons=coverage_incomplete,
+                    # F3: объявленные корни продукта + их снятия (``complete`` по снятиям).
+                    declared_roots={product_id: product_roots},
+                    captures={product_id: product_captures},
+                    # Объявленный отпечаток политики — тот же объект, что дал
+                    # ``crawl_policy_digest`` для ``run_id`` (второй формулы нет).
+                    declared_policy_digest=(
+                        None if crawl_policy is None else crawl_policy.digest
+                    ),
                 )
                 # 16 §3.2: ``coverage_complete`` строки продукта — та же величина, что
                 # легла в ``corpus_coverage``, а не второй её расчёт.
@@ -4700,7 +4722,7 @@ def _build_corpus(
                     None if crawl_policy is None else crawl_policy.digest
                 )
                 live_doc_set_digest = product_doc_set_digest
-                for capture in state.iter_captures(product_id):
+                for capture in product_captures:
                     if (
                         capture.run_id != run_id
                         or capture.observed_how != CAPTURE_OBSERVED_LIVE
@@ -5000,6 +5022,19 @@ def _build_corpus(
     # корпусе, а не о статусе сеанса, поэтому остаётся на границе фазы (пишется поверх
     # per-product строк и закрывает продукты, вообще не вошедшие в цикл).
     if session is not None:
+        # План 20 §11.2: полнота — по снятиям корней. Карта строится для всех продуктов
+        # фазы: у продукта без элементов сеанса снятие прошлого прогона — единственный
+        # носитель полноты (``frozen``/``offline``). Сбой чтения одного продукта не рушит
+        # покрытие остальных: продукт получает пустой список (полнота не удостоверена).
+        coverage_captures: dict[str, list[CaptureRow]] = {}
+        if state is not None:
+            for pid in sorted(set(url_map) | set(products)):
+                try:
+                    coverage_captures[pid] = list(state.iter_captures(pid))
+                except Exception as exc:  # noqa: BLE001 — покрытие важнее снятий
+                    errors.append(
+                        f"{pid}: coverage captures: {type(exc).__name__}: {exc}"
+                    )
         try:
             end_coverage = _persist_corpus_coverage(
                 store,
@@ -5022,6 +5057,12 @@ def _build_corpus(
                 # Тот же набор продуктов-ремонтов: перезапись не должна вернуть им
                 # ``complete``, которого они не заслужили.
                 incomplete_reasons=coverage_incomplete,
+                # F3: объявленные корни и их снятия — второй предикат полноты нет.
+                declared_roots=url_map,
+                captures=coverage_captures,
+                declared_policy_digest=(
+                    None if crawl_policy is None else crawl_policy.digest
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(

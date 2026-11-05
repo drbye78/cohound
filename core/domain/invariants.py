@@ -12,6 +12,7 @@ Pydantic (см. docs/architecture/01-modules-and-contracts.md §2.3).
 
 from __future__ import annotations
 
+import datetime as _dt
 from collections.abc import Sequence
 
 from core.domain.enums import (
@@ -30,6 +31,7 @@ from core.domain.models import (
     Cell,
     CellEvidence,
     CorpusCoverage,
+    CorpusRootCoverage,
     EvidenceScope,
     ProtocolExhaustion,
     Satellite,
@@ -50,6 +52,16 @@ EXHAUSTION_CONTOURS: tuple[str, ...] = ("corpus", "serp", "registry", "inheritan
 #: Deprecated-алиас :data:`EXHAUSTION_CONTOURS` (публичный символ домена; читается
 #: отчётом и старыми вызовами). Смысл изменился: список контуров больше не требование.
 REQUIRED_EXHAUSTION_CONTOURS: tuple[str, ...] = EXHAUSTION_CONTOURS
+
+#: Машинный токен причины «у ``❌`` нет датированного носителя» (I2d, план 20 §11.2).
+#:
+#: Живёт константой рядом с прочими машинными причинами (:data:`absence_coverage_unsatisfied`
+#: в ``core.pipeline.evaluate``; токен снятого правила ``reuse_unconfirmed`` остаётся только в
+#: старых записях и в коде больше не объявлен): ``evidence_scope.reason``
+#: — свободная строка, а не перечисление ``docs/status-dictionary.yaml``, поэтому
+#: расширение значений не меняет смысл правил покрытия и не является методологической
+#: границей (§13). Тот же токен уходит в ``cells.validation_notes``.
+ABSENCE_UNDATED_REASON = "absence_undated"
 
 # Контракт derived-evidence (K5) допускает два пути:
 #   * наследование — ``source_kind: inheritance``;
@@ -351,6 +363,109 @@ def check_absence_coverage(
             )
         ]
     return []
+
+
+def _parse_iso_utc(value: str | None) -> _dt.datetime | None:
+    """Разобрать ISO-8601 в aware-``datetime``; ``None`` — даты нет/не разобрана.
+
+    Наивная форма трактуется как UTC: сравнивать надо моменты, а не записи, иначе
+    ``+03:00`` и ``+00:00`` решали бы, какая опора «раньше», хотя это один и тот же миг.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.UTC)
+    return parsed
+
+
+def check_absence_dated(
+    *,
+    denial_strength: DenialStrength | str,
+    cited_observations: Sequence[tuple[str, str | None]],
+    roots: Sequence[CorpusRootCoverage],
+) -> tuple[bool, str | None, list[str]]:
+    """I2d: у ``❌`` есть **датированный носитель**; ``as_of`` — самая слабая опора.
+
+    ``❌`` перестаёт быть утверждением о сегодняшнем дне и становится утверждением о
+    событии с датой (план 20 §11.2). Носитель зависит от класса отрицания:
+
+    * ``explicit``/``authoritative`` — запись наблюдения **каждого** документа, чья
+      цитата/энумерация держит отрицание: ``observed_at`` обязателен. Способ наблюдения
+      при наличии даты не ограничен (``adopted`` допускается: это explicit-свидетельство,
+      а не вывод из исчерпания);
+    * ``bounded`` — снятие **каждого** объявленного корня с ``complete=True`` и датой.
+      ``observed_how='adopted'`` удостоверить ``bounded`` **не может**: предоставление —
+      не обход, и «корень исчерпан» оно не утверждает;
+    * ``unobserved``/``not_stated``/``instrument_failed`` — функция не применяется:
+      ``❌`` этими классами не публикуется (``(True, None, [])``).
+
+    ``as_of`` = **min** дат носителей. Для ``bounded`` это конъюнкция по корням: она
+    верна ровно до самого раннего удостоверения, после которого хотя бы один корень мог
+    измениться. Для ``explicit`` — самая старая цитата (цитата не стареет, дата лишь
+    честная нижняя граница). ``max`` выдал бы самую свежую опору за дату всего
+    утверждения — ровно ошибка, от которой уходит F3.
+
+    :returns: ``(ok, as_of, missing)``. ``ok=False`` — носителя/даты нет; ``missing``
+        называет недостающее (для ``evidence_scope.reason`` и ``cells.validation_notes``,
+        токен :data:`ABSENCE_UNDATED_REASON`), ``as_of=None``.
+    """
+    strength = (
+        denial_strength
+        if isinstance(denial_strength, DenialStrength)
+        else DenialStrength(denial_strength)
+    )
+    if strength not in ABSENT_DENIAL_STRENGTHS:
+        return (True, None, [])
+    if strength in {DenialStrength.EXPLICIT, DenialStrength.AUTHORITATIVE}:
+        if not cited_observations:
+            return (
+                False,
+                None,
+                ["нет цитируемых документов: отрицанию не на что опереться"],
+            )
+        missing: list[str] = []
+        dates: list[_dt.datetime] = []
+        for url, observed_at in cited_observations:
+            parsed = _parse_iso_utc(observed_at)
+            if parsed is None:
+                missing.append(f"нет даты наблюдения документа: {url}")
+            else:
+                dates.append(parsed)
+        if missing:
+            return (False, None, missing)
+        return (True, min(dates).isoformat(), [])
+    # bounded: исчерпание — свойство пространства, поэтому нужен обход каждого корня.
+    if not roots:
+        return (
+            False,
+            None,
+            ["нет объявленных корней продукта: исчерпание нечем удостоверить"],
+        )
+    missing = []
+    dates = []
+    for root in roots:
+        if not root.complete:
+            missing.append(f"корень {root.root_url}: нет снятия с complete=1")
+            continue
+        if root.observed_how == "adopted":
+            missing.append(
+                f"корень {root.root_url}: снятие adopted не удостоверяет исчерпание "
+                "(предоставление — не обход)"
+            )
+            continue
+        parsed = _parse_iso_utc(root.observed_at)
+        if parsed is None:
+            missing.append(f"корень {root.root_url}: у снятия не записана дата")
+            continue
+        dates.append(parsed)
+    if missing:
+        return (False, None, missing)
+    return (True, min(dates).isoformat(), [])
 
 
 def check_evidence(ev: CellEvidence, cell: Cell | None = None) -> list[Violation]:

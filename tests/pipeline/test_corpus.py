@@ -70,7 +70,7 @@ from core.ports.crawl_executor import (
     CrawlSubmitResult,
     CrawlWorkItem,
 )
-from core.ports.state import UrlStateRow
+from core.ports.state import CaptureRow, UrlStateRow
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -4823,6 +4823,24 @@ def _session_item(
     )
 
 
+def _certified_root(root_url: str = "https://a.example/") -> tuple[list[str], list[CaptureRow]]:
+    """Объявленный корень + удостоверяющее снятие (F3: ``complete`` — по снятиям)."""
+    return (
+        [root_url],
+        [
+            CaptureRow(
+                capture_id="cap-1",
+                product_id="p1",
+                root_url=root_url,
+                started_at="2026-01-01T00:00:00+00:00",
+                finished_at="2026-01-01T00:10:00+00:00",
+                complete=True,
+                observed_how="live",
+            )
+        ],
+    )
+
+
 def test_derive_corpus_coverage_counts_blocked_sources() -> None:
     """Ф0: failed-исходы считаются по каноническому ``error_kind``, fetched — observed.
 
@@ -4992,11 +5010,14 @@ def test_source_unavailable_on_readable_origin_stays_complete() -> None:
         ),
     ]
 
+    roots, captures = _certified_root()
     coverage = derive_corpus_coverage(
         product_id="p1",
         items=items,
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=roots,
+        captures=captures,
     )
 
     assert coverage.complete is True
@@ -5110,11 +5131,14 @@ def test_not_found_only_origin_is_readable() -> None:
         ),
     ]
 
+    roots, captures = _certified_root()
     coverage = derive_corpus_coverage(
         product_id="p1",
         items=items,
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=roots,
+        captures=captures,
     )
 
     assert coverage.complete is True
@@ -5134,11 +5158,14 @@ def test_one_fetched_plus_not_found_stays_complete() -> None:
         ),
     ]
 
+    roots, captures = _certified_root()
     coverage = derive_corpus_coverage(
         product_id="p1",
         items=items,
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=roots,
+        captures=captures,
     )
 
     assert coverage.complete is True
@@ -5201,21 +5228,29 @@ def test_derive_corpus_coverage_is_deterministic() -> None:
 
 
 def test_build_corpus_persists_product_coverage(tmp_path: Path) -> None:
-    """Ф0: фаза корпуса персистит покрытие по персистентным элементам сеанса."""
+    """Ф0/F3: покрытие пишется на границе продукта и полно по снятию корня.
+
+    ``complete`` решается снятием (план 20 §11.2), поэтому живой прогон идёт с
+    ``state.db``: без durable-снятия полноту нечем удостоверить, и ``complete=False`` —
+    честный ответ, а не дефект фазы.
+    """
     store = SqliteStore(":memory:")
     try:
         _make_run(store)
-        result = _build(
-            tmp_path,
-            pages={URL_P1_A: b"page one"},
-            urls={"p1": [URL_P1_A]},
-            store=store,
-            run_id=RUN_ID,
-        )
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                run_id=RUN_ID,
+                state=state,
+            )
         assert result.status == "ok"
         coverage = store.read_corpus_coverage(RUN_ID, "p1")
         assert coverage is not None
         assert coverage.complete is True
+        assert [root.complete for root in coverage.roots] == [True]
         assert coverage.expected_sources == coverage.observed_sources == 1
         assert coverage.blocked == {}
         assert coverage.truncated is False

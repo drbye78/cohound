@@ -75,7 +75,15 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: недоступна отчёту, а ``stale_roots`` (план 20 §6) требует ещё и связи артефакта с
 #: корнем, которой у ``corpus_docs`` нет. Шимов нет: файлы ≤ 3.18.0 отвергаются гейтом
 #: версии, прогон переносится пересозданием.
-SCHEMA_VERSION = "3.19.0"
+#:
+#: 3.20.0 (F3 плана ``20``, **один** bump на носитель даты и полноты, §11.2):
+#: ``corpus_coverage.roots_json`` — снятия объявленных корней продукта (``root_url``,
+#: ``capture_id``, ``complete``, ``observed_how``, ``observed_at``): ``complete`` теперь
+#: решается по ним, а не по элементам сеанса, и проход без сети обязан нести удостоверение
+#: прошлого обхода. ``cells.absence_as_of`` — дата слабой опоры ``❌`` (``min`` дат
+#: носителей, I2d): пишется фазой оценки, отчёт только проецирует. Шимов нет: файлы
+#: ≤ 3.19.0 отвергаются гейтом версии, прогон переносится пересозданием.
+SCHEMA_VERSION = "3.20.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -317,6 +325,9 @@ CREATE TABLE IF NOT EXISTS cells (
     stale_reason      TEXT,                             -- инвалидация при смене сборки/prompt
     review_reason     TEXT,                             -- аннотация причины pending (не статус)
     evidence_scope    TEXT,                             -- JSON силы отрицания + вектора охвата (§2.3)
+    -- План 20 §11.2 (F3, I2d): дата слабой опоры ❌ — min дат носителей (наблюдения
+    -- цитируемых документов / снятия объявленных корней). NULL = не записана.
+    absence_as_of     TEXT,
     primary_evidence_id TEXT,
     reviewed_by       TEXT,
     -- 09 §10 (схема cell-reuse-2): происхождение ячейки. ``observed`` — вердикт получен
@@ -557,6 +568,10 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
     blocked_json      TEXT NOT NULL DEFAULT '{}',   -- {"error_kind": count}
     unreadable_origins_json TEXT NOT NULL DEFAULT '[]',  -- ["origin", ...]
     partial_blocks_json     TEXT NOT NULL DEFAULT '{}',  -- {"origin": {"error_kind": count}}
+    -- План 20 §11.2 (F3): снятия объявленных корней продукта. ``complete`` решается по
+    -- ним, а не по элементам сеанса: проход без сети (``frozen``/``offline``) не имеет
+    -- элементов, но корпус удостоверен датированным обходом прошлого прогона.
+    roots_json        TEXT,                          -- [{"root_url", "capture_id", "complete", ...}]
     truncated         INTEGER NOT NULL DEFAULT 0,
     computed_at       TEXT NOT NULL,
     reason            TEXT,

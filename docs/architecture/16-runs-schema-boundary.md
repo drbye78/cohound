@@ -38,7 +38,8 @@
 и импортирует `core/pipeline/corpus.py`/`phases.py`; правка этих файлов на ходу ломает его.
 
 **Третья причина (решение владельца 29.10.2026): в границу входит правило «`❌` требует
-`live|revalidated`»** (`09` §11.2). Оно меняет условие публикации `❌`, то есть
+`live|revalidated`»** (`09` §11.2; **снято F3 плана 20** — носитель теперь датированный,
+I2d, `09` §11.2 врезка). Оно меняет условие публикации `❌`, то есть
 absence/evidence-модель, а значит по `AGENTS.md` §13 это `methodology_change` с
 обязательными `golden-full` **и** пере-аннотацией golden. Правило неотделимо от
 `corpus_docs.reuse_kind`: без колонки оно неисполнимо, а колонка без правила — только
@@ -192,7 +193,7 @@ retained-байтов).
 происхождение наблюдения там же. Решение границы: **поля
 `CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2195`, явные
 kwargs) + `_has_column`-терпимость к необязательным колонкам
-(`core/store/sqlite_rows.py:76`). ✅ As-built — так и сделано.
+(`core/store/sqlite_rows.py:77`). ✅ As-built — так и сделано.
 
 ### 3.4. `corpus_doc_version` — отображение версии документа в строку корпуса (**as-built**)
 
@@ -214,7 +215,9 @@ CREATE INDEX IF NOT EXISTS idx_corpus_doc_version_doc
 `source_id`, то есть обязано отобразить `dv_...` в строку `corpus_docs`. Обратной функции у
 `short_hash` нет, а `doc_id` не выводится из `dv` — значит отображение обязано быть
 **записано**. Без него правило снимало бы подтверждённые `❌` как «наблюдение не записано»
-(§10 п. 8–9).
+(§10 п. 8–9). **Зачем это нужно после F3:** отображение читает I2d, чтобы найти
+`corpus_artifact` по `doc_version_id` (дата носителя адресована версией документа); писатель
+прежнего правила удалён, таблица осталась носителем адреса.
 
 **Почему таблица, а не колонка `corpus_docs.doc_version_id`.** `doc_id` дедуплицируется по
 `content_hash`, который **не включает уровень извлечения**, а `document_level` объявлен
@@ -266,12 +269,12 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 (`core/pipeline/digests.py:400-442`) требует точного набора ключей, но вызывается ровно из
 одного места — `run_identity.py:321`, внутри `build_execution_contract`, то есть только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:2054-2078`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:2049-2108`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. Поэтому старые прогоны читаются, а их diff честно говорит
 `execution_change: embed_device`.
 
 `RunManifest` (`core/domain/models.py:1528-1740`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2528-2531`) сопоставляет имя
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2539-2542`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS` (`:2490`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
@@ -281,7 +284,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 Колонка, не вписанная туда, останется `NULL` навсегда: штатного `ALTER TABLE` больше нет
 (схема версионируется, старая БД отвергается), поэтому расхождение списка с `DDL` — дефект,
 а не «домигрируется». Чтение — `read_manifest` (`:2486-2665`), где необязательные поля идут
-через `_has_column` (`core/store/sqlite_rows.py:76`).
+через `_has_column` (`core/store/sqlite_rows.py:77`).
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено»
 
@@ -508,7 +511,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
   `_derive_partition_build_id(**явные kwargs)`; новый обязательный аргумент → `TypeError`.
 - `tests/pipeline/test_corpus.py:933-947` — перечень вариантов чувствительности `pb`
   (подмножество параметров проходит, но перечень вариантов надо расширить).
-- `tests/selfcheck.py:783-791` (список обязательных таблиц — `run_product` в него),
+- `tests/selfcheck.py:793-801` (список обязательных таблиц — `run_product` в него),
   `:801-827` (ассерты по колонкам `runs`/`corpus_docs`), `:1524-1527` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml`: `reuse_kind` (`:651`), `run_scope` (`:670`), `pdf_device`
@@ -599,14 +602,18 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    существует (`core/domain/models.py:2758`) и не персистится ни разу — единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей.
-4. **Правило `❌` (часть той же полосы, `09` §11.2).** Проверка рядом с
-   `_enforce_absence_coverage` (`core/pipeline/evaluate.py:1758-1842`): у `explicit`/
+4. **Правило `❌` (часть той же полосы, `09` §11.2) — СНЯТО F3 плана 20.** Проверка рядом с
+   `_enforce_absence_coverage` (`core/pipeline/evaluate.py`): у `explicit`/
    `authoritative` — каждый документ, на который опирается `❌`, обязан иметь
    `reuse_kind ∈ {live, revalidated}`; у корпусных классов — ни один документ корпуса
    продукта не `reused`/`stale`. Нарушение ⇒ ячейка `❓` (`not_stated`, I12) с причиной
    `reuse_unconfirmed` в `evidence_scope.reason` и `cells.validation_notes`,
    `absence_evidence=[]`. Зеркало в отчёте (как у `absence_coverage_unsatisfied`).
    `freshness`/`offline` **не** нужны: правило читает `corpus_docs.reuse_kind` этого прогона.
+   **As-built 0.3.0:** вместо этого — `_enforce_dated_absence` (I2d): носитель
+   `explicit`/`authoritative` — `corpus_artifact.observed_at` каждого цитируемого документа,
+   `bounded` — `corpus_coverage.roots` (`complete=1` + дата); токен `absence_undated`,
+   дата `absence_as_of` пишется в `cells.absence_as_of` (SCHEMA 3.20.0).
 5. **Версия и golden.** Класс границы — `methodology_version` (§1): bump
    `METHODOLOGY_VERSION`, `methodology_change` в lineage, **полный `golden-full`** и
    **пере-аннотация golden** по `09` §13 — одним прогоном на всю границу, не дважды.

@@ -129,6 +129,10 @@ _CELL_COLUMNS = (
     "measurement_origin",
     "carried_from_run_id",
     "cell_reuse_key",
+    #: План 20 §11.2 (F3, I2d): дата слабой опоры ``❌`` (``min`` дат носителей).
+    #: Колонка провенанса: вердикт от неё не зависит, но без неё дата утверждения
+    #: остаётся только в тексте причины.
+    "absence_as_of",
 )
 
 #: Источники, стоящие в порядке §2.2 п.7 **ниже** реестра. Guard использует это только
@@ -2344,13 +2348,19 @@ class SqliteStore:
             ensure_ascii=False,
             sort_keys=True,
         )
+        # План 20 §11.2 (F3): снятия объявленных корней — носитель полноты.
+        roots_json = json.dumps(
+            [root.model_dump(mode="json") for root in coverage.roots],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         with self.conn:
             self.conn.execute(
                 "INSERT INTO corpus_coverage"
                 " (run_id, product_id, complete, expected_sources, observed_sources,"
                 "  blocked_json, unreadable_origins_json, partial_blocks_json,"
-                "  truncated, computed_at, reason, resolved_manually)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  roots_json, truncated, computed_at, reason, resolved_manually)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(run_id, product_id) DO UPDATE SET"
                 "  complete = excluded.complete,"
                 "  expected_sources = excluded.expected_sources,"
@@ -2358,6 +2368,7 @@ class SqliteStore:
                 "  blocked_json = excluded.blocked_json,"
                 "  unreadable_origins_json = excluded.unreadable_origins_json,"
                 "  partial_blocks_json = excluded.partial_blocks_json,"
+                "  roots_json = excluded.roots_json,"
                 "  truncated = excluded.truncated,"
                 "  computed_at = excluded.computed_at,"
                 "  reason = excluded.reason,"
@@ -2371,6 +2382,7 @@ class SqliteStore:
                     blocked_json,
                     unreadable_origins_json,
                     partial_blocks_json,
+                    roots_json,
                     int(coverage.truncated),
                     coverage.computed_at,
                     coverage.reason,
@@ -3234,9 +3246,9 @@ class SqliteStore:
 
         Одна версия → один документ; обратное неверно (``dv`` включает уровень извлечения,
         ``doc_id`` — нет), поэтому носитель — производная таблица, а не колонка строки
-        корпуса. Читатель нужен там, где адрес приходит версией, а ``reuse_kind`` живёт
-        строкой корпуса: правило «``❌`` требует ``live|revalidated``» получает версию
-        **каждого** документа, а не одну на строку.
+        корпуса. Читатель нужен там, где адрес приходит версией, а носитель даты
+        (``corpus_artifact``) адресован ``doc_version_id``: I2d (план 20 §11.2) датирует
+        **каждый** документ, чья цитата держит ``❌``, а не одну версию на строку.
 
         Область — как у :meth:`iter_corpus_docs`: ``corpus_doc_version`` не несёт
         ``run_id``, поэтому выборка — корпус прогона (в штатной раскладке БД принадлежит

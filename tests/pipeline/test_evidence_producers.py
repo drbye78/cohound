@@ -37,6 +37,7 @@ from core.domain import (
     TerminationReason,
 )
 from core.domain.enums import AbsenceRuleType
+from core.domain.models import CorpusRootCoverage
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.evaluate import evaluate_phase
 from core.pipeline.exhaustion import (
@@ -523,9 +524,33 @@ def test_scope_acceptance_mapping_is_looked_up_per_product() -> None:
 
 
 def test_scope_acceptance_mapping_publishes_bounded_absent_for_accepted_product() -> None:
-    """Принятый риск делает конечный справочник ``bounded`` ⇒ ``❌``, подпись видна."""
+    """Принятый риск делает конечный справочник ``bounded`` ⇒ ``❌``, подпись видна.
+
+    Полнота — по снятию корня (I2d, план 20 §11.2): у ``bounded`` без ``complete``-снятия
+    датированного носителя нет, поэтому подпись риска **одна** ``❌`` больше не держит
+    (ужесточение §11.4 п.2 закреплено в ``test_absence_dated.py``). Здесь проверяется
+    **отображение** подписи в вердикт и протокол, поэтому носитель задан явно.
+    """
     store = _store()
-    store.save_corpus_coverage(RUN_ID, _coverage("p1", complete=False))
+    store.save_corpus_coverage(
+        RUN_ID,
+        CorpusCoverage(
+            product_id="p1",
+            complete=True,
+            roots=[
+                CorpusRootCoverage(
+                    root_url="https://p1.test/",
+                    capture_id="cap-1",
+                    complete=True,
+                    observed_how="live",
+                    observed_at=FIXED_TS,
+                )
+            ],
+            expected_sources=0,
+            observed_sources=0,
+            computed_at=FIXED_TS,
+        ),
+    )
     result = evaluate_phase(
         plan=_distribution_plan(),
         ports=Ports(evaluator=_absent_evaluator(), lexical_index=_chunks_index()),

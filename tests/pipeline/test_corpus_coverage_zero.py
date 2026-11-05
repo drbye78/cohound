@@ -38,6 +38,7 @@ from core.pipeline.corpus_coverage import _persist_corpus_coverage
 from core.pipeline.crawl_session import default_session_id, open_session
 from core.pipeline.evaluate import _coverage_for, evaluate_phase
 from core.pipeline.runner import Ports
+from core.ports.state import CaptureRow
 from core.store.sqlite_store import SqliteStore
 
 RUN_ID = "run-zero"
@@ -87,6 +88,7 @@ def test_persist_coverage_writes_zero_source_row_for_every_plan_product() -> Non
         )
     )
 
+    # F3: полнота — по снятию корня, поэтому удостоверяющее снятие подаётся явно.
     _persist_corpus_coverage(
         store,
         RUN_ID,
@@ -94,6 +96,20 @@ def test_persist_coverage_writes_zero_source_row_for_every_plan_product() -> Non
         set(),
         "2026-10-19T00:00:00+00:00",
         products=["p1", "p2"],
+        declared_roots={"p1": ["https://p1.test/"]},
+        captures={
+            "p1": [
+                CaptureRow(
+                    capture_id="cap-1",
+                    product_id="p1",
+                    root_url="https://p1.test/",
+                    started_at="2026-10-19T00:00:00+00:00",
+                    finished_at="2026-10-19T00:10:00+00:00",
+                    complete=True,
+                    observed_how="live",
+                )
+            ]
+        },
     )
 
     p1 = store.read_corpus_coverage(RUN_ID, "p1")

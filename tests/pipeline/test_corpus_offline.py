@@ -507,12 +507,15 @@ def test_offline_chunker_version_mismatch_does_not_reuse_or_fetch(
 # --------------------------------------------------------------------------- #
 
 
-def test_offline_run_never_claims_complete_coverage(tmp_path: Path) -> None:
-    """``reused`` — «в этом прогоне не наблюдалось»: покрытие неполно, причина названа.
+def test_offline_run_is_complete_by_capture_and_names_its_own_reason(
+    tmp_path: Path,
+) -> None:
+    """``reused``: наблюдений этого прогона нет, но корпус удостоверен снятием (F3).
 
-    Правило I2c/``check_absence_coverage`` не ослабляется: ``complete=False`` при
-    нулевом ``observed_sources`` — то же условие, что и для любого другого прогона без
-    наблюдений. Переиспользованный документ честно называется переиспользованным.
+    План 20 §11.2: ``complete`` — факт **корпуса** (датированное исчерпание корня), а
+    ``observed_sources = 0`` — факт **прогона**. Переиспользованный документ по-прежнему
+    называется переиспользованным, а ``reason`` называет, что сеть не трогалась;
+    полнота при этом не выдумана, а унаследована вместе с наблюдением.
     """
     with SqliteStateStore(":memory:") as state:
         _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
@@ -522,7 +525,8 @@ def test_offline_run_never_claims_complete_coverage(tmp_path: Path) -> None:
             coverage = store.read_corpus_coverage(RUN_ID, "p1")
             assert coverage is not None
             assert coverage.observed_sources == 0, "наблюдений этого прогона нет"
-            assert coverage.complete is False
+            assert coverage.complete is True
+            assert [root.complete for root in coverage.roots] == [True]
             assert coverage.reason == COVERAGE_OFFLINE_NO_OBSERVATION
             # Строка продукта: прогон завершился, документ есть, охват неполон.
             assert coverage.expected_sources == 0
@@ -559,7 +563,10 @@ def test_offline_report_note_names_both_facts() -> None:
     assert "чанков 7" in note
     assert "переиспользовать нечего 1" in note
     assert "корней вне состояния 1" in note
-    assert "❌ не публикуется" in note
+    # F3: «переиспользовано» не отменяет `❌` — отменяет отсутствие даты у носителя (I2d).
+    assert "наблюдений этого прогона нет" in note
+    assert "только с датой носителя, I2d" in note
+    assert "❌ не публикуется" not in note
 
 
 @pytest.mark.parametrize("text", [OFFLINE_UNKNOWN_ROOT_TEXT, OFFLINE_NO_VERSION_TEXT])

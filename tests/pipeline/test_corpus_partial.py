@@ -44,6 +44,7 @@ from core.pipeline.corpus import (
     build_corpus,
     derive_corpus_coverage,
 )
+from core.ports.state import CaptureRow
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
@@ -178,6 +179,7 @@ def _build(
     *,
     pages: dict[str, bytes],
     partial_urls: set[str] | None = None,
+    state: Any | None = None,
 ) -> tuple[object, SqliteStore]:
     store = _store()
     result = build_corpus(
@@ -190,6 +192,7 @@ def _build(
         raw_root=tmp_path,
         run_id=RUN_ID,
         out_dir=tmp_path / "runs",
+        state=state,
     )
     return result, store
 
@@ -200,6 +203,19 @@ def _build(
 def _item(url: str, status: CrawlItemStatus) -> CrawlSessionItem:
     return CrawlSessionItem(
         session_id="crawl:run", product_id="p1", url=url, status=status
+    )
+
+
+def _root_capture(root_url: str = "https://docs.test/") -> CaptureRow:
+    """Удостоверяющее снятие корня: F3 решает ``complete`` по нему, а не по сеансу."""
+    return CaptureRow(
+        capture_id="cap-1",
+        product_id="p1",
+        root_url=root_url,
+        started_at=TS,
+        finished_at="2026-01-01T00:10:00+00:00",
+        complete=True,
+        observed_how="live",
     )
 
 def test_partial_extraction_makes_coverage_incomplete() -> None:
@@ -229,6 +245,8 @@ def test_coverage_without_partial_documents_is_unchanged() -> None:
         ],
         truncated=False,
         computed_at=TS,
+        declared_roots=["https://docs.test/"],
+        captures=[_root_capture()],
     )
 
     assert coverage.complete is True
@@ -268,23 +286,35 @@ def test_partial_document_reaches_corpus_and_coverage(tmp_path: Path) -> None:
         store.close()
 
 def test_full_document_keeps_coverage_complete(tmp_path: Path) -> None:
-    """Документ без частичности не блокирует корпус зря (регресс-защита)."""
-    result, store = _build(tmp_path, pages={URL: b"whole document"})
-    try:
-        doc = next(iter(store.iter_corpus_docs(RUN_ID)))
-        assert doc.partial is False
-        assert doc.partial_reason is None
-        assert doc.pages_converted is None
+    """Документ без частичности не блокирует корпус зря (регресс-защита).
 
-        coverage = store.read_corpus_coverage(RUN_ID, "p1")
-        assert coverage is not None
-        assert coverage.complete is True
-        assert "partial_extraction" not in coverage.blocked
+    F3: полнота — по снятию корня, поэтому живой прогон идёт с ``state.db``: без
+    durable-снятия полноту нечем удостоверить (``complete=False`` — честный отказ, а не
+    дефект экстрактора).
+    """
+    from core.store.state_store import SqliteStateStore
 
-        notes = [entry for entry in result.log_entries if isinstance(entry, str)]
-        assert not any("частично" in note for note in notes), notes
-    finally:
-        store.close()
+    with SqliteStateStore(":memory:") as state:
+        result, store = _build(
+            tmp_path, pages={URL: b"whole document"}, state=state
+        )
+        try:
+            doc = next(iter(store.iter_corpus_docs(RUN_ID)))
+            assert doc.partial is False
+            assert doc.partial_reason is None
+            assert doc.pages_converted is None
+
+            coverage = store.read_corpus_coverage(RUN_ID, "p1")
+            assert coverage is not None
+            assert coverage.complete is True
+            assert [root.complete for root in coverage.roots] == [True]
+            assert coverage.roots[0].observed_at
+            assert "partial_extraction" not in coverage.blocked
+
+            notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+            assert not any("частично" in note for note in notes), notes
+        finally:
+            store.close()
 
 def test_partial_without_stated_reason_still_marks_the_corpus(tmp_path: Path) -> None:
     """Экстрактор не назвал причину — документ всё равно помечен, а не молчит.
@@ -370,6 +400,8 @@ def test_partial_coverage_downgrades_undocumented_absent_to_unknown() -> None:
         items=[_item(URL, CrawlItemStatus.FETCHED)],
         truncated=False,
         computed_at=TS,
+        declared_roots=["https://docs.test/"],
+        captures=[_root_capture()],
     )
     assert _denial_basis(_coverage_vector(full), full) == "not_stated"
 
@@ -454,6 +486,8 @@ def test_partial_coverage_cannot_be_declared_complete() -> None:
         items=[_item(URL, CrawlItemStatus.FETCHED)],
         truncated=False,
         computed_at=TS,
+        declared_roots=["https://docs.test/"],
+        captures=[_root_capture()],
     ).complete is True
 
 

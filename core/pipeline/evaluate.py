@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from core.domain import (
+    ABSENCE_UNDATED_REASON,
     EVAL_SCHEMA_VERSION,
     AbsenceRuleType,
     CatalogRow,
@@ -70,13 +71,15 @@ from core.domain import (
     FailureKind,
     LLMCellOutput,
     MeasurementOrigin,
-    ReuseKind,
     Satellite,
     SourceKind,
     Status,
 )
 from core.domain.anchors import SourceResolver
-from core.domain.invariants import check_absence_coverage
+from core.domain.invariants import (
+    _parse_iso_utc as _parse_iso_utc,  # noqa: PLC2701 — тот же разбор момента, что у I2d
+)
+from core.domain.invariants import check_absence_coverage, check_absence_dated
 from core.domain.models import absence_evidence_id
 from core.pipeline.carry_forward import (
     CarriedCell,
@@ -126,7 +129,7 @@ from core.ports.vector_index import (
     batched_search,
 )
 from core.util.hashing import content_hash
-from core.util.ids import doc_version_of, parse_source_id
+from core.util.ids import DOC_VERSION_PREFIX, doc_version_of, parse_source_id
 
 __all__ = [
     "ABSENCE_COVERAGE_UNSATISFIED_REASON",
@@ -137,7 +140,6 @@ __all__ = [
     "DEFAULT_RETRIEVAL_PROFILE",
     "DENIAL_QUOTE_WITHOUT_MARKERS",
     "NO_FRAGMENTS_REASON",
-    "REUSE_UNCONFIRMED_REASON",
     "REVALIDATE_FAILED_PREFIX",
     "REVALIDATE_NOTHING_TO_DO",
     "REVALIDATE_SKIP_BUILD_MISMATCH",
@@ -153,7 +155,7 @@ __all__ = [
     "STALE_SKIP_UNKNOWN_BUILD",
     "SUPPORT_CONCENTRATION_QUOTE_LIMIT",
     "SUPPORT_NOT_ABOUT_SUBJECT",
-    "CorpusReuseObservation",
+    "CorpusArtifactDates",
     "EvaluationOutcome",
     "RevalidationReport",
     "StaleSelection",
@@ -162,7 +164,7 @@ __all__ = [
     "evaluate_batch",
     "evaluate_cell",
     "evaluate_phase",
-    "observe_corpus_reuse",
+    "observe_corpus_artifact_dates",
     "precompute_dense_hits",
     "precompute_query_vectors",
     "reevaluate_stale",
@@ -193,13 +195,6 @@ ABSENCE_UNATTESTED_REVIEW_REASON = "absence_unattested"
 #: в консоли.
 ABSENCE_COVERAGE_UNSATISFIED_REASON = "absence_coverage_unsatisfied"
 
-#: Машинный токен правила «``❌`` требует ``live|revalidated``» (16 §8 п.4, 09 §11.2):
-#: ``❌`` **не публикуется**, потому что наблюдение, на котором он держится, в этом цикле
-#: сервером не подтверждено (``corpus_docs.reuse_kind`` ∈ ``reused``/``stale`` либо не
-#: записано вовсе). Пишется и в ``evidence_scope.reason`` (почему ``❓``), и в
-#: ``cells.validation_notes`` (что именно не так) — предъявим после прогона.
-REUSE_UNCONFIRMED_REASON = "reuse_unconfirmed"
-
 #: Машинный токен O5: у evidence **нет адреса версии документа**. Пишется в
 #: ``cells.validation_notes``, когда ``chunk_id`` ретривнутого чанка не разбирается в
 #: версию (``dv_...``): малформед-адрес либо legacy-форма ``product:content_hash:chunk_no``,
@@ -208,112 +203,173 @@ REUSE_UNCONFIRMED_REASON = "reuse_unconfirmed"
 EVIDENCE_DOC_VERSION_UNRESOLVED_REASON = "evidence_doc_version_unresolved"
 
 #: Классы отрицания, чьё «нет» держится на **конкретном** документе (цитата вендора либо
-#: авторитетная энумерация): у них проверяется каждый документ, на который опирается ``❌``.
-#: Остальные классы, дающие ``❌`` (``bounded``), выводят «нет» из **корпуса** — у них
-#: проверяется весь корпус продукта: отсутствие не доказано, если часть корпуса в этом
-#: цикле не наблюдалась (09 §11.2, два уровня правила).
+#: авторитетная энумерация). Только для них цитаты ячеек резолвятся в даты наблюдений:
+#: ``bounded`` держится на снятиях корней, а не на документах, и его носитель проверяет
+#: сам домен (:func:`core.domain.invariants.check_absence_dated`). Перечень не задаёт
+#: правило — он выбирает, какой носитель **собрать**; применяет инвариант домен.
 _EVIDENCE_LEVEL_DENIALS: frozenset[DenialStrength] = frozenset(
     {DenialStrength.EXPLICIT, DenialStrength.AUTHORITATIVE}
 )
 
-#: Происхождение наблюдения, **подтверждающее** ``❌``: сервер ответил в этом цикле
-#: (живой fetch либо 304 — версия документа не изменилась, но ответ состоялся).
-_CONFIRMED_REUSE_KINDS: frozenset[ReuseKind] = frozenset(
-    {ReuseKind.LIVE, ReuseKind.REVALIDATED}
-)
-
 
 @dataclass(frozen=True, slots=True)
-class CorpusReuseObservation:
-    """Снимок происхождения наблюдения корпуса продукта (``corpus_docs.reuse_kind``).
+class CorpusArtifactDates:
+    """Даты наблюдения артефактов корпуса продукта — носитель I2d (план 20 §11.2).
 
-    Носитель правила «``❌`` требует ``live|revalidated``» на уровне **корпуса**: строится
-    одним проходом по ``corpus_docs`` продукта, а не на ячейку — 181 параметр × продукты
-    читали бы одну и ту же таблицу сотни раз. Срок жизни — вызов фазы: это наблюдение
-    **этого** прогона, а не кэш между прогонами (иное означало бы публиковать ``❌`` по
-    вчерашнему ответу сервера).
+    ``❌`` стал утверждением о **событии с датой**: «в пространстве, исчерпанном снятием
+    C от даты D, этого нет». Для ``explicit``/``authoritative`` носитель — запись
+    наблюдения каждого документа, чья цитата держит отрицание; поэтому нужен индекс
+    «документ → дата». Строится одним проходом по ``corpus_artifact`` продукта, а не на
+    ячейку: 181 параметр × продукты читали бы ту же таблицу сотни раз.
 
-    ``by_doc`` — ``doc_id`` (``{product_id}:{doc_hash}``) → ``reuse_kind``; ``None`` в
-    значении значит «наблюдение не записано» (legacy-строка), и это **не** подтверждение.
-    ``by_doc_version`` — второй индекс: ``doc_version_id`` (``dv_...``) → тот же
-    ``reuse_kind``. Два индекса, потому что у документа две формы адреса: ``doc_id`` —
-    content-hash (на нём держится дедуп корпуса), а ``chunk_id``/``source_id`` несут
-    версию (16 §6), и ``dv_`` из хеша не выводится. Это **одна** семантика «документ
-    наблюдён» в двух формах, а не два правила: второй индекс выводится из первого через
-    отображение ``corpus_doc_version`` (версия → документ), поэтому версий ровно столько,
-    сколько их у документов корпуса, — а не одна на строку.
+    ``by_doc_version`` — **основной** индекс: ``doc_version_id`` (``dv_...``) → ``observed_at``.
+    Версию несёт ``chunk_id``/``source_id`` (16 §6), и ``dv_`` из хеша не выводится.
+    ``by_doc`` — вторая форма адреса: ``doc_id`` (``{product_id}:{content_hash}``, на нём
+    держится дедуп корпуса) → самая ранняя дата его версий. Это **одна** семантика
+    «документ наблюдался тогда-то» в двух формах, а не два правила: без второго индекса
+    legacy-адрес цитаты не находился бы вовсе.
+
+    ``None`` в значении — строка артефакта есть, а даты у неё нет (adoption без
+    наблюдения, субстрат): это «дата не записана», а не «документа нет».
     """
 
     product_id: str
-    by_doc: Mapping[str, ReuseKind | None]
-    by_doc_version: Mapping[str, ReuseKind | None] = field(default_factory=dict)
-
-    def is_applicable(self) -> bool:
-        """Правило применимо только там, где есть наблюдения корпуса.
-
-        Пустая карта — «корпуса нет вовсе»: проверять нечего, вердикт не меняется (та же
-        дисциплина, что у I2c при ``coverage is None``).
-        """
-        return bool(self.by_doc) or bool(self.by_doc_version)
-
-    def unconfirmed_docs(self) -> list[str]:
-        """Документы корпуса без серверного подтверждения (сортировано — детерминизм)."""
-        return sorted(
-            doc_id
-            for doc_id, kind in self.by_doc.items()
-            if kind not in _CONFIRMED_REUSE_KINDS
-        )
+    by_doc_version: Mapping[str, str | None]
+    by_doc: Mapping[str, str | None] = field(default_factory=dict)
 
 
-def observe_corpus_reuse(
+def _earliest_iso(current: str | None, candidate: str | None) -> str | None:
+    """Более ранняя из двух ISO-дат (моменты, а не строки: смещения бывают разные).
+
+    Неразбираемая дата не вытесняет разбираемую: «дата не записана» — отсутствие данных,
+    и оно не должно выглядеть как самая слабая опора (``min`` по нему неопределён).
+    """
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    left, right = _parse_iso_utc(current), _parse_iso_utc(candidate)
+    if left is None:
+        return candidate
+    if right is None:
+        return current
+    return candidate if right < left else current
+
+
+def observe_corpus_artifact_dates(
     store: StorePort | None,
     run_id: str,
     product_id: str,
-) -> CorpusReuseObservation | None:
-    """Один проход по ``corpus_docs`` продукта — снимок для правила ``❌``/reuse.
+) -> CorpusArtifactDates | None:
+    """Один проход по ``corpus_artifact`` продукта — индекс дат для I2d.
 
-    :returns: наблюдение продукта либо ``None``, если читать нечем (``store`` без
-        ``iter_corpus_docs``): правило тогда неприменимо, вердикт не меняется. Сбой
-        чтения здесь **не** глушится — его изолирует вызывающий (``errors`` фазы):
-        выдать отказ чтения за «наблюдений нет» значило бы снять правило молча.
+    :returns: индекс продукта либо ``None``, если читать нечем (``store`` без
+        ``iter_corpus_artifacts``): I2d тогда неприменим, вердикт не меняется. Сбой чтения
+        здесь **не** глушится — его изолирует вызывающий (``errors`` фазы): выдать отказ
+        чтения за «наблюдений нет» значило бы снять инвариант молча.
 
-    Цена: две выборки таблиц на продукт (не на ячейку) — строки корпуса и отображение
-    версий. ``corpus_docs`` не несёт ``run_id``, поэтому выборка — корпус прогона (та же
-    семантика, что у ``iter_corpus_docs``).
+    Пустой индекс (таблица есть, строк нет) — законный ответ: ``❌`` с цитатой остаётся
+    без датированного носителя и понижается (I2d), а не публикуется по умолчанию.
 
-    Второй индекс строится по отображению ``corpus_doc_version`` (версия → документ),
-    которое отдаёт :meth:`SqliteStore.iter_corpus_doc_versions`. Версий у документа может
-    быть несколько (``dv`` включает уровень извлечения, ``doc_id`` — нет: один и тот же
-    текст на разных уровнях — один документ и две версии), поэтому версия берётся из
-    отображения, а не из строки корпуса. Хранилище без этого читателя (или БД прошлой
-    версии без таблицы) даёт пустой второй индекс: правило остаётся исполнимым по
-    ``by_doc``, а не падает и не выдумывает версии.
+    Цена: две выборки на продукт (не на ячейку) — строки ``corpus_artifact`` и отображение
+    ``corpus_doc_version`` (версия → ``doc_id``) для второй формы адреса. Читатель версий
+    опционален: без него индекс остаётся исполнимым по версии, а не падает.
     """
-    reader = getattr(store, "iter_corpus_docs", None)
+    reader = getattr(store, "iter_corpus_artifacts", None)
     if not callable(reader):
         return None
-    by_doc: dict[str, ReuseKind | None] = {}
-    for doc in reader(run_id):
-        if doc.product_id != product_id:
+    by_doc_version: dict[str, str | None] = {}
+    for row in reader(run_id, product_id):
+        if row.product_id != product_id:
             continue
-        by_doc[str(doc.doc_id)] = doc.reuse_kind
-    by_doc_version: dict[str, ReuseKind | None] = {}
+        version = str(row.doc_version_id or "").strip()
+        if version:
+            # Одна версия — один документ, поэтому повтор строки не меняет дату; при
+            # нескольких адресах одного содержания берётся самая ранняя (слабая опора).
+            by_doc_version[version] = _earliest_iso(
+                by_doc_version.get(version), row.observed_at
+            )
+    by_doc: dict[str, str | None] = {}
     versions_reader = getattr(store, "iter_corpus_doc_versions", None)
     if callable(versions_reader):
         for version, doc_id in versions_reader(run_id, product_id).items():
-            # Версия, чей документ не наблюдён строкой корпуса, в индекс не попадает:
-            # «не найдено» — честный ответ, а ``None`` здесь означал бы наблюдение,
-            # которого нет.
-            if doc_id in by_doc:
-                by_doc_version[str(version)] = by_doc[doc_id]
-    return CorpusReuseObservation(
-        product_id=product_id, by_doc=by_doc, by_doc_version=by_doc_version
+            if str(version) not in by_doc_version:
+                # Версия без строки артефакта даты не имеет: «не найдено» — честный
+                # ответ, а ``None`` здесь означал бы наблюдение, которого нет.
+                continue
+            key = str(doc_id)
+            by_doc[key] = _earliest_iso(
+                by_doc.get(key), by_doc_version[str(version)]
+            )
+    return CorpusArtifactDates(
+        product_id=product_id, by_doc_version=by_doc_version, by_doc=by_doc
     )
 
 
-def _reuse_kind_text(kind: ReuseKind | None) -> str:
-    """Текст значения ``reuse_kind`` для причины: ``NULL`` называется прямо."""
-    return "не записано (NULL)" if kind is None else kind.value
+def _cited_observations(
+    dates: CorpusArtifactDates,
+    absence_evidence: Sequence[dict],
+) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """Резолвит цитаты ``❌`` в пары «адрес документа → дата наблюдения».
+
+    Цитаты живут в ``absence_evidence``: их ``source_id`` — ``product:doc:chunk_no[:build]``
+    (:mod:`core.util.ids`). Второй сегмент адресует документ в **одной из двух форм**:
+    версию (``dv_...``, 16 §6) или legacy ``content_hash``. Ищется сначала версия —
+    основная форма, — затем ``{product_id}:{doc}`` в индексе документов; причина нарушения
+    называет **ту форму**, которой не хватило, иначе оператор не знает, чего искать.
+    Записи без ``source_id`` (протокол отсутствия) документом не являются и пропускаются.
+
+    :returns: ``(наблюдения, неразрешимые)``. Неразрешимое — не «нет даты», а «носителя
+        нет вовсе»: малформед-адрес, чужой продукт или отсутствующая строка артефакта.
+        Обе категории одинаково снимают ``❌`` (I2d), но называются по-разному.
+    """
+    observations: list[tuple[str, str | None]] = []
+    unresolved: list[str] = []
+    seen: set[str] = set()
+    for entry in absence_evidence:
+        raw = entry.get("source_id")
+        if not raw:
+            continue
+        try:
+            ref = parse_source_id(str(raw))
+        except ValueError:
+            message = (
+                f"источник '{raw}' не разбирается в документ — "
+                "дата наблюдения не подтверждаема"
+            )
+            if message not in unresolved:
+                unresolved.append(message)
+            continue
+        if ref.product_id != dates.product_id:
+            message = (
+                f"документ {ref.product_id}:{ref.doc_id} вне корпуса продукта "
+                f"{dates.product_id} — датировать нечем"
+            )
+            if message not in unresolved:
+                unresolved.append(message)
+            continue
+        if ref.doc_id in seen:
+            continue
+        seen.add(ref.doc_id)
+        label = f"{ref.product_id}:{ref.doc_id}"
+        if ref.doc_id in dates.by_doc_version:
+            observations.append((label, dates.by_doc_version[ref.doc_id]))
+            continue
+        if label in dates.by_doc:
+            observations.append((label, dates.by_doc[label]))
+            continue
+        # Причина называет **ту форму**, которой не хватило: адрес версии ищется в
+        # основном индексе, legacy-адрес (content-hash) — во втором.
+        searched = (
+            f"doc_version_id={ref.doc_id}"
+            if ref.doc_id.startswith(DOC_VERSION_PREFIX)
+            else f"doc_id={label}"
+        )
+        unresolved.append(
+            f"документ {label} отсутствует в corpus_artifact "
+            f"(искали {searched}) — наблюдение не записано"
+        )
+    return observations, unresolved
 
 
 @dataclass(frozen=True)
@@ -344,17 +400,17 @@ def _carried_rules_hold(
     param: CatalogRow,
     product_id: str,
     coverage: CorpusCoverage | None,
-    corpus_reuse: CorpusReuseObservation | None,
+    artifact_dates: CorpusArtifactDates | None,
     evidence: Sequence[Any] = (),
-) -> bool:
-    """Проходит ли перенесённая ячейка **текущие** правила допуска ``❌`` (I2c, §11.2).
+) -> tuple[bool, str | None]:
+    """Проходит ли перенесённая ячейка **текущие** правила допуска ``❌`` (I2c, I2d).
 
     Перенос обязан проходить тот же эшелон, что и живая оценка, иначе он стал бы обходом
     инварианта: перенесённый ``❌`` опубликовался бы там, где измеренный уже понижен до
     ``❓``. Проверка спрашивает **те же две функции**, а не их копию:
 
     * :func:`_enforce_absence_coverage` (I2c) — класс отрицания против наблюдённого охвата;
-    * :func:`_enforce_reuse_confirmed` (§11.2) — ``❌`` требует ``live|revalidated``.
+    * :func:`_enforce_dated_absence` (I2d) — у ``❌`` есть датированный носитель.
 
     Демотирование не применяется к перенесённой ячейке: она **не переносится**, и Ш6 меряет
     её обычным путём — тогда причина понижения рождается в единственном месте (там же, где
@@ -370,9 +426,14 @@ def _carried_rules_hold(
     ``source_id`` нет), а в ``cell_evidence``. Проверять только ``absence_evidence``
     значило бы, что перенесённый ``❌`` проходит правило, которое сняло бы тот же ``❌``,
     измеренный в этом цикле, — то есть перенос стал бы обходом инварианта.
+
+    :returns: ``(переносим, absence_as_of)``. Второй элемент — дата слабой опоры по
+        носителям **текущего** прогона: перенесённый ``❌`` публикует её, а не дату
+        прошлого прогона (даты обязаны описывать носитель, на который ссылается карта).
+        ``None`` — правило неприменимо либо ячейка не ``❌``.
     """
     if cell.status is not Status.ABSENT:
-        return True
+        return True, None
     status_after_coverage, scope_after_coverage, demoted, _ = _enforce_absence_coverage(
         out_status=cell.status,
         scope=cell.evidence_scope,
@@ -382,13 +443,13 @@ def _carried_rules_hold(
         coverage=coverage,
     )
     if demoted:
-        return False
-    _, _, demoted_reuse, _ = _enforce_reuse_confirmed(
+        return False, None
+    _, _, demoted_dates, _, as_of = _enforce_dated_absence(
         out_status=status_after_coverage,
         scope=scope_after_coverage,
         # Цитаты ``❌`` + протокол отсутствия: первое — документы, на которые опирается
-        # «нет», второе — контур, в котором искали. Правило уровня evidence смотрит только
-        # на записи с ``source_id``, поэтому смешение видов здесь безопасно.
+        # «нет», второе — контур, в котором искали. Резолв дат смотрит только на записи с
+        # ``source_id``, поэтому смешение видов здесь безопасно.
         absence_evidence=[
             *cell.absence_evidence,
             *(_absence_dict(ev) for ev in evidence),
@@ -396,9 +457,9 @@ def _carried_rules_hold(
         param=param,
         product_id=product_id,
         coverage=coverage,
-        corpus_reuse=corpus_reuse,
+        artifact_dates=artifact_dates,
     )
-    return not demoted_reuse
+    return (not demoted_dates), as_of
 
 
 def _persist_carried(
@@ -447,7 +508,7 @@ def _carry_one(
     retrieved: Sequence[ChunkLike],
     retrieval: RetrievalResult | None,
     protected: Cell | None,
-    corpus_reuse: CorpusReuseObservation | None,
+    artifact_dates: CorpusArtifactDates | None,
     scope_acceptance: str | None,
     store: StorePort | None,
 ) -> EvaluationOutcome | None:
@@ -476,15 +537,21 @@ def _carry_one(
     )
     if carried is None:
         return None
-    if not _carried_rules_hold(
+    holds, absence_as_of = _carried_rules_hold(
         carried.cell,
         param=param,
         product_id=product_id,
         coverage=coverage,
-        corpus_reuse=corpus_reuse,
+        artifact_dates=artifact_dates,
         evidence=carried.evidence,
-    ):
+    )
+    if not holds:
         return None
+    # Дата слабой опоры — по носителям **этого** прогона: карта публикует носитель, на
+    # который она ссылается сейчас, а не дату прошлого цикла. Правило неприменимо
+    # (``coverage``/читателя нет) — остаётся дата, записанная в ячейке-предшественнике.
+    if absence_as_of is not None:
+        carried.cell.absence_as_of = absence_as_of
     _persist_carried(store, carried, prompt_hash=carried.prompt_hash)
     return EvaluationOutcome(
         cell=carried.cell,
@@ -1842,98 +1909,7 @@ def _enforce_absence_coverage(
     return Status.UNKNOWN, demoted, True, notes
 
 
-def _evidence_level_reuse_violations(
-    corpus_reuse: CorpusReuseObservation,
-    absence_evidence: Sequence[dict],
-) -> list[str]:
-    """Уровень evidence: **каждый** документ, на который опирается ``❌``, обязан быть подтверждён.
-
-    Источник документов — записи ``absence_evidence``: у них ``source_id`` формата
-    ``product:doc:chunk_no[:build_id]`` (:mod:`core.util.ids`). Второй сегмент — **версия
-    документа** (``dv_...``, 16 §6), тогда как ``corpus_docs.doc_id`` = ``f"{product_id}:{content_hash}"``
-    (на хеше держится дедуп корпуса). Поэтому документ ищется в **двух формах**, и это
-    одна семантика «документ наблюдён», а не два правила: сначала префиксная
-    ``f"{product_id}:{doc}"`` в ``by_doc`` (так адресовали документы до границы A —
-    ``content_hash``), затем ``doc`` в ``by_doc_version`` (``dv_``). Причина нарушения
-    называет ту форму, которую искали: иначе оператор не знает, чего именно не хватило —
-    строки корпуса или версии в ней. Записи без ``source_id`` (протокол отсутствия)
-    документом не являются и пропускаются.
-    """
-    violations: list[str] = []
-    seen: set[str] = set()
-    for entry in absence_evidence:
-        raw = entry.get("source_id")
-        if not raw:
-            continue
-        try:
-            ref = parse_source_id(str(raw))
-        except ValueError:
-            # Идентификатор есть, но адресует не документ: подтвердить нечего.
-            violation = (
-                f"источник '{raw}' не разбирается в документ — "
-                "происхождение наблюдения не подтверждаемо"
-            )
-            if violation not in violations:
-                violations.append(violation)
-            continue
-        doc_id = f"{ref.product_id}:{ref.doc_id}"
-        if doc_id in seen:
-            continue
-        seen.add(doc_id)
-        if ref.product_id != corpus_reuse.product_id:
-            violations.append(
-                f"документ {doc_id} вне корпуса продукта "
-                f"{corpus_reuse.product_id} — подтвердить нечем"
-            )
-            continue
-        if doc_id in corpus_reuse.by_doc:
-            kind = corpus_reuse.by_doc[doc_id]
-        elif ref.doc_id in corpus_reuse.by_doc_version:
-            # Вторая форма адреса: ``source_id`` несёт версию документа (16 §6).
-            kind = corpus_reuse.by_doc_version[ref.doc_id]
-        else:
-            violations.append(
-                f"документ {doc_id} отсутствует в corpus_docs "
-                f"(искали doc_id, затем doc_version_id={ref.doc_id}) — "
-                "наблюдение не записано"
-            )
-            continue
-        if kind not in _CONFIRMED_REUSE_KINDS:
-            violations.append(
-                f"документ {doc_id}: reuse_kind={_reuse_kind_text(kind)}"
-            )
-    return violations
-
-
-def _corpus_level_reuse_violations(
-    corpus_reuse: CorpusReuseObservation,
-) -> list[str]:
-    """Уровень корпуса: **ни один** документ продукта не ``reused``/``stale``/``NULL``.
-
-    «Нет» у этих классов выводится из корпуса, поэтому документ, не наблюдённый в этом
-    цикле, снимает ``❌`` так же, как неполное покрытие снимает его у ``bounded``: часть
-    корпуса не наблюдалась — отсутствие не доказано. Причина называет **счётчики по
-    классам** и примеры документов, а не только «нельзя»: иначе оператор не знает, чинить
-    ли краул, resume или ревалидацию.
-    """
-    unconfirmed = corpus_reuse.unconfirmed_docs()
-    if not unconfirmed:
-        return []
-    counts: dict[str, int] = {}
-    for doc_id in unconfirmed:
-        counts[_reuse_kind_text(corpus_reuse.by_doc[doc_id])] = (
-            counts.get(_reuse_kind_text(corpus_reuse.by_doc[doc_id]), 0) + 1
-        )
-    breakdown = ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
-    sample = ", ".join(unconfirmed[:3]) + ("…" if len(unconfirmed) > 3 else "")
-    return [
-        f"корпус продукта {corpus_reuse.product_id}: {len(unconfirmed)} из "
-        f"{len(corpus_reuse.by_doc)} документов без серверного подтверждения "
-        f"({breakdown}); например {sample}"
-    ]
-
-
-def _enforce_reuse_confirmed(
+def _enforce_dated_absence(
     *,
     out_status: Status,
     scope: EvidenceScope | None,
@@ -1941,80 +1917,109 @@ def _enforce_reuse_confirmed(
     param: CatalogRow,
     product_id: str,
     coverage: CorpusCoverage | None,
-    corpus_reuse: CorpusReuseObservation | None,
-) -> tuple[Status, EvidenceScope | None, bool, list[str]]:
-    """Правило «``❌`` требует ``live|revalidated``» (16 §8 п.4, 09 §11.2) — единственное место вызова.
+    artifact_dates: CorpusArtifactDates | None,
+) -> tuple[Status, EvidenceScope | None, bool, list[str], str | None]:
+    """I2d: у ``❌`` есть **датированный носитель**, и дата публикуется — единственное место.
 
-    Два уровня, потому что у двух групп классов **разный носитель утверждения**:
+    ``❌`` — не утверждение о сегодняшнем дне, а утверждение о **событии с датой** (план 20
+    §11.2): «в пространстве, исчерпанном снятием C от даты D, этого нет». Носитель зависит
+    от класса отрицания, и выбирает его домен
+    (:func:`core.domain.invariants.check_absence_dated`), а не эта функция:
 
-    * уровень **evidence** (``explicit``/``authoritative``) — «нет» держится на конкретном
-      документе, поэтому проверяется **каждый** документ, на который опирается ``❌``;
-    * уровень **корпуса** (``bounded`` и прочие классы, дающие ``❌``) — «нет» выводится из
-      корпуса, поэтому ``reused``/``stale``/``NULL``-документ в корпусе продукта снимает
-      ``❌`` целиком.
+    * ``explicit``/``authoritative`` — запись наблюдения **каждого** документа, чья цитата
+      держит отрицание: ``observed_at`` в ``corpus_artifact`` (дата не обязана быть в этом
+      цикле — цитата не стареет, пока версия та же);
+    * ``bounded`` — снятие **каждого** объявленного корня с ``complete=1`` и датой
+      (``coverage.roots``); ``adopted``-снятие исчерпание не удостоверяет;
+    * ``unobserved``/``not_stated``/``instrument_failed`` — правило не применяется.
 
-    Почему нарушение даёт ``❓``, а не ``failed`` (I4). Неподтверждённое наблюдение —
-    **процедурное** условие публикации, а не отказ прибора: краул отработал, но сервер в
-    этом цикле не отвечал за документ. ``failed`` выпадает из карты целиком, а здесь факт
+    Цитаты резолвятся в даты **здесь**, потому что носитель — запись наблюдения документа,
+    а адрес документа приходит только из ``absence_evidence`` (:func:`_cited_observations`).
+    Поиск идёт в двух формах адреса (``doc_version_id`` — основная, ``doc_id`` — вторая), и
+    причина называет ту, которой не хватило.
+
+    Почему нарушение даёт ``❓``, а не ``failed`` (I4). Отсутствие носителя — **процедурное**
+    условие публикации, а не отказ прибора: краул отработал, но наблюдение за документ не
+    записано (или снятие корня неполно). ``failed`` выпадает из карты целиком, а здесь факт
     остаётся в карте как ``❓`` (I12: ``❓`` никогда не трактуется как ``❌``), и протокол
     отсутствия снимается: «искали и не нашли» — утверждение, которое не доказано.
 
-    ``coverage is None`` (нет записи покрытия: нет краула/legacy) и отсутствие наблюдений
-    корпуса делают проверку **неприменимой** — та же дисциплина, что у I2c
-    (:func:`_enforce_absence_coverage`): нет наблюдений — нечего проверять.
+    ``coverage is None`` (нет записи покрытия: нет краула/legacy) или отсутствие читателя
+    ``corpus_artifact`` делают проверку **неприменимой** — та же дисциплина, что у I2c
+    (:func:`_enforce_absence_coverage`): нет носителя — нечего сверять, и вердикт не
+    меняется. Пустая таблица артефактов — наоборот, **применима**: это «ни одного
+    наблюдения не записано», и ``❌`` публиковаться не должен.
 
     Порядок с I2c. Проверка вызывается **после** неё и только для уцелевшего ``❌``: если
     I2c уже снял ``❌``, ячейка ``❓`` и второй причины не появляется (``out_status`` на
-    входе — результат I2c).
+    входе — результат I2c). Ужесточение §11.4 п.2 получается само: ``adopted``-снятие даёт
+    ``coverage.complete=False``, поэтому ``bounded``-ячейка уходит в ``❓`` даже с подписанным
+    ``scope_acceptance`` — подпись о риске не заменяет датированный носитель.
 
-    :returns: ``(status, scope, demoted, notes)``; ``demoted`` запрещает публиковать
-        протокол отсутствия, ``notes`` — машинные записи для ``cells.validation_notes``.
+    :returns: ``(status, scope, demoted, notes, absence_as_of)``. ``demoted`` запрещает
+        публиковать протокол отсутствия, ``notes`` — машинные записи для
+        ``cells.validation_notes``, ``absence_as_of`` — ``min`` дат носителей (``None``,
+        когда правило неприменимо или ``❌`` снят).
     """
     if out_status is not Status.ABSENT:
-        return out_status, scope, False, []
-    if coverage is None or corpus_reuse is None or not corpus_reuse.is_applicable():
-        return out_status, scope, False, []
+        return out_status, scope, False, [], None
+    if coverage is None or artifact_dates is None:
+        return out_status, scope, False, [], None
 
-    evidence_level = (
-        scope is not None and scope.denial_strength in _EVIDENCE_LEVEL_DENIALS
+    strength = (
+        scope.denial_strength if scope is not None else DenialStrength.NOT_STATED
     )
-    violations = (
-        _evidence_level_reuse_violations(corpus_reuse, absence_evidence)
-        if evidence_level
-        else _corpus_level_reuse_violations(corpus_reuse)
-    )
-    if not violations:
-        return out_status, scope, False, []
+    cited: list[tuple[str, str | None]] = []
+    unresolved: list[str] = []
+    if strength in _EVIDENCE_LEVEL_DENIALS:
+        cited, unresolved = _cited_observations(artifact_dates, absence_evidence)
+        if unresolved:
+            # Часть цитат не датируется — утверждение не публикуется; домен спрашивать
+            # незачем: он увидел бы пустой список и назвал бы не ту причину («цитировать
+            # нечего» вместо «у цитаты нет наблюдения»).
+            ok, as_of, missing = False, None, unresolved
+        else:
+            ok, as_of, missing = check_absence_dated(
+                denial_strength=strength,
+                cited_observations=cited,
+                roots=coverage.roots,
+            )
+    else:
+        ok, as_of, missing = check_absence_dated(
+            denial_strength=strength,
+            cited_observations=[],
+            roots=coverage.roots,
+        )
+    if ok and not missing:
+        return out_status, scope, False, [], as_of
 
-    level = "evidence" if evidence_level else "corpus"
-    detail = "; ".join(violations)
+    detail = "; ".join(missing) or "дата носителя не записана"
     reason = (
-        f"{REUSE_UNCONFIRMED_REASON}: ❌ не публикуется — {product_id}/{param.param_id}: "
-        f"уровень {level}: {detail}"
+        f"{ABSENCE_UNDATED_REASON}: ❌ не публикуется — {product_id}/{param.param_id}: "
+        f"{detail}"
     )
     demoted = (
         EvidenceScope(
             denial_strength=DenialStrength.NOT_STATED,
             reason=reason,
-            basis="reuse_unconfirmed",
+            basis="pipeline->absence_undated",
         )
         if scope is None
         else scope.model_copy(
             update={
                 "denial_strength": DenialStrength.NOT_STATED,
                 "reason": reason,
-                "basis": f"{scope.basis or 'pipeline'}->reuse_unconfirmed",
+                "basis": f"{scope.basis or 'pipeline'}->absence_undated",
             }
         )
     )
     notes = [
         _compact_note(
-            f"{REUSE_UNCONFIRMED_REASON}: {product_id}/{param.param_id}: "
-            f"{level}: {violation}"
+            f"{ABSENCE_UNDATED_REASON}: {product_id}/{param.param_id}: {violation}"
         )
-        for violation in violations
+        for violation in missing
     ]
-    return Status.UNKNOWN, demoted, True, notes
+    return Status.UNKNOWN, demoted, True, notes, None
 
 
 def _coverage_for(
@@ -2119,6 +2124,7 @@ def _evaluated_cell(
     evidence_scope: EvidenceScope | None = None,
     validation_notes: Sequence[str] = (),
     review_reason: str | None = None,
+    absence_as_of: str | None = None,
 ) -> Cell:
     """Собирает успешную ``evaluated``-ячейку (§2.2; I1/I2/I3/I4/I13-совместимую).
 
@@ -2128,6 +2134,8 @@ def _evaluated_cell(
     только консолью. ``review_reason`` заполняется противоречием «наличие + прямое
     отрицание» (см. :func:`_present_status_denial`) и посторонним доказательством у ``✅``
     (:func:`support_subject_overlap`): вердикт не оспаривается, но конфликт виден.
+    ``absence_as_of`` — дата слабой опоры ``❌`` (I2d): заполняется только у опубликованного
+    ``❌``; ``❓``/``failed`` несут ``None`` (дата снятого утверждения — не дата).
     """
     index_build_id, retrieval_profile, retrieval_params_json = provenance
     return Cell(
@@ -2141,6 +2149,7 @@ def _evaluated_cell(
         evidence=list(evidence),
         absence_evidence=absence_evidence,
         evidence_scope=evidence_scope,
+        absence_as_of=absence_as_of,
         index_build_id=index_build_id,
         retrieval_profile=retrieval_profile,
         retrieval_params_json=retrieval_params_json,
@@ -2463,7 +2472,7 @@ def evaluate_cell(
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
-    corpus_reuse: CorpusReuseObservation | None = None,
+    artifact_dates: CorpusArtifactDates | None = None,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
 
@@ -2509,11 +2518,12 @@ def evaluate_cell(
         ``LLMRequest``, — не пере-собранный: иначе артефакт описывал бы другой вход.
         Хит ``eval_cache`` не пишется: модель в этом прогоне не вызывалась, и промпт не
         был исполнен (кэш ключуется текстом, см. ``eval_echo`` ниже — ключ не меняется).
-    :param corpus_reuse: снимок происхождения наблюдения корпуса продукта
-        (:class:`CorpusReuseObservation`): им исполняется правило «``❌`` требует
-        ``live|revalidated``» (16 §8 п.4, 09 §11.2). Строится **один раз на продукт**
-        вызывающим (:func:`observe_corpus_reuse`), а не на ячейку. ``None`` ⇒ правило
-        неприменимо (модульный вызов/нет чтения корпуса), вердикт не меняется.
+    :param artifact_dates: даты наблюдения артефактов корпуса продукта
+        (:class:`CorpusArtifactDates`) — носитель I2d: по ним ``explicit``/
+        ``authoritative`` получают дату каждого цитируемого документа, а ``bounded``
+        сверяется со снятиями корней из ``coverage``. Строится **один раз на продукт**
+        вызывающим (:func:`observe_corpus_artifact_dates`), а не на ячейку. ``None`` ⇒
+        I2d неприменим (модульный вызов/читателя нет), вердикт не меняется.
 
     **Пустой срез не тратит вызов модели.** При ``chunks == ()`` промпт компилируется
     (провенанс: ``prompt_hash`` ячейки остаётся честной функцией входа), но оценщик не
@@ -2763,25 +2773,28 @@ def evaluate_cell(
             # Протокол пустоты на ``❓``-ячейке был бы утверждением «искали и не нашли».
             absence_evidence = []
             denial_notes = [*denial_notes, *coverage_notes]
-        # 16 §8 п.4 / 09 §11.2: «``❌`` требует ``live|revalidated``». Проверка идёт
-        # **после** I2c и только для уцелевшего ``❌``: если I2c уже снял его, ячейка —
-        # ``❓`` (``out_status`` на входе — результат I2c) и второй причины не появляется.
-        # Нарушение — тоже ``❓`` с причиной и без протокола отсутствия: неподтверждённое
-        # наблюдение — процедурное условие, а не отказ прибора (I4).
-        out_status, evidence_scope, reuse_demoted, reuse_notes = (
-            _enforce_reuse_confirmed(
+        # I2d: у ``❌`` есть **датированный носитель**, и дата публикуется (план 20
+        # §11.2). Проверка идёт **после** I2c и только для уцелевшего ``❌``: если I2c уже
+        # снял его, ячейка — ``❓`` (``out_status`` на входе — результат I2c) и второй
+        # причины не появляется. Нарушение — тоже ``❓`` с причиной и без протокола
+        # отсутствия: отсутствие носителя — процедурное условие, а не отказ прибора (I4).
+        out_status, evidence_scope, dated_demoted, dated_notes, absence_as_of = (
+            _enforce_dated_absence(
                 out_status=out_status,
                 scope=evidence_scope,
                 absence_evidence=absence_evidence,
                 param=param,
                 product_id=product_id,
                 coverage=effective_coverage,
-                corpus_reuse=corpus_reuse,
+                artifact_dates=artifact_dates,
             )
         )
-        if reuse_demoted:
+        if dated_demoted:
             absence_evidence = []
-            denial_notes = [*denial_notes, *reuse_notes]
+            denial_notes = [*denial_notes, *dated_notes]
+            # Снятое утверждение даты не несёт: ``absence_as_of`` — дата **опоры**, а не
+            # отметка о том, что дата искалась.
+            absence_as_of = None
         cell = _evaluated_cell(
             out_status=out_status,
             evidence=out.evidence,
@@ -2791,6 +2804,7 @@ def evaluate_cell(
             run_id=run_id,
             provenance=provenance,
             evidence_scope=evidence_scope,
+            absence_as_of=absence_as_of,
             # Заметки эшелона §10 (аномалии «✅ на одной цитате», низкий score), ремонт и
             # понижение класса — всё это свидетельства о качестве ячейки, а не отладка.
             validation_notes=_compact_notes(
@@ -2944,7 +2958,7 @@ def evaluate_batch(
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
-    corpus_reuse: CorpusReuseObservation | None = None,
+    artifact_dates: CorpusArtifactDates | None = None,
     carry: CarryForwardContext | None = None,
     reuse_conditions: CellReuseConditions | None = None,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
@@ -3002,7 +3016,7 @@ def evaluate_batch(
                 retrieved=chunks,
                 retrieval=primary_retrieval,
                 protected=protected,
-                corpus_reuse=corpus_reuse,
+                artifact_dates=artifact_dates,
                 scope_acceptance=scope_acceptance,
                 store=store,
             )
@@ -3027,7 +3041,7 @@ def evaluate_batch(
             eval_cache=eval_cache,
             eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
-            corpus_reuse=corpus_reuse,
+            artifact_dates=artifact_dates,
         )
         if reuse_conditions is None or protected is not None:
             # Строку индекса не пишем, если механизм выключен **или** ячейку в карте этого
@@ -3272,27 +3286,36 @@ def evaluate_phase(
         # Ф0: покрытие корпуса продукта читается один раз (на главном потоке) и
         # прокидывается в ячейки. Продукт плана без строки покрытия — аномалия (O3).
         coverage = _coverage_for(None, store, run_id, product_id, planned=True)
-        # 16 §8 п.4: происхождение наблюдения корпуса — **один** проход на продукт, не на
-        # ячейку (181 параметр × продукты читали бы ту же таблицу сотни раз). Сбой чтения
-        # виден в ``errors``, а не выдан за «наблюдений нет»: иначе правило снималось бы
-        # молча и ``❌`` публиковался бы на неподтверждённом наблюдении.
+        # I2d: даты наблюдения артефактов — **один** проход на продукт, не на ячейку
+        # (181 параметр × продукты читали бы ту же таблицу сотни раз). Сбой чтения виден
+        # в ``errors``, а не выдан за «наблюдений нет»: иначе инвариант снимался бы молча
+        # и ``❌`` публиковался бы без датированного носителя.
         try:
-            corpus_reuse: CorpusReuseObservation | None = observe_corpus_reuse(
+            artifact_dates: CorpusArtifactDates | None = observe_corpus_artifact_dates(
                 store, run_id, product_id
             )
         except Exception as exc:  # noqa: BLE001 — провенанс не роняет фазу, но видим
             errors.append(
-                f"{product_id}: corpus_docs.reuse_kind: {type(exc).__name__}: {exc} — "
-                "правило «❌ требует live|revalidated» не применено"
+                f"{product_id}: corpus_artifact: {type(exc).__name__}: {exc} — "
+                "I2d (датированный носитель ❌) не применён"
             )
-            corpus_reuse = None
-        if coverage is not None and coverage.expected_sources == 0:
-            # O2/O3: ноль источников — failed-ячейки (I4), не «тихий ok» и не ❌.
-            # ``coverage_missing`` (нет строки покрытия вовсе) остаётся своим классом:
-            # это аномалия провенанса, а не отсутствие источников. Все zero-source
-            # причины (``no_seeds``/``all_seeds_rejected``/``no_urls_entry``) —
-            # **наблюдательные** и живут в тексте ошибки; класс сбоя один — ``no_sources``,
-            # поэтому словарь классов сбоя (§4.1) не расширяется.
+            artifact_dates = None
+        # O2/O3: ноль **наблюдённых сеансом** источников — failed-ячейки (I4), не «тихий
+        # ok» и не ❌. План 20 §11.2: полнота — факт **корпуса**, а не сеанса, поэтому
+        # проход без сети на удостоверённом снятиями корпусе (``expected_sources=0`` при
+        # ``complete=True``) сюда не попадает: у него есть материал, и вердикт даёт I2d
+        # по датам наблюдений. Иначе ``frozen`` терял бы ячейки целиком, а не публиковал
+        # ``❌`` с датой (измерено 05.11.2026, plan 20 §11.6).
+        # ``coverage_missing`` (нет строки покрытия вовсе) остаётся своим классом:
+        # это аномалия провенанса, а не отсутствие источников. Все zero-source
+        # причины (``no_seeds``/``all_seeds_rejected``/``no_urls_entry``) —
+        # **наблюдательные** и живут в тексте ошибки; класс сбоя один — ``no_sources``,
+        # поэтому словарь классов сбоя (§4.1) не расширяется.
+        if (
+            coverage is not None
+            and coverage.expected_sources == 0
+            and not coverage.complete
+        ):
             kind = (
                 FailureKind.COVERAGE_MISSING.value
                 if coverage.reason == FailureKind.COVERAGE_MISSING.value
@@ -3435,7 +3458,7 @@ def evaluate_phase(
             eval_cache=eval_cache,
             eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
-            corpus_reuse=corpus_reuse,
+            artifact_dates=artifact_dates,
             carry=carry_ctx,
             reuse_conditions=reuse_conditions,
         )
@@ -3955,9 +3978,9 @@ def reevaluate_stale(
     for cell in targets:
         groups.setdefault(_cell_condition(cell), []).append(cell)
 
-    # 16 §8 п.4: происхождение наблюдения корпуса — один снимок на продукт и на вызов
+    # I2d: даты наблюдения артефактов — один снимок на продукт и на вызов
     # (группы одного продукта различаются профилем/K, корпус у них общий).
-    reuse_by_product: dict[str, CorpusReuseObservation | None] = {}
+    dates_by_product: dict[str, CorpusArtifactDates | None] = {}
 
     for product_id, profile, cutoff in sorted(groups):
         group = sorted(groups[(product_id, profile, cutoff)], key=lambda c: str(c.param_id))
@@ -3975,17 +3998,17 @@ def reevaluate_stale(
             )
             query_vectors = None
         coverage = _coverage_for(None, store, str(run_id), product_id)
-        if product_id not in reuse_by_product:
+        if product_id not in dates_by_product:
             try:
-                reuse_by_product[product_id] = observe_corpus_reuse(
+                dates_by_product[product_id] = observe_corpus_artifact_dates(
                     store, str(run_id), product_id
                 )
             except Exception as exc:  # noqa: BLE001 — провенанс виден, фазу не роняет
                 report.errors.append(
-                    f"{product_id}: corpus_docs.reuse_kind: {type(exc).__name__}: {exc} — "
-                    "правило «❌ требует live|revalidated» не применено"
+                    f"{product_id}: corpus_artifact: {type(exc).__name__}: {exc} — "
+                    "I2d (датированный носитель ❌) не применён"
                 )
-                reuse_by_product[product_id] = None
+                dates_by_product[product_id] = None
         try:
             dense_by_query = precompute_dense_hits(
                 group_params,
@@ -4049,7 +4072,7 @@ def reevaluate_stale(
                     eval_cache=eval_cache,
                     eval_conditions=eval_conditions,
                     prompt_archive=prompt_archive,
-                    corpus_reuse=reuse_by_product.get(product_id),
+                    artifact_dates=dates_by_product.get(product_id),
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 report.errors.append(

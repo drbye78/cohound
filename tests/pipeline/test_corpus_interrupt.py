@@ -44,6 +44,7 @@ from core.pipeline.corpus import build_corpus
 from core.pipeline.crawl_session import default_session_id
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 from core.store.sqlite_store import SqliteStore
+from core.store.state_store import SqliteStateStore
 from core.util.hashing import content_hash
 from core.util.index_partition import is_committed, read_manifest
 
@@ -211,7 +212,12 @@ def test_death_at_second_product_keeps_first_product_work(
         abort=abort,
     )
     try:
-        with pytest.raises(type(abort(URL_P2))):
+        # F3: полнота — по снятию корня, поэтому durable-краул идёт с ``state.db``;
+        # без снятия ``complete`` нечем удостоверить.
+        with (
+            SqliteStateStore(":memory:") as state,
+            pytest.raises(type(abort(URL_P2))),
+        ):
             build_corpus(
                 _plan(("p1", "p2", "p3")),
                 crawler,
@@ -225,6 +231,7 @@ def test_death_at_second_product_keeps_first_product_work(
                 index_builder=builder,
                 package_id=PACKAGE,
                 run_id=RUN_ID,
+                state=state,
             )
 
         # 1. Чанки первого продукта персистентны (не только в RAM).

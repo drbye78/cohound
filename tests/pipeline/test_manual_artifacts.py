@@ -349,12 +349,14 @@ def test_refusal_row_survives_manual_provision(tmp_path: Path) -> None:
         store.close()
 
 
-def test_coverage_counts_gap_as_closed_but_keeps_audit(tmp_path: Path) -> None:
-    """``complete=True`` при ``blocked``/``partial_blocks``/``resolved_manually`` — не ложь.
+def test_coverage_counts_gap_as_closed_but_is_not_a_walk(tmp_path: Path) -> None:
+    """Подача сохраняет аудит и закрывает пробел материала, но **не** удостоверяет обход.
 
-    Заменяется не факт (краулу отказано), а его последствие для полноты: материал
-    наблюдён другим путём. ``observed_sources`` остаётся счётчиком **краула** (0) — строка
-    не утверждает, что сайт прочитан.
+    F3 (план 20 §11.2, I2d): ``adopted``-материал наблюдён, поэтому ``resolved_manually``
+    назван, ``blocked`` остаётся аудитом, а ``observed_sources`` — счётчиком **краула**
+    (0). ``complete`` при этом ``False``: предоставление не является обходом корня, и
+    «корень исчерпан» оно не утверждает. ``bounded``-ячейка на таком корпусе останется
+    ``❓`` — это ужесточение §11.4 п.2, а не регресс аудита.
     """
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -374,7 +376,7 @@ def test_coverage_counts_gap_as_closed_but_keeps_audit(tmp_path: Path) -> None:
         assert coverage.partial_blocks == {"docs.test": {"robots_disallow": 1}}
         assert coverage.resolved_manually == 1
         assert coverage.observed_sources == 0
-        assert coverage.complete is True
+        assert coverage.complete is False
         assert coverage.unreadable_origins == []
         # Продукт без подачи — прежнее поведение: подача не размазывается по когорте.
         assert store.read_corpus_coverage(RUN_ID, "p2") is None
@@ -440,7 +442,9 @@ def test_derive_coverage_resolution_is_bound_to_url_and_kind() -> None:
     assert coverage.resolved_manually == 1
     assert coverage.blocked == {"not_found": 1, "robots_disallow": 1}
     assert coverage.partial_blocks == {"docs.test": {"robots_disallow": 1}}
-    assert coverage.complete is True
+    # F3: подача закрывает пробел материала, но не удостоверяет обход корня; корень без
+    # снятия ``complete=1`` оставляет покрытие неполным.
+    assert coverage.complete is False
 
     # Подача по **чужому** URL пробел не закрывает.
     other = derive_corpus_coverage(
