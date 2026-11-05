@@ -13,8 +13,8 @@ seed-root продукта, **узел** — процесс краула.
 ## 1. Границы подсистемы и контракт с соседями
 
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:957`),
-сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2440`), retention сырых байтов
-(`retain`, `core/pipeline/corpus_ingest.py:940`), durable per-URL состоянием (`crawl_session_items`,
+сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2459`), retention сырых байтов
+(`retain`, `core/pipeline/corpus_ingest.py:948`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:357`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:31`), а не из корпуса.
@@ -24,12 +24,12 @@ seed-root продукта, **узел** — процесс краула.
 
 **Единица работы** — один URL объявленного корня. **Результат** — файл в `corpus_raw` плюс элемент
 сеанса `FETCHED` с `raw_path`/`content_hash`; это durable-факт **до** конверсии, и порядок в коде
-такой: байты пишутся, затем `retain` ставит `FETCHED` (`core/pipeline/corpus_ingest.py:1009`), а
-вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:2731`).
+такой: байты пишутся, затем `retain` ставит `FETCHED` (`core/pipeline/corpus_ingest.py:1017`), а
+вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:2750`).
 
 **Соседи приходят двумя путями.** Конверсия — **потребитель** durable-факта (§4); SERP — наоборот,
 **производитель**: его находки входят в frontier путём sitemap-`<loc>` — блэклист, `max_documents`,
-дедуп (`core/pipeline/corpus_ingest.py:2257`). Краул не поглощает поиск, а принимает URL; поэтому
+дедуп (`core/pipeline/corpus_ingest.py:2276`). Краул не поглощает поиск, а принимает URL; поэтому
 масштабирование SERP и краула независимы — первый добавляет работы, второй её разбирает.
 
 **«Краул выполнен»** = элементы сеанса терминальны, frontier исчерпан, усечение записано. Это **не**
@@ -104,8 +104,8 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 
 **Водитель — единственный мутатор состояния.** Полоса исполняет ровно `limiter.wait` +
 `active.fetch`; контракт «никакой мутации состояния сеанса здесь нет» уже записан у
-`local_fetch` (`core/pipeline/corpus_ingest.py:2440`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2306`). Потоки не получают ни `Frontier`, ни
+`local_fetch` (`core/pipeline/corpus_ingest.py:2459`), а pre-fetch — чистая фаза
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2325`). Потоки не получают ни `Frontier`, ни
 стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:748`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 
@@ -317,7 +317,7 @@ edge не примет её как `workers`.
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:583`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:584`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:166`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,
@@ -589,7 +589,7 @@ edge не примет её как `workers`.
   До F9 `drive_roots` вызывался **внутри** цикла продуктов, поэтому волна не могла содержать
   корни двух продуктов и окна `fetch_started_at` продуктов не пересекались ни при какой оси
   `crawl.host_concurrency` (наблюдено: продукты когорты шли строго последовательно). Теперь
-  вызов **один на когорту** (`core/pipeline/corpus.py:3928`): поток планов содержит корни всех
+  вызов **один на когорту** (`core/pipeline/corpus.py:3960`): поток планов содержит корни всех
   продуктов в авторском порядке, а граница продукта — типизированный маркер
   `ProductBoundary` (`core/pipeline/corpus_driver.py:86`), а не «смена `product_id`». Маркер
   нужен потому, что смена pid не наступает у **последнего** продукта потока и у продукта без
@@ -597,17 +597,17 @@ edge не примет её как `workers`.
   **Единица права — host на всю когорту.** Реестр claim (`claimed`) один на вызов драйвера:
   волна корня допускается, только если её host'ы не заняты волной **любого** продукта. Поэтому
   synthetic-бакеты ревалидации (leftover каталога, orphan-бакеты) идут тем же потоком планов
-  (`core/pipeline/corpus.py:3352`), а не отдельным дренажом в хвосте продукта: одиночный
+  (`core/pipeline/corpus.py:3384`), а не отдельным дренажом в хвосте продукта: одиночный
   дренаж открыл бы второй реестр и пустил бы бакет на host, который уже держит сосед.
   **Хвост продукта — на главном потоке, при закрытии его последнего корня**
-  (`core/pipeline/corpus.py:3219`; сам вызов — `core/pipeline/corpus_driver.py:227`). Почему
+  (`core/pipeline/corpus.py:3251`; сам вызов — `core/pipeline/corpus_driver.py:227`). Почему
   там: run-DB — SQLite с **одним** писателем (§1), а драйвер — единственный мутатор состояния
   фазы (инвариант T5), значит конверсия, Pass B, покрытие и строка продукта обязаны исполняться
   там же, где коммитятся исходы корней, и не могут идти параллельно ни друг с другом, ни с
   коммитом. Цена этого компромисса не молчит: пока идёт хвост, новые волны не выдаются
   (отправленные доживают в пулах), и время хвоста пишется отдельным бакетом `product_tail_s`
   (`core/pipeline/corpus_index.py:277`), который публикуется рядом с бакетами стадий
-  (`core/pipeline/corpus.py:856`) и **не входит** в `stage_sum()`: интервал пересекается с
+  (`core/pipeline/corpus.py:857`) и **не входит** в `stage_sum()`: интервал пересекается с
   `embed_s`/`build_s`, и остаток окна иначе ушёл бы в минус.
   **Ось не объявлена — прежняя последовательность и прежний `run_id`.** При
   `crawl.host_concurrency` `None`/`1` драйвер изымает ровно один план за раз, поэтому
@@ -616,11 +616,11 @@ edge не примет её как `workers`.
   объявленных входов F9 не вводит: объявление самой оси, как и до F9 (F1), даёт новый `run_id`
   штатным `crawl_config_digest`, а F9 меняет только расписание исполнения — то есть ни одного
   нового поля в `EXECUTION_CONTRACT_FIELDS`.
-  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:3939`): ось
+  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:3971`): ось
   объявлена на корень (`app < run < site`), поэтому продукт со строгим объявлением не получает
   полос «за компанию» с соседом; потолок когорты — максимум объявленных продуктовых значений.
   Продуктовые значения (накопитель, дедуп-множества, счётчик seed'ов, бакеты стадий, группы
-  ревалидации) живут в `ProductContext` (`core/pipeline/corpus.py:722`): хвост исполняется
+  ревалидации) живут в `ProductContext` (`core/pipeline/corpus.py:723`): хвост исполняется
   позже планирования, и переменная цикла была бы читателем чужого продукта.
   Проверки: `test_cohort_waves_of_two_products_overlap_on_distinct_hosts` (два продукта на
   разных host'ах реально в полёте вместе; `product_start` второго раньше `product_end`

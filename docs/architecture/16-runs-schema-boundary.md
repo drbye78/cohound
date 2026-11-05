@@ -168,7 +168,7 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`_resume_page`, `core/pipeline/corpus.py:826-879`) — `reused`. Resume перечитывает и те документы, которые
+(`_resume_page`, `core/pipeline/corpus.py:827-880`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -179,10 +179,10 @@ retained-байтов).
 публикуется; писатель границы всегда пишет значение.
 
 **Оба значения уже в руках у единственного писателя** — новой проводки не нужно:
-`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1219-1259`, рядом живут `reuse`
+`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1227-1267`, рядом живут `reuse`
 (`:5197` `reused = active_reuse is not None`) и `page.status_code` (он же уже уходит в
 `url_state` как `last_http_status`, `:5217`; второй путь — `:5053`). Точка записи одна — `_persist_docs`
-(`core/pipeline/corpus_ingest.py:1219-1259`, докстринг сам это фиксирует).
+(`core/pipeline/corpus_ingest.py:1227-1267`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
 `upsert_corpus_doc`. Прецедент в коде — `origin` (`core/pipeline/corpus_index.py:128-130`): это kwarg, а не
@@ -254,9 +254,9 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1248` → `core/pipeline/corpus.py:1482` (объявление оси) и
+  **явным параметром**: `core/pipeline/phases.py:1248` → `core/pipeline/corpus.py:1495` (объявление оси) и
   `:4336`/`:4370` (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
-  (`core/pipeline/corpus.py:2246` — единственный источник этого значения).
+  (`core/pipeline/corpus.py:2259` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
@@ -557,7 +557,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    - **словарь**: `core/domain/dictionary.py` + `docs/status-dictionary.yaml`
      (`embed_device`, статусы продукта прогона);
    - **дефекты краула 1 и 3 — одна правка, не две.** Зарядка бюджета на resume
-     (`core/pipeline/corpus.py:3245`) и дренаж уже добытого расцеплены: URL
+     (`core/pipeline/corpus.py:3277`) и дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed`, чей work-set гейтится режимом продукта
      (`_revalidation_items`, `:6612-6624`). Правило: **заряженный URL обязан быть и

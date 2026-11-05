@@ -67,14 +67,14 @@
 развалится.
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
-намерению: `_retain` (`core/pipeline/corpus.py:666-687`) — единственный writer сырых
+намерению: `_retain` (`core/pipeline/corpus.py:667-688`) — единственный writer сырых
 байтов, с единственным вызовом (`:4980`, `_commit_local`), в который сходятся оба
 транспорта (локальный и executor).
 
 ```
 RawPage (core/ports/types.py:91-121)
-  → _retain (core/pipeline/corpus.py:666-687)   # сам хеширует байты, кладёт в corpus_raw
-    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus.py:1320-1340)
+  → _retain (core/pipeline/corpus.py:667-688)   # сам хеширует байты, кладёт в corpus_raw
+    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus.py:1333-1353)
 ```
 
 `RawPage` уже умеет всё нужное: `content`/`staged_path` (файл вместо RAM), и докстринг
@@ -299,14 +299,14 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:314` — единственный writer, зовут
-   `core/pipeline/corpus.py:3245` и `core/pipeline/report.py:2810`; человеческая строка —
+   `core/pipeline/corpus.py:3277` и `core/pipeline/report.py:2810`; человеческая строка —
    `core/pipeline/artifacts_gap.py:196`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
-   `core/pipeline/corpus.py:3383`; `origin` — `core/store/sqlite.py:118`;
+   `core/pipeline/corpus.py:3415`; `origin` — `core/store/sqlite.py:118`;
    `resolved_manually` — `core/domain/models.py:2207` + `core/pipeline/corpus_coverage.py:118`;
    доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:345`).
    As-built и расхождения — §10.
@@ -401,11 +401,11 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   схема `manual_artifacts/1` (`:67`), путь от пакета (`:192-212`), сверка `sha256` (`:297-303`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:3245`), и `report` (`core/pipeline/report.py:2810`); форма —
+  (`core/pipeline/corpus.py:3277`), и `report` (`core/pipeline/report.py:2810`); форма —
   `core/pipeline/artifacts_gap.py:219` (`collect_artifact_gaps`), человеческая строка —
   `:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:132`); подача
-  живёт внутри `corpus` (`core/pipeline/corpus.py:3245`), т.е. §5 исполнен буквально.
+  живёт внутри `corpus` (`core/pipeline/corpus.py:3277`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:148`,
   материал `(product_id, url, sha256)` — `:361`), считается даже при пустом наборе.
 - ⬜ **Связность (`parent_run_id`)** — не сделана: см. §8 п. 3.

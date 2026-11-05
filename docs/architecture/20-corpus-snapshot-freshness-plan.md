@@ -63,7 +63,7 @@
    `observed_how`, `actor`, `superseded_by` — append-only, как `crawl_policy` (план 19).
 2. `url_state` получает наблюдение: `observed_at`, `observed_how`, `capture_id`,
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
-   `last_checked_at` пишется при любом исходе, включая отказ (`corpus_ingest.py:882-899`).
+   `last_checked_at` пишется при любом исходе, включая отказ (`corpus_ingest.py:890-907`).
 3. Ручные артефакты (`hound package state adopt`, `state_adopt.py:703,1478`) создают снятие с
    `observed_how=adopted`, `complete=False` и `actor`. **`complete=False` — не осторожность, а
    факт**: предоставленный артефакт не является обходом и не может удостоверить исчерпание.
@@ -210,7 +210,7 @@
 2. **`complete` из снятия — не то же, что `complete` текущего корпуса.** Корень мог быть
    исчерпан в июле и с тех пор получить новые страницы: снятие удостоверяет полноту **на свою
    дату**, и `bounded ❌` становится утверждением «по снятию C», а не «сегодня».
-3. **Дедуп и канонический адрес** (`corpus.py:636-660`) опирается на `crawl_session_items`,
+3. **Дедуп и канонический адрес** (`corpus.py:637-661`) опирается на `crawl_session_items`,
    которых у adoption/frozen нет: снимок обязан нести durable-группы дедупа (план 19, P3).
 4. **Пере-извлечение меняет текст** (`extractor_version`): наблюдение — про **байты**, версия
    документа — про текст; смешение даёт ложный «контент изменился» (план 19, `frozen_reextract_mismatch`).
