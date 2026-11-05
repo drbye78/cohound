@@ -581,6 +581,14 @@ class ProductIngest:
     product_id: str
     docs: list[CorpusDoc] = field(default_factory=list)
     chunks: list[CorpusChunk] = field(default_factory=list)
+    #: Нормализованные ключи URL, которые **этот прогон наблюдал** (живой ответ
+    #: ``200``/``304``), включая те, что схлопнулись по ``doc_hash`` и потому не дошли
+    #: до ``docs``. Носитель нужен переиспользованию запрещённого корня (E.6): строка
+    #: корпуса адресуется **URL**, и переиспользованная копия не имеет права встать на
+    #: место наблюдения только потому, что наблюдение оказалось алиасом близнеца
+    #: (правило 2 оркестратора, 05.11.2026). ``reused`` (retained-байты) сюда не входит:
+    #: сети не было — наблюдения нет.
+    observed_urls: set[str] = field(default_factory=set)
     #: Сколько чанков продукта записано (нужно финальному циклу манифеста для ``stats_json``).
     chunk_count: int = 0
     #: Сколько **разных** документов эти чанки покрывают (``stats_json.docs``). Документ
@@ -1589,6 +1597,17 @@ def finish_one(
 
     # 4. Дедуп по content_hash (в пределах продукта).
     document_id = f"{product_id}:{doc_hash}"
+    # E.6 (правило 2): наблюдение регистрируется **до** дедупа. Алиас по ``doc_hash``
+    # выходит из функции, не доходя до ``ingest.docs``, и без этой записи
+    # переиспользование запрещённого корня вставило бы для того же URL строку
+    # ``reused``/``http_status=NULL`` со старым носителем — ложный провенанс (наблюдение
+    # было) и устаревший текст рядом с наблюдённым (I19). Запись идёт после проверки
+    # хеша: документ без ``content_hash`` не наблюдался как документ, и его durable-копия
+    # вправе остаться в корпусе (иначе состав корня сузился бы молча).
+    if not manual and reuse_kind in (ReuseKind.LIVE, ReuseKind.REVALIDATED):
+        observed_key = _state_url_key(page.url)
+        if observed_key is not None:
+            ingest.observed_urls.add(observed_key)
     if doc_hash in seen_docs:
         # Наблюдаемость: сколько документов схлопнулось по продукту. Класс исхода
         # не меняется (алиас получает ``FETCHED`` и версию близнеца) — это счётчик,
@@ -3203,6 +3222,13 @@ class OfflineReuseReport:
     :param unknown_roots: авторские корни, которых нет в ``url_state``: оффлайн их
         наблюдать нечем, и сети для этого прогона не существует.
     :param urls: URL, для которых сеть не трогалась (порядок прохода).
+    :param skipped_present: URL, которые проход **не** тронул, потому что в этом прогоне
+        у них **уже есть строка корпуса** (``ingest.docs``): живое наблюдение этого
+        прогона или документ, добавленный предыдущим проходом переиспользования. Это не
+        «переиспользовано» и не «нечего переиспользовать», а третий факт: копия в
+        состоянии есть, но строка корпуса уже занята — и вторая строка на тот же URL
+        была бы либо ложным провенансом (``reused``/``NULL`` при состоявшемся 200), либо
+        устаревшей версией того же URL рядом с наблюдённой (I19).
     """
 
     reused: int = 0
@@ -3210,6 +3236,10 @@ class OfflineReuseReport:
     no_version: tuple[str, ...] = ()
     unknown_roots: tuple[str, ...] = ()
     urls: tuple[str, ...] = ()
+    #: URL, пропущенные, потому что строка корпуса этого прогона уже есть (E.6):
+    #: живое наблюдение побеждает копию по построению, а второй проход не повторяет
+    #: работу первого (иначе ``duplicates`` считал бы схлопывание, которого не было).
+    skipped_present: tuple[str, ...] = ()
     #: Durable-группы дедупа, которые использовал проход (план 19 §P3): пары
     #: ``(doc_hash, url)``. Пишутся в запись снятия, чтобы следующий ``frozen`` выбрал
     #: тот же канонический адрес, не обращаясь к ``crawl_session_items``.
@@ -3221,10 +3251,19 @@ class OfflineReuseReport:
 
     def note(self, product_id: str) -> str:
         """Операторская строка продукта: проход и его цена в наблюдении."""
+        # Хвост про пропуск добавляется **только когда он есть**: строка ``offline``
+        # без живых наблюдений не должна обрастать нулевым фактом.
+        skipped = (
+            ""
+            if not self.skipped_present
+            else f", уже в корпусе этого прогона {len(self.skipped_present)} "
+            "(не переиспользуется)"
+        )
         return (
             f"corpus: {self.label} {product_id} — переиспользовано документов "
             f"{self.reused} (чанков {self.chunks}), переиспользовать нечего "
-            f"{len(self.no_version)}, корней вне состояния {len(self.unknown_roots)}; "
+            f"{len(self.no_version)}, корней вне состояния {len(self.unknown_roots)}"
+            f"{skipped}; "
             "сеть не трогалась, наблюдений этого прогона нет "
             "(❌ — только с датой носителя, I2d)"
         )
@@ -3248,6 +3287,7 @@ def offline_reuse_product(
     partial_unknown_products: dict[str, list[str]],
     persist_docs: Callable[..., None],
     label: str = "offline",
+    skip_urls: Sequence[str] = (),
 ) -> OfflineReuseReport:
     """Оффлайн-проход продукта: корпус из durable-субстрата, **ноль сетевых вызовов**.
 
@@ -3296,14 +3336,32 @@ def offline_reuse_product(
     (``network_denied`` ‖ ``on_request`` без запроса). Проход один и тот же («продукт →
     корень»), различается провенанс: переиспользование по политике не означает, что
     оператор просил ``offline``.
+
+    **``skip_urls`` — строка корпуса одна на URL (E.6, решение оркестратора 05.11.2026).**
+    Идентичность корпусной строки для этого вопроса — **URL**, а не ``doc_hash``: если
+    URL в этом прогоне уже имеет строку корпуса (живое наблюдение 200/304, ручной
+    артефакт или документ предыдущего прохода переиспользования), его копия не входит в
+    работу вовсе. Иначе получалось бы одно из двух: при том же тексте — строка
+    оставалась бы ``reused``/``http_status=NULL``, то есть врала бы о провенансе
+    (наблюдение было); при изменённом — рядом с наблюдённой встала бы устаревшая версия
+    того же URL как кандидат в доказательства (I19). Пропуск называется отдельным
+    счётчиком ``skipped_present``, а не выдаётся за «переиспользовано 0»: это третий
+    факт, а не отсутствие копии.
     """
     report_reused = 0
     report_chunks = 0
     no_version: list[str] = []
     unknown_roots: list[str] = []
     touched: list[str] = []
+    skipped_present: list[str] = []
     seen_urls: set[str] = set()
     capture_pairs: list[tuple[str, str, str]] = []
+    #: Пропуск — по нормализованному ключу ``url_state``: тот же, которым проход
+    #: адресует строку состояния. Ненормализуемый вход молча не пропускается: он
+    #: попадёт в собственную видимую ошибку ниже.
+    skip_keys = {
+        key for url in skip_urls if (key := _state_url_key(url)) is not None
+    }
 
     # Порядок: авторские корни (порядок входа) → известные URL (порядок планировщика).
     # Корни идут первыми, потому что они — авторское решение: если корень недоступен
@@ -3327,6 +3385,11 @@ def offline_reuse_product(
             )
             continue
         if key in seen_urls:
+            continue
+        if key in skip_keys:
+            # Строка корпуса этого прогона уже есть (живое наблюдение или документ
+            # предыдущего прохода): вторая строка на тот же URL не появляется.
+            skipped_present.append(url)
             continue
         seen_urls.add(key)
         touched.append(url)
@@ -3441,6 +3504,7 @@ def offline_reuse_product(
         no_version=tuple(no_version),
         unknown_roots=tuple(unknown_roots),
         urls=tuple(touched),
+        skipped_present=tuple(skipped_present),
         capture_docs=tuple(
             CapturedDocRow(
                 doc_hash=doc_hash,
@@ -4221,6 +4285,60 @@ def group_revalidation_items(
         else:
             groups[best_root].append(item.url)
     return groups, orphans
+
+
+def durable_urls_by_owner(
+    product_id: str,
+    roots: Sequence[str],
+    *,
+    state: ProductStatePort | None,
+    scope_hosts_by_product: Mapping[str, frozenset[str]],
+    errors: list[str],
+) -> dict[str, list[str]]:
+    """Durable-документы продукта, разложенные по **корню-владельцу** (E.6 плана 19).
+
+    Зачем это, если есть :func:`group_revalidation_items`. Группы ревалидации — это
+    work-set **сетевого** обхода: вне режима ``incremental`` планировщик их не строит
+    (``plan_incremental_items`` под сетью возвращает ``[]`` для ``new``/``full``). Для
+    корня, которому политика запретила сеть, work-set другой по определению — это
+    **durable-субстрат**, ровно как у прохода без сети: там ``url_state`` и есть работа
+    (AGENTS §6.1; измерено 04.11.2026 — roots-only потерял 7 документов из 9). Брать
+    ревалидационную группу значило бы тихо терять документы корня в ``full``/``new``.
+
+    Владелец — тот же предикат, что у группировки ревалидации (:func:`scope_owner`:
+    самый специфичный ``root_path_prefix``), поэтому найденный URL не может «переехать»
+    под другой корень между двумя ответами. URL вне scope всех авторских корней
+    (orphan) сюда не входят: они не принадлежат ни одному корню продукта.
+
+    :returns: ``{root_url: [url, ...], ...}`` — порядок ``url_state`` (сортировка по
+        ``normalized_url``), чтобы проход был воспроизводим. Корень без документов в
+        словаре отсутствует.
+    """
+    if state is None or not roots:
+        return {}
+    product_scope_hosts = scope_hosts_by_product.get(product_id, frozenset())
+    scopes = [
+        (root, Frontier(root, CrawlLimits(), scope_hosts=product_scope_hosts))
+        for root in roots
+    ]
+    owned: dict[str, list[str]] = {}
+    try:
+        rows = sorted(state.iter_url_state(product_id), key=lambda row: row.normalized_url)
+    except Exception as exc:  # noqa: BLE001 — изоляция чтения состояния
+        errors.append(
+            f"{product_id}: durable_urls_by_owner: {type(exc).__name__}: {exc} — "
+            "переиспользование корня пойдёт по авторскому адресу"
+        )
+        return {}
+    for row in rows:
+        # Адрес — тот, которым строка адресована состоянию (``row.url``): им же
+        # пользуется планировщик (``_item_from_url_state``), и он же станет
+        # ``corpus_docs.url`` переиспользованной копии.
+        owner = scope_owner(row.url, scopes)
+        if owner is None:
+            continue
+        owned.setdefault(owner, []).append(row.url)
+    return owned
 
 
 def resolve_product_revalidate_cap(

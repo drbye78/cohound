@@ -48,15 +48,15 @@ per-host статуса и без различения дискавери и о�
 
 | механизм | где | чего не хватает |
 |---|---|---|
-| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:854`, `run_identity.py:209`, `plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падает в `auto` (`corpus.py:395-400`) |
+| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:854`, `run_identity.py:209`, `plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падает в `auto` (`corpus.py:397-401`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`state_sqlite.py:115`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3124` | переиспользует **чанки** ⇒ отказ при смене версий; не пишет `url_state`/`document_version` как «последнюю версию» (`:3173-3177`) — эту дисциплину обязан унаследовать `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
 | per-host[+path] оси и их digest в `run_id` | `domain_profiles.py:49`, `report.py:669` | **не знает продукта** |
 | `product → host+path` слои | `crawl_sources.py:48,77,87` | digest информационный (`models.py:1533`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`package/commands.py:2994`) | — образец для CLI политики |
-| видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1149`), `product_skipped` (`corpus.py:3989`), `incomplete_reasons` (`corpus.py:3855`) | нет токена «запрещено политикой» |
-| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1701,2175`; `corpus_coverage.py:228`) | переиспользуется политическими пропусками |
+| видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1149`), `product_skipped` (`corpus.py:4021`), `incomplete_reasons` (`corpus.py:3887`) | нет токена «запрещено политикой» |
+| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1714,2175`; `corpus_coverage.py:228`) | переиспользуется политическими пропусками |
 
 **Ни один носитель не даёт «продукт × хост × путь» без ложной идентичности:**
 `crawl_sources.yaml` знает продукт, но не входит в `run_id`; `domain_profiles.yaml` входит в
@@ -165,7 +165,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:457`): иначе
    `run` и `crawl run` адресуют разные сеансы при одном объявленном входе.
 5. **Неизвестное значение политики — `EXIT_USAGE`, не `auto`.** Тихий fallback
-   (`corpus.py:401`) — это сеть по опечатке (AGENTS §2).
+   (`corpus.py:402`) — это сеть по опечатке (AGENTS §2).
 6. Время снятия (`captured_at`) — **провенанс**, не идентичность (как `extractor_version`).
 7. Честная граница: резолв ветки «discovery vs update» читает `url_state`, поэтому **те же
    объявленные входы при сдвинутом `state.db` дают другой корпус** — так уже живёт `auto`
@@ -196,22 +196,22 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 ### P2 — исполнение: `on_request` и `network_denied` — ✅ сделано
 
-- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`corpus.py:2875`) — **до**
+- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`corpus.py:2888`) — **до**
   `crawl_target` (`:2951`) и `expand_directory` (`:2957`), — и до сборки синтетических корней
   (`_synthetic_root_plans`, `:2801`). Гейт во фронтьере (`crawl_frontier.py:1412,1443,1523`)
   недостаточен: он ниже feed/sitemap-разворота. Порядок закреплён **AST-тестом**
   (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
   вызовов в теле генератора: генератор — это порядок исполнения, текст комментария — нет.
 - ✅ **SERP-контур** глушится политикой с `not_executed_reason=crawl_policy_skipped`
-  (`corpus.py:1836`), находки фильтруются по корню.
+  (`corpus.py:1849`), находки фильтруются по корню.
 - ✅ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks`
   (`corpus_drain.py:168,171`), а не один enum. `bytes` появится в P3 — объявлять значение без
   исполнения значило бы обещать режим, которого нет.
-- ✅ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3130`, «продукт →
+- ✅ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3149`, «продукт →
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
   `incomplete_reasons` + `truncated_products` (`corpus_commit.py:105`) — тем же каналом, что
-  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1736,3136`). `expected_sources` не уменьшается молча.
+  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1749,3136`). `expected_sources` не уменьшается молча.
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `:3742` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
@@ -238,10 +238,10 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   (сверяет множество значений enum с ключами таблицы) и
   `test_dispatch_has_no_silent_default_for_unknown_policy`.
 - ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
-  (`corpus_ingest.py:3575`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
+  (`corpus_ingest.py:3639`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
   (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
 - ✅ **Дрейф пере-извлечения виден**: промах кэша с другим `content_hash` → токен
-  `frozen_reextract_mismatch` (`corpus_ingest.py:3394`), документ **не публикуется** и в
+  `frozen_reextract_mismatch` (`corpus_ingest.py:3457`), документ **не публикуется** и в
   `document_version` не попадает: ложного `document_id`, ложного дедупа и другого
   `doc_set_digest` не возникает.
 - ✅ **Канонический адрес согласован и в `frozen`**: `crawl_session_items` не пишутся, дедуп
@@ -373,8 +373,11 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 2. **Пере-извлечение меняет текст** (`html-6`/`policy-5` на старых байтах) — это
    `content_change`+`execution_change`, а не «тот же прогон».
 3. **Смешанный продукт** (часть корней `fetch`, часть `chunks`) — новая семантика исполнения
-   (дедуп между reuse- и fetch-путями, порядок `_open_product` → дренаж), а не «обобщение
-   offline-пути». Требует отдельного подтверждения (§E.6).
+   (дедуп между reuse- и fetch-путями, порядок планирование → дренаж → переиспользование), а не
+   «обобщение offline-пути». Решено оркестратором 05.11.2026 по объявленным правилам (I19, AGENTS §6.1; §E.6): переиспользование запрещённого
+   корня идёт **в хвосте продукта**, после живых документов, и пропускает URL, у которого строка
+   корпуса этого прогона уже есть, — поэтому живое наблюдение побеждает копию по построению, а
+   не по порядку вставки.
 4. **Не делаем:** расписаний и периодичности (`next_check_at` по-прежнему не читается),
    приоритетов URL внутри корня, per-URL режимов, автоподбора режима по частоте изменений.
 5. **Не обещаем** экономию запросов там, где режим `auto`: цель — управляемость и
@@ -392,6 +395,8 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 | 04.11.2026 | равная специфичность = конфликт, не тай-брейк | тай-брейк по часам/порядку вставки делает резолв неповторяемым |
 | 04.11.2026 | `--refresh-scope` входит в `crawl_policy_digest` | он меняет корпус ⇒ обязан менять `run_id` |
 | 04.11.2026 | неизвестное значение политики — `EXIT_USAGE` | тихий `auto` — сеть по опечатке |
+| 05.11.2026 | смешанный продукт: переиспользование — в хвосте продукта, пропуск по **URL** | живое наблюдение обязано побеждать копию по построению, а не по порядку вставки (`reused`/`NULL` рядом с 200 — ложный провенанс) |
+| 05.11.2026 | состав запрещённого корня = все durable-документы, владелец — специфичный `root_path_prefix` | под `full` ревалидационной группы нет: roots-only work-set терял листья молча (тот же failure mode, что 7 из 9 документов) |
 
 ## 11. Правки по ревью @oracle (04.11.2026)
 
@@ -412,4 +417,4 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 | E.4 | продукт без сохранённых байтов при `network_denied` | мерить нечем: `❓`/`no_sources` или продукт выпадает из отчёта | ✅ решено владельцем 04.11.2026: продукт **остаётся на карте**, причина видна (`stored_bytes_missing`/`unknown_roots`), покрытие неполно, ни одна ячейка не публикуется как `❌` |
 | E.7 | члены контейнеров в проходе без сети | `frozen`/`network_denied` пере-извлекает верхнеуровневые байты; члены контейнера приходят только из обхода (`ArchiveDescentWalker`), которого в этом проходе нет. Замер: 2 документа и 271 чанк из 597 на `jatoba` | ✅ решено владельцем 05.11.2026 («спуск контейнера в проходе без сети») и сделано: `container_state` (STATE 9 → 10) пишется write-through живым спуском; `frozen` читает её **до** ветки `no_version` и спускает сохранённые байты inline (без пула, без `crawl_session_items`), называя невоспроизведённое (`stored_bytes_missing`, `frozen_container_unreadable`, `frozen_container_empty`, `frozen_container_replayed:{n}`). Замер: 9 / 876 против 9 / 876, чанки 9 из 9 |
 | E.5 | `--refresh-scope` как условие измерения | если владелец считает это «операционным запросом», это противоречит `run_id = f(объявленных входов)` | ✅ решено: входит в дайджест |
-| E.6 | смешанный продукт (часть корней `fetch`, часть `chunks`) | дедуп и порядок дренажа — новая семантика исполнения | ⬜ |
+| E.6 | смешанный продукт (часть корней `fetch`, часть `chunks`) | дедуп и порядок дренажа — новая семантика исполнения | ✅ решено 05.11.2026 — оркестратор, по объявленным правилам (I19, AGENTS §6.1), не решение владельца (три правила: строка корпуса — на **URL**; провенанс выжившей строки — наблюдение; состав запрещённого корня — **все** его durable-документы, владелец — самый специфичный `root_path_prefix`). Сделано: `_policy_skip` больше не переиспользует во время планирования, а только откладывает набор (`ProductContext.deferred_reuse`), хвост `_close_product` переиспользует его после живых документов с пропуском по URL (`skipped_present`, третий факт рядом с `reused`/`no_version`), состав корня считает `durable_urls_by_owner` (`state.db: url_state` — и есть work-set под `full`). Пропуск учитывает и **наблюдения прогона** (`ProductIngest.observed_urls`, пополняется в `finish_one` до дедупа): URL, наблюдённый живым путём, но схлопнутый по `doc_hash` в алиас близнеца, не получает `reused`-строку со старым носителем, хотя строки у него нет. Гейт политики остался до `crawl_target`/`expand_directory`; набор URL в сеть не изменился; пины — `tests/pipeline/test_corpus_crawl_policy.py` |

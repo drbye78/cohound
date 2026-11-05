@@ -268,6 +268,7 @@ from core.pipeline.corpus_ingest import (  # noqa: F401
     terminal_failure_kind,
 )
 from core.pipeline.corpus_ingest import capture_id_for as _capture_id_for
+from core.pipeline.corpus_ingest import durable_urls_by_owner as _durable_urls_by_owner
 from core.pipeline.corpus_ingest import frozen_bytes_product as _frozen_bytes_product
 from core.pipeline.corpus_ingest import offline_reuse_product as _offline_reuse_product
 from core.pipeline.corpus_ingest import persist_docs as _persist_docs
@@ -1136,6 +1137,18 @@ class ProductContext:
     #: наполняет ``ingest.docs``), и пик памяти рос бы с числом продуктов, а не с числом
     #: полос.
     incremental_items: Sequence[IncrementalItem] = field(default_factory=tuple)
+    #: E.6 плана 19: отложенное переиспользование корней, которым политика запретила
+    #: сеть. Гейт политики срабатывает в планировании (до первого сетевого вызова), но
+    #: **читает** субстрат только хвост продукта — после конвертации живых документов:
+    #: иначе переиспользованная копия выигрывала бы у наблюдения того же URL (провенанс
+    #: строки врал бы: ``reused``/``NULL`` при состоявшемся 200). Каждый элемент — корни
+    #: одного прохода в порядке появления (авторский корень ‖ synthetic-бакет).
+    deferred_reuse: list[tuple[str, ...]] = field(default_factory=list)
+    #: E.6: кэш «корень → его durable-документы» (``None`` — ещё не читали). Читается
+    #: один раз на продукт при первом политическом пропуске: ``url_state`` — один и тот
+    #: же носитель для всех корней, и обход на каждый запрещённый корень был бы платой за
+    #: то же знание.
+    durable_urls: dict[str, list[str]] | None = None
     #: Хвост продукта уже исполнен (конверсия → Pass B → покрытие → строка продукта).
     #: Нужен одному решению: «краул когорты закончен» — это «закрыты **все** продукты»,
     #: а не «закрыт последний по порядку»: при объявленной оси последний по порядку
@@ -3140,7 +3153,7 @@ def _build_corpus(
         known_urls: Sequence[str] = (),
         author_seed: bool = True,
     ) -> None:
-        """Видимый пропуск корня политикой (план 19 §P2): провенанс, покрытие, субстрат.
+        """Видимый пропуск корня политикой (план 19 §P2): провенанс, покрытие, работа.
 
         Зовётся **из гейта планов** — до резолва цели, развёртки каталога (feed/channel)
         и sitemap, — поэтому «ни одного запроса» здесь не обещание, а следствие места
@@ -3149,10 +3162,26 @@ def _build_corpus(
         продукт остаётся на карте (I4), а не превращается в ``BLOCKED``
         («несостоявшееся измерение» — это другой случай).
 
-        ``chunks``-корень берёт корпус тем же обобщённым проходом, что ``offline``
-        («продукт → корень»), а не вторым путём: ``url_state``/``document_version`` там
-        не переписываются, поэтому следующий живой прогон не примет переиспользованное
-        за наблюдённое.
+        **Переиспользование отложено до хвоста продукта** (E.6 плана 19, решение
+        оркестратора 05.11.2026). Здесь фиксируется только **пропуск** (провенант, покрытие,
+        работа в очередь хвоста); сам проход «корень → чанки» исполняет
+        ``_close_product`` — после конвертации живых документов и до Pass B. Причина:
+        идентичность корпусной строки для этого вопроса — **URL**, и живое наблюдение
+        обязано побеждать переиспользованную копию по построению. При записи в
+        планировании копия попадала в корпус раньше живого документа (конверсия
+        отложена): при том же тексте строка оставалась ``reused``/``http_status=NULL``
+        при состоявшемся 200 (ложный провенанс), при изменённом — рядом с наблюдённой
+        вставала устаревшая версия того же URL (I19: старый текст как кандидат в
+        доказательства). Место гейта при этом **не сдвинулось**: сеть запрещена до
+        первого вызова, как и раньше.
+
+        Состав работы корня — **все его durable-документы** (владелец — самый
+        специфичный ``root_path_prefix``, тот же предикат, что у группировки
+        ревалидации): ревалидационная группа вне ``incremental`` пуста, и ``full``/``new``
+        молча теряли бы документы корня (дисциплина прохода без сети, AGENTS §6.1).
+
+        ``url_state``/``document_version`` проход не переписывает, поэтому следующий
+        живой прогон не примет переиспользованное за наблюдённое.
         """
         reason = CRAWL_POLICY_SKIPPED_REASON
         reasons = [reason, *([execution.reason] if execution.reason else [])]
@@ -3183,25 +3212,28 @@ def _build_corpus(
         )
         if execution.corpus_source is not CrawlCorpusSource.CHUNKS or ctx is None:
             return
-        report = _offline_reuse_product(
-            product_id,
-            [*([root_url] if author_seed else []), *known_urls],
-            [],
-            state=state,
-            errors=errors,
-            chunker_version=resolved_chunker_version,
-            embed_model_id=embed_model_id,
-            store=store,
-            ingest=ctx.ingest,
-            seen_docs=ctx.seen_docs,
-            seen_chunk_ids=ctx.seen_chunk_ids,
-            duplicates=duplicates,
-            doc_counters=doc_counters,
-            partial_unknown_products=partial_unknown_products,
-            persist_docs=_persist_docs,
-            label="crawl_policy",
+        # Durable-документы корня — один раз на продукт: их владелец не меняется, а
+        # ``state`` читается тем же носителем (``url_state``) для всех корней.
+        if ctx.durable_urls is None:
+            ctx.durable_urls = _durable_urls_by_owner(
+                product_id,
+                ctx.roots,
+                state=state,
+                scope_hosts_by_product=scope_hosts_by_product,
+                errors=errors,
+            )
+        owned = ctx.durable_urls.get(root_url, ())
+        deferred = tuple(
+            dict.fromkeys(
+                [
+                    *([root_url] if author_seed else []),
+                    *known_urls,
+                    *owned,
+                ]
+            )
         )
-        policy_notes.append(report.note(product_id))
+        if deferred:
+            ctx.deferred_reuse.append(deferred)
 
     def _synthetic_root_plans(
         ctx: ProductContext,
@@ -4121,6 +4153,57 @@ def _build_corpus(
             )
         if manual_resolved:
             manual_urls_by_product[product_id] = manual_resolved
+
+        # --- E.6 плана 19: переиспользование корней, запрещённых политикой -------- #
+        # Здесь, а не в планировании (где стоит гейт политики): живое наблюдение этого
+        # прогона обязано победить переиспользованную копию **по построению**, потому
+        # что строка корпуса — на URL, а не на ``doc_hash``. К этому моменту очередь
+        # сконвертирована и ручные артефакты поданы: у каждого наблюдённого URL уже есть
+        # строка с провенансом наблюдения (правило 2 оркестратора, 05.11.2026), и проход
+        # переиспользования обязан такие URL пропустить (`skip_urls`), а не встать с ними
+        # рядом (устаревшая версия того же URL — кандидат в доказательства, I19).
+        #
+        # Порядок шагов хвоста прежний, добавлен **один**: конверсия → ручные артефакты
+        # → переиспользование запрещённых корней → потолок ревалидации → ``product_end``
+        # → Pass B. Документы прохода входят в ту же сборку (I19), а ``url_state``/
+        # ``document_version`` проход по-прежнему не переписывает.
+        if ctx.deferred_reuse and state is not None:
+            for reuse_roots in ctx.deferred_reuse:
+                # Пропуск — по **строке корпуса этого продукта** и по **наблюдениям этого
+                # прогона**, а не по провенансу: к этому моменту в ``ingest.docs`` лежат
+                # и живые документы (они вошли первыми), и документы предыдущих проходов,
+                # а в ``observed_urls`` — URL, которые прогон наблюдал, но чья строка
+                # схлопнулась по ``doc_hash`` (E.6, правило 2): наблюдение обязано
+                # побеждать копию и тогда, когда строки у него нет. Границы продукта
+                # обязательны: ``ingest`` — носитель одного продукта, но набор
+                # наблюдений всё равно читается только у него. Пересчёт на каждый проход
+                # намеренный: второй проход того же запрещённого корня (авторский корень
+                # и его synthetic-бакет ревалидации) не должен повторять работу первого и
+                # считать ``duplicates`` там, где никакого схлопывания по контенту не
+                # было.
+                present_urls = [
+                    doc.url for doc in ingest.docs if doc.product_id == product_id
+                ] + sorted(ingest.observed_urls)
+                report = _offline_reuse_product(
+                    product_id,
+                    reuse_roots,
+                    [],
+                    state=state,
+                    errors=errors,
+                    chunker_version=resolved_chunker_version,
+                    embed_model_id=embed_model_id,
+                    store=store,
+                    ingest=ingest,
+                    seen_docs=seen_docs,
+                    seen_chunk_ids=seen_chunk_ids,
+                    duplicates=duplicates,
+                    doc_counters=doc_counters,
+                    partial_unknown_products=partial_unknown_products,
+                    persist_docs=_persist_docs,
+                    label="crawl_policy",
+                    skip_urls=present_urls,
+                )
+                policy_notes.append(report.note(product_id))
 
         # Ops-потолок ревалидации — **продуктовое** усечение через существующий канал
         # (``truncated`` + ``truncated_reason``), без новой coverage/freshness-оси.

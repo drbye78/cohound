@@ -36,6 +36,7 @@ from core.domain import (
     CatalogRow,
     Cohort,
     CohortEntry,
+    CrawlRunConfig,
     CrawlSessionStatus,
     RunConfig,
     RunMode,
@@ -45,6 +46,7 @@ from core.pipeline import RunPlan
 from core.pipeline import corpus as corpus_mod
 from core.pipeline import crawl_policy as crawl_policy_mod
 from core.pipeline.corpus import IndexBuild, build_corpus
+from core.pipeline.corpus_ingest import OFFLINE_UNKNOWN_ROOT_TEXT
 from core.pipeline.crawl_policy import (
     CRAWL_POLICY_SKIPPED_REASON,
     DeclaredRoot,
@@ -320,6 +322,7 @@ def _run_corpus(
     product_modes: dict[str, str] | None = None,
     refresh_policy: str = "auto",
     products: list[str] | None = None,
+    crawl_defaults: Any = None,
 ):
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -339,6 +342,7 @@ def _run_corpus(
         search=search,
         serp_rounds=serp_rounds,
         serp_source="declared",
+        crawl_defaults=crawl_defaults,
     )
     if products is None:
         products = sorted(urls)
@@ -358,6 +362,7 @@ def _seed_substrate(
     *,
     pages: dict[str, bytes],
     roots: list[str],
+    crawl_defaults: Any = None,
 ) -> None:
     """Наполняет ``state.db`` **реальным** путём: прогон ``auto`` с живым краулером."""
     store = SqliteStore(":memory:")
@@ -376,6 +381,7 @@ def _seed_substrate(
             state=state,
             product_modes={"p1": "incremental"},
             refresh_policy="auto",
+            crawl_defaults=crawl_defaults,
         )
     finally:
         store.close()
@@ -628,6 +634,586 @@ def test_one_live_and_one_denied_root_is_partial_with_named_token(
         )
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 4b. E.6 плана 19: смешанный продукт — часть корней fetch, часть chunks
+# --------------------------------------------------------------------------- #
+
+
+def _mixed_policy(*, deny_site: str, roots: list[str]):
+    """Продукт ``auto``; запись сайта ``deny_site`` — ``network_denied``.
+
+    Остальные корни продукта остаются ``fetch``: это и есть смешанный продукт
+    (часть корней в сеть, часть — из durable-субстрата).
+    """
+    return resolve_crawl_policy(
+        package_policy=CrawlPolicyConfig.model_validate(
+            {
+                "products": {"p1": {"mode": "auto"}},
+                "sites": {"p1": {deny_site: {"mode": "network_denied"}}},
+            }
+        ),
+        operator_rows=[],
+        roots=[_root(url) for url in roots],
+        now=NOW,
+        observed_at={},
+    )
+
+
+def _chunk_rows(store: SqliteStore) -> list[tuple[str, str, str]]:
+    """``(chunk_id, content_hash, url)`` всех строк ``corpus_chunks`` прогона."""
+    return [
+        (row["chunk_id"], row["content_hash"], row["url"])
+        for row in store.conn.execute(
+            "SELECT chunk_id, content_hash, url FROM corpus_chunks ORDER BY rowid"
+        )
+    ]
+
+
+def test_denied_root_reuses_its_chunks_next_to_a_fetched_root(
+    tmp_path: Path,
+) -> None:
+    """E.6: живой корень + запрещённый корень с субстратом дают **один** корпус.
+
+    Смешанный продукт — не «или сеть, или чанки»: живой корень наблюдается этим
+    прогоном, запрещённый берёт свой документ из ``state.db`` тем же проходом, что
+    ``offline`` (``label=crawl_policy``), но **в хвосте продукта** — после живых
+    документов. Провенанс каждой строки при этом честный: у живой — ответ этого
+    прогона, у переиспользованной — носитель, и ни один чанк не вставлен дважды.
+    """
+    other_body = b"other page text"
+    with SqliteStateStore(":memory:") as state:
+        # Наполняющий прогон: оба корня наблюдены живым путём (дефолт ``max_depth=0``
+        # — ровно по документу на корень).
+        _seed_substrate(
+            tmp_path,
+            state,
+            pages={ROOT: BODY, OTHER: other_body},
+            roots=[ROOT, OTHER],
+        )
+
+        crawler = _FirstRunCrawler({ROOT: BODY})
+        result, store, coverages, run_products, session = _run_corpus(
+            tmp_path,
+            policy=_mixed_policy(deny_site="other.test", roots=[ROOT, OTHER]),
+            urls={"p1": [ROOT, OTHER]},
+            crawler=crawler,
+            extractor=_FirstRunExtractor(),
+            chunker=_FirstRunChunker(),
+            state=state,
+        )
+        try:
+            # 1. Сеть тронута ровно живым корнем.
+            assert [url for url, _plan in crawler.calls] == [ROOT]
+
+            # 2. Корпус продукта — **оба** документа: наблюдённый и переиспользованный.
+            docs = {doc.url: doc for doc in store.iter_corpus_docs(RUN_ID)}
+            assert set(docs) == {ROOT, OTHER}
+            live = docs[ROOT]
+            assert live.http_status == 200, "живой корень — ответ этого прогона"
+            assert (
+                live.reuse_kind is not None and live.reuse_kind.value == "revalidated"
+            )
+            reused = docs[OTHER]
+            assert reused.http_status is None, "сети не было — статус NULL, а не 200"
+            assert reused.reuse_kind is not None and reused.reuse_kind.value == "reused"
+            assert reused.content_hash == content_hash(other_body)
+
+            # 3. Чанки не задвоены: ``chunk_id`` — PK, но проверяем и по контенту —
+            #    два пути (fetch и reuse) не должны оставить две записи одного куска.
+            rows = _chunk_rows(store)
+            assert len(rows) == 2, f"ожидался один чанк на документ: {rows}"
+            assert len({row[0] for row in rows}) == len(rows)
+            assert len({row[1] for row in rows}) == len(rows)
+            # Счётчики честные: один фетч (живой корень) и ни одной новой нарезки — живой
+            # корень ответил 200 с тем же хешем (``revalidated``), chunk-set обоих
+            # документов взят из субстрата. Смешанный путь виден именно парой
+            # «фетч = 1, документов = 2».
+            build = next(
+                entry for entry in result.log_entries if isinstance(entry, IndexBuild)
+            )
+            assert build.crawl_fetched == 1
+            assert build.doc_counters["p1"] == {"total": 2, "new": 0, "reused": 2}
+
+            # 4. Пропуск назван и продукт остаётся на карте.
+            notes = _notes(result)
+            assert CRAWL_POLICY_SKIPPED_REASON in notes
+            coverage = coverages["p1"]
+            assert coverage.complete is False
+            assert coverage.reason == CRAWL_POLICY_SKIPPED_REASON
+            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
+            assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+        finally:
+            store.close()
+
+
+#: Перекрывающиеся корни: ``OVERLAP_PAGE`` лежит под обоими. Первый — живой (сеть),
+#: второй — ``network_denied``: ровно случай «документ пришёл двумя путями».
+OVERLAP_ROOT = "https://p1.test/"
+OVERLAP_OTHER = "https://p1.test/docs/"
+OVERLAP_PAGE = "https://p1.test/docs/a"
+OVERLAP_ROOT_BODY = b'<html>root <a href="/docs/a">a</a></html>'
+OVERLAP_OTHER_BODY = b'<html>docs <a href="/docs/a">a</a></html>'
+OVERLAP_LEAF = b"<html>leaf text</html>"
+OVERLAP_NEW_LEAF = b"<html>new text</html>"
+
+
+def _overlap_run(
+    tmp_path: Path,
+    state: SqliteStateStore,
+    *,
+    seed_leaf: bytes,
+    live_leaf: bytes,
+):
+    """Смешанный прогон «перекрывающиеся корни»: живой ``/`` + запрещённый ``/docs/``.
+
+    Состояние наполняется **реальным** путём (``auto``, глубина 1) от запрещённого
+    корня, поэтому ``url_state`` знает и ``/docs/``, и лист ``/docs/a``. В самом
+    прогоне ``OVERLAP_ROOT`` идёт в сеть (BFS находит лист), ``OVERLAP_OTHER`` —
+    ``network_denied``: его durable-документы (``overlap_page``) переиспользуются в
+    хвосте. ``seed_leaf``/``live_leaf`` различаются только в тесте изменённого контента.
+    """
+    _seed_substrate(
+        tmp_path,
+        state,
+        pages={OVERLAP_OTHER: OVERLAP_OTHER_BODY, OVERLAP_PAGE: seed_leaf},
+        roots=[OVERLAP_OTHER],
+        crawl_defaults=CrawlRunConfig(max_depth=1),
+    )
+    crawler = _FirstRunCrawler(
+        {OVERLAP_ROOT: OVERLAP_ROOT_BODY, OVERLAP_PAGE: live_leaf}
+    )
+    result, store, coverages, run_products, _session = _run_corpus(
+        tmp_path,
+        policy=_mixed_policy(
+            deny_site="p1.test/docs", roots=[OVERLAP_ROOT, OVERLAP_OTHER]
+        ),
+        urls={"p1": [OVERLAP_ROOT, OVERLAP_OTHER]},
+        crawler=crawler,
+        extractor=_FirstRunExtractor(),
+        chunker=_FirstRunChunker(),
+        state=state,
+        crawl_defaults=CrawlRunConfig(max_depth=1),
+    )
+    return result, store, coverages, run_products, crawler
+
+
+def test_overlapping_roots_do_not_duplicate_a_document(tmp_path: Path) -> None:
+    """E.6: документ под двумя корнями (живым и запрещённым) входит **один** раз.
+
+    ``OVERLAP_ROOT`` покрывает ``/docs/a`` как BFS-находку, а ``OVERLAP_OTHER``
+    (запрещённый) — как известный URL своего корня (самый специфичный
+    ``root_path_prefix`` выигрывает группировку). Строка корпуса одна: переиспользование
+    пропускает URL, у которого строка уже есть (``skipped_present``), поэтому
+    ``duplicates`` (алиасы контента) здесь пуст — схлопывание идёт по URL, а не по
+    ``doc_hash``. Счётчик ``fetched``/``docs`` не удваивается, покрытие неполно по
+    политическому токену.
+    """
+    with SqliteStateStore(":memory:") as state:
+        result, store, coverages, run_products, crawler = _overlap_run(
+            tmp_path, state, seed_leaf=OVERLAP_LEAF, live_leaf=OVERLAP_LEAF
+        )
+        try:
+            # 1. Живой корень сходил в сеть за собой и за листом; запрещённый — нет.
+            assert [url for url, _plan in crawler.calls] == [
+                OVERLAP_ROOT,
+                OVERLAP_PAGE,
+            ]
+
+            # 2. Документ под обоими корнями — **одна** строка, и он попал в корпус
+            #    один раз, хотя к нему вели два пути.
+            docs = list(store.iter_corpus_docs(RUN_ID))
+            under_page = [doc for doc in docs if doc.url == OVERLAP_PAGE]
+            assert len(under_page) == 1, f"дубль документа: {[doc.url for doc in docs]}"
+            assert len(docs) == 3, "живой корень + корень запрещённого + его лист"
+            # Пропуск назван строкой прохода: «два пути» не молчат.
+            assert "уже в корпусе этого прогона 1" in _notes(result)
+            build = next(
+                entry for entry in result.log_entries if isinstance(entry, IndexBuild)
+            )
+            assert build.duplicates == {}, build.duplicates
+            assert build.doc_counters["p1"]["total"] == len(docs)
+            # Счётчик фетчей — только живые (корень и лист), переиспользование его
+            # не удваивает: иначе «два пути» читались бы как два обхода.
+            assert build.crawl_fetched == 2
+            # Ни один чанк не повторён по контенту (и fetch, и reuse пишут в один набор).
+            hashes = [row[1] for row in _chunk_rows(store)]
+            assert len(hashes) == len(set(hashes))
+            assert len(hashes) == len(docs), "один чанк на документ, ни одного лишнего"
+
+            # 3. Покрытие неполно по политике, продукт на карте.
+            assert coverages["p1"].complete is False
+            assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
+            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
+            assert CRAWL_POLICY_SKIPPED_REASON in _notes(result)
+        finally:
+            store.close()
+
+
+def test_live_200_over_a_reused_row_keeps_the_observation_provenance(
+    tmp_path: Path,
+) -> None:
+    """Правило 2 владельца: провенанс строки называет наблюдение, а не носитель.
+
+    Тот же контент, живой 200 поверх переиспользованной копии: строка **одна**, и она
+    200 этого прогона (``revalidated`` — 200 с прежним ``content_hash``), с
+    ``fetched_at`` наблюдения. ``reused``/``http_status=NULL`` здесь были бы ложной
+    записью: сеть в этом прогоне трогали, и I19 требует называть это наблюдением.
+    """
+    with SqliteStateStore(":memory:") as state:
+        _result, store, _coverages, _products, _crawler = _overlap_run(
+            tmp_path, state, seed_leaf=OVERLAP_LEAF, live_leaf=OVERLAP_LEAF
+        )
+        try:
+            rows = [
+                doc
+                for doc in store.iter_corpus_docs(RUN_ID)
+                if doc.url == OVERLAP_PAGE
+            ]
+            assert len(rows) == 1, [doc.url for doc in rows]
+            doc = rows[0]
+            assert doc.http_status == 200, "сервер отвечал в этом прогоне"
+            assert doc.fetched_at is not None, "время получения — факт наблюдения"
+            assert doc.reuse_kind is not None
+            assert doc.reuse_kind.value == "revalidated", doc.reuse_kind
+        finally:
+            store.close()
+
+
+def test_changed_live_document_does_not_coexist_with_its_reused_copy(
+    tmp_path: Path,
+) -> None:
+    """E.6: один ``url`` — одна строка корпуса, даже если контент изменился.
+
+    Замер 05.11.2026 (до правки): ``corpus_docs`` нёс **обе** версии
+    ``https://p1.test/docs/a`` — ``reuse_kind=reused``, ``http_status=NULL`` (из
+    ``state.db``) и ``reuse_kind=live``, ``http_status=200`` (живой фетч прогона).
+    Причина — порядок: переиспользование запрещённого корня писалось в планировании,
+    а живой путь конвертируется в хвосте, поэтому дедуп по ``doc_hash`` их не сталкивал
+    (хеши разные, URL один), и устаревший текст оставался кандидатом в доказательства
+    (I19). Теперь переиспользование идёт в хвосте после живых документов и пропускает
+    URL, у которого строка уже есть.
+    """
+    with SqliteStateStore(":memory:") as state:
+        result, store, coverages, _products, crawler = _overlap_run(
+            tmp_path, state, seed_leaf=b"<html>old text</html>", live_leaf=OVERLAP_NEW_LEAF
+        )
+        try:
+            assert [url for url, _plan in crawler.calls] == [
+                OVERLAP_ROOT,
+                OVERLAP_PAGE,
+            ]
+            # Покрытие неполно по токену: дефект не читается как «корпус собран».
+            assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
+            assert CRAWL_POLICY_SKIPPED_REASON in _notes(result)
+            docs = list(store.iter_corpus_docs(RUN_ID))
+            under_page = [doc for doc in docs if doc.url == OVERLAP_PAGE]
+            assert len(under_page) == 1, (
+                "один URL — одна строка корпуса; в корпусе обе версии: "
+                + ", ".join(
+                    f"{doc.content_hash[:8]}/{doc.reuse_kind}" for doc in under_page
+                )
+            )
+            assert under_page[0].http_status == 200, "выживает наблюдение этого прогона"
+            # Устаревшей копии нет и в чанках: единственный чанк под этим URL — новый.
+            texts = [
+                row[2]
+                for row in store.conn.execute(
+                    "SELECT content_hash, url, text FROM corpus_chunks WHERE url = ?",
+                    (OVERLAP_PAGE,),
+                )
+            ]
+            assert texts == [OVERLAP_NEW_LEAF.decode()], texts
+        finally:
+            store.close()
+
+
+#: Алиас по контенту: ``ALIAS_PAGE`` (запрещённый корень) и ``ALIAS_TWIN`` (живой корень)
+#: приносят одинаковый контент, поэтому в корпусе остаётся одна строка — близнеца.
+#: В ``state.db`` у ``ALIAS_PAGE`` при этом лежит **другой**, старый текст.
+ALIAS_ROOT = "https://p1.test/"
+ALIAS_DENIED = "https://p1.test/docs/"
+ALIAS_TWIN = "https://p1.test/a"
+ALIAS_PAGE = "https://p1.test/docs/x"
+ALIAS_OLD = b"<html>old durable text</html>"
+ALIAS_SHARED = b"<html>shared observed text</html>"
+ALIAS_ROOT_BODY = b'<html>root <a href="/a">a</a><a href="/docs/x">x</a></html>'
+ALIAS_DENIED_BODY = b'<html>docs <a href="/docs/x">x</a></html>'
+
+
+class _NoVersionWrites:
+    """Состояние, которому нельзя записать версию: ``upsert_document_version`` падает.
+
+    Моделируется реальный, а не гипотетический отказ (занятая/недоступная БД): он
+    видим в ``errors`` и не роняет фазу. Чтение — как у настоящего состояния.
+    """
+
+    def __init__(self, inner: SqliteStateStore) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def upsert_document_version(self, row: Any) -> None:
+        raise RuntimeError("state: база занята (инъекция теста)")
+
+
+def _alias_run(
+    tmp_path: Path,
+    state: SqliteStateStore,
+    *,
+    skip_version_writes: bool,
+):
+    """Смешанный прогон «алиас по контенту»: живой ``/`` + запрещённый ``/docs/``.
+
+    Порядок обхода — по адресу (frontier ``(depth,url)``), поэтому ``/a`` идёт раньше
+    ``/docs/x``: строку корпуса создаёт близнец, а запрещённый URL становится алиасом
+    ``doc_hash`` и выходит до ``ingest.docs``.
+    """
+    crawler = _FirstRunCrawler(
+        {
+            ALIAS_ROOT: ALIAS_ROOT_BODY,
+            ALIAS_TWIN: ALIAS_SHARED,
+            ALIAS_PAGE: ALIAS_SHARED,
+        }
+    )
+    port: Any = _NoVersionWrites(state) if skip_version_writes else state
+    result, store, coverages, run_products, _session = _run_corpus(
+        tmp_path,
+        policy=_mixed_policy(
+            deny_site="p1.test/docs", roots=[ALIAS_ROOT, ALIAS_DENIED]
+        ),
+        urls={"p1": [ALIAS_ROOT, ALIAS_DENIED]},
+        crawler=crawler,
+        extractor=_FirstRunExtractor(),
+        chunker=_FirstRunChunker(),
+        state=port,
+        crawl_defaults=CrawlRunConfig(max_depth=1),
+    )
+    return result, store, coverages, run_products, crawler
+
+
+def test_observed_alias_does_not_bring_back_its_stale_durable_copy(
+    tmp_path: Path,
+) -> None:
+    """E.6, правило 2: наблюдённый URL не получает ``reused``-строку со старым текстом.
+
+    Алиас по ``doc_hash`` выходит из ``finish_one`` **до** ``ingest.docs``, поэтому
+    строка корпуса у него отсутствует — и раньше это читалось как «наблюдения не было»:
+    переиспользование запрещённого корня вставляло ``ALIAS_PAGE`` с
+    ``reuse_kind=reused``/``http_status=NULL`` и **старым** текстом, хотя прогон видел
+    этот URL своими глазами (200) и его контент уже лежит в корпусе строкой близнеца
+    (I19: устаревшая версия того же URL — не кандидат в доказательства).
+
+    Условие достижимости названо честно: в простом случае алиас сам продвигает
+    ``url_state.doc_version_id`` к наблюдённой версии (см. соседний пин), и
+    переиспользование разрешает уже наблюдённый хеш. Дыра открывается, когда этой
+    записи нет — например, запись версии в ``state.db`` отказала (видимая ошибка), а
+    ``COALESCE``-upsert сохранил прежний указатель на старый носитель.
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(
+            tmp_path,
+            state,
+            pages={ALIAS_DENIED: ALIAS_DENIED_BODY, ALIAS_PAGE: ALIAS_OLD},
+            roots=[ALIAS_DENIED],
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+        )
+        result, store, coverages, _products, crawler = _alias_run(
+            tmp_path, state, skip_version_writes=True
+        )
+        try:
+            # 1. Сеть — только живой корень: запрещённый не тронут, но алиас наблюдён.
+            assert [url for url, _plan in crawler.calls] == [
+                ALIAS_ROOT,
+                ALIAS_TWIN,
+                ALIAS_PAGE,
+            ]
+
+            # 2. Строки со старым носителем нет ни в корпусе, ни в чанках.
+            docs = list(store.iter_corpus_docs(RUN_ID))
+            by_url = {doc.url: doc for doc in docs}
+            assert ALIAS_PAGE not in by_url, (
+                "наблюдённый алиас получил строку: "
+                f"{by_url[ALIAS_PAGE].reuse_kind}/{by_url[ALIAS_PAGE].content_hash[:8]}"
+            )
+            old_texts = [
+                row[0]
+                for row in store.conn.execute(
+                    "SELECT text FROM corpus_chunks WHERE url = ?", (ALIAS_PAGE,)
+                )
+            ]
+            assert old_texts == [], old_texts
+            all_texts = [
+                row[0] for row in store.conn.execute("SELECT text FROM corpus_chunks")
+            ]
+            assert ALIAS_OLD.decode() not in all_texts, "старый текст попал в корпус"
+
+            # 3. Остальной корпус на месте: живой корень, близнец и сам запрещённый
+            #    корень (его durable-документ) — состав корня не сузился.
+            assert set(by_url) == {ALIAS_ROOT, ALIAS_TWIN, ALIAS_DENIED}, sorted(by_url)
+            assert by_url[ALIAS_DENIED].reuse_kind is not None
+            assert by_url[ALIAS_DENIED].reuse_kind.value == "reused"
+
+            # 4. Пропуск назван, а не проглочен: иначе «наблюдение победило» читалось бы
+            #    как «URL не было в состоянии».
+            assert "уже в корпусе этого прогона" in _notes(result)
+
+            # 5. ``duplicates`` честный: один алиас (X схлопнулся с Y), переиспользование
+            #    его не удвоило.
+            build = next(
+                entry for entry in result.log_entries if isinstance(entry, IndexBuild)
+            )
+            assert build.duplicates.get("p1", 0) == 1, build.duplicates
+
+            # 6. Покрытие неполно по политическому токену, продукт на карте.
+            assert coverages["p1"].complete is False
+            assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
+        finally:
+            store.close()
+
+
+def test_observed_alias_points_state_at_the_observed_version(tmp_path: Path) -> None:
+    """Почему простой алиас дыру не открывает: наблюдение продвигает ``url_state``.
+
+    Алиас находит версию по **наблюдённому** ``content_hash`` (``find_doc_version``) и
+    пишет её в ``url_state.doc_version_id``, поэтому переиспользование того же URL
+    разрешает уже наблюдённый контент, а не вставляет прежний носитель. Пин держит
+    первую линию защиты правила 2; вторую (носитель наблюдений) проверяет соседний тест —
+    он же отвечает за то, чтобы тот же алиас не был посчитан ``duplicates`` дважды
+    (наблюдение + кандидат переиспользования одного и того же URL).
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(
+            tmp_path,
+            state,
+            pages={ALIAS_DENIED: ALIAS_DENIED_BODY, ALIAS_PAGE: ALIAS_OLD},
+            roots=[ALIAS_DENIED],
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+        )
+        result, store, coverages, _products, _crawler = _alias_run(
+            tmp_path, state, skip_version_writes=False
+        )
+        try:
+            docs = list(store.iter_corpus_docs(RUN_ID))
+            by_url = {doc.url: doc for doc in docs}
+            assert ALIAS_PAGE not in by_url, sorted(by_url)
+            row = state.get_url_state("p1", ALIAS_PAGE)
+            assert row is not None and row.doc_version_id
+            version = state.get_document_version(row.doc_version_id)
+            assert version is not None
+            assert version.content_hash == content_hash(ALIAS_SHARED), (
+                "указатель состояния обязан называть наблюдённый контент, а не старый"
+            )
+            build = next(
+                entry for entry in result.log_entries if isinstance(entry, IndexBuild)
+            )
+            assert build.duplicates.get("p1", 0) == 1, build.duplicates
+            assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
+        finally:
+            store.close()
+
+
+def test_denied_root_without_prior_chunks_is_not_silently_empty(
+    tmp_path: Path,
+) -> None:
+    """E.6: запрещённый корень без субстрата даёт **видимый** ноль, а не «пусто».
+
+    Переиспользовать нечего — это отдельный факт от «корень ничего не содержит»:
+    он называется в ``errors`` (``crawl_policy:`` + текст «нет в durable-состоянии»)
+    и в операторской строке прохода (``переиспользовано документов 0``).
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
+
+        crawler = _FirstRunCrawler({ROOT: BODY})
+        result, store, coverages, run_products, _session = _run_corpus(
+            tmp_path,
+            policy=_mixed_policy(deny_site="other.test", roots=[ROOT, OTHER]),
+            urls={"p1": [ROOT, OTHER]},
+            crawler=crawler,
+            extractor=_FirstRunExtractor(),
+            chunker=_FirstRunChunker(),
+            state=state,
+        )
+        try:
+            # 1. Сеть — только живой корень.
+            assert [url for url, _plan in crawler.calls] == [ROOT]
+
+            # 2. Запрещённый корень в корпусе отсутствует, и это названо причиной:
+            #    переиспользовать нечего, а не «корень пуст».
+            docs = {doc.url for doc in store.iter_corpus_docs(RUN_ID)}
+            assert docs == {ROOT}
+            unknown = OFFLINE_UNKNOWN_ROOT_TEXT.replace("offline:", "crawl_policy:", 1)
+            assert any(unknown in error for error in result.errors), result.errors
+            notes = _notes(result)
+            assert "переиспользовано документов 0" in notes
+
+            # 3. Покрытие неполно по токену, продукт не ``BLOCKED``.
+            assert coverages["p1"].complete is False
+            assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
+            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
+        finally:
+            store.close()
+
+
+def test_denied_root_in_full_mode_replays_all_its_durable_documents(
+    tmp_path: Path,
+) -> None:
+    """E.6: запрещённый корень берёт **все** свои durable-документы, не только корень.
+
+    Продукт в режиме ``full``: ревалидационного work-set нет вовсе
+    (``plan_incremental_items`` под сетью возвращает пусто для ``new``/``full``), и
+    ``known_urls`` из ревалидационной группы был бы пуст — лист корня терялся бы молча
+    (замер до правки: 2 документа в ``state.db`` → 1 в корпусе, ``errors`` пуст). Работа
+    корня без сети — это durable-субстрат целиком: ``url_state`` и есть work-set
+    (AGENTS §6.1; тот же измеренный failure mode — roots-only терял 7 документов из 9).
+    """
+    denied = "https://other.test/docs/"
+    leaf = "https://other.test/docs/a"
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(
+            tmp_path,
+            state,
+            pages={denied: b'<html>docs <a href="/docs/a">a</a></html>', leaf: b"<html>a</html>"},
+            roots=[denied],
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+        )
+        crawler = _FirstRunCrawler({ROOT: BODY})
+        result, store, coverages, run_products, _session = _run_corpus(
+            tmp_path,
+            policy=_mixed_policy(deny_site="other.test", roots=[ROOT, denied]),
+            urls={"p1": [ROOT, denied]},
+            crawler=crawler,
+            extractor=_FirstRunExtractor(),
+            chunker=_FirstRunChunker(),
+            state=state,
+            # Режим продукта ``full`` — ревалидационной группы не существует.
+            product_modes={"p1": "full"},
+        )
+        try:
+            # 1. Сеть — только живой корень: запрещённый корень не тронут.
+            assert [url for url, _plan in crawler.calls] == [ROOT]
+
+            # 2. В корпусе — живой документ и **оба** durable-документа запрещённого
+            #    корня: сам корень и его лист.
+            docs = {doc.url: doc for doc in store.iter_corpus_docs(RUN_ID)}
+            assert set(docs) == {ROOT, denied, leaf}, sorted(docs)
+            for url in (denied, leaf):
+                assert docs[url].reuse_kind is not None
+                assert docs[url].reuse_kind.value == "reused"
+                assert docs[url].http_status is None
+
+            # 3. Потери не замаскированы ошибкой: их просто нет.
+            assert not [error for error in result.errors if denied in error], result.errors
+
+            # 4. Покрытие неполно по политическому токену, продукт на карте.
+            assert coverages["p1"].complete is False
+            assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
+            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
+        finally:
+            store.close()
 
 
 # --------------------------------------------------------------------------- #
