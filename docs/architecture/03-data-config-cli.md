@@ -323,9 +323,9 @@ class SqliteStore:
 | `cycle_id` | `--cycle-id` > `run.yaml:cycle_id` > `snapshot_date` | `--cycle-id`, `--update` |
 | `cohort_digest` | состав + `cohort_ref` + `frozen_at` когорты (`digests.cohort_digest`) | правка `cohort.yaml`/`cohort_ref` |
 | `seeds_digest` | эффективный seed-набор, включая **порядок** корней внутри продукта (`digests.seeds_digest`) | **`--urls FILE`** (полная замена набора), правка `seeds.yaml`/`corpus_urls.yaml`, перестановка корней |
-| `execution_contract_digest` | отпечаток осей контракта (`digests.execution_contract_digest`, §C.1 выше) | смена любой оси контракта: `--llm-model`, `--llm-slot`, `--retrieval-profile`, `--cutoff-k`, `--document-level`, `--profile`, `run.yaml:crawl.*` |
+| `execution_contract_digest` | отпечаток осей контракта (`digests.execution_contract_digest`, §C.1 выше) | смена любой оси контракта: `--llm-model`, `--llm-slot`, `--retrieval-profile`, `--cutoff-k`, `--document-level`, `--frozen-source`, `--profile`, `run.yaml:crawl.*` |
 | `run_scope` | `full` \| `only_failed` \| `product:<id>` | **`--only-failed`**, **`--only-product ID`** |
-| `refresh_policy` | `auto`\|`revalidate`\|`refresh`\|`offline` | **`--refresh MODE`** |
+| `refresh_policy` | `auto`\|`revalidate`\|`refresh`\|`offline`\|`frozen` | **`--refresh MODE`** |
 | `focus` | `run.yaml:focus` (модули и параметры, отсортированные) | правка `run.yaml:focus` |
 
 Практические следствия, которые оператор обязан знать:
@@ -455,7 +455,7 @@ products: [pangolin, alt1, alt2, ...]
 package: pg-core
 methodology_version: 0.1.0        # опц. (дефолт — пин проекта); входит в контракт, НЕ в run_id-материал напрямую
 cycle_id: 2026-Q2                 # опц.: ISO-дата/ISO-неделя; None → snapshot_date. ВХОДИТ в run_id
-refresh_policy: auto              # опц.: auto|revalidate|refresh|offline; None → auto. ВХОДИТ в run_id
+refresh_policy: auto              # опц.: auto|revalidate|refresh|offline|frozen; None → auto. ВХОДИТ в run_id
 llm_slot: cheap                   # опц.: cheap|flagship; активный слот оценщика → в llm_scenarios (контракт)
 focus: { modules: [storage, backup], params: [pg_backup_pitr] }   # ВХОДИТ в run_id
 languages: [ru, en]
@@ -935,6 +935,43 @@ env-переменной с токеном канала — **единствен
 **Версионирование.** Операционные оси краула `run.yaml:crawl.strategy`/`crawl.rate_limit` — это
 версионная граница класса `execution_change` (§13, `03 §C.1`/Backlog B), а отпечаток конфигурации
 источников `crawl_sources_digest` — **информационный** маркер провенанса (не граница §13).
+
+### D.2.2. Политика краула по областям и режимы обновления (планы 19/20)
+
+Режим обновления задаётся **по области** (`product` | `host` | `root` | `path`) командой
+`hound crawl policy`; запись живёт в `state/{package_id}/state.db` оператора (append-only
+через `superseded_by`), пакет может задавать дефолты в необязательном
+`packages/{case_id}/crawl_policy.yaml` (`defaults` → `products` → `sites`). Резолв —
+наиболее специфичная область выигрывает (`path` > `root` > `host` > `product`, самый длинный
+литеральный префикс внутри одного уровня); равная специфичность с разными режимами —
+конфликт (`crawl_policy_conflict`, `EXIT_USAGE`), тай-брейка по часам или порядку вставки нет.
+
+```bash
+# записать режим области (без записи — с --dry-run; машинно — с --json)
+hound crawl policy set --package {case_id} --scope root --id {host}/{root_path_prefix} \
+  --mode scheduled --interval-hours 168 --actor {кто}
+
+# эффективный режим по объявленным корням; --json добавляет observed_at/due_at/overdue_by_seconds
+hound crawl policy list --package {case_id} [--json]
+
+# отозвать записи оператора по области (append-only, без удаления строк)
+hound crawl policy clear --package {case_id} --scope host --id {host}
+```
+
+Режимы: `auto` (как до политики), `on_request` (первичный дискавери автоматический,
+обновление — только если корень назван во `--refresh-scope` прогона), `scheduled`
+(обновление, когда `now − observed_at ≥ interval_hours`), `network_denied` (ни дискавери,
+ни обновления; корпус собирается из уже сохранённого, покрытие неполно и названо — продукт
+не выпадает из карты). Смена записанной политики меняет `crawl_policy_digest` ⇒ новый
+`run_id` (`execution_change`); `note`/`actor`/запись, не совпавшая ни с одним объявленным
+корнем (`crawl_policy_unmatched`), в дайджест не входят.
+
+Уровень прогона — `--refresh {auto,revalidate,refresh,offline,frozen}` (`refresh_policy`,
+отдельное слагаемое `run_id`): `offline` переиспользует чанки при нулевых запросах;
+`frozen` — сохранённые байты `corpus_raw` с текущей экстракцией и нарезкой, источник
+задаётся `--frozen-source {bytes,chunks}` (вне `frozen` канонизируется в `n/a`).
+Снятия (`capture`) и даты наблюдений артефактов — план 20 (`20` §F1–F3): `absence_as_of`,
+свежесть корпуса в отчёте.
 
 ### D.3. Линтер (`pipeline/lint.py`, блокирует прогон)
 

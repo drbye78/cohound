@@ -205,6 +205,30 @@ sites:
 
 Иерархия `defaults` → `products` → `sites`; site-key — `host` или `host/path` без схемы URL. Возможны `kind`, `engine`, `fetch`, `extract`, `strategy`, `wait_for`, `rate_limit`, `params`. `params` пока свободный словарь, его схема по движку не валидируется. Это source routing, не разрешение на расширение host scope.
 
+### Режимы обновления корпуса
+
+По умолчанию все корни обновляются автоматически (`auto`). Ограничить обновление можно
+командой `hound crawl policy` — запись живёт в `state/{package_id}/state.db` оператора
+(append-only), пакет может задавать дефолты в необязательном `crawl_policy.yaml`:
+
+```bash
+hound crawl policy set --package example_case --scope host --id docs.example.com \
+  --mode scheduled --interval-hours 168 --actor {кто}
+hound crawl policy list --package example_case          # эффективный режим по корням
+```
+
+- `on_request` — первичный обход автоматический; повторное обновление — только если корень
+  назван во `--refresh-scope` прогона.
+- `scheduled` — обновление, когда `now − observed_at ≥ interval_hours`.
+- `network_denied` — запросов нет вовсе; корпус собирается из уже сохранённого, покрытие
+  неполное, и это видно в отчёте (продукт не выпадает).
+
+Разовый выбор без правки политики — флаги прогона: `--refresh offline` (переиспользовать
+чанки, ноль запросов) или `--refresh frozen --frozen-source bytes` (корпус из сохранённых
+байтов `corpus_raw`, но с текущей экстракцией и нарезкой). Резолв по областям — «наиболее
+специфичная выигрывает» (`path` > `root` > `host` > `product`); смена политики или режима
+обновления меняет `run_id`. Подробности — `docs/architecture/03-data-config-cli.md` §D.2.2.
+
 ### Отсутствие и `scope_attestation.yaml`
 
 Классы absence нельзя считать взаимозаменяемыми:

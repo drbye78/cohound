@@ -221,6 +221,11 @@ PDF с механизмом `structured` (docling) требует ещё extra `
 элементы. `crawl restart` запускает его заново. Причины нулевого корпуса продукта
 сохраняются в результатах прогона и не маскируются как «просто пустой результат».
 
+Режимы обновления по областям (`auto|on_request|scheduled|network_denied` —
+`crawl policy set|list|clear`) и разовые политики прогона (`--refresh`, `--frozen-source`)
+описаны в [`docs/architecture/03-data-config-cli.md`](docs/architecture/03-data-config-cli.md)
+§D.2.2 и [`docs/user-guide/package-profile.md`](docs/user-guide/package-profile.md).
+
 ## Форматы и extraction
 
 - HTML — основной веб-источник.
