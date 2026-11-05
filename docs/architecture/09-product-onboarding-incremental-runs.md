@@ -23,7 +23,8 @@
 > doc_version_id}` и правило «`❌` только при `live|revalidated`» (§11.2, снято F3 плана 20:
 > I2d — датированный носитель), формат
 > партиции `partition-2`, `chunk_id` с `doc_version_id` (§14.6 п. 11), три дефекта
-> краула (§6.3). `METHODOLOGY_VERSION` — `0.2.0`. Прежняя редакция называла эти пункты
+> краула (§6.3). `METHODOLOGY_VERSION` — `0.2.0` (текущие значения: контракт — **31** поле,
+> методология — **`0.3.0`**). Прежняя редакция называла эти пункты
 > design-only: верно до 29.10.2026, неверно сейчас.
 
 > **Как читать этот документ.** Это **гибрид**: часть механизмов работает в прогоне
@@ -1160,7 +1161,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 
 ### 4.3. Что остаётся в `runs/{run_id}/cohound.db` — ✅ реализовано (граница A)
 
-> **Статус: ✅ сделано; схема версионируется (`SCHEMA_VERSION = "3.14.0"`), аддитивных
+> **Статус: ✅ сделано; схема версионируется (`SCHEMA_VERSION = "3.20.0"`), аддитивных
 > `ALTER TABLE` нет ни одного (волна S плана 17).** В `runs` есть
 > `cycle_id`/`previous_run_id`/`change_class` (`core/store/sqlite.py:89-91`),
 > `run_scope`/`product_plan_json` (`:94-95`), `embed_device` (`:74`) и таблица `run_product`
@@ -1170,8 +1171,8 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > `state.db.run_lineage` (§12.3); `RunManifest` несёт `cycle_id`/`previous_run_id`/
 > `change_class` и `run_scope`/`product_plan`.
 
-Фактическое содержимое run DB (`SCHEMA_VERSION = "3.14.0"`), **23** таблицы включая
-`schema_meta` (22 предметных; проверяется `connect(':memory:')` + `sqlite_master`; граница A
+Фактическое содержимое run DB (`SCHEMA_VERSION = "3.20.0"`), **25** таблиц включая
+`schema_meta` (24 предметных; проверяется `connect(':memory:')` + `sqlite_master`; граница A
 добавила `run_product` и `corpus_doc_version`):
 
 - `runs` — идентичность прогона и провенанс: `run_id`, `case_id`, `anchor_product_id`,
@@ -2273,7 +2274,7 @@ RAM), поэтому адаптер извлекает **один** член в�
 исход (`members_ingested`/`members_failed`/`skipped` с причинами и ограниченными примерами/
 `stopped_reason`/`cycle_stops`/`bytes_written`). Запись есть для **каждого** контейнера,
 включая пустой и нечитаемый. Обе таблицы добавлены аддитивно (`CREATE TABLE IF NOT EXISTS`)
-в схеме 3.10.0; текущая `SCHEMA_VERSION` — `3.14.0` (`core/store/sqlite.py`), то есть
+в схеме 3.10.0; текущая `SCHEMA_VERSION` — `3.20.0` (`core/store/sqlite.py`), то есть
 колонки с тех пор дополнялись в рамках той же таблицы.
 
 **Вложенность без потолка глубины — и всё же конечная.** Оси `archive_max_*`
@@ -3277,7 +3278,7 @@ for param in plan.params:
 
 ### 11.1. Поля `corpus_coverage` — реализовано (реальный состав)
 
-Фактическая таблица (`core/store/sqlite.py`, `SCHEMA_VERSION = "3.14.0"`; миграция старой БД
+Фактическая таблица (`core/store/sqlite.py`, `SCHEMA_VERSION = "3.20.0"`; миграция старой БД
 запрещена гейтом версии — файл другой версии отвергается, `11` §2.6):
 
 ```sql
@@ -3342,7 +3343,7 @@ CREATE TABLE corpus_coverage (
 > «`❌` только при `complete` **или** подписи» — то есть делала **всякое** «нет» зависимым от
 > полноты краула. Код (`9ec346e`) считает иначе: условие зависит от **класса отрицания**
 > (`denial_strength`), а не от одной полноты. Ниже — as-built; правило объявлено в
-> `check_absence_coverage` (`core/domain/invariants.py:286`), исполняется в конвейере через
+> `check_absence_coverage` (`core/domain/invariants.py:298`), исполняется в конвейере через
 > `_enforce_absence_coverage` (`core/pipeline/evaluate.py:1758`), и зеркало есть в отчёте.
 
 `❌` публикуется, если `coverage.complete == True` **и** наблюдение подтверждено сервером в
@@ -3617,7 +3618,7 @@ CREATE TABLE corpus_coverage (
 > `change_class` (и они **заполняются** — до 29.10.2026 были объявлены и всегда `None`),
 > а `state.db.run_lineage` остаётся полной цепочкой. Те же три поля есть и в `runs`
 > (`core/store/sqlite.py:89-91`, объявлены в `CREATE TABLE`; схема версионируется —
-> `SCHEMA_VERSION = "3.14.0"`): провенанс прогона читается запросом, без открытия
+> `SCHEMA_VERSION = "3.20.0"`): провенанс прогона читается запросом, без открытия
 > `state.db`. Цепочка при этом остаётся свойством пакета: `runs` описывает один прогон,
 > `run_lineage` — переходы между ними.
 
@@ -3920,8 +3921,8 @@ golden**.
 > `core/ports/state.py`: имена в дизайне и в коде разошлись, и это записано как соответствие,
 > а не как долг.
 >
-> Фактическая схема run DB — 23 таблицы (`SCHEMA_VERSION = "3.14.0"`), фактическая схема
-> `state.db` — 15 таблиц (`STATE_SCHEMA_VERSION = "5"`); реальные колонки — §4.2/§4.3.
+> Фактическая схема run DB — 25 таблиц (`SCHEMA_VERSION = "3.20.0"`), фактическая схема
+> `state.db` — 15 таблиц (`STATE_SCHEMA_VERSION = "12"`); реальные колонки — §4.2/§4.3.
 > **`SCHEMA_VERSION` за всю эту работу не поднят ни разу**: все изменения аддитивны, а
 > гейт `_reject_foreign_schema` (`core/store/sqlite.py`) существует ради несовместимого
 > чтения, а не ради счётчика ревизий. Значит завершённые прогоны остаются читаемыми.
@@ -3935,7 +3936,7 @@ golden**.
 > которому снята `CoverageFreshness` (§3.1): два носителя одной величины расходятся, и
 > расходятся молча.
 
-**Сделано; схема версионируется** (`SCHEMA_VERSION = "3.14.0"`, волна S плана 17):
+**Сделано; схема версионируется** (`SCHEMA_VERSION = "3.20.0"`, волна S плана 17):
 аддитивных `ALTER TABLE` нет, все колонки объявлены в `CREATE TABLE`, а файл прежней
 версии отвергается гейтом (`_reject_foreign_schema`) и пересоздаётся оператором:
 
