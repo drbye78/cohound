@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime as _dt
 import fnmatch
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -110,11 +110,21 @@ class CrawlPolicyConflict(ValueError):
 
 @dataclass(frozen=True)
 class DeclaredRoot:
-    """Объявленный корень продукта: ``host`` + префикс ``path`` (пусто — весь host)."""
+    """Объявленный корень продукта: ``host`` + префикс ``path`` (пусто — весь host).
+
+    ``root_url`` — URL сида, которым корень объявлен. В **тождество** корня не входит
+    (``compare=False``): один и тот же ``host``+``path``, объявленный двумя сидами,
+    остаётся одним корнем — иначе поверхность решений получила бы два решения на один
+    обход. Нужен как адрес: у product-записи политики ``host``/``path`` в решении
+    описывают **область**, а не корень, и без URL два корня продукта неразличимы в
+    ``hound crawl policy list``.
+    """
 
     product_id: str
     host: str
     path: str = ""
+    #: URL сида-объявления (адрес для человека и для отчёта о сроке), не тождество.
+    root_url: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -162,6 +172,9 @@ class PolicyDecision:
     #: Причина отказа сети (``crawl_network_denied``/``crawl_on_request_not_requested``)
     #: либо ``None`` — сеть разрешена. Токен идёт в провенанс корня и в ``notes``.
     reason: str | None = None
+    #: URL объявленного корня, к которому относится решение (адрес, не область записи:
+    #: у product-записи ``host``/``path`` пусты). Нужен отчёту о сроке обхода.
+    root_url: str | None = None
 
     @property
     def scope(self) -> str:
@@ -190,6 +203,7 @@ class PolicyDecision:
             "actor": self.actor,
             "created_at": self.created_at,
             "policy_id": self.policy_id,
+            "root_url": self.root_url,
         }
 
 
@@ -303,9 +317,15 @@ class CrawlPolicyResolution:
         )
 
     def as_dict(self) -> dict[str, Any]:
-        """JSON-представление (дайджест + решения + несовпавшие записи + запросы)."""
+        """JSON-представление (отпечатки + решения + несовпавшие записи + запросы).
+
+        ``digest`` — поверхность решений (вход ``run_id``), ``space_digest`` — отпечаток
+        удостоверяемого пространства (носитель I2d): читатель видит обе величины, а не
+        одну, иначе «политика не менялась» было бы неотличимо от «часы сдвинули решение».
+        """
         return {
             "digest": self.digest,
+            "space_digest": self.space_digest,
             "decisions": [item.as_dict() for item in self.decisions],
             "requested": [item.raw for item in self.requested],
             "unmatched_requested": [item.raw for item in self.unmatched_requested],
@@ -428,7 +448,14 @@ def declared_roots(seeds: SeedsConfig) -> list[DeclaredRoot]:
         for seed in product.enabled_for():
             host, path = _split_url(seed.normalized_url)
             if host:
-                roots.add(DeclaredRoot(product_id=str(product_id), host=host, path=path))
+                roots.add(
+                    DeclaredRoot(
+                        product_id=str(product_id),
+                        host=host,
+                        path=path,
+                        root_url=str(seed.normalized_url),
+                    )
+                )
     return sorted(roots, key=lambda root: (root.product_id, root.host, root.path))
 
 
@@ -757,6 +784,7 @@ def resolve_crawl_policy(
                 created_at=chosen.created_at,
                 policy_id=chosen.policy_id,
                 reason=reason,
+                root_url=root.root_url or None,
             )
         )
     unmatched = tuple(

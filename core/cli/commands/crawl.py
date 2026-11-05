@@ -104,6 +104,7 @@ from core.pipeline import PHASES
 from core.pipeline.crawl_metric import build_crawl_metric
 from core.pipeline.crawl_policy import (
     CrawlPolicyConflict,
+    PolicyDecision,
     declared_roots,
     observations_by_root,
     resolve_crawl_policy,
@@ -1187,6 +1188,40 @@ def _policy_scope_label(
     return f"{product_id} [{kind.value}] {target}"
 
 
+def _policy_due_payload(
+    decision: PolicyDecision,
+    *,
+    observed_at: _dt.datetime | None,
+    now: _dt.datetime,
+) -> dict[str, Any]:
+    """Когда корень просрочен: наблюдение + **объявленный** интервал (план 20 §10 п.3).
+
+    Чистое вычисление из уже прочитанного: ``observed_at`` — ``url_state.last_checked_at``
+    корня (тот же максимум по URL, каким пользуется резолв ``scheduled``), интервал — из
+    записи политики. ``due_at`` есть только у ``scheduled`` с интервалом и наблюдением;
+    у остальных режимов срока нет по определению («когда смотреть» они не задают).
+
+    ``overdue_by_seconds`` **отрицателен**, когда срок ещё не наступил. Это наблюдение, а
+    не порог: решение «достаточно ли часто» принимает читатель (A3), а не код.
+
+    Зачем это здесь: без чисел «просрочен / на сколько» вопрос «нужен ли планировщик»
+    решается мнением. Считается из ``url_state``, поэтому ничего не пишет и сеть не
+    трогает.
+    """
+    if (
+        decision.mode is not CrawlPolicyMode.SCHEDULED
+        or decision.interval_hours is None
+        or observed_at is None
+    ):
+        return {"observed_at": None, "due_at": None, "overdue_by_seconds": None}
+    due = observed_at + _dt.timedelta(hours=int(decision.interval_hours))
+    return {
+        "observed_at": observed_at.isoformat(),
+        "due_at": due.isoformat(),
+        "overdue_by_seconds": round((now - due).total_seconds(), 3),
+    }
+
+
 def _policy_mode_values(args: argparse.Namespace) -> tuple[CrawlPolicyMode, int | None]:
     """``--mode``/``--interval-hours`` с проверкой «интервал только у scheduled»."""
     raw = getattr(args, "mode", None)
@@ -1502,22 +1537,44 @@ def policy_list(args: argparse.Namespace) -> int:
     db_path = state_db_path(paths.state, Path(package).name)
     rows = read_crawl_policy_rows(db_path)
     observed = observations_by_root(read_crawl_observations(db_path), roots)
+    now = _dt.datetime.now(_dt.UTC)
     try:
         resolution = resolve_crawl_policy(
             package_policy=config,
             operator_rows=rows,
             roots=roots,
-            now=_dt.datetime.now(_dt.UTC),
+            now=now,
             observed_at=observed,
         )
     except CrawlPolicyConflict as exc:
         raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
+    # Наблюдение корня — тот же ключ, что у резолва ``scheduled``; ``root_url`` в решении
+    # нужен потому, что ``host``/``path`` решения описывают **область записи**, а не корень
+    # (у product-записи они пусты): без него два корня продукта неразличимы в списке.
+    observed_by_root = {
+        (root.product_id, root.root_url): observed.get(
+            (root.product_id, root.host, root.path)
+        )
+        for root in roots
+    }
+    decisions_payload = [
+        {
+            **item.as_dict(),
+            **_policy_due_payload(
+                item,
+                observed_at=observed_by_root.get((item.product_id, item.root_url or "")),
+                now=now,
+            ),
+        }
+        for item in resolution.decisions
+    ]
     payload = {
         "ok": True,
         "package": package,
         "state_db": str(db_path),
         "digest": resolution.digest,
-        "decisions": [item.as_dict() for item in resolution.decisions],
+        "space_digest": resolution.space_digest,
+        "decisions": decisions_payload,
         "unmatched": [
             {
                 "product_id": item.product_id,
@@ -1540,10 +1597,12 @@ def policy_list(args: argparse.Namespace) -> int:
             f"package: {package}",
             f"state_db: {db_path}",
             f"crawl_policy_digest: {resolution.digest}",
+            f"crawl_policy_space_digest: {resolution.space_digest}",
             f"decisions: {len(resolution.decisions)}",
         ]
-        for decision in resolution.decisions:
-            lines.append(
+        for index, decision in enumerate(resolution.decisions):
+            due = decisions_payload[index]
+            line = (
                 "  "
                 + _policy_scope_label(
                     decision.product_id,
@@ -1554,6 +1613,14 @@ def policy_list(args: argparse.Namespace) -> int:
                 + f" mode={decision.mode.value} decision={decision.decision} "
                 f"source={decision.source}"
             )
+            if decision.root_url:
+                line += f" root={decision.root_url}"
+            if due["due_at"]:
+                line += (
+                    f" observed_at={due['observed_at']} due_at={due['due_at']}"
+                    f" overdue_by={due['overdue_by_seconds']}s"
+                )
+            lines.append(line)
         lines.append(f"operator records: {len(rows)}")
         for row in rows:
             lines.append(

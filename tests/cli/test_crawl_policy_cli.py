@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import shutil
 import sqlite3
@@ -43,6 +44,24 @@ def _package(tmp_path: Path, name: str = "policy_pkg") -> Path:
 
 def _db_path(package: Path) -> Path:
     return state_db_path(resolve_paths().state, package.name)
+
+
+def _insert_observation(package: Path, url: str, checked_at: str) -> None:
+    """Кладёт наблюдение ``url_state.last_checked_at`` — то, из чего считается срок.
+
+    Именно ``last_checked_at`` (а не ``observed_at``): резолв ``scheduled`` читает его,
+    и отчёт о сроке обязан отвечать про ту же величину, что и решение.
+    """
+    con = sqlite3.connect(_db_path(package))
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO url_state"
+            " (product_id, url, normalized_url, last_checked_at) VALUES (?, ?, ?, ?)",
+            ("p1", url, url, checked_at),
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 def _run(capsys: pytest.CaptureFixture[str], argv: list[str]) -> tuple[int, str, str]:
@@ -166,6 +185,76 @@ def test_list_shows_effective_mode_and_source(
     assert decision["mode"] == "network_denied"
     assert decision["source"] == "operator"
     assert payload["records"][0]["actor"] == "roger"
+
+
+def test_list_publishes_due_at_and_overdue_for_scheduled_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`scheduled` публикует срок и опоздание числом: без них «нужен ли планировщик» —
+    вопрос мнения, а не замера (план 20 §10 п.3).
+
+    Наблюдение берётся из ``url_state.last_checked_at`` — того же максимума по URL, каким
+    пользуется резолв решения, а срок считается как «наблюдение + объявленный интервал».
+    """
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    observed = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=10)
+    _insert_observation(package, "https://p1.test/", observed.isoformat())
+
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    decision = next(
+        item for item in payload["decisions"] if item["product_id"] == "p1"
+    )
+    assert decision["mode"] == "scheduled"
+    assert decision["decision"] == "refresh", "просроченный корень идёт в сеть"
+    assert decision["observed_at"] == observed.isoformat()
+    assert _dt.datetime.fromisoformat(decision["due_at"]) == observed + _dt.timedelta(
+        hours=168
+    )
+    assert decision["overdue_by_seconds"] > 0
+    assert payload["space_digest"], "отпечаток пространства (I2d) публикуется"
+    assert decision["root_url"] == "https://p1.test/"
+
+
+def test_list_shows_negative_overdue_before_the_deadline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """До срока ``overdue_by_seconds`` отрицателен, решение — ``reuse``.
+
+    Знак — часть наблюдения: «ещё не время» и «давно пора» не должны быть неотличимы
+    (иначе порог пришлось бы вводить, а его нет: A3).
+    """
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    observed = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=1)
+    _insert_observation(package, "https://p1.test/", observed.isoformat())
+
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    decision = next(
+        item for item in json.loads(out)["decisions"] if item["product_id"] == "p1"
+    )
+    assert decision["decision"] == "reuse"
+    assert decision["overdue_by_seconds"] < 0
+
+
+def test_list_without_observation_publishes_no_due(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Нет наблюдения ⇒ ``due_at=None``: срок не выдумывается (первичный дискавери)."""
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    decision = next(
+        item for item in json.loads(out)["decisions"] if item["product_id"] == "p1"
+    )
+    assert decision["decision"] == "refresh"
+    assert decision["observed_at"] is None
+    assert decision["due_at"] is None
+    assert decision["overdue_by_seconds"] is None
 
 
 def test_clear_dry_run_then_clear(
