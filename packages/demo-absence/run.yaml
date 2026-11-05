@@ -1,0 +1,45 @@
+# Демонстрационный стенд правила I2d (план 20 §11). Не кейс: одна страница вендора,
+# четыре параметра с явными отрицаниями. Ничего не публикуется.
+#
+# Что объявлено и почему:
+#  * products/anchor — один продукт `tantor`: стенду нужны оценённые ячейки, а не сравнение;
+#  * serp.rounds: 0 — внешний поиск в стенде не нужен (страница известна заранее), бюджета нет;
+#  * crawl.max_depth: 0 / max_documents: 20 — обход равен самой странице; потолок объявлен,
+#    потому что у корня без потолка состав корпуса решался бы случаем;
+#  * crawl.document_level: text — HTML-страница вендора, PDF в корпусе нет.
+#    `full` тянул бы OCR-стоимость без единого документа, к которому она применима.
+anchor: tantor
+case_id: demo-absence
+cohort: cohort-demo-absence-2026-11-05
+# Версия методологии объявлена входом (§13); 0.2.0 — текущая, а не историческая.
+methodology_version: '0.2.0'
+focus:
+  modules:
+  - core
+  params:
+  - logrep_ddl
+  - logrep_sequences
+  - logrep_large_objects
+  - logrep_relation_types
+languages:
+- ru
+- en
+serp:
+  rounds: 0
+mode: strict
+package: demo-absence
+products:
+- tantor
+ranking_policy: capability_ranked
+snapshot_date: '2026-11-05'
+# Пилот `ru-pg-dbms` секцию `gates` не объявляет ⇒ действует дефолт `external`, а G4
+# блокирует. У стенда внешнего ревью нет по определению, поэтому делегирование объявлено
+# явно: отказ виден в манифесте (`gate_waivers`), а не отсутствует. Процесс, не измерение —
+# в `EXECUTION_CONTRACT_FIELDS` секция не входит, `run_id` от неё не зависит.
+gates:
+  g3: waived
+  g4: waived
+crawl:
+  max_depth: 0
+  max_documents: 20
+  document_level: text

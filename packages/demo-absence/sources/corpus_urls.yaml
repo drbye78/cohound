@@ -1,0 +1,5 @@
+# Корпусный вход стенда demo-absence (--urls).
+# Одна страница вендора с дословными отрицаниями; кандидат-источник, не evidence
+# до corpus_raw → hash → index (I19).
+tantor:
+- https://docs.tantorlabs.ru/tdb/ru/18_6/se/logical-replication-restrictions.html

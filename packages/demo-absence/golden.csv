@@ -1,0 +1,5 @@
+product_id,param_id,expected_status,expected_evidence_kind,case_class,tier,note
+tantor,logrep_ddl,❌,documentation,class_absent,full,"вендор: «Все схемы базы данных и команды DDL не реплицируются.»"
+tantor,logrep_sequences,❌,documentation,class_absent,full,"вендор: «Данные последовательности не реплицируются.»"
+tantor,logrep_large_objects,❌,documentation,class_absent,full,"вендор: «Все объекты большого размера … не реплицируются. Для этого нет обходного пути…»"
+tantor,logrep_relation_types,❌,documentation,class_absent,fast,"вендор: репликация поддерживается только для таблиц, прочие типы отношений дают ошибку"

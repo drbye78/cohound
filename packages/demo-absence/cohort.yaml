@@ -1,0 +1,7 @@
+case_id: demo-absence
+entries:
+- anchor_relation: anchor
+  product_id: tantor
+  role_overlap: 1.0
+  selection_reason: "демонстрационный стенд правила I2d (план 20 §11): вендор явно перечисляет отсутствующие возможности; не кейс"
+frozen_at: '2026-11-05'
