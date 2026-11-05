@@ -19,6 +19,14 @@
 > `CREATE TABLE`, файл прежней версии отвергается гейтом (`SchemaVersionMismatch` →
 > `EXIT_USAGE`/`schema_version`). Запись ниже сохранена как **история решения на 29.10.2026**:
 > она объясняет, почему граница A обошлась без bump'а, и больше не описывает поведение кода.
+>
+> **ОБНОВЛЕНО 2026-11-05 (планы 19/20, F1–F3).** Действующие значения: `SCHEMA_VERSION =
+> "3.20.0"` (3.17.0 — `crawl_policy_digest`, план 19; 3.18.0 — `runs.corpus_snapshot_json`;
+> 3.19.0 — `corpus_artifact`; 3.20.0 — `corpus_coverage.roots_json` + `cells.absence_as_of`),
+> `STATE_SCHEMA_VERSION = "12"` (8/9 — `crawl_policy`/`corpus_capture`, 10 —
+> `container_state`, 11 — `capture`/наблюдения `url_state`, 12 — отпечаток пространства
+> снятия), `METHODOLOGY_VERSION = "0.3.0"` (датированное отсутствие I2d, F3). Всё ниже —
+> история границы, не описание текущего кода.
 
 **Дата:** 2026-10-29. **Основание:** `09` §14.1 (состав границы), `14` оговорка 5 (замер
 устройства эмбеддера).
@@ -143,14 +151,14 @@ CREATE TABLE IF NOT EXISTS run_product (
 
 Пишется на границе продукта (там же, где `corpus_docs`, `09` §4.7) и переписывается в конце
 фазы — так же, как `corpus_coverage`. Прецедент записи — `store.save_corpus_coverage(run_id,
-coverage)` (`core/pipeline/corpus_coverage.py:410`): одна функция на продукт, вызывается на границе,
+coverage)` (`core/pipeline/corpus_coverage.py:654`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: переноса
 ячеек нет (`09` §10), и колонка, всегда равная нулю, — ложь о том, что механизм
 существует.
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — те же величины, что `product_end` пишет в `results[].notes` прогона
-(`core/pipeline/corpus_coverage.py:193-215`). Два носителя одной величины разойдутся, если один из них обновят, а
+(`core/pipeline/corpus_coverage.py:276-298`). Два носителя одной величины разойдутся, если один из них обновят, а
 второй нет. Решение границы: **`run_product` — носитель, `notes` остаётся для оператора**
 (текст), и расхождение между ними — аномалия отчёта, а не допустимое состояние.
 
@@ -599,7 +607,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    может отличить полное измерение от среза, не заглянув в `state.db`. Сегодня
    `run_scope` не хранится нигде, кроме материала `run_id` (`core/pipeline/plan.py:94`;
    прямо зафиксировано в `core/pipeline/state_adopt.py:33`, `:117`), а `ProductPlanSet`
-   существует (`core/domain/models.py:2758`) и не персистится ни разу — единственное
+   существует (`core/domain/models.py:2762`) и не персистится ни разу — единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей.
 4. **Правило `❌` (часть той же полосы, `09` §11.2) — СНЯТО F3 плана 20.** Проверка рядом с

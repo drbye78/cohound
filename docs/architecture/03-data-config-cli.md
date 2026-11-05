@@ -185,8 +185,11 @@ runs/{run_id}/
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
-(18 предметных таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.14.0`** (3.14.0 — гейт версии вместо аддитивных шимов — волна S плана 17; 3.13.0 — свидетельство живости сеанса краула — `crawl_sessions.owner`/`heartbeat_at`,
+(25 таблиц, включая `schema_meta`; индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
+= **`3.20.0`** (3.14.0 — гейт версии вместо аддитивных шимов — волна S плана 17; 3.17.0 —
+`crawl_policy_digest`, план 19; 3.18.0 — `runs.corpus_snapshot_json`, план 20 F1; 3.19.0 —
+`corpus_artifact`, F2; 3.20.0 — `corpus_coverage.roots_json` + `cells.absence_as_of`, F3/0.3.0;
+3.13.0 — свидетельство живости сеанса краула — `crawl_sessions.owner`/`heartbeat_at`,
 `interrupted` в `crawl_session_status`; B3: спуск в контейнеры — `corpus_members`/`archive_observations`
 (PK `(archive_content_hash, member_path, product_id)` с 3.13.0 — провенанс члена не перезаписывается
 другим продуктом); E2: дайджест спецификаций реестров; D3/D4/сеансы/провенанс краула/P1-самодостаточность; gates: `gate_decisions` с предметом решения) — версия **SQLite-схемы**, не регламента; колонки
@@ -201,13 +204,14 @@ runs/{run_id}/
 провенанс краула и build-id witness, а таблицы `crawl_sessions`/`crawl_session_items` — первоклассный сеанс краула
 (id/статус/прогресс/возобновляемость; legacy `crawl_attempts` удалена в v3.1.0); таблица `run_inputs`
 (снимок плановых входов: `catalog`/веса/когорта) делает `runs/{run_id}` самодостаточным — источник
-истины пост-хок команд, а `plan_inputs.json` — лишь производный экспорт (P1). Миграция
-additive/idempotent (`ALTER TABLE ... ADD COLUMN`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
+истины пост-хок команд, а `plan_inputs.json` — лишь производный экспорт (P1). Миграции нет:
+версия сверяется **до** DDL, файл чужой версии отвергается гейтом; аддитивные шимы
+`ALTER TABLE` снесены (волна S плана 17, `16`).
 
 **Гейт версии схемы (v3.12.0, `11` §2.6).** Аддитивность не означает «читать чужую схему можно»:
 `connect()` сверяет `schema_meta.schema_version` **до** DDL и миграций и при несовпадении
 поднимает `SchemaVersionMismatch` (`core/store/sqlite.py`) — CLI печатает
-`schema_version: схема БД несовместима: … код ожидает '3.14.0' …` и возвращает `EXIT_USAGE`,
+`schema_version: схема БД несовместима: … код ожидает '3.20.0' …` и возвращает `EXIT_USAGE`,
 вместо трейсбека или молчаливого апгрейда. Прогон переносится **пересозданием** каталога прогона,
 а не чтением старой БД: аддитивные дельты сделали бы «старую» строку неотличимой от «новой».
 Поэтому `_ensure_columns` теперь страховка от «полусозданной» БД **в пределах** объявленной
@@ -1561,7 +1565,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ сделано (T1.2; `core/domain/enums.py:1` … `core/domain/anchors.py:1`) — монолит **удалён**, гейт `tests/selfcheck.py:1123` |
 | 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ сделано (T1.3; `core/store/sqlite.py:21`) — монолит **удалён**, тот же гейт `tests/selfcheck.py:1123` |
 | 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ сделано (`core/ports/` — 20 модулей портов, напр. `core/ports/store.py:1`; импорт-граф — `tests/selfcheck.py:948`) |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1172` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:196` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1172` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется

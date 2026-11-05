@@ -344,18 +344,19 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W3 — Store — ✅ done
 
-✅ сделано (проверено) — `core/store/sqlite.py:22` (`SCHEMA_VERSION = "3.14.0"`; на `f6100c7` в схеме
+✅ сделано (проверено) — `core/store/sqlite.py:86` (`SCHEMA_VERSION = "3.20.0"`; на `f6100c7` в схеме
 21 таблица, из них 20 предметных + `sqlite_sequence` — текст ниже говорит «19», это устарело),
-`core/store/state_sqlite.py:41` (`STATE_SCHEMA_VERSION = "5"`, в тексте ниже `"4"`),
+`core/store/state_sqlite.py:84` (`STATE_SCHEMA_VERSION = "12"`, в тексте ниже `"4"`),
 `core/store/state_store.py:1022` (`save_profile_attestation` — писателя в прогоне нет, см. §5.W4).
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.14.0"`
-  (19 таблиц, включая `schema_meta`; гейт версии схемы — файл другой версии отвергается,
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.20.0"`
+  (25 таблиц, включая `schema_meta`; гейт версии схемы — файл другой версии отвергается,
   `11` §2.6; свидетельство живости сеанса краула — F1).
 - `core/pipeline/liveness.py` — `owner`/`heartbeat_at`, recovery-on-open (`running` → `interrupted`),
   `Heartbeat` (F1/Д-6).
 - `core/store/state_sqlite.py` — durable per-product состояние (`state/{package_id}/state.db`,
-  `STATE_SCHEMA_VERSION = "4"`): lineage, `previous_run_id`, `profile_attestation`. Источник
+  `STATE_SCHEMA_VERSION = "12"`): lineage, `previous_run_id`, `profile_attestation`, политика
+  краула/снятия (планы 19/20). Источник
   `--since-run`/класса изменения (09 §4.1).
 - `core/store/sqlite_store.py` — реализация `StorePort`/`GateStore`; батчевые транзакции, WAL.
 - `core/store/backup.py` — backup/restore прогона + GC иммутабельных индексных сборок (T12.2).

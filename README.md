@@ -146,14 +146,20 @@ public source → corpus_raw → hash → extraction → index → retrieval →
 
 ```bash
 # Полный локальный контур для реального прогона
-uv pip install -e '.[dev,retrieval,crawl,extract]'
+uv pip install -e '.[dev,retrieval,crawl,extract,embed]'
 
 # Для 7z/rar добавьте extra extract-archives
-uv pip install -e '.[dev,retrieval,crawl,extract,extract-archives]'
+uv pip install -e '.[dev,retrieval,crawl,extract,embed,extract-archives]'
+
+# Лёгкая эмбеддинг-ветка без torch (model2vec, CPU) вместо embed
+uv pip install -e '.[dev,retrieval,crawl,extract,embed-lite]'
 
 # Воспроизводимая установка из lock-файла
-uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract
+uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract --extra embed-lite
 ```
+
+PDF с механизмом `structured` (docling) требует ещё extra `extract-pdf` (тянет torch);
+`text_layer` (pypdfium2) — базовая зависимость и работает без extra.
 
 Проверить состав окружения можно без сети:
 
@@ -219,7 +225,9 @@ uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract
 
 - HTML — основной веб-источник.
 - Plain text, markdown и EPUB — first-class форматы со своими reader/chunker.
-- PDF и Office (`docx`, `pptx`, `xlsx`) — через docling.
+- PDF — по объявленной оси `crawl.pdf_pipeline`: `structured` (docling: layout-модели,
+  таблицы, OCR; extra `extract-pdf`) или `text_layer` (pypdfium2: только текстовый слой,
+  без моделей). Office (`docx`, `pptx`, `xlsx`) — через docling.
 - `zip` читается стандартной библиотекой; `7z` и `rar` требуют
   `extract-archives` и соответствующих внешних backend'ов.
 - Глубина вложенных архивов не ограничивается искусственным числом уровней; конечность
