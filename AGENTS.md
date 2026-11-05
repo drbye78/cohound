@@ -154,7 +154,7 @@ declared but **not wired**: the extractor always runs in the core (D-9). See
 |---|---|
 | **I1** | evaluated ✅/⚠️ → at least one evidence item. |
 | **I2/I2b** | evaluated ❌ → absence-evidence. `parameter_reference`/`distribution_absence` need `source_scope: exhaustive` **and** `scope_attested_by`. `registry_absence` needs `exhaustive` recorded (checked by `_has_exhaustive_scope`) but no human attestation — a registry is an authoritative enumeration. `explicit` needs no `source_scope` (but see I2c). |
-| **I2d** | `❌` → **датированный носитель**, и дата публикуется: `explicit`/`authoritative` — запись наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`; `adopted` допускается, дата не обязана быть в этом цикле); `bounded` — снятие **каждого** объявленного корня `complete=1` с датой и совпадающим `policy_digest` (`adopted` исчерпание **не** удостоверяет); `registry_absence` — как I2b. `absence_as_of = min(дат носителей)` → `cells.absence_as_of` + `cell_freshness.csv`. Носителя нет → `❓` + токен `absence_undated` (`evidence_scope.reason` и `validation_notes`), протокол отсутствия не публикуется. Перенесённый `❌` проходит то же правило. |
+| **I2d** | `❌` → **датированный носитель**, и дата публикуется: `explicit`/`authoritative` — запись наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`; `adopted` допускается, дата не обязана быть в этом цикле); `bounded` — снятие **каждого** объявленного корня `complete=1` с датой и совпадающим `policy_digest` (отпечаток **пространства**: объявленные режимы + `crawl_config_digest`, без решения по часам; `adopted` исчерпание **не** удостоверяет); `registry_absence` — как I2b. `absence_as_of = min(дат носителей)` → `cells.absence_as_of` + `cell_freshness.csv`. Носителя нет → `❓` + токен `absence_undated` (`evidence_scope.reason` и `validation_notes`), протокол отсутствия не публикуется. Перенесённый `❌` проходит то же правило. |
 | **I3** | strict `❓` → **full** exhaustion protocol (`corpus` + `serp` + `registry` + `inheritance`) **or** `reviewed_by ≠ null`. An incomplete protocol is a report anomaly, not a status change. The protocol is written from **observed** facts and names only circuits that actually ran — a run without the SERP circuit keeps `❓` as an anomaly; that is a correct signal, not a defect to silence. |
 | **I4** | `failed` → `status = null`, never a status. |
 | **I5** | `failed` **is** in the Coverage denominator. Universe mode: denominator = `Σ w(scope)`; `pending`/missing counts as unresolved. `preliminary` (I13) and `N/A` (I7) are **outside** it; `universe = 0` → Coverage `defined=False`/UNDEFINED and Capability is not published (I11/G4). |
@@ -217,11 +217,17 @@ Two consequences that are easy to miss:
   carrier, so `bounded` + incomplete capture ⇒ `❓` even with a signed acceptance. That is a
   tightening of I2c's branch, not a new gate: I2c itself is untouched.
 
-`policy_digest` of the capture is compared with the declared `crawl_policy_digest`: a **known**
+`policy_digest` of the capture is the **fingerprint of the space the walk exhausted**
+(declared policy modes + `crawl_config_digest`), not of the decision surface: the clock-derived
+`decision`/`network_mode`/`corpus_source` decide *when* to look, not *what* was exhausted, and
+including them would make a complete capture stop attesting on the next run whose `scheduled`
+decision flipped. It is compared with the same space digest declared by the run: a **known**
 mismatch forces `complete=False`; an unknown digest (either side) does not — absence of a fact
-is not a fact of absence (A3). No staleness threshold is introduced (A3): `absence_as_of` is
-published, and «верить ли `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.20.0 (`corpus_coverage.roots_json`, `cells.absence_as_of`).
+is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
+term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
+`❌` от марта» is the reader's judgement, not a verdict.
+`SCHEMA_VERSION` 3.20.0 (`corpus_coverage.roots_json`, `cells.absence_as_of`); STATE `12`
+(`capture.policy_digest` changed meaning ⇒ old files are rejected by the version gate).
 
 ## 6. Crawl scope: declared hosts
 
@@ -371,7 +377,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   "not recoverable from the manifest".
 - **Observation dates are provenance, not identity** (plan 20 §F1). Because parts of a
   corpus refresh asynchronously, dates per artifact *are* different by definition. A
-  **capture** is one walk of one root (`state.db: capture`, STATE 11: `capture_id` from
+  **capture** is one walk of one root (`state.db: capture`, STATE 12: `capture_id` from
   `(product, root, run_id)`, `complete` = the walk was exhausted) and an **observation** is
   `url_state.observed_at`/`observed_how`/`capture_id` (COALESCE-upsert: a pass without
   network never erases a live observation). The run's **corpus snapshot**

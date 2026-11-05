@@ -81,7 +81,7 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: ``actor``, ``superseded_by``). ``last_checked_at`` роли наблюдения не несёт: он
 #: пишется при любом исходе, включая отказ. Шимов нет; файл версии ≤ 10 отвергается
 #: ``SchemaVersionMismatch``.
-STATE_SCHEMA_VERSION = "11"
+STATE_SCHEMA_VERSION = "12"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -447,7 +447,7 @@ CREATE TABLE IF NOT EXISTS capture (
     complete        INTEGER NOT NULL,            -- 1 — обход исчерпан, 0 — нет
     coverage_digest TEXT,
     doc_set_digest  TEXT,
-    policy_digest   TEXT,                        -- crawl_policy_digest прогона
+    policy_digest   TEXT,                        -- отпечаток удостоверяемого пространства (режимы политики + лимиты краула)
     observed_how    TEXT NOT NULL CHECK (
         observed_how IN ('live','revalidated','adopted','scheduled')
     ),

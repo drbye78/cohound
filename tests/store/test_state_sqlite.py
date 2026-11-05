@@ -69,7 +69,7 @@ def test_schema_version(conn: sqlite3.Connection) -> None:
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     assert row is not None
-    assert row["value"] == STATE_SCHEMA_VERSION == "11"
+    assert row["value"] == STATE_SCHEMA_VERSION == "12"
 
 
 @pytest.mark.parametrize(
@@ -136,7 +136,7 @@ def test_reconnect_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_url_state_observation_columns_declared(conn: sqlite3.Connection) -> None:
-    """План 20 §3: наблюдение артефакта объявлено в ``url_state`` (STATE 11).
+    """План 20 §3: наблюдение артефакта объявлено в ``url_state`` (STATE 12).
 
     ``last_checked_at`` для этой роли не переиспользуется: он пишется при любом исходе,
     включая отказ, а отказ наблюдённой версией не является.
@@ -151,7 +151,7 @@ def test_url_state_observation_columns_declared(conn: sqlite3.Connection) -> Non
 
 
 def test_capture_table_shape(conn: sqlite3.Connection) -> None:
-    """Снятие корня (STATE 11): обязательные колонки и CHECK ``observed_how``."""
+    """Снятие корня (STATE 12): обязательные колонки и CHECK ``observed_how``."""
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(capture)")}
     assert {
         "capture_id",

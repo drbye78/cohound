@@ -479,8 +479,56 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 ячейки в проходе без сеанса, и I2d не исполнялся (измерено на стенде). Ветка `no_sources`
 для настоящего нуля источников сохранена.
 
-**Дефект, найденный замером и оставленный как есть:** `_persist_manifest` в
-`core/pipeline/corpus.py` пишется до гейта композиции, поэтому при отсутствии эмбеддера
-run-DB утверждала «партиция на диске», хотя `commit()` не исполнялся. На 0.3.0 путь
-недостижим только потому, что эмбеддер в `.venv` восстановлен; **сам порядок не исправлен** —
-это отдельная правка (провенанс не должен описывать несостоявшийся коммит).
+**Дефект, найденный замером и исправленный 05.11.2026:** `_persist_manifest` в
+`core/pipeline/corpus.py` писался до гейта композиции, поэтому при отсутствии эмбеддера
+run-DB утверждала «партиция на диске», хотя `commit()` не исполнялся. Теперь и коммит, и
+реестр стоят под одним предикатом `build_ran`, а реестр пишется **после** исполненного
+`commit()` (строка утверждает «на диске», доказательство — коммит сборки, а не факт фиксации
+партиции на границе продукта). Отказ коммита реестр не пишет и называет причину в `errors`;
+отсутствие сборки (нет эмбеддера/билдера) называет wiring, а не фаза. Тесты:
+`test_manifest_is_written_after_commit`, `test_manifest_is_not_written_when_commit_fails`,
+`test_manifest_is_not_written_without_a_build`; пин порядка записи пересобран осознанно
+(211/173 → 208/170 — ушёл ровно один блок `index_manifest`).
+
+### 11.10. As-built (05.11.2026) — отпечаток пространства снятия (предусловие F4)
+
+**Дефект, найденный разбором F4 и исправленный до постройки планировщика.** Снятие корня
+штамповалось `crawl_policy.digest` — отпечатком **поверхности решений** прогона, в материал
+которого входят `decision` (`scheduled` → `refresh|reuse` по часам) и производные оси
+(`network_mode`/`corpus_source`). Сверка `_root_coverages` при известном расхождении обнуляет
+`complete`. Следствие по построению: полное свежее снятие, сделанное при `decision=refresh`,
+**не удостоверяло** следующий прогон с `decision=reuse`; то же для `on_request` с
+`--refresh-scope` и без него. `bounded ❌` терялся бы как `❓`/`absence_undated` на первом же
+прогоне без сети. Пилот дефекта не показывал (все 181 параметр `explicit`), что и есть
+ловушка «пилот ≠ ограничение» (§1.1 AGENTS).
+
+**Что сделано.** Новая величина — `crawl_space_digest` (`core/pipeline/digests.py`): материал
+`(product_id, scope_kind, host, path, mode)` объявленных режимов + `crawl_config_digest`
+(лимиты краула определяют исчерпываемое пространство: исчерпание при `max_documents=100` не
+удостоверяет прогон с 500). `CrawlPolicyResolution.space_digest` считается из тех же решений,
+рядом с `.digest`; `.digest` **не изменён** и остаётся входом `run_id`. Снятие
+(`_record_root_capture`, догон дайджестов на границе продукта) штампует `space_digest`;
+`_persist_corpus_coverage` передаёт `declared_space_digest`; поле `roots_json` и имена
+`policy_digest`/`policy_matched` сохранены (содержимое — пространство). Adopted-снятие
+(`complete=0`) остаётся с `policy_digest=None`: adoption не разрешает политику и не имеет
+объявленного пространства — «неизвестно» (A3), а не «другое пространство». `crawl_config_digest`
+берётся из `declared.crawl_config_digest` (резолв осей поднят **до** политики в `run`/`plan`/
+`crawl run`): второго расчёта `crawl_control_digest` нет.
+
+**Версия.** STATE `11 → 12`: смысл колонки `capture.policy_digest` изменился, поэтому старые
+файлы отвергаются гейтом версии (шимов нет, решение владельца 01.11.2026), данные не
+мигрируются. `SCHEMA_VERSION` 3.20.0 не менялся: форма `roots_json` та же, значения — другие.
+`METHODOLOGY_VERSION` не менялся: смысл I2d прежний — исправлен **носитель** отпечатка, а не
+правило.
+
+**Тесты.** `test_scheduled_space_digest_does_not_move_with_the_clock`,
+`test_on_request_space_digest_does_not_move_with_the_request`,
+`test_space_digest_tracks_crawl_limits`, `test_space_digest_tracks_declared_mode`,
+`test_capture_attests_after_scheduled_decision_flips`,
+`test_capture_does_not_attest_other_crawl_limits` — все красные до правки
+(`unexpected keyword argument 'crawl_config_digest'`, отсутствие `space_digest`), зелёные после.
+Полный CI: 6651 passed / 6 skipped.
+
+**Открыто.** Adopted-снятие без объявленного пространства (нужен носитель отпечатка в
+провенансе прогона — решение о носителе, не механическая правка); F4-цикл не строился
+(см. §10 п.3 — решается замером).

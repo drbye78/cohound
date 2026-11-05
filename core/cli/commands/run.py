@@ -646,17 +646,6 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         cohort_ref=getattr(inputs.run, "cohort_ref", None),
     )
     seeds_d = seeds_digest(seed_config)
-    # План 19 §6.1: эффективная политика краула входит в ``run_id`` тем же резолвом, что
-    # у ``plan``/``crawl``. P1 её только разрешает: исполнение (network_mode/corpus_source)
-    # — отдельный слой, поэтому здесь нет ни одного сетевого решения по политике.
-    try:
-        policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
-    except CrawlPolicyConflict as exc:
-        raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
-    except ValueError as exc:
-        # План 19 §5: неразбираемый ``--refresh-scope`` — отказ использования, а не
-        # «запрос не совпал»: иначе оператор считает, что обновление запрошено.
-        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     # R7 (07 §7) + §13 (методология 2.4.0): деплой-конфиг и **декларированные** оси нужны
     # ДО контракта — они входят в него (deploy-профиль, версия seam-схемы, оси краула,
     # стек извлечения). Один резолвер на контракт и манифест: второй формулы нет.
@@ -668,6 +657,25 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
             args=args, inputs=inputs, deploy=deploy_config
         )
     except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    # План 19 §6.1: эффективная политика краула входит в ``run_id`` тем же резолвом, что
+    # у ``plan``/``crawl``. P1 её только разрешает: исполнение (network_mode/corpus_source)
+    # — отдельный слой, поэтому здесь нет ни одного сетевого решения по политике.
+    # ``crawl_config_digest`` берётся у уже разрешённых осей (то же значение, что входит в
+    # контракт): лимиты определяют удостоверяемое пространство снятия (I2d), и вторая
+    # формула разошлась бы с контрактом.
+    try:
+        policy_resolution = _crawl_policy_resolution(
+            args,
+            inputs,
+            seed_config,
+            crawl_config_digest=declared.crawl_config_digest,
+        )
+    except CrawlPolicyConflict as exc:
+        raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
+    except ValueError as exc:
+        # План 19 §5: неразбираемый ``--refresh-scope`` — отказ использования, а не
+        # «запрос не совпал»: иначе оператор считает, что обновление запрошено.
         raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     # §7.4/I21: env COHOUND_LLM_MODEL/_DECODER оценщиком не читаются, а endpoint из env
     # вообще вне execution contract. Оба расхождения — видимые (payload + logs/wiring.jsonl),

@@ -1633,6 +1633,11 @@ def _apply_product(
                 finished_at=adopted_at,
                 complete=False,
                 observed_how=CAPTURE_OBSERVED_ADOPTED,
+                # ``policy_digest`` не выдумывается: adoption не разрешает политику
+                # краула и не имеет объявленного пространства (режимы + лимиты), поэтому
+                # отпечаток — ``None``/«неизвестно» (A3). Ложное «другое пространство» из
+                # этого не следует: сверка решает только по наблюдённому несовпадению, а
+                # ``complete=False`` adopted-снятие всё равно не удостоверяет ``bounded``.
                 coverage_digest=(
                     None if item.snapshot is None else item.snapshot.coverage_digest
                 ),

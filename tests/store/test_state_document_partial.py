@@ -96,8 +96,8 @@ def _build_v4(db_path: Path) -> None:
 
 
 def test_state_schema_version_carries_container_state() -> None:
-    """``container_state`` (план 19 §E.7) объявлен в DDL, без ``ALTER`` (сейчас v11)."""
-    assert STATE_SCHEMA_VERSION == "11"
+    """``container_state`` (план 19 §E.7) объявлен в DDL, без ``ALTER`` (сейчас v12)."""
+    assert STATE_SCHEMA_VERSION == "12"
 
 
 def test_chunk_meta_carries_chunk_offsets() -> None:

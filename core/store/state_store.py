@@ -1832,6 +1832,10 @@ class SqliteStateStore:
         ``complete``/дайджесты), но **не** ``started_at`` и не идентичность строки:
         снятие — наблюдение, а не настройка. ``superseded_by`` — только
         :meth:`supersede_capture`.
+
+        ``policy_digest`` строки — отпечаток **удостоверяемого пространства** (режимы
+        политики + лимиты краула), а не поверхность решений прогона: снятие отвечает,
+        какое исчерпание оно удостоверяет (I2d).
         """
         values = [getattr(row, name) for name in _CAPTURE_COLUMNS]
         with self._conn:

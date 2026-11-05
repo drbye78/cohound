@@ -275,8 +275,25 @@ def run(args: argparse.Namespace) -> int:
         profiles=profiles,
         urls_override=operator_urls,
     )
+    # §13 (2.4.0): декларированные оси — тот же резолвер и тот же deploy-конфиг, что
+    # у ``run``/``crawl``. Резолвятся **до** политики: их ``crawl_config_digest`` — часть
+    # удостоверяемого пространства снятия (I2d), и второй формулы лимитов быть не должно.
     try:
-        policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
+        declared = resolve_declared_axes(
+            args=args, inputs=inputs, deploy=deploy_config
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    # План 19 §6.1/P1: эффективная политика краула — часть ``run_id``. Резолв печатается
+    # всегда (в т.ч. при ``--run-id``), но ничего не исполняет: сеть на этом слое не
+    # трогается. Конфликт равной специфичности — ``EXIT_USAGE``, а не «первая запись».
+    try:
+        policy_resolution = _crawl_policy_resolution(
+            args,
+            inputs,
+            seed_config,
+            crawl_config_digest=declared.crawl_config_digest,
+        )
     except CrawlPolicyConflict as exc:
         raise CliError(
             str(exc), code=exc.code, exit_code=EXIT_USAGE
@@ -296,9 +313,6 @@ def run(args: argparse.Namespace) -> int:
             cohort_ref=getattr(inputs.run, "cohort_ref", None),
         )
         seeds = seeds_digest(seed_config)
-        # §13 (2.4.0): декларированные оси — тот же резолвер и тот же deploy-конфиг, что
-        # у ``run``/``crawl``. Иначе ``plan`` показывал бы иной ``run_id``, чем реальный
-        # прогон: контракт перестал быть функцией только ``run.yaml``.
         # §7.4/I21: env-настройки модели оценщика не читаются — предупреждение видно в
         # payload ``plan`` (identity-preview), а не только в логе прогона.
         notices.extend(
@@ -319,12 +333,6 @@ def run(args: argparse.Namespace) -> int:
                 cli_rounds=getattr(args, "serp_rounds", None),
             )
         )
-        try:
-            declared = resolve_declared_axes(
-                args=args, inputs=inputs, deploy=deploy_config
-            )
-        except ValueError as exc:
-            raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
         contract = build_execution_contract(
             inputs,
             cohort_digest=cohort,

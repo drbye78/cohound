@@ -34,7 +34,7 @@ from core.ports.state import CaptureRow
 def _root_coverages(
     declared_roots: Iterable[str],
     captures: Iterable[CaptureRow],
-    declared_policy_digest: str | None = None,
+    declared_space_digest: str | None = None,
 ) -> list[CorpusRootCoverage]:
     """Снятия объявленных корней продукта: по одному блоку на корень (план 20 §11.2).
 
@@ -48,15 +48,18 @@ def _root_coverages(
     а проход по сохранённым байтам — декодированным. Форма записи не вправе решать,
     удостоверён корень или нет.
 
-    **Сверка политики.** Снятие описывает пространство при **той** поверхности решений
-    политики краула, при которой шёл обход; смена политики — смена условий измерения,
-    поэтому отпечаток снятия сверяется с **объявленным** ``crawl_policy_digest`` прогона.
-    Известны обе стороны и различаются ⇒ ``policy_matched=False``, и ``complete`` корня
-    принудительно ``False``: обход удостоверяет другое пространство. Хотя бы одна сторона
-    неизвестна ⇒ ``policy_matched=None`` и ``complete`` не меняется. Это **отступление от
-    буквы §11.2** («чей ``policy_digest`` совпадает»), названное осознанно: отсутствие
-    отпечатка — отсутствие данных, а не факт несовпадения; объявлять по нему неполноту
-    значило бы решать по незнанию (A3). Решает только наблюдённое несовпадение.
+    **Сверка пространства.** Снятие описывает пространство, исчерпанное обходом: режимы
+    политики и лимиты краула (``crawl_space_digest``). Поверхность решений
+    (``decision``/``network_mode``/``corpus_source``) в отпечаток не входит: она зависит
+    от решения по часам и от ``--refresh-scope``, то есть отвечает «когда смотрели», а не
+    «что исчерпано». Поэтому отпечаток снятия сверяется с **объявленным**
+    ``declared_space_digest`` прогона. Известны обе стороны и различаются ⇒
+    ``policy_matched=False``, и ``complete`` корня принудительно ``False``: обход
+    удостоверяет другое пространство. Хотя бы одна сторона неизвестна ⇒
+    ``policy_matched=None`` и ``complete`` не меняется. Это **отступление от буквы §11.2**
+    («чей ``policy_digest`` совпадает»), названное осознанно: отсутствие отпечатка —
+    отсутствие данных, а не факт несовпадения; объявлять по нему неполноту значило бы
+    решать по незнанию (A3). Решает только наблюдённое несовпадение.
 
     Нет снятия ⇒ ``complete=False, capture_id=None`` — «корень не удостоверён», а не
     «покрытие неизвестно»: отсутствие носителя и есть неполнота.
@@ -77,12 +80,12 @@ def _root_coverages(
         chosen = newest.get(key)
         capture_policy = None if chosen is None else chosen.policy_digest
         policy_matched: bool | None = None
-        if declared_policy_digest and capture_policy:
-            policy_matched = declared_policy_digest == capture_policy
+        if declared_space_digest and capture_policy:
+            policy_matched = declared_space_digest == capture_policy
         complete = False if chosen is None else bool(chosen.complete)
         if policy_matched is False:
-            # Обход шёл при другой поверхности решений политики: это другое
-            # пространство, и исчерпание одного не удостоверяет другое.
+            # Обход шёл в другом пространстве (другие режимы/лимиты): исчерпание одного
+            # не удостоверяет другое.
             complete = False
         roots.append(
             CorpusRootCoverage(
@@ -119,7 +122,7 @@ def derive_corpus_coverage(
     computed_at: str,
     declared_roots: Iterable[str] = (),
     captures: Iterable[CaptureRow] = (),
-    declared_policy_digest: str | None = None,
+    declared_space_digest: str | None = None,
     manual_urls: Iterable[str] = (),
     partial_docs: Iterable[str] = (),
 ) -> CorpusCoverage:
@@ -139,11 +142,12 @@ def derive_corpus_coverage(
        (``complete`` выбирается из новейшего неотозванного снятия корня, см.
        :func:`_root_coverages`). Корень без снятия даёт ``complete=False`` — «не
        удостоверён». ``observed_sources == 0`` больше **не** самостоятельное условие:
-       его роль исполняет корень без ``complete=1``. ``declared_policy_digest`` —
-       отпечаток политики прогона: разошедшийся с ним отпечаток снятия обнуляет
-       ``complete`` корня (снятие удостоверяет другое пространство). Отсутствие одной из
-       сторон сверять не с чем — ``policy_matched=None``, ``complete`` не меняется (A3:
-       незнание не выдаётся за несовпадение; см. :func:`_root_coverages`).
+       его роль исполняет корень без ``complete=1``. ``declared_space_digest`` —
+       отпечаток удостоверяемого пространства прогона (режимы политики + лимиты краула):
+       разошедшийся с ним отпечаток снятия обнуляет ``complete`` корня (снятие удостоверяет
+       другое пространство). Отсутствие одной из сторон сверять не с чем —
+       ``policy_matched=None``, ``complete`` не меняется (A3: незнание не выдаётся за
+       несовпадение; см. :func:`_root_coverages`).
     2. **И** в текущем сеансе нет неразрешённых блокирующих фактов: ``truncated``,
        нечитаемый origin, ``FAILED`` с ``error_kind`` из
        :data:`core.domain.enums.BLOCKING_FAILURE_KINDS`, ``partial_extraction``.
@@ -279,7 +283,7 @@ def derive_corpus_coverage(
     # Снятие выбирается здесь же: один расчёт на два представления (``roots`` и
     # ``complete``) — второго предиката нет.
     roots = _root_coverages(
-        declared_roots, captures, declared_policy_digest
+        declared_roots, captures, declared_space_digest
     )
     roots_ok = bool(roots) and all(root.complete for root in roots)
     # Сеансовые условия действуют, только когда сеанс **есть** (есть элементы): у прохода
@@ -472,7 +476,7 @@ def _persist_corpus_coverage(
     incomplete_reasons: Mapping[str, str] | None = None,
     declared_roots: Mapping[str, Iterable[str]] | None = None,
     captures: Mapping[str, Iterable[CaptureRow]] | None = None,
-    declared_policy_digest: str | None = None,
+    declared_space_digest: str | None = None,
 ) -> dict[str, CorpusCoverage]:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
 
@@ -524,10 +528,13 @@ def _persist_corpus_coverage(
     Пустая карта — «корни не переданы», и тогда ``complete=False`` (носителя нет), а не
     «всё полно».
 
-    ``declared_policy_digest`` — ``crawl_policy_digest`` прогона (тот же, что в манифесте
-    и ``run_id``): снятие, сделанное при другой поверхности решений политики, удостоверяет
-    другое пространство, поэтому разошедшийся отпечаток обнуляет ``complete`` корня.
-    ``None`` — сверять не с чем (незнание не выдаётся за несовпадение, A3).
+    ``declared_space_digest`` — отпечаток **удостоверяемого пространства** прогона
+    (режимы политики + ``crawl_config_digest``; :func:`crawl_space_digest`): снятие,
+    сделанное в другом пространстве, удостоверяет другое исчерпание, поэтому разошедшийся
+    отпечаток обнуляет ``complete`` корня. Поверхность решений
+    (``crawl_policy_digest``) сюда не входит: она отвечает «когда смотрели» и является
+    входом ``run_id``. ``None`` — сверять не с чем (незнание не выдаётся за несовпадение,
+    A3).
 
     :returns: ``product_id → CorpusCoverage`` — ровно те строки, которые записаны. Нужен
         писателю ``run_product`` (16 §3.2): ``coverage_complete`` — та же величина, что
@@ -556,8 +563,8 @@ def _persist_corpus_coverage(
             computed_at=computed_at,
             declared_roots=roots_by_product.get(product_id, ()),
             captures=captures_by_product.get(product_id, ()),
-            # Сверка политики снятия с объявленной (I2d §11.2).
-            declared_policy_digest=declared_policy_digest,
+            # Сверка удостоверяемого пространства снятия с объявленным (I2d §11.2).
+            declared_space_digest=declared_space_digest,
             # 13-manual-artifacts §3.3: URL, чей материал предъявлен артефактом.
             manual_urls=(resolved_manually or {}).get(product_id, ()),
             # I2/I2c: документы, прочитанные не целиком (причина

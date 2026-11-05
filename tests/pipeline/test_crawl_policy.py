@@ -19,6 +19,7 @@ from core.pipeline.crawl_policy import (
     DeclaredRoot,
     declared_roots,
     observations_by_root,
+    parse_requested_scopes,
     resolve_crawl_policy,
 )
 from core.ports.state import CrawlPolicyRow
@@ -65,6 +66,8 @@ def _resolve(
     *,
     observed: dict[tuple[str, str, str], dt.datetime] | None = None,
     now: dt.datetime = NOW,
+    requested: tuple[str, ...] = (),
+    crawl_config_digest: str | None = None,
 ):
     return resolve_crawl_policy(
         package_policy=config,
@@ -72,6 +75,10 @@ def _resolve(
         roots=roots,
         now=now,
         observed_at=observed,
+        requested=parse_requested_scopes(
+            requested, product_ids={root.product_id for root in roots}
+        ),
+        crawl_config_digest=crawl_config_digest,
     )
 
 
@@ -255,6 +262,59 @@ def test_scheduled_due_is_a_decision_and_enters_digest_by_clock() -> None:
         observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=10)},
     )
     assert same_decision.digest == stale.digest
+
+
+def test_scheduled_space_digest_does_not_move_with_the_clock() -> None:
+    """Пространство не зависит от того, какое решение по часам принял прогон.
+
+    ``scheduled`` при одном и том же объявленном режиме и лимитах даёт разные
+    ``digest`` (поверхность решений входит в ``run_id``) и один ``space_digest``
+    (удостоверяемое пространство — носитель I2d).
+    """
+    config = _config(
+        sites={"p1": {"docs.test/docs": {"mode": "scheduled", "interval_hours": 24}}}
+    )
+    observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=1)}
+    due = _resolve(
+        config, [ROOT], observed=observed, now=NOW + dt.timedelta(hours=25)
+    )
+    fresh = _resolve(config, [ROOT], observed=observed, now=NOW)
+    assert due.decisions[0].decision == "refresh"
+    assert fresh.decisions[0].decision == "reuse"
+    assert due.digest != fresh.digest
+    assert due.space_digest == fresh.space_digest
+
+
+def test_on_request_space_digest_does_not_move_with_the_request() -> None:
+    """``--refresh-scope`` меняет поверхность решений, но не объявленное пространство."""
+    config = _config(products={"p1": {"mode": "on_request"}})
+    observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=1)}
+    plain = _resolve(config, [ROOT], observed=observed)
+    requested = _resolve(
+        config, [ROOT], observed=observed, requested=("docs.test",)
+    )
+    assert plain.decisions[0].network_mode != requested.decisions[0].network_mode
+    assert plain.digest != requested.digest
+    assert plain.space_digest == requested.space_digest
+
+
+def test_space_digest_tracks_crawl_limits() -> None:
+    """Лимиты краула входят в пространство: исчерпание при 100 не удостоверяет 500."""
+    config = _config(products={"p1": {"mode": "auto"}})
+    first = _resolve(config, [ROOT], crawl_config_digest="limits-100")
+    second = _resolve(config, [ROOT], crawl_config_digest="limits-500")
+    assert first.space_digest != second.space_digest
+    # Поверхность решений лимитов не знает — ``run_id`` от них не меняется.
+    assert first.digest == second.digest
+
+
+def test_space_digest_tracks_declared_mode() -> None:
+    """Смена объявленного режима — другое пространство, а не другое решение."""
+    auto = _resolve(_config(products={"p1": {"mode": "auto"}}), [ROOT])
+    denied = _resolve(
+        _config(products={"p1": {"mode": "network_denied"}}), [ROOT]
+    )
+    assert auto.space_digest != denied.space_digest
 
 
 def test_scheduled_without_observation_is_discovery() -> None:

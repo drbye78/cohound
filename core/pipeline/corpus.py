@@ -3101,8 +3101,10 @@ def _build_corpus(
         догоняется той же строкой (``record_capture`` обновляет дайджесты, не трогая
         ``started_at``): второй расчёт не появляется.
 
-        ``policy_digest`` — ``crawl_policy_digest`` прогона (тот же объект, что дал
-        ``run_id``): F3 сравнит его с объявленным, поэтому второй формулы нет.
+        ``policy_digest`` — отпечаток **удостоверяемого пространства** прогона
+        (``crawl_policy.space_digest``: режимы + лимиты краула). Отпечаток поверхности
+        решений (``crawl_policy.digest``) остаётся входом ``run_id`` и носителем здесь не
+        является: «когда смотреть» не решает, «что исчерпано» (I2d).
         """
         if state is None or run_id is None:
             return
@@ -3120,7 +3122,7 @@ def _build_corpus(
             finished_at=_now_iso(),
             complete=complete,
             observed_how=CAPTURE_OBSERVED_LIVE,
-            policy_digest=None if crawl_policy is None else crawl_policy.digest,
+            policy_digest=None if crawl_policy is None else crawl_policy.space_digest,
         )
         try:
             state.record_capture(capture)
@@ -4693,10 +4695,11 @@ def _build_corpus(
                     # F3: объявленные корни продукта + их снятия (``complete`` по снятиям).
                     declared_roots={product_id: product_roots},
                     captures={product_id: product_captures},
-                    # Объявленный отпечаток политики — тот же объект, что дал
-                    # ``crawl_policy_digest`` для ``run_id`` (второй формулы нет).
-                    declared_policy_digest=(
-                        None if crawl_policy is None else crawl_policy.digest
+                    # Объявленный отпечаток **удостоверяемого пространства** — тот же
+                    # объект, что несёт снятие (режимы + лимиты); поверхность решений
+                    # остаётся входом ``run_id`` и здесь не сверяется (I2d).
+                    declared_space_digest=(
+                        None if crawl_policy is None else crawl_policy.space_digest
                     ),
                 )
                 # 16 §3.2: ``coverage_complete`` строки продукта — та же величина, что
@@ -4719,7 +4722,7 @@ def _build_corpus(
             try:
                 live_coverage_digest = coverage_digest(product_coverage)
                 live_policy_digest = (
-                    None if crawl_policy is None else crawl_policy.digest
+                    None if crawl_policy is None else crawl_policy.space_digest
                 )
                 live_doc_set_digest = product_doc_set_digest
                 for capture in product_captures:
@@ -5060,8 +5063,8 @@ def _build_corpus(
                 # F3: объявленные корни и их снятия — второй предикат полноты нет.
                 declared_roots=url_map,
                 captures=coverage_captures,
-                declared_policy_digest=(
-                    None if crawl_policy is None else crawl_policy.digest
+                declared_space_digest=(
+                    None if crawl_policy is None else crawl_policy.space_digest
                 ),
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
@@ -5198,12 +5201,16 @@ def _build_corpus(
     if _disk_notice is not None:
         errors.append(corpus_drain.disk_headroom_line(_disk_notice))
 
-    # Строки манифеста — после того, как композиция известна (PK включает
-    # ``index_build_id``) и партиции уже на диске; чанки персистентны ещё с границы
-    # продукта. Сбой записи снимает композицию (она не должна ссылаться на партицию,
-    # которой нет в реестре прогона).
-    if not _persist_manifest(store, manifest_entries, errors):
-        counters.all_physical_ok = False
+    # Строки манифеста пишутся **после** исполненного ``commit()`` — в блоке композиции
+    # ниже (см. комментарий там). Строка реестра утверждает «партиция на диске», и
+    # доказательство этому — коммит сборки, а не факт, что партиция была зафиксирована на
+    # границе продукта. Прежняя редакция писала реестр здесь, ДО проверки
+    # эмбеддера/билдера: прогон без эмбеддера оставлял в run-DB строку ``index_manifest``
+    # со ``store_path`` каталога, которого нет на диске (измерено 05.11.2026 на стенде
+    # ``demo-absence``: 5 чанков, строка есть, ``index_store/`` не создан, ``commit()``
+    # не исполнялся). Флаг ``build_ran`` — единственное условие и для коммита, и для
+    # реестра: два места с одним предикатом разошлись бы.
+    build_ran = bool(entries) and embedder is not None and index_builder is not None
 
     # K2/§13: ячейки, привязанные к **прошлой** сборке этого же прогона, помечаются
     # устаревшими. Живой случай — повтор фазы на существующем прогоне (``--reset``/
@@ -5215,13 +5222,25 @@ def _build_corpus(
         store, run_id, index_build_id, errors
     )
 
-    if entries and embedder is not None and index_builder is not None:
+    if build_ran and index_builder is not None:
         commit_ok = True
         try:
             index_builder.commit()
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             commit_ok = False
             errors.append(f"index commit: {type(exc).__name__}: {exc}")
+
+        # Реестр — **после** коммита и **до** файла композиции. Первое делает утверждение
+        # «на диске» доказанным (``commit()`` — акт фиксации сборки), второе сохраняет
+        # прежний инвариант: сбой записи реестра снимает композицию, иначе она ссылалась
+        # бы на партицию, которой нет в реестре прогона. Отказ коммита реестр не пишет —
+        # и это видно: строка ``index_manifest`` не появляется, причина в ``errors``.
+        if commit_ok and not _persist_manifest(store, manifest_entries, errors):
+            counters.all_physical_ok = False
+        elif not commit_ok and manifest_entries:
+            errors.append(
+                "index_manifest: не записан — сборка не зафиксирована (commit отказал)"
+            )
 
         # 09 §8.2/§8.6: композиция пишется **после** фиксации всех партиций и их
         # DB-строк. Частичный сбой члена/коммита ⇒ композиции нет (иначе она ссылалась
@@ -5254,6 +5273,10 @@ def _build_corpus(
                         run_id=run_id,
                         errors=errors,
                     )
+    # ``entries`` без сборки (нет эмбеддера/билдера) реестр не получает: строка
+    # утверждала бы «на диске» без ``commit()``. Это состояние, а не ошибка фазы —
+    # отсутствие эмбеддера называет ``_resolve_embedder`` в журнале wiring
+    # (``embed_device_note``), а ``no_embedder`` есть в словаре причин.
 
     # L1a/C2: счётчики durable-краула (наблюдаемость) — целиком из элементов сеанса. Без
     # сеанса (``store``/``run_id`` не заданы) — нули. ``crawl_done`` — зеркало ``crawl_fetched``

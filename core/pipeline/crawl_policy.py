@@ -46,7 +46,7 @@ from core.domain.enums import (
     CrawlPolicyScopeKind,
 )
 from core.domain.models import SeedsConfig
-from core.pipeline.digests import crawl_policy_digest
+from core.pipeline.digests import crawl_policy_digest, crawl_space_digest
 from core.ports.state import CrawlPolicyRow
 from core.util.rate_limit import normalize_host
 
@@ -244,11 +244,20 @@ class RequestedScope:
 
 @dataclass(frozen=True)
 class CrawlPolicyResolution:
-    """Результат разрешения: решения, несовпавшие строки и отпечаток поверхности."""
+    """Результат разрешения: решения, несовпавшие строки и отпечатки.
+
+    ``digest`` — отпечаток **поверхности решений** (вход ``run_id``): эффективные
+    ``decision``/``network_mode``/``corpus_source``, то есть «что прогон сделал».
+    ``space_digest`` — отпечаток **удостоверяемого пространства** (носитель I2d): какие
+    режимы объявлены и при каких лимитах краула, то есть «что исчерпано». Часы меняют
+    первое и не меняют второе.
+    """
 
     decisions: tuple[PolicyDecision, ...]
     unmatched: tuple[PolicyRecord, ...]
     digest: str
+    #: Отпечаток объявленного пространства (режимы + лимиты) — носитель I2d.
+    space_digest: str
     #: Per-run запросы ``--refresh-scope`` в разобранном виде (они вошли в ``digest``).
     requested: tuple[RequestedScope, ...] = ()
     #: Запросы, не совпавшие ни с одним объявленным корнем: видимы, но решения не меняют.
@@ -683,6 +692,7 @@ def resolve_crawl_policy(
     now: _dt.datetime,
     observed_at: Mapping[tuple[str, str, str], _dt.datetime] | None = None,
     requested: Sequence[RequestedScope] | None = None,
+    crawl_config_digest: str | None = None,
 ) -> CrawlPolicyResolution:
     """Разрешает эффективную политику по объявленным корням (план 19 §4/§6.1).
 
@@ -694,6 +704,9 @@ def resolve_crawl_policy(
         запрет ``on_request`` и делает ``scheduled`` обновлением; сам запрос входит в
         материал дайджеста через оси исполнения, а не отдельным полем (§6.1: «одно поле —
         один материал»).
+    :param crawl_config_digest: отпечаток лимитов краула (``crawl_control_digest``,
+        ``declared.crawl_config_digest``). Входит **только** в ``space_digest``: лимиты
+        определяют исчерпываемое пространство, но не поверхность решений.
     :raises CrawlPolicyConflict: равная специфичность с разными режимами.
     """
     records = [*package_records(package_policy), *operator_records(operator_rows)]
@@ -769,10 +782,27 @@ def resolve_crawl_policy(
         )
         for decision in decisions
     )
+    # Удостоверяемое пространство считается из **тех же** решений вторым материалом:
+    # объявленный режим + лимиты. ``decision`` здесь намеренно **не** берётся — оно
+    # решает «когда смотреть», а не «что исчерпано» (I2d).
+    space_digest = crawl_space_digest(
+        (
+            (
+                decision.product_id,
+                decision.scope_kind.value,
+                decision.host,
+                decision.path,
+                decision.mode.value,
+            )
+            for decision in decisions
+        ),
+        crawl_config_digest=crawl_config_digest,
+    )
     return CrawlPolicyResolution(
         decisions=tuple(decisions),
         unmatched=unmatched,
         digest=digest,
+        space_digest=space_digest,
         requested=requests,
         unmatched_requested=unmatched_requested,
     )

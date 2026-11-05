@@ -554,7 +554,7 @@ absence-модель, scoring и определения Coverage/Comparability �
   (`core/pipeline/digests.py:96`). Схема/путь/секрет не пишутся намеренно.
 - ✅ 4 — benchmark читает `golden_status`: `core/pipeline/evaluator_benchmark.py:115,361,494`.
 - ✅ 5 — класс назван: `prompt_template` отнесён к `execution_versions`
-  (`cohound-spec-v2.md:861,880`), т.е. `execution_change`, как и исполняет код.
+  (`cohound-spec-v2.md:898,902`), т.е. `execution_change`, как и исполняет код.
   ❔ остаток: отчёт замера `2026-10-27-support-not-about-subject.md:84` продолжает называть
   границей `methodology_version` — это историческая запись, не обновлена.
 
@@ -670,7 +670,7 @@ absence-модель, scoring и определения Coverage/Comparability �
   `endpoint_host` (`core/cli/execution_axes.py:804`) и признак `rnd_endpoint`
   (`core/domain/scoring.py:956`).
 - 7 ✅ названо — регламент отнёс `prompt_template` к `execution_versions`
-  (`cohound-spec-v2.md:861,880`). ❔ отчёт замера (`2026-10-27-support-not-about-subject.md:84`)
+  (`cohound-spec-v2.md:898,902`). ❔ отчёт замера (`2026-10-27-support-not-about-subject.md:84`)
   не обновлён.
 - 8 ✅ разведены и оба сделаны: P6 — `core/pipeline/digests.py:156`,
   P7 — `core/pipeline/prompt.py:117`.

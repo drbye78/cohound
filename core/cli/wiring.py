@@ -2775,6 +2775,17 @@ def _resolve_embedder(
             return lite
     if _module_installed("sentence_transformers"):
         return LocalEmbedder(device=resolved.value)
+    # Нет ни одной ветви — это **видимое** состояние, а не молчаливая дыра: без эмбеддера
+    # композиция не собирается, ``index_manifest``/``index_store`` не пишутся (реестр
+    # утверждал бы «партиция на диске» без коммита), ``embed_model_id`` пуст, а R0
+    # работает лексически. Пишется в журнал wiring; ``None`` сам по себе молчал бы.
+    if notices is not None:
+        notices.append(
+            "эмбеддер не найден (ни model2vec, ни sentence-transformers): dense-ветвь не "
+            "собрана — композиция и index_manifest не пишутся, embed_model_id пуст, R0 "
+            "работает лексически; dense-оценка недоступна (`uv sync --extra embed-lite` "
+            "или --extra embed)"
+        )
     return None
 
 

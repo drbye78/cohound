@@ -458,6 +458,56 @@ def crawl_policy_digest(
     )
 
 
+def crawl_space_digest(
+    decisions: Iterable[tuple[str, str, str | None, str | None, str]],
+    *,
+    crawl_config_digest: str | None,
+) -> str:
+    """Дайджест **удостоверяемого пространства** политики краула, 24 hex-символа.
+
+    Отвечает на вопрос «какое пространство исчерпано», а не «какое решение принял
+    прогон по часам». Материал — отсортированное **множество** кортежей
+    ``(product_id, scope_kind, host, path, mode)`` объявленных режимов плюс
+    ``crawl_config_digest``. Это носитель I2d: снятие корня несёт этот отпечаток, и
+    следующий прогон сверяет с ним своё пространство.
+
+    **Не** входят ``decision``/``network_mode``/``corpus_source``: они производны от
+    решения по часам (``scheduled`` → ``refresh``/``reuse``, ``--refresh-scope`` → сеть),
+    то есть решают **когда** смотреть, а не **что** исчерпано. Если бы они входили, полный
+    свежий обход при ``decision=refresh`` не удостоверял бы прогон с ``decision=reuse``.
+
+    **Не** входят ``interval_hours``/``requested``/``note``/``actor``/``created_at``/
+    ``policy_id`` — политика записи, а не пространство.
+
+    ``crawl_config_digest`` входит потому, что лимиты (``max_depth``/``max_documents``/
+    ``exclude_*``/``document_level``/``pdf_pipeline``) определяют пространство: исчерпание
+    при ``max_documents=100`` не удостоверяет прогон с 500. ``None`` сериализуется как JSON
+    ``null`` (как в :func:`execution_contract_digest`): отсутствие значения — часть
+    отпечатка, а не «любое значение».
+    """
+    rows = sorted(
+        {
+            (
+                str(product_id),
+                str(scope_kind),
+                None if host is None else str(host),
+                None if path is None else str(path),
+                str(mode),
+            )
+            for product_id, scope_kind, host, path, mode in decisions
+        }
+    )
+    return short_hash(
+        _canonical(
+            {
+                "crawl_space": [list(row) for row in rows],
+                "crawl_config_digest": crawl_config_digest,
+            }
+        ),
+        _DIGEST_LEN,
+    )
+
+
 def execution_contract_digest(values: Mapping[str, Any]) -> str:
     """Дайджест условий измерения (09 §12.5), 24 hex-символа.
 

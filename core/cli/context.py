@@ -298,6 +298,7 @@ def _crawl_policy_resolution(
     seed_config: Any,
     *,
     now: _dt.datetime | None = None,
+    crawl_config_digest: str | None = None,
 ) -> Any:
     """Разрешает политику краула для ``plan``/``run``/``crawl run`` (план 19 §6.1).
 
@@ -308,6 +309,10 @@ def _crawl_policy_resolution(
 
     ``now`` — параметр: резолв ``scheduled`` зависит от часов, и тест обязан подменять их,
     а не ждать сутки.
+
+    ``crawl_config_digest`` — **то же** значение, что входит в контракт прогона
+    (``declared.crawl_config_digest``): лимиты краула определяют удостоверяемое
+    пространство снятия (I2d), поэтому второй формулы здесь нет.
     """
     from core.config.crawl_policy import CrawlPolicyConfig
     from core.pipeline.crawl_policy import (
@@ -345,6 +350,7 @@ def _crawl_policy_resolution(
         now=now or _dt.datetime.now(_dt.UTC),
         observed_at=observed,
         requested=requested,
+        crawl_config_digest=crawl_config_digest,
     )
 
 

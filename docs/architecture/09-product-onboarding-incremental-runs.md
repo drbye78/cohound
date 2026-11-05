@@ -170,7 +170,7 @@
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
 | §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus_drain.py:1172`; зонд — `corpus_drain.py:1203`), семейство чанкеров — `chunker_family` |
-| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1529`), waiver-след (`core/pipeline/runner.py:467`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
+| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1648`), waiver-след (`core/pipeline/runner.py:467`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/store/backup.py:687`; вызов — `core/cli/package/commands.py:2394`) |
 | §9 | ✅ сделано | строка «Cell/evidence» описывает as-built перенос (§10): `measurement_origin`/`carried_from_run_id`, копии evidence с per-run `evidence_id` |
@@ -2493,7 +2493,7 @@ TextChunker.version`, `chunker_family.composite_chunker_version` — тот же
    `profile_digest` один раз, и прогоны с тем же содержимым профиля не требуют повторного
    решения (профиль квази-константен: 2–5 правок в год при еженедельных прогонах).
    Резолвер — `make_profile_gate` (`core/pipeline/profile_attestation.py`), подключён в CLI
-   (`_profile_gate_resolver`, `core/cli/context.py:1529`; вызов `make_profile_gate` — `:1356`). Аттестация применима **только** к
+   (`_profile_gate_resolver`, `core/cli/context.py:1648`; вызов `make_profile_gate` — `:1356`). Аттестация применима **только** к
    G1/G2; отозванная (`superseded_at`) действующей не считается. При расхождении дайджеста
    сообщение **называет** изменившийся компонент (`describe_subject_diff`), а не «гейт не
    пройден».

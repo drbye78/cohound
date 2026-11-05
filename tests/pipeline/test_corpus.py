@@ -1215,6 +1215,13 @@ def test_domain_profile_browser_without_browser_crawler_keeps_error(
 
 
 def test_store_persistence_round_trip(tmp_path: Path) -> None:
+    """Документы/чанки/реестр переживают раунд-трип через ``StorePort``.
+
+    Реестр (``index_manifest``) пишется только при **исполненной** сборке: строка несёт
+    ``store_path`` и ``index_build_id``, то есть утверждает «партиция на диске». Поэтому
+    тест подаёт эмбеддер и сборщик (без них ``commit()`` не исполняется, и реестр обязан
+    молчать — см. ``test_manifest_is_not_written_without_a_build``).
+    """
     store = SqliteStore(":memory:")
     try:
         result = _build(
@@ -1222,6 +1229,8 @@ def test_store_persistence_round_trip(tmp_path: Path) -> None:
             pages={URL_P1_A: b"persist me", URL_P2_A: b"persist two"},
             urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
             store=store,
+            embedder=_Embedder(),
+            index_builder=_IndexBuilder(),
         )
         build = _build_of(result)
         docs = list(store.conn.execute("SELECT doc_id, content_hash, raw_path FROM corpus_docs ORDER BY doc_id"))
@@ -1243,6 +1252,112 @@ def test_store_persistence_round_trip(tmp_path: Path) -> None:
 
 class _AbortCrawl(BaseException):
     """Жёсткое прерывание прогона (аналог OOM/SIGKILL): ``Exception``-изоляция его не ловит."""
+
+
+class _OrderedBuilder(_IndexBuilder):
+    """Сборщик, оставляющий метку ``commit()`` в общем следе SQL (проверка порядка).
+
+    След ``sqlite3`` и метка сборщика пишутся в один список: только так видно, что
+    коммит **предшествует** записи реестра, а не просто «оба случились».
+    """
+
+    def __init__(self, trace: list[str]) -> None:
+        super().__init__()
+        self.trace = trace
+
+    def commit(self) -> None:
+        super().commit()
+        self.trace.append("<commit>")
+
+
+class _FailingCommitBuilder(_IndexBuilder):
+    """Сборщик, чей ``commit()`` отказывает (диск/фиксация): реестр писать нельзя."""
+
+    def commit(self) -> None:
+        raise RuntimeError("commit failed")
+
+
+def test_manifest_is_written_after_commit(tmp_path: Path) -> None:
+    """Реестр пишется **после** исполненного ``commit()``: строка утверждает «на диске».
+
+    Порядок — не косметика. Реестр несёт ``store_path``/``index_build_id``, то есть
+    утверждает, что партиция зафиксирована сборкой; до коммита это утверждение не имеет
+    доказательства (``disk first, DB second``, K2/§13).
+    """
+    trace: list[str] = []
+    store = SqliteStore(":memory:")
+    try:
+        store.conn.set_trace_callback(trace.append)
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"order"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            embedder=_Embedder(),
+            index_builder=_OrderedBuilder(trace),
+        )
+        assert result.errors == []
+        commit_at = trace.index("<commit>")
+        manifest_at = next(
+            i
+            for i, sql in enumerate(trace)
+            if sql.lower().startswith("insert or replace into index_manifest")
+        )
+        assert commit_at < manifest_at
+        assert [
+            row["product_id"]
+            for row in store.conn.execute("SELECT product_id FROM index_manifest")
+        ] == ["p1"]
+    finally:
+        store.close()
+
+
+def test_manifest_is_not_written_when_commit_fails(tmp_path: Path) -> None:
+    """Отказ ``commit()`` не оставляет строки реестра — и это названо в ``errors``.
+
+    Молчаливое отсутствие строки читалось бы как «партиций не было». Композиция при
+    отказе коммита тоже не пишется (её условие — ``commit_ok``), так что реестр и
+    композиция не расходятся: оба утверждения об одной и той же фиксации.
+    """
+    store = SqliteStore(":memory:")
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"no commit"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            embedder=_Embedder(),
+            index_builder=_FailingCommitBuilder(),
+        )
+        assert list(store.conn.execute("SELECT * FROM index_manifest")) == []
+        assert any("не зафиксирована" in err for err in result.errors), result.errors
+    finally:
+        store.close()
+
+
+def test_manifest_is_not_written_without_a_build(tmp_path: Path) -> None:
+    """Без сборки ``index_manifest`` не пишется: ``commit()`` не исполнялся.
+
+    Измерено 05.11.2026 на стенде ``demo-absence``: прогон без эмбеддера оставлял строку
+    реестра со ``store_path`` каталога, которого нет на диске (5 чанков, ``index_store/``
+    не создан, ``commit()`` не вызывался). Реестр утверждает «партиция зафиксирована», и
+    фиксирует её коммит сборки. Отсутствие строки при этом **не** ошибка фазы: про
+    отсутствие эмбеддера сообщает wiring (``embed_device_note``), а чанки персистентны —
+    партиция и реестр разные утверждения.
+    """
+    store = SqliteStore(":memory:")
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"no build"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+        )
+        assert result.errors == []
+        assert list(store.conn.execute("SELECT * FROM index_manifest")) == []
+        assert list(store.conn.execute("SELECT chunk_id FROM corpus_chunks"))
+    finally:
+        store.close()
 
 
 class _AbortOnUrlCrawler(_Crawler):
@@ -1591,8 +1706,14 @@ def test_successful_build_writes_manifest_matching_disk(tmp_path: Path) -> None:
 
 
 def test_docs_and_chunks_without_index_builder(tmp_path: Path) -> None:
-    # Легитимный путь «логический манифест без физического индекса»: без embedder/builder
-    # docs, chunks и index_manifest всё равно персистятся (обратная совместимость).
+    """Без embedder/builder персистятся docs, chunks и партиция — но **не** реестр.
+
+    Реестр (``index_manifest``) несёт ``store_path`` и ``index_build_id``, то есть
+    утверждает «партиция зафиксирована сборкой». Без ``commit()`` это было бы ложью
+    (измерено 05.11.2026 на ``demo-absence``), поэтому строка не пишется, а отсутствие
+    сборки называет wiring. Логическая часть корпуса при этом полноценна: документы,
+    чанки и физическая партиция на месте — «нет dense-индекса» ≠ «нет корпуса».
+    """
     store = SqliteStore(":memory:")
     try:
         result = _build(
@@ -1608,7 +1729,7 @@ def test_docs_and_chunks_without_index_builder(tmp_path: Path) -> None:
         manifest = list(store.conn.execute("SELECT product_id FROM index_manifest"))
         assert len(docs) == 1
         assert len(chunks) == 1
-        assert [m["product_id"] for m in manifest] == ["p1"]
+        assert manifest == []
         assert _chunk_count(store, build.entries[0].partition_build_id or "") == 1
     finally:
         store.close()

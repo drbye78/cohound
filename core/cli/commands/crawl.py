@@ -421,10 +421,26 @@ def _execute_crawl_locked(
         cohort_ref=getattr(inputs.run, "cohort_ref", None),
     )
     seeds_d = seeds_digest(seed_config)
+    # §13 (2.4.0): декларированные оси — тот же резолвер и deploy-конфиг, что у ``run``
+    # (иначе crawl адресовал бы другой ``run_id``/сеанс). Резолвятся **до** политики: их
+    # ``crawl_config_digest`` — часть удостоверяемого пространства снятия (I2d), а снятия,
+    # записанные ``crawl run``, обязаны совпасть с тем, что посчитает ``run``.
+    # P5/P7: операторские оси краула (``--document-level``/``--pdf-pipeline``) входят в
+    # дайджест через ``resolve_declared_axes`` — они меняют текст корпуса, значит ``run_id``.
+    deploy_config = load_deploy_config(None)
+    try:
+        declared = resolve_declared_axes(args=args, inputs=inputs, deploy=deploy_config)
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     # План 19 §6.1: политика краула — та же поверхность решений, что у ``plan``/``run``,
     # иначе ``crawl run`` адресовал бы другой ``run_id``. P1 не исполняет политику.
     try:
-        policy_resolution = _crawl_policy_resolution(args, inputs, seed_config)
+        policy_resolution = _crawl_policy_resolution(
+            args,
+            inputs,
+            seed_config,
+            crawl_config_digest=declared.crawl_config_digest,
+        )
     except CrawlPolicyConflict as exc:
         raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc
     except ValueError as exc:
@@ -440,15 +456,6 @@ def _execute_crawl_locked(
         refresh_policy = resolve_refresh_policy(
             cli=getattr(args, "refresh", None), run_config=inputs.run
         )
-    except ValueError as exc:
-        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
-    # §13 (2.4.0): декларированные оси — тот же резолвер и deploy-конфиг, что у ``run``
-    # (иначе crawl адресовал бы другой ``run_id``/сеанс).
-    # P5/P7: операторские оси краула (``--document-level``/``--pdf-pipeline``) входят в
-    # дайджест через ``resolve_declared_axes`` — они меняют текст корпуса, значит ``run_id``.
-    deploy_config = load_deploy_config(None)
-    try:
-        declared = resolve_declared_axes(args=args, inputs=inputs, deploy=deploy_config)
     except ValueError as exc:
         raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     status_dict_version = declared_status_dict_version()

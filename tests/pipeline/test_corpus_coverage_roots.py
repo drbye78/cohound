@@ -302,11 +302,11 @@ def test_cells_absence_as_of_roundtrip() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Сверка политики снятия с объявленной (план 20 §11.2)
+# Сверка удостоверяемого пространства снятия с объявленным (план 20 §11.2, I2d)
 # --------------------------------------------------------------------------- #
 
 
-def test_matching_policy_keeps_capture_completeness() -> None:
+def test_matching_space_digest_keeps_capture_completeness() -> None:
     """Отпечатки известны и равны ⇒ ``complete`` как у снятия, ``policy_matched=True``."""
     coverage = derive_corpus_coverage(
         product_id=PRODUCT,
@@ -314,18 +314,18 @@ def test_matching_policy_keeps_capture_completeness() -> None:
         truncated=False,
         computed_at=TS,
         declared_roots=[ROOT],
-        captures=[_capture(policy_digest="policy-a")],
-        declared_policy_digest="policy-a",
+        captures=[_capture(policy_digest="space-a")],
+        declared_space_digest="space-a",
     )
 
     root = coverage.roots[0]
-    assert root.policy_digest == "policy-a"
+    assert root.policy_digest == "space-a"
     assert root.policy_matched is True
     assert root.complete is True
     assert coverage.complete is True
 
 
-def test_mismatched_policy_forces_incomplete() -> None:
+def test_mismatched_space_digest_forces_incomplete() -> None:
     """Разошедшийся отпечаток — снятие удостоверяет другое пространство ⇒ неполно."""
     coverage = derive_corpus_coverage(
         product_id=PRODUCT,
@@ -333,18 +333,18 @@ def test_mismatched_policy_forces_incomplete() -> None:
         truncated=False,
         computed_at=TS,
         declared_roots=[ROOT],
-        captures=[_capture(policy_digest="policy-old")],
-        declared_policy_digest="policy-new",
+        captures=[_capture(policy_digest="space-old")],
+        declared_space_digest="space-new",
     )
 
     root = coverage.roots[0]
-    assert root.policy_digest == "policy-old"
+    assert root.policy_digest == "space-old"
     assert root.policy_matched is False
     assert root.complete is False
     assert coverage.complete is False
 
 
-def test_missing_policy_digest_is_not_a_mismatch() -> None:
+def test_missing_space_digest_is_not_a_mismatch() -> None:
     """Нет отпечатка у снятия ⇒ ``policy_matched=None``, ``complete`` не тронут (A3)."""
     coverage = derive_corpus_coverage(
         product_id=PRODUCT,
@@ -353,7 +353,7 @@ def test_missing_policy_digest_is_not_a_mismatch() -> None:
         computed_at=TS,
         declared_roots=[ROOT],
         captures=[_capture(policy_digest=None)],
-        declared_policy_digest="policy-new",
+        declared_space_digest="space-new",
     )
 
     root = coverage.roots[0]
@@ -369,12 +369,108 @@ def test_missing_policy_digest_is_not_a_mismatch() -> None:
         truncated=False,
         computed_at=TS,
         declared_roots=[ROOT],
-        captures=[_capture(policy_digest="policy-old")],
-        declared_policy_digest=None,
+        captures=[_capture(policy_digest="space-old")],
+        declared_space_digest=None,
     )
-    assert other.roots[0].policy_digest == "policy-old"
+    assert other.roots[0].policy_digest == "space-old"
     assert other.roots[0].policy_matched is None
     assert other.roots[0].complete is True
+
+
+def _space_resolution(
+    *,
+    now: _dt.datetime,
+    interval_hours: int = 24,
+    crawl_config_digest: str | None = None,
+):
+    """Резолв политики для сверки: один объявленный корень, одно наблюдение.
+
+    Наблюдение фиксировано (01.01 00:00): при ``interval_hours=24`` прогон 01.01 00:30
+    получает ``reuse``, а 03.01 — ``refresh``, то есть решение по часам переворачивается
+    при одном объявленном режиме и одних лимитах.
+    """
+    from core.config.crawl_policy import CrawlPolicyConfig
+    from core.pipeline.crawl_policy import DeclaredRoot, resolve_crawl_policy
+
+    config = CrawlPolicyConfig.model_validate(
+        {
+            "products": {
+                PRODUCT: {"mode": "scheduled", "interval_hours": interval_hours}
+            }
+        }
+    )
+    root = DeclaredRoot(PRODUCT, "docs.test", "/p1")
+    return resolve_crawl_policy(
+        package_policy=config,
+        operator_rows=[],
+        roots=[root],
+        now=now,
+        observed_at={
+            (PRODUCT, "docs.test", "/p1"): _dt.datetime(
+                2026, 1, 1, tzinfo=_dt.UTC
+            )
+        },
+        crawl_config_digest=crawl_config_digest,
+    )
+
+
+def test_capture_attests_after_scheduled_decision_flips() -> None:
+    """Снятие удостоверяет полноту, даже если следующий прогон решил иначе по часам.
+
+    Дефект F3: ``scheduled`` при просроченном корне даёт ``refresh``, при свежем —
+    ``reuse``; решения по часам входят в поверхность решений, но не в пространство.
+    Снятие, сделанное при ``refresh``, обязано удостоверять ``reuse``-прогон.
+    """
+    due = _space_resolution(now=_dt.datetime(2026, 1, 3, tzinfo=_dt.UTC))
+    fresh = _space_resolution(
+        now=_dt.datetime(2026, 1, 1, 0, 30, tzinfo=_dt.UTC)
+    )
+    assert due.decisions[0].decision == "refresh"
+    assert fresh.decisions[0].decision == "reuse"
+    assert due.digest != fresh.digest
+    assert due.space_digest == fresh.space_digest
+
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[_capture(policy_digest=due.space_digest)],
+        declared_space_digest=fresh.space_digest,
+    )
+
+    root = coverage.roots[0]
+    assert root.policy_matched is True
+    assert root.complete is True
+    assert coverage.complete is True
+
+
+def test_capture_does_not_attest_other_crawl_limits() -> None:
+    """Другие лимиты краула — другое пространство, даже при том же режиме."""
+    narrow = _space_resolution(
+        now=_dt.datetime(2026, 1, 2, tzinfo=_dt.UTC),
+        crawl_config_digest="limits-100",
+    )
+    wide = _space_resolution(
+        now=_dt.datetime(2026, 1, 2, tzinfo=_dt.UTC),
+        crawl_config_digest="limits-500",
+    )
+
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[_capture(policy_digest=narrow.space_digest)],
+        declared_space_digest=wide.space_digest,
+    )
+
+    root = coverage.roots[0]
+    assert root.policy_matched is False
+    assert root.complete is False
+    assert coverage.complete is False
 
 
 def test_policy_fields_roundtrip_through_store() -> None:
@@ -393,7 +489,7 @@ def test_policy_fields_roundtrip_through_store() -> None:
                     complete=False,
                     observed_how="live",
                     observed_at="2026-01-01T00:10:00+00:00",
-                    policy_digest="policy-old",
+                    policy_digest="space-old",
                     policy_matched=False,
                 )
             ],
@@ -405,7 +501,7 @@ def test_policy_fields_roundtrip_through_store() -> None:
         assert stored is not None
         assert stored.roots == coverage.roots
         assert stored.roots[0].policy_matched is False
-        assert stored.roots[0].policy_digest == "policy-old"
+        assert stored.roots[0].policy_digest == "space-old"
     finally:
         store.close()
 
