@@ -568,14 +568,26 @@ def _chunker() -> None:
 
 
 def _pdf_extractor() -> None:
-    from core.adapters.extract_document import DoclingDocumentExtractor
+    from core.adapters.extract_document import (
+        DoclingDocumentExtractor,
+        docling_extractor_version,
+    )
+    from core.domain.enums import DocumentLevel
 
-    ex = DoclingDocumentExtractor()
+    # Уровень ``text``, а не дефолтный ``full``: ``full`` при сборке конвертера
+    # проверяет OCR-движок (``_require_working_ocr``), а эта проверка тянет модели OCR
+    # с внешнего хоста (rapidocr → modelscope.cn). Фундаментная проверка не имеет права
+    # зависеть от сети: 05.11.2026 холодный раннер CI упал на ``ReadTimeout`` к
+    # modelscope, хотя проверяется деградация адаптера, а не наличие моделей.
+    # ``text`` идёт через ``NativePdfFormatOption`` — моделей нет вовсе, а деградация
+    # того же пути (``_convert`` → ``error``) проверяется как прежде.
+    ex = DoclingDocumentExtractor(level=DocumentLevel.TEXT)
     # При недоступном docling адаптер деградирует, а не падает.
     res = ex.extract_bytes(b"%PDF-1.4 not really a pdf", "manual.pdf")
     _assert(res.text == "")
     _assert(res.error is not None)
-    _assert(res.extractor_version == DoclingDocumentExtractor.version)
+    # Штамп провенанса — уровневый, а не классовый дефолт ``full``.
+    _assert(res.extractor_version == docling_extractor_version(DocumentLevel.TEXT))
     # Реестр форматов: pdf + office (§3.2).
     _assert(DoclingDocumentExtractor.supports("a.pdf"))
     _assert(DoclingDocumentExtractor.supports("a.docx"))
