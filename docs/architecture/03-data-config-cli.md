@@ -1581,7 +1581,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | I10/I15 | B.1 (resolve_source_url) |
 | Развёртывание/DMZ (07) | A.1 (`edge/`, `config/deploy.yaml`), D.5, E.3 |
 
-**Открытые вопросы к итерации 4:** формат импорт-графа CI — ✅ сделано (`tests/selfcheck.py:970-1012`,
+**Открытые вопросы к итерации 4:** формат импорт-графа CI — ✅ сделано (`tests/selfcheck.py:982-1024`,
 `_import_graph`, вызов `:354`; AST по `core.*`); структура логирования — ✅ сделано
 (`core/util/logging.py:1` — JSON-lines `runs/{run_id}/logs/{phase}.jsonl`, поля 04 §B.1); бэкап/
 восстановление прогона — ✅ сделано (`core/store/backup.py:173` `backup_run` + `:211` `restore_run` —
