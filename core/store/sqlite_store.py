@@ -823,6 +823,27 @@ class SqliteStore:
                 "source_kind": row["source_kind"],
             }
 
+    def iter_cell_evidence_refs(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Ссылки evidence на артефакты корпуса (``source_url``/``doc_version_id``).
+
+        План 20 §F2: дата ячейки — дата цитируемых артефактов. Один запрос на прогон:
+        построчный читатель дал бы запрос на ячейку, а вопрос задаётся ко всем сразу.
+        Резолв (версия → адрес) здесь не выполняется: адрес сравнивается канонической
+        формой (:func:`core.pipeline.digests.snapshot_url_key`), и её второй экземпляр
+        разошёлся бы с снимком корпуса.
+        """
+        sql = (
+            f"SELECT {self._readable('cell_evidence', _EVIDENCE_COLUMNS)}"  # noqa: S608 - проекция из _EVIDENCE_COLUMNS, аргумент — bind
+            " FROM cell_evidence WHERE run_id = ? ORDER BY rowid"
+        )
+        for row in self.conn.execute(sql, (run_id,)):
+            yield {
+                "product_id": str(row["product_id"]),
+                "param_id": str(row["param_id"]),
+                "source_url": row["source_url"],
+                "doc_version_id": row["doc_version_id"],
+            }
+
     def _absence_by_cell(self, run_id: str) -> dict[tuple[str, str], list[dict[str, Any]]]:
         """Группирует absence-записи прогона по ключу ячейки (одним запросом, R5)."""
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}

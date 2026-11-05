@@ -881,6 +881,12 @@ def _corpus_artifact_rows(
     без ``observed_at`` наблюдением не является (отказ/запись до появления колонок), поэтому
     все четыре датных поля остаются ``NULL``. Документ в корпусе — факт, и строка остаётся.
 
+    Член контейнера (``{archive}!/{member}``) наследует наблюдение **контейнера**: его байты
+    получены тем же ответом сервера, что и контейнер, а наблюдение — про байты, а не про URL.
+    Контейнер — префикс адреса до первого ``!/``, поэтому вложенный член наследует от
+    внешнего; нет наблюдения контейнера — поля остаются ``NULL`` (не выдумываются), и это
+    видно счётчиком ``artifacts_without_observation``.
+
     ``root_url`` — корень снятия, на которое ссылается ``capture_id``. Нет наблюдения или
     снятия — ``NULL``: корень не выдумывается.
 
@@ -896,6 +902,9 @@ def _corpus_artifact_rows(
     by_url = {str(row.url): row for row in observing}
     by_key = {snapshot_url_key(str(row.url)): row for row in observing}
     root_by_capture = {capture.capture_id: capture.root_url for capture in captures}
+    #: Разделитель адреса провенанса ``{archive}!/{member}``
+    #: (:func:`core.pipeline.archive_descent.member_url`); вложенность даёт несколько.
+    member_separator = "!/"
 
     rows: dict[str, CorpusArtifactRow] = {}
     for url, doc_version_id in artifacts:
@@ -903,6 +912,12 @@ def _corpus_artifact_rows(
         if key in rows:
             continue
         observed = by_url.get(url) or by_key.get(key)
+        if observed is None and member_separator in url:
+            # Член контейнера: дата — у внешнего контейнера (до первого ``!/``).
+            container_url = url.split(member_separator, 1)[0]
+            observed = by_url.get(container_url) or by_key.get(
+                snapshot_url_key(container_url)
+            )
         if observed is None:
             rows[key] = CorpusArtifactRow(
                 run_id=run_id,

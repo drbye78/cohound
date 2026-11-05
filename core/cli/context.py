@@ -451,6 +451,49 @@ def _previous_cycle_id(args: argparse.Namespace) -> str | None:
     return read_previous_cycle_id(state_db_path(paths.state, Path(package).name), Path(package).name)
 
 
+def observation_dates_by_product(args: argparse.Namespace) -> dict[str, list[str]]:
+    """Даты наблюдений артефактов по продуктам из ``state.db`` — **только чтение**.
+
+    Нужны ``plan`` (план 20 §7 F2): предупреждение «у продукта даты расходятся больше
+    чем на N суток» говорит о **предстоящем** прогоне, поэтому источник — durable-наблюдения
+    ``url_state.observed_at``, а не БД прогона (у ``report`` — она, ``corpus_artifact``).
+    Две фазы — два носителя; это не второй расчёт одной величины.
+
+    Штатное открытие состояния (:func:`_open_state_store`) применяет схему и пишет
+    ``schema_meta``, а ``plan`` обещает «ничего не пишет» (как
+    :func:`_previous_cycle_id`). Поэтому чтение идёт ``mode=ro``. Отсутствующий файл,
+    отсутствующая колонка (``state.db`` прошлой версии) и битый файл — пустая карта:
+    «наблюдений не записано» — честное состояние, а не выдумка и не отказ плана.
+    """
+    import sqlite3
+
+    from core.store.state_sqlite import state_db_path
+
+    package = getattr(args, "package", None)
+    if not package or not Path(package).is_dir():
+        return {}
+    paths = getattr(args, "paths", None)
+    if paths is None:
+        paths = _resolve_paths(args)
+    path = state_db_path(paths.state, Path(package).name)
+    if not path.exists():
+        return {}
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        grouped: dict[str, list[str]] = {}
+        for row in conn.execute(
+            "SELECT product_id, observed_at FROM url_state"
+            " WHERE observed_at IS NOT NULL"
+        ):
+            grouped.setdefault(str(row["product_id"]), []).append(str(row["observed_at"]))
+        return grouped
+    except sqlite3.DatabaseError:
+        return {}
+    finally:
+        conn.close()
+
+
 def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any], list[Any]]:
     """Читает цикл прогона: ``(манифест, ячейки, документы корпуса)`` для ``diff``.
 
@@ -566,6 +609,11 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # Числа публикуются и строкой-заметкой (см. ``commands/report.py``), путь нужен,
         # чтобы оператор знал, куда смотреть.
         "support_quality": _path(getattr(artifacts, "support_quality", None)),
+        # План 20 §7 F2: даты актуальности артефактов корпуса — файл и таблица по ячейкам.
+        # ``cell_freshness`` = ``None`` — датированных ячеек нет (пустой CSV не создаётся);
+        # отсутствие видно числом ``cells_without_dated_evidence`` в ``corpus_freshness``.
+        "corpus_freshness": _path(getattr(artifacts, "corpus_freshness", None)),
+        "cell_freshness": _path(getattr(artifacts, "cell_freshness", None)),
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []
@@ -3056,6 +3104,30 @@ def _print_run_report(payload: dict[str, Any]) -> None:
             "продолжите после записи решения: hound gate --db <db> --gate <G1|G2> --actor <вы>"
         )
     sys.stdout.write("\n".join(lines) + "\n")
+
+
+def add_freshness_warn_days_flag(parser: argparse.ArgumentParser) -> None:
+    """Флаг ``--freshness-warn-days`` — порог **отображения** разброса дат (план 20 §7 F2).
+
+    Объявлен один раз и регистрируется и ``plan``, и ``run``: ``plan``-only флагов в
+    проекте быть не должно (иначе план принимал бы вход, которого прогон не знает). Это
+    **не** ось измерения: значение не входит ни в ``EXECUTION_CONTRACT_FIELDS``, ни в
+    ``run_id``, ни в дайджесты (оно не регистрируется ни в одном инвентаре осей) и ничего
+    не блокирует — печатается вместе с числом разброса. Дефолт —
+    :data:`core.pipeline.corpus_freshness.FRESHNESS_WARN_DAYS_DEFAULT` (7 суток: такт
+    публикационного обновления, AGENTS §1.1).
+    """
+    from core.pipeline.corpus_freshness import FRESHNESS_WARN_DAYS_DEFAULT
+
+    parser.add_argument(
+        "--freshness-warn-days",
+        type=float,
+        default=FRESHNESS_WARN_DAYS_DEFAULT,
+        help=(
+            "порог отображения: предупредить, если наблюдения продукта разнесены больше "
+            f"чем на N суток (дефолт {FRESHNESS_WARN_DAYS_DEFAULT:g}); на run_id не влияет"
+        ),
+    )
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:

@@ -271,7 +271,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 `execution_change: embed_device`.
 
 `RunManifest` (`core/domain/models.py:1528-1740`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2507-2510`) сопоставляет имя
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2528-2531`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS` (`:2490`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».

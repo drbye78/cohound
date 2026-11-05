@@ -180,3 +180,57 @@ def test_empty_corpus_is_zero_rows_and_no_error(store: SqliteStore) -> None:
     # Идемпотентно: повторная пустая замена — тот же факт.
     store.replace_corpus_artifacts(RUN_ID, "p1", [])
     assert list(store.iter_corpus_artifacts(RUN_ID, "p1")) == []
+
+def test_evidence_refs_read_in_one_query(store: SqliteStore) -> None:
+    """Ссылки evidence на артефакты — одним запросом на прогон (план 20 §7 F2).
+
+    Отчёт сопоставляет ``doc_version_id``/``source_url`` evidence со строками
+    ``corpus_artifact``; построчный читатель дал бы запрос на ячейку. Здесь пинится
+    контракт читателя: ровно четыре поля, порядок вставки, отсутствующее значение —
+    ``None``, а не ``''``.
+    """
+    from core.domain.enums import EvidenceType, SourceKind
+    from core.domain.models import CellEvidence
+
+    first = CellEvidence(
+        evidence_id="ev-1",
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param_a",
+        source_kind=SourceKind.DOCUMENTATION,
+        evidence_type=EvidenceType.DIRECT,
+        source_id="p1:dv_1:0",
+        source_url="https://docs.test/p1/a",
+        citation_quote="цитата",
+        content_hash="hash",
+        doc_version_id="dv_1",
+    )
+    second = CellEvidence(
+        evidence_id="ev-2",
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param_a",
+        source_kind=SourceKind.DOCUMENTATION,
+        evidence_type=EvidenceType.DIRECT,
+        source_id="p1:dv_2:1",
+        source_url=None,
+        citation_quote="цитата",
+        content_hash="hash",
+    )
+    store.add_evidence(first)
+    store.add_evidence(second)
+
+    assert list(store.iter_cell_evidence_refs(RUN_ID)) == [
+        {
+            "product_id": "p1",
+            "param_id": "param_a",
+            "source_url": "https://docs.test/p1/a",
+            "doc_version_id": "dv_1",
+        },
+        {
+            "product_id": "p1",
+            "param_id": "param_a",
+            "source_url": None,
+            "doc_version_id": None,
+        },
+    ]

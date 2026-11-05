@@ -49,6 +49,7 @@ from core.cli.context import (
     _run_report_payload,
     _session_snapshot,
     _snapshot_run_inputs,
+    add_freshness_warn_days_flag,
     resolve_content_cache,
 )
 from core.cli.errors import (
@@ -97,6 +98,10 @@ from core.domain import (
 )
 from core.pipeline import GATE_PHASES, PHASES, Ports
 from core.pipeline.compute import bundle_for_run
+from core.pipeline.corpus_freshness import (
+    FRESHNESS_WARN_DAYS_DEFAULT,
+    document_observation_freshness,
+)
 from core.pipeline.crawl_frontier import resolve_pdf_device
 from core.pipeline.crawl_policy import CrawlPolicyConflict
 from core.pipeline.crawl_session import (
@@ -1591,6 +1596,28 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
             payload["crawl_truncation_anomalies"] = list(
                 artifacts_obj.crawl_truncation_anomalies
             )
+            # План 20 §7 F2: разброс дат **вошедшего** корпуса — числом, и предупреждение
+            # по порогу отображения. Источник — документ отчёта (``corpus_freshness``), а
+            # не ``state.db``: прогон сдвинул наблюдения, и прежний разброс по ним уже не
+            # восстановить. Ни вердиктов, ни ``run_id`` это не касается.
+            freshness_document = getattr(artifacts_obj, "corpus_freshness_summary", None)
+            if freshness_document:
+                freshness_block = document_observation_freshness(
+                    freshness_document,
+                    warn_days=float(
+                        getattr(
+                            args,
+                            "freshness_warn_days",
+                            FRESHNESS_WARN_DAYS_DEFAULT,
+                        )
+                    ),
+                )
+                payload["observation_freshness"] = freshness_block
+                if freshness_block["warnings"]:
+                    payload["warnings"] = [
+                        *(payload.get("warnings") or []),
+                        *freshness_block["warnings"],
+                    ]
         if truncation:
             # N4: усечение видно в run/--json payload (а не только в провенансе сеанса).
             payload["crawl_truncation"] = truncation
@@ -1753,6 +1780,12 @@ def configure(sub: Any) -> None:
         help="активный LLM-слот оценщика (override COHOUND_LLM_SLOT/deploy.llm.slot)",
     )
     _add_llm_model_flag(p_run)
+    # План 20 §7 F2: тот же порог **отображения**, что у ``plan`` (общий регистратор:
+    # план не принимает флагов, которых прогон не знает). Здесь он применяется к датам
+    # **вошедшего** корпуса (документ ``corpus_freshness`` отчёта): к концу прогона
+    # ``state.db`` уже сдвинут этим прогоном, и «разброс до измерения» по нему не
+    # восстановить.
+    add_freshness_warn_days_flag(p_run)
     p_run.add_argument(
         "--serp-rounds",
         dest="serp_rounds",

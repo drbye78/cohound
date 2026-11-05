@@ -36,6 +36,11 @@
 приходят из ``load_inputs``. Флаг ``--dry-run`` удалён: он ничего не менял (``plan`` и так
 ничего не пишет) и намекал на существование «не-dry» режима.
 
+``--freshness-warn-days`` — **параметр отображения**, а не ось измерения: он печатает
+разброс дат наблюдений по продуктам и предупреждает, если он больше N суток (план 20 §7
+F2). Ни ``run_id``, ни дайджесты, ни решения гейтов от него не зависят, и прогон он не
+блокирует: возраст публикуется числом, а решает читатель (§6).
+
 Нейтрален к предметной категории (§1.3).
 """
 
@@ -56,6 +61,8 @@ from core.cli.context import (
     _previous_cycle_id,
     _print_json,
     _print_plan,
+    add_freshness_warn_days_flag,
+    observation_dates_by_product,
 )
 from core.cli.errors import EXIT_OK, EXIT_USAGE, CliError, LintFailure
 from core.cli.execution_axes import (
@@ -73,6 +80,11 @@ from core.cli.execution_axes import (
 )
 from core.cli.wiring import llm_env_notices, serp_env_notices
 from core.config.deploy import load_deploy_config, profile_notices, shard_notices
+from core.pipeline.corpus_freshness import (
+    FRESHNESS_WARN_DAYS_DEFAULT,
+    freshness_lines,
+    observation_freshness,
+)
 from core.pipeline.crawl_policy import CrawlPolicyConflict
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
@@ -359,6 +371,19 @@ def run(args: argparse.Namespace) -> int:
                 refresh_policy=refresh_policy.value,
             )
         )
+    # План 20 §7 F2: разброс дат наблюдений по продуктам — **числом**, и предупреждение,
+    # если он больше порога отображения. Источник — ``state.db`` (``url_state.observed_at``),
+    # а не БД прогона: план исполняется до прогона. Порог — параметр отображения: он не
+    # входит в ``EXECUTION_CONTRACT_FIELDS``/``run_id``/дайджесты и ничего не блокирует
+    # (§6: возраст публикуется, а не сравнивается с потолком).
+    observation_freshness_block = observation_freshness(
+        observation_dates_by_product(args),
+        warn_days=float(
+            getattr(args, "freshness_warn_days", FRESHNESS_WARN_DAYS_DEFAULT)
+        ),
+    )
+    payload["observation_freshness"] = observation_freshness_block
+    notices.extend(observation_freshness_block["warnings"])
     if notices:
         payload["warnings"] = list(notices)
     if args.json:
@@ -366,6 +391,8 @@ def run(args: argparse.Namespace) -> int:
     else:
         _print_plan(payload)
         for line in _axis_lines(payload):
+            sys.stdout.write(line + "\n")
+        for line in freshness_lines(observation_freshness_block):
             sys.stdout.write(line + "\n")
     return EXIT_OK
 
@@ -392,6 +419,10 @@ def configure(sub: Any) -> None:
     # ``CONTRACT_FLAGS`` (не второй список), паритет с ``run``/``crawl`` — в тесте,
     # читающем собранные парсеры.
     add_contract_flags(p_plan)
+    # План 20 §7 F2: порог **отображения** разброса дат наблюдений (дней; объявленный
+    # дефолт — :data:`core.pipeline.corpus_freshness.FRESHNESS_WARN_DAYS_DEFAULT` = 7).
+    # Регистратор общий с ``run``: план не принимает флагов, которых не знает прогон.
+    add_freshness_warn_days_flag(p_plan)
     _add_common(p_plan)
     _add_llm_slot_flag(p_plan)
     _add_llm_model_flag(p_plan)

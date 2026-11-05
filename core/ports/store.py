@@ -208,6 +208,17 @@ class StorePort(Protocol):
         ``evidence_type``/``source_kind``. Порядок — порядок вставки (детерминизм).
         """
 
+    def iter_cell_evidence_refs(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Ссылки evidence **на артефакты корпуса** — одним запросом (план 20 §F2).
+
+        Запись — словарь ``product_id``/``param_id``/``source_url``/``doc_version_id``.
+        Один запрос на прогон: дата ячейки — это дата цитируемых артефактов, и вопрос
+        задаётся ко всем ячейкам сразу (построчный читатель дал бы запрос на ячейку).
+        Пустое значение поля не подменяется: ``None`` — «не записано», а резолв
+        (версия → адрес) делает вызывающий, потому что второй формулы адреса быть не
+        должно (:func:`core.pipeline.digests.snapshot_url_key`).
+        """
+
     def log_search(self, entry: SearchLogEntry) -> None: ...
 
     def save_exhaustion(self, pe: ProtocolExhaustion) -> None: ...

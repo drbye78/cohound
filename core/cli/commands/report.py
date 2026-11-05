@@ -159,6 +159,12 @@ def run(args: argparse.Namespace) -> int:
         # машинном выводе, а не только в CSV: вопрос «сколько вердиктов взято из прошлого
         # цикла» задаётся к отчёту, и ответ не должен требовать открытия файла.
         "cell_origin": list(getattr(artifacts, "cell_origins", None) or []),
+        # План 20 §7 F2: даты актуальности артефактов корпуса — **тот же** словарь, что
+        # ``outputs/corpus_freshness.yaml`` (один сборщик): опорное наблюдение прогона,
+        # ``stale_roots`` и распределение возраста по продукту. Вердиктов не касается.
+        "corpus_freshness": (
+            getattr(artifacts, "corpus_freshness_summary", None) or None
+        ),
         # Путь к таблице на диске: строки уже в payload, но артефакт без объявленного
         # пути — та же невидимость, что и его отсутствие. ``None`` — строк нет (файл
         # не создаётся: пустая таблица читалась бы как «продуктов нет»).
@@ -199,6 +205,22 @@ def run(args: argparse.Namespace) -> int:
                 f"status={row.get('status')} scope={row.get('scope')} "
                 f"docs={row.get('docs_total')} cells={row.get('cells_total')}"
                 f"/{row.get('cells_pending')} pending\n"
+            )
+        # План 20 §7 F2: даты — числом, а не только файлом, который надо открыть.
+        # ``corpus_as_of: null`` печатается как «дат не записано»: это факт, а не «свежо».
+        for product_id, block in sorted(
+            (payload.get("corpus_freshness") or {}).get("products", {}).items()
+        ):
+            age = block.get("corpus_age") or {}
+            as_of = block.get("corpus_as_of") or {}
+            sys.stdout.write(
+                f"freshness: {product_id} as_of={as_of.get('from') or '—'}"
+                f"…{as_of.get('to') or '—'} artifacts={age.get('artifacts')} "
+                f"median={age.get('median_days')} p90={age.get('p90_days')} "
+                f"max={age.get('max_days')} "
+                f"stale_roots={len(block.get('stale_roots') or ())} "
+                f"cells={block.get('cells')}"
+                f"/{block.get('cells_without_dated_evidence')} without dated evidence\n"
             )
         for note in notes:
             sys.stdout.write(f"note: {note}\n")

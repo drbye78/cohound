@@ -15,7 +15,10 @@
 * ``outputs/publishability.yaml`` — профиль публикуемости (A1/§6) вместе с объявленным
   исключением стенда RnD (§10): ``rnd_endpoint``, хосты endpoint'ов, замечания;
 * ``outputs/measurement_uncertainty.yaml`` — полоса неопределённости вердиктов (P6c) с
-  провенансом и машинным ограничением ранжирования.
+  провенансом и машинным ограничением ранжирования;
+* ``outputs/corpus_freshness.yaml`` — даты актуальности артефактов корпуса (план 20 §7 F2):
+  опорное наблюдение прогона, ``corpus_as_of``/``stale_roots`` и распределение возраста по
+  продукту (медиана/p90/max); ``outputs/cell_freshness.csv`` — ``evidence_as_of`` ячеек.
 
 Инварианты:
 
@@ -84,6 +87,11 @@ from core.pipeline.compute import (
     ScoreBundle,
     assert_publishable,
     publish_warnings,
+)
+from core.pipeline.corpus_freshness import (
+    collect_corpus_freshness,
+    write_cell_freshness_rows,
+    write_corpus_freshness_artifact,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
@@ -344,6 +352,19 @@ class Artifacts:
     support_quality: Path | None = None
     #: Те же числа свёрнутыми — чтобы CLI назвал факт строкой, даже когда файла нет.
     support_quality_summary: dict[str, Any] | None = None
+    #: ``outputs/corpus_freshness.yaml`` — даты актуальности артефактов корпуса (план 20
+    #: §7 F2): опорное наблюдение прогона, ``corpus_as_of``/``stale_roots`` по продукту,
+    #: распределение возраста (медиана/p90/max) и счётчики «дат не записано» —
+    #: ``cells``/``cells_without_dated_evidence`` парой (ноль без знаменателя не отличим
+    #: от «ячеек не было»). Файл пишется всегда: ``corpus_as_of: null`` — факт, а не
+    #: отсутствие артефакта.
+    corpus_freshness: Path | None = None
+    #: ``outputs/cell_freshness.csv`` — по строке на ячейку **с** датой (``evidence_as_of``
+    #: из цитируемых артефактов). ``None`` — датированных ячеек нет (файл не создаётся).
+    cell_freshness: Path | None = None
+    #: Тот же документ ``corpus_freshness.yaml`` — для ``--json`` payload: файл и машинный
+    #: вывод собираются одним расчётом и разойтись не могут.
+    corpus_freshness_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -3273,6 +3294,13 @@ def write_reports(
     источник тот же (``crawl_session_items``); файл не measurement, его сбой отчёт не
     роняет (``Artifacts.artifacts_gap is None``).
 
+    Пишет также ``outputs/corpus_freshness.yaml`` и (при датированных ячейках)
+    ``outputs/cell_freshness.csv`` — даты актуальности артефактов корпуса (план 20 §7 F2):
+    опорное наблюдение прогона, ``corpus_as_of``/``stale_roots`` и распределение возраста
+    по продукту, ``evidence_as_of`` ячеек. Источник — durable-проекция ``corpus_artifact``
+    и ссылки ``cell_evidence``, а не ``state.db``. Вердикты не меняются: дата здесь —
+    провенанс (§2), датированное отсутствие — F3.
+
     G4/I11: вызывается :func:`core.pipeline.compute.assert_publishable` (предупреждение);
     при полностью отсутствующем Coverage (``coverage.defined is False`` либо пустой
     знаменатель) battle card **не эмитится** (``Artifacts.battle_card is None``).
@@ -3424,6 +3452,21 @@ def write_reports(
         support_payload = None
         support_path = None
 
+    # План 20 §7 F2: даты актуальности артефактов корпуса — из durable-проекции прогона
+    # (``corpus_artifact``) и ссылок ``cell_evidence``. Отчёт не открывает ``state.db``:
+    # у пост-хок ``hound report`` его нет. Один сборщик пишет YAML и отдаёт словарь для
+    # ``--json``: файл и машинный вывод не могут разойтись (конвенция манифеста).
+    # Вердикты не меняются: это чтение провенанса, а не условие статуса (это F3).
+    freshness = collect_corpus_freshness(
+        store=store, run_id=run_id, cells=cell_list, manifest=manifest
+    )
+    corpus_freshness_path = write_corpus_freshness_artifact(
+        freshness.document, outputs_dir / "corpus_freshness.yaml"
+    )
+    cell_freshness_path = write_cell_freshness_rows(
+        freshness.cell_rows, outputs_dir / "cell_freshness.csv"
+    )
+
     nda_questions = render_nda_questions(
         cell_list,
         outputs_dir / "nda_questions.csv",
@@ -3471,6 +3514,9 @@ def write_reports(
         partial_docs_summary=partial_summary,
         support_quality=support_path,
         support_quality_summary=support_payload,
+        corpus_freshness=corpus_freshness_path,
+        cell_freshness=cell_freshness_path,
+        corpus_freshness_summary=freshness.document,
         publishability=publishability_path,
         measurement_uncertainty=uncertainty_path,
         preliminary_findings=preliminary,

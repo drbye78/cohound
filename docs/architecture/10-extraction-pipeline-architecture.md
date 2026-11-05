@@ -347,7 +347,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `crawl_sessions.owner`/`heartbeat_at` в DDL
 > (`core/store/sqlite.py:328-329`), `core/pipeline/liveness.py` (свидетельство живости,
 > recovery-on-open, `interrupt_session`), heartbeat в корпусе
-> (`core/pipeline/corpus.py:1533`), `interrupted` в словаре (`core/domain/enums.py:721`).
+> (`core/pipeline/corpus.py:1548`), `interrupted` в словаре (`core/domain/enums.py:721`).
 > Остаток решения, названный К-4: это **не** lease — переназначения элемента другому
 > исполнителю нет, конфликт двух нод только виден (`owner`).
 
@@ -814,7 +814,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 > ✅ **A1 сделан** (2026-10-28): зеркала нет. `TantivyLexicalIndex` не держит записей —
 > тело чанка читается из store одним батчем на поисковое окно
 > (`core/adapters/lexical_tantivy.py:624-668`, `StorePort.get_chunks` —
-> `core/ports/store.py:554`, реализация `core/store/sqlite_store.py:2753`), засев
+> `core/ports/store.py:694`, реализация `core/store/sqlite_store.py:3071`), засев
 > потоковый (`index(chunks: Iterable)`, `:409`), `product_id` объявлен `stored`
 > (ось скоупа I17 читается из документа, а не из гидрированной записи). Приёмка —
 > `tests/adapters/test_lexical_tantivy.py`: `weakref`'ы всех засеянных записей мертвы
@@ -986,7 +986,7 @@ B1 включает B2 (без идентичности нет паритета)
 > (`core/config/domain_profiles.py:100`; цепочка app < run < site в
 > `core/pipeline/crawl_frontier.py:672-680`), `document_level` входит в `CrawlLimits.as_dict`
 > (`:379`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
-> ключ профиля плюс `__default__` (`core/pipeline/report.py:688-693`), не по скаляру.
+> ключ профиля плюс `__default__` (`core/pipeline/report.py:707-712`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
 > (`core/pipeline/corpus.py:2205,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.

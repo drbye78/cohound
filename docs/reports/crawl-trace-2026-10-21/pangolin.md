@@ -175,7 +175,7 @@ https://sbertech.ru/strapi/api/media/PSQ_8_2_0_exploitation_1988c54bf3.zip
 возврата требуют условия, которое статически не воспроизводится: блэклист ложен, а
 `seed_truncated` требует `frontier.fetched >= 10` на момент `add_seed`, тогда как
 единственные in-scope-retained элементы того момента (`pangolin.sbertech.ru`, 60 шт.)
-уже заряджены первым корнем через `resume_counted` (F13, `core/pipeline/corpus.py:3046`).
+уже заряджены первым корнем через `resume_counted` (F13, `core/pipeline/corpus.py:3061`).
 
 **Причина не установлена.** Лог прогона утрачен при перезагрузке хоста (23:22 MSK,
 `/tmp` очищен), а `errors` фазы не персистится. Что бы это закрыло: строка ошибки
