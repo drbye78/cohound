@@ -92,7 +92,7 @@
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
 URL сейчас выражается не пропуском фазы, а zero-source причиной продукта (`ZERO_SOURCE_NO_URLS_ENTRY`,
-`core/pipeline/corpus_coverage.py:184`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
+`core/pipeline/corpus_coverage.py:398`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
 оставлены в словаре как объявленные, но выдавать их за работающие механизмы нельзя.
 
 **Оси, которые входят в `run_id` (и почему).** `DocumentLevel`, `PdfPipeline`, `PdfDevice`,
@@ -146,7 +146,7 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 полного протокола исчерпания (`corpus`+`serp`+`registry`+`inheritance`); это был **рецепт
 реализации**, а не инвариант: он делал честное `❓` недостижимым для параметра, который нельзя
 доказать поиском, и ничего не говорил о том, **почему** отсутствие не установлено. Действующее
-требование (вариант 2, `core/domain/invariants.py:74`): `reviewed_by` **ИЛИ**
+требование (вариант 2, `core/domain/invariants.py:86`): `reviewed_by` **ИЛИ**
 (`evidence_scope.denial_strength ∈ {unobserved, not_stated}` **и** непустая `reason`).
 `EXHAUSTION_CONTOURS` остался справочником того, что вообще наблюдается, а
 `REQUIRED_EXHAUSTION_CONTOURS` — **deprecated-алиас**: параметр `required` игнорируется.

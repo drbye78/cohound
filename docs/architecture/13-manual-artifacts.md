@@ -38,10 +38,10 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:110-119`).
 - Любой такой элемент **по построению** делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2441-2614`, `core/pipeline/corpus_coverage.py:119-131`, условие 2).
+  (`core/domain/models.py:2527-2618`, `core/pipeline/corpus_coverage.py:216-218`, условие 2).
 - Неполное покрытие ⇒ `❌` с `absence_rule=explicit` требует человеческой подписи
   `scope_attested_by` (I2c). Докстринг называет это прямо: **«человеческий escape hatch»**
-  (`core/pipeline/corpus_coverage.py:104-107`).
+  (`core/pipeline/corpus_coverage.py:268-271`).
 
 То есть сегодня единственный способ разблокировать `❌` — человек подписывает, что
 «ненаблюдённая часть сайта могла бы содержать параметр». Это честно, но это **слабее**
@@ -87,8 +87,8 @@ RawPage (core/ports/types.py:91-121)
 
 **Чего нельзя делать: переиспользовать `source_kind=manual`.** Оно уже занято и означает
 другое — провенанс **вердикта** человека, а не байтов (`core/domain/enums.py:20-26`,
-I22-исключение в `core/domain/invariants.py:259-272`). Более того, `MANUAL` **вне**
-`_CORPUS_SOURCE_KINDS` (`invariants.py:54-58`), поэтому для него I19 не требует
+I22-исключение в `core/domain/invariants.py:510-512`). Более того, `MANUAL` **вне**
+`_CORPUS_SOURCE_KINDS` (`invariants.py:76-78`), поэтому для него I19 не требует
 `content_hash`. Совместить два смысла в одном поле значило бы дать ручному байту
 opportunity пройти мимо хеширования. Поэтому признак происхождения байтов — отдельная
 колонка (§3.3), а `source_kind` не трогается.
@@ -307,7 +307,7 @@ gaps:
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
    `core/pipeline/corpus.py:3415`; `origin` — `core/store/sqlite.py:118`;
-   `resolved_manually` — `core/domain/models.py:2207` + `core/pipeline/corpus_coverage.py:118`;
+   `resolved_manually` — `core/domain/models.py:2579` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:345`).
    As-built и расхождения — §10.
 3. ⬜ не сделано — `parent_run_id` прогона-продолжения в коде отсутствует

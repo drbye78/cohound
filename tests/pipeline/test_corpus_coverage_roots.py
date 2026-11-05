@@ -188,6 +188,183 @@ def test_superseded_capture_is_not_chosen() -> None:
     assert only_old.complete is False
 
 
+def test_adopted_capture_does_not_shadow_a_complete_capture() -> None:
+    """Замер 06.11.2026: более новое ``adopted``-снятие не отменяет полного живого.
+
+    Дефект: ``_capture_rank`` брал **самое новое** неотозванное снятие независимо от
+    ``complete``, поэтому принятый артефакт от 05.11 (``complete=False``,
+    ``observed_how=adopted``) вытеснял живой обход корня от 01.11, и ``bounded ❌``
+    молча деградировал в ``❓/absence_undated``. По I2d старое датированное
+    ``complete=1``-снятие — законный носитель: решает опубликованная дата, а не
+    свежесть записи (порога «устарело» план 20 не вводит, A3).
+    """
+    live = _capture(
+        capture_id="cap-live",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-01T00:00:00+00:00",
+        finished_at="2026-11-01T00:10:00+00:00",
+        policy_digest="space-a",
+    )
+    adopted = _capture(
+        capture_id="cap-adopted",
+        complete=False,
+        observed_how="adopted",
+        started_at="2026-11-05T00:00:00+00:00",
+        finished_at="2026-11-05T00:00:00+00:00",
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[live, adopted],
+        declared_space_digest="space-a",
+    )
+
+    root = coverage.roots[0]
+    assert root.capture_id == "cap-live", "удостоверяет полное снятие, а не принятое"
+    assert root.complete is True
+    assert root.observed_how == "live"
+    assert root.policy_matched is True
+    assert root.observed_at == "2026-11-01T00:10:00+00:00", "дата — удостоверяющего"
+    assert coverage.complete is True
+
+
+def test_truncated_later_capture_does_not_shadow_a_complete_capture() -> None:
+    """Усечённый обход от 05.11 не вытесняет полный от 01.11: дата — полного.
+
+    Оба снятия живые; различает их только ``complete``. Носитель ``bounded ❌`` — это
+    исчерпанный обход, и более поздний неполный проход корня не делает исчерпание
+    несостоявшимся: он лишь добавляет факт «корень трогали позже».
+    """
+    complete = _capture(
+        capture_id="cap-complete",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-01T00:00:00+00:00",
+        finished_at="2026-11-01T00:10:00+00:00",
+    )
+    truncated = _capture(
+        capture_id="cap-truncated",
+        complete=False,
+        observed_how="live",
+        started_at="2026-11-05T00:00:00+00:00",
+        finished_at="2026-11-05T00:20:00+00:00",
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[complete, truncated],
+    )
+
+    root = coverage.roots[0]
+    assert root.capture_id == "cap-complete"
+    assert root.complete is True
+    assert root.observed_at == "2026-11-01T00:10:00+00:00"
+    assert coverage.complete is True
+
+
+def test_newest_incomplete_capture_still_names_the_failure() -> None:
+    """Полного снятия нет — выбирается новейшее неполное: причина неполноты свежая.
+
+    Приоритет ``complete`` не превращается в «любое старое лучше нового»: среди
+    неполных побеждает новейшее, поэтому оператор видит последний факт (усечённый
+    обход), а не самое раннее касание (принятый артефакт).
+    """
+    adopted = _capture(
+        capture_id="cap-adopted",
+        complete=False,
+        observed_how="adopted",
+        started_at="2026-11-03T00:00:00+00:00",
+        finished_at="2026-11-03T00:00:00+00:00",
+    )
+    truncated = _capture(
+        capture_id="cap-truncated",
+        complete=False,
+        observed_how="live",
+        started_at="2026-11-05T00:00:00+00:00",
+        finished_at="2026-11-05T00:20:00+00:00",
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[truncated, adopted],
+    )
+
+    root = coverage.roots[0]
+    assert root.capture_id == "cap-truncated"
+    assert root.complete is False, "неполнота не выдаётся за удостоверение"
+    assert root.observed_how == "live"
+    assert root.observed_at == "2026-11-05T00:20:00+00:00"
+    assert coverage.complete is False
+
+
+def test_bounded_absence_date_is_the_attesting_capture_not_the_last_touch() -> None:
+    """I2d: ``absence_as_of`` у ``bounded`` — дата **удостоверяющего** снятия.
+
+    Композиция проверки и выбора: корень удостоверён полным снятием 01.11, позже на
+    него легло ``adopted`` 05.11. ``check_absence_dated`` обязан принять первое и назвать
+    его дату; если бы выбиралось последнее касание, носителя не было бы вовсе —
+    ``adopted`` исчерпание не удостоверяет.
+    """
+    live = _capture(
+        capture_id="cap-live",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-01T00:00:00+00:00",
+        finished_at="2026-11-01T00:10:00+00:00",
+    )
+    adopted = _capture(
+        capture_id="cap-adopted",
+        complete=False,
+        observed_how="adopted",
+        started_at="2026-11-05T00:00:00+00:00",
+        finished_at="2026-11-05T00:00:00+00:00",
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[live, adopted],
+    )
+
+    ok, as_of, missing = check_absence_dated(
+        denial_strength="bounded",
+        cited_observations=[],
+        roots=coverage.roots,
+    )
+    assert ok is True, missing
+    assert missing == []
+    assert as_of == "2026-11-01T00:10:00+00:00", "дата носителя, а не последнего касания"
+
+    # Контроль: если бы побеждало последнее касание, носителя не было бы вовсе.
+    only_adopted = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[adopted],
+    )
+    ok2, as_of2, missing2 = check_absence_dated(
+        denial_strength="bounded",
+        cited_observations=[],
+        roots=only_adopted.roots,
+    )
+    assert ok2 is False and as_of2 is None
+    assert any("complete=1" in item for item in missing2), missing2
+
+
 def test_root_address_forms_are_one_root() -> None:
     """Percent-encoded и декодированная формы — **один** корень (форма записи не решает)."""
     encoded = "https://docs.test/p1/%D0%9B%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F.pdf"
@@ -375,6 +552,141 @@ def test_missing_space_digest_is_not_a_mismatch() -> None:
     assert other.roots[0].policy_digest == "space-old"
     assert other.roots[0].policy_matched is None
     assert other.roots[0].complete is True
+
+
+def test_matching_space_capture_wins_over_newer_other_space_capture() -> None:
+    """Полное снятие из объявленного пространства старше нового из другого — замер.
+
+    Дефект 06.11.2026: ранг предпочитал ``complete``, но не пространство. Два **полных**
+    снятия (``S1`` от 01.11, ``S2`` от 05.11) при объявленном ``S1``: побеждало новое
+    ``S2``, сверка давала ``policy_matched=False`` и обнуляла ``complete`` — ``bounded ❌``
+    снова терял датированного носителя, хотя обход ``S1`` состоялся и датирован.
+    """
+    s1 = _capture(
+        capture_id="cap-s1",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-01T00:00:00+00:00",
+        finished_at="2026-11-01T00:10:00+00:00",
+        policy_digest="space-s1",
+    )
+    s2 = _capture(
+        capture_id="cap-s2",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-05T00:00:00+00:00",
+        finished_at="2026-11-05T00:20:00+00:00",
+        policy_digest="space-s2",
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[s2, s1],
+        declared_space_digest="space-s1",
+    )
+
+    root = coverage.roots[0]
+    assert root.capture_id == "cap-s1", "удостоверяет снятие объявленного пространства"
+    assert root.policy_matched is True
+    assert root.complete is True
+    assert root.observed_at == "2026-11-01T00:10:00+00:00", "дата носителя"
+    assert coverage.complete is True
+
+    ok, as_of, missing = check_absence_dated(
+        denial_strength="bounded",
+        cited_observations=[],
+        roots=coverage.roots,
+    )
+    assert ok is True, missing
+    assert missing == []
+    assert as_of == "2026-11-01T00:10:00+00:00"
+
+
+def test_only_mismatched_complete_capture_does_not_attest() -> None:
+    """Полное снятие из другого пространства — не носитель, и причина названа.
+
+    Без совпадающего удостоверения носителя нет вовсе. Но это не «снятия не было»:
+    блок корня называет снятие и расхождение (``policy_matched=False``), а проверка I2d
+    говорит о другом пространстве — иначе оператор искал бы пропавшую запись вместо
+    недостающего обхода.
+    """
+    other = _capture(
+        capture_id="cap-s2",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-05T00:00:00+00:00",
+        finished_at="2026-11-05T00:20:00+00:00",
+        policy_digest="space-s2",
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[other],
+        declared_space_digest="space-s1",
+    )
+
+    root = coverage.roots[0]
+    assert root.capture_id == "cap-s2", "снятие есть — оно названо, а не потеряно"
+    assert root.policy_digest == "space-s2"
+    assert root.policy_matched is False
+    assert root.complete is False
+    assert coverage.complete is False
+
+    ok, as_of, missing = check_absence_dated(
+        denial_strength="bounded",
+        cited_observations=[],
+        roots=coverage.roots,
+    )
+    assert ok is False and as_of is None
+    assert any("другом пространстве" in item for item in missing), missing
+    assert not any("нет снятия" in item for item in missing), missing
+
+
+def test_unknown_space_digest_still_attests() -> None:
+    """``policy_digest=None`` — «неизвестно»: не блокирует даже против нового чужого (A3).
+
+    Отсутствие отпечатка — отсутствие данных, а не факт несовпадения. Поэтому снятие без
+    отпечатка годится в носители и тогда, когда рядом лежит **более новое** полное снятие
+    из другого пространства: порогом оно не становится.
+    """
+    unknown = _capture(
+        capture_id="cap-unknown",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-01T00:00:00+00:00",
+        finished_at="2026-11-01T00:10:00+00:00",
+        policy_digest=None,
+    )
+    other = _capture(
+        capture_id="cap-s2",
+        complete=True,
+        observed_how="live",
+        started_at="2026-11-05T00:00:00+00:00",
+        finished_at="2026-11-05T00:20:00+00:00",
+        policy_digest="space-s2",
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[other, unknown],
+        declared_space_digest="space-s1",
+    )
+
+    root = coverage.roots[0]
+    assert root.capture_id == "cap-unknown", "незнание не выдаётся за несовпадение"
+    assert root.policy_digest is None
+    assert root.policy_matched is None
+    assert root.complete is True
+    assert coverage.complete is True
 
 
 def _space_resolution(

@@ -56,7 +56,7 @@ per-host статуса и без различения дискавери и о�
 | `product → host+path` слои | `crawl_sources.py:48,77,87` | digest информационный (`models.py:1533`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`package/commands.py:2994`) | — образец для CLI политики |
 | видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1149`), `product_skipped` (`corpus.py:4021`), `incomplete_reasons` (`corpus.py:3887`) | нет токена «запрещено политикой» |
-| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1714,2175`; `corpus_coverage.py:228`) | переиспользуется политическими пропусками |
+| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1714,2175`; `corpus_coverage.py:405`) | переиспользуется политическими пропусками |
 
 **Ни один носитель не даёт «продукт × хост × путь» без ложной идентичности:**
 `crawl_sources.yaml` знает продукт, но не входит в `run_id`; `domain_profiles.yaml` входит в
@@ -156,7 +156,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 2. Поле входит в `EXECUTION_CONTRACT_FIELDS` (`digests.py:89`), 29 → **30**. Это объявленная
    версионная граница: переснять `PINNED_EXECUTION_CONTRACT_DIGEST`
    (`tests/pipeline/test_corpus_stage_timings.py:78`) и обновить литералы «29 полей»
-   (`AGENTS.md:303`, `09…:3656`, `16-runs-schema-boundary.md:475`, `14…:424`,
+   (`AGENTS.md:303`, `09…:3656`, `16-runs-schema-boundary.md:271`, `14…:424`,
    `docs/status-dictionary.yaml:446`).
 3. **`refresh_policy`** уже в `run_id` отдельным слагаемым (`plan.py:112`); `frozen` — новое
    значение. **`frozen_source` канонизируется**: в материал входит только при
@@ -411,7 +411,7 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 
 | № | вопрос | почему это не деталь | статус |
 |---|---|---|---|
-| E.1 | **Публикация `❌` при различающихся датах** | правило «`❌` требует ответа сервера в этом цикле» (`evaluate.py:221`, `:1946-2001`) и условие `observed_sources>0` (`corpus_coverage.py:59`) закрепляют допущение «цикл = одна дата»; владелец требует архитектуру с **разными** датами | ⬜ перенесено в план 20, фаза F3 (методология + golden) |
+| E.1 | **Публикация `❌` при различающихся датах** | правило «`❌` требует ответа сервера в этом цикле» (`evaluate.py:221`, `:1946-2001`) и условие `observed_sources>0` (`corpus_coverage.py:209`) закрепляют допущение «цикл = одна дата»; владелец требует архитектуру с **разными** датами | ⬜ перенесено в план 20, фаза F3 (методология + golden) |
 | E.2 | право менять правило `live\|revalidated` | решение владельца 29.10.2026 (`09…:3403`), не следствие плана | ⬜ |
 | E.3 | носитель записи снятия (`STATE 8`) | необратимая схема-граница | ✅ реализовано и в работе (`corpus_capture`/`corpus_capture_doc`, STATE 9); подтверждение владельца — в §P5-прогоне |
 | E.4 | продукт без сохранённых байтов при `network_denied` | мерить нечем: `❓`/`no_sources` или продукт выпадает из отчёта | ✅ решено владельцем 04.11.2026: продукт **остаётся на карте**, причина видна (`stored_bytes_missing`/`unknown_roots`), покрытие неполно, ни одна ячейка не публикуется как `❌` |

@@ -17,7 +17,7 @@ seed-root продукта, **узел** — процесс краула.
 (`retain`, `core/pipeline/corpus_ingest.py:948`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:357`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
-(`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:31`), а не из корпуса.
+(`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.
 
 **Не владеет:** конверсией (docling/pdfium/office), нарезкой, эмбеддингом, индексом, дедупом по
 контенту (I17 — свойство корпуса), вердиктами.
