@@ -654,7 +654,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
     URL (`url_state` + `document_version` + chunk-set) переиспользуется: `reuse_kind=reused`,
     `http_status IS NULL`, `fetched_at IS NULL`, экстрактор и чанкер **не вызываются**.
     Исполнение — отдельный проход `offline_reuse_product`
-    (`core/pipeline/corpus_ingest.py:3070`), вызываемый **до** дренажа и вместо него
+    (`core/pipeline/corpus_ingest.py:3280`), вызываемый **до** дренажа и вместо него
     (`core/pipeline/corpus.py:2169`): в код, единственное назначение которого сеть, политика
     не заходит вовсе. Поэтому группировка ревалидации и дренаж корней под `offline` не
     исполняются, а SERP-контур не запускается (`rounds.not_executed_reason =

@@ -102,10 +102,11 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 (`core/util/rate_limit.py:168`, замер
 `docs/reports/measurements/2026-10-31-crawl-parallelism-limits.md:31`). Между host'ами — линейно.
 
-**Водитель — единственный мутатор состояния.** Полоса исполняет ровно `limiter.wait` +
+**Водитель — единственный мутатор состояния.** Полоса исполняет ровно
+`limiter.wait_reserved` (один резерв на фетч: pacing и метка попытки — один вызов) +
 `active.fetch`; контракт «никакой мутации состояния сеанса здесь нет» уже записан у
-`local_fetch` (`core/pipeline/corpus_ingest.py:2459`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2325`). Потоки не получают ни `Frontier`, ни
+`local_fetch` (`core/pipeline/corpus_ingest.py:2612`), а pre-fetch — чистая фаза
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2474`). Потоки не получают ни `Frontier`, ни
 стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:748`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 

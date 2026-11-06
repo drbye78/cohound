@@ -9,10 +9,17 @@
 (маршрут помечен в :class:`WaveRequest`), фетч исполняется **не** на вызывающем потоке,
 `max_active == 1` (поток-владелец один), а коммит исхода остаётся за вызывающим потоком —
 то есть мутации не уходят в чужой поток (T5).
+
+Там же — пин **пулевого** пейсинга: ``local_fetch`` делает ровно **один** резерв на фетч
+(``wait_reserved`` — это и pacing, и метка попытки). Inline-путь
+(``fetch_and_commit``) пейсится иначе, и до этой проверки удвоение резервов в пуле
+проходило незамеченным: единственный тест пейсинга мерил именно inline-ветку.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +34,7 @@ from core.pipeline.corpus_drain import (
 )
 from core.pipeline.corpus_index import _CorpusStageTimings
 from core.pipeline.corpus_ingest import LocalFetch, local_fetch
-from core.ports.types import FetchMode, FetchPlan, RawPage
+from core.ports.types import FetchMode, FetchPlan, RateLimitSpec, RawPage
 from core.util.rate_limit import RateLimiter
 
 
@@ -66,13 +73,20 @@ class _ThreadRecordingCrawler:
                 self._active -= 1
 
 
-def _desc(crawler: _ThreadRecordingCrawler, url: str, *, poolable: bool) -> LocalFetch:
+def _desc(
+    crawler: _ThreadRecordingCrawler,
+    url: str,
+    *,
+    poolable: bool,
+    fetch: FetchMode = FetchMode.BROWSER,
+    rate_limit: RateLimitSpec | None = None,
+) -> LocalFetch:
     """Дескриптор живого фетча: ``poolable=False`` — браузерный маршрут."""
     return LocalFetch(
         pid="p1",
         wu=url,
         depth=0,
-        fetch_plan=FetchPlan(fetch=FetchMode.BROWSER),
+        fetch_plan=FetchPlan(fetch=fetch, rate_limit=rate_limit),
         active=crawler,
         engine_value="browser",
         prior_item=None,
@@ -203,6 +217,85 @@ def test_local_fetch_takes_start_label_from_limiter_reservation() -> None:
 
     assert desc.fetch_started_at == _RESERVED
     assert desc.fetch_ms is not None
+
+
+#: Стена фейковых часов: от неё строится ISO-метка, чтобы резерв был валидным временем.
+_WALL_EPOCH = 1_700_000_000.0
+
+
+class _CountingLimiter(RateLimiter):
+    """Лимитер на фейковых часах: считает резервы и суммы сна (без wall-clock).
+
+    Наследует **боевой** :class:`RateLimiter` — дефект живёт в вызывающей стороне, не в
+    примитиве, поэтому тест обязан считать именно вызовы ``_reserve``: один вызов = один
+    слот origin'а, то есть один объявленный интервал.
+    """
+
+    def __init__(self) -> None:
+        self.reserves: list[str] = []
+        self.slept: list[float] = []
+        self._now = 0.0
+        super().__init__(
+            sleep=self._fake_sleep,
+            rng=random.Random(0),
+            clock=lambda: self._now,
+            wall=lambda: _WALL_EPOCH + self._now,
+        )
+
+    def _fake_sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self._now += seconds
+
+    def _reserve(self, host: str, spec: RateLimitSpec) -> tuple[float, int]:
+        self.reserves.append(host)
+        return super()._reserve(host, spec)
+
+
+def test_pool_fetch_takes_exactly_one_reservation_per_fetch() -> None:
+    """Пулевой путь (``local_fetch``): **один** резерв на фетч, интервал — объявленный.
+
+    ``_dispatch_wave`` отправляет в пул ровно ``local_fetch`` (единственный сетевой вызов
+    пула), поэтому проверяется он, а не inline ``fetch_and_commit``: у того
+    ``wait_reserved`` и всегда был один. Дефект: ``wait`` + ``wait_reserved`` на один фетч
+    = **два** слота, и фактический интервал между двумя запросами одного origin'а
+    становится суммой двух ``uniform(min_s, max_s)`` (при объявленных 1–5 с — 2–10 с и
+    среднее 6 с вместо 3 с; для бюджета 5000 документов пол 8.33 ч вместо 4.17 ч).
+    """
+    step = 0.5
+    spec = RateLimitSpec(min_s=step, max_s=step)
+    limiter = _CountingLimiter()
+    crawler = _ThreadRecordingCrawler()
+    first = _desc(
+        crawler,
+        "https://browser.test/1",
+        poolable=True,
+        fetch=FetchMode.HTTP,
+        rate_limit=spec,
+    )
+    second = _desc(
+        crawler,
+        "https://browser.test/2",
+        poolable=True,
+        fetch=FetchMode.HTTP,
+        rate_limit=spec,
+    )
+
+    local_fetch(first, limiter=limiter)
+    local_fetch(second, limiter=limiter)
+
+    # Один слот на фетч: два фетча — два резерва (при удвоении их четыре).
+    assert limiter.reserves == ["browser.test", "browser.test"]
+    # Суммарный сон = 2 × объявленный шаг, а не 4 ×.
+    assert limiter.slept == [step, step]
+    # Метки попытки разнесены ровно на объявленный интервал, а не на удвоенный.
+    first_label = first.fetch_started_at
+    second_label = second.fetch_started_at
+    assert first_label is not None
+    assert second_label is not None
+    started = [
+        _dt.datetime.fromisoformat(label) for label in (first_label, second_label)
+    ]
+    assert started[1] - started[0] == _dt.timedelta(seconds=step)
 
 
 def test_fetch_and_commit_takes_start_label_from_limiter_reservation() -> None:
