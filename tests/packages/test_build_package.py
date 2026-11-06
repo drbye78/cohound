@@ -68,7 +68,12 @@ PROFILE_FIELDS = {
 #: P7 gate §3: бюджеты ``run.yaml:crawl`` (run-слой, execution-дефолты).
 RUN_CRAWL_MAX_DEPTH = 8
 RUN_CRAWL_MAX_DOCUMENTS = 600
-RUN_CRAWL_MAX_WORKERS = 3
+#: ``max_workers`` (сетевой пул) объявлен на **узле** — ``config/deploy.yaml:crawl``
+#: (решение владельца 07.11.2026: это свойство машины, как ``host_concurrency`` и
+#: ``pdf_device``, а не измерения). В пакете ось поэтому **отсутствует**, и пин ниже
+#: держит именно это: значение, приехавшее в run-слой, перекрыло бы host-значение.
+NODE_CRAWL_MAX_WORKERS = 10
+NODE_CRAWL_HOST_CONCURRENCY = 5
 #: Пул экстракции пересмотрен после замера `queue_max_size=1` (−49 % RSS: 4174 → 2126 MB
 #: на 665-стр. документе при идентичном markdown) ⇒ 2 воркера помещаются в бюджет хоста.
 #: Пин держит значение синхронным с `run.yaml` и генератором (иначе дрейф, P7).
@@ -198,7 +203,9 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
     assert crawl.rate_limit == RateLimitSpec(min_s=1.0, max_s=5.0)
     assert crawl.max_depth == RUN_CRAWL_MAX_DEPTH
     assert crawl.max_documents == RUN_CRAWL_MAX_DOCUMENTS
-    assert crawl.max_workers == RUN_CRAWL_MAX_WORKERS
+    # Ось ушла на узел (``config/deploy.yaml:crawl.max_workers``): пакет её не несёт,
+    # иначе host-значение было бы перекрыто (app < run < site).
+    assert crawl.max_workers is None
     # Ось не объявлена намеренно: значение выводится из бюджета, а не назначается
     # вручную — объявленная ось была бы сильнее формулы.
     assert crawl.extract_workers is RUN_CRAWL_EXTRACT_WORKERS
@@ -254,12 +261,41 @@ def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: 
 
     assert limits.max_depth == max_depth
     assert limits.max_documents == max_documents
-    # Прочие оси наследуются из run-слоя (site-слой их не переопределяет).
-    assert limits.max_workers == RUN_CRAWL_MAX_WORKERS
+    # ``max_workers``/``host_concurrency`` пакет больше не объявляет: они на узле
+    # (``config/deploy.yaml:crawl``). Пустой app-слой ⇒ оси не заданы ни на одном слое.
+    assert limits.max_workers is None
+    assert limits.host_concurrency is None
     assert limits.extract_workers is RUN_CRAWL_EXTRACT_WORKERS
     assert limits.document_level is DocumentLevel.LAYOUT_TABLES
     assert list(limits.exclude_paths) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
+
+
+def test_node_layer_declares_crawl_width() -> None:
+    """Ширина краула разрешается из **узла**, и ни run-, ни site-слой её не перекрывают.
+
+    Решение владельца 07.11.2026: ``max_workers`` — свойство машины, ``host_concurrency`` —
+    свойство узла. Пин держит оба конца цепочки: объявленное на узле значение доезжает до
+    ``CrawlLimits``, а пакет его не перебивает (иначе правка ``run.yaml`` вернула бы
+    «число из пакета» и замер темпа показывал бы чужую ширину пула).
+    """
+    cfg = load_run_config(ON_DISK_RUN)
+    profiles = load_domain_profiles(ON_DISK_PROFILES)
+    limits = resolve_crawl_limits(
+        "https://docs.tantorlabs.ru/",
+        app=CrawlConfig(
+            max_workers=NODE_CRAWL_MAX_WORKERS,
+            host_concurrency=NODE_CRAWL_HOST_CONCURRENCY,
+        ),
+        run=cfg.crawl,
+        profiles=profiles,
+    )
+    assert limits.max_workers == NODE_CRAWL_MAX_WORKERS
+    assert limits.host_concurrency == NODE_CRAWL_HOST_CONCURRENCY
+    # Обе оси входят в отпечаток конфигурации краула: смена ширины — новый ``run_id``.
+    payload = limits.as_dict()
+    assert payload["max_workers"] == NODE_CRAWL_MAX_WORKERS
+    assert payload["host_concurrency"] == NODE_CRAWL_HOST_CONCURRENCY
 
 
 def test_www_gaz_is_host_root_does_not_discover() -> None:
