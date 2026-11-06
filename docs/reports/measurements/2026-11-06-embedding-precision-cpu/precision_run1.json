@@ -1,0 +1,127 @@
+{
+  "python": "3.14.0",
+  "torch": "2.14.1+cu130",
+  "model": "BAAI/bge-m3",
+  "cuda_available": true,
+  "cuda_device": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "cpu_count": 6,
+  "float32_matmul_precision": "highest",
+  "allow_tf32": false,
+  "sample": {
+    "product_id": "postgrespro",
+    "rows_total": 138961,
+    "chunks": 512,
+    "mean_chars": 945.8,
+    "max_chars": 1500,
+    "stride": 271.408,
+    "first_chunk_id": "postgrespro:dv_00051c21b47e21614aff018e:0",
+    "last_chunk_id": "postgrespro:dv_ff6ad711113a26d1966528dd:6"
+  },
+  "precision": [
+    {
+      "variant": "fp32",
+      "device": "cuda",
+      "batch_size": 32,
+      "chunks": 512,
+      "chunks_per_s": 6.0166,
+      "chunks_per_s_runs": [
+        6.0166,
+        4.4842
+      ],
+      "wall_s": 85.098,
+      "peak_vram_bytes": 3388341760,
+      "peak_vram_reserved_bytes": 4160749568,
+      "rss_after_load_bytes": 1378287616,
+      "peak_rss_bytes": 1875255296,
+      "cpu_ratio": 1.017,
+      "determinism_max_abs_delta": 0.0,
+      "agreement": {
+        "cos_gap": {
+          "median": 0.0,
+          "p95": 0.0,
+          "max": 0.0
+        },
+        "top10_overlap": 1.0
+      }
+    },
+    {
+      "variant": "tf32",
+      "device": "cuda",
+      "batch_size": 32,
+      "chunks": 512,
+      "chunks_per_s": 7.5818,
+      "chunks_per_s_runs": [
+        7.5818,
+        6.9339
+      ],
+      "wall_s": 67.53,
+      "peak_vram_bytes": 3388341760,
+      "peak_vram_reserved_bytes": 4160749568,
+      "rss_after_load_bytes": 1860235264,
+      "peak_rss_bytes": 1861689344,
+      "cpu_ratio": 1.02,
+      "determinism_max_abs_delta": 0.0,
+      "agreement": {
+        "cos_gap": {
+          "median": 2.38e-07,
+          "p95": 1.517e-06,
+          "max": 9.5546e-05
+        },
+        "top10_overlap": 0.998047
+      }
+    },
+    {
+      "variant": "bf16",
+      "device": "cuda",
+      "batch_size": 32,
+      "chunks": 512,
+      "chunks_per_s": 16.1492,
+      "chunks_per_s_runs": [
+        16.1492,
+        16.1569
+      ],
+      "wall_s": 31.704,
+      "peak_vram_bytes": 3043815936,
+      "peak_vram_reserved_bytes": 3395289088,
+      "rss_after_load_bytes": 1336352768,
+      "peak_rss_bytes": 1546854400,
+      "cpu_ratio": 1.032,
+      "determinism_max_abs_delta": 0.0,
+      "agreement": {
+        "cos_gap": {
+          "median": 3.7104e-05,
+          "p95": 0.00011265,
+          "max": 0.000753045
+        },
+        "top10_overlap": 0.989258
+      }
+    },
+    {
+      "variant": "fp16",
+      "device": "cuda",
+      "batch_size": 32,
+      "chunks": 512,
+      "chunks_per_s": 15.3953,
+      "chunks_per_s_runs": [
+        15.3953,
+        15.4041
+      ],
+      "wall_s": 33.257,
+      "peak_vram_bytes": 3043815936,
+      "peak_vram_reserved_bytes": 3395289088,
+      "rss_after_load_bytes": 1602715648,
+      "peak_rss_bytes": 1834131456,
+      "cpu_ratio": 1.03,
+      "determinism_max_abs_delta": 0.0,
+      "agreement": {
+        "cos_gap": {
+          "median": 4.17e-07,
+          "p95": 1.994e-06,
+          "max": 8.3387e-05
+        },
+        "top10_overlap": 0.998047
+      }
+    }
+  ],
+  "elapsed_s": 519.1
+}

@@ -1,0 +1,148 @@
+{
+  "python": "3.14.0",
+  "torch": "2.14.1+cu130",
+  "model": "BAAI/bge-m3",
+  "cuda_available": true,
+  "cuda_device": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "cpu_count": 6,
+  "float32_matmul_precision": "highest",
+  "allow_tf32": false,
+  "sample": {
+    "product_id": "postgrespro",
+    "rows_total": 138961,
+    "chunks": 512,
+    "mean_chars": 945.8,
+    "max_chars": 1500,
+    "stride": 271.408,
+    "first_chunk_id": "postgrespro:dv_00051c21b47e21614aff018e:0",
+    "last_chunk_id": "postgrespro:dv_ff6ad711113a26d1966528dd:6"
+  },
+  "cpu": {
+    "device": "cpu",
+    "variant": "fp32",
+    "chunks": 256,
+    "batch_sizes": [
+      32,
+      64,
+      128
+    ],
+    "threads": [
+      1,
+      4,
+      8,
+      12
+    ],
+    "rss_before_bytes": 1292115968,
+    "cells": [
+      {
+        "threads": 1,
+        "torch_num_threads": 1,
+        "batch_size": 32,
+        "chunks": 256,
+        "chunks_per_s": 0.1789,
+        "cpu_ratio": 1.009,
+        "peak_rss_bytes": 3728019456
+      },
+      {
+        "threads": 1,
+        "torch_num_threads": 1,
+        "batch_size": 64,
+        "chunks": 256,
+        "chunks_per_s": 0.1599,
+        "cpu_ratio": 1.009,
+        "peak_rss_bytes": 4535795712
+      },
+      {
+        "threads": 1,
+        "torch_num_threads": 1,
+        "batch_size": 128,
+        "chunks": 256,
+        "chunks_per_s": 0.1421,
+        "cpu_ratio": 1.008,
+        "peak_rss_bytes": 5383331840
+      },
+      {
+        "threads": 4,
+        "torch_num_threads": 4,
+        "batch_size": 32,
+        "chunks": 256,
+        "chunks_per_s": 0.454,
+        "cpu_ratio": 3.114,
+        "peak_rss_bytes": 2777563136
+      },
+      {
+        "threads": 4,
+        "torch_num_threads": 4,
+        "batch_size": 64,
+        "chunks": 256,
+        "chunks_per_s": 0.3937,
+        "cpu_ratio": 3.064,
+        "peak_rss_bytes": 3947032576
+      },
+      {
+        "threads": 4,
+        "torch_num_threads": 4,
+        "batch_size": 128,
+        "chunks": 256,
+        "chunks_per_s": 0.3449,
+        "cpu_ratio": 3.046,
+        "peak_rss_bytes": 5481242624
+      },
+      {
+        "threads": 8,
+        "torch_num_threads": 8,
+        "batch_size": 32,
+        "chunks": 256,
+        "chunks_per_s": 0.6183,
+        "cpu_ratio": 7.075,
+        "peak_rss_bytes": 2830876672
+      },
+      {
+        "threads": 8,
+        "torch_num_threads": 8,
+        "batch_size": 64,
+        "chunks": 256,
+        "chunks_per_s": 0.543,
+        "cpu_ratio": 7.224,
+        "peak_rss_bytes": 4001558528
+      },
+      {
+        "threads": 8,
+        "torch_num_threads": 8,
+        "batch_size": 128,
+        "chunks": 256,
+        "chunks_per_s": 0.4655,
+        "cpu_ratio": 7.294,
+        "peak_rss_bytes": 5530226688
+      },
+      {
+        "threads": 12,
+        "torch_num_threads": 12,
+        "batch_size": 32,
+        "chunks": 256,
+        "chunks_per_s": 0.6924,
+        "cpu_ratio": 11.212,
+        "peak_rss_bytes": 2939568128
+      },
+      {
+        "threads": 12,
+        "torch_num_threads": 12,
+        "batch_size": 64,
+        "chunks": 256,
+        "chunks_per_s": 0.6143,
+        "cpu_ratio": 10.872,
+        "peak_rss_bytes": 4070838272
+      },
+      {
+        "threads": 12,
+        "torch_num_threads": 12,
+        "batch_size": 128,
+        "chunks": 256,
+        "chunks_per_s": 0.5074,
+        "cpu_ratio": 10.395,
+        "peak_rss_bytes": 5590421504
+      }
+    ]
+  },
+  "elapsed_s": 12708.1
+}
