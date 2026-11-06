@@ -72,14 +72,14 @@ class _FakeLexicalIndex:
             found.extend(self.by_product.get(product_id, []))
         return found[:top_k]
 
-def _chunk(text: str = TEXT) -> RetrievedChunk:
+def _chunk(text: str = TEXT, *, build_id: str = BUILD) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id="c1",
         product_id=PRODUCT,
         text=text,
         content_hash="hash-c1",
         heading_path="H",
-        build_id=BUILD,
+        build_id=build_id,
         score=1.0,
     )
 
@@ -149,6 +149,51 @@ def _store(db: Path, *, with_chunks: bool = True) -> None:
         )
         store.conn.commit()
 
+#: Измеренная форма данных (06.11.2026, ``ru-pg-dbms-c2e7b860ac17``): строка прогона
+#: несёт **композицию** ``cb_*``, а ``corpus_chunks.build_id`` — продукт-партицию ``pb_*``;
+#: связывает их ``index_manifest.partition_build_id``.
+COMPOSITION = "cb_bench_comp"
+PARTITION = "pb_bench_part"
+
+
+def _store_partitioned(db: Path) -> None:
+    """Стор в измеренной форме: ``runs.index_build_id = cb_*``, чанки — под ``pb_*``."""
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with SqliteStore(db) as store:
+        store.create_run("run.bench", _cfg())
+        store.conn.execute(
+            "UPDATE runs SET index_build_id = ?, retrieval_profile = 'R0',"
+            " retrieval_cutoff_K = 10, retrieval_params_json = ?"
+            " WHERE run_id = 'run.bench'",
+            (COMPOSITION, json.dumps({"rrf_k": 60})),
+        )
+        store.upsert_corpus_doc(
+            CorpusDoc(doc_id="doc", product_id=PRODUCT, url="https://example.test/p")
+        )
+        store.add_chunks_batch(
+            [
+                CorpusChunk(
+                    chunk_id="c1",
+                    doc_id="doc",
+                    product_id=PRODUCT,
+                    text=TEXT,
+                    heading_path="H",
+                    content_hash="hash-c1",
+                    build_id=PARTITION,
+                )
+            ]
+        )
+        store.save_index_manifest(
+            IndexManifestEntry(
+                index_build_id=COMPOSITION,
+                partition_build_id=PARTITION,
+                product_id=PRODUCT,
+                package_id=PKG,
+            )
+        )
+        store.conn.commit()
+
+
 def _golden(tmp_path: Path) -> Path:
     path = tmp_path / "golden.csv"
     path.write_text(
@@ -210,6 +255,43 @@ def test_parser_accepts_repeated_model() -> None:
     assert args.limit == 5
     assert args.handler.__name__ == "run_evaluator_benchmark"
 
+def test_parser_accepts_reasoning_effort_and_max_tokens() -> None:
+    """Объявленные оси замера парсятся: уровень усилия и потолок генерации."""
+    args = build_parser().parse_args(
+        [
+            "experiment",
+            "evaluator-benchmark",
+            "--db",
+            "x.db",
+            "--golden",
+            "g.csv",
+            "--reasoning-effort",
+            "high",
+            "--max-tokens",
+            "16384",
+        ]
+    )
+    assert args.reasoning_effort == "high"
+    assert args.max_tokens == 16384
+
+
+def test_parser_rejects_unknown_reasoning_effort() -> None:
+    """Опечатка в уровне — ошибка парсера, а не «оси нет»."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "experiment",
+                "evaluator-benchmark",
+                "--db",
+                "x.db",
+                "--golden",
+                "g.csv",
+                "--reasoning-effort",
+                "ultra",
+            ]
+        )
+
+
 # ---------------------------------------------------------------------------
 # Успешное измерение и форма payload
 # ---------------------------------------------------------------------------
@@ -262,6 +344,69 @@ def test_benchmark_json_payload_and_artifact(
     written = json.loads(artifact.read_text(encoding="utf-8"))
     assert written["models"][0]["axes"]["model_id"] == "flag-model"
 
+def test_measured_shape_composition_and_partition_are_measured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Регрессия измеренного дефекта: ``cb_*`` в строке прогона, ``pb_*`` в чанках.
+
+    ``hound experiment evaluator-benchmark`` на реальных прогонах отвечал
+    ``no_cases``/``product_not_in_build`` по всем продуктам: проба чанков шла по
+    композиции, а ``corpus_chunks.build_id`` несёт партицию. Здесь стор — настоящий
+    ``SqliteStore`` (``iter_chunks`` фильтрует ``WHERE build_id = ?``), поэтому тест
+    падает ровно там, где падал замер.
+    """
+    db = tmp_path / "runs" / "run.bench" / "cohound.db"
+    _store_partitioned(db)
+    ports = SimpleNamespace(
+        lexical_index=_FakeLexicalIndex(
+            {PRODUCT: [_chunk(build_id=PARTITION)]}, build_id=COMPOSITION
+        ),
+        vector_index=None,
+        embedder=None,
+    )
+    code = main(
+        _args(db, _golden(tmp_path), "--model", "flag-model", "--json"),
+        ports=ports,
+        evaluator_generate=_generate,
+    )
+    payload = json_out(capsys)
+    assert code == EXIT_OK
+    assert payload["status"] == "measured"
+    assert payload["n_cells"] == 1
+    assert payload["skipped"] == {}
+    # Провенанс сборки остаётся композицией (I17/S5), а не партицией.
+    assert payload["index_build_id"] == COMPOSITION
+
+
+def test_product_absent_from_build_names_it_in_message(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Продукт golden без партиции — ``no_cases``, и верхнее сообщение называет продукт."""
+    db = tmp_path / "runs" / "run.bench" / "cohound.db"
+    _store_partitioned(db)
+    golden = tmp_path / "golden_absent.csv"
+    golden.write_text(
+        "product_id,param_id,expected_status,expected_evidence_kind,case_class\n"
+        "p_absent,param_a,✅,documentation,class_a\n",
+        encoding="utf-8",
+    )
+    code = main(
+        _args(db, golden, "--model", "flag-model", "--json"),
+        ports=SimpleNamespace(
+            lexical_index=_FakeLexicalIndex({}, build_id=COMPOSITION),
+            vector_index=None,
+            embedder=None,
+        ),
+        evaluator_generate=_generate,
+    )
+    payload = json_out(capsys)
+    assert code == EXIT_ERROR
+    assert payload["skip_reason"] == "no_cases"
+    assert "p_absent" in payload["message"]
+    assert COMPOSITION in payload["message"]
+    assert payload["details"]["products_not_in_build"] == ["p_absent"]
+
+
 def test_repeated_model_flag_runs_every_candidate(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -302,6 +447,67 @@ def test_model_flag_wins_over_env(
     assert code == EXIT_OK
     assert payload["models"][0]["axes"]["model_id"] == "flag-model"
     assert "env-model" not in json.dumps(payload)
+
+def test_reasoning_effort_and_max_tokens_reach_measured_axes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Уровень и потолок доезжают до адаптера и попадают в объявленные оси отчёта.
+
+    ``reasoning_effort`` идёт тем же путём, что в прогоне (``build_evaluator_llm`` →
+    ``ensure_reasoning_wire`` → ``LocalEvaluator``), ``max_tokens`` — в поле адаптера,
+    откуда его читает провод. Иначе отчёт о замере не назвал бы условия замера.
+    """
+    db = tmp_path / "runs" / "run.bench" / "cohound.db"
+    _store(db)
+    code = main(
+        _args(
+            db,
+            _golden(tmp_path),
+            "--model",
+            "deepseek-v4.1-flash-1017:yellow",
+            "--reasoning-effort",
+            "high",
+            "--max-tokens",
+            "16384",
+            "--json",
+        ),
+        ports=_ports(),
+        evaluator_generate=_generate,
+    )
+    payload = json_out(capsys)
+    assert code == EXIT_OK
+    model = payload["models"][0]
+    assert model["axes"]["reasoning_effort"] == "high"
+    assert model["axes"]["max_tokens"] == 16384
+    # Статьи расхода уровня присутствуют в отчёте даже при оффлайн-шве (нули — честно).
+    for key in ("reasoning", "finish_reason", "invalid_json", "status_counts"):
+        assert key in model
+
+
+def test_unsupported_reasoning_effort_is_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Невыразимый для модели уровень — ``EXIT_USAGE``, а не тихий пропуск параметра."""
+    db = tmp_path / "runs" / "run.bench" / "cohound.db"
+    _store(db)
+    code = main(
+        _args(
+            db,
+            _golden(tmp_path),
+            "--model",
+            "flag-model",
+            "--reasoning-effort",
+            "high",
+            "--json",
+        ),
+        ports=_ports(),
+        evaluator_generate=_generate,
+    )
+    payload = json_out(capsys)
+    assert code == EXIT_USAGE
+    assert payload["ok"] is False
+    assert "невыразимо" in json.dumps(payload, ensure_ascii=False)
+
 
 def test_table_output_is_compact(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]

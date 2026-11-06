@@ -70,7 +70,8 @@ class _FnEvaluator:
         model_id: str = "fake",
         seed: int = 0,
         temperature: float = 0.0,
-        usage: tuple[int, int] = (10, 5),
+        usage: tuple[int, int, int] = (10, 5, 0),
+        finish_reason: str | None = None,
     ) -> None:
         self._fn = fn
         self.model_id = model_id
@@ -80,6 +81,7 @@ class _FnEvaluator:
         self.seed = seed
         self.temperature = temperature
         self.usage = usage
+        self.finish_reason = finish_reason
         self.prompts: list[str] = []
 
     def complete(self, req: LLMRequest) -> LLMResponse:
@@ -92,6 +94,7 @@ class _FnEvaluator:
             raw=result.model_dump_json(),
             prompt_hash="ph",
             decoder="none",
+            finish_reason=self.finish_reason,
             usage=TokenUsage(*self.usage),
         )
 
@@ -244,6 +247,32 @@ def test_perfect_model_scores_are_honest() -> None:
     assert payload["contract"]["max_retries"] == 2
     assert payload["contract"]["prompt_template"] == BENCHMARK_CONTRACT["prompt_template"]
 
+def test_reasoning_tokens_and_finish_reason_are_measured() -> None:
+    """Уровень усилия доказывается **расходом**, а не фактом приёма параметра.
+
+    ``reasoning_tokens`` из ``usage`` агрегируются по ячейкам (среднее/медиана/макс), а
+    ``finish_reason`` — по вызовам: без этого «уровень действует» осталось бы словами.
+    """
+    evaluator = _FnEvaluator(_perfect, usage=(10, 5, 12), finish_reason="stop")
+    report = run_benchmark(
+        _two_cases(),
+        [ModelUnderTest(model_id="fake", label="fake", evaluator=evaluator)],
+        clock=_fixed_clock(),
+    )
+    model = report.models[0]
+    assert model.reasoning["mean"] == pytest.approx(12.0)
+    assert model.reasoning["median"] == pytest.approx(12.0)
+    assert model.reasoning["max"] == 12
+    assert model.reasoning["cells_with_reasoning"] == 2
+    assert model.finish_reason["counts"] == {"stop": 2}
+    assert model.finish_reason["length_fraction"] == pytest.approx(0.0)
+    assert model.invalid_json["calls"] == 0
+    assert model.status_counts == {"✅": 1, "❌": 1}
+    payload = report.to_dict()["models"][0]
+    assert payload["cells"][0]["reasoning_tokens"] == 12
+    assert payload["cells"][0]["finish_reasons"] == ["stop"]
+
+
 def test_bootstrap_ci_brackets_point_estimate() -> None:
     report = run_benchmark(_two_cases(), [_model(_perfect)], clock=_fixed_clock())
     model = report.models[0]
@@ -289,6 +318,9 @@ def test_invalid_json_is_evaluation_failed_with_retries() -> None:
     assert model.kappa_undefined_reason  # причина названа, число не выдумано
     # usage не сообщён — отчёт говорит это прямо, а не выдаёт 0 за измерение.
     assert model.tokens["usage_reported_cells"] == 0
+    # Невалидный JSON назван отдельной статьёй: это путь отказа, а не «пустой ответ».
+    assert model.invalid_json["calls"] == 3
+    assert model.invalid_json["fraction"] == pytest.approx(1.0)
     assert any("usage" in limit for limit in report.limits)
 
 def test_fabricated_support_is_counted_not_rewarded() -> None:
@@ -669,4 +701,192 @@ def test_absent_golden_status_keeps_previous_behaviour() -> None:
             lexical_index=_FakeLexicalIndex({}),
         )
     assert exc.value.reason == "no_cases"
-    assert exc.value.details == {}
+    # Разложение по строкам теперь публикуется как ``details`` (второй уровень причины),
+    # а не теряется: причина уровня набора — в ``message``.
+    assert exc.value.details["row_skip_reasons"] == {"no_chunks": 1}
+    assert exc.value.details["products_not_in_build"] == []
+    assert "no_chunks" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Два id-пространства: композиция прогона (cb_) vs продукт-партиция (pb_)
+# ---------------------------------------------------------------------------
+
+_COMPOSITION = "cb_bench_comp"
+_PARTITION = "pb_bench_part"
+
+
+class _PartitionStore:
+    """Стор в **измеренной** форме: ``runs.index_build_id`` = ``cb_*``, чанки — под ``pb_*``.
+
+    Ключевое свойство (и сторож регрессии): чанки читаются **только** по тому
+    ``build_id``, который передан, поэтому запрос композицией возвращает пусто — ровно
+    так ведёт себя ``SqliteStore.iter_chunks`` (``WHERE corpus_chunks.build_id = ?``).
+    """
+
+    def __init__(
+        self,
+        *,
+        composition: str = _COMPOSITION,
+        partitions: dict[str, str] | None = None,
+        chunks: dict[tuple[str, str], list[Any]] | None = None,
+    ) -> None:
+        self.composition = composition
+        #: ``product_id -> partition_build_id`` (как ``index_manifest``).
+        self.partitions = partitions if partitions is not None else {PRODUCT: _PARTITION}
+        self.chunks = chunks if chunks is not None else {}
+        self.probed_build_ids: list[str] = []
+        self.manifest_queries: list[str] = []
+
+    def read_manifest(self, run_id: str) -> Any:  # noqa: ARG002
+        return SimpleNamespace(
+            retrieval_profile="R0",
+            retrieval_cutoff_K=10,
+            retrieval_params_json='{"rrf_k": 60}',
+            index_build_id=self.composition,
+        )
+
+    def read_run_index_ref(self, run_id: str) -> Any:  # noqa: ARG002
+        return SimpleNamespace(index_build_id=self.composition)
+
+    def iter_index_manifest(self, index_build_id: str):  # noqa: ANN201
+        self.manifest_queries.append(index_build_id)
+        for product_id, partition in self.partitions.items():
+            yield SimpleNamespace(
+                product_id=product_id,
+                package_id="pkg",
+                index_build_id=self.composition,
+                partition_build_id=partition,
+            )
+
+    def iter_chunks(self, build_id: str, *, product_id: str | None = None):  # noqa: ANN201
+        self.probed_build_ids.append(build_id)
+        yield from self.chunks.get((build_id, product_id or ""), [])
+
+
+def test_prepare_cases_probes_partition_not_composition() -> None:
+    """Регрессия измеренного дефекта: проба чанков идёт по ``pb_*``, а не по ``cb_*``.
+
+    До правки ``_product_has_chunks`` получал композицию прогона, а
+    ``corpus_chunks.build_id`` несёт партицию ⇒ все продукты выглядели пустыми и
+    benchmark отвечал ``no_cases`` при живом корпусе (измерено 06.11.2026 на
+    ``ru-pg-dbms-c2e7b860ac17``).
+    """
+    chunk = RetrievedChunk(
+        chunk_id="c1",
+        product_id=PRODUCT,
+        text=TEXT_OK,
+        content_hash="hash-c1",
+        heading_path="H",
+        build_id=_PARTITION,
+        score=1.0,
+    )
+    store = _PartitionStore(chunks={(_PARTITION, PRODUCT): [chunk]})
+    prepared = prepare_cases(
+        store=store,
+        run_id=RUN_ID,
+        golden=[_golden("param_ok", Status.OK)],
+        catalog={"param_ok": _param("param_ok", "CELL_OK")},
+        lexical_index=_FakeLexicalIndex({PRODUCT: [chunk]}, build_id=_COMPOSITION),
+    )
+    assert len(prepared.cases) == 1
+    assert prepared.skipped == {}
+    # Проба — по партиции; композиция в ``corpus_chunks`` не встречается по построению.
+    assert store.probed_build_ids == [_PARTITION]
+    assert store.manifest_queries == [_COMPOSITION]
+    # Провенанс ячейки остаётся композицией (I17/S5): партиция — уровень чанка.
+    assert prepared.index_build_id == _COMPOSITION
+    assert prepared.cases[0].index_build_id == _COMPOSITION
+    assert prepared.cases[0].retrievals.build_id == _COMPOSITION
+
+
+def test_product_without_manifest_row_is_product_not_in_build() -> None:
+    """Продукт без строки в ``index_manifest`` — честный отказ, а не «попробуем cb_»."""
+    chunk = RetrievedChunk(
+        chunk_id="c1",
+        product_id=PRODUCT,
+        text=TEXT_OK,
+        content_hash="hash-c1",
+        heading_path="H",
+        build_id=_PARTITION,
+        score=1.0,
+    )
+    store = _PartitionStore(chunks={(_PARTITION, PRODUCT): [chunk]})
+    with pytest.raises(BenchmarkPreconditionError) as exc:
+        prepare_cases(
+            store=store,
+            run_id=RUN_ID,
+            golden=[_golden("param_ok", Status.OK, product_id="p_absent")],
+            catalog={"param_ok": _param("param_ok", "CELL_OK")},
+            # Явный список продуктов не создаёт партицию: её даёт только манифест.
+            product_ids=[PRODUCT, "p_absent"],
+            lexical_index=_FakeLexicalIndex({PRODUCT: [chunk]}, build_id=_COMPOSITION),
+        )
+    assert exc.value.reason == "no_cases"
+    assert exc.value.details["row_skip_reasons"] == {"product_not_in_build": 1}
+    assert exc.value.details["products_not_in_build"] == ["p_absent"]
+    assert "p_absent" in str(exc.value)
+    # Ни одной пробы чанков у отсутствующего продукта: сверять не с чем.
+    assert store.probed_build_ids == []
+    assert exc.value.details["row_skips"] == {"p_absent/param_ok": "product_not_in_build"}
+
+
+def test_no_cases_message_names_products_absent_from_build() -> None:
+    """Верхняя причина называет **какие** продукты golden отсутствуют в сборке.
+
+    ``details`` читает только ``--json``; тот, кто выбирает модель, видит ``message``.
+    Общий ``no_cases`` отправлял искать поломку в чанках там, где продукта в сборке нет
+    вовсе.
+    """
+    store = _PartitionStore()
+    with pytest.raises(BenchmarkPreconditionError) as exc:
+        prepare_cases(
+            store=store,
+            run_id=RUN_ID,
+            golden=[
+                _golden("param_ok", Status.OK, product_id="p8"),
+                _golden("param_ok", Status.OK, product_id="p9"),
+            ],
+            catalog={"param_ok": _param("param_ok", "CELL_OK")},
+            lexical_index=_FakeLexicalIndex({}),
+        )
+    error = exc.value
+    message = str(error)
+    assert error.reason == "no_cases"
+    assert "ни один продукт golden не входит в сборку" in message
+    assert _COMPOSITION in message
+    assert "p8" in message
+    assert "p9" in message
+    assert error.details["products_not_in_build"] == ["p8", "p9"]
+    assert error.details["row_skip_reasons"] == {"product_not_in_build": 2}
+    assert error.details["build_id"] == _COMPOSITION
+
+
+def test_build_mismatch_compares_with_composition_id() -> None:
+    """I17 не потерян: результат, назвавший партицию вместо сборки, отвергается.
+
+    ``RetrievalResult.build_id`` — провенанс **сборки** (композиция); порт, отдавший
+    ``pb_*``, пришёл из другого пространства id, и ячейка не должна попасть в замер.
+    """
+    chunk = RetrievedChunk(
+        chunk_id="c1",
+        product_id=PRODUCT,
+        text=TEXT_OK,
+        content_hash="hash-c1",
+        heading_path="H",
+        build_id=_PARTITION,
+        score=1.0,
+    )
+    store = _PartitionStore(chunks={(_PARTITION, PRODUCT): [chunk]})
+    with pytest.raises(BenchmarkPreconditionError) as exc:
+        prepare_cases(
+            store=store,
+            run_id=RUN_ID,
+            golden=[_golden("param_ok", Status.OK)],
+            catalog={"param_ok": _param("param_ok", "CELL_OK")},
+            # Порт назвал партицию — это не сборка прогона (I17).
+            lexical_index=_FakeLexicalIndex({PRODUCT: [chunk]}, build_id=_PARTITION),
+        )
+    assert exc.value.reason == "no_cases"
+    assert exc.value.details["row_skip_reasons"] == {"build_mismatch": 1}
+    assert _PARTITION in str(exc.value) and _COMPOSITION in str(exc.value)

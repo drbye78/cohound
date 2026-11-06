@@ -69,7 +69,7 @@ from core.cli.wiring import (
     resolve_experiment_target,
 )
 from core.config.deploy import LLM_SLOTS, load_deploy_config
-from core.domain.enums import SkipReason
+from core.domain.enums import ReasoningEffort, SkipReason
 from core.pipeline import (
     BENCHMARK_CONTRACT,
     DEFAULT_PROFILES,
@@ -384,9 +384,18 @@ def _build_benchmark_models(
     тот баг, от которого защищает эта граница. Из окружения/слота берутся только
     ``base_url``/``api_key``/``decoder``/``timeout``.
 
+    **Уровень рассуждения — тот же путь, что в прогоне.** ``--reasoning-effort`` уходит
+    в :func:`core.cli.wiring.build_evaluator_llm` как ``reasoning_effort`` и проверяется
+    :func:`core.cli.wiring.ensure_reasoning_wire`: невыразимый для модели уровень —
+    ``CliError`` (``EXIT_USAGE``), а не тихий пропуск параметра. ``--max-tokens`` —
+    объявленный потолок генерации: он ставится полю адаптера, откуда его читает провод
+    (``LocalEvaluator._http_complete``), как и потолок из слота в прогоне.
+
     :raises CliError: endpoint не сконфигурирован — измерять не на чем (:data:`EXIT_USAGE`).
     """
     model_ids = list(args.model or DEFAULT_BENCHMARK_MODELS)
+    reasoning_effort = getattr(args, "reasoning_effort", None)
+    max_tokens = getattr(args, "max_tokens", None)
     models: list[ModelUnderTest] = []
     for model_id in model_ids:
         evaluator = build_evaluator_llm(
@@ -400,6 +409,9 @@ def _build_benchmark_models(
             # Контракт измерения: greedy + фиксированный seed (A3/§7.1).
             seed=int(BENCHMARK_CONTRACT["seed"]),
             temperature=float(BENCHMARK_CONTRACT["temperature"]),
+            # Уровень рассуждения резолвится и проверяется той же функцией, что в прогоне;
+            # невыразимый уровень даёт EXIT_USAGE до первого вызова.
+            reasoning_effort=reasoning_effort,
         )
         if evaluator is None:
             raise CliError(
@@ -409,6 +421,11 @@ def _build_benchmark_models(
                 code="llm",
                 exit_code=EXIT_USAGE,
             )
+        if max_tokens is not None:
+            # Явный потолок генерации перекрывает потолок слота: это ось замера, а не
+            # настройка вида. ``setattr`` — потому что порт оценщика потолок не объявляет
+            # (он в ``LLMRequest``/адаптере), а ``evaluator`` здесь конкретный адаптер.
+            setattr(evaluator, "max_tokens", int(max_tokens))  # noqa: B010 — поле адаптера
         models.append(
             ModelUnderTest(
                 model_id=model_id,
@@ -433,11 +450,16 @@ def _fmt_ci_dict(data: dict[str, Any] | None) -> str:
     return f"[{data['low']:.2f};{data['high']:.2f}]"
 
 def _benchmark_table(payload: dict[str, Any]) -> str:
-    """Markdown-таблица измерений (модель | validity | κ | abstention | …)."""
+    """Markdown-таблица измерений (модель | validity | κ | abstention | …).
+
+    Колонки ``reasoning/cell``, ``length`` и ``invalid JSON`` показывают цену уровня
+    рассуждения: доля обрезаний по потолку и невалидных ответов, приходящихся на него.
+    """
     lines = [
         "| model | validity (95% CI) | κ (95% CI) | abstention | fabricated | "
-        "determinism | tokens/cell | p95 ms |",
-        "|---|---|---|---|---|---|---|---|",
+        "determinism | tokens/cell | reasoning/cell | length | invalid JSON | p95 ms | "
+        "reasoning_effort | max_tokens |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for model in payload["models"]:
         validity = model["validity"]
@@ -460,10 +482,19 @@ def _benchmark_table(payload: dict[str, Any]) -> str:
             determinism_text = f"{determinism['stable_fraction']:.2f}"
         else:
             determinism_text = "n/a"
+        length_fraction = model["finish_reason"]["length_fraction"]
+        length_text = "n/a" if length_fraction is None else f"{length_fraction:.2f}"
+        invalid_fraction = model["invalid_json"]["fraction"]
+        invalid_text = "n/a" if invalid_fraction is None else f"{invalid_fraction:.2f}"
+        reasoning_mean = model["reasoning"]["mean"]
+        axes = model["axes"]
         lines.append(
             "| {label} | {rate:.2f} {ci} | {kappa} | {abst} | {fab}/{ok} | {det} | "
-            "{tokens:.0f} | {p95:.1f} |".format(
+            "{tokens:.0f} | {reasoning:.0f} | {length} | {invalid} | {p95:.1f} | "
+            "{effort} | {max_tokens} |".format(
                 label=model["label"],
+                effort=axes.get("reasoning_effort") or "n/a",
+                max_tokens=axes.get("max_tokens") or "n/a",
                 rate=validity["rate"],
                 ci=_fmt_ci_dict(validity["ci95"]),
                 kappa=kappa_text,
@@ -472,6 +503,9 @@ def _benchmark_table(payload: dict[str, Any]) -> str:
                 ok=abstention["golden_ok"],
                 det=determinism_text,
                 tokens=model["tokens"]["per_cell_mean"],
+                reasoning=reasoning_mean,
+                length=length_text,
+                invalid=invalid_text,
                 p95=model["latency_ms"]["p95"],
             )
         )
@@ -751,6 +785,26 @@ def configure(sub: Any) -> None:
         default=1,
         metavar="N",
         help="число повторов для пробы детерминизма (N>=2 включает пробу); дефолт 1",
+    )
+    p_bench.add_argument(
+        "--reasoning-effort",
+        dest="reasoning_effort",
+        choices=[effort.value for effort in ReasoningEffort],
+        default=None,
+        metavar="LEVEL",
+        help="объявленный уровень усилия рассуждения оценщика "
+        f"({', '.join(effort.value for effort in ReasoningEffort)}); уходит тем же путём, "
+        "что в прогоне (reasoning_wire), невыразимый для модели уровень — EXIT_USAGE. "
+        "Дефолт — из слота (llm.<slot>.reasoning_effort)",
+    )
+    p_bench.add_argument(
+        "--max-tokens",
+        dest="max_tokens",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="объявленный потолок генерации (перекрывает llm.<slot>.max_tokens); "
+        "дефолт — потолок слота",
     )
     p_bench.add_argument(
         "--limit",

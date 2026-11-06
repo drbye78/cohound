@@ -146,6 +146,13 @@ class BenchmarkPreconditionError(RuntimeError):
 # Входы измерения
 # ---------------------------------------------------------------------------
 
+def _effort_value(effort: Any) -> str | None:
+    """Уровень усилия → строка отчёта (``None`` — ось не объявлена)."""
+    if effort is None:
+        return None
+    return str(getattr(effort, "value", effort))
+
+
 @dataclass(frozen=True)
 class ModelUnderTest:
     """Кандидат на сценарий ``evaluator``: порт + объявленные оси исполнения.
@@ -194,6 +201,12 @@ class ModelUnderTest:
             "web_tool": False,
             "seed": getattr(self.evaluator, "seed", None),
             "temperature": getattr(self.evaluator, "temperature", None),
+            # Объявленные оси исполнения оценщика (решение 06.11.2026): без них отчёт о
+            # замере уровня не называл бы, какой уровень и потолок он измерял.
+            "reasoning_effort": _effort_value(
+                getattr(self.evaluator, "reasoning_effort", None)
+            ),
+            "max_tokens": getattr(self.evaluator, "max_tokens", None),
         }
 
 @dataclass(frozen=True)
@@ -276,16 +289,42 @@ def _manifest_rrf_k(manifest: Any) -> tuple[int, bool]:
     return DEFAULT_RRF_K, False
 
 def _product_has_chunks(
-    store: StorePort, build_id: str, product_id: str
+    store: StorePort, partition_build_id: str, product_id: str
 ) -> tuple[bool, str | None]:
-    """Есть ли у продукта чанк в сборке; ``(has, error)`` — ошибка чтения названа.
+    """Есть ли у продукта чанк в **продукт-партиции**; ``(has, error)`` — ошибка названа.
+
+    Аргумент — ``partition_build_id`` (``pb_…``), а не композиция прогона (``cb_…``):
+    ``corpus_chunks.build_id`` несёт физическую партицию (09 §8.1), поэтому запрос по
+    композиции всегда дал бы «чанков нет» (измерено 06.11.2026 на
+    ``ru-pg-dbms-c2e7b860ac17``: 37 589 чанков под ``pb_*``, ноль под ``cb_*``).
+    Отображение «продукт → партиция» даёт ``index_manifest``; вызывающий обязан передать
+    id оттуда, а не подставлять композицию.
 
     Ленивая выборка (генератор останавливается на первом элементе) — полный скан не нужен.
     """
     try:
-        return next(iter(store.iter_chunks(build_id, product_id=product_id)), None) is not None, None
+        return next(
+            iter(store.iter_chunks(partition_build_id, product_id=product_id)), None
+        ) is not None, None
     except Exception as exc:  # noqa: BLE001 — ошибка чтения ≠ «чанков нет»
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def _retrieval_build_mismatch(returned: str, composition_id: str) -> bool:
+    """Результат ретривала пришёл **не из сборки прогона** (I17)?
+
+    Сравнение идёт с **композицией** (``runs.index_build_id``, ``cb_…``), а не с
+    продуктовой партицией: ``RetrievalResult.build_id`` — провенанс сборки, его ставят
+    сами порты ретривала. ``NpyVectorIndex.build_id`` — ``composition_id`` вида
+    (``adapters/vector_npy.py``), лексический индекс засевается явно с
+    ``build_id=view.composition_id`` (``wiring.seed_lexical_index``). Партиция ``pb_…``
+    живёт уровнем ниже — в ``RetrievedChunk.build_id`` — и на ячейку не выносится.
+
+    Поэтому сверять этот id с партицией значило бы объявить ``build_mismatch`` на каждом
+    корректном результате композиционной сборки. Пустой ``returned`` — «сборка не
+    названа»: это не расхождение, а отсутствие факта (A3), поэтому mismatch не ставится.
+    """
+    return bool(returned) and str(returned) != str(composition_id)
 
 def prepare_cases(
     *,
@@ -315,10 +354,20 @@ def prepare_cases(
     дефолт **с явной заметкой** в :attr:`PreparedCases.notes`.
 
     Пропуски всегда названы: ``catalog_missing`` (параметра нет в каталоге),
-    ``product_not_in_build`` (продукта нет в сборке), ``no_chunks`` (у продукта нет чанков),
-    ``chunk_read_failed`` (ошибка чтения чанков), ``retrieval_failed`` (ретривал бросил),
-    ``build_mismatch`` (результат не из сборки прогона — I17). Дубликат golden-строки
-    игнорируется с заметкой (не молча).
+    ``product_not_in_build`` (у продукта нет строки в ``index_manifest`` этой сборки —
+    партиции, по которой его читать, не существует), ``no_chunks`` (в партиции продукта
+    нет чанков), ``chunk_read_failed`` (ошибка чтения чанков), ``retrieval_failed``
+    (ретривал бросил), ``build_mismatch`` (результат не из сборки прогона — I17).
+    Дубликат golden-строки игнорируется с заметкой (не молча).
+
+    **Два id-пространства (09 §8.1), и это не деталь.** ``runs.index_build_id`` —
+    **композиция** когорты (``cb_…``), ``corpus_chunks.build_id`` — сборка
+    **продукт-партиции** (``pb_…``); связывает их ``index_manifest``. Наличие чанков
+    поэтому проверяется по ``partition_build_id`` записи продукта, а не по композиции:
+    запрос по композиции всегда вернул бы «чанков нет» и весь benchmark отвечал бы
+    ``no_cases`` при живом корпусе (измерено 06.11.2026). Продукт без строки в манифесте
+    получает ``product_not_in_build``: пробовать «оба варианта» значило бы маскировать
+    расхождение манифеста с данными.
 
     **Объявленный отказ эталона (P6b).** ``golden_status.state == declined`` — причина
     отказа **эталона**, а не отсутствия пригодных ячеек: сверять не с чем по решению
@@ -331,7 +380,9 @@ def prepare_cases(
 
     :param store: открытый стор прогона (**только чтение**).
     :param catalog: ``param_id -> CatalogRow`` из пакета прогона.
-    :param product_ids: продукты сборки; ``None`` — из ``index_manifest``.
+    :param product_ids: продукты сборки; ``None`` — из ``index_manifest``. Продукт, для
+        которого в манифесте нет строки, всё равно пропускается как
+        ``product_not_in_build``: состав берётся из манифеста, а не из аргумента.
     :param build_id: сборка прогона; ``None`` — ``runs.index_build_id``/манифест.
     :param limit: ограничить число ячеек (smoke-подмножество, детерминированно по golden).
     :param golden_status: объявленное состояние эталона (:func:`read_golden_status`);
@@ -393,14 +444,26 @@ def prepare_cases(
     if not rrf_fixed:
         notes.append(f"rrf_k не зафиксирован в прогоне — взят {rrf_k} (дефолт)")
 
-    if product_ids is None:
-        product_ids = sorted(
-            {
-                entry.product_id
-                for entry in store.iter_index_manifest(str(resolved_build))
-                if getattr(entry, "product_id", None)
-            }
+    # Отображение «продукт → продукт-партиция» — из ``index_manifest`` (K1/I17); это
+    # единственный авторитетный источник: ``corpus_chunks.build_id`` несёт ``pb_…``, а
+    # композиция прогона (``runs.index_build_id``, ``cb_…``) в этой колонке не встречается
+    # по построению. Legacy-строка манифеста без ``partition_build_id`` читается как
+    # ``pb := index_build_id`` (MVP-4 шаг 1) — прежняя семантика таких сборок.
+    manifest_entries = list(store.iter_index_manifest(str(resolved_build)))
+    partition_by_product: dict[str, str] = {}
+    for entry in manifest_entries:
+        entry_product = getattr(entry, "product_id", None)
+        if not entry_product:
+            continue
+        partition = (
+            getattr(entry, "partition_build_id", None)
+            or getattr(entry, "index_build_id", None)
+            or str(resolved_build)
         )
+        partition_by_product.setdefault(str(entry_product), str(partition))
+
+    if product_ids is None:
+        product_ids = sorted(partition_by_product)
     products = tuple(dict.fromkeys(str(pid) for pid in product_ids))
     if not products:
         raise BenchmarkPreconditionError(
@@ -410,11 +473,16 @@ def prepare_cases(
     product_set = set(products)
     # Проверяем чанки только у продуктов, которые реально встречаются в golden: для
     # больших когорт это одна ленивая выборка на нужный продукт, а не на всю сборку.
+    # Продукт без строки в ``index_manifest`` не имеет партиции в этой сборке — это
+    # ``product_not_in_build`` ниже, а композиция вместо партиции не подставляется.
     needed_products = sorted({row.product_id for row in golden} & product_set)
     has_chunks: dict[str, bool] = {}
     chunk_errors: dict[str, str] = {}
     for pid in needed_products:
-        found, error = _product_has_chunks(store, str(resolved_build), pid)
+        partition_build_id = partition_by_product.get(pid)
+        if partition_build_id is None:
+            continue
+        found, error = _product_has_chunks(store, partition_build_id, pid)
         has_chunks[pid] = found
         if error is not None:
             chunk_errors[pid] = error
@@ -437,7 +505,7 @@ def prepare_cases(
         if param is None:
             skipped[cell_id] = "catalog_missing"
             continue
-        if row.product_id not in product_set:
+        if row.product_id not in product_set or row.product_id not in partition_by_product:
             skipped[cell_id] = "product_not_in_build"
             continue
         if row.product_id in chunk_errors:
@@ -466,7 +534,7 @@ def prepare_cases(
         except Exception as exc:  # noqa: BLE001 — ячейка изолирована, пропуск назван
             skipped[cell_id] = f"retrieval_failed: {type(exc).__name__}: {exc}"
             continue
-        if result.build_id and str(result.build_id) != str(resolved_build):
+        if _retrieval_build_mismatch(str(result.build_id or ""), str(resolved_build)):
             skipped[cell_id] = (
                 f"build_mismatch: ретривал вернул {result.build_id!r}, "
                 f"прогон зафиксировал {resolved_build!r} (I17)"
@@ -494,10 +562,14 @@ def prepare_cases(
     if declined and golden_status is not None:
         raise _golden_declined_error(golden_status, skipped=skipped, notes=notes)
     if not cases:
-        detail = "; ".join(f"{cid}: {reason}" for cid, reason in sorted(skipped.items()))
-        raise BenchmarkPreconditionError(
-            PRECONDITION_NO_CASES,
-            "ни одной пригодной ячейки: " + (detail or "golden-набор пуст"),
+        raise _no_cases_error(
+            build_id=str(resolved_build),
+            skipped=skipped,
+            notes=notes,
+            golden_products={row.product_id for row in golden},
+            # «В сборке» = есть и в запрошенных продуктах, и строка манифеста с
+            # партицией: продукт без партиции честно отсутствует (см. пропуски выше).
+            product_set=product_set & set(partition_by_product),
         )
     if truncated:
         notes.append(
@@ -514,6 +586,51 @@ def prepare_cases(
         retrieval_cutoff_k=cutoff_k,
         rrf_k=rrf_k,
         notes=tuple(notes),
+    )
+
+
+def _no_cases_error(
+    *,
+    build_id: str,
+    skipped: Mapping[str, str],
+    notes: Sequence[str],
+    golden_products: set[str],
+    product_set: set[str],
+) -> BenchmarkPreconditionError:
+    """«Ни одной пригодной ячейки» — с **названными** продуктами golden, которых нет в сборке.
+
+    Разложение по строкам (``details``) читает только ``--json``; тому, кто выбирает
+    модель, нужна причина уровня набора. Если продукты golden целиком отсутствуют в
+    сборке, сообщение называет **какие именно**: иначе общий ``no_cases`` отправляет
+    искать поломку в чанках там, где сверять нечего (A3).
+    """
+    counts = _skip_reason_counts(skipped)
+    breakdown = ", ".join(f"{reason}={count}" for reason, count in counts.items())
+    absent = sorted(str(pid) for pid in golden_products - product_set)
+    if absent and set(counts) == {"product_not_in_build"}:
+        lead = (
+            f"ни один продукт golden не входит в сборку {build_id!r}: "
+            + ", ".join(absent)
+        )
+    elif absent:
+        lead = (
+            f"продукты golden отсутствуют в сборке {build_id!r}: "
+            + ", ".join(absent)
+        )
+    else:
+        lead = f"ни одной пригодной ячейки в сборке {build_id!r}"
+    rows = "; ".join(f"{cid}: {reason}" for cid, reason in sorted(skipped.items()))
+    tail = f" (по причинам: {breakdown})" if breakdown else ""
+    return BenchmarkPreconditionError(
+        PRECONDITION_NO_CASES,
+        f"{lead}: {rows or 'golden-набор пуст'}{tail}",
+        details={
+            "build_id": build_id,
+            "products_not_in_build": absent,
+            "row_skip_reasons": counts,
+            "row_skips": dict(sorted(skipped.items())),
+            "notes": list(notes),
+        },
     )
 
 
@@ -577,6 +694,16 @@ class _CountingEvaluator:
         self.calls_failed = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        #: Токены рассуждения (провенанс исполнения): по ним видно, **действовал ли**
+        #: объявленный уровень усилия. ``0`` у провайдера, который их не называет, —
+        #: «не сообщено», а не измеренный ноль (различить помогает
+        #: :attr:`usage_reported_calls`).
+        self.reasoning_tokens = 0
+        #: Метки остановки генерации по каждому вызову (``None`` — не названо).
+        self.finish_reasons: list[str | None] = []
+        #: Вызовы, отвергнутые как невалидный JSON/форма, и обрезанные по потолку.
+        self.invalid_json_calls = 0
+        self.truncated_calls = 0
         #: Сколько вызовов реально сообщили usage (нули могут значить «не сообщено»).
         self.usage_reported_calls = 0
         self.last_output: LLMCellOutput | None = None
@@ -587,6 +714,11 @@ class _CountingEvaluator:
         self.endpoint_kind = getattr(inner, "endpoint_kind", "")
         self.seed = getattr(inner, "seed", None)
         self.temperature = getattr(inner, "temperature", None)
+        # Аксиомы исполнения (уровень усилия и потолок генерации) проксируются, чтобы
+        # ``evaluate_cell`` видел их на порте, как на исходном адаптере: иначе запрос
+        # уходил бы без объявленного уровня, а журнал называл бы не тот потолок.
+        self.reasoning_effort = getattr(inner, "reasoning_effort", None)
+        self.max_tokens = getattr(inner, "max_tokens", None)
 
     def complete(self, req: LLMRequest) -> LLMResponse:
         """Делегирует вызов и учитывает расход; исключения пробрасываются как есть."""
@@ -596,17 +728,54 @@ class _CountingEvaluator:
         except Exception as exc:
             self.calls_failed += 1
             self.last_error = f"{type(exc).__name__}: {exc}"
+            self._record_failure(exc)
             raise
         self.calls_ok += 1
         usage = getattr(response, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        reasoning_tokens = int(getattr(usage, "reasoning_tokens", 0) or 0)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
-        if prompt_tokens or completion_tokens:
+        self.reasoning_tokens += reasoning_tokens
+        if prompt_tokens or completion_tokens or reasoning_tokens:
             self.usage_reported_calls += 1
+        finish_reason = getattr(response, "finish_reason", None)
+        self.finish_reasons.append(
+            finish_reason if isinstance(finish_reason, str) else None
+        )
+        if finish_reason == "length":
+            self.truncated_calls += 1
         self.last_output = response.output
         return response
+
+    def _record_failure(self, exc: BaseException) -> None:
+        """Учитывает отказ вызова: класс (невалидный JSON/потолок) и израсходованное.
+
+        Отказ после отправки тоже стоит токенов: адаптер кладёт ``usage`` в
+        :class:`~core.adapters.llm_local.EvaluationError`. Не учесть его значило бы
+        занизить цену уровня, который тратит бюджет на рассуждение и обрывается.
+        """
+        reason = getattr(exc, "reason", None)
+        finish_reason = getattr(exc, "finish_reason", None)
+        if reason == "invalid_json":
+            self.invalid_json_calls += 1
+        if reason == "length" or finish_reason == "length":
+            self.truncated_calls += 1
+        self.finish_reasons.append(
+            finish_reason if isinstance(finish_reason, str) else None
+        )
+        usage = getattr(exc, "usage", None)
+        if usage is None:
+            return
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        reasoning_tokens = int(getattr(usage, "reasoning_tokens", 0) or 0)
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        self.reasoning_tokens += reasoning_tokens
+        if prompt_tokens or completion_tokens or reasoning_tokens:
+            self.usage_reported_calls += 1
 
 # ---------------------------------------------------------------------------
 # Замеры и метрики
@@ -637,6 +806,13 @@ class CellMeasurement:
     repeat: int
     prompt_hash: str | None = None
     harness_error: str | None = None
+    #: Токены рассуждения за ячейку (все вызовы, включая неудачные).
+    reasoning_tokens: int = 0
+    #: Метки остановки по каждому вызову ячейки (``None`` — провайдер не назвал).
+    finish_reasons: tuple[str | None, ...] = ()
+    #: Вызовы, отвергнутые как невалидный JSON/форма, и обрезанные по потолку.
+    invalid_json_calls: int = 0
+    truncated_calls: int = 0
 
     @property
     def cell_id(self) -> str:
@@ -818,6 +994,15 @@ class ModelMetrics:
     latency_ms: dict[str, float]
     determinism: dict[str, Any]
     cells: tuple[CellMeasurement, ...]
+    #: Статистика токенов рассуждения: по ней видно, **действовал ли** объявленный
+    #: уровень усилия (``llm.reasoning_effort``), а не только был принят на проводе.
+    reasoning: dict[str, Any] = field(default_factory=dict)
+    #: Распределение меток остановки генерации (доля ``length`` — цена потолка).
+    finish_reason: dict[str, Any] = field(default_factory=dict)
+    #: Невалидный JSON/форма: сколько вызовов и какая доля от всех вызовов.
+    invalid_json: dict[str, Any] = field(default_factory=dict)
+    #: Распределение статусов ячеек (``failed`` — ``status=None``, I4).
+    status_counts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-представление метрик модели."""
@@ -844,6 +1029,10 @@ class ModelMetrics:
             "abstention": dict(self.abstention),
             "first_attempt_pass": self.first_attempt_pass,
             "tokens": dict(self.tokens),
+            "reasoning": dict(self.reasoning),
+            "finish_reason": dict(self.finish_reason),
+            "invalid_json": dict(self.invalid_json),
+            "status_counts": dict(self.status_counts),
             "latency_ms": dict(self.latency_ms),
             "determinism": dict(self.determinism),
             "cells": [
@@ -859,6 +1048,10 @@ class ModelMetrics:
                     "calls": m.calls,
                     "prompt_tokens": m.prompt_tokens,
                     "completion_tokens": m.completion_tokens,
+                    "reasoning_tokens": m.reasoning_tokens,
+                    "finish_reasons": list(m.finish_reasons),
+                    "invalid_json_calls": m.invalid_json_calls,
+                    "truncated_calls": m.truncated_calls,
                     "latency_ms": m.latency_ms,
                     "harness_error": m.harness_error,
                 }
@@ -972,6 +1165,10 @@ def _measure_once(
             latency_ms=elapsed_ms,
             repeat=repeat,
             harness_error=f"{type(exc).__name__}: {exc}",
+            reasoning_tokens=proxy.reasoning_tokens,
+            finish_reasons=tuple(proxy.finish_reasons),
+            invalid_json_calls=proxy.invalid_json_calls,
+            truncated_calls=proxy.truncated_calls,
         )
     elapsed_ms = (timer() - started) * 1000.0
     cell = outcome.cell
@@ -990,6 +1187,10 @@ def _measure_once(
         latency_ms=elapsed_ms,
         repeat=repeat,
         prompt_hash=outcome.prompt_hash,
+        reasoning_tokens=proxy.reasoning_tokens,
+        finish_reasons=tuple(proxy.finish_reasons),
+        invalid_json_calls=proxy.invalid_json_calls,
+        truncated_calls=proxy.truncated_calls,
     )
 
 def _abstention_metrics(measurements: Sequence[CellMeasurement]) -> dict[str, Any]:
@@ -1085,6 +1286,16 @@ def _model_metrics(
     usage_reported = sum(1 for m in ordered if m.prompt_tokens or m.completion_tokens)
     latencies = [m.latency_ms for m in ordered]
 
+    reasoning_values = [m.reasoning_tokens for m in ordered]
+    finish_counter: Counter[str | None] = Counter(
+        finish for m in ordered for finish in m.finish_reasons
+    )
+    length_calls = int(finish_counter.get("length", 0))
+    invalid_json_calls = sum(m.invalid_json_calls for m in ordered)
+    status_counts: Counter[str] = Counter(
+        m.status if m.status is not None else "failed" for m in ordered
+    )
+
     determinism: dict[str, Any] = {
         "measured": repeats >= 2,
         "repeats": repeats,
@@ -1151,6 +1362,33 @@ def _model_metrics(
         },
         determinism=determinism,
         cells=tuple(ordered),
+        reasoning={
+            "total": sum(reasoning_values),
+            "mean": (sum(reasoning_values) / len(reasoning_values))
+            if reasoning_values
+            else 0.0,
+            "median": _percentile(reasoning_values, 0.5) if reasoning_values else 0.0,
+            "max": max(reasoning_values) if reasoning_values else 0,
+            "cells_with_reasoning": sum(1 for value in reasoning_values if value > 0),
+            "cells": len(reasoning_values),
+        },
+        finish_reason={
+            "counts": {
+                (finish if finish is not None else "not_reported"): count
+                for finish, count in sorted(
+                    finish_counter.items(), key=lambda item: str(item[0])
+                )
+            },
+            "length_calls": length_calls,
+            "length_fraction": (length_calls / calls) if calls else None,
+            "calls": calls,
+        },
+        invalid_json={
+            "calls": invalid_json_calls,
+            "fraction": (invalid_json_calls / calls) if calls else None,
+            "calls_total": calls,
+        },
+        status_counts={key: status_counts[key] for key in sorted(status_counts)},
     )
 
 def _limits(
