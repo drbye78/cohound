@@ -1329,7 +1329,8 @@ hound run \
   --passports-dir passports \
   [--urls <urls>.yaml] \
   --until corpus \
-  [--refresh auto|revalidate|refresh|offline] \
+  [--refresh auto|revalidate|refresh|offline|frozen] \
+  [--frozen-source bytes|chunks] \
   [--render-modes <render>.yaml]
 ```
 
@@ -1338,8 +1339,14 @@ hound run \
   (канонический) либо legacy `sources/corpus_urls.yaml`; приоритет и значимость порядка
   корней — §A.1.1. `doc_domains` паспортов молча не фетчатся (I19).
 - `--refresh MODE` — политика наблюдения корпуса (`auto` дефолт, `revalidate` — только
-  известные URL, `refresh` — живой ре-фетч, `offline` — без сети). **Входит в `run_id`**
-  (§C.1.1): смена политики — новый прогон, а не продолжение.
+  известные URL, `refresh` — живой ре-фетч, `offline` — без сети, корпус из **чанков**,
+  `frozen` — без сети, корпус из сохранённых **байтов** `corpus_raw` с **текущим**
+  извлечением и нарезкой). **Входит в `run_id`** (§C.1.1): смена политики — новый прогон,
+  а не продолжение.
+- `--frozen-source {bytes,chunks}` — источник корпуса при `frozen` (`bytes` — байты →
+  текущая экстракция, `chunks` — поведение `offline`); вне `frozen` канонизируется в `n/a`
+  и `run_id` не меняет. Режимы по области (`auto|on_request|scheduled|network_denied`) —
+  отдельное измерение (`hound crawl policy`, план 19 §6.1), не этот флаг.
 - `[--render-modes <render>.yaml]` — `{url: "http"|"browser"}`: явное переопределение оси
   `fetch` для SPA/JS-страниц (значение не из `http`/`browser` → `EXIT_USAGE`). **Явное
   переопределение побеждает доменный профиль** по оси `fetch`; `extract`/`strategy`/`wait_for`/
@@ -1478,7 +1485,8 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 **Флаги `hound run`.** Полный набор (`hound run --help`) делится на три класса.
 
 * **Меняют идентичность прогона** (`run_id`, §C.1.1): `--urls FILE` (`seeds_digest`),
-  `--refresh {auto,revalidate,refresh,offline}` (`refresh_policy`), `--only-failed` /
+  `--refresh {auto,revalidate,refresh,offline,frozen}` (`refresh_policy`), `--frozen-source
+  {bytes,chunks}` (`frozen_source`, канонизируется в `n/a` вне `frozen`), `--only-failed` /
   `--only-product ID` (`run_scope`), `--cycle-id` / `--update` (`cycle_id`), `--profile
   {local,split}` (`deploy_profile`), а также
   `--llm-slot`, `--llm-model`, `--retrieval-profile`, `--cutoff-k`, `--document-level`,

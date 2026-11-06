@@ -621,7 +621,7 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
 ```
 hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
     --update [--cycle-id 2026-W43 | --cycle-id 2026-10-19]
-    [--since-run <run_id>] [--refresh auto|revalidate|refresh|offline]
+    [--since-run <run_id>] [--refresh auto|revalidate|refresh|offline|frozen]
     [--only-failed | --only-product ID]
     [--dry-run] [--json] [--reset]
 ```
@@ -758,7 +758,7 @@ corpus-снимка, а не «отсутствует в прошлом `run.yam
 | `SeedState` | `enabled`, `disabled`, `invalid` | операционное состояние seed'а | да |
 | `ReuseKind` | `live`, `revalidated`, `reused`, `stale` | как получен документ в этом цикле | да |
 | `ChangeClass` | `none`, `content_change`, `cohort_expansion`, `cohort_reduction`, `execution_change`, `methodology_change` | класс изменения между прогонами | да |
-| `RefreshPolicy` | `auto`, `revalidate`, `refresh`, `offline` | политика обновления | да |
+| `RefreshPolicy` | `auto`, `revalidate`, `refresh`, `offline`, `frozen` | политика обновления | да |
 | `CoverageFreshness` | `live`, `revalidated`, `stale` | свежесть наблюдения корпуса | **➖ снято** решением 29.10.2026 |
 | `MeasurementOrigin` | `observed`, `carried` | ячейка измерена или перенесена | **да** (волна 2; словарь `measurement_origin`) |
 | `RunProductStatus` | `pending`, `running`, `complete`, `partial`, `failed`, `blocked` | статус продукта в прогоне | **да** (граница A) |
@@ -1089,7 +1089,7 @@ CREATE TABLE run_lineage (
     completed_at      TEXT,
     error             TEXT,
     products_json     TEXT,                     -- JSON-массив product_id (NULL = неизвестно)
-    refresh_policy    TEXT                      -- auto|revalidate|refresh|offline
+    refresh_policy    TEXT                      -- auto|revalidate|refresh|offline|frozen
 );
 
 -- 9. Реестр иммутабельных индексных партиций и композиций.
@@ -1690,7 +1690,7 @@ def derive_run_id(inputs: RunInputs, *, cycle_id: str, cohort_digest: str,
   остаётся провенансом и входит в `index`/manifest.
 - `run_scope` (`full` | `only_failed` | `product:<id>`) входит в id: иначе scoped-прогон
   совпал бы с полным `run_id`, и `Runner` пропустил бы фазы как resume.
-- `refresh_policy` (`auto|revalidate|refresh|offline`) входит в id: смена политики
+- `refresh_policy` (`auto|revalidate|refresh|offline|frozen`) входит в id: смена политики
   наблюдения — это другое измерение, а не resume.
 - `cohort_digest` = `H(canonical JSON of sorted (product_id, anchor_relation, role_overlap);
   case_id; frozen_at; cohort_ref)`. `selection_reason` **не** входит: авторский текст не
