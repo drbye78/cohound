@@ -46,6 +46,34 @@ foreign versions visibly (`SchemaVersionMismatch`), packages/formats may be re-s
 **not** negotiable is the methodology (axioms §2), `run_id = f(declared inputs)`, I1–I23, and
 category neutrality of `core/`.
 
+### 1.2 Documentation lags the code — verify before citing
+
+Documentation here is written as a record; the code, the host and the corpora keep moving. A
+stale sentence is therefore the **normal** state of an old document, not an exception: a claim
+read in `docs/` is a **hypothesis**, not a fact.
+
+- **Numbers age fastest.** Row counts, document/chunk counts, timings, memory/VRAM peaks and
+  verdicts like "unusable"/"rejected" describe **one measurement, on one date, on one host,
+  against one corpus**. Before reusing one: re-measure it, or point to the published
+  measurement file (`docs/reports/measurements/`), or quote it **with its date**. A number
+  without a date is not evidence.
+- **The artifact outranks the document.** Measured 06.11.2026: three documents still called
+  `packages/ru-pg-dbms/golden.csv` "236 rows, unusable" long after the owner had rebuilt it to
+  905 rows = 181 params × 5 products (`25cf2ab`) — the file was fine, the documents were not.
+  Read the file, the DB row, or `git log` before repeating what a document says about it.
+- **Code drift is silent.** Anchors in `docs/`, `README.md`, `AGENTS.md` are gated
+  (`scripts/check_doc_anchors.py`), but the gate checks that `path:line` **resolves**, not that
+  the sentence still means what the code does. Read the cited lines.
+- **"Not done" / "rejected" / "open" carry a date and a reason.** A rejection is revisited when
+  its condition changes (A3), not cited forever; an "open" item may have been closed since.
+- **Correct a stale statement in the same commit** in which you find it. The next reader
+  inherits what you leave behind — propagating it costs more than fixing it.
+
+Owner note (06.11.2026): the project moves fast, so reusing old estimates and conclusions —
+about the environment (keys, devices, caches, corpora) as well as about the code (throughput,
+memory, document counts) — is where trust is lost: usually not by being wrong, but by being
+outdated.
+
 ## 2. Axioms (spec §0) — do not violate
 
 | | Axiom |
