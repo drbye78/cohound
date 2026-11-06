@@ -1474,10 +1474,15 @@ def build_phases(
             eval_conditions=eval_conditions_from_run(
                 inputs.run, status_dict_version=declared_status_dict_version
             ),
-            # V7: аудит исполненных промптов — `runs/{run_id}/prompts/{prompt_hash}.json`
+            # V7: аудит исполненных промптов — `runs/{run_id}/prompts/{sha256(text)}.json`
             # (03 §A.2, 04 §B.3, 09 §14.4). Путь — из resolved-раскладки прогона
             # (`out_dir`), а не выдуман: фаза не читает окружение.
             prompt_dir=Path(out_dir) / plan.run_id / "prompts",
+            # Журнал вызовов оценщика: строка на попытку — метка остановки, расход,
+            # латентность и полный текст ответа. Без него путь отказа неразбираем:
+            # ``eval_cache`` пишет только успех, ``prompts/`` — только вход. Файл —
+            # провенанс исполнения, в ``run_id``/DDL не входит.
+            llm_journal=Path(out_dir) / plan.run_id / "logs" / "llm_calls.jsonl",
             # I3/§5: факты других фаз — только наблюдённые (см. helper).
             exhaustion_facts=_observed_exhaustion_facts(
                 ctx, plan, inputs, passports

@@ -34,8 +34,17 @@ retrieval-пути строка отсутствует (это видимая г
 **``prompt_hash``.** Ровно контракт :func:`core.util.hashing.prompt_hash`:
 ``H(template_version, rule, absence_rule, sorted(chunk_ids))``. Сателлиты,
 ``extra_instructions`` и отрендеренный текст в hash **не входят** — такова
-фиксированная формула §5/01 §5. Полный текст сохраняется рядом с hash
-(``prompts/{hash}.json``), чтобы аудит мог сверить содержимое.
+фиксированная формула §5/01 §5. Полный текст сохраняется в каталоге аудита
+(``prompts/{sha256(text)}.json``), чтобы аудит мог сверить содержимое.
+
+**Адрес артефакта ≠ ``prompt_hash`` (замер 06.11.2026).** Формула §5 не покрывает ни
+``product_id``, ни заголовок параметра, ни текст чанков, поэтому две разные ячейки
+законно получают **один** ``prompt_hash`` (в прогоне ``ru-pg-dbms-c2e7b860ac17``:
+``xlsx_056`` и ``xlsx_057`` у ``jatoba``). Пока имя файла было ``{prompt_hash}.json``,
+второй промпт отказывал в записи (``prompt_hash_conflict``) и в архиве оставался текст
+**другой** ячейки. Формула hash — методология (§5) и здесь не меняется; исправлена
+**адресация артефакта**: имя файла — ``sha256(текста)``, ``prompt_hash`` остаётся полем
+внутри. Контентный адрес не может совпасть у разных текстов по построению.
 
 **Инварианты.** I18 — оценщик работает только по переданным чанкам, промпт не
 инструктирует его искать. I10/I15 — модель не генерирует URL. I7 — N/A запрещён.
@@ -58,7 +67,7 @@ from core.domain.enums import AbsenceRuleType
 from core.domain.models import CatalogRow, Satellite
 from core.ports.types import Chunk
 from core.ports.vector_index import RetrievedChunk
-from core.util.hashing import prompt_hash
+from core.util.hashing import content_hash, prompt_hash
 
 __all__ = [
     "ABSENCE_GUIDANCE",
@@ -174,8 +183,11 @@ _CHUNK_NO_SUFFIX_RE = re.compile(r"(?:#|:)\d+$")
 class CompiledPrompt:
     """Скомпилированный промпт ячейки: текст + провенанс для аудита (§3 A.2, §5).
 
-    ``prompt_hash`` — ключ адресации ``prompts/{prompt_hash}.json`` и значение,
-    сохраняемое в ячейке (воспроизводимость + инвалидация при смене шаблона).
+    ``prompt_hash`` — канонический ключ §5 (шаблон + правило + absence_rule + набор
+    ``chunk_id``); он сохраняется **полем** артефакта и в ячейке (воспроизводимость и
+    инвалидация при смене шаблона). Адресует файл аудита не он, а ``sha256`` текста:
+    формула §5 не покрывает product/title/текст чанков, поэтому один ``prompt_hash``
+    законно описывает несколько разных промптов (см. докстринг модуля).
     ``cell_key`` — ``(product_id, param_id)`` целевой ячейки.
     """
 
@@ -186,7 +198,7 @@ class CompiledPrompt:
     cell_key: tuple[str, str]
 
     def to_json(self) -> dict:
-        """Словарь для ``prompts/{hash}.json`` (JSON-совместимый, детерминированный)."""
+        """Словарь для файла артефакта (JSON-совместимый, детерминированный)."""
         return {
             "prompt_hash": self.prompt_hash,
             "template_version": self.template_version,
@@ -196,7 +208,7 @@ class CompiledPrompt:
         }
 
     def save(self, out_dir: str | Path) -> Path:
-        """Сохраняет промпт в ``out_dir/{prompt_hash}.json`` (см. :func:`save_prompt`)."""
+        """Сохраняет промпт в ``out_dir/{sha256(text)}.json`` (см. :func:`save_prompt`)."""
         return save_prompt(self, out_dir)
 
 
@@ -411,8 +423,19 @@ def render_queries(param: CatalogRow, max_queries: int = 3) -> list[str]:
     return queries[:max_queries]
 
 
+def prompt_artifact_name(compiled: CompiledPrompt) -> str:
+    """Имя файла артефакта: ``sha256(текста)`` + ``.json`` — **контентный** адрес.
+
+    ``prompt_hash`` (§5) адресом быть не может: он не покрывает product/title/текст
+    чанков, поэтому разные промпты законно делят его (замер 06.11.2026: ``xlsx_056`` и
+    ``xlsx_057`` одного продукта). sha256 текста — адрес, который по построению не
+    совпадает у разных текстов и совпадает у одинаковых (дедуп сохраняется).
+    """
+    return f"{content_hash(compiled.text)}.json"
+
+
 def _payload(compiled: CompiledPrompt) -> str:
-    """Детерминированный JSON-текст артефакта ``prompts/{prompt_hash}.json``.
+    """Детерминированный JSON-текст артефакта ``prompts/{sha256(text)}.json``.
 
     Единственный источник формы файла: и :func:`save_prompt`, и сверка содержимого в
     :meth:`PromptArchive.record` берут текст отсюда, иначе сравнение «тот же файл или
@@ -424,18 +447,19 @@ def _payload(compiled: CompiledPrompt) -> str:
 
 
 def save_prompt(compiled: CompiledPrompt, out_dir: str | Path) -> Path:
-    """Пишет ``out_dir/{prompt_hash}.json``; **иммутабельно** — существующий файл не трогает.
+    """Пишет ``out_dir/{sha256(text)}.json``; **иммутабельно** — существующий файл не трогает.
 
-    Возвращает путь. Повторный вызов идемпотентен (тот же hash → тот же файл, без
-    перезаписи), что защищает аудит-артефакт от мутации.
+    Возвращает путь. Повторный вызов идемпотентен (тот же текст → тот же файл, без
+    перезаписи), что защищает аудит-артефакт от мутации. ``prompt_hash`` внутрь файла
+    по-прежнему пишется — он остаётся провенансом ячейки, но адресом файла не служит.
 
-    Расхождение содержимого при совпавшем ``prompt_hash`` здесь **не** диагностируется
+    Расхождение содержимого по тому же адресу здесь **не** диагностируется
     (функция остаётся «пиши, если нет»): видимая диагностика — дело
     :class:`PromptArchive`, который пишет в наблюдение прогона, а не в файл.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"{compiled.prompt_hash}.json"
+    path = out / prompt_artifact_name(compiled)
     if not path.exists():
         path.write_text(_payload(compiled), encoding="utf-8")
     return path
@@ -443,17 +467,24 @@ def save_prompt(compiled: CompiledPrompt, out_dir: str | Path) -> Path:
 
 @dataclass
 class PromptArchive:
-    """Каталог аудита **исполненных** промптов: ``{dir}/{prompt_hash}.json`` (V7, §7.1).
+    """Каталог аудита **исполненных** промптов: ``{dir}/{sha256(text)}.json`` (V7, §7.1).
 
     Зачем объект, а не один вызов :func:`save_prompt`: запись артефакта аудита не имеет
     права ни ронять фазу, ни пропадать молча. Фаза отдаёт архив в ячейки, а после цикла
     забирает из него наблюдение — так сбой диска виден в ``PhaseResult.errors``, а
     вердикты остаются полученными (артефакт аудита — не условие измерения).
 
-    **Стоимость.** Файл — один на ``prompt_hash``, поэтому запись дедуплицируется по
-    содержимому входа: две ячейки с одинаковым входом (те же чанки, то же правило) дают
-    один файл. Учёт (``saved``/``reused``/``bytes_written``) — наблюдённые факты, их
-    печатает фаза; оценок «сколько должно быть» архив не делает.
+    **Адрес — контент, не ``prompt_hash``.** Имя файла — ``sha256`` текста промпта.
+    ``prompt_hash`` §5 не покрывает product/title/текст чанков, поэтому две разные
+    ячейки могут получить один hash (замер 06.11.2026: ``xlsx_056``/``xlsx_057``);
+    при адресации по hash второй промпт отказывал (``prompt_hash_conflict``) и в
+    архиве оставался текст **чужой** ячейки, то есть аудит свидетельствовал о входе,
+    которого не было.
+
+    **Стоимость.** Файл — один на текст промпта, поэтому запись дедуплицируется по
+    содержимому входа: две ячейки с одинаковым входом дают один файл. Учёт
+    (``saved``/``reused``/``bytes_written``) — наблюдённые факты, их печатает фаза;
+    оценок «сколько должно быть» архив не делает.
     """
 
     directory: Path
@@ -475,11 +506,14 @@ class PromptArchive:
     def record(self, compiled: CompiledPrompt) -> Path | None:
         """Сохраняет промпт и возвращает путь; ``None`` — запись не удалась (видно в ``errors``).
 
-        Идемпотентность — content-addressed: существующий файл не перезаписывается, а его
-        текст сверяется с тем, что дал бы этот вход. Расхождение — видимая аномалия
-        :data:`PROMPT_HASH_CONFLICT`, а не тихая подмена и не падение прогона.
+        Идемпотентность — content-addressed: адрес файла — ``sha256`` текста, существующий
+        файл не перезаписывается, а его текст сверяется с тем, что дал бы этот вход.
+        Расхождение означает **подмену артефакта на диске** (запись под тем же адресом с
+        другим текстом) — это видимая аномалия :data:`PROMPT_HASH_CONFLICT`, а не тихая
+        перезапись и не падение прогона. Две разные ячейки с одним ``prompt_hash`` сюда не
+        попадают вовсе: у них разные тексты, значит разные файлы.
         """
-        path = self.directory / f"{compiled.prompt_hash}.json"
+        path = self.directory / prompt_artifact_name(compiled)
         expected = _payload(compiled)
         if path.exists():
             self.reused += 1
@@ -490,8 +524,8 @@ class PromptArchive:
                 return None
             if existing != expected:
                 self.errors.append(
-                    f"{PROMPT_HASH_CONFLICT}: {path} — файл с тем же prompt_hash несёт "
-                    "другой текст (не перезаписан): prompt_hash перестал адресовать вход"
+                    f"{PROMPT_HASH_CONFLICT}: {path} — файл с тем же контентным адресом "
+                    "несёт другой текст (не перезаписан): артефакт подменён на диске"
                 )
             return path
         try:

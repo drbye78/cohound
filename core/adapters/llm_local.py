@@ -40,6 +40,12 @@ HTTP-клиент подтягивается только в реальном п
 **Ошибки.** Невалидный JSON/форма/нарушение инвариантов модели (I1/I7) →
 ``EvaluationError``; pipeline (T9.3) отображает его в ``evaluation_failed`` с retry ≤2
 (§7.1). Отсутствие HTTP-зависимости без внедрённого ``generate`` → ``EvaluatorUnavailable``.
+Ошибка несёт провенанс ответа (``finish_reason``/``raw``/``usage``): по артефактам прогона
+видно, **что** вернула модель на отказе, а не только что JSON не разобрался.
+
+**``finish_reason`` и шов.** HTTP-путь заполняет метку остановки из ответа провайдера
+(``LLMResponse.finish_reason``). Шов ``generate`` возвращает только текст, поэтому метка
+остаётся ``None`` — «провайдер не назвал», а не выдуманный ``stop``.
 
 Нейтрален (§1.3): идентификаторы моделей/движков — данные, переопределяемые параметрами.
 """
@@ -124,7 +130,30 @@ class EvaluationError(RuntimeError):
     """Оценщик вернул невалидный JSON/форму или нарушил инварианты ячейки (§7.1).
 
     Pipeline отображает ошибку в ``evaluation_failed`` с retry ≤2 (не в статус — I4).
+
+    Отказ несёт **провенанс ответа** — что именно вернул провайдер: ``finish_reason``
+    (метка остановки генерации), ``raw`` (сырой текст ответа, если он был) и ``usage``.
+    Без них путь отказа неразбираем: обрезание по потолку и невалидный JSON выглядели
+    одинаково, а самого ответа модели не оставалось нигде (журнал вызовов пишет их —
+    ``logs/llm_calls.jsonl``). ``reason`` — машинный класс отказа
+    (``length``/``invalid_json``/``schema``/``http_error``), чтобы читатель не разбирал
+    текст сообщения.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str | None = None,
+        finish_reason: str | None = None,
+        raw: str | None = None,
+        usage: TokenUsage | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.finish_reason = finish_reason
+        self.raw = raw
+        self.usage = usage
 
 
 class EvaluatorUnavailable(RuntimeError):
@@ -295,6 +324,7 @@ class LocalEvaluator:
         seed = req.seed if req.seed is not None else self.seed
         temperature = req.temperature if req.temperature is not None else self.temperature
         usage = TokenUsage()
+        finish_reason: str | None = None
         # Счётчик вызовов растёт **до** запроса: провалившийся вызов тоже стоил времени
         # (а часто и токенов — HTTP-ошибка после отправки). Токены прибавляются после
         # ответа: их знает только сервер.
@@ -302,16 +332,30 @@ class LocalEvaluator:
         if self._generate is not None:
             raw = self._generate(req.prompt, req.response_schema)
         else:
-            raw, usage = self._http_complete(req, seed=seed, temperature=temperature)
+            raw, usage, finish_reason = self._http_complete(
+                req, seed=seed, temperature=temperature
+            )
         self._prompt_tokens += usage.prompt_tokens
         self._completion_tokens += usage.completion_tokens
         raw = raw if isinstance(raw, str) else str(raw)
-        output = self._parse(req.response_schema, raw)
+        try:
+            output = self._parse(req.response_schema, raw)
+        except EvaluationError as exc:
+            # Путь отказа обязан назвать ответ: ``_parse`` знает текст, но не знает
+            # метку остановки/расход; дополняем недостающее, не затирая названное.
+            if exc.raw is None:
+                exc.raw = raw
+            if exc.usage is None:
+                exc.usage = usage
+            if exc.finish_reason is None:
+                exc.finish_reason = finish_reason
+            raise
         return LLMResponse(
             output=output,
             raw=raw,
             prompt_hash=content_hash(req.prompt),
             decoder=self.decoder,
+            finish_reason=finish_reason,
             usage=usage,
         )
 
@@ -323,19 +367,29 @@ class LocalEvaluator:
         """Разбирает сырой JSON в модель ``schema`` и проверяет форму/inварианты (§7.1)."""
         if not (isinstance(schema, type) and issubclass(schema, BaseModel)):
             raise EvaluationError(
-                f"response_schema обязан быть pydantic-моделью, получено {schema!r}"
+                f"response_schema обязан быть pydantic-моделью, получено {schema!r}",
+                reason="schema",
+                raw=raw,
             )
         try:
             parsed = schema.model_validate_json(raw)
         except ValidationError as exc:
             raise EvaluationError(
-                f"оценщик вернул невалидный JSON/форму ({exc.error_count()} ошибок): {exc}"
+                f"оценщик вернул невалидный JSON/форму ({exc.error_count()} ошибок): {exc}",
+                reason="invalid_json",
+                raw=raw,
             ) from exc
         except (ValueError, TypeError) as exc:  # защитный слой (не JSON, None и т.п.)
-            raise EvaluationError(f"не удалось разобрать выход оценщика: {exc}") from exc
+            raise EvaluationError(
+                f"не удалось разобрать выход оценщика: {exc}",
+                reason="invalid_json",
+                raw=raw,
+            ) from exc
         if not isinstance(parsed, LLMCellOutput):
             raise EvaluationError(
-                f"схема {schema.__name__} не является LLMCellOutput (контракт §7.1)"
+                f"схема {schema.__name__} не является LLMCellOutput (контракт §7.1)",
+                reason="schema",
+                raw=raw,
             )
         return parsed
 
@@ -345,8 +399,12 @@ class LocalEvaluator:
 
     def _http_complete(
         self, req: LLMRequest, *, seed: int, temperature: float
-    ) -> tuple[str, TokenUsage]:
-        """Реальный вызов OI-совместимого API. Схема → constrained decoding; без tools (I18)."""
+    ) -> tuple[str, TokenUsage, str | None]:
+        """Реальный вызов OI-совместимого API. Схема → constrained decoding; без tools (I18).
+
+        Возвращает ``(content, usage, finish_reason)``: метка остановки генерации —
+        провенанс ответа (``length`` иначе неотличим от невалидного JSON).
+        """
         httpx = self._import_http()
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.api_key:
@@ -381,7 +439,9 @@ class LocalEvaluator:
             response.raise_for_status()
             data = response.json()
         except Exception as exc:  # httpx.HTTPError/JSON-ошибки транспорта
-            raise EvaluationError(f"HTTP-вызов оценщика не удался: {exc}") from exc
+            raise EvaluationError(
+                f"HTTP-вызов оценщика не удался: {exc}", reason="http_error"
+            ) from exc
         return self._extract(data)
 
     def _response_format(self, req: LLMRequest) -> dict[str, Any]:
@@ -403,39 +463,56 @@ class LocalEvaluator:
             },
         }
 
-    def _extract(self, data: Any) -> tuple[str, TokenUsage]:
-        """Достаёт ``choices[0].message.content`` и ``usage`` из ответа сервера.
+    def _extract(self, data: Any) -> tuple[str, TokenUsage, str | None]:
+        """Достаёт ``choices[0].message.content``, ``usage`` и ``finish_reason``.
 
         V5: ``finish_reason == "length"`` с пустым текстом — это **исчерпанный потолок
         генерации**, а не «невалидный JSON». Различать обязательно: иначе обрезание
         уходит в ``validation_failed`` → retry ≤2 → ``failed``, и причина отказа не
         называется ни в ячейке, ни в отчёте (так же поступает discovery-адаптер,
         ``llm_discovery.py:256-272``).
+
+        Метка остановки и ``usage`` читаются **до** проверок: отказ по потолку тоже
+        израсходовал токены, и путь отказа обязан их назвать (журнал вызовов).
         """
         try:
             choice = data["choices"][0]
             message = choice["message"]
             content = message["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise EvaluationError(f"неожиданная форма ответа сервера: {data!r}") from exc
+            raise EvaluationError(
+                f"неожиданная форма ответа сервера: {data!r}", reason="http_error"
+            ) from exc
         finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        if not isinstance(finish_reason, str):
+            finish_reason = None
+        usage_raw = data.get("usage") or {}
+        if not isinstance(usage_raw, dict):
+            # Неожиданная форма расхода — «не названо», а не измеренный ноль.
+            usage_raw = {}
+        usage = TokenUsage(
+            prompt_tokens=int(usage_raw.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
+        )
         if (content is None or content == "") and finish_reason == "length":
             limit = self.max_tokens if self.max_tokens is not None else "серверный"
             raise EvaluationError(
                 "генерация оценщика оборвана по потолку токенов "
                 f"(finish_reason=length, max_tokens={limit}): увеличьте "
-                "llm.<slot>.max_tokens — модель израсходовала бюджет на reasoning"
+                "llm.<slot>.max_tokens — модель израсходовала бюджет на reasoning",
+                reason="length",
+                finish_reason=finish_reason,
+                raw=content if isinstance(content, str) else "",
+                usage=usage,
             )
         if not isinstance(content, str):
             raise EvaluationError(
-                f"choices[0].message.content обязан быть строкой, получено {type(content).__name__}"
+                f"choices[0].message.content обязан быть строкой, получено {type(content).__name__}",
+                reason="invalid_json",
+                finish_reason=finish_reason,
+                usage=usage,
             )
-        usage_raw = data.get("usage") or {}
-        usage = TokenUsage(
-            prompt_tokens=int(usage_raw.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
-        )
-        return content, usage
+        return content, usage, finish_reason
 
     def _import_http(self) -> Any:
         """Лениво импортирует ``httpx``; при отсутствии — ``EvaluatorUnavailable``."""

@@ -135,6 +135,29 @@ _CELL_COLUMNS = (
     "absence_as_of",
 )
 
+#: Первичный ключ ``cells``: колонки, которые upsert обновляет в существующей строке.
+_CELL_KEY_COLUMNS = ("run_id", "product_id", "param_id")
+
+#: ``SET``-список upsert'а: обновляются только колонки доменной модели. Колонки, которых
+#: ``Cell`` не несёт (``prompt_hash``/``model_id``/``justification``/``llm_scenario``),
+#: остаются нетронутыми. ``INSERT OR REPLACE`` стирал их в NULL: строку удаляли и вставляли
+#: заново, поэтому любой повторный ``save_cell`` (Ш6 → протокол исчерпания) обнулял
+#: провенанс. Измерено на ``ru-pg-dbms-c2e7b860ac17``: 271 ``❓`` (все) теряли
+#: ``prompt_hash``/``model_id``, хотя писались те же значения, что у ``✅``.
+_CELL_UPDATE_SET = ", ".join(
+    f"{column} = excluded.{column}"
+    for column in _CELL_COLUMNS
+    if column not in _CELL_KEY_COLUMNS
+)
+
+#: SQL upsert ячейки: обновляет только колонки модели, чужие колонки строки сохраняет.
+_CELL_UPSERT_SQL = (
+    f"INSERT INTO cells ({', '.join(_CELL_COLUMNS)})"  # noqa: S608 - имена из _CELL_COLUMNS
+    f" VALUES ({', '.join('?' for _ in _CELL_COLUMNS)})"
+    f" ON CONFLICT ({', '.join(_CELL_KEY_COLUMNS)}) DO UPDATE SET {_CELL_UPDATE_SET}"
+)
+
+
 #: Источники, стоящие в порядке §2.2 п.7 **ниже** реестра. Guard использует это только
 #: как узкую страховку (defense-in-depth), а не как несущую логику прецедента: полный
 #: порядок и решение о ``pending`` живут в ``core.pipeline.precedence`` (слой выше).
@@ -556,28 +579,28 @@ class SqliteStore:
         сохраняется как NULL. Триггеры I4/I6/I7/I13 применяются БД. Перед записью
         срабатывает guard против тихого понижения высокого источника (defense-in-depth).
 
-        **``validation_notes`` накапливаются, а не перезаписываются.** ``INSERT OR
-        REPLACE`` заменяет строку целиком, поэтому заметки, уже лежащие в БД, читаются
-        до записи и сливаются с ``cell.validation_notes`` (без дублей, порядок
-        сохранён). Причина: одну ячейку могут оценивать дважды (resume), и вторая
-        оценка обязана оставить видимой причину первой.
+        **``validation_notes`` накапливаются, а не перезаписываются.** Заметки, уже
+        лежащие в БД, читаются до записи и сливаются с ``cell.validation_notes`` (без
+        дублей, порядок сохранён). Причина: одну ячейку могут оценивать дважды (resume),
+        и вторая оценка обязана оставить видимой причину первой.
+
+        **Upsert, а не replace.** ``INSERT OR REPLACE`` удалял строку и вставлял новую,
+        поэтому колонки, которых доменная ``Cell`` не несёт (``prompt_hash``/``model_id``/
+        ``justification``/``llm_scenario``), обнулялись при **любой** повторной записи —
+        так провенанс теряли ровно ``❓``-ячейки (их повторно пишет протокол исчерпания).
+        Теперь обновляются только колонки модели, чужие остаются как были.
 
         ``absence_rule`` пишется в свою колонку (аддитивная миграция), ``evidence``/
         ``absence_evidence`` колонок в ``cells`` по-прежнему не имеют: evidence живёт в
         ``cell_evidence``.
         """
-        placeholders = ", ".join("?" for _ in _CELL_COLUMNS)
         stored = self._validation_notes_map(cell.run_id).get(
             (cell.product_id, cell.param_id)
         )
         notes = _merge_validation_notes(stored, cell.validation_notes)
         with self.conn:
             self._guard_against_downgrade(cell)
-            self.conn.execute(
-                f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"  # noqa: S608 - имена из _CELL_COLUMNS, значения — bind
-                f" VALUES ({placeholders})",
-                self._cell_row(cell, notes),
-            )
+            self.conn.execute(_CELL_UPSERT_SQL, self._cell_row(cell, notes))
 
     def set_cell_provenance(
         self,
@@ -587,20 +610,37 @@ class SqliteStore:
         *,
         prompt_hash: str | None = None,
         model_id: str | None = None,
+        justification: str | None = None,
+        llm_scenario: str | None = None,
     ) -> None:
         """Узкий UPDATE провенанса уже сохранённой ячейки (R7/§13).
 
-        Колонки ``cells.prompt_hash``/``cells.model_id`` существуют в схеме §4.4, но
-        доменная ``Cell`` их не несёт, поэтому ``save_cell`` их не пишет. Этот метод
-        дописывает провенанс **после** успешного upsert, не расширяя ``_CELL_COLUMNS``
-        для всех писателей. ``None`` не затирает существующее значение (``COALESCE``).
+        Колонки ``cells.prompt_hash``/``model_id``/``justification``/``llm_scenario``
+        существуют в схеме §4.4, но доменная ``Cell`` их не несёт, поэтому ``save_cell``
+        их не пишет. Этот метод дописывает провенанс **после** успешного upsert, не
+        расширяя ``_CELL_COLUMNS`` для всех писателей. ``None`` не затирает существующее
+        значение (``COALESCE``): повтор без провенанса не стирает уже записанный.
+
+        ``justification`` — текст модели (``LLMCellOutput.justification``),
+        ``llm_scenario`` — маршрут §7.4/I21 (``evaluator``). Оба пишутся только там, где
+        модель **действительно** вызывалась; ``no_fragments`` их не несёт.
         """
         with self.conn:
             self.conn.execute(
                 "UPDATE cells SET prompt_hash = COALESCE(?, prompt_hash), "
-                "model_id = COALESCE(?, model_id) "
+                "model_id = COALESCE(?, model_id), "
+                "justification = COALESCE(?, justification), "
+                "llm_scenario = COALESCE(?, llm_scenario) "
                 "WHERE run_id = ? AND product_id = ? AND param_id = ?",
-                (prompt_hash, model_id, run_id, product_id, param_id),
+                (
+                    prompt_hash,
+                    model_id,
+                    justification,
+                    llm_scenario,
+                    run_id,
+                    product_id,
+                    param_id,
+                ),
             )
 
     def save_cells_batch(self, cells: list[Cell], chunk_size: int = DEFAULT_BATCH_SIZE) -> None:
@@ -608,15 +648,13 @@ class SqliteStore:
 
         Каждая ячейка проходит тот же guard, что и :meth:`save_cell`, и то же слияние
         ``validation_notes``: заметки читаются **до** upsert (одна выборка на прогон в
-        пределах пачки), иначе ``INSERT OR REPLACE`` стёр бы причину прошлой оценки.
+        пределах пачки), иначе повторная запись стёрла бы причину прошлой оценки.
+        Upsert (``ON CONFLICT DO UPDATE``), а не replace: колонки провенанса
+        (``prompt_hash``/``model_id``/``justification``/``llm_scenario``) не обнуляются.
         """
         if chunk_size <= 0:
             raise ValueError("chunk_size обязан быть > 0")
-        placeholders = ", ".join("?" for _ in _CELL_COLUMNS)
-        sql = (
-            f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"  # noqa: S608 - имена из _CELL_COLUMNS, значения — bind
-            f" VALUES ({placeholders})"
-        )
+        sql = _CELL_UPSERT_SQL
         for start in range(0, len(cells), chunk_size):
             part = cells[start : start + chunk_size]
             stored: dict[str, dict[tuple[str, str], str | None]] = {}

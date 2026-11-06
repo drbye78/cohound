@@ -31,7 +31,7 @@ from typing import Any
 
 from core.util.security import sanitize_filename
 
-__all__ = ["HAS_STRUCTLOG", "LEVELS", "LEVEL_RANK", "PhaseLogger"]
+__all__ = ["HAS_STRUCTLOG", "LEVELS", "LEVEL_RANK", "JsonlAppender", "PhaseLogger"]
 
 #: Допустимые уровни (04 §B.1), по возрастанию важности.
 LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARN", "ERROR")
@@ -90,6 +90,74 @@ def _normalize_level(level: str) -> str:
             f"неизвестный уровень логирования: {level!r} (допустимо: {', '.join(LEVELS)})"
         )
     return normalized
+
+
+class JsonlAppender:
+    """Append-only поток **плоских** JSON-записей (журнал вызовов оценщика, §7.1).
+
+    Отличие от :class:`PhaseLogger` — не второй формат, а другая единица записи. У фазы
+    событие с фиксированным набором полей и произвольным ``ctx``; здесь одна строка =
+    один **вызов** с плоскими полями верхнего уровня (``finish_reason``/``usage``/
+    ``latency_ms``/…), потому что её читают запросом вида
+    ``jq 'select(.outcome=="length")'``. Сериализация — общая (:func:`_json_dumps`):
+    UTF-8, ``sort_keys=True``, ровно одна строка на запись.
+
+    Сбой записи не бросается: журнал вторичен к измерению и не имеет права отнять уже
+    полученные вердикты. Видимость даёт вызывающий (``errors`` фазы) — так же, как у
+    ``PromptArchive``.
+
+    :param path: файл журнала (``runs/{run_id}/logs/llm_calls.jsonl``).
+    :param now: фабрика ``ts`` (внедряемые часы для детерминированных тестов);
+        по умолчанию — текущее время UTC в ISO-8601.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        now: Callable[[], str] | None = None,
+    ) -> None:
+        if not str(path):
+            raise ValueError("путь журнала не может быть пустым")
+        self.path = Path(path)
+        self._now = now or _utc_now_iso
+        #: Записей реально добавлено (наблюдённый факт для сводки фазы).
+        self.written = 0
+        #: Видимые аномалии записи (сжатые, как у ``PromptArchive``).
+        self.errors: list[str] = []
+        self._collapsed_failures = 0
+        self._last_failure = ""
+
+    def append(self, record: Mapping[str, Any]) -> bool:
+        """Дописывает одну запись; ``False`` — запись не удалась (видно в ``errors``).
+
+        ``ts`` ставит сам журнал: поле — факт момента записи, а не вход вызывающего.
+        """
+        event: dict[str, Any] = {"ts": self._now(), **dict(record)}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(_json_dumps(event) + "\n")
+        except OSError as exc:
+            self._collapsed_failures += 1
+            self._last_failure = (
+                f"llm_journal_write_failed: {self.path}: {type(exc).__name__}: {exc}"
+            )
+            if self._collapsed_failures == 1:
+                self.errors.append(self._last_failure)
+            return False
+        self.written += 1
+        return True
+
+    def summary(self) -> str:
+        """Сводка для ``log_entries`` фазы: сколько вызовов записано и куда."""
+        parts = [f"журнал вызовов: {self.written} записей", f"файл {self.path}"]
+        if self._collapsed_failures > 1:
+            parts.append(
+                f"сбоев записи: {self._collapsed_failures} "
+                f"(последний: {self._last_failure})"
+            )
+        return "; ".join(parts)
 
 
 class PhaseLogger:

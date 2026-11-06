@@ -4433,7 +4433,7 @@ state/state.db                                 # durable-состояние па
 | Этап | Что | Риск | Ценность | Статус |
 |---|---|---|---|---|
 | **0. Контракты** | `seeds.yaml` schema, `ProductStatePort`, enum'ы, `state.db` DDL, `composition` формулы | низкий | фиксирует границы | ✅ сделано; enum'ы `MeasurementOrigin`/`RunProductStatus` — ✅ есть, `CoverageFreshness` — ➖ снят (§3.1) |
-| **1. Seeds + preflight (MVP-1)** | `add-product` пишет seeds; `run` читает seeds; preflight блокирует `pending_seeds`; coverage zero-source; `_coverage_for` anomaly | низкий | закрывает «тихий пустой продукт» | ✅ сделано, включая аномалию `coverage_missing` (`core/pipeline/evaluate.py:2032`) |
+| **1. Seeds + preflight (MVP-1)** | `add-product` пишет seeds; `run` читает seeds; preflight блокирует `pending_seeds`; coverage zero-source; `_coverage_for` anomaly | низкий | закрывает «тихий пустой продукт» | ✅ сделано, включая аномалию `coverage_missing` (`core/pipeline/evaluate.py:2179`) |
 | **2. Run identity + state (MVP-2)** | `derive_run_id` без products; `cycle_id`/`--update`; `state.db` (product/seed/snapshot/lineage); new/full/incremental | средний | продукт не теряется между прогонами | ✅ сделано; `run_product` — ✅ есть (граница A, §4.3) |
 | **3. Incremental corpus (MVP-3)** | `url_state`/`document_version`; conditional GET; reuse doc/chunks; per-product doc-set | средний | экономия сети/экстракции | ✅ сделано; чанки durable в run DB на границе продукта (§4.7) |
 | **4. Partitions + composition (MVP-4)** | `partition_build_id`; `composition_id`; `CompositionView`; retrieval/lexical | высокий (индексный контур) | добавление продукта не пересобирает старые | ✅ сделано (шаг 1 и шаг 2) |

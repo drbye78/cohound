@@ -419,6 +419,63 @@ def test_missing_dependency_raises_evaluator_unavailable(monkeypatch: pytest.Mon
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# Провенанс ответа: finish_reason / raw / usage на успехе и на отказе
+# ---------------------------------------------------------------------------
+
+
+def test_real_path_exposes_finish_reason() -> None:
+    """``finish_reason`` провайдера доезжает до ``LLMResponse`` — иначе ``stop``/``length``
+    неразличимы выше по стеку."""
+    body = _http_body()
+    body["choices"][0]["finish_reason"] = "stop"
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=body))
+        resp = LocalEvaluator(base_url="http://localhost:8000").complete(_req())
+
+    assert resp.finish_reason == "stop"
+
+
+def test_length_failure_carries_raw_finish_reason_and_usage() -> None:
+    """Потолок генерации: отказ несёт метку, пустой ответ и расход токенов.
+
+    Без этого ячейка ``status=null`` не говорила, что модель ответила пустотой по
+    ``finish_reason=length``: сам ответ не сохранялся нигде (кэш пишет только успех).
+    """
+    body = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 4096},
+    }
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=body))
+        with pytest.raises(EvaluationError) as excinfo:
+            LocalEvaluator(
+                base_url="http://localhost:8000", max_tokens=4096
+            ).complete(_req())
+
+    error = excinfo.value
+    assert error.reason == "length"
+    assert error.finish_reason == "length"
+    assert error.raw == ""
+    assert error.usage == TokenUsage(prompt_tokens=1000, completion_tokens=4096)
+    assert "max_tokens" in str(error)
+
+
+def test_invalid_json_error_carries_raw_response() -> None:
+    """Невалидный JSON: сырой текст ответа обязан пережить отказ (журнал вызовов)."""
+    ev = LocalEvaluator(generate=lambda p, s: "{not json")
+    with pytest.raises(EvaluationError) as excinfo:
+        ev.complete(_req())
+
+    assert excinfo.value.reason == "invalid_json"
+    assert excinfo.value.raw == "{not json"
+
+
+# ---------------------------------------------------------------------------
 # Нейтральность модуля (§1.3)
 # ---------------------------------------------------------------------------
 

@@ -23,7 +23,7 @@ indented code, HTML-блоки, сноски, fenced div, line blocks, grid/mult
 - **Таблицы теряют шапку**: 292 из 1450 таблиц когорты длиннее `chunk_size`; шапка
   остаётся в предыдущем чанке, строки без имён параметров нечитаемы как evidence.
 - **`context_prefix` — дубль `heading_path`** (`chunker_markdown.py:231`), а промпт печатает
-  только один из двух (`core/pipeline/prompt.py:309`): ёмкость поля простаивает.
+  только один из двух (`core/pipeline/prompt.py:323`): ёмкость поля простаивает.
 - **Провенанс не доходит до оценщика**: `RetrievedChunk` не несёт `context_prefix`
   (`core/ports/vector_index.py:34`).
 
@@ -166,7 +166,7 @@ shortcodes. Это не «никогда»: нет грамматики — не
   корректности; на корпусе она видна как +10 % символов при −10 % чанков.
 - ✅ Перекрытие снято (`chunk_overlap = 0`); атомарность по §5; продолжения несут шапку
   таблицы, info string fence и маркер цитаты в `context_prefix` (промпт печатает
-  `context:`, когда он не равен `heading_path` — `core/pipeline/prompt.py:309`).
+  `context:`, когда он не равен `heading_path` — `core/pipeline/prompt.py:323`).
 - ✅ Переустановка пинов (не удаление): `test_adjacent_chunks_do_not_overlap` (вместо
   `test_overlap_never_exceeds_chunk_overlap`), `test_cut_prefers_line_boundary`,
   `test_version_is_md_heading_5` (AGENTS §4.10).

@@ -4,7 +4,8 @@
 детерминированными ключами upsert:
 
 * **Ячейки** — PK ``(run_id, product_id, param_id)``: ``StorePort.save_cell(s)`` делает
-  ``INSERT OR REPLACE``, поэтому повторная запись обновляет ту же строку.
+  upsert (``ON CONFLICT DO UPDATE``), поэтому повторная запись обновляет ту же строку,
+  не обнуляя колонки провенанса, которых доменная модель не несёт.
 * **Evidence** — PK ``evidence_id = H(run_id, product_id, param_id, source_id, source_kind,
   seq)`` (S8): один и тот же кусок доказательства при resume получает тот же id и
   перезаписывается, а не дублируется.
@@ -61,7 +62,7 @@ def upsert_cells(store: StorePort, cells: list[Cell]) -> int:
     """Идемпотентно пишет ячейки пачкой (upsert по PK ``(run_id, product_id, param_id)``).
 
     Возвращает число переданных ячеек. Повторный вызов с тем же набором не создаёт новых
-    строк: ``INSERT OR REPLACE`` перезаписывает существующие по PK. Батчевая
+    строк: upsert по PK обновляет существующие, не обнуляя провенанс. Батчевая
     транзакционность — на стороне ``StorePort`` (§B.2).
     """
     items = list(cells)

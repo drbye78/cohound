@@ -1,4 +1,4 @@
-"""Тесты аудита **исполненных** промптов Ш6: ``runs/{run_id}/prompts/{prompt_hash}.json`` (V7).
+"""Тесты аудита **исполненных** промптов Ш6: ``runs/{run_id}/prompts/{sha256(text)}.json`` (V7).
 
 До правки ``save_prompt`` существовал и был покрыт тестами, но конвейер его не вызывал:
 каталога ``prompts/`` в живом прогоне не было вовсе, и восстановить вход модели по
@@ -7,8 +7,9 @@
 
 * артефакт — **ровно тот** промпт, который ушёл в модель (сверка с ``req.prompt``
   скриптованного оценщика), а не пере-сборка;
-* запись content-addressed: повтор с тем же ``prompt_hash`` не перезаписывает файл, а
-  расхождение содержимого видно как ``prompt_hash_conflict``;
+* запись content-addressed: адрес файла — ``sha256`` текста промпта, повтор того же
+  входа не перезаписывает файл, а подмена артефакта на диске видна как
+  ``prompt_hash_conflict``; две ячейки с одним ``prompt_hash`` §5 дают **два** файла;
 * сбой I/O не роняет фазу и не пропадает молча — ``prompt_save_failed`` в наблюдении;
 * неисполненный промпт не пишется: пустой срез (вызова нет) и хит ``eval_cache``;
 * ключ ``eval_cache`` от аудита не меняется (он по тексту промпта).
@@ -34,6 +35,7 @@ from core.pipeline.prompt import (
     compile_prompt,
 )
 from core.pipeline.runner import Ports
+from core.util.hashing import content_hash
 from tests.fakes.ports import FakeEvaluator
 from tests.pipeline.test_evaluate import (
     _chunks,
@@ -76,7 +78,7 @@ def test_archive_writes_one_file_per_prompt_hash(tmp_path: Path) -> None:
 
     path = archive.record(first)
     assert path is not None
-    assert path.name == f"{first.prompt_hash}.json"
+    assert path.name == f"{content_hash(first.text)}.json"
     assert json.loads(path.read_text(encoding="utf-8")) == first.to_json()
 
     again = archive.record(first)
@@ -89,6 +91,37 @@ def test_archive_writes_one_file_per_prompt_hash(tmp_path: Path) -> None:
     archive.record(other)
     assert archive.saved == 2
     assert len(list((tmp_path / "prompts").glob("*.json"))) == 2
+
+
+def test_two_cells_with_same_prompt_hash_get_two_files(tmp_path: Path) -> None:
+    """Один ``prompt_hash`` §5, разные тексты → **два** файла, конфликта нет.
+
+    Замер 06.11.2026 на прогоне ``ru-pg-dbms-c2e7b860ac17``: ``jatoba xlsx_056`` и
+    ``xlsx_057`` делили ``prompt_hash`` (формула §5 не покрывает product/title/текст
+    чанков). При адресации по hash второй промпт отказывал (``prompt_hash_conflict``) и
+    в архиве оставался текст **другой** ячейки. Формула hash — методология и не меняется;
+    адрес файла теперь ``sha256(text)``, поэтому обе ячейки оставляют свой вход.
+    """
+    archive = PromptArchive(tmp_path / "prompts")
+    first = _compiled(product_id="p1")
+    second = _compiled(product_id="p2")  # product входит в текст, но не в prompt_hash
+    assert first.prompt_hash == second.prompt_hash
+    assert first.text != second.text
+
+    path_a = archive.record(first)
+    path_b = archive.record(second)
+
+    assert path_a is not None and path_b is not None
+    assert path_a != path_b
+    assert archive.saved == 2
+    assert archive.errors == []  # прежний конфликт невозможен: адреса разные
+    files = sorted((tmp_path / "prompts").glob("*.json"))
+    assert len(files) == 2
+    texts = {json.loads(path.read_text(encoding="utf-8"))["text"] for path in files}
+    assert texts == {first.text, second.text}
+    assert {
+        json.loads(path.read_text(encoding="utf-8"))["cell_key"][0] for path in files
+    } == {"p1", "p2"}
 
 
 def test_archive_reports_hash_conflict_without_overwriting(tmp_path: Path) -> None:
@@ -164,7 +197,7 @@ def test_evaluate_cell_saves_the_prompt_that_went_to_the_model(tmp_path: Path) -
     payload = json.loads(files[0].read_text(encoding="utf-8"))
     assert payload["text"] == evaluator.calls[0].prompt
     assert payload["prompt_hash"] == outcome.prompt_hash
-    assert files[0].stem == outcome.prompt_hash
+    assert files[0].stem == content_hash(evaluator.calls[0].prompt)
     assert archive.saved == 1 and archive.reused == 0 and archive.errors == []
 
 

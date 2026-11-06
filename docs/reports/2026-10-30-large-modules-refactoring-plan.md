@@ -604,4 +604,4 @@ _partition_reuse_reason 2926-3005
     `ruff` чист; `check_doc_anchors.py` — **0 проблем / 15 предупреждений** (после
     перенумерации 143 якорей и трёх ручных исправлений: `corpus_index.py:80`
     `_derive_partition_build_id`, `_PARTITION_SCHEMA` `partition-1 → partition-2`,
-    `evaluate.py:2455/2665-2694` для `max_retries`).
+    `evaluate.py:2636/2846-2874` для `max_retries`).

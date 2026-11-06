@@ -51,7 +51,8 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -70,6 +71,7 @@ from core.domain import (
     EvidenceType,
     FailureKind,
     LLMCellOutput,
+    LLMScenario,
     MeasurementOrigin,
     Satellite,
     SourceKind,
@@ -130,6 +132,7 @@ from core.ports.vector_index import (
 )
 from core.util.hashing import content_hash
 from core.util.ids import DOC_VERSION_PREFIX, doc_version_of, parse_source_id
+from core.util.logging import JsonlAppender
 
 __all__ = [
     "ABSENCE_COVERAGE_UNSATISFIED_REASON",
@@ -139,6 +142,7 @@ __all__ = [
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
     "DENIAL_QUOTE_WITHOUT_MARKERS",
+    "LLM_CALL_OUTCOMES",
     "NO_FRAGMENTS_REASON",
     "REVALIDATE_FAILED_PREFIX",
     "REVALIDATE_NOTHING_TO_DO",
@@ -157,6 +161,7 @@ __all__ = [
     "SUPPORT_NOT_ABOUT_SUBJECT",
     "CorpusArtifactDates",
     "EvaluationOutcome",
+    "LLMCallJournal",
     "RevalidationReport",
     "StaleSelection",
     "SupportSubjectOverlap",
@@ -684,6 +689,155 @@ class EvaluationOutcome:
     raw: str | None = field(default=None)
     support_overlap: SupportSubjectOverlap | None = field(default=None)
     measurement: CellMeasurementRow | None = field(default=None)
+    #: Текст модели (``LLMCellOutput.justification``) — провенанс ответа. ``None`` — модель
+    #: не вызывалась (``no_fragments``) либо ответ ни разу не разобрался. Нужен писателям,
+    #: которые персистят **после** оценки (пере-оценка stale-ячеек): у них ``store=None``
+    #: внутри ``evaluate_cell``, и провенанс иначе некуда взять.
+    justification: str | None = field(default=None)
+    #: Маршрут §7.4/I21 (``evaluator``), по которому получен вердикт; ``None`` — модель не
+    #: вызывалась. В вердикт не входит: это провенанс исполнения.
+    llm_scenario: str | None = field(default=None)
+
+
+#: Исходы вызова оценщика в журнале (``logs/llm_calls.jsonl``). Машинные токены, чтобы
+#: разбор отказа не зависел от текста сообщения: ``length`` — потолок генерации,
+#: ``invalid_json`` — ответ не разобран/не та форма, ``quote_not_substring`` — ответ
+#: разобран, но цитата не подтверждена (I22), ``http_error`` — транспорт/сервер,
+#: ``exception`` — прочий сбой адаптера, ``validation_failed`` — иной отказ §10.
+LLM_CALL_OUTCOMES: tuple[str, ...] = (
+    "ok",
+    "length",
+    "invalid_json",
+    "quote_not_substring",
+    "validation_failed",
+    "http_error",
+    "exception",
+)
+
+
+def _error_outcome(error: BaseException) -> str:
+    """Класс отказа вызова по машинному ``reason`` исключения (без импорта адаптера).
+
+    ``pipeline`` не имеет права импортировать ``adapters`` (§4.1: адаптеры зависят от
+    портов, не наоборот), поэтому отказ читается **структурно**: ``EvaluationError``
+    объявляет ``reason``/``raw``/``finish_reason``, и этих атрибутов достаточно. Чужое
+    исключение (таймаут транспорта, ошибка шва) — ``exception``; ``reason`` неизвестен,
+    но сырой ответ есть — ``invalid_json`` (модель ответила, разбор не удался).
+    """
+    reason = getattr(error, "reason", None)
+    if reason == "length":
+        return "length"
+    if reason in {"invalid_json", "schema"}:
+        return "invalid_json"
+    if reason == "http_error":
+        return "http_error"
+    if getattr(error, "raw", None) is not None:
+        return "invalid_json"
+    return "exception"
+
+
+def _validation_outcome(validation: ValidationResult) -> str:
+    """Класс исхода по результату эшелона §10 (модель ответила и ответ разобран).
+
+    ``quote_not_substring`` — отказ цитатной сверки I22 (цитата не подстрока/пустая):
+    самый частый отказ, и его надо отличать от прочих нарушений (чужой ``source_id``,
+    отсутствие evidence). Признак — машинный префикс заметки ``I22:``, а не текст фразы.
+    """
+    if validation.ok:
+        return "ok"
+    if any(str(note).startswith("I22:") for note in validation.notes):
+        return "quote_not_substring"
+    return "validation_failed"
+
+
+@dataclass
+class LLMCallJournal:
+    """Append-only журнал вызовов оценщика: ``logs/llm_calls.jsonl``, строка на **вызов**.
+
+    Зачем отдельный артефакт, если есть ``eval_cache`` и ``prompts/``. Кэш пишет только
+    **успешный** вердикт, а промпт — только вход. Отказ (``EvaluationError``) не оставлял
+    ничего: 21 ячейка прогона ``ru-pg-dbms-c2e7b860ac17`` имела ``status=null``, и что
+    именно вернула модель — 18 обрезаний по потолку, 2 невалидных JSON — по артефактам
+    восстановить было нельзя. Здесь пишется **каждая** попытка: метка остановки, расход,
+    латентность, полный текст ответа и адрес промпта.
+
+    Строка — провенанс исполнения, а не условие измерения: журнал не входит ни в
+    ``EXECUTION_CONTRACT_FIELDS``, ни в ``run_id``; DDL не меняется (файл, не таблица).
+
+    :param path: файл журнала (``runs/{run_id}/logs/llm_calls.jsonl``).
+    :param run_id: прогон (колонка ``run_id`` в каждой строке).
+    :param now: фабрика ``ts`` (внедряемые часы для детерминированных тестов).
+    """
+
+    path: Path
+    run_id: str
+    #: Фабрика ``ts`` (внедряемые часы для детерминированных тестов); ``None`` — UTC now.
+    now: Callable[[], str] | None = field(default=None, repr=False)
+    _writer: JsonlAppender = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.path = Path(self.path)
+        self._writer = JsonlAppender(self.path, now=self.now)
+
+    def record(
+        self,
+        *,
+        cell_key: str,
+        attempt: int,
+        prompt_hash: str,
+        prompt_text_sha256: str,
+        model_id: str,
+        decoder: str,
+        max_tokens: int | None,
+        finish_reason: str | None,
+        usage: dict[str, int] | None,
+        latency_ms: float,
+        outcome: str,
+        response_raw: str | None,
+    ) -> None:
+        """Дописывает одну попытку вызова (не одну ячейку: повторы видны поштучно).
+
+        ``response_raw`` — полный текст ответа модели; ``None`` — ответа не было (HTTP
+        не ответил, исключение шва). ``response_sha256``/``response_len`` выводятся из
+        него, чтобы адрес ответа не расходился с самим текстом.
+        """
+        self._writer.append(
+            {
+                "run_id": self.run_id,
+                "cell_key": cell_key,
+                "attempt": attempt,
+                "prompt_hash": prompt_hash,
+                "prompt_text_sha256": prompt_text_sha256,
+                "model_id": model_id,
+                "decoder": decoder,
+                "max_tokens": max_tokens,
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "latency_ms": latency_ms,
+                "outcome": outcome,
+                "response_sha256": (
+                    content_hash(response_raw) if response_raw is not None else None
+                ),
+                "response_len": (
+                    len(response_raw) if response_raw is not None else None
+                ),
+                "response_raw": response_raw,
+            }
+        )
+
+    @property
+    def errors(self) -> list[str]:
+        """Видимые аномалии записи (сбои диска не отнимают вердикты)."""
+        return self._writer.errors
+
+    @property
+    def written(self) -> int:
+        """Сколько строк реально дописано (наблюдённый факт для сводки фазы)."""
+        return self._writer.written
+
+    def summary(self) -> str:
+        """Сводка для ``log_entries`` фазы: сколько вызовов записано и куда."""
+        return self._writer.summary()
 
 
 # ---------------------------------------------------------------------------
@@ -2222,16 +2376,26 @@ def _record_cell_provenance(
     *,
     prompt_hash: str | None,
     model_id: str | None,
+    justification: str | None = None,
+    llm_scenario: str | None = None,
 ) -> None:
-    """Дописывает провенанс промпта/модели в ``cells``, если store это умеет.
+    """Дописывает провенанс промпта/модели/обоснования в ``cells``, если store это умеет.
 
     ``_CELL_COLUMNS`` намеренно не расширяются: доменная ``Cell`` не несёт
-    ``prompt_hash``/``model_id``, и менять набор колонок для всех писателей значило бы
-    менять их контракт. Вместо этого — узкий UPDATE **после** успешного upsert.
-    Тестовые двойники без метода пропускаются: провенанс аддитивен и не должен ломать
-    совместимость duck-typed store.
+    ``prompt_hash``/``model_id``/``justification``/``llm_scenario``, и менять набор
+    колонок для всех писателей значило бы менять их контракт. Вместо этого — узкий
+    UPDATE **после** успешного upsert. Тестовые двойники без метода пропускаются:
+    провенанс аддитивен и не должен ломать совместимость duck-typed store.
+
+    ``justification``/``llm_scenario`` пишутся только там, где модель **действительно**
+    вызывалась: у ``no_fragments`` модель не звалась, и оба поля остаются ``None``.
     """
-    if prompt_hash is None and model_id is None:
+    if (
+        prompt_hash is None
+        and model_id is None
+        and justification is None
+        and llm_scenario is None
+    ):
         return
     writer = getattr(store, "set_cell_provenance", None)
     if not callable(writer):
@@ -2242,6 +2406,8 @@ def _record_cell_provenance(
         cell.param_id,
         prompt_hash=prompt_hash,
         model_id=model_id,
+        justification=justification,
+        llm_scenario=llm_scenario,
     )
 
 
@@ -2284,6 +2450,8 @@ def _persist(
     protected: Cell | None = None,
     prompt_hash: str | None = None,
     model_id: str | None = None,
+    justification: str | None = None,
+    llm_scenario: str | None = None,
 ) -> None:
     """Пишет ячейку и её evidence в store (идемпотентный upsert по PK/evidence_id, S8).
 
@@ -2293,9 +2461,10 @@ def _persist(
     несущий провенанс высокого источника. Evidence обоих контуров пишется всегда —
     строки ``cell_evidence`` детерминированы и переживают upsert ячейки.
 
-    ``prompt_hash``/``model_id`` — аддитивный провенанс ячейки (колонки ``cells`` существуют,
-    но доменная модель их не несёт). Пишутся только для реально сохранённой ячейки, поэтому
-    при ``kept_high`` чужой провенанс не затирается.
+    ``prompt_hash``/``model_id``/``justification``/``llm_scenario`` — аддитивный провенанс
+    ячейки (колонки ``cells`` существуют, но доменная модель их не несёт). Пишутся только
+    для реально сохранённой ячейки, поэтому при ``kept_high`` чужой провенанс не затирается.
+    ``justification``/``llm_scenario`` передаются только там, где модель вызывалась.
 
     **Absence-evidence (R4, §4.2).** Протокол отсутствия пишется тем же батч-механизмом, что
     и прочие evidence (``add_absence_evidence``), с ``evidence_type='absence'`` и
@@ -2319,7 +2488,12 @@ def _persist(
     if to_save is not None:
         store.save_cell(to_save)
         _record_cell_provenance(
-            store, to_save, prompt_hash=prompt_hash, model_id=model_id
+            store,
+            to_save,
+            prompt_hash=prompt_hash,
+            model_id=model_id,
+            justification=justification,
+            llm_scenario=llm_scenario,
         )
     if validation is not None and validation.resolved_evidence:
         store.add_evidence_batch(validation.resolved_evidence)
@@ -2473,6 +2647,7 @@ def evaluate_cell(
     eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
     artifact_dates: CorpusArtifactDates | None = None,
+    llm_journal: LLMCallJournal | None = None,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
 
@@ -2512,8 +2687,9 @@ def evaluate_cell(
         бы промпт и модель, но не правила ответа, и кэш мог бы вернуть вердикт,
         посчитанный по старым правилам (09 §10.5). ``None`` допустим только при
         ``eval_cache=None``; иначе — :class:`ValueError`, а не тихий промах-каждый-раз.
-    :param prompt_archive: каталог аудита исполненных промптов (``prompts/{prompt_hash}
-        .json``, V7). ``None`` ⇒ артефакт не пишется (поведение байт-в-байт прежнее).
+    :param prompt_archive: каталог аудита исполненных промптов
+        (``prompts/{sha256(text)}.json``, V7). ``None`` ⇒ артефакт не пишется
+        (поведение байт-в-байт прежнее).
         Сохраняется **тот же** объект :class:`CompiledPrompt`, из которого построен
         ``LLMRequest``, — не пере-собранный: иначе артефакт описывал бы другой вход.
         Хит ``eval_cache`` не пишется: модель в этом прогоне не вызывалась, и промпт не
@@ -2524,6 +2700,10 @@ def evaluate_cell(
         сверяется со снятиями корней из ``coverage``. Строится **один раз на продукт**
         вызывающим (:func:`observe_corpus_artifact_dates`), а не на ячейку. ``None`` ⇒
         I2d неприменим (модульный вызов/читателя нет), вердикт не меняется.
+    :param llm_journal: журнал вызовов оценщика (:class:`LLMCallJournal`). ``None`` ⇒
+        журнал не пишется (модульный вызов). Строка — на **попытку**, а не на ячейку:
+        повторы видны поштучно, и путь отказа (``finish_reason=length``/невалидный JSON)
+        называет ответ модели. Сбой записи не отнимает вердикты — видимость даёт фаза.
 
     **Пустой срез не тратит вызов модели.** При ``chunks == ()`` промпт компилируется
     (провенанс: ``prompt_hash`` ячейки остаётся честной функцией входа), но оценщик не
@@ -2672,10 +2852,75 @@ def evaluate_cell(
         # Пишется один раз на ячейку независимо от числа повторов: вход у повторов тот же.
         if prompt_archive is not None:
             prompt_archive.record(compiled)
-        for _ in range(max_retries + 1):
+        # Журнал вызовов: неизменные поля попытки считаются один раз, а строка пишется
+        # **на каждую** попытку — и на успех, и на отказ. ``prompt_text_sha256`` — это
+        # контентный адрес входа: ``prompt_hash`` §5 не покрывает text/product/title.
+        journal_cell_key = f"{product_id}/{param.param_id}"
+        journal_prompt_sha256 = content_hash(compiled.text)
+        journal_decoder = str(getattr(evaluator, "decoder", "none") or "none")
+        journal_max_tokens = (
+            request.max_tokens
+            if request.max_tokens is not None
+            else getattr(evaluator, "max_tokens", None)
+        )
+
+        def _journal(
+            *,
+            attempt: int,
+            outcome: str,
+            started: float,
+            response: LLMResponse | None = None,
+            error: BaseException | None = None,
+        ) -> None:
+            """Одна строка ``logs/llm_calls.jsonl``; сбой записи вердикт не отнимает."""
+            if llm_journal is None:
+                return
+            raw = response.raw if response is not None else getattr(error, "raw", None)
+            usage_obj = (
+                response.usage
+                if response is not None
+                else getattr(error, "usage", None)
+            )
+            usage: dict[str, int] | None = None
+            if usage_obj is not None and (
+                usage_obj.prompt_tokens or usage_obj.completion_tokens
+            ):
+                # Ноль/ноль — «провайдер не назвал», а не измеренная стоимость.
+                usage = {
+                    "prompt": usage_obj.prompt_tokens,
+                    "completion": usage_obj.completion_tokens,
+                }
+            finish_reason = (
+                response.finish_reason
+                if response is not None
+                else getattr(error, "finish_reason", None)
+            )
+            llm_journal.record(
+                cell_key=journal_cell_key,
+                attempt=attempt,
+                prompt_hash=compiled.prompt_hash,
+                prompt_text_sha256=journal_prompt_sha256,
+                model_id=request.model_id,
+                decoder=journal_decoder,
+                max_tokens=journal_max_tokens,
+                finish_reason=finish_reason,
+                usage=usage,
+                latency_ms=round((time.monotonic() - started) * 1000.0, 3),
+                outcome=outcome,
+                response_raw=raw if isinstance(raw, str) else None,
+            )
+
+        for attempt in range(1, max_retries + 2):
+            started = time.monotonic()
             try:
                 response = evaluator.complete(request)
             except Exception as exc:  # noqa: BLE001 — изоляция адаптера, маппинг в failure_kind
+                _journal(
+                    attempt=attempt,
+                    outcome=_error_outcome(exc),
+                    started=started,
+                    error=exc,
+                )
                 last_response = None
                 last_validation = None
                 last_kind = FailureKind.EVALUATION_FAILED.value
@@ -2687,8 +2932,14 @@ def evaluate_cell(
                 )
                 continue
 
-            last_response = response
             last_validation = _validate(response)
+            _journal(
+                attempt=attempt,
+                outcome=_validation_outcome(last_validation),
+                started=started,
+                response=response,
+            )
+            last_response = response
             if last_validation.ok:
                 last_kind = None
                 # Только живой, успешно провалидированный ответ становится вердиктом.
@@ -2827,6 +3078,10 @@ def evaluate_cell(
             protected=protected,
             prompt_hash=compiled.prompt_hash,
             model_id=request.model_id,
+            # Провенанс ответа: что модель сказала и в каком сценарии (§7.4/I21).
+            # Записывается только на пути реального вызова — здесь он и есть.
+            justification=out.justification,
+            llm_scenario=LLMScenario.EVALUATOR.value,
         )
         validation = last_validation
         if denial_notes:
@@ -2843,6 +3098,8 @@ def evaluate_cell(
             failure_kind=None,
             raw=last_response.raw,
             support_overlap=support_overlap,
+            justification=out.justification,
+            llm_scenario=LLMScenario.EVALUATOR.value,
         )
 
     # Валидация/вызов не прошли после всех попыток: failed (strict) или кандидат.
@@ -2860,6 +3117,14 @@ def evaluate_cell(
         raw=last_response.raw if last_response is not None else None,
         protected=protected,
         model_id=request.model_id,
+        # Модель вызывалась (цикл исполнил ≥1 попытку) — сценарий известен; текст ответа
+        # есть только если хотя бы один раз удалось его разобрать.
+        justification=(
+            last_response.output.justification
+            if last_response is not None
+            else None
+        ),
+        llm_scenario=LLMScenario.EVALUATOR.value,
     )
 
 
@@ -2878,6 +3143,8 @@ def _unresolved_outcome(
     raw: str | None,
     protected: Cell | None = None,
     model_id: str | None = None,
+    justification: str | None = None,
+    llm_scenario: str | None = None,
 ) -> EvaluationOutcome:
     """Собирает исход несостоявшейся валидации: ``failed`` (I4) либо preliminary (I13).
 
@@ -2926,6 +3193,8 @@ def _unresolved_outcome(
         protected=protected,
         prompt_hash=prompt_hash,
         model_id=model_id,
+        justification=justification,
+        llm_scenario=llm_scenario,
     )
     return EvaluationOutcome(
         cell=cell,
@@ -2933,6 +3202,8 @@ def _unresolved_outcome(
         validation=merged_validation,
         failure_kind=kind if strict else None,
         raw=raw,
+        justification=justification,
+        llm_scenario=llm_scenario,
     )
 
 
@@ -2959,6 +3230,7 @@ def evaluate_batch(
     eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
     artifact_dates: CorpusArtifactDates | None = None,
+    llm_journal: LLMCallJournal | None = None,
     carry: CarryForwardContext | None = None,
     reuse_conditions: CellReuseConditions | None = None,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
@@ -2985,6 +3257,9 @@ def evaluate_batch(
     иначе второму нечего сравнивать. ``carry`` отвечает на «можно ли не мерить», индекс —
     на «чем мерили», поэтому при ``carry=None`` и ``reuse_conditions`` заданных переноса
     нет, а индекс есть.
+
+    ``llm_journal`` пробрасывается в :func:`evaluate_cell` как есть: строка журнала
+    пишется на попытку вызова (см. :class:`LLMCallJournal`), батч её не агрегирует.
     """
 
     def _one(param: CatalogRow) -> EvaluationOutcome:
@@ -3042,6 +3317,7 @@ def evaluate_batch(
             eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
             artifact_dates=artifact_dates,
+            llm_journal=llm_journal,
         )
         if reuse_conditions is None or protected is not None:
             # Строку индекса не пишем, если механизм выключен **или** ячейку в карте этого
@@ -3087,6 +3363,7 @@ def evaluate_phase(
     eval_conditions: EvalConditions | None = None,
     exhaustion_facts: ExhaustionFacts | None = None,
     prompt_dir: str | Path | None = None,
+    llm_journal: str | Path | None = None,
     previous_run_id: str | None = None,
     state: ProductStatePort | None = None,
     previous_store: StorePort | None = None,
@@ -3147,6 +3424,11 @@ def evaluate_phase(
         composition root через ``phases.build_phases``; фактическое число файлов и байт
         попадает в ``log_entries`` фазы, а сбои записи — в ``errors`` (видимо, но без
         отнятия уже полученных вердиктов: артефакт аудита — не условие измерения).
+    :param llm_journal: файл журнала вызовов оценщика
+        (``runs/{run_id}/logs/llm_calls.jsonl``). Строка — на **попытку**: метка остановки,
+        расход, латентность и полный текст ответа. ``None`` ⇒ журнал не пишется
+        (модульный вызов). Файл — провенанс исполнения, в ``run_id``/DDL не входит;
+        число строк и сбои записи видны в ``log_entries``/``errors`` фазы.
     :param previous_run_id: прогон, **против которого** идёт оценка (09 §12.3); резолвит
         вызывающий (``phases.build_phases`` → :func:`core.pipeline.run_identity.previous_run_of`),
         фаза лишь называет его в ``log_entries``. ``None`` — предшественника нет/resume
@@ -3207,6 +3489,9 @@ def evaluate_phase(
     # V7: аудит исполненных промптов. Архив живёт в фазе, а не в ячейке: путь артефакта —
     # свойство прогона, и ячейка не должна знать раскладку ``runs/``.
     prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
+    # Журнал вызовов (``logs/llm_calls.jsonl``) — так же свойство прогона: один файл на
+    # фазу, append-only, строка на **попытку** (не на ячейку).
+    call_journal = LLMCallJournal(Path(llm_journal), run_id) if llm_journal is not None else None
 
     # Запросы пакета одинаковы для всех продуктов когорты, поэтому векторы считаются
     # **один раз до цикла оценки**: батчами и по уникальному тексту. Оценщик за
@@ -3482,6 +3767,7 @@ def evaluate_phase(
             eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
             artifact_dates=artifact_dates,
+            llm_journal=call_journal,
             carry=carry_ctx,
             reuse_conditions=reuse_conditions,
         )
@@ -3554,6 +3840,11 @@ def evaluate_phase(
         # артефакта аудита).
         log_entries.append(f"evaluate: {prompt_archive.summary()}")
         errors.extend(prompt_archive.errors)
+    if call_journal is not None:
+        # Журнал вызовов — та же дисциплина: наблюдённое число строк в лог, сбои записи
+        # в ``errors`` фазы; вердикты не отнимаются.
+        log_entries.append(f"evaluate: {call_journal.summary()}")
+        errors.extend(call_journal.errors)
 
     # 09 §10.3/§11.4: происхождение ячеек — измеренный факт фазы. ``measured`` — вызов
     # оценщика состоялся (в том числе ``failed``/``preliminary``: это исходы измерения),
@@ -3972,6 +4263,7 @@ def reevaluate_stale(
     param_ids: Sequence[str] | None = None,
     current_build_id: str | None = None,
     prompt_dir: str | Path | None = None,
+    llm_journal: str | Path | None = None,
 ) -> RevalidationReport:
     """Пере-оценивает **только** устаревшие ячейки и снимает пометку при вердикте.
 
@@ -4006,6 +4298,9 @@ def reevaluate_stale(
     :param eval_cache: межпрогонный кэш вердиктов; ``None`` ⇒ выключен.
     :param eval_conditions: объявленные методологические условия вердикта; обязательны
         при включённом кэше (09 §10.5), как и в фазе Ш6.
+    :param llm_journal: файл журнала вызовов (``runs/{run_id}/logs/llm_calls.jsonl``);
+        ``None`` ⇒ журнал не пишется. Пере-оценка исполняет те же вызовы, что Ш6, поэтому
+        пишет в **тот же** файл прогона: иначе путь отказа повторной оценки был бы неразбираем.
     """
     selection = select_stale_cells(
         store, run_id, product_ids=product_ids, param_ids=param_ids
@@ -4064,6 +4359,8 @@ def reevaluate_stale(
     # лежит в том же каталоге прогона (``prompt_dir``); ``None`` — пере-оценка без аудита
     # (модульный вызов).
     prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
+    # Журнал вызовов пере-оценки — тот же файл прогона: путь ``None`` выключает запись.
+    call_journal = LLMCallJournal(Path(llm_journal), str(run_id)) if llm_journal is not None else None
 
     # Группы = условия измерения ячейки (продукт/профиль/K): векторы запросов и dense-плечо
     # считаются **на группу**, а не на всю фазу — цена пропорциональна затронутым ячейкам.
@@ -4166,6 +4463,7 @@ def reevaluate_stale(
                     eval_conditions=eval_conditions,
                     prompt_archive=prompt_archive,
                     artifact_dates=dates_by_product.get(product_id),
+                    llm_journal=call_journal,
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 report.errors.append(
@@ -4190,6 +4488,8 @@ def reevaluate_stale(
                     outcome.validation,
                     prompt_hash=outcome.prompt_hash,
                     model_id=model_id,
+                    justification=outcome.justification,
+                    llm_scenario=outcome.llm_scenario,
                 )
                 report.reevaluated.append(
                     {
@@ -4227,6 +4527,10 @@ def reevaluate_stale(
         # Объём аудита — наблюдённый факт в сообщении, аномалии записи — в ``errors``.
         report.message = f"{report.message}; {prompt_archive.summary()}"
         report.errors.extend(prompt_archive.errors)
+    if call_journal is not None:
+        # Журнал вызовов: наблюдённое число строк — в сообщение, сбои записи — в ``errors``.
+        report.message = f"{report.message}; {call_journal.summary()}"
+        report.errors.extend(call_journal.errors)
     return report
 
 

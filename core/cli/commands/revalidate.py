@@ -260,6 +260,9 @@ def run(args: argparse.Namespace) -> int:
                 current_build_id=current_build,
                 # V7: аудит промптов пере-оценки — тот же каталог прогона.
                 prompt_dir=Path(db_path).parent / "prompts",
+                # Журнал вызовов — тот же файл прогона, что у Ш6: путь отказа повторной
+                # оценки обязан быть разбираем тем же ``jq``-запросом.
+                llm_journal=Path(db_path).parent / "logs" / "llm_calls.jsonl",
             )
             payload = {
                 "ok": report.ok,

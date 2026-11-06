@@ -5,7 +5,7 @@
 дословный текст), детерминированный порядок и порядко-независимый ``prompt_hash``,
 ``render_queries`` (S13), I18-гард (нет инструкций искать; работает только по чанкам,
 без URL), запрет N/A (I7), правило языка цитаты и семантику пустого раздела ДАННЫЕ (v5),
-идемпотентное сохранение ``prompts/{hash}.json`` и JSON-раундтрип ``CompiledPrompt``.
+идемпотентное сохранение ``prompts/{sha256(text)}.json`` и JSON-раундтрип ``CompiledPrompt``.
 Фикстуры категорийно-нейтральны (§1.3).
 """
 
@@ -35,7 +35,7 @@ from core.pipeline.prompt import (
 )
 from core.ports.types import Chunk
 from core.ports.vector_index import RetrievedChunk
-from core.util.hashing import prompt_hash
+from core.util.hashing import content_hash, prompt_hash
 
 # ---------------------------------------------------------------------------
 # Фикстуры (нейтральные данные, §1.3)
@@ -445,15 +445,22 @@ def test_to_json_round_trips() -> None:
     assert data["text"] == compiled.text
 
 
-def test_save_prompt_writes_hash_named_file(tmp_path) -> None:
+def test_save_prompt_writes_content_addressed_file(tmp_path) -> None:
+    """Адрес файла — ``sha256(текста)``, а не ``prompt_hash`` §5.
+
+    Формула §5 не покрывает product/title/текст чанков, поэтому два разных промпта
+    законно делят ``prompt_hash``; адрес по hash терял второй промпт. ``prompt_hash``
+    остаётся полем файла (см. ниже).
+    """
     compiled = compile_prompt(
         param=_param(), product_id="p1", chunks=[_chunk("c1")]
     )
     path = save_prompt(compiled, tmp_path)
-    assert path == tmp_path / f"{compiled.prompt_hash}.json"
+    assert path == tmp_path / f"{content_hash(compiled.text)}.json"
     assert path.is_file()
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved == compiled.to_json()
+    assert saved["prompt_hash"] == compiled.prompt_hash
 
 
 def test_save_prompt_is_idempotent_and_immutable(tmp_path) -> None:
@@ -473,7 +480,7 @@ def test_compiled_prompt_save_delegates(tmp_path) -> None:
     )
     assert isinstance(compiled, CompiledPrompt)
     path = compiled.save(tmp_path)
-    assert path.name == f"{compiled.prompt_hash}.json"
+    assert path.name == f"{content_hash(compiled.text)}.json"
 
 
 # ---------------------------------------------------------------------------
