@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -255,6 +256,136 @@ def test_list_without_observation_publishes_no_due(
     assert decision["observed_at"] is None
     assert decision["due_at"] is None
     assert decision["overdue_by_seconds"] is None
+
+
+def _decision(payload: dict[str, object], product_id: str = "p1") -> dict[str, object]:
+    """Решение по продукту из payload ``list``."""
+    decisions = payload["decisions"]
+    assert isinstance(decisions, list)
+    return next(item for item in decisions if item["product_id"] == product_id)
+
+
+def test_list_counts_missed_captures_not_yet_due(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Срок не наступил ⇒ ``missed_captures=0``: такт ещё не пропущен."""
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    observed = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=1)
+    _insert_observation(package, "https://p1.test/", observed.isoformat())
+
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    decision = _decision(json.loads(out))
+    assert decision["interval_hours"] == 168
+    assert decision["missed_captures"] == 0
+    assert decision["overdue_by_seconds"] < 0
+
+
+def test_list_counts_due_moment_as_one_missed_capture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ровно в срок ⇒ ``1``: момент ``due`` — уже пропущенный такт."""
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    observed = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=168)
+    _insert_observation(package, "https://p1.test/", observed.isoformat())
+
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    assert _decision(json.loads(out))["missed_captures"] == 1
+
+    # Число публикуется и человекочитаемой строкой, рядом с опозданием.
+    code, text, _ = _run(capsys, ["crawl", "policy", "list", "--package", str(package)])
+    assert code == EXIT_OK
+    assert "missed_captures=1" in text
+
+
+def test_list_counts_missed_captures_over_two_and_half_intervals(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """2.5 интервала просрочки ⇒ ``3``: ``due`` (1) + два полных интервала.
+
+    Арифметика проверяется из опубликованного ``overdue_by_seconds``: пропущено
+    ``floor(overdue/interval)+1``, то есть просрочка 2.5 интервала даёт 3, а не 2.
+    """
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    observed = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=int(2.5 * 168) + 168)
+    _insert_observation(package, "https://p1.test/", observed.isoformat())
+
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    decision = _decision(json.loads(out))
+    interval_seconds = 168 * 3600
+    overdue = decision["overdue_by_seconds"]
+    assert overdue > 2 * interval_seconds
+    assert decision["missed_captures"] == int(overdue // interval_seconds) + 1
+    assert decision["missed_captures"] == 3
+
+
+def test_list_missed_captures_is_unknown_without_due(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Срок не определён ⇒ ``None``, а не ``0``: неизвестно ≠ не пропущено (A3).
+
+    Два случая: ``scheduled`` без наблюдения и режим, срока не задающий.
+    """
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    decision = _decision(json.loads(out))
+    assert decision["interval_hours"] == 168
+    assert decision["missed_captures"] is None
+
+    _set(capsys, package, mode="network_denied")
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    decision = _decision(json.loads(out))
+    assert decision["mode"] == "network_denied"
+    assert decision["interval_hours"] is None
+    assert decision["due_at"] is None
+    assert decision["missed_captures"] is None
+
+    _set(capsys, package, mode="auto")
+    code, out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    assert _decision(json.loads(out))["missed_captures"] is None
+
+
+def test_list_is_read_only_and_payload_is_stable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Повторный ``list`` — то же число без записи в ``state.db``.
+
+    Сверяются байты ``state.db`` (sha256) и payload целиком, кроме часового слагаемого
+    ``overdue_by_seconds``: оно по построению зависит от момента вызова, всё прочее —
+    из ``url_state`` и записей политики.
+    """
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    observed = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=17)
+    _insert_observation(package, "https://p1.test/", observed.isoformat())
+    db_path = _db_path(package)
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+    code, first_out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    code, second_out, _ = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+
+    after = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    assert after == before, "list читает state.db, но не пишет в него"
+
+    first = json.loads(first_out)
+    second = json.loads(second_out)
+    assert first["digest"] == second["digest"]
+    for payload in (first, second):
+        for item in payload["decisions"]:
+            item.pop("overdue_by_seconds")
+    assert first == second
+    assert first["decisions"][0]["missed_captures"] == 2
 
 
 def test_clear_dry_run_then_clear(

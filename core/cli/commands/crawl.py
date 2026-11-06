@@ -1204,21 +1204,39 @@ def _policy_due_payload(
     ``overdue_by_seconds`` **отрицателен**, когда срок ещё не наступил. Это наблюдение, а
     не порог: решение «достаточно ли часто» принимает читатель (A3), а не код.
 
+    ``missed_captures`` — сколько объявленных тактов прошло без снятия: момент ``due`` уже
+    считается пропущенным, поэтому ровно в срок — ``1``, 2.5 интервала — ``3``. ``None``,
+    когда срок не определён (не ``scheduled`` / нет интервала / нет наблюдения): это
+    «неизвестно», а не ``0`` — отсутствие факта не факт отсутствия (A3).
+
     Зачем это здесь: без чисел «просрочен / на сколько» вопрос «нужен ли планировщик»
     решается мнением. Считается из ``url_state``, поэтому ничего не пишет и сеть не
     трогает.
     """
+    interval_hours = decision.interval_hours
+    unknown: dict[str, Any] = {
+        "observed_at": None,
+        "due_at": None,
+        "overdue_by_seconds": None,
+        "interval_hours": interval_hours,
+        "missed_captures": None,
+    }
     if (
         decision.mode is not CrawlPolicyMode.SCHEDULED
-        or decision.interval_hours is None
+        or interval_hours is None
         or observed_at is None
     ):
-        return {"observed_at": None, "due_at": None, "overdue_by_seconds": None}
-    due = observed_at + _dt.timedelta(hours=int(decision.interval_hours))
+        return unknown
+    interval_seconds = float(int(interval_hours) * 3600)
+    due = observed_at + _dt.timedelta(seconds=interval_seconds)
+    overdue_seconds = (now - due).total_seconds()
+    missed = 0 if overdue_seconds < 0 else int(overdue_seconds // interval_seconds) + 1
     return {
         "observed_at": observed_at.isoformat(),
         "due_at": due.isoformat(),
-        "overdue_by_seconds": round((now - due).total_seconds(), 3),
+        "overdue_by_seconds": round(overdue_seconds, 3),
+        "interval_hours": interval_hours,
+        "missed_captures": missed,
     }
 
 
@@ -1619,6 +1637,7 @@ def policy_list(args: argparse.Namespace) -> int:
                 line += (
                     f" observed_at={due['observed_at']} due_at={due['due_at']}"
                     f" overdue_by={due['overdue_by_seconds']}s"
+                    f" missed_captures={due['missed_captures']}"
                 )
             lines.append(line)
         lines.append(f"operator records: {len(rows)}")
