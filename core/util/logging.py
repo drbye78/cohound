@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import threading
 from collections.abc import Callable, Mapping
 from functools import lru_cache
 from pathlib import Path
@@ -106,6 +107,15 @@ class JsonlAppender:
     полученные вердикты. Видимость даёт вызывающий (``errors`` фазы) — так же, как у
     ``PromptArchive``.
 
+    **Потокобезопасность.** Журнал вызовов пишется из пула потоков оценки (число вызовов
+    оценщика в полёте — объявленный параметр исполнения), поэтому ``append`` держит замок:
+    без него две строки могли бы перемешаться в одном буфере файла и дать невалидный JSON,
+    а счётчики ``written``/``errors`` — потерять запись. Замок один и охватывает и запись,
+    и изменение счётчиков: «сколько строк записано» — наблюдённый факт, он не имеет права
+    зависеть от гонки. Порядок строк в файле — порядок захвата замка, а не порядок ячеек;
+    строка при этом самодостаточна (несёт ``cell_key``/``attempt``), поэтому перемешивание
+    порядка не мешает разбору (это проверяет тест пула).
+
     :param path: файл журнала (``runs/{run_id}/logs/llm_calls.jsonl``).
     :param now: фабрика ``ts`` (внедряемые часы для детерминированных тестов);
         по умолчанию — текущее время UTC в ISO-8601.
@@ -127,6 +137,8 @@ class JsonlAppender:
         self.errors: list[str] = []
         self._collapsed_failures = 0
         self._last_failure = ""
+        #: Замок записи и счётчиков: журнал пишется из пула потоков оценки.
+        self._lock = threading.Lock()
 
     def append(self, record: Mapping[str, Any]) -> bool:
         """Дописывает одну запись; ``False`` — запись не удалась (видно в ``errors``).
@@ -134,29 +146,32 @@ class JsonlAppender:
         ``ts`` ставит сам журнал: поле — факт момента записи, а не вход вызывающего.
         """
         event: dict[str, Any] = {"ts": self._now(), **dict(record)}
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(_json_dumps(event) + "\n")
-        except OSError as exc:
-            self._collapsed_failures += 1
-            self._last_failure = (
-                f"llm_journal_write_failed: {self.path}: {type(exc).__name__}: {exc}"
-            )
-            if self._collapsed_failures == 1:
-                self.errors.append(self._last_failure)
-            return False
-        self.written += 1
+        line = _json_dumps(event) + "\n"
+        with self._lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(line)
+            except OSError as exc:
+                self._collapsed_failures += 1
+                self._last_failure = (
+                    f"llm_journal_write_failed: {self.path}: {type(exc).__name__}: {exc}"
+                )
+                if self._collapsed_failures == 1:
+                    self.errors.append(self._last_failure)
+                return False
+            self.written += 1
         return True
 
     def summary(self) -> str:
         """Сводка для ``log_entries`` фазы: сколько вызовов записано и куда."""
-        parts = [f"журнал вызовов: {self.written} записей", f"файл {self.path}"]
-        if self._collapsed_failures > 1:
-            parts.append(
-                f"сбоев записи: {self._collapsed_failures} "
-                f"(последний: {self._last_failure})"
-            )
+        with self._lock:
+            written = self.written
+            collapsed = self._collapsed_failures
+            last_failure = self._last_failure
+        parts = [f"журнал вызовов: {written} записей", f"файл {self.path}"]
+        if collapsed > 1:
+            parts.append(f"сбоев записи: {collapsed} (последний: {last_failure})")
         return "; ".join(parts)
 
 

@@ -42,7 +42,7 @@ from core.pipeline import RunPlan, corpus_drain, corpus_driver
 from core.pipeline.corpus import IndexBuild, build_corpus
 from core.pipeline.corpus_index import _CorpusStageTimings
 from core.pipeline.corpus_ingest import LocalFetch
-from core.pipeline.crawl_session import default_session_id
+from core.pipeline.crawl_session import default_session_id, read_provenance
 from core.ports.state import UrlStateRow
 from core.ports.types import (
     Chunk,
@@ -1060,6 +1060,64 @@ def _page_bytes(page: Any) -> bytes:
         return page.content
     path = getattr(page, "source_path", None)
     return pathlib.Path(path).read_bytes() if path else b""
+
+
+# --------------------------------------------------------------------------- #
+# (7) Прибор темпа: внутрихостовая конкурентность видна числом, а не молчанием
+# --------------------------------------------------------------------------- #
+
+
+def test_within_host_parallel_fetches_are_seen_by_pacing_counter(
+    tmp_path: Path,
+) -> None:
+    """Один корень, два ребёнка на том же host'е, ``K=2``, без паузы ⇒ пик = 2.
+
+    Это пин внутрихостовой конкурентности: пул шириной 2 обязан отправить двух детей
+    одного host'а одновременно. До прибора понижение до одного не покраснело бы ни
+    один тест — корпус, ``index_build_id`` и порядок коммита от этого не меняются, а
+    темп падает вдвое. Пик читается из **durable**-провенанса сеанса: то же число
+    публикуют ``hound crawl status --per-host`` и ``metrics.json.resources.crawl``.
+    """
+    children = [f"{ROOT}{name}" for name in ("a", "b")]
+    pages: dict[str, bytes] = {
+        ROOT: "".join(f'<a href="{url}">{url}</a>' for url in children).encode()
+    }
+    pages.update({url: f"<html>{url}</html>".encode() for url in children})
+    # Гейт только на детей: волна 1 — корень (один), волна 2 — оба ребёнка. Без гейта
+    # перекрытие зависело бы от планировщика, и тест мог бы «не увидеть» пик случайно.
+    crawler = _TimedCrawler(pages, gate_to=2, gate_timeout=0.5, gate_urls=set(children))
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages=pages,
+            crawler=crawler,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1,
+                max_workers=2,
+                rate_limit=RateLimitSpec(min_s=0.0, max_s=0.0),
+            ),
+        )
+        assert result.errors == []
+        # Предпосылка теста: волна действительно была шире одного запроса.
+        assert crawler.host_max_active["docs.test"] == 2
+
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        pacing = read_provenance(session)["pacing"]
+        host = pacing["hosts"]["docs.test"]
+        assert host["requests"] == 3  # корень + два ребёнка
+        assert host["in_flight_max"] == 2
+        assert host["requests_per_s"] is not None and host["requests_per_s"] > 0.0
+        # Паузы не объявлено — ожидания не было (а не «не измеряли»).
+        assert host["limiter_waits"] == 0
+        assert pacing["total"]["in_flight_max"] == 2
+        assert pacing["products"]["p1"]["requests"] == 3
+    finally:
+        store.close()
 
 
 # --------------------------------------------------------------------------- #

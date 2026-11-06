@@ -724,6 +724,7 @@ def build_resources_block(
     phase_durations: Mapping[str, float | None] | None = None,
     observation: ResourcesObservation | None = None,
     budget: Mapping[str, Any] | None = None,
+    crawl_pacing: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Собирает блок ``resources`` для ``metrics.json`` (детерминированно, 1 знак).
 
@@ -738,6 +739,11 @@ def build_resources_block(
       фетча/экстракции, работа нарезки/эмбеддинга/сборки, остаток окна. Пустой dict —
       «фаза стадий не измеряла».
     * ``budget`` — бюджет памяти и его провенанс (:func:`mem_budget_provenance`).
+    * ``crawl`` — наблюдённый темп обхода по origin из провенанса сеанса
+      (``hosts``/``products``/``total``: ``requests``, ``requests_per_s``,
+      ``in_flight_max``, ``limiter_waits``, ``limiter_waited_s``, ``fetch_ms`` p50/p95,
+      окно). ``{}`` — прибор не работал; это провенанс исполнения, ни одно поле не
+      входит в ``run_id``/``crawl_config_digest``.
 
     Фазы объединяются по объединению ключей: длительность без пика и пик без
     длительности — оба наблюдаемые факты, и терять их нельзя.
@@ -777,4 +783,5 @@ def build_resources_block(
         ),
         "budget": dict(budget or {}),
         "stage_timings": dict(observation.stage_timings) if observation is not None else {},
+        "crawl": dict(crawl_pacing or {}),
     }

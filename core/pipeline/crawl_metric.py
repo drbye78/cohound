@@ -27,6 +27,15 @@
 Плюс ``requests_by_state`` и ``errors_by_kind``: отказ фетча — тоже результат краула, и
 «сколько запросов и почему не доехало» обязано быть видно рядом с таймингами.
 
+**Темп (прибор темпа, ``pacing``).** ``requests_per_s``, ``in_flight_max``,
+``limiter_waits`` и ``limiter_waited_s`` берутся из блока ``pacing`` провенанса сеанса
+(:mod:`core.pipeline.crawl_pacing`) — и **ниоткуда больше**: пик одновременных запросов и
+суммарное ожидание лимитера нельзя восстановить из элементов сеанса, а второй носитель
+разошёлся бы с первым. Сеанс без блока (старый или прерванный прогон) даёт ``null`` в
+этих полях и заметку ``notes``: «не измеряли» — это факт, а ``0`` был бы выдуманным
+измерением. ``requests_per_s`` — наблюдённая частота ``requests / окно`` (окно от первого
+до последнего живого запроса origin'а, включая паузы лимитера).
+
 **Формулы (воспроизводимы, без «примерно»).**
 
 * ``observed_min_interval_s`` — минимум по разностям **соседних** моментов
@@ -174,6 +183,19 @@ def _min_s(spec: Any) -> float | None:
         return None
 
 
+def _pacing_block(provenance: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Блок ``pacing`` из провенанса сеанса (темп); нет/не mapping → ``None``.
+
+    Читается напрямую из провенанса, а не через :mod:`core.pipeline.crawl_pacing`: тот
+    импортирует :func:`nearest_rank` отсюда, и обратный импорт дал бы цикл. Форма блока —
+    его контракт; здесь только защита от чужого типа.
+    """
+    if not provenance:
+        return None
+    block = provenance.get("pacing")
+    return dict(block) if isinstance(block, Mapping) and block else None
+
+
 def declared_min_intervals(
     provenance: Mapping[str, Any] | None,
 ) -> dict[str, tuple[float, ...]]:
@@ -261,13 +283,19 @@ def _error_counts(items: Sequence[Any]) -> dict[str, int]:
 
 
 def _host_row(
-    host: str, items: Sequence[Any], variants: tuple[float, ...]
+    host: str,
+    items: Sequence[Any],
+    variants: tuple[float, ...],
+    pacing: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Строка host'а: запросы, интервал, отношение к объявленному, ``fetch_ms``.
+    """Строка host'а: запросы, интервал, отношение к объявленному, ``fetch_ms``, темп.
 
     ``requests`` — число попыток с наблюдённым началом (``fetch_started_at``): именно из них
     считается интервал. ``items`` — все элементы host'а, включая те, что не дошли до сети
     (``fetch_started_at is None``): разница между двумя числами — видимая доля «не начались».
+
+    ``pacing`` — строка host'а из блока ``pacing`` провенанса (:mod:`core.pipeline.crawl_pacing`);
+    ``None`` — прибор не работал, и поля темпа остаются ``None`` (не нули).
     """
     timestamps = [getattr(item, "fetch_started_at", None) for item in items]
     intervals = observed_intervals_s(timestamps)
@@ -303,6 +331,11 @@ def _host_row(
         "host": host,
         "items": len(items),
         "requests": attempts,
+        # Темп — из наблюдённого блока; отсутствие блока = «не измеряли» (``None``).
+        "requests_per_s": (pacing or {}).get("requests_per_s"),
+        "in_flight_max": (pacing or {}).get("in_flight_max"),
+        "limiter_waits": (pacing or {}).get("limiter_waits"),
+        "limiter_waited_s": (pacing or {}).get("limiter_waited_s"),
         "observed_min_interval_s": observed,
         "median_interval_s": nearest_rank(intervals, 50),
         "intervals_total": len(intervals),
@@ -355,11 +388,15 @@ def build_crawl_metric(
     * ``requests_by_state``/``errors_by_kind``/``fetch_ms``/``fetch_ms_unknown``;
     * ``backlog_bytes``/``backlog_files``/``backlog_missing``/``queue_rows``;
     * ``per_host`` — строки :func:`_host_row` в лексикографическом порядке host'ов;
+    * ``pacing`` — блок темпа из провенанса (``hosts``/``products``/``total``), ``None`` —
+      прибор не работал;
     * ``declared_min_interval_source`` и ``notes`` — откуда взята объявленная вежливость и
       что из неё не восстановилось (пустой ``notes`` — всё восстановлено).
     """
     rows = list(items)
     declared = declared_min_intervals(provenance)
+    pacing_block = _pacing_block(provenance)
+    pacing_hosts = (pacing_block.get("hosts") or {}) if pacing_block else {}
     by_host: dict[str, list[Any]] = {}
     for item in rows:
         by_host.setdefault(_host_of(str(getattr(item, "url", "") or "")), []).append(item)
@@ -377,7 +414,7 @@ def build_crawl_metric(
     )
 
     per_host = [
-        _host_row(host, by_host[host], declared.get(host, ()))
+        _host_row(host, by_host[host], declared.get(host, ()), pacing_hosts.get(host))
         for host in sorted(by_host)
     ]
     fetch_values = [
@@ -405,6 +442,11 @@ def build_crawl_metric(
             "declared_min_interval_s: корни одного host'а объявили разные минимумы (варианты "
             "в declared_min_interval_variants): " + ", ".join(conflicted)
         )
+    if not pacing_block:
+        notes.append(
+            "pacing: не измерялся (в провенансе сеанса нет блока pacing) — "
+            "requests_per_s/in_flight_max/limiter_* не считаются"
+        )
 
     metric: dict[str, Any] = {
         "hosts": len(by_host),
@@ -422,6 +464,9 @@ def build_crawl_metric(
         "fetch_ms_unknown": len(rows) - len(fetch_values),
         "declared_min_interval_source": DECLARED_SOURCE,
         "per_host": per_host,
+        # Полный блок темпа (hosts/products/total) — тот же носитель, что в провенансе:
+        # терминал печатает выборку, ``--json`` не теряет агрегат по продукту/прогону.
+        "pacing": pacing_block,
         "notes": notes,
         **_backlog_block(backlog),
     }

@@ -58,10 +58,12 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
+from typing import Any
 
 from core.domain.enums import AbsenceRuleType
 from core.domain.models import CatalogRow, Satellite
@@ -499,6 +501,10 @@ class PromptArchive:
     #: Сколько сбоев записи уже сжато в один агрегат (чтобы не печатать 119 строк).
     _collapsed_failures: int = field(default=0, repr=False)
     _last_failure: str = field(default="", repr=False)
+    #: Замок записи: архив наполняется из пула потоков оценки (оценщик вызывается
+    #: параллельно), а адрес файла — контентный. Два потока с одним текстом промпта
+    #: писали бы один и тот же файл одновременно, и ``write_text`` не атомарен.
+    _lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.directory = Path(self.directory)
@@ -512,9 +518,19 @@ class PromptArchive:
         другим текстом) — это видимая аномалия :data:`PROMPT_HASH_CONFLICT`, а не тихая
         перезапись и не падение прогона. Две разные ячейки с одним ``prompt_hash`` сюда не
         попадают вовсе: у них разные тексты, значит разные файлы.
+
+        Замок охватывает проверку существования и запись вместе: иначе два потока с
+        одинаковым текстом промпта увидели бы «файла нет» и писали бы его одновременно.
         """
         path = self.directory / prompt_artifact_name(compiled)
         expected = _payload(compiled)
+        with self._lock:
+            return self._record_locked(compiled, path, expected)
+
+    def _record_locked(
+        self, compiled: CompiledPrompt, path: Path, expected: str
+    ) -> Path | None:
+        """Тело :meth:`record` под замком (см. его докстринг)."""
         if path.exists():
             self.reused += 1
             try:

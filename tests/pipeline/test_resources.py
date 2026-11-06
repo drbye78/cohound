@@ -609,6 +609,7 @@ def test_build_resources_block_without_observation_is_neutral() -> None:
         "workers_peak_rss_mb": None,
         "budget": {},
         "stage_timings": {},
+        "crawl": {},
     }
 
 

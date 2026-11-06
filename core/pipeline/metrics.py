@@ -342,21 +342,25 @@ def _normalize_crawl_session(
     return _round_floats(dict(crawl_session))
 
 
-def _round_floats(value: Any) -> Any:
-    """Рекурсивно округляет float до 1 знака (без «float-мусора» в метриках).
+def _round_floats(value: Any, *, digits: int = 1) -> Any:
+    """Рекурсивно округляет float до ``digits`` знаков (без «float-мусора» в метриках).
 
     Целые, строки и ``None`` возвращаются как есть: округление — про дробные секунды и
     MB, а не про счётчики. Списки сохраняют порядок (он может быть смыслом), словари
     сортируются по ключу — детерминизм JSON (§R7).
+
+    ``digits`` — политика **блока**: по умолчанию 1 знак (ресурсы/секунды), но темп
+    (``resources.crawl``) публикуется с 3 знаками: ``requests_per_s = 0.048`` при
+    округлении до одного знака превратилось бы в ``0.0`` — то есть в «не измеряли».
     """
     if isinstance(value, bool):
         return value
     if isinstance(value, float):
-        return round(value, 1)
+        return round(value, digits)
     if isinstance(value, Mapping):
-        return {str(key): _round_floats(value[key]) for key in sorted(value)}
+        return {str(key): _round_floats(value[key], digits=digits) for key in sorted(value)}
     if isinstance(value, (list, tuple)):
-        return [_round_floats(item) for item in value]
+        return [_round_floats(item, digits=digits) for item in value]
     return value
 
 
@@ -366,10 +370,19 @@ def _normalize_resources(resources: Mapping[str, Any] | None) -> dict[str, Any]:
     Блок собирается :func:`core.pipeline.resources.build_resources_block`; здесь только
     гарантия формы: отсортированные ключи и округление до 1 знака. Отсутствие блока —
     пустой dict (поле присутствует всегда, но нейтрально: «не измеряли» ≠ «ноль»).
+
+    Подблок ``crawl`` (темп обхода) округляется до 6 знаков: частота запросов дробная
+    по своей природе, а окно бывает короче секунды — политика 1 знака стёрла бы и то,
+    и другое (см. :func:`_round_floats`).
     """
     if not resources:
         return {}
-    return _round_floats(resources)
+    data = dict(resources)
+    pacing = data.pop("crawl", None)
+    normalized = _round_floats(data)
+    if isinstance(pacing, Mapping):
+        normalized["crawl"] = _round_floats(dict(pacing), digits=6)
+    return dict(sorted(normalized.items()))
 
 
 def _normalize_crawl_truncation(

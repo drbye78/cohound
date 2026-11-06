@@ -7,7 +7,7 @@
 (дефект проводки, исправлен `a2c6150`). У F9 не измерены кросс-продуктовое слияние корпусов и
 пик памяти N продуктов в полёте (§6, F9), и это названо, а не обещано.
 Утверждения о поведении помечены `путь:строка` (гейт `scripts/check_doc_anchors.py`). Терминология: **host** —
-имя сайта без схемы и порта (это ключ вежливости, `core/util/rate_limit.py:54`), **корень** —
+имя сайта без схемы и порта (это ключ вежливости, `core/util/rate_limit.py:55`), **корень** —
 seed-root продукта, **узел** — процесс краула.
 
 ## 1. Границы подсистемы и контракт с соседями
@@ -105,8 +105,8 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 **Водитель — единственный мутатор состояния.** Полоса исполняет ровно
 `limiter.wait_reserved` (один резерв на фетч: pacing и метка попытки — один вызов) +
 `active.fetch`; контракт «никакой мутации состояния сеанса здесь нет» уже записан у
-`local_fetch` (`core/pipeline/corpus_ingest.py:2612`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2474`). Потоки не получают ни `Frontier`, ни
+`local_fetch` (`core/pipeline/corpus_ingest.py:2613`), а pre-fetch — чистая фаза
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2475`). Потоки не получают ни `Frontier`, ни
 стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:748`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 
@@ -318,7 +318,7 @@ edge не примет её как `workers`.
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:585`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:592`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:166`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,

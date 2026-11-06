@@ -1030,6 +1030,7 @@ def build_phases(
     product_plan: Mapping[str, Any] | None = None,
     crawl_only: bool = False,
     consume_only: bool = False,
+    llm_concurrency: int = 1,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -1162,6 +1163,10 @@ def build_phases(
         приходит только от ``hound crawl run|resume|restart --crawl-only``; полный ``run``
         его не объявляет (иначе прогон печатал бы корпус без документов). ``False`` —
         прежнее поведение байт-в-байт.
+    :param llm_concurrency: ось **исполнения** Ш6 (``--llm-concurrency``): сколько вызовов
+        оценщика держать в полёте. Дефолт ``1`` — последовательно, поведение байт-в-байт.
+        В контракт/``run_id`` не входит: время фазы — не условие измерения. Запись в store
+        остаётся однопоточной (см. :func:`core.pipeline.evaluate.evaluate_batch`).
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -1504,6 +1509,9 @@ def build_phases(
             # ``None`` выключает механизм, и это видно строкой ``carry=—`` в логе фазы.
             state=state,
             previous_store=previous_store,
+            # Ось исполнения Ш6: число вызовов оценщика в полёте (не условие измерения,
+            # поэтому в ``run_id`` не входит). Дефолт 1 — прежний последовательный путь.
+            llm_concurrency=llm_concurrency,
         )
 
     # -- Ш7: ревью (advisory-очередь, ничего не решает за человека) ---------- #

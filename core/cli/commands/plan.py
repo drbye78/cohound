@@ -53,6 +53,7 @@ from typing import Any
 
 from core.cli.context import (
     _add_common,
+    _add_llm_concurrency_flag,
     _add_llm_model_flag,
     _add_llm_reasoning_effort_flag,
     _add_llm_slot_flag,
@@ -436,4 +437,5 @@ def configure(sub: Any) -> None:
     _add_llm_slot_flag(p_plan)
     _add_llm_model_flag(p_plan)
     _add_llm_reasoning_effort_flag(p_plan)
+    _add_llm_concurrency_flag(p_plan)
     p_plan.set_defaults(handler=run)

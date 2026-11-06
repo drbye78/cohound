@@ -23,6 +23,7 @@ from core.adapters.lexical_tantivy import tantivy_available
 from core.cli.context import (
     _acquire_package_lock,
     _add_common,
+    _add_llm_concurrency_flag,
     _add_llm_model_flag,
     _add_llm_reasoning_effort_flag,
     _add_phase4_flags,
@@ -1485,6 +1486,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 ),
                 None,
             )
+            # Прибор темпа: ``pacing`` из провенанса — тот же durable-носитель, что читает
+            # ``hound crawl status --per-host`` (второго носителя нет). ``None`` — прибор
+            # не работал, и блок ``resources.crawl`` остаётся пустым (не выдуманные нули).
+            crawl_pacing_block: dict[str, Any] | None = None
             try:
                 # Backlog A: счётчики durable-сеанса краула в метрики. Соглашение об
                 # ``session_id`` живёт на стороне CLI (least coupling): метрики не знают о нём.
@@ -1492,11 +1497,13 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 try:
                     session = store.get_crawl_session(default_session_id(run_id))
                     crawl_counts = store.crawl_session_counts(default_session_id(run_id))
+                    provenance = read_provenance(session) if session is not None else {}
                     truncation = (
-                        truncation_summary(read_provenance(session))
-                        if session is not None
-                        else {}
+                        truncation_summary(provenance) if session is not None else {}
                     )
+                    pacing = provenance.get("pacing")
+                    if isinstance(pacing, dict):
+                        crawl_pacing_block = pacing
                     # F1/Д-6: жизненный цикл сеанса — в ``metrics.json`` (``interrupted``
                     # должен быть виден без разбора БД). ``stale_reason`` — чистая функция
                     # свидетельства живости, ничего не пишет.
@@ -1566,6 +1573,7 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                         phase_durations=instrumentation.durations,
                         observation=corpus_observation,
                         budget=budget_provenance,
+                        crawl_pacing=crawl_pacing_block,
                     ),
                 )
             except Exception as exc:  # noqa: BLE001 — наблюдаемость не роняет прогон
@@ -1790,6 +1798,7 @@ def configure(sub: Any) -> None:
     )
     _add_llm_model_flag(p_run)
     _add_llm_reasoning_effort_flag(p_run)
+    _add_llm_concurrency_flag(p_run)
     # План 20 §7 F2: тот же порог **отображения**, что у ``plan`` (общий регистратор:
     # план не принимает флагов, которых прогон не знает). Здесь он применяется к датам
     # **вошедшего** корпуса (документ ``corpus_freshness`` отчёта): к концу прогона

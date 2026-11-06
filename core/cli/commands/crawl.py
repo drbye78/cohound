@@ -43,6 +43,7 @@ from typing import Any
 
 from core.cli.context import (
     _add_common,
+    _add_llm_concurrency_flag,
     _add_llm_model_flag,
     _add_llm_reasoning_effort_flag,
     _add_llm_slot_flag,
@@ -851,7 +852,8 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
     rows = metric.get("per_host") or []
     if rows:
         header = (
-            f"{'host':<28} {'items':>6} {'requests':>9} {'min_ivl_s':>10} {'med_ivl_s':>10} "
+            f"{'host':<28} {'items':>6} {'requests':>9} {'req/s':>8} {'peak':>5} "
+            f"{'wait_s':>8} {'min_ivl_s':>10} {'med_ivl_s':>10} "
             f"{'declared_s':>11} {'short':>11} {'p50_ms':>7} {'p95_ms':>7} {'unknown':>8}"
         )
         lines.append("  " + header)
@@ -861,6 +863,9 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
             lines.append(
                 "  "
                 + f"{row['host']:<28} {row['items']:>6} {row['requests']:>9} "
+                f"{_fmt_metric(row.get('requests_per_s')):>8} "
+                f"{_fmt_metric(row.get('in_flight_max'), 0):>5} "
+                f"{_fmt_metric(row.get('limiter_waited_s')):>8} "
                 f"{_fmt_metric(row.get('observed_min_interval_s')):>10} "
                 f"{_fmt_metric(row.get('median_interval_s')):>10} "
                 f"{_fmt_metric(row.get('declared_min_interval_s')):>11} "
@@ -868,6 +873,22 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
                 f"{_fmt_metric((row.get('fetch_ms') or {}).get('p50'), 0):>7} "
                 f"{_fmt_metric((row.get('fetch_ms') or {}).get('p95'), 0):>7} "
                 f"{row.get('fetch_ms_unknown', 0):>8}"
+            )
+        pacing_total = (metric.get("pacing") or {}).get("total") or {}
+        if pacing_total:
+            # Агрегат прогона: сумма запросов, максимум пиков (не сумма), сумма ожидания.
+            lines.append(
+                "  pacing total: hosts={hosts} products={products} requests={requests} "
+                "req/s={rate} in_flight_max={peak} limiter_waits={waits} "
+                "limiter_waited_s={waited}".format(
+                    hosts=pacing_total.get("hosts", 0),
+                    products=pacing_total.get("products", 0),
+                    requests=pacing_total.get("requests", 0),
+                    rate=_fmt_metric(pacing_total.get("requests_per_s")),
+                    peak=pacing_total.get("in_flight_max", 0),
+                    waits=pacing_total.get("limiter_waits", 0),
+                    waited=_fmt_metric(pacing_total.get("limiter_waited_s")),
+                )
             )
     else:
         lines.append("hosts: — (элементов нет)")
@@ -1818,6 +1839,7 @@ def configure(sub: Any) -> None:
     _add_llm_slot_flag(p_run)
     _add_llm_model_flag(p_run)
     _add_llm_reasoning_effort_flag(p_run)
+    _add_llm_concurrency_flag(p_run)
     p_run.set_defaults(handler=run)
 
     p_status = crawl.add_parser("status", help="статус сеанса и счётчики (read-only)")
@@ -1849,6 +1871,7 @@ def configure(sub: Any) -> None:
     _add_llm_slot_flag(p_resume)
     _add_llm_model_flag(p_resume)
     _add_llm_reasoning_effort_flag(p_resume)
+    _add_llm_concurrency_flag(p_resume)
     p_resume.set_defaults(handler=resume)
 
     p_restart = crawl.add_parser("restart", help="очистить сеанс и запустить заново")
@@ -1860,6 +1883,7 @@ def configure(sub: Any) -> None:
     _add_llm_slot_flag(p_restart)
     _add_llm_model_flag(p_restart)
     _add_llm_reasoning_effort_flag(p_restart)
+    _add_llm_concurrency_flag(p_restart)
     p_restart.set_defaults(handler=restart)
 
     p_cancel = crawl.add_parser("cancel", help="терминально снять сеанс (interrupted|cancelled)")

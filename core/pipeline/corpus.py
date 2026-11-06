@@ -290,6 +290,7 @@ from core.pipeline.crawl_frontier import (
     normalize_scope_host,
     resolve_crawl_limits,
 )
+from core.pipeline.crawl_pacing import CrawlPacing
 from core.pipeline.crawl_policy import (
     CRAWL_POLICY_SKIPPED_REASON,
     CrawlPolicyResolution,
@@ -2317,6 +2318,10 @@ def _build_corpus(
 
     # P2-3: единый владелец politeness-пейсинга — corpus (адаптерный ``rate_limiter`` — None).
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
+    # Прибор темпа (провенанс, не контракт): пик запросов «в полёте» по origin и
+    # сведение ожидания лимитера. Один экземпляр на фазу — как ``counters``; мутируют
+    # воркеры пула, читает финализация сеанса. В ``run_id`` не входит (§9).
+    pacing = CrawlPacing(limiter=limiter)
 
     # P3-A2: размер волны executor-транспорта. Читаем модульную константу в момент вызова
     # (тесты могут её подменить) — но инъекция через параметр приоритетнее.
@@ -2496,11 +2501,12 @@ def _build_corpus(
         errors=errors,
         applied_engines=applied_engines,
     )
-    _local_fetch = partial(corpus_ingest.local_fetch, limiter=limiter)
+    _local_fetch = partial(corpus_ingest.local_fetch, limiter=limiter, pacing=pacing)
     _fetch_and_commit = partial(
         corpus_ingest.fetch_and_commit,
         limiter=limiter,
         commit_local=_commit_local,
+        pacing=pacing,
     )
     _local_prefetch = partial(
         corpus_ingest.local_prefetch,
@@ -2738,6 +2744,10 @@ def _build_corpus(
         truncation_records=truncation_records,
         errors=errors,
         lifecycle=lifecycle,
+        # Прибор темпа: снимок пишется в провенанс сеанса (durable-носитель), откуда
+        # его читают ``metrics.json`` и ``hound crawl status --per-host``. Провенанс,
+        # не контракт: ``run_id``/``crawl_config_digest`` не меняются.
+        pacing=pacing,
         # F7 (17 §2): шард узла — провенанс развёртывания. ``None`` у прогонов без
         # объявленной карты, поэтому их провенанс/статус не меняется.
         shard=shard_block,

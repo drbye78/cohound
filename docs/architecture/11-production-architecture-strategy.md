@@ -304,7 +304,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > ⬜ не сделано — инфраструктура обоих полос готова, ни одна измерительная задача не закрыта.
 > - **Оценщик:** `hound experiment evaluator-benchmark` реализован
 >   (`core/cli/commands/experiment.py:530`, метрики κ/abstention/`fabricated_support`/bootstrap —
->   `core/pipeline/evaluator_benchmark.py:621-704`), но замера на трёх моделях нет: в
+>   `core/pipeline/evaluator_benchmark.py:1232-1392`), но замера на трёх моделях нет: в
 >   `docs/reports/measurements/` нет файла с результатами benchmark'а, а обе слоты `deploy.yaml`
 >   несут одну и ту же модель (`config/deploy.yaml:98-99` и `:94`). Выбор модели по κ
 >   **не сделан** — модель объявлена, а не измерена (A3).

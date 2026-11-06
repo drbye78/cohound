@@ -88,6 +88,7 @@ from core.pipeline.crawl_frontier import (
     Frontier,
     is_blacklisted,
 )
+from core.pipeline.crawl_pacing import CrawlPacing
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import CrawlTarget, resolve_crawl_target
 from core.pipeline.extract_cache import ExtractionCache
@@ -2609,7 +2610,12 @@ def local_prefetch(
     )
 
 
-def local_fetch(desc: LocalFetch, *, limiter: RateLimiter) -> RawPage:
+def local_fetch(
+    desc: LocalFetch,
+    *,
+    limiter: RateLimiter,
+    pacing: CrawlPacing | None = None,
+) -> RawPage:
     """D4 fetch-фаза (**единственный** вызов, идущий в пул): pacing + ``active.fetch``.
 
     Никакой мутации состояния сеанса здесь нет — только живой сетевой вызов.
@@ -2633,11 +2639,19 @@ def local_fetch(desc: LocalFetch, *, limiter: RateLimiter) -> RawPage:
     # берётся ``perf_counter`` вокруг живого вызова. Второго резерва здесь быть не должно:
     # ``wait_reserved`` — это и есть pacing (см. докстринг).
     desc.fetch_started_at = limiter.wait_reserved(desc.host, desc.fetch_plan.rate_limit)
-    _started = time.perf_counter()
-    try:
-        return desc.active.fetch(desc.wu, desc.fetch_plan)
-    finally:
-        desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
+    # Прибор темпа (провенанс, не контракт): учёт считает **только** сетевой вызов,
+    # ожидание лимитера в «в полёте» не входит — спящий поток к хосту не обращается.
+    tracker = (
+        pacing.request(desc.pid, desc.host)
+        if pacing is not None
+        else contextlib.nullcontext()
+    )
+    with tracker:
+        _started = time.perf_counter()
+        try:
+            return desc.active.fetch(desc.wu, desc.fetch_plan)
+        finally:
+            desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
 
 
 def fetch_and_commit(
@@ -2645,6 +2659,7 @@ def fetch_and_commit(
     *,
     limiter: RateLimiter,
     commit_local: Callable[..., tuple[RawPage, Path, FetchPlan, bool] | None],
+    pacing: CrawlPacing | None = None,
 ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
     """Inline-фетч на главном потоке + коммит (последовательный путь и browser-режим D4).
 
@@ -2654,13 +2669,21 @@ def fetch_and_commit(
     берётся из резерва лимитера — по той же причине, что в :func:`local_fetch`.
     """
     desc.fetch_started_at = limiter.wait_reserved(desc.host, desc.fetch_plan.rate_limit)
-    _started = time.perf_counter()
-    try:
-        page = desc.active.fetch(desc.wu, desc.fetch_plan)
-    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+    # Тот же прибор темпа, что у пулового пути: inline-фетч обязан считаться так же,
+    # иначе браузерный маршрут (он всегда inline) не дал бы своего измеренного пика.
+    tracker = (
+        pacing.request(desc.pid, desc.host)
+        if pacing is not None
+        else contextlib.nullcontext()
+    )
+    with tracker:
+        _started = time.perf_counter()
+        try:
+            page = desc.active.fetch(desc.wu, desc.fetch_plan)
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
+            return commit_local(desc, exc=exc)
         desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
-        return commit_local(desc, exc=exc)
-    desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
     return commit_local(desc, page=page)
 
 

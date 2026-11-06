@@ -459,6 +459,90 @@ def test_violation_is_computed_from_recorded_declaration(tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
+# (4b) прибор темпа: ожидание лимитера и наблюдённая частота — durable-факты
+# --------------------------------------------------------------------------- #
+
+
+def test_limiter_waits_and_rate_are_published_with_declared_pause(
+    tmp_path: Path,
+) -> None:
+    """Объявленная пауза видна числами: интервалы соблюдены, ожидание посчитано.
+
+    Проверяется связка двух носителей одного факта: интервалы — из элементов сеанса
+    (``fetch_started_at``), а ``limiter_waits``/``limiter_waited_s`` — из блока ``pacing``
+    провенанса (считает сам лимитер). Метрика краула обязана показать оба, не подменяя
+    одно другим.
+    """
+    store = _crawl(
+        tmp_path,
+        _pages("https://h0.docs.test/a", "https://h0.docs.test/b"),
+        crawl_defaults=CrawlRunConfig(
+            max_depth=1,
+            max_workers=2,
+            rate_limit=RateLimitSpec(min_s=ROOT_MIN, max_s=ROOT_MIN),
+        ),
+    )
+    try:
+        session = store.get_crawl_session(SESSION_ID)
+        provenance = read_provenance(session)
+        pacing = provenance["pacing"]
+        h0 = pacing["hosts"]["h0.docs.test"]
+        assert h0["requests"] == 2
+        # Оба запроса к h0 прошли через пейсинг с объявленным минимумом профиля.
+        assert h0["limiter_waits"] >= 2
+        assert h0["limiter_waited_s"] >= 2 * H0_MIN
+        # Пик на h0 — 1: два запроса одного host'а разнесены паузой, а не одновременны.
+        assert h0["in_flight_max"] == 1
+        assert h0["requests_per_s"] is not None and h0["requests_per_s"] > 0.0
+        assert pacing["total"]["requests"] == 3  # корень + два ребёнка
+
+        metric = build_crawl_metric(
+            session=session,
+            items=_items(store),
+            provenance=provenance,
+        )
+        row = next(r for r in metric["per_host"] if r["host"] == "h0.docs.test")
+        # Метрика читает тот же блок: второго расчёта нет.
+        assert row["limiter_waits"] == h0["limiter_waits"]
+        assert row["limiter_waited_s"] == h0["limiter_waited_s"]
+        assert row["in_flight_max"] == 1
+        assert row["requests_per_s"] == h0["requests_per_s"]
+        # Интервалы соблюдены: метка попытки — момент резерва, шаг ≥ объявленного.
+        assert row["observed_min_interval_s"] >= H0_MIN
+        assert row["politeness_violation"] is False
+    finally:
+        store.close()
+
+
+def test_metric_without_pacing_block_names_it_not_zero(tmp_path: Path) -> None:
+    """Сеанс без блока темпа: поля ``null`` и заметка, а не ``0`` (не измеряли ≠ ноль)."""
+    store = _crawl(
+        tmp_path,
+        _pages(),
+        crawl_defaults=CrawlRunConfig(
+            max_depth=0,
+            rate_limit=RateLimitSpec(min_s=0.0, max_s=0.0),
+        ),
+    )
+    try:
+        session = store.get_crawl_session(SESSION_ID)
+        provenance = read_provenance(session)
+        provenance.pop("pacing", None)  # как у старого/прерванного сеанса
+        metric = build_crawl_metric(
+            session=session, items=_items(store), provenance=provenance
+        )
+        row = metric["per_host"][0]
+        assert row["requests_per_s"] is None
+        assert row["in_flight_max"] is None
+        assert row["limiter_waits"] is None
+        assert row["limiter_waited_s"] is None
+        assert metric["pacing"] is None
+        assert any("pacing: не измерялся" in note for note in metric["notes"])
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
 # (5) совместимость: старый провенанс (per-root ``limits``) читается как прежде
 # --------------------------------------------------------------------------- #
 

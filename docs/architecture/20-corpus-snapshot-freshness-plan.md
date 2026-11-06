@@ -19,7 +19,7 @@
 
 | где | что зашито |
 |---|---|
-| `core/pipeline/evaluate.py:221` (`_CONFIRMED_REUSE_KINDS = {live, revalidated}`), вызов `:1946-2001` | `❌` публикуется только если сервер ответил **в этом цикле** |
+| `core/domain/invariants.py:386` (`check_absence_dated`; на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`, снято фазой F3) | `❌` публикуется только если сервер ответил **в этом цикле** (сегодня — только если есть **датированный** носитель, I2d) |
 | `core/pipeline/corpus_coverage.py:206-215`, `:370` | полнота считается по элементам **этого** сеанса, `observed_sources > 0` |
 | `docs/status-dictionary.yaml`, `ReuseKind` | `reused`/`stale` — «сеть не трогалась», а не «наблюдалось тогда-то» |
 

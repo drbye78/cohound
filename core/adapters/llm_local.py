@@ -53,6 +53,7 @@ HTTP-клиент подтягивается только в реальном п
 from __future__ import annotations
 
 import importlib.util
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -64,6 +65,7 @@ from core.domain import LLMCellOutput
 from core.domain.enums import Decoder, ReasoningEffort
 from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
 from core.util.hashing import content_hash
+from core.util.retry import retry_after_header
 
 __all__ = [
     "CHAT_COMPLETIONS_PATH",
@@ -141,6 +143,12 @@ class EvaluationError(RuntimeError):
     ``logs/llm_calls.jsonl``). ``reason`` — машинный класс отказа
     (``length``/``invalid_json``/``schema``/``http_error``), чтобы читатель не разбирал
     текст сообщения.
+
+    ``status_code``/``retry_after`` — HTTP-ответ, из которого следует **пауза** повтора:
+    провайдер говорит «подожди N секунд» заголовком ``Retry-After`` (секунды или
+    HTTP-date, как есть — разбирает вызывающий), а статус (``429``/``5xx``) называет
+    причину. Без них повтор шёл бы немедленно, и при нескольких вызовах в полёте лимит
+    провайдера превратился бы в шторм повторов.
     """
 
     def __init__(
@@ -151,12 +159,18 @@ class EvaluationError(RuntimeError):
         finish_reason: str | None = None,
         raw: str | None = None,
         usage: TokenUsage | None = None,
+        status_code: int | None = None,
+        retry_after: str | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
         self.finish_reason = finish_reason
         self.raw = raw
         self.usage = usage
+        #: HTTP-статус отказа (``None`` — отказа не было/транспортный сбой).
+        self.status_code = status_code
+        #: Заголовок ``Retry-After`` **как есть** (``None`` — провайдер паузу не назвал).
+        self.retry_after = retry_after
         #: Текст рассуждения, если провайдер успел его отдать. Заполняется путями отказа
         #: (:meth:`LocalEvaluator._extract`) и :meth:`LocalEvaluator.complete`: на отказе
         #: это единственный диагностический след, и журнал пишет его целиком.
@@ -390,6 +404,12 @@ class LocalEvaluator:
         ``llm.reasoning_effort``); переопределяется ``req.reasoning_effort``. Уровень
         переводится в тело запроса таблицей семейств (:func:`reasoning_wire`);
         невыразимый уровень — :class:`ReasoningWireUnsupported`, а не тихий пропуск.
+    :param max_connections: потолок соединений HTTP-клиента (число вызовов в полёте
+        объявлено осью исполнения ``--llm-concurrency``). Клиент **один** на адаптер:
+        ``httpx.post`` на каждый вызов делал бы лишнее TLS-рукопожатие. ``None`` —
+        дефолт ``httpx`` (``100``), он заведомо выше любого объявленного параллелизма;
+        значение ниже объявленного числа потоков заставило бы воркеры ждать соединения,
+        то есть «параллельность» осталась бы в отчёте, а не в исполнении.
     """
 
     def __init__(
@@ -407,6 +427,7 @@ class LocalEvaluator:
         timeout: float = DEFAULT_TIMEOUT,
         max_tokens: int | None = None,
         reasoning_effort: ReasoningEffort | str | None = None,
+        max_connections: int | None = None,
     ) -> None:
         if not model_id:
             raise ValueError("model_id обязан быть непустым")
@@ -422,6 +443,10 @@ class LocalEvaluator:
             raise ValueError(f"temperature не может быть отрицательной, получено {temperature!r}")
         if max_tokens is not None and max_tokens <= 0:
             raise ValueError(f"max_tokens обязан быть положительным, получено {max_tokens!r}")
+        if max_connections is not None and max_connections <= 0:
+            raise ValueError(
+                f"max_connections обязан быть положительным, получено {max_connections!r}"
+            )
         try:
             resolved_decoder = Decoder(decoder)
         except ValueError as exc:  # V4: метка вне перечисления — отказ, а не «включим схему»
@@ -456,10 +481,24 @@ class LocalEvaluator:
         # ``metrics.json`` обязан называть цену прогона, а факт вызова и расход токенов
         # известны **только** здесь: выше по стеку ячейка несёт ``model_id``, но не
         # ``usage``. Ноль в этих счётчиках означает «вызовов не было», а не «не считали».
+        #
+        # Счётчики инкрементируются из пула потоков (число вызовов в полёте — объявленная
+        # ось исполнения), поэтому ``+=`` на ``int`` здесь недостаточно: два потока прочли
+        # бы одно значение и один вызов потерялся бы. Замок охватывает и запись, и чтение
+        # (:meth:`usage_summary`): цена прогона — наблюдённый факт, а не приблизительный.
         self._calls = 0
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._reasoning_tokens = 0
+        self._usage_lock = threading.Lock()
+        #: Потолок соединений одного клиента (``None`` — дефолт ``httpx``).
+        self.max_connections = max_connections
+        # Клиент создаётся **лениво** (первый реальный вызов): модуль импортируется без
+        # ``httpx``, и конструктор обязан работать без него. Замок — потому что ленивое
+        # создание идёт из пула: два потока создали бы два клиента, и пул соединений
+        # перестал бы быть одним.
+        self._client: Any = None
+        self._client_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Наблюдаемость стоимости
@@ -476,17 +515,33 @@ class LocalEvaluator:
         Числа не входят ни в ``execution_contract_digest``, ни в ``pb``: это измерение
         исполнения (стоимость), а не условие измерения (A3/§13).
         """
+        with self._usage_lock:
+            calls = self._calls
+            prompt_tokens = self._prompt_tokens
+            completion_tokens = self._completion_tokens
+            reasoning_tokens = self._reasoning_tokens
         tokens: dict[str, int] = {}
-        if self._prompt_tokens or self._completion_tokens:
+        if prompt_tokens or completion_tokens:
             tokens = {
-                "prompt": self._prompt_tokens,
-                "completion": self._completion_tokens,
+                "prompt": prompt_tokens,
+                "completion": completion_tokens,
             }
             # Рассуждение — отдельная статья расхода (часть ``completion``); не
             # смешивается с ним, иначе «сколько стоило думать» неотличимо от ответа.
-            if self._reasoning_tokens:
-                tokens["reasoning"] = self._reasoning_tokens
-        return {"calls": self._calls, "tokens": tokens}
+            if reasoning_tokens:
+                tokens["reasoning"] = reasoning_tokens
+        return {"calls": calls, "tokens": tokens}
+
+    def close(self) -> None:
+        """Закрывает HTTP-клиент адаптера (``None`` — клиент не создавался).
+
+        Один клиент на адаптер означает владельца: пул соединений держит сокеты, и после
+        прогона их надо вернуть. Метод идемпотентен (повторный вызов — no-op).
+        """
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     # ------------------------------------------------------------------
     # Контракт порта
@@ -512,17 +567,19 @@ class LocalEvaluator:
         reasoning: str | None = None
         # Счётчик вызовов растёт **до** запроса: провалившийся вызов тоже стоил времени
         # (а часто и токенов — HTTP-ошибка после отправки). Токены прибавляются после
-        # ответа: их знает только сервер.
-        self._calls += 1
+        # ответа: их знает только сервер. Инкремент под замком — вызовы идут из пула.
+        with self._usage_lock:
+            self._calls += 1
         if self._generate is not None:
             raw = self._generate(req.prompt, req.response_schema)
         else:
             raw, usage, finish_reason, reasoning = self._http_complete(
                 req, seed=seed, temperature=temperature
             )
-        self._prompt_tokens += usage.prompt_tokens
-        self._completion_tokens += usage.completion_tokens
-        self._reasoning_tokens += usage.reasoning_tokens
+        with self._usage_lock:
+            self._prompt_tokens += usage.prompt_tokens
+            self._completion_tokens += usage.completion_tokens
+            self._reasoning_tokens += usage.reasoning_tokens
         raw = raw if isinstance(raw, str) else str(raw)
         try:
             output = self._parse(req.response_schema, raw)
@@ -604,7 +661,6 @@ class LocalEvaluator:
         :class:`ReasoningWireUnsupported` **до** отправки: тихий пропуск параметра выдал бы
         «уровень не выбран» за «уровень объявлен».
         """
-        httpx = self._import_http()
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -637,20 +693,65 @@ class LocalEvaluator:
             # (в живом прогоне: манифест ``json_object``, провод ``json_schema``).
             payload["response_format"] = self._response_format(req)
         # I18: tools/web_search в запрос НЕ добавляются — здесь их нет по построению.
+        #
+        # Один клиент на адаптер: ``httpx.post`` создаёт клиент на вызов, а при
+        # параллельных вызовах это лишнее TLS-рукопожатие на каждый. Пул соединений
+        # ограничен ``max_connections`` (≥ объявленного числа вызовов в полёте).
+        client = self._http_client()
         try:
-            response = httpx.post(
+            response = client.post(
                 f"{normalize_api_base(self.base_url)}{CHAT_COMPLETIONS_PATH}",
                 json=payload,
                 headers=headers,
                 timeout=self.timeout,
             )
-            response.raise_for_status()
-            data = response.json()
         except Exception as exc:  # httpx.HTTPError/JSON-ошибки транспорта
             raise EvaluationError(
-                f"HTTP-вызов оценщика не удался: {exc}", reason="http_error"
+                f"HTTP-вызов оценщика не удался: {type(exc).__name__}: {exc}",
+                reason="http_error",
+            ) from exc
+        if response.status_code >= 400:
+            # Статус и ``Retry-After`` едут в отказе: вызывающий (Ш6) по ним отличает
+            # «подожди и повтори» (``429``/``5xx``) от «ответ по существу» и ставит паузу,
+            # а не повторяет немедленно. Текст сообщения — без заголовков и ключей.
+            raise EvaluationError(
+                f"HTTP-вызов оценщика не удался: HTTP {response.status_code}",
+                reason="http_error",
+                status_code=response.status_code,
+                retry_after=retry_after_header(response),
+            )
+        try:
+            data = response.json()
+        except Exception as exc:  # JSON-ошибка транспорта
+            raise EvaluationError(
+                f"HTTP-вызов оценщика не удался: {type(exc).__name__}: {exc}",
+                reason="http_error",
+                status_code=response.status_code,
             ) from exc
         return self._extract(data)
+
+    def _http_client(self) -> Any:
+        """Ленивый единый HTTP-клиент адаптера (пул соединений на все вызовы).
+
+        ``httpx`` импортируется лениво: модуль обязан импортироваться без него
+        (:func:`_httpx_available`). Лимит соединений — ``max_connections`` (дефолт
+        ``httpx`` — 100, заведомо выше объявленного параллелизма): значение ниже числа
+        потоков заставило бы воркеры ждать соединения, и «параллельность» осталась бы в
+        отчёте, а не в исполнении.
+        """
+        with self._client_lock:
+            if self._client is None:
+                httpx = self._import_http()
+                limits = (
+                    httpx.Limits(
+                        max_connections=self.max_connections,
+                        max_keepalive_connections=self.max_connections,
+                    )
+                    if self.max_connections is not None
+                    else httpx.Limits()
+                )
+                self._client = httpx.Client(limits=limits)
+            return self._client
 
     def _response_format(self, req: LLMRequest) -> dict[str, Any]:
         """``response_format`` под объявленный механизм (зеркало discovery-адаптера).

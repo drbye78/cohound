@@ -148,7 +148,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   укладывается: `core/util/document_probe.py:11-14`, `:72-76`.
 - ✅ F5 — единая точка разбора XML + hostile-тесты (`0c683f0`), сверено по `core/util/feed.py`.
 - ✅ F6 — предикат «ось не задана» — `is not None`: `core/util/container_policy.py:292,301`.
-- ✅ F7 — ось `crawl.document_timeout_s` доходит до docling: `core/cli/wiring.py:2205`, `:2122`,
+- ✅ F7 — ось `crawl.document_timeout_s` доходит до docling: `core/cli/wiring.py:2214`, `:2122`,
   `:3068`; ось объявлена в аргументах — `core/cli/execution_axes.py:197`.
 - ✅ F8 — OOXML по **центральному каталогу** zip, неузнанный OOXML остаётся `document`:
   `core/util/document_probe.py:8`, `core/util/document_formats.py:478-479`.
@@ -197,7 +197,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
 | S1 | SERP-кэш не реализован → R7 на поисковом контуре недостижим | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`: кэш собирается `resolve_content_cache`, ключ несёт язык) | `serp_key` только `cache.py:84`,`:113`; `get_json`/`put_json` не вызываются; адаптеры собираются без `cache` (сборка `build_search_adapter` — `core/cli/wiring.py:727-753`) при готовом объекте в
-`core/cli/context.py:1702-1715` | кэш-примитивы покрыты, прод-путь нет | М | **P1** |
+`core/cli/context.py:1703-1716` | кэш-примитивы покрыты, прод-путь нет | М | **P1** |
 | S2 | `run_serp_round`/`run_serp_loop` без производителя; спека устарела | ЧАСТИЧНО | мертвы только эти две; `invalidate_affected` вызывается (`core/pipeline/corpus.py:1012`), `SearchPhase.SERP` излучается (`core/pipeline/corpus.py:801`) | — | Г | P0 |
 | S3 | набор запросов фиксирован между раундами: `rounds>1` жжёт бюджет | ПОДТВЕРЖДЕНО → **закрыто** (`no_query_variation`: раунды 2..n не исполняются, причина в наблюдении — «измерять и называть», не потолок) | `core/pipeline/serp_loop.py:126-131`, `:1313` | `test_serp_discover.py::test_rounds_above_one_without_query_variation_are_not_executed` | Д | P5 |
 | S4 | контур последовательный, poll 30 с, async-режим: ~10 ч/продукт/раунд | ПОДТВЕРЖДЕНО → **измеряемо** (`SearchTiming`: `wait_seconds`/`request_seconds`/`polls`/`measured`, инъектируемые часы и `sleep`); параллелизм не вводился — «медленно» стало числом, а не диагнозом | `search_yandex.py:108-128`, `:418` | тайминги инъекцией `sleep` | Д | P5 |
@@ -450,7 +450,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 | ID | Находка | Вердикт | Доказательство (HEAD) | Класс | P |
 |---|---|---|---|---|---|
 | V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно | `cohound-spec-v2.md:660` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `core/pipeline/evaluate.py:1173-1211` `support_subject_overlap` + вызов `:1054` + `outputs/support_quality.yaml`. Врут два документа: `02-subsystems.md:534` и `llm_local.py:22` приписывают шаг 3 `validate.py` | М | P0 + P6 |
-| V2 | Точность оценщика неизмерима | **ПОСЫЛКА СНЯТА 28.10, замер не выполнен**: эталон пересобран и объявлен пригодным, поэтому «неизмерима» больше не верно — но и «измерена» не верно | `packages/ru-pg-dbms/sources/golden_status.yaml:1-2` `state: present`; loader — `core/pipeline/golden_status.py:216` `read_golden_status` → `state=present, declared=True, comparison_available=True` (проверено вызовом). `golden.csv` = **905 строк = 181 параметр × 5 продуктов** (tier: 750 `full` / 155 `fast`; ожидание ✅500 / ⚠️123 / ❌282), в т.ч. **181 `jatoba`** (было 0) и новый 5-й продукт `digital_q_database`. Ветка отказа жива и читается (`core/pipeline/evaluator_benchmark.py:115,361,494`), но больше не срабатывает. **Не сделано:** `hound experiment evaluator-benchmark` на новом наборе **не запускался** — κ, confusion, abstention, `fabricated_support` по 5 продуктам не посчитаны. До него «точность измерима» — утверждение о данных, а не результат замера | М | P6 |
+| V2 | Точность оценщика неизмерима | **ПОСЫЛКА СНЯТА 28.10, замер не выполнен**: эталон пересобран и объявлен пригодным, поэтому «неизмерима» больше не верно — но и «измерена» не верно | `packages/ru-pg-dbms/sources/golden_status.yaml:1-2` `state: present`; loader — `core/pipeline/golden_status.py:216` `read_golden_status` → `state=present, declared=True, comparison_available=True` (проверено вызовом). `golden.csv` = **905 строк = 181 параметр × 5 продуктов** (tier: 750 `full` / 155 `fast`; ожидание ✅500 / ⚠️123 / ❌282), в т.ч. **181 `jatoba`** (было 0) и новый 5-й продукт `digital_q_database`. Ветка отказа жива и читается (`core/pipeline/evaluator_benchmark.py:115,412,517`), но больше не срабатывает. **Не сделано:** `hound experiment evaluator-benchmark` на новом наборе **не запускался** — κ, confusion, abstention, `fabricated_support` по 5 продуктам не посчитаны. До него «точность измерима» — утверждение о данных, а не результат замера | М | P6 |
 | V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `core/pipeline/evaluate.py:2653` `max_retries=2`, `:2665-2694` цикл публикует **первый валидный** сэмпл; `templates`… ; **но** `max_retries` не в контракте, номер попытки не пишется, полосы в артефактах нет, R7 пайплайном не считается. Число 95.8 % формально проходит порог §11.7 (≥95 %) | М | P2 |
 | V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:84` `DEFAULT_DECODER="none"` достижим в проде (`core/cli/wiring.py:1075`); `llm_local.py:482-495` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:556` `Decoder | None`, в `status-dictionary.yaml` ключа нет); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
 | V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:94`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:36-45`), в payload нет (`llm_local.py:617-638`), `build_evaluator_llm` не читает (`core/cli/wiring.py:1334-1476`), читает `build_discovery_llm` (`:1132-1224`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
@@ -467,7 +467,7 @@ absence-модель, scoring и определения Coverage/Comparability �
   той же строке: `core/adapters/llm_local.py:22` всё ещё приписывает «достаточность»
   `validate.py`.
 - 🟡 V2 — **отчётность закрыта** (`golden_declined` читается benchmark'ом:
-  `core/pipeline/evaluator_benchmark.py:115,361,494`; объявление —
+  `core/pipeline/evaluator_benchmark.py:115,412,517`; объявление —
   `packages/ru-pg-dbms/sources/golden_status.yaml:1-2`, `state: present`). **Открыт замер:**
   на пересобранном наборе (905 строк = 181 × 5) benchmark не запускался, поэтому точность
   оценщика по-прежнему не имеет числа. Закрывается одной командой после прогона:
@@ -506,7 +506,7 @@ absence-модель, scoring и определения Coverage/Comparability �
   (`no_fragments`), причина зафиксирована комментарием `:1938-1940`.
 - ✅ 3 — правило языка цитаты есть в `evaluator_v5` (`core/pipeline/prompt.py:108-115`, `:117`).
 - ⬜ 4 — **не сделано**: `min_retrieval_score` проверяется в `core/pipeline/validate.py:374`
-  и объявлен в подписи `core/pipeline/evaluate.py:2183`, но `evaluate_batch`
+  и объявлен в подписи `core/pipeline/evaluate.py:2255`, но `evaluate_batch`
   (`:2615`) параметра **не принимает вовсе** и в `config/`/`packages/` значения нет
   (`grep -rn min_retrieval_score core/config packages` — пусто) ⇒ аномалия §10.4
   по-прежнему недостижима.
@@ -552,7 +552,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 - ✅ 3 — `base_url` вошёл в идентичность как **хост**: `llm_scenarios.endpoint_host`
   (`core/cli/execution_axes.py:817`), а `llm_scenarios` — поле контракта
   (`core/pipeline/digests.py:96`). Схема/путь/секрет не пишутся намеренно.
-- ✅ 4 — benchmark читает `golden_status`: `core/pipeline/evaluator_benchmark.py:115,361,494`.
+- ✅ 4 — benchmark читает `golden_status`: `core/pipeline/evaluator_benchmark.py:115,412,517`.
 - ✅ 5 — класс назван: `prompt_template` отнесён к `execution_versions`
   (`cohound-spec-v2.md:898,902`), т.е. `execution_change`, как и исполняет код.
   ❔ остаток: отчёт замера `2026-10-27-support-not-about-subject.md:84` продолжает называть
@@ -657,7 +657,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 
 - 1 ➖ снято — решением §10 п. 1: все правки до прогона, `run_id` меняется один раз. Исполнено:
   P2/P6/P7 сведены в `f6100c7`.
-- 2 ✅ отвечен кодом — ось доходит до docling (`core/cli/wiring.py:2205,2122,3068`,
+- 2 ✅ отвечен кодом — ось доходит до docling (`core/cli/wiring.py:2214,2122,3068`,
   `core/cli/execution_axes.py:197`), т.е. выбран первый вариант.
 - 3 ✅ отвечен кодом — политика переехала в ядро (`core/util/robots.py:73,483`), одна для
   транспортов; per-request ось осталась свойством адаптера (`core/adapters/crawl_scrapy.py:422`).
@@ -787,7 +787,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 | Паритет `split`: члены архивов через шов, `document_level`/`pdf_pipeline` в edge, двойной фетч, дыра покрытия (архив скачан, члены не извлечены ⇒ `complete=True` на пустом корпусе) | профиль `split` — опция MVP (M1), а не паритетен; дыра покрытия даёт ложную уверенность в полноте | архитектура шва | 4 → ⬜ **не сделано** (волна 4 не начата; ограничение записано как причина `deploy_profile` в контракте — `core/pipeline/digests.py:134-147`) |
 | Лексический индекс: одно поле вместо четырёх (C8), персист либо явная запись «время жизни процесса» | 4× работы анализаторов и объёма индекса ради 3 профилей, которые прогон не запрашивает; пересборка каждый прогон в temp | архитектура | 3 → **сделано** (`1e7fad9`: одно поле + `lexical_spec` в контракте) |
 | Таксономия `CrawlError` из адаптера в порт/домен (R5) | десяток модулей ядра импортировали таксономию из реализации; место было зафиксировано компромиссом в `ports/crawler.py:20` | архитектура | 3 → **сделано** (`dfa428d`) |
-| `document_timeout_s` как настоящая ось `CrawlLimits` + проводка в docling (F7) | ось объявлена, до docling не доходит; `FULL: None` означает «слот занят до конца прогона» | код + контракт | 2 → ✅ **сделано**: ось в аргументах (`core/cli/execution_axes.py:197`), до docling (`core/cli/wiring.py:2205,2122,3068`) |
+| `document_timeout_s` как настоящая ось `CrawlLimits` + проводка в docling (F7) | ось объявлена, до docling не доходит; `FULL: None` означает «слот занят до конца прогона» | код + контракт | 2 → ✅ **сделано**: ось в аргументах (`core/cli/execution_axes.py:197`), до docling (`core/cli/wiring.py:2214,2122,3068`) |
 | `extract_cache`: частичность при 304-reuse | переиспользование полного результата для частично извлечённого документа скрывает деградацию | схема state.db | 3 → **сделано** (`8d55b6a`, схема состояния 5) |
 | `PARTIAL_SUCCESS`/`SKIP_READ_FAILED` (без `corpus_members`) | отказ, который сейчас теряется, — это невидимая потеря, а не типизация | код | 3 → **сделано** (`8d55b6a`: `MemberOutcome.partial` с инвариантом, `PARTIAL_EXTRACTION` в блокирующих классах) |
 

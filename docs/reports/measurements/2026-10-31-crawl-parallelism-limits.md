@@ -122,7 +122,7 @@ extract-archives/safety/ops` (`uv sync --frozen`, 223 пакета).
 
 ## 5. SERP-контур — следующий кандидат на потолок (не измерен)
 
-Контур исполняется **до** цикла продуктов (`core/pipeline/corpus.py:1431`), запрос за
+Контур исполняется **до** цикла продуктов (`core/pipeline/corpus.py:2209`), запрос за
 запросом: в `serp_loop` нет ни пула, ни асинхронности — двойной последовательный цикл
 (`core/pipeline/serp_loop.py:532-535`, `for product_id` → `for query`). Объём при текущем
 `run.yaml` (`serp.rounds: 1`, `serp.budget: 362`, `mode: sync`): 5 продуктов × 362 =

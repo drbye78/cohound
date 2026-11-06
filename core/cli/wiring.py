@@ -1347,6 +1347,7 @@ def build_evaluator_llm(
     temperature: float | None = None,
     reasoning_effort: ReasoningEffort | str | None = None,
     run_reasoning_effort: ReasoningEffort | str | None = None,
+    max_connections: int | None = None,
 ) -> EvaluatorPort | None:
     """Собирает runtime-оценщик из активного LLM-слота; ``None`` — слот не сконфигурирован.
 
@@ -1386,6 +1387,10 @@ def build_evaluator_llm(
     :param run_reasoning_effort: уровень run-слоя (``run.yaml: llm_reasoning_effort``) —
         цепочка та же, что у модели (:func:`resolve_evaluator_reasoning_effort`), поэтому
         рантайм и ``llm_scenarios`` не могут разойтись.
+    :param max_connections: потолок соединений HTTP-клиента оценщика — ось исполнения
+        ``--llm-concurrency``: при N вызовах в полёте клиент обязан держать N соединений.
+        ``None`` — дефолт ``httpx`` (``100``); в контракт/``run_id`` не входит (это время
+        фазы, а не условие измерения).
     :raises ValueError: неизвестный слот (``--llm-slot``/``COHOUND_LLM_SLOT``/``run.yaml``).
     :raises CliError: endpoint активен, но модель не объявлена (ни слот, ни ``--llm-model``).
     """
@@ -1462,6 +1467,10 @@ def build_evaluator_llm(
         # семейству модели и **отказывает**, если уровень невыразим
         # (``reasoning_wire``) — тихий пропуск параметра был бы ложным провенансом.
         reasoning_effort=resolved_effort,
+        # Ось исполнения Ш6: пул соединений одного клиента адаптера. Клиент один на
+        # адаптер (``httpx.post`` создавал бы его на каждый вызов — лишнее TLS-рукопожатие
+        # при параллельных вызовах).
+        max_connections=max_connections,
     )
 
 

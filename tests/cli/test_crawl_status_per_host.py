@@ -112,6 +112,64 @@ def _items() -> list[CrawlSessionItem]:
     ]
 
 
+def _pacing() -> dict[str, Any]:
+    """Блок темпа в провенансе — ровно та форма, что пишет сеанс при финализации.
+
+    Числа подобраны под ``_items()``: у ``a.test`` три запроса за окно 4 с (0.750 req/s),
+    пик 2, ожидание лимитера 3.0 с; у ``b.test`` один запрос и пик 1.
+    """
+    return {
+        "hosts": {
+            "a.test": {
+                "requests": 3,
+                "requests_per_s": 0.75,
+                "in_flight_max": 2,
+                "limiter_waits": 3,
+                "limiter_waited_s": 3.0,
+                "fetch_ms": {"p50": 100, "p95": 200, "n": 2},
+                "window_s": 4.0,
+                "first_request_at": "2026-01-01T00:00:00+00:00",
+                "last_request_at": "2026-01-01T00:00:04+00:00",
+            },
+            "b.test": {
+                "requests": 1,
+                "requests_per_s": None,
+                "in_flight_max": 1,
+                "limiter_waits": 0,
+                "limiter_waited_s": 0.0,
+                "fetch_ms": {"p50": None, "p95": None, "n": 0},
+                "window_s": None,
+                "first_request_at": "2026-01-01T00:00:01+00:00",
+                "last_request_at": "2026-01-01T00:00:01+00:00",
+            },
+        },
+        "products": {
+            "p1": {
+                "requests": 4,
+                "hosts": ["a.test", "b.test"],
+                "requests_per_s": 1.0,
+                "fetch_ms": {"p50": 100, "p95": 200, "n": 2},
+                "window_s": 4.0,
+                "first_request_at": "2026-01-01T00:00:00+00:00",
+                "last_request_at": "2026-01-01T00:00:04+00:00",
+            }
+        },
+        "total": {
+            "hosts": 2,
+            "products": 1,
+            "requests": 4,
+            "requests_per_s": 1.0,
+            "in_flight_max": 2,
+            "limiter_waits": 3,
+            "limiter_waited_s": 3.0,
+            "fetch_ms": {"p50": 100, "p95": 200, "n": 2},
+            "window_s": 4.0,
+            "first_request_at": "2026-01-01T00:00:00+00:00",
+            "last_request_at": "2026-01-01T00:00:04+00:00",
+        },
+    }
+
+
 def _argv(db: Path, *extra: str, json_mode: bool = True) -> list[str]:
     argv = ["crawl", "status", "--run-id", "r1", "--db", str(db)]
     if json_mode:
@@ -210,6 +268,59 @@ def test_per_host_human_table_is_aligned_and_named(
     assert "a.test" in out and "2.000" in out
     # У host'а без объявленного значения ratio не считается — печатается прочерк, не ноль.
     assert "note: declared_min_interval_s: нет объявленного значения для host'ов: b.test" in out
+
+
+# --------------------------------------------------------------------------- #
+# Темп (прибор): requests/s, пик в полёте и ожидание лимитера — в --json и в таблице
+# --------------------------------------------------------------------------- #
+
+
+def test_per_host_publishes_pacing_numbers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--json``: поля темпа в строке host'а и полный блок ``pacing`` (агрегаты)."""
+    db = _db(
+        tmp_path,
+        items=_items(),
+        provenance={**_provenance(("https://a.test/", 1.0)), "pacing": _pacing()},
+    )
+
+    assert main(_argv(db, "--per-host")) == EXIT_OK
+    metric = json_out(capsys)["metric"]
+
+    a = next(row for row in metric["per_host"] if row["host"] == "a.test")
+    assert a["requests_per_s"] == 0.75
+    assert a["in_flight_max"] == 2
+    assert a["limiter_waits"] == 3
+    assert a["limiter_waited_s"] == 3.0
+
+    b = next(row for row in metric["per_host"] if row["host"] == "b.test")
+    assert b["requests_per_s"] is None  # один запрос — окна нет, а не бесконечность
+    assert b["in_flight_max"] == 1
+
+    # Агрегат по продукту/прогону не теряется в --json.
+    assert metric["pacing"]["total"]["requests"] == 4
+    assert metric["pacing"]["total"]["in_flight_max"] == 2
+    assert metric["pacing"]["products"]["p1"]["requests"] == 4
+    assert not any("pacing: не измерялся" in note for note in metric["notes"])
+
+
+def test_per_host_human_table_shows_pacing_columns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Человекочитаемая форма: колонки ``req/s``/``peak``/``wait_s`` и строка агрегата."""
+    db = _db(
+        tmp_path,
+        items=_items(),
+        provenance={**_provenance(("https://a.test/", 1.0)), "pacing": _pacing()},
+    )
+
+    assert main(_argv(db, "--per-host", json_mode=False)) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "req/s" in out and "peak" in out and "wait_s" in out
+    assert "0.750" in out  # requests/s host'а a.test
+    assert "pacing total: hosts=2 products=1 requests=4" in out
+    assert "limiter_waits=3" in out and "limiter_waited_s=3.000" in out
 
 
 def test_per_host_missing_declared_is_null_with_note(

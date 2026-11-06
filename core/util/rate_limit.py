@@ -28,6 +28,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -129,6 +130,18 @@ def _iso_utc_us(micros: int) -> str:
     )
 
 
+@dataclass
+class _WaitStat:
+    """Кумулятивное ожидание одного origin: сколько раз ждали и сколько секунд.
+
+    Ведётся лимитером под его же локом (там, где известны ``delay``/``remaining``), и
+    только публикуется наружу. Политику паузы не меняет: это наблюдение, а не рычаг.
+    """
+
+    waits: int = 0
+    waited_s: float = 0.0
+
+
 class RateLimiter:
     """Межзапросный интервал **по origin** с резервированием времени (не сон под локом).
 
@@ -197,6 +210,9 @@ class RateLimiter:
         #: Шаг этой цепи равен ``delay`` ровно, поэтому интервал между публикуемыми
         #: метками не несёт ни дрожания часов, ни квантования ISO.
         self._last_label: dict[str, int] = {}
+        #: Наблюдённое ожидание по origin (см. :meth:`wait_stats`). Счётчики
+        #: **кумулятивные**: ``_prune`` их не трогает — это итог, а не резерв.
+        self._waits: dict[str, _WaitStat] = {}
         #: Лок защищает **только** чтение/запись ``_last`` и сэмплирование ``rng``
         #: (``random.Random`` не потокобезопасен). Сон — строго вне лока.
         self._lock = threading.Lock()
@@ -232,7 +248,15 @@ class RateLimiter:
             )
             self._last_label[origin] = label_us
             self._prune(now, wall_us)
-        return target - now, label_us
+            remaining = target - now
+            # Наблюдение ожидания (не политика): сколько раз и сколько секунд этот origin
+            # заставил ждать. ``remaining > 0`` — собственно пауза; резерв с нулевой
+            # задержкой (``min_s = max_s = 0``) ожиданием не считается.
+            if remaining > 0.0:
+                stat = self._waits.setdefault(origin, _WaitStat())
+                stat.waits += 1
+                stat.waited_s += remaining
+        return remaining, label_us
 
     def wait(self, host: str, spec: RateLimitSpec | None) -> float:
         """Резервирует слот для ``host`` и спит до него; возвращает проспанные секунды.
@@ -246,6 +270,26 @@ class RateLimiter:
         remaining, _label = self._reserve(host, spec)
         self._sleep(remaining)
         return remaining
+
+    def wait_stats(self) -> dict[str, dict[str, float]]:
+        """Наблюдённое ожидание по origin: ``{host: {waits, waited_s}}`` (кумулятивно).
+
+        ``waits`` — сколько резервов **действительно ждали** (``remaining > 0``), а не
+        сколько раз вызывали ``wait``: резерв без задержки (``min_s = max_s = 0``) паузой
+        не является и в счёт не идёт. ``waited_s`` — сумма запланированных пауз: ровно
+        то, что поток проспит до целевого момента (``time.sleep`` не возвращается раньше,
+        но может позже — число остаётся нижней границей фактического простоя).
+        Записи с нулём не появляются: «не ждали» и «ждали 0 секунд» — один факт.
+
+        Это **провенанс исполнения**, а не условие измерения: в ``run_id``/дайджесты
+        значение не входит. Потребитель — прибор темпа
+        (:mod:`core.pipeline.crawl_pacing`).
+        """
+        with self._lock:
+            return {
+                origin: {"waits": stat.waits, "waited_s": stat.waited_s}
+                for origin, stat in sorted(self._waits.items())
+            }
 
     def wait_reserved(self, host: str, spec: RateLimitSpec | None) -> str:
         """Резервирует слот, спит до него и возвращает **разрешённый** момент (ISO-8601 UTC).

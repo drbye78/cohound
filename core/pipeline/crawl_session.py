@@ -116,6 +116,7 @@ def finalize_session(
     revalidation_fetched: int | None = None,
     truncated_products: Sequence[str] | None = None,
     shard: Mapping[str, Any] | None = None,
+    pacing: Mapping[str, Any] | None = None,
 ) -> CrawlSessionStatus:
     """Финализирует сеанс: ``COMPLETED`` (нет сбоев) либо ``PARTIAL`` (есть failed/cancelled).
 
@@ -130,9 +131,11 @@ def finalize_session(
 
     Phase 2: в ``CrawlSession.provenance_json`` пишется компактный JSON-провенанс
     ``{engines, kinds, crawl_sources_digest, status, truncated, effective_limits,
-    pages_fetched, revalidation_fetched}``. Персистенция — через
+    pages_fetched, revalidation_fetched, pacing}``. Персистенция — через
     :meth:`StorePort.set_crawl_session_provenance`
-    (targeted ``UPDATE``).
+    (targeted ``UPDATE``). ``pacing`` — наблюдённый темп обхода по origin
+    (:mod:`core.pipeline.crawl_pacing`); это провенанс исполнения, а не условие
+    измерения, поэтому ключ не входит ни в один дайджест.
 
     **F7 (17 §2): шард узла.** ``shard`` — провенанс развёртывания
     ``{node, hosts, declared, filtered, reason}``. Блок пишется, только когда шард
@@ -173,6 +176,12 @@ def finalize_session(
     # которая уже лежит в ``effective_limits.roots[*].limits.host_shards``.
     if shard_block is not None:
         provenance["shard"] = shard_block
+    # Прибор темпа (``core.pipeline.crawl_pacing``): наблюдённая конкурентность и
+    # ожидание лимитера по origin. Провенанс исполнения, а не условие измерения —
+    # ключ появляется только когда снимок есть (старый/прерванный сеанс его не имеет,
+    # и «не измеряли» честнее нулей).
+    if pacing:
+        provenance["pacing"] = dict(pacing)
     store.set_crawl_session_provenance(
         session_id,
         json.dumps(provenance, ensure_ascii=False, sort_keys=True),

@@ -40,6 +40,7 @@ from tests.pipeline.test_evaluate import (
     _bad_output,
     _chunks,
     _data,
+    _no_sleep,
     _ok_output,
     _param,
     _ScriptedEvaluator,
@@ -71,6 +72,12 @@ FIELDS = {
     "run_id",
     "ts",
     "usage",
+    # Пауза перед следующей попыткой (Ш6): сколько, почему и что сказал провайдер.
+    # У успешной попытки и у последней (бюджет повторов исчерпан) — ``None``, но поле
+    # есть **в каждой** строке: форма записи одна, а не «есть, если был повтор».
+    "retry_wait_s",
+    "retry_reason",
+    "retry_after_s",
 }
 
 
@@ -212,6 +219,8 @@ def test_plain_exception_is_journaled_without_response(tmp_path: Path) -> None:
         evaluator=_ScriptedEvaluator([RuntimeError("таймаут адаптера")]),
         chunks=_chunks(data),
         llm_journal=journal,
+        # Пауза повтора — предмет отдельного теста; здесь проверяется запись строк.
+        sleep=_no_sleep,
     )
 
     lines = _lines(journal.path)

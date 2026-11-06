@@ -183,6 +183,7 @@ __all__ = [
     "PlanInputsSnapshot",
     "_acquire_package_lock",
     "_add_common",
+    "_add_llm_concurrency_flag",
     "_add_llm_model_flag",
     "_add_llm_reasoning_effort_flag",
     "_add_llm_slot_flag",
@@ -1932,6 +1933,10 @@ def _resolve_ports(
             run_reasoning_effort=getattr(
                 getattr(inputs, "run", None), "llm_reasoning_effort", None
             ),
+            # Ось исполнения ``--llm-concurrency``: тот же вход питает пул соединений
+            # адаптера — при N вызовах в полёте клиент обязан уметь держать N соединений,
+            # иначе воркеры ждут их и объявленная параллельность остаётся на бумаге.
+            max_connections=getattr(args, "llm_concurrency", None),
         )
         if deploy_config is not None
         else None
@@ -2808,6 +2813,10 @@ def _resolve_phases(
         # ``--only-failed``: work-set ремонта (провалы из сеанса либо ``url_state``) —
         # отдельный вход Ш5: ремонт идёт известными depth-0 URL, а не обходом корней.
         "only_failed_repairs": only_failed_repairs,
+        # Ось исполнения Ш6: сколько вызовов оценщика держать в полёте. Не входит в
+        # ``EXECUTION_CONTRACT_FIELDS`` (время фазы ≠ условие измерения), поэтому
+        # ``run_id`` от неё не зависит; None — значение не объявлено, действует дефолт 1.
+        "llm_concurrency": getattr(args, "llm_concurrency", None) or 1,
         # 09 §12.5: готовый отпечаток условий измерения → манифест Ш9 (без пересчёта).
         "execution_contract_digest": execution_contract_digest,
         # 09 §12.3/§13: база сравнения прогона (результат ``previous_run_of`` — резолвится
@@ -3260,6 +3269,35 @@ def _add_llm_model_flag(parser: argparse.ArgumentParser) -> None:
         help=(
             "model_id оценщика (override deploy.llm.<slot>.model_id); входит в run_id. "
             "Env COHOUND_LLM_MODEL оценщиком не читается (только LLM-разведка)"
+        ),
+    )
+
+
+def _add_llm_concurrency_flag(parser: argparse.ArgumentParser) -> None:
+    """Флаг ``--llm-concurrency`` — сколько вызовов оценщика держать в полёте.
+
+    Это ось **исполнения**, а не измерения: она меняет время фазы Ш6, но не условия, при
+    которых получен вердикт (промпт, модель, срез ретривала, правила §10 — всё то же).
+    Поэтому флаг **не** входит в ``EXECUTION_CONTRACT_FIELDS`` и ``run_id`` не меняет;
+    доказательство — тест, сравнивающий ``run_id`` прогона с флагом и без него.
+
+    Дефолт ``1`` — прежнее поведение байт-в-байт: фаза исполняется последовательно.
+    Замер, обосновывающий ось: прогон ``ru-pg-dbms-c2e7b860ac17`` — evaluate 10 906 с на
+    656 вызовов (16.6 с на вызов) при локальной работе в доли секунды, то есть фаза
+    упирается только в латентность модели.
+
+    ``plan`` принимает флаг наравне с ``run`` по общему правилу «план знает всё, что знает
+    прогон»: флаг не влияет на идентичность, но план не должен отвергать вход прогона.
+    """
+    parser.add_argument(
+        "--llm-concurrency",
+        dest="llm_concurrency",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "вызовов оценщика в полёте (Ш6); дефолт 1 — последовательно. "
+            "Условие исполнения: в run_id не входит"
         ),
     )
 

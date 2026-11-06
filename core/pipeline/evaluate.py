@@ -53,9 +53,10 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from core.domain import (
     ABSENCE_UNDATED_REASON,
@@ -117,7 +118,7 @@ from core.pipeline.retrieve import (
     RetrievalResult,
     retrieve,
 )
-from core.pipeline.runner import PhaseResult, Ports, run_isolated
+from core.pipeline.runner import PhaseResult, Ports
 from core.pipeline.validate import ChunkLike, ValidationResult, validate_output
 from core.ports.embedder import EmbedderPort
 from core.ports.lexical_index import LexicalIndexPort
@@ -133,6 +134,7 @@ from core.ports.vector_index import (
 from core.util.hashing import content_hash
 from core.util.ids import DOC_VERSION_PREFIX, doc_version_of, parse_source_id
 from core.util.logging import JsonlAppender
+from core.util.retry import backoff_delay, parse_retry_after
 
 __all__ = [
     "ABSENCE_COVERAGE_UNSATISFIED_REASON",
@@ -750,6 +752,61 @@ def _validation_outcome(validation: ValidationResult) -> str:
     return "validation_failed"
 
 
+#: Классы отказа, при которых пауза повтора **бессмысленна**: провайдер ответил
+#: (``raw``/``finish_reason`` есть), а непригоден сам ответ — обрезание по потолку,
+#: невалидный JSON, отказ §10. Ждать здесь нечего: ответ детерминированного оценщика
+#: повторится тем же (промпт механический, см. модульный docstring), и пауза лишь
+#: растянула бы фазу. Пауза нужна там, где отказ говорит о **пропускной способности**
+#: (``http_error``: ``429``/``5xx``/транспорт) или о неизвестном сбое адаптера.
+_ANSWER_SIDE_OUTCOMES: frozenset[str] = frozenset(
+    {"length", "invalid_json", "validation_failed", "quote_not_substring"}
+)
+
+
+def _retry_pause(
+    attempt: int,
+    *,
+    max_retries: int,
+    outcome: str,
+    error: BaseException | None = None,
+) -> tuple[float | None, str | None, float | None]:
+    """Пауза перед **следующей** попыткой: ``(секунды, причина, Retry-After)``.
+
+    До правки повтор шёл немедленно: провайдер отвечал ``429``/``503``, цикл тут же
+    переиздавал запрос, и при нескольких вызовах в полёте лимит превращался в шторм
+    повторов — то есть отказ провайдера усиливался самим клиентом.
+
+    Политика одна на все HTTP-адаптеры (:mod:`core.util.retry`), здесь она только
+    применяется: ``Retry-After`` провайдера (секунды или HTTP-date) уважается и усечён
+    потолком :data:`core.util.retry.MAX_RETRY_DELAY`; без него — экспоненциальная пауза с
+    джиттером (диапазоны последовательных пауз не пересекаются). Ждать дольше потолка
+    нельзя: «подожди час» — это не пауза повтора, а отказ прогона.
+
+    Пауза назначается только там, где отказ говорит о **пропускной способности** или
+    неизвестном сбое адаптера (``http_error``/``exception``). Отказ по существу ответа
+    (``length``/``invalid_json``/``validation_failed``/``quote_not_substring``) паузы не
+    получает: провайдер ответил, ждать нечего, а повтор детерминированного оценщика дал бы
+    тот же ответ (см. :data:`_ANSWER_SIDE_OUTCOMES`).
+
+    :param attempt: номер только что завершившейся попытки (1-based).
+    :param max_retries: сколько повторов объявлено сверх первой попытки.
+    :param outcome: машинный класс исхода попытки (:data:`LLM_CALL_OUTCOMES`).
+    :param error: отказ адаптера — источник ``retry_after`` (``None`` у отказа валидации).
+    :returns: ``(пауза, причина, Retry-After_секунды)``; ``(None, None, None)`` — следующей
+        попытки нет либо пауза не нужна.
+    """
+    if attempt > max_retries or outcome in _ANSWER_SIDE_OUTCOMES:
+        return None, None, None
+    raw_retry_after = getattr(error, "retry_after", None) if error is not None else None
+    retry_after = raw_retry_after if isinstance(raw_retry_after, str) else None
+    parsed = parse_retry_after(retry_after)
+    delay = backoff_delay(attempt, retry_after)
+    # Причина — машинный токен: читатель журнала отличает паузу «провайдер назвал срок»
+    # от паузы «наш собственный backoff» по ``retry_after_s``, а не по тексту.
+    reason = f"{outcome}:retry_after" if parsed is not None else outcome
+    return delay, reason, parsed
+
+
 @dataclass
 class LLMCallJournal:
     """Append-only журнал вызовов оценщика: ``logs/llm_calls.jsonl``, строка на **вызов**.
@@ -795,6 +852,9 @@ class LLMCallJournal:
         outcome: str,
         response_raw: str | None,
         reasoning: str | None = None,
+        retry_wait_s: float | None = None,
+        retry_reason: str | None = None,
+        retry_after_s: float | None = None,
     ) -> None:
         """Дописывает одну попытку вызова (не одну ячейку: повторы видны поштучно).
 
@@ -808,6 +868,13 @@ class LLMCallJournal:
         Обоснование: на отказе рассуждение нередко единственный текст ответа (``content``
         пуст при ``finish_reason=length``), без него путь отказа неразбираем; на успехе
         оно дублирует уже сохранённый вердикт и растёт на десятки мегабайт за прогон.
+
+        ``retry_wait_s``/``retry_reason``/``retry_after_s`` — **пауза, которую вызов
+        назначил следующей попытке**: сколько секунд ждать, машинная причина и
+        распознанный ``Retry-After`` провайдера (``None`` — провайдер срока не называл).
+        Пауза принадлежит строке **отказавшей** попытки: она видна ровно там, где
+        решение принято, и не требует отдельного вида записи. У последней попытки
+        (повторов больше нет) все три поля ``None``.
         """
         self._writer.append(
             {
@@ -839,6 +906,11 @@ class LLMCallJournal:
                 "reasoning_content": (
                     reasoning if outcome != "ok" else None
                 ),
+                # Пауза перед следующей попыткой (см. докстринг метода): у успеха и у
+                # исчерпанного бюджета повторов — ``None``.
+                "retry_wait_s": retry_wait_s,
+                "retry_reason": retry_reason,
+                "retry_after_s": retry_after_s,
             }
         )
 
@@ -2665,6 +2737,7 @@ def evaluate_cell(
     prompt_archive: PromptArchive | None = None,
     artifact_dates: CorpusArtifactDates | None = None,
     llm_journal: LLMCallJournal | None = None,
+    sleep: Callable[[float], Any] = time.sleep,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
 
@@ -2721,6 +2794,9 @@ def evaluate_cell(
         журнал не пишется (модульный вызов). Строка — на **попытку**, а не на ячейку:
         повторы видны поштучно, и путь отказа (``finish_reason=length``/невалидный JSON)
         называет ответ модели. Сбой записи не отнимает вердикты — видимость даёт фаза.
+    :param sleep: ожидание между попытками (внедряемое: тесты не спят). По умолчанию
+        ``time.sleep``; пауза считается :func:`_retry_pause` (``Retry-After`` провайдера
+        либо экспоненциальный backoff с джиттером) и публикуется в журнале вызовов.
 
     **Пустой срез не тратит вызов модели.** При ``chunks == ()`` промпт компилируется
     (провенанс: ``prompt_hash`` ячейки остаётся честной функцией входа), но оценщик не
@@ -2900,6 +2976,9 @@ def evaluate_cell(
             started: float,
             response: LLMResponse | None = None,
             error: BaseException | None = None,
+            retry_wait_s: float | None = None,
+            retry_reason: str | None = None,
+            retry_after_s: float | None = None,
         ) -> None:
             """Одна строка ``logs/llm_calls.jsonl``; сбой записи вердикт не отнимает."""
             if llm_journal is None:
@@ -2949,6 +3028,9 @@ def evaluate_cell(
                 outcome=outcome,
                 response_raw=raw if isinstance(raw, str) else None,
                 reasoning=reasoning if isinstance(reasoning, str) else None,
+                retry_wait_s=retry_wait_s,
+                retry_reason=retry_reason,
+                retry_after_s=retry_after_s,
             )
 
         for attempt in range(1, max_retries + 2):
@@ -2956,11 +3038,21 @@ def evaluate_cell(
             try:
                 response = evaluator.complete(request)
             except Exception as exc:  # noqa: BLE001 — изоляция адаптера, маппинг в failure_kind
+                outcome = _error_outcome(exc)
+                # Пауза считается **до** записи: строка отказа обязана назвать срок,
+                # который вызов собирается ждать, иначе шторм повторов неотличим от
+                # нормального хода по журналу.
+                pause, pause_reason, retry_after_s = _retry_pause(
+                    attempt, max_retries=max_retries, outcome=outcome, error=exc
+                )
                 _journal(
                     attempt=attempt,
-                    outcome=_error_outcome(exc),
+                    outcome=outcome,
                     started=started,
                     error=exc,
+                    retry_wait_s=pause,
+                    retry_reason=pause_reason,
+                    retry_after_s=retry_after_s,
                 )
                 last_response = None
                 last_validation = None
@@ -2971,14 +3063,29 @@ def evaluate_cell(
                     notes=[f"оценщик недоступен: {type(exc).__name__}: {exc}"],
                     resolved_evidence=[],
                 )
+                if pause is not None:
+                    sleep(pause)
                 continue
 
             last_validation = _validate(response)
+            outcome = _validation_outcome(last_validation)
+            # Пауза назначается только отказу, после которого будет ещё попытка. Успех
+            # паузы не получает: строка «ok» с ненулевым ``retry_wait_s`` читалась бы как
+            # «повтор ещё предстоит», хотя вердикт уже получен.
+            if last_validation.ok:
+                pause, pause_reason, retry_after_s = None, None, None
+            else:
+                pause, pause_reason, retry_after_s = _retry_pause(
+                    attempt, max_retries=max_retries, outcome=outcome
+                )
             _journal(
                 attempt=attempt,
-                outcome=_validation_outcome(last_validation),
+                outcome=outcome,
                 started=started,
                 response=response,
+                retry_wait_s=pause,
+                retry_reason=pause_reason,
+                retry_after_s=retry_after_s,
             )
             last_response = response
             if last_validation.ok:
@@ -2992,6 +3099,8 @@ def evaluate_cell(
                     eval_cache.put(eval_key, response.output, echo=eval_echo)
                 break
             last_kind = FailureKind.VALIDATION_FAILED.value
+            if pause is not None:
+                sleep(pause)
 
     if last_validation is None:  # цикл обязан исполнить ≥1 попытку (max_retries ≥ 0)
         raise RuntimeError("цикл валидации не исполнил ни одной попытки: max_retries < 0")
@@ -3248,6 +3357,61 @@ def _unresolved_outcome(
     )
 
 
+class _CellWriteBuffer:
+    """Буфер записи ячейки: копит вызовы store, а исполняет их вызывающий поток.
+
+    Зачем. Соединение SQLite открыто с ``check_same_thread=True``
+    (``core/store/sqlite.py``), поэтому запись из воркера пула — ``ProgrammingError``.
+    Делать соединение многопоточным нельзя: ``StorePort`` — один владелец записи.
+    Поэтому работа с моделью (вызов, валидация, сборка ячейки) идёт в пуле, а запись —
+    в потоке, который соединение открыл: воркер наполняет **этот** буфер, вызывающий
+    проигрывает его на настоящем store (:meth:`replay`).
+
+    Набор методов — ровно те записи, что делает :func:`_persist` (и :func:`_persist_carried`).
+    Чтения сюда не маршрутизируются вовсе: их пришлось бы исполнять в чужом потоке,
+    поэтому покрытие и перенос ячеек вызывающий разрешает **до** пула.
+
+    :meth:`replay` повторяет дисциплину duck-typed store: метод, которого у настоящего
+    store нет, пропускается (двойники в тестах), а не роняет запись.
+    """
+
+    def __init__(self) -> None:
+        #: Вызовы записи в порядке, в котором их сделало тело оценки.
+        self.ops: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def save_cell(self, cell: Cell) -> None:
+        """Откладывает upsert ячейки."""
+        self.ops.append(("save_cell", (cell,), {}))
+
+    def set_cell_provenance(self, *args: Any, **kwargs: Any) -> None:
+        """Откладывает узкий UPDATE провенанса (``prompt_hash``/``model_id``/…)."""
+        self.ops.append(("set_cell_provenance", args, dict(kwargs)))
+
+    def add_evidence_batch(self, evidence: Sequence[Any]) -> None:
+        """Откладывает запись evidence (копия списка: он не должен меняться после)."""
+        self.ops.append(("add_evidence_batch", (list(evidence),), {}))
+
+    def add_absence_evidence(self, records: Sequence[Any]) -> None:
+        """Откладывает запись протокола отсутствия."""
+        self.ops.append(("add_absence_evidence", (list(records),), {}))
+
+    def replay(self, store: StorePort | None) -> None:
+        """Проигрывает накопленные записи на настоящем store — **в вызывающем потоке**.
+
+        ``store=None`` (модульный вызов без хранилища) — записи не нужны: буфер просто
+        очищается, ровно как ``_persist`` ничего не пишет без store.
+        """
+        ops, self.ops = self.ops, []
+        if store is None:
+            return
+        for name, args, kwargs in ops:
+            method = getattr(store, name, None)
+            if not callable(method):
+                # Двойник без метода — как в ``_persist``: провенанс аддитивен.
+                continue
+            method(*args, **kwargs)
+
+
 def evaluate_batch(
     *,
     params: Sequence[CatalogRow],
@@ -3274,11 +3438,34 @@ def evaluate_batch(
     llm_journal: LLMCallJournal | None = None,
     carry: CarryForwardContext | None = None,
     reuse_conditions: CellReuseConditions | None = None,
+    llm_concurrency: int = 1,
+    sleep: Callable[[float], Any] = time.sleep,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
     """Прогоняет :func:`evaluate_cell` по параметрам с изоляцией сбоев (§A.1).
 
     Возвращает ``(успешные_исходы, ошибки)``: исключение на одном параметре не роняет
-    батч (``run_isolated``). Порядок исходов соответствует порядку ``params``.
+    батч. Порядок исходов соответствует порядку ``params`` **всегда** — в том числе при
+    ``llm_concurrency > 1``, где вызовы завершаются вразнобой: результат — множество
+    ячеек по порядку каталога, а не по порядку ответов модели.
+
+    **Число вызовов оценщика в полёте (``llm_concurrency``).** Фаза упирается в латентность
+    модели (замер: 10 906 с на 656 вызовов, локальная работа — доли секунды), поэтому
+    вызовы идут пулом потоков, когда объявлено ``> 1``. По умолчанию ``1`` — поведение
+    прежнее, байт-в-байт (тот же порядок вызовов и записей).
+
+    **Один писатель в store.** Соединение SQLite открыто с ``check_same_thread=True``
+    (``core/store/sqlite.py``), поэтому запись из воркера — ``ProgrammingError``. Схема
+    разделения: воркер делает **только** работу вне store (вызов модели, валидация, сборка
+    ячейки), а все записи складывает в :class:`_CellWriteBuffer`; вызывающий поток
+    проигрывает буфер на настоящем store по мере готовности ячеек. Так у store остаётся
+    **один писатель** — тот поток, который соединение открыл. Побочное следствие: перенос
+    ячеек (``carry``) и чтение покрытия тоже идут в вызывающем потоке — они читают БД.
+
+    **Пауза повтора.** Повтор больше не переиздаёт запрос немедленно: :func:`_retry_pause`
+    считает ``Retry-After`` провайдера либо экспоненциальный backoff с джиттером, и пауза
+    публикуется в журнале вызовов. Без неё несколько вызовов в полёте превращали лимит
+    провайдера в шторм повторов. ``sleep`` внедряется тестами (по умолчанию
+    ``time.sleep``).
 
     **Контракт ``chunks_by_param``.** Ключ обязан быть на каждый параметр: пустой срез —
     это наблюдённый факт («ретривал отработал и ничего не нашёл»), а отсутствие ключа —
@@ -3301,13 +3488,40 @@ def evaluate_batch(
 
     ``llm_journal`` пробрасывается в :func:`evaluate_cell` как есть: строка журнала
     пишется на попытку вызова (см. :class:`LLMCallJournal`), батч её не агрегирует.
-    """
 
-    def _one(param: CatalogRow) -> EvaluationOutcome:
+    :raises ValueError: ``llm_concurrency < 1`` — «ноль вызовов в полёте» не исполнение.
+    """
+    if isinstance(llm_concurrency, bool) or not isinstance(llm_concurrency, int):
+        raise TypeError(
+            f"llm_concurrency обязан быть целым, получено {llm_concurrency!r}"
+        )
+    if llm_concurrency < 1:
+        raise ValueError(
+            f"llm_concurrency обязан быть ≥ 1, получено {llm_concurrency!r}"
+        )
+
+    outcomes: list[EvaluationOutcome | None] = [None] * len(params)
+    errors: list[str] = []
+    # Параллельный путь: покрытие разрешается **до** пула. В ячейке ``_coverage_for``
+    # читает store, когда аргумент не передан; читать его из воркера нельзя (тот же
+    # единственный поток-владелец соединения). Значение — свойство продукта, а не ячейки,
+    # поэтому один проход на батч даёт ровно то же, что поштучные чтения. При
+    # ``llm_concurrency == 1`` путь прежний: ячейка читает покрытие сама, как раньше.
+    if llm_concurrency > 1 and coverage is None and store is not None:
+        coverage = _coverage_for(None, store, run_id, product_id)
+
+    def _prepare_one(
+        param: CatalogRow,
+    ) -> tuple[
+        Sequence[ChunkLike],
+        RetrievalResult | Sequence[RetrievalResult] | None,
+        Cell | None,
+        EvaluationOutcome | None,
+    ]:
         # Контракт карты: ключ на **каждый** переданный параметр. Отсутствие ключа —
         # это «ретривал не состоялся», а не пустой срез: подстановка ``()`` превращала
         # отказ прибора в измеренное ``❓``/``❌`` (I4). Сбой остаётся видимым
-        # (``run_isolated`` → ``errors``), а не маскируется пустым входом.
+        # (``errors``), а не маскируется пустым входом.
         if param.param_id not in chunks_by_param:
             raise ValueError(
                 f"chunks_by_param не содержит ключ {param.param_id!r}: отсутствие "
@@ -3337,7 +3551,17 @@ def evaluate_batch(
                 store=store,
             )
             if carried_outcome is not None:
-                return carried_outcome
+                return chunks, retrieval, protected, carried_outcome
+        return chunks, retrieval, protected, None
+
+    def _measure(
+        param: CatalogRow,
+        chunks: Sequence[ChunkLike],
+        retrieval: RetrievalResult | Sequence[RetrievalResult] | None,
+        protected: Cell | None,
+        write_target: StorePort | None,
+    ) -> EvaluationOutcome:
+        """Оценивает одну ячейку (без записи, если ``write_target`` — буфер)."""
         outcome = evaluate_cell(
             param=param,
             product_id=product_id,
@@ -3349,7 +3573,7 @@ def evaluate_batch(
             strict=strict,
             retrievals=retrieval,
             max_retries=max_retries,
-            store=store,
+            store=write_target,
             protected=protected,
             coverage=coverage,
             scope_acceptance=scope_acceptance,
@@ -3359,6 +3583,7 @@ def evaluate_batch(
             prompt_archive=prompt_archive,
             artifact_dates=artifact_dates,
             llm_journal=llm_journal,
+            sleep=sleep,
         )
         if reuse_conditions is None or protected is not None:
             # Строку индекса не пишем, если механизм выключен **или** ячейку в карте этого
@@ -3374,7 +3599,7 @@ def evaluate_batch(
                 param=param,
                 conditions=reuse_conditions,
                 coverage=coverage,
-                retrieval=primary_retrieval,
+                retrieval=_primary_retrieval(retrieval),
                 retrieved=chunks,
                 # Evidence берётся то, что реально записано (``resolved_evidence``
                 # эшелона §10), а не исходный ответ модели: отпечаток обязан описывать
@@ -3385,7 +3610,90 @@ def evaluate_batch(
             ),
         )
 
-    return run_isolated(params, _one)
+    if llm_concurrency == 1:
+        # Последовательный путь — прежний байт-в-байт: подготовка и оценка идут по
+        # параметру за раз, поэтому порядок вызовов, записей и **ошибок** тот же, что до
+        # появления оси (``llm_concurrency=1`` не меняет ничего наблюдаемого).
+        for index, param in enumerate(params):
+            try:
+                chunks, retrieval, protected, carried_outcome = _prepare_one(param)
+                if carried_outcome is not None:
+                    outcomes[index] = carried_outcome
+                    continue
+                outcomes[index] = _measure(
+                    param, chunks, retrieval, protected, store
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
+        return [outcome for outcome in outcomes if outcome is not None], errors
+
+    #: Готовая к вызову работа: (индекс в ``params``, параметр, чанки, провенанс
+    #: ретривала, защищённая ячейка). Перенос и проверка контракта карты выполняются
+    #: **здесь**, в вызывающем потоке: они читают БД, а у неё один поток-владелец.
+    work: list[
+        tuple[
+            int,
+            CatalogRow,
+            Sequence[ChunkLike],
+            RetrievalResult | Sequence[RetrievalResult] | None,
+            Cell | None,
+        ]
+    ] = []
+    for index, param in enumerate(params):
+        try:
+            chunks, retrieval, protected, carried_outcome = _prepare_one(param)
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
+            continue
+        if carried_outcome is not None:
+            outcomes[index] = carried_outcome
+            continue
+        work.append((index, param, chunks, retrieval, protected))
+
+    if len(work) <= 1:
+        for index, param, chunks, retrieval, protected in work:
+            try:
+                outcomes[index] = _measure(param, chunks, retrieval, protected, store)
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
+        return [outcome for outcome in outcomes if outcome is not None], errors
+
+    with ThreadPoolExecutor(
+        max_workers=llm_concurrency, thread_name_prefix="evaluate-llm"
+    ) as pool:
+        futures = {}
+        buffers: dict[int, _CellWriteBuffer] = {}
+        for index, param, chunks, retrieval, protected in work:
+            buffer = _CellWriteBuffer()
+            buffers[index] = buffer
+            futures[
+                pool.submit(
+                    _measure,
+                    param,
+                    chunks,
+                    retrieval,
+                    protected,
+                    cast("StorePort | None", buffer),
+                )
+            ] = (index, param)
+        # Запись — только здесь: ``as_completed`` исполняется в вызывающем потоке, том
+        # самом, что открыл соединение. Порядок записи — порядок готовности (так ячейка
+        # не теряется при падении процесса), порядок **результата** — порядок ``params``.
+        for future in as_completed(futures):
+            index, param = futures[future]
+            try:
+                outcome = future.result()
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
+                continue
+            try:
+                buffers[index].replay(store)
+            except Exception as exc:  # noqa: BLE001 — запись ячейки изолирована
+                errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
+                continue
+            outcomes[index] = outcome
+
+    return [outcome for outcome in outcomes if outcome is not None], errors
 
 
 def evaluate_phase(
@@ -3408,6 +3716,7 @@ def evaluate_phase(
     previous_run_id: str | None = None,
     state: ProductStatePort | None = None,
     previous_store: StorePort | None = None,
+    llm_concurrency: int = 1,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
 
@@ -3485,6 +3794,12 @@ def evaluate_phase(
         закрывает её composition root (``phases.build_phases``): путь
         ``runs/{run_id}/cohound.db`` знает раскладка, а ``pipeline`` раскладку не читает.
         ``None`` ⇒ перенос выключен: без доказательств прошлого прогона вердикт не переезжает.
+    :param llm_concurrency: сколько вызовов оценщика держать в полёте (ось исполнения
+        ``--llm-concurrency``, дефолт ``1`` — прежнее поведение байт-в-байт). Фаза упирается
+        в латентность модели, а не в локальную работу, поэтому число вызовов в полёте —
+        условие **исполнения**, а не измерения: в ``EXECUTION_CONTRACT_FIELDS`` оно не
+        входит и ``run_id`` не меняет (пока замер не покажет, что вердикты меняются).
+        Запись в store при этом остаётся однопоточной (см. :func:`evaluate_batch`).
 
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
@@ -3503,6 +3818,13 @@ def evaluate_phase(
     resolved_cutoff: int = (
         int(cutoff_k) if cutoff_k is not None else DEFAULT_RETRIEVAL_CUTOFF_K
     )
+    if llm_concurrency < 1:
+        # Ось исполнения с нулём бессмысленна: «ноль вызовов в полёте» — не исполнение.
+        # Отказ громкий (CLI переводит ``ValueError`` в ``EXIT_USAGE``), а не тихая
+        # подстановка единицы: объявленное значение обязано действовать (R5).
+        raise ValueError(
+            f"llm_concurrency обязан быть ≥ 1, получено {llm_concurrency!r}"
+        )
 
     cells: list[Cell] = []
     errors: list[str] = []
@@ -3527,6 +3849,9 @@ def evaluate_phase(
         and eval_conditions is not None
     )
     log_entries.append(f"evaluate: carry={'on' if carry_ready else '—'}")
+    # Ось исполнения: сколько вызовов оценщика было в полёте. Это провенанс исполнения
+    # (в ``run_id`` не входит), но читатель отчёта обязан видеть, чем мерили по времени.
+    log_entries.append(f"evaluate: llm_concurrency={llm_concurrency}")
     # V7: аудит исполненных промптов. Архив живёт в фазе, а не в ячейке: путь артефакта —
     # свойство прогона, и ячейка не должна знать раскладку ``runs/``.
     prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
@@ -3811,6 +4136,7 @@ def evaluate_phase(
             llm_journal=call_journal,
             carry=carry_ctx,
             reuse_conditions=reuse_conditions,
+            llm_concurrency=llm_concurrency,
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)

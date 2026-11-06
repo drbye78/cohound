@@ -550,8 +550,8 @@ _partition_reuse_reason 2926-3005
    владельца, §0 п. 3). Миграция как таковая: **+61 / −39**, и в ней **ни одной**
    изменённой строки `assert` — проверено `git diff -U0 tests/ | grep '^[+-].*assert '`
    (пусто). Единственная не-импортная правка — `tests/selfcheck.py`, где локальное
-   `_DIRECTORY_KINDS` стало `DIRECTORY_KINDS`: это тот же объект (`core/pipeline/corpus_ingest.py:152` — там же, где он теперь
-   объявлял `_DIRECTORY_KINDS = DIRECTORY_KINDS`, определение — `corpus_ingest.py:152`),
+   `_DIRECTORY_KINDS` стало `DIRECTORY_KINDS`: это тот же объект (`core/pipeline/corpus_ingest.py:163` — там же, где он теперь
+   объявлял `_DIRECTORY_KINDS = DIRECTORY_KINDS`, определение — `corpus_ingest.py:163`),
    сравнение и текст сообщения не тронуты. Перенесено 22 приватных имени (48
    name-операторов в 27 операторах импорта) на модули-владельцы. **Три имени остались через
    `corpus`** — `_serp_note`, `_serp_disabled_observation`, `_stage_timings_aggregate`:

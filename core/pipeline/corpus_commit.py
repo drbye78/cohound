@@ -309,6 +309,7 @@ def finalize_crawl_session(
     truncation_records: list[dict[str, Any]],
     errors: list[str],
     lifecycle: PhaseLifecycle | None,
+    pacing: Any = None,
     shard: dict[str, Any] | None = None,
 ) -> None:
     """L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``).
@@ -332,10 +333,24 @@ def finalize_crawl_session(
     **не** закрывает сеанс ``completed`` (узел видел часть корпуса, см.
     :func:`core.pipeline.crawl_session.finalize_session`). ``None`` — шардов нет, и
     артефакт прогона не меняется.
+
+    ``pacing`` (прибор темпа) — наблюдатель :class:`core.pipeline.crawl_pacing.CrawlPacing`;
+    его снимок пишется в провенанс сеанса (``pacing``). Это провенанс исполнения, а не
+    условие измерения: ``run_id``/``crawl_config_digest`` от него не зависят. ``None`` —
+    учёта не было, и блок не появляется (ноль был бы выдуманным фактом).
     """
     if session is None or counters.session_finalized:
         return
     counters.session_finalized = True
+    # Наблюдение темпа снимается до `finalize_session`: снимок уходит в провенанс вместе
+    # с лимитами и числом страниц. Сбой прибора не валит финализацию — факт виден в errors,
+    # а блок просто не появляется («не измеряли» ≠ нули).
+    pacing_block: dict[str, Any] | None = None
+    if pacing is not None:
+        try:
+            pacing_block = pacing.snapshot()
+        except Exception as exc:  # noqa: BLE001 — провенанс не важнее персистенции
+            errors.append(f"crawl_pacing({session}): {type(exc).__name__}: {exc}")
     try:
         # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
         # элементов** (``items.values()``: фактически применённый ``engine`` и ``kind``
@@ -366,6 +381,8 @@ def finalize_crawl_session(
             pages_fetched=counters.pages_fetched_total,
             revalidation_fetched=counters.revalidation_fetched_total,
             truncated_products=sorted(truncated_products),
+            # Прибор темпа: провенанс исполнения, не условие измерения.
+            pacing=pacing_block,
             # F7 (17 §2): шард узла — провенанс развёртывания (``node_id`` durable,
             # принадлежность host'а выводима из карты в ``effective_limits``). При
             # ``filtered=True`` сеанс станет ``partial``: узел видел часть корпуса.

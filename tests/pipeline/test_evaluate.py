@@ -179,7 +179,16 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
         min_retrieval_score=min_retrieval_score,
         coverage=coverage,
         scope_acceptance=scope_acceptance,
+        # Пауза между попытками здесь **не** предмет проверки: она записывается и
+        # сверяется в ``tests/pipeline/test_evaluate_concurrency.py``. Без подстановки
+        # тесты отказа адаптера (3 попытки) спали бы секундами впустую.
+        sleep=_no_sleep,
     )
+
+
+def _no_sleep(_seconds: float) -> None:
+    """``sleep``-двойник: пауза повтора учитывается, но не исполняется (тесты)."""
+    return None
 
 
 # ---------------------------------------------------------------------------

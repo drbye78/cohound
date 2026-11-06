@@ -893,6 +893,39 @@ def test_llm_model_flag_is_part_of_declared_axes_parity(
     assert _payload(capsys)["run_id"] != run_id
 
 
+def test_llm_concurrency_flag_does_not_change_run_identity(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--llm-concurrency`` — ось **исполнения**, а не измерения: ``run_id`` не меняется.
+
+    Число вызовов оценщика в полёте меняет время фазы Ш6, но не условия, при которых
+    получен вердикт (промпт, модель, срез ретривала, правила §10 — всё то же). Поэтому
+    флаг **не** входит в ``EXECUTION_CONTRACT_FIELDS``, а прогон с ним и без него — один
+    и тот же прогон. Иначе правка оператором параллельности плодила бы «новое измерение»
+    и ломала кросс-цикловый дифф. Паритет: ``plan``/``crawl``/``run`` считают одинаково.
+    """
+    assert "llm_concurrency" not in EXECUTION_CONTRACT_FIELDS
+
+    package = valid_package(tmp_path)
+    common = _common(package)
+
+    assert main(["run", *common, "--dry-run"]) == EXIT_OK
+    default_id = _payload(capsys)["run_id"]
+
+    assert main(["run", *common, "--dry-run", "--llm-concurrency", "4"]) == EXIT_OK
+    concurrent_id = _payload(capsys)["run_id"]
+    assert concurrent_id == default_id
+
+    assert main(["plan", *common, "--llm-concurrency", "4"]) == EXIT_OK
+    assert _payload(capsys)["run_id"] == default_id
+
+    assert (
+        main(["crawl", "run", *common, "--until", "plan", "--llm-concurrency", "4"])
+        == EXIT_OK
+    )
+    assert _payload(capsys)["run_id"] == default_id
+
+
 def test_pdf_pipeline_flag_is_part_of_execution_contract(
     tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

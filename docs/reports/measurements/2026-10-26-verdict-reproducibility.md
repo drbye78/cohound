@@ -26,7 +26,7 @@
 - та же сборка (`cb_ecf3850d…`), тот же оценщик, тот же `model_id`.
 
 Сравнение — по каждой ячейке: `status` + `prompt_hash`. `prompt_hash` считается как
-`digest(TEMPLATE_VERSION, param.rule, absence_rule, chunk_ids)` (`core/pipeline/prompt.py:216`),
+`digest(TEMPLATE_VERSION, param.rule, absence_rule, chunk_ids)` (`core/pipeline/prompt.py:368`),
 поэтому **равный `prompt_hash` = равный промпт = равный набор чанков**. Это и разделяет две
 причины: если промпт тот же, а вердикт другой — виноват оценщик; если промпт другой —
 виноват ретривал.
