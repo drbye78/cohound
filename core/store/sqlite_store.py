@@ -3128,6 +3128,25 @@ class SqliteStore:
         for row in self.conn.execute(sql, params):
             yield self._row_to_chunk(row)
 
+    def has_corpus_chunks(
+        self, build_id: str, *, product_id: str | None = None
+    ) -> bool:
+        """Есть ли в сборке ``build_id`` хотя бы один чанк (``LIMIT 1``).
+
+        ``build_id`` — сборка продукт-партиции (``pb_…``, см.
+        :meth:`core.ports.store.StorePort.has_corpus_chunks`). Проба существования, а не
+        счётчик: спрашивают её о материале продукта, поэтому ``SELECT 1 ... LIMIT 1``
+        дешевле и ``COUNT(*)`` (читает весь срез партиции), и ``iter_chunks`` (сортирует
+        срез ради первого элемента).
+        """
+        sql = "SELECT 1 FROM corpus_chunks WHERE build_id = ?"
+        params: list[Any] = [build_id]
+        if product_id is not None:
+            sql += " AND product_id = ?"
+            params.append(product_id)
+        sql += " LIMIT 1"
+        return self.conn.execute(sql, params).fetchone() is not None
+
     def resolve(self, source_id: str) -> ResolvedSource | None:
         """Детерминированно резолвит ``source_id`` в источник (I10/I15/I19), без сети.
 

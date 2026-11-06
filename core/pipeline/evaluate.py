@@ -3311,50 +3311,73 @@ def evaluate_phase(
         # причины (``no_seeds``/``all_seeds_rejected``/``no_urls_entry``) —
         # **наблюдательные** и живут в тексте ошибки; класс сбоя один — ``no_sources``,
         # поэтому словарь классов сбоя (§4.1) не расширяется.
+        #
+        # 06.11.2026 (решение владельца): ``expected_sources`` — счётчик **элементов
+        # сеанса краула**, а в проходе без сети сеанса нет вовсе, значит счётчик всегда
+        # 0; adoption даёт снятие с ``complete=0``. Двух фактов мало: «ноль элементов
+        # сеанса» — не то же самое, что «нет материала». Третий член предиката —
+        # **материал**: хотя бы один извлечённый чанк текущей сборки у продукта (вердикт
+        # требует чанков, I19). Чанки лежат под сборкой **партиции** (``pb_…``), а не под
+        # композицией ``runs.index_build_id`` (``cb_…``): связь даёт ``index_manifest``,
+        # см. :func:`_no_material_reason`. Измерено 06.11.2026: ``cells_measured=0`` при 2952
+        # документах и 37 589 чанках (``ru-pg-dbms-c2e7b860ac17``) — то есть I2c, который
+        # ожидает оценку при неполном покрытии для ``explicit``/``authoritative``, был
+        # недостижим. Неизвестная сборка и сбой чтения считаются отсутствием материала,
+        # но причина называется в ``errors``, а не глотается.
         if (
             coverage is not None
             and coverage.expected_sources == 0
             and not coverage.complete
         ):
-            kind = (
-                FailureKind.COVERAGE_MISSING.value
-                if coverage.reason == FailureKind.COVERAGE_MISSING.value
-                else FailureKind.NO_SOURCES.value
-            )
-            provenance = (
-                None,
-                resolved_profile.value
-                if isinstance(resolved_profile, RetrievalProfile)
-                else resolved_profile,
-                None,
-            )
-            for param in plan.params:
-                # P6/O5: ячейка высокого источника (реестр/наследование) не затирается
-                # failed-ячейкой даже при нулевом корпусе — она остаётся в отчёте.
-                protected = protected_by_param.get(param.param_id)
-                if protected is not None:
-                    cells.append(protected)
-                    continue
-                failed = _unresolved_cell(
-                    state=CellState.FAILED,
-                    param=param,
-                    product_id=product_id,
-                    run_id=run_id,
-                    provenance=provenance,
-                    # Класс сбоя прибора виден в карте: это не «вендор не заявил».
-                    evidence_scope=EvidenceScope.for_instrument_failure(
-                        kind,
-                        detail=f"expected_sources=0 ({coverage.reason or 'no coverage'})",
-                    ),
+            no_material = _no_material_reason(store, run_id, product_id)
+            # Материала нет — прежний отказ (I4). Материал есть — ячейки измеряются:
+            # ноль элементов сеанса в проходе без сети не означает отсутствия корпуса.
+            if no_material is not None:
+                kind = (
+                    FailureKind.COVERAGE_MISSING.value
+                    if coverage.reason == FailureKind.COVERAGE_MISSING.value
+                    else FailureKind.NO_SOURCES.value
                 )
-                _persist(store, failed, None)
-                _record_cell_failure(store, failed, kind)
-                cells.append(failed)
-            errors.append(
-                f"{product_id}: {kind}: expected_sources=0 "
-                f"({coverage.reason or 'no coverage'}) — оценка невозможна"
-            )
-            continue
+                provenance = (
+                    None,
+                    resolved_profile.value
+                    if isinstance(resolved_profile, RetrievalProfile)
+                    else resolved_profile,
+                    None,
+                )
+                for param in plan.params:
+                    # P6/O5: ячейка высокого источника (реестр/наследование) не
+                    # затирается failed-ячейкой даже при нулевом корпусе — она
+                    # остаётся в отчёте.
+                    protected = protected_by_param.get(param.param_id)
+                    if protected is not None:
+                        cells.append(protected)
+                        continue
+                    failed = _unresolved_cell(
+                        state=CellState.FAILED,
+                        param=param,
+                        product_id=product_id,
+                        run_id=run_id,
+                        provenance=provenance,
+                        # Класс сбоя прибора виден в карте: это не «вендор не заявил».
+                        evidence_scope=EvidenceScope.for_instrument_failure(
+                            kind,
+                            detail=(
+                                f"expected_sources=0 "
+                                f"({coverage.reason or 'no coverage'}); "
+                                f"material=none ({no_material})"
+                            ),
+                        ),
+                    )
+                    _persist(store, failed, None)
+                    _record_cell_failure(store, failed, kind)
+                    cells.append(failed)
+                errors.append(
+                    f"{product_id}: {kind}: expected_sources=0 "
+                    f"({coverage.reason or 'no coverage'}) — material=none "
+                    f"({no_material}) — оценка невозможна"
+                )
+                continue
         # Dense-плечо всех запросов продукта — одним батч-вызовом порта: партиция
         # читается и умножается один раз, а не на каждый из 600 запросов. Сбой батча
         # не выдаётся за успех и не подменяется «пусто»: он виден в ``errors``, а поиск
@@ -3844,6 +3867,76 @@ def _current_build_id(store: StorePort, run_id: str) -> str | None:
     except Exception:  # noqa: BLE001 — чтение провенанса не должно ронять команду
         return None
     return getattr(ref, "index_build_id", None) or None
+
+
+def _no_material_reason(
+    store: StorePort, run_id: str, product_id: str
+) -> str | None:
+    """Причина, по которой у продукта **нет материала**, либо ``None``, если он есть.
+
+    Материал вердикта — извлечённые чанки текущей сборки прогона: без них оценщику нечего
+    читать (I19), и ячейка честно ``failed`` (I4). Ноль **элементов сеанса краула**
+    (``coverage.expected_sources``) материалом не является и его отсутствием тоже:
+    в проходе без сети сеанса нет вовсе, а корпус при этом может быть принят целиком.
+
+    **Два id-пространства, и это не деталь.** ``runs.index_build_id`` — **композиция**
+    когорты (``cb_…``), а ``corpus_chunks.build_id`` — сборка **продукт-партиции**
+    (``pb_…``); связывает их ``index_manifest`` (K1/I17). Поэтому проба идёт по
+    ``partition_build_id`` записи продукта, а не по композиции: сравнение ``cb_`` с
+    колонкой ``pb_`` всегда даёт «чанков нет» (измерено 06.11.2026 на
+    ``ru-pg-dbms-c2e7b860ac17`` — 37 589 чанков под ``pb_*`` и ноль под ``cb_*``).
+    Legacy-строка манифеста без ``partition_build_id`` читается как ``pb :=
+    index_build_id`` (MVP-4 шаг 1) — прежняя семантика таких сборок.
+
+    «Любой build_id продукта» здесь не ищется: если манифест не называет партицию,
+    материала **этой** сборки нет, и причина называет манифест, а не догадку.
+
+    Проба — существование, а не счётчик (:meth:`StorePort.has_corpus_chunks`): вопрос
+    один бит, а ``COUNT(*)``/``iter_chunks`` читали бы (и сортировали бы) весь срез
+    партиции. Неизвестная сборка, пустой манифест и сбой чтения считаются отсутствием
+    материала — мерить не по чему, — но причина возвращается вызывающему и попадает в
+    ``errors``: молчаливый отказ выдал бы сбой прибора за «вендор не заявил».
+    """
+    reader = getattr(store, "read_run_index_ref", None)
+    if not callable(reader):
+        return "build_id unknown: store не умеет читать runs.index_build_id"
+    try:
+        ref = reader(str(run_id))
+    except Exception as exc:  # noqa: BLE001 — провенанс не роняет фазу, но виден
+        return f"build_id read failed: {type(exc).__name__}: {exc}"
+    composition_id = getattr(ref, "index_build_id", None) if ref is not None else None
+    if not composition_id:
+        return "build_id unknown: runs.index_build_id пуст"
+    lister = getattr(store, "iter_index_manifest", None)
+    if not callable(lister):
+        return (
+            "manifest unavailable: у store нет iter_index_manifest "
+            f"(build={composition_id})"
+        )
+    try:
+        entries = list(lister(str(composition_id)))
+    except Exception as exc:  # noqa: BLE001 — сбой чтения не выдаётся за «нет чанков»
+        return f"manifest read failed: {type(exc).__name__}: {exc}"
+    entry = next(
+        (e for e in entries if getattr(e, "product_id", None) == str(product_id)),
+        None,
+    )
+    if entry is None:
+        return (
+            f"build={composition_id}: манифест не называет партицию продукта "
+            f"{product_id}"
+        )
+    partition_id = getattr(entry, "partition_build_id", None) or composition_id
+    probe = getattr(store, "has_corpus_chunks", None)
+    if not callable(probe):
+        return "chunk probe unavailable: у store нет has_corpus_chunks"
+    try:
+        present = bool(probe(str(partition_id), product_id=str(product_id)))
+    except Exception as exc:  # noqa: BLE001 — сбой чтения не выдаётся за «нет чанков»
+        return f"chunk probe failed: {type(exc).__name__}: {exc}"
+    if present:
+        return None
+    return f"partition={partition_id}: в corpus_chunks нет ни одного чанка продукта"
 
 
 def _kept_stale_cell(cell: Cell, *, reason: str, detail: str | None) -> Cell:

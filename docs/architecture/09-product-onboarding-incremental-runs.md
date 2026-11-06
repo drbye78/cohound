@@ -2037,8 +2037,12 @@ def evaluate_phase(ctx):
 - Новый продукт: полный набор ячеек `plan.params × product` (переносить не из чего).
 - Существующий: ячейки с совпавшим `cell_reuse_key` переносятся (§10), остальные меряются.
 - `failed`-ячейки (I4) — `status = null`, не статус.
-- Продукт с `coverage is None` или `expected_sources = 0` — `failed`-ячейки с
-  `failure_kind ∈ {coverage_missing, no_sources}`, **не** `❌`/`❓`.
+- Продукт с `coverage is None` или `expected_sources = 0` **и без материала** (ни одного чанка
+  текущей сборки) — `failed`-ячейки с `failure_kind ∈ {coverage_missing, no_sources}`, **не**
+  `❌`/`❓`. Ноль элементов сеанса сам по себе отказа не даёт: в проходе без сети сеанса нет,
+  поэтому при наличии материала продукт измеряется (решение владельца 06.11.2026; проба —
+  `StorePort.has_corpus_chunks` по сборке **партиции** `pb_…` из `index_manifest`, причина
+  отсутствия называется в `errors`).
 
 ### 6.5. Статус прогона и продукта (as-built)
 
