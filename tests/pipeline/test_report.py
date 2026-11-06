@@ -71,6 +71,7 @@ from core.domain.models import (
 )
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
 from core.pipeline.compute import ScoreBundle, compute, publish_warnings
+from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.normalize import load_inputs
 from core.pipeline.report import (
     DIFF_BOUNDARY_FIELDS,
@@ -82,6 +83,7 @@ from core.pipeline.report import (
     Artifacts,
     CrossCycleDiffError,
     PublishBlockedError,
+    _contract_field_diagnostics,
     build_manifest,
     collect_absence_undated_anomalies,
     collect_corpus_coverage_anomalies,
@@ -228,6 +230,32 @@ def _manifest(run_id: str = RUN_ID, **overrides: Any) -> RunManifest:
     }
     data.update(overrides)
     return RunManifest(**data)
+
+
+def _diagnostic_limit_reason(prev: RunManifest, curr: RunManifest) -> str:
+    """Строка «предел диагностики» для пары манифестов, с перечнем **из контракта**.
+
+    Зачем перечень выводится, а не выписывается. Строка называет поля
+    :data:`~core.pipeline.digests.EXECUTION_CONTRACT_FIELDS`, которых пара не несёт
+    (``_contract_field_diagnostics``). Выписанный руками перечень устаревает молча при
+    каждом новом объявленном входе — так и вышло с ``embed_precision`` (ось
+    ``embed.precision``, 06.11.2026): сообщение стало верным, а эталон в тесте — нет, и
+    набор падал не по делу. Здесь пин держит **формулировку**, контрактный порядок и
+    непустоту перечня, а состав берётся из контракта: новая ось меняет сообщение и
+    ожидание вместе, без ручной правки и без ослабления проверки.
+    """
+    _, missing = _contract_field_diagnostics(prev, curr)
+    assert missing, (
+        "у пары без восстановимых отличий перечень недоступных полей не может быть пуст: "
+        "строки «предел диагностики» тогда не существует"
+    )
+    # Перечень обязан быть подпоследовательностью контракта: ни выдуманных имён, ни
+    # переставленного порядка (детерминизм вывода, 09 §12.5).
+    assert missing == [name for name in EXECUTION_CONTRACT_FIELDS if name in set(missing)]
+    return (
+        "execution_change: execution_contract_digest: различающееся поле не "
+        "восстановимо из манифеста (" + "/".join(missing) + " либо иная ось)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1495,16 +1523,22 @@ def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
     значило бы соврать про прогон, сделанный другим шаблоном. Что записанные дайджесты
     **называются** осью, проверяет
     ``tests/pipeline/test_manifest_identity_digests.py``.
+
+    Перечень недоступных полей **не выписан здесь руками**, а выведен из
+    ``EXECUTION_CONTRACT_FIELDS`` (:func:`_diagnostic_limit_reason`): объявленный вход без
+    колонки на манифесте обязан попасть в предел диагностики сам. Свежая проверка этой
+    асимметрии — ось ``embed.precision``: ``embed_precision`` в контракте есть, но манифест
+    её не несёт (в отличие от ``embed_device``), поэтому она названа в перечне.
     """
     prev = _manifest(execution_contract_digest="ec_1")
     curr = _manifest(execution_contract_digest="ec_2")
     reasons = diff_boundary_violations(prev, curr)
+    limit = _diagnostic_limit_reason(prev, curr)
     assert reasons == [
         "execution_change: execution_contract_digest: ec_1 → ec_2",
-        "execution_change: execution_contract_digest: различающееся поле не "
-        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/crawl_policy_digest/"
-        "serp_rounds/serp_mode/prompt_template/frozen_source/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
+        limit,
     ]
+    assert "embed_precision" in limit and "embed_device" not in limit
     assert not any("chunker_version" in reason for reason in reasons)
     assert not any("embed_model_id" in reason for reason in reasons)
     assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
@@ -1540,12 +1574,11 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
 
     # Состав неизвестен — набор не выдумывается, причина остаётся общей (с детализацией).
     # Дайджесты идентичности в этой паре не записаны (манифест прошлой схемы), поэтому они
-    # честно попадают в перечень недоступных; записанные — называются осью.
+    # честно попадают в перечень недоступных; записанные — называются осью. Перечень
+    # выведен из контракта (:func:`_diagnostic_limit_reason`), а не выписан руками.
     assert diff_boundary_violations(prev, curr) == [
         "execution_change: execution_contract_digest: ec_1 → ec_2",
-        "execution_change: execution_contract_digest: различающееся поле не "
-        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/crawl_policy_digest/"
-        "serp_rounds/serp_mode/prompt_template/frozen_source/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
+        _diagnostic_limit_reason(prev, curr),
     ]
 
 

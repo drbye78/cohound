@@ -38,7 +38,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:110-119`).
 - Любой такой элемент **по построению** делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2527-2618`, `core/pipeline/corpus_coverage.py:216-218`, условие 2).
+  (`core/domain/models.py:2540-2631`, `core/pipeline/corpus_coverage.py:216-218`, условие 2).
 - Неполное покрытие ⇒ `❌` с `absence_rule=explicit` требует человеческой подписи
   `scope_attested_by` (I2c). Докстринг называет это прямо: **«человеческий escape hatch»**
   (`core/pipeline/corpus_coverage.py:268-271`).
@@ -67,14 +67,14 @@
 развалится.
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
-намерению: `_retain` (`core/pipeline/corpus.py:667-688`) — единственный writer сырых
+намерению: `_retain` (`core/pipeline/corpus.py:668-689`) — единственный writer сырых
 байтов, с единственным вызовом (`:4980`, `_commit_local`), в который сходятся оба
 транспорта (локальный и executor).
 
 ```
 RawPage (core/ports/types.py:91-121)
-  → _retain (core/pipeline/corpus.py:667-688)   # сам хеширует байты, кладёт в corpus_raw
-    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus.py:1333-1353)
+  → _retain (core/pipeline/corpus.py:668-689)   # сам хеширует байты, кладёт в corpus_raw
+    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus.py:1334-1354)
 ```
 
 `RawPage` уже умеет всё нужное: `content`/`staged_path` (файл вместо RAM), и докстринг
@@ -122,7 +122,7 @@ provide:
 Новое поле в `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py`, сейчас 19 полей):
 `manual_artifacts_digest`.
 
-Материал — по образцу `seeds_digest` (`digests.py:240-274`): отсортированные
+Материал — по образцу `seeds_digest` (`digests.py:248-282`): отсортированные
 `(product_id, url, sha256)`. **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
 это провенанс записи, а не измерение (прецедент: `seeds_digest` исключает `source`/`added_*`;
 `scope_attested_by` не входит в контракт вовсе). Пустой набор даёт стабильный дайджест
@@ -187,7 +187,7 @@ manual_artifacts:
 
 **Смежный соблазн, который надо назвать явно.** Рядом лежит «выключить robots для продукта».
 Сейчас это невозможно по коду, и так должно остаться: ось `robots` объявлена **только** на
-app-слое (`core/config/deploy.py:432-436`), у `CrawlRunConfig` её нет, у `DomainProfile` нет
+app-слое (`core/config/deploy.py:434-438`), у `CrawlRunConfig` её нет, у `DomainProfile` нет
 и появиться не может (`extra="forbid"`, `core/config/domain_profiles.py:56`). Ручной артефакт
 не должен становиться обходным путём к тому же результату: он даёт **документ**, а отказ по
 robots остаётся в аудите.
@@ -197,13 +197,13 @@ robots остаётся в аудите.
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **Сегодня его нет.** Провалы фетчей попадают в отчёт только агрегатами
-(`core/domain/models.py:1528` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1252-1257`
-— движки в шапке; `core/pipeline/report.py:1684-1724` — `blocked = {error_kind: count}` и
+(`core/domain/models.py:1541` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1267-1272`
+— движки в шапке; `core/pipeline/report.py:1699-1739` — `blocked = {error_kind: count}` и
 `unreadable_origins` от `derive_corpus_coverage`). Ни URL, ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 
-Ближайший образец формы — `core/pipeline/report.py:1627-1746` `render_nda_questions`: единый CSV, строка =
+Ближайший образец формы — `core/pipeline/report.py:1642-1761` `render_nda_questions`: единый CSV, строка =
 аномалия, `anomaly_kind ∈ {i3_protocol, crawl_truncation, corpus_incomplete}`. Тот же приём,
 другая таблица.
 
@@ -299,20 +299,20 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:314` — единственный writer, зовут
-   `core/pipeline/corpus.py:3277` и `core/pipeline/report.py:2810`; человеческая строка —
+   `core/pipeline/corpus.py:3286` и `core/pipeline/report.py:2825`; человеческая строка —
    `core/pipeline/artifacts_gap.py:196`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
-   `core/pipeline/corpus.py:3415`; `origin` — `core/store/sqlite.py:118`;
-   `resolved_manually` — `core/domain/models.py:2579` + `core/pipeline/corpus_coverage.py:281`;
-   доля — `core/pipeline/phases.py:1477`; дайджест — `core/pipeline/digests.py:345`).
+   `core/pipeline/corpus.py:3424`; `origin` — `core/store/sqlite.py:118`;
+   `resolved_manually` — `core/domain/models.py:2592` + `core/pipeline/corpus_coverage.py:281`;
+   доля — `core/pipeline/phases.py:1485`; дайджест — `core/pipeline/digests.py:353`).
    As-built и расхождения — §10.
 3. ⬜ не сделано — `parent_run_id` прогона-продолжения в коде отсутствует
    (`grep -rn "parent_run_id" core/` — 0 совпадений), `hound diff` показывает дельту через
-   `execution_change: … manual_artifacts_digest` (`core/pipeline/report.py:1975-1986`,
+   `execution_change: … manual_artifacts_digest` (`core/pipeline/report.py:1990-2001`,
    поле входит в `EXECUTION_CONTRACT_FIELDS`), но связи «этот прогон — продолжение того» нет.
    **Связность**: `parent_run_id` для прогона-продолжения, дельта в `hound diff`.
 4. ⬜ не сделано — `pb` остаётся продукт-скоупед: W14 (F3) не начат
@@ -401,12 +401,12 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   схема `manual_artifacts/1` (`:67`), путь от пакета (`:192-212`), сверка `sha256` (`:297-303`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:3277`), и `report` (`core/pipeline/report.py:2810`); форма —
+  (`core/pipeline/corpus.py:3286`), и `report` (`core/pipeline/report.py:2825`); форма —
   `core/pipeline/artifacts_gap.py:219` (`collect_artifact_gaps`), человеческая строка —
   `:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:132`); подача
-  живёт внутри `corpus` (`core/pipeline/corpus.py:3277`), т.е. §5 исполнен буквально.
-- ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:148`,
+  живёт внутри `corpus` (`core/pipeline/corpus.py:3286`), т.е. §5 исполнен буквально.
+- ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:156`,
   материал `(product_id, url, sha256)` — `:361`), считается даже при пустом наборе.
 - ⬜ **Связность (`parent_run_id`)** — не сделана: см. §8 п. 3.
 - ⬜ **F3** — не начат: см. §8 п. 4.

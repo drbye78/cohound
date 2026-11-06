@@ -48,15 +48,15 @@ per-host статуса и без различения дискавери и о�
 
 | механизм | где | чего не хватает |
 |---|---|---|
-| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:854`, `run_identity.py:209`, `plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падает в `auto` (`corpus.py:397-401`) |
+| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:913`, `run_identity.py:213`, `plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падает в `auto` (`corpus.py:398-402`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`state_sqlite.py:115`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3124` | переиспользует **чанки** ⇒ отказ при смене версий; не пишет `url_state`/`document_version` как «последнюю версию» (`:3173-3177`) — эту дисциплину обязан унаследовать `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
 | per-host[+path] оси и их digest в `run_id` | `domain_profiles.py:49`, `report.py:669` | **не знает продукта** |
-| `product → host+path` слои | `crawl_sources.py:48,77,87` | digest информационный (`models.py:1533`) |
+| `product → host+path` слои | `crawl_sources.py:48,77,87` | digest информационный (`models.py:1546`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`package/commands.py:2994`) | — образец для CLI политики |
-| видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1149`), `product_skipped` (`corpus.py:4021`), `incomplete_reasons` (`corpus.py:3887`) | нет токена «запрещено политикой» |
-| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1714,2175`; `corpus_coverage.py:405`) | переиспользуется политическими пропусками |
+| видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1180`), `product_skipped` (`corpus.py:4030`), `incomplete_reasons` (`corpus.py:3896`) | нет токена «запрещено политикой» |
+| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1716,2175`; `corpus_coverage.py:405`) | переиспользуется политическими пропусками |
 
 **Ни один носитель не даёт «продукт × хост × путь» без ложной идентичности:**
 `crawl_sources.yaml` знает продукт, но не входит в `run_id`; `domain_profiles.yaml` входит в
@@ -66,7 +66,7 @@ per-host статуса и без различения дискавери и о�
 ## 4. Модель данных
 
 **Имена.** Режимы — `auto | on_request | scheduled | network_denied`. Термин `blocked` **не
-переиспользуется**: он занят трижды — `RunProductStatus.BLOCKED` (`enums.py:984`),
+переиспользуется**: он занят трижды — `RunProductStatus.BLOCKED` (`enums.py:1043`),
 `onboarding_state='blocked'` (`state_sqlite.py:81`), `inheritance_mode=blocked`
 (spec §…). В отчёте режим называется `network_denied`, токеном — `crawl_network_denied`.
 
@@ -152,20 +152,20 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
    `(product_id, scope_kind, host, path, decision)`. `note`, `actor`, `created_at`,
    `policy_id`, `interval_hours` в материал **не входят** (режим и решение — входят); несовпавшие
    строки — тоже. Отдельного поля для `--refresh-scope` нет: это тот же материал (правило
-   «одно поле — один материал», `digests.py:178-188`).
+   «одно поле — один материал», `digests.py:186-196`).
 2. Поле входит в `EXECUTION_CONTRACT_FIELDS` (`digests.py:89`), 29 → **30**. Это объявленная
    версионная граница: переснять `PINNED_EXECUTION_CONTRACT_DIGEST`
-   (`tests/pipeline/test_corpus_stage_timings.py:78`) и обновить литералы «29 полей»
+   (`tests/pipeline/test_corpus_stage_timings.py:85`) и обновить литералы «29 полей»
    (`AGENTS.md:303`, `09…:3656`, `16-runs-schema-boundary.md:271`, `14…:424`,
-   `docs/status-dictionary.yaml:446`).
+   `docs/status-dictionary.yaml:447`).
 3. **`refresh_policy`** уже в `run_id` отдельным слагаемым (`plan.py:112`); `frozen` — новое
    значение. **`frozen_source` канонизируется**: в материал входит только при
    `refresh_policy=frozen`, иначе `n/a` (иначе объявленная, но не действующая ось даёт ложный
    `execution_change`).
-4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:457`): иначе
+4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:458`): иначе
    `run` и `crawl run` адресуют разные сеансы при одном объявленном входе.
 5. **Неизвестное значение политики — `EXIT_USAGE`, не `auto`.** Тихий fallback
-   (`corpus.py:402`) — это сеть по опечатке (AGENTS §2).
+   (`corpus.py:403`) — это сеть по опечатке (AGENTS §2).
 6. Время снятия (`captured_at`) — **провенанс**, не идентичность (как `extractor_version`).
 7. Честная граница: резолв ветки «discovery vs update» читает `url_state`, поэтому **те же
    объявленные входы при сдвинутом `state.db` дают другой корпус** — так уже живёт `auto`
@@ -196,14 +196,14 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 ### P2 — исполнение: `on_request` и `network_denied` — ✅ сделано
 
-- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`corpus.py:2888`) — **до**
+- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`corpus.py:2897`) — **до**
   `crawl_target` (`:2951`) и `expand_directory` (`:2957`), — и до сборки синтетических корней
-  (`_synthetic_root_plans`, `:2801`). Гейт во фронтьере (`crawl_frontier.py:1412,1443,1523`)
+  (`_synthetic_root_plans`, `:2801`). Гейт во фронтьере (`crawl_frontier.py:1443,1443,1523`)
   недостаточен: он ниже feed/sitemap-разворота. Порядок закреплён **AST-тестом**
   (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
   вызовов в теле генератора: генератор — это порядок исполнения, текст комментария — нет.
 - ✅ **SERP-контур** глушится политикой с `not_executed_reason=crawl_policy_skipped`
-  (`corpus.py:1849`), находки фильтруются по корню.
+  (`corpus.py:1858`), находки фильтруются по корню.
 - ✅ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks`
   (`corpus_drain.py:168,171`), а не один enum. `bytes` появится в P3 — объявлять значение без
   исполнения значило бы обещать режим, которого нет.
@@ -211,11 +211,11 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
   `incomplete_reasons` + `truncated_products` (`corpus_commit.py:105`) — тем же каналом, что
-  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1749,3136`). `expected_sources` не уменьшается молча.
+  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1758,3136`). `expected_sources` не уменьшается молча.
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `:3742` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
-  (`core/cli/execution_axes.py:200`), паритет `plan`/`run`/`crawl run` по построению; значение
+  (`core/cli/execution_axes.py:206`), паритет `plan`/`run`/`crawl run` по построению; значение
   входит в `crawl_policy_digest` через оси исполнения (7-кортеж решения), отдельного поля нет.
 - ✅ Наблюдаемость: `crawl_network_denied`, `crawl_on_request_not_requested`,
   `crawl_policy_skipped`, `policy_scope` (+ `policy_skips` в `product_end`) и строки в

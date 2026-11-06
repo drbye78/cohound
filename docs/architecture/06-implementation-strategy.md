@@ -193,7 +193,7 @@ staging крупных артефактов отсутствует; (3) ось `
 извлекаются — `core/adapters/remote_extractor.py:42` (`supports_source_path = False`);
 (2) страница `collect` ограничена 8 MiB — `core/edge/scheduler.py:163` (`_COLLECT_MAX_BYTES`),
 файлового staging крупных артефактов через шов нет; (3) ось `crawl.document_level` под `split`
-принимается и игнорируется — `core/cli/wiring.py:2294`.
+принимается и игнорируется — `core/cli/wiring.py:2426`.
 
 ---
 
@@ -336,7 +336,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W2 — Домен — ✅ done
 
-✅ сделано (проверено) — `core/domain/models.py:72` (`ConfigDict(extra="forbid", …)` — база всех моделей),
+✅ сделано (проверено) — `core/domain/models.py:74` (`ConfigDict(extra="forbid", …)` — база всех моделей),
 `core/domain/scoring.py:444` (знаменатель `scope_universe`), property-тесты — `tests/domain/`.
 
 - Модели Pydantic с `extra="forbid"`, `StrEnum`-перечисления, чистые `check_*`-инварианты,
@@ -368,7 +368,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ✅ сделано (проверено) — `core/pipeline/runner.py:167` (`PhaseResult` c
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
-`core/cli/context.py:1669` (`make_profile_gate` подключён в CLI).
+`core/cli/context.py:1670` (`make_profile_gate` подключён в CLI).
 ⬜ не сделано — durable-аттестация профиля: `save_profile_attestation` не вызывается ни из
 одного прод-пути (`grep -rn save_profile_attestation core` → только определение), строку пишут тесты.
 
@@ -428,7 +428,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W7 — Корпус — ✅ done по коду; ⚠️ под `split` — с расхождениями
 
-✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:1172` (`host_in_scope`), `:1149`/`:1154`
+✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:1203` (`host_in_scope`), `:1149`/`:1154`
 (`out_of_scope_subdomains`/`accepted_foreign_hosts`), `core/pipeline/archive_descent.py:110-112`
 (`archive_cycle`/`archive_budget_exhausted` — исчерпание видимо), цепочка 5000 архивов —
 `tests/pipeline/test_corpus_descent.py`.
@@ -545,7 +545,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:1752-1755` (`render_battle_card`,
+✅ сделано (проверено) — `core/pipeline/report.py:1767-1770` (`render_battle_card`,
 `render_nda_questions`, `render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, включая `battle_card.xlsx` и `diff.md`).
 
@@ -557,7 +557,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:836-964` вызывает `_run_serp_contour`
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:837-965` вызывает `_run_serp_contour`
 (поиск → допуск → расширение seed-набора **до** дренажа, одна сборка), `core/pipeline/search_log.py`
 (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1549`)
@@ -577,7 +577,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173/211/300` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:2936`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3130`),
 но приёмочный контур не пройден: golden-full дал 6.8 % (`2026-10-27-golden-reference-set-unusable.md`),
 §11.5-baseline и кейсы 2–5 не делались.
 
@@ -726,7 +726,7 @@ P5), но строка помечена здесь как неактуальна
 
   ➖ снято — утверждение выше, что `extract_workers` входит в `crawl_config_digest` и класс
   `execution_change`, **неверно на `f6100c7`** (F0): параллелизм извлечения в `as_dict()` не входит,
-  иначе `run_id` стал бы функцией хоста — `core/pipeline/crawl_frontier.py:211-214`.
+  иначе `run_id` стал бы функцией хоста — `core/pipeline/crawl_frontier.py:213-216`.
 
 - **Уровни извлечения документов (P5, as-built).** Ось `crawl.document_level`
   (`off`|`text`|`layout`|`layout_tables`|`full`; app < run < site, per seed-root,
@@ -941,8 +941,8 @@ uv sync --frozen --extra dev
    Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
    ✅ проверено на `f6100c7`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
-   канал в Ш6 — `core/pipeline/phases.py:1292`. Имя параметра сменилось: `scope_acceptance`
-   (принятие риска) — `core/pipeline/evaluate.py:3060-3528`. Прежнее `scope_attested_by` живёт
+   канал в Ш6 — `core/pipeline/phases.py:1293`. Имя параметра сменилось: `scope_acceptance`
+   (принятие риска) — `core/pipeline/evaluate.py:3101-3569`. Прежнее `scope_attested_by` живёт
    **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:324-326`)
    и как миграция колонки (`core/store/sqlite.py:317`); в сигнатуре оценщика алиаса нет —
    прежняя редакция выдавала желаемое за сделанное.
@@ -997,9 +997,9 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
   Открытыми остались **семь** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
-  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2102-2108`),
+  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2117-2123`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `_template`), паритет реестров под `split`
-  (`core/cli/context.py:1674` против `core/edge/server.py:1104`), R3 (ревизия весов моделей не
+  (`core/cli/context.py:1675` против `core/edge/server.py:1104`), R3 (ревизия весов моделей не
   входит в `extractor_version`, `core/adapters/extract_document.py:252-284`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`), A1 follow-up (мультиплексирование
   root/product **закрыто** F4a/F4b — `core/pipeline/corpus_driver.py`; открыт нит
@@ -1015,7 +1015,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   local/split (§2.3): одна процедура — «один вход, два профиля, сравнить `index_build_id` и
   `registry_spec_digest`», — а не две.
   ➖ **снято как пункт, но не как факт:** под `split` процессной экстракции нет — это устройство
-  зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2350`), а не недоделка.
+  зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2482`), а не недоделка.
   Так же снят прежний остаток «`use_ocr=False` — мёртвый код»: решением P5 `full` несёт OCR,
   `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:909-926`),
   и документированное прежде «сканы дают пустой текст» было неверным.
@@ -1040,7 +1040,7 @@ DLP, набор IDS-правил) — design-требования зафикси
    раньше, чем помогает «больше железа».
 4. **Паритет `split` — одним замером, до флота.** Открытыми висят два вопроса об одном и том же:
    совпадает ли `index_build_id` для одного входа под `local` и `split` (§2.3) и совпадает ли
-   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1674`, edge
+   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1675`, edge
    выбирает фетчер по своей карте — `core/edge/server.py:1104`). Это **одна** процедура: один
    вход, два профиля, сравнить сборку и дайджест. Пока она не проведена, `split`-прогон нельзя
    публиковать наравне с `local`, и это дешевле любой строки из `08` §8.0: измерение, не разработка.

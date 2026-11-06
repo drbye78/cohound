@@ -794,12 +794,20 @@ class LLMCallJournal:
         latency_ms: float,
         outcome: str,
         response_raw: str | None,
+        reasoning: str | None = None,
     ) -> None:
         """Дописывает одну попытку вызова (не одну ячейку: повторы видны поштучно).
 
         ``response_raw`` — полный текст ответа модели; ``None`` — ответа не было (HTTP
         не ответил, исключение шва). ``response_sha256``/``response_len`` выводятся из
         него, чтобы адрес ответа не расходился с самим текстом.
+
+        ``reasoning`` — текст рассуждения, если провайдер его отдал. Правило записи:
+        ``reasoning_len``/``reasoning_sha256`` пишутся **всегда** (это дешёвый признак
+        «думала ли модель и сколько»), а сам текст — **только при** ``outcome != "ok"``.
+        Обоснование: на отказе рассуждение нередко единственный текст ответа (``content``
+        пуст при ``finish_reason=length``), без него путь отказа неразбираем; на успехе
+        оно дублирует уже сохранённый вердикт и растёт на десятки мегабайт за прогон.
         """
         self._writer.append(
             {
@@ -822,6 +830,15 @@ class LLMCallJournal:
                     len(response_raw) if response_raw is not None else None
                 ),
                 "response_raw": response_raw,
+                # Провенанс рассуждения: длина/хеш — всегда, текст — только на отказе
+                # (на успехе он дублирует вердикт и растит файл на десятки МБ).
+                "reasoning_len": (len(reasoning) if reasoning is not None else None),
+                "reasoning_sha256": (
+                    content_hash(reasoning) if reasoning is not None else None
+                ),
+                "reasoning_content": (
+                    reasoning if outcome != "ok" else None
+                ),
             }
         )
 
@@ -2749,6 +2766,10 @@ def evaluate_cell(
         model_version=getattr(evaluator, "model_version", "") or "",
         seed=getattr(evaluator, "seed", None),
         temperature=getattr(evaluator, "temperature", None),
+        # §7.4 (решение 06.11.2026): уровень рассуждения — объявленный вход. Берётся у
+        # адаптера (он получил его резолвом объявленных слоёв), а не из окружения: одна
+        # проекция объявленного входа на провод.
+        reasoning_effort=getattr(evaluator, "reasoning_effort", None),
     )
 
     # Ключ кэша вердиктов: **отрендеренный** текст промпта, конфигурация оценщика и
@@ -2782,6 +2803,14 @@ def evaluate_cell(
             "model_version": request.model_version,
             "seed": request.seed,
             "temperature": request.temperature,
+            # §7.4: уровень рассуждения — часть условий ответа. Без него ответ при ``high``
+            # переиспользовался бы как ответ при ``off`` (формулировка задачи), хотя текст
+            # и расход токенов у них разные.
+            "reasoning_effort": (
+                None
+                if request.reasoning_effort is None
+                else request.reasoning_effort.value
+            ),
             "decoder": getattr(evaluator, "decoder", "none"),
             "endpoint_kind": getattr(evaluator, "endpoint_kind", ""),
             # V3: повтор переиздаёт запрос, значит «первый валидный ответ» зависит от
@@ -2881,15 +2910,26 @@ def evaluate_cell(
                 if response is not None
                 else getattr(error, "usage", None)
             )
+            reasoning = (
+                response.reasoning
+                if response is not None
+                else getattr(error, "reasoning", None)
+            )
             usage: dict[str, int] | None = None
             if usage_obj is not None and (
-                usage_obj.prompt_tokens or usage_obj.completion_tokens
+                usage_obj.prompt_tokens
+                or usage_obj.completion_tokens
+                or usage_obj.reasoning_tokens
             ):
-                # Ноль/ноль — «провайдер не назвал», а не измеренная стоимость.
+                # Ноль/ноль(/ноль) — «провайдер не назвал», а не измеренная стоимость.
                 usage = {
                     "prompt": usage_obj.prompt_tokens,
                     "completion": usage_obj.completion_tokens,
                 }
+                if usage_obj.reasoning_tokens:
+                    # Токены рассуждения — отдельная статья: по ней видно, действовал ли
+                    # объявленный уровень усилия (``llm.reasoning_effort``).
+                    usage["reasoning"] = usage_obj.reasoning_tokens
             finish_reason = (
                 response.finish_reason
                 if response is not None
@@ -2908,6 +2948,7 @@ def evaluate_cell(
                 latency_ms=round((time.monotonic() - started) * 1000.0, 3),
                 outcome=outcome,
                 response_raw=raw if isinstance(raw, str) else None,
+                reasoning=reasoning if isinstance(reasoning, str) else None,
             )
 
         for attempt in range(1, max_retries + 2):

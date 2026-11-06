@@ -36,8 +36,10 @@ from core.domain.enums import (
     Decoder,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     PdfDevice,
     PdfPipeline,
+    ReasoningEffort,
 )
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
@@ -108,7 +110,7 @@ DEFAULT_LLM_SLOT = "cheap"
 #: результат измерения. Финальный выбор модели оценщика даёт
 #: ``hound experiment evaluator-benchmark`` (A3); смена — граница ``execution_versions``
 #: (``execution_change``, §13), а не ``methodology_version``.
-DEFAULT_LLM_MODEL_ID = "deepseek-v4.1-flash:purple"
+DEFAULT_LLM_MODEL_ID = "deepseek-v4.1-flash-1017:yellow"
 
 # Путь по умолчанию относительно рабочего каталога (раскладка A.1).
 DEFAULT_DEPLOY_PATH: Path = Path("config/deploy.yaml")
@@ -641,22 +643,35 @@ class CrawlConfig(BaseModel):
 
 
 class EmbedConfig(BaseModel):
-    """Секция ``embed`` deploy-конфига: где считается вектор (ось ``embed.device``).
+    """Секция ``embed`` deploy-конфига: где и с какой точностью считается вектор.
 
-    Намеренно **только** устройство: ``backend``/``base_url``/``model_version``
+    Две объявленные оси: ``device`` (``embed.device``) и ``precision``
+    (``embed.precision``). Обе входят в ``EXECUTION_CONTRACT_FIELDS``, в материал ``pb`` и
+    в ключ ``embed_cache``, поэтому объявлены в конфиге, а не читаются у эмбеддера.
+
+    Намеренно **только** эти две: ``backend``/``base_url``/``model_version``
     (``14`` §6 п. 5) остаются недекларированными до решения о появлении инстанса.
-    Устройство — не «настройка адаптера»: оно входит в ``EXECUTION_CONTRACT_FIELDS``,
-    поэтому объявлено в конфиге, а не читается у эмбеддера.
+
+    ``precision`` — решение владельца 06.11.2026 (fp16); за ним замер
+    ``docs/reports/measurements/2026-11-06-embedding-precision-cpu.md``: 15.40/13.82
+    чанка/с против 6.02/4.99 у fp32 (2.6–2.8×), худший чанк ``1−cos = 8.3e-05``,
+    top-10 0.998, детерминизм побитовый. ``bf16``/``tf32`` в перечисление не входят —
+    отвергнуты тем же замером (см. :class:`core.domain.enums.EmbedPrecision`).
 
     ``extra="forbid"``: ключ без модели отвергается, а не игнорируется молча — иначе
     ``deploy.yaml`` с ``embed: {backend: ...}`` создавал бы впечатление объявленного
     backend'а, которого никто не исполняет. Секции ``embed:`` в ``config/deploy.yaml``
-    может не быть: дефолт ``cpu`` и есть отсутствие секции.
+    может не быть: дефолты ``cpu``/``fp32`` и есть отсутствие секции.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     device: EmbedDevice = EmbedDevice.CPU
+    #: Точность счёта вектора. Дефолт ``fp32`` — поведение до появления оси (байт-в-байт).
+    #: Объявленная точность обязана доехать до провода (``torch.autocast``): эмбеддер,
+    #: который её не исполняет (``model2vec``/NumPy), исключается, а при отсутствии
+    #: torch-пути — ``WiringError``. Тихий fp32 запрещён: это ложный провенанс.
+    precision: EmbedPrecision = EmbedPrecision.FP32
 
 
 class LLMSlotConfig(BaseModel):
@@ -682,6 +697,13 @@ class LLMSlotConfig(BaseModel):
     decoder: Decoder | None = None
     timeout_s: float | None = Field(default=None, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
+    #: §7.4 (решение владельца 06.11.2026): усилие рассуждения оценщика. ``None`` — не
+    #: объявлено на этом слое (резолв идёт вверх по цепочке: ``--llm-reasoning-effort`` >
+    #: ``run.yaml: llm_reasoning_effort`` > этот ключ), и параметра на провод не уходит.
+    #: Входит в ``llm_scenarios`` → ``run_id``: рассуждение меняет и расход токенов, и
+    #: текст ответа. Уровень, не выразимый на проводе объявленного семейства модели, —
+    #: отказ (``EXIT_USAGE``), а не тихая отправка без параметра.
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class LLMDeployConfig(BaseModel):

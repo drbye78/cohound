@@ -121,7 +121,7 @@ Sitemap не дал обхода: `https://jatoba.ru/sitemap.xml` содержи
 При этом на той же странице лежат **17 прямых PDF** `/files/products/jatoba/*.pdf` и
 **14 ссылок Joomla-компонента** `/component/jdownloads/?task=download.send&id=…` — все
 вне path-scope корня. То есть документация физически доступна и лежит на один клик
-глубже, но архитектура scope (`root_path_prefix`, `crawl_frontier.py:452`) её отсекает.
+глубже, но архитектура scope (`root_path_prefix`, `crawl_frontier.py:454`) её отсекает.
 Это корректное поведение по I17: тот же `/files/products/` содержит документы других
 продуктов.
 

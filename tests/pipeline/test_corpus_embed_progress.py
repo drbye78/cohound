@@ -263,8 +263,10 @@ def test_batched_embedding_is_bitwise_equal_to_a_single_call() -> None:
     def _mark(done: int, total_count: int, elapsed: float) -> None:
         marks.append((done, total_count, elapsed))
 
-    # 16 §5.1: устройство счёта — обязательный keyword (дефолт объявленной оси).
-    vectors = _embed_batched(embedder, chunks, embed_device="cpu", on_batch=_mark)
+    # 16 §5.1: устройство и точность счёта — обязательные keywords (дефолты объявленных осей).
+    vectors = _embed_batched(
+        embedder, chunks, embed_device="cpu", embed_precision="fp32", on_batch=_mark
+    )
 
     # Побитовое равенство одному вызову на том же входе (тем же адаптером).
     assert vectors == FakeEmbedder(dim=4).embed([c.text for c in chunks])
@@ -302,6 +304,7 @@ def test_embed_and_build_batches_and_passes_all_vectors_in_order() -> None:
         chunker_version="chunker-1",
         embed_model_id="fake-embedder",
         embed_device="cpu",
+        embed_precision="fp32",
         extractor_version="extractor-1",
         lexical_engine_version="fake-bm25-1",
         vector_store="fake",

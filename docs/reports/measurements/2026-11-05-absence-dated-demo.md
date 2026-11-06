@@ -81,7 +81,7 @@ note: evaluate: carry=on  |  cells_measured=0 cells_carried=0
 `observed_sources = 0`, потому что покрытие считается по элементам **сеанса**
 (`core/pipeline/corpus_coverage.py:181`), а у прохода без сети элементов нет. Перенос из
 предыдущего прогона тоже отказывает: `carry_forward` не переносит при
-`coverage.complete = False` (`core/pipeline/carry_forward.py:476`), отсюда `cells_carried=0`.
+`coverage.complete = False` (`core/pipeline/carry_forward.py:494`), отсюда `cells_carried=0`.
 
 Следствия для F3 (и они шире одного инварианта):
 

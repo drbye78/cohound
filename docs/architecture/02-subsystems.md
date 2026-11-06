@@ -203,7 +203,7 @@ plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
 | `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`core/pipeline/corpus_driver.py:355-366`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:2195-2244`) | один на прогон, переиспользуется всеми корнями/продуктами |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:2204-2253`) | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
@@ -258,7 +258,7 @@ URL ставится в очередь, если он (1) проходит SSRF-
 **объявленному** хосту, (3) укладывается в path-prefix корня по границе сегмента, (4) не в
 блэклисте. SSRF-проверка — не проверка scope, это разные предикаты.
 
-- `Frontier.host_in_scope` (`crawl_frontier.py:682-706`): хост корня — всегда, `www.`-
+- `Frontier.host_in_scope` (`crawl_frontier.py:713-737`): хост корня — всегда, `www.`-
   вариант эквивалентен базовому (`normalize_scope_host`); поддомен — **только если
   объявлен** (`scope_hosts`: seed-корень продукта или ключ `domain_profiles.yaml`); чужой
   хост и необъявленный поддомен — вне scope.
@@ -391,7 +391,7 @@ top-level URL, затем опрос каталогов, волна 2 — зап
 
 - `partition_build_id` = `"pb_" + short_hash(_PARTITION_SCHEMA, package_id, product_id,
   chunker_version, embed_model_id, extractor_version, lexical_engine_version, vector_store,
-  product_content_token)` (`_derive_partition_build_id`, `core/pipeline/corpus_index.py:80-139`).
+  product_content_token)` (`_derive_partition_build_id`, `core/pipeline/corpus_index.py:86-151`).
   `product_content_token` — отпечаток содержимого партиции, sorted `(chunk_id,
   content_hash)`: порядко-независим и чувствителен к любому изменению контента.
   **`params_token` (каталог/фокус) и `snapshot_date` намеренно исключены** — каталог и фокус
@@ -539,7 +539,7 @@ prompt_hash = H(template_version, rule, absence_rule, sorted(chunk_ids))
 (`validate.py:300-381`), и ни одна не спрашивает, **следует ли заявленный статус из цитаты**.
 Регламент (§7.1) разрешает «частично механически» и требует следствия-*аномалии*, поэтому
 шаг присутствует в норме, но не в коде. Что существует вместо него: замер
-`support_subject_overlap` (`core/pipeline/evaluate.py:1156-1194`) — пересечение стемов параметра и цитаты
+`support_subject_overlap` (`core/pipeline/evaluate.py:1173-1211`) — пересечение стемов параметра и цитаты
 для ✅/⚠️; он **не меняет вердиктов**, пишет `cells.validation_notes`/`review_reason` и
 агрегируется в `outputs/support_quality.yaml`. Измеренный масштаб — в
 `docs/reports/measurements/2026-10-27-support-not-about-subject.md`: v2 публиковал 45 `✅`
@@ -793,12 +793,12 @@ flowchart LR
 | I16–I23 | A–E |
 
 **Открытые вопросы к итерации 3:** формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
-(раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2, `core/pipeline/report.py:2674`,
+(раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2, `core/pipeline/report.py:2689`,
 `core/pipeline/gate_subject.py:427`); версионирование `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:117`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
 `core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
 `core/util/hashing.py:45`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
-(`core/util/cache.py:133`, проводка `core/cli/context.py:1556`); политика ретраев и backoff —
+(`core/util/cache.py:133`, проводка `core/cli/context.py:1557`); политика ретраев и backoff —
 ✅ сделано (общая политика `core/util/retry.py:1`, потребитель — `core/adapters/search_glm.py:66`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано (`core/store/sqlite.py:21` WAL +
 `core/store/sqlite_store.py:92` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:602` — одна

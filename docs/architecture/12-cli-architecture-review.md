@@ -128,7 +128,7 @@ $ diff <(plan --json) <(plan --dry-run --json)
 
 ⬜ не сделано — расхождение осталось дословным: `plan`/`review`/`report`/`run` есть и в
 `PHASES` (`core/pipeline/runner.py`), и как команды; `run --until` принимает **все** 15 фаз
-включительно с `plan` (`core/cli/commands/run.py:1423`), то есть «посмотреть план без записи»
+включительно с `plan` (`core/cli/commands/run.py:1424`), то есть «посмотреть план без записи»
 и «записать прогон до фазы plan» по-прежнему две команды с одним словом.
 Статус `status` называет следующую команду — это отвечает на «что дальше», но не устраняет
 двоение имён.
@@ -268,7 +268,7 @@ hound run --package <dir>        # run.yaml берётся из пакета
 ### 4.2 Фаза не равна команде
 
 ⬜ не сделано — `hound plan` остался на месте (и не переименован), `run --until plan` остался
-(`core/cli/commands/run.py:1423`, `choices=PHASES`), `review` и `gate` — отдельные команды, а не
+(`core/cli/commands/run.py:1424`, `choices=PHASES`), `review` и `gate` — отдельные команды, а не
 фазы, `hound approve`/`hound reject` не появились. Сделана только читающая часть сценария —
 `hound status <run_id>`, которая печатает готовую команду продолжения.
 
@@ -379,7 +379,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 «это меняет run_id».
 **Уточнение 2026-10-28:** `--extract-workers` и `--crawl-strategy` флагами **не** являются и
 не были — обе оси живут в `run.yaml`/`deploy.yaml` (`crawl.extract_workers`,
-`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:736-739` через
+`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:749-752` через
 `_crawl_strategy(run_crawl)`). Флаговые контрактные оси сейчас: `--document-level`,
 `--pdf-pipeline`, `--document-timeout`, `--llm-model`, `--llm-slot`, `--retrieval-profile`,
 `--cutoff-k`, `--max-depth`, `--max-documents`, `--serp-rounds`. Пример в тексте был неточен
@@ -430,12 +430,12 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:981`, `core/store/sqlite_store.py:1939`,
+✅ сделано (`core/cli/commands/crawl.py:982`, `core/store/sqlite_store.py:1939`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
 текстовом выводе (`:713`), и в JSON (`:682`). Докстринг `iter_crawl_sessions` прямо называет
 этот дефект причиной фильтра.
 
-**Было:** `crawl.py:698`: `for session in store.iter_crawl_sessions()` — без фильтра. Аргумент
+**Было:** `crawl.py:699`: `for session in store.iter_crawl_sessions()` — без фильтра. Аргумент
 разобран, `--run-id` есть в usage, и он молча ничего не делает. Тихий игнор аргумента
 хуже его отсутствия: пользователь уверен, что отфильтровал.
 

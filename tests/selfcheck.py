@@ -2713,6 +2713,7 @@ def _report_gates() -> None:
     from core.pipeline.report import (
         CrossCycleDiffError,
         PublishBlockedError,
+        _contract_field_diagnostics,
         collect_i3_anomalies,
         diff_boundary_violations,
         render_battle_card,
@@ -2824,17 +2825,29 @@ def _report_gates() -> None:
         # этой парой **не записаны** (строка прошлой схемы) — предел диагностики назван,
         # причина не выдумывается (09 §12.5). Записанная ось политики называется —
         # ``tests/pipeline/test_manifest_crawl_policy.py``.
+        #
+        # Перечень недоступных полей выведен из ``EXECUTION_CONTRACT_FIELDS``, а не выписан
+        # руками: иначе каждая новая объявленная ось (последняя — ``embed_precision``,
+        # 06.11.2026) роняет проверку не по делу. Пин держит формулировку и непустоту.
         contract_reasons = diff_boundary_violations(
             _manifest("ib_a", execution_contract_digest="ec_1"),
             _manifest("ib_a", execution_contract_digest="ec_2"),
         )
+        _, unavailable = _contract_field_diagnostics(
+            _manifest("ib_a", execution_contract_digest="ec_1"),
+            _manifest("ib_a", execution_contract_digest="ec_2"),
+        )
+        if not unavailable:
+            raise AssertionError(
+                "09 §12.5: у пары обязаны быть недоступные поля — иначе это не предел "
+                "диагностики"
+            )
         expected_contract_reasons = [
             "execution_change: execution_contract_digest: ec_1 → ec_2",
             "execution_change: execution_contract_digest: различающееся поле не "
-            "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/crawl_policy_digest/"
-            "serp_rounds/serp_mode/prompt_template/frozen_source/chunking_spec/"
-            "evaluation_policy/lexical_spec/render_modes_digest/passports_digest "
-            "либо иная ось)",
+            "восстановимо из манифеста ("
+            + "/".join(unavailable)
+            + " либо иная ось)",
         ]
         if contract_reasons != expected_contract_reasons:
             raise AssertionError(

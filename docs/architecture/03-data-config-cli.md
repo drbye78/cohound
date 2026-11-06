@@ -66,7 +66,7 @@ repo/
   cache/http/{url_hash}.bin                      # кэш HTTP      │ в репозитории, при
   extract_cache/             # кэш экстракции                      │ настроенной раскладке —
   eval_cache/                # кэш оценщика (Ш6)                   │ вне его (§A.1.2)
-  embed_cache/{model}/{h2}/{content_hash}.vec  # кэш векторов (Ш5) │
+  embed_cache/{model}/{device}/{precision}/{h2}/{content_hash}.vec  # кэш векторов (Ш5) │
   state/{package_id}/state.db  # durable-состояние продукта (09 §4.1)│
   reports/{run_id}/          # (опц.) публикуемые артефакты        ┘
   tests/
@@ -1212,7 +1212,7 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `COHOUND_LLM_BASE_URL` | базовый URL [OI]-совместимого LLM-API корпоративного облака | опц. | — (обязателен: внутренний endpoint) | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) **и** `wiring.build_evaluator_llm` (endpoint оценщика; env-значение переопределяет слот и оставляет `llm_scenarios` пустой — см. ниже) |
 | `COHOUND_LLM_API_KEY` | ключ LLM-API (единственный источник; внешних фолбэков нет) | **обязателен для вызова** | — (обязателен для вызова) | `wiring.build_discovery_llm` **и** `build_evaluator_llm` |
 | `COHOUND_LLM_SLOT` | активный LLM-слот: `cheap`\|`flagship` (см. `deploy.yaml.llm`) | опц. | `cheap` | `wiring` (выбор слота — и оценщиком, и разведкой) |
-| `COHOUND_LLM_MODEL` | `model_id` **LLM-разведки** (переопределяет активный слот) | опц. | `deepseek-v4.1-flash:purple` (провизионно) | **только** `wiring.build_discovery_llm`; оценщик её **не читает** (модель оценщика — `deploy.llm.<slot>.model_id` или `--llm-model`) |
+| `COHOUND_LLM_MODEL` | `model_id` **LLM-разведки** (переопределяет активный слот) | опц. | `deepseek-v4.1-flash-1017:yellow` (провизионно) | **только** `wiring.build_discovery_llm`; оценщик её **не читает** (модель оценщика — `deploy.llm.<slot>.model_id` или `--llm-model`) |
 | `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | **только** `wiring.build_discovery_llm`; оценщик берёт `decoder` из слота |
 | `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm`/`build_evaluator_llm` (операционный параметр хоста) |
 | `COHOUND_LLM_MAX_TOKENS` | максимум токенов ответа (>0) | опц. | `4096` | `wiring.build_discovery_llm` |
@@ -1287,7 +1287,7 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 - **Две слотовые модели (`deploy.yaml.llm`).** Секция `llm:` в `config/deploy.yaml` задаёт два
   именованных слота — `cheap` и `flagship`. **Обе слоты по умолчанию пусты**
   (`LLMDeployConfig`: ни `base_url`, ни `model_id` не заданы), т.е. оценщик из коробки
-  **не поднимается**. `deepseek-v4.1-flash:purple` — **провизионный дефолт LLM-разведки**
+  **не поднимается**. `deepseek-v4.1-flash-1017:yellow` — **провизионный дефолт LLM-разведки**
   (`wiring.DEFAULT_LLM_MODEL`), а не слотов; он же прописан в `model_id` обоих слотов
   канонического `config/deploy.yaml` как провизионные данные (финальный выбор даёт
   `hound experiment evaluator-benchmark`). Активный слот выбирается детерминированно по
@@ -1618,7 +1618,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ сделано (T1.2; `core/domain/enums.py:1` … `core/domain/anchors.py:1`) — монолит **удалён**, гейт `tests/selfcheck.py:1123` |
 | 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ сделано (T1.3; `core/store/sqlite.py:21`) — монолит **удалён**, тот же гейт `tests/selfcheck.py:1123` |
 | 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ сделано (`core/ports/` — 20 модулей портов, напр. `core/ports/store.py:1`; импорт-граф — `tests/selfcheck.py:948`) |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1172` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1185` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется

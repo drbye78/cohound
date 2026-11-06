@@ -48,6 +48,7 @@ from core.domain import (
     CrawlRunConfig,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     ReuseKind,
     RunProductStatus,
 )
@@ -89,8 +90,9 @@ def _reuse_reason(index_root: Path, entry: Any, **overrides: Any) -> str | None:
         "product_content_token": entry.content_digest or "",
         "chunker_version": entry.chunker_version or "",
         "embed_model_id": entry.embed_model_id or "",
-        # Ось объявлена дефолтом: ``_build`` её не задаёт, а партиция посчитана им.
+        # Оси объявлены дефолтами: ``_build`` их не задаёт, а партиция посчитана ими.
         "embed_device": EmbedDevice.CPU.value,
+        "embed_precision": EmbedPrecision.FP32.value,
         "extractor_version": entry.extractor_version or "",
         "lexical_engine_version": entry.lexical_engine_version or "",
         "vector_store": entry.vector_store or "",
@@ -128,6 +130,35 @@ def test_partition_of_another_device_is_not_reusable(tmp_path: Path) -> None:
     assert _derive_partition_build_id(
         **base, embed_device=EmbedDevice.CPU.value
     ) != _derive_partition_build_id(**base, embed_device=EmbedDevice.CUDA.value)
+
+
+@requires_numpy
+def test_partition_of_another_precision_is_not_reusable(tmp_path: Path) -> None:
+    """Ось ``embed.precision``: партиция другой точности не переиспользуется.
+
+    fp16- и fp32-векторы — разные числа под тем же содержимым (решение 06.11.2026).
+    Манифест называет точность, которой считал сборщик, поэтому подмена точности в
+    объявленных входах — видимая причина отказа, а не «id совпал, значит можно».
+    """
+    index_root, entry = _built_partition(tmp_path)
+    assert _reuse_reason(index_root, entry) is None
+    reason = _reuse_reason(index_root, entry, embed_precision=EmbedPrecision.FP16.value)
+    assert reason is not None
+    assert "embed_precision" in reason
+    # ``pb`` различает точности сам — первый, дешёвый уровень (16 §5.1).
+    base = dict(
+        package_id=entry.package_id or "",
+        product_id="p1",
+        chunker_version=entry.chunker_version or "",
+        embed_model_id=entry.embed_model_id or "",
+        extractor_version=entry.extractor_version or "",
+        lexical_engine_version=entry.lexical_engine_version or "",
+        vector_store=entry.vector_store or "",
+        product_content_token=entry.content_digest or "",
+    )
+    assert _derive_partition_build_id(
+        **base, embed_precision=EmbedPrecision.FP32.value
+    ) != _derive_partition_build_id(**base, embed_precision=EmbedPrecision.FP16.value)
 
 
 @requires_numpy

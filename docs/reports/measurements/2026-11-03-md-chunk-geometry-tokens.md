@@ -63,7 +63,7 @@
 | | значение |
 |---|---|
 | `runs.embed_model_id` | **NULL** (и `embed_device`, и `index_build_id` — тоже NULL) |
-| модель замера | `BAAI/bge-m3` — `DEFAULT_MODEL_ID` из `core/adapters/embed_local.py:64` |
+| модель замера | `BAAI/bge-m3` — `DEFAULT_MODEL_ID` из `core/adapters/embed_local.py:74` |
 | класс токенизатора | `XLMRobertaTokenizer` (медленный, `transformers` 5.19.0) |
 | размер словаря | 250 002 (`vocab_size` = 250 002, `len(tokenizer)` = 250 002) |
 | `tokenizer.json` | `~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181/tokenizer.json` |

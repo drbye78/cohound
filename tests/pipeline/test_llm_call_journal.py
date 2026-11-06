@@ -33,7 +33,7 @@ from core.pipeline.evaluate import (
 from core.pipeline.exhaustion import ExhaustionFacts
 from core.pipeline.prompt import compile_prompt
 from core.pipeline.runner import Ports
-from core.ports.llm import TokenUsage
+from core.ports.llm import LLMResponse, TokenUsage
 from core.util.hashing import content_hash
 from tests.fakes.ports import FakeEvaluator
 from tests.pipeline.test_evaluate import (
@@ -62,6 +62,9 @@ FIELDS = {
     "outcome",
     "prompt_hash",
     "prompt_text_sha256",
+    "reasoning_content",
+    "reasoning_len",
+    "reasoning_sha256",
     "response_len",
     "response_raw",
     "response_sha256",
@@ -465,3 +468,108 @@ def test_journal_is_not_in_execution_contract() -> None:
 
     assert "llm_journal" not in EXECUTION_CONTRACT_FIELDS
     assert "llm_calls" not in EXECUTION_CONTRACT_FIELDS
+
+# ---------------------------------------------------------------------------
+# Рассуждение модели: длина/хеш — всегда, текст — только на отказе
+# ---------------------------------------------------------------------------
+
+
+class _ReasoningEvaluator:
+    """Оценщик, возвращающий рассуждение (как провайдер, отдающий ``reasoning_content``)."""
+
+    model_id = "fake-model"
+    model_version = "1.0"
+    seed = 0
+    temperature = 0.0
+
+    def __init__(self, output: Any, reasoning: str) -> None:
+        self._output = output
+        self._reasoning = reasoning
+        self.calls: list[Any] = []
+
+    def complete(self, req: Any) -> LLMResponse:
+        self.calls.append(req)
+        return LLMResponse(
+            output=self._output,
+            raw=self._output.model_dump_json(),
+            prompt_hash="ph",
+            decoder="fake",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=20, reasoning_tokens=7),
+            reasoning=self._reasoning,
+        )
+
+
+def test_success_journals_reasoning_length_and_hash_but_not_text(tmp_path: Path) -> None:
+    """На успехе текст рассуждения в журнал не пишется (дублирует вердикт и растёт).
+
+    Длина и хеш пишутся **всегда**: по ним видно, думала ли модель и сколько, — это
+    провенанс, которого у вердикта нет.
+    """
+    data = _data()
+    reasoning = "модель рассуждала: цитата подтверждает функцию"
+    journal = _journal(tmp_path)
+
+    evaluate_cell(
+        param=_param(data),
+        product_id=data["product_id"],
+        run_id=data["run_id"],
+        evaluator=_ReasoningEvaluator(_ok_output(data), reasoning),
+        chunks=_chunks(data),
+        llm_journal=journal,
+    )
+
+    line = _lines(journal.path)[0]
+    assert line["outcome"] == "ok"
+    assert line["reasoning_len"] == len(reasoning)
+    assert line["reasoning_sha256"] == content_hash(reasoning)
+    assert line["reasoning_content"] is None
+    assert line["usage"] == {"prompt": 10, "completion": 20, "reasoning": 7}
+
+
+def test_failure_journals_the_full_reasoning_text(tmp_path: Path) -> None:
+    """На отказе рассуждение — часто единственный текст ответа: он сохраняется целиком."""
+    data = _data()
+    reasoning = "думал: бюджет кончился на середине ответа"
+    error = EvaluationError(
+        "генерация оборвана по потолку токенов (finish_reason=length, max_tokens=4096)",
+        reason="length",
+        finish_reason="length",
+        raw="",
+        usage=TokenUsage(prompt_tokens=5, completion_tokens=4096),
+    )
+    error.reasoning = reasoning
+    journal = _journal(tmp_path)
+
+    evaluate_cell(
+        param=_param(data),
+        product_id=data["product_id"],
+        run_id=data["run_id"],
+        evaluator=_ScriptedEvaluator([error]),
+        chunks=_chunks(data),
+        llm_journal=journal,
+    )
+
+    first = _lines(journal.path)[0]
+    assert first["outcome"] == "length"
+    assert first["reasoning_len"] == len(reasoning)
+    assert first["reasoning_sha256"] == content_hash(reasoning)
+    assert first["reasoning_content"] == reasoning
+
+
+def test_absent_reasoning_is_not_invented(tmp_path: Path) -> None:
+    """Провайдер не отдал рассуждение — ``None``, а не пустая строка (не выдумываем)."""
+    data = _data()
+    journal = _journal(tmp_path)
+    evaluate_cell(
+        param=_param(data),
+        product_id=data["product_id"],
+        run_id=data["run_id"],
+        evaluator=_ScriptedEvaluator([_ok_output(data)]),
+        chunks=_chunks(data),
+        llm_journal=journal,
+    )
+
+    line = _lines(journal.path)[0]
+    assert line["reasoning_len"] is None
+    assert line["reasoning_sha256"] is None
+    assert line["reasoning_content"] is None

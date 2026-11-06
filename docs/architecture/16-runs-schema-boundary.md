@@ -56,7 +56,7 @@ absence/evidence-модель, а значит по `AGENTS.md` §13 это `met
 **Четвёртая причина (решение владельца 29.10.2026): в ту же полосу входят два дефекта
 краула**, найденные живым прогоном (`09` §6.3). Оба меняют корпус, то есть по отдельности
 дали бы `execution_change` — а `golden_required_for` возвращает `full` **и** для
-`execution_change` (`core/pipeline/run_identity.py:363`; `09` §12.1). Отдельная полоса
+`execution_change` (`core/pipeline/run_identity.py:372`; `09` §12.1). Отдельная полоса
 стоила бы второго `golden-full` и второго нового `run_id` на том же изменении корпуса.
 Класс полосы от этого не меняется: `methodology_version` поглощает `execution_change`
 (правило `❌` сильнее), поэтому объединение **дешевле**, а не «менее строго».
@@ -75,7 +75,7 @@ absence/evidence-модель, а значит по `AGENTS.md` §13 это `met
 |---|---|---|
 | ось `embed_device` (`cpu\|cuda`) в контракте | устройство эмбеддера сегодня выбирает torch, а `run_id` об этом не знает (`14` оговорка 5) | `execution_change` |
 | `embed_device` в материале `pb` и в проверке переиспользования партиции | иначе CPU-партиция молча переиспользуется CUDA-прогоном | `content_change` (следствие) |
-| `vector_digest` в проверке переиспользования | сборщик его пишет (`core/adapters/index_npy.py:275`), `_guard_immutable` сверяет (`:309`), но при переиспользовании сборка не строится — гард не исполняется | `content_change` |
+| `vector_digest` в проверке переиспользования | сборщик его пишет (`core/adapters/index_npy.py:276`), `_guard_immutable` сверяет (`:309`), но при переиспользовании сборка не строится — гард не исполняется | `content_change` |
 | `content_hash` в `chunk_ids.jsonl` | **необходимое условие** предыдущего пункта, см. §5 | формат партиции `partition-2` |
 | `embed_device` в ключе `embed_cache` | иначе CPU-прогон получит CUDA-векторы | стоимость, не идентичность |
 | `runs.cohort_ref` — писать `cfg.cohort_ref`, а не имя файла когорты (**✅ сделано**) | манифест показывает ревизию, которой в `run_id` не было (`09` §12.2) | провенанс, `run_id` **не** меняется |
@@ -176,7 +176,7 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`_resume_page`, `core/pipeline/corpus.py:827-880`) — `reused`. Resume перечитывает и те документы, которые
+(`_resume_page`, `core/pipeline/corpus.py:828-881`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -193,7 +193,7 @@ retained-байтов).
 (`core/pipeline/corpus_ingest.py:1227-1267`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
-`upsert_corpus_doc`. Прецедент в коде — `origin` (`core/pipeline/corpus_index.py:128-130`): это kwarg, а не
+`upsert_corpus_doc`. Прецедент в коде — `origin` (`core/pipeline/corpus_index.py:139-141`): это kwarg, а не
 поле модели, с доводом «доменная модель не получает смысла, которого у неё нет». Довод
 здесь **не переносится**: `origin` пишется и назад не читается, а `http_status`/`reuse_kind`
 обязаны читаться — `hound diff` строит дельту документов по `corpus_docs`
@@ -229,7 +229,7 @@ CREATE INDEX IF NOT EXISTS idx_corpus_doc_version_doc
 
 **Почему таблица, а не колонка `corpus_docs.doc_version_id`.** `doc_id` дедуплицируется по
 `content_hash`, который **не включает уровень извлечения**, а `document_level` объявлен
-per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня одного текста в одном прогоне
+per-site (`core/pipeline/crawl_frontier.py:636-641`) — два уровня одного текста в одном прогоне
 законны. Колонка держит одну версию на строку, то есть теряет вторую молча. Воспроизведение
 и цена — §10 п. 8.
 
@@ -249,40 +249,40 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
   появилась вместе с полем, как и требовалось). ✅ **As-built:** обе модели существуют
   (`EmbedConfig`, `EmbedRunConfig`); `DeployConfig` теперь несёт
   `profile`/`edge`/`extractor_zone`/`search`/`crawl`/`llm`/`embed`, и секция несёт **только**
-  ось `device` — внешний backend (`backend`/`base_url`/`model_version`) не объявлен и
-  остаётся решением `14` §6 п. 5.
+  оси `device` и `precision` — внешний backend (`backend`/`base_url`/`model_version`) не
+  объявлен и остаётся решением `14` §6 п. 5.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
-  `core/domain/models.py:491`), дефолт `None` — по той же причине, что у `pdf_device`
+  `core/domain/models.py:493`), дефолт `None` — по той же причине, что у `pdf_device`
   (`:543-549`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
-  что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:457-467`).
+  что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:459-469`).
 - Резолвер: `resolve_embed_device(app, run)` — копия `resolve_pdf_device` без site-слагаемого.
   Дефолт `cpu`, значения только `cpu|cuda`, `auto` **нет** (R5: объявленная ось обязана
   действовать). Enum `EmbedDevice` — в `core/domain/enums.py` рядом с `PdfDevice` (`:531-552`).
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1248` → `core/pipeline/corpus.py:1495` (объявление оси) и
+  **явным параметром**: `core/pipeline/phases.py:1249` → `core/pipeline/corpus.py:1496` (объявление оси) и
   `:4336`/`:4370` (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
-  (`core/pipeline/corpus.py:2259` — единственный источник этого значения).
+  (`core/pipeline/corpus.py:2268` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
-`EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:88-197`):
+`EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:88-205`):
 добавляется `embed_device` рядом с `extractor_stack` (та же природа: устройство как условие
-измерения). Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:237`)
-из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:627-686`).
+измерения). Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:241`)
+из `DeclaredExecutionAxes` — там же, где `extractor_stack` (`core/cli/execution_axes.py:633-692`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
-(`core/pipeline/digests.py:400-442`) требует точного набора ключей, но вызывается ровно из
-одного места — `run_identity.py:321`, внутри `build_execution_contract`, то есть только на
+(`core/pipeline/digests.py:408-450`) требует точного набора ключей, но вызывается ровно из
+одного места — `run_identity.py:325`, внутри `build_execution_contract`, то есть только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:2049-2108`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:2064-2123`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. Поэтому старые прогоны читаются, а их diff честно говорит
 `execution_change: embed_device`.
 
-`RunManifest` (`core/domain/models.py:1528-1740`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2539-2542`) сопоставляет имя
+`RunManifest` (`core/domain/models.py:1541-1753`) получает поле `embed_device`, и этого
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2554-2557`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS` (`:2490`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
@@ -296,7 +296,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено»
 
-`_resolve_embedder` (`core/cli/wiring.py:2731-2778`) сегодня выбирает по факту установки:
+`_resolve_embedder` (`core/cli/wiring.py:2871-2954`) сегодня выбирает по факту установки:
 `model2vec` → `LocalEmbedder` → `None`. `LiteEmbedder` — NumPy/CPU by design
 (`core/adapters/embed_model2vec.py:4`), и `device` он игнорировать обязан.
 
@@ -312,16 +312,18 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 устройства — отказ, а не CPU (прецедент `require_pdf_device`).
 
 `LocalEmbedder` получает `device=` в конструктор и передаёт в
-`SentenceTransformer(...)` (`core/adapters/embed_local.py:176-180`) — сегодня аргумента нет,
+`SentenceTransformer(...)` (`core/adapters/embed_local.py:210-214`) — сегодня аргумента нет,
 и устройство выбирает torch.
 
 ---
 
-## 5. Партиция: формат `partition-2`
+## 5. Партиция: формат `partition-3`
 
-`_PARTITION_SCHEMA = "partition-1"` (`core/pipeline/corpus_index.py:48`) → `partition-2`.
-Ревизия схемы уже даёт новые `pb` (старые партиции остаются на диске, но не
-переиспользуются) — это и есть механизм, которым вносятся три изменения сразу.
+`_PARTITION_SCHEMA = "partition-1"` (`core/pipeline/corpus_index.py:48`) → `partition-2`
+(граница A, 29.10.2026, ниже) → `partition-3` (06.11.2026: материал `pb` получил
+объявленную точность `embed_precision`, ось `embed.precision`; сам формат партиции от
+точности не изменился). Ревизия схемы уже даёт новые `pb` (старые партиции остаются на
+диске, но не переиспользуются) — это и есть механизм, которым вносятся изменения.
 
 **✅ As-built, и цена оказалась больше, чем «новый `pb`»:** `recompute_vector_digest`
 возвращает `None` для **всех десяти** существующих партиций — они `partition-1` и не несут
@@ -333,13 +335,13 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
 Материал `_derive_partition_build_id` (`core/pipeline/corpus_ingest.py:229-242`) получает `embed_device`
 рядом с `embed_model_id`; манифест партиции — ключ `embed_device` в том же явном словаре
-(`core/adapters/index_npy.py:250-276`, где `extra` сливается на `:270`; второго места нет);
-проверка `_partition_reuse_reason` (`core/pipeline/corpus_index.py:590-642`) — в `expected` рядом с шестью
+(`core/adapters/index_npy.py:251-277`, где `extra` сливается на `:270`; второго места нет);
+проверка `_partition_reuse_reason` (`core/pipeline/corpus_index.py:609-662`) — в `expected` рядом с шестью
 текущими (`:2840-2846`: `content_digest`, `chunker_version`, `embed_model_id`,
 `extractor_version`, `lexical_engine_version`, `vector_store`).
 
-`_derive_partition_build_id` вызывается из `core/pipeline/corpus_index.py:80-139`, а в тестах — с явными kwargs
-(`tests/pipeline/test_corpus_phase_boundary.py:153-162`,
+`_derive_partition_build_id` вызывается из `core/pipeline/corpus_index.py:86-151`, а в тестах — с явными kwargs
+(`tests/pipeline/test_corpus_phase_boundary.py:153-163`,
 `tests/pipeline/test_document_levels.py:574-585`): новый **обязательный** аргумент даёт там
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
 же полосе. Пинованные значения — `PINNED_PARTITION_BUILD_ID`
@@ -353,7 +355,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 ### 5.2. `vector_digest` — и почему одного поля в `expected` мало (**✅ as-built**)
 
 `vector_digest` считается как хеш `chunk_ids` + `content_hashes` + байтов матрицы
-(`core/adapters/index_npy.py:119-130`) и пишется в манифест (`:275`). Но на диск
+(`core/adapters/index_npy.py:120-131`) и пишется в манифест (`:275`). Но на диск
 `chunk_ids.jsonl` пишет **только** `{"chunk_id": …}` (`core/adapters/index_format.py:124-126`)
 — `content_hash` не сохраняется. Значит пересчитать `vector_digest` из партиции **нельзя**,
 и проверка «просто добавить его в `expected`» не работает: сверять было бы нечего.
@@ -372,10 +374,15 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
 ### 5.3. `embed_cache` получает третью компоненту ключа (**✅ as-built**)
 
-Ключ сегодня — `(content_hash текста, embed_model_id)` (`core/pipeline/embed_cache.py`,
+Ключ тогда — `(content_hash текста, embed_model_id)` (`core/pipeline/embed_cache.py`,
 докстринг модуля). Векторы CPU и CUDA численно разные, а ключ их не различает — значит
 после введения оси `cuda`-прогон молча взял бы `cpu`-векторы из кэша (и наоборот). Ключ
-становится `(content_hash, embed_model_id, embed_device)`.
+стал `(content_hash, embed_model_id, embed_device)`.
+
+**06.11.2026 — четвёртая компонента.** Ось `embed.precision` добавила `embed_precision`
+(`fp16`- и `fp32`-векторы — тоже разные числа), поэтому сегодня ключ
+`(content_hash, embed_model_id, embed_device, embed_precision)`, а формат конверта
+поднят до `2`: запись без точности — промах, а не догадка (A3).
 
 **Стоимость названа честно и измерена** (`docs/reports/measurements/2026-10-29-embed-cache-device-migration-cost.md`):
 существующие записи кэша созданы без объявленного устройства, поэтому приписать им `cuda`
@@ -393,7 +400,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
 ## 6. `chunk_id` (run-level)
 
-`_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:169-187`, где
+`_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:181-199`, где
 `doc_hash` — `extracted.content_hash`, `:3287`) → **`f"{product_id}:{doc_version_id}:{chunk_no}"`**.
 Почему в этой границе: `chunk_id` — часть `LexicalChunk`/`RetrievedChunk` и адрес гидртации
 из store, поэтому смена формата и так требует пересборки партиций; делать её отдельным
@@ -415,7 +422,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 - `chunker_version` — поле `EXECUTION_CONTRACT_FIELDS`, то есть **один чанкер на прогон**;
   внутри прогонной БД `chunk_id` уникален и без него (PK `corpus_chunks.chunk_id`);
 - смена чанкера уже меняет `pb` (он в `expected` у `_partition_reuse_reason`,
-  `core/pipeline/corpus_index.py:757-767`), то есть даёт новую партицию;
+  `core/pipeline/corpus_index.py:785-795`), то есть даёт новую партицию;
 - evidence уже несёт физическую партицию (`cell_evidence.partition_build_id`), поэтому
   `(chunk_id, partition_build_id)` различает то, что «голый» `chunk_id` не различает.
 
@@ -484,7 +491,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    новые колонки (иначе они `NULL` навсегда), `read_manifest` терпит необязательные колонки
    без `IndexError`.
 2. `tests/pipeline/test_run_identity.py` — `embed_device` в контракте: `cpu`→`cuda` даёт
-   другой `execution_contract_digest`; тот же — стабилен; `len(EXECUTION_CONTRACT_FIELDS) == 30`.
+   другой `execution_contract_digest`; тот же — стабилен; `len(EXECUTION_CONTRACT_FIELDS) == 32`.
 3. `tests/config/test_deploy.py` — `deploy.embed.device` объявлен; неизвестный ключ в
    `embed:` отвергается (`extra="forbid"`, там уже есть параметризация `:653-666`);
    `run.yaml:embed.device` резолвится app < run, site-слой отсутствует.
@@ -514,17 +521,17 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
 - `tests/pipeline/test_corpus_stage_timings.py:64` `PINNED_PARTITION_BUILD_ID`, `:65`
   `PINNED_EXECUTION_CONTRACT_DIGEST` (сверки `:399`, `:404`) — оба значения меняются.
-- `tests/pipeline/test_corpus_phase_boundary.py:153-162`,
+- `tests/pipeline/test_corpus_phase_boundary.py:153-163`,
   `tests/pipeline/test_document_levels.py:574-585` — вызывают
   `_derive_partition_build_id(**явные kwargs)`; новый обязательный аргумент → `TypeError`.
-- `tests/pipeline/test_corpus.py:933-947` — перечень вариантов чувствительности `pb`
+- `tests/pipeline/test_corpus.py:934-948` — перечень вариантов чувствительности `pb`
   (подмножество параметров проходит, но перечень вариантов надо расширить).
 - `tests/selfcheck.py:793-801` (список обязательных таблиц — `run_product` в него),
   `:801-827` (ассерты по колонкам `runs`/`corpus_docs`), `:1524-1527` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml`: `reuse_kind` (`:651`), `run_scope` (`:670`), `pdf_device`
   (`:437`) есть, `embed_device` **нет**, перечня статусов продукта прогона **нет**.
-  Синхронизация обязательна: `core/domain/dictionary.py:78` `assert_dictionary_integrity`,
+  Синхронизация обязательна: `core/domain/dictionary.py:80` `assert_dictionary_integrity`,
   `required`-список (`:144` `reuse_kind`), `checks`-таблица (`:162`); словарь грузится
   selfcheck'ом.
 
@@ -565,7 +572,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    - **словарь**: `core/domain/dictionary.py` + `docs/status-dictionary.yaml`
      (`embed_device`, статусы продукта прогона);
    - **дефекты краула 1 и 3 — одна правка, не две.** Зарядка бюджета на resume
-     (`core/pipeline/corpus.py:3277`) и дренаж уже добытого расцеплены: URL
+     (`core/pipeline/corpus.py:3286`) и дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed`, чей work-set гейтится режимом продукта
      (`_revalidation_items`, `:6612-6624`). Правило: **заряженный URL обязан быть и
@@ -607,7 +614,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
    может отличить полное измерение от среза, не заглянув в `state.db`. Сегодня
    `run_scope` не хранится нигде, кроме материала `run_id` (`core/pipeline/plan.py:94`;
    прямо зафиксировано в `core/pipeline/state_adopt.py:33`, `:117`), а `ProductPlanSet`
-   существует (`core/domain/models.py:2762`) и не персистится ни разу — единственное
+   существует (`core/domain/models.py:2775`) и не персистится ни разу — единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей.
 4. **Правило `❌` (часть той же полосы, `09` §11.2) — СНЯТО F3 плана 20.** Проверка рядом с
@@ -688,7 +695,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 Записаны здесь, чтобы вторая редакция не повторяла ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2490`, а не `:1970`; `reuse_kind` в `url_state` —
+`core/pipeline/report.py:2505`, а не `:1970`; `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:106`, а не `:93` (там комментарий); `_PARTITION_SCHEMA` —
 `core/pipeline/corpus_index.py:48`; `composition.py` исключён из состава (§8);
 «`embed_device` в `extra` **и** в корне» — одно место, а не два (§5.1); «геттер в
@@ -725,7 +732,7 @@ per-site (`core/pipeline/crawl_frontier.py:605-610`) — два уровня о�
 
    Причина не в реализации, а в схеме: `doc_id = product:content_hash` **не различает
    уровень извлечения**, а `dv` различает — и `document_level` объявлен **per-site**
-   (`core/pipeline/crawl_frontier.py:605-610`), то есть два уровня в одном прогоне законны.
+   (`core/pipeline/crawl_frontier.py:636-641`), то есть два уровня в одном прогоне законны.
    Вторая версия терялась бы молча, и evidence, цитирующий её, получал бы «наблюдение не
    записано» — ложное утверждение о прогоне. Носитель — производная таблица
    `corpus_doc_version(doc_version_id PK, product_id, doc_id)`: одна версия → один документ,

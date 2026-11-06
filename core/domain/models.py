@@ -31,6 +31,7 @@ from core.domain.enums import (
     DenialStrength,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     EndpointKind,
     EvidenceState,
     EvidenceType,
@@ -54,6 +55,7 @@ from core.domain.enums import (
     ProductMode,
     ProductScope,
     RankingPolicy,
+    ReasoningEffort,
     RefreshPolicy,
     Relationship,
     ReuseKind,
@@ -510,20 +512,24 @@ def canonical_rate_limit(spec: RateLimitSpec | None) -> str | None:
 
 
 class EmbedRunConfig(BaseModel):
-    """``run.yaml`` → секция ``embed``: run-слой устройства эмбеддера (``embed.device``).
+    """``run.yaml`` → секция ``embed``: run-слой осей эмбеддера (``device``/``precision``).
 
-    ``device`` — ``None`` = не задано на этом слое: резолв берёт app-дефолт ``cpu``. Не
-    ``cpu`` по умолчанию — по той же причине, что у ``CrawlRunConfig.pdf_device``: дефолт
-    run-слоя перекрыл бы app-слой в цепочке ``_pick``, и объявленный
-    ``deploy.yaml:embed.device`` молча не действовал бы (R5).
+    Оба поля — ``None`` = не задано на этом слое: резолв берёт app-дефолт (``cpu`` /
+    ``fp32``). Не ``cpu``/``fp32`` по умолчанию — по той же причине, что у
+    ``CrawlRunConfig.pdf_device``: дефолт run-слоя перекрыл бы app-слой в цепочке
+    ``_pick``, и объявленный ``deploy.yaml:embed.*`` молча не действовал бы (R5).
 
-    Per-site слоя нет: устройство — свойство **хоста исполнения**, а не сайта (тот же
-    довод, что в :func:`core.pipeline.crawl_frontier.resolve_pdf_device`).
+    Per-site слоя нет: и устройство, и точность — свойства **хоста исполнения** и его
+    стека, а не сайта (тот же довод, что в
+    :func:`core.pipeline.crawl_frontier.resolve_pdf_device`).
     """
 
     model_config = _BASE
 
     device: EmbedDevice | None = None
+    #: Точность счёта (ось ``embed.precision``). Механизм исполнения — ``torch.autocast``
+    #: объявленного устройства; эмбеддер, который её не исполняет, не выбирается вовсе.
+    precision: EmbedPrecision | None = None
 
 
 class CrawlRunConfig(BaseModel):
@@ -718,6 +724,13 @@ class RunConfig(BaseModel):
     #: ``core.config`` (матрица слоёв 01 §1); допустимые значения валидирует
     #: composition root (:func:`core.config.deploy.resolve_llm_slot`).
     llm_slot: str | None = None
+    #: §7.4 (решение владельца 06.11.2026): усилие рассуждения оценщика на run-слое.
+    #: Цепочка резолва — ``--llm-reasoning-effort`` (CLI) > этот ключ >
+    #: ``deploy.llm.<slot>.reasoning_effort``; она **одна** для контракта и рантайма
+    #: (:func:`core.cli.wiring.resolve_evaluator_reasoning_effort`), иначе манифест
+    #: объявлял бы уровень, с которым модель не работала. ``None`` — не объявлено на
+    #: этом слое: параметр не отправляется, и это отличимо от объявленного ``off``.
+    llm_reasoning_effort: ReasoningEffort | None = None
     # §6/B-1 (v2.1): калибруемый порог неразличимости ранжирования (доля диапазона
     # агрегата); ``None`` → 0.0. Идёт в манифест с provenance (A3).
     ranking_epsilon: float | None = None

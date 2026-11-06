@@ -28,6 +28,7 @@ from core.domain import (
     Importance,
     LLMCellOutput,
     LLMEvidence,
+    ReasoningEffort,
     RunConfig,
     RunManifest,
     RunMode,
@@ -670,6 +671,34 @@ def test_methodological_conditions_change_busts_key_on_evaluate(
 
     assert len(evaluator.calls) == 2
     assert cache.stats()["hits"] == 0
+
+
+def test_reasoning_effort_change_busts_key(tmp_path: Path) -> None:
+    """§7.4: уровень рассуждения — условие ответа, а не провенанс рядом с ключом.
+
+    Тот же промпт при ``off`` и ``high`` даёт разные формулировки и разный расход
+    токенов; без поля в ``echo`` кэш отдал бы ответ ``high`` как ответ ``off``.
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    cache = EvalVerdictCache(tmp_path / "cache")
+
+    _evaluate(data, evaluator, cache)
+    evaluator.reasoning_effort = ReasoningEffort.HIGH
+    _evaluate(data, evaluator, cache)
+
+    assert len(evaluator.calls) == 2
+    assert cache.stats()["hits"] == 0
+
+
+def test_reasoning_effort_is_part_of_the_key_echo() -> None:
+    """Поле входит в материал ключа: ``off`` (объявлено) и ``None`` (не объявлено) различимы."""
+    assert build_eval_key(_echo(reasoning_effort="off")) != build_eval_key(
+        _echo(reasoning_effort=None)
+    )
+    assert build_eval_key(_echo(reasoning_effort="high")) != build_eval_key(
+        _echo(reasoning_effort="low")
+    )
 
 
 def test_catalog_row_change_busts_key_with_equal_prompt(tmp_path: Path) -> None:

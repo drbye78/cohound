@@ -24,7 +24,7 @@ from core.adapters.llm_local import (
     EvaluatorUnavailable,
     LocalEvaluator,
 )
-from core.domain import LLMCellOutput, Status
+from core.domain import LLMCellOutput, ReasoningEffort, Status
 from core.ports.llm import LLMRequest, TokenUsage
 from core.util.hashing import content_hash
 
@@ -480,3 +480,136 @@ def test_invalid_json_error_carries_raw_response() -> None:
 # ---------------------------------------------------------------------------
 
 
+
+
+# ---------------------------------------------------------------------------
+# Усилие рассуждения (ось ``llm.reasoning_effort``): провод и провенанс
+# ---------------------------------------------------------------------------
+
+
+def _capture_payload(body: dict[str, Any] | None = None) -> Any:
+    """Перехватывает тело запроса; возвращает функцию-обработчик и хранилище."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: Any) -> Any:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=body or _http_body())
+
+    return handler, captured
+
+
+def test_reasoning_effort_of_deepseek_reaches_the_request_body() -> None:
+    """Объявленный уровень едет в теле запроса — провод, а не только метка манифеста."""
+    handler, captured = _capture_payload()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(side_effect=handler)
+        LocalEvaluator(
+            base_url="http://localhost:8000",
+            model_id="deepseek-v4.1-flash-1017:yellow",
+            reasoning_effort="high",
+        ).complete(_req(model_id="deepseek-v4.1-flash-1017:yellow"))
+
+    assert captured["reasoning_effort"] == "high"
+
+
+def test_reasoning_effort_off_is_absence_of_the_parameter() -> None:
+    """``off`` — объявленное «не просим»: параметра нет, и это отличимо от ``None``."""
+    handler, captured = _capture_payload()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(side_effect=handler)
+        LocalEvaluator(
+            base_url="http://localhost:8000",
+            model_id="deepseek-v4.1-flash-1017:yellow",
+            reasoning_effort="off",
+        ).complete(_req(model_id="deepseek-v4.1-flash-1017:yellow"))
+
+    assert "reasoning_effort" not in captured
+
+
+def test_request_effort_overrides_adapter_default() -> None:
+    """``req.reasoning_effort`` сильнее поля адаптера (одна цепочка с контрактом)."""
+    handler, captured = _capture_payload()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(side_effect=handler)
+        LocalEvaluator(
+            base_url="http://localhost:8000",
+            model_id="deepseek-v4.1-flash-1017:yellow",
+            reasoning_effort="low",
+        ).complete(
+            _req(
+                model_id="deepseek-v4.1-flash-1017:yellow",
+                reasoning_effort=ReasoningEffort.MEDIUM,
+            )
+        )
+
+    assert captured["reasoning_effort"] == "medium"
+
+
+def test_unexpressible_effort_is_refused_before_the_request() -> None:
+    """Уровень, ключ которого для семейства не подтверждён, — отказ **до** отправки.
+
+    ``qwen``/``glm`` названы в таблице, но механизм не подтверждён замером; неизвестное
+    семейство тоже отказ. Выдуманный ключ объявил бы уровень, которого модель не получала.
+    """
+    for model_id in ("qwen-max", "glm-4.5", "llama-3-70b"):
+        with respx.mock(assert_all_called=False) as mock:
+            route = mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=_http_body()))
+            with pytest.raises(module.ReasoningWireUnsupported) as excinfo:
+                LocalEvaluator(
+                    base_url="http://localhost:8000", model_id=model_id
+                ).complete(
+                    _req(model_id=model_id, reasoning_effort=ReasoningEffort.HIGH)
+                )
+            assert not route.called  # запрос не ушёл
+        assert model_id in str(excinfo.value)
+
+
+def test_off_is_expressible_for_any_family() -> None:
+    """``off`` — отсутствие параметра: он не требует знания механизма семейства."""
+    assert module.reasoning_wire("qwen-max", ReasoningEffort.OFF) == {}
+    assert module.reasoning_wire("unknown-model", ReasoningEffort.OFF) == {}
+    assert module.reasoning_wire("deepseek-x", ReasoningEffort.OFF) == {}
+    assert module.reasoning_wire("deepseek-x", ReasoningEffort.LOW) == {
+        "reasoning_effort": "low"
+    }
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        # OI-совместимая форма.
+        {"prompt_tokens": 10, "completion_tokens": 50,
+         "completion_tokens_details": {"reasoning_tokens": 30}},
+        # Плоское поле части совместимых серверов.
+        {"prompt_tokens": 10, "completion_tokens": 50, "completion_thinking_tokens": 30},
+    ],
+)
+def test_reasoning_tokens_are_parsed_from_both_provider_forms(usage: dict[str, Any]) -> None:
+    """Токены рассуждения — отдельная статья расхода (провенанс, не ``run_id``)."""
+    body = _http_body(usage={"prompt_tokens": usage["prompt_tokens"],
+                             "completion_tokens": usage["completion_tokens"]})
+    body["usage"] = usage
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=body))
+        resp = LocalEvaluator(base_url="http://localhost:8000").complete(_req())
+
+    assert resp.usage.reasoning_tokens == 30
+    assert resp.usage.completion_tokens == 50  # не прибавлены к completion повторно
+
+
+def test_reasoning_content_is_exposed_and_counted() -> None:
+    """``message.reasoning_content`` — провенанс ответа; расход виден в ``usage_summary``."""
+    body = _http_body()
+    body["choices"][0]["message"]["reasoning_content"] = "думал так"
+    body["usage"] = {
+        "prompt_tokens": 5,
+        "completion_tokens": 9,
+        "completion_tokens_details": {"reasoning_tokens": 4},
+    }
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=body))
+        ev = LocalEvaluator(base_url="http://localhost:8000")
+        resp = ev.complete(_req())
+
+    assert resp.reasoning == "думал так"
+    assert ev.usage_summary()["tokens"] == {"prompt": 5, "completion": 9, "reasoning": 4}

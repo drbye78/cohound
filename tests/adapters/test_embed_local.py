@@ -23,6 +23,7 @@ from core.adapters.embed_local import (
     DEFAULT_DEVICE,
     DEFAULT_DIM,
     DEFAULT_MODEL_ID,
+    DEFAULT_PRECISION,
     EmbedderUnavailable,
     LocalEmbedder,
 )
@@ -298,3 +299,77 @@ def test_embed_fn_seam_ignores_device(monkeypatch: pytest.MonkeyPatch) -> None:
     emb = LocalEmbedder(_fn, dim=2, device="cuda")
     assert emb.embed(["a", "b"]) == [[1.0, 0.0], [1.0, 0.0]]
     assert calls == [["a", "b"]]
+
+
+# ---------------------------------------------------------------------------
+# Точность (ось ``embed.precision``): объявленное значение доезжает до провода
+# ---------------------------------------------------------------------------
+
+
+def _fake_torch_module() -> tuple[types.ModuleType, list[dict[str, Any]]]:
+    """Поддельный ``torch``: журнал входов ``autocast`` (тяжёлая зависимость не нужна)."""
+    calls: list[dict[str, Any]] = []
+
+    class _Autocast:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    fake = types.ModuleType("torch")
+    fake.autocast = lambda **kwargs: _Autocast(**kwargs)  # type: ignore[attr-defined]
+    fake.float16 = "float16-sentinel"  # type: ignore[attr-defined]
+    return fake, calls
+
+
+def test_precision_defaults_to_declared_fp32() -> None:
+    """Точность — объявленная ось: дефолт ``fp32`` (поведение до оси, байт-в-байт)."""
+    assert DEFAULT_PRECISION == "fp32"
+    assert LocalEmbedder().precision == "fp32"
+
+
+def test_invalid_precision_is_refused() -> None:
+    """Третьего значения нет (``auto``/``bf16`` отвергнуты замером) — отказ, не подмена."""
+    with pytest.raises(ValueError, match="precision"):
+        LocalEmbedder(precision="bf16")
+    with pytest.raises(ValueError, match="precision"):
+        LocalEmbedder(precision="auto")
+
+
+def test_fp16_reaches_the_wire_as_autocast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``fp16`` исполняется ``torch.autocast`` объявленного устройства (замер 06.11.2026).
+
+    Провод — не метка в манифесте, а именно контекст счёта: без него ``embed_precision``
+    назвал бы точность, которой векторы не считались (A3).
+    """
+    torch_fake, autocast_calls = _fake_torch_module()
+    monkeypatch.setitem(sys.modules, "torch", torch_fake)
+    fake, instances = _fake_st_module(dim=2)
+    monkeypatch.setattr(module, "_sentence_transformers_available", lambda: True)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+    emb = LocalEmbedder(model_id="test/model", dim=2, device="cuda", precision="fp16")
+    out = emb.embed(["a", "bb"])
+
+    assert autocast_calls == [{"device_type": "cuda", "dtype": "float16-sentinel"}]
+    assert instances[0].encode_calls[0]["batch"] == ["a", "bb"]
+    assert len(out) == 2 and all(len(vec) == 2 for vec in out)
+
+
+def test_fp32_does_not_enter_autocast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``fp32`` — прежний путь: никакого autocast, те же вызовы ``encode``."""
+    torch_fake, autocast_calls = _fake_torch_module()
+    monkeypatch.setitem(sys.modules, "torch", torch_fake)
+    fake, instances = _fake_st_module(dim=2)
+    monkeypatch.setattr(module, "_sentence_transformers_available", lambda: True)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+    emb = LocalEmbedder(model_id="test/model", dim=2, precision="fp32")
+    emb.embed(["a"])
+
+    assert autocast_calls == []
+    assert instances[0].encode_calls[0]["normalize_embeddings"] is True

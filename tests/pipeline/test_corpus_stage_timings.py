@@ -72,10 +72,18 @@ CHILD_B = "https://docs.test/b"
 #: Переснято ещё раз планом 19 (P1, 04.11.2026): в контракт вошёл
 #: ``crawl_policy_digest`` (эффективная поверхность решений политики краула), полей
 #: стало 30. Это та же природа: новый объявленный вход меняет ``run_id``.
-PINNED_PARTITION_BUILD_ID = "pb_73f6be9e1dd88a028814154a"
+#:
+#: Переснято 06.11.2026 осью ``embed.precision`` (решение владельца, ``fp16``): материал
+#: ``pb`` получил ``embed_precision`` и схему ``partition-3``, поэтому ``pb`` и
+#: ``index_build_id`` (он собирается из ``pb``) сдвинулись; ``EXECUTION_CONTRACT_FIELDS``
+#: вырос до 32 полей — поэтому сдвинулся и синтетический
+#: ``execution_contract_digest``. ``content_digest`` **не** изменился: точность —
+#: условие счёта векторов, а не содержимого чанков. Это снова объявленная смена
+#: идентичности (``execution_change``), а не дрейф инструментирования.
+PINNED_PARTITION_BUILD_ID = "pb_b633e90996b4f36fd2a6b6e9"
 PINNED_CONTENT_DIGEST = "f26d9da9face8cc0662b9b6d"
-PINNED_INDEX_BUILD_ID = "cb_2b5c9399f9e69bf2d08d092f"
-PINNED_EXECUTION_CONTRACT_DIGEST = "b8b831c8c06eb886c8d8df02"
+PINNED_INDEX_BUILD_ID = "cb_197ae68483e35f9d8f3ce976"
+PINNED_EXECUTION_CONTRACT_DIGEST = "668225494775d76549a4c65f"
 
 #: Поля, которые обязана нести строка продукта (``product_end``) и её Pass B-продолжение.
 CRAWL_BUCKETS = ("fetch_wait_s", "extract_wait_s", "chunk_s")
@@ -451,8 +459,9 @@ def test_build_failure_still_reports_build_s() -> None:
         package_id=PACKAGE,
         chunker_version="chunker-1",
         embed_model_id="fake-embedder-1",
-        # 16 §5.1: устройство счёта — обязательный keyword (дефолт объявленной оси).
+        # 16 §5.1: устройство и точность счёта — обязательные keywords (дефолты осей).
         embed_device="cpu",
+        embed_precision="fp32",
         extractor_version="extractor-1",
         lexical_engine_version="fake-bm25-1",
         vector_store="fake",
@@ -487,8 +496,9 @@ def test_embed_failure_still_reports_embed_s() -> None:
         package_id=PACKAGE,
         chunker_version="chunker-1",
         embed_model_id="fake-embedder-1",
-        # 16 §5.1: устройство счёта — обязательный keyword (дефолт объявленной оси).
+        # 16 §5.1: устройство и точность счёта — обязательные keywords (дефолты осей).
         embed_device="cpu",
+        embed_precision="fp32",
         extractor_version="extractor-1",
         lexical_engine_version="fake-bm25-1",
         vector_store="fake",

@@ -5,7 +5,7 @@
     index_store/{package}/{build}/{product_id}/
       vectors.fp16.npy      # float16, shape (N, dim)
       chunk_ids.jsonl       # строка i ↔ chunk_id [+ content_hash] (порядок строк = порядок векторов)
-      manifest.json         # embed_model_id, embed_device, dim, chunker_version, stats
+      manifest.json         # embed_model_id, embed_device, embed_precision, dim, chunker_version, stats
     index_store/{package}/_compositions/{composition_id}.json
                           # манифест композиции партиций (09 §8.2), не сборка
 

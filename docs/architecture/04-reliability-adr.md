@@ -330,13 +330,13 @@ tests/
   одним замером; мера (`.npy`-шарды) есть: `core/adapters/vector_npy.py:247`.
 - ANN-альтернатива — ❔ не проверено — условие срабатывания (`brute-force p95 вне бюджета` /
   партиция не влезает в RAM) не измерено; ANN-адаптера нет.
-- эмбеддинги на CPU — ✅ сделано — батчевый путь реализован: `core/adapters/embed_local.py:158`
+- эмбеддинги на CPU — ✅ сделано — батчевый путь реализован: `core/adapters/embed_local.py:192`
   (нарезка входа `batch_size`); цена в часах опубликована
   (`docs/reports/measurements/2026-10-25-embedding-throughput.md`: 8.2–9.4 ч на корпус).
 - массовая запись в SQLite — ✅ сделано — `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:21`)
   и одна транзакция на пачку 200 (`core/store/sqlite_store.py:92`, `save_cells_batch` `:602`).
 - search-адаптер latency/стоимость — ✅ сделано — бюджет фазы объявляется и проверяется
-  (`core/pipeline/corpus.py:1183`, безлимит запрещён `:1234-1237`), кэш — `core/util/cache.py:133`.
+  (`core/pipeline/corpus.py:1184`, безлимит запрещён `:1234-1237`), кэш — `core/util/cache.py:133`.
 
 ### D.1. Память и OOM
 
@@ -536,7 +536,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 - формат импорт-графа CI (статический анализ импортов `core.*`) — ✅ сделано (`tests/selfcheck.py:982-1024`
   `_import_graph`, AST по `core.*`, вызов `:354`; тот же шаг в CI — `scripts/ci.sh:39`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
-  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1225` и `:1367`; производитель
+  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1238` и `:1367`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);
 - версионирование prompt-шаблонов (по файлам? по hash?) — ✅ сделано **по файлам**:
   `core/pipeline/prompt.py:117` (`TEMPLATE_VERSION = "evaluator_v5"`), `templates/{version}.txt`,
@@ -547,7 +547,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 - стратегия бэкапа/восстановления прогона — ✅ сделано (`core/store/backup.py:173` `backup_run`,
   `:211` `restore_run`; снапшот через `sqlite3.Connection.backup`, не копирование файла);
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
-  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:2674`; маркер
+  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:2689`; маркер
   `NOT_FOR_PUBLICATION` — `:149`; профиль публикуемости `outputs/publishability.yaml` — `:266`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через

@@ -12,7 +12,8 @@
 вектор кладётся на диск под ключом :func:`embed_cache_key` и переиспользуется следующим
 прогоном **почанково**.
 
-**Ключ — ``(content_hash текста чанка, embed_model_id, embed_device)`` и только он.** В ключ
+**Ключ — ``(content_hash текста чанка, embed_model_id, embed_device, embed_precision)`` и
+только он.** В ключ
 намеренно **не** входят ``extractor_version``/``chunker_version``/``chunk_id``/``product_id``:
 вектор — функция текста, модели и места счёта, а не истории происхождения этого текста. Если
 текст чанка совпал байт-в-байт (тот же ``content_hash``), то и вектор совпадает, каким бы
@@ -34,7 +35,15 @@
 значило бы выдать догадку за измерение, поэтому они — **промах** (первый прогон после
 появления оси пере-эмбеддит корпус; цена названа в 16 §5.3).
 
-**Раскладка.** ``{root}/{model_dir}/{embed_device}/{content_hash[:2]}/{content_hash}.vec`` —
+**``embed_precision`` в ключе — по той же причине, что устройство.** fp32- и fp16-векторы
+одной модели на одном устройстве — **разные числа** (замер 06.11.2026: худший чанк
+``1−cos = 8.3e-05``, top-10 соседей 0.998). Без точности в ключе прогон, объявивший fp16,
+молча получил бы fp32-векторы из кэша (и наоборот), то есть ось действовала бы везде,
+кроме счёта. Записи формата 1 точности не несут — по A3 приписать им ``fp32`` было бы
+догадкой, поэтому они — промах (формат конверта поднят до 2).
+
+**Раскладка.** ``{root}/{model_dir}/{embed_device}/{embed_precision}/{content_hash[:2]}/
+{content_hash}.vec`` —
 без центрального индекса и без блокировок: путь выводится из ключа, поэтому разные процессы
 пишут в разные файлы, а совпадающие ключи дают идентичное содержимое. Каталог модели —
 :func:`model_dir_name` (безопасный префикс + короткий хеш полного ``embed_model_id``):
@@ -63,12 +72,13 @@
 float32/float64: кэш не имеет права менять измеряемое содержимое партиции.
 
 **Промах — не ошибка.** Отсутствие файла, битый/нечитаемый заголовок, несовпадение версии
-формата, ``content_hash``/``embed_model_id``/``embed_device``/``dim`` с запросом, неверная
-длина payload, нечисловые (``NaN``/``inf``) компоненты — всё это **промах** (считается в
-:meth:`EmbedCache.stats`), а не исключение: устаревшая или повреждённая запись не должна
-ломать прогон, но и не должна обслуживаться. Проверка ``dim`` защищает от подмены файла
-вектором другой размерности (такой хит дал бы матрицу неверной формы и упал бы уже в
-сборщике), проверка ``embed_device`` — от подмены/переноса записи между устройствами.
+формата, ``content_hash``/``embed_model_id``/``embed_device``/``embed_precision``/``dim`` с
+запросом, неверная длина payload, нечисловые (``NaN``/``inf``) компоненты — всё это
+**промах** (считается в :meth:`EmbedCache.stats`), а не исключение: устаревшая или
+повреждённая запись не должна ломать прогон, но и не должна обслуживаться. Проверка ``dim``
+защищает от подмены файла вектором другой размерности (такой хит дал бы матрицу неверной
+формы и упал бы уже в сборщике), проверки ``embed_device``/``embed_precision`` — от
+подмены/переноса записи между устройствами и точностями.
 
 **Бюджет диска.** ``max_bytes`` — суммарный размер ``*.vec`` под ``root``; когда объём
 превышает бюджет, самые старые по ``mtime`` записи удаляются, пока сумма не вернётся в
@@ -113,7 +123,12 @@ __all__ = [
 
 #: Версия формата конверта. Входит в заголовок: будущая ревизия схемы не будет обслужена
 #: старым читателем (для него это промах), поэтому несовместимая запись безопасна.
-ENVELOPE_FORMAT = 1
+#:
+#: ``2`` — в заголовок добавлена ``embed_precision`` (ось ``embed.precision``,
+#: решение владельца 06.11.2026). Записи формата 1 точности не несут, и приписать им
+#: ``fp32`` значило бы выдать догадку за измерение (A3): они — промах, первый прогон
+#: после появления оси пере-эмбеддит корпус.
+ENVELOPE_FORMAT = 2
 
 #: Расширение файла записи. Не ``.json``: payload бинарный (fp16), и расширение честно
 #: говорит, что читать это как JSON нельзя.
@@ -134,10 +149,11 @@ KEY_SEP = "\x1f"
 #: ``..`` и прочие пути-ловушки: ключ — имя файла, а не произвольная строка.
 _HASH_CHARS = frozenset("0123456789abcdefABCDEF")
 
-#: Устройство счёта — короткая метка, годная как сегмент пути (``cpu``/``cuda``).
-#: Шаблон, а не перечень значений: перечень — доменное знание (``EmbedDevice``), а модуль
-#: обязан оставаться категорийно-нейтральным и не знать о нём.
-_DEVICE_RE = re.compile(r"[A-Za-z0-9._:-]{1,32}")
+#: Устройство/точность счёта — короткая метка, годная как сегмент пути
+#: (``cpu``/``cuda``, ``fp32``/``fp16``). Шаблон, а не перечень значений: перечень —
+#: доменное знание (``EmbedDevice``/``EmbedPrecision``), а модуль обязан оставаться
+#: категорийно-нейтральным и не знать о них.
+_LABEL_RE = re.compile(r"[A-Za-z0-9._:-]{1,32}")
 
 #: Минимальная длина ключа: два символа нужны для шарда ``content_hash[:2]``.
 _MIN_KEY_LEN = 2
@@ -147,16 +163,25 @@ _MIN_KEY_LEN = 2
 _MODEL_DIR_MAX = 48
 
 
-def embed_cache_key(content_hash: str, embed_model_id: str, embed_device: str) -> str:
-    """Ключ записи кэша: ``content_hash`` текста чанка + модель + устройство счёта.
+def embed_cache_key(
+    content_hash: str,
+    embed_model_id: str,
+    embed_device: str,
+    embed_precision: str,
+) -> str:
+    """Ключ записи кэша: текст чанка + модель + устройство + точность счёта.
 
-    Все три компоненты обязательны. Возвращается склейка через :data:`KEY_SEP` — она же
+    Все четыре компоненты обязательны. Возвращается склейка через :data:`KEY_SEP` — она же
     используется как материал для диагностики. В ключ **не** входят версии
-    экстрактора/чанкера: вектор зависит от текста, модели и места счёта, а не от того,
-    каким движком текст получен (см. модульный docstring). Устройство входит потому, что
-    CPU- и CUDA-векторы одной модели — разные числа, а не разные сведения о них.
+    экстрактора/чанкера: вектор зависит от текста, модели, места и точности счёта, а не от
+    того, каким движком текст получен (см. модульный docstring). Устройство и точность
+    входят потому, что CPU/CUDA- и fp32/fp16-векторы одной модели — **разные числа**, а не
+    разные сведения о них.
     """
-    return f"{content_hash}{KEY_SEP}{embed_model_id}{KEY_SEP}{embed_device}"
+    return (
+        f"{content_hash}{KEY_SEP}{embed_model_id}{KEY_SEP}{embed_device}"
+        f"{KEY_SEP}{embed_precision}"
+    )
 
 
 def model_dir_name(embed_model_id: str) -> str:
@@ -179,11 +204,11 @@ def _valid_key(content_hash: Any) -> bool:
     return all(char in _HASH_CHARS for char in content_hash)
 
 
-def _valid_device(embed_device: Any) -> bool:
-    """Устройство пригодно как компонент ключа: короткая метка, а не символы пути."""
-    if not isinstance(embed_device, str) or _DEVICE_RE.fullmatch(embed_device) is None:
+def _valid_label(label: Any) -> bool:
+    """Устройство/точность пригодны как компонент ключа: короткая метка, не символы пути."""
+    if not isinstance(label, str) or _LABEL_RE.fullmatch(label) is None:
         return False
-    return embed_device not in {".", ".."}
+    return label not in {".", ".."}
 
 
 def _half(value: Any) -> float:
@@ -295,14 +320,15 @@ class EmbedCache:
         embed_model_id: str,
         *,
         embed_device: str,
+        embed_precision: str,
         dim: int | None = None,
     ) -> list[float] | None:
         """Вектор из кэша или ``None`` (промах).
 
         Промах — отсутствие файла, битая/несовместимая запись, несовпадение любого
-        элемента ключа (``content_hash``/``embed_model_id``/``embed_device``) и
-        несовпадение ``dim`` (вектор другой размерности несовместим с текущей моделью).
-        Ни один случай не бросает исключение.
+        элемента ключа (``content_hash``/``embed_model_id``/``embed_device``/
+        ``embed_precision``) и несовпадение ``dim`` (вектор другой размерности
+        несовместим с текущей моделью). Ни один случай не бросает исключение.
 
         :param content_hash: ``content_hash`` **текста** чанка (``CorpusChunk.content_hash``).
         :param embed_model_id: идентификатор модели, посчитавшей вектор (``EmbedderPort.model_id``).
@@ -310,6 +336,10 @@ class EmbedCache:
             Обязателен и только по имени: устройство — часть значения, а не удобный дефолт.
             Запись, созданная без объявленного устройства (старый кэш), — **промах**:
             приписать ей ``cuda`` было бы догадкой.
+        :param embed_precision: точность, с которой посчитан вектор (``fp32``/``fp16``,
+            объявленная ось прогона). Обязательна и только по имени: fp32- и fp16-векторы
+            — разные числа, поэтому запись, созданная без объявленной точности (формат 1),
+            — **промах**, а не догадка о ней.
         :param dim: ожидаемая размерность; ``None`` — не проверять.
 
         :returns: список ``dim`` чисел (значения — ровно те, что лежат в fp16-записи) либо
@@ -320,12 +350,15 @@ class EmbedCache:
         if (
             not _valid_key(content_hash)
             or not model_id
-            or not _valid_device(embed_device)
+            or not _valid_label(embed_device)
+            or not _valid_label(embed_precision)
         ):
             self._invalid_key += 1
             self._misses += 1
             return None
-        path = self._entry_path(content_hash, model_id, embed_device)
+        path = self._entry_path(
+            content_hash, model_id, embed_device, embed_precision
+        )
         try:
             raw = path.read_bytes()
         except FileNotFoundError:
@@ -348,6 +381,7 @@ class EmbedCache:
             envelope.get("content_hash") != content_hash
             or envelope.get("embed_model_id") != model_id
             or envelope.get("embed_device") != embed_device
+            or envelope.get("embed_precision") != embed_precision
         ):
             self._misses += 1
             return None
@@ -370,24 +404,29 @@ class EmbedCache:
         vector: Sequence[float],
         *,
         embed_device: str,
+        embed_precision: str,
         dim: int | None = None,
     ) -> None:
         """Сохраняет вектор (атомарно, без блокировок).
 
-        Невалидный ключ (в т.ч. необъявленное устройство), нечисловой/неконечный компонент,
+        Невалидный ключ (в т.ч. необъявленные устройство/точность), нечисловой/неконечный
+        компонент,
         несовпадение ``dim`` и сбой записи (нет прав, полный диск, переполнение half) —
         тихий no-op со счётчиком: кэш — оптимизация и не должен ронять прогон, а
         «не закэшировали» дешевле, чем «сохранили ложь».
 
         :param embed_device: устройство, на котором вектор посчитан; пишется в заголовок
             конверта, поэтому читатель другой оси получит промах, а не чужой вектор.
+        :param embed_precision: точность, с которой вектор посчитан; той же ролью, что
+            устройство: читатель другой точности получает промах.
         :param dim: ожидаемая размерность; ``None`` → длина ``vector``.
         """
         model_id = str(embed_model_id or "")
         if (
             not _valid_key(content_hash)
             or not model_id
-            or not _valid_device(embed_device)
+            or not _valid_label(embed_device)
+            or not _valid_label(embed_precision)
         ):
             self._invalid_key += 1
             return
@@ -415,12 +454,15 @@ class EmbedCache:
             "content_hash": content_hash,
             "embed_model_id": model_id,
             "embed_device": embed_device,
+            "embed_precision": embed_precision,
         }
         # Детерминированные байты: одинаковый вход → одинаковый файл (diff/аудит).
         header = json.dumps(
             envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
-        path = self._entry_path(content_hash, model_id, embed_device)
+        path = self._entry_path(
+            content_hash, model_id, embed_device, embed_precision
+        )
         payload = header + b"\n" + body
         if self._write_atomic(path, payload, content_hash) is None:
             return
@@ -562,20 +604,26 @@ class EmbedCache:
     # ------------------------------------------------------------------ #
 
     def _entry_path(
-        self, content_hash: str, embed_model_id: str, embed_device: str
+        self,
+        content_hash: str,
+        embed_model_id: str,
+        embed_device: str,
+        embed_precision: str,
     ) -> Path:
-        """Путь записи: ``{root}/{каталог модели}/{устройство}/{hash[:2]}/{hash}.vec``.
+        """Путь записи: ``{root}/{модель}/{устройство}/{точность}/{hash[:2]}/{hash}.vec``.
 
         Каталог модели разделяет физически: векторы разных моделей несравнимы, и общий
         каталог заставлял бы читателя проверять модель, чтобы не обслужить чужой вектор.
-        Сегмент устройства делает то же для оси ``embed_device``: векторы CPU и CUDA —
-        разные числа под одним ключом, и общий путь означал бы, что записи двух осей
-        перезаписывают друг друга (каждый второй прогон платил бы полный эмбеддинг).
+        Сегменты устройства и точности делают то же для осей ``embed_device``/
+        ``embed_precision``: CPU/CUDA- и fp32/fp16-векторы — разные числа под одним ключом,
+        и общий путь означал бы, что записи двух исполнений перезаписывают друг друга
+        (каждый второй прогон платил бы полный эмбеддинг).
         """
         return (
             self._root
             / model_dir_name(embed_model_id)
             / embed_device
+            / embed_precision
             / content_hash[:2]
             / f"{content_hash}{SUFFIX}"
         )

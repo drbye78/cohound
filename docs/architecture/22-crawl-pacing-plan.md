@@ -8,7 +8,7 @@
 
 ## 1. Как задан темп сейчас
 
-- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:478`).
+- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:480`).
   Резолвится цепочкой `defaults < run < profile < product < site`
   (`core/pipeline/crawl_sources.py:145-151`), едет в `FetchPlan` **на каждый URL**.
 - Примитив — не token bucket, а **резерв слота по origin**: `target = max(now, last[origin])
@@ -21,8 +21,8 @@
 - Ширина пула полосы — `max_workers` (`core/pipeline/corpus_drain.py`), число
   полос — `host_concurrency` (`core/pipeline/corpus_driver.py`). Полоса — право на **host**;
   внутри хоста резервы сериализуются лимитером.
-- `crawl_rate_limit` — одно из 31 поля `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:120`)
-  и берётся **только из `run.yaml`** (`core/cli/execution_axes.py:1030`). В
+- `crawl_rate_limit` — одно из 32 полей `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:128`)
+  и берётся **только из `run.yaml`** (`core/cli/execution_axes.py:1061`). В
   `crawl_config_digest` его нет намеренно: «вежливость не меняет состав корпуса»
   (`core/pipeline/corpus_commit.py:276-278`).
 

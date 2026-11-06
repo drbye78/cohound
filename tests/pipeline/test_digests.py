@@ -260,3 +260,18 @@ def test_execution_contract_is_sensitive_to_each_field(field: str) -> None:
     right = _contract_values()
     right[field] = "changed"
     assert execution_contract_digest(left) != execution_contract_digest(right)
+
+
+def test_embed_precision_is_a_contract_condition() -> None:
+    """``embed.precision`` — условие измерения, а не настройка вида (решение 06.11.2026).
+
+    fp16- и fp32-векторы одного текста — разные числа, поэтому смена точности меняет
+    корпус индекса и обязана менять ``run_id``: иначе два разных измерения жили бы под
+    одним именем.
+    """
+    assert "embed_precision" in EXECUTION_CONTRACT_FIELDS
+    fp32 = _contract_values()
+    fp32["embed_precision"] = "fp32"
+    fp16 = _contract_values()
+    fp16["embed_precision"] = "fp16"
+    assert execution_contract_digest(fp32) != execution_contract_digest(fp16)

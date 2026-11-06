@@ -87,7 +87,7 @@ serp_loop  → index_build contract
 
 У runtime уже есть самостоятельный тестовый контур `tests/pipeline/test_corpus_extract_pool.py`.
 Одновременно исчезнет private coupling из `core/cli/wiring.py`, где используются
-`ExtractionPool` (`wiring.py:139`), `set_worker_extractor` (`wiring.py:2146`);
+`ExtractionPool` (`wiring.py:149`), `set_worker_extractor` (`wiring.py:2278`);
 `_extract_worker` и `_run_extract` переехали в `core/pipeline/extraction_runtime.py`
 (`:441` и `:313` — волна декомпозиции; прежний адрес был в `wiring.py` на строке 2250).
 

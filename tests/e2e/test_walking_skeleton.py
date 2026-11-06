@@ -35,6 +35,7 @@ from core.domain import (
     CellState,
     CorpusChunk,
     EmbedDevice,
+    EmbedPrecision,
     LLMCellOutput,
     LLMEvidence,
     Status,
@@ -128,6 +129,10 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         # 16 §4.1: прогон не объявляет ось ``embed.device`` ⇒ действует объявленный
         # дефолт ``cpu`` (его и передаёт фаза).
         embed_device=EmbedDevice.CPU.value,
+        # То же у оси ``embed.precision``: не объявлена ⇒ дефолт ``fp32``, который
+        # передаёт фаза. Обе оси входят в ``pb`` (``partition-3``): пересчёт формулы
+        # обязан брать те же значения, что и прогон, иначе тест сравнивает разные условия.
+        embed_precision=EmbedPrecision.FP32.value,
         extractor_version=FakeExtractor.version,
         lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
         vector_store=FakeIndexBuilder.vector_store,

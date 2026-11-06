@@ -330,7 +330,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 ### Д-5. Провенанс спуска в контейнеры теряется именно тогда, когда нужен (R3)
 
 > ✅ **сделано** (A5, write-through) — наблюдение контейнера и строка члена пишутся сразу
-> за появлением (`core/pipeline/corpus_index.py:135-191`), синки подключены к спуску
+> за появлением (`core/pipeline/corpus_index.py:147-203`), синки подключены к спуску
 > (`:7498`); блок в конце фазы (`:9274-9285`) остался идемпотентной **страховкой**.
 
 `archive_observations` и `corpus_member_rows` копились в родителе на всю фазу и писались
@@ -347,7 +347,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `crawl_sessions.owner`/`heartbeat_at` в DDL
 > (`core/store/sqlite.py:328-329`), `core/pipeline/liveness.py` (свидетельство живости,
 > recovery-on-open, `interrupt_session`), heartbeat в корпусе
-> (`core/pipeline/corpus.py:1561`), `interrupted` в словаре (`core/domain/enums.py:721`).
+> (`core/pipeline/corpus.py:1562`), `interrupted` в словаре (`core/domain/enums.py:780`).
 > Остаток решения, названный К-4: это **не** lease — переназначения элемента другому
 > исполнителю нет, конфликт двух нод только виден (`owner`).
 
@@ -364,8 +364,8 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 
 > ✅ **сделано** — формула `min(floor((budget − parent_floor) / peak(level)), cpu_cap)`
 > (`core/pipeline/resources.py:542-614`), ось `extract_workers_derived`
-> (`core/pipeline/crawl_frontier.py:181`, `:497-507`), отказ при `workers=0` с называнием
-> пика и пола (`core/cli/wiring.py:2511-2537`). Явно объявленная
+> (`core/pipeline/crawl_frontier.py:183`, `:497-507`), отказ при `workers=0` с называнием
+> пика и пола (`core/cli/wiring.py:2643-2669`). Явно объявленная
 > `crawl.extract_workers` сильнее бюджета — это оставлено намеренно.
 > ✅ **расширено (2026-10-28, P9):** под `crawl.pdf_device: cuda` добавляется второе
 > слагаемое по видеопамяти — см. §5.5 и §3.4–3.6.
@@ -380,7 +380,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** — сборка движка входит в `extractor_version`:
 > `docling-doc-3:<level>/<device>/docling-<build>`, единственный источник —
 > `docling_engine_build()` (`core/adapters/extract_document.py:241-250`); тот же вызов питает
-> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:665-716`, `:1016`).
+> `extractor_stack_version()` для `run_id` (`core/cli/execution_axes.py:671-729`, `:1016`).
 > ✅ **расширено (2026-10-28, P9):** ключ различает **устройство** — без сегмента
 > `cpu`/`cuda` CUDA-прогон нашёл бы в `extract_cache` CPU-текст под тем же ключом (Д-8 в
 > новом виде). Смена устройства — `execution_change`: `run_id` меняется один раз, кэш один
@@ -476,8 +476,8 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 ### 5.2. Окно: что именно ограничено
 
 > ⬜ **не сделано** — ось `extract_window` есть только как число воркеров
-> (`crawl.extract_workers`, `core/domain/models.py:533`, выводится в
-> `core/pipeline/crawl_frontier.py:498-508`); `chunk_window` и `retrieval_window` в коде
+> (`crawl.extract_workers`, `core/domain/models.py:539`, выводится в
+> `core/pipeline/crawl_frontier.py:500-539`); `chunk_window` и `retrieval_window` в коде
 > отсутствуют (`grep -rn "chunk_window\|retrieval_window" core/` — пусто).
 
 Окно — **объявленная ось**, а не скрытая константа, и оно задаётся в артефактах, а не в
@@ -499,7 +499,7 @@ R2 выполняется, когда у каждого артефакта ес�
 
 > ⚠️ **сделано по форме, с названным остатком** — `extract` больше не ветка кода:
 > `RemoteExtractor` принимает `RawPage` с локальными байтами и передаёт артефакт, уровень и
-> устройство едут в запросе (`core/adapters/remote_extractor.py`, `core/cli/wiring.py:3143-3155`).
+> устройство едут в запросе (`core/adapters/remote_extractor.py`, `core/cli/wiring.py:3327-3339`).
 > Остаток: per-site слой уровня под `split` не резолвится (порты собираются до per-root
 > резолва) — это различие в **данных** размещения, а не в контракте порта.
 
@@ -590,8 +590,8 @@ R2 выполняется, когда у каждого артефакта ес�
 
 > ✅ **сделано** — формула реализована в `core/pipeline/resources.py:542-614`
 > (`workers_from_budget`, `peak_mb`, `parent_floor_mb` публикуются в сообщении/метриках), ось
-> `extract_workers_derived` в `core/pipeline/crawl_frontier.py:249`, `:702`;
-> `workers=0` — ошибка конфигурации (`core/cli/wiring.py:2511-2537`). `pooled`-часть
+> `extract_workers_derived` в `core/pipeline/crawl_frontier.py:251`, `:702`;
+> `workers=0` — ошибка конфигурации (`core/cli/wiring.py:2643-2669`). `pooled`-часть
 > (число как свойство пула) не реализована — пула как размещения нет.
 > ✅ **сделано (2026-10-28): второе ограничение — VRAM** (ось `crawl.pdf_device`, P9);
 > ⬜ VRAM-пик уровня `full` не измерен — см. ниже.
@@ -648,8 +648,8 @@ RTX 3050 — 1.10× при ΣVRAM 1 344 MB, то есть карта не свя
 > ✅ **сделано** (F1) — `core/pipeline/liveness.py` (`current_owner`, `owner_is_alive`,
 > `stale_reason`, `interrupt_session`, `recover_interrupted_sessions`, `Heartbeat`),
 > `crawl_sessions.owner`/`heartbeat_at` в DDL (`core/store/sqlite.py:328-329`),
-> `interrupted` в `CrawlSessionStatus` (`core/domain/enums.py:721`) и в словаре
-> (`docs/status-dictionary.yaml:531`). Терминальность — `_TERMINAL_SESSION_STATUSES`
+> `interrupted` в `CrawlSessionStatus` (`core/domain/enums.py:780`) и в словаре
+> (`docs/status-dictionary.yaml:564`). Терминальность — `_TERMINAL_SESSION_STATUSES`
 > (`core/cli/context.py`), как и предупреждает раздел.
 
 `crawl_sessions` получает `heartbeat_at` и `owner` (аддитивная миграция). **Это не
@@ -686,7 +686,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 
 > ➖ **снято** — дизайн отменён в `11` §3.1 («две фазы не нужны»: с документным токеном `pb`
 > вычислим до первой нарезки). В коде не реализован **ни один** из вариантов: `pb`
-> по-прежнему хеширует пары `(chunk_id, content_hash)` (`core/pipeline/corpus_index.py:80`,
+> по-прежнему хеширует пары `(chunk_id, content_hash)` (`core/pipeline/corpus_index.py:86`,
 > `_PARTITION_SCHEMA = "partition-2"` — `corpus_index.py:48`; `partition-1` был до границы A,
 > `3736fae`), двухфазной записи и зачистки `NULL` нет.
 >
@@ -727,7 +727,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 
 > ✅ **сделано** — `docling_engine_build()` (`core/adapters/extract_document.py:241-250`),
 > `docling_extractor_version()` (`:252-284`), один и тот же вызов в `extractor_stack`
-> (`core/cli/execution_axes.py:665-716`).
+> (`core/cli/execution_axes.py:671-729`).
 
 Пока `extractor_version` не несёт сборку движка, `extract_cache` отдаёт текст, произведённый
 другим движком, и `run_id` об этом лжёт. Два варианта, различающиеся ценой:
@@ -806,7 +806,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 > ✅ **A5 сделан** (write-through): наблюдение контейнера и строка члена пишутся сразу
 > за появлением (`core/pipeline/extract_consume.py:126-178` — синки
 > `persist_observation_sync`/`persist_member_sync`, подключены в `:1041-1042`), а блок в
-> конце фазы (`core/pipeline/corpus.py:3721-3732`) — идемпотентная **страховка**, не
+> конце фазы (`core/pipeline/corpus.py:3730-3741`) — идемпотентная **страховка**, не
 > единственная запись. Приёмка — `tests/pipeline/test_corpus_descent.py:1502`
 > (`test_kill_mid_descent_keeps_settled_member_rows`: `KeyboardInterrupt` на третьем
 > члене оставляет строки двух доведённых), `:1551` (повторный спуск не плодит строки),
@@ -881,7 +881,7 @@ SQLite-запросов, но **не** убирает O(N) чтения: `read_p
 
 > ✅ **B4 сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `core/pipeline/liveness.py`,
 > `crawl_sessions.owner`/`heartbeat_at` (`core/store/sqlite.py:328-329`), `interrupted`
-> (`core/domain/enums.py:667`), recovery-on-open (`core/pipeline/crawl_session.py:65`).
+> (`core/domain/enums.py:726`), recovery-on-open (`core/pipeline/crawl_session.py:65`).
 > ✅ **B1 сделано** (2026-10-28) — четыре операции в шве
 > (`contracts/seam/extract.schema.json`, `openapi.json`), сервис приёма и извлечения в DMZ
 > (`core/edge/extract_service.py`), клиент по артефакту
@@ -905,13 +905,13 @@ SQLite-запросов, но **не** убирает O(N) чтения: `read_p
 > `split`» требует прогона одного корпуса двумя профилями. Механизм есть, паритет не
 > измерен — и это не то же самое.
 > ✅ **B3 сделано по объявленному слою** — `level` и `device` едут в `submit` из резолва
-> app < run (`core/cli/wiring.py:3143-3155`), edge строит экстрактор по ним.
+> app < run (`core/cli/wiring.py:3327-3339`), edge строит экстрактор по ним.
 > ⚠️ **Остаток B3:** per-site слой уровня (ключ `domain_profiles.yaml`) под `split` **не
 > действует** — порты собираются до per-root резолва, а фабрика прокси не знает ключа
 > пула. То же ограничение, что у `pdf_pipeline`. Честный фикс — фабрика прокси по ключу
 > `(level, pipeline, window)`, отдельная работа.
 > ➖ **B5 снят как работа, но не заменён реализацией** — дизайн двух фаз отменён в `11` §3.1;
-> документного токена `pb` в коде нет (`core/pipeline/corpus_index.py:80`).
+> документного токена `pb` в коде нет (`core/pipeline/corpus_index.py:86`).
 > ⬜ **B6 не сделано** — общего носителя артефактов нет; `pooled` не существует как размещение.
 > ⚠️ **`extract_cache` под `split` остаётся write-only** (не регресс): проба ключа берёт
 > идентичность прокси, а запись — идентичность edge, которую нельзя узнать без извлечения.
@@ -979,16 +979,16 @@ B1 включает B2 (без идентичности нет паритета)
 | 8.4 | `chunk_window` — **документ + две фазы**; коммутативный аккумулятор токена отклонён | §5.7, B5 |
 
 > ✅ **8.2 сделано** — `interrupted` в словаре и enum'е, `_TERMINAL_SESSION_STATUSES`,
-> recovery-on-open (`core/domain/enums.py:721`, `core/pipeline/liveness.py`).
+> recovery-on-open (`core/domain/enums.py:780`, `core/pipeline/liveness.py`).
 > ⬜ **8.1 не сделано** — M1 (передача артефакта чанками) не реализована: `contracts/seam/`
 > не содержит `extract/*`; модели M2/M3 остаются отклонёнными (➖).
 > ✅ **8.3 сделано** (под `local`) — профиль домена читается резолвером
 > (`core/config/domain_profiles.py:100`; цепочка app < run < site в
-> `core/pipeline/crawl_frontier.py:672-680`), `document_level` входит в `CrawlLimits.as_dict`
+> `core/pipeline/crawl_frontier.py:703-711`), `document_level` входит в `CrawlLimits.as_dict`
 > (`:379`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
 > ключ профиля плюс `__default__` (`core/pipeline/report.py:707-712`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
-> (`core/pipeline/corpus.py:2218,6575,7021`). Открытым остаётся **другой** пункт: под `split`
+> (`core/pipeline/corpus.py:2227,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.
 > ➖ **8.4 снято** — `11` §3.1 отменяет две фазы; реализация любого варианта отсутствует.
 

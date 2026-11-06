@@ -73,6 +73,16 @@ crawl:
 # `LiteEmbedder` (model2vec, NumPy/CPU by design) исключается с видимой заметкой.
 embed:
   device: cuda
+  # Точность счёта вектора (ось `embed.precision`, `EXECUTION_CONTRACT_FIELDS`).
+  # Решение владельца 06.11.2026 — fp16. Замер
+  # `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md` (cuda, bge-m3):
+  # 15.40/13.82 чанка/с против 6.02/4.99 у fp32 (2.6×), худший чанк `1−cos` 8.3e-05,
+  # top-10 соседей 0.998, детерминизм побитовый (`max|Δ| = 0.0`). bf16 отвергнут тем же
+  # замером (`1−cos` 7.5e-04 при той же скорости), tf32 — 9.6e-05 при 1.26–1.39×.
+  # `auto` не существует (R5): объявленная точность обязана доехать до провода
+  # (`torch.autocast`), а эмбеддер, который её не исполнит (LiteEmbedder/NumPy), —
+  # отказ с числами, а не тихий fp32.
+  precision: fp16
 
 search:
   adapter: yandex              # провайдер по умолчанию (--search-adapter переопределяет)
@@ -90,10 +100,13 @@ search:
 
 # --- LLM (commodity/execution-слой; 07 §7 / 03 D.5) --------------------------
 # Две именованные слоты моделей; активная выбирается в рантайме. Оба слота указывают на
-# одну модель `deepseek-v4.1-flash:purple` — это ПРОВИЗОРНЫЕ данные (идентификатор, который
-# используется сегодня), а не решение: финальный выбор модели оценщика даёт измерение
+# одну модель `deepseek-v4.1-flash-1017:yellow` — это ПРОВИЗОРНЫЕ данные (идентификатор,
+# который используется сегодня), а не решение: финальный выбор модели оценщика даёт измерение
 # `hound experiment evaluator-benchmark` (A3). Смена model_id слота — версионная граница
 # `execution_versions` (execution_change, §13): меняется run_id, methodology_version — нет.
+# Вариант `-1017:yellow` объявлен владельцем 06.11.2026; он проверен живым вызовом
+# (модель отвечает, `usage.completion_tokens_details.reasoning_tokens` и
+# `message.reasoning_content` отдаются — иначе ось усилия было бы нечем мерить).
 # base_url пустой → слот не активен (оценщик не поднимается; llm_scenarios пуста).
 # Модели обслуживаются OI-совместимым API корпоративного облака (не self-host). Ключ — из env.
 # Env COHOUND_LLM_MODEL/_DECODER оценщиком НЕ читаются (только LLM-разведка): модель оценщика —
@@ -115,14 +128,23 @@ llm:
     # (замер моделей на одном endpoint, Д-36); в корпоративном периметре здесь
     # внутренний адрес. Секрет (api_key) остаётся в env: COHOUND_LLM_API_KEY.
     base_url: "https://plusvibeapi.ru"
-    model_id: "deepseek-v4.1-flash:purple"
+    # Решение владельца 06.11.2026: оценщик — `deepseek-v4.1-flash-1017:yellow`.
+    # Вариант модели — объявленный вход (llm_scenarios → run_id): смена варианта даёт
+    # новый run_id, старый прогон остаётся с тем, на чём считался.
+    model_id: "deepseek-v4.1-flash-1017:yellow"
     model_version: ""
     decoder: json_object      # none | json_object | json_schema
-    timeout_s: 120
-    max_tokens: 4096
+    # Решение владельца 06.11.2026: потолок 16 384. Арифметика, а не догадка: модель
+    # reasoning (thinking-токены списываются из того же потолка), замер прогона
+    # ru-pg-dbms-c2e7b860ac17 — ~1 456 completion-токенов за 16.6 с ≈ 88 ток/с, значит
+    # 16 384 токена ≈ 186 с. Таймаут ниже потолка резал бы ответ клиентом, а не сервером,
+    # и отказ выглядел бы как http_error вместо finish_reason=length. Потолок — условие
+    # измерения (в llm_scenarios), таймаут — операционный (в run_id не входит).
+    timeout_s: 300
+    max_tokens: 16384
   flagship:
     base_url: ""
-    model_id: "deepseek-v4.1-flash:purple"
+    model_id: "deepseek-v4.1-flash-1017:yellow"
     model_version: ""
     decoder: json_object
     timeout_s: 120

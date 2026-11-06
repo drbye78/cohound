@@ -94,6 +94,10 @@ class DeclaredAxesLike(Protocol):
     #: счёта — условие измерения: векторы CPU и CUDA численно разные, поэтому один
     #: ``run_id`` не может описывать оба исполнения. ``None`` — ось не передана.
     embed_device: str | None = None
+    #: 16 §4.1 (решение владельца 06.11.2026): точность счёта вектора (``fp32`` | ``fp16``)
+    #: — отдельное условие измерения, а не свойство устройства: fp16- и fp32-векторы одной
+    #: модели на одном устройстве численно разные. ``None`` — ось не передана.
+    embed_precision: str | None = None
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов. Раунд подачи
     #: добавляет документы корпуса, то есть доказательства, — это **условие измерения**,
     #: а не провенанс записи: спрятать его значило бы дать корпусу измениться без
@@ -333,6 +337,11 @@ def build_execution_contract(
         # портов, поэтому остаётся «функцией входа». ``None`` — ось не передана (чистые
         # вызовы): «не объявлено» отличимо от «объявлено ``cpu``».
         "embed_device": _declared(declared, "embed_device"),
+        # 16 §4.1: точность — тем же правом, что устройство. Объявленная ось
+        # (``deploy.yaml:embed.precision`` < ``run.yaml:embed.precision``), вычислима до
+        # сборки портов, поэтому остаётся «функцией входа». ``None`` — ось не передана
+        # (чистые вызовы): «не объявлено» отличимо от «объявлено ``fp32``».
+        "embed_precision": _declared(declared, "embed_precision"),
         "crawl_strategy": _declared(declared, "crawl_strategy"),
         "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),
         "crawl_config_digest": _declared(declared, "crawl_config_digest"),

@@ -184,6 +184,7 @@ __all__ = [
     "_acquire_package_lock",
     "_add_common",
     "_add_llm_model_flag",
+    "_add_llm_reasoning_effort_flag",
     "_add_llm_slot_flag",
     "_artifacts_payload",
     "_concise",
@@ -1924,6 +1925,13 @@ def _resolve_ports(
             # §7.4/I21: модель оценщика — объявленный вход. ``--llm-model`` питает и runtime,
             # и ``llm_scenarios`` (execution_axes) — один вход, две проекции, без расхождения.
             model_id=getattr(args, "llm_model", None),
+            # §7.4 (решение 06.11.2026): усилие рассуждения — та же цепочка и та же
+            # функция, что у контракта (:func:`resolve_evaluator_reasoning_effort`):
+            # CLI > run.yaml > поле слота.
+            reasoning_effort=getattr(args, "llm_reasoning_effort", None),
+            run_reasoning_effort=getattr(
+                getattr(inputs, "run", None), "llm_reasoning_effort", None
+            ),
         )
         if deploy_config is not None
         else None
@@ -3252,6 +3260,35 @@ def _add_llm_model_flag(parser: argparse.ArgumentParser) -> None:
         help=(
             "model_id оценщика (override deploy.llm.<slot>.model_id); входит в run_id. "
             "Env COHOUND_LLM_MODEL оценщиком не читается (только LLM-разведка)"
+        ),
+    )
+
+
+def _add_llm_reasoning_effort_flag(parser: argparse.ArgumentParser) -> None:
+    """Флаг ``--llm-reasoning-effort`` — объявленный вход идентичности (§7.4/§13).
+
+    Усилие рассуждения входит в ``llm_scenarios`` → ``execution_contract_digest`` →
+    ``run_id``: оно меняет и расход токенов, и текст ответа. Поэтому флаг питает **и**
+    runtime-оценщик (:func:`core.cli.wiring.build_evaluator_llm`), **и** таблицу
+    ``llm_scenarios`` (:func:`core.cli.execution_axes.resolve_declared_axes`) — одна
+    функция резолва на обе проекции, как у ``--llm-model``.
+
+    ``plan``/``crawl`` получают флаг наравне с ``run``: они считают тот же ``run_id``, и
+    иначе показали бы иную идентичность, чем прогон с тем же объявлением.
+    """
+    from core.domain.enums import ReasoningEffort
+
+    parser.add_argument(
+        "--llm-reasoning-effort",
+        dest="llm_reasoning_effort",
+        choices=[item.value for item in ReasoningEffort],
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "усилие рассуждения оценщика "
+            f"({', '.join(item.value for item in ReasoningEffort)}); override "
+            "run.yaml: llm_reasoning_effort и deploy.llm.<slot>.reasoning_effort. "
+            "Входит в run_id"
         ),
     )
 

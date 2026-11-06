@@ -411,8 +411,10 @@ def test_partition_build_id_does_not_depend_on_the_snapshot(tmp_path: Path) -> N
     )
     assert pb_a == pb_b
     assert pb_a.startswith("pb_")
-    # Версия формулы не менялась: снимок — провенанс, а не слагаемое.
-    assert _PARTITION_SCHEMA == "partition-2"
+    # Версия формулы не менялась снимком: он провенанс, а не слагаемое. ``partition-3``
+    # (ось ``embed.precision``, 06.11.2026) — смена **другого** слагаемого; пин остаётся,
+    # потому что он ловит случайный бамп схемы, а не потому, что снимок на неё влияет.
+    assert _PARTITION_SCHEMA == "partition-3"
 
 
 def test_split_wrapper_reads_snapshot_without_recomputing() -> None:

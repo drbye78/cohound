@@ -43,7 +43,7 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
 )
-from core.cli.main import EXIT_ERROR, EXIT_OK, main
+from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
 from core.cli.wiring import ENV_LLM_DECODER, ENV_LLM_MODEL
 from core.config.deploy import (
     CrawlConfig,
@@ -53,7 +53,13 @@ from core.config.deploy import (
     LLMDeployConfig,
     LLMSlotConfig,
 )
-from core.domain.enums import CrawlStrategy, DocumentLevel, EmbedDevice, PdfDevice
+from core.domain.enums import (
+    CrawlStrategy,
+    DocumentLevel,
+    EmbedDevice,
+    EmbedPrecision,
+    PdfDevice,
+)
 from core.domain.models import CrawlRunConfig, RateLimitSpec
 from core.pipeline.digests import (
     EXECUTION_CONTRACT_FIELDS,
@@ -95,9 +101,18 @@ def _inputs(package: Path) -> Any:
 
 
 def _args(
-    package: Path, *, llm_slot: str | None = None, llm_model: str | None = None
+    package: Path,
+    *,
+    llm_slot: str | None = None,
+    llm_model: str | None = None,
+    llm_reasoning_effort: str | None = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(package=str(package), llm_slot=llm_slot, llm_model=llm_model)
+    return SimpleNamespace(
+        package=str(package),
+        llm_slot=llm_slot,
+        llm_model=llm_model,
+        llm_reasoning_effort=llm_reasoning_effort,
+    )
 
 
 def _resolve(
@@ -146,6 +161,9 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         # 16 §4.2: устройство эмбеддера — объявленная ось (``deploy < run``), а не
         # наблюдение: векторы CPU и CUDA численно разные.
         "embed_device",
+        # 16 §4.1 (решение 06.11.2026): точность счёта вектора — отдельное условие
+        # измерения (fp16- и fp32-векторы — разные числа), поэтому отдельная ось.
+        "embed_precision",
         "serp_rounds",
         "serp_source",
         # I3/§5: режим запроса поиска — отдельное условие измерения (какой бэкенд
@@ -370,6 +388,9 @@ def test_llm_scenarios_are_deterministic_rows(tmp_path: Path) -> None:
             "temperature": 0.0,
             "endpoint_host": "llm.test",
             "max_tokens": None,
+            # §7.4 (решение 06.11.2026): уровень рассуждения — часть условий генерации.
+            # ``None`` — не объявлен ни на одном слое (отличимо от объявленного ``off``).
+            "reasoning_effort": None,
         },
     )
     assert "run_id" not in rows[0]
@@ -413,6 +434,108 @@ def test_llm_scenarios_active_slot_without_declared_model_is_error(
 
     assert excinfo.value.code == "llm"
     assert "--llm-model" in str(excinfo.value)
+
+
+def _llm_deploy(model_id: str = "deepseek-v4.1-flash-1017", **slot: Any) -> DeployConfig:
+    """Активный слот оценщика с объявленной моделью (цепочка уровней — на нём)."""
+    return DeployConfig(
+        llm=LLMDeployConfig(
+            cheap=LLMSlotConfig(
+                base_url="https://llm.test/v1",
+                model_id=model_id,
+                decoder="json_object",
+                **slot,
+            )
+        )
+    )
+
+
+def test_llm_reasoning_effort_flag_reaches_llm_scenarios(tmp_path: Path) -> None:
+    """§7.4: ``--llm-reasoning-effort`` — объявленный вход, а не настройка вида.
+
+    Уровень входит в ``llm_scenarios`` → ``execution_contract_digest`` → ``run_id``:
+    ответ при ``high`` и при ``off`` — разные числа, и один ``run_id`` их не описывает.
+    ``off`` (объявлено «не просим») отличимо от ``None`` (ось не объявлена).
+    """
+    package = _package(tmp_path)
+    deploy = _llm_deploy()
+    declared_off = _resolve(
+        package, deploy=deploy, args=_args(package, llm_reasoning_effort="off")
+    ).llm_scenarios
+    declared_high = _resolve(
+        package, deploy=deploy, args=_args(package, llm_reasoning_effort="high")
+    ).llm_scenarios
+    undeclared = _resolve(package, deploy=deploy).llm_scenarios
+
+    assert declared_off[0]["reasoning_effort"] == "off"
+    assert declared_high[0]["reasoning_effort"] == "high"
+    assert undeclared[0]["reasoning_effort"] is None
+    assert declared_off != declared_high
+
+
+def test_llm_reasoning_effort_precedence_cli_over_run_over_slot(
+    tmp_path: Path,
+) -> None:
+    """Одна цепочка для контракта и рантайма: CLI > ``run.yaml`` > поле слота."""
+    package = _package(tmp_path)
+    deploy = _llm_deploy(reasoning_effort="low")
+
+    from_slot = _resolve(package, deploy=deploy).llm_scenarios
+    assert from_slot[0]["reasoning_effort"] == "low"
+
+    run_yaml = package / "run.yaml"
+    data = yaml.safe_load(run_yaml.read_text(encoding="utf-8"))
+    data["llm_reasoning_effort"] = "medium"
+    run_yaml.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    from_run = _resolve(package, deploy=deploy).llm_scenarios
+    assert from_run[0]["reasoning_effort"] == "medium"
+
+    from_cli = _resolve(
+        package, deploy=deploy, args=_args(package, llm_reasoning_effort="high")
+    ).llm_scenarios
+    assert from_cli[0]["reasoning_effort"] == "high"
+
+
+def test_llm_reasoning_effort_of_unsupported_family_is_usage_error(
+    tmp_path: Path,
+) -> None:
+    """Уровень, невыразимый на проводе семейства, — ``EXIT_USAGE``, а не тихий пропуск.
+
+    ``plan`` обязан отказать там же, где откажет прогон: иначе он печатал бы ``run_id``
+    измерения, которое не выполнится. ``off`` не требует провода — он выражается
+    отсутствием параметра и потому разрешён любой модели.
+    """
+    package = _package(tmp_path)
+    for model_id in ("qwen-max", "glm-4.5", "llama-3-70b"):
+        deploy = _llm_deploy(model_id=model_id)
+        with pytest.raises(CliError) as excinfo:
+            _resolve(
+                package, deploy=deploy, args=_args(package, llm_reasoning_effort="high")
+            )
+        assert excinfo.value.code == "llm"
+        assert excinfo.value.exit_code == EXIT_USAGE
+        assert model_id in str(excinfo.value)
+        # ``off`` — выразимое «не просим» для любого семейства.
+        declared_off = _resolve(
+            package, deploy=deploy, args=_args(package, llm_reasoning_effort="off")
+        ).llm_scenarios
+        assert declared_off[0]["reasoning_effort"] == "off"
+
+
+def test_llm_reasoning_effort_typo_is_usage_error(tmp_path: Path) -> None:
+    """Строка вне перечисления — ошибка входа, а не «ось не объявлена»."""
+    package = _package(tmp_path)
+    with pytest.raises(CliError) as excinfo:
+        _resolve(
+            package,
+            deploy=_llm_deploy(),
+            args=_args(package, llm_reasoning_effort="hihg"),
+        )
+    assert excinfo.value.code == "llm"
+    assert excinfo.value.exit_code == EXIT_USAGE
+    assert "hihg" in str(excinfo.value)
 
 
 def test_docling_version_uses_installed_distribution() -> None:
@@ -1141,6 +1264,92 @@ def test_embed_device_value_is_json_serializable(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 16 §4.1: ось ``embed.precision`` — объявленная точность счёта вектора
+# ---------------------------------------------------------------------------
+
+
+def _with_embed_precision(package: Path, *, precision: str) -> Path:
+    """Дописывает ``embed.precision`` в ``run.yaml`` пакета (run-слой оси)."""
+    run_yaml = package / "run.yaml"
+    data = yaml.safe_load(run_yaml.read_text(encoding="utf-8"))
+    data["embed"] = {"precision": precision}
+    run_yaml.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return package
+
+
+def test_embed_precision_axis_defaults_to_fp32(tmp_path: Path) -> None:
+    """Ось не объявлена — ``fp32``: поведение до оси, объявленное, а не выведенное."""
+    assert _resolve(_package(tmp_path)).embed_precision == "fp32"
+
+
+def test_embed_precision_run_layer_overrides_deploy(tmp_path: Path) -> None:
+    """``run.yaml:embed.precision`` сильнее ``deploy.embed.precision`` (app < run)."""
+    package = _with_embed_precision(_package(tmp_path), precision="fp16")
+    declared = _resolve(
+        package, deploy=DeployConfig(embed=EmbedConfig(precision="fp32"))
+    )
+    assert declared.embed_precision == "fp16"
+
+
+def test_embed_precision_changes_the_contract_digest(tmp_path: Path) -> None:
+    """Точность — условие измерения: fp16- и fp32-векторы — разные числа.
+
+    Без оси в контракте прогон, сменивший точность, получил бы тот же ``run_id`` и
+    сравнивался бы с собой, хотя корпус векторов другой.
+    """
+    fp32_pkg = _package(tmp_path, name="fp32")
+    fp16_pkg = _with_embed_precision(
+        _package(tmp_path, name="fp16"), precision="fp16"
+    )
+    fp32 = _resolve(fp32_pkg)
+    fp16 = _resolve(fp16_pkg)
+    assert fp32.embed_precision == "fp32" and fp16.embed_precision == "fp16"
+    # Остальные входы одинаковы — разница только в объявленной точности.
+    fp32_digest = build_execution_contract(
+        _inputs(fp32_pkg), cohort_digest="c", seeds_digest="s", declared=fp32
+    )
+    fp16_digest = build_execution_contract(
+        _inputs(fp16_pkg), cohort_digest="c", seeds_digest="s", declared=fp16
+    )
+    assert fp32_digest != fp16_digest
+
+
+def test_local_embedder_receives_declared_precision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Провод: объявленная точность доезжает до ``LocalEmbedder``, а не теряется в резолве."""
+    seen = _stub_embed_stack(
+        monkeypatch, model2vec=False, sentence_transformers=True
+    )
+    resolved = wiring_mod._resolve_embedder(  # noqa: SLF001
+        EmbedDevice.CPU, precision=EmbedPrecision.FP16
+    )
+    assert isinstance(resolved, _FakeEmbedder)
+    assert seen["local_kwargs"] == {"device": "cpu", "precision": "fp16"}
+
+
+def test_fp16_without_torch_path_is_wiring_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Объявленный ``fp16`` без torch-пути — отказ, а не тихий fp32 (A3).
+
+    ``LiteEmbedder`` (NumPy/CPU) точность исполнить не может; молчаливая подмена
+    сделала бы ``embed_precision``/``pb``/ключ ``embed_cache`` ложью.
+    """
+    notices: list[str] = []
+    _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=False)
+    with pytest.raises(wiring_mod.WiringError) as excinfo:
+        wiring_mod._resolve_embedder(  # noqa: SLF001
+            EmbedDevice.CPU, precision=EmbedPrecision.FP16, notices=notices
+        )
+    assert "precision=fp16" in str(excinfo.value)
+    # Исключение LiteEmbedder — видимое, а не молчаливое.
+    assert any("embed.precision=fp16" in note for note in notices)
+
+
+# ---------------------------------------------------------------------------
 # 16 §4.3: выбор эмбеддера по объявленному устройству
 # ---------------------------------------------------------------------------
 
@@ -1196,7 +1405,7 @@ def test_cuda_excludes_lite_embedder_with_visible_note(
 
     assert resolved is not lite
     assert isinstance(resolved, _FakeEmbedder) and resolved.device == "cuda"
-    assert seen["local_kwargs"] == {"device": "cuda"}
+    assert seen["local_kwargs"] == {"device": "cuda", "precision": "fp32"}
     assert len(notices) == 1
     assert "LiteEmbedder исключён" in notices[0]
     assert "cuda" in notices[0]
@@ -1233,11 +1442,11 @@ def test_local_embedder_receives_declared_device(
 
     cpu = wiring_mod._resolve_embedder(EmbedDevice.CPU)  # noqa: SLF001
     assert isinstance(cpu, _FakeEmbedder) and cpu.device == "cpu"
-    assert seen["local_kwargs"] == {"device": "cpu"}
+    assert seen["local_kwargs"] == {"device": "cpu", "precision": "fp32"}
 
     cuda = wiring_mod._resolve_embedder("cuda")  # noqa: SLF001 — строка тоже принимается
     assert isinstance(cuda, _FakeEmbedder) and cuda.device == "cuda"
-    assert seen["local_kwargs"] == {"device": "cuda"}
+    assert seen["local_kwargs"] == {"device": "cuda", "precision": "fp32"}
 
 
 def test_require_embed_device_passes_cpu_always() -> None:

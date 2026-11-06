@@ -24,6 +24,7 @@ from core.cli.context import (
     _acquire_package_lock,
     _add_common,
     _add_llm_model_flag,
+    _add_llm_reasoning_effort_flag,
     _add_phase4_flags,
     _concise,
     _crawl_policy_resolution,
@@ -1788,6 +1789,7 @@ def configure(sub: Any) -> None:
         help="активный LLM-слот оценщика (override COHOUND_LLM_SLOT/deploy.llm.slot)",
     )
     _add_llm_model_flag(p_run)
+    _add_llm_reasoning_effort_flag(p_run)
     # План 20 §7 F2: тот же порог **отображения**, что у ``plan`` (общий регистратор:
     # план не принимает флагов, которых прогон не знает). Здесь он применяется к датам
     # **вошедшего** корпуса (документ ``corpus_freshness`` отчёта): к концу прогона

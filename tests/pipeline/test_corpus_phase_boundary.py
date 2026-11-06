@@ -32,7 +32,7 @@ from typing import Any
 
 from test_corpus import RUN_ID, SqliteStore, _build, _build_of, _make_run
 
-from core.domain.enums import EmbedDevice
+from core.domain.enums import EmbedDevice, EmbedPrecision
 from core.pipeline import corpus as corpus_module
 from core.pipeline.corpus import IndexBuild
 from core.pipeline.corpus_index import (
@@ -156,10 +156,12 @@ def test_build_provenance_is_recomputable_from_persisted_chunks(tmp_path: Path) 
                 product_id=entry.product_id,
                 chunker_version=entry.chunker_version or "",
                 embed_model_id=entry.embed_model_id or "",
-                # 16 §5.1: устройство счёта входит в материал ``pb``. У ``IndexManifestEntry``
-                # своего поля нет (это наблюдаемое поле партиции, не идентичность), а прогон
-                # здесь не объявляет ось ⇒ действует объявленный дефолт ``cpu``.
+                # 16 §5.1: устройство и точность счёта входят в материал ``pb``. У
+                # ``IndexManifestEntry`` своих полей нет (это наблюдаемые поля партиции, не
+                # идентичность), а прогон здесь не объявляет оси ⇒ действуют объявленные
+                # дефолты ``cpu``/``fp32``.
                 embed_device=EmbedDevice.CPU.value,
+                embed_precision=EmbedPrecision.FP32.value,
                 extractor_version=entry.extractor_version or "",
                 lexical_engine_version=entry.lexical_engine_version or "",
                 vector_store=entry.vector_store or "",

@@ -193,6 +193,7 @@ from core.domain import (
     CrawlStrategy,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     IndexManifestEntry,
     PdfPipeline,
     RefreshPolicy,
@@ -1638,6 +1639,7 @@ def _build_corpus(
     explicit_fetch: Mapping[str, FetchMode] | None = None,
     crawl_defaults: CrawlRunConfig | None = None,
     embed_device: str = EmbedDevice.CPU.value,
+    embed_precision: str = EmbedPrecision.FP32.value,
     rate_limiter: RateLimiter | None = None,
     package_id: str | None = None,
     run_id: str | None = None,
@@ -1733,6 +1735,13 @@ def _build_corpus(
         входит в материал ``pb``, в манифест партиции, в ключ ``embed_cache`` и в проверку
         переиспользования; дефолт ``cpu`` — объявленный дефолт оси, а не «что выберет
         движок» (``auto`` не существует).
+    :param embed_precision: точность счёта векторов — **объявленная ось** прогона
+        (``embed.precision``, решение владельца 06.11.2026). Резолвится composition root'ом
+        (:func:`core.pipeline.crawl_frontier.resolve_embed_precision`) и приходит аргументом
+        по той же причине, что устройство: точность — часть значения вектора, а не ответ
+        адаптера. Идёт в материал ``pb``, в манифест партиции, в ключ ``embed_cache`` и в
+        проверку переиспользования; дефолт ``fp32`` — объявленный дефолт оси (поведение до
+        её появления).
     :param rate_limiter: владелец politeness-пейсинга (**единственный** — corpus). Перед
         каждым **живым** фетчем вызывается ``wait(host, fetch_plan.rate_limit)``;
         ``spec is None`` → без сна. ``None`` → строится :class:`RateLimiter` с реальным
@@ -4566,6 +4575,9 @@ def _build_corpus(
                 embed_model_id=embed_model_id,
                 # 16 §5.1: место счёта — часть условий сборки партиции.
                 embed_device=embed_device,
+                # Точность — теми же правами, что устройство: иначе fp16-сборка
+                # получила бы тот же ``pb``, что fp32, и молча переиспользовала чужие числа.
+                embed_precision=embed_precision,
                 extractor_version=extractor_token,
                 lexical_engine_version=lexical_engine_version,
                 vector_store=vector_store,
@@ -4600,6 +4612,7 @@ def _build_corpus(
                         chunker_version=resolved_chunker_version,
                         embed_model_id=embed_model_id,
                         embed_device=embed_device,
+                        embed_precision=embed_precision,
                         extractor_version=extractor_token,
                         lexical_engine_version=lexical_engine_version,
                         vector_store=vector_store,
@@ -4637,6 +4650,7 @@ def _build_corpus(
                         chunker_version=resolved_chunker_version,
                         embed_model_id=embed_model_id,
                         embed_device=embed_device,
+                        embed_precision=embed_precision,
                         extractor_version=extractor_token,
                         lexical_engine_version=lexical_engine_version,
                         vector_store=vector_store,
@@ -4644,7 +4658,7 @@ def _build_corpus(
                         snapshot_date=snapshot,
                         partition_build_id=partition_build_id,
                         # План 20 §4: снимок продукта — провенанс сборки, **не** слагаемое
-                        # ``pb`` (``_PARTITION_SCHEMA`` остаётся ``partition-2``).
+                        # ``pb`` (``_PARTITION_SCHEMA`` остаётся ``partition-3``).
                         corpus_snapshot_id=snapshot_product_id,
                         errors=errors,
                         on_batch=_make_embed_reporter(

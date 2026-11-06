@@ -41,6 +41,7 @@ from core.domain import (
     CrawlProvenance,
     CrawlSessionProvenance,
     EmbedDevice,
+    EmbedPrecision,
     LLMCellOutput,
     LLMEvidence,
     RunManifest,
@@ -229,6 +230,10 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         embed_model_id=FakeEmbedder().model_id,
         # 16 §4.1: ось ``embed.device`` не объявлена ⇒ объявленный дефолт ``cpu``.
         embed_device=EmbedDevice.CPU.value,
+        # Та же природа у оси ``embed.precision``: не объявлена ⇒ объявленный дефолт
+        # ``fp32`` (его и передаёт фаза). Обе оси — слагаемые ``pb`` (``partition-3``);
+        # без них этот пересчёт формулы разошёлся бы с прогоном, хотя измеряет то же.
+        embed_precision=EmbedPrecision.FP32.value,
         extractor_version=FakeExtractor.version,
         lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
         vector_store=FakeIndexBuilder.vector_store,

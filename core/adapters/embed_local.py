@@ -9,6 +9,15 @@
 ``batch_size``, конкатенируя результаты. Порядок выхода совпадает с порядком входа
 (детерминизм, A3).
 
+**Точность (ось ``embed.precision``).** ``precision="fp16"`` включает
+``torch.autocast(device_type=<device>, dtype=torch.float16)`` вокруг вызова модели —
+механизм, которым снят замер ``2026-11-06-embedding-precision-cpu.md`` на cuda
+(15.40/13.82 чанка/с против 6.02/4.99 у fp32, худший чанк ``1−cos`` 8.3e-05, детерминизм
+побитовый). Значение приходит **объявленной осью**, а не выбирается библиотекой: тихий
+откат на fp32 сделал бы ``embed_precision``/партицию/ключ кэша ложью. Эмбеддер без torch
+(``LiteEmbedder``) точность исполнить не может — это решается при выборе порта
+(``core.cli.wiring._resolve_embedder``), отказом, а не подменой.
+
 **Ревизия и оффлайн.** ``revision`` (git-sha/тег) входит в ``model_id`` как
 ``repo@<sha>``, поэтому ``embed_model_id`` описывает фактические веса, а не «текущий
 main»; ``local_files_only=True`` по умолчанию — как у ``LiteEmbedder``: веса берутся из
@@ -55,6 +64,7 @@ __all__ = [
     "DEFAULT_DEVICE",
     "DEFAULT_DIM",
     "DEFAULT_MODEL_ID",
+    "DEFAULT_PRECISION",
     "EmbedFn",
     "EmbedderUnavailable",
     "LocalEmbedder",
@@ -68,6 +78,14 @@ DEFAULT_DIM = 1024
 DEFAULT_BATCH_SIZE = 32
 #: Устройство по умолчанию — **объявленный** дефолт оси ``embed.device`` (``cpu``).
 DEFAULT_DEVICE = "cpu"
+#: Точность по умолчанию — **объявленный** дефолт оси ``embed.precision`` (``fp32``):
+#: поведение до появления оси, байт-в-байт.
+DEFAULT_PRECISION = "fp32"
+
+#: Объявленные значения точности (зеркало ``EmbedPrecision``): адаптер не импортирует
+#: домен ради двух строк — значения приходят строками, как и у устройства.
+_PRECISION_FP32 = "fp32"
+_PRECISION_FP16 = "fp16"
 
 #: Внедряемая функция эмбеддинга: батч текстов → батч векторов (без torch).
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -106,6 +124,12 @@ class LocalEmbedder:
         то есть ``embed_device``/``pb``/ключ ``embed_cache`` называли бы устройство,
         которого прогон не объявлял. Дефолт ``cpu`` — объявленный дефолт оси (не
         ``None``: ``None`` снова отдал бы выбор окружению).
+    :param precision: точность счёта (``fp32``/``fp16``) — **объявленная** ось
+        ``embed.precision``. ``fp32`` — прежний путь без изменений. ``fp16`` исполняется
+        ``torch.autocast(device_type=<device>, dtype=torch.float16)`` вокруг вызова
+        модели (тот же механизм, которым снят замер
+        ``2026-11-06-embedding-precision-cpu.md``: 2.6–2.8× при ``1−cos`` 8.3e-05).
+        Дефолт ``fp32`` — объявленный дефолт оси.
     """
 
     def __init__(
@@ -118,6 +142,7 @@ class LocalEmbedder:
         revision: str | None = None,
         local_files_only: bool = True,
         device: str = DEFAULT_DEVICE,
+        precision: str = DEFAULT_PRECISION,
     ) -> None:
         if not model_id:
             raise ValueError("model_id обязан быть непустым")
@@ -132,6 +157,15 @@ class LocalEmbedder:
         self.local_files_only = local_files_only
         #: Устройство счёта (``cpu``/``cuda``) — объявленная ось, не догадка библиотеки.
         self.device = device
+        #: Точность счёта — объявленная ось. ``fp32`` не включает autocast вовсе (прежнее
+        #: поведение), ``fp16`` — включает; третьего значения нет (``auto`` не существует).
+        if precision not in {_PRECISION_FP32, _PRECISION_FP16}:
+            raise ValueError(
+                f"precision={precision!r} вне объявленных значений "
+                f"({_PRECISION_FP32}/{_PRECISION_FP16}): точность — ось, а не режим "
+                "библиотеки"
+            )
+        self.precision = precision
         self.dim = dim
         self.batch_size = batch_size
         self._embed_fn = embed_fn
@@ -197,12 +231,26 @@ class LocalEmbedder:
         model = self._model
 
         def _encode(batch: list[str]) -> list[list[float]]:
-            matrix = model.encode(
-                batch,
-                batch_size=len(batch),
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-            )
+            # Объявленная точность **доезжает до провода**: fp16 — ``torch.autocast``
+            # объявленного устройства (тот же механизм, которым снят замер). fp32 —
+            # прежний путь без autocast, байт-в-байт.
+            if self.precision == _PRECISION_FP16:
+                import torch  # локально: тяжёлая зависимость нужна только здесь
+
+                with torch.autocast(device_type=self.device, dtype=torch.float16):
+                    matrix = model.encode(
+                        batch,
+                        batch_size=len(batch),
+                        normalize_embeddings=True,
+                        convert_to_numpy=True,
+                    )
+            else:
+                matrix = model.encode(
+                    batch,
+                    batch_size=len(batch),
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                )
             return matrix.tolist()
 
         return _encode

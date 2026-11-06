@@ -1187,7 +1187,22 @@ def build_manifest(
 
     llm_scenarios = (
         [
-            ScenarioBinding(run_id=str(getattr(plan, "run_id", "")), **dict(row))
+            # ``reasoning_effort`` — слагаемое **контракта** (``llm_scenarios`` →
+            # ``execution_contract_digest`` → ``run_id``), а не колонка таблицы
+            # ``llm_scenarios``: схема БД не мигрирует (SCHEMA_VERSION не меняется), а
+            # ``ScenarioBinding`` объявлен ``extra="forbid"``. Уровень остаётся видимым
+            # там, где он действует: ``execution_contract_digest``, ``echo`` конверта
+            # ``eval_cache`` (``build_eval_key``) и ``logs/llm_calls.jsonl``
+            # (``usage.reasoning``). Манифест его не выдумывает: расхождение по этой оси
+            # печатается как «предел диагностики» (``_contract_field_diagnostics``).
+            ScenarioBinding(
+                run_id=str(getattr(plan, "run_id", "")),
+                **{
+                    key: value
+                    for key, value in dict(row).items()
+                    if key != "reasoning_effort"
+                },
+            )
             for row in (getattr(axes, "llm_scenarios", ()) or ())
         ]
         if axes is not None

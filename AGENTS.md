@@ -266,7 +266,7 @@ check is **one** check — it is not a scope check.
 - The root host is always in scope. A subdomain is in scope **only if declared** (product
   seed root, or a `domain_profiles.yaml` key). `www.` is equivalent to the bare host on both
   sides.
-- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1172`). This is
+- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1203`). This is
   **different** semantics from `fetch_plan._host_matches`: there a subdomain **inherits
   profile axes** (`fetch`/`extract`/limits), which is correct and needed. Inheriting axes ≠
   the right to spend another seed root's budget.
@@ -380,7 +380,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
 
 ## 9. Run identity, declared axes, versioning
 
-- `run_id` is a function of **declared inputs only**: 31 fields in
+- `run_id` is a function of **declared inputs only**: 32 fields in
   `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:88`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
@@ -390,7 +390,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
 - **Crawl axes:** `crawl_strategy`, `crawl.rate_limit` and `crawl_config_digest` are contract
   fields; `max_depth`/`max_documents`/`exclude_*`/`robots`/`document_level`/`pdf_pipeline`
   enter through `crawl_config_digest` (`CrawlLimits.as_dict()`). Add a new operator axis to
-  the single inventory `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:184`) so `plan` and
+  the single inventory `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:190`) so `plan` and
   `run` pick it up together — flag parity is tested. Changing an axis gives a **new `run_id`**
   (`execution_change`), not an edit of the current run; otherwise two different corpora become
   one measurement.

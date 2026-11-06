@@ -61,7 +61,7 @@ application-layer firewall (L7). Функционал, которому нуже
 |---|---|---|
 | **Z0 CORE** (доверенная) | **нет** веб-эгрессии; недоступна для входящих из DMZ; секретов эгрессии нет | `pipeline` (оркестратор, гейты), `domain`, `store`, индексы/ретривал, **клиент evaluator-LLM (I18)**, `compute`, `report` |
 | **Z1 EDGE / DMZ** (условно-доверенная) | есть веб-эгрессия; **считается компрометируемой**; процесс только отвечает, не инициирует в Z0 | `crawler` (Scrapy+playwright · **прямой Playwright/CDP** — honest/hybrid, альтернатива Scrapy), HTTP-fetch, `search`-адаптер (SERP), `registry`-фетчеры, `poller` (feed/channel/sitemap), discovery/concept-scout (search-enabled) |
-| **Z2 PARSE** (roadmap; **не реализована**) | hardening парсинга недоверенного контента | *пока ничего: экстрактор исполняется в ядре (§2, `extractor_zone`); целевой контракт — `10` §5.4* — ⬜ не сделано: зоны Z2 в коде нет, `EXTRACTOR_ZONES` (`core/config/deploy.py:88`) — только объявление |
+| **Z2 PARSE** (roadmap; **не реализована**) | hardening парсинга недоверенного контента | *пока ничего: экстрактор исполняется в ядре (§2, `extractor_zone`); целевой контракт — `10` §5.4* — ⬜ не сделано: зоны Z2 в коде нет, `EXTRACTOR_ZONES` (`core/config/deploy.py:90`) — только объявление |
 | **Зона LLM корп. облака** (внешняя, внутр. сеть) | [OI]-совместимый API; веса/движок — забота облака | evaluator-LLM (только Z0-originated трафик), discovery-LLM (search-enabled, Z1) |
 
 **Классификация портов (`Zone`):**
@@ -92,8 +92,8 @@ application-layer firewall (L7). Функционал, которому нуже
 > целевой контракт — `10-extraction-pipeline-architecture.md` §4 (Д-1), §5.4.
 >
 > ⬜ **не сделано (2026-10-28), подтверждено кодом:** `grep -rn extractor_zone core/` даёт только
-> `core/config/deploy.py:592` и валидатор `:607`; сборка экстрактора (
-> `core/cli/wiring.py:2070-2138` `build_worker_extractor`) на поле не смотрит.
+> `core/config/deploy.py:594` и валидатор `:607`; сборка экстрактора (
+> `core/cli/wiring.py:2202-2270` `build_worker_extractor`) на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из
 > интернета — это основная поверхность атаки (парсеры/шрифты/архивы). Идея «вынести её в edge»
@@ -329,8 +329,8 @@ LLM-endpoint корп. облака — только в Z0.
 > хардненинг, которого нет, поэтому молчаливое принятие запрещено. `config/deploy.yaml` это
 > значение не использует. Ступень «Z2 + egress-прокси» — **roadmap** (`08`), не текущая
 > функциональность. ➖ снято как открытый вопрос — это **решение D-8**, а не недоделка:
-> алиас принят, и предупреждение `profile_notices` о нём реализовано (`core/config/deploy.py:651`,
-> вызовы `core/cli/commands/run.py:609`, `core/cli/commands/plan.py:171`).
+> алиас принят, и предупреждение `profile_notices` о нём реализовано (`core/config/deploy.py:661`,
+> вызовы `core/cli/commands/run.py:610`, `core/cli/commands/plan.py:172`).
 
 **Локальный путь исполнения (as-built).** При `local` краул идёт in-process; как устроены пулы
 (per-seed-root fetch-пул, browser-элементы вне пула) — §4. Отсюда: `workers` в `edge.yaml` и
@@ -357,7 +357,7 @@ LLM-endpoint корп. облака — только в Z0.
    сделано: `core/edge/scheduler.py:163` (`_COLLECT_MAX_BYTES = 8 MiB`),
    `core/adapters/gateway_validate.py:53` (`MAX_RESPONSE_BYTES = 52_428_800`)
 3. **`crawl.document_level` под `split` не действует** — конвертеры строит edge сам, ось ядра
-   на них не влияет. — ⬜ не сделано: `core/cli/wiring.py:2294` (явный комментарий «ось здесь не
+   на них не влияет. — ⬜ не сделано: `core/cli/wiring.py:2426` (явный комментарий «ось здесь не
    действует»)
 
 Поэтому `split` — не «та же функциональность за швом»: по корпусу он **уже** `local`. Это
@@ -378,7 +378,7 @@ LLM-endpoint корп. облака — только в Z0.
 решений / `deploy.yaml` к профилю), а не открытый вопрос к детальному проектированию. Профиль
 `split-hardened` (Z2 PARSE, egress-прокси) — естественная ступень для вариантов с внешним контуром.
 ➖ снято — решение владельца: классификация инсталляции — deployment-политика, методологию не
-меняет; в коде ей соответствует поле `profile` (`core/config/deploy.py:744`).
+меняет; в коде ей соответствует поле `profile` (`core/config/deploy.py:766`).
 
 ```mermaid
 flowchart LR
@@ -433,8 +433,8 @@ edge:
 extractor_zone: core                # edge | core | separate — объявлено, НЕ подключено (D-9, §2)
 llm:                                # модели корпоративного облака ([OI]-совместимый API)
   slot: cheap                       # активный слот по умолчанию (cheap | flagship)
-  cheap:    {model_id: "deepseek-v4.1-flash:purple"}   # провизорно: финальный выбор — измерение
-  flagship: {model_id: "deepseek-v4.1-flash:purple"}   # (hound experiment evaluator-benchmark, A3)
+  cheap:    {model_id: "deepseek-v4.1-flash-1017:yellow"}   # провизорно: финальный выбор — измерение
+  flagship: {model_id: "deepseek-v4.1-flash-1017:yellow"}   # (hound experiment evaluator-benchmark, A3)
   # выбор слота: --llm-slot > env COHOUND_LLM_SLOT > run.yaml: llm_slot > deploy.llm.slot > cheap
   # модель оценщика: --llm-model > deploy.llm.<slot>.model_id (env COHOUND_LLM_MODEL — только
   # для LLM-разведки: идентичность оценщика входит в execution_contract_digest, 03 §D.6)

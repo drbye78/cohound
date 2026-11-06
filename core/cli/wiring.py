@@ -81,7 +81,9 @@ from core.adapters.llm_local import (
     EVALUATOR_DEFAULT_SEED,
     EVALUATOR_DEFAULT_TEMPERATURE,
     LocalEvaluator,
+    ReasoningWireUnsupported,
     normalize_api_base,
+    reasoning_wire,
 )
 from core.adapters.llm_local import (
     GenerateFn as EvaluatorGenerateFn,
@@ -122,7 +124,14 @@ from core.config.deploy import (
     resolve_serp_rounds,
 )
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import DocumentLevel, EmbedDevice, PdfDevice, PdfPipeline
+from core.domain.enums import (
+    DocumentLevel,
+    EmbedDevice,
+    EmbedPrecision,
+    PdfDevice,
+    PdfPipeline,
+    ReasoningEffort,
+)
 from core.domain.models import CrawlRunConfig, EmbedRunConfig
 from core.domain.scoring import endpoint_host_notices
 from core.pipeline import Ports, Runner
@@ -134,6 +143,7 @@ from core.pipeline.composition import (
 from core.pipeline.crawl_frontier import (
     resolve_crawl_limits,
     resolve_embed_device,
+    resolve_embed_precision,
     resolve_pdf_device,
 )
 from core.pipeline.extraction_runtime import ExtractionPool
@@ -217,6 +227,7 @@ __all__ = [
     "build_store",
     "build_vector_index",
     "build_worker_extractor",
+    "ensure_reasoning_wire",
     "llm_env_notices",
     "llm_host_notices",
     "manifest_deploy_fields",
@@ -225,6 +236,7 @@ __all__ = [
     "require_pdf_device",
     "resolve_and_build_search_adapter",
     "resolve_evaluator_model_identity",
+    "resolve_evaluator_reasoning_effort",
     "resolve_experiment_target",
     "resolve_extraction_budget",
     "run_db_path",
@@ -264,7 +276,7 @@ DEFAULT_LLM_BASE_URL = ""
 #: поле слота > это значение). Модель разведки операционна (её выход — кандидаты/гипотезы
 #: G2, не evidence), поэтому здесь допустим и env-фолбэк. Значение держится равным
 #: ``config/deploy.yaml:llm.<slot>.model_id`` (пин в ``tests/config/test_deploy.py``).
-DEFAULT_LLM_MODEL = "deepseek-v4.1-flash:purple"
+DEFAULT_LLM_MODEL = "deepseek-v4.1-flash-1017:yellow"
 
 #: Env-переопределения лёгкого оффлайн-эмбеддера (P4a; данные, не предметная категория):
 #: HF-идентификатор модели, пин ревизии (sha/тег → входит в ``embed_model_id`` как ``repo@sha``,
@@ -919,6 +931,103 @@ _EVALUATOR_ENV_DECLARED_SOURCE: dict[str, str] = {
 }
 
 
+def resolve_evaluator_reasoning_effort(
+    *,
+    slot_config: LLMSlotConfig | None,
+    effort: ReasoningEffort | str | None = None,
+    run_effort: ReasoningEffort | str | None = None,
+    slot_name: str | None = None,
+) -> ReasoningEffort | None:
+    """Резолвит усилие рассуждения оценщика — **одна** формула для контракта и рантайма.
+
+    Приоритет — только объявленные входы, ровно как у
+    :func:`resolve_evaluator_model_identity`: ``--llm-reasoning-effort`` (CLI ``effort``) >
+    ``run.yaml: llm_reasoning_effort`` (``run_effort``) > поле активного слота
+    ``deploy.llm.<slot>.reasoning_effort``. Env здесь не читается: уровень входит в
+    ``llm_scenarios`` → ``execution_contract_digest`` → ``run_id``, поэтому обязан быть
+    функцией объявленных входов (иначе два хоста с одним ``run.yaml`` получили бы разный
+    ``run_id`` и разные вердикты под одним именем прогона).
+
+    Функция нужна **одна**: ею пользуются и ``_resolve_llm_scenarios`` (контракт), и
+    :func:`build_evaluator_llm` (рантайм), и ``evaluate_cell`` (через атрибут адаптера).
+    Вторая формула разошлась бы с первой — ровно тот разрыв, который уже был измерен на
+    модели (``resolve_evaluator_model_identity``).
+
+    ``None`` — уровень не объявлен ни на одном слое: параметр на провод не уходит, и это
+    **отличимо** от объявленного ``off`` (``off`` — заявление «рассуждение не запрошено»,
+    ``None`` — «оси нет»).
+
+    Выразимость объявленного уровня на проводе семейства модели проверяет **адаптер**
+    (:func:`core.adapters.llm_local.reasoning_wire`): там же, где уровень становится
+    телом запроса. Значение, которое нельзя выразить, — отказ, а не тихий пропуск.
+
+    :param slot_config: конфиг активного слота (``None`` — слотов нет).
+    :param effort: явный CLI-уровень (``--llm-reasoning-effort``).
+    :param run_effort: уровень run-слоя (``run.yaml: llm_reasoning_effort``).
+    :param slot_name: имя активного слота (для текста ошибки).
+    :raises CliError: значение вне перечисления (опечатка) — отказ с перечнем, а не
+        молчаливое «не объявлено».
+    """
+    declared_cli = _coerce_reasoning_effort(effort, source="--llm-reasoning-effort")
+    declared_run = _coerce_reasoning_effort(
+        run_effort, source=f"run.yaml: llm_reasoning_effort (слот {slot_name or '<slot>'})"
+    )
+    slot_value = getattr(slot_config, "reasoning_effort", None)
+    slot_effort = _coerce_reasoning_effort(
+        slot_value,
+        source=f"deploy.llm.{slot_name or '<slot>'}.reasoning_effort",
+    )
+    return declared_cli if declared_cli is not None else (
+        declared_run if declared_run is not None else slot_effort
+    )
+
+
+def _coerce_reasoning_effort(
+    value: ReasoningEffort | str | None, *, source: str
+) -> ReasoningEffort | None:
+    """Приводит объявленный уровень к enum; ``None``/пусто — «не объявлено».
+
+    Строка, которой нет в перечислении, — ошибка входа: молча превратить её в ``None``
+    значило бы объявить «оси нет» вместо «опечатка», и прогон пошёл бы без параметра,
+    называя ``run_id`` без уровня.
+    """
+    if value is None:
+        return None
+    if isinstance(value, ReasoningEffort):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return ReasoningEffort(text.lower())
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in ReasoningEffort)
+        raise CliError(
+            f"{source}: недопустимый уровень рассуждения «{value}»; "
+            f"ожидается один из {allowed}",
+            code="llm",
+            exit_code=EXIT_USAGE,
+        ) from exc
+
+
+def ensure_reasoning_wire(
+    model_id: str, effort: ReasoningEffort | None
+) -> None:
+    """Проверяет, что объявленный уровень рассуждения выразим на проводе модели.
+
+    Единственная точка отказа для «уровень объявлен, но отправить его модели нечем»:
+    вызывается и runtime-сборкой оценщика (:func:`build_evaluator_llm`), и расчётом
+    контракта (``_resolve_llm_scenarios``), поэтому ``plan`` и ``run`` отказывают
+    одинаково — прогон не может начаться с уровнем, которого модель не получит.
+
+    :raises CliError: уровень невыразим (``EXIT_USAGE``, код ``llm``).
+    """
+    try:
+        reasoning_wire(model_id, effort)
+    except ReasoningWireUnsupported as exc:
+        raise CliError(str(exc), code="llm", exit_code=EXIT_USAGE) from exc
+
+
 def resolve_evaluator_model_identity(
     *,
     slot_config: LLMSlotConfig | None,
@@ -1236,6 +1345,8 @@ def build_evaluator_llm(
     run_slot: str | None = None,
     seed: int | None = None,
     temperature: float | None = None,
+    reasoning_effort: ReasoningEffort | str | None = None,
+    run_reasoning_effort: ReasoningEffort | str | None = None,
 ) -> EvaluatorPort | None:
     """Собирает runtime-оценщик из активного LLM-слота; ``None`` — слот не сконфигурирован.
 
@@ -1271,6 +1382,10 @@ def build_evaluator_llm(
     :param seed: seed сэмплирования; ``None`` — дефолт адаптера (``0``). Benchmark оценщика
         передаёт ``0`` явно: детерминизм — условие измерения (A3), а не настройка.
     :param temperature: температура; ``None`` — дефолт адаптера (``0.0``, greedy).
+    :param reasoning_effort: явный CLI-уровень рассуждения (``--llm-reasoning-effort``).
+    :param run_reasoning_effort: уровень run-слоя (``run.yaml: llm_reasoning_effort``) —
+        цепочка та же, что у модели (:func:`resolve_evaluator_reasoning_effort`), поэтому
+        рантайм и ``llm_scenarios`` не могут разойтись.
     :raises ValueError: неизвестный слот (``--llm-slot``/``COHOUND_LLM_SLOT``/``run.yaml``).
     :raises CliError: endpoint активен, но модель не объявлена (ни слот, ни ``--llm-model``).
     """
@@ -1303,6 +1418,19 @@ def build_evaluator_llm(
         model_id=model_id,
         decoder=decoder,
     )
+    # §7.4 (решение 06.11.2026): усилие рассуждения — объявленный вход той же цепочкой,
+    # что модель (CLI > run.yaml > слот). Вторая формула разошлась бы с контрактом, и
+    # манифест назвал бы уровень, с которым модель не работала.
+    resolved_effort = resolve_evaluator_reasoning_effort(
+        slot_config=slot_config,
+        effort=reasoning_effort,
+        run_effort=run_reasoning_effort,
+        slot_name=_resolved_slot,
+    )
+    # Объявленный уровень обязан быть выразим на проводе **этой** модели: иначе прогон
+    # пошёл бы без параметра, а ``llm_scenarios``/``run_id`` называли бы уровень. Это
+    # ошибка входа (``EXIT_USAGE`` до старта), а не сбой исполнения одной ячейки.
+    ensure_reasoning_wire(resolved_model, resolved_effort)
     resolved_version = (
         model_version if model_version is not None else slot_version
     )
@@ -1330,6 +1458,10 @@ def build_evaluator_llm(
         max_tokens=(
             slot_config.max_tokens if slot_config is not None else None
         ),
+        # Уровень рассуждения доезжает до провода: адаптер строит тело запроса по
+        # семейству модели и **отказывает**, если уровень невыразим
+        # (``reasoning_wire``) — тихий пропуск параметра был бы ложным провенансом.
+        reasoning_effort=resolved_effort,
     )
 
 
@@ -2577,6 +2709,7 @@ def _build_local_ports(
     document_timeout: float | None = None,
     pdf_device: PdfDevice = PdfDevice.CPU,
     embed_device: EmbedDevice | str = EmbedDevice.CPU,
+    embed_precision: EmbedPrecision | str = EmbedPrecision.FP32,
     embed_notices: list[str] | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
@@ -2602,6 +2735,11 @@ def _build_local_ports(
     исключает ``LiteEmbedder`` (NumPy/CPU by design) с видимой заметкой в ``embed_notices``
     и требует ``LocalEmbedder`` — недоступность стека отказ, а не CPU-фолбэк
     (:func:`_resolve_embedder`).
+
+    **Точность эмбеддера (``embed.precision``).** ``embed_precision`` — вторая объявленная
+    ось того же резолва. ``fp16`` исполняется ``torch.autocast``, поэтому тоже исключает
+    ``LiteEmbedder`` и требует torch-путь; ``fp32`` — прежний приоритет. Точность, которую
+    выбранный эмбеддер не исполнит, — отказ, а не тихий fp32 (:func:`_resolve_embedder`).
 
     **Dense- и лексическое плечи (P4a, I17).** ``vector_index``/``lexical_index`` строятся
     :func:`build_vector_index`/:func:`seed_lexical_index` только при наличии предпосылок
@@ -2663,7 +2801,9 @@ def _build_local_ports(
     resolved_embedder = (
         embedder
         if embedder is not None
-        else _resolve_embedder(embed_device, notices=embed_notices)
+        else _resolve_embedder(
+            embed_device, precision=embed_precision, notices=embed_notices
+        )
     )
     index_builder = (
         NpyIndexBuilder(
@@ -2731,9 +2871,10 @@ def _build_local_ports(
 def _resolve_embedder(
     device: EmbedDevice | str = EmbedDevice.CPU,
     *,
+    precision: EmbedPrecision | str = EmbedPrecision.FP32,
     notices: list[str] | None = None,
 ) -> EmbedderPort | None:
-    """Выбирает эмбеддер по **объявленному** устройству (P4a + ось ``embed.device``).
+    """Выбирает эмбеддер по **объявленным** устройству и точности (P4a + ``embed.*``).
 
     Таблица ``16`` §4.3 — минимальная, backend остаётся недекларированным:
 
@@ -2747,11 +2888,46 @@ def _resolve_embedder(
     Тихого фолбэка нет ни в одну сторону: прогон, объявивший ``cuda``, не должен получить
     CPU-векторы под тем же ``run_id``.
 
+    **Точность (``embed.precision``, решение владельца 06.11.2026).** ``fp32`` — прежний
+    путь. ``fp16`` исполняется ``torch.autocast(device_type=<устройство>,
+    dtype=float16)`` вокруг вызова модели (:class:`~core.adapters.embed_local.LocalEmbedder`),
+    поэтому эмбеддер без torch (``LiteEmbedder``/``model2vec`` — NumPy/CPU by design)
+    точность исполнить **не может** и исключается с видимой заметкой; недоступен
+    torch-путь — :class:`WiringError`. Тихий fp32 запрещён: объявленная точность вошла бы
+    в ``run_id``/``pb``/ключ ``embed_cache``, а считалась бы другая — ложный провенанс.
+
+    Замер, на котором стоит ``fp16`` (``2026-11-06-embedding-precision-cpu.md``, cuda,
+    bge-m3): 15.40/13.82 чанка/с против 6.02/4.99 у fp32, худший чанк ``1−cos = 8.3e-05``,
+    top-10 0.998, детерминизм побитовый. Механизм на cpu исполним (torch.autocast), но
+    собственных чисел у него нет — прогон их и публикует.
+
     :param device: объявленное устройство (:class:`EmbedDevice` или строка).
+    :param precision: объявленная точность (:class:`EmbedPrecision` или строка).
     :param notices: список для видимых замечаний выбора (пишутся в журнал wiring).
-    :raises WiringError: ``cuda`` без ``sentence-transformers``/``LocalEmbedder``.
+    :raises WiringError: ``cuda`` без ``sentence-transformers``/``LocalEmbedder``;
+        ``fp16`` без torch-пути (``sentence-transformers``).
     """
     resolved = EmbedDevice(device)
+    resolved_precision = EmbedPrecision(precision)
+    if resolved_precision is not EmbedPrecision.FP32:
+        # Точность исполняется только через ``torch.autocast``: эмбеддер без torch её не
+        # исполнит. Исключение видимое (журнал), а отсутствие пути — отказ, не fp32.
+        if notices is not None and model2vec_available():
+            notices.append(
+                f"embed.precision={resolved_precision.value}: LiteEmbedder исключён — он "
+                "NumPy/CPU by design и объявленную точность исполнить не может; выбран "
+                "LocalEmbedder (bge-m3) с torch.autocast"
+            )
+        if not _module_installed("sentence_transformers"):
+            raise WiringError(
+                "embed.precision="
+                f"{resolved_precision.value} требует sentence-transformers "
+                "(LocalEmbedder + torch.autocast): установите extra 'embed' "
+                "(`uv sync --frozen --extra embed`) либо объявите "
+                "embed.precision=fp32. Тихий fp32 запрещён — прогон объявил точность, "
+                "которая вошла бы в embed_precision/партицию/ключ embed_cache"
+            )
+        return LocalEmbedder(device=resolved.value, precision=resolved_precision.value)
     if resolved is EmbedDevice.CUDA:
         if notices is not None and model2vec_available():
             notices.append(
@@ -2765,7 +2941,7 @@ def _resolve_embedder(
                 "embed.device=cpu. Тихий фолбэк на CPU запрещён — прогон объявил cuda, "
                 "и CPU-векторы разошлись бы с embed_device/партицией/ключом embed_cache"
             )
-        return LocalEmbedder(device=resolved.value)
+        return LocalEmbedder(device=resolved.value, precision=resolved_precision.value)
     if model2vec_available():
         try:
             lite = build_lite_embedder()
@@ -2774,7 +2950,7 @@ def _resolve_embedder(
         if lite is not None and lite.available:
             return lite
     if _module_installed("sentence_transformers"):
-        return LocalEmbedder(device=resolved.value)
+        return LocalEmbedder(device=resolved.value, precision=resolved_precision.value)
     # Нет ни одной ветви — это **видимое** состояние, а не молчаливая дыра: без эмбеддера
     # композиция не собирается, ``index_manifest``/``index_store`` не пишутся (реестр
     # утверждал бы «партиция на диске» без коммита), ``embed_model_id`` пуст, а R0
@@ -3058,6 +3234,13 @@ def build_adapters(
             (deploy.embed if deploy is not None else EmbedConfig()),
             run_embed,
         )
+        # Точность — соседняя объявленная ось того же резолва ``app < run``. Исполнимость
+        # проверяет выбор адаптера (``_resolve_embedder``): torch-путь умеет fp16
+        # (``autocast``), Lite — нет, и тогда это отказ, а не тихий fp32.
+        embed_precision = resolve_embed_precision(
+            (deploy.embed if deploy is not None else EmbedConfig()),
+            run_embed,
+        )
         require_embed_device(embed_device)
         embed_notices: list[str] = []
         ports = _build_local_ports(
@@ -3082,6 +3265,7 @@ def build_adapters(
             # ``extractor_version`` портов и Ш5 описывали бы разные устройства.
             pdf_device=crawl_limits.pdf_device,
             embed_device=embed_device,
+            embed_precision=embed_precision,
             embed_notices=embed_notices,
         )
         # Выбор эмбеддера под объявленное устройство виден в журнале wiring (тот же

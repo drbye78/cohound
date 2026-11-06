@@ -117,9 +117,11 @@ from core.cli.context import (
 )
 from core.cli.errors import EXIT_USAGE, CliError
 from core.cli.wiring import (
+    ensure_reasoning_wire,
     manifest_deploy_fields,
     registry_specs_digest,
     resolve_evaluator_model_identity,
+    resolve_evaluator_reasoning_effort,
 )
 from core.config.deploy import (
     ENV_SERP,
@@ -131,7 +133,11 @@ from core.config.passports import passport_content_digests
 from core.domain.dictionary import load_dictionary
 from core.domain.enums import FrozenSource, PdfDevice, RefreshPolicy, SearchMode
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
-from core.pipeline.crawl_frontier import resolve_embed_device, resolve_pdf_device
+from core.pipeline.crawl_frontier import (
+    resolve_embed_device,
+    resolve_embed_precision,
+    resolve_pdf_device,
+)
 from core.pipeline.digests import passports_digest, render_modes_digest
 from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.manual_artifacts import load_manual_artifacts
@@ -686,6 +692,13 @@ class DeclaredExecutionAxes:
     #: ``run_id`` не описывал бы, на чём считался индекс. ``None`` — ось не передана
     #: (чистые вызовы/legacy-конструкторы в тестах): «не объявлено», а не «cpu».
     embed_device: str | None = None
+    #: Точность эмбеддера (ось ``embed.precision``,
+    #: :class:`core.domain.enums.EmbedPrecision`): ``fp32``/``fp16`` из той же цепочки
+    #: ``app < run``, что увидит исполнение
+    #: (:func:`core.pipeline.crawl_frontier.resolve_embed_precision`). Входит в контракт
+    #: (поле ``embed_precision``), потому что fp16- и fp32-векторы — разные числа: без оси
+    #: ``run_id`` не описывал бы, с какой точностью посчитан индекс.
+    embed_precision: str | None = None
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов
     #: (``sources/manual_artifacts.yaml``). Объявленный вход (файл пакета), поэтому
     #: вычислим до сборки портов; материал — ``(product_id, url, sha256)``, где
@@ -832,6 +845,19 @@ def _resolve_llm_scenarios(
         slot_name=slot,
         model_id=getattr(args, "llm_model", None),
     )
+    # §7.4 (решение 06.11.2026): усилие рассуждения — та же цепочка, что у модели, и та же
+    # функция, что у рантайма (``resolve_evaluator_reasoning_effort``): CLI >
+    # ``run.yaml: llm_reasoning_effort`` > поле слота. Вторая формула развела бы контракт и
+    # провод, и манифест назвал бы уровень, с которым модель не работала.
+    reasoning_effort = resolve_evaluator_reasoning_effort(
+        slot_config=config,
+        effort=getattr(args, "llm_reasoning_effort", None),
+        run_effort=getattr(getattr(inputs, "run", None), "llm_reasoning_effort", None),
+        slot_name=slot,
+    )
+    # Та же проверка выразимости, что у runtime-оценщика: ``plan`` обязан отказать там
+    # же, где откажет прогон, — иначе он показывал бы ``run_id`` исполнимого измерения.
+    ensure_reasoning_wire(model_id, reasoning_effort)
     # V5/V6: условия генерации — часть того, что описывает ``run_id``. Поле ``decoder``
     # до правки было единственным, а ``seed``/``temperature``/``constrained_decoding``
     # писались NULL, хотя объявлены в схеме и обещаны §7.1/02 C.1: манифест не мог
@@ -855,6 +881,11 @@ def _resolve_llm_scenarios(
         # быть виден именно здесь.
         "endpoint_host": endpoint_host(str(base_url)),
         "max_tokens": getattr(config, "max_tokens", None),
+        # Усилие рассуждения — условие генерации, как потолок и seed: оно меняет и расход
+        # токенов, и текст ответа, значит может менять вердикт. ``None`` — ось не
+        # объявлена ни на одном слое (отличимо от объявленного ``off``: тот означает
+        # «рассуждение не запрошено» и параметра на провод не отправляет).
+        "reasoning_effort": None if reasoning_effort is None else reasoning_effort.value,
     }
     return (row,)
 
@@ -1076,6 +1107,13 @@ def resolve_declared_axes(
         # Доступность CUDA здесь **не** проверяется: это preflight, а не условие
         # идентичности (иначе ``run_id`` стал бы функцией хоста).
         embed_device=resolve_embed_device(
+            config.embed,
+            getattr(getattr(inputs, "run", None), "embed", None),
+        ).value,
+        # Ось ``embed.precision`` — той же формулой ``app < run`` и без per-site слоя:
+        # точность — свойство стека/хоста, а не сайта. Исполнимость проверяется отдельно
+        # (``_resolve_embedder``), потому что это выбор адаптера, а не идентичность.
+        embed_precision=resolve_embed_precision(
             config.embed,
             getattr(getattr(inputs, "run", None), "embed", None),
         ).value,

@@ -47,6 +47,7 @@ from core.domain.enums import (
     CrawlItemStatus,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     PdfPipeline,
     RefreshPolicy,
     SkipReason,
@@ -1360,6 +1361,13 @@ def build_phases(
             # ради которого ось вводится. Дефолт — объявленный дефолт оси (``cpu``).
             embed_device=str(
                 getattr(axes, "embed_device", None) or EmbedDevice.CPU.value
+            ),
+            # 16 §4.1 (решение 06.11.2026): точность счёта — та же объявленная ось того же
+            # резолва ``app < run`` (:func:`core.pipeline.crawl_frontier.resolve_embed_precision`).
+            # Фаза её не выводит и не спрашивает адаптер: точность — часть значения
+            # вектора, а не ответ порта. Дефолт — объявленный дефолт оси (``fp32``).
+            embed_precision=str(
+                getattr(axes, "embed_precision", None) or EmbedPrecision.FP32.value
             ),
             # D1/D2: application-слой осей краула (deploy.yaml:crawl) — низший приоритет.
             crawl_app=crawl_app,

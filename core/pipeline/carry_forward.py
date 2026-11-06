@@ -147,10 +147,13 @@ class CarriedCell:
 def model_config_digest(evaluator: Any) -> str:
     """Дайджест конфигурации оценщика (09 §10.1), 24 hex-символа.
 
-    Материал — ``model_version``/``decoder``/``seed``/``temperature``/``endpoint_kind``:
-    это те же условия, что входят в ключ кэша вердиктов (§10.5), но **без** промпта и
-    правил — они идут отдельными слагаемыми ключа переноса. ``model_id`` сюда не входит:
-    он в ключе отдельным полем, чтобы разбор расхождения называл именно модель.
+    Материал — ``model_version``/``decoder``/``seed``/``temperature``/``endpoint_kind``/
+    ``reasoning_effort``: это те же условия, что входят в ключ кэша вердиктов (§10.5), но
+    **без** промпта и правил — они идут отдельными слагаемыми ключа переноса.
+    ``reasoning_effort`` добавлен решением 06.11.2026: объявленный уровень рассуждения
+    меняет текст ответа, значит и вердикт — без него перенос считал бы ``high`` и ``off``
+    одним условием. ``model_id`` сюда не входит: он в ключе отдельным полем, чтобы разбор
+    расхождения называл именно модель.
     """
     payload = {
         "model_version": getattr(evaluator, "model_version", "") or "",
@@ -158,8 +161,23 @@ def model_config_digest(evaluator: Any) -> str:
         "seed": getattr(evaluator, "seed", None),
         "temperature": getattr(evaluator, "temperature", None),
         "endpoint_kind": str(getattr(evaluator, "endpoint_kind", "") or ""),
+        # §7.4 (решение 06.11.2026): уровень рассуждения входит в условия ответа, значит и
+        # в отпечаток конфигурации оценщика. Без него перенос ячейки считал бы ответ при
+        # ``high`` эквивалентным ответу при ``off``.
+        "reasoning_effort": _effort_value(getattr(evaluator, "reasoning_effort", None)),
     }
     return short_hash(json.dumps(payload, ensure_ascii=False, sort_keys=True), 24)
+
+
+def _effort_value(value: Any) -> str | None:
+    """Уровень рассуждения как строка (``None`` — не объявлен).
+
+    Enum приводится к значению, чтобы отпечаток не зависел от типа: ``ReasoningEffort.HIGH``
+    и ``"high"`` — один и тот же объявленный уровень, а не два разных условия.
+    """
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
 
 
 def prompt_template_digest(param: CatalogRow) -> str:

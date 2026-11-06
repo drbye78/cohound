@@ -45,7 +45,13 @@ _FIELD_SEP = "\x1f"
 #: диска), ``chunk_id`` адресует версию документа (``doc_version_id``). Партиции формата
 #: ``partition-1`` остаются на диске иммутабельно и **читаются**, но не переиспользуются:
 #: их ``vector_digest`` недоказуем (в ``chunk_ids.jsonl`` нет ``content_hash``).
-_PARTITION_SCHEMA = "partition-2"
+#:
+#: ``partition-3`` (решение владельца 06.11.2026): в material добавлена точность счёта
+#: (``embed_precision``). Причина та же, что у устройства: fp32- и fp16-векторы одной
+#: модели — разные числа (замер: худший чанк ``1−cos = 8.3e-05``), поэтому партиция,
+#: собранная в одной точности, не описывает другую. Старые партиции остаются на диске
+#: иммутабельно и не переиспользуются молча — их манифест точности не несёт.
+_PARTITION_SCHEMA = "partition-3"
 
 #: Наблюдаемость эмбеддинга: число чанков в одном батче **на уровне фазы**
 #: (Pass B, :func:`_embed_and_build`).
@@ -84,6 +90,7 @@ def _derive_partition_build_id(
     chunker_version: str,
     embed_model_id: str,
     embed_device: str = "",
+    embed_precision: str = "",
     extractor_version: str,
     lexical_engine_version: str,
     vector_store: str,
@@ -102,6 +109,9 @@ def _derive_partition_build_id(
        ``embed_model_id``: тот описывает веса, а не хост, на котором они считались.
        Векторы CPU и CUDA одной модели численно разные, поэтому без устройства в ``pb``
        CPU-партиция молча переиспользовалась бы CUDA-прогоном;
+    5a. ``embed_precision`` — точность счёта (``fp32``/``fp16``): те же векторы в разных
+       точностях — тоже разные числа, поэтому партиция одной точности не описывает
+       другую (та же природа, что у устройства);
     6. ``extractor_version`` — композит версий экстрактора **этого** продукта;
     7. ``lexical_engine_version`` — фактический лексический движок прогона
        (``tantivy-<ver>``; пусто — лексического плеча нет). Берётся у сборщика,
@@ -115,9 +125,10 @@ def _derive_partition_build_id(
     не содержимое. Это позволяет переиспользовать партицию при смене фокуса/каталога
     (09 §8.1). ``retrieval_*`` тоже не входят: ретривал-конфиг не меняет чанкинг/векторы.
 
-    ``embed_device`` имеет значение по умолчанию ``""`` ради вызывающих, которые считают
-    ``pb`` **без** объявленной оси (юнит-тесты формулы): фаза всегда передаёт ось явно
-    (дефолт объявленной оси — ``cpu``), поэтому живой прогон не получает пустое значение.
+    ``embed_device``/``embed_precision`` имеют значение по умолчанию ``""`` ради
+    вызывающих, которые считают ``pb`` **без** объявленной оси (юнит-тесты формулы): фаза
+    всегда передаёт обе оси явно (дефолты объявленных осей — ``cpu``/``fp32``), поэтому
+    живой прогон не получает пустое значение, отличимое от «не объявлено».
 
     Ревизия формулы (``_PARTITION_SCHEMA``) всегда даёт новые id: старые партиции
     остаются на диске иммутабельно, но новой композицией не переиспользуются.
@@ -130,6 +141,7 @@ def _derive_partition_build_id(
             chunker_version,
             embed_model_id,
             embed_device,
+            embed_precision,
             extractor_version,
             lexical_engine_version,
             vector_store,
@@ -503,6 +515,7 @@ def _embed_batched(
     cache: EmbedCache | None = None,
     embed_model_id: str = "",
     embed_device: str,
+    embed_precision: str,
     census: _EmbedCensus | None = None,
 ) -> list[list[float]]:
     """Эмбеддинг чанков внешними батчами; порядок входа = порядок выхода (детерминизм, A3).
@@ -516,7 +529,8 @@ def _embed_batched(
     Батч лишь ограничивает **второй** материализуемый список (тексты) и даёт наблюдение.
 
     **Кэш векторов (опция).** При ``cache`` каждый чанк батча сначала спрашивается у кэша
-    по ключу ``(content_hash текста, embed_model_id, embed_device)``; эмбеддер получает
+    по ключу ``(content_hash текста, embed_model_id, embed_device, embed_precision)``;
+    эмбеддер получает
     только промахи, свежие векторы сразу записываются в кэш, а хиты подставляются в **свои**
     позиции. Поэтому порядок входа = порядок выхода и при смешанном батче (инвариант
     держится структурой: слоты батча индексируются позицией чанка, а не порядком ответа
@@ -535,6 +549,9 @@ def _embed_batched(
         Обязательный keyword: векторы CPU и CUDA численно разные, поэтому догадка о
         устройстве обслуженной записи была бы подменой значения провенансом. Значение —
         объявленная ось прогона, а не ответ адаптера (``EmbedderPort`` о ней не знает).
+    :param embed_precision: точность счёта — четвёртая компонента ключа кэша. Той же
+        природой: fp16- и fp32-векторы — разные числа, и подставить одну точность вместо
+        другой значило бы отдать чужой вектор под объявленным условием.
     :param census: счётчики per продукт (хиты/посчитанные); ``None`` — не считать.
     """
     total = len(chunks)
@@ -562,6 +579,7 @@ def _embed_batched(
                     chunk.content_hash or "",
                     embed_model_id,
                     embed_device=embed_device,
+                    embed_precision=embed_precision,
                     dim=expected_dim,
                 )
                 if hit is None:
@@ -586,6 +604,7 @@ def _embed_batched(
                         embed_model_id,
                         vector,
                         embed_device=embed_device,
+                        embed_precision=embed_precision,
                         dim=expected_dim,
                     )
             if census is not None:
@@ -609,6 +628,7 @@ def _embed_and_build(
     chunker_version: str,
     embed_model_id: str,
     embed_device: str,
+    embed_precision: str,
     extractor_version: str,
     lexical_engine_version: str,
     vector_store: str,
@@ -641,6 +661,9 @@ def _embed_and_build(
         Идёт в ключ ``embed_cache`` и в манифест партиции (``extra["embed_device"]``):
         без него CUDA-прогон мог бы переиспользовать CPU-партицию/векторы (16 §5.1/§5.3).
         Значение приходит аргументом, а не спрашивается у адаптера.
+    :param embed_precision: точность счёта (объявленная ось ``embed.precision``). Той же
+        ролью, что устройство: ключ ``embed_cache`` и манифест партиции
+        (``extra["embed_precision"]``) — иначе fp16-прогон переиспользовал бы fp32-векторы.
     :param census: счётчики «из кэша / посчитано» этого продукта (наполняется эмбеддингом).
     :param timings: бакеты стадий продукта (наблюдаемость): сюда пишутся ``embed_s`` и
         ``build_s``. ``None`` — не измерять (юнит-путь). Оба бакета — **работа** главного
@@ -680,6 +703,7 @@ def _embed_and_build(
                 cache=cache,
                 embed_model_id=embed_model_id,
                 embed_device=embed_device,
+                embed_precision=embed_precision,
                 census=census,
             )
         finally:
@@ -708,6 +732,9 @@ def _embed_and_build(
                 # 16 §5.1: место счёта векторов. Сборщик уже пишет его из ``extra``;
                 # без записи CUDA-партиция была бы неотличима от CPU-партиции по манифесту.
                 "embed_device": embed_device,
+                # Та же роль, что у устройства: точность — часть условий сборки, а не
+                # диагностика. fp16-партиция под fp32-объявлением была бы чужими числами.
+                "embed_precision": embed_precision,
                 # План 20 §4: снимок продукта — провенанс, не слагаемое ``pb``. Ключ не
                 # добавляется, когда снимка нет: ``None`` в ``extra`` был бы выдумкой.
                 **(
@@ -740,6 +767,7 @@ def _partition_reuse_reason(
     chunker_version: str,
     embed_model_id: str,
     embed_device: str = "",
+    embed_precision: str = "",
     extractor_version: str,
     lexical_engine_version: str,
     vector_store: str,
@@ -752,8 +780,8 @@ def _partition_reuse_reason(
        ``product_content_token``; совпал id — совпали входы by construction.
     2. **физический уровень (эта проверка).** Партиция реально зафиксирована на диске
        (``is_committed``), а её ``manifest.json`` несёт тот же ``content_digest`` и те же
-       ``chunker_version``/``embed_model_id``/``embed_device``/``extractor_version``/
-       ``lexical_engine_version``/``vector_store``. Это защита от коллизии id, порчи и
+       ``chunker_version``/``embed_model_id``/``embed_device``/``embed_precision``/
+       ``extractor_version``/``lexical_engine_version``/``vector_store``. Это защита от коллизии id, порчи и
        подмены артефакта: id — не доказательство целостности диска.
     3. **отпечаток содержимого (16 §5.2).** ``vector_digest`` пересчитывается **с диска**
        и сверяется с манифестом. Сборщик пишет его при сборке, а при переиспользовании
@@ -781,6 +809,9 @@ def _partition_reuse_reason(
         # 16 §5.1: место счёта — часть условий сборки, а не провенанс. Партиция другого
         # устройства содержит другие числа под тем же содержимым.
         "embed_device": embed_device,
+        # fp16- и fp32-векторы — разные числа под тем же содержимым (ось
+        # ``embed.precision``); манифест обязан называть точность, которой считал.
+        "embed_precision": embed_precision,
         "extractor_version": extractor_version,
         "lexical_engine_version": lexical_engine_version,
         "vector_store": vector_store,

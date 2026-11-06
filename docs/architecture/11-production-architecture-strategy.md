@@ -180,11 +180,11 @@
 из бюджета вместо константы, preflight с `EXIT_USAGE`, пик воркера через файл-сток,
 `COHOUND_MEM_BUDGET_MB` (`03` §D.6). Закрывает Д-7.
 *Доказательство исполнения (HEAD `f6100c7`):* блок собирается в прогоне
-(`core/cli/commands/run.py:1297` — `build_resources_block`) и пишется в `metrics.json`
+(`core/cli/commands/run.py:1298` — `build_resources_block`) и пишется в `metrics.json`
 (`core/pipeline/metrics.py:459`); живой прогон его несёт — `runs/ru-pg-dbms-3edf2b06097c/metrics.json`
 (`resources.budget.source = "available"`, `resources.phases.discovery.peak_rss_mb`).
 Распределение чанков по семействам наполняется фазой корпуса
-(`core/pipeline/corpus.py:3277` — `summarize_chunks_per_doc`), поэтому в прогоне без
+(`core/pipeline/corpus.py:3286` — `summarize_chunks_per_doc`), поэтому в прогоне без
 переисполнения корпуса блок пуст — это наблюдение, а не дефект.
 
 **Содержание.**
@@ -226,11 +226,11 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
 >   контракте — `trafilatura-html-6+text-plain-2+epub-2+pdfium-text-2+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
 >   (сегмент `cpu`/`cuda` — ось `crawl.pdf_device`, P9).
-> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2511` (`workers_from_budget`),
->   preflight `core/cli/wiring.py:2453` (`preflight_extraction_budget`, `EXIT_USAGE`).
+> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2643` (`workers_from_budget`),
+>   preflight `core/cli/wiring.py:2585` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
->   `core/pipeline/corpus.py:3277`; видимая строка пропуска по бюджету —
+>   `core/pipeline/corpus.py:3286`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:1050` (`SKIP_BUDGET`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
 >   `core/store/sqlite.py:406`.
@@ -256,14 +256,14 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   Выбор — по замеру F0 достоверности таблиц, не по вкусу.
 - Хвост фазы durable: провенанс спуска по контейнеру, а не в конце. **Дизайн согласован
   (совет 2026-10-24, три полосы независимо + синтез).** `archive_observations`/
-  `corpus_members` копятся в памяти (`core/pipeline/corpus.py:2224-2225`) и пишутся пачкой в
-  `core/pipeline/corpus.py:3277` ⇒ SIGKILL теряет всё. Лечение — write-through: `ArchiveDescentWalker`
+  `corpus_members` копятся в памяти (`core/pipeline/corpus.py:2233-2234`) и пишутся пачкой в
+  `core/pipeline/corpus.py:3286` ⇒ SIGKILL теряет всё. Лечение — write-through: `ArchiveDescentWalker`
   получает два необязательных колбэка (`persist_observation`, `persist_member`), `None` —
   прежнее поведение байт-в-байт. Точки: наблюдение — `_record` (`archive_descent.py:332`,
   вызовы `409`/`445`/`467`/`741`), член — `_settle` (`:530`), где уже есть `doc_id`/
   `extracted_content_hash`; вложенные — `:634`/`:652`. Финальную пачку сохранить как
   идемпотентный reconciliation-pass (дешёвый повторный upsert). Сбой записи изолируется в
-  `errors` по образцу `_persist_docs` (`core/pipeline/corpus_index.py:80-111`) — отказ store не должен убивать спуск.
+  `errors` по образцу `_persist_docs` (`core/pipeline/corpus_index.py:86-121`) — отказ store не должен убивать спуск.
   Идемпотентность уже обеспечена: `observation_id` детерминирован (`run|product|root|hash|depth`),
   `corpus_members` — UPSERT. **Не делать в первом патче:** предварительное observation «контейнер
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
@@ -306,20 +306,20 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`core/cli/commands/experiment.py:530`, метрики κ/abstention/`fabricated_support`/bootstrap —
 >   `core/pipeline/evaluator_benchmark.py:621-704`), но замера на трёх моделях нет: в
 >   `docs/reports/measurements/` нет файла с результатами benchmark'а, а обе слоты `deploy.yaml`
->   несут одну и ту же модель (`config/deploy.yaml:88-89` и `:94`). Выбор модели по κ
+>   несут одну и ту же модель (`config/deploy.yaml:98-99` и `:94`). Выбор модели по κ
 >   **не сделан** — модель объявлена, а не измерена (A3).
-> - **`base_url` в слот:** ✅ сделано — `config/deploy.yaml:107`
+> - **`base_url` в слот:** ✅ сделано — `config/deploy.yaml:117`
 >   (`base_url: "https://plusvibeapi.ru"`), пустой слот теперь означает «оценщик не
 >   поднимается», а не «endpoint берётся из env»; место исполнения объявлено флагом
->   `rnd_endpoint` (`config/deploy.yaml:99`).
+>   `rnd_endpoint` (`config/deploy.yaml:109`).
 > - **SERP-контур:** ✅ сделано, но **не** через `run_serp_loop`. Производитель запросов —
->   `_run_serp_contour` (`core/pipeline/corpus.py:836-964`), вызов внутри фазы корпуса **до**
->   дренажа — `core/pipeline/corpus.py:836-964`; `run_serp_loop` сам остаётся невызываемым
+>   `_run_serp_contour` (`core/pipeline/corpus.py:837-965`), вызов внутри фазы корпуса **до**
+>   дренажа — `core/pipeline/corpus.py:837-965`; `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1549` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:117`), значение из
->   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1095`).
+>   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1204`).
 >   Оговорка: контур исполняется только при объявленных `rounds > 0` **и** бюджете
->   (`core/pipeline/corpus.py:836-964`); на прогоне `ru-pg-dbms-3edf2b06097c` он не исполнялся.
+>   (`core/pipeline/corpus.py:837-965`); на прогоне `ru-pg-dbms-3edf2b06097c` он не исполнялся.
 > - **Exit:** прогон с непустой `llm_scenarios` и живыми вердиктами есть
 >   (`runs/ru-pg-dbms-3edf2b06097c/run_manifest.yaml` — сценарий `evaluator`,
 >   `web_tool: False`), а «посчитанный κ» — **нет**: golden-набор оказался непригоден
@@ -390,7 +390,7 @@ retrieval-тесты байт-идентичны прежним при том ж
 > `crawl/{submit,status,cancel,collect,poll}`), передача артефакта чанками не реализована
 > (только inline-base64, `core/edge/server.py:591`), ось уровня в запросе edge игнорирует.
 > Текущий `split` работает, но **не паритетен** `local`: игнор `document_level`/`pdf_pipeline`,
-> двойной фетч, потеря членов контейнеров (`core/pipeline/digests.py:129-132`;
+> двойной фетч, потеря членов контейнеров (`core/pipeline/digests.py:137-140`;
 > `core/adapters/remote_extractor.py:42` — `supports_source_path = False`). Зависимость от F3
 > соблюдена: F3 не начата ⇒ F4 законно не начата.
 

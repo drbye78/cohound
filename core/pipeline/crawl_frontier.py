@@ -70,6 +70,7 @@ from core.domain.enums import (
     ArchiveDescent,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     PdfDevice,
     PdfPipeline,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "normalize_scope_host",
     "resolve_crawl_limits",
     "resolve_embed_device",
+    "resolve_embed_precision",
     "resolve_pdf_device",
     "root_path_prefix",
     "url_form_key",
@@ -384,7 +386,7 @@ class CrawlLimits:
             # решаемый на изъятии, меняют **состав корпуса** на ограниченных прогонах,
             # поэтому обязаны менять ``run_id``. Носитель — именно ``crawl_config_digest``
             # (:func:`core.pipeline.report.crawl_control_digest`): ``EXECUTION_CONTRACT_FIELDS``
-            # (31 поле, ``digests.py``) не трогаются, слаг входит в контракт через этот
+            # (32 поля, ``digests.py``) не трогаются, слаг входит в контракт через этот
             # дайджест. Ключ безусловный намеренно: это не ось, которую оператор может
             # объявить или не объявить, а версия правил — прогон, снятый прежней
             # семантикой, несравним с новым при тех же осях, и один ``run_id`` над двумя
@@ -505,6 +507,35 @@ def resolve_embed_device(app: object, run: object | None = None) -> EmbedDevice:
     # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``EmbedDevice``
     # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
     return EmbedDevice(EmbedDevice.CPU if value is None else value)  # type: ignore[arg-type]
+
+
+def resolve_embed_precision(app: object, run: object | None = None) -> EmbedPrecision:
+    """Точность счёта вектора по объявленным слоям: app < run (ось ``embed.precision``).
+
+    Цепочка та же, что у :func:`resolve_embed_device`, и из тех же соображений:
+    точность — свойство стека/хоста исполнения, а не сайта, поэтому per-site слагаемого
+    нет; дефолт ``fp32`` **объявлен** (это поведение до появления оси), а не выведен из
+    окружения — иначе прогон на хосте с «удобным» autocast считал бы векторы иначе, чем
+    объявляет ``embed_precision``/``pb``/ключ ``embed_cache``.
+
+    Функция чистая (никаких импортов torch): *исполнимость* объявленной точности
+    проверяется там, где выбирается эмбеддер
+    (:func:`core.cli.wiring._resolve_embedder`), — «не поддержано» обязан быть отказ, а
+    не тихий fp32.
+
+    :param app: app-слой (:class:`core.config.deploy.EmbedConfig`); допускается контейнер
+        (:class:`DeployConfig`) — тогда берётся его секция ``embed`` (та же терпимость,
+        что у :func:`resolve_embed_device`: иначе вызов с ``deploy`` вернул бы дефолт и
+        объявил неисполнявшуюся точность).
+    :param run: run-слой (:class:`core.domain.models.EmbedRunConfig`) или ``None``.
+    """
+    app_layer = getattr(app, "embed", app)
+    run_layer = getattr(run, "embed", run) if run is not None else None
+    run_value = getattr(run_layer, "precision", None) if run_layer is not None else None
+    value = _pick(getattr(app_layer, "precision", None), run_value, None)
+    # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``EmbedPrecision``
+    # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
+    return EmbedPrecision(EmbedPrecision.FP32 if value is None else value)  # type: ignore[arg-type]
 
 
 def _pick(app: object, run: object, site: object) -> object:

@@ -10,7 +10,8 @@
 # Операционные (добавление значений НЕ требует бампа status_dictionary_version):
 # crawl_*, archive_*, document_*, fetch_mode, extraction_route, seed_*, onboarding_state,
 # product_mode, refresh_policy, product_scope, incremental_kind, reuse_kind, change_class,
-# run_scope, run_product_status, embed_device, skip_reason, stale_reason, search_phase,
+# run_scope, run_product_status, embed_device, embed_precision, reasoning_effort,
+# skip_reason, stale_reason, search_phase,
 # termination_reason, adapter_kind,
 # endpoint_kind, llm_scenario, gate/gate_source/gate_verdict/gate_policy, golden_tier, cap,
 # importance, param_type, archetype, anchor_relation, crawl_probe_*,
@@ -444,7 +445,7 @@ pdf_device:
 # выше (R5): объявленная ось обязана действовать, а `auto` = «устройство выбрало
 # окружение», то есть тот же класс дефекта, что чтение модели оценщика из env (§7.4).
 # Ось входит в `EXECUTION_CONTRACT_FIELDS` (поле `embed_device`, 28 → 29; текущий размер
-# контракта — 31 поле после `frozen_source`, план 19 §P3), поэтому её
+# контракта — 32 поля после `frozen_source` и `embed_precision`, планы 19 §P3 и 16 §4.1), поэтому её
 # смена — `execution_change` (новый `run_id`); входит в материал `pb` и в ключ
 # `embed_cache` — иначе CPU-прогон получил бы CUDA-векторы под тем же ключом. Дефолт —
 # cpu (app-слой `deploy.yaml:embed.device`; run-слой `run.yaml:embed.device` его
@@ -455,6 +456,38 @@ pdf_device:
 embed_device:
   - cpu
   - cuda
+
+# 16 §4.1 (решение владельца 06.11.2026). Точность счёта вектора эмбеддера
+# (`embed.precision`): fp32 | fp16. bf16/tf32 НЕ вводятся — оба отвергнуты замером
+# (`docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`): bf16 при той же
+# скорости даёт `1−cos` 7.5e-04 (top-10 0.9893), tf32 — 9.6e-05 при 1.26–1.39×;
+# fp16 — 8.3e-05 при 2.56–2.77× и побитовый детерминизм. `auto` не существует по той же
+# причине, что у `embed_device` (R5): объявленная ось обязана действовать.
+# Ось входит в `EXECUTION_CONTRACT_FIELDS` (`embed_precision`, 32-е поле; уровень
+# рассуждения входит внутрь `llm_scenarios`, отдельного поля контракта не добавляя), в материал `pb` и
+# в ключ `embed_cache` — иначе fp16- и fp32-векторы смешались бы под одним ключом.
+# Дефолт — fp32 (поведение до появления оси, байт-в-байт). Неподдержанное объявление
+# (эмбеддер без torch/autocast) — отказ EXIT_USAGE, не тихий fp32.
+# Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря.
+embed_precision:
+  - fp32
+  - fp16
+
+# §7.4/§13. Усилие рассуждения оценщика (`llm.reasoning_effort`): off | low | medium | high.
+# Объявленный вход, а не настройка вида: рассуждение меняет расход токенов и текст
+# ответа, значит входит в `llm_scenarios` → `execution_contract_digest` → `run_id`.
+# `off` = «рассуждение не запрошено» (параметр не отправляется), а не «провайдер не
+# думает»: фактическое рассуждение видно в журнале вызовов (`usage.reasoning`).
+# Уровень для объявленной модели обязан быть выразим на проводе семейства; иначе —
+# отказ EXIT_USAGE с именем модели и уровня, а не тихая отправка без параметра.
+# Замер 06.11.2026: параметр принимается без ошибки, но на тривиальном промпте уровни
+# неразличимы (low 20 / high 17 reasoning-токенов) — «принято» ≠ «действует».
+# Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря.
+reasoning_effort:
+  - "off"          # в кавычках: без них YAML 1.1 читает off как False (булево)
+  - low
+  - medium
+  - high
 
 # §4.1/§5. Семейство документа — выбор чанкера (``ExtractedDoc.family`` →
 # ``chunker_family``): markdown → чанкер с ``heading_path``, text → абзацный,

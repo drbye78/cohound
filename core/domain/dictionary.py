@@ -29,6 +29,7 @@ from core.domain.enums import (
     DenialStrength,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     ExcludedCellClass,
     ExtractionRoute,
     ExtractQueueState,
@@ -48,6 +49,7 @@ from core.domain.enums import (
     PublishabilityClass,
     RankingPolicy,
     RankingRestriction,
+    ReasoningEffort,
     RefreshPolicy,
     ReuseKind,
     RunProductStatus,
@@ -117,6 +119,10 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "pdf_device",
         # 16 §4.1: устройство эмбеддера (embed.device) — объявленная ось прогона.
         "embed_device",
+        # 16 §4.1 (решение 06.11.2026): точность счёта вектора (embed.precision).
+        "embed_precision",
+        # §7.4: усилие рассуждения оценщика (llm.reasoning_effort) — объявленный вход.
+        "reasoning_effort",
         # 16 §3.2: статус продукта в прогоне (носитель — таблица run_product).
         "run_product_status",
         # §7.1/§7.4: механизм constrained decoding оценщика (V4).
@@ -194,6 +200,15 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # 16 §4.1: ось устройства эмбеддера — сверяется с enum'ом, потому что производитель
         # у неё есть (резолвер ``resolve_embed_device`` + контракт ``embed_device``).
         "embed_device": {v.value for v in EmbedDevice},
+        # Точность эмбеддера: производитель — резолвер ``resolve_embed_precision``,
+        # поле контракта ``embed_precision`` и ключ ``embed_cache``. Сверка обязательна:
+        # значение ходит в идентичность прогона, и расхождение словаря с enum'ом
+        # молча меняло бы ``run_id``.
+        "embed_precision": {v.value for v in EmbedPrecision},
+        # Усилие рассуждения: производитель — резолвер модели оценщика
+        # (``resolve_evaluator_model_identity``/``resolve_evaluator_reasoning_effort``)
+        # и строка ``llm_scenarios``; значение входит в ``run_id``.
+        "reasoning_effort": {v.value for v in ReasoningEffort},
         # 16 §3.2: статус продукта в прогоне. Сверка есть, потому что производитель
         # появился вместе с писателем ``run_product``: перечисление без писателя было бы
         # объявлением семантики, которую некому исполнять, а секция словаря без сверки

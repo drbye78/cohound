@@ -44,6 +44,7 @@ from typing import Any
 from core.cli.context import (
     _add_common,
     _add_llm_model_flag,
+    _add_llm_reasoning_effort_flag,
     _add_llm_slot_flag,
     _add_phase4_flags,
     _crawl_policy_resolution,
@@ -1816,6 +1817,7 @@ def configure(sub: Any) -> None:
     _add_common(p_run)
     _add_llm_slot_flag(p_run)
     _add_llm_model_flag(p_run)
+    _add_llm_reasoning_effort_flag(p_run)
     p_run.set_defaults(handler=run)
 
     p_status = crawl.add_parser("status", help="статус сеанса и счётчики (read-only)")
@@ -1846,6 +1848,7 @@ def configure(sub: Any) -> None:
     _add_common(p_resume)
     _add_llm_slot_flag(p_resume)
     _add_llm_model_flag(p_resume)
+    _add_llm_reasoning_effort_flag(p_resume)
     p_resume.set_defaults(handler=resume)
 
     p_restart = crawl.add_parser("restart", help="очистить сеанс и запустить заново")
@@ -1856,6 +1859,7 @@ def configure(sub: Any) -> None:
     _add_common(p_restart)
     _add_llm_slot_flag(p_restart)
     _add_llm_model_flag(p_restart)
+    _add_llm_reasoning_effort_flag(p_restart)
     p_restart.set_defaults(handler=restart)
 
     p_cancel = crawl.add_parser("cancel", help="терминально снять сеанс (interrupted|cancelled)")

@@ -767,7 +767,7 @@ def test_canonical_llm_both_slots_same_default_model() -> None:
     assert cfg.llm.slot == DEFAULT_LLM_SLOT
     assert cfg.llm.cheap.model_id == DEFAULT_LLM_MODEL_ID
     assert cfg.llm.flagship.model_id == DEFAULT_LLM_MODEL_ID
-    assert cfg.llm.cheap.model_id == "deepseek-v4.1-flash:purple"
+    assert cfg.llm.cheap.model_id == "deepseek-v4.1-flash-1017:yellow"
 
 
 def test_default_model_constants_track_deploy_config() -> None:
@@ -814,8 +814,8 @@ def test_llm_scenarios_empty_when_slot_inactive_so_model_id_is_not_in_run_id() -
     )
     new = DeployConfig(
         llm=LLMDeployConfig(
-            cheap=LLMSlotConfig(model_id="deepseek-v4.1-flash:purple"),
-            flagship=LLMSlotConfig(model_id="deepseek-v4.1-flash:purple"),
+            cheap=LLMSlotConfig(model_id="deepseek-v4.1-flash-1017:yellow"),
+            flagship=LLMSlotConfig(model_id="deepseek-v4.1-flash-1017:yellow"),
         )
     )
 

@@ -555,13 +555,13 @@ _partition_reuse_reason 2926-3005
    сравнение и текст сообщения не тронуты. Перенесено 22 приватных имени (48
    name-операторов в 27 операторах импорта) на модули-владельцы. **Три имени остались через
    `corpus`** — `_serp_note`, `_serp_disabled_observation`, `_stage_timings_aggregate`:
-   они там **определены** (`corpus.py:962/765/714`), переезжать некуда.
+   они там **определены** (`corpus.py:963/765/714`), переезжать некуда.
    **Три `monkeypatch`-адреса оставлены на `corpus` намеренно и доказанно**: это шов, а не
-   долг. `_ingest_member_doc` (`corpus.py:2874`) и `_persist_docs` (`corpus.py:274`, `:2639`)
+   долг. `_ingest_member_doc` (`corpus.py:2883`) и `_persist_docs` (`corpus.py:275`, `:2639`)
    связываются в `partial` в кадре `_build_corpus`, поэтому подмена на модуле-владельце не
    доехала бы до кода. Доказательство прогоном в обе стороны: raise-спай на
    `corpus_ingest.persist_docs` тест **не** роняет, на `corpus._persist_docs` — роняет.
-   `_EXECUTOR_MAX_WAVES_PER_ROOT` читается в `corpus.py:2556` — подмена реального дефолта
+   `_EXECUTOR_MAX_WAVES_PER_ROOT` читается в `corpus.py:2565` — подмена реального дефолта
    на `1000` роняет тест на `assert 2 == 1`.
    **Суммарно по `tests/` коммит даёт 24 файла, +2056 / −69** — разница с 19/+61/−39 не
    относится к миграции: 4 файла новые (`test_corpus_offline.py` 11 тестов,
@@ -602,6 +602,6 @@ _partition_reuse_reason 2926-3005
 10. **CI** — 5557 passed, 6 skipped, coverage **89.90 %**; `mypy_gate.py` 121/121 (долг не
     вырос; 12 ключей сменили путь — записи переехали вслед за кодом); `selfcheck` 111/111;
     `ruff` чист; `check_doc_anchors.py` — **0 проблем / 15 предупреждений** (после
-    перенумерации 143 якорей и трёх ручных исправлений: `corpus_index.py:80`
+    перенумерации 143 якорей и трёх ручных исправлений: `corpus_index.py:86`
     `_derive_partition_build_id`, `_PARTITION_SCHEMA` `partition-1 → partition-2`,
-    `evaluate.py:2636/2846-2874` для `max_retries`).
+    `evaluate.py:2653/2846-2874` для `max_retries`).

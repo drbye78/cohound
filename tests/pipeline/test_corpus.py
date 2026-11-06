@@ -36,6 +36,7 @@ from core.domain import (
     CrawlStrategy,
     DocumentLevel,
     EmbedDevice,
+    EmbedPrecision,
     FailureKind,
     RateLimitSpec,
     ReuseKind,
@@ -999,9 +1000,10 @@ def test_partition_build_id_uses_actual_builder_engine(tmp_path: Path) -> None:
         product_id="p1",
         chunker_version=entry.chunker_version or "",
         embed_model_id=entry.embed_model_id or "",
-        # Ось устройства объявлена здесь как дефолт: ``_build`` её не задаёт, а партиция
-        # в этом прогоне посчитана именно дефолтом (16 §4.1, ``cpu``).
+        # Оси устройства и точности объявлены здесь как дефолты: ``_build`` их не задаёт,
+        # а партиция в этом прогоне посчитана именно ими (16 §4.1, ``cpu``/``fp32``).
         embed_device=EmbedDevice.CPU.value,
+        embed_precision=EmbedPrecision.FP32.value,
         extractor_version=entry.extractor_version or "",
         lexical_engine_version="tantivy-0.26.2",
         vector_store=entry.vector_store or "",

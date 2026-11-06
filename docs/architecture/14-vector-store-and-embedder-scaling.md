@@ -45,14 +45,14 @@ production-масштабе, — это четыре дефекта **нашег
 
 ## 2. Ключевой факт: поиск никогда не идёт по всему корпусу
 
-✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:787-859`) объявляет
+✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:787-876`) объявляет
 `product_ids: Sequence[str] | None = None` с докстрингом «по умолчанию `[product_id]`;
 сателлиты добавляет вызывающий (I17)», а `NpyVectorIndex.search_many`
 (`core/adapters/vector_npy.py:272-330`) обходит `for product_id in products` и читает
 партицию продукта. Номера строк в абзаце ниже сверены с кодом (2026-10-28):
-`core/pipeline/evaluate.py:787-859`, `vector_npy.py:312-330`; смысл не изменился.
+`core/pipeline/evaluate.py:787-876`, `vector_npy.py:312-330`; смысл не изменился.
 
-`core/pipeline/evaluate.py:787-859` + `retrieve_for_cell` (`:443-515`): `product_ids` — по
+`core/pipeline/evaluate.py:787-876` + `retrieve_for_cell` (`:443-515`): `product_ids` — по
 умолчанию `[product_id]`, сателлиты добавляет вызывающий (I17). В
 `core/adapters/vector_npy.py:312-330` цикл `for product_id in dict.fromkeys(q.product_ids)`
 читает **партицию продукта**, а не общий индекс.
@@ -90,8 +90,8 @@ Brute-force косинус, тот же код (`_cosine_scores`), 1024 dim:
    всей партиции в fp32: **новая аллокация 46.7 MB** и 27.8 ms на каждый запрос.
 3. `for chunk_id, score in zip(...): meta = self._lookup(chunk_id)` (`:183`) — резолвер
    метаданных вызывается для **всех** 11 400 чанков, хотя нужны только `top_k=10`. В
-   composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:368`,
-   `core/cli/context.py:1859`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
+   composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:369`,
+   `core/cli/context.py:1860`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
    point-lookup в БД прогона: 4 мкс ⇒ 42 ms на поиск.
 
 Сумма на один поиск при масштабе: 23.3 MB чтения + 27.8 ms конверсии + 4.5 ms матмула +
@@ -170,7 +170,7 @@ top-10 из 600** у близких соседей. Замер при едино
 | HNSW/IVF по 17 млн | **нет**: поиск продукт-скоупед, 11.4 тыс. — brute force быстрее ANN |
 | Квантование int8 (4× меньше) | частично: 35 GB → 9 GB, но fp16 уже даёт 2×, а диск не узкое место |
 | Фильтрация (payload) | **нет**: фильтр — это `product_id`, он и так задаёт партицию |
-| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id)`; подключён в `core/cli/context.py:2432`) |
+| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id, embed_device, embed_precision)`; подключён в `core/cli/context.py:2440`) |
 | Общий индекс для нескольких нод | **да** — единственное настоящее преимущество, см. ниже |
 | Одновременные читатели/писатели | **нет**: у нас модель «иммутабельная сборка», читателей несколько, писатель один на прогон |
 
@@ -239,21 +239,21 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
   2510-2527), приоритет по-прежнему «что установлено на хосте». Это и есть открытый пункт 5 §6.
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
-  ✅ форма на месте (`core/config/deploy.py:533`, `LLMSlotConfig`), ⬜ переиспользована не
+  ✅ форма на месте (`core/config/deploy.py:535`, `LLMSlotConfig`), ⬜ переиспользована не
   была: `DeployConfig` (`:564-581`) поля `embed` не имеет и лишний ключ отвергает.
 
 ### 5.0 Спецификация `deploy.embed` (оформлено; реализация — по появлении инстанса)
 
 ⬜ не сделано (проверено 2026-10-31) — оформлена только спецификация в этом документе.
 Уточнение против записи 28.10: поле `embed` в `DeployConfig` **появилось**
-(`core/config/deploy.py:603`), но объявляет ровно одно — `device`
-(`EmbedConfig`, `core/config/deploy.py:514`), потому что устройство входит в контракт;
+(`core/config/deploy.py:605`), но объявляет ровно одно — `device`
+(`EmbedConfig`, `core/config/deploy.py:516`), потому что устройство входит в контракт;
 `backend`/`base_url`/`model_version` по-прежнему отвергаются (`extra="forbid"`), а
 `RemoteEmbedder` не существует и маршрута `embed` в контурах шва нет (`contracts/seam/`:
 `capabilities`, `crawl`, `envelope`, `extract`, `fetch`, `health`, `openapi`, `registry`,
 `search` — схемы эмбеддинга среди них нет).
 Форма-образец (`deploy.llm` со слотами `base_url`/`model_id`/`model_version`/`timeout_s`)
-наличествует: `core/config/deploy.py:533` (`LLMSlotConfig`).
+наличествует: `core/config/deploy.py:535` (`LLMSlotConfig`).
 Что осталось: `backend`/`model_version` в схеме конфига + `RemoteEmbedder` за портом +
 правило `backend: remote` ⇒ непустой `model_version` с `EXIT_USAGE`/код `embed`.
 
@@ -278,7 +278,8 @@ embed:
     timeout_s: 60
     max_retries: 2            # как у оценщика: ≤2, без подмены модели
   # Кэш векторов по чанкам (core/pipeline/embed_cache.py) общий для обоих backend:
-  # ключ (content_hash текста, embed_model_id) — смена backend'а его не инвалидирует,
+  # ключ (content_hash текста, embed_model_id, embed_device, embed_precision) —
+  # смена backend'а его не инвалидирует,
   # если совпал embed_model_id; расхождение версии — промах, а не тихий хит.
 ```
 
@@ -303,8 +304,9 @@ embed:
 правила 1–3 и 5 адресуют несуществующий конфиг, правило 4 (`COHOUND_EMBED_API_KEY`) не
 объявлено ни в `.env.example`, ни в `03`, правило 6 (дефолт `local`) держится **побочно** —
 дефолт и есть единственная реализация. Единственное, что действует уже сейчас: кэш векторов
-по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash, embed_model_id)`), подключён в
-`core/cli/context.py:2750-2760` и в раскладку `core/config/paths.py:79`.
+по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash, embed_model_id, embed_device,
+embed_precision)`), подключён в
+`core/cli/context.py:2758-2768` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -327,7 +329,7 @@ embed:
 
 ✅ локальная часть сделана — `LiteEmbedder` даёт `repo@sha`: `self.model_id = f"{model_id}@{revision}"
 if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то же объяснение в
-`core/adapters/embed_local.py:119-120` для `LocalEmbedder`).
+`core/adapters/embed_local.py:143-144` для `LocalEmbedder`).
 ⬜ внешняя часть не сделана — нет `RemoteEmbedder`, значит нет ни сверки `model_version` с
 объявленной, ни отказа на пустой пин (правило 1 §5.0).
 Нормативная часть (смена `embed_model_id` классифицируется как `content_change`, а не
@@ -347,7 +349,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:281-292`).
+(`core/cli/wiring.py:293-304`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
@@ -422,19 +424,33 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 :func:`core.pipeline.crawl_frontier.resolve_embed_device`; передаётся в
 `SentenceTransformer(..., device=…)` **явным параметром** (`core/adapters/embed_local.py`),
 а не спрашивается у адаптера. Ось входит в `EXECUTION_CONTRACT_FIELDS` (28 → 29; текущий
-размер контракта — 31 поле после `frozen_source`, план 19 §P3), в материал
+размер контракта — 32 поля после `frozen_source` и `embed_precision`, планы 19 §P3 и
+`16` §4.1), в материал
 `pb`, в манифест партиции и в ключ `embed_cache` — CPU- и CUDA-прогон больше не могут
 обменяться векторами. `vector_digest` пересчитывается с диска при проверке переиспользования
 (`core/util/index_partition.py:recompute_vector_digest`), поэтому партиция с чужими
 векторами — видимый отказ, а не тихое принятие. Цена миграции кэша измерена и опубликована:
 `docs/reports/measurements/2026-10-29-embed-cache-device-migration-cost.md`.
 
+**Точность (ось `embed.precision`, решение владельца 06.11.2026 — `fp16`).** Вторая
+объявленная ось того же резолва `app < run`: `EmbedPrecision` (`fp32`|`fp16`, без `auto`;
+`bf16`/`tf32` отвергнуты замером) в `deploy.yaml:embed.precision` <
+`run.yaml:embed.precision`, резолвер
+:func:`core.pipeline.crawl_frontier.resolve_embed_precision`. `fp16` исполняется
+`torch.autocast(device_type=<устройство>, dtype=torch.float16)` вокруг вызова модели
+(`core/adapters/embed_local.py`), `fp32` — прежний путь без autocast. Ось входит в
+`EXECUTION_CONTRACT_FIELDS`, в материал `pb` (`partition-3`), в манифест партиции и в ключ
+`embed_cache`; эмбеддер, который точность исполнить не может (`LiteEmbedder`/NumPy), —
+`WiringError`/`EXIT_USAGE`, а не тихий `fp32`. Замер: `2026-11-06-embedding-precision-cpu.md`
+(cuda, bge-m3) — 15.40/13.82 чанка/с против 6.02/4.99 у `fp32` (2.6×), худший чанк
+`1−cos = 8.3e-05`, top-10 соседей 0.998, детерминизм побитовый.
+
 
 
 **Факт.** `LocalEmbedder` не передаёт `device` в загрузчик: `SentenceTransformer(self._repo_id,
-revision=…, local_files_only=…)` (`core/adapters/embed_local.py:176`). Устройство выбирает
+revision=…, local_files_only=…)` (`core/adapters/embed_local.py:210`). Устройство выбирает
 torch по умолчанию, то есть `cuda`, если она доступна. В этом окружении
-`torch 2.14.1+cu130`, `cuda_available=True`, `_resolve_embedder()` (`core/cli/wiring.py:2731-2778`)
+`torch 2.14.1+cu130`, `cuda_available=True`, `_resolve_embedder()` (`core/cli/wiring.py:2871-2954`)
 выбрал `LocalEmbedder` (bge-m3, dim 1024) — значит эмбеддинг исполнялся **на карте**, и это
 видно не по декларации, а по факту `nvidia-smi --query-compute-apps`. Состав процессов
 меняется по фазе, и это как раз доказательство: в docling-фазе на карте **два** процесса
@@ -446,13 +462,13 @@ torch по умолчанию, то есть `cuda`, если она досту�
 экстрактора ровно этот класс закрыт: `pdf_device` входит в `extractor_version`
 (`docling-doc-3:layout_tables/cuda/…`) и в `extractor_stack`. Для эмбеддера такой оси **нет**:
 прогон на CPU и прогон на CUDA дают одинаковый `embed_model_id`, то есть одинаковый `pb`
-(`core/pipeline/corpus_index.py:125-138` — `embed_model_id` в материале хеша).
+(`core/pipeline/corpus_index.py:136-150` — `embed_model_id` в материале хеша).
 
 **Дефект 2 — переиспользование не проверяет векторы.** `_partition_reuse_reason`
-(`core/pipeline/corpus_index.py:714-793`) сверяет шесть объявленных полей манифеста:
+(`core/pipeline/corpus_index.py:741-824`) сверяет шесть объявленных полей манифеста:
 `content_digest`, `chunker_version`, `embed_model_id`, `extractor_version`,
 `lexical_engine_version`, `vector_store`. `vector_digest` — полный отпечаток, включающий
-**байты векторов** (`core/adapters/index_npy.py:275`) — в этом списке отсутствует, хотя
+**байты векторов** (`core/adapters/index_npy.py:276`) — в этом списке отсутствует, хотя
 сборщик его пишет, а `_guard_immutable` (`:309`) его сверяет. Разница существенна: при
 переиспользовании сборка не строится, значит `_guard_immutable` не исполняется, и партиция
 с чужими векторами принимается молча. Ось `pdf_device` такой лазейки не имеет только
@@ -548,7 +564,7 @@ torch по умолчанию, то есть `cuda`, если она досту�
    (решение владельца 29.10.2026, `09` §14.1); делать после отчёта текущего прогона.
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`core/cli/wiring.py:2756-2776` — `model2vec_available()` → `_module_installed("sentence_transformers")`
+установки** (`core/cli/wiring.py:2932-2952` — `model2vec_available()` → `_module_installed("sentence_transformers")`
 → `None`). При появлении `deploy.embed` приоритет становится объявленным:
 `backend` из конфига, а наличие библиотек — предпосылка, а не решение.
 **Проверено на 2026-10-28: не сделано** (строки 2274-2295 → 2510-2527, логика прежняя).

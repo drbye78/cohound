@@ -31,6 +31,7 @@ from core.domain import (
     Focus,
     LLMCellOutput,
     MeasurementOrigin,
+    ReasoningEffort,
     RunConfig,
     RunMode,
     Status,
@@ -39,6 +40,7 @@ from core.pipeline.carry_forward import (
     carry_forward_cell,
     cell_reuse_conditions,
     evidence_digest,
+    model_config_digest,
 )
 from core.pipeline.corpus_index import _chunk_id
 from core.pipeline.digests import (
@@ -298,6 +300,35 @@ def test_retrieved_doc_set_digest_ignores_rank_and_chunk_identity() -> None:
         [same_doc_other_chunk]
     )
     assert retrieved_doc_set_digest([chunk]) == retrieved_doc_set_digest([reranked])
+
+
+def test_model_config_digest_names_the_reasoning_effort() -> None:
+    """§7.4: уровень рассуждения — условие ответа, значит и часть отпечатка оценщика.
+
+    Без него перенос ячейки счёл бы ответ при ``high`` и при ``off`` одним условием.
+    Enum и его строка — один объявленный уровень, а не два разных.
+    """
+    class _Evaluator:
+        model_version = "1.0"
+        decoder = "json_schema"
+        seed = 0
+        temperature = 0.0
+        endpoint_kind = "api"
+        reasoning_effort: object = None
+
+    undeclared = _Evaluator()
+    high = _Evaluator()
+    high.reasoning_effort = ReasoningEffort.HIGH
+    high_as_string = _Evaluator()
+    high_as_string.reasoning_effort = "high"
+    off = _Evaluator()
+    off.reasoning_effort = ReasoningEffort.OFF
+
+    assert model_config_digest(undeclared) != model_config_digest(high)
+    assert model_config_digest(off) != model_config_digest(high)
+    # ``None`` (оси нет) отличимо от объявленного ``off``.
+    assert model_config_digest(undeclared) != model_config_digest(off)
+    assert model_config_digest(high) == model_config_digest(high_as_string)
 
 
 def test_cell_reuse_key_is_stable_for_identical_conditions() -> None:

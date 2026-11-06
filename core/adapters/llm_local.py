@@ -54,13 +54,14 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
 from core.domain import LLMCellOutput
-from core.domain.enums import Decoder
+from core.domain.enums import Decoder, ReasoningEffort
 from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
 from core.util.hashing import content_hash
 
@@ -77,9 +78,11 @@ __all__ = [
     "EvaluatorUnavailable",
     "GenerateFn",
     "LocalEvaluator",
+    "ReasoningWireUnsupported",
     "decoder_wire_type",
     "endpoint_host",
     "normalize_api_base",
+    "reasoning_wire",
 ]
 
 #: Модель оценщика по умолчанию — **только fallback прямой конструкции** (§7.4).
@@ -88,7 +91,7 @@ __all__ = [
 #: ``build_evaluator_llm`` отказывает (``llm``/``EXIT_USAGE``), не подставляя это значение.
 #: Значение держится равным ``config/deploy.yaml:llm.<slot>.model_id`` (пин в
 #: ``tests/config/test_deploy.py``): источник истины — конфиг, а не константа адаптера.
-DEFAULT_MODEL_ID = "deepseek-v4.1-flash:purple"
+DEFAULT_MODEL_ID = "deepseek-v4.1-flash-1017:yellow"
 #: Профиль зоны (07): API корпоративного облака (OI-совместимый), не self-host инсталляция.
 DEFAULT_ENDPOINT_KIND = "api"
 #: Механизм constrained decoding по умолчанию: без навязанной грамматики.
@@ -154,10 +157,39 @@ class EvaluationError(RuntimeError):
         self.finish_reason = finish_reason
         self.raw = raw
         self.usage = usage
+        #: Текст рассуждения, если провайдер успел его отдать. Заполняется путями отказа
+        #: (:meth:`LocalEvaluator._extract`) и :meth:`LocalEvaluator.complete`: на отказе
+        #: это единственный диагностический след, и журнал пишет его целиком.
+        self.reasoning: str | None = None
 
 
 class EvaluatorUnavailable(RuntimeError):
     """Оценщик недоступен: нет HTTP-зависимости и не внедрён ``generate``."""
+
+
+def _reasoning_tokens_of(usage_raw: dict[str, Any]) -> int:
+    """Токены рассуждения из ``usage`` (0 — провайдер не назвал).
+
+    Две подтверждённые формы: ``completion_tokens_details.reasoning_tokens``
+    (OI-совместимая, отдаётся замеренной моделью) и плоское
+    ``completion_thinking_tokens`` (часть совместимых серверов; образец —
+    :mod:`core.adapters.llm_discovery`). Порядок — от точной формы к запасной; нечисловое
+    значение не выдумывается как ноль, а читается как «не названо».
+    """
+    details = usage_raw.get("completion_tokens_details")
+    candidates: list[Any] = []
+    if isinstance(details, dict):
+        candidates.append(details.get("reasoning_tokens"))
+    candidates.append(usage_raw.get("completion_thinking_tokens"))
+    for value in candidates:
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        return max(0, number)
+    return 0
 
 
 def _httpx_available() -> bool:
@@ -187,6 +219,142 @@ def endpoint_host(base_url: str) -> str | None:
     if not host:
         return None
     return f"{host}:{parsed.port}" if parsed.port else host
+
+class ReasoningWireUnsupported(RuntimeError):
+    """Объявленный уровень рассуждения **невыразим** на проводе этой модели.
+
+    Отказ, а не тихий пропуск параметра: пропуск выглядел бы как «уровень не выбран», и
+    прогон жил бы под ``run_id``, называющим уровень, который никуда не ушёл. Класс
+    ошибки отдельный, чтобы composition root мог отобразить его в ``EXIT_USAGE`` с именем
+    модели и уровня (это ошибка входа, а не сбой исполнения).
+    """
+
+    def __init__(self, message: str, *, model_id: str, effort: ReasoningEffort | None = None
+    ) -> None:
+        super().__init__(message)
+        self.model_id = model_id
+        self.effort = effort
+
+
+@dataclass(frozen=True)
+class _ReasoningFamily:
+    """Одно семейство моделей и способ выразить уровень рассуждения на его проводе.
+
+    ``wire is None`` — механизм семейства **известен, но не подтверждён замером** на этом
+    стенде; такой уровень — отказ, а не догадка о теле запроса (A3: «принято» ≠
+    «действует», и выдуманный ключ — тем более).
+
+    Таблица нужна одна: второй список семейств разошёлся бы с первым молча.
+    """
+
+    name: str
+    #: Подстроки ``model_id`` (в нижнем регистре), по которым семейство опознаётся.
+    markers: tuple[str, ...]
+    #: Провод уровня → фрагмент тела запроса. ``None`` — не подтверждён замером.
+    wire: Callable[[ReasoningEffort], dict[str, Any]] | None
+    #: Что известно о механизме семейства (для текста отказа/докстринга).
+    mechanism: str
+
+
+#: Таблица «семейство модели → провод усилия рассуждения». Единственная.
+#:
+#: Замер 06.11.2026 (4 вызова, ``https://plusvibeapi.ru/v1``, модель
+#: ``deepseek-v4.1-flash-1017:yellow``): ``reasoning_effort`` принимается в теле запроса
+#: без ошибки; ``usage.completion_tokens_details.reasoning_tokens`` отдаётся (17–25 на
+#: тривиальном вопросе), ``choices[0].message.reasoning_content`` присутствует. На
+#: тривиальном промпте уровни неразличимы (low 20 / high 17 reasoning-токенов) — то есть
+#: действенность уровня **измеряется**, а не предполагается; это публикует журнал вызовов.
+#:
+#: ``off`` на этом проводе выражается **отсутствием параметра**: «не просим» — иная
+#: форма, чем «просим уровень off», и выдумывать её ключ запрещено. Разницу между
+#: объявленным ``off`` и фактическим рассуждением видно в журнале (``usage.reasoning``).
+#:
+#: ``qwen``/``glm`` перечислены, потому что их механизмы известны, но **замером здесь не
+#: подтверждены**: ``qwen`` — ``enable_thinking`` (+ бюджет через ``chat_template_kwargs``),
+#: ``glm`` — ``thinking: {type: enabled|disabled}``. Пока не снят замер, запрос такого
+#: уровня — отказ (``ReasoningWireUnsupported``), а не догадка. Точка расширения: снять
+#: замер, заполнить ``wire`` — и всё, что выше, начнёт действовать без правок вызывающих.
+_REASONING_FAMILIES: tuple[_ReasoningFamily, ...] = (
+    _ReasoningFamily(
+        name="deepseek",
+        markers=("deepseek",),
+        wire=lambda level: (
+            {} if level is ReasoningEffort.OFF else {"reasoning_effort": level.value}
+        ),
+        mechanism="reasoning_effort в теле запроса (подтверждено замером 06.11.2026)",
+    ),
+    _ReasoningFamily(
+        name="qwen",
+        markers=("qwen",),
+        wire=None,
+        mechanism=(
+            "enable_thinking (+ бюджет через chat_template_kwargs); замером на этом "
+            "стенде не подтверждено"
+        ),
+    ),
+    _ReasoningFamily(
+        name="glm",
+        markers=("glm", "chatglm"),
+        wire=None,
+        mechanism=(
+            "thinking: {type: enabled|disabled}; замером на этом стенде не подтверждено"
+        ),
+    ),
+)
+
+
+def reasoning_family(model_id: str) -> _ReasoningFamily | None:
+    """Семейство модели по ``model_id`` (``None`` — не опознано).
+
+    Опознание — по подстроке маркера в нижнем регистре: варианты и версии
+    (``deepseek-v4.1-flash-1017:yellow``, ``...:purple``) принадлежат одному семейству,
+    поэтому ``model_id`` целиком в таблицу не заводится (иначе каждая новая версия
+    требовала бы правки).
+    """
+    text = str(model_id or "").strip().lower()
+    for family in _REASONING_FAMILIES:
+        if any(marker in text for marker in family.markers):
+            return family
+    return None
+
+
+def reasoning_wire(model_id: str, effort: ReasoningEffort | None) -> dict[str, Any]:
+    """Фрагмент тела запроса для объявленного уровня рассуждения.
+
+    ``{}`` — уровня нет (``None``) или объявлено ``off``. ``off`` выражается
+    **отсутствием параметра** и потому выразимо для **любой** модели: «не просим» не
+    требует знания ключа семейства. Отличить объявленное ``off`` от фактического
+    рассуждения (провайдер мог думать по своему дефолту) призван журнал
+    (``usage.reasoning``) — это провенанс исполнения, а не обещание.
+
+    Иначе — ключи тела запроса по таблице семейств.
+
+    :raises ReasoningWireUnsupported: семейство не опознано, либо уровень для него не
+        подтверждён замером. Молча вернуть ``{}`` значило бы выдать «уровень не действует»
+        за «уровень объявлен» — ложный провенанс в ``llm_scenarios`` и журнале.
+    """
+    if effort is None or effort is ReasoningEffort.OFF:
+        return {}
+    family = reasoning_family(model_id)
+    if family is None:
+        raise ReasoningWireUnsupported(
+            f"усилие рассуждения «{effort.value}» для модели «{model_id}» невыразимо: "
+            "семейство модели не опознано, а угадывать ключ тела запроса запрещено "
+            "(A3). Объявите llm.reasoning_effort: off либо модель семейства, для "
+            "которого провод подтверждён замером",
+            model_id=model_id,
+            effort=effort,
+        )
+    if family.wire is None:
+        raise ReasoningWireUnsupported(
+            f"усилие рассуждения «{effort.value}» для модели «{model_id}» невыразимо: "
+            f"механизм семейства {family.name} — {family.mechanism}. Запрос не отправлен: "
+            "выдуманный ключ объявил бы уровень, которого модель не получала",
+            model_id=model_id,
+            effort=effort,
+        )
+    return family.wire(effort)
+
 
 def decoder_wire_type(decoder: str) -> str | None:
     """Механизм, который реально уходит по проводам для объявленной метки (V4).
@@ -218,6 +386,10 @@ class LocalEvaluator:
     :param base_url: база OI-совместимого API (реальный путь).
     :param api_key: необязательный bearer-токен (ключ корпоративного облака).
     :param timeout: таймаут HTTP-запроса, с.
+    :param reasoning_effort: объявленное усилие рассуждения (ось
+        ``llm.reasoning_effort``); переопределяется ``req.reasoning_effort``. Уровень
+        переводится в тело запроса таблицей семейств (:func:`reasoning_wire`);
+        невыразимый уровень — :class:`ReasoningWireUnsupported`, а не тихий пропуск.
     """
 
     def __init__(
@@ -234,6 +406,7 @@ class LocalEvaluator:
         api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | str | None = None,
     ) -> None:
         if not model_id:
             raise ValueError("model_id обязан быть непустым")
@@ -272,6 +445,12 @@ class LocalEvaluator:
         #: Потолок генерации (V5): ``None`` — серверный дефолт провайдера, и это надо
         #: знать: без потолка обрезание приходит как ``finish_reason=length``.
         self.max_tokens = max_tokens
+        #: Усилие рассуждения — объявленный вход (входит в ``llm_scenarios``). Хранится
+        #: как объявлено (enum), чтобы провенанс (``model_config_digest``) и провод
+        #: читали одно значение, а не две её копии.
+        self.reasoning_effort = (
+            None if reasoning_effort is None else ReasoningEffort(reasoning_effort)
+        )
         self._generate = generate
         # Счётчики стоимости (§15/M1): заполняются в :meth:`complete`. Нужны потому, что
         # ``metrics.json`` обязан называть цену прогона, а факт вызова и расход токенов
@@ -280,6 +459,7 @@ class LocalEvaluator:
         self._calls = 0
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        self._reasoning_tokens = 0
 
     # ------------------------------------------------------------------
     # Наблюдаемость стоимости
@@ -302,6 +482,10 @@ class LocalEvaluator:
                 "prompt": self._prompt_tokens,
                 "completion": self._completion_tokens,
             }
+            # Рассуждение — отдельная статья расхода (часть ``completion``); не
+            # смешивается с ним, иначе «сколько стоило думать» неотличимо от ответа.
+            if self._reasoning_tokens:
+                tokens["reasoning"] = self._reasoning_tokens
         return {"calls": self._calls, "tokens": tokens}
 
     # ------------------------------------------------------------------
@@ -325,6 +509,7 @@ class LocalEvaluator:
         temperature = req.temperature if req.temperature is not None else self.temperature
         usage = TokenUsage()
         finish_reason: str | None = None
+        reasoning: str | None = None
         # Счётчик вызовов растёт **до** запроса: провалившийся вызов тоже стоил времени
         # (а часто и токенов — HTTP-ошибка после отправки). Токены прибавляются после
         # ответа: их знает только сервер.
@@ -332,11 +517,12 @@ class LocalEvaluator:
         if self._generate is not None:
             raw = self._generate(req.prompt, req.response_schema)
         else:
-            raw, usage, finish_reason = self._http_complete(
+            raw, usage, finish_reason, reasoning = self._http_complete(
                 req, seed=seed, temperature=temperature
             )
         self._prompt_tokens += usage.prompt_tokens
         self._completion_tokens += usage.completion_tokens
+        self._reasoning_tokens += usage.reasoning_tokens
         raw = raw if isinstance(raw, str) else str(raw)
         try:
             output = self._parse(req.response_schema, raw)
@@ -349,6 +535,10 @@ class LocalEvaluator:
                 exc.usage = usage
             if exc.finish_reason is None:
                 exc.finish_reason = finish_reason
+            # Текст рассуждения на отказе — единственный диагностический след: именно он
+            # объясняет, почему модель не дошла до JSON (журнал пишет его целиком).
+            if exc.reasoning is None:
+                exc.reasoning = reasoning
             raise
         return LLMResponse(
             output=output,
@@ -357,6 +547,9 @@ class LocalEvaluator:
             decoder=self.decoder,
             finish_reason=finish_reason,
             usage=usage,
+            # Рассуждение — провенанс диагностики: журнал пишет длину на успехе и полный
+            # текст на отказе (иначе файл растёт на десятки МБ).
+            reasoning=reasoning,
         )
 
     # ------------------------------------------------------------------
@@ -399,23 +592,38 @@ class LocalEvaluator:
 
     def _http_complete(
         self, req: LLMRequest, *, seed: int, temperature: float
-    ) -> tuple[str, TokenUsage, str | None]:
+    ) -> tuple[str, TokenUsage, str | None, str | None]:
         """Реальный вызов OI-совместимого API. Схема → constrained decoding; без tools (I18).
 
-        Возвращает ``(content, usage, finish_reason)``: метка остановки генерации —
-        провенанс ответа (``length`` иначе неотличим от невалидного JSON).
+        Возвращает ``(content, usage, finish_reason, reasoning_content)``: метка остановки
+        генерации — провенанс ответа (``length`` иначе неотличим от невалидного JSON),
+        текст рассуждения — провенанс диагностики (журнал).
+
+        **Усилие рассуждения** (ось ``llm.reasoning_effort``) переводится в тело запроса
+        таблицей семейств (:func:`reasoning_wire`). Невыразимый уровень —
+        :class:`ReasoningWireUnsupported` **до** отправки: тихий пропуск параметра выдал бы
+        «уровень не выбран» за «уровень объявлен».
         """
         httpx = self._import_http()
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        model_id = req.model_id or self.model_id
+        effort = (
+            req.reasoning_effort
+            if req.reasoning_effort is not None
+            else self.reasoning_effort
+        )
         payload: dict[str, Any] = {
-            "model": req.model_id or self.model_id,
+            "model": model_id,
             "messages": [{"role": "user", "content": req.prompt}],
             "temperature": temperature,  # 0.0 ⇒ greedy (детерминизм)
             "seed": seed,
             "stream": False,
         }
+        # Уровень рассуждения — условие генерации (входит в llm_scenarios → run_id).
+        # Таблица одна на все семейства; невыразимый уровень — отказ, а не пропуск.
+        payload.update(reasoning_wire(model_id, effort))
         # V5: потолок генерации — условие измерения, а не «настройка вида». До правки
         # ``max_tokens`` из слота не доезжал до провода вообще, поэтому потолок задавал
         # сервер своим дефолтом, а обрезанная генерация была неотличима от невалидного
@@ -463,7 +671,9 @@ class LocalEvaluator:
             },
         }
 
-    def _extract(self, data: Any) -> tuple[str, TokenUsage, str | None]:
+    def _extract(
+        self, data: Any
+    ) -> tuple[str, TokenUsage, str | None, str | None]:
         """Достаёт ``choices[0].message.content``, ``usage`` и ``finish_reason``.
 
         V5: ``finish_reason == "length"`` с пустым текстом — это **исчерпанный потолок
@@ -490,13 +700,22 @@ class LocalEvaluator:
         if not isinstance(usage_raw, dict):
             # Неожиданная форма расхода — «не названо», а не измеренный ноль.
             usage_raw = {}
+        # Рассуждение провайдер называет по-разному: ``completion_tokens_details.
+        # reasoning_tokens`` (OI-совместимая форма) либо ``completion_thinking_tokens``
+        # (плоское поле части совместимых серверов). Оба — часть ``completion``, поэтому
+        # не прибавляются к нему, а публикуются отдельной статьёй (провенанс стоимости).
         usage = TokenUsage(
             prompt_tokens=int(usage_raw.get("prompt_tokens", 0) or 0),
             completion_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
+            reasoning_tokens=_reasoning_tokens_of(usage_raw),
         )
+        # Текст рассуждения, если провайдер его отдал (замер 06.11.2026: отдаёт).
+        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+        if not isinstance(reasoning, str) or not reasoning:
+            reasoning = None
         if (content is None or content == "") and finish_reason == "length":
             limit = self.max_tokens if self.max_tokens is not None else "серверный"
-            raise EvaluationError(
+            error = EvaluationError(
                 "генерация оценщика оборвана по потолку токенов "
                 f"(finish_reason=length, max_tokens={limit}): увеличьте "
                 "llm.<slot>.max_tokens — модель израсходовала бюджет на reasoning",
@@ -505,14 +724,20 @@ class LocalEvaluator:
                 raw=content if isinstance(content, str) else "",
                 usage=usage,
             )
+            # Рассуждение — единственный текст, который успела выдать модель: без него
+            # путь отказа неразбираем (в ответе ``content`` пуст).
+            error.reasoning = reasoning
+            raise error
         if not isinstance(content, str):
-            raise EvaluationError(
+            error = EvaluationError(
                 f"choices[0].message.content обязан быть строкой, получено {type(content).__name__}",
                 reason="invalid_json",
                 finish_reason=finish_reason,
                 usage=usage,
             )
-        return content, usage, finish_reason
+            error.reasoning = reasoning
+            raise error
+        return content, usage, finish_reason, reasoning
 
     def _import_http(self) -> Any:
         """Лениво импортирует ``httpx``; при отсутствии — ``EvaluatorUnavailable``."""
