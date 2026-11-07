@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -890,3 +891,128 @@ def test_build_mismatch_compares_with_composition_id() -> None:
     assert exc.value.reason == "no_cases"
     assert exc.value.details["row_skip_reasons"] == {"build_mismatch": 1}
     assert _PARTITION in str(exc.value) and _COMPOSITION in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Ось исполнения ``concurrency``: вызовы в полёте, порядок и валидация
+# ---------------------------------------------------------------------------
+
+class _OverlapEvaluator:
+    """Модель, которая ждёт ``expected`` одновременных вызовов и считает фактический пик.
+
+    Барьер делает проверку детерминированной: если пул окажется уже ``expected``, барьер
+    не соберётся, вызовы дождутся таймаута и тест увидит ``broken=True``. Считать только
+    ``max_in_flight`` без барьера значило бы проверять планировщик, а не пул.
+    """
+
+    def __init__(self, fn, *, expected: int) -> None:  # noqa: ANN001
+        self._fn = fn
+        self._barrier = threading.Barrier(expected)
+        self._lock = threading.Lock()
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.broken = False
+        self.model_id = "fake"
+        self.model_version = "1.0"
+        self.decoder = "none"
+        self.endpoint_kind = "api"
+        self.seed = 0
+        self.temperature = 0.0
+
+    def complete(self, req: LLMRequest) -> LLMResponse:
+        with self._lock:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            self._barrier.wait(timeout=5.0)
+        except threading.BrokenBarrierError:
+            self.broken = True
+        finally:
+            with self._lock:
+                self.in_flight -= 1
+        result = self._fn(req.prompt)
+        return LLMResponse(
+            output=result,
+            raw=result.model_dump_json(),
+            prompt_hash="ph",
+            decoder="none",
+            usage=TokenUsage(10, 5, 0),
+        )
+
+
+def test_concurrency_keeps_calls_in_flight_and_order() -> None:
+    """``concurrency=4`` держит 4 вызова в полёте и возвращает ячейки по порядку ``cases``."""
+    cases = [_case(f"param_{index}", "CELL_OK", Status.OK) for index in range(4)]
+    evaluator = _OverlapEvaluator(_perfect, expected=4)
+    model = ModelUnderTest(model_id="fake", label="fake", evaluator=evaluator)
+
+    report = run_benchmark(cases, [model], concurrency=4)
+
+    assert not evaluator.broken, "пул не собрал 4 вызова в полёте"
+    assert evaluator.max_in_flight == 4
+    # Порядок результата — порядок параметров, а не порядок ответов модели.
+    assert [m.param_id for m in report.models[0].cells] == [
+        "param_0",
+        "param_1",
+        "param_2",
+        "param_3",
+    ]
+    assert report.models[0].validity_rate == pytest.approx(1.0)
+    assert report.concurrency == 4
+    assert report.to_dict()["contract"]["concurrency"] == 4
+
+
+def test_concurrency_one_stays_sequential() -> None:
+    """Дефолт ``1`` — прежний последовательный обход: в полёте ровно один вызов."""
+    cases = _two_cases()
+    evaluator = _OverlapEvaluator(_perfect, expected=1)
+    model = ModelUnderTest(model_id="fake", label="fake", evaluator=evaluator)
+
+    report = run_benchmark(cases, [model])
+
+    assert not evaluator.broken
+    assert evaluator.max_in_flight == 1
+    assert report.concurrency == 1
+
+
+def test_concurrency_is_validated() -> None:
+    """«Ноль вызовов в полёте» — не исполнение; ``bool`` не число потоков."""
+    with pytest.raises(ValueError):
+        run_benchmark(_two_cases(), [_model(_perfect)], concurrency=0)
+    with pytest.raises(TypeError):
+        run_benchmark(_two_cases(), [_model(_perfect)], concurrency=True)
+
+
+class _Http429(Exception):
+    """Отказ адаптера с классом ``http_error`` (как ``EvaluationError`` при 429)."""
+
+    reason = "http_error"
+
+
+def test_last_error_names_the_retry_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Повтор виден не только числом ``calls``: артефакт называет **причину** (429).
+
+    Журнал ``logs/llm_calls.jsonl`` принадлежит фазе; у benchmark его нет, поэтому
+    единственный носитель причины повтора в отчёте — ``last_error``. Без него вопрос
+    «держит ли провайдер k вызовов в полёте» решался бы по латентности и ``calls``.
+    """
+    import core.pipeline.evaluate as evaluate_module
+
+    # Пауза повтора — не предмет этого теста: без неё он ждал бы секунды даром.
+    monkeypatch.setattr(evaluate_module, "backoff_delay", lambda *a, **k: 0.0)
+    state = {"calls": 0}
+
+    def flaky(_prompt: str) -> LLMCellOutput:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise _Http429("HTTP-вызов оценщика не удался: HTTP 429")
+        return _ok_output()
+
+    report = run_benchmark(
+        [_case("param_ok", "CELL_OK", Status.OK)], [_model(flaky)]
+    )
+    cell = report.models[0].cells[0]
+    assert cell.calls == 2
+    assert cell.status == Status.OK.value
+    assert cell.last_error is not None and "429" in cell.last_error
+    assert report.to_dict()["models"][0]["cells"][0]["last_error"] == cell.last_error

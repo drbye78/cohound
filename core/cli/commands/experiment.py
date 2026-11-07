@@ -524,6 +524,7 @@ def _emit_benchmark(args: argparse.Namespace, payload: dict[str, Any]) -> None:
             **payload["retrieval"]
         ),
         f"n_cells: {payload['n_cells']} (products: {payload['n_products']})",
+        f"concurrency: {payload['contract']['concurrency']}",
         f"input_digest: {payload['input_digest']}",
         f"skipped: {len(payload['skipped'])}",
         f"artifact: {payload['artifact']}",
@@ -661,6 +662,7 @@ def run_evaluator_benchmark(args: argparse.Namespace) -> int:
             clock=getattr(args, "clock", None),
             skipped=prepared.skipped,
             notes=tuple(notes) + prepared.notes,
+            concurrency=int(getattr(args, "concurrency", 1) or 1),
         )
 
     payload = report.to_dict()
@@ -812,6 +814,15 @@ def configure(sub: Any) -> None:
         default=None,
         metavar="N",
         help="smoke-подмножество: не более N ячеек (детерминированно по golden)",
+    )
+    p_bench.add_argument(
+        "--concurrency",
+        type=_positive_int,
+        default=1,
+        metavar="K",
+        help="сколько вызовов оценщика держать в полёте (ось исполнения "
+        "--llm-concurrency фазы Ш6); дефолт 1 — последовательно, байт-в-байт. "
+        "Точки одного замера снимаются по одной: провайдер общий",
     )
     _add_common(p_bench)
     p_bench.set_defaults(handler=run_evaluator_benchmark)

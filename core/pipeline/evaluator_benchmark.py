@@ -48,6 +48,7 @@ import random
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -813,6 +814,11 @@ class CellMeasurement:
     #: Вызовы, отвергнутые как невалидный JSON/форма, и обрезанные по потолку.
     invalid_json_calls: int = 0
     truncated_calls: int = 0
+    #: Текст **последнего** отказа вызова (``Тип: сообщение``) — провенанс повтора.
+    #: ``calls > 1`` говорит «был повтор», но не «из-за чего»: при ``429`` провайдер
+    #: ограничивает темп, при ``length`` виноват потолок генерации. Поле аддитивно и на
+    #: поведение замера не влияет (в метрики/κ/статусы не входит).
+    last_error: str | None = None
 
     @property
     def cell_id(self) -> str:
@@ -1054,6 +1060,7 @@ class ModelMetrics:
                     "truncated_calls": m.truncated_calls,
                     "latency_ms": m.latency_ms,
                     "harness_error": m.harness_error,
+                    "last_error": m.last_error,
                 }
                 for m in self.cells
             ],
@@ -1079,6 +1086,9 @@ class BenchmarkReport:
     eval_cache_enabled: bool = False
     bootstrap_resamples: int = 2000
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: Число вызовов оценщика в полёте (**ось исполнения**, не условие измерения): без
+    #: него артефакт замера не называл бы, при каком ``k`` снята точка.
+    concurrency: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         """Полный JSON-payload отчёта (единая форма для файла и ``--json``)."""
@@ -1103,6 +1113,9 @@ class BenchmarkReport:
                 "web_tool": BENCHMARK_CONTRACT["web_tool"],
                 "repeats": self.repeats,
                 "eval_cache": self.eval_cache_enabled,
+                # Ось исполнения, а не условия измерения: печатается рядом с ``repeats``,
+                # чтобы точка замера была привязана к ``k``, но в ``run_id`` не входила.
+                "concurrency": self.concurrency,
                 "bootstrap": {
                     "resamples": self.bootstrap_resamples,
                     "level": 0.95,
@@ -1169,6 +1182,7 @@ def _measure_once(
             finish_reasons=tuple(proxy.finish_reasons),
             invalid_json_calls=proxy.invalid_json_calls,
             truncated_calls=proxy.truncated_calls,
+            last_error=proxy.last_error,
         )
     elapsed_ms = (timer() - started) * 1000.0
     cell = outcome.cell
@@ -1191,6 +1205,7 @@ def _measure_once(
         finish_reasons=tuple(proxy.finish_reasons),
         invalid_json_calls=proxy.invalid_json_calls,
         truncated_calls=proxy.truncated_calls,
+        last_error=proxy.last_error,
     )
 
 def _abstention_metrics(measurements: Sequence[CellMeasurement]) -> dict[str, Any]:
@@ -1444,6 +1459,57 @@ def _limits(
     )
     return tuple(limits)
 
+def _measure_repeat(
+    cases: Sequence[CellCase],
+    model: ModelUnderTest,
+    *,
+    repeat: int,
+    concurrency: int,
+    timer: Callable[[], float],
+    eval_cache: EvalVerdictCache | None,
+    eval_conditions: EvalConditions | None,
+) -> list[CellMeasurement]:
+    """Один повтор по всем ячейкам: **в том же порядке**, при ``concurrency`` в полёте.
+
+    ``concurrency == 1`` — прежний последовательный обход байт-в-байт. Иначе ячейки
+    отправляются в пул, но результат возвращается **по порядку ``cases``**, а не по
+    порядку ответов: иначе ``cells`` отчёта зависели бы от того, какая модель ответила
+    первой, и отчёт перестал бы быть сравнимым между точками замера.
+
+    Пул здесь тот же по смыслу, что пул фазы Ш6 (``evaluate.evaluate_batch``): ячейка —
+    независимая единица работы, а разделяемого состояния у измерения нет (``store=None``,
+    счётчик вызовов свой на ячейку). Отдельного пула не строится: это и есть реюз
+    поведения фазы, только с ``store=None``.
+    """
+    if concurrency == 1:
+        return [
+            _measure_once(
+                case,
+                model,
+                repeat=repeat,
+                timer=timer,
+                eval_cache=eval_cache,
+                eval_conditions=eval_conditions,
+            )
+            for case in cases
+        ]
+    with ThreadPoolExecutor(
+        max_workers=concurrency, thread_name_prefix="benchmark-llm"
+    ) as pool:
+        return list(
+            pool.map(
+                lambda case: _measure_once(
+                    case,
+                    model,
+                    repeat=repeat,
+                    timer=timer,
+                    eval_cache=eval_cache,
+                    eval_conditions=eval_conditions,
+                ),
+                cases,
+            )
+        )
+
 def run_benchmark(
     cases: Sequence[CellCase],
     models: Sequence[ModelUnderTest],
@@ -1457,6 +1523,7 @@ def run_benchmark(
     generated_at: str | None = None,
     skipped: Mapping[str, str] | None = None,
     notes: Sequence[str] = (),
+    concurrency: int = 1,
 ) -> BenchmarkReport:
     """Прогоняет все модели на одном наборе :class:`CellCase` и возвращает отчёт.
 
@@ -1479,11 +1546,21 @@ def run_benchmark(
     :param generated_at: ISO-время отчёта; ``None`` — текущее UTC.
     :param skipped: ``cell_id -> reason`` из :func:`prepare_cases` (пропуски видны в отчёте).
     :param notes: заметки подготовки (незафиксированные настройки, пустые срезы).
-    :raises ValueError: нет ячеек/моделей, ``repeats < 1`` либо дубли меток моделей.
+    :param concurrency: сколько вызовов оценщика держать в полёте (ось исполнения
+        ``--llm-concurrency`` фазы Ш6, перенесённая в замер: без неё «ускорение от
+        параллелизма» оставалось бы арифметикой). ``1`` — прежний последовательный обход
+        байт-в-байт; ``> 1`` — ячейки идут пулом, порядок результатов сохраняется.
+        **Не** условие измерения: в ``run_id``/контракт отчёта не входит (как и в фазе).
+    :raises ValueError: нет ячеек/моделей, ``repeats < 1``, ``concurrency < 1`` либо дубли
+        меток моделей.
     :raises BenchmarkContractError: у модели нарушены условия измерения либо вход разошёлся.
     """
     if repeats < 1:
         raise ValueError("repeats обязан быть >= 1")
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int):
+        raise TypeError(f"concurrency обязан быть целым, получено {concurrency!r}")
+    if concurrency < 1:
+        raise ValueError(f"concurrency обязан быть ≥ 1, получено {concurrency!r}")
     if eval_cache is not None and eval_conditions is None:
         # 09 §10.5: тот же контракт, что у прогона. Иначе каждая ячейка стала бы
         # ``harness_error`` — измерение сообщило бы «модель не ответила» там, где
@@ -1509,16 +1586,17 @@ def run_benchmark(
     for model in models:
         collected: list[CellMeasurement] = []
         for repeat in range(repeats):
-            for case in cases:
-                measurement = _measure_once(
-                    case,
-                    model,
-                    repeat=repeat,
-                    timer=timer,
-                    eval_cache=eval_cache,
-                    eval_conditions=eval_conditions,
-                )
-                collected.append(measurement)
+            batch = _measure_repeat(
+                cases,
+                model,
+                repeat=repeat,
+                concurrency=concurrency,
+                timer=timer,
+                eval_cache=eval_cache,
+                eval_conditions=eval_conditions,
+            )
+            collected.extend(batch)
+            for case, measurement in zip(cases, batch, strict=True):
                 if measurement.prompt_hash:
                     prompt_hashes.setdefault(
                         (case.product_id, case.param.param_id), set()
@@ -1596,4 +1674,5 @@ def run_benchmark(
         eval_cache_enabled=eval_cache is not None,
         bootstrap_resamples=bootstrap_resamples,
         notes=tuple(notes or ()),
+        concurrency=concurrency,
     )
