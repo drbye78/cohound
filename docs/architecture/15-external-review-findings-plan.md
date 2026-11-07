@@ -184,7 +184,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
 | C1 | ничья в RRF без `chunk_id` | ПОДТВЕРЖДЕНО для мёртвого модуля; **живой путь корректен** | мёртвый: `util/fusion.py:102` (+ `_fuse_template` не выносит `chunk_id`); живой: `retrieve.py:126`,`:219` | живой покрыт (`test_retrieve.py:181-205`, `tests/selfcheck.py:392`) | Г | P5 |
-| C2 | `core/util/fusion.py` — мёртвый дубль, докстринг и `06` врут о подключении | ПОДТВЕРЖДЕНО (покрытие 52 %) | импортов в `core/` нет; `06-implementation-strategy.md:32` «обёрнуто в ретривал W8» | единственный тест — `tests/selfcheck.py:336` | Г | P5 |
+| C2 | `core/util/fusion.py` — мёртвый дубль, докстринг и `06` врут о подключении | ПОДТВЕРЖДЕНО (покрытие 52 %) | импортов в `core/` нет; `06-implementation-strategy.md:47` — «✅ удалён (`aa4185b`): мёртвый дубль» | единственный тест — `tests/selfcheck.py:336` | Г | P5 |
 | C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:15` | нет | М | **P2** |
 | C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:248` (`_pieces`), `:290` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
 | C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | **ЗАКРЫТО `text-para-4`**: кусок — точный срез, `citation_quote` — подстрока документа | `chunker_text.py:248` (`TextChunker.chunk`), `:268` (`char_start`/`char_end`); P1/P4 = 0 на 194 документах (`2026-11-04-text-chunker-exact-slices.md`) | `test_chunker_text.py` (P1/P4), `test_corpus_chunk_offsets.py` | Г | — |
@@ -198,7 +198,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 **Статус на 2026-10-28.** ✅ C1–C4, C6–C11 · ➖ C5.
 
 - ✅ C1/C2 — `core/util/fusion.py` **удалён** (файла нет); живой путь RRF — `core/pipeline/retrieve.py:119-120`,
-  там ничья разрешается по `chunk_id`; `06-implementation-strategy.md:32` говорит правду («мёртвый дубль»).
+  там ничья разрешается по `chunk_id`; `06-implementation-strategy.md:47` говорит правду («удалён»).
 - ✅ C3 — геометрия чанка в контракте: `chunking_spec` — `core/pipeline/digests.py:170`
   (28 полей, `_prompt_template_identity`-подобный композит из чанкеров).
 - ✅ C4 — граница реза по переводу строки, не по середине слова: `core/adapters/chunker_markdown.py:485`
@@ -286,8 +286,9 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   недостижим (после P1 — снять пометку).
 - `cohound-spec-v2.md:546-548` — исправить устаревшее: `invalidate_affected` вызывается,
   `SearchPhase.SERP` излучается, мертвы только `run_serp_round`/`run_serp_loop`.
-- `docs/architecture/06-implementation-strategy.md:32` — `fusion.py` не «обёрнут в
-  ретривал», а не подключён.
+- `docs/architecture/06-implementation-strategy.md:47` — `fusion.py` не «обёрнут в
+  ретривал», а **удалён** (`aa4185b`); строка C1 выше ссылается на файл, которого нет,
+  и читается как историческая.
 - `AGENTS.md:523-527`, `core/pipeline/archive_descent.py:12-22`,`:693` — конечность спуска:
   цикл и бюджет **не** дают её для цепочки различных архивов; фактический предел —
   рекурсия интерпретатора. Формулировку заменить на измеренную (до P4).
@@ -399,7 +400,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 **Статус пакетов на 2026-10-28** (маркер — по пакету, детали — в блоках §3 и §6).
 
 - ✅ P0 — все перечисленные обещания приведены к коду: `core/util/cache.py:1-12` (SERP-кэш
-  теперь правда), `06-implementation-strategy.md:32` (`fusion` — мёртвый дубль), `AGENTS.md`
+  теперь правда), `06-implementation-strategy.md:47` (`fusion` удалён), `AGENTS.md`
   (спуск: итеративный обход, цепочка 5000), `core/util/document_probe.py:11-14` (окна вместо
   «по шапке»), `02-subsystems.md:508-515` (шапка фрагмента), `core/adapters/llm_local.py:18-29`.
   ⬜ **остаток P0**: `core/adapters/llm_local.py:22` всё ещё перечисляет «достаточность» среди

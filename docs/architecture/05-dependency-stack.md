@@ -1,18 +1,18 @@
 # coHound — архитектура: реестр зависимостей
 
-> **Статус открытых вопросов на 2026-10-28** (HEAD `f6100c7`): 3 закрыто, 2 открыто.
-> У каждого пункта в §6 маркер ✅/⬜/➖/❔ с доказательством (V3 — выбор без подтверждения
-> измерением, V4 — офлайн-веса и лицензии).
+> **Статус открытых вопросов на 2026-11-08** (HEAD `2af6d1e`, сверено с кодом и `uv.lock`): 3 закрыто (V1, V2, V5), 2 открыто (V3, V4). Реестр §2 сверен с `pyproject.toml`/`uv.lock`; отклонения с замером — решения, а не долг.
+> Поправка к V4: `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 **читается**
+> (`.venv/…/docling/datamodel/settings.py:62-71`), поэтому офлайн-механизм исполним; открыты лицензии весов и `repo_id`/`revision` в манифесте.
 
 **Документ:** `docs/architecture/05-dependency-stack.md`
-**Статус:** реестр решений (снимок 2026-10-08)
+**Статус:** реестр решений (снимок 2026-10-08; сверено с `uv.lock` и кодом 2026-11-08)
 **Опирается на:** `00-overview.md` (AD1, AD10), `01-modules-and-contracts.md` (порты/адаптеры)
 **Источник истины:** `cohound-spec-v2.md` §3.2. При расхождении — регламент главнее.
 
 Назначение: зафиксировать **какие внешние пакеты берём, какие откладываем и какие запрещены**,
 с обоснованием и лицензией. Реестр — вход для «пин+лицензии» M0.
 Версии/лицензии/`requires_python` — из первичных источников (PyPI JSON API, GitHub API, офф. docs)
-на 2026-10-08.
+на 2026-10-08; установленный набор сверен с `uv.lock` на 2026-11-08.
 
 Легенда вердикта: **a** — брать (MVP) · **b** — кандидат/опционально · **c** — только идея ·
 **d** — не брать. Пометки достоверности: ✅ подтверждено · 🟡 частично · ❓ не подтверждено.
@@ -39,15 +39,15 @@ legacy-шимы и совпадает с целевым окружением. У
 облаке; coHound потребляет модели по [OI]-совместимому API и в стек не входит.
 
 **Следствие:** тяжёлые ML-зависимости эмбеддинг-контура (`torch`) не обязаны разделять venv с CLI.
-CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; индекс-контур — изолированное окружение/образ,
+CLI-ядро (`pydantic`+`pyyaml`+`pypdfium2`+`markdown-it-py`/`mdit-py-plugins`+stdlib) ставится везде; индекс-контур — изолированное окружение/образ,
 а LLM-инференс вообще внешний (корп. облако, §2.3). Это согласуется с **AD1** (commodity за портами)
 и A1.
 
 **Проверено резолвом и установкой на Python 3.14 (2026-10-08):** все лёгкие extras (ядро + `retrieval`,
 `crawl`, `extract`, `safety`, `ops`, `dev`, `ann`, `pdf-measure`, `embed-lite`) разрешаются и
 устанавливаются; `torch`/`sentence-transformers` (`embed`) — тоже (колёса `cp314` есть). Полный
-совместный набор — 137 пакетов, без torch по умолчанию. `extract-pdf` намеренно тяжёлый
-(`torch`+`torchvision` — см. §1: `cu130` на Linux, CPU на macOS).
+совместный набор — **213** записей `uv.lock` на 2026-11-08 (прежние «137» — счётчик 08.10, другой прибор),
+без torch по умолчанию. `extract-pdf` намеренно тяжёлый (`torch`+`torchvision` — см. §1: `cu130` на Linux, CPU на macOS).
 `requires-python = ">=3.14"` в `pyproject.toml`; CI резолвит на 3.14.
 
 **Воспроизводимость установки (`uv.lock`, проверено 2026-10-23).** `uv lock --check` проходит;
@@ -101,7 +101,7 @@ index+sources и есть единственная декларативная о
 (R5, `10-extraction-pipeline-architecture.md` §1): объявленная ось обязана действовать, а
 `auto` = «устройство выбрал движок», тот же класс, что чтение модели оценщика из env (§7.4).
 Устройство подставляется в `accelerator_options` конвертера, входит в `extractor_version`
-(`docling-doc-3:<level>/<device>/docling-<build>`) и в `extractor_stack` — значит меняет
+(`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`) и в `extractor_stack` — значит меняет
 ключ `extract_cache` и `run_id` (`execution_change`, §13). `pdf_device: cuda` при
 недоступном устройстве — `EXIT_USAGE` с числами, **не** тихий CPU.
 
@@ -123,7 +123,7 @@ index+sources и есть единственная декларативная о
 в `run.yaml` продукта. Проверено сквозняком через сам пайплайн (не отдельным скриптом):
 `build_worker_extractor(LAYOUT_TABLES, pdf_device=cuda)` → `extract(...)` на реальной
 181-стр. книге корпуса дал **189 006 симв. за 31.7 с**, пик VRAM **478 MB**, `error=None`,
-и документ назвался `docling-doc-3:layout_tables/cuda/docling-2.135.0` — то есть устройство
+и документ назвался `docling-doc-3:layout_tables/cuda/docling-2.135.0` (на 2026-10-28 — до появления `/<policy>/<finalize>` в строке версии) — то есть устройство
 доехало до конвертера и до провенанса. Окно воркеров на этом хосте — **1** по host-памяти
 (доступно 5 266 MB при пике уровня 3 679 MB), VRAM-слагаемое его не ограничивает (3 583 MB
 доступной карты против 817 MB на воркер), что совпадает с замером §3.6: связывает host.
@@ -153,11 +153,11 @@ index+sources и есть единственная декларативная о
 | `pyyaml` | 6.0.x | MIT ✅ | **a** | `run.yaml`, `package.yaml`, `cohort.yaml` |
 | `csv`, `argparse`, `sqlite3`, `json` | stdlib | PSF | **a** | отчёты, CLI, хранилище, сериализация |
 
-> `numpy` **не** входит в ядро: базовые `dependencies` — только `pydantic` + `pyyaml`
-> (`pyproject.toml`). `numpy` живёт в extras `retrieval`/`embed-lite` и импортируется
-> **лениво** (`adapters/index_format.py`, `index_npy.py`, `vector_npy.py`,
-> `embed_model2vec.py`): CLI-ядро ставится и работает без него, `.npy`-шарды и
-> brute-force cosine требуют `retrieval`.
+> Базовые `dependencies` (5) — `pydantic` (MIT), `pyyaml` (MIT), `pypdfium2` (BSD-3/Apache-2.0; механизм
+> `text_layer` оси `crawl.pdf_pipeline`), `markdown-it-py`+`mdit-py-plugins` (MIT; Markdown AST чанкера,
+> план 18) — `pyproject.toml:18-27`. `numpy` **не** входит в ядро: живёт в extras `retrieval`/`embed-lite`
+> и импортируется **лениво** (`adapters/index_format.py`, `index_npy.py`, `vector_npy.py`, `embed_model2vec.py`);
+> `.npy`-шарды и brute-force cosine требуют `retrieval`; `marko` 2.2.4 приходит с docling (0 импортов).
 
 ### 2.2. Ретривал: лексика и вектора
 
@@ -185,7 +185,7 @@ index+sources и есть единственная декларативная о
 | `intfloat/multilingual-e5-large` | — | MIT ✅ | **b** | альтернатива (512 контекста, нужны префиксы query:/passage:) |
 | `deepvk/USER-bge-m3` | — | Apache-2.0 ✅ | **b** | RU-специализированный файнтюн bge-m3 (**только ru**, 86★) — кандидат R9/R10, если RU-recall надо усилить; EN просядет → нужен билингвальный напарник |
 | `ai-forever/ru-en-RoSBERTa` | — | MIT ✅ | **b** | ru+en, MIT — альтернативный билингвальный кандидат R9/R10 |
-| `model2vec` | 0.9.x | MIT ✅ | **b** | лёгкий fallback без torch (статичные эмбеддинги, CPU); качество RU 🟡 — как абляция |
+| `model2vec` | 0.9.x | MIT ✅ | **b** | лёгкий fallback без torch (статичные эмбеддинги, CPU); качество RU 🟡 — как абляция. Extra `embed-lite` объявляет `huggingface_hub` (1.33.0, Apache-2.0) явно: адаптер резолвит пин ревизии через `snapshot_download` |
 | `FlagEmbedding` | 1.4.x | MIT ✅ | **d** | training-тулкит (deepspeed, flash-attn); для инференса избыточен |
 | `llama-cpp-python` | 0.3.x | MIT ✅ | ~~**b**/**a**~~ | **снято (2026-10, см. `06` §5.W9/§5.13):** офлайн-fallback для тестов порта не реализован и вытеснен [OI]-совместимым LLM-клиентом внутреннего периметра (`core/adapters/llm_local.py`). Строка сохранена как исторический след решения, конвейер путь не использует. ⚠️ PyPI отдаёт **только sdist** (без wheels) → потребовал бы C/C++/CMake-тулчейн; build-free альтернатива — first-party `llama.cpp` `llama-server` |
 | `transformers` | 5.19.x | Apache-2.0 ✅ | **c** | не для сервинга; приходит через ST |
@@ -215,14 +215,14 @@ index+sources и есть единственная декларативная о
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `trafilatura` | 2.3.x | Apache-2.0 ✅ | **a** | main-content → markdown, заголовки/списки/таблицы |
-| `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **обязателен**: extra `[format-office]` его не покрывает, а цепочка импорта `DocumentConverter` (`pipeline→models.factories→base_ocr_model→datamodel.spatial`) требует `rtree` — поэтому он объявлен в extra `extract` явно (`pyproject.toml`), и `doctor` держит его в обязательных для `deps:extract` |
-| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (из индексов `pytorch-cu130`/`pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0) |
+| `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **обязателен**: extra `[format-office]` его не покрывает, а цепочка импорта `DocumentConverter` (`pipeline→models.factories→base_ocr_model→datamodel.spatial`) требует `rtree` — поэтому он объявлен в extra `extract` явно (`pyproject.toml`), а `doctor` проверяет его в группе `deps:extract`; группа опциональна — отсутствие даёт `warn`, а не `fail` (`core/cli/doctor.py:121,354-365`) |
+| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (из индексов `pytorch-cu130`/`pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0). OCR-движок `rapidocr` (Apache-2.0) держится прямым пином `>=3.9.1,<3.10` (`pyproject.toml:71`): 3.10.0 удалил `PP_OCRV6_LANGS` из `rapidocr.utils.model_resolver`, а метаданные docling (`rapidocr<4,>=3.9.1`) пропускают 3.10.0 — и OCR при `document_level=full` молча выключается |
 | `lxml` | 6.1.x | BSD-3 ✅ | **a** (транзитивно) | уже в дереве trafilatura/Scrapy |
 | `openpyxl` | 3.1.x | MIT ✅ | **a** | XLSX-отчёты; Office-бэкенд docling |
 | `python-docx` / `python-pptx` | 1.2.x / 1.0.x | MIT ✅ | **b** (через docling) | отдельно не нужны |
 | `markitdown` (Microsoft) | 0.1.x | MIT ✅ | **b**, не устанавливается | fallback экзотики (EPUB/msg/xls); PDF не layout-aware. В коде импортов **ноль**, fallback-путей в адаптерах нет |
 | `pypdf` / `pdfplumber` | 6.19.x / 0.11.x | BSD-3 / MIT ✅ | **b** — extra `pdf-measure` | Сравнительные измерения; не являются runtime fallback-путём |
-| `selectolax` / `beautifulsoup4` | 1.0.0 / 4.15.x | MIT ✅ | **b**, не устанавливаются | заявлены как fallback-парсинг и извлечение `h1–h6` под `heading_path`; иерархию заголовков сегодня даёт свой чанкер (`chunker_markdown`) |
+| `selectolax` / `beautifulsoup4` | 1.0.0 / 4.15.x | MIT ✅ | **b**, не устанавливаются | `selectolax` не устанавливается; `beautifulsoup4` 4.15.0 приходит транзитивно с `docling-slim[standard]` (`extract-pdf`), но импортов в адаптерах ноль. Заявлены как fallback-парсинг и извлечение `h1–h6` под `heading_path`; иерархию заголовков сегодня даёт свой чанкер (`chunker_markdown`) |
 | `readability-lxml` / `markdownify` | 0.9 / 1.2.x | Apache-2.0 / MIT ✅ | **b**, не устанавливаются | fallback main-content / HTML→MD; main-content даёт `trafilatura` |
 | `camelot-py` / `tabula-py` | 2.0 / 2.10 | MIT ✅ | **c** | тяжёлые (opencv+pandas / JVM); таблицами занимается docling |
 | `PyMuPDF` | 1.28.x | **AGPL** ✅ | **d** | AGPL исключён (курс проекта) |
@@ -235,7 +235,7 @@ EPUB не добавляют в стек ни одного пакета: тек�
 через уже принятый субстрат контейнеров (`core/adapters/extract_epub.py`,
 `core/adapters/container_zip.py`, `core/util/container_policy.py`). `markitdown` (b) для
 EPUB **не** используется (лишний слой конвертации поверх того же ZIP); LlamaIndex/LangChain
-остаются **d** (§3.1) — EPUB-разбор не повод их подключать.
+остаются **d** (§3.1) — EPUB-разбор не повод их подключать. Разбор Markdown в чанкере — отдельная ось: `markdown-it-py`+`mdit-py-plugins` (базовые, план 18, §2.1).
 
 **Extra `pdf-measure` содержит только измерительные библиотеки.** `pypdf` и `pdfplumber`
 используются скриптом `scripts/measure_pdf_backends.py` для сравнительных замеров; они не
@@ -300,7 +300,7 @@ commodity-слой (A2): замена читателя контейнеров н
 `_EXTRACT_TASK_TIMEOUT_S = 1800` (866 с на 665 стр.).
 
 Класс изменения — **`execution_change`** (§13), не `methodology_change`: `extractor_version`
-(`docling-doc-3:<level>/docling-<build>`) **не включает** эту ручку и от замера не меняется,
+(`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`) **не включает** эту ручку и от замера не меняется,
 поэтому записи `extract_cache/` (ключ — `(sha256 байтов, extractor_version, level)`)
 **остаются валидными**, `golden-full` не требуется. Значение ручки публикуется в `settings_provenance` манифеста
 (`document_extract.queue_max_size`, `source: measured`) — провенанс замера, не граница
@@ -311,9 +311,9 @@ commodity-слой (A2): замена читателя контейнеров н
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `Scrapy` | 2.19.x | BSD-3 ✅ | **a** | `DOWNLOAD_SLOTS` per-domain, AutoThrottle, HttpCache |
-| `scrapy-playwright` | 0.0.48 | BSD-3 ✅ | **a** (с пином + smoke) | per-request `playwright=True` для JS-доменов. **V5: зрелый де-факто стандарт** (org `scrapy-plugins`, активные PR Zyte 2026, py3.14 поддержан PR #375); ярлык `0.0.x` = конвенция автора (classifier Beta), не заброшенность |
-| `playwright` | 1.63.x | Apache-2.0 ✅ | **a** (пин + smoke) | headless-рендер; **два пути краула:** движок `scrapy-playwright` и **прямой** sync-API `BrowserCrawler` (`adapters/crawl_browser.py`, honest/hybrid, без Scrapy/Twisted; выбор — сменой адаптера за портом `CrawlerPort`, A2). Нужен бинарь `playwright install chromium`; браузеры качаются с CDN — в закрытом контуре зеркало (`PLAYWRIGHT_DOWNLOAD_HOST`), изоляция — `PLAYWRIGHT_BROWSERS_PATH` |
-| `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, tests). **Watch-item (2026-10):** апстрим-активность снизилась; Pydantic ведёт преемник `httpx2` (Scrapy 2.18+ использует его). `httpx` ещё не EOL; миграция — отдельное решение по триггеру (§14). `httpx2` — кандидат в этот реестр |
+| `scrapy-playwright` | 0.0.48 | BSD-3 ✅ | **a** (диапазон + smoke) | per-request `playwright=True` для JS-доменов. **V5: зрелый де-факто стандарт** (org `scrapy-plugins`, активные PR Zyte 2026, py3.14 поддержан PR #375); ярлык `0.0.x` = конвенция автора (classifier Beta), не заброшенность |
+| `playwright` | 1.63.x | Apache-2.0 ✅ | **a** (диапазон + smoke) | headless-рендер; **два пути краула:** движок `scrapy-playwright` и **прямой** sync-API `BrowserCrawler` (`adapters/crawl_browser.py`, honest/hybrid, без Scrapy/Twisted; выбор — сменой адаптера за портом `CrawlerPort`, A2). Нужен бинарь `playwright install chromium`; браузеры качаются с CDN — в закрытом контуре зеркало (`PLAYWRIGHT_DOWNLOAD_HOST`), изоляция — `PLAYWRIGHT_BROWSERS_PATH` |
+| `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, tests). **Watch-item (08.11.2026):** `httpx` 0.28.1 в локе, `httpx2` в графе нет; Scrapy 2.19.0 от `httpx` не зависит. Миграция — по триггеру §14 |
 | `curl_cffi` | 0.16.x | MIT ✅ | **b** — **не подключён** | Не устанавливается extra `crawl`: «дешёвый первый ярус» остаётся заявкой, а не работающим fetch-адаптером |
 | `trafilatura`/`courlan` (fetch) | 2.3.x | Apache-2.0 ✅ | **b** | простой политкорректный fetch |
 | `crawl4ai` | 0.9.x | Apache-2.0 ✅ | **c** | LLM-first, тянет litellm/patchright/stealth — избыточно (A1) |
@@ -340,7 +340,7 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 - ✅ **Smoke-тест пройден (2026-10-08):** `tests/smoke_scrapy_playwright.py` на связке
   Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright 1.63.0, браузеры chromium и firefox
   (Python 3.14). Проверены: HTTP-запрос не видит JS, рендер видит JS (chromium и firefox).
-  **Пин `playwright==1.63` подтверждён; фолбэк на 1.57 не нужен.**
+  **Диапазон `playwright>=1.63,<2` (`pyproject.toml:41`) подтверждён; пина `==` нет, фолбэк на 1.57 не нужен.**
 - ℹ️ **Неочевидные факты, вскрытые тестом (учесть в адаптере краула):**
   (1) в **Scrapy 2.19 у `Spider` удалён `start_requests`** — стартовые запросы задаются
   `async def start()` (иначе паук завершается с 0 запросов); (2) одинаковые URL в стартовых
@@ -373,13 +373,13 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 | `pytest-xdist` | 3.8.x | MIT ✅ | **b** | параллельный прогон (`-n auto --dist worksteal`); CI ускоряется ~2x. Транзитивно тянет `execnet` (MIT) |
 | `ruff` | 0.17.3 (в `uv.lock` — 0.17.3) | MIT ✅ | **a** | линтер, гейт `scripts/ci.sh`; extra `dev`. Набор правил и обоснования — `pyproject.toml` `[tool.ruff.lint]` и §2.7.1 |
 | `mypy` | 2.4.0 | MIT ✅ | **a** (`core/domain`) / **b** (остальной `core/`) | type-checker; extra `dev`. Гейт «ноль» на `core/domain`, зафиксированный baseline на остальном ядре — §2.7.1 |
-| `rich` / `typer` / `click` | 15.0 / 0.27 / 8.5 | MIT / BSD-3 ✅ | **b** | `argparse` хватает для MVP (A1); typer — при росте подкоманд |
+| `rich` / `typer` / `click` | 15.0 / 0.26.8 / 8.5 | MIT / BSD-3 ✅ | **b** | `argparse` хватает для MVP (A1); typer — при росте подкоманд. Все три уже стоят транзитивно (docling/`huggingface_hub`), прямыми зависимостями не объявлены |
 | `pydantic-settings` | 2.15.x | MIT ✅ | **b** | конфиг — YAML, поэтому опц.; **не ставить `[all]`** (boto3/azure) |
 | `orjson` | 3.13.x | Apache-2.0 ✅ | **b** | скорость сериализации; stdlib `json` достаточен |
 | `tqdm` | 4.70.x | MPL-2.0 AND MIT ✅ | **b** | прогресс длинных фаз |
 | `xlsxwriter` | 3.2.x | BSD-2 ✅ | **b** | богаче форматирование отчётов, чем openpyxl |
 | `hishel` | 1.4.x | BSD ✅ | **b** | RFC-9111 кэш поверх httpx (свой content-addressed уже есть, R7) |
-| `pandas` | 3.0.x | BSD-3 ✅ | **d** | матрицу/скоры считает `domain/scoring.py`; отчёты — openpyxl+csv |
+| `pandas` | 3.0.x | BSD-3 ✅ | **d** | матрицу/скоры считает `domain/scoring.py`; отчёты — openpyxl+csv. Транзитивно приходит с `docling-slim[standard]` (`docling-core` 2.101.0), но прямой зависимости нет |
 | `python-slugify` / `Unidecode` | 9.1 / 1.4 | MIT / **GPL-2.0+** 🟡 | **d** | транзитив GPL; свой `sanitize_slug` уже есть |
 | `requests-cache` | 1.3.x | BSD-2 ✅ | **c** | ориентирован на `requests`, у нас httpx |
 
@@ -387,11 +387,12 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 
 До 2026-10-27 в проекте не было ни линтера, ни type-checker'а. Это был **молчаливый пробел**, а
 не решение: реестр разбирает `rich`, `typer`, `pandas`, `hishel`, `python-slugify`, но не их.
-Заменой считались `tests/selfcheck.py` (111 проверок, включая AST-проверки импорт-графа §1 и
-нейтральности §1.3), Pydantic `extra="forbid"` + `StrEnum` (runtime-валидация) и property-тесты
-`hypothesis`. Замер показал, чего эта замена не покрывает.
+Заменой считались `tests/selfcheck.py` (113 проверок на 08.11.2026, включая AST-проверки
+импорт-графа §1 и нейтральности §1.3), Pydantic `extra="forbid"` + `StrEnum` (runtime-валидация) и
+property-тесты `hypothesis`. Замер показал, чего эта замена не покрывает.
 
-**Замер до включения** (`core/` — 212 файлов, 101 781 строка; `tests/` — 234 файла):
+**Замер до включения** (27.10.2026: `core/` — 212 файлов, 101 781 строка; `tests/` — 234 файла;
+на 08.11.2026 — 258 файлов / 151 571 строка и 340 файлов, `git ls-files`):
 
 | инструмент | результат | автофиксится |
 |---|---|---|
@@ -428,8 +429,9 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 * `S101` отключён **только в `tests/`** (`per-file-ignores`): там `assert` — механизм, а не забытая
   проверка. В `core/` правило действует.
 
-**Почему mypy не гейтит весь `core/` сразу.** 1581 упоминание `Any` и 1047 вызовов `getattr` в
-`core/` заражают типы, поэтому «127» — нижняя граница, а `--strict` даст существенно больше.
+**Почему mypy не гейтит весь `core/` сразу.** 2357 упоминаний `Any` и 1497 вызовов `getattr` в
+`core/` (08.11.2026; на 27.10 было 1581 и 1047) заражают типы, поэтому «127» — нижняя граница, а
+`--strict` даст существенно больше.
 Гейт «весь `core/` в ноль» означал бы либо месяцы разбора, либо `# type: ignore` везде — второе
 хуже отсутствия проверки, потому что создаёт видимость. Поэтому проверка разделена по смыслу:
 
@@ -557,13 +559,14 @@ copyright, перечень изменений. Такой реестр нель
 
 ## 4. Предлагаемый набор MVP
 
-**Runtime (`a`):** `pydantic` · `pyyaml` · `numpy`+`tantivy` (extra `retrieval`) · `trafilatura` ·
+**Runtime (`a`):** `pydantic` · `pyyaml` · `pypdfium2` · `markdown-it-py`+`mdit-py-plugins` ·
+`numpy`+`tantivy` (extra `retrieval`) · `trafilatura` ·
 `docling-slim[format-office]`+`rtree` (extra `extract`) · `Scrapy`+`scrapy-playwright`+`playwright`
 (extra `crawl`) · `httpx` · `nh3`+`defusedxml` (extra `safety`) · `openpyxl` · `structlog` (extra
 `ops`) · stdlib (`sqlite3`, `csv`, `argparse`, `json`).
 Собирается как extras в `pyproject.toml`: `retrieval`, `crawl`, `extract`, `safety`, `ops`.
-Базовые `dependencies` — только `pydantic`+`pyyaml`: CLI-ядро ставится без numpy/tantivy, а
-`.npy`-шарды и лексическое плечо требуют extra `retrieval` (см. §2.1).
+Базовые `dependencies` (5): `pydantic`, `pyyaml`, `pypdfium2`, `markdown-it-py`, `mdit-py-plugins`
+(`pyproject.toml:18-27`). `.npy`/лексика требуют `retrieval`; CLI-ядро ставится без numpy/tantivy (см. §2.1).
 
 **Отдельные окружения (не в CLI-venv):**
 - **PDF layout:** `docling-slim[standard]` (torch+torchvision; `cu130` на Linux, CPU на macOS — §1) — extra `extract-pdf`, блокер M0.
@@ -594,14 +597,14 @@ copyright, перечень изменений. Такой реестр нель
 ## 5. Версионные границы (связь с §13)
 
 Класс границы определяется **не типом зависимости**, а тем, входит ли величина в
-`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 2.4.0). Таблица — зеркало
+`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 0.3.0 — `core/domain/models.py:162`). Таблица — зеркало
 `03` §C.1/§C.2 и `core/pipeline/digests.py`:
 
 | Что меняется | Класс | Следствие |
 |---|---|---|
 | `embed_model_id`, `lexical_engine_version`, `vector_store`, `extractor_version` | **`content_change`** | наблюдаемые величины: **вне** контракта (не выводятся из входа — per-product композит корпуса, диск, wheel'ы). Новая `index_build_id`, diff **разрешён** с баннером и doc-delta |
 | `chunker_version`, `extractor_stack` | **`execution_change`** | входят в контракт → новый `run_id`, diff блокируется; `methodology_version` **не** меняется |
-| `crawl.document_level` | **`execution_change`** | входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full`) → `crawl_config_digest` → новый `run_id`. Дополнительно наблюдается в `extractor_version` (`docling-doc-3:<level>/docling-<build>`) → новая сборка; но идентичность разошлась раньше, поэтому класс — `execution_change` |
+| `crawl.document_level` | **`execution_change`** | входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full`) → `crawl_config_digest` → новый `run_id`. Дополнительно наблюдается в `extractor_version` (`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`) → новая сборка; но идентичность разошлась раньше, поэтому класс — `execution_change` |
 | `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (`rrf_k`/fusion) | **`execution_change`** | входят в контракт; `index_build_id` **не** меняется (ретривал-конфиг не влияет на чанкинг/векторы), обязателен retrieval-golden |
 | `scoring_policy_version`, `status_dict_version`, `capability_policy`, `unknown_policy`, `partial_score` (`METHODOLOGY_FIELDS`) | **`methodology_change`** | bump `methodology_version` + `golden-full` **и пере-аннотация golden** (§13) |
 | модель под сценарий оценщика (`llm_scenarios`) | **`execution_change`** | новый `run_id`; `methodology_version` не меняется (`core/config/deploy.py`) |
@@ -612,7 +615,7 @@ copyright, перечень изменений. Такой реестр нель
 
 **Апгрейд `docling` внутри диапазона `>=2.135,<3` — что происходит с `extract_cache`.** Пин
 задан диапазоном, поэтому минорное обновление проходит без правки кода; `extractor_version`
-документа — `docling-doc-3:<level>/docling-<build>`, где `<build>` — версия установленной
+документа — `docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`, где `<build>` — версия установленной
 библиотеки (единственный источник — `docling_engine_build()` в
 `core/adapters/extract_document.py`). Отсюда: (1) `extractor_stack` (в контракте) меняется ⇒
 новый `run_id` — прогон честно объявляет новый движок; (2) та же сборка входит в ключ
@@ -629,11 +632,11 @@ copyright, перечень изменений. Такой реестр нель
 
 | # | Вопрос | Метод проверки |
 |---|---|---|
-| V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Внешний `snowballstemmer` не нужен |
-| V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` |
-| V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10. ⬜ не сделано — `bge-m3` зафиксирован кодом как дефолт (`core/adapters/embed_local.py:73`), но **сравнения с RU-файнтюнами не было**: ни одного замера по `USER-bge-m3`/`RoSBERTa` в `docs/reports/measurements/` нет |
-| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика уточнена:** штатный офлайн-механизм — `DOCLING_ARTIFACTS_PATH` / pipeline `artifacts_path`, заполняемый `docling-tools models download` (см. §7); `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. Открыт аудит лицензий весов. ⬜ не сделано — аудита лицензий весов нет, и офлайн-бандл **ничем не включён**: в docling 2.135.0 `DOCLING_ARTIFACTS_PATH` не читается (`.venv/…/docling/datamodel/settings.py:71` — только поле `artifacts_path`), а coHound передаёт `artifacts_path` лишь в OCR-пробу (`core/adapters/extract_document.py:571-610`), в `PdfPipelineOptions` экстракции его нет |
-| V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | ✅ **закрыт smoke-тестом (2026-10-08):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14). Smoke `tests/smoke_scrapy_playwright.py` пройден на Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright **1.63.0** (chromium + firefox) → **оставляем с жёстким пином**; связка 1.63/2.19 подтверждена, фолбэк 1.57 не нужен. Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
+| V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Подтверждён кодом: `core/adapters/lexical_tantivy.py:878-881` (`stemmer("russian")` + `stopword("russian")`). Внешний `snowballstemmer` не нужен |
+| V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. Подтверждён установкой: `uv.lock` (08.11.2026) держит ровно эти версии. См. `pyproject.toml` |
+| V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10. ⬜ **ОТКРЫТО (08.11.2026)** — `bge-m3` зафиксирован кодом как дефолт (`core/adapters/embed_local.py:74`), но **сравнения с RU-файнтюнами не было**: ни одного замера по `USER-bge-m3`/`RoSBERTa` в `docs/reports/measurements/` нет |
+| V4 | docling offline-веса в контуре + лицензии весов | ⬜ **ОТКРЫТО (08.11.2026), но посылка прежней записи ложна:** `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 **читается** — `env_prefix="DOCLING_"` (`.venv/…/docling/datamodel/settings.py:62-71`), а `BasePipeline` берёт `settings.artifacts_path` как fallback (`…/docling/pipeline/base_pipeline.py:67-68`). Механика офлайн-бандла исполниме: env → `artifacts_path`; `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. coHound передаёт `artifacts_path` только в OCR-пробу (`core/adapters/extract_document.py:594-606`). Остаётся: лицензии весов и `repo_id`/`revision` в манифесте |
+| V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | ✅ **закрыт smoke-тестом (2026-10-08):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14). Smoke `tests/smoke_scrapy_playwright.py` пройден на Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright **1.63.0** (chromium + firefox) → **оставляем с диапазоном `playwright>=1.63,<2`** (пина `==` нет); связка 1.63/2.19 подтверждена, фолбэк 1.57 не нужен. Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
 
 ---
 
@@ -646,8 +649,11 @@ air-gap) сетевого доступа к HF нет — либо загруз�
 обращение наружу.
 
 **Механика (подтверждена в коде `docling 2.135.0`; штатный офлайн — через artifacts-путь):**
-- штатный офлайн-switch — pipeline `artifacts_path` / env `DOCLING_ARTIFACTS_PATH`; бандл
-  заполняется `docling-tools models download` (или `download_models()`);
+- штатный офлайн-switch — pipeline `artifacts_path` / env `DOCLING_ARTIFACTS_PATH`; env **читается**:
+  `env_prefix="DOCLING_"` (`…/docling/datamodel/settings.py:62-71`), а `BasePipeline` берёт
+  `settings.artifacts_path` как fallback, когда опция пайплайна не задана
+  (`…/docling/pipeline/base_pipeline.py:67-68`). Бандл заполняется `docling-tools models download`
+  (или `download_models()`);
 - `HF_HUB_OFFLINE=1` (и `TRANSFORMERS_OFFLINE=1`) — валидный **hub-level** guard, но не основной
   переключатель Docling: он лишь запрещает обращения к HF-hub, полагаясь на локальный кэш;
 - (внутренний путь загрузки) `docling/models/utils/hf_model_download.py` → `huggingface_hub.snapshot_download(repo_id=…, revision=…)`;
@@ -656,13 +662,15 @@ air-gap) сетевого доступа к HF нет — либо загруз�
 - часть моделей пинится по `revision` (напр. TableFormer `v2.3.0`) — плюс к воспроизводимости;
 - кэш — стандартный HF (`HF_HOME`), полем `local_dir` можно задать свой путь.
 
-**Статус:** ✅ план **подтверждён владельцем (2026-10-08), механика уточнена 2026-10-12**
+**Статус:** ✅ план **подтверждён владельцем (2026-10-08), механика уточнена 2026-10-12,
+посылка исправлена 2026-11-08**
 (предзакачка бандла → `DOCLING_ARTIFACTS_PATH` + `HF_HUB_OFFLINE=1` как guard → revision-пины →
 аудит лицензий весов). ⬜ не сделано — исполнение ниже не подтверждается репозиторием: шаг 1
 (бандл весов) — операция окружения и в репозитории не виден; ш. 3–4 отсутствуют — манифест несёт
-`extractor_stack` (константы + версия docling, `core/pipeline/run_identity.py:83`), но **не**
-repo_id/revision/лицензию весов; env-переключателя `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 нет
-(§6/V4), поэтому `artifacts_path` придётся объявлять опцией пайплайна.
+`extractor_stack` (константы + версия docling, `core/pipeline/run_identity.py:92`), но **не**
+repo_id/revision/лицензию весов; env-переключатель `DOCLING_ARTIFACTS_PATH` есть, но остаётся
+передать `artifacts_path` в `PdfPipelineOptions` экстракции явно, чтобы путь был объявленным
+входом, а не env (`core/adapters/extract_document.py:594-606` — сегодня только OCR-проба).
 
 **Что делать (план, закрывает V4):**
 1. **Предзакачать** нужные веса (`docling-tools models download`) на машине с доступом к сети →

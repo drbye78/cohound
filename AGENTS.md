@@ -628,7 +628,10 @@ Browser smoke test (separate environment with browser binaries, exit codes 0 ok 
 2 skip when deps are absent): `python3 tests/smoke_scrapy_playwright.py`.
 
 **Environment.** Python **3.14** (pinned baseline; greenfield, controlled deployment, all stack
-deps ship cp314/abi3 wheels — `05-dependency-stack.md` §1), `pydantic>=2`, `pyyaml`.
+deps ship cp314/abi3 wheels — `05-dependency-stack.md` §1). Base `dependencies` — пять:
+`pydantic`, `pyyaml`, `pypdfium2` (механизм `text_layer`, ось обязана быть исполнимой без
+extra), `markdown-it-py`+`mdit-py-plugins` (чанкер, план 18). `numpy` живёт в `retrieval`/
+`embed-lite` и импортируется лениво.
 
 ```bash
 # Extras are split on purpose: `extract` is torch-free (HTML + Office),
