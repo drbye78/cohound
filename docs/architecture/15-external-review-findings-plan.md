@@ -451,36 +451,39 @@ absence-модель, scoring и определения Coverage/Comparability �
 |---|---|---|---|---|---|
 | V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно | `cohound-spec-v2.md:660` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `core/pipeline/evaluate.py:1173-1211` `support_subject_overlap` + вызов `:1054` + `outputs/support_quality.yaml`. Врут два документа: `02-subsystems.md:541` и `llm_local.py:22` приписывают шаг 3 `validate.py` | М | P0 + P6 |
 | V2 | Точность оценщика неизмерима | **ПОСЫЛКА СНЯТА 28.10, замер не выполнен**: эталон пересобран и объявлен пригодным, поэтому «неизмерима» больше не верно — но и «измерена» не верно | `packages/ru-pg-dbms/sources/golden_status.yaml:1-2` `state: present`; loader — `core/pipeline/golden_status.py:216` `read_golden_status` → `state=present, declared=True, comparison_available=True` (проверено вызовом). `golden.csv` = **905 строк = 181 параметр × 5 продуктов** (tier: 750 `full` / 155 `fast`; ожидание ✅500 / ⚠️123 / ❌282), в т.ч. **181 `jatoba`** (было 0) и новый 5-й продукт `digital_q_database`. Ветка отказа жива и читается (`core/pipeline/evaluator_benchmark.py:115,412,517`), но больше не срабатывает. **Сделано 07.11.2026:** первый прогон на срезе нового набора — 50 ячеек × 3 продукта с корпусом (`2026-11-07-reasoning-effort-matrix.md`): κ **0.008–0.056** (все CI накрывают ноль), `fabricated_support` 0, `abstention.absent_rate` 0.0 — модель ни разу не выдала `❌` при 9 golden-`❌`. **Не сделано:** полный набор (905 строк / 5 продуктов) не прогнан — κ, confusion, abstention по `postgrespro`/`tantor` невозможны без прогона с краулом, а до 07.11.2026 команда на реальном прогоне не измеряла ничего (сверка чанков шла по композиции `cb_…` вместо партиции `pb_…`, `cf28a89`) — то есть κ по этому эталону посчитана впервые | М | P6 |
-| V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `core/pipeline/evaluate.py:2653` `max_retries=2`, `:2665-2694` цикл публикует **первый валидный** сэмпл; `templates`… ; **но** `max_retries` не в контракте, номер попытки не пишется, полосы в артефактах нет, R7 пайплайном не считается. Число 95.8 % формально проходит порог §11.7 (≥95 %) | М | P2 |
+| V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `core/pipeline/evaluate.py:2653` `max_retries=2`, `:2665-2694` цикл публикует **первый валидный** сэмпл; `max_retries` **объявлен** (`core/pipeline/evaluation_policy.py:31`), номер попытки **пишется** (`logs/llm_calls.jsonl`, 07.11.2026: 1 187 строк, попытки 543/329/315). **R7 измерен 07.11.2026: 91.7 %** при шумовом поле 8.3 % (2 из 24 ячеек меняются на повторе того же прогона, `2026-11-07-llm-concurrency-scaling.md:83`) — порог §11.7 (≥95 %) **не выполняется**; прежнее «95.8 % формально проходит» опиралось на 119 ячеек и другой знаменатель. Решение владельца 08.11.2026: считать порогом, пересмотреть **измерением** (полный benchmark на 905 ячейках), а не менять правило | М | P2 |
 | V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:84` `DEFAULT_DECODER="none"` достижим в проде (`core/cli/wiring.py:1075`); `llm_local.py:482-495` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:556` `Decoder | None`, в `status-dictionary.yaml` ключа нет); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
 | V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:94`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:36-45`), в payload нет (`llm_local.py:617-638`), `build_evaluator_llm` не читает (`core/cli/wiring.py:1334-1476`), читает `build_discovery_llm` (`:1132-1224`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
 | V6 | Внешний LLM-хост в закоммиченном конфиге | **ПОДТВЕРЖДЕНО, и хуже аудита** | `config/deploy.yaml:89` `https://plusvibeapi.ru` при шапке того же файла `:13-14` «внутреннего периметра, внешние хосты не используются»; `core/cli/commands/run.py:534` `load_deploy_config(None)` безусловно на каждом прогоне, флага `--deploy` у `run` нет; `base_url` **не входит ни в `llm_scenarios`, ни в контракт** (`ScenarioBinding` — 11 полей, endpoint только как `endpoint_kind: api`); поведение запинено тестом `test_deploy.py:812-831`; ссылка «Д-36» в `deploy.yaml:77` не имеет адресата в `docs/` | Б/М | **P0 + P2** |
 | V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО** → **закрыто** (`4ee192f`: `PromptArchive` пишет `runs/{run_id}/prompts/{prompt_hash}.json` для исполненных промптов; замер — 117 файлов, 2.93 MiB на 119 параметров); «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** На момент находки: `save_prompt` не импортировался в `evaluate.py`; в `runs/ru-pg-dbms-3edf2b06097c/` каталога `prompts/` не было; три документа обещали артефакт. Сейчас: `PromptArchive` пишет каталог из фазы (замер на 119 параметрах jatoba — 117 различных промптов, 2.93 MiB), документы исправлены. Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`core/pipeline/evaluate.py:1173-1211`), коллизий в прогоне нет (104/104 различных). **06.11.2026:** на прогоне `ru-pg-dbms-c2e7b860ac17` узость дала 3 реальных коллизии (`jatoba` `xlsx_056`/`xlsx_057` и др.), и файл с адресом по `prompt_hash` терял второй промпт (`prompt_hash_conflict`); адрес артефакта заменён на `sha256(text)` — формула §5 при этом не менялась | М | P6 |
 
-**Статус на 2026-10-29.** ✅ V3–V7 · 🟡 V2 · ⬜ V1.
+**Статус на 2026-11-07** (сверено по коду, HEAD `19d90af`). ✅ V4–V7 · 🟡 V2, V3 · ⬜ V1.
 
 - ⬜ V1 — **не сделано** в части «аномалия класса утверждения»: замер предмета есть
-  (`core/pipeline/evaluate.py:1173-1211` `support_subject_overlap`, артефакт `support_quality.yaml`),
-  но `anomaly_kind` в отчёте по-прежнему три (`core/pipeline/report.py:1507-1531`:
-  `i3_protocol`, `crawl_truncation`, `corpus_incomplete`) — строки «✅ при цитате без предмета»
-  среди них нет. §7 ставил этот шаг **после** P7; P7 сделан, шаг — нет. Плюс остаток P0 по
-  той же строке: `core/adapters/llm_local.py:22` всё ещё приписывает «достаточность»
-  `validate.py`.
+  (`core/pipeline/evaluate.py:1466-1505` `support_subject_overlap`, артефакт `support_quality.yaml`),
+  но `anomaly_kind` в отчёте — **пять видов** (`core/pipeline/report.py:1885-1933`:
+  `i3_protocol`, `crawl_truncation`, `corpus_incomplete`, `golden_exempt_product`,
+  `absence_undated`) — строки «✅ при цитате без предмета» среди них нет. §7 ставил этот шаг
+  **после** P7; P7 сделан, шаг — нет. Плюс остаток P0 по той же строке:
+  `core/adapters/llm_local.py:22` всё ещё приписывает «достаточность» `validate.py`.
 - 🟡 V2 — **отчётность закрыта** (`golden_declined` читается benchmark'ом:
   `core/pipeline/evaluator_benchmark.py:115,412,517`; объявление —
   `packages/ru-pg-dbms/sources/golden_status.yaml:1-2`, `state: present`). **Открыт замер:**
   на пересобранном наборе (905 строк = 181 × 5) benchmark не запускался, поэтому точность
   оценщика по-прежнему не имеет числа. Закрывается одной командой после прогона:
   `hound experiment evaluator-benchmark --golden packages/ru-pg-dbms/golden.csv --tier full`.
-- ✅ V3 — `max_retries` объявлен (`core/pipeline/evaluation_policy.py:31`, поле
-  `evaluation_policy` — `core/pipeline/digests.py:176`) и полоса неопределённости публикуется
+- 🟡 V3 — `max_retries` объявлен (`core/pipeline/evaluation_policy.py:31`, поле
+  `evaluation_policy` — `core/pipeline/digests.py:198`) и полоса неопределённости публикуется
   (`core/pipeline/measurement_uncertainty.py:196`, запрет ранжирования — `:245-252`).
-  ⬜ остаток: номер попытки в ячейку не пишется (`grep "attempt" core/pipeline/evaluate.py` пуст),
-  поэтому «сколько раз переиздавали» из артефакта не восстановить.
+  ✅ остаток снят: номер попытки пишется строкой на попытку (`logs/llm_calls.jsonl`,
+  реализовано `b5cddf4`; 07.11.2026 — 1 187 строк). **Открыт не остаток, а вердикт:**
+  R7 на замере 07.11.2026 — 91.7 % при шумовом поле 8.3 % и пороге ≥95 % (`cohound-spec-v2.md:822`,
+  определение `:854`); решение владельца 08.11.2026 — считать порогом и пересмотреть измерением.
 - ✅ V4 — `Decoder` как `StrEnum` (`core/domain/enums.py:400`), валидация слота
-  (`core/config/deploy.py:516`), ключ в словаре (`docs/status-dictionary.yaml:266`).
-- ✅ V5 — `max_tokens` и `finish_reason` читаются: `core/adapters/llm_local.py:608-634`.
-- ✅ V6 — `rnd_endpoint` объявлен и виден: `core/cli/wiring.py:1136`, `core/cli/commands/run.py:1069`,
+  (`core/config/deploy.py:697`), ключ в словаре (`docs/status-dictionary.yaml:266`);
+  `decoder_wire_type` переводит `json_object` → `json_object` (`core/adapters/llm_local.py:373-387`).
+- ✅ V5 — `max_tokens` и `finish_reason` читаются: `core/adapters/llm_local.py:655-700`.
+- ✅ V6 — `rnd_endpoint` объявлен и виден: `core/cli/wiring.py:1147,1161`, `core/cli/commands/run.py:1331`,
   профиль публикуемости (`core/domain/scoring.py:956`), правило в регламенте
   (`cohound-spec-v2.md:741-754`).
 - ✅ V7 — архив исполненных промптов (`4ee192f`), документы исправлены (`45278b0`).
