@@ -199,7 +199,7 @@ retained-байтов).
 обязаны читаться — `hound diff` строит дельту документов по `corpus_docs`
 (`core/cli/commands/diff.py:105`), а правило `❌`-допустимости (I2c) обязано спрашивать
 происхождение наблюдения там же. Решение границы: **поля
-`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2580`, явные
+`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2615`, явные
 kwargs) + `_has_column`-терпимость к необязательным колонкам
 (`core/store/sqlite_rows.py:77`). ✅ As-built — так и сделано.
 
@@ -462,7 +462,7 @@ per-site (`core/pipeline/crawl_frontier.py:636-641`) — два уровня о�
 > `chunk_id` записан не канонической формой. В БД прошлой версии таблицы нет: шаг не
 > исполняется, фолбэк остаётся прежним, а не падает.
 
-`StorePort.resolve` (`core/store/sqlite_store.py:3188`) сначала делает прямой lookup по
+`StorePort.resolve` (`core/store/sqlite_store.py:3224`) сначала делает прямой lookup по
 `corpus_chunks.chunk_id`, а при промахе разбирает `source_id` через `parse_source_id` и ищет
 `WHERE product_id = ? AND doc_id = ? AND chunk_no = ?`. **Этот второй путь не может
 сработать**: `parse_source_id` возвращает `doc_id` = второй сегмент = `doc_hash`

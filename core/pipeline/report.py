@@ -3174,7 +3174,30 @@ def _write_cell_origins(rows: Sequence[Mapping[str, Any]], path: Path) -> Path |
     )
 
 
-def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
+def _cell_failure_kinds(
+    store: Any, run_id: str
+) -> dict[tuple[str, str], str | None]:
+    """Класс сбоя каждой ячейки прогона (``cells.failure_kind``), если store умеет читать.
+
+    Доменная ``Cell`` колонку не несёт, поэтому отчёт спрашивает store — тот же
+    источник, что у метрик и селектора ремонта. Пустая карта — «класс не прочитан»,
+    и колонка остаётся пустой: «не записано» ≠ «сбоя не было».
+    """
+    reader = getattr(store, "read_cell_failure_kinds", None)
+    if not callable(reader):
+        return {}
+    try:
+        return dict(reader(str(run_id)))
+    except Exception:  # noqa: BLE001 — провенанс не роняет отчёт
+        return {}
+
+
+def _write_cell_diagnostics(
+    cells: Iterable[Any],
+    path: Path,
+    *,
+    failure_kinds: Mapping[tuple[str, str], str | None] | None = None,
+) -> Path | None:
     """Пишет ``cell_diagnostics.csv`` — ячейки, о которых человек обязан знать.
 
     Поводом попасть в файл служит **записанный факт**, а не догадка читателя: непустые
@@ -3195,8 +3218,15 @@ def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
     ``cell.evidence_scope`` (может отсутствовать) и печатаются пустыми, если не
     измерены — «не измерено» не выдаётся за ноль. Пустой список поводов ⇒ ``None``
     (файл не создаётся: пустой список — не артефакт).
+
+    ``failure_kinds`` — карта ``(product_id, param_id) → cells.failure_kind`` из store:
+    доменная ``Cell`` колонку не несёт. Колонка ``failure_kind`` публикуется рядом с
+    ``validation_notes`` (машиночитаемо); пустое значение — «класс не записан», что не
+    то же самое, что «сбоя не было». Записанный класс сам по себе — повод попасть в
+    файл: иначе факт сбоя с пустыми заметками остался бы невидимым.
     """
     material = list(cells)
+    kinds = failure_kinds or {}
     # Правило отсутствия записано хотя бы у одной ячейки ⇒ смешанный прогон, и
     # незаписанное правило у остальных — аномалия конкретной ячейки.
     rule_recorded = any(getattr(cell, "absence_rule", None) is not None for cell in material)
@@ -3205,7 +3235,15 @@ def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
         notes = list(getattr(cell, "validation_notes", ()) or ())
         absence_rule = getattr(cell, "absence_rule", None)
         review_reason = getattr(cell, "review_reason", None)
-        if not notes and not review_reason and not (absence_rule is None and rule_recorded):
+        failure_kind = kinds.get(
+            (str(cell.product_id), str(cell.param_id))
+        )
+        if (
+            not notes
+            and not review_reason
+            and not (absence_rule is None and rule_recorded)
+            and not failure_kind
+        ):
             continue
         scope = getattr(cell, "evidence_scope", None)
         coverage_value = getattr(scope, "relevant_evidence_coverage", None)
@@ -3221,6 +3259,7 @@ def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
                     or ("" if absence_rule is None else str(absence_rule))
                 ),
                 "review_reason": review_reason or "",
+                "failure_kind": failure_kind or "",
                 "denial_strength": getattr(
                     getattr(scope, "denial_strength", None), "value", None
                 )
@@ -3243,6 +3282,7 @@ def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
                 "status": "",
                 "absence_rule": "",
                 "review_reason": "",
+                "failure_kind": "",
                 "denial_strength": "",
                 "relevant_evidence_coverage": "",
                 "validation_notes": (
@@ -3266,6 +3306,7 @@ def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
             "status",
             "absence_rule",
             "review_reason",
+            "failure_kind",
             "denial_strength",
             "relevant_evidence_coverage",
             "validation_notes",
@@ -3447,7 +3488,9 @@ def write_reports(
     # Файл — очередь разбора (как ``stale_cells.csv``), а не измерение; пишется только
     # при непустом списке поводов.
     cell_diagnostics = _write_cell_diagnostics(
-        cell_list, outputs_dir / "cell_diagnostics.csv"
+        cell_list,
+        outputs_dir / "cell_diagnostics.csv",
+        failure_kinds=_cell_failure_kinds(store, run_id),
     )
     # I2/I2c: документы, прочитанные не целиком — числом, отдельным артефактом. Без него
     # «7 страниц из 2763» видно только в строке покрытия (``blocked``), а сам документ

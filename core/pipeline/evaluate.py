@@ -52,7 +52,7 @@ import datetime as _dt
 import json
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -146,6 +146,17 @@ __all__ = [
     "DENIAL_QUOTE_WITHOUT_MARKERS",
     "LLM_CALL_OUTCOMES",
     "NO_FRAGMENTS_REASON",
+    "RETRYABLE_FAILURE_KINDS",
+    "RETRY_ATTEMPT_PREFIX",
+    "RETRY_NOTHING_TO_DO",
+    "RETRY_SKIP_CORPUS_ABSENT",
+    "RETRY_SKIP_CORPUS_UNKNOWN",
+    "RETRY_SKIP_NOT_RETRYABLE",
+    "RETRY_SKIP_PARAM",
+    "RETRY_SKIP_UNRECORDED",
+    "RETRY_STATUS_NOOP",
+    "RETRY_STATUS_REFUSED",
+    "RETRY_STATUS_RETRIED",
     "REVALIDATE_FAILED_PREFIX",
     "REVALIDATE_NOTHING_TO_DO",
     "REVALIDATE_SKIP_BUILD_MISMATCH",
@@ -163,7 +174,10 @@ __all__ = [
     "SUPPORT_NOT_ABOUT_SUBJECT",
     "CorpusArtifactDates",
     "EvaluationOutcome",
+    "FailedSelection",
     "LLMCallJournal",
+    "RetryJournal",
+    "RetryReport",
     "RevalidationReport",
     "StaleSelection",
     "SupportSubjectOverlap",
@@ -176,7 +190,9 @@ __all__ = [
     "precompute_query_vectors",
     "reevaluate_stale",
     "retrieve_for_cell",
+    "retry_failed_cells",
     "run_queries_for_cell",
+    "select_failed_cells",
     "select_stale_cells",
     "support_concentration",
     "support_overlap_counts",
@@ -2440,9 +2456,13 @@ def _unresolved_cell(
 
 
 def _record_cell_failure(
-    store: StorePort | None, cell: Cell, failure_kind: str
+    store: StorePort | None, cell: Cell, failure_kind: str | None
 ) -> None:
     """Фиксирует класс сбоя ``failed``-ячейки (узкий UPDATE, аддитивно).
+
+    ``None`` **снимает** класс (``cells.failure_kind = NULL``): ячейка, получившая
+    вердикт, не имеет права показывать сбой на карте. Запись идёт только после успешного
+    upsert ячейки — иначе UPDATE попал бы в строку, которой ещё нет.
 
     Store-двойники без метода пропускаются: доменная модель класса не несёт, и
     отсутствие колонки не должно ломать оценку (контракт duck-typed, как у
@@ -2541,6 +2561,7 @@ def _persist(
     model_id: str | None = None,
     justification: str | None = None,
     llm_scenario: str | None = None,
+    failure_kind: str | None = None,
 ) -> None:
     """Пишет ячейку и её evidence в store (идемпотентный upsert по PK/evidence_id, S8).
 
@@ -2554,6 +2575,14 @@ def _persist(
     ячейки (колонки ``cells`` существуют, но доменная модель их не несёт). Пишутся только
     для реально сохранённой ячейки, поэтому при ``kept_high`` чужой провенанс не затирается.
     ``justification``/``llm_scenario`` передаются только там, где модель вызывалась.
+
+    ``failure_kind`` — **единственный** write-site класса сбоя (``cells.failure_kind``).
+    До этой правки класс писали вручную только два пути (сбой ретривала и отсутствие
+    источников), а сбой оценщика терялся: ``_unresolved_outcome`` знал класс, но
+    сохранял лишь ячейку. Теперь класс доезжает до БД на любом ``failed``-пути, включая
+    параллельный (``_CellWriteBuffer.record_cell_failure``). ``None`` — «класса нет»
+    (``evaluated``/``preliminary``): колонка не трогается, чтобы успешная ячейка не
+    затирала чужой факт.
 
     **Absence-evidence (R4, §4.2).** Протокол отсутствия пишется тем же батч-механизмом, что
     и прочие evidence (``add_absence_evidence``), с ``evidence_type='absence'`` и
@@ -2584,7 +2613,11 @@ def _persist(
             justification=justification,
             llm_scenario=llm_scenario,
         )
-        if to_save.state is not CellState.FAILED:
+        if failure_kind is not None:
+            # Порядок важен: upsert ячейки, затем узкий UPDATE класса. Обратный порядок
+            # писал бы класс в строку, которой ещё нет (и терял бы его).
+            _record_cell_failure(store, to_save, failure_kind)
+        elif to_save.state is not CellState.FAILED:
             # Ячейка получила вердикт — класса сбоя у неё быть не может. Снимаем
             # оставшийся от прошлой попытки: иначе измеренная ячейка несёт класс сбоя
             # (измерено 08.11.2026 на живом прогоне: 362 ячейки двух продуктов держали
@@ -3356,6 +3389,9 @@ def _unresolved_outcome(
         model_id=model_id,
         justification=justification,
         llm_scenario=llm_scenario,
+        # Класс сбоя — машиночитаемый факт: ``validation_notes`` объясняют человеку,
+        # ``cells.failure_kind`` читает машина (селектор ремонта, метрики, отчёт).
+        failure_kind=kind if strict else None,
     )
     return EvaluationOutcome(
         cell=cell,
@@ -3397,6 +3433,16 @@ class _CellWriteBuffer:
     def set_cell_provenance(self, *args: Any, **kwargs: Any) -> None:
         """Откладывает узкий UPDATE провенанса (``prompt_hash``/``model_id``/…)."""
         self.ops.append(("set_cell_provenance", args, dict(kwargs)))
+
+    def record_cell_failure(self, *args: Any, **kwargs: Any) -> None:
+        """Откладывает узкий UPDATE класса сбоя (``cells.failure_kind``).
+
+        Без этого метода параллельный путь Ш6 (``llm_concurrency > 1``) терял бы класс:
+        ``_persist`` пишет через буфер, и запись, которой в буфере нет, не доезжает до
+        store. Имя метода совпадает с store-методом намеренно — :meth:`replay`
+        проигрывает op по имени.
+        """
+        self.ops.append(("record_cell_failure", args, dict(kwargs)))
 
     def add_evidence_batch(self, evidence: Sequence[Any]) -> None:
         """Откладывает запись evidence (копия списка: он не должен меняться после)."""
@@ -4031,8 +4077,7 @@ def evaluate_phase(
                             ),
                         ),
                     )
-                    _persist(store, failed, None)
-                    _record_cell_failure(store, failed, kind)
+                    _persist(store, failed, None, failure_kind=kind)
                     cells.append(failed)
                 errors.append(
                     f"{product_id}: {kind}: expected_sources=0 "
@@ -4122,8 +4167,12 @@ def evaluate_phase(
                         [f"{FailureKind.SEARCH_FAILED.value}: {detail}"]
                     ),
                 )
-                _persist(store, failed, None)
-                _record_cell_failure(store, failed, FailureKind.SEARCH_FAILED.value)
+                _persist(
+                    store,
+                    failed,
+                    None,
+                    failure_kind=FailureKind.SEARCH_FAILED.value,
+                )
                 cells.append(failed)
 
         outcomes, batch_errors = evaluate_batch(
@@ -4625,6 +4674,239 @@ def _kept_stale_cell(cell: Cell, *, reason: str, detail: str | None) -> Cell:
     return cell.model_copy(update={"validation_notes": notes})
 
 
+@dataclass(frozen=True)
+class _CellAttempt:
+    """Одна попытка оценки ячейки: исход, класс ошибки и наблюдённая цена.
+
+    ``outcome is None`` — попытка не дошла до вердикта: сбой ретривала
+    (``error_kind="retrieval_failed"``) либо исключение оценщика
+    (``error_kind="evaluation_error"``); ``detail`` несёт текст исключения.
+
+    ``retrieval_s``/``evaluation_s`` — **наблюдённое** время двух шагов (их пишет
+    ``logs/retry.jsonl``). Ретривал исполняется в вызывающем потоке, оценка — в пуле;
+    сумма честно называет цену попытки, а не делит её догадкой.
+    """
+
+    cell: Cell
+    outcome: EvaluationOutcome | None = None
+    error_kind: str | None = None
+    detail: str | None = None
+    retrieval_s: float = 0.0
+    evaluation_s: float = 0.0
+
+
+def _evaluate_cells_by_condition(
+    *,
+    store: StorePort,
+    run_id: str,
+    targets: Sequence[Cell],
+    catalog: Mapping[str, CatalogRow],
+    ports: Ports,
+    satellites: Sequence[Satellite] = (),
+    resolver: SourceResolver | None = None,
+    strict: bool = True,
+    eval_cache: EvalVerdictCache | None = None,
+    eval_conditions: EvalConditions | None = None,
+    max_retries: int = 2,
+    prompt_archive: PromptArchive | None = None,
+    call_journal: LLMCallJournal | None = None,
+    errors: list[str] | None = None,
+    llm_concurrency: int = 1,
+) -> Iterator[_CellAttempt]:
+    """Общий шаг ``revalidate`` и ``retry``: условия ячейки → ретривал → оценка.
+
+    Обе команды исполняют **тот же** конвейер Ш6, поэтому шаг вынесен сюда, а не
+    скопирован: две копии разошлись бы молча (в проекте это уже случалось). Отличие
+    команд — только в том, **кого** они выбрали и **как** классифицируют исход;
+    ретривал (профиль/K из самой ячейки, I16/I17/I20), промпт, оценщик (I18) и эшелон
+    §10 берутся из одних и тех же функций.
+
+    Группировка — по условиям ячейки (:func:`_cell_condition`): векторы запросов и
+    dense-плечо считаются **на группу**, а не на всю фазу — цена пропорциональна
+    затронутым ячейкам.
+
+    **Один писатель в store.** Ретривал идёт в вызывающем потоке (индексы и store
+    читаются там же), а пул несёт только вызов оценщика (``store=None``): запись делает
+    вызывающий после ``yield``. ``errors`` — накопитель вызывающего: сбои групп
+    (векторы/dense), ретривала и оценки видны поимённо, а не глотаются.
+
+    :param llm_concurrency: вызовов оценщика в полёте (≥1); порядок ``yield`` —
+    порядок ``(продукт, параметр)``, а не порядок ответов модели.
+    """
+    if errors is None:
+        errors = []
+    evaluator = getattr(ports, "evaluator", None)
+    if evaluator is None:
+        # Вызывающие проверяют это до входа (``refused``), но шаг не имеет права
+        # молча оценивать «без прибора»: отсутствие оценщика — отказ, а не пустой исход.
+        raise ValueError("оценщик не сконфигурирован: ретривал без оценки невозможен")
+    groups: dict[tuple[str, str, int], list[Cell]] = {}
+    for cell in targets:
+        groups.setdefault(_cell_condition(cell), []).append(cell)
+
+    # I2d: даты наблюдения артефактов — один снимок на продукт и на вызов (группы
+    # одного продукта различаются профилем/K, корпус у них общий).
+    dates_by_product: dict[str, CorpusArtifactDates | None] = {}
+
+    def _evaluate_one(
+        cell: Cell,
+        param: CatalogRow,
+        retrieval: RetrievalResult,
+        coverage: CorpusCoverage | None,
+        retrieval_s: float,
+    ) -> _CellAttempt:
+        started = time.monotonic()
+        try:
+            # ``store=None``: персистенция — забота вызывающего (после классификации).
+            outcome = evaluate_cell(
+                param=param,
+                product_id=str(cell.product_id),
+                run_id=str(run_id),
+                evaluator=evaluator,
+                chunks=retrieval.chunks,
+                satellites=satellites,
+                resolver=resolver,
+                strict=strict,
+                retrievals=retrieval,
+                max_retries=max_retries,
+                store=None,
+                coverage=coverage,
+                scope_acceptance=_accepted_risk(cell),
+                eval_cache=eval_cache,
+                eval_conditions=eval_conditions,
+                prompt_archive=prompt_archive,
+                artifact_dates=dates_by_product.get(str(cell.product_id)),
+                llm_journal=call_journal,
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            return _CellAttempt(
+                cell=cell,
+                error_kind="evaluation_error",
+                detail=f"{type(exc).__name__}: {exc}",
+                retrieval_s=retrieval_s,
+                evaluation_s=time.monotonic() - started,
+            )
+        return _CellAttempt(
+            cell=cell,
+            outcome=outcome,
+            retrieval_s=retrieval_s,
+            evaluation_s=time.monotonic() - started,
+        )
+
+    for product_id, profile, cutoff in sorted(groups):
+        group = sorted(
+            groups[(product_id, profile, cutoff)], key=lambda c: str(c.param_id)
+        )
+        group_params = [catalog[str(cell.param_id)] for cell in group]
+        try:
+            query_vectors = precompute_query_vectors(
+                group_params,
+                profile=profile,
+                embedder=getattr(ports, "embedder", None),
+                memo={},
+            )
+        except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
+            errors.append(
+                f"{product_id}: query_vectors: {type(exc).__name__}: {exc}"
+            )
+            query_vectors = None
+        coverage = _coverage_for(None, store, str(run_id), product_id)
+        if product_id not in dates_by_product:
+            try:
+                dates_by_product[product_id] = observe_corpus_artifact_dates(
+                    store, str(run_id), product_id
+                )
+            except Exception as exc:  # noqa: BLE001 — провенанс виден, фазу не роняет
+                errors.append(
+                    f"{product_id}: corpus_artifact: {type(exc).__name__}: {exc} — "
+                    "I2d (датированный носитель ❌) не применён"
+                )
+                dates_by_product[product_id] = None
+        try:
+            dense_by_query = precompute_dense_hits(
+                group_params,
+                product_ids=[product_id],
+                profile=profile,
+                cutoff_k=cutoff,
+                vector_index=getattr(ports, "vector_index", None),
+                query_vectors=query_vectors,
+            )
+        except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
+            errors.append(
+                f"{product_id}: dense batch: {type(exc).__name__}: {exc} — "
+                "поиск пошёл поштучно"
+            )
+            dense_by_query = None
+
+        prepared: list[tuple[Cell, CatalogRow, RetrievalResult, float]] = []
+        for cell in group:
+            param = catalog[str(cell.param_id)]
+            started = time.monotonic()
+            try:
+                retrieval = retrieve_for_cell(
+                    param,
+                    product_id=product_id,
+                    profile=profile,
+                    cutoff_k=cutoff,
+                    lexical_index=getattr(ports, "lexical_index", None),
+                    vector_index=getattr(ports, "vector_index", None),
+                    embedder=getattr(ports, "embedder", None),
+                    query_vectors=query_vectors,
+                    dense_by_query=dense_by_query,
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(
+                    f"{product_id}/{cell.param_id}: retrieval: {type(exc).__name__}: {exc}"
+                )
+                yield _CellAttempt(
+                    cell=cell,
+                    error_kind="retrieval_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    retrieval_s=time.monotonic() - started,
+                )
+                continue
+            prepared.append((cell, param, retrieval, time.monotonic() - started))
+
+        if llm_concurrency > 1 and len(prepared) > 1:
+            with ThreadPoolExecutor(
+                max_workers=llm_concurrency, thread_name_prefix="retry-llm"
+            ) as pool:
+                futures = [
+                    (
+                        pool.submit(
+                            _evaluate_one, cell, param, retrieval, coverage, retrieval_s
+                        ),
+                        cell,
+                        retrieval_s,
+                    )
+                    for cell, param, retrieval, retrieval_s in prepared
+                ]
+                attempts = []
+                for future, cell, retrieval_s in futures:
+                    try:
+                        attempts.append(future.result())
+                    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                        attempts.append(
+                            _CellAttempt(
+                                cell=cell,
+                                error_kind="evaluation_error",
+                                detail=f"{type(exc).__name__}: {exc}",
+                                retrieval_s=retrieval_s,
+                            )
+                        )
+        else:
+            attempts = [
+                _evaluate_one(cell, param, retrieval, coverage, retrieval_s)
+                for cell, param, retrieval, retrieval_s in prepared
+            ]
+        for attempt in attempts:
+            if attempt.error_kind == "evaluation_error":
+                errors.append(
+                    f"{product_id}/{attempt.cell.param_id}: evaluate: {attempt.detail}"
+                )
+            yield attempt
+
+
 def reevaluate_stale(
     *,
     store: StorePort,
@@ -4740,162 +5022,76 @@ def reevaluate_stale(
     # Журнал вызовов пере-оценки — тот же файл прогона: путь ``None`` выключает запись.
     call_journal = LLMCallJournal(Path(llm_journal), str(run_id)) if llm_journal is not None else None
 
-    # Группы = условия измерения ячейки (продукт/профиль/K): векторы запросов и dense-плечо
-    # считаются **на группу**, а не на всю фазу — цена пропорциональна затронутым ячейкам.
-    groups: dict[tuple[str, str, int], list[Cell]] = {}
-    for cell in targets:
-        groups.setdefault(_cell_condition(cell), []).append(cell)
-
-    # I2d: даты наблюдения артефактов — один снимок на продукт и на вызов
-    # (группы одного продукта различаются профилем/K, корпус у них общий).
-    dates_by_product: dict[str, CorpusArtifactDates | None] = {}
-
-    for product_id, profile, cutoff in sorted(groups):
-        group = sorted(groups[(product_id, profile, cutoff)], key=lambda c: str(c.param_id))
-        group_params = [catalog[str(cell.param_id)] for cell in group]
-        try:
-            query_vectors = precompute_query_vectors(
-                group_params,
-                profile=profile,
-                embedder=getattr(ports, "embedder", None),
-                memo={},
-            )
-        except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
-            report.errors.append(
-                f"{product_id}: query_vectors: {type(exc).__name__}: {exc}"
-            )
-            query_vectors = None
-        coverage = _coverage_for(None, store, str(run_id), product_id)
-        if product_id not in dates_by_product:
-            try:
-                dates_by_product[product_id] = observe_corpus_artifact_dates(
-                    store, str(run_id), product_id
-                )
-            except Exception as exc:  # noqa: BLE001 — провенанс виден, фазу не роняет
-                report.errors.append(
-                    f"{product_id}: corpus_artifact: {type(exc).__name__}: {exc} — "
-                    "I2d (датированный носитель ❌) не применён"
-                )
-                dates_by_product[product_id] = None
-        try:
-            dense_by_query = precompute_dense_hits(
-                group_params,
-                product_ids=[product_id],
-                profile=profile,
-                cutoff_k=cutoff,
-                vector_index=getattr(ports, "vector_index", None),
-                query_vectors=query_vectors,
-            )
-        except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
-            report.errors.append(
-                f"{product_id}: dense batch: {type(exc).__name__}: {exc} — "
-                "поиск пошёл поштучно"
-            )
-            dense_by_query = None
-
-        for cell in group:
-            param = catalog[str(cell.param_id)]
-            try:
-                retrieval = retrieve_for_cell(
-                    param,
-                    product_id=product_id,
-                    profile=profile,
-                    cutoff_k=cutoff,
-                    lexical_index=getattr(ports, "lexical_index", None),
-                    vector_index=getattr(ports, "vector_index", None),
-                    embedder=getattr(ports, "embedder", None),
-                    query_vectors=query_vectors,
-                    dense_by_query=dense_by_query,
-                )
-            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                report.errors.append(
-                    f"{product_id}/{cell.param_id}: retrieval: {type(exc).__name__}: {exc}"
-                )
-                report.remaining.append(
-                    {
-                        **_cell_key(cell),
-                        "reason": "retrieval_failed",
-                        "stale_reason": _enum_text(cell.stale_reason),
-                        "index_build_id": cell.index_build_id,
-                    }
-                )
-                continue
-            try:
-                # ``store=None``: персистенция — только после классификации исхода.
-                # Иначе неуспешная пере-оценка успела бы снять пометку upsert'ом.
-                outcome = evaluate_cell(
-                    param=param,
-                    product_id=product_id,
-                    run_id=str(run_id),
-                    evaluator=evaluator,
-                    chunks=retrieval.chunks,
-                    satellites=satellites,
-                    resolver=resolver,
-                    strict=strict,
-                    retrievals=retrieval,
-                    max_retries=max_retries,
-                    store=None,
-                    coverage=coverage,
-                    scope_acceptance=_accepted_risk(cell),
-                    eval_cache=eval_cache,
-                    eval_conditions=eval_conditions,
-                    prompt_archive=prompt_archive,
-                    artifact_dates=dates_by_product.get(product_id),
-                    llm_journal=call_journal,
-                )
-            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                report.errors.append(
-                    f"{product_id}/{cell.param_id}: evaluate: {type(exc).__name__}: {exc}"
-                )
-                report.remaining.append(
-                    {
-                        **_cell_key(cell),
-                        "reason": "evaluation_error",
-                        "stale_reason": _enum_text(cell.stale_reason),
-                        "index_build_id": cell.index_build_id,
-                    }
-                )
-                continue
-
-            keep_reason = _keep_stale_reason(outcome, resolved_build)
-            if keep_reason is None:
-                fresh = outcome.cell.model_copy(update={"stale_reason": None})
-                _persist(
-                    store,
-                    fresh,
-                    outcome.validation,
-                    prompt_hash=outcome.prompt_hash,
-                    model_id=model_id,
-                    justification=outcome.justification,
-                    llm_scenario=outcome.llm_scenario,
-                )
-                report.reevaluated.append(
-                    {
-                        **_cell_key(cell),
-                        "state": _enum_text(fresh.state),
-                        "status": _enum_text(fresh.status),
-                        "index_build_id": fresh.index_build_id,
-                        "previous_index_build_id": cell.index_build_id,
-                    }
-                )
-                continue
-
-            detail = outcome.failure_kind or next(
-                (note for note in reversed(outcome.validation.notes) if note), None
-            )
-            kept = _kept_stale_cell(cell, reason=keep_reason, detail=detail)
-            store.save_cell(kept)
+    for attempt in _evaluate_cells_by_condition(
+        store=store,
+        run_id=str(run_id),
+        targets=targets,
+        catalog=catalog,
+        ports=ports,
+        satellites=satellites,
+        resolver=resolver,
+        strict=strict,
+        eval_cache=eval_cache,
+        eval_conditions=eval_conditions,
+        max_retries=max_retries,
+        prompt_archive=prompt_archive,
+        call_journal=call_journal,
+        # Сбои групп/ретривала/оценки — в тот же список, что и раньше: наблюдаемость
+        # не зависит от того, кто исполнил шаг.
+        errors=report.errors,
+    ):
+        cell = attempt.cell
+        if attempt.outcome is None:
             report.remaining.append(
                 {
                     **_cell_key(cell),
-                    "reason": keep_reason,
-                    "stale_reason": _enum_text(kept.stale_reason),
-                    "index_build_id": kept.index_build_id,
-                    "state": _enum_text(outcome.cell.state),
-                    "failure_kind": outcome.failure_kind,
-                    "note": f"{REVALIDATE_FAILED_PREFIX}: {keep_reason}",
+                    "reason": attempt.error_kind,
+                    "stale_reason": _enum_text(cell.stale_reason),
+                    "index_build_id": cell.index_build_id,
                 }
             )
+            continue
+        outcome = attempt.outcome
+
+        keep_reason = _keep_stale_reason(outcome, resolved_build)
+        if keep_reason is None:
+            fresh = outcome.cell.model_copy(update={"stale_reason": None})
+            _persist(
+                store,
+                fresh,
+                outcome.validation,
+                prompt_hash=outcome.prompt_hash,
+                model_id=model_id,
+                justification=outcome.justification,
+                llm_scenario=outcome.llm_scenario,
+            )
+            report.reevaluated.append(
+                {
+                    **_cell_key(cell),
+                    "state": _enum_text(fresh.state),
+                    "status": _enum_text(fresh.status),
+                    "index_build_id": fresh.index_build_id,
+                    "previous_index_build_id": cell.index_build_id,
+                }
+            )
+            continue
+
+        detail = outcome.failure_kind or next(
+            (note for note in reversed(outcome.validation.notes) if note), None
+        )
+        kept = _kept_stale_cell(cell, reason=keep_reason, detail=detail)
+        store.save_cell(kept)
+        report.remaining.append(
+            {
+                **_cell_key(cell),
+                "reason": keep_reason,
+                "stale_reason": _enum_text(kept.stale_reason),
+                "index_build_id": kept.index_build_id,
+                "state": _enum_text(outcome.cell.state),
+                "failure_kind": outcome.failure_kind,
+                "note": f"{REVALIDATE_FAILED_PREFIX}: {keep_reason}",
+            }
+        )
 
     report.status = (
         REVALIDATE_STATUS_REEVALUATED if report.reevaluated else REVALIDATE_STATUS_NOOP
@@ -4926,3 +5122,674 @@ def _keep_stale_reason(outcome: EvaluationOutcome, current_build_id: str) -> str
     if (cell.index_build_id or "") != current_build_id:
         return REVALIDATE_SKIP_BUILD_MISMATCH
     return None
+
+
+# ---------------------------------------------------------------------------
+# Ремонт недоделанной Ш6 (``hound retry``): селектор + исполнение
+# ---------------------------------------------------------------------------
+
+#: Причина пропуска: класс сбоя не записан, а признака ``instrument_failed`` нет.
+#: Повтор не выдумывается — «класс неизвестен» не означает «повтор поможет».
+RETRY_SKIP_UNRECORDED = "failure_kind_unrecorded"
+#: Причина пропуска: у продукта нет корпуса — повтор дал бы тот же ``no_sources``.
+RETRY_SKIP_CORPUS_ABSENT = "corpus_absent"
+#: Причина пропуска: наличие корпуса у продукта **неизвестно** (store не умеет читать):
+#: «не знаем» не выдаётся ни за «есть», ни за «нет».
+RETRY_SKIP_CORPUS_UNKNOWN = "corpus_unknown"
+#: Причина пропуска: ``param_id`` ячейки отсутствует в каталоге прогона.
+RETRY_SKIP_PARAM = "param_not_in_catalog"
+#: Причина пропуска: класс сбоя терминален (``not_found``/``robots_disallow``/…):
+#: тот же вход даст тот же исход, и повтор — оплаченный no-op.
+RETRY_SKIP_NOT_RETRYABLE = "failure_not_retryable"
+
+#: Префикс машинной заметки о попытке повтора (``cells.validation_notes``). Полная
+#: форма — ``retry:attempt=N``; прежняя причина сбоя **сохраняется** рядом: она
+#: объясняет, почему ячейка была без вердикта, и без неё история попыток теряется.
+RETRY_ATTEMPT_PREFIX = "retry:attempt"
+
+#: Статус отчёта: попытки состоялись.
+RETRY_STATUS_RETRIED = "retried"
+#: Статус отчёта: повторять нечего (``failed``-ячеек нет либо ни одна не повторяема).
+RETRY_STATUS_NOOP = "noop"
+#: Статус отчёта: повтор невозможен по объявленной причине (нет оценщика).
+RETRY_STATUS_REFUSED = "refused"
+
+#: Явное сообщение идемпотентного no-op.
+RETRY_NOTHING_TO_DO = "повторять нечего: ячеек без вердикта нет"
+
+#: Классы сбоя, повторяемые **по определению**: отказ прибора (сеть/5xx/таймаут),
+#: непрошедший эшелон §10 ответ или сбой ретривала. Терминальные классы
+#: (``not_found``/``robots_disallow``/``payload_too_large``/…) сюда не входят: тот же
+#: вход даст тот же исход, и повтор был бы оплаченным no-op.
+RETRYABLE_FAILURE_KINDS: frozenset[str] = frozenset(
+    {
+        FailureKind.EVALUATION_FAILED.value,
+        FailureKind.VALIDATION_FAILED.value,
+        FailureKind.SEARCH_FAILED.value,
+    }
+)
+
+
+def _read_cell_failure_kinds(
+    store: StorePort, run_id: str
+) -> dict[tuple[str, str], str | None] | None:
+    """Класс сбоя каждой ячейки прогона либо ``None`` — store не умеет читать.
+
+    Доменная ``Cell`` колонку не несёт (как ``prompt_hash``/``model_id``), поэтому
+    селектор спрашивает store. ``None`` — «неизвестно», а не «классов нет»: селектор
+    обязан назвать этот случай, а не выдать все ``failed`` за повторяемые.
+    """
+    reader = getattr(store, "read_cell_failure_kinds", None)
+    if not callable(reader):
+        return None
+    try:
+        return dict(reader(str(run_id)))
+    except Exception:  # noqa: BLE001 — чтение провенанса не роняет команду
+        return None
+
+
+def _product_has_corpus(
+    store: StorePort, run_id: str, product_id: str
+) -> bool | None:
+    """Есть ли у продукта материал корпуса: ``True``/``False``/``None`` (неизвестно).
+
+    Проба существования (``has_corpus_docs``), а не счётчик: вопрос один бит. Store без
+    пробы падает на ``iter_corpus_docs`` (он в порте), а store без обоих даёт ``None`` —
+    «не знаем» не выдаётся ни за «есть корпус», ни за «нет».
+    """
+    probe = getattr(store, "has_corpus_docs", None)
+    if callable(probe):
+        try:
+            return bool(probe(str(product_id)))
+        except Exception:  # noqa: BLE001 — проба не роняет команду
+            return None
+    lister = getattr(store, "iter_corpus_docs", None)
+    if not callable(lister):
+        return None
+    try:
+        return any(
+            str(getattr(doc, "product_id", "")) == str(product_id)
+            for doc in lister(str(run_id))
+        )
+    except Exception:  # noqa: BLE001 — чтение корпуса не роняет команду
+        return None
+
+
+@dataclass(frozen=True)
+class FailedSelection:
+    """Результат селектора: **все** ячейки без вердикта, разделённые по повторяемости.
+
+    :param run_id: прогон, по которому читались ячейки.
+    :param failed_total: сколько ячеек прогона в состоянии ``failed`` (после фильтров).
+    :param retryable_cells: ячейки, повтор которых осмыслен (см.
+        :func:`select_failed_cells`), порядок ``(product_id, param_id)``.
+    :param skipped: остальные ``failed``-ячейки с причиной — «сколько осталось и почему»
+        видно, а не растворяется в счётчике.
+
+    Инвариант: ``len(retryable_cells) + len(skipped) == failed_total``.
+    """
+
+    run_id: str
+    failed_total: int = 0
+    retryable_cells: tuple[Cell, ...] = ()
+    skipped: tuple[dict[str, Any], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-совместимый вид селекции (счётчики + ключи + причины)."""
+        return {
+            "run_id": self.run_id,
+            "failed_total": self.failed_total,
+            "retryable": len(self.retryable_cells),
+            "retryable_cells": [_cell_key(cell) for cell in self.retryable_cells],
+            "skipped": len(self.skipped),
+            "skipped_cells": list(self.skipped),
+        }
+
+
+def _failed_skip_reason(
+    cell: Cell,
+    *,
+    failure_kind: str | None,
+    kind_recorded: bool,
+    corpus_present: bool | None,
+) -> str | None:
+    """Почему ``failed``-ячейку **нельзя** повторить (``None`` — можно).
+
+    Порядок проверок — от «к ячейке нельзя прикасаться» к «повтор бесполезен»:
+
+    1. ``source_kind`` не ``documentation`` — вердикт чужого контура (реестр/
+       наследование/ручное) не переписывается;
+    2. класс сбоя не записан: признак ``instrument_failed`` в ``evidence_scope`` —
+       так выглядят прогоны **до** правки write-site (312 ячеек живого прогона);
+       без признака — ``failure_kind_unrecorded``, догадка запрещена;
+    3. ``no_sources`` повторяем только при наличии корпуса у продукта: без корпуса
+       повтор даст тот же класс, и это называется ``corpus_absent``, а не «попробовали»;
+    4. прочие классы — только из :data:`RETRYABLE_FAILURE_KINDS`.
+    """
+    if cell.source_kind is not _CELL_SOURCE_KIND:
+        return f"source_kind_not_documentation:{_enum_text(cell.source_kind)}"
+    if not kind_recorded:
+        # store не умеет читать класс: «не знаем» — не «повторяемо».
+        return RETRY_SKIP_UNRECORDED
+    if failure_kind is None:
+        scope = cell.evidence_scope
+        strength = getattr(scope, "denial_strength", None)
+        if strength is DenialStrength.INSTRUMENT_FAILED:
+            # Так выглядят ячейки, оценённые до правки write-site: класс известен
+            # только текстом/признаком, и это отказ прибора, а не корпуса.
+            return None
+        return RETRY_SKIP_UNRECORDED
+    if failure_kind == FailureKind.NO_SOURCES.value:
+        if corpus_present is True:
+            return None
+        if corpus_present is None:
+            return RETRY_SKIP_CORPUS_UNKNOWN
+        return RETRY_SKIP_CORPUS_ABSENT
+    if failure_kind in RETRYABLE_FAILURE_KINDS:
+        return None
+    return f"{RETRY_SKIP_NOT_RETRYABLE}:{failure_kind}"
+
+
+def select_failed_cells(
+    store: StorePort,
+    run_id: str,
+    *,
+    product_ids: Sequence[str] | None = None,
+    param_ids: Sequence[str] | None = None,
+) -> FailedSelection:
+    """Селектор: ячейки без вердикта, повтор которых осмыслен, **из хранилища**.
+
+    Возвращаются только ``state=failed`` **и** ``source_kind=documentation``:
+    ``evaluated``/``reviewed``/``preliminary`` не возвращаются никогда (первое — уже
+    измерено, второе — решение человека I6/I7, третье — кандидат I13), а вердикты
+    чужих контуров повтор оценщиком не переписывает.
+
+    Разделение внутри ``failed`` — по классу сбоя (:func:`_failed_skip_reason`):
+    отказ прибора повторяем, терминальный класс — нет, а ``no_sources`` — только если
+    корпус у продукта уже есть. Каждая неотобранная ячейка попадает в ``skipped``
+    с причиной.
+
+    :param product_ids: фильтр продуктов (``None`` — все).
+    :param param_ids: фильтр параметров (``None`` — все).
+    """
+    products = set(product_ids) if product_ids is not None else None
+    params = set(param_ids) if param_ids is not None else None
+    kinds = _read_cell_failure_kinds(store, str(run_id))
+    corpus: dict[str, bool | None] = {}
+    retryable: list[Cell] = []
+    skipped: list[dict[str, Any]] = []
+    failed_total = 0
+    for cell in store.iter_cells(str(run_id)):
+        if cell.state is not CellState.FAILED:
+            continue
+        if products is not None and str(cell.product_id) not in products:
+            continue
+        if params is not None and str(cell.param_id) not in params:
+            continue
+        failed_total += 1
+        key = (str(cell.product_id), str(cell.param_id))
+        kind_recorded = kinds is not None
+        failure_kind = kinds.get(key) if kinds is not None else None
+        corpus_present: bool | None = None
+        if failure_kind == FailureKind.NO_SOURCES.value:
+            product_key = str(cell.product_id)
+            if product_key not in corpus:
+                corpus[product_key] = _product_has_corpus(
+                    store, str(run_id), product_key
+                )
+            corpus_present = corpus[product_key]
+        reason = _failed_skip_reason(
+            cell,
+            failure_kind=failure_kind,
+            kind_recorded=kind_recorded,
+            corpus_present=corpus_present,
+        )
+        if reason is None:
+            retryable.append(cell)
+            continue
+        skipped.append(
+            {
+                **_cell_key(cell),
+                "reason": reason,
+                "failure_kind": failure_kind,
+                "source_kind": _enum_text(cell.source_kind),
+                "state": _enum_text(cell.state),
+                "index_build_id": cell.index_build_id,
+            }
+        )
+    retryable.sort(key=lambda c: (str(c.product_id), str(c.param_id)))
+    skipped.sort(key=lambda row: (row["product_id"], row["param_id"]))
+    return FailedSelection(
+        run_id=str(run_id),
+        failed_total=failed_total,
+        retryable_cells=tuple(retryable),
+        skipped=tuple(skipped),
+    )
+
+
+@dataclass
+class RetryJournal:
+    """Append-only журнал попыток ремонта: ``logs/retry.jsonl``, строка на попытку.
+
+    Зачем отдельно от ``logs/llm_calls.jsonl``. Журнал вызовов отвечает «что вернула
+    модель», а этот — «что стало с ячейкой»: попытка может не дойти до модели (сбой
+    ретривала) и всё равно должна быть видна, а повтор одной ячейки в разные дни
+    различается номером попытки. Поля — ровно те, по которым оператор строит
+    «сколько попыток, сколько вернулось, сколько осталось».
+
+    Строка — провенанс исполнения, а не условие измерения: файл, не таблица; DDL и
+    ``run_id`` не меняются.
+
+    :param path: файл журнала (``runs/{run_id}/logs/retry.jsonl``).
+    :param run_id: прогон (колонка ``run_id`` в каждой строке).
+    """
+
+    path: Path
+    run_id: str
+    _writer: JsonlAppender = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.path = Path(self.path)
+        self._writer = JsonlAppender(self.path)
+
+    def record(
+        self,
+        *,
+        product_id: str,
+        param_id: str,
+        attempt: int,
+        outcome: str,
+        failure_kind: str | None,
+        duration_s: float,
+    ) -> None:
+        """Дописывает одну попытку; сбой записи виден в :attr:`errors`, не бросается."""
+        self._writer.append(
+            {
+                "run_id": self.run_id,
+                "product_id": str(product_id),
+                "param_id": str(param_id),
+                "attempt": int(attempt),
+                "outcome": outcome,
+                "failure_kind": failure_kind,
+                "duration_s": round(float(duration_s), 3),
+            }
+        )
+
+    @property
+    def errors(self) -> list[str]:
+        """Видимые аномалии записи (сбой диска не отнимает вердикты)."""
+        return self._writer.errors
+
+    @property
+    def written(self) -> int:
+        """Сколько строк реально дописано."""
+        return self._writer.written
+
+    def summary(self) -> str:
+        """Сводка для сообщения отчёта: сколько строк записано и куда."""
+        return self._writer.summary()
+
+
+@dataclass
+class RetryReport:
+    """Отчёт ремонта: что было без вердикта, что повторяемо, что стало с каждой ячейкой.
+
+    :param status: :data:`RETRY_STATUS_RETRIED` | ``..._NOOP`` | ``..._REFUSED``.
+    :param message: человекочитаемая сводка **тех же** чисел, что в полях.
+    :param failed_total: сколько ячеек прогона было ``failed`` на входе.
+    :param retryable: сколько из них селектор признал повторяемыми.
+    :param retried: сколько попыток реально исполнено.
+    :param recovered: сколько ячеек получили вердикт (``state=evaluated``).
+    :param still_failed: сколько попыток вердикта не дали (I4/I13 — как и было).
+    :param skipped: неотобранные ячейки с причиной (``product_id``/``param_id``/``reason``).
+    :param cells: построчно — что стало с каждой повторённой ячейкой.
+    :param errors: изолированные сбои ретривала/оценки/записи журналов.
+    :param notes: ограничения и наблюдения команды (не ошибки).
+    """
+
+    run_id: str
+    index_build_id: str | None = None
+    status: str = RETRY_STATUS_NOOP
+    message: str = ""
+    failed_total: int = 0
+    retryable: int = 0
+    retried: int = 0
+    recovered: int = 0
+    still_failed: int = 0
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    cells: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """Состоялась ли работа: были попытки либо повторять было нечего."""
+        return self.retried == 0 or self.recovered > 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-совместимый вид отчёта (``--json`` payload команды ``retry``)."""
+        return {
+            "run_id": self.run_id,
+            "index_build_id": self.index_build_id,
+            "status": self.status,
+            "message": self.message,
+            "failed_total": self.failed_total,
+            "retryable": self.retryable,
+            "retried": self.retried,
+            "recovered": self.recovered,
+            "still_failed": self.still_failed,
+            "skipped": len(self.skipped),
+            "skipped_cells": list(self.skipped),
+            "cells": list(self.cells),
+            "errors": list(self.errors),
+            "notes": list(self.notes),
+        }
+
+
+def _retry_summary(report: RetryReport) -> str:
+    """Сводка отчёта: без вердикта / повторяемо / попыток / вердикт / осталось."""
+    parts = [
+        f"без вердикта {report.failed_total}",
+        f"повторяемо {report.retryable}",
+        f"попыток {report.retried}",
+        f"вердикт получен {report.recovered}",
+        f"осталось без вердикта {report.still_failed}",
+    ]
+    if report.skipped:
+        parts.append(
+            f"вне повтора {len(report.skipped)} "
+            f"({_reasons_breakdown(report.skipped)})"
+        )
+    return "; ".join(parts)
+
+
+def _next_retry_attempt(cell: Cell) -> int:
+    """Номер следующей попытки повтора для ячейки (по уже записанным маркерам).
+
+    Считается по ``validation_notes``, а не по часам/счётчику процесса: номер обязан
+    быть воспроизводим из артефакта, иначе «попытка 3» в журнале не сверяется с БД.
+    """
+    prefix = f"{RETRY_ATTEMPT_PREFIX}="
+    return 1 + sum(1 for note in cell.validation_notes if str(note).startswith(prefix))
+
+
+def retry_failed_cells(
+    *,
+    store: StorePort,
+    run_id: str,
+    params: Mapping[str, CatalogRow],
+    ports: Ports,
+    satellites: Sequence[Satellite] = (),
+    resolver: SourceResolver | None = None,
+    strict: bool = True,
+    eval_cache: EvalVerdictCache | None = None,
+    eval_conditions: EvalConditions | None = None,
+    max_retries: int = 2,
+    product_ids: Sequence[str] | None = None,
+    param_ids: Sequence[str] | None = None,
+    current_build_id: str | None = None,
+    prompt_dir: str | Path | None = None,
+    llm_journal: str | Path | None = None,
+    retry_journal: str | Path | None = None,
+    llm_concurrency: int = 1,
+) -> RetryReport:
+    """Повторяет оценку **только** ячеек без вердикта и **на существующем** ``run_id``.
+
+    Это исполнение селектора :func:`select_failed_cells`: набор сужается до
+    ``state=failed`` + ``source_kind=documentation`` + повторяемого класса сбоя, поэтому
+    уже измеренное не оплачивается повторно, а терминальные классы не выдаются за
+    «попробуем ещё». Конвейер — тот же, что у Ш6 и ``revalidate``
+    (:func:`_evaluate_cells_by_condition`): условия из самой ячейки (I16/I17/I20),
+    промпт, оценщик (I18), эшелон §10.
+
+    **Вердикт получен** (``state=evaluated``): ячейка перезаписывается с
+    ``stale_reason=None``, ``index_build_id`` текущей сборки, а класс сбоя **снимается**
+    (``cells.failure_kind=NULL``) — иначе карта показывала бы сбой у измеренной ячейки.
+
+    **Вердикта нет** (``failed``/``preliminary``): ``status=None`` (I4/I13), класс сбоя
+    обновляется, а в ``validation_notes`` добавляется ``retry:attempt=N``; прежняя
+    причина сохраняется — она объясняет, почему ячейка была без вердикта.
+
+    **Идемпотентность.** Повтор без провалов — no-op: селектор пуст, оценщик не
+    вызывается. Порога числа попыток нет (A3): номер виден в заметке и журнале,
+    сколько звать команду — решает оператор.
+
+    :param current_build_id: текущая сборка прогона; ``None`` — читается из
+        ``runs.index_build_id``. Неизвестна — вердикт получает сборку из провенанса
+        ретривала (не выдуманную).
+    :param llm_concurrency: вызовов оценщика в полёте (≥1, ось исполнения — в
+        ``run_id`` не входит). Порядок записи — порядок ``(продукт, параметр)``.
+    :param retry_journal: файл ``logs/retry.jsonl``; ``None`` — журнал не пишется.
+    """
+    selection = select_failed_cells(
+        store, run_id, product_ids=product_ids, param_ids=param_ids
+    )
+    resolved_build = current_build_id or _current_build_id(store, run_id)
+    journal = (
+        RetryJournal(Path(retry_journal), str(run_id))
+        if retry_journal is not None
+        else None
+    )
+    report = RetryReport(
+        run_id=str(run_id),
+        index_build_id=resolved_build,
+        status=RETRY_STATUS_NOOP,
+        failed_total=selection.failed_total,
+        retryable=len(selection.retryable_cells),
+        skipped=[dict(row) for row in selection.skipped],
+    )
+    if not selection.retryable_cells:
+        report.message = (
+            RETRY_NOTHING_TO_DO
+            if selection.failed_total == 0
+            else f"повторять нечего: {_retry_summary(report)}"
+        )
+        return report
+
+    catalog = {str(key): row for key, row in params.items()}
+    targets: list[Cell] = []
+    for cell in selection.retryable_cells:
+        if str(cell.param_id) not in catalog:
+            report.skipped.append({**_cell_key(cell), "reason": RETRY_SKIP_PARAM})
+            continue
+        targets.append(cell)
+    if not targets:
+        # Отобрано было, а адресовать нечем: это не «повторять нечего» (no-op), а отказ —
+        # без каталога запросы и промпт по ячейке не построить (значения не выдумываем).
+        report.status = RETRY_STATUS_REFUSED
+        report.message = (
+            f"повтор невозможен: повторяемых {report.retryable}, но ни одна не "
+            f"адресуется каталогу ({_reasons_breakdown(report.skipped)})"
+        )
+        return report
+
+    evaluator = getattr(ports, "evaluator", None)
+    if evaluator is None:
+        report.status = RETRY_STATUS_REFUSED
+        report.message = (
+            "повтор невозможен: оценщик не сконфигурирован — ячейки остаются без "
+            "вердикта, выдавать их за измеренные нельзя"
+        )
+        return report
+
+    model_id = getattr(evaluator, "model_id", "") or _UNSPECIFIED_MODEL_ID
+    # Промпты — в тот же каталог прогона, журнал вызовов — тот же файл, что у Ш6:
+    # путь отказа повтора обязан разбираться тем же запросом.
+    prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
+    call_journal = (
+        LLMCallJournal(Path(llm_journal), str(run_id))
+        if llm_journal is not None
+        else None
+    )
+    # Класс до попытки — для строки отчёта: после вердикта он снимается, и без снимка
+    # «что было» пришлось бы угадывать.
+    previous_kinds = _read_cell_failure_kinds(store, str(run_id)) or {}
+
+    for attempt in _evaluate_cells_by_condition(
+        store=store,
+        run_id=str(run_id),
+        targets=targets,
+        catalog=catalog,
+        ports=ports,
+        satellites=satellites,
+        resolver=resolver,
+        strict=strict,
+        eval_cache=eval_cache,
+        eval_conditions=eval_conditions,
+        max_retries=max_retries,
+        prompt_archive=prompt_archive,
+        call_journal=call_journal,
+        errors=report.errors,
+        llm_concurrency=llm_concurrency,
+    ):
+        cell = attempt.cell
+        attempt_no = _next_retry_attempt(cell)
+        marker = f"{RETRY_ATTEMPT_PREFIX}={attempt_no}"
+        duration = attempt.retrieval_s + attempt.evaluation_s
+        report.retried += 1
+        if attempt.outcome is None:
+            # Вердикта нет: попытка не дошла до модели (ретривал) либо модель бросила.
+            # Ячейка остаётся ``failed``/``status=None`` (I4), класс обновляется на
+            # наблюдённый, причина попытки дописывается к прежней.
+            kind = (
+                FailureKind.SEARCH_FAILED.value
+                if attempt.error_kind == "retrieval_failed"
+                else FailureKind.EVALUATION_FAILED.value
+            )
+            notes = _compact_notes(
+                [
+                    *cell.validation_notes,
+                    f"{attempt.error_kind}: {attempt.detail}",
+                    marker,
+                ]
+            )
+            updated = cell.model_copy(update={"validation_notes": notes})
+            _persist(
+                store,
+                updated,
+                None,
+                # Модель вызывалась только при ``evaluation_error``; при сбое ретривала
+                # провенанс вызова писать нечестно.
+                model_id=(
+                    model_id
+                    if attempt.error_kind == "evaluation_error"
+                    else None
+                ),
+                failure_kind=kind,
+            )
+            report.still_failed += 1
+            report.cells.append(
+                {
+                    **_cell_key(cell),
+                    "attempt": attempt_no,
+                    "outcome": attempt.error_kind,
+                    "failure_kind": kind,
+                }
+            )
+            if journal is not None:
+                journal.record(
+                    product_id=str(cell.product_id),
+                    param_id=str(cell.param_id),
+                    attempt=attempt_no,
+                    outcome=str(attempt.error_kind),
+                    failure_kind=kind,
+                    duration_s=duration,
+                )
+            continue
+
+        outcome = attempt.outcome
+        if outcome.cell.state is CellState.EVALUATED:
+            fresh = outcome.cell.model_copy(
+                update={
+                    "stale_reason": None,
+                    "index_build_id": resolved_build or outcome.cell.index_build_id,
+                }
+            )
+            _persist(
+                store,
+                fresh,
+                outcome.validation,
+                prompt_hash=outcome.prompt_hash,
+                model_id=model_id,
+                justification=outcome.justification,
+                llm_scenario=outcome.llm_scenario,
+            )
+            # Класс снимается **после** upsert: ячейка измерена, сбоя у неё нет.
+            _record_cell_failure(store, fresh, None)
+            report.recovered += 1
+            report.cells.append(
+                {
+                    **_cell_key(cell),
+                    "attempt": attempt_no,
+                    "outcome": "recovered",
+                    "state": _enum_text(fresh.state),
+                    "status": _enum_text(fresh.status),
+                    "index_build_id": fresh.index_build_id,
+                    "previous_failure_kind": previous_kinds.get(
+                        (str(cell.product_id), str(cell.param_id))
+                    ),
+                }
+            )
+            if journal is not None:
+                journal.record(
+                    product_id=str(cell.product_id),
+                    param_id=str(cell.param_id),
+                    attempt=attempt_no,
+                    outcome="recovered",
+                    failure_kind=None,
+                    duration_s=duration,
+                )
+            continue
+
+        # Вердикта нет: ``failed`` (I4) либо ``preliminary`` (I13) — статус не выдуман.
+        notes = _compact_notes(
+            [
+                *cell.validation_notes,
+                *outcome.cell.validation_notes,
+                marker,
+            ]
+        )
+        unchanged = outcome.cell.model_copy(update={"validation_notes": notes})
+        _persist(
+            store,
+            unchanged,
+            outcome.validation,
+            prompt_hash=outcome.prompt_hash,
+            model_id=model_id,
+            justification=outcome.justification,
+            llm_scenario=outcome.llm_scenario,
+            failure_kind=outcome.failure_kind,
+        )
+        report.still_failed += 1
+        report.cells.append(
+            {
+                **_cell_key(cell),
+                "attempt": attempt_no,
+                "outcome": "no_verdict",
+                "state": _enum_text(unchanged.state),
+                "failure_kind": outcome.failure_kind,
+                "note": marker,
+            }
+        )
+        if journal is not None:
+            journal.record(
+                product_id=str(cell.product_id),
+                param_id=str(cell.param_id),
+                attempt=attempt_no,
+                outcome="no_verdict",
+                failure_kind=outcome.failure_kind,
+                duration_s=duration,
+            )
+
+    report.status = RETRY_STATUS_RETRIED
+    report.message = _retry_summary(report)
+    if prompt_archive is not None:
+        report.message = f"{report.message}; {prompt_archive.summary()}"
+        report.errors.extend(prompt_archive.errors)
+    if call_journal is not None:
+        report.message = f"{report.message}; {call_journal.summary()}"
+        report.errors.extend(call_journal.errors)
+    if journal is not None:
+        report.message = f"{report.message}; {journal.summary()}"
+        report.errors.extend(journal.errors)
+    return report

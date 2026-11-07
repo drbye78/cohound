@@ -384,7 +384,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`core/pipeline/evaluate.py:961-975`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`core/pipeline/evaluate.py:977-991`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 

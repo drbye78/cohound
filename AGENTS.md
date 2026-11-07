@@ -572,6 +572,12 @@ entry point.
 # 5. Evaluator model selection is a measurement task (A3), not a predetermination.
 ./hound.py experiment evaluator-benchmark --runs-dir runs --run-id {run_id} \
   --golden packages/{case_id}/golden.csv --model {model_id}
+
+# 6. Finish an interrupted Ш6 on the SAME run_id: retry only cells without a verdict.
+#    --dry-run = selector only (no ports built). run_id does not change; per-attempt log
+#    is runs/{run_id}/logs/retry.jsonl (08.11.2026, plan 25).
+./hound.py retry --runs-dir runs --run-id {run_id} --dry-run
+./hound.py retry --runs-dir runs --run-id {run_id} --llm-concurrency 4
 ```
 
 Resume/force: `--until {phase}` stops after a phase; `--reset` repeats the phases bypassing

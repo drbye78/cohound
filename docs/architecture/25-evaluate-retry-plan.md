@@ -139,3 +139,87 @@
 оценщике); `no_sources` без корпуса — `corpus_absent` без вызова модели; успешная
 попытка снимает класс; неуспешная обновляет и сохраняет старую причину; `run_id` не
 меняется; повтор без провалов — no-op.
+
+## 7. Реализовано (08.11.2026)
+
+Всё ниже — в коде и под тестами; имена — фактические.
+
+### 7.1. Класс сбоя на единственном write-site
+
+* `core/pipeline/evaluate.py`:
+  * `_persist(..., failure_kind=None)` — единственная точка записи класса: после
+    успешного upsert ячейки вызывает `_record_cell_failure`. Порядок (upsert → UPDATE)
+    важен: обратный писал бы класс в строку, которой ещё нет.
+  * `_unresolved_outcome` передаёт `failure_kind=kind if strict else None` — дефект
+    «класс известен, но не сохранён» закрыт.
+  * `_CellWriteBuffer.record_cell_failure` — op в буфере; `replay` проигрывает его по
+    имени, поэтому параллельный путь (`llm_concurrency > 1`) класс **не теряет**
+    (проверено тестом с `llm_concurrency=2`).
+  * Ручные вызовы `_record_cell_failure` в ветках `no_sources`/`search_failed`
+    переведены на `_persist(..., failure_kind=...)`: порядок тот же (upsert → UPDATE),
+    дублей нет.
+* `core/store/sqlite_store.py`: `record_cell_failure` принимает `None` (снятие класса),
+  добавлен `read_cell_failure_kinds(run_id)` — один запрос на прогон (доменная `Cell`
+  колонку не несёт); `has_corpus_docs(product_id)` — проба существования для селектора.
+
+### 7.2. Селектор и исполнение
+
+* `select_failed_cells` → `FailedSelection` (`run_id`, `failed_total`,
+  `retryable_cells`, `skipped`, `to_dict`) — только `state=failed` +
+  `source_kind=documentation`; правила классов — §4.2 без изменений.
+* `retry_failed_cells` → `RetryReport` (`failed_total/retryable/retried/recovered/
+  still_failed/skipped/cells/errors/notes`, `to_dict`, сводка-строка).
+* Общий шаг с `revalidate` вынесен в `_evaluate_cells_by_condition`
+  (группировка по `_cell_condition`, `precompute_query_vectors`, `precompute_dense_hits`,
+  `observe_corpus_artifact_dates`, `retrieve_for_cell`, `evaluate_cell`, `_accepted_risk`).
+  Ретривал идёт в вызывающем потоке, пул несёт только вызов оценщика (`store=None`);
+  запись — после `yield`, в порядке `(продукт, параметр)`. Тест
+  `test_retry_uses_the_same_prompt_as_phase` доказывает, что промпт — из
+  `compile_prompt`, а не из второй копии.
+* `logs/retry.jsonl` — `RetryJournal` (`JsonlAppender`): строка на попытку с
+  `run_id/product_id/param_id/attempt/outcome/failure_kind/duration_s`; сбои записи —
+  в `errors`, не исключение. `logs/llm_calls.jsonl` и `prompts/` — те же файлы прогона.
+
+### 7.3. CLI и видимость
+
+* `core/cli/commands/retry.py` — зеркало `revalidate.py`; зарегистрирована в
+  `core/cli/commands/__init__.py` сразу после `revalidate`.
+* `--max-retries` по умолчанию — `EVALUATION_MAX_RETRIES` из
+  `core/pipeline/evaluation_policy.py`: это **та же** величина, которую
+  `evaluation_policy_spec()` кладёт в контракт (отдельной колонки в `runs` нет, второй
+  формулы не заводилось).
+* `report.py:_write_cell_diagnostics` — колонка `failure_kind` (пусто = «не записано»);
+  записанный класс сам по себе стал поводом попасть в файл.
+* `metrics.py` — блок `cells_by_failure_kind` рядом с `cells_by_state`; источник —
+  `store.read_cell_failure_kinds`, не пересчёт по журналу.
+
+### 7.4. Расхождение с планом (исправлен план, не код)
+
+* В §4.2 добавлен исход `corpus_unknown`: store без пробы корпуса — «не знаем», а не
+  `corpus_absent` (выдавать неизвестность за отсутствие запрещено A3).
+* «Дефолт `--max-retries` из `evaluation_policy` прогона» реализован через константу
+  политики: в `runs` поля нет, а контрактное значение — её проекция (§7.3).
+
+### 7.5. Проверка
+
+`tests/pipeline/test_evaluate_retry.py` — 15 тестов (класс сбоя на пути фазы в двух
+режимах, все ветки селектора, успех/провал попытки, `corpus_absent` без вызова модели,
+неизменность `runs`, no-op, метрики, `cell_diagnostics`); `tests/cli/test_retry_cli.py` —
+3 (dry-run без сборки портов, частичный успех + журнал, отказ без объявленной модели).
+Схема БД, `EXECUTION_CONTRACT_FIELDS`, `run_id`, `docs/status-dictionary.yaml`,
+`uv.lock` не менялись; новых enum-значений нет — причины пропуска это строки отчёта.
+
+### 7.6. Снятие класса на пути фазы (вошло слиянием)
+
+Одна половина дефекта жила **не** в ретрае: `_persist` писал ячейку с вердиктом, но
+класс сбоя прошлой попытки не снимал — его снимал только явный вызов, которого на пути
+успешной оценки не было. Измерено 08.11.2026 на прогоне `2a5b51af5778`: после пересборки
+корпуса 362 ячейки двух продуктов получили вердикт, но сохранили
+`cells.failure_kind='no_sources'`; `metrics.json` одновременно давал `evaluated: 905` и
+362 класса сбоя.
+
+Правка (коммит до слияния): `_persist` снимает класс у любой сохранённой ячейки, чьё
+состояние не `failed`; `record_cell_failure(None)` = снятие с `AND failure_kind IS NOT NULL`.
+Тест `test_verdict_clears_stale_failure_kind` проверен в обе стороны (без правки падает).
+Слияние оставило обе ветки в одном месте: `if failure_kind is not None` (запись класса) /
+`elif state is not FAILED` (снятие).

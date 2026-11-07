@@ -318,7 +318,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 Решение владельца **29.10.2026** «`❌` требует `live|revalidated` в этом цикле»
 (as-built: `_enforce_reuse_confirmed`, два уровня — evidence для `explicit`/`authoritative`
 и корпус для `bounded`; токен `reuse_unconfirmed`. **Удалено в 0.3.0:** правило заменено
-`_enforce_dated_absence` (`core/pipeline/evaluate.py:2083`) с токеном `absence_undated` —
+`_enforce_dated_absence` (`core/pipeline/evaluate.py:2099`) с токеном `absence_undated` —
 см. §11.9).
 
 Оно было верным для своего носителя: тогда корпус был «один прогон = один снимок», и `reused`

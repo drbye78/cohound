@@ -37,6 +37,8 @@ E2E_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
 #: Ожидаемые ключи метрик §B.2 (+ Backlog A ``crawl``).
 B2_KEYS = {
     "cells_by_state",
+    # План 25: ячейки без вердикта по классу сбоя (``unrecorded`` — класс не записан).
+    "cells_by_failure_kind",
     "failure_rate",
     "coverage_aggregate",
     "search_calls_by_phase",

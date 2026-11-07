@@ -35,6 +35,8 @@ B1_FIELDS = {"ts", "run_id", "phase", "component", "level", "message", "ctx", "i
 #: Ключи метрик §B.2 (+ Backlog A ``crawl``).
 B2_KEYS = {
     "cells_by_state",
+    # План 25: ячейки без вердикта по классу сбоя (``unrecorded`` — класс не записан).
+    "cells_by_failure_kind",
     "failure_rate",
     "coverage_aggregate",
     "search_calls_by_phase",
@@ -297,6 +299,8 @@ def test_write_run_metrics_writes_expected_keys(tmp_path: Path) -> None:
         "preliminary": 0,
         "reviewed": 0,
     }
+    # Без store класс сбоя не читается: пусто = «не считали», а не ноль.
+    assert data["cells_by_failure_kind"] == {}
     # Backlog A: без переданных счётчиков краула поле — пустая карта (стабильная форма).
     assert data["crawl"] == {}
 
