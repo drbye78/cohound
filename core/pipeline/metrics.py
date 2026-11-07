@@ -82,6 +82,42 @@ def _resolve_cells(
     return []
 
 
+def _count_cells_by_failure_kind(
+    store: Any, run_id: str | None, cells: Iterable[Any]
+) -> dict[str, int]:
+    """Считает ячейки **без вердикта** по классу сбоя (``cells.failure_kind``).
+
+    Источник — store, а не пересчёт по журналу вызовов: класс живёт в колонке
+    (``read_cell_failure_kinds``), и метрика обязана называть то же, что читает
+    селектор ремонта и отчёт. ``unrecorded`` — ячейки ``failed`` без записанного класса
+    (так выглядят прогоны до правки write-site): «класс не записан» ≠ «сбоя не было»,
+    поэтому нулевое значение публикуется всегда.
+
+    Пустая карта — «не считали»: store не умеет читать класс либо чтение не удалось.
+    Ноль здесь выдал бы неизвестность за факт.
+    """
+    if store is None or run_id is None:
+        return {}
+    reader = getattr(store, "read_cell_failure_kinds", None)
+    if not callable(reader):
+        return {}
+    try:
+        kinds = dict(reader(str(run_id)))
+    except Exception:  # noqa: BLE001 — метрика не роняет прогон
+        return {}
+    counts: dict[str, int] = {}
+    for cell in cells:
+        if _value_of(getattr(cell, "state", None)) != CellState.FAILED.value:
+            continue
+        kind = kinds.get(
+            (str(getattr(cell, "product_id", "")), str(getattr(cell, "param_id", "")))
+        )
+        label = kind or "unrecorded"
+        counts[label] = counts.get(label, 0) + 1
+    counts.setdefault("unrecorded", 0)
+    return dict(sorted(counts.items()))
+
+
 def _count_cells_by_state(cells: Iterable[Any]) -> dict[str, int]:
     """Считает ячейки по состояниям; все известные состояния присутствуют даже с нулём.
 
@@ -418,6 +454,8 @@ class RunMetrics:
     """Метрики прогона (04 §B.2); JSON-совместимы и детерминированы.
 
     :param cells_by_state: количество ячеек по состояниям (все ``CellState``).
+    :param cells_by_failure_kind: ячейки **без вердикта** по классу сбоя
+        (``cells.failure_kind``); ``unrecorded`` — класс не записан. Пусто — не читали.
     :param failure_rate: ``failed / (evaluated ∪ failed)`` (R13).
     :param coverage_aggregate: Evidence Coverage (0.0, если бандл не передан).
     :param search_calls_by_phase: вызовы поиска по фазам (I23).
@@ -436,6 +474,10 @@ class RunMetrics:
     llm_calls: int
     tokens: dict[str, int]
     duration_by_phase: dict[str, float]
+    #: Ячейки **без вердикта** по классу сбоя (``{"evaluation_failed": 312,
+    #: "no_sources": 362, "unrecorded": 0}``); ``unrecorded`` — класс не записан.
+    #: Пусто — store не умеет читать класс (неизвестность, а не ноль).
+    cells_by_failure_kind: dict[str, int] = field(default_factory=dict)
     #: M1/§15: стоимость LLM с разбивкой «накоплено прогоном / вклад этого процесса»,
     #: источником вклада (``adapter``/``absent``/``error``) и границей учёта
     #: (``accounting``). Пусто — блок не передан (прямой вызов ``compute_metrics``).
@@ -459,6 +501,7 @@ class RunMetrics:
         """Плоский JSON-совместимый словарь метрик (для манифеста/логов)."""
         return {
             "cells_by_state": dict(self.cells_by_state),
+            "cells_by_failure_kind": dict(self.cells_by_failure_kind),
             "failure_rate": self.failure_rate,
             "coverage_aggregate": self.coverage_aggregate,
             "search_calls_by_phase": dict(self.search_calls_by_phase),
@@ -555,6 +598,7 @@ def compute_metrics(
         coverage = 0.0
     return RunMetrics(
         cells_by_state=_count_cells_by_state(resolved),
+        cells_by_failure_kind=_count_cells_by_failure_kind(store, run_id, resolved),
         failure_rate=failure,
         coverage_aggregate=coverage,
         search_calls_by_phase=_count_search_calls(search_log),

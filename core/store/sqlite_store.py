@@ -2429,13 +2429,15 @@ class SqliteStore:
             )
 
     def record_cell_failure(
-        self, run_id: str, product_id: str, param_id: str, failure_kind: str
+        self, run_id: str, product_id: str, param_id: str, failure_kind: str | None
     ) -> None:
         """Узкий UPDATE класса сбоя ячейки (``cells.failure_kind``).
 
         Доменная ``Cell`` не несёт ``failure_kind``; колонка заполняется отдельным
         контуром (как ``prompt_hash``/``model_id``). Используется zero-source/anomaly
-        путями оценки (O2/O3): ``failed``-ячейка обязана назвать класс сбоя.
+        путями оценки (O2/O3) и сбоем оценщика: ``failed``-ячейка обязана назвать класс
+        сбоя. ``None`` **снимает** класс — так ``hound retry`` убирает сбой у ячейки,
+        получившей вердикт (иначе карта показывала бы сбой у измеренной ячейки).
         """
         with self.conn:
             self.conn.execute(
@@ -2443,6 +2445,24 @@ class SqliteStore:
                 " WHERE run_id = ? AND product_id = ? AND param_id = ?",
                 (failure_kind, run_id, product_id, param_id),
             )
+
+    def read_cell_failure_kinds(
+        self, run_id: str
+    ) -> dict[tuple[str, str], str | None]:
+        """Класс сбоя каждой ячейки прогона: ``{(product_id, param_id): failure_kind}``.
+
+        Читается **одним** запросом, а не по ячейке: селектору ремонта нужен класс
+        всех ``failed``-ячеек сразу, а ``None`` — такой же ответ («класс не записан»),
+        как и значение. Доменная ``Cell`` колонку не несёт, поэтому это единственный
+        способ увидеть класс без пересчёта по журналу вызовов.
+        """
+        return {
+            (str(row["product_id"]), str(row["param_id"])): row["failure_kind"]
+            for row in self.conn.execute(
+                "SELECT product_id, param_id, failure_kind FROM cells WHERE run_id = ?",
+                (run_id,),
+            )
+        }
 
     def read_corpus_coverage(
         self, run_id: str, product_id: str
@@ -3184,6 +3204,22 @@ class SqliteStore:
             params.append(product_id)
         sql += " LIMIT 1"
         return self.conn.execute(sql, params).fetchone() is not None
+
+    def has_corpus_docs(self, product_id: str) -> bool:
+        """Есть ли у продукта хотя бы один документ корпуса (``LIMIT 1``).
+
+        Проба существования, а не счётчик: селектор ремонта спрашивает один бит
+        («есть ли по чему мерить повторно»), а ``COUNT(*)``/``iter_corpus_docs`` читали
+        бы весь корпус. ``corpus_docs`` не несёт ``run_id`` — в штатной раскладке БД
+        принадлежит одному прогону (§4.4), поэтому ``product_id`` и есть область запроса.
+        """
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM corpus_docs WHERE product_id = ? LIMIT 1",
+                (product_id,),
+            ).fetchone()
+            is not None
+        )
 
     def resolve(self, source_id: str) -> ResolvedSource | None:
         """Детерминированно резолвит ``source_id`` в источник (I10/I15/I19), без сети.

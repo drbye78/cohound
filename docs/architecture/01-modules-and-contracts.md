@@ -894,7 +894,7 @@ pytest + `--cov` (`:78-88`).
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:98` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
 `core/domain/models.py:1508`; структура `ProtocolExhaustion` — `core/domain/models.py:1272`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2481` (`max_retries`), цикл `:2675`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2760` (`max_retries`), цикл `:3069`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
 строит вызывающий (`core/pipeline/evaluate.py:2161`).
