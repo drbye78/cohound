@@ -41,6 +41,7 @@ from core.pipeline.eval_cache import EvalConditions
 from core.pipeline.evaluate import (
     ABSENCE_UNATTESTED_REVIEW_REASON,
     DENIAL_QUOTE_WITHOUT_MARKERS,
+    EVALUATOR_UNAVAILABLE_NOTE,
     NO_FRAGMENTS_REASON,
     EvaluationOutcome,
     evaluate_batch,
@@ -512,6 +513,69 @@ def test_verdict_clears_stale_failure_kind() -> None:
     assert outcome.cell.state is CellState.EVALUATED
     assert outcome.cell.status is not None
     assert _stored_failure_kind(store, outcome.cell) is None
+
+
+def test_verdict_drops_stale_evaluator_note() -> None:
+    """Вердикт снимает заметку о сбое оценщика прошлой попытки, прочие заметки — нет.
+
+    Измерено 08.11.2026 на прогоне ``2a5b51af5778``: 308 ячеек получили вердикт во второй
+    попытке (22:52), но сохранили заметку «оценщик недоступен: … HTTP 503» от первой
+    (16:36) — ✅ 106, ⚠️ 75, ❌ 10, ❓ 117. ``validation_notes`` накапливаются, поэтому
+    причина отказа читалась как текущее состояние ячейки. Снимается **только** префикс
+    сбоя оценщика: ``no_fragments``/I2b/``support_not_about_subject`` описывают текущий
+    вердикт и обязаны остаться.
+    """
+    data = _data()
+    store = SqliteStore(":memory:")
+    store.create_run(
+        data["run_id"],
+        RunConfig(
+            case_id="case",
+            anchor=data["product_id"],
+            cohort="case",
+            products=[data["product_id"]],
+            package="pkg",
+            focus=Focus(),
+            snapshot_date=_dt.date(2026, 1, 1),
+            mode=RunMode.STRICT,
+        ),
+    )
+    # Прошлая попытка: сбой оценщика. К заметке сбоя добавлена «живая» — она не про сбой.
+    stale = _evaluate(
+        data, _ScriptedEvaluator([RuntimeError("HTTP 503")]), strict=True
+    ).cell
+    assert any(
+        note.startswith(EVALUATOR_UNAVAILABLE_NOTE) for note in stale.validation_notes
+    ), "фикстура должна давать заметку о сбое оценщика"
+    live_note = "denial_fields_ignored_on_present: denial_strength=not_stated"
+    stale = stale.model_copy(
+        update={"validation_notes": [*stale.validation_notes, live_note]}
+    )
+    store.save_cell(stale)
+    assert any(
+        note.startswith(EVALUATOR_UNAVAILABLE_NOTE)
+        for note in _stored_notes(store, stale)
+    )
+
+    # Новая попытка даёт вердикт — заметка о сбое обязана исчезнуть, «живая» остаться.
+    outcome = _evaluate(data, _ScriptedEvaluator([_ok_output(data)]), store=store)
+
+    assert outcome.cell.status is not None
+    notes = _stored_notes(store, outcome.cell)
+    assert not any(note.startswith(EVALUATOR_UNAVAILABLE_NOTE) for note in notes)
+    assert live_note in notes
+
+
+def _stored_notes(store: Any, cell: Cell) -> list[str]:
+    """``cells.validation_notes`` ячейки из store как список заметок."""
+    row = store.conn.execute(
+        "SELECT validation_notes FROM cells"
+        " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+        (cell.run_id, cell.product_id, cell.param_id),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return []
+    return [str(item) for item in json.loads(row[0])]
 
 
 def _stored_failure_kind(store: Any, cell: Cell) -> str | None:

@@ -225,6 +225,17 @@ ABSENCE_COVERAGE_UNSATISFIED_REASON = "absence_coverage_unsatisfied"
 #: остаётся ``NULL`` — выдуманный адрес хуже отсутствующего: он выглядит проверенным.
 EVIDENCE_DOC_VERSION_UNRESOLVED_REASON = "evidence_doc_version_unresolved"
 
+#: Префикс заметки о **сбое оценщика** (исключение на вызове модели). Заметка пишется в
+#: ``cells.validation_notes`` на пути отказа и там **накапливается**: одна ячейка может
+#: оцениваться дважды, и вторая попытка не стирает причину первой. Обратная сторона —
+#: у ячейки, получившей вердикт позже, строка «оценщик недоступен» описывает **прошлую**
+#: попытку и читается как текущее состояние (измерено 08.11.2026 на прогоне
+#: ``2a5b51af5778``: 308 ячеек с вердиктом несли след HTTP 503 шестичасовой давности).
+#: Поэтому на вердикте :func:`_persist` снимает заметки с этим префиксом — как снимает
+#: класс сбоя. История попыток остаётся в ``logs/evaluate.jsonl`` и ``logs/llm_calls.jsonl``,
+#: то есть провенанс не теряется, а перестаёт выдаваться за результат.
+EVALUATOR_UNAVAILABLE_NOTE = "оценщик недоступен:"
+
 #: Классы отрицания, чьё «нет» держится на **конкретном** документе (цитата вендора либо
 #: авторитетная энумерация). Только для них цитаты ячеек резолвятся в даты наблюдений:
 #: ``bounded`` держится на снятиях корней, а не на документах, и его носитель проверяет
@@ -2628,6 +2639,21 @@ def _persist(
             recorder = getattr(store, "record_cell_failure", None)
             if callable(recorder):
                 recorder(to_save.run_id, to_save.product_id, to_save.param_id, None)
+        if failure_kind is None and to_save.status is not None:
+            # Ячейка измерена: заметка о сбое оценщика описывает **прошлую** попытку, а
+            # не этот результат. ``validation_notes`` накапливаются, поэтому без снятия
+            # вердикт соседствует с причиной отказа шестичасовой давности и провенанс
+            # читается как текущее состояние (измерено 08.11.2026 на ``2a5b51af5778``:
+            # 308 ячеек). Снимается только этот префикс: ``no_fragments``, I2b и
+            # ``support_not_about_subject`` описывают текущий вердикт и остаются.
+            dropper = getattr(store, "drop_cell_notes", None)
+            if callable(dropper):
+                dropper(
+                    to_save.run_id,
+                    to_save.product_id,
+                    to_save.param_id,
+                    (EVALUATOR_UNAVAILABLE_NOTE,),
+                )
     if validation is not None and validation.resolved_evidence:
         store.add_evidence_batch(validation.resolved_evidence)
     # Absence пишется независимо от прецедента — как и прочие evidence: строки
@@ -3104,7 +3130,7 @@ def evaluate_cell(
                 last_validation = ValidationResult(
                     ok=False,
                     failure_kind=last_kind,
-                    notes=[f"оценщик недоступен: {type(exc).__name__}: {exc}"],
+                    notes=[f"{EVALUATOR_UNAVAILABLE_NOTE} {type(exc).__name__}: {exc}"],
                     resolved_evidence=[],
                 )
                 if pause is not None:
@@ -3443,6 +3469,15 @@ class _CellWriteBuffer:
         проигрывает op по имени.
         """
         self.ops.append(("record_cell_failure", args, dict(kwargs)))
+
+    def drop_cell_notes(self, *args: Any, **kwargs: Any) -> None:
+        """Откладывает узкое снятие заметок прошлой попытки (``validation_notes``).
+
+        Пара к :meth:`record_cell_failure`: вердикт снимает и класс сбоя, и заметку о
+        сбое оценщика. Без этого метода параллельный путь Ш6 (``llm_concurrency > 1``)
+        оставлял бы заметку навсегда: ``_persist`` пишет через буфер.
+        """
+        self.ops.append(("drop_cell_notes", args, dict(kwargs)))
 
     def add_evidence_batch(self, evidence: Sequence[Any]) -> None:
         """Откладывает запись evidence (копия списка: он не должен меняться после)."""

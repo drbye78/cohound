@@ -2461,6 +2461,58 @@ class SqliteStore:
                 (failure_kind, run_id, product_id, param_id),
             )
 
+    def drop_cell_notes(
+        self,
+        run_id: str,
+        product_id: str,
+        param_id: str,
+        prefixes: Sequence[str],
+    ) -> None:
+        """Узкое снятие заметок прошлой попытки (``cells.validation_notes``).
+
+        Заметки **накапливаются** между попытками (``_merge_validation_notes``): одна
+        ячейка может оцениваться дважды, и вторая оценка не стирает причину первой.
+        Обратная сторона — причина **сбоя** прошлой попытки переживает вердикт и читается
+        как текущее состояние. Измерено 08.11.2026 на прогоне ``2a5b51af5778``: 308 ячеек
+        несли «оценщик недоступен: … HTTP 503» рядом с вердиктом, полученным через шесть
+        часов (✅ 106, ⚠️ 75, ❌ 10, ❓ 117), — провенанс говорил о шторме 503 больше, чем
+        о результате.
+
+        Снимается только то, что названо префиксом (решение о том, какие заметки
+        устарели, принимает вызывающий: знание о тексте заметки живёт там, где она
+        пишется). Остальные заметки — в том числе ``no_fragments``, I2b и
+        ``support_not_about_subject`` — остаются: они описывают **текущий** вердикт.
+        """
+        if not prefixes:
+            return
+        row = self.conn.execute(
+            "SELECT validation_notes FROM cells"
+            " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+            (run_id, product_id, param_id),
+        ).fetchone()
+        if row is None:
+            return
+        stored = _notes_from_text(row["validation_notes"])
+        kept = [
+            note
+            for note in stored
+            if not any(note.startswith(prefix) for prefix in prefixes)
+        ]
+        if len(kept) == len(stored):
+            # Ничего не устарело — UPDATE не нужен (0 строк, как у снятия класса сбоя).
+            return
+        with self.conn:
+            self.conn.execute(
+                "UPDATE cells SET validation_notes = ?"
+                " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+                (
+                    json.dumps(kept, ensure_ascii=False) if kept else None,
+                    run_id,
+                    product_id,
+                    param_id,
+                ),
+            )
+
     def read_cell_failure_kinds(
         self, run_id: str
     ) -> dict[tuple[str, str], str | None]:
