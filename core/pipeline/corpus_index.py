@@ -208,20 +208,24 @@ class _EmbedCensus:
     «сколько взято готовым» — разные величины, и только их пара отвечает на вопрос
     «сколько сэкономил кэш».
 
-    ``processed = cached + embedded`` — сколько чанков продукта уже обслужено (это и есть
-    прогресс ``embed_chunks``). ``hit_ratio_pct`` — целые проценты: наблюдаемость печатает
-    целые, а не дробь, которую нечем сверить.
+    ``processed = cached + embedded + deduplicated`` — сколько чанков продукта уже
+    обслужено (это и есть прогресс ``embed_chunks``). ``embedded`` считает **уникальные
+    тексты**, ушедшие в эмбеддер, а ``deduplicated`` — позиции, которые без дедупа ушли бы
+    в модель повторно (то есть измеренную экономию вызовов). ``hit_ratio_pct`` — целые
+    проценты: наблюдаемость печатает целые, а не дробь, которую нечем сверить.
     """
 
     #: Чанки, вектор которых взят из кэша (эмбеддер не вызывался).
     cached: int = 0
-    #: Чанки, вектор которых посчитан в этом прогоне (промахи кэша).
+    #: Уникальные тексты (по ``content_hash``), посчитанные в этом прогоне.
     embedded: int = 0
+    #: Вызовы эмбеддера, сэкономленные дедупом в пределах вызова.
+    deduplicated: int = 0
 
     @property
     def processed(self) -> int:
-        """Сколько чанков уже обслужено (хиты + свежие)."""
-        return self.cached + self.embedded
+        """Сколько чанков уже обслужено (хиты + уникальные тексты + дедуп)."""
+        return self.cached + self.embedded + self.deduplicated
 
     @property
     def hit_ratio_pct(self) -> int:
@@ -230,6 +234,26 @@ class _EmbedCensus:
         if total <= 0:
             return 0
         return round(100.0 * self.cached / total)
+
+    @property
+    def dedup_saved_pct(self) -> int:
+        """Доля вызовов эмбеддера, снятых дедупом (от «было бы отправлено»)."""
+        would_embed = self.embedded + self.deduplicated
+        if would_embed <= 0:
+            return 0
+        return round(100.0 * self.deduplicated / would_embed)
+
+
+def _now_iso() -> str:
+    """Текущее время в ISO-8601 (UTC) — провенанс ``corpus_chunks.embedded_at``.
+
+    Тот же источник, что у соседнего кода фазы (``core.pipeline.corpus._now_iso``):
+    часы читает оркестрирующая функция, а не чистый эмбеддинг батча. Импорт локальный,
+    чтобы правка не сдвигала строки шапки модуля: на них держатся якоря ``docs/``.
+    """
+    import datetime as _dt
+
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 @dataclass
 class _CorpusStageTimings:
@@ -458,7 +482,9 @@ def _make_embed_reporter(
     При подключённом кэше векторов (:class:`~core.pipeline.embed_cache.EmbedCache`) к ним
     добавляются ``embed_cached`` — сколько чанков взято готовыми — и
     ``embed_hit_ratio_pct`` — их доля. Человекочитаемая форма тех же величин —
-    :func:`format_embed_progress`.
+    :func:`format_embed_progress`. Дедуп по ``content_hash`` публикует пару
+    ``embed_dedup_saved`` (сколько вызовов эмбеддера снято) и ``embed_dedup_pct`` (их доля
+    среди уникальных текстов и снятых вызовов).
 
     **``embed_chunks`` — обработанные чанки, ``embed_chunks_per_min`` — темп эмбеддинга.**
     Прогресс обязан считать хиты (иначе «из кэша 3000 из 3000» выглядело бы как стоящий на
@@ -495,6 +521,9 @@ def _make_embed_reporter(
         if census is not None:
             counts["embed_cached"] = census.cached
             counts["embed_hit_ratio_pct"] = census.hit_ratio_pct
+            # Дедуп по тексту: без числа «сколько сэкономил» недоказуемо, как и кэш.
+            counts["embed_dedup_saved"] = census.deduplicated
+            counts["embed_dedup_pct"] = census.dedup_saved_pct
         if rate is not None and rate > 0:
             counts["embed_chunks_per_min"] = round(rate * 60.0)
         if eta is not None:
@@ -534,8 +563,15 @@ def _embed_batched(
     только промахи, свежие векторы сразу записываются в кэш, а хиты подставляются в **свои**
     позиции. Поэтому порядок входа = порядок выхода и при смешанном батче (инвариант
     держится структурой: слоты батча индексируются позицией чанка, а не порядком ответа
-    эмбеддера). ``cache=None`` — прежнее поведение байт-в-байт: один вызов ``embed`` на
-    весь батч.
+    эмбеддера). ``cache=None`` — без кэша: один вызов ``embed`` на батч (по уникальным
+    текстам), результат побайтово тот же.
+
+    **Дедуп по тексту.** Входной список группируется по ``CorpusChunk.content_hash``:
+    одинаковый текст, попавший в батч дважды (и в разные батчи — при ``cache=None``), уходит
+    в эмбеддер **один раз**, а полученный вектор раскладывается по всем его позициям. Порядок
+    векторов остаётся порядком чанков: слоты адресуются позицией, поэтому массив партиции
+    побайтово тот же, что у пути без дедупа. Чанк без ``content_hash`` дедупу не подлежит:
+    пустой ключ не различает тексты.
 
     Кэш — оптимизация, а потому его сбой не должен стоить прогона: ``get``/``put`` устроены
     как промах/no-op на любой порче файла. Ошибка самого эмбеддера по-прежнему пробрасывается
@@ -564,56 +600,118 @@ def _embed_batched(
     except (TypeError, ValueError):
         declared_dim = 0
     expected_dim = declared_dim if declared_dim > 0 else None
+    # Тексты, уже обслуженные в этом вызове, — только для пути без кэша: при кэше ту же
+    # роль играет ``cache.get`` (вектор записан сразу после эмбеддинга батча), и попадание
+    # остаётся фактом диска, а не памятью процесса.
+    known: dict[str, list[float]] = {}
     for start in range(0, total, batch_size):
         batch = chunks[start : start + batch_size]
-        if cache is None:
-            vectors.extend(embedder.embed([c.text for c in batch]))
-            if census is not None:
-                census.embedded += len(batch)
-        else:
-            slots: list[list[float] | None] = [None] * len(batch)
-            pending: list[int] = []
-            cached_now = 0
-            for position, chunk in enumerate(batch):
-                hit = cache.get(
-                    chunk.content_hash or "",
+        slots: list[list[float] | None] = [None] * len(batch)
+        # Дедуп по тексту: один ``content_hash`` — одна работа эмбеддера. Порядок слотов
+        # держит позиция чанка, поэтому порядок векторов не меняется (A3), а массив
+        # партиции остаётся побайтово тем же, что у пути без дедупа.
+        groups: dict[str, list[int]] = {}
+        unkeyed: list[int] = []
+        for position, chunk in enumerate(batch):
+            key = chunk.content_hash or ""
+            if key:
+                groups.setdefault(key, []).append(position)
+            else:
+                # Пустой хеш не различает тексты: такой чанк дедупу не подлежит.
+                unkeyed.append(position)
+        # ``(ключ, позиции, текст)`` на каждый уникальный текст батча.
+        pending: list[tuple[str, list[int], str]] = []
+        cached_now = 0
+        # Сколько позиций ушло бы в эмбеддер без дедупа: ровно это и есть измеряемая
+        # экономия. Кэш-хиты сюда не входят — они и так не считаются.
+        would_embed = len(unkeyed)
+        for key, positions in groups.items():
+            reused = known.get(key) if cache is None else None
+            if reused is not None:
+                for position in positions:
+                    slots[position] = reused
+                would_embed += len(positions)
+                continue
+            hit = (
+                cache.get(
+                    key,
                     embed_model_id,
                     embed_device=embed_device,
                     embed_precision=embed_precision,
                     dim=expected_dim,
                 )
-                if hit is None:
-                    pending.append(position)
-                    continue
+                if cache is not None
+                else None
+            )
+            if hit is not None:
+                for position in positions:
+                    slots[position] = hit
+                cached_now += len(positions)
+                continue
+            pending.append((key, positions, batch[positions[0]].text))
+            would_embed += len(positions)
+        for position in unkeyed:
+            hit = (
+                cache.get(
+                    "",
+                    embed_model_id,
+                    embed_device=embed_device,
+                    embed_precision=embed_precision,
+                    dim=expected_dim,
+                )
+                if cache is not None
+                else None
+            )
+            if hit is not None:
                 slots[position] = hit
                 cached_now += 1
-            if pending:
-                fresh = embedder.embed([batch[i].text for i in pending])
-                if len(fresh) != len(pending):
-                    raise ValueError(
-                        "эмбеддер вернул "
-                        f"{len(fresh)} векторов на {len(pending)} чанков"
-                    )
-                for offset, position in enumerate(pending):
-                    vector = fresh[offset]
+                continue
+            pending.append(("", [position], batch[position].text))
+            would_embed += 1
+        if pending:
+            fresh = embedder.embed([text for _key, _positions, text in pending])
+            if len(fresh) != len(pending):
+                raise ValueError(
+                    "эмбеддер вернул "
+                    f"{len(fresh)} векторов на {len(pending)} уникальных текстов"
+                )
+            for (key, positions, _text), vector in zip(pending, fresh, strict=True):
+                # Вектор — функция текста: один и тот же на все позиции группы.
+                for position in positions:
                     slots[position] = vector
-                    # Пишем ровно то, что вернула модель: квантизация в fp16 — забота
-                    # кэша, и она тождественна той, что делает сборщик индекса.
+                if key:
+                    if cache is None:
+                        # Без кэша повтор того же текста в следующем батче берётся отсюда.
+                        known[key] = vector
+                    else:
+                        # Пишем ровно то, что вернула модель: квантизация в fp16 — забота
+                        # кэша, и она тождественна той, что делает сборщик индекса.
+                        cache.put(
+                            key,
+                            embed_model_id,
+                            vector,
+                            embed_device=embed_device,
+                            embed_precision=embed_precision,
+                            dim=expected_dim,
+                        )
+                elif cache is not None:
+                    # Пустой ключ невалиден — ``put`` остаётся видимым no-op кэша.
                     cache.put(
-                        batch[position].content_hash or "",
+                        "",
                         embed_model_id,
                         vector,
                         embed_device=embed_device,
                         embed_precision=embed_precision,
                         dim=expected_dim,
                     )
-            if census is not None:
-                census.cached += cached_now
-                census.embedded += len(pending)
-            for value in slots:
-                if value is None:  # pragma: no cover — позиция заполняется всегда
-                    raise ValueError("батч эмбеддинга оставил чанк без вектора")
-                vectors.append(value)
+        if census is not None:
+            census.cached += cached_now
+            census.embedded += len(pending)
+            census.deduplicated += would_embed - len(pending)
+        for value in slots:
+            if value is None:  # pragma: no cover — позиция заполняется всегда
+                raise ValueError("батч эмбеддинга оставил чанк без вектора")
+            vectors.append(value)
         if on_batch is not None:
             on_batch(start + len(batch), total, time.monotonic() - started)
     return vectors
@@ -710,6 +808,14 @@ def _embed_and_build(
             # Бакет не теряется и при исключении: время до отказа — измеренный факт.
             if timings is not None:
                 timings.embed_s += time.perf_counter() - _embed_started
+        # Провенанс вектора строки ``corpus_chunks``: чанк получил вектор в этом
+        # продукт-цикле. Одно значение на продукт — момент границы эмбеддинга; часы
+        # читаются здесь, а не в чистой :func:`_embed_batched`, которая остаётся
+        # функцией аргументов (A3). Запись колонки делает ``StorePort.add_chunks_batch``
+        # из ``CorpusChunk.embedded_at``: поле не теряется на слое записи.
+        embedded_at = _now_iso()
+        for chunk in chunks:
+            chunk.embedded_at = embedded_at
         meta = IndexMeta(
             package=package_id,
             chunker_version=chunker_version,
