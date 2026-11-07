@@ -70,6 +70,7 @@ from core.pipeline.corpus import (
     build_corpus,
 )
 from core.pipeline.crawl_session import default_session_id
+from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.extraction_runtime import _ExtractRequest
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 from core.store.sqlite_store import SqliteStore
@@ -222,6 +223,7 @@ def _run(
     embedder: Any = None,
     index_builder: Any = None,
     container_reader: Any = None,
+    extract_cache: Any = None,
 ) -> Iterator[tuple[SqliteStore, Any, Any]]:
     """Один прогон фазы корпуса над одним архивом; читатель контейнеров — реальный.
 
@@ -250,6 +252,7 @@ def _run(
             index_root=index_root,
             embedder=embedder,
             index_builder=index_builder,
+            extract_cache=extract_cache,
         )
         yield store, result, fake_extractor
     finally:
@@ -1158,6 +1161,12 @@ def test_pooled_members_are_byte_identical_to_inline(tmp_path: Path) -> None:
     assert routes["a/first.pdf"] is ExtractionRoute.DOCUMENT
     assert routes["b/readme.md"] is ExtractionRoute.AUTO
 
+    # S2/план 23: ключ кэша члена — хеш **байтов** члена, а не номер temp-файла
+    # (``member-N.bin``): иначе разные члены архива делили бы одну запись кэша.
+    for request in created[0].requests:
+        assert request.cache_key, "у задания члена обязан быть явный ключ кэша"
+        assert request.cache_key != Path(request.raw_path).stem
+
     # Операторская строка: доведённые задания пула = **члены** (7), без самой страницы
     # архива. До F5 архив тоже уходил в пул (и его «извлечение» выбрасывалось), поэтому
     # счётчик был 8; теперь зонд артефакта идёт до submit (``_start_row``), и за контейнер
@@ -1167,6 +1176,98 @@ def test_pooled_members_are_byte_identical_to_inline(tmp_path: Path) -> None:
         isinstance(entry, str) and "документов через пул: 7" in entry
         for entry in pooled_result.log_entries
     ), pooled_result.log_entries
+
+
+def test_member_extraction_cache_is_reused_across_runs(tmp_path: Path) -> None:
+    """S2/план 23: второй прогон над теми же байтами не конвертирует членов заново.
+
+    Кэш межпрогонный: retained-файл архива назван его хешем, байты членов те же, поэтому
+    экстрактор во втором прогоне не зовётся ни разу — а наблюдаемый корпус обязан
+    совпасть с первым байт-в-байт (кэш не меняет артефакт, только его цену). Тест идёт
+    **inline**-путём (пула нет): раньше кэш там не спрашивался вовсе, и ``frozen``/
+    повторный тираж конвертировал все члены заново.
+    """
+    archive = _rich_archive()
+    cache = ExtractionCache(tmp_path / "extract_cache")
+
+    with _run(tmp_path / "first", archive, extract_cache=cache) as (
+        first_store,
+        first_result,
+        first_extractor,
+    ):
+        first = _snapshot(first_store, first_result)
+        # 7 членов-документов, но ``c/copy.md`` и ``d/copy.md`` — одни и те же байты:
+        # второй уже не конвертируется (S2). Дедуп текста схлопнул бы их и раньше, разница
+        # в том, что прежде обе копии платили конвертацию.
+        assert len(first_extractor.calls) == 6
+
+    with _run(tmp_path / "second", archive, extract_cache=cache) as (
+        second_store,
+        second_result,
+        second_extractor,
+    ):
+        second = _snapshot(second_store, second_result)
+
+    assert second_extractor.calls == [], "повторные байты членов ушли в конвертер второй раз"
+    for key in (
+        "docs",
+        "chunks",
+        "chunk_urls",
+        "index_build_id",
+        "chunk_count",
+        "entries",
+        "errors",
+        "members",
+        "observations",
+        "probes",
+    ):
+        assert second[key] == first[key], f"кэш изменил наблюдаемый артефакт: {key}"
+
+
+def test_descent_closes_container_reader_at_the_end(tmp_path: Path) -> None:
+    """Конец спуска закрывает открытые хендлы читателя контейнеров (S2/план 23).
+
+    ``ZipContainer`` держит один ``ZipFile`` на архив на всё время обхода (иначе индекс
+    читался бы на каждого члена). События «архив закончился» в порте нет, поэтому
+    закрытие — обязанность спуска: иначе последний архив остался бы открытым до конца
+    процесса. Читатель без ``close`` (7z/rar, тестовые обёртки) ничего не обязан уметь.
+    """
+    archive = _zip({"a.md": b"# a\n", "b.md": b"# b\n"})
+    closed: list[Any] = []
+
+    class _ClosingReader:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+            self.version = getattr(inner, "version", "wrapped-1")
+
+        def available(self) -> bool:
+            return self._inner.available()
+
+        def list_members(self, path: str) -> Any:
+            return self._inner.list_members(path)
+
+        def open_member(self, path: str, member_path: str) -> Iterator[bytes]:
+            yield from self._inner.open_member(path, member_path)
+
+        def close(self) -> None:
+            closed.append(self)
+            self._inner.close()
+
+    reader: _ClosingReader | None = None
+
+    def _reader(path: str) -> Any:
+        nonlocal reader
+        inner = container_for(path)
+        if inner is None:
+            return None
+        reader = _ClosingReader(inner)
+        return reader
+
+    with _run(tmp_path, archive, container_reader=_reader) as (store, _result, _):
+        assert len(_docs(store)) == 2
+
+    assert closed, "конец спуска обязан закрыть читателя контейнеров"
+    assert reader is not None and reader._inner._open == {}  # type: ignore[attr-defined]
 
 
 def test_pooled_commit_order_is_walk_order_not_completion_order(

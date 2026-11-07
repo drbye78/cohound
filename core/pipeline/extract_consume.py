@@ -254,13 +254,21 @@ def member_extract_request(
     level: DocumentLevel,
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
     rss_dir: str | None = None,
+    cache_root: str | None = None,
+    cache_max_bytes: int | None = None,
 ) -> _ExtractRequest:
     """B3/P4: payload экстракции члена — только примитивы, байты не передаются (I19).
 
     Источник байтов — **путь** к временному файлу члена (воркер читает его сам), маршрут —
-    по суффиксу члена, ``content_type`` — по суффиксу (данные, не эвристика). Межпрогонный
-    кэш экстракции членам не передаётся: имена временных файлов (``member-N.bin``) не
-    content-addressed, и кэш не должен зависеть от их нумерации.
+    по суффиксу члена, ``content_type`` — по суффиксу (данные, не эвристика).
+
+    **Ключ кэша — явный** (S2/план 23): ``cache_key=task.content_hash`` — хеш **байтов
+    члена**, посчитанный спуском в том же потоке, которым байты писались в temp-файл.
+    Выводимая форма (``stem`` файла) для члена неверна по построению: ``member-N.bin`` —
+    номер, одинаковый по смыслу для всех членов архива, поэтому все они делили бы одну
+    запись кэша и получали бы друг чужой текст. Имя temp-файла в ключ не входит и после
+    этого: повторные байты находят одну запись, даже если пришли из разных архивов и
+    названы разными номерами.
     """
     suffix = task.suffix.lower()
     return _ExtractRequest(
@@ -275,6 +283,9 @@ def member_extract_request(
         route=_member_route(suffix),
         level=level,
         pdf_pipeline=pdf_pipeline,
+        cache_root=cache_root,
+        cache_max_bytes=cache_max_bytes,
+        cache_key=task.content_hash,
         rss_dir=rss_dir,
     )
 
@@ -312,6 +323,7 @@ def ingest_member_doc(
     lang: str | None,
     artifact_probes: list[dict[str, Any]],
     extracted: Any = _INLINE,
+    extract_cache: ExtractionCache | None = None,
     timings: _CorpusStageTimings | None = None,
     reuse_kind: ReuseKind,
     persist_docs: Callable[..., None],
@@ -323,6 +335,11 @@ def ingest_member_doc(
     **архив** (сырьё I19), а не на член.
 
     **Маршрут** — по суффиксу самого члена (pdf → ``document``, md/html → ``auto``).
+
+    **Кэш (S2/план 23).** Ключ — хеш **байтов члена** (``task.content_hash``, посчитан
+    спуском), а не номер временного файла: одинаковые байты в разных архивах делят одну
+    запись, разные члены одного архива — никогда. ``extract_cache=None`` — прежнее
+    поведение (кэш не спрашивается).
 
     **``split``.** Экстрактор шва (``RemoteExtractor``) работает по URL и локальные байты
     не принимает; такой член не извлекается молча, а возвращает видимый пропуск
@@ -358,15 +375,39 @@ def ingest_member_doc(
         lang=lang,
         source_path=task.temp_path,
     )
+    route = _member_route(suffix)
+    #: S2/план 23: ключ кэша члена — хеш **его байтов**, посчитанный спуском в том же
+    #: потоке, которым байты писались в temp-файл (I19). Номер ``member-N.bin`` в ключ не
+    #: входит: иначе все члены архива делили бы одну запись.
+    cache_key = task.content_hash or None
     if extracted is _INLINE:
-        # Inline-путь (нет пула): извлечение здесь, на главном потоке.
-        try:
-            extracted = extractor.extract(page, _member_route(suffix))
-        except Exception as exc:  # noqa: BLE001 — отказ члена изолируется (контракт фазы)
-            return MemberOutcome(
-                skip_reason=SKIP_EXTRACT_FAILED,
-                detail=f"{type(exc).__name__}: {exc}",
+        # Inline-путь (нет пула): извлечение здесь, на главном потоке. Кэш спрашивается и
+        # здесь: проход без сети (``frozen``) исполняет членов inline, и повторные байты
+        # не должны конвертироваться второй раз только из-за отсутствия пула.
+        cached = None
+        if extract_cache is not None and cache_key:
+            # Версия движка — фактического для этого маршрута: иначе проба не совпадёт с
+            # записью и кэш останется write-only (та же причина, что у страниц).
+            cached = extract_cache.get(
+                cache_key,
+                _cache_extractor_version(extractor, page, route),
+                _as_text(level),
             )
+        if cached is not None:
+            extracted = cached
+        else:
+            try:
+                extracted = extractor.extract(page, route)
+            except Exception as exc:  # noqa: BLE001 — отказ члена изолируется (контракт фазы)
+                return MemberOutcome(
+                    skip_reason=SKIP_EXTRACT_FAILED,
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            if extract_cache is not None and cache_key:
+                # ``put`` сам не сохраняет сбой/пустоту/частичность — здесь только ключ.
+                extract_cache.put(
+                    extracted, level=_as_text(level), content_hash=cache_key
+                )
     if extracted is None or getattr(extracted, "error", None):
         return MemberOutcome(
             skip_reason=SKIP_EXTRACT_FAILED,
@@ -991,6 +1032,14 @@ def _descend_container(
     pool_key: _ExtractPoolKey | None = (
         (level, pdf_pipeline, window) if window is not None else None
     )
+    #: S2/план 23: корень и бюджет кэша — те же, что у фазы. Едут в payload члена
+    #: примитивами; ключ задания — хеш байтов члена (``member_extract_request``).
+    member_cache_root = (
+        str(scope.extract_cache.root) if scope.extract_cache is not None else None
+    )
+    member_cache_max_bytes = (
+        scope.extract_cache.max_bytes if scope.extract_cache is not None else None
+    )
     defer_member: MemberDeferral | None = None
     #: Пул этого спуска признан мёртвым (``2 × timeout`` без завершений): остаток членов —
     #: видимый пропуск, а не 47 ожиданий по таймауту.
@@ -1051,6 +1100,8 @@ def _descend_container(
                     level=level,
                     pdf_pipeline=pdf_pipeline,
                     rss_dir=scope.worker_rss_dir,
+                    cache_root=member_cache_root,
+                    cache_max_bytes=member_cache_max_bytes,
                 ),
             )
 
@@ -1134,6 +1185,8 @@ def _descend_container(
             fetched_at=page.fetched_at,
             lang=page.lang,
             artifact_probes=scope.artifact_probes,
+            # S2/план 23: inline-член спрашивает кэш по хешу своих байтов, как и воркер.
+            extract_cache=scope.extract_cache,
             timings=scope.timings,
             reuse_kind=reuse_kind,
         ),
@@ -1238,8 +1291,9 @@ def descend_frozen_container(
 
     Маршрут и уровень — **объявленные** (per-URL ``extractor_factory(level, pdf_pipeline)``
     у вызывающего): иначе ``extractor_version`` назвал бы условие, которого в корпусе не
-    было (I21/A3). ``extract_cache`` здесь не используется: кэш живого пути ключуется
-    хешем байтов **верхнеуровневого** файла, а у членов его нет.
+    было (I21/A3). ``extract_cache`` спрашивается по хешу байтов **члена** (считан на
+    спуске, S2/план 23): повторный проход без сети над неизменёнными архивами не
+    конвертирует те же члены второй раз.
 
     :returns: :class:`FrozenDescentReport` — статус и измеренные приросты корпуса.
     """
@@ -1273,6 +1327,9 @@ def descend_frozen_container(
             fetched_at=fetched_at,
             lang=None,
             artifact_probes=scope.artifact_probes,
+            # S2/план 23: проход без сети извлекает членов inline — кэш по хешу байтов
+            # члена работает и здесь (иначе повторный ``frozen`` конвертировал бы всё).
+            extract_cache=scope.extract_cache,
             timings=scope.timings,
             reuse_kind=ReuseKind.REUSED,
         ),

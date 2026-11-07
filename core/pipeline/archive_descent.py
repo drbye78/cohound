@@ -55,6 +55,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import tempfile
 from collections import deque
@@ -287,6 +288,24 @@ def member_url(archive_url: str, member_path: str) -> str:
     return f"{archive_url}!/{member_path}"
 
 
+def _close_reader_stream(stream: Any) -> None:
+    """Закрывает поток члена, если он это умеет (генератор адаптера контейнера — умеет).
+
+    ``bounded_iter`` — простая обёртка и вложенный генератор не закрывает, поэтому
+    закрывать нужно **исходный** поток. Без этого архив остаётся открытым до сборки
+    брошенного генератора, то есть, например, на весь дальнейший обход архива после
+    ``member_stream_too_large``. Уборка не вправе менять исход чтения: свой отказ она
+    гасит.
+    """
+    close = getattr(stream, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:  # noqa: BLE001 — уборка не подменяет исход чтения
+        return
+
+
 def _bounded_histogram(entries: list[tuple[str, str]]) -> dict[str, dict[str, Any]]:
     """``{причина: {"count": N, "examples": [...]}}`` — счёт полный, примеры ограничены."""
     buckets: dict[str, dict[str, Any]] = {}
@@ -360,6 +379,10 @@ class ArchiveDescentWalker:
         self._window = max(1, int(window))
         #: Хеши архивов, уже пройденных в этом корне (цикл по содержимому).
         self._seen: set[str] = set()
+        #: Читатели контейнеров, участвовавшие в спуске: в конце их надо закрыть. Порт не
+        #: несёт «архив закончился», а ``ZipContainer`` держит один ``ZipFile`` на архив
+        #: (S2/план 23); без этой точки хендл жил бы до конца процесса.
+        self._readers: dict[int, ContainerPort] = {}
         #: Кумулятивно прочитанные байты членов по всему корню.
         self._total = 0
         #: Один временный файл на **члена**: архив целиком в файл не пишется никогда, а
@@ -379,6 +402,7 @@ class ArchiveDescentWalker:
         """
         self._seen = {archive_content_hash}
         self._total = 0
+        self._readers = {}
         try:
             return self._walk(
                 archive_path=Path(archive_path),
@@ -390,6 +414,9 @@ class ArchiveDescentWalker:
             if self._tmpdir is not None:
                 self._tmpdir.cleanup()
                 self._tmpdir = None
+            # S2/план 23: конец спуска — единственная точка, где читатель вправе отдать
+            # открытые хендлы контейнеров (порт не несёт события «архив закончился»).
+            self._close_readers()
 
     # -- внутреннее --------------------------------------------------------- #
 
@@ -406,11 +433,36 @@ class ArchiveDescentWalker:
         if self._container_for is None:
             return None
         try:
-            return self._container_for(path)
+            reader = self._container_for(path)
         except (RecursionError, MemoryError):
             raise
         except Exception:  # noqa: BLE001 — выбор читателя не должен ронять фазу
             return None
+        if reader is not None:
+            # Запоминается по тождеству: читатели форматов — синглтоны, и один и тот же
+            # экземпляр обслуживает все архивы формата; закрывать его надо один раз.
+            self._readers[id(reader)] = reader
+        return reader
+
+    def _close_readers(self) -> None:
+        """Отдаёт читателям завершение спуска (``close`` — необязательный метод порта).
+
+        Контейнер вправе держать открытый хендл архива на весь обход (``ZipContainer``:
+        один ``ZipFile`` на архив, а не на члена — S2/план 23), а события «архив
+        закончился» в порте нет. Конец спуска — единственная точка, где хендл больше не
+        нужен. Читатель без ``close`` (7z/rar, тестовые обёртки) ничего не обязан
+        реализовывать: отсутствие метода — не ошибка, а отказ уборки не меняет исход
+        спуска (он уже состоялся и записан).
+        """
+        readers = list(self._readers.values())
+        self._readers.clear()
+        for reader in readers:
+            close = getattr(reader, "close", None)
+            if not callable(close):
+                continue
+            # Отказ уборки не подменяет исход спуска: он уже состоялся и записан.
+            with contextlib.suppress(Exception):
+                close()
 
     def _temp_path(self) -> Path:
         """Новый временный файл члена (создаётся лениво, каталог чистится в ``descend``)."""
@@ -802,18 +854,24 @@ class ArchiveDescentWalker:
             temp_path = self._temp_path()
             hasher = hashlib.sha256()
             written = 0
+            #: Поток байтов члена: закрывается явно — ``bounded_iter`` его не закрывает, а
+            #: ``open_member`` держит открытый архив до конца итерации (S2/план 23).
+            member_chunks: Any = None
             try:
                 with temp_path.open("wb") as handle:
-                    chunks = reader.open_member(str(archive_path), member.path)
+                    member_chunks = reader.open_member(str(archive_path), member.path)
                     stream = (
-                        bounded_iter(chunks, member_limit)
+                        bounded_iter(member_chunks, member_limit)
                         if member_limit is not None
-                        else chunks
+                        else member_chunks
                     )
-                    for chunk in stream:
-                        handle.write(chunk)
-                        hasher.update(chunk)
-                        written += len(chunk)
+                    try:
+                        for chunk in stream:
+                            handle.write(chunk)
+                            hasher.update(chunk)
+                            written += len(chunk)
+                    finally:
+                        _close_reader_stream(member_chunks)
             except MemberTooLarge:
                 _flush()
                 temp_path.unlink(missing_ok=True)

@@ -7,7 +7,10 @@
 1. перестановка порядка ингеста даёт один и тот же ``corpus_docs.url`` — меньший адрес;
 2. смена канонического адреса видна оператору (строка лога фазы + машинное поле
    ``product_end.canonical_url_changes``), а не подменяется молча;
-3. повторный проход согласования идемпотентен (ничего не меняет и возвращает ``0``).
+3. повторный проход согласования идемпотентен (ничего не меняет и возвращает ``0``);
+4. документ-член контейнера (у него нет элемента сеанса) получает ``min(member_url)`` по
+   ``corpus_members``, а не адрес последнего писателя; группа адресов — объединение
+   носителей (сеанс + члены), а неполная группа минимум не выдумывает.
 
 Порты подменены детерминированными заглушками (без сети), сторадж — реальный
 ``SqliteStore``: проверяется фактический артефакт (``corpus_docs``), а не промежуточный
@@ -34,7 +37,11 @@ from core.domain import (
     CatalogRow,
     Cohort,
     CohortEntry,
+    CorpusDoc,
+    CorpusMember,
+    CrawlItemStatus,
     CrawlRunConfig,
+    CrawlSessionItem,
     RunConfig,
     RunMode,
 )
@@ -372,6 +379,170 @@ def test_reconciliation_pass_is_idempotent(tmp_path: Path) -> None:
 
         assert again == 0
         assert _docs(store, run_id) == before
+        assert errors == []
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# (4) Документ-член контейнера: адрес — min(member_url), а не последний писатель
+# --------------------------------------------------------------------------- #
+
+#: Средний адрес: третий член группы, чтобы минимум не совпадал с порядком вставки.
+URL_MID = "https://h0b.docs.test/a"
+
+
+def _member_doc_id() -> str:
+    """``doc_id`` документа с текстом ``SAME``: тот же ключ, что у страниц."""
+    return f"p1:{content_hash(SAME)}"
+
+
+def _member_row(
+    member_path: str, member_url: str, doc_id: str, archive_hash: str
+) -> CorpusMember:
+    """Строка ``corpus_members``: адрес члена — ``{archive_url}!/{member_path}``."""
+    return CorpusMember(
+        archive_content_hash=archive_hash,
+        member_path=member_path,
+        product_id="p1",
+        member_url=member_url,
+        doc_id=doc_id,
+    )
+
+
+def _seed_member_doc(
+    store: SqliteStore, run_id: str, *, doc_url: str, member_urls: tuple[str, ...]
+) -> str:
+    """Документ-член (без элемента сеанса) и его строки членов из разных архивов."""
+    _make_run(store, run_id)
+    doc_id = _member_doc_id()
+    store.upsert_corpus_doc(
+        CorpusDoc(
+            doc_id=doc_id,
+            product_id="p1",
+            url=doc_url,
+            content_hash=content_hash(SAME),
+        )
+    )
+    store.save_corpus_members(
+        [
+            _member_row(
+                member_path=url.rsplit("!/", 1)[-1],
+                member_url=url,
+                doc_id=doc_id,
+                archive_hash=content_hash(url),
+            )
+            for url in member_urls
+        ]
+    )
+    return doc_id
+
+
+def test_member_doc_url_is_min_of_member_urls(tmp_path: Path) -> None:
+    """Адрес документа-члена — ``min(member_url)`` по всем членам, а не последний писатель.
+
+    У документа-члена нет элемента ``crawl_session_items``, поэтому ``url = excluded.url``
+    в upsert оставлял адрес того архива, который доспус**тился последним** — функция
+    расписания. Проход обязан брать минимум по ``corpus_members`` и быть идемпотентным:
+    порядок вставки строк членов на результат не влияет.
+    """
+    run_id = "run-canon-members"
+    store = SqliteStore(":memory:")
+    try:
+        member_urls = (
+            f"{URL_LARGE}!/b.txt",
+            f"{URL_SMALL}!/a.txt",
+            f"{URL_MID}!/c.txt",
+        )
+        _seed_member_doc(
+            store, run_id, doc_url=f"{URL_LARGE}!/b.txt", member_urls=member_urls
+        )
+        errors: list[str] = []
+
+        changed = canonicalize_doc_urls(
+            "p1", items={}, store=store, run_id=run_id, errors=errors
+        )
+
+        assert changed == 1
+        assert _docs(store, run_id) == [(_member_doc_id(), f"{URL_SMALL}!/a.txt")]
+        assert errors == []
+        # Идемпотентность: повторный проход ничего не пишет.
+        assert (
+            canonicalize_doc_urls(
+                "p1", items={}, store=store, run_id=run_id, errors=errors
+            )
+            == 0
+        )
+        assert _docs(store, run_id) == [(_member_doc_id(), f"{URL_SMALL}!/a.txt")]
+        assert errors == []
+    finally:
+        store.close()
+
+
+def test_member_doc_url_with_incomplete_group_is_not_invented(tmp_path: Path) -> None:
+    """Текущий адрес не входит в известную группу членов — минимум не выдумывается.
+
+    Такая строка значит, что часть адресов этого текста не записана (другой носитель,
+    старая БД): минимум по неполному множеству был бы подменой, поэтому проход её
+    пропускает, а не «исправляет» на первый известный адрес.
+    """
+    run_id = "run-canon-members-incomplete"
+    store = SqliteStore(":memory:")
+    try:
+        unknown = "https://h9.docs.test/a"
+        _seed_member_doc(
+            store,
+            run_id,
+            doc_url=unknown,
+            member_urls=(f"{URL_LARGE}!/b.txt", f"{URL_SMALL}!/a.txt"),
+        )
+        errors: list[str] = []
+
+        changed = canonicalize_doc_urls(
+            "p1", items={}, store=store, run_id=run_id, errors=errors
+        )
+
+        assert changed == 0
+        assert _docs(store, run_id) == [(_member_doc_id(), unknown)]
+        assert errors == []
+    finally:
+        store.close()
+
+
+def test_member_and_session_urls_are_one_known_group(tmp_path: Path) -> None:
+    """Документ, известный и как страница, и как член: минимум — по объединению адресов.
+
+    Оба носителя описывают один и тот же текст, поэтому «полное известное множество» —
+    их объединение. Без него сеансовая группа из одного адреса не была бы спорной, а
+    группа членов не содержала бы текущий адрес, и канонический адрес зависел бы от
+    того, какой носитель успел записаться.
+    """
+    run_id = "run-canon-members-union"
+    store = SqliteStore(":memory:")
+    try:
+        _seed_member_doc(
+            store,
+            run_id,
+            doc_url=URL_LARGE,
+            member_urls=(f"{URL_SMALL}!/a.txt",),
+        )
+        items = {
+            ("p1", URL_LARGE): CrawlSessionItem(
+                session_id="session",
+                product_id="p1",
+                url=URL_LARGE,
+                status=CrawlItemStatus.FETCHED,
+                doc_hash=content_hash(SAME),
+            )
+        }
+        errors: list[str] = []
+
+        changed = canonicalize_doc_urls(
+            "p1", items=items, store=store, run_id=run_id, errors=errors
+        )
+
+        assert changed == 1
+        assert _docs(store, run_id) == [(_member_doc_id(), f"{URL_SMALL}!/a.txt")]
         assert errors == []
     finally:
         store.close()

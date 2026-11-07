@@ -585,8 +585,40 @@ def _persist_manifest(
 
 CANONICAL_URL_CHANGED_NOTE = (
     "corpus: {product_id}: канонический адрес {count} документов переопределён "
-    "минимумом url среди равных doc_hash (дедуп не зависит от порядка наблюдения)"
+    "минимумом url среди равных doc_hash или адресов членов контейнеров "
+    "(дедуп не зависит от порядка наблюдения)"
 )
+
+
+def _member_urls_by_doc(
+    product_id: str, store: Any, errors: list[str]
+) -> dict[str, set[str]]:
+    """``doc_id → {member_url}`` членов контейнеров продукта (носитель — ``corpus_members``).
+
+    Документ-член не имеет элемента сеанса краула, поэтому ``crawl_session_items`` о нём
+    молчит, и единственный носитель его адресов — ``corpus_members.member_url``. Член без
+    ``doc_id`` (видимый пропуск) в группу не входит: у него нет документа, чей адрес можно
+    согласовать.
+
+    Стор без носителя членов (фейк/старый порт) группы не даёт — и терять там нечего:
+    членов в нём нет по построению. Ошибка чтения изолируется в ``errors``: согласование
+    адресов вторично к корпусу (контракт фазы).
+    """
+    reader = getattr(store, "iter_corpus_members", None)
+    if not callable(reader):
+        return {}
+    groups: dict[str, set[str]] = {}
+    try:
+        for member in reader(product_id=product_id):
+            if not member.doc_id or not member.member_url:
+                continue
+            groups.setdefault(member.doc_id, set()).add(member.member_url)
+    except Exception as exc:  # noqa: BLE001 — изоляция персистенции (контракт фазы)
+        errors.append(
+            f"canonical_url({product_id}): members: {type(exc).__name__}: {exc}"
+        )
+        return {}
+    return groups
 
 
 def canonicalize_doc_urls(
@@ -612,6 +644,13 @@ def canonicalize_doc_urls(
     ``corpus_docs.content_hash`` для группировки не годится — это тот же ключ, но
     ``crawl_session_items.content_hash`` хранит хеш **сырых байтов** (I19), а дедуп идёт по
     хешу **извлечённого текста**: разные величины, и по байтам алиасы не собрать.
+
+    **Документы-члены контейнеров** (S3/план 23). У члена нет элемента сеанса: его адреса
+    известны только по ``corpus_members.member_url``. Без этого прохода адрес такого
+    документа был бы «последним писателем» (``url = excluded.url`` в upsert), то есть
+    функцией расписания спуска, а не содержания. Группы членов объединяются с сеансовыми:
+    «полное известное множество адресов одного текста» — объединение обоих носителей, а не
+    один из них.
 
     **Границы (и почему проход ничего не портит).**
 
@@ -644,16 +683,23 @@ def canonicalize_doc_urls(
     """
     if store is None or run_id is None:
         return 0
+    #: Группы адресов по **doc_id** (``{product_id}:{doc_hash}``): элемент сеанса даёт
+    #: ``doc_hash``, член контейнера — готовый ``doc_id``.
     groups: dict[str, set[str]] = {}
     for (item_product_id, item_url), item in items.items():
         if item_product_id != product_id or not item.doc_hash:
             continue
-        groups.setdefault(item.doc_hash, set()).add(item_url)
+        groups.setdefault(f"{product_id}:{item.doc_hash}", set()).add(item_url)
+    # S3/план 23: адреса документов-членов — из ``corpus_members`` (элемента сеанса у них
+    # нет). Объединение с сеансовыми: минимум считается по полному известному множеству.
+    for doc_id, member_urls in _member_urls_by_doc(product_id, store, errors).items():
+        groups.setdefault(doc_id, set()).update(member_urls)
     # (а) документ с единственным URL согласовывать не с чем, поэтому пары фильтруются
     # **до** чтения корпуса: прогон без дедупа не приобретает ни одного лишнего запроса
-    # (наблюдаемость важна и в обратную сторону — молчаливая цена чтения тоже видна).
+    # дальше этого места. Чтение ``corpus_members`` здесь безусловно — иначе «спорен ли
+    # адрес члена» не узнать: это второй носитель, а не проверка на всякий случай.
     contested = {
-        doc_hash: urls for doc_hash, urls in groups.items() if len(urls) > 1
+        doc_id: urls for doc_id, urls in groups.items() if len(urls) > 1
     }
     if not contested:
         return 0
@@ -664,9 +710,8 @@ def canonicalize_doc_urls(
             for doc in store.iter_corpus_docs(run_id)
             if doc.product_id == product_id
         }
-        for doc_hash in sorted(contested):
-            urls = contested[doc_hash]
-            doc_id = f"{product_id}:{doc_hash}"
+        for doc_id in sorted(contested):
+            urls = contested[doc_id]
             current = urls_by_doc.get(doc_id)
             if current is None or current not in urls:
                 # (б) текущий адрес не принадлежит известной группе: часть адресов этого
@@ -680,6 +725,7 @@ def canonicalize_doc_urls(
                 changed += 1
                 # Память продукта говорит то же, что durable-строка: иначе строка продукта
                 # и покрытие назвали бы документ по адресу, которого в корпусе уже нет.
+                urls_by_doc[doc_id] = canonical
                 for doc in docs:
                     if doc.doc_id == doc_id:
                         doc.url = canonical
