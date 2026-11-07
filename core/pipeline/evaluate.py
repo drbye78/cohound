@@ -2584,6 +2584,17 @@ def _persist(
             justification=justification,
             llm_scenario=llm_scenario,
         )
+        if to_save.state is not CellState.FAILED:
+            # Ячейка получила вердикт — класса сбоя у неё быть не может. Снимаем
+            # оставшийся от прошлой попытки: иначе измеренная ячейка несёт класс сбоя
+            # (измерено 08.11.2026 на живом прогоне: 362 ячейки двух продуктов держали
+            # `no_sources` после пересборки корпуса), и карта показывает сбой у ячейки
+            # с вердиктом. `failure_kind` не входит в доменную `Cell`, поэтому пишется
+            # отдельным контуром; `None` — снятие, а не «нет класса»
+            # (см. `record_cell_failure`).
+            recorder = getattr(store, "record_cell_failure", None)
+            if callable(recorder):
+                recorder(to_save.run_id, to_save.product_id, to_save.param_id, None)
     if validation is not None and validation.resolved_evidence:
         store.add_evidence_batch(validation.resolved_evidence)
     # Absence пишется независимо от прецедента — как и прочие evidence: строки

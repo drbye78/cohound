@@ -2429,15 +2429,31 @@ class SqliteStore:
             )
 
     def record_cell_failure(
-        self, run_id: str, product_id: str, param_id: str, failure_kind: str
+        self, run_id: str, product_id: str, param_id: str, failure_kind: str | None
     ) -> None:
         """Узкий UPDATE класса сбоя ячейки (``cells.failure_kind``).
 
         Доменная ``Cell`` не несёт ``failure_kind``; колонка заполняется отдельным
         контуром (как ``prompt_hash``/``model_id``). Используется zero-source/anomaly
         путями оценки (O2/O3): ``failed``-ячейка обязана назвать класс сбоя.
+
+        ``None`` **снимает** класс: ячейка, получившая вердикт, не сбой. Без этого
+        класс прошлой попытки оставался на измеренной ячейке (измерено 08.11.2026 на
+        живом прогоне: 362 ячейки двух продуктов несли ``no_sources`` после того, как
+        корпус был пересобран и вердикт получен) — карта показывала сбой у ячейки с
+        вердиктом.
         """
         with self.conn:
+            if failure_kind is None:
+                # ``AND failure_kind IS NOT NULL`` делает снятие бесплатным для ячеек,
+                # у которых класса не было: UPDATE трогает 0 строк.
+                self.conn.execute(
+                    "UPDATE cells SET failure_kind = NULL"
+                    " WHERE run_id = ? AND product_id = ? AND param_id = ?"
+                    " AND failure_kind IS NOT NULL",
+                    (run_id, product_id, param_id),
+                )
+                return
             self.conn.execute(
                 "UPDATE cells SET failure_kind = ?"
                 " WHERE run_id = ? AND product_id = ? AND param_id = ?",

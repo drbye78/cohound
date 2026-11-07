@@ -9,6 +9,7 @@ preliminary-провал — кандидат без статуса (I13), и ч
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from pathlib import Path
 from typing import Any
@@ -22,10 +23,14 @@ from core.domain import (
     CellState,
     CorpusCoverage,
     DenialStrength,
+    FailureKind,
+    Focus,
     Importance,
     LLMCellOutput,
     LLMEvidence,
     ParamType,
+    RunConfig,
+    RunMode,
     SourceKind,
     SourceScope,
     Status,
@@ -49,6 +54,7 @@ from core.pipeline.validate import ValidationResult
 from core.ports.llm import LLMRequest, LLMResponse
 from core.ports.types import Chunk
 from core.ports.vector_index import RetrievedChunk
+from core.store.sqlite_store import SqliteStore
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -466,6 +472,56 @@ def test_store_persists_cell_and_evidence() -> None:
     assert store.cells == [outcome.cell]
     assert len(store.evidence) == len(outcome.validation.resolved_evidence) == 1
     assert outcome.cell.source_kind is SourceKind.DOCUMENTATION
+
+
+def test_verdict_clears_stale_failure_kind() -> None:
+    """Вердикт снимает класс сбоя прошлой попытки — измеренная ячейка не сбой.
+
+    Измерено 08.11.2026 на прогоне ``2a5b51af5778``: 362 ячейки ``jatoba``/``pangolin``
+    получили вердикт после пересборки корпуса, но сохранили ``failure_kind='no_sources'``
+    от попытки, в которой корпуса не было (``_persist`` писал ячейку, а класс снимал
+    только явный вызов, которого на пути фазы не было). Карта показывала сбой у ячейки
+    с вердиктом. Класс живёт отдельным контуром: ``Cell`` его не несёт.
+    """
+    data = _data()
+    store = SqliteStore(":memory:")
+    store.create_run(
+        data["run_id"],
+        RunConfig(
+            case_id="case",
+            anchor=data["product_id"],
+            cohort="case",
+            products=[data["product_id"]],
+            package="pkg",
+            focus=Focus(),
+            snapshot_date=_dt.date(2026, 1, 1),
+            mode=RunMode.STRICT,
+        ),
+    )
+    # Прошлая попытка: ячейка `failed` с классом «корпуса нет».
+    stale = _evaluate(data, _ScriptedEvaluator([RuntimeError("нет корпуса")]), strict=True).cell
+    store.save_cell(stale)
+    store.record_cell_failure(
+        stale.run_id, stale.product_id, stale.param_id, FailureKind.NO_SOURCES.value
+    )
+    assert _stored_failure_kind(store, stale) == FailureKind.NO_SOURCES.value
+
+    # Новая попытка даёт вердикт — класс обязан исчезнуть, а не пережить измерение.
+    outcome = _evaluate(data, _ScriptedEvaluator([_ok_output(data)]), store=store)
+
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.status is not None
+    assert _stored_failure_kind(store, outcome.cell) is None
+
+
+def _stored_failure_kind(store: Any, cell: Cell) -> str | None:
+    """``cells.failure_kind`` ячейки из store (доменная ``Cell`` колонку не несёт)."""
+    row = store.conn.execute(
+        "SELECT failure_kind FROM cells"
+        " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+        (cell.run_id, cell.product_id, cell.param_id),
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 # ---------------------------------------------------------------------------
