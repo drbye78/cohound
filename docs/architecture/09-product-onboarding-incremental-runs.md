@@ -154,7 +154,7 @@
 | §1 | ✅ сделано | исторический контекст: все четыре дефекта закрыты MVP-1/2; секция читается в прошедшем времени |
 | §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1472`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1586`; формула — `next_cohort_ref:1566`). Повтор с тем же составом — no-op. Остаётся колонка `runs.cohort_ref`, которая хранит другое поле (§12.2) |
 | §2.3 | ✅ сделано | подкоманды `hound package seeds list/add/disable/enable/export` (`core/cli/package/parser.py:482`, слой — `core/pipeline/package_seeds.py`); `sources/seeds.yaml` в `ARTIFACT_FILES`; ложные подсказки в `context.py`/`corpus.py` стали правдой |
-| §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:2949`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`:3144`), ноль сетевых вызовов (`tests/pipeline/test_corpus_offline.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
+| §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:3154`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`:3784`), ноль сетевых вызовов; chunk-set чужой версии при наличных байтах пересобирается текущим конвейером (`rebuild_from_stored_bytes`), без байтов — `no_bytes` (`tests/pipeline/test_corpus_offline.py`, `tests/pipeline/test_corpus_reuse_rebuild.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
 | §3.1 | ✅ сделано | `RunProductStatus` — ✅ есть (`core/domain/enums.py`) и сверен со словарём (`run_product_status`). `CoverageFreshness` — **➖ снято**: её роль исполняет `corpus_docs.reuse_kind`, вторая ось свежести была бы вторым носителем одной величины. `MeasurementOrigin` — ✅ волна 2: `observed\|carried`, сверен со словарём (`docs/status-dictionary.yaml:measurement_origin`, `core/domain/dictionary.py`) и несётся ячейкой (`Cell.measurement_origin`) |
 | §3.2 | ➖ снято решением (30.10.2026) | модели живут как `*Row` в `core/ports/state.py`, и это **и есть** их форма; `CellMeasurement`/`RunProduct`/`CompositionMember` как отдельные Pydantic-модели не заводятся — они были бы вторым носителем той же формы (обоснование — §3.2) |
 | §3.3 | ✅ сделано | O1/O2/O3/O12 as-built; **O4 ✅** (run-level `chunk_id` = `product:doc_version_id:chunk_no`, `core/pipeline/corpus_index.py:181`); **O5 ✅** — колонка `cell_evidence.doc_version_id` есть (аддитивно), адрес пишет `evaluate._with_doc_versions` из `chunk_id` (`core/util/ids.py:98` `doc_version_of`), перенос проверяет его **дополнительно** к `content_hash` (`carry_forward._evidence_chain_valid`); остаток — `registry`/`inheritance`-evidence идут с `NULL` (у них нет чанка-версии: `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` читается как «не записано», а не «любая версия»; **O6 ✅** (`carry_forward_cell`), **O13 ✅** в доступной части: перенос инвалидируется сменой `scope_acceptance` через `attestation_digest`, `reviewed`/`N/A` едут только как `carried` с провенансом |
@@ -652,21 +652,28 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
   - `refresh`: безусловный GET, content-hash дедуп сохраняется;
   - `offline` — **без сети, только durable-субстрат** (as-built с 30.10.2026). Известный
     URL (`url_state` + `document_version` + chunk-set) переиспользуется: `reuse_kind=reused`,
-    `http_status IS NULL`, `fetched_at IS NULL`, экстрактор и чанкер **не вызываются**.
-    Исполнение — отдельный проход `offline_reuse_product`
-    (`core/pipeline/corpus_ingest.py:3347`), вызываемый **до** дренажа и вместо него
+    `http_status IS NULL`, `fetched_at IS NULL`, экстрактор и чанкер **не вызываются**, пока
+    chunk-set годится. Исполнение — отдельный проход `offline_reuse_product`
+    (`core/pipeline/corpus_ingest.py:3784`), вызываемый **до** дренажа и вместо него
     (`core/pipeline/corpus.py:2224`): в код, единственное назначение которого сеть, политика
     не заходит вовсе. Поэтому группировка ревалидации и дренаж корней под `offline` не
     исполняются, а SERP-контур не запускается (`rounds.not_executed_reason =
     offline_refresh_policy`). Авторский корень, известный состоянию, тоже переиспользуется;
     **корень, которого в `url_state` нет, — видимая ошибка** (оффлайн-наблюдение
-    невозможно), а не GET. Известный URL без пригодной версии — тоже видимая ошибка и
-    счётчик `offline.no_version`: пропуск нельзя прочитать как успех. Честность покрытия:
-    наблюдений этого прогона нет (`observed_sources = 0`, `complete = False`, причина
-    `offline_no_network_observation`), `❌` на `reused` по-прежнему не публикуется (§11.2).
-    Отсутствие сети — проверяемое свойство: `tests/pipeline/test_corpus_offline.py`
-    подменяет краулер/экстрактор/чанкер/поиск заглушками, падающими на любом вызове, и
-    отдельно доказывает, что наполняющий прогон `auto` действительно фетчил.
+    невозможно), а не GET. Известный URL без пригодной версии — видимая ошибка и счётчик
+    `offline.no_version`: пропуск нельзя прочитать как успех. **Chunk-set отвергнут**
+    (чужая версия чанкера, пустой набор, I19-расхождение текста), а сохранённые байты на
+    месте — документ **пересобирается** текущим конвейером (`rebuild_from_stored_bytes`,
+    `:3527`; per-URL экстрактор → текущий чанкер), это `offline.rebuilt_docs` /
+    `reuse_bytes_rebuild`, а не ошибка; байтов нет — `offline.no_bytes` /
+    `reuse_bytes_missing`. Три исхода (`reused`/`rebuilt`/`no_bytes`) различимы, chunk-set
+    чужой версии по-прежнему **не** принимается как есть (I19 не ослаблен). Честность
+    покрытия: наблюдений этого прогона нет (`observed_sources = 0`), а `complete` решают
+    **снятия** корней, а не элементы сеанса (план 20 §11.2/F1), поэтому переиспользованный
+    корпус может быть полным по унаследованному снятию; `❌` на `reused` опирается на
+    датированный носитель (§11.2, I2d). Отсутствие сети — проверяемое свойство:
+    `tests/pipeline/test_corpus_offline.py` подменяет краулер заглушкой, падающей на любом
+    вызове, и отдельно доказывает, что наполняющий прогон `auto` действительно фетчил.
 - **`--only-failed`** — **межпрогонный ремонт** (as-built с 30.10.2026). Work-set резолвит
   `_only_failed_work_set` (`core/cli/context.py`) в порядке источников: (1) `FAILED`-элементы
   **текущего** сеанса `crawl:{run_id}` — точный набор при resume того же `run_id`; (2) если
@@ -4370,7 +4377,7 @@ state/state.db                                 # durable-состояние па
 | T17b | Изменён документ вне top-K ячейки | ячейка **перенесена**, LLM не вызван (per-cell) | as-built: `test_new_document_outside_top_k_does_not_block_carry` |
 | T18 | Смена `methodology_version` | carry-forward запрещён; eval cache miss; golden-full требуется | as-built в части переноса/кэша: версия входит в оба ключа (`test_cell_reuse_key_changes_with_any_condition`, `EVAL_CACHE_FORMAT = 2`); требование golden-full — процесс §13, тестом не покрыто |
 | T19 | Смена модели/слота | carry-forward запрещён; eval cache miss (I21) | as-built в части ключей (`model_id`/`llm_scenario` в `cell_reuse_key`, `test_cell_reuse_key_changes_with_any_condition`); сквозного прогона с двумя моделями нет |
-| T20 | `offline` refresh | сеть **не трогается** ни разу; документы переиспользованы из durable-субстрата; `reuse_kind=reused`, `http_status IS NULL`; `❌` не публикуется; покрытие неполно с названной причиной | as-built с 30.10.2026 (`offline_reuse_product`, §2.4). Ожидание переписано: прежняя редакция требовала `freshness=stale`, а `CoverageFreshness` снята решением (§3.1) — свежесть уже выражает `corpus_docs.reuse_kind`. Приёмка — `tests/pipeline/test_corpus_offline.py` (11 тестов; заглушки падают на любом сетевом вызове) |
+| T20 | `offline` refresh | сеть **не трогается** ни разу; документы переиспользованы из durable-субстрата; `reuse_kind=reused`, `http_status IS NULL`; `❌` — только на датированном носителе (I2d, план 20 §11.2), а не «не публикуется»; полнота — по снятиям, причина прогона названа (`offline_no_network_observation`) | as-built с 30.10.2026 (`offline_reuse_product`, §2.4). Ожидание переписано дважды: прежняя редакция требовала `freshness=stale`, а `CoverageFreshness` снята решением (§3.1); затем F1/F3 плана 20 разделили «наблюдений прогона нет» (`observed_sources = 0`) и «корпус удостоверен снятием» (`complete`). Приёмка — `tests/pipeline/test_corpus_offline.py` (12 тестов) и `tests/pipeline/test_corpus_reuse_rebuild.py` (8 тестов; заглушки падают на любом сетевом вызове) |
 
 ### 15.2. Инвариантные тесты
 

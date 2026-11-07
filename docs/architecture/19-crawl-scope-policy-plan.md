@@ -50,7 +50,7 @@ per-host статуса и без различения дискавери и о�
 |---|---|---|
 | `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:913`, `run_identity.py:213`, `plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падает в `auto` (`corpus.py:398-402`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`state_sqlite.py:115`), `ReuseKind.revalidated` | — |
-| ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3124` | переиспользует **чанки** ⇒ отказ при смене версий; не пишет `url_state`/`document_version` как «последнюю версию» (`:3173-3177`) — эту дисциплину обязан унаследовать `frozen` |
+| ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3784` | переиспользует **чанки**; при смене версии чанкера/пустом наборе/I19-расхождении и **наличных байтах** документ пересобирается текущим конвейером (`rebuild_from_stored_bytes`), байтов нет — `no_bytes`; не пишет `url_state`/`document_version` как «последнюю версию» — эту дисциплину наследует и `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
 | per-host[+path] оси и их digest в `run_id` | `domain_profiles.py:49`, `report.py:669` | **не знает продукта** |
 | `product → host+path` слои | `crawl_sources.py:48,77,87` | digest информационный (`models.py:1546`) |
@@ -136,7 +136,9 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 * `auto`/`revalidate`/`refresh` — как сейчас, для областей `auto` и для `on_request`-областей,
   названных `--refresh-scope`;
-* `offline` — ноль запросов, reuse **чанков** (сегодняшнее поведение сохраняется);
+* `offline` — ноль запросов, reuse **чанков**, а при непригодном chunk-set (чужая версия
+  чанкера/пустой набор/I19) — пересборка из сохранённых байтов текущим конвейером
+  (07.11.2026; три исхода `reused`/`rebuilt`/`no_bytes`, §3);
 * **`frozen`** — ноль запросов, корпус из **`corpus_raw`** с пере-извлечением текущими
   версиями; `--frozen-source chunks` возвращает поведение `offline`.
 
@@ -205,9 +207,10 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 - ✅ **SERP-контур** глушится политикой с `not_executed_reason=crawl_policy_skipped`
   (`corpus.py:1904`), находки фильтруются по корню.
 - ✅ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks`
-  (`corpus_drain.py:168,171`), а не один enum. `bytes` появится в P3 — объявлять значение без
-  исполнения значило бы обещать режим, которого нет.
-- ✅ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3107`, «продукт →
+  (`corpus_drain.py:168,171`), а не один enum. `bytes` исполняется осью прогона
+  (`--refresh frozen --frozen-source bytes`, P3), а не значением `RootPlan`: объявленное
+  значение без исполнения дало бы ложный `execution_change`.
+- ✅ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3784`, «продукт →
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
   `incomplete_reasons` + `truncated_products` (`corpus_commit.py:105`) — тем же каналом, что
@@ -238,10 +241,11 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   (сверяет множество значений enum с ключами таблицы) и
   `test_dispatch_has_no_silent_default_for_unknown_policy`.
 - ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
-  (`corpus_ingest.py:3597`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
+  (`corpus_ingest.py:4268`, `frozen_bytes_product`; общий шаг — `rebuild_from_stored_bytes`
+  `:3527`, им же пользуется фолбэк переиспользования). Ключ `extract_cache` — хеш **сырых байтов**
   (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
 - ✅ **Дрейф пере-извлечения виден**: промах кэша с другим `content_hash` → токен
-  `frozen_reextract_mismatch` (`corpus_ingest.py:4006`), документ **не публикуется** и в
+  `frozen_reextract_mismatch` (`corpus_ingest.py:4573`), документ **не публикуется** и в
   `document_version` не попадает: ложного `document_id`, ложного дедупа и другого
   `doc_set_digest` не возникает.
 - ✅ **Канонический адрес согласован и в `frozen`**: `crawl_session_items` не пишутся, дедуп

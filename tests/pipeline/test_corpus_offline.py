@@ -46,6 +46,8 @@ from core.pipeline.corpus import (
 from core.pipeline.corpus_ingest import (
     OFFLINE_NO_VERSION_TEXT,
     OFFLINE_UNKNOWN_ROOT_TEXT,
+    REUSE_BYTES_MISSING,
+    REUSE_BYTES_MISSING_TEXT,
     OfflineReuseReport,
 )
 from core.pipeline.crawl_session import default_session_id
@@ -485,19 +487,77 @@ def test_offline_known_url_without_version_is_visible_and_excluded(
             store.close()
 
 
-def test_offline_chunker_version_mismatch_does_not_reuse_or_fetch(
+def test_offline_chunker_version_mismatch_rebuilds_from_stored_bytes(
     tmp_path: Path,
 ) -> None:
-    """Чужой ``chunker_version`` в версии: chunk-set не переиспользуется и не фетчится."""
+    """Чужой ``chunker_version`` + наличные байты: документ **пересобирается**.
+
+    Chunk-set чужой версии по-прежнему не годится как есть (I19 не ослаблен), но
+    отсутствовавшее плечо — «байты → текущий конвейер» — теперь есть: документ входит в
+    корпус, экстрактор/чанкер вызываются, сеть не трогается, а пересборка названа фактом
+    (``rebuilt``/``reuse_bytes_rebuild``), а не ошибкой.
+    """
     with SqliteStateStore(":memory:") as state:
         _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
         result, store, crawler = _offline_run(
-            tmp_path, state, roots=[ROOT], chunker_version="chunker-OTHER"
+            tmp_path,
+            state,
+            roots=[ROOT],
+            chunker_version="chunker-OTHER",
+            extractor=_FirstRunExtractor(),
+            chunker=_FirstRunChunker(),
+        )
+        try:
+            assert crawler.calls == [], "пересборка не трогает сеть"
+            docs = _docs(store)
+            assert len(docs) == 1, "документ пересобран из сохранённых байтов"
+            assert docs[0].content_hash == content_hash(BODY)
+            assert docs[0].reuse_kind is not None
+            assert docs[0].reuse_kind.value == "reused"
+            assert docs[0].http_status is None, "сервер не отвечал — статус NULL"
+            events = _offline_events(result)
+            assert events[0]["offline"]["reused_docs"] == 0
+            assert events[0]["offline"]["rebuilt_docs"] == 1
+            assert events[0]["offline"]["rebuilt_chunks"] == 1
+            assert events[0]["offline"]["no_bytes"] == []
+        finally:
+            store.close()
+
+
+def test_offline_chunker_version_mismatch_without_bytes_is_visible(
+    tmp_path: Path,
+) -> None:
+    """Чужой ``chunker_version`` и **нет** байтов: пересобрать нечем — видимая причина.
+
+    Три исхода различимы: это ``no_bytes`` (не «переиспользовано» и не «пересобрано»).
+    Причина названа отдельно от прежней «переиспользовать нечего»: оператор должен
+    видеть, что дело в отсутствии файла, а не в версии чанкера.
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
+        prior = state.get_url_state("p1", ROOT)
+        version = state.get_document_version(prior.doc_version_id)
+        assert version is not None and version.raw_path
+        Path(version.raw_path).unlink()
+        result, store, crawler = _offline_run(
+            tmp_path,
+            state,
+            roots=[ROOT],
+            chunker_version="chunker-OTHER",
+            extractor=_FirstRunExtractor(),
+            chunker=_FirstRunChunker(),
         )
         try:
             assert crawler.calls == []
-            assert _docs(store) == []
-            assert any("chunker" in error for error in result.errors), result.errors
+            assert _docs(store) == [], "пересобрать нечем — документа нет"
+            assert any(
+                REUSE_BYTES_MISSING_TEXT in error and ROOT in error
+                for error in result.errors
+            ), f"нет видимой причины: {result.errors}"
+            assert any(REUSE_BYTES_MISSING in error for error in result.errors)
+            events = _offline_events(result)
+            assert events[0]["offline"]["no_bytes"] == [ROOT]
+            assert events[0]["offline"]["rebuilt_docs"] == 0
         finally:
             store.close()
 

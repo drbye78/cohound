@@ -3912,6 +3912,17 @@ def _build_corpus(
                     doc_counters=doc_counters,
                     partial_unknown_products=partial_unknown_products,
                     persist_docs=_persist_docs,
+                    # Второе плечо переиспользования: chunk-set отвергнут, а байты на
+                    # месте → пересборка **текущим** конвейером. Те же аргументы, что у
+                    # ``frozen_bytes_product``: один шаг «байты → документ → чанки».
+                    extractor=extractor,
+                    chunker=chunker,
+                    extract_cache=extract_cache,
+                    fetch_plan_for=lambda url: _crawl_target(
+                        ctx.product_id, url
+                    ).plan,
+                    limits_for=_limits_for_url,
+                    extractor_factory=extractor_factory,
                     label=pass_label,
                 )
                 offline_notes.append(ctx.offline_report.note(ctx.product_id))
@@ -4265,6 +4276,17 @@ def _build_corpus(
                     doc_counters=doc_counters,
                     partial_unknown_products=partial_unknown_products,
                     persist_docs=_persist_docs,
+                    # То же второе плечо, что у ``offline``: политика корня запретила
+                    # сеть, chunk-set отвергнут, а сохранённые байты есть — документ
+                    # пересобирается текущим конвейером без единого запроса.
+                    extractor=extractor,
+                    chunker=chunker,
+                    extract_cache=extract_cache,
+                    fetch_plan_for=lambda url: _crawl_target(
+                        product_id, url
+                    ).plan,
+                    limits_for=_limits_for_url,
+                    extractor_factory=extractor_factory,
                     label="crawl_policy",
                     skip_urls=present_urls,
                 )
@@ -4364,6 +4386,7 @@ def _build_corpus(
             elif offline_report is not None:
                 no_version_count = len(offline_report.no_version)
                 unknown_roots_count = len(offline_report.unknown_roots)
+                missing_bytes_count = len(offline_report.no_bytes)
             if not ingest.docs and not manual_resolved:
                 product_reason = no_network_reason
                 zero_source_pending.append(
@@ -4506,6 +4529,13 @@ def _build_corpus(
                         "label": offline_report.label,
                         "reused_docs": offline_report.reused,
                         "reused_chunks": offline_report.chunks,
+                        # Второе плечо: chunk-set отвергнут, документ пересобран из
+                        # сохранённых байтов текущим конвейером. Это факт, а не ошибка
+                        # (``errors`` его не несёт): сеть не трогалась.
+                        "rebuilt_docs": offline_report.rebuilt,
+                        "rebuilt_chunks": offline_report.rebuilt_chunks,
+                        "rebuild_s": round(offline_report.rebuilt_seconds, 3),
+                        "no_bytes": list(offline_report.no_bytes),
                         "no_version": list(offline_report.no_version),
                         "unknown_roots": list(offline_report.unknown_roots),
                     }

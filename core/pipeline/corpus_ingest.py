@@ -3276,8 +3276,8 @@ OFFLINE_UNKNOWN_ROOT_TEXT = (
     "--refresh auto/revalidate, чтобы получить документ"
 )
 OFFLINE_NO_VERSION_TEXT = (
-    "offline: переиспользовать нечего — у URL нет активной версии документа либо "
-    "chunk-set отвергнут проверкой I19; документ не вошёл в корпус (сеть не трогается)"
+    "offline: переиспользовать нечего — у URL нет активной версии документа; "
+    "документ не вошёл в корпус (сеть не трогается)"
 )
 
 
@@ -3285,15 +3285,22 @@ OFFLINE_NO_VERSION_TEXT = (
 class OfflineReuseReport:
     """Итог оффлайн-прохода продукта: что переиспользовано и что не удалось (09 §6.3).
 
-    Отчёт существует, потому что «переиспользовано N» и «переиспользовать нечего»
-    — разные факты, и второй не должен выглядеть как первый. Все три счётчика
-    публикуются строкой продукта и в ``errors`` (для второго и третьего), поэтому
-    оффлайн-прогон нельзя спутать с полным.
+    Отчёт существует, потому что «переиспользовано N», «пересобрано из байтов M» и
+    «пересобрать нечем J» — разные факты, и ни один не должен выглядеть как другой.
+    Счётчики публикуются строкой продукта и в событии ``product_end``; в ``errors``
+    идут только **отказы** (``no_version``/``no_bytes``), а пересборка — факт, не
+    ошибка, поэтому оффлайн-прогон нельзя спутать ни с полным, ни с провалившимся.
 
     :param reused: документов вошло в корпус из durable-субстрата.
     :param chunks: чанков переиспользовано (сумма по принятым документам).
-    :param no_version: URL известны состоянию, но переиспользовать нечего (нет активной
-        версии либо chunk-set отвергнут ``classify_reuse``/I19-проверкой).
+    :param rebuilt: документов **пересобрано** из сохранённых байтов текущим
+        конвейером (chunk-set отвергнут, байты на месте).
+    :param rebuilt_chunks: чанков принято из пересобранных документов (сумма).
+    :param rebuilt_seconds: суммарное время пересборки (экстракция + нарезка).
+    :param no_bytes: URL, у которых chunk-set не годится **и** сохранённых байтов нет:
+        пересобрать нечем (отдельно от ``no_version``: там нет версии, здесь нет файла).
+    :param no_version: URL известны состоянию, но активной версии документа нет
+        (в том числе ``superseded``): пересобирать не из чего.
     :param unknown_roots: авторские корни, которых нет в ``url_state``: оффлайн их
         наблюдать нечем, и сети для этого прогона не существует.
     :param urls: URL, для которых сеть не трогалась (порядок прохода).
@@ -3308,6 +3315,19 @@ class OfflineReuseReport:
 
     reused: int = 0
     chunks: int = 0
+    #: Документов **пересобрано** из сохранённых байтов текущим конвейером: chunk-set
+    #: отвергнут (чужая версия чанкера, пустой набор, I19-расхождение текста), но байты
+    #: на месте. Это не «переиспользовано» (экстрактор и чанкер вызывались) и не ошибка
+    #: (сеть не трогалась): третий факт, названный токеном ``reuse_bytes_rebuild``.
+    rebuilt: int = 0
+    #: Чанков принято из пересобранных документов (сумма).
+    rebuilt_chunks: int = 0
+    #: Суммарное время пересборки (экстракция + нарезка), секунды. Медиана не нужна:
+    #: публикуется **цена** прохода, а не распределение одной выборки.
+    rebuilt_seconds: float = 0.0
+    #: URL, у которых chunk-set не годится **и** сохранённых байтов нет: пересобрать
+    #: нечем. Отдельно от ``no_version``: там нет версии, здесь нет файла байтов.
+    no_bytes: tuple[str, ...] = ()
     no_version: tuple[str, ...] = ()
     unknown_roots: tuple[str, ...] = ()
     urls: tuple[str, ...] = ()
@@ -3336,12 +3356,429 @@ class OfflineReuseReport:
         )
         return (
             f"corpus: {self.label} {product_id} — переиспользовано документов "
-            f"{self.reused} (чанков {self.chunks}), переиспользовать нечего "
-            f"{len(self.no_version)}, корней вне состояния {len(self.unknown_roots)}"
+            f"{self.reused} (чанков {self.chunks}), пересобрано из байтов "
+            f"{self.rebuilt} (чанков {self.rebuilt_chunks}), переиспользовать нечего "
+            f"{len(self.no_version)}, байтов нет {len(self.no_bytes)}, "
+            f"корней вне состояния {len(self.unknown_roots)}"
             f"{skipped}; "
+            f"reused={self.reused} rebuilt={self.rebuilt} "
+            f"chunks={self.chunks + self.rebuilt_chunks} no_bytes={len(self.no_bytes)}; "
             "сеть не трогалась, наблюдений этого прогона нет "
             "(❌ — только с датой носителя, I2d)"
+            f"{self._rebuild_token()}"
         )
+
+    def _rebuild_token(self) -> str:
+        """Машинный токен пересборки с числами — только когда пересборка была.
+
+        Токен **не** идёт в ``errors``: пересборка — не ошибка, а факт («сеть не
+        трогалась, документ вошёл в корпус»). Ноль пересобранных документов не
+        публикуется: нулевой факт читался бы как «пересобирали и не вышло».
+        """
+        if not self.rebuilt:
+            return ""
+        return (
+            f"; {REUSE_BYTES_REBUILD}:{self.rebuilt} — документов пересобрано из "
+            f"сохранённых байтов (чанков {self.rebuilt_chunks}, "
+            f"{self.rebuilt_seconds:.1f} с)"
+        )
+
+
+#: Токен видимого факта: документ **пересобран** из сохранённых байтов текущим
+#: конвейером (экстрактор → чанкер) вместо переиспользования чужого chunk-set. Это не
+#: ошибка: сеть не трогалась, а документ вошёл в корпус.
+REUSE_BYTES_REBUILD = "reuse_bytes_rebuild"
+
+#: Токен видимой причины: chunk-set не годится, а сохранённых байтов нет (нет файла
+#: retention либо его хеш не совпал с записанным) — пересобрать нечем.
+REUSE_BYTES_MISSING = "reuse_bytes_missing"
+
+#: Токен видимого факта: пересборка дала **другой** ``content_hash``, чем записан в
+#: ``document_version``. Это не «контент изменился» (сети не было) — сменился движок
+#: извлечения; класс изменения — ``content_change``, и документ остаётся в корпусе.
+REUSE_BYTES_REEXTRACT = "reuse_bytes_reextract"
+
+#: Пояснение к :data:`REUSE_BYTES_MISSING` (операторский канал).
+REUSE_BYTES_MISSING_TEXT = (
+    "offline: chunk-set не годится для переиспользования, а сохранённых сырых байтов "
+    "нет (нет файла retention либо его хеш не совпал с записанным) — пересобрать "
+    "нечем, документ не вошёл в корпус (сеть не трогается)"
+)
+
+
+@dataclass(frozen=True)
+class RebuiltDoc:
+    """Документ, пересобранный из сохранённых байтов **текущим** конвейером.
+
+    Один носитель результата для двух проходов без сети: ``frozen_source=bytes``
+    (пере-извлечение по оси прогона) и фолбэк переиспользования (chunk-set отвергнут).
+    Пока результат был словарём в теле ``frozen``, второе плечо пришлось бы писать
+    второй копией, и копии разошлись бы молча.
+
+    :param url: URL, которому принадлежат байты (адрес версии в состоянии).
+    :param key: нормализованный ключ ``url_state``.
+    :param doc_hash: ``content_hash`` **текущей** экстракции — идентичность документа.
+    :param raw_path: файл сохранённых байтов (провенанс, не копия содержимого).
+    :param extractor_token: ``extractor_version`` фактического движка (штамп адаптера).
+    :param level_text: объявленный уровень извлечения (условие измерения).
+    :param partial_fields: поля частичности извлечения (измерены сейчас, не из записи).
+    :param chunks: чанки текущего чанкера в порядке ``chunk_no``.
+    :param from_cache: ``ExtractedDoc`` взят из ``extract_cache`` (экстрактор не звался).
+    :param extracted: экстрактор вызывался (даже если затем отказал).
+    :param content_changed: ``doc_hash`` разошёлся с durable-версией (дрейф извлечения).
+    :param seconds: время попытки (экстракция + нарезка).
+    """
+
+    url: str
+    key: str
+    doc_hash: str
+    raw_path: Path
+    extractor_token: str
+    level_text: str
+    partial_fields: dict[str, Any]
+    chunks: list[Any]
+    from_cache: bool = False
+    extracted: bool = False
+    content_changed: bool = False
+    seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class BytesRebuildOutcome:
+    """Итог попытки пересборки одного документа из сохранённых байтов.
+
+    Три исхода различимы по построению: ``missing_bytes`` (пересобирать нечем),
+    ``failed`` (байты есть, конвейер отказал — причина в ``errors``) и ``doc``
+    (документ пересобран). Молчаливого «ничего не произошло» нет.
+    """
+
+    doc: RebuiltDoc | None = None
+    missing_bytes: bool = False
+    failed: bool = False
+    cache_hit: bool = False
+    extracted: bool = False
+    seconds: float = 0.0
+
+
+def _verified_raw_key(
+    product_id: str, url: str, raw_path: Path, *, label: str, errors: list[str]
+) -> str | None:
+    """Ключ ``extract_cache`` из **содержимого** файла либо ``None`` (байтов нет).
+
+    Retention называет файл ``{sha256 сырых байтов}.bin``, поэтому ``raw_path.stem`` —
+    ожидаемый ключ, а :func:`_hash_file` — фактический. Расхождение имени и содержимого
+    означает «сохранённых байтов нет» (файл подменён/битый), а не «контент изменился».
+    """
+    if not raw_path.is_file():
+        return None
+    try:
+        raw_key = _hash_file(raw_path)
+    except OSError as exc:
+        errors.append(
+            f"{product_id}/{url}: {label}: чтение retained-байтов {raw_path}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+    return raw_key if raw_key == raw_path.stem else None
+
+
+def _level_extractor(
+    *,
+    product_id: str,
+    url: str,
+    label: str,
+    errors: list[str],
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline,
+    extractor: ExtractorPort,
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort]
+    | None,
+    level_extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort],
+) -> ExtractorPort:
+    """Экстрактор **объявленного** уровня URL — тот же резолвер, что у живого пути.
+
+    Экземпляр строится один раз на ключ ``(уровень, механизм)`` — как пул живого
+    пути: построение docling заново на каждый документ стоило бы загрузки моделей по
+    числу PDF (замер: 5 перезагрузок подряд), а не по числу условий. Уровень
+    композиции (``full`` + ``structured``) — переданный экстрактор, без фабрики.
+    Отказ фабрики виден в ``errors`` и не подменяет уровень молча.
+    """
+    if extractor_factory is None or (
+        level is DocumentLevel.FULL and pdf_pipeline is PdfPipeline.STRUCTURED
+    ):
+        return extractor
+    extractor_key = (level, pdf_pipeline)
+    cached = level_extractors.get(extractor_key)
+    if cached is not None:
+        return cached
+    try:
+        built = extractor_factory(level, pdf_pipeline)
+    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+        errors.append(
+            f"{product_id}/{url}: {label}: extractor_factory({level.value}, "
+            f"{pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
+            "понижен до переданного экстрактора"
+        )
+        return extractor
+    level_extractors[extractor_key] = built
+    return built
+
+
+def rebuild_from_stored_bytes(
+    product_id: str,
+    url: str,
+    *,
+    raw_path: Path | None,
+    prior: UrlStateRow | None,
+    prior_doc: DocumentVersionRow | None,
+    label: str,
+    errors: list[str],
+    extractor: ExtractorPort,
+    chunker: ChunkerPort,
+    extract_cache: ExtractionCache | None,
+    fetch_plan_for: Callable[[str], FetchPlan],
+    limits_for: Callable[[str], Any],
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort]
+    | None = None,
+    level_extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort]
+    | None = None,
+) -> BytesRebuildOutcome:
+    """Сохранённые байты → **текущий** экстрактор → **текущий** чанкер. Ноль запросов.
+
+    Общий шаг двух проходов без сети: ``frozen_source=bytes`` (ось прогона) и фолбэк
+    переиспользования, когда chunk-set отвергнут (чужая версия чанкера, пустой набор,
+    I19-расхождение текста). Второй копии этого пути нет намеренно: копии расходятся
+    молча, а цена расхождения — «тот же файл, другой текст» под тем же провенансом.
+
+    **Ключ ``extract_cache`` — хеш сырых байтов** (``_hash_file`` = ``raw_path.stem``),
+    а не версия чанкера: повторный проход в том же окружении обязан попадать в кэш и не
+    платить конверсию дважды. Промах кэша — не ошибка.
+
+    **Уровень и механизм PDF — условие измерения**, а не свойство «какой экстрактор
+    случайно передали»: экстрактор выбирается per-URL через ``extractor_factory`` (тот
+    же резолвер, что у живого пути). Иначе ``extractor_version`` назвал бы условие,
+    которого в корпусе не было, а ``extract_cache`` получил бы второй ключ.
+
+    **Маршрут — по байтам файла**, а не по URL/``Content-Type``: у retained-файла
+    суффикс ``.bin``, заголовка ответа в этом прогоне нет. Иначе PDF по бессуффиксному
+    URL ушёл бы в HTML-ветку и дал ложный дрейф.
+
+    ``content_changed`` не отказ: смена текста при том же файле — ``content_change``
+    (движок извлечения — провенанс, а не ось контракта), и решает вызывающий: ``frozen``
+    называет это дрейфом измерения и отклоняет, фолбэк переиспользования принимает с
+    отдельным видимым токеном.
+
+    :returns: :class:`BytesRebuildOutcome`; ``doc`` заполнен только при успехе.
+    """
+    if raw_path is None:
+        return BytesRebuildOutcome(missing_bytes=True)
+    raw_key = _verified_raw_key(product_id, url, raw_path, label=label, errors=errors)
+    if raw_key is None:
+        return BytesRebuildOutcome(missing_bytes=True)
+
+    started = time.perf_counter()
+    plan = fetch_plan_for(url)
+    limits = limits_for(url)
+    level = limits.document_level
+    level_text = _as_text(level)
+    extractor_obj = _level_extractor(
+        product_id=product_id,
+        url=url,
+        label=label,
+        errors=errors,
+        level=level,
+        pdf_pipeline=limits.pdf_pipeline,
+        extractor=extractor,
+        extractor_factory=extractor_factory,
+        level_extractors={} if level_extractors is None else level_extractors,
+    )
+    try:
+        probe = probe_artifact(str(raw_path), product_id=product_id, url=url)
+        route = (
+            ExtractionRoute.DOCUMENT
+            if probe.artifact.kind == CLASS_DOCUMENT
+            else ExtractionRoute.AUTO
+        )
+    except Exception as exc:  # noqa: BLE001 — зонд не должен ронять продукт
+        errors.append(
+            f"{product_id}/{url}: {label}: probe: {type(exc).__name__}: {exc} — "
+            "маршрут по URL (байты не классифицированы)"
+        )
+        route = ExtractionRoute.AUTO
+    # ``fetched_at`` — **прежнее** наблюдение байтов, не «сейчас»: нового получения не
+    # было. ``status_code``/``render_mode``/``lang`` не выдумываются.
+    page = RawPage(
+        url=url,
+        content=b"",
+        source_path=str(raw_path),
+        fetched_at=str(
+            (prior.last_checked_at if prior is not None else None)
+            or (prior_doc.first_seen_at if prior_doc is not None else None)
+            or ""
+        ),
+        fetch_mode=plan.fetch,
+        status_code=None,
+        content_type=None,
+        engine=None,
+    )
+    extracted = None
+    cache_hit = False
+    if extract_cache is not None:
+        version_token = _cache_extractor_version(extractor_obj, page, route)
+        extracted = extract_cache.get(raw_key, version_token, level_text)
+        if extracted is not None:
+            cache_hit = True
+    extracted_now = False
+    if extracted is None:
+        try:
+            extracted = extractor_obj.extract(page, route)
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            errors.append(
+                f"{product_id}/{url}: {label}: extract: {type(exc).__name__}: {exc}"
+            )
+            return BytesRebuildOutcome(
+                failed=True,
+                extracted=True,
+                seconds=time.perf_counter() - started,
+            )
+        extracted_now = True
+        if extract_cache is not None:
+            extract_cache.put(extracted, level=level_text, content_hash=raw_key)
+    if getattr(extracted, "error", None):
+        errors.append(f"{product_id}/{url}: {label}: extract: {extracted.error}")
+        return BytesRebuildOutcome(
+            failed=True,
+            extracted=extracted_now,
+            cache_hit=cache_hit,
+            seconds=time.perf_counter() - started,
+        )
+    doc_hash = str(getattr(extracted, "content_hash", "") or "")
+    if not doc_hash:
+        errors.append(
+            f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён"
+        )
+        return BytesRebuildOutcome(
+            failed=True,
+            extracted=extracted_now,
+            cache_hit=cache_hit,
+            seconds=time.perf_counter() - started,
+        )
+    try:
+        chunks = chunker.chunk(extracted, f"{product_id}:{doc_hash}")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(
+            f"{product_id}/{url}: {label}: chunk: {type(exc).__name__}: {exc}"
+        )
+        return BytesRebuildOutcome(
+            failed=True,
+            extracted=extracted_now,
+            cache_hit=cache_hit,
+            seconds=time.perf_counter() - started,
+        )
+    return BytesRebuildOutcome(
+        doc=RebuiltDoc(
+            url=url,
+            key=_state_url_key(url) or url,
+            doc_hash=doc_hash,
+            raw_path=raw_path,
+            extractor_token=str(getattr(extracted, "extractor_version", None) or ""),
+            level_text=str(level_text or ""),
+            partial_fields=_partial_fields(extracted),
+            chunks=sorted(
+                chunks or [], key=lambda chunk: getattr(chunk, "chunk_no", 0)
+            ),
+            from_cache=cache_hit,
+            extracted=extracted_now,
+            content_changed=bool(
+                prior_doc is not None and doc_hash != prior_doc.content_hash
+            ),
+            seconds=time.perf_counter() - started,
+        ),
+        cache_hit=cache_hit,
+        extracted=extracted_now,
+        seconds=time.perf_counter() - started,
+    )
+
+
+def _persist_rebuilt_doc(
+    product_id: str,
+    canonical_url: str,
+    rebuilt: RebuiltDoc,
+    *,
+    state: ProductStatePort | None,
+    errors: list[str],
+    embed_model_id: str,
+    store: Any,
+    ingest: ProductIngest,
+    seen_docs: dict[str, str],
+    seen_chunk_ids: set[str],
+    duplicates: dict[str, int],
+    doc_counters: dict[str, dict[str, int]],
+    persist_docs: Callable[..., None],
+) -> int | None:
+    """Пишет пересобранный документ в корпус; ``None`` — тот же ``doc_hash`` уже вошёл.
+
+    Единственная точка записи пересобранного документа: ``frozen`` и фолбэк
+    переиспользования идут сюда, поэтому «что считается документом корпуса» у них не
+    может разойтись. ``reuse_kind=REUSED``: байты в этом прогоне не получались, и
+    провенанс — прежнее наблюдение (I2d), а не ответ сервера. ``url_state`` не
+    переписывается: наблюдения не было.
+
+    :returns: число принятых чанков либо ``None`` (дедуп по ``doc_hash``).
+    """
+    doc_hash = rebuilt.doc_hash
+    if doc_hash in seen_docs:
+        duplicates[product_id] = duplicates.get(product_id, 0) + 1
+        return None
+    seen_docs[doc_hash] = canonical_url
+    document_id = f"{product_id}:{doc_hash}"
+    dv_id = doc_version_id(
+        product_id, doc_hash, rebuilt.extractor_token, rebuilt.level_text
+    )
+    doc = CorpusDoc(
+        doc_id=document_id,
+        product_id=product_id,
+        url=canonical_url,
+        # Получения не было: ``fetched_at``/``render_mode``/``lang`` — NULL, а не
+        # «сейчас»/«http»/дефолт. Провенанс записи — ``reuse_kind=reused``.
+        fetched_at=None,
+        content_hash=doc_hash,
+        raw_path=str(rebuilt.raw_path),
+        extractor_version=rebuilt.extractor_token or None,
+        render_mode=None,
+        lang=None,
+        http_status=None,
+        reuse_kind=ReuseKind.REUSED,
+        **rebuilt.partial_fields,
+    )
+    ingest.docs.append(doc)
+    persist_docs(store, [doc], errors, versions_by_doc={document_id: dv_id})
+    accepted = _accept_chunk_candidates(
+        product_id,
+        document_id,
+        dv_id,
+        [
+            (
+                int(getattr(chunk, "chunk_no", 0)),
+                getattr(chunk, "text", "") or "",
+                getattr(chunk, "heading_path", "") or "",
+                getattr(chunk, "context_prefix", "") or "",
+                str(getattr(chunk, "content_hash", "") or "").strip(),
+                getattr(chunk, "char_start", None),
+                getattr(chunk, "char_end", None),
+            )
+            for chunk in rebuilt.chunks
+        ],
+        ingest=ingest,
+        seen_chunk_ids=seen_chunk_ids,
+        errors=errors,
+        url=canonical_url,
+        lang=None,
+        embed_model_id=embed_model_id,
+    )
+    count_doc(product_id, reused=True, state=state, doc_counters=doc_counters)
+    return len(accepted)
+
 
 
 def offline_reuse_product(
@@ -3361,6 +3798,13 @@ def offline_reuse_product(
     doc_counters: dict[str, dict[str, int]],
     partial_unknown_products: dict[str, list[str]],
     persist_docs: Callable[..., None],
+    extractor: ExtractorPort,
+    chunker: ChunkerPort,
+    extract_cache: ExtractionCache | None,
+    fetch_plan_for: Callable[[str], FetchPlan],
+    limits_for: Callable[[str], Any],
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort]
+    | None = None,
     label: str = "offline",
     skip_urls: Sequence[str] = (),
 ) -> OfflineReuseReport:
@@ -3386,14 +3830,32 @@ def offline_reuse_product(
     (:data:`OFFLINE_UNKNOWN_ROOT_TEXT`), а не тихий пропуск и не поход в сеть: пустой
     корпус без причины читался бы как «у продукта ничего нет».
 
-    **Известный URL без пригодной версии.** Нет ``document_version`` либо chunk-set
+    **Известный URL без пригодной версии.** Нет ``document_version`` (или она
+    ``superseded``) — пересобирать не из чего: документ в корпус не попадает, причина
+    называется :data:`OFFLINE_NO_VERSION_TEXT`, счётчик ``no_version``. Chunk-set
     отвергнут ``reuse_plan`` (несовпадение версии чанкера, текст не сошёлся с
-    ``content_hash``, пустой набор) — переиспользовать нечего: документ в корпус не
-    попадает. Причина отказа записывается самим ``reuse_plan``, а следствие называет
-    :data:`OFFLINE_NO_VERSION_TEXT` — две строки говорят разное («почему субстрат не
-    годится» и «что стало с документом»), и вторая не выводится из первой. Это **не**
-    успех: счётчик ``no_version`` и ``errors`` не дают выдать пропуск за
-    переиспользование.
+    ``content_hash``, пустой набор) — причина записывается самим ``reuse_plan``, а
+    следствие зависит от **байтов**:
+
+    * файл сохранённых байтов на месте и его хеш совпал с именем — документ
+      **пересобирается** текущим конвейером (:func:`rebuild_from_stored_bytes`:
+      per-URL экстрактор → текущий чанкер) и входит в корпус; это факт
+      ``rebuilt``/``reuse_bytes_rebuild``, а **не** ошибка: сеть не трогалась, а
+      chunk-set чужой версии по-прежнему не годится как есть (I19 не ослаблен);
+    * байтов нет (``raw_path`` пуст, файла нет, хеш не совпал) — пересобрать нечем:
+      :data:`REUSE_BYTES_MISSING_TEXT`, счётчик ``no_bytes`` и ``errors``.
+
+    Три исхода различимы потому, что это три разных факта: «переиспользовано»,
+    «пересобрано» и «пересобрать нечем». Первый не зовёт приборов, второй зовёт, третий
+    не может. Молчаливого пропуска нет ни в одном.
+
+    **Пересборка — не наблюдение.** ``url_state`` не переписывается (наблюдения не
+    было), а датированный носитель ``❌`` — прежнее durable-наблюдение URL
+    (``corpus_artifact.observed_at`` из ``url_state``, I2d). Если текущий экстрактор дал
+    **другой** ``content_hash``, это ``content_change`` (движок — провенанс, не ось
+    контракта): документ остаётся в корпусе, а дрейф назван
+    :data:`REUSE_BYTES_REEXTRACT`. ``frozen`` тот же дрейф отклоняет: там он означает
+    расхождение измерения, здесь — что пересборка дала новый текст того же файла.
 
     **Чего здесь нет намеренно.** Нет записи в ``url_state``: наблюдения не было, и
     ``reuse_kind``/``last_http_status`` прошлого цикла переписывать нельзя — иначе
@@ -3425,12 +3887,19 @@ def offline_reuse_product(
     """
     report_reused = 0
     report_chunks = 0
+    report_rebuilt = 0
+    report_rebuilt_chunks = 0
+    report_rebuilt_seconds = 0.0
     no_version: list[str] = []
+    no_bytes: list[str] = []
     unknown_roots: list[str] = []
     touched: list[str] = []
     skipped_present: list[str] = []
     seen_urls: set[str] = set()
     capture_pairs: list[tuple[str, str, str]] = []
+    #: Экстракторы по ключу ``(уровень, механизм PDF)`` — один на условие прохода
+    #: (тот же резолвер, что у ``frozen`` и живого пути).
+    level_extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort] = {}
     #: Пропуск — по нормализованному ключу ``url_state``: тот же, которым проход
     #: адресует строку состояния. Ненормализуемый вход молча не пропускается: он
     #: попадёт в собственную видимую ошибку ниже.
@@ -3482,6 +3951,16 @@ def offline_reuse_product(
         prior_doc = _prior_document_version(
             prior, product_id, url, state=state, errors=errors
         )
+        if prior_doc is None or prior_doc.status != _DOC_STATUS_ACTIVE:
+            # Нет версии (либо она вытеснена живым прогоном): пересобирать не из чего,
+            # а воскрешать ``superseded`` значило бы вернуть в корпус вытесненное.
+            no_version.append(url)
+            errors.append(f"{product_id}/{url}: {_reason(OFFLINE_NO_VERSION_TEXT)}")
+            continue
+        #: Граница ошибок ``reuse_plan``: его причина («повторная нарезка») — объяснение
+        #: отказа, а не сбой прогона. Успешная пересборка делает её неактуальной и не
+        #: оставляет в ``errors`` (пересборка — не ошибка); при отказе причина остаётся.
+        errors_before_reuse = len(errors)
         reuse = reuse_plan(
             product_id,
             url,
@@ -3491,12 +3970,75 @@ def offline_reuse_product(
             chunker_version=chunker_version,
         )
         if reuse is None:
-            # Причина отказа уже записана ``reuse_plan``/``load_reused_chunks`` (версия
-            # чанкера, I19-расхождение, пустой набор) — а следствие для корпуса
-            # называется здесь: молча пропустить документ значило бы выдать пропуск за
-            # переиспользование.
-            no_version.append(url)
-            errors.append(f"{product_id}/{url}: {_reason(OFFLINE_NO_VERSION_TEXT)}")
+            # Второе плечо: chunk-set не годится (версия чанкера/пустой набор/I19), но
+            # сохранённые байты могут дать документ **текущим** конвейером. Причина
+            # отказа уже записана ``reuse_plan``/``load_reused_chunks`` — здесь
+            # называется следствие для корпуса, и оно зависит от байтов.
+            raw_path = Path(prior_doc.raw_path) if prior_doc.raw_path else None
+            outcome = rebuild_from_stored_bytes(
+                product_id,
+                url,
+                raw_path=raw_path,
+                prior=prior,
+                prior_doc=prior_doc,
+                label=label,
+                errors=errors,
+                extractor=extractor,
+                chunker=chunker,
+                extract_cache=extract_cache,
+                fetch_plan_for=fetch_plan_for,
+                limits_for=limits_for,
+                extractor_factory=extractor_factory,
+                level_extractors=level_extractors,
+            )
+            if outcome.missing_bytes:
+                # Пересобрать нечем: файла байтов нет либо его хеш не совпал с именем.
+                no_bytes.append(url)
+                errors.append(
+                    f"{product_id}/{url}: {_reason(REUSE_BYTES_MISSING_TEXT)}"
+                )
+                continue
+            if outcome.doc is None:
+                # Байты есть, конвейер отказал — причина уже в ``errors``; документа нет.
+                continue
+            rebuilt_doc = outcome.doc
+            # Пересборка состоялась: причина отказа ``reuse_plan`` больше не описывает
+            # исход документа. Снимаем **только** её срез — ошибки конвейера,
+            # персистенции и чанк-гейта ниже остаются.
+            del errors[errors_before_reuse:]
+            if rebuilt_doc.content_changed:
+                # Тот же файл, другой текст: сменился движок извлечения, а не контент
+                # (сети не было). Класс изменения — ``content_change``; документ
+                # остаётся в корпусе, но факт назван, а не спрятан.
+                errors.append(
+                    f"{product_id}/{url}: {REUSE_BYTES_REEXTRACT}: content_hash "
+                    f"пересборки {rebuilt_doc.doc_hash} != записанного "
+                    f"{prior_doc.content_hash} — тот же файл, другой текст текущего "
+                    "движка (наблюдения не было)"
+                )
+            report_rebuilt_seconds += outcome.seconds
+            # Durable-группа: алиас тоже участвует в дедупе (как у переиспользования).
+            capture_pairs.append((rebuilt_doc.doc_hash, url, key))
+            rebuilt_accepted = _persist_rebuilt_doc(
+                product_id,
+                url,
+                rebuilt_doc,
+                state=state,
+                errors=errors,
+                embed_model_id=embed_model_id,
+                store=store,
+                ingest=ingest,
+                seen_docs=seen_docs,
+                seen_chunk_ids=seen_chunk_ids,
+                duplicates=duplicates,
+                doc_counters=doc_counters,
+                persist_docs=persist_docs,
+            )
+            if rebuilt_accepted is None:
+                # Тот же ``doc_hash`` уже вошёл (дедуп): строк не плодим.
+                continue
+            report_rebuilt += 1
+            report_rebuilt_chunks += rebuilt_accepted
             continue
 
         doc_hash = str(reuse.doc_version.content_hash or "")
@@ -3573,9 +4115,21 @@ def offline_reuse_product(
         report_reused += 1
         report_chunks += len(accepted)
 
+    if no_bytes:
+        # Машинный токен с числом — в тот же канал видимых причин, что у ``frozen``:
+        # «сколько пересобрать нечем» важнее «есть ли причина», а ``failed`` здесь нет
+        # (I4): прогон состоялся, корпус просто неполон.
+        errors.append(
+            f"{product_id}: {REUSE_BYTES_MISSING}:{len(no_bytes)} — сохранённых байтов "
+            f"нет у {len(no_bytes)} известных URL, пересобрать нечем ({label})"
+        )
     return OfflineReuseReport(
         reused=report_reused,
         chunks=report_chunks,
+        rebuilt=report_rebuilt,
+        rebuilt_chunks=report_rebuilt_chunks,
+        rebuilt_seconds=report_rebuilt_seconds,
+        no_bytes=tuple(no_bytes),
         no_version=tuple(no_version),
         unknown_roots=tuple(unknown_roots),
         urls=tuple(touched),
@@ -3782,7 +4336,7 @@ def frozen_bytes_product(
     :returns: :class:`FrozenBytesReport` — документы, чанки, причины и группы дедупа.
     """
     #: Накопленные кандидаты: один на URL, ещё без адреса документа.
-    collected: list[dict[str, Any]] = []
+    collected: list[RebuiltDoc] = []
     unknown_roots: list[str] = []
     stored_bytes_missing: list[str] = []
     no_version: list[str] = []
@@ -3826,34 +4380,18 @@ def frozen_bytes_product(
     def _extractor_at(
         level: DocumentLevel, pdf_pipeline: PdfPipeline, url: str
     ) -> ExtractorPort:
-        """Экстрактор **объявленного** уровня URL — тот же резолвер, что у живого пути.
-
-        Экземпляр строится один раз на ключ ``(уровень, механизм)`` — как пул живого
-        пути: построение docling заново на каждый документ стоило бы загрузки моделей по
-        числу PDF (замер: 5 перезагрузок подряд), а не по числу условий. Уровень
-        композиции (``full`` + ``structured``) — переданный экстрактор, без фабрики.
-        Отказ фабрики виден в ``errors`` и не подменяет уровень молча.
-        """
-        if extractor_factory is None or (
-            level is DocumentLevel.FULL
-            and pdf_pipeline is PdfPipeline.STRUCTURED
-        ):
-            return extractor
-        extractor_key = (level, pdf_pipeline)
-        cached = level_extractors.get(extractor_key)
-        if cached is not None:
-            return cached
-        try:
-            built = extractor_factory(level, pdf_pipeline)
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            errors.append(
-                f"{product_id}/{url}: {label}: extractor_factory({level.value}, "
-                f"{pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
-                "понижен до переданного экстрактора"
-            )
-            return extractor
-        level_extractors[extractor_key] = built
-        return built
+        """Экстрактор объявленного уровня URL — общий резолвер с ``reuse``-фолбэком."""
+        return _level_extractor(
+            product_id=product_id,
+            url=url,
+            label=label,
+            errors=errors,
+            level=level,
+            pdf_pipeline=pdf_pipeline,
+            extractor=extractor,
+            extractor_factory=extractor_factory,
+            level_extractors=level_extractors,
+        )
 
     def _replay_container(
         container: ContainerStateRow, prior: UrlStateRow | None, url: str
@@ -3991,143 +4529,62 @@ def frozen_bytes_product(
             continue
 
         raw_path = Path(prior_doc.raw_path) if prior_doc.raw_path else None
-        raw_key = None
-        if raw_path is not None and raw_path.is_file():
+        outcome = rebuild_from_stored_bytes(
+            product_id,
+            url,
+            raw_path=raw_path,
+            prior=prior,
+            prior_doc=prior_doc,
+            label=label,
+            errors=errors,
+            extractor=extractor,
+            chunker=chunker,
+            extract_cache=extract_cache,
+            fetch_plan_for=fetch_plan_for,
+            limits_for=limits_for,
+            extractor_factory=extractor_factory,
+            level_extractors=level_extractors,
+        )
+        if outcome.cache_hit:
+            cache_hits += 1
+        if outcome.extracted:
+            reextracted += 1
+        if outcome.missing_bytes:
             # I19: верификация от **содержимого** файла, а не от имени. Retention
             # называет файл ``{sha256 сырых байтов}.bin``, поэтому ``raw_path.stem`` —
             # ожидаемый ключ, а ``_hash_file`` — фактический. ``document_version.content_hash``
             # здесь **не** ключ: это хеш извлечённого текста, а не байтов. Расхождение
             # имени и содержимого означает «сохранённых байтов нет» (файл подменён/битый),
             # а не «контент изменился».
-            try:
-                raw_key = _hash_file(raw_path)
-            except OSError as exc:
-                errors.append(
-                    f"{product_id}/{url}: {label}: чтение retained-байтов "
-                    f"{raw_path}: {type(exc).__name__}: {exc}"
-                )
-            else:
-                if raw_key != raw_path.stem:
-                    raw_key = None
-        if raw_key is None:
             stored_bytes_missing.append(url)
             errors.append(
                 f"{product_id}/{url}: {_reason(FROZEN_STORED_BYTES_MISSING_TEXT)}"
             )
             continue
-
-        plan = fetch_plan_for(url)
-        limits = limits_for(url)
-        level = limits.document_level
-        level_text = _as_text(level)
-        # Зеркало живого пути корня (P5/P8): уровень и механизм PDF — **условие
-        # измерения**, а не свойство «какой экстрактор случайно передали». Без этой
-        # подмены ``frozen`` извлекал документ экстрактором композиции (уровень
-        # ``full``) и штамповал ``extractor_version`` этого уровня, хотя в корпусе
-        # записан объявленный (``layout_tables``): на стенде это дало дрейф
-        # пере-извлечения у 4 из 5 PDF — «тот же файл, другой текст» — и второй
-        # ``doc_version_id`` у выжившего. Отказ фабрики — видимая деградация, не тишина.
-        extractor_obj = _extractor_at(level, limits.pdf_pipeline, url)
-        # Маршрут — по **байтам** сохранённого файла, а не по URL/``Content-Type``: у
-        # retained-файла суффикс ``.bin``, а заголовка ответа в этом прогоне нет. Иначе
-        # PDF, отданный по бессуффиксному URL, ушёл бы в HTML-ветку и дал ложный дрейф.
-        try:
-            probe = probe_artifact(str(raw_path), product_id=product_id, url=url)
-            route = (
-                ExtractionRoute.DOCUMENT
-                if probe.artifact.kind == CLASS_DOCUMENT
-                else ExtractionRoute.AUTO
-            )
-        except Exception as exc:  # noqa: BLE001 — зонд не должен ронять продукт
-            errors.append(
-                f"{product_id}/{url}: frozen: probe: {type(exc).__name__}: {exc} — "
-                "маршрут по URL (байты не классифицированы)"
-            )
-            route = ExtractionRoute.AUTO
-        # ``fetched_at`` — **прежнее** наблюдение байтов, не «сейчас»: нового получения
-        # не было. ``status_code``/``render_mode``/``lang`` не выдумываются.
-        page = RawPage(
-            url=url,
-            content=b"",
-            source_path=str(raw_path),
-            fetched_at=str(prior.last_checked_at or prior_doc.first_seen_at),
-            fetch_mode=plan.fetch,
-            status_code=None,
-            content_type=None,
-            engine=None,
-        )
-        extracted = None
-        if extract_cache is not None:
-            version_token = _cache_extractor_version(extractor_obj, page, route)
-            extracted = extract_cache.get(raw_key, version_token, level_text)
-            if extracted is not None:
-                cache_hits += 1
-        if extracted is None:
-            try:
-                extracted = extractor_obj.extract(page, route)
-            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                errors.append(
-                    f"{product_id}/{url}: frozen: extract: {type(exc).__name__}: {exc}"
-                )
-                continue
-            reextracted += 1
-            if extract_cache is not None:
-                extract_cache.put(extracted, level=level_text, content_hash=raw_key)
-        if getattr(extracted, "error", None):
-            errors.append(
-                f"{product_id}/{url}: frozen: extract: {extracted.error}"
-            )
+        if outcome.doc is None:
+            # Байты есть, конвейер отказал — причина уже в ``errors``.
             continue
-        doc_hash = str(getattr(extracted, "content_hash", "") or "")
-        if not doc_hash:
-            errors.append(
-                f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён"
-            )
-            continue
-        if doc_hash != prior_doc.content_hash:
+        rebuilt = outcome.doc
+        if rebuilt.content_changed:
             # Дрейф пере-извлечения: тот же файл, другой текст. Не «контент изменился»
             # (наблюдения не было), поэтому причина — свой токен.
             reextract_mismatch.append(url)
             errors.append(
                 f"{product_id}/{url}: {FROZEN_REEXTRACT_MISMATCH}: content_hash "
-                f"пере-извлечения {doc_hash} != записанного {prior_doc.content_hash} — "
-                "тот же файл, другой текст текущего движка (смена контента не "
-                "наблюдалась)"
+                f"пере-извлечения {rebuilt.doc_hash} != записанного "
+                f"{prior_doc.content_hash} — тот же файл, другой текст текущего "
+                "движка (смена контента не наблюдалась)"
             )
             continue
-
-        try:
-            chunks = chunker.chunk(extracted, f"{product_id}:{doc_hash}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(
-                f"{product_id}/{url}: frozen: chunk: {type(exc).__name__}: {exc}"
-            )
-            continue
-        partial_fields = _partial_fields(extracted)
-        collected.append(
-            {
-                "url": url,
-                "key": key,
-                "doc_hash": doc_hash,
-                "raw_path": raw_path,
-                "extractor_token": str(
-                    getattr(extracted, "extractor_version", None) or ""
-                ),
-                "level_text": level_text,
-                "partial_fields": partial_fields,
-                "chunks": sorted(
-                    chunks or [], key=lambda chunk: getattr(chunk, "chunk_no", 0)
-                ),
-            }
-        )
+        collected.append(rebuilt)
 
     # --- дедуп и канонический адрес ------------------------------------------- #
     # Группа — ``content_hash``: одинаковый текст двух URL — один документ. Группа
     # расширяется алиасами прошлого снятия (durable), а адрес выбирается ``min(url)``:
     # порядок прохода и host_concurrency на адрес не влияют.
-    by_hash: dict[str, list[dict[str, Any]]] = {}
+    by_hash: dict[str, list[RebuiltDoc]] = {}
     for candidate in collected:
-        by_hash.setdefault(str(candidate["doc_hash"]), []).append(candidate)
+        by_hash.setdefault(candidate.doc_hash, []).append(candidate)
 
     report_docs = 0
     report_chunks = 0
@@ -4135,7 +4592,7 @@ def frozen_bytes_product(
     capture_doc_map: dict[str, CapturedDocRow] = {}
     for doc_hash in sorted(by_hash):
         candidates = by_hash[doc_hash]
-        urls = {str(candidate["url"]) for candidate in candidates}
+        urls = {candidate.url for candidate in candidates}
         urls.update(prior_urls_by_hash.get(doc_hash, ()))
         canonical_url = min(urls)
         groups.append((doc_hash, tuple(sorted(urls))))
@@ -4150,60 +4607,26 @@ def frozen_bytes_product(
                 reuse_kind=ReuseKind.REUSED.value,
             )
 
-        if doc_hash in seen_docs:
-            duplicates[product_id] = duplicates.get(product_id, 0) + 1
-            continue
-        seen_docs[doc_hash] = canonical_url
-
-        chosen = min(candidates, key=lambda candidate: str(candidate["url"]))
-        document_id = f"{product_id}:{doc_hash}"
-        extractor_token = str(chosen["extractor_token"] or "")
-        level_text = str(chosen["level_text"] or "")
-        dv_id = doc_version_id(product_id, doc_hash, extractor_token, level_text)
-        doc = CorpusDoc(
-            doc_id=document_id,
-            product_id=product_id,
-            url=canonical_url,
-            # Получения не было: ``fetched_at``/``render_mode``/``lang`` — NULL. Байты
-            # прежние, поэтому ``http_status`` — тоже NULL (ответа в этом прогоне нет).
-            fetched_at=None,
-            content_hash=doc_hash,
-            raw_path=str(chosen["raw_path"]),
-            extractor_version=extractor_token or None,
-            render_mode=None,
-            lang=None,
-            http_status=None,
-            reuse_kind=ReuseKind.REUSED,
-            **chosen["partial_fields"],
-        )
-        ingest.docs.append(doc)
-        persist_docs(store, [doc], errors, versions_by_doc={document_id: dv_id})
-        accepted = _accept_chunk_candidates(
+        chosen = min(candidates, key=lambda candidate: candidate.url)
+        accepted = _persist_rebuilt_doc(
             product_id,
-            document_id,
-            dv_id,
-            [
-                (
-                    int(getattr(chunk, "chunk_no", 0)),
-                    getattr(chunk, "text", "") or "",
-                    getattr(chunk, "heading_path", "") or "",
-                    getattr(chunk, "context_prefix", "") or "",
-                    str(getattr(chunk, "content_hash", "") or "").strip(),
-                    getattr(chunk, "char_start", None),
-                    getattr(chunk, "char_end", None),
-                )
-                for chunk in chosen["chunks"]
-            ],
-            ingest=ingest,
-            seen_chunk_ids=seen_chunk_ids,
+            canonical_url,
+            chosen,
+            state=state,
             errors=errors,
-            url=canonical_url,
-            lang=None,
             embed_model_id=embed_model_id,
+            store=store,
+            ingest=ingest,
+            seen_docs=seen_docs,
+            seen_chunk_ids=seen_chunk_ids,
+            duplicates=duplicates,
+            doc_counters=doc_counters,
+            persist_docs=persist_docs,
         )
-        count_doc(product_id, reused=True, state=state, doc_counters=doc_counters)
+        if accepted is None:
+            continue
         report_docs += 1
-        report_chunks += len(accepted)
+        report_chunks += accepted
 
     if stored_bytes_missing:
         # Машинный токен с числом — в тот же канал видимых причин, а не только в отчёт:
