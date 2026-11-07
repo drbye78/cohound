@@ -429,7 +429,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 ### W7 — Корпус — ✅ done по коду; ⚠️ под `split` — с расхождениями
 
 ✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:1203` (`host_in_scope`), `:1149`/`:1154`
-(`out_of_scope_subdomains`/`accepted_foreign_hosts`), `core/pipeline/archive_descent.py:110-112`
+(`out_of_scope_subdomains`/`accepted_foreign_hosts`), `core/pipeline/archive_descent.py:111-113`
 (`archive_cycle`/`archive_budget_exhausted` — исчерпание видимо), цепочка 5000 архивов —
 `tests/pipeline/test_corpus_descent.py`.
 ⬜ остаётся паритет `split` (§2.3).
@@ -562,7 +562,7 @@ docs/reports/measurements/` → пусто). В дереве есть тольк
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:837-965` вызывает `_run_serp_contour`
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:883-1011` вызывает `_run_serp_contour`
 (поиск → допуск → расширение seed-набора **до** дренажа, одна сборка), `core/pipeline/search_log.py`
 (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1549`)
@@ -710,7 +710,7 @@ P5), но строка помечена здесь как неактуальна
   `crawl_sources.py` (см. выше).
 - **Параллельная экстракция (P4, as-built).** Ось `crawl.extract_workers` (app < run < site,
   `CrawlLimits.extract_workers`, `crawl_config_digest`/манифест-поле `crawl_extract_workers`) —
-  пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:120`), фабрика
+  пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:128`), фабрика
   `new_extract_pool` в `core/pipeline/corpus_ingest.py:4669`, воркер
   от composition root. `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
   воркер через `core/cli/wiring.py`), `split` — потоки поверх `RemoteExtractor`; шов

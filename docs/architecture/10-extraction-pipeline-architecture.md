@@ -264,7 +264,7 @@ docling — `BaseSettings` с префиксом `DOCLING_`, поэтому бе
 ### Д-2. Результат фазы пересекает границу фазы в памяти (R1, R2)
 
 > ✅ **сделано** (A3/A4, 2026-10-28) — `IndexBuild.docs` **удалён**, вместо него счётчик
-> `doc_count` (`core/pipeline/extraction_runtime.py:575`); `_ProductIngest` отпускает `docs`/`chunks`
+> `doc_count` (`core/pipeline/extraction_runtime.py:606`); `_ProductIngest` отпускает `docs`/`chunks`
 > на границе продукта, оставляя сводку (`:8997-9008`); сайт-эффект единственного
 > потребителя — перенормировки раунда — снят (`core/pipeline/serp_loop.py:444`).
 > Приёмка: `tests/pipeline/test_corpus_phase_boundary.py` (см. §6, группа A).
@@ -347,7 +347,7 @@ fp32-матрицы живут в бюджетном LRU `PartitionCache` (`core
 > ✅ **сделано** (F1, `SCHEMA_VERSION = 3.12.0`) — `crawl_sessions.owner`/`heartbeat_at` в DDL
 > (`core/store/sqlite.py:328-329`), `core/pipeline/liveness.py` (свидетельство живости,
 > recovery-on-open, `interrupt_session`), heartbeat в корпусе
-> (`core/pipeline/corpus.py:1562`), `interrupted` в словаре (`core/domain/enums.py:780`).
+> (`core/pipeline/corpus.py:1608`), `interrupted` в словаре (`core/domain/enums.py:780`).
 > Остаток решения, названный К-4: это **не** lease — переназначения элемента другому
 > исполнителю нет, конфликт двух нод только виден (`owner`).
 
@@ -806,7 +806,7 @@ Run-DB — SQLite: один писатель, локальный файл. На 
 > ✅ **A5 сделан** (write-through): наблюдение контейнера и строка члена пишутся сразу
 > за появлением (`core/pipeline/extract_consume.py:126-178` — синки
 > `persist_observation_sync`/`persist_member_sync`, подключены в `:1041-1042`), а блок в
-> конце фазы (`core/pipeline/corpus.py:3730-3741`) — идемпотентная **страховка**, не
+> конце фазы (`core/pipeline/corpus.py:3776-3787`) — идемпотентная **страховка**, не
 > единственная запись. Приёмка — `tests/pipeline/test_corpus_descent.py:1502`
 > (`test_kill_mid_descent_keeps_settled_member_rows`: `KeyboardInterrupt` на третьем
 > члене оставляет строки двух доведённых), `:1551` (повторный спуск не плодит строки),
@@ -988,7 +988,7 @@ B1 включает B2 (без идентичности нет паритета)
 > (`:379`), а `crawl_config_digest` считается по **резолвнутой карте** — по входу на каждый
 > ключ профиля плюс `__default__` (`core/pipeline/report.py:707-712`), не по скаляру.
 > Применение: `limits.document_level` в извлечении и pre-fetch-пропуске
-> (`core/pipeline/corpus.py:2227,6575,7021`). Открытым остаётся **другой** пункт: под `split`
+> (`core/pipeline/corpus.py:2273,6575,7021`). Открытым остаётся **другой** пункт: под `split`
 > ось не действует вовсе (B3, Д-1.4), и это не про резолвинг, а про шов.
 > ➖ **8.4 снято** — `11` §3.1 отменяет две фазы; реализация любого варианта отсутствует.
 

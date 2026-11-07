@@ -55,8 +55,8 @@ per-host статуса и без различения дискавери и о�
 | per-host[+path] оси и их digest в `run_id` | `domain_profiles.py:49`, `report.py:669` | **не знает продукта** |
 | `product → host+path` слои | `crawl_sources.py:48,77,87` | digest информационный (`models.py:1546`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`package/commands.py:2994`) | — образец для CLI политики |
-| видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1180`), `product_skipped` (`corpus.py:4030`), `incomplete_reasons` (`corpus.py:3896`) | нет токена «запрещено политикой» |
-| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1716,2175`; `corpus_coverage.py:405`) | переиспользуется политическими пропусками |
+| видимые отказы корня/продукта | `out_of_scope_subdomains` (`crawl_frontier.py:1180`), `product_skipped` (`corpus.py:4076`), `incomplete_reasons` (`corpus.py:3942`) | нет токена «запрещено политикой» |
+| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`corpus.py:1762,2221`; `corpus_coverage.py:405`) | переиспользуется политическими пропусками |
 
 **Ни один носитель не даёт «продукт × хост × путь» без ложной идентичности:**
 `crawl_sources.yaml` знает продукт, но не входит в `run_id`; `domain_profiles.yaml` входит в
@@ -196,14 +196,14 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 ### P2 — исполнение: `on_request` и `network_denied` — ✅ сделано
 
-- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`corpus.py:2897`) — **до**
+- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`corpus.py:2943`) — **до**
   `crawl_target` (`:2951`) и `expand_directory` (`:2957`), — и до сборки синтетических корней
   (`_synthetic_root_plans`, `:2801`). Гейт во фронтьере (`crawl_frontier.py:1443,1443,1523`)
   недостаточен: он ниже feed/sitemap-разворота. Порядок закреплён **AST-тестом**
   (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
   вызовов в теле генератора: генератор — это порядок исполнения, текст комментария — нет.
 - ✅ **SERP-контур** глушится политикой с `not_executed_reason=crawl_policy_skipped`
-  (`corpus.py:1858`), находки фильтруются по корню.
+  (`corpus.py:1904`), находки фильтруются по корню.
 - ✅ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks`
   (`corpus_drain.py:168,171`), а не один enum. `bytes` появится в P3 — объявлять значение без
   исполнения значило бы обещать режим, которого нет.
@@ -211,7 +211,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
   `incomplete_reasons` + `truncated_products` (`corpus_commit.py:105`) — тем же каналом, что
-  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1758,3136`). `expected_sources` не уменьшается молча.
+  `HOST_OUT_OF_SHARD_REASON` (`corpus.py:1804,3182`). `expected_sources` не уменьшается молча.
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `:3742` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`

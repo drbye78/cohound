@@ -203,7 +203,7 @@ plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
 | `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`core/pipeline/corpus_driver.py:355-366`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:2204-2253`) | один на прогон, переиспользуется всеми корнями/продуктами |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`core/pipeline/corpus.py:2250-2299`) | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
@@ -346,7 +346,7 @@ top-level URL, затем опрос каталогов, волна 2 — зап
   контейнера, включая пустой и нечитаемый: «внутри нет ингестируемого» — это наблюдение,
   а не отсутствие данных.
 - **Члены извлекаются через фазовый пул экстракции**, с окном упреждения
-  `K = extract_window` и **строгой FIFO-доводкой** (`core/pipeline/extract_consume.py:1002-1038`,
+  `K = extract_window` и **строгой FIFO-доводкой** (`core/pipeline/extract_consume.py:1051-1087`,
   `ArchiveDescentWalker(defer_member=…, window=…)`). Это не оптимизация порядка, а условие
   корректности: `_content_digest` сборки склеивает чанки **в порядке вставки**, а
   `partition_build_id` от порядка **не** зависит. Коммит в порядке завершения дал бы тот же
