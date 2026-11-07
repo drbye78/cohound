@@ -14,7 +14,11 @@ jurisdiction: RU
 doc_domains:
   - "tantorlabs.ru"
   - "tantorlabs.ru/products/dbms"
-  - "docs.tantorlabs.ru"
+  # Корень этого хоста с миграции сайта отдаёт 301 на `https://tantorlabs.ru/docs/`
+  # (маркетинговая страница на чужом для корня хосте) — то есть ноль документов и
+  # `redirect_out_of_scope`. Живая документация — `/tdb/` на том же хосте; проверено
+  # 07.11.2026 (`/tdb/` → 200, `…/tdb/ru/18_6/se/differences.html`).
+  - "docs.tantorlabs.ru/tdb"
   # Прямой путь к Confluence-пространству TANDOCS («База Знаний Tantor»): host-root
   # вики уводит в общую документацию Astra, а не в контент продукта.
   - "wiki.astralinux.ru/tandocs"

@@ -883,6 +883,11 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "max_depth": 8,
             "max_documents": 5000,
+            # Лимит хоста измерен 07.11.2026 (`--crawl-only`, 3 панели по 250–300 док):
+            # `{0.2, 0.5}` даёт 1.57 запроса/с против 0.32 при `{1.0, 5.0}`, отказов
+            # 0 из 891, p50 ответа не изменился. Это нижняя граница терпимого, не потолок.
+            # Держать в синхроне с `domain_profiles.yaml` — иначе `generator_drift` (P7).
+            "rate_limit": {"min_s": 0.2, "max_s": 0.5},
         },
         # Host-root seed (https://database.diasoft.ru/) — корень сайта вендора, а не
         # продукта: любой обход с depth > 0 затянул бы в партицию Q.DataBase страницы

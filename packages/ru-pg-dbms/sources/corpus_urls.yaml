@@ -47,5 +47,10 @@ postgrespro:
 tantor:
 - https://tantorlabs.ru/
 - https://tantorlabs.ru/products/dbms/
-- https://docs.tantorlabs.ru/
+# Корень `/` этого хоста мёртв с миграции сайта: 301 на `https://tantorlabs.ru/docs/`
+# (чужая область ⇒ ноль документов и `redirect_out_of_scope`). Проверено 07.11.2026:
+# `/` → 301 → маркетинговая страница; живая документация — `/tdb/` на том же хосте
+# (`/tdb/` → `…/tdb/ru/18_6/se/differences.html`, 200). Замер темпа этого хоста шёл
+# именно с `/tdb/` (`docs/reports/measurements/2026-11-07-crawl-rate-tantor.md`).
+- https://docs.tantorlabs.ru/tdb/
 - https://wiki.astralinux.ru/tandocs/
