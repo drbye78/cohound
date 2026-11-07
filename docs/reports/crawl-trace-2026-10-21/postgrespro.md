@@ -138,7 +138,7 @@ demo-small-20161013.zip, demo-medium-20161013.zip, demo-big-20161013.zip,
 demo_small.zip, demo_medium.zip, demo_big.zip
 ```
 
-Причина потери класса — `_is_oversize_failure` (`crawl_scrapy.py:503`): предикат ищет
+Причина потери класса — `_is_oversize_failure` (`crawl_scrapy.py:608`): предикат ищет
 `maxsize` / `maximum size` / `downloaded more than` / `too large` / `filesize` /
 `stopdownload`, а Scrapy пишет `larger than download max size`. Проверено прямым вызовом
 на точной строке: `False`.

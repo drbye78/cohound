@@ -87,6 +87,7 @@ from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
     is_terminal_artifact,
 )
+from core.util.http_audit import note_request
 from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
@@ -397,6 +398,11 @@ class HttpCrawler:
         try:
             while True:
                 hop_host = _host_of(current)
+                # Провенанс (07.11.2026): каждый хоп — отдельный запрос к своему хосту.
+                # Считается **до** ``httpx.stream``: отметка = запрос выпущен; хост берётся
+                # из фактического URL хопа, а не из хоста полосы (редирект на чужой хост —
+                # запрос к чужому хосту). Вне попытки фетча (``http_audit.attempt``) — no-op.
+                note_request(current)
                 with httpx.stream(
                     "GET",
                     current,

@@ -40,6 +40,12 @@
   «ждать было нечего», а не «не измеряли».
 * ``fetch_ms`` p50/p95 — nearest-rank по наблюдённым длительностям (та же функция,
   что у метрики краула: один ряд — одна формула).
+* ``http_requests``/``foreign_hosts`` — **фактические** HTTP-запросы попытки, а не число
+  вызовов ``fetch``: лента ``robots.txt``, каждый хоп редиректа и повтор загрузчика — тоже
+  запросы к хосту. Считает транспорт (:mod:`core.util.http_audit`), атрибуция — по
+  фактическому хосту запроса; ``foreign_hosts`` — что ушло не на host полосы (измерено
+  07.11.2026: опубликованный темп панели C был вдвое ниже фактического). Наблюдения нет
+  (кэш, браузер, внедрённый шов) → ``None`` и пустая карта, не ноль.
 
 Нейтрально к предметной категории (§1.3): host — строка из данных, никаких названий
 продуктов и вендоров.
@@ -56,6 +62,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.pipeline.crawl_metric import nearest_rank
+from core.util import http_audit
 from core.util.rate_limit import RateLimiter, normalize_host
 
 __all__ = ["CrawlPacing", "pacing_from_provenance"]
@@ -80,6 +87,11 @@ class _OriginState:
     last_finished: float | None = None
     first_wall: float | None = None
     last_wall: float | None = None
+    #: Фактические HTTP-запросы, ушедшие при обслуживании этого origin'а (роботс, хопы,
+    #: повторы загрузчика). ``http_observed`` отличает «измерено 0» от «не измеряли».
+    http_requests: int = 0
+    http_observed: bool = False
+    foreign_hosts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -203,6 +215,12 @@ class CrawlPacing:
         спящий поток к хосту не обращается, и считать его «в полёте» значило бы завысить
         наблюдённую конкурентность. Пик фиксируется на входе — так он не зависит от того,
         какой из потоков первым отпустит лок.
+
+        Заодно открывается **попытка** учёта фактических HTTP-запросов
+        (:mod:`core.util.http_audit`): транспорт отмечает каждый выпущенный запрос, и на
+        выходе их число сводится в ``http_requests``/``foreign_hosts`` origin'а. Учёт
+        необязателен: путь, который не отмечает запросы (кэш, браузер, внедрённый шов),
+        публикует ``http_requests: None`` — «не измеряли», а не ноль.
         """
         origin = normalize_host(host)
         started = self._clock()
@@ -221,12 +239,15 @@ class CrawlPacing:
             if product.first_started is None:
                 product.first_started = started
                 product.first_wall = started_wall
+        audit: http_audit.HttpAudit | None = None
         try:
-            yield
+            with http_audit.attempt(origin) as audit:
+                yield
         finally:
             finished = self._clock()
             finished_wall = self._wall()
             elapsed_ms = int((finished - started) * 1000)
+            observed = audit.snapshot() if audit is not None else None
             with self._lock:
                 state.in_flight -= 1
                 state.fetch_ms.append(elapsed_ms)
@@ -239,6 +260,13 @@ class CrawlPacing:
                 product.last_finished = _latest(product.last_finished, finished)
                 if product.last_finished == finished:
                     product.last_wall = finished_wall
+                if observed is not None and observed["http_requests"] is not None:
+                    state.http_requests += int(observed["http_requests"])
+                    state.http_observed = True
+                    for foreign_host, count in observed["foreign_hosts"].items():
+                        state.foreign_hosts[foreign_host] = (
+                            state.foreign_hosts.get(foreign_host, 0) + int(count)
+                        )
 
     def snapshot(self) -> dict[str, Any]:
         """Снимок наблюдений: ``{hosts, products, total}`` (детерминированный порядок).
@@ -256,6 +284,9 @@ class CrawlPacing:
                     state.last_finished,
                     state.first_wall,
                     state.last_wall,
+                    state.http_requests,
+                    state.http_observed,
+                    dict(state.foreign_hosts),
                 )
                 for host, state in self._origins.items()
             }
@@ -278,8 +309,22 @@ class CrawlPacing:
         total_last: float | None = None
         total_first_wall: float | None = None
         total_last_wall: float | None = None
+        total_http: int = 0
+        total_http_observed = False
+        total_foreign: dict[str, int] = {}
         for host in sorted(origins):
-            requests, peak, values, first, last, first_wall, last_wall = origins[host]
+            (
+                requests,
+                peak,
+                values,
+                first,
+                last,
+                first_wall,
+                last_wall,
+                http_requests,
+                http_observed,
+                foreign,
+            ) = origins[host]
             all_values.extend(values)
             window = _published_window(first, last)
             wait = waits.get(host) or {"waits": 0, "waited_s": 0.0}
@@ -293,7 +338,18 @@ class CrawlPacing:
                 "window_s": window,
                 "first_request_at": _iso_utc(first_wall),
                 "last_request_at": _iso_utc(last_wall),
+                # Фактические HTTP-запросы (лента, хопы, повторы) — провенанс нагрузки.
+                # ``None`` — наблюдения не было (кэш/браузер/внедрённый шов), не ноль.
+                "http_requests": http_requests if http_observed else None,
+                "foreign_hosts": dict(sorted(foreign.items())),
             }
+            if http_observed:
+                total_http += int(http_requests)
+                total_http_observed = True
+                for foreign_host, count in foreign.items():
+                    total_foreign[foreign_host] = (
+                        total_foreign.get(foreign_host, 0) + int(count)
+                    )
             total_first = _earliest(total_first, first)
             total_last = _latest(total_last, last)
             total_first_wall = _earliest(total_first_wall, first_wall)
@@ -359,6 +415,10 @@ class CrawlPacing:
             "window_s": total_window,
             "first_request_at": _iso_utc(total_first_wall),
             "last_request_at": _iso_utc(total_last_wall),
+            # Фактические запросы: сумма по origin'ам; ``None`` — ни один origin не
+            # наблюдался (не «ноль запросов»).
+            "http_requests": total_http if total_http_observed else None,
+            "foreign_hosts": dict(sorted(total_foreign.items())),
         }
         return {
             "hosts": hosts,

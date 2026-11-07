@@ -852,17 +852,25 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
     rows = metric.get("per_host") or []
     if rows:
         header = (
-            f"{'host':<28} {'items':>6} {'requests':>9} {'req/s':>8} {'peak':>5} "
-            f"{'wait_s':>8} {'min_ivl_s':>10} {'med_ivl_s':>10} "
-            f"{'declared_s':>11} {'short':>11} {'p50_ms':>7} {'p95_ms':>7} {'unknown':>8}"
+            f"{'host':<28} {'items':>6} {'requests':>9} {'http':>6} {'req/s':>8} "
+            f"{'peak':>5} {'wait_s':>8} {'min_ivl_s':>10} {'med_ivl_s':>10} "
+            f"{'declared_s':>11} {'short':>11} {'p50_ms':>7} {'p95_ms':>7} "
+            f"{'unknown':>8} {'foreign':>10}"
         )
         lines.append("  " + header)
         for row in rows:
             short = row.get("intervals_below_declared")
             total = row.get("intervals_total") or 0
+            foreign = row.get("foreign_hosts") or {}
+            foreign_text = (
+                ",".join(f"{host}={count}" for host, count in sorted(foreign.items()))
+                if foreign
+                else "—"
+            )
             lines.append(
                 "  "
                 + f"{row['host']:<28} {row['items']:>6} {row['requests']:>9} "
+                f"{_fmt_metric(row.get('http_requests'), 0):>6} "
                 f"{_fmt_metric(row.get('requests_per_s')):>8} "
                 f"{_fmt_metric(row.get('in_flight_max'), 0):>5} "
                 f"{_fmt_metric(row.get('limiter_waited_s')):>8} "
@@ -872,7 +880,8 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
                 f"{(f'{short}/{total}' if short is not None else '—'):>11} "
                 f"{_fmt_metric((row.get('fetch_ms') or {}).get('p50'), 0):>7} "
                 f"{_fmt_metric((row.get('fetch_ms') or {}).get('p95'), 0):>7} "
-                f"{row.get('fetch_ms_unknown', 0):>8}"
+                f"{row.get('fetch_ms_unknown', 0):>8} "
+                f"{foreign_text:>10}"
             )
         pacing_total = (metric.get("pacing") or {}).get("total") or {}
         if pacing_total:
@@ -880,7 +889,7 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
             lines.append(
                 "  pacing total: hosts={hosts} products={products} requests={requests} "
                 "req/s={rate} in_flight_max={peak} limiter_waits={waits} "
-                "limiter_waited_s={waited}".format(
+                "limiter_waited_s={waited} http_requests={http} foreign_hosts={foreign}".format(
                     hosts=pacing_total.get("hosts", 0),
                     products=pacing_total.get("products", 0),
                     requests=pacing_total.get("requests", 0),
@@ -888,6 +897,14 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
                     peak=pacing_total.get("in_flight_max", 0),
                     waits=pacing_total.get("limiter_waits", 0),
                     waited=_fmt_metric(pacing_total.get("limiter_waited_s")),
+                    http=_fmt_metric(pacing_total.get("http_requests"), 0),
+                    foreign=",".join(
+                        f"{host}={count}"
+                        for host, count in sorted(
+                            (pacing_total.get("foreign_hosts") or {}).items()
+                        )
+                    )
+                    or "—",
                 )
             )
     else:

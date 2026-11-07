@@ -49,6 +49,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urljoin
 
+from core.util.http_audit import note_request
 from core.util.security import validate_url
 
 __all__ = [
@@ -101,6 +102,10 @@ def follow_validated_redirects(
     current = url
     hops = 0
     while True:
+        # Провенанс (07.11.2026): хоп — это HTTP-запрос к **своему** URL; без отметки
+        # цепочка редиректов уходила бы вне счётчика нагрузки на хост. Вне попытки
+        # фетча отметка — no-op.
+        note_request(current)
         response = fetch_hop(current)
         try:
             status = int(response.status_code)

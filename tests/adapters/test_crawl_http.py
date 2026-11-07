@@ -1015,3 +1015,56 @@ def test_live_redirect_chain_reveals_which_hop_was_rejected(tmp_path: Path) -> N
         assert "10.0.0.1" in str(excinfo.value)
         # Первый (безопасный) хоп исполнен, второй — нет.
         assert server.seen == ["/start", "/middle"]
+
+
+# ---------------------------------------------------------------------------
+# Провенанс нагрузки: каждый выпущенный запрос считается по фактическому хосту
+# ---------------------------------------------------------------------------
+
+
+def test_redirect_hops_are_counted_as_http_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Редирект — отдельный HTTP-запрос: 2 хопа ⇒ ``http_requests == 2``.
+
+    Атрибуция — по фактическому хосту хопа: уход на объявленный чужой хост виден в
+    ``foreign_hosts`` (измерено 07.11.2026: хопы редиректов шли вне счётчика темпа).
+    """
+    from core.util import http_audit
+
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(url=URL, status_code=302, location="https://other.test/final"),
+            _FakeResponse(url="https://other.test/final", content=BODY, status_code=200),
+        ],
+        cache,
+    )
+
+    with http_audit.attempt("example.com") as audit:
+        crawler.fetch(URL)
+
+    assert [call[0] for call in fake.calls] == [URL, "https://other.test/final"]
+    assert audit.snapshot() == {
+        "http_requests": 2,
+        "foreign_hosts": {"other.test": 1},
+    }
+
+
+def test_no_attempt_means_no_observation_not_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Вне попытки фетча учёт не ведётся: счётчик остаётся «не измеряли»."""
+    from core.util import http_audit
+
+    cache = ContentAddressedCache(tmp_path)
+    crawler, _fake = _crawler_with_httpx(
+        monkeypatch, [_FakeResponse(content=BODY, status_code=200)], cache
+    )
+
+    crawler.fetch(URL)  # вне http_audit.attempt — отметок нет
+
+    audit = http_audit.HttpAudit("example.com")
+    assert audit.snapshot() == {"http_requests": None, "foreign_hosts": {}}
+    assert http_audit.current_attempt() is None

@@ -10,13 +10,25 @@ I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``por
   вообще не обращается к ленте (проверено по исходнику установленной 2.19.0:
   ``process_request`` начинается с этой проверки). До исправления объявленное
   ``crawl.robots: false`` на Scrapy-пути **не действовало** — конфиг врал;
+* **лента ``robots.txt`` — один раз на origin, а не на документ.** Стоковый
+  ``RobotsTxtMiddleware`` кеширует разобранную ленту в своём ``_parsers``, а инстанс
+  создаётся заново на каждый ``CrawlerRunner``, то есть на каждый ``fetch``: лента
+  перезапрашивалась на каждый документ (измерено 07.11.2026: у ``docs.tantorlabs.ru``
+  ``/robots.txt`` → 301 на чужой хост → 404, поэтому на документ уходил лишний запрос на
+  нужный хост **и** запрос на чужой — вне объявленного лимита и вне счётчика). Подкласс
+  :func:`_shared_robots_middleware_class` держит **общий на процесс** кеш разобранных
+  лент; проверка каждого запроса (и каждого хопа редиректа) остаётся на middleware, поэтому
+  политика §10 не ослаблена. Кешируются только **разрешённые** ленты (парсер или
+  «ленты нет»); ``Deferred`` не кешируется (привязан к закрытому краулеру), а недоступная
+  лента — тем более (иначе сбой чтения стал бы вечным разрешением);
 * **похоповая валидация редиректов** (R10) — стоковые ``RedirectMiddleware`` и
   ``MetaRefreshMiddleware`` заменяются подклассами, которые проверяют цель каждого хопа
   (``validate_url``) и при нарушении поднимают ``IgnoreRequest``, **не** выпуская запрос;
   отказ доезжает до вызывающего как ``CrawlUrlError`` (см. ``_redirect_guard_classes``);
 * **playwright per-request** — при ``plan.fetch is FetchMode.BROWSER`` запрос идёт с
   ``playwright``-meta (снимок после готовности JS, ``plan.wait_for``; V5-оговорки 05 §2.5);
-* **retries/backoff** — через настройки Scrapy (``RETRY_TIMES``/``DOWNLOAD_DELAY``);
+* **retries/backoff** — через настройки Scrapy (``RETRY_TIMES``); свой пейсинг Scrapy
+  выключен (``DOWNLOAD_DELAY=0``) — темп задаёт ``RateLimiter`` (см. ниже);
 * **content-addressed кэш** — перед живым фетчем консультируется глобальный кэш
   (``core.util.cache``, ADR 0016): попадание → ``RawPage`` из байтов, промах →
   фетч + ``put_bytes("http", http_key(url), content)`` (R7 между ``run_id``).
@@ -100,6 +112,7 @@ from core.ports.crawl_errors import (
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
+from core.util.http_audit import current_attempt
 from core.util.security import validate_url
 
 #: Таксономия сбоев (``CrawlError`` и подклассы) объявлена в **порту** —
@@ -133,8 +146,29 @@ DEFAULT_SCRAPY_SETTINGS: dict[str, Any] = {
     # Повторы/backoff на уровне загрузчика (05 §2.5).
     "RETRY_TIMES": 2,
     "RETRY_HTTP_CODES": [408, 429, 500, 502, 503, 504, 522, 524],
-    "DOWNLOAD_DELAY": 0.5,
+    # **Пейсинг один — ``RateLimiter``** (``core/util/rate_limit.py``, объявленная ось
+    # ``rate_limit``). ``DOWNLOAD_DELAY`` = 0 намеренно, и ключ оставлен явной
+    # декларацией: раньше здесь стояло 0.5, и это был **второй** пейсер поверх лимитера,
+    # не входивший ни в ``crawl_config_digest``, ни в ``run_id``. Как «вежливость» он
+    # бессмысленен (``fetch`` строит свежий ``CrawlerRunner`` на документ, поэтому
+    # интервал между документами он не соблюдает), но начисляет 0.25–0.75 с **внутри**
+    # одной попытки — между запросом ленты и страницы. Измерено 07.11.2026 на
+    # ``docs.tantorlabs.ru`` (5 URL, ``fetch_ms`` p50): ``plan.robots=False`` — 147 мс;
+    # ``robots=True`` + ``DOWNLOAD_DELAY=0`` — 246 мс; штатные настройки — **1409 мс**
+    # при собственном времени ответа хоста ≈100 мс
+    # (``docs/reports/measurements/2026-11-07-crawl-rate-tantor.md`` §4, §7.5).
+    # A3: скрытый default заменён замером, а не предусмотрительностью.
+    "DOWNLOAD_DELAY": 0,
+    # Джойтер к задержке явно нулевой: при нулевой задержке он и так ничего не даёт, но
+    # пусть «скрытой задержки нет» будет декларацией, а не следствием арифметики.
+    "DOWNLOAD_DELAY_JITTER": 0,
     "DOWNLOAD_TIMEOUT": 30,
+    # Не потолок ширины краула: ``CONCURRENT_REQUESTS_PER_DOMAIN`` действует **внутри
+    # одного downloader'а**, а downloader здесь свой на каждый ``fetch`` (свежий
+    # ``CrawlerRunner``) — то есть это не более двух одновременных запросов одной попытки,
+    # а не limit на хост. Ширина обхода задаётся пулом/полосами узла
+    # (``config/deploy.yaml: crawl.max_workers/host_concurrency``); замер: 5 потоков давали
+    # ``in_flight_max`` 5–6, то есть эта настройка потолком не работала.
     "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
     # asyncio-реактор обязателен для scrapy-playwright при concurrency>1 (V5).
     # NB: под CrawlerRunner настройка инертна — реактор ставит воркер; оставлена
@@ -597,6 +631,140 @@ _STOCK_REDIRECT_MIDDLEWARES: tuple[str, ...] = (
 #: Приоритеты взяты у стоковых middleware (``DOWNLOADER_MIDDLEWARES_BASE``).
 _REDIRECT_MIDDLEWARE_PRIORITY = 600
 _METAREFRESH_MIDDLEWARE_PRIORITY = 580
+
+#: Стоковый ``RobotsTxtMiddleware`` Scrapy — заменяется подклассом с общим кешем лент.
+_STOCK_ROBOTS_MIDDLEWARE = "scrapy.downloadermiddlewares.robotstxt.RobotsTxtMiddleware"
+#: Приоритет стокового ``RobotsTxtMiddleware`` (``DOWNLOADER_MIDDLEWARES_BASE``).
+_ROBOTS_MIDDLEWARE_PRIORITY = 100
+#: Счётчик фактических запросов ставится **сразу после** robots: запрос, который robots
+#: запретил, в сеть не уходил и HTTP-запросом не является, а сама лента
+#: (``meta dont_obey_robotstxt``) проходит дальше и считается.
+_HTTP_AUDIT_MIDDLEWARE_PRIORITY = 105
+
+#: Внутренний канал «адаптер → downloader-middleware»: счётчик фактических HTTP-запросов
+#: текущей попытки (:mod:`core.util.http_audit`). Не пользовательская настройка Scrapy —
+#: ``CrawlerRunner`` строится на один ``fetch``, поэтому объект живёт ровно одну попытку.
+#: Через ``settings``, а не через ``meta``: запрос ленты создаёт сам Scrapy (своя ``meta``),
+#: и привязать его к попытке можно только уровнем краулера.
+_HTTP_AUDIT_SETTING = "COHOUND_HTTP_AUDIT"
+
+#: Общий на процесс кеш разобранных лент ``robots.txt``: ``(netloc, user_agent) -> парсер``.
+#: Кешируются только **разрешённые** ленты — парсер и «ленты нет» (404/410): это наблюдение
+#: origin'а. ``Deferred`` не кешируется (привязан к краулеру, который закрывается), а
+#: недоступная лента (`None`) — тем более: сбой чтения не должен стать вечным разрешением.
+#: Ключ включает user-agent: у разных агентов лента разная, смешивать их нельзя.
+_ROBOTS_CACHE: dict[tuple[str, str], Any] = {}
+_ROBOTS_CACHE_LOCK = threading.Lock()
+
+
+def _clear_robots_cache() -> None:
+    """Сброс кеша лент ``robots.txt`` (тесты; смена набора операторских настроек)."""
+    with _ROBOTS_CACHE_LOCK:
+        _ROBOTS_CACHE.clear()
+
+
+@lru_cache(maxsize=1)
+def _shared_robots_middleware_class() -> type:
+    """Подкласс ``RobotsTxtMiddleware`` с **общим на процесс** кешем разобранных лент.
+
+    Зачем. Стоковый middleware кеширует ленту в ``self._parsers``, а инстанс создаётся
+    вместе с ``CrawlerRunner`` на каждый ``fetch`` ⇒ кеш живёт один документ. Измерено
+    07.11.2026 (``docs/reports/measurements/2026-11-07-crawl-rate-tantor.md`` §7.5): у
+    ``docs.tantorlabs.ru`` лента отдаёт ``301`` на чужой хост и ``404``, поэтому на каждый
+    документ уходило **два** лишних запроса — на нужный хост и на чужой, вне объявленного
+    лимита и вне счётчика темпа.
+
+    **Семантика проверки не меняется**: middleware остаётся включённым на том же
+    приоритете, ``process_request`` спрашивает парсер для **каждого** запроса (включая
+    хопы редиректов), отказ по-прежнему ``IgnoreRequest("Forbidden by robots.txt")`` —
+    его и распознаёт :func:`_is_robots_refusal` (``robots_disallow``). Кешируется только
+    результат разбора ленты, а не решение по URL.
+
+    Кешируются **только** разрешённые ленты: парсер (в том числе разобранная пустая лента —
+    «правил нет», это наблюдение ``404``/``410``) и ничего больше. ``super().robot_parser``
+    возвращает ``None`` при ошибке чтения (``_robots_error``), и ``None`` не кешируется:
+    каждая следующая попытка спросит origin снова, то есть недоступность не превращается
+    в разрешение навсегда. ``Deferred`` в общий кеш не попадает никогда — он принадлежит
+    краулеру, который будет закрыт.
+
+    Трактовка ``301``/``404`` не расходится с ``RobotsGate`` (путь ``http``,
+    ``core/util/robots.py:368-375``): цепочка редиректов ленты проходится штатным
+    ``RedirectMiddleware`` (с похоповой SSRF-проверкой), итоговый ответ разбирается тем же
+    ``ROBOTSTXT_PARSER``; ``404`` — «ленты нет» = разрешено, недоступность — нет.
+    """
+    from scrapy.downloadermiddlewares.robotstxt import (  # type: ignore[import-not-found]
+        RobotsTxtMiddleware,
+    )
+    from scrapy.utils.httpobj import urlparse_cached  # type: ignore[import-not-found]
+
+    class _SharedRobotsTxtMiddleware(RobotsTxtMiddleware):  # type: ignore[misc]
+        """``RobotsTxtMiddleware`` + общий кеш лент по ``(origin, user-agent)``."""
+
+        def _cache_key(self, request: Any) -> tuple[str, str]:
+            """Ключ кеша: origin запроса и **тот же** user-agent, которым решается доступ.
+
+            Агент берётся там же, где его берёт стоковый ``process_request_2``: настройка
+            ``ROBOTSTXT_USER_AGENT``, иначе заголовок запроса, иначе ``USER_AGENT``
+            краулера. Другой агент — другой ключ: лента для одного агента не описывает
+            политику для другого.
+            """
+            netloc = urlparse_cached(request).netloc
+            agent = self.crawler.settings.get("ROBOTSTXT_USER_AGENT")
+            if not agent:
+                agent = request.headers.get(
+                    b"User-Agent", self.crawler.settings["USER_AGENT"]
+                )
+            text = agent.decode("latin-1") if isinstance(agent, bytes) else str(agent)
+            return netloc, text
+
+        async def robot_parser(self, request: Any) -> Any:
+            """Парсер ленты origin'а: из общего кеша, иначе штатное чтение с запоминанием."""
+            key = self._cache_key(request)
+            with _ROBOTS_CACHE_LOCK:
+                cached = _ROBOTS_CACHE.get(key)
+            if cached is not None:
+                return cached
+            parser = await super().robot_parser(request)
+            if parser is not None:
+                with _ROBOTS_CACHE_LOCK:
+                    _ROBOTS_CACHE[key] = parser
+            return parser
+
+    return _SharedRobotsTxtMiddleware
+
+
+@lru_cache(maxsize=1)
+def _http_audit_middleware_class() -> type:
+    """Downloader-middleware, отмечающий **каждый** запрос, дошедший до загрузчика.
+
+    Источник числа — сам загрузчик, а не форма URL: middleware вызывается на каждый
+    выпускаемый запрос (лента ``robots.txt``, хоп редиректа, повтор после повтора), и
+    атрибуция идёт по ``request.url`` — фактическому хосту запроса, а не хосту полосы.
+    Это провенанс (``pacing.http_requests``/``foreign_hosts``), не контракт.
+    """
+
+    class _HttpAuditMiddleware:
+        """Считает запросы текущей попытки в переданный счётчик."""
+
+        def __init__(self, audit: Any) -> None:
+            self._audit = audit
+
+        @classmethod
+        def from_crawler(cls, crawler: Any) -> _HttpAuditMiddleware:
+            """Берёт счётчик из настроек краулера; без него middleware не нужен."""
+            from scrapy.exceptions import NotConfigured  # type: ignore[import-not-found]
+
+            audit = crawler.settings.get(_HTTP_AUDIT_SETTING)
+            if audit is None:
+                # Учёт не запрошен (кэш-попадание/юнит-тест настроек): ничего не выдумываем.
+                raise NotConfigured
+            return cls(audit)
+
+        def process_request(self, request: Any) -> None:
+            """Отмечает запрос перед выпуском (``None`` — пропустить дальше без изменений)."""
+            self._audit.note(request.url)
+
+    return _HttpAuditMiddleware
 
 
 @lru_cache(maxsize=1)
@@ -1130,8 +1298,10 @@ class ScrapyCrawler:
         404/410 и прочие не-2xx обязаны остаться на errback-пути с прежней
         классификацией.
 
-        Там же (после переопределений) ставится redirect-middleware с похоповой
-        валидацией (R10, см. :meth:`_install_redirect_guard`).
+        Там же (после переопределений) ставятся middleware политики и учёта:
+        redirect с похоповой валидацией (R10, см. :meth:`_install_redirect_guard`),
+        подкласс ``RobotsTxtMiddleware`` с общим кешем лент (:meth:`_install_robots_cache`)
+        и счётчик фактических HTTP-запросов (:meth:`_install_http_audit`).
         """
         settings = dict(DEFAULT_SCRAPY_SETTINGS)
         cap = self._cap_for(plan)
@@ -1155,7 +1325,41 @@ class ScrapyCrawler:
             statuses.append(304)
         settings["HTTPERROR_ALLOWED_CODES"] = statuses
         self._install_redirect_guard(settings)
+        self._install_robots_cache(settings)
+        self._install_http_audit(settings)
         return settings
+
+    @staticmethod
+    def _install_robots_cache(settings: dict[str, Any]) -> None:
+        """Заменяет стоковый ``RobotsTxtMiddleware`` подклассом с общим кешем лент.
+
+        Ставится **после** переопределений оператора — по той же логике, что redirect
+        guard: политика §10 не должна теряться из-за забывчивости конфига. Стоковый
+        отключается (``None`` — штатный способ Scrapy убрать компонент из
+        ``DOWNLOADER_MIDDLEWARES_BASE``), подкласс занимает его приоритет.
+        """
+        middleware = dict(settings.get("DOWNLOADER_MIDDLEWARES") or {})
+        middleware[_STOCK_ROBOTS_MIDDLEWARE] = None
+        middleware[_shared_robots_middleware_class()] = _ROBOTS_MIDDLEWARE_PRIORITY
+        settings["DOWNLOADER_MIDDLEWARES"] = middleware
+
+    @staticmethod
+    def _install_http_audit(settings: dict[str, Any]) -> None:
+        """Ставит счётчик фактических HTTP-запросов, если попытка его запросила.
+
+        Попытку открывает прибор темпа (:meth:`core.pipeline.crawl_pacing.CrawlPacing.request`);
+        счётчик берётся из ``threading.local()`` вызывающего потока — движок исполняется в
+        потоке реактора, поэтому объект передаётся явно через настройки краулера.
+        Попытки нет (прямой вызов адаптера, кэш-попадание) — middleware не ставится:
+        «не измеряли» честнее выдуманного нуля.
+        """
+        audit = current_attempt()
+        if audit is None:
+            return
+        settings[_HTTP_AUDIT_SETTING] = audit
+        middleware = dict(settings.get("DOWNLOADER_MIDDLEWARES") or {})
+        middleware[_http_audit_middleware_class()] = _HTTP_AUDIT_MIDDLEWARE_PRIORITY
+        settings["DOWNLOADER_MIDDLEWARES"] = middleware
 
     @staticmethod
     def _install_redirect_guard(settings: dict[str, Any]) -> None:

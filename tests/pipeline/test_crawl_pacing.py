@@ -333,3 +333,78 @@ def test_contract_digest_is_unchanged_when_pacing_is_measured() -> None:
     assert execution_contract_digest(values) == baseline
     with pytest.raises(ValueError, match="неизвестные поля"):
         execution_contract_digest({**values, "pacing": measured})
+
+# --------------------------------------------------------------------------- #
+# (7) Фактические HTTP-запросы: лента, хопы редиректов, повторы загрузчика
+# --------------------------------------------------------------------------- #
+
+
+def test_http_requests_and_foreign_hosts_are_aggregated_by_origin() -> None:
+    """``http_requests`` — запросы, а не вызовы ``fetch``; чужой хост виден отдельно.
+
+    Измерено 07.11.2026: на панели C опубликованный темп был вдвое ниже фактического,
+    потому что лента ``robots.txt`` и хопы редиректов в счётчик попыток не попадали.
+    """
+    from core.util.http_audit import note_request
+
+    pacing = CrawlPacing()
+    with pacing.request("p1", HOST):
+        note_request(f"https://{HOST}/robots.txt")
+        note_request(f"https://{HOST}/page")
+        note_request("https://other.test/docs/robots.txt")
+    with pacing.request("p1", HOST):
+        note_request(f"https://{HOST}/page-2")
+
+    snapshot = pacing.snapshot()
+    host = snapshot["hosts"][HOST]
+    assert host["requests"] == 2  # попытки фетча не подменяются числом запросов
+    assert host["http_requests"] == 4
+    assert host["foreign_hosts"] == {"other.test": 1}
+    assert snapshot["total"]["http_requests"] == 4
+    assert snapshot["total"]["foreign_hosts"] == {"other.test": 1}
+    # Тот же носитель, что уходит в provenance_json: числа не теряются по дороге.
+    block = pacing_from_provenance({"pacing": snapshot})
+    assert block is not None
+    assert block["hosts"][HOST]["http_requests"] == 4
+
+
+def test_http_requests_not_observed_is_none_not_zero() -> None:
+    """Попытка без отметок (кэш/внедрённый шов) — «не измеряли», а не «0 запросов»."""
+    pacing = CrawlPacing()
+    with pacing.request("p1", HOST):
+        pass
+
+    host = pacing.snapshot()["hosts"][HOST]
+    assert host["http_requests"] is None
+    assert host["foreign_hosts"] == {}
+    assert pacing.snapshot()["total"]["http_requests"] is None
+    assert pacing.snapshot()["total"]["foreign_hosts"] == {}
+
+
+def test_http_audit_does_not_leak_between_worker_threads() -> None:
+    """Параллельные попытки на разных origin'ах не смешивают счётчики (``threading.local``)."""
+    from core.util.http_audit import note_request
+
+    pacing = CrawlPacing()
+    barrier = threading.Barrier(2)
+
+    def one(host: str, requests: int) -> None:
+        with pacing.request("p1", host):
+            for index in range(requests):
+                note_request(f"https://{host}/{index}")
+            barrier.wait(timeout=5)
+
+    threads = [
+        threading.Thread(target=one, args=("a.test", 2)),
+        threading.Thread(target=one, args=("b.test", 3)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    hosts = pacing.snapshot()["hosts"]
+    assert hosts["a.test"]["http_requests"] == 2
+    assert hosts["b.test"]["http_requests"] == 3
+    assert hosts["a.test"]["foreign_hosts"] == {}
+    assert hosts["b.test"]["foreign_hosts"] == {}
