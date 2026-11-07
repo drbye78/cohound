@@ -53,7 +53,6 @@ from mdit_py_plugins.deflist import deflist_plugin
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 from mdit_py_plugins.footnote import footnote_plugin
 from mdit_py_plugins.front_matter import front_matter_plugin
-from mdit_py_plugins.gfm_autolink import gfm_autolink_plugin
 from mdit_py_plugins.superscript import superscript_plugin
 from mdit_py_plugins.tasklists import tasklists_plugin
 
@@ -295,7 +294,14 @@ def _parser(profile: str, *, front_matter: bool) -> MarkdownIt:
     md = MarkdownIt("commonmark")
     if profile in ("gfm", "pandoc"):
         md = md.enable("table").enable("strikethrough")
-        md = md.use(gfm_autolink_plugin).use(tasklists_plugin)
+        # Плагин пакета зацикливается на ``www.`` в подписи ссылки (silent-ветка не
+        # двигает ``state.pos`` ⇒ ``parseLinkLabel`` не выходит из цикла). Наш — тот же
+        # код с исправленной silent-веткой; см. :mod:`core.adapters.md_gfm_autolink`.
+        from core.adapters.md_gfm_autolink import (  # noqa: PLC0415
+            gfm_autolink_plugin as _fixed_gfm_autolink_plugin,
+        )
+
+        md = md.use(_fixed_gfm_autolink_plugin).use(tasklists_plugin)
     if front_matter and profile != "commonmark":
         md = md.use(front_matter_plugin)
     if profile == "pandoc":
