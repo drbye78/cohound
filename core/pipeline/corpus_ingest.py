@@ -117,6 +117,14 @@ from core.pipeline.manual_artifacts import (
 from core.pipeline.refresh_modes import dispatch_refresh
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
+from core.ports.crawl_errors import (
+    CrawlError,
+    CrawlNotFound,
+    CrawlPayloadTooLarge,
+    CrawlRefused,
+    CrawlUnavailable,
+    CrawlUrlError,
+)
 from core.ports.crawl_executor import (
     ACTIVE_JOB_STATUSES,
     CrawlExecutorPort,
@@ -2610,13 +2618,120 @@ def local_prefetch(
     )
 
 
+#: Сколько раз живой фетч повторяется на транзиентный исход (сверх первой попытки).
+#: Число совпадает с прежним ``RETRY_TIMES`` движка Scrapy (2), чтобы по числу попыток
+#: поведение не менялось — изменилось только то, что каждая попытка берёт свой слот
+#: лимитера (см. ``_fetch_with_paced_retries``). **Не** ось контракта: это исполнение, а
+#: не условие измерения, и в ``run_id``/``crawl_config_digest`` оно не входит.
+FETCH_RETRY_TIMES = 2
+
+#: HTTP-статусы, повторяемые сверх 5xx: ``408`` (таймаут запроса) и ``429`` (rate limit) —
+#: не сбой источника, а просьба «попробуй позже»; слот лимитера и есть это «позже».
+FETCH_RETRY_STATUSES: frozenset[int] = frozenset({408, 429})
+
+#: Классы отказа, которые повтор **не** лечит: отказ политики (robots), отклонённый SSRF,
+#: определённое «ресурса нет», превышение потолка, недоступный движок.
+_TERMINAL_FETCH_ERRORS: tuple[type[BaseException], ...] = (
+    CrawlUrlError,
+    CrawlRefused,
+    CrawlUnavailable,
+    CrawlNotFound,
+    CrawlPayloadTooLarge,
+)
+
+
+def _is_transient_fetch_error(exc: BaseException) -> bool:
+    """Несёт ли исход повод для повтора (транзиентность), а не терминальный ответ.
+
+    Повторяются ровно две вещи: **сетевой сбой до ответа** (``CrawlError`` без статуса —
+    так адаптеры оборачивают таймаут/обрыв/DNS) и **HTTP-ответ с ``http_status`` 5xx**
+    либо 408/429. Терминальные классы (:data:`_TERMINAL_FETCH_ERRORS`) и статусы
+    ``4xx``/``403`` — нет: там повтор адресован тому, что уже ответило отказом.
+
+    Транспорты (``http``/``scrapy``/``browser``) по контракту поднимают ``CrawlError``;
+    прочие исключения — дефект, а не сетевой исход, и трижды его повторять незачем.
+    """
+    if isinstance(exc, _TERMINAL_FETCH_ERRORS):
+        return False
+    if not isinstance(exc, CrawlError):
+        return False
+    status = getattr(exc, "http_status", None)
+    if isinstance(status, int):
+        return status >= 500 or status in FETCH_RETRY_STATUSES
+    # Статуса нет — ответ до нас не дошёл: таймаут, обрыв, DNS. Повтор осмыслен.
+    return True
+
+
+def _fetch_with_paced_retries(
+    desc: LocalFetch,
+    *,
+    limiter: RateLimiter,
+    pacing: CrawlPacing | None = None,
+) -> RawPage:
+    """Живой фетч с повторами, **каждый из которых берёт свой слот** лимитера.
+
+    Один помощник на оба пути (пуловой :func:`local_fetch` и inline
+    :func:`fetch_and_commit`): ретрай, живущий только в одном из них, — тот же дефект,
+    что был у движка, только незаметнее.
+
+    Поведение:
+
+    * **пауза между попытками** — не изобретённая экспонента, а сам ``RateLimiter``:
+      ``wait_reserved`` перед каждой попыткой резервирует новый слот origin'а и спит до
+      него. ``RawPage`` заголовков не несёт, поэтому ``Retry-After`` здесь недоступен;
+      объявленный интервал и есть вежливая пауза (если он нулевой — паузы нет, это
+      объявленный факт, а не забывчивость).
+    * ``fetch_started_at`` — метка **последнего** резерва (разрешённый момент, а не момент
+      пробуждения), как и раньше: интервал вежливости меряется по резервам.
+    * ``fetch_ms`` — полная длительность работы (все попытки и паузы между ними), без
+      первого ожидания резерва: у одной удачной попытки семантика прежняя («время вокруг
+      живого вызова»).
+    * ``pacing.request`` оборачивает **каждую** попытку отдельно: спящий в лимитере поток
+      к хосту не обращается и «в полёте» не считается; фактический HTTP-учёт каждой
+      попытки складывается в тот же origin.
+    * Повтор считается в приборе (``pacing.retry``): «сколько запросов было повтором»
+      видно и без вычитания ``http_requests - items``.
+    """
+    attempts = 1 + FETCH_RETRY_TIMES
+    started: float | None = None
+    try:
+        for attempt in range(1, attempts + 1):
+            desc.fetch_started_at = limiter.wait_reserved(
+                desc.host, desc.fetch_plan.rate_limit
+            )
+            if started is None:
+                # Отсчёт начинается после первого резерва: ожидание слота — не работа
+                # фетча (та же граница, что у прежнего замера одной попытки).
+                started = time.perf_counter()
+            # Прибор темпа (провенанс, не контракт): учёт считает **только** сетевой
+            # вызов, ожидание лимитера в «в полёте» не входит — спящий поток к хосту не
+            # обращается. Попытка — отдельная запись: у повтора свой слот и своё время.
+            tracker = (
+                pacing.request(desc.pid, desc.host)
+                if pacing is not None
+                else contextlib.nullcontext()
+            )
+            with tracker:
+                try:
+                    return desc.active.fetch(desc.wu, desc.fetch_plan)
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    if attempt >= attempts or not _is_transient_fetch_error(exc):
+                        raise
+                    if pacing is not None:
+                        pacing.retry(desc.pid, desc.host)
+    finally:
+        if started is not None:
+            desc.fetch_ms = int((time.perf_counter() - started) * 1000)
+    raise AssertionError("цикл повторов обязан вернуть страницу или поднять исключение")
+
+
 def local_fetch(
     desc: LocalFetch,
     *,
     limiter: RateLimiter,
     pacing: CrawlPacing | None = None,
 ) -> RawPage:
-    """D4 fetch-фаза (**единственный** вызов, идущий в пул): pacing + ``active.fetch``.
+    """D4 fetch-фаза (**единственный** вызов, идущий в пул): paced-ретраи + ``active.fetch``.
 
     Никакой мутации состояния сеанса здесь нет — только живой сетевой вызов.
     ``limiter.wait_reserved`` даёт интервал **по origin** и одновременно метку попытки:
@@ -2625,33 +2740,16 @@ def local_fetch(
     Гарантия — внутри процесса; при пуле процессов состояние не разделяется (см.
     ``util/rate_limit``).
 
-    **Резерв ровно один на фетч.** ``wait_reserved`` уже делает и резерв, и сон, и
-    возвращает разрешённый момент; дополнительный ``limiter.wait`` перед ним — это
+    **Резерв — один на попытку, не один на элемент работы.** Успешный фетч по-прежнему
+    делает ровно один резерв; повтор (5xx/408/429/сетевой сбой) — новый резерв, и это
+    исправление дефекта 07.11.2026: ретраи загрузчика Scrapy исполнялись внутри одной
+    попытки и пейсинга не видели. Дополнительный ``limiter.wait`` перед резервом — это
     **второй** независимый слот того же origin'а, то есть удвоенный объявленный интервал
     (``rate_limit: {min_s: 1, max_s: 5}`` превращался в 2–10 с при среднем 6 с).
-    Два пути обязаны пейсить одинаково: inline-путь (``fetch_and_commit``) зовёт
-    ``wait_reserved`` один раз.
+    Оба пути (:func:`local_fetch` и :func:`fetch_and_commit`) зовут один помощник
+    :func:`_fetch_with_paced_retries`, поэтому пейсят одинаково.
     """
-    # 17 §6 (F6): метка попытки — **разрешённый** момент резерва, а не момент
-    # пробуждения. Пробудившаяся метка несла задержку передачи GIL, и интервал между
-    # двумя попытками одного host'а выходил короче объявленного на 25 мкс…9 мс — проверка
-    # вежливости мерила планировщик потоков. Длительность — отдельно, ниже: её время
-    # берётся ``perf_counter`` вокруг живого вызова. Второго резерва здесь быть не должно:
-    # ``wait_reserved`` — это и есть pacing (см. докстринг).
-    desc.fetch_started_at = limiter.wait_reserved(desc.host, desc.fetch_plan.rate_limit)
-    # Прибор темпа (провенанс, не контракт): учёт считает **только** сетевой вызов,
-    # ожидание лимитера в «в полёте» не входит — спящий поток к хосту не обращается.
-    tracker = (
-        pacing.request(desc.pid, desc.host)
-        if pacing is not None
-        else contextlib.nullcontext()
-    )
-    with tracker:
-        _started = time.perf_counter()
-        try:
-            return desc.active.fetch(desc.wu, desc.fetch_plan)
-        finally:
-            desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
+    return _fetch_with_paced_retries(desc, limiter=limiter, pacing=pacing)
 
 
 def fetch_and_commit(
@@ -2664,26 +2762,14 @@ def fetch_and_commit(
     """Inline-фетч на главном потоке + коммит (последовательный путь и browser-режим D4).
 
     Используется, когда фетч **не** уходит в пул: ``max_workers in (None, 1)`` либо
-    browser-элемент (``BrowserCrawler`` не потокобезопасен). pacing — вне ``try`` (как в
-    прежнем ``process_local``): его сбой — не сбой источника. Метка ``fetch_started_at``
-    берётся из резерва лимитера — по той же причине, что в :func:`local_fetch`.
+    browser-элемент (``BrowserCrawler`` не потокобезопасен). Метка ``fetch_started_at``
+    и повторы — тот же помощник, что у пулового пути (:func:`_fetch_with_paced_retries`),
+    поэтому успешный фетч делает ровно один резерв, а повтор — ещё один.
     """
-    desc.fetch_started_at = limiter.wait_reserved(desc.host, desc.fetch_plan.rate_limit)
-    # Тот же прибор темпа, что у пулового пути: inline-фетч обязан считаться так же,
-    # иначе браузерный маршрут (он всегда inline) не дал бы своего измеренного пика.
-    tracker = (
-        pacing.request(desc.pid, desc.host)
-        if pacing is not None
-        else contextlib.nullcontext()
-    )
-    with tracker:
-        _started = time.perf_counter()
-        try:
-            page = desc.active.fetch(desc.wu, desc.fetch_plan)
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-            desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
-            return commit_local(desc, exc=exc)
-        desc.fetch_ms = int((time.perf_counter() - _started) * 1000)
+    try:
+        page = _fetch_with_paced_retries(desc, limiter=limiter, pacing=pacing)
+    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+        return commit_local(desc, exc=exc)
     return commit_local(desc, page=page)
 
 

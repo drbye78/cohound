@@ -46,6 +46,9 @@
   фактическому хосту запроса; ``foreign_hosts`` — что ушло не на host полосы (измерено
   07.11.2026: опубликованный темп панели C был вдвое ниже фактического). Наблюдения нет
   (кэш, браузер, внедрённый шов) → ``None`` и пустая карта, не ноль.
+* ``retries`` — сколько попыток фетча было **повтором** (5xx/408/429/сетевой сбой).
+  Повтор берёт новый слот лимитера (07.11.2026: ретраи движка обходили пейсинг), поэтому
+  число видно отдельно от ``http_requests``, в которое входят ещё лента и хопы.
 
 Нейтрально к предметной категории (§1.3): host — строка из данных, никаких названий
 продуктов и вендоров.
@@ -91,6 +94,9 @@ class _OriginState:
     #: повторы загрузчика). ``http_observed`` отличает «измерено 0» от «не измеряли».
     http_requests: int = 0
     http_observed: bool = False
+    #: Сколько раз попытка фетча была повторена на этом origin'е (повтор берёт свой слот
+    #: лимитера). Отличает «один запрос» от «повтор после 5xx» без вычитания.
+    retries: int = 0
     foreign_hosts: dict[str, int] = field(default_factory=dict)
 
 
@@ -268,6 +274,19 @@ class CrawlPacing:
                             state.foreign_hosts.get(foreign_host, 0) + int(count)
                         )
 
+    def retry(self, product_id: str, host: str) -> None:
+        """Учесть повторную попытку фетча на ``host`` (провенанс, а не контракт).
+
+        Считается в момент решения повторить: повтор — это ещё один запрос к тому же
+        origin'у, который тоже взял слот лимитера. Так «сколько запросов было повтором»
+        читается прямо, а не вычитанием ``http_requests - items`` (разница ещё содержит
+        ``robots.txt`` и хопы редиректов — §7.3).
+        """
+        origin = normalize_host(host)
+        with self._lock:
+            state = self._origins.setdefault(origin, _OriginState())
+            state.retries += 1
+
     def snapshot(self) -> dict[str, Any]:
         """Снимок наблюдений: ``{hosts, products, total}`` (детерминированный порядок).
 
@@ -286,6 +305,7 @@ class CrawlPacing:
                     state.last_wall,
                     state.http_requests,
                     state.http_observed,
+                    state.retries,
                     dict(state.foreign_hosts),
                 )
                 for host, state in self._origins.items()
@@ -311,6 +331,7 @@ class CrawlPacing:
         total_last_wall: float | None = None
         total_http: int = 0
         total_http_observed = False
+        total_retries = 0
         total_foreign: dict[str, int] = {}
         for host in sorted(origins):
             (
@@ -323,6 +344,7 @@ class CrawlPacing:
                 last_wall,
                 http_requests,
                 http_observed,
+                retries,
                 foreign,
             ) = origins[host]
             all_values.extend(values)
@@ -342,6 +364,8 @@ class CrawlPacing:
                 # ``None`` — наблюдения не было (кэш/браузер/внедрённый шов), не ноль.
                 "http_requests": http_requests if http_observed else None,
                 "foreign_hosts": dict(sorted(foreign.items())),
+                # Сколько попыток было повтором (каждая — новый слот лимитера).
+                "retries": retries,
             }
             if http_observed:
                 total_http += int(http_requests)
@@ -354,6 +378,7 @@ class CrawlPacing:
             total_last = _latest(total_last, last)
             total_first_wall = _earliest(total_first_wall, first_wall)
             total_last_wall = _latest(total_last_wall, last_wall)
+            total_retries += retries
 
         products_block: dict[str, dict[str, Any]] = {}
         products_values: dict[str, list[int]] = {}
@@ -419,6 +444,8 @@ class CrawlPacing:
             # наблюдался (не «ноль запросов»).
             "http_requests": total_http if total_http_observed else None,
             "foreign_hosts": dict(sorted(total_foreign.items())),
+            # Повторы по всем origin'ам: `items + retries` — сколько фетч-попыток было.
+            "retries": total_retries,
         }
         return {
             "hosts": hosts,

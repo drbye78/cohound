@@ -33,6 +33,7 @@ from core.domain import (
     CatalogRow,
     Cohort,
     CohortEntry,
+    CrawlItemStatus,
     CrawlRunConfig,
     RateLimitSpec,
     RunConfig,
@@ -40,11 +41,13 @@ from core.domain import (
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import build_corpus
+from core.pipeline.corpus_ingest import FETCH_RETRY_TIMES
 from core.pipeline.crawl_metric import (
     build_crawl_metric,
     declared_min_intervals,
 )
 from core.pipeline.crawl_session import default_session_id, read_provenance
+from core.ports.crawl_errors import CrawlError, CrawlNotFound
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -53,6 +56,7 @@ from core.ports.types import (
 )
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
+from core.util.http_audit import note_request
 
 RUN_ID = "run-rate-provenance"
 SESSION_ID = default_session_id(RUN_ID)
@@ -113,6 +117,27 @@ class _Crawler:
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008
         body = self.pages.get(url, b"")
         return RawPage(url=url, content=body, fetched_at=TS)
+
+
+class _FlakyCrawler(_Crawler):
+    """Краулер по сценарию: отдаёт отказы из очереди, затем страницу.
+
+    Каждый вызов отмечает запрос в ``http_audit`` — так же, как настоящий транспорт:
+    без этого прибор не отличил бы повтор от одного запроса, и проверка
+    ``retries == http_requests - items`` была бы тавтологией.
+    """
+
+    def __init__(self, pages: dict[str, bytes], failures: list[Exception]) -> None:
+        super().__init__(pages)
+        self.failures = list(failures)
+        self.calls = 0
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008
+        self.calls += 1
+        note_request(url)
+        if self.failures:
+            raise self.failures.pop(0)
+        return super().fetch(url, plan)
 
 
 class _Extractor:
@@ -198,6 +223,7 @@ def _pages(*links: str) -> dict[str, bytes]:
 def _crawl(tmp_path: Path, pages: dict[str, bytes], **kwargs: Any) -> SqliteStore:
     """Синтетический краул в свой ``:memory:``-store; сеанс остаётся в нём же."""
     store = SqliteStore(":memory:")
+    crawler = kwargs.pop("crawler", None) or _Crawler(pages)
     store.create_run(
         RUN_ID,
         RunConfig(
@@ -212,7 +238,7 @@ def _crawl(tmp_path: Path, pages: dict[str, bytes], **kwargs: Any) -> SqliteStor
     )
     build_corpus(
         _plan(),
-        _Crawler(pages),
+        crawler,
         _Extractor(),
         _Chunker(),
         store,
@@ -580,3 +606,103 @@ def test_per_host_map_wins_over_root_scoped_fallback() -> None:
         }
     }
     assert declared_min_intervals(mixed) == {"a.test": (1.0,), "cdn.a.test": (0.25,)}
+
+# --------------------------------------------------------------------------- #
+# (6) ретраи: каждая попытка — свой слот лимитера, повтор виден в приборе
+# --------------------------------------------------------------------------- #
+
+
+def test_transient_500_is_retried_with_a_new_slot_and_item_still_fetched(
+    tmp_path: Path,
+) -> None:
+    """500 → 200: элемент ``fetched`` (``attempts = 1``), а прибор называет повтор числом.
+
+    Дефект 07.11.2026: ретрай жил в движке, внутри одного резерва лимитера, и на хост
+    уходило до трёх запросов без интервала. Здесь повтор идёт слоем фетча — значит,
+    ``retries`` в провенансе и ``http_requests`` обязаны это показать.
+    """
+    crawler = _FlakyCrawler(
+        {ROOT: b"<html>root</html>"},
+        [CrawlError("HTTP 500", http_status=500)],
+    )
+    store = _crawl(
+        tmp_path, {ROOT: b"<html>root</html>"}, crawler=crawler
+    )
+    try:
+        items = _items(store)
+        assert len(items) == 1
+        assert items[0].status is CrawlItemStatus.FETCHED
+        # Попытка элемента работы одна: сеть повторялась внутри неё, а не снаружи
+        # (семантика ``--max-attempts`` не меняется).
+        assert items[0].attempts == 1
+
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        host = read_provenance(session)["pacing"]["hosts"]["docs.test"]
+        assert crawler.calls == 2  # первая попытка + один повтор
+        assert host["requests"] == 2  # две фетч-попытки
+        assert host["http_requests"] == 2  # по одному запросу на попытку
+        assert host["retries"] == 1
+        # Тождество прибора: повтор — ровно лишний запрос сверх элемента работы
+        # (у внедрённого шва нет ни ленты, ни хопов).
+        assert host["retries"] == host["http_requests"] - len(items)
+    finally:
+        store.close()
+
+
+def test_terminal_404_is_not_retried(tmp_path: Path) -> None:
+    """404 — определённый ответ, а не транзиентный сбой: одна попытка, ``retries = 0``."""
+    crawler = _FlakyCrawler(
+        {ROOT: b"<html>root</html>"},
+        [CrawlNotFound("HTTP 404", http_status=404)],
+    )
+    store = _crawl(
+        tmp_path, {ROOT: b"<html>root</html>"}, crawler=crawler
+    )
+    try:
+        items = _items(store)
+        assert len(items) == 1
+        assert items[0].status is CrawlItemStatus.FAILED
+        assert items[0].error_kind == "not_found"
+
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        host = read_provenance(session)["pacing"]["hosts"]["docs.test"]
+        assert crawler.calls == 1  # повтор адресовался бы тому, что уже ответило
+        assert host["retries"] == 0
+        assert host["requests"] == 1
+    finally:
+        store.close()
+
+
+def test_exhausted_network_failure_marks_item_failed_after_all_attempts(
+    tmp_path: Path,
+) -> None:
+    """Сетевой сбой на каждой попытке: ``failed``/``source_unavailable``, ``attempts = 1``.
+
+    Повторов ровно :data:`FETCH_RETRY_TIMES` — столько же, сколько было у движка; каждая
+    попытка взяла свой слот, и это видно числом, а не выводится из текста ошибки.
+    """
+    crawler = _FlakyCrawler(
+        {ROOT: b"<html>root</html>"},
+        [CrawlError("обрыв соединения") for _ in range(1 + FETCH_RETRY_TIMES)],
+    )
+    store = _crawl(
+        tmp_path, {ROOT: b"<html>root</html>"}, crawler=crawler
+    )
+    try:
+        items = _items(store)
+        assert len(items) == 1
+        assert items[0].status is CrawlItemStatus.FAILED
+        assert items[0].error_kind == "source_unavailable"
+        # Сеть повторялась, попытка элемента — одна.
+        assert items[0].attempts == 1
+
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        host = read_provenance(session)["pacing"]["hosts"]["docs.test"]
+        assert crawler.calls == 1 + FETCH_RETRY_TIMES
+        assert host["retries"] == FETCH_RETRY_TIMES
+        assert host["http_requests"] == 1 + FETCH_RETRY_TIMES
+    finally:
+        store.close()

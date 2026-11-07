@@ -852,10 +852,10 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
     rows = metric.get("per_host") or []
     if rows:
         header = (
-            f"{'host':<28} {'items':>6} {'requests':>9} {'http':>6} {'req/s':>8} "
-            f"{'peak':>5} {'wait_s':>8} {'min_ivl_s':>10} {'med_ivl_s':>10} "
-            f"{'declared_s':>11} {'short':>11} {'p50_ms':>7} {'p95_ms':>7} "
-            f"{'unknown':>8} {'foreign':>10}"
+            f"{'host':<28} {'items':>6} {'requests':>9} {'http':>6} {'retr':>5} "
+            f"{'req/s':>8} {'peak':>5} {'wait_s':>8} {'min_ivl_s':>10} "
+            f"{'med_ivl_s':>10} {'declared_s':>11} {'short':>11} {'p50_ms':>7} "
+            f"{'p95_ms':>7} {'unknown':>8} {'foreign':>10}"
         )
         lines.append("  " + header)
         for row in rows:
@@ -871,6 +871,7 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
                 "  "
                 + f"{row['host']:<28} {row['items']:>6} {row['requests']:>9} "
                 f"{_fmt_metric(row.get('http_requests'), 0):>6} "
+                f"{_fmt_metric(row.get('retries'), 0):>5} "
                 f"{_fmt_metric(row.get('requests_per_s')):>8} "
                 f"{_fmt_metric(row.get('in_flight_max'), 0):>5} "
                 f"{_fmt_metric(row.get('limiter_waited_s')):>8} "
@@ -889,7 +890,7 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
             lines.append(
                 "  pacing total: hosts={hosts} products={products} requests={requests} "
                 "req/s={rate} in_flight_max={peak} limiter_waits={waits} "
-                "limiter_waited_s={waited} http_requests={http} foreign_hosts={foreign}".format(
+                "limiter_waited_s={waited} http_requests={http} retries={retries} foreign_hosts={foreign}".format(
                     hosts=pacing_total.get("hosts", 0),
                     products=pacing_total.get("products", 0),
                     requests=pacing_total.get("requests", 0),
@@ -898,6 +899,7 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
                     waits=pacing_total.get("limiter_waits", 0),
                     waited=_fmt_metric(pacing_total.get("limiter_waited_s")),
                     http=_fmt_metric(pacing_total.get("http_requests"), 0),
+                    retries=pacing_total.get("retries", 0),
                     foreign=",".join(
                         f"{host}={count}"
                         for host, count in sorted(

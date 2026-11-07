@@ -130,6 +130,9 @@ def _pacing() -> dict[str, Any]:
                 "window_s": 4.0,
                 "first_request_at": "2026-01-01T00:00:00+00:00",
                 "last_request_at": "2026-01-01T00:00:04+00:00",
+                "http_requests": 4,
+                "foreign_hosts": {},
+                "retries": 1,
             },
             "b.test": {
                 "requests": 1,
@@ -141,6 +144,9 @@ def _pacing() -> dict[str, Any]:
                 "window_s": None,
                 "first_request_at": "2026-01-01T00:00:01+00:00",
                 "last_request_at": "2026-01-01T00:00:01+00:00",
+                "http_requests": 1,
+                "foreign_hosts": {},
+                "retries": 0,
             },
         },
         "products": {
@@ -166,6 +172,9 @@ def _pacing() -> dict[str, Any]:
             "window_s": 4.0,
             "first_request_at": "2026-01-01T00:00:00+00:00",
             "last_request_at": "2026-01-01T00:00:04+00:00",
+            "http_requests": 5,
+            "foreign_hosts": {},
+            "retries": 1,
         },
     }
 
@@ -293,6 +302,8 @@ def test_per_host_publishes_pacing_numbers(
     assert a["in_flight_max"] == 2
     assert a["limiter_waits"] == 3
     assert a["limiter_waited_s"] == 3.0
+    # Повтор попытки — отдельное число прибора, а не разность с http_requests.
+    assert a["retries"] == 1
 
     b = next(row for row in metric["per_host"] if row["host"] == "b.test")
     assert b["requests_per_s"] is None  # один запрос — окна нет, а не бесконечность
@@ -318,9 +329,12 @@ def test_per_host_human_table_shows_pacing_columns(
     assert main(_argv(db, "--per-host", json_mode=False)) == EXIT_OK
     out = capsys.readouterr().out
     assert "req/s" in out and "peak" in out and "wait_s" in out
+    # Колонка повтора — рядом с соседними числами, а не отдельной строкой.
+    assert "retr" in out
     assert "0.750" in out  # requests/s host'а a.test
     assert "pacing total: hosts=2 products=1 requests=4" in out
     assert "limiter_waits=3" in out and "limiter_waited_s=3.000" in out
+    assert "retries=1" in out
 
 
 def test_per_host_missing_declared_is_null_with_note(

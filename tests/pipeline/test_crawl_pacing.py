@@ -278,6 +278,7 @@ def test_pacing_reaches_metrics_json_without_losing_the_rate(tmp_path: Any) -> N
                         "window_s": 41.625,
                         "first_request_at": "2026-01-01T00:00:00+00:00",
                         "last_request_at": "2026-01-01T00:00:41.625000+00:00",
+                        "retries": 1,
                     }
                 },
                 "products": {},
@@ -297,6 +298,8 @@ def test_pacing_reaches_metrics_json_without_losing_the_rate(tmp_path: Any) -> N
     assert host["limiter_waited_s"] == 41.5
     assert host["window_s"] == 41.625
     assert host["fetch_ms"] == {"p50": 1520, "p95": 7630, "n": 2}
+    # Повтор попытки едет тем же блоком: метрика не пересчитывает его из http_requests.
+    assert host["retries"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -315,6 +318,7 @@ def test_no_pacing_field_enters_the_execution_contract() -> None:
         "limiter_waited_s",
         "fetch_ms",
         "window_s",
+        "retries",
     ):
         assert name not in EXECUTION_CONTRACT_FIELDS
 
@@ -379,6 +383,30 @@ def test_http_requests_not_observed_is_none_not_zero() -> None:
     assert host["foreign_hosts"] == {}
     assert pacing.snapshot()["total"]["http_requests"] is None
     assert pacing.snapshot()["total"]["foreign_hosts"] == {}
+
+
+def test_retries_are_counted_per_origin_and_in_total() -> None:
+    """Повтор попытки — самостоятельное число провенанса, а не вывод из запросов.
+
+    ``retries`` считает решения «повторить» (5xx/408/429/сетевой сбой): каждая такая
+    попытка берёт новый слот лимитера, и ``http_requests`` один её не называет — в том
+    же счётчике живут ``robots.txt`` и хопы редиректов.
+    """
+    pacing = CrawlPacing()
+    with pacing.request("p1", "a.test"):
+        pass
+    pacing.retry("p1", "a.test")
+    with pacing.request("p1", "a.test"):
+        pass
+    with pacing.request("p2", "b.test"):
+        pass
+
+    snapshot = pacing.snapshot()
+    assert snapshot["hosts"]["a.test"]["retries"] == 1
+    assert snapshot["hosts"]["b.test"]["retries"] == 0
+    assert snapshot["total"]["retries"] == 1
+    # Хосты без повтора публикуют 0 — это измеренный факт, а не отсутствие поля.
+    assert "retries" in snapshot["hosts"]["b.test"]
 
 
 def test_http_audit_does_not_leak_between_worker_threads() -> None:
