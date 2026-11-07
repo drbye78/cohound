@@ -389,11 +389,13 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   `chunk_size`, `prompt_template`, `evaluation_policy`, `render_modes`, `passports`.
 - **Crawl axes:** `crawl_strategy`, `crawl.rate_limit` and `crawl_config_digest` are contract
   fields; `max_depth`/`max_documents`/`exclude_*`/`robots`/`document_level`/`pdf_pipeline`
-  enter through `crawl_config_digest` (`CrawlLimits.as_dict()`). Add a new operator axis to
-  the single inventory `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:190`) so `plan` and
-  `run` pick it up together — flag parity is tested. Changing an axis gives a **new `run_id`**
-  (`execution_change`), not an edit of the current run; otherwise two different corpora become
-  one measurement.
+  enter through `crawl_config_digest` (`CrawlLimits.as_dict()`), and so does the **resolved**
+  `rate_limit` (site > run, same formula as execution, key only when declared) — a per-site
+  value overrides the run-level axis, so leaving it out let a host be re-paced without a new
+  `run_id`. Add a new operator axis to the single inventory `CRAWL_AXIS_DESTS`
+  (`core/cli/execution_axes.py:190`) so `plan` and `run` pick it up together — flag parity is
+  tested. Changing an axis gives a **new `run_id`** (`execution_change`), not an edit of the
+  current run; otherwise two different corpora become one measurement.
 - **Crawl policy is identity, its execution is provenance.** `crawl_policy_digest`
   (plan 19 §6.1) is in `EXECUTION_CONTRACT_FIELDS`; `refresh_policy` is a separate `run_id`
   term and `frozen_source` enters canonicalised. Only those three describe the measurement
