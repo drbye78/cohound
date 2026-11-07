@@ -33,7 +33,9 @@ from core.domain import (
     CatalogRow,
     Cohort,
     CohortEntry,
+    CrawlItemStatus,
     CrawlRunConfig,
+    CrawlSessionStatus,
     RateLimitSpec,
     RunConfig,
     RunMode,
@@ -41,8 +43,9 @@ from core.domain import (
 from core.pipeline import RunPlan, corpus_drain, corpus_driver
 from core.pipeline.corpus import IndexBuild, build_corpus
 from core.pipeline.corpus_index import _CorpusStageTimings
-from core.pipeline.corpus_ingest import LocalFetch
+from core.pipeline.corpus_ingest import LocalFetch, RetainedRaw
 from core.pipeline.crawl_session import default_session_id, read_provenance
+from core.pipeline.liveness import interrupt_session
 from core.ports.state import UrlStateRow
 from core.ports.types import (
     Chunk,
@@ -1537,3 +1540,200 @@ def test_wait_receives_only_pending_futures(
     assert passed_done == [0] * len(passed_done), passed_done
     # И число вызовов не растёт с длиной окна (при 5 с — сотни итераций).
     assert len(passed_done) <= 5, len(passed_done)
+
+
+# --------------------------------------------------------------------------- #
+# (7) Resume убитого сеанса: волна без живого фетча — не застой драйвера
+# --------------------------------------------------------------------------- #
+
+
+def test_driver_continues_after_wave_without_live_fetch() -> None:
+    """Регресс: коммит волны без живого фетча не заканчивает прогон падением.
+
+    Измеренная форма (07.11.2026, проба ``docs.tantorlabs.ru``): процесс-владелец убит
+    по таймауту, сеанс остался ``interrupted`` с 91 документом ``FETCHED``. ``crawl
+    resume`` строит первую волну целиком из retained-байтов (``resume``), у неё нет ни
+    одного ``future`` — она коммитится сразу, и корень тут же отдаёт **следующую**
+    (ссылки из переиспользованной страницы). Прежний цикл читал «нет отправленной волны»
+    как застой и падал ``AssertionError``: resume был невозможен, каждый сбой стоил
+    полного пере-краула и нового удара по чужим сайтам.
+
+    Ассерт при этом не ослаблен: он остаётся сторожем настоящего застоя (полоса есть, а
+    плана волны у неё нет вовсе). Здесь проверяется именно различение: *план есть* ⇒
+    драйвер обязан вернуться к отправке.
+
+    Наблюдаемое драйвера: две подряд волны без живого фетча коммитятся без фетчей, третья
+    (живая) доходит до пула ровно один раз, ``errors`` пуст.
+    """
+    host = "docs.test"
+
+    def desc(url: str, *, resume: Any = None) -> LocalFetch:
+        return LocalFetch(
+            pid="p1",
+            wu=url,
+            depth=0,
+            fetch_plan=FetchPlan(),
+            active=None,
+            engine_value=None,
+            prior_item=None,
+            resume=resume,
+            browser_blocked=False,
+            # Как в ``local_prefetch``: у resume живого фетча нет ⇒ в пул не идёт.
+            poolable=resume is None,
+            host=host,
+            scope_host=None,
+            enforce_redirect_scope=False,
+        )
+
+    def retained(url: str) -> Any:
+        return RetainedRaw(
+            path=Path("/nonexistent/retained.bin"), content_hash="h", size=1
+        )
+
+    committed: list[list[Any]] = []
+
+    def begin(plan: Any, *, fetch_pool: Any = None, browser_pool: Any = None) -> Any:
+        # Волна 1: только retained-байты (первая волна resume — как у убитого сеанса).
+        wave_one = [
+            corpus_drain._WaveEntry(
+                pid="p1",
+                wu=f"https://{host}/r{i}",
+                depth=0,
+                kind="fetch",
+                desc=desc(f"https://{host}/r{i}", resume=retained(f"r{i}")),
+            )
+            for i in range(2)
+        ]
+        committed.append(list((yield corpus_drain.WavePlan(entries=wave_one)).fetch))
+        # Волна 2: тоже без живого фетча — вторая порция retained (следствие волны 1).
+        wave_two = [
+            corpus_drain._WaveEntry(
+                pid="p1",
+                wu=f"https://{host}/r2",
+                depth=0,
+                kind="fetch",
+                desc=desc(f"https://{host}/r2", resume=retained("r2")),
+            )
+        ]
+        committed.append(list((yield corpus_drain.WavePlan(entries=wave_two)).fetch))
+        # Волна 3: остаток — живой фетч (ссылка, которой в durable-состоянии не было).
+        live = corpus_drain._WaveEntry(
+            pid="p1",
+            wu=f"https://{host}/new",
+            depth=0,
+            kind="fetch",
+            desc=desc(f"https://{host}/new"),
+        )
+        yield corpus_drain.WavePlan(entries=[live], hosts=frozenset({host}))
+        return (None, [])
+
+    fetched: list[str] = []
+
+    def fetch(lane_desc: Any) -> RawPage:
+        fetched.append(lane_desc.wu)
+        return RawPage(url=lane_desc.wu, content=b"x", fetched_at=TS)
+
+    errors: list[str] = []
+    timings: dict[str, Any] = {}
+    outcomes = corpus_driver.drive_roots(
+        [_lane_plan(f"https://{host}/", "p1")],
+        host_concurrency=1,
+        begin=begin,
+        lane_width=lambda plan: 2,
+        local_fetch=fetch,
+        timings_for=lambda pid: timings.setdefault(str(pid), _CorpusStageTimings()),
+        errors=errors,
+        label=" теста",
+    )
+
+    assert errors == []
+    assert len(outcomes) == 1
+    # Retained-волны не ходили в пул: у них не было живого фетча вовсе.
+    assert committed == [[None, None], [None]]
+    # Живой остаток добыт ровно один раз — волна после коммитов не потерялась.
+    assert fetched == [f"https://{host}/new"]
+
+
+def test_resume_after_interrupted_session_continues_without_refetch(
+    tmp_path: Path,
+) -> None:
+    """Регресс (измеренная форма): ``resume`` убитого сеанса продолжает, а не падает.
+
+    Сценарий — ровно то, что случилось на живой пробе 07.11.2026: сеанс добыл часть
+    документов (2 из 5), процесс убит, ``crawl_sessions.status = interrupted``, элементы
+    ``FETCHED`` с retained-байтами на диске. Возобновление с той же сессией **обязано**
+    (а) дойти до терминального статуса, (б) не пере-фетчить уже ``FETCHED`` URL,
+    (в) добрать остаток.
+
+    Отдельно проверяется, что переиспользование не выдаётся за новую попытку: ``attempts``
+    у resumed-элементов остаётся прежним (иначе ``max_attempts`` съедался бы каждым
+    resume, и «продолжить» деградировало бы до «сдаться»).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    links = "".join(f'<a href="/c{i}">{i}</a>' for i in range(4))
+    pages: dict[str, bytes] = {ROOT: f"<html>{links}</html>".encode()}
+    remainder = {f"{ROOT}c{i}" for i in range(1, 4)}
+    for i in range(4):
+        pages[f"{ROOT}c{i}"] = f"<html>child-{i}</html>".encode()
+
+    try:
+        # --- прерванный прогон: 2 документа добыты, дальше бюджет исчерпан ------- #
+        first_crawl = _Crawler(pages)
+        first = _build(
+            tmp_path / "first",
+            pages=pages,
+            crawler=first_crawl,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1, max_workers=1, max_documents=2
+            ),
+        )
+        assert first.status == "ok"
+        fetched_before = {
+            item.url
+            for item in store.iter_crawl_session_items(SESSION_ID)
+            if item.status is CrawlItemStatus.FETCHED
+        }
+        # Предусловие формы: часть корпуса добыта, остаток — нет.
+        assert len(fetched_before) == 2
+        assert set(first_crawl.calls) == fetched_before
+        assert remainder.isdisjoint(first_crawl.calls)
+
+        # --- процесс-владелец убит: durable-свидетельство, а не память --------- #
+        interrupt_session(store, SESSION_ID, reason="owner_dead: процесс убит (тест)")
+        assert (
+            store.get_crawl_session(SESSION_ID).status
+            is CrawlSessionStatus.INTERRUPTED
+        )
+
+        # --- resume: та же сессия, пул фетча этой полосы (прежний ассерт тут) --- #
+        second_crawl = _Crawler(pages)
+        second = _build(
+            tmp_path / "second",
+            pages=pages,
+            crawler=second_crawl,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1, max_workers=2, max_documents=10
+            ),
+        )
+
+        assert second.status == "ok"
+        assert second.errors == []
+        # (б) уже FETCHED элементы не пере-фетчены: ни одного повторного запроса.
+        assert set(second_crawl.calls) & fetched_before == set()
+        # (в) остаток добран — и именно тот, которого в durable-состоянии не было.
+        assert remainder <= set(second_crawl.calls)
+
+        items_after = list(store.iter_crawl_session_items(SESSION_ID))
+        assert all(item.status is CrawlItemStatus.FETCHED for item in items_after)
+        assert len(items_after) == 5
+        # Переиспользование — не попытка: счётчик повторов не вырос.
+        assert {item.attempts for item in items_after} == {1}
+        # Корпус собран целиком (5 уникальных документов), сборка одна.
+        assert _build_of(second).doc_count == 5
+    finally:
+        store.close()
