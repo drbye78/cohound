@@ -461,7 +461,7 @@ cohort: cohort-pg-2026q2
 cohort_ref: cohort-pg-2026q2-r2    # опц.: авторская ссылка на состав когорты → входит в cohort_digest
 products: [pangolin, alt1, alt2, ...]
 package: pg-core
-methodology_version: 0.1.0        # опц. (дефолт — пин проекта); входит в контракт, НЕ в run_id-материал напрямую
+methodology_version: 0.3.0        # опц. (дефолт — пин проекта); входит в контракт, НЕ в run_id-материал напрямую
 cycle_id: 2026-Q2                 # опц.: ISO-дата/ISO-неделя; None → snapshot_date. ВХОДИТ в run_id
 refresh_policy: auto              # опц.: auto|revalidate|refresh|offline|frozen; None → auto. ВХОДИТ в run_id
 llm_slot: cheap                   # опц.: cheap|flagship; активный слот оценщика → в llm_scenarios (контракт)

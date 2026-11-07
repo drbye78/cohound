@@ -82,6 +82,7 @@ from core.cli.execution_axes import (
 )
 from core.cli.wiring import llm_env_notices, serp_env_notices
 from core.config.deploy import load_deploy_config, profile_notices, shard_notices
+from core.domain.models import METHODOLOGY_VERSION
 from core.pipeline.corpus_freshness import (
     FRESHNESS_WARN_DAYS_DEFAULT,
     freshness_lines,
@@ -198,6 +199,32 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
     ]
 
 
+def methodology_notices(declared: str) -> list[str]:
+    """Расхождение ярлыка методологии в ``run.yaml`` с семантикой кода (§13).
+
+    ``methodology_version`` — **объявленный вход**: он уходит в манифест и в
+    ``execution_contract_digest`` → ``run_id``. Правила же берутся из кода, то есть
+    исполняется семантика :data:`core.domain.models.METHODOLOGY_VERSION`. Разойдясь,
+    эти два числа дают ложный провенанс: манифест запишет одно, измерено будет другое.
+    Поэтому расхождение видно **до** старта — предупреждением, а не блокировкой:
+    ярлык — вопрос к пакету, а не к измеримости (A3: решение принимает читатель).
+
+    Сравнение — **точным строковым равенством**: ``methodology_version`` — объявленный
+    ярлык исполняемой семантики, а не semver-выражение, поэтому ``'0.3'`` и ``'0.3.0'``
+    здесь разные значения. Нормализация («дописать нули») выдала бы совпадение, которого
+    в объявлении нет, и скрыла бы ровно тот дрейф, который проверка ищет.
+
+    Чистая функция (один аргумент): её зовёт ``plan``, и она проверяема тестом.
+    """
+    if declared == METHODOLOGY_VERSION:
+        return []
+    return [
+        f"methodology_version: run.yaml объявляет '{declared}', а код исполняет семантику "
+        f"'{METHODOLOGY_VERSION}'; манифест запишет объявленное значение '{declared}' — "
+        "приведите ярлык в run.yaml к версии кода (правила берутся из кода, а не из ярлыка)"
+    ]
+
+
 def run(args: argparse.Namespace) -> int:
     """``plan``: ``load_inputs → lint → plan`` (``03`` §D.3/E.1).
 
@@ -224,6 +251,10 @@ def run(args: argparse.Namespace) -> int:
         # но и не тишина: «host'ов ноль и работы ноль» оператор обязан увидеть **до**
         # старта, а не выяснять из отсутствия артефактов.
         *shard_notices(getattr(deploy_config.crawl, "shards", None)),
+        # §13: ярлык методологии — объявленный вход (манифест и ``run_id``), а семантика
+        # исполняется из кода. Расхождение не блокирует (пакет правится отдельно от
+        # измеримости), но и не молчит: иначе прогон запишет чужую методологию.
+        *methodology_notices(inputs.run.methodology_version),
     ]
     declared: DeclaredExecutionAxes | None = None
     contract: str | None = None

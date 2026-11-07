@@ -11,8 +11,9 @@
 anchor: tantor
 case_id: demo-absence
 cohort: cohort-demo-absence-2026-11-05
-# Версия методологии объявлена входом (§13); 0.2.0 — текущая, а не историческая.
-methodology_version: '0.2.0'
+# Версия методологии объявлена входом (§13); 0.3.0 — текущая семантика кода, а не
+# историческая: ярлык обязан совпадать с `METHODOLOGY_VERSION` (I2d, датированное отсутствие).
+methodology_version: '0.3.0'
 focus:
   modules:
   - core
