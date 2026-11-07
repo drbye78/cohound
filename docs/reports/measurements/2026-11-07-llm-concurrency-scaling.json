@@ -1,0 +1,423 @@
+{
+ "kind": "llm_concurrency_scaling",
+ "date": "2026-11-07",
+ "tree": "73ebee5 + незакоммиченные правки полосы (--concurrency в evaluator-benchmark)",
+ "model": "deepseek-v4.1-flash-1017:yellow",
+ "slot": "cheap",
+ "max_tokens": 16384,
+ "reasoning_effort": "off",
+ "limit": 24,
+ "run_id": "ru-pg-dbms-c2e7b860ac17",
+ "index_build_id": "cb_97e9f9d3ae7f816429710667",
+ "tool": "hound experiment evaluator-benchmark --limit 24 --concurrency K",
+ "points": [
+  {
+   "point": "k1",
+   "concurrency": 1,
+   "repeats": 1,
+   "wall_s": 508.1,
+   "calls": 24,
+   "cells_per_min": 2.83,
+   "speedup_vs_k1": 1.0,
+   "latency_s": {
+    "p50": 10.2,
+    "p95": 58.3,
+    "mean": 21.0
+   },
+   "retries": 0,
+   "retry_reasons": {},
+   "failures": {
+    "failed_cells": 0,
+    "failure_kinds": {
+     "evaluation_failed": 0,
+     "harness_error": 0,
+     "none": 24,
+     "validation_failed": 0
+    },
+    "invalid_json": 0,
+    "length_truncated": 0
+   },
+   "tokens": {
+    "prompt": 129275,
+    "completion": 29234,
+    "completion_per_cell": 1218
+   },
+   "status_counts": {
+    "⚠️": 5,
+    "✅": 2,
+    "❌": 1,
+    "❓": 16
+   },
+   "changed_vs_k1": 0,
+   "changed_detail_vs_k1": {},
+   "determinism": {
+    "cells_total": 0,
+    "changed_cells": 0,
+    "fraction_changed": null,
+    "measured": false,
+    "repeats": 1,
+    "stable_fraction": null
+   },
+   "kappa": 0.04545454545454545,
+   "input_digest": "e528e28a1ef48ca9fce0159be24147b3cdca316aa6ebd249cc167753642386c6",
+   "statuses": {
+    "digital_q_database/xlsx_001_razrabotchik": "❓",
+    "pangolin/xlsx_001_razrabotchik": "❓",
+    "jatoba/xlsx_001_razrabotchik": "⚠️",
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": "⚠️",
+    "pangolin/xlsx_002_god_nachala_razrabotki": "❓",
+    "jatoba/xlsx_002_god_nachala_razrabotki": "❓",
+    "digital_q_database/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "pangolin/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "jatoba/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "✅",
+    "digital_q_database/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "pangolin/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "jatoba/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "✅",
+    "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7": "❌",
+    "pangolin/xlsx_005_tehnicheskaya_podderzhka_24_7": "❓",
+    "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7": "⚠️",
+    "digital_q_database/xlsx_006_nalichie_saita_tp": "❓",
+    "pangolin/xlsx_006_nalichie_saita_tp": "❓",
+    "jatoba/xlsx_006_nalichie_saita_tp": "❓",
+    "digital_q_database/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "❓",
+    "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "jatoba/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "digital_q_database/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "pangolin/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "jatoba/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓"
+   }
+  },
+  {
+   "point": "k2",
+   "concurrency": 2,
+   "repeats": 1,
+   "wall_s": 214.2,
+   "calls": 24,
+   "cells_per_min": 6.72,
+   "speedup_vs_k1": 2.37,
+   "latency_s": {
+    "p50": 11.2,
+    "p95": 41.7,
+    "mean": 17.4
+   },
+   "retries": 0,
+   "retry_reasons": {},
+   "failures": {
+    "failed_cells": 0,
+    "failure_kinds": {
+     "evaluation_failed": 0,
+     "harness_error": 0,
+     "none": 24,
+     "validation_failed": 0
+    },
+    "invalid_json": 0,
+    "length_truncated": 0
+   },
+   "tokens": {
+    "prompt": 129277,
+    "completion": 31920,
+    "completion_per_cell": 1330
+   },
+   "status_counts": {
+    "⚠️": 4,
+    "✅": 3,
+    "❌": 1,
+    "❓": 16
+   },
+   "changed_vs_k1": 1,
+   "changed_detail_vs_k1": {
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": [
+     "⚠️",
+     "✅"
+    ]
+   },
+   "determinism": {
+    "cells_total": 0,
+    "changed_cells": 0,
+    "fraction_changed": null,
+    "measured": false,
+    "repeats": 1,
+    "stable_fraction": null
+   },
+   "kappa": 0.05697445972495087,
+   "input_digest": "e528e28a1ef48ca9fce0159be24147b3cdca316aa6ebd249cc167753642386c6",
+   "statuses": {
+    "digital_q_database/xlsx_001_razrabotchik": "❓",
+    "pangolin/xlsx_001_razrabotchik": "❓",
+    "jatoba/xlsx_001_razrabotchik": "⚠️",
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": "✅",
+    "pangolin/xlsx_002_god_nachala_razrabotki": "❓",
+    "jatoba/xlsx_002_god_nachala_razrabotki": "❓",
+    "digital_q_database/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "pangolin/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "jatoba/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "✅",
+    "digital_q_database/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "pangolin/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "jatoba/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "✅",
+    "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7": "❌",
+    "pangolin/xlsx_005_tehnicheskaya_podderzhka_24_7": "❓",
+    "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7": "⚠️",
+    "digital_q_database/xlsx_006_nalichie_saita_tp": "❓",
+    "pangolin/xlsx_006_nalichie_saita_tp": "❓",
+    "jatoba/xlsx_006_nalichie_saita_tp": "❓",
+    "digital_q_database/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "❓",
+    "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "jatoba/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "digital_q_database/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "pangolin/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "jatoba/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓"
+   }
+  },
+  {
+   "point": "k4",
+   "concurrency": 4,
+   "repeats": 1,
+   "wall_s": 172.0,
+   "calls": 24,
+   "cells_per_min": 8.37,
+   "speedup_vs_k1": 2.95,
+   "latency_s": {
+    "p50": 16.2,
+    "p95": 80.8,
+    "mean": 26.5
+   },
+   "retries": 0,
+   "retry_reasons": {},
+   "failures": {
+    "failed_cells": 0,
+    "failure_kinds": {
+     "evaluation_failed": 0,
+     "harness_error": 0,
+     "none": 24,
+     "validation_failed": 0
+    },
+    "invalid_json": 0,
+    "length_truncated": 0
+   },
+   "tokens": {
+    "prompt": 129135,
+    "completion": 38359,
+    "completion_per_cell": 1598
+   },
+   "status_counts": {
+    "⚠️": 4,
+    "✅": 2,
+    "❌": 1,
+    "❓": 17
+   },
+   "changed_vs_k1": 1,
+   "changed_detail_vs_k1": {
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": [
+     "⚠️",
+     "❓"
+    ]
+   },
+   "determinism": {
+    "cells_total": 0,
+    "changed_cells": 0,
+    "fraction_changed": null,
+    "measured": false,
+    "repeats": 1,
+    "stable_fraction": null
+   },
+   "kappa": 0.04725897920604915,
+   "input_digest": "e528e28a1ef48ca9fce0159be24147b3cdca316aa6ebd249cc167753642386c6",
+   "statuses": {
+    "digital_q_database/xlsx_001_razrabotchik": "❓",
+    "pangolin/xlsx_001_razrabotchik": "❓",
+    "jatoba/xlsx_001_razrabotchik": "⚠️",
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": "❓",
+    "pangolin/xlsx_002_god_nachala_razrabotki": "❓",
+    "jatoba/xlsx_002_god_nachala_razrabotki": "❓",
+    "digital_q_database/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "pangolin/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "jatoba/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "✅",
+    "digital_q_database/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "pangolin/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "jatoba/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "✅",
+    "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7": "❌",
+    "pangolin/xlsx_005_tehnicheskaya_podderzhka_24_7": "❓",
+    "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7": "⚠️",
+    "digital_q_database/xlsx_006_nalichie_saita_tp": "❓",
+    "pangolin/xlsx_006_nalichie_saita_tp": "❓",
+    "jatoba/xlsx_006_nalichie_saita_tp": "❓",
+    "digital_q_database/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "❓",
+    "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "jatoba/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "digital_q_database/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "pangolin/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "jatoba/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓"
+   }
+  },
+  {
+   "point": "k8",
+   "concurrency": 8,
+   "repeats": 1,
+   "wall_s": 83.7,
+   "calls": 24,
+   "cells_per_min": 17.21,
+   "speedup_vs_k1": 6.07,
+   "latency_s": {
+    "p50": 16.4,
+    "p95": 45.4,
+    "mean": 22.5
+   },
+   "retries": 0,
+   "retry_reasons": {},
+   "failures": {
+    "failed_cells": 0,
+    "failure_kinds": {
+     "evaluation_failed": 0,
+     "harness_error": 0,
+     "none": 24,
+     "validation_failed": 0
+    },
+    "invalid_json": 0,
+    "length_truncated": 0
+   },
+   "tokens": {
+    "prompt": 129233,
+    "completion": 33636,
+    "completion_per_cell": 1402
+   },
+   "status_counts": {
+    "⚠️": 3,
+    "✅": 3,
+    "❌": 1,
+    "❓": 17
+   },
+   "changed_vs_k1": 2,
+   "changed_detail_vs_k1": {
+    "jatoba/xlsx_001_razrabotchik": [
+     "⚠️",
+     "✅"
+    ],
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": [
+     "⚠️",
+     "❓"
+    ]
+   },
+   "determinism": {
+    "cells_total": 0,
+    "changed_cells": 0,
+    "fraction_changed": null,
+    "measured": false,
+    "repeats": 1,
+    "stable_fraction": null
+   },
+   "kappa": 0.058823529411764684,
+   "input_digest": "e528e28a1ef48ca9fce0159be24147b3cdca316aa6ebd249cc167753642386c6",
+   "statuses": {
+    "digital_q_database/xlsx_001_razrabotchik": "❓",
+    "pangolin/xlsx_001_razrabotchik": "❓",
+    "jatoba/xlsx_001_razrabotchik": "✅",
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": "❓",
+    "pangolin/xlsx_002_god_nachala_razrabotki": "❓",
+    "jatoba/xlsx_002_god_nachala_razrabotki": "❓",
+    "digital_q_database/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "pangolin/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "jatoba/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "✅",
+    "digital_q_database/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "pangolin/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "jatoba/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "✅",
+    "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7": "❌",
+    "pangolin/xlsx_005_tehnicheskaya_podderzhka_24_7": "❓",
+    "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7": "⚠️",
+    "digital_q_database/xlsx_006_nalichie_saita_tp": "❓",
+    "pangolin/xlsx_006_nalichie_saita_tp": "❓",
+    "jatoba/xlsx_006_nalichie_saita_tp": "❓",
+    "digital_q_database/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "❓",
+    "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "jatoba/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "digital_q_database/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "pangolin/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "jatoba/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓"
+   }
+  },
+  {
+   "point": "noise",
+   "concurrency": 1,
+   "repeats": 2,
+   "wall_s": 1813.7,
+   "calls": 24,
+   "cells_per_min": null,
+   "speedup_vs_k1": null,
+   "latency_s": {
+    "p50": 15.5,
+    "p95": 78.7,
+    "mean": 31.4
+   },
+   "retries": 0,
+   "retry_reasons": {},
+   "failures": {
+    "failed_cells": 0,
+    "failure_kinds": {
+     "evaluation_failed": 0,
+     "harness_error": 0,
+     "none": 24,
+     "validation_failed": 0
+    },
+    "invalid_json": 0,
+    "length_truncated": 0
+   },
+   "tokens": {
+    "prompt": 129081,
+    "completion": 39254,
+    "completion_per_cell": 1636
+   },
+   "status_counts": {
+    "⚠️": 3,
+    "✅": 3,
+    "❌": 1,
+    "❓": 17
+   },
+   "changed_vs_k1": 2,
+   "changed_detail_vs_k1": {
+    "jatoba/xlsx_001_razrabotchik": [
+     "⚠️",
+     "❓"
+    ],
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": [
+     "⚠️",
+     "✅"
+    ]
+   },
+   "determinism": {
+    "cells_total": 24,
+    "changed_cells": 2,
+    "fraction_changed": 0.08333333333333333,
+    "measured": true,
+    "repeats": 2,
+    "stable_fraction": 0.9166666666666666
+   },
+   "kappa": 0.058823529411764684,
+   "input_digest": "e528e28a1ef48ca9fce0159be24147b3cdca316aa6ebd249cc167753642386c6",
+   "statuses": {
+    "digital_q_database/xlsx_001_razrabotchik": "❓",
+    "pangolin/xlsx_001_razrabotchik": "❓",
+    "jatoba/xlsx_001_razrabotchik": "❓",
+    "digital_q_database/xlsx_002_god_nachala_razrabotki": "✅",
+    "pangolin/xlsx_002_god_nachala_razrabotki": "❓",
+    "jatoba/xlsx_002_god_nachala_razrabotki": "❓",
+    "digital_q_database/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "pangolin/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "❓",
+    "jatoba/xlsx_003_versiya_postgresql_v_kachestve_osnovy_poslednyaya_do": "✅",
+    "digital_q_database/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "pangolin/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "❓",
+    "jatoba/xlsx_004_podderzhka_poslednei_dostupnoi_na_tekushchii_moment": "✅",
+    "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7": "❌",
+    "pangolin/xlsx_005_tehnicheskaya_podderzhka_24_7": "❓",
+    "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7": "⚠️",
+    "digital_q_database/xlsx_006_nalichie_saita_tp": "❓",
+    "pangolin/xlsx_006_nalichie_saita_tp": "❓",
+    "jatoba/xlsx_006_nalichie_saita_tp": "❓",
+    "digital_q_database/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "❓",
+    "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "jatoba/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite": "⚠️",
+    "digital_q_database/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "pangolin/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓",
+    "jatoba/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami": "❓"
+   }
+  }
+ ]
+}

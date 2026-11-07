@@ -305,9 +305,10 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > - **Оценщик:** `hound experiment evaluator-benchmark` реализован
 >   (`core/cli/commands/experiment.py:530`, метрики κ/abstention/`fabricated_support`/bootstrap —
 >   `core/pipeline/evaluator_benchmark.py:1232-1392`), но замера на трёх моделях нет: в
->   `docs/reports/measurements/` нет файла с результатами benchmark'а, а обе слоты `deploy.yaml`
->   несут одну и ту же модель (`config/deploy.yaml:98-99` и `:94`). Выбор модели по κ
->   **не сделан** — модель объявлена, а не измерена (A3).
+>   `docs/reports/measurements/` лежит замер **одной** модели
+>   (`2026-11-07-reasoning-effort-matrix.md`, 50 ячеек × 3 продукта, κ 0.008–0.056), а обе слоты
+>   `deploy.yaml` по-прежнему несут одну и ту же модель (`config/deploy.yaml:98-99` и `:94`). Выбор
+>   модели по κ **не сделан** — модель объявлена, а не измерена (A3).
 > - **`base_url` в слот:** ✅ сделано — `config/deploy.yaml:117`
 >   (`base_url: "https://plusvibeapi.ru"`), пустой слот теперь означает «оценщик не
 >   поднимается», а не «endpoint берётся из env»; место исполнения объявлено флагом
