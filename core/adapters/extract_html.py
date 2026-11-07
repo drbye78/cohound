@@ -304,7 +304,8 @@ class HtmlExtractor:
     version = "trafilatura-html-6"
 
     #: B3: адаптер читает байты **локального** файла (``page.source_path``), поэтому годится
-    #: для членов контейнеров (спуск). Шов ``split`` этого не умеет — см. ``RemoteExtractor``.
+    #: для членов контейнеров (спуск). Шов ``split`` умеет то же с ``ae0f933``:
+    #: ``RemoteExtractor.supports_source_path`` отправляет те же байты в ``extract/submit``.
     supports_source_path = True
 
     def __init__(self, extract_fn: ExtractFn | None = None, *, sanitize: bool = True) -> None:
