@@ -257,7 +257,7 @@ class SqliteStore:
     def upsert_crawl_session_item(item: CrawlSessionItem) # per-URL элемент; счётчики сеанса — в той же транзакции
     def update_crawl_session_status(session_id, status, *, ...)  # жизненный цикл сеанса
     def recover_crawl_session(session_id) -> int          # running → pending при рестарте
-    def clear_crawl_session(session_id)                   # сброс при --reset
+    def clear_crawl_session(session_id)                   # сброс при --from-scratch (run)
     # чтение
     def iter_cells(run_id, state=None) -> Iterator[Cell]
     def iter_exhaustions(run_id) -> Iterator[ProtocolExhaustion]    # I3/§5: протоколы исчерпания
@@ -1375,7 +1375,8 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 пишется `hound gate --runs-dir runs --run-id {run_id} --gate G1 --actor {кто}
 --target cohort --notes "{почему}"` (§E.2). Строка `gate_decisions` от **прошлого** прогона
 не действует: новый `run_id` требует новых решений. Продолжить с места остановки —
-повторный `run` (resume) или `--until {фаза}`; `--reset` форсирует перезапуск.
+повторный `run` (resume) или `--until {фаза}`; `--reset` форсирует перезапуск фаз (журнал
+фаз; durable-сеанс краула при этом сохраняется — стирает его только `--from-scratch`).
 
 Что появится на диске (раскладка A.1/A.2):
 
@@ -1500,8 +1501,10 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
   `--llm-slot`, `--llm-model`, `--retrieval-profile`, `--cutoff-k`, `--document-level`,
   `--max-depth`, `--max-documents`, `--exclude-path`, `--exclude-document` (оси контракта).
   Частичный прогон — **другой прогон**, а не resume полного.
-* **Меняют объём работы, но не идентичность:** `--reset` (форсировать полный перезапуск,
-  обход resume), `--from-scratch` (сброс сеанса + живой ре-фетч в обход R7-кэша),
+* **Меняют объём работы, но не идентичность:** `--reset` (повторить фазы в обход resume;
+  durable-сеанс краула **сохраняется** — `corpus` переоткрывает его и не фетчит заново URL
+  с retained-байтами), `--from-scratch` (единственный, кто стирает сеанс краула, + живой
+  ре-фетч в обход R7-кэша),
   `--max-attempts N` (потолок попыток по URL → терминальный `failed`/`attempts_exhausted`),
   `--since-run ID` (явный predecessor для carry-forward/lineage; по умолчанию — последний
   прогон пакета из `state.db`).

@@ -3335,15 +3335,18 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
     """Phase 4: флаги ``run``/``crawl run|resume|restart`` — кэш, фильтры, потолок, follow.
 
     ``--from-scratch`` — сброс сеанса + живой ре-фетч в обход R7-кэша (``cache=None``);
-    ``--only-failed`` — ремонт провалов (``FAILED`` сеанса, иначе ``url_state``) известными
-    depth-0 URL; ``--only-product`` — фильтр объёма; ``--max-attempts`` —
-    потолок попыток по URL; ``--follow``/``--watch`` (+``--interval``) — прогресс до терминала.
+    у ``hound run`` это **единственный** флаг, стирающий durable-сеанс краула (``--reset``
+    там его сохраняет: resume переиспользует элементы); ``--only-failed`` — ремонт провалов
+    (``FAILED`` сеанса, иначе ``url_state``) известными depth-0 URL; ``--only-product`` —
+    фильтр объёма; ``--max-attempts`` — потолок попыток по URL; ``--follow``/``--watch``
+    (+``--interval``) — прогресс до терминала.
     """
     parser.add_argument(
         "--from-scratch",
         dest="from_scratch",
         action="store_true",
-        help="сброс сеанса + живой ре-фетч в обход R7-кэша (cache=None)",
+        help="сброс сеанса краула + живой ре-фетч в обход R7-кэша (cache=None); у "
+        "`hound run` — единственный флаг, стирающий сеанс (--reset его сохраняет)",
     )
     parser.add_argument(
         "--only-failed",

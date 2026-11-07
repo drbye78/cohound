@@ -693,7 +693,10 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
   обновляет `last_completed_run_id` продукта (частичное измерение не становится baseline).
   `run_id` включает `run_scope=product:<id>`; без этого scoped-прогон совпал бы с полным
   `run_id` и resume пропустил бы фазы.
-- **`--reset`** — сбрасывает **прогон** (сессию/фазы), но **не** durable state. Для
+- **`--reset`** — сбрасывает **прогон** (журнал фаз), но **не** durable state и **не**
+  durable-сеанс краула: `corpus` переоткрывает `crawl:{run_id}` и переиспользует его
+  элементы (URL с retained-байтами не фетчится заново; правка 07.11.2026 —
+  `core/cli/commands/run.py:1455`). Стирает сеанс краула только `--from-scratch`. Для
   разрушительного сброса — отдельные команды `hound package state forget-product` /
   `state rebuild`: **design-only**, таких подкоманд нет (в CLI есть только `index-gc` и
   `builds-gc`); сейчас это ручное удаление `state/{package}/state.db` с бэкапом.
@@ -3605,7 +3608,7 @@ CREATE TABLE corpus_coverage (
 > В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:638`) — имя файла
 > когорты из `run.yaml`, и `cohort_ref: str | None` (`:646`) — авторская ревизия, которая
 > **входит в `cohort_digest`**. `core/store/sqlite_store.py:339` кладёт в колонку `cohort_ref` значение
-> `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:569`).
+> `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:694`).
 > Следствие на живом прогоне `ru-pg-dbms-3d3dc7c3c969`: `runs.cohort_ref =
 > 'cohort-ru-pg-dbms-2026-10-28-golden00'` (имя файла), а в дайджест ушло `None` — то есть
 > манифест показывает «ревизию», которая в `run_id` **не входила**. Правка меняет состав
@@ -3891,7 +3894,9 @@ golden**.
   `corpus` переиспользует doc-версии и чанки завершённых продуктов (чанки пишутся на
   границе продукта, §4.7); незавершённый продукт и `index_manifest`/композиция
   восстанавливаются пересборкой только его партиции.
-- `--reset` — сбрасывает сессию/фазы текущего прогона, но не state.db.
+- `--reset` — сбрасывает журнал фаз текущего прогона, но не state.db и не durable-сеанс
+  краула: `corpus` переоткрывает `crawl:{run_id}` и переиспользует его элементы (стирает
+  сеанс только `--from-scratch`, `core/cli/commands/run.py:1455`).
 - Падение между corpus и evaluate: `last_corpus_run_id` установлен, `last_evaluated_run_id`
   — нет → следующий прогон `full` (O12), но doc-версии/партиция переиспользуются.
 

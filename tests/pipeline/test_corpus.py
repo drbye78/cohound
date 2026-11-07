@@ -1794,7 +1794,14 @@ def _items(store: SqliteStore) -> list[CrawlSessionItem]:
 
 
 def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
-    """URL с prior ``FETCHED`` + retained raw НЕ фетчится повторно и ре-извлекается (L1a)."""
+    """URL с prior ``FETCHED`` + retained raw НЕ фетчится повторно и ре-извлекается (L1a).
+
+    Это пин на уровне корпуса для семантики ``hound run --reset``: сброс журнала фаз
+    сеанс краула не стирает, поэтому повторный вход в ``corpus`` того же ``run_id``
+    обязан переиспользовать retained-байты (``_BombCrawler`` падает на любом ``fetch``).
+    Измерено 07.11.2026: когда ``--reset`` стирал сеанс, повтор фазы шёл в сеть заново —
+    5 060 ``fetched``-элементов и ≈7 ч на трёх продуктах при байтах на диске.
+    """
     store = SqliteStore(":memory:")
     _make_run(store)
     try:
@@ -1819,6 +1826,8 @@ def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
         # Повторный resume идемпотентен: один и тот же id сборки, статус FETCHED.
         assert build.index_build_id == _build_of(first).index_build_id
         assert next(iter(_items(store))).status is CrawlItemStatus.FETCHED
+        # Аудит не размножается: один URL — одна строка ``crawl_session_items``.
+        assert len(_items(store)) == 1
         # Сеанс финализирован без сбоев → ``COMPLETED``.
         session = store.get_crawl_session(SESSION_ID)
         assert session is not None and session.status is CrawlSessionStatus.COMPLETED

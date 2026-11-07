@@ -12,6 +12,8 @@
 Семантика подкоманд:
 
 * ``run``     — запустить сеанс краула (фаза корпуса); ``--reset`` очищает сеанс до старта.
+  Это семантика **команды** ``crawl``: у ``hound run`` ``--reset`` сеанс краула
+  сохраняет (resume переиспользует его элементы), стирает его только ``--from-scratch``.
 * ``status``  — сеанс и счётчики (``--per-url`` — построчно, ``--per-host`` — метрика
   §7.2: host'ы/интервалы/тайминги/backlog; флаги независимы и складываются). Сеанса нет →
   ``EXIT_OK`` с ``status: null`` (пустой, но валидный машинночитаемый ответ).
@@ -504,7 +506,9 @@ def _execute_crawl_locked(
     follow = bool(getattr(args, "follow", False))
     interval = float(getattr(args, "interval", 1.0) or 0.0)
     # Phase 4: ``--from-scratch`` обходит R7-кэш (cache=None — единственный способ) и по
-    # семантике «сброс + живой ре-фетч» очищает сеанс (как ``--reset``/``restart``).
+    # семантике «сброс + живой ре-фетч» очищает сеанс (как ``crawl run --reset``/``restart``).
+    # Это семантика **команды** ``crawl``: у ``hound run`` ``--reset`` сеанс краула
+    # сохраняет, а стирает его только ``--from-scratch`` (см. ``commands/run.py``).
     no_cache = bool(from_scratch)
     clear_first = clear_first or bool(getattr(args, "reset", False)) or no_cache
 

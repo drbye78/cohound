@@ -621,15 +621,17 @@ def test_absent_run_inputs_keeps_limit_note(
 
 
 # ---------------------------------------------------------------------------
-# L1b: ``--reset`` очищает durable-краул (сеанс краула)
+# L1b: ``--reset`` сохраняет durable-краул, ``--from-scratch`` — стирает
 # ---------------------------------------------------------------------------
 
 
-def test_reset_clears_crawl_session(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """``hound run --reset`` очищает сеанс краула прогона ``f"crawl:{run_id}"`` (L1b)."""
-    from core.cli.wiring import run_db_path
+def _seed_session_item(db_path: Path, run_id: str, url: str) -> str:
+    """Кладёт в сеанс прогона элемент ``FETCHED`` и возвращает ``session_id``.
+
+    Это носитель аудита: ``crawl_session_items`` — учёт фетчей, который ``--reset``
+    обязан сохранить (иначе ``crawl status --per-url`` показывает пустоту после прогона,
+    который был).
+    """
     from core.domain import (
         CrawlItemStatus,
         CrawlSession,
@@ -639,13 +641,7 @@ def test_reset_clears_crawl_session(
     from core.pipeline.crawl_session import default_session_id
     from core.store.sqlite_store import SqliteStore
 
-    runs_dir = tmp_path / "runs"
-    run_id = "sc-reset"
     session_id = default_session_id(run_id)
-    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
-    capsys.readouterr()
-    db_path = run_db_path(runs_dir, run_id)
-
     store = SqliteStore(db_path)
     try:
         store.upsert_crawl_session(
@@ -661,33 +657,156 @@ def test_reset_clears_crawl_session(
             CrawlSessionItem(
                 session_id=session_id,
                 product_id="p1",
-                url="https://example.com/a",
+                url=url,
                 status=CrawlItemStatus.FETCHED,
             )
         )
-        assert store.get_crawl_session(session_id) is not None
-        # Ш5 исполняется (G1–G3 больше не блокируют), поэтому в сеансе уже могут быть
-        # элементы прошлого прогона: проверяется наличие нашего, а не общее число.
+    finally:
+        store.close()
+    return session_id
+
+
+def _phase_notes(payload: dict[str, Any], phase: str) -> list[str]:
+    """Строковые заметки конкретной фазы из ``--json`` payload ``run``."""
+    return [
+        note
+        for item in payload.get("results") or ()
+        if item.get("phase") == phase
+        for note in item.get("notes") or ()
+    ]
+
+
+def test_reset_keeps_crawl_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``hound run --reset`` сеанс краула **сохраняет** и называет факт заметкой (L1b).
+
+    Регресс на измеренный дефект: стирание сеанса под ``--reset`` превращало повтор фазы
+    в новый обход — 07.11.2026 это 5 060 ``fetched``-элементов и ≈7 ч сети на трёх
+    продуктах при байтах всех документов в ``corpus_raw``.
+    """
+    from core.cli.wiring import run_db_path
+    from core.domain import CrawlItemStatus
+    from core.pipeline.crawl_session import default_session_id
+    from core.store.sqlite_store import SqliteStore
+
+    runs_dir = tmp_path / "runs"
+    run_id = "sc-reset"
+    url = "https://example.com/a"
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
+    capsys.readouterr()
+    db_path = run_db_path(runs_dir, run_id)
+    session_id = _seed_session_item(db_path, run_id, url)
+    assert session_id == default_session_id(run_id)
+
+    code = main(
+        run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, extra=["--reset"])
+    )
+    assert code == EXIT_BLOCKED
+    payload = json_out(capsys)
+
+    # Сеанс тот же (id не пересоздан) и элемент-носитель аудита на месте.
+    store = SqliteStore(db_path)
+    try:
+        session = store.get_crawl_session(session_id)
+        assert session is not None
+        assert session.session_id == session_id
         assert any(
-            item.url == "https://example.com/a"
+            item.url == url and item.status is CrawlItemStatus.FETCHED
             for item in store.iter_crawl_session_items(session_id)
         )
     finally:
         store.close()
 
-    # Повторный прогон с --reset очищает durable-состояние краула (сеанс + элементы).
+    # Факт назван, а не умолчан: resume переиспользует элементы, новый обход — только
+    # для недобранного.
+    notes = " ".join(_phase_notes(payload, "corpus"))
+    assert "reset: сеанс краула сохранён" in notes
+    assert "fetched=" in notes
+
+
+def test_from_scratch_clears_crawl_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``hound run --from-scratch`` по-прежнему стирает сеанс краула (объявленная семантика)."""
+    from core.cli.wiring import run_db_path
+    from core.store.sqlite_store import SqliteStore
+
+    runs_dir = tmp_path / "runs"
+    run_id = "sc-scratch"
+    url = "https://example.com/a"
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
+    capsys.readouterr()
+    db_path = run_db_path(runs_dir, run_id)
+    session_id = _seed_session_item(db_path, run_id, url)
+
     code = main(
-        run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, extra=["--reset"])
+        run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, extra=["--from-scratch"])
     )
     assert code == EXIT_BLOCKED
     capsys.readouterr()
+
     store = SqliteStore(db_path)
     try:
-        # Сброшенный сеанс не переживает reset: ручной элемент исчез (сеанс мог быть
+        # Сброшенный сеанс не переживает from-scratch: ручной элемент исчез (сеанс мог быть
         # создан заново текущим прогоном, но уже без него).
         assert not any(
-            item.url == "https://example.com/a"
-            for item in store.iter_crawl_session_items(session_id)
+            item.url == url for item in store.iter_crawl_session_items(session_id)
         )
     finally:
         store.close()
+
+
+def test_reset_does_not_call_clear_crawl_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Шпион на store: ``--reset`` не зовёт ``clear_crawl_session``, ``--from-scratch`` — зовёт.
+
+    Прямая проверка решения, а не его следствий: единственная точка стирания сеанса —
+    ``clear_crawl_session``, и её вызов привязан к одному флагу.
+    """
+    from core.cli.commands import run as run_module
+
+    runs_dir = tmp_path / "runs"
+    run_id = "sc-spy"
+    cleared: list[str] = []
+    real_build_store = run_module.build_store
+
+    def _spy_build_store(db_path: Any, **kwargs: Any) -> Any:
+        store = real_build_store(db_path, **kwargs)
+        real_clear = store.clear_crawl_session
+
+        def _record(session_id: str) -> None:
+            cleared.append(session_id)
+            real_clear(session_id)
+
+        store.clear_crawl_session = _record
+        return store
+
+    monkeypatch.setattr(run_module, "build_store", _spy_build_store)
+
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
+    capsys.readouterr()
+
+    # ``--reset``: журнал фаз сброшен, durable-сеанс не тронут.
+    assert (
+        main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, extra=["--reset"]))
+        == EXIT_BLOCKED
+    )
+    capsys.readouterr()
+    assert cleared == []
+
+    # ``--from-scratch``: сеанс стирается — и именно тот, что принадлежит прогону.
+    assert (
+        main(
+            run_argv(
+                E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, extra=["--from-scratch"]
+            )
+        )
+        == EXIT_BLOCKED
+    )
+    capsys.readouterr()
+    from core.pipeline.crawl_session import default_session_id
+
+    assert cleared == [default_session_id(run_id)]
+

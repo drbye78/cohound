@@ -574,7 +574,9 @@ entry point.
   --golden packages/{case_id}/golden.csv --model {model_id}
 ```
 
-Resume/force: `--until {phase}` stops after a phase, `--reset` forces a rerun, `--from-scratch`
+Resume/force: `--until {phase}` stops after a phase; `--reset` repeats the phases bypassing
+the phase journal but **keeps** the durable crawl session (`corpus` reopens it and does not
+re-fetch URLs that have retained bytes); only `--from-scratch` wipes the crawl session and
 adds a live re-fetch bypassing the R7 cache.
 
 Crawl sessions: `./hound.py crawl run|status|list|resume|restart|cancel` (`resume` is

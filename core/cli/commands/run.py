@@ -535,6 +535,53 @@ def _append_console(marker: tuple[Any, Any, Any] | None, text: str) -> None:
         marker[2].write(text.rstrip("\n") + "\n")
 
 
+def _reset_session_note(store: Any, session_id: str, errors: list[str]) -> str | None:
+    """Заметка ``--reset`` о **сохранённом** durable-сеансе краула (иначе ``None``).
+
+    ``--reset`` сбрасывает только журнал фаз (resume фаз), durable-сеанс краула он не
+    стирает — его стирает единственный ``--from-scratch``. Прежнее поведение («reset
+    очищает сеанс») превращало повтор фазы в новый обход: измерено 07.11.2026 — 5 060
+    ``fetched``-элементов и ≈7 ч сети на трёх продуктах, при том что байты всех
+    документов уже лежали в ``corpus_raw``. Поэтому факт не молчит, а называется числом:
+    сколько элементов resume переиспользует и сколько из них ``fetched``/``failed``.
+
+    Сеанса нет или элементов в нём нет — «сохранять было нечего»: не ошибка и не заметка
+    (``None``). Сбой чтения — видимая диагностика в ``errors``, а не тишина: иначе строка
+    «сеанс сохранён» была бы утверждением без проверки.
+    """
+    try:
+        if store.get_crawl_session(session_id) is None:
+            return None
+        counts = store.crawl_session_counts(session_id)
+    except Exception as exc:  # noqa: BLE001 — заметка не роняет прогон
+        errors.append(f"reset crawl_session note: {type(exc).__name__}: {_concise(exc)}")
+        return None
+    total = sum(counts.values())
+    if total <= 0:
+        return None
+    fetched = int(counts.get(CrawlItemStatus.FETCHED.value, 0))
+    failed = int(counts.get(CrawlItemStatus.FAILED.value, 0))
+    return (
+        f"reset: сеанс краула сохранён — resume переиспользует {total} элементов "
+        f"(fetched={fetched}, failed={failed}); новый обход только для недобранного"
+    )
+
+
+def _attach_phase_note(report: Any, phase: str, note: str) -> None:
+    """Добавляет строковую заметку фазе отчёта — канал ``results[].notes`` (``note: …``).
+
+    Тот же канал, что уже используют обёртки фаз (``retrieval: …``) и ``corpus``: строка
+    попадает в человекочитаемый вывод (``  note: …``), в ``--json`` и в
+    ``logs/console.log`` (stdout дублируется тудой), а не в ``errors`` — это не сбой.
+    Фазы в отчёте нет (прогон остановлен раньше) — заметка не печатается: говорить о
+    сеансе краула нечего.
+    """
+    for result in report.results:
+        if result.phase == phase:
+            result.log_entries.append(note)
+            return
+
+
 def run(args: argparse.Namespace) -> int:
     """``run``: держать файловый lock пакета и провести ``Runner`` по фазам Ш1–Ш9.
 
@@ -566,8 +613,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
     Resume honour'ится: строка прогона **не пересоздаётся**, если она уже есть, поэтому
     durable-карта фаз в ``runs.state`` сохраняется между процессами (``02`` §A.1).
 
-    ``--dry-run`` показывает план фаз/линт без записи; ``--reset`` форсирует полный
-    перезапуск в обход durable-состояния.
+    ``--dry-run`` показывает план фаз/линт без записи; ``--reset`` форсирует повтор фаз в
+    обход resume (журнал фаз), но durable-сеанс краула **сохраняет**: ``corpus``
+    переоткрывает тот же сеанс и не фетчит заново URL с retained-байтами. Стирает сеанс
+    краула (и обходит R7-кэш, ``cache=None``) единственный флаг — ``--from-scratch``.
 
     Durable per-product состояние (09 §4.1): ``--dry-run`` читает существующий
     ``state/{package_id}/state.db`` (отсутствующий не создаёт), реальный незаблокированный
@@ -1354,6 +1403,8 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         crawl_counts: dict[str, int] = {}
         truncation: dict[str, Any] = {}
         crawl_session_lifecycle: dict[str, Any] = {}
+        #: ``--reset``: заметка «сеанс краула сохранён» (``None`` — сеанса/элементов нет).
+        reset_session_note: str | None = None
         try:
             _ensure_run(store, run_id, inputs)
             # I21/§7.4: объявленная таблица ``scenario → модель`` пишется в строку прогона
@@ -1403,11 +1454,17 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
             )
             if args.reset or from_scratch:
                 runner.reset(run_id)
-                # D3/L1b: сброс durable-краула — очищаем сеанс краула прогона, чтобы resume не
-                # подхватил старые retained-элементы. Канонический ``session_id`` сеанса прогона —
-                # ``f"crawl:{run_id}"`` (:func:`core.pipeline.crawl_session.default_session_id`).
-                # Phase 4 ``--from-scratch`` = сброс сеанса + живой ре-фетч (cache=None);
-                # ``--reset`` форсирует повторную попытку, но кэш не обходит.
+            # D3/L1b: сброс журнала фаз (выше) — не сброс durable-краула. Сеанс краула
+            # прогона (``f"crawl:{run_id}"``, :func:`core.pipeline.crawl_session.default_session_id`)
+            # стирает **только** ``--from-scratch``: его объявленная семантика — «сброс
+            # сеанса + живой ре-фетч» (``cache=None`` выше). ``--reset`` форсирует повторную
+            # попытку фаз, но ни кэш, ни сеанс не обходит: ``corpus`` переоткрывает тот же
+            # сеанс (get-or-create + recovery), и URL с retained-байтами не фетчится заново.
+            # Стирание сеанса под ``--reset`` превращало повтор фазы в новый обход —
+            # измерено 07.11.2026: 5 060 fetched-элементов и ≈7 ч сети на трёх продуктах
+            # при байтах всех документов в ``corpus_raw``; заодно исчезал аудит фетчей
+            # (``crawl status --per-url`` показывал пустоту).
+            if from_scratch:
                 try:
                     if store.get_crawl_session(session_id) is not None:
                         store.clear_crawl_session(session_id)
@@ -1415,7 +1472,14 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                     instrumentation_errors.append(
                         f"reset crawl_session: {type(exc).__name__}: {_concise(exc)}"
                     )
+            elif args.reset:
+                # Сеанс сохранён — называем это числом (``note: …`` у фазы ``corpus``).
+                reset_session_note = _reset_session_note(
+                    store, session_id, instrumentation_errors
+                )
             run_report = runner.run(run_id, until=args.until)
+            if reset_session_note is not None:
+                _attach_phase_note(run_report, "corpus", reset_session_note)
             # Durable state — итог прогона (09 §4.4/§5.1): снимки продуктов, рубежи
             # ``last_corpus_run_id``/``last_evaluated_run_id``/``last_completed_run_id`` и
             # ``run_lineage``. ``previous_run_id`` читается **до** записи текущей строки
@@ -1747,7 +1811,10 @@ def configure(sub: Any) -> None:
         "--dry-run", action="store_true", help="показать план фаз без записи и исполнения"
     )
     p_run.add_argument(
-        "--reset", action="store_true", help="форсировать полный перезапуск (обход resume)"
+        "--reset",
+        action="store_true",
+        help="повторить фазы в обход resume (журнал фаз); durable-сеанс краула "
+        "сохраняется — resume переиспользует его элементы (стирает только --from-scratch)",
     )
     _add_phase4_flags(p_run)
     p_run.add_argument(
