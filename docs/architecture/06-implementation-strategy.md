@@ -181,19 +181,13 @@ flowchart LR
 L7-инспектируемый JSON, публикуемые схемы, атрибуция запросов, отсутствие пиннинга сертификатов,
 блокирующего TLS-инспекцию. *Аттестация конкретных корпоративных средств — вне рамок этой работы.*
 
-⚠️ **Паритета `local` и `split` по корпусу нет.** «Один и тот же прогон» сегодня не проходит под
-`split` эквивалентно: (1) члены контейнеров не извлекаются — `RemoteExtractor.supports_source_path
-= False` даёт видимый пропуск `extract_unavailable`; (2) сырьё пересекает шов только
-inline-base64 в странице `collect` (бюджет 8 MiB/страница, клиент отвергает страницу > 50 MiB) —
-staging крупных артефактов отсутствует; (3) ось `crawl.document_level` под `split` не действует
-(конвертеры строит edge). Поэтому `split` — **функционально уже `local`** по артефактам и
-контейнерам; это известное ограничение MVP, а не достигнутый паритет.
-
-⬜ не сделано — паритет `split` не изменился на `f6100c7`: (1) члены контейнеров не
-извлекаются — `core/adapters/remote_extractor.py:42` (`supports_source_path = False`);
-(2) страница `collect` ограничена 8 MiB — `core/edge/scheduler.py:186` (`_COLLECT_MAX_BYTES`),
-файлового staging крупных артефактов через шов нет; (3) ось `crawl.document_level` под `split`
-принимается и игнорируется — `core/cli/wiring.py:2426`.
+✅ **Паритет `local` и `split` по извлечению закрыт по механизму (B1–B3, 2026-10-28).** Члены
+контейнеров извлекаются (`supports_source_path = True`, `core/adapters/remote_extractor.py:214`),
+артефакт пересекает шов чанками (`/v1/extract/{upload,submit,collect,abort}`,
+`core/edge/server.py:621-624`), оси `level`/`device` едут в `submit`. ⚠️ Остаток: паритет `pb`
+между профилями **измерением не подтверждён** (прогона двумя профилями не было), per-site слой
+`document_level` под `split` не действует (`core/cli/wiring.py:3352-3355` — порты собираются
+до per-root резолва), `pdf_pipeline` выбирает edge. Детали — `10-extraction-pipeline-architecture.md` §4 (Д-1), §6 (B).
 
 ---
 

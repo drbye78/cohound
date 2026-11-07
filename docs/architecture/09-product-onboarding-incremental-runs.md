@@ -1,31 +1,31 @@
 # 09. Онбординг продукта и инкрементальные прогоны обновления
 
-> **Статус реализации на 2026-10-30** (перемер по коду **рабочего дерева**: HEAD `d79b7ad`
-> плюс незакоммиченные полосы — там, где это меняет вердикт, это названо; предыдущая
-> сверка — `59068f7`): PARTIAL — по реестру секций **31 пункт ✅ из 36**, 4 открыто,
-> 1 снято решением. Открыты §3.2 (доменные модели), §14 (schema/ports/migrations),
-> §15 (acceptance-тесты) и §17 (сводка). Ниже у каждого пункта маркер ✅/⬜/➖/❔.
+> **Статус реализации на 2026-11-08** (перемер по коду, HEAD `b278b79`): PARTIAL — по реестру
+> секций **34 пункта ✅ из 36, 2 ➖ снято решением, 0 открыто**. Открытых строк нет;
+> остаток — не «долг», а названные ограничения внутри ✅-строк (§14: снятые колонки;
+> §15: T15–T20 без отдельного теста на сценарий).
+> Текущие значения: `SCHEMA_VERSION` **3.20.0**, `STATE_SCHEMA_VERSION` **"12"**,
+> `METHODOLOGY_VERSION` **0.3.0**, контракт — **32** поля, `SEAM_VERSION` "1".
+> Правило «`❌` требует `live|revalidated`» **снято** (F3 плана 20): действует **I2d** —
+> `❌` требует датированного носителя (`corpus_artifact.observed_at` для
+> `explicit`/`authoritative`; снятие каждого корня `complete=1` для `bounded`),
+> иначе `❓` с токеном `absence_undated`. `complete` — факт **снятий корней**
+> (`CorpusCoverage.roots`), а не элементов сеанса.
+> `--reset` сбрасывает журнал фаз и **не** стирает durable-сеанс краула; стирает только
+> `--from-scratch`. Переиспользование отвергнутого chunk-set **пересобирает** документ из
+> сохранённых байтов (`rebuild_from_stored_bytes`), а не теряет его.
 >
-> **Что изменилось в этой редакции — статусный слой перемерен по коду, не по памяти.**
-> Сняты пять протухших «нет»: у `profile_attestation` есть производитель, и это
-> **человек** (`hound package profile attest`, §6.9); `cell_measurement` пишет Ш6 (§4.1);
-> `run_product` и файловый lock пакета существуют (§4.3/§4.4); run-level `chunk_id` несёт
-> `doc_version_id` (§3.3 O4, §14.6 п. 11); `cell_evidence.doc_version_id` **есть**, и
-> перенос проверяет адрес версии дополнительно к `content_hash` (§3.3 O5). Вердикты строк
-> реестра при этом не изменились — они уже стояли ✅; исправлены текст секций, «чего нет»
-> и адреса. Отдельно приведены к снятому решению все места, где `freshness` числилась
-> «design-only»: это **➖**, а не «не сделано».
->
-> **Предыдущая редакция (29.10.2026) — применена граница A**
-> (`16-runs-schema-boundary.md`, 29.10.2026): `run_product` и статус продукта в прогоне
-> (§4.3/§6.5), `run_scope` и `product_plan` в манифесте и `--json` (§13.6), ось
-> `embed_device` в контракте (28 → 29 полей), `corpus_docs.{http_status,reuse_kind,
-> doc_version_id}` и правило «`❌` только при `live|revalidated`» (§11.2, снято F3 плана 20:
-> I2d — датированный носитель), формат
-> партиции `partition-2`, `chunk_id` с `doc_version_id` (§14.6 п. 11), три дефекта
-> краула (§6.3). `METHODOLOGY_VERSION` — `0.2.0` (текущие значения: контракт — **31** поле,
-> методология — **`0.3.0`**). Прежняя редакция называла эти пункты
-> design-only: верно до 29.10.2026, неверно сейчас.
+> **Исторические редакции (не текущий статус).** 30.10.2026 (`d79b7ad`) реестр был перемерен
+> по коду: сняты пять протухших «нет» (производитель `profile_attestation` — человек,
+> §6.9; писатель `cell_measurement` — Ш6, §4.1; `run_product` и файловый lock пакета,
+> §4.3/§4.4; run-level `chunk_id` с `doc_version_id`, §3.3 O4/§14.6 п. 11;
+> `cell_evidence.doc_version_id`, §3.3 O5), а `freshness` переведена в **➖**.
+> **29.10.2026** применена граница A (`16-runs-schema-boundary.md`): `run_product` и статус
+> продукта в прогоне (§4.3/§6.5), `run_scope`/`product_plan` в манифесте и `--json`
+> (§13.6), ось `embed_device` в контракте, `corpus_docs.{http_status,reuse_kind}`,
+> формат партиции `partition-2`, `chunk_id` с `doc_version_id` (§14.6 п. 11), три дефекта
+> краула (§6.3). Правило «`❌` только при `live|revalidated`» того же дня **снято**
+> F3 плана 20 — см. врезку про I2d выше.
 
 > **Как читать этот документ.** Это **гибрид**: часть механизмов работает в прогоне
 > сегодня, часть описана как целевой дизайн и не имеет производителя в коде. Каждая
@@ -152,65 +152,58 @@
 | Секция | Статус | Чего нет / что важно |
 |---|---|---|
 | §1 | ✅ сделано | исторический контекст: все четыре дефекта закрыты MVP-1/2; секция читается в прошедшем времени |
-| §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1472`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1586`; формула — `next_cohort_ref:1566`). Повтор с тем же составом — no-op. Остаётся колонка `runs.cohort_ref`, которая хранит другое поле (§12.2) |
+| §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1472`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1586`; формула — `next_cohort_ref:1566`). Повтор с тем же составом — no-op. Колонка `runs.cohort_ref` пишет `cfg.cohort_ref` (ревизию), а не имя файла (§12.2) |
 | §2.3 | ✅ сделано | подкоманды `hound package seeds list/add/disable/enable/export` (`core/cli/package/parser.py:482`, слой — `core/pipeline/package_seeds.py`); `sources/seeds.yaml` в `ARTIFACT_FILES`; ложные подсказки в `context.py`/`corpus.py` стали правдой |
 | §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:3154`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`:3784`), ноль сетевых вызовов; chunk-set чужой версии при наличных байтах пересобирается текущим конвейером (`rebuild_from_stored_bytes`), без байтов — `no_bytes` (`tests/pipeline/test_corpus_offline.py`, `tests/pipeline/test_corpus_reuse_rebuild.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
 | §3.1 | ✅ сделано | `RunProductStatus` — ✅ есть (`core/domain/enums.py`) и сверен со словарём (`run_product_status`). `CoverageFreshness` — **➖ снято**: её роль исполняет `corpus_docs.reuse_kind`, вторая ось свежести была бы вторым носителем одной величины. `MeasurementOrigin` — ✅ волна 2: `observed\|carried`, сверен со словарём (`docs/status-dictionary.yaml:measurement_origin`, `core/domain/dictionary.py`) и несётся ячейкой (`Cell.measurement_origin`) |
 | §3.2 | ➖ снято решением (30.10.2026) | модели живут как `*Row` в `core/ports/state.py`, и это **и есть** их форма; `CellMeasurement`/`RunProduct`/`CompositionMember` как отдельные Pydantic-модели не заводятся — они были бы вторым носителем той же формы (обоснование — §3.2) |
 | §3.3 | ✅ сделано | O1/O2/O3/O12 as-built; **O4 ✅** (run-level `chunk_id` = `product:doc_version_id:chunk_no`, `core/pipeline/corpus_index.py:181`); **O5 ✅** — колонка `cell_evidence.doc_version_id` есть (аддитивно), адрес пишет `evaluate._with_doc_versions` из `chunk_id` (`core/util/ids.py:98` `doc_version_of`), перенос проверяет его **дополнительно** к `content_hash` (`carry_forward._evidence_chain_valid`); остаток — `registry`/`inheritance`-evidence идут с `NULL` (у них нет чанка-версии: `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` читается как «не записано», а не «любая версия»; **O6 ✅** (`carry_forward_cell`), **O13 ✅** в доступной части: перенос инвалидируется сменой `scope_acceptance` через `attestation_digest`, `reviewed`/`N/A` едут только как `carried` с провенансом |
-| §4.1, §4.2 | ✅ сделано | `state.db` — `STATE_SCHEMA_VERSION = "5"` (`core/store/state_sqlite.py:41`); **`cell_measurement` — есть писатель** (Ш6, §10.1); `attestation`/`cycle` — по-прежнему **нет писателя** |
+| §4.1, §4.2 | ✅ сделано | `state.db` — `STATE_SCHEMA_VERSION = "12"` (`core/store/state_sqlite.py:84`), **20 таблиц** (19 предметных + `schema_meta`); **`cell_measurement` — есть писатель** (Ш6, §10.1); `attestation`/`cycle` — по-прежнему **нет писателя** |
 | §4.3 | ✅ сделано | таблица `run_product` (16 §3.2) + `save_run_product`/`iter_run_products` (`core/store/sqlite_store.py`); писатель — корпус, читатель — отчёт (`outputs/run_product.csv` и `--json`) |
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
 | §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:525`), провенанс спуска — write-through (§4.7) |
-| §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277,304`), вызов — `preflight` из `core/cli/commands/run.py:713,774` |
+| §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277,304`), вызов — `preflight` из `core/cli/commands/run.py:917,1052` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
-| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:2852`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
+| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:3111`) и для `incremental`, и для прохода без сети (`no_network`, `core/pipeline/corpus_ingest.py:3103-3111`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
-| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/corpus_drain.py:1172`; зонд — `corpus_drain.py:1203`), семейство чанкеров — `chunker_family` |
-| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1650`), waiver-след (`core/pipeline/runner.py:467`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
+| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:320`; зонд — `core/pipeline/artifact_probe.py:67`), семейство чанкеров — `chunker_family` |
+| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1650`), waiver-след (`core/pipeline/runner.py:476`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/store/backup.py:687`; вызов — `core/cli/package/commands.py:2394`) |
 | §9 | ✅ сделано | строка «Cell/evidence» описывает as-built перенос (§10): `measurement_origin`/`carried_from_run_id`, копии evidence с per-run `evidence_id` |
 | §10 | ✅ сделано | `cell_reuse_key` (`cell-reuse-2`, 21 слагаемое), `carry_forward_cell`, `measurement_origin`, писатель `cell_measurement` (Ш6), счётчики `cells_carried` в снимке и отчёте; **§10.5 (ключ eval cache) — ✅ сделано** ранее. Per-cell (решение 29.10.2026): ключ после retrieval, `retrieved_doc_set_digest` вместо doc-set продукта. Приёмка — `tests/pipeline/test_carry_forward.py` |
-| §11 | ✅ сделано | колонки покрытия (включая `resolved_manually`); `scope_acceptance` — канал проложен (§11.5); **правило `❌` → только `live\|revalidated` исполняется** (`_enforce_reuse_confirmed`), и оно же применяется к перенесённой ячейке (`_carried_rules_hold`); **§11.4** — `cells_carried`/`cells_measured` в снимке (`state_sync._cell_stats`) и `outputs/cell_origin.csv` + `--json: cell_origin` (`report.collect_cell_origins`) |
+| §11 | ✅ сделано | колонки покрытия (включая `resolved_manually` и `roots_json`); `scope_acceptance` — канал проложен (§11.5); **I2d: `❌` требует датированного носителя** (`_enforce_dated_absence`, `core/pipeline/evaluate.py:2155`; `check_absence_dated`, `core/domain/invariants.py:386`), и то же правило применяется к перенесённой ячейке (`_carried_rules_hold`); `reuse_kind` — провенанс строки корпуса, а не условие публикации; **§11.4** — `cells_carried`/`cells_measured` в снимке (`state_sync._cell_stats`) и `outputs/cell_origin.csv` + `--json: cell_origin` (`report.collect_cell_origins`) |
 | §12.1–§12.2, §12.5 | ✅ сделано | `execution_contract_digest`, `content_change`; дефект `runs.cohort_ref` (хранила имя файла вместо ревизии) закрыт границей A |
-| §12.3 | ✅ сделано | lineage пишется в `state.db.run_lineage` и читается в манифест: `cycle_id`/`previous_run_id`/`change_class` (правило — один резолвер `previous_run_of`); те же три поля есть и в `runs` (`core/store/sqlite.py:89-91`) |
+| §12.3 | ✅ сделано | lineage пишется в `state.db.run_lineage` и читается в манифест: `cycle_id`/`previous_run_id`/`change_class` (правило — один резолвер `previous_run_of`); те же три поля есть и в `runs` (`core/store/sqlite.py:144-146`) |
 | §13 | ✅ сделано | §13.3 (carry-forward) исполняется; смена класса изменения по-прежнему переоценивает ячейки — перенос не переживает смену условий (§10.3) |
 | §14 | ✅ разобрано 30.10.2026 | §14.1: колонки добавлены аддитивно (`SCHEMA_VERSION` не поднят), а **девять полей снято** — каждое дублировало величину, которую уже несёт другая колонка/таблица (§14.1, таблица обоснований); §14.2: снимок входов `snapshot_version` 1 → 2 (цепочка циклов без `state.db`), O11 не ослаблен — снимок прежней версии не перезаписывается, факт назван; §14.3: имена дизайна сверены с `core/ports/state.py` как **замены**, а не долг; §14.4: `hound backup`/`restore` + `--include-state` (согласованный снимок `state.db`). Пп. 1–11 §14.6 ✅, п. 12 — **➖ снято** (решение 29.10.2026) |
 | §15 | ✅ сделано | T1 **➖ снят** (ожидание было неверным: код отказывает, а не планирует); T13/T20 переписаны под реализацию; T16 — as-built по материалу дайджестов; **T15 закрыт 30.10.2026** — retirement получил производителя (`_reconcile_declared_retirements`) и наблюдаемый возврат (`re_added_at`). Тесты волны 2 (`tests/pipeline/test_carry_forward.py`, 16 шт.) — **не** T15–T20: нумерация занята другими приёмками |
 | §16 | ✅ сделано | этапы 0–4 реализованы; **этап 5 (carry-forward) исполняется** (маркеры в §16.1) |
 | §17 | ✅ сделано | все 15 пунктов: п. 9 (carry-forward) — волна 2, п. 11 (ключ eval cache) и п. 13 (межпрогонный `--only-failed`) — 30.10.2026 |
-| §18 | ✅ сделано | все 10 вопросов закрыты: п. 2 (`❌` только при `live\|revalidated`), п. 6 (**per-cell**), п. 10 (`run_scope` персистится, политика `--only-product` не меняется) — решениями 29.10.2026; п. 5, 7, 9 — механизмом |
+| §18 | ✅ сделано | все 10 вопросов закрыты: п. 2 (**I2d — датированный носитель**), п. 6 (**per-cell**), п. 10 (`run_scope` персистится, политика `--only-product` не меняется) — решениями 29.10.2026; п. 5, 7, 9 — механизмом |
 | §19 | ✅ сделано (переписано в as-built) | псевдокод заменён описанием фактического порядка: `package_lock` → `preflight` → фазы; перенос ячеек внутри Ш6, а не отдельным проходом (§10.2) |
-| §20 | ✅ сделано | benchmark оценщика (`core/cli/commands/experiment.py:529`) |
+| §20 | ✅ сделано | benchmark оценщика (`core/cli/commands/experiment.py:564`) |
 
-> **Как читать маркеры** (проверка 2026-10-30, HEAD `d79b7ad`; предыдущая — `59068f7`): ✅ —
+> **Как читать маркеры** (проверка 2026-11-08, HEAD `b278b79`): ✅ —
 > исполнение найдено в `core/` (вызов из `core/pipeline/`, `core/cli/` или `core/store/`), а не
 > только объявление; ⬜ — механизма в прогоне нет; ➖ — снято решением (`11` §3.1); ❔ —
-> установить не удалось. Разница редакций — 29 коммитов; эта сверка перемерла по коду то, что
-> прошлая называла design-only: производитель `profile_attestation` — CLI
-> (`bfcf891`, §6.9), писатель `cell_measurement` (§4.1), `run_product` + файловый lock
-> (§4.3/§4.4), run-level `chunk_id` с `doc_version_id` (§3.3 O4),
-> `runs.{cycle_id,previous_run_id,change_class,product_plan_json}` (§4.3/§12.3).
-> Итог по 36 строкам: **31 ✅ / 4 ⬜ / 1 ➖ / 0 ❔** (перемер 30.10.2026 после волны 2:
-> §3.1, §3.3, §6.4, §9, §10, §11, §13, §16, §19 перешли в ✅ — перенос ячеек исполняется).
-> Эта сверка вердиктов строк не меняла, но исправила текст секций §4.3, §6.5, §6.9, §12.3,
-> §13.1, §14.1, §14.6, §16.1, §17, §18 и три адреса. Прежние 21/14 не учитывали, что перенос
-> ячеек, `MeasurementOrigin` и счётчики уже производятся прогоном. Символ, существующий и
-> покрытый тестом, но не вызываемый конвейером, здесь считается ⬜ (пример из проекта —
-> `run_serp_round`).
+> установить не удалось. Символ, существующий и покрытый тестом, но не вызываемый
+> конвейером, здесь считается ⬜ (пример из проекта — `run_serp_round`).
+> Итог по 36 строкам: **34 ✅ / 0 ⬜ / 2 ➖ / 0 ❔**.
 
-> **Что осталось.** Две строки закрыты 30.10.2026 (межпрогонный `--only-failed` и
-> `offline` — оба as-built, §2.4), остальные сводятся к **одному пункту**:
+> **Что осталось.** Открытых строк реестра **нет**. Остаток назван внутри ✅-строк и
+> долгом не является:
 >
-> 1. **Агрегатные строки реестра** (§3.2, §14, §15, §17): доменные модели
->    `CellMeasurement`/`RunProduct`/`CompositionMember` живут как `*Row`/элемент
->    `members_json`; в §14 design-only остаются `cells.*_digest`-колонки и
->    `origin_evidence_id`; T15–T20 — план приёмки без отдельного теста на сценарий.
+> 1. **Снятые колонки §14.1** — девять полей не заводятся намеренно (второй носитель уже
+>    существующей величины, таблица обоснований — §14.1), а не «не успели».
+> 2. **T15–T20 §15.1** — план приёмки без отдельного теста на сценарий; T15 закрыт
+>    механизмом (`_reconcile_declared_retirements`), нумерация занята прежними приёмками.
+> 3. **Доменные модели §3.2** — `CellMeasurement`/`RunProduct`/`CompositionMember` живут
+>    как `*Row`/элемент `members_json`; это **➖ снято решением** (30.10.2026), а не долг.
 >
 > **Что НЕ входит в эти строки, хотя выглядит как открытое.** `attestation` и `cycle` —
 > таблицы без писателя: `attestation` дублирует `scope_attestation.yaml`, `cycle` не нужен,
@@ -250,7 +243,9 @@
 > партиции `partition-2`, ось `embed_device` (оговорка 5 `14`, 28 → 29 полей контракта),
 > `runs.cohort_ref` (§12.2). **`SCHEMA_VERSION` не поднят** — всё аддитивно
 > (`_ensure_columns` + `CREATE TABLE IF NOT EXISTS`); `_reject_foreign_schema` существует
-> ради несовместимого чтения, а не счётчика ревизий. **Класс —
+> ради несовместимого чтения, а не счётчика ревизий. **На 08.11.2026 шим `_ensure_columns`
+> удалён** (решение 01.11.2026): версия читается **до** DDL, несовпадение — `SchemaVersionMismatch`
+> (`core/store/sqlite.py:30,736`), аддитивных `ALTER TABLE` нет ни одного. **Класс —
 > `methodology_version` (`0.1.0` → `0.2.0`)**: правило reuse меняет условие публикации
 > `❌`, то есть absence/evidence-модель; цена названа честно — `golden-full` и
 > пере-аннотация golden.
@@ -277,7 +272,8 @@
 > 3. **Зарядка бюджета на resume не делала URL дренируемым** (§6.3, «Дефект 29.10.2026»):
 >    корень заряжался в потолок, `add_seed` возвращал `truncated`, дренаж выходил до
 >    обхода. Измерено на продукте с 509 документами: 25 чанков при 4935 чанках в
->    durable-субстрате. Теперь каждый заряженный элемент ставится depth-0 листом через
+>    durable-субстрате (29.10.2026; на 08.11.2026 у `pangolin` — **1 693** документа, корпус
+>    прогона `2a5b51af5778` — **8 115 док / 154 664 чанка / 5 партиций**). Теперь каждый заряженный элемент ставится depth-0 листом через
 >    `add_revalidate_seed` **независимо от режима продукта**, а бюджет повторно не
 >    тратится.
 >
@@ -336,9 +332,9 @@
 > после удаления `params_token` из id это единственный diff-видимый сигнал смены каталога.
 > Прунинг неиспользуемых композиций реализован: `gc_index_compositions` + `hound package
 > index-gc` (живое множество — `runs.index_build_id` по run DB; §8.6). Не реализовано:
-> `offline`-reuse (**не реализован**: планировщик деградирует до `revalidate` с видимой
-> ошибкой на продукт — молчаливая смена политики запрещена, §2.4), расписание
-> `next_check_at`; carry-forward (этап 5) **исполняется** (§10). Операторский потолок
+> только расписание `next_check_at` (колонка есть, не читается — `core/pipeline/incremental.py:145`);
+> `offline`-reuse **реализован** отдельным проходом без сети (`offline_reuse_product`,
+> `core/pipeline/corpus_ingest.py:3784`, §2.4); carry-forward (этап 5) **исполняется** (§10). Операторский потолок
 > ревалидации `crawl.revalidate_max_documents` **реализован** как default-off ось (§8.7).
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
 > обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
@@ -360,11 +356,12 @@
 > **Закрыто методологией 2.3.0** (было отклонением, стало правилом): `hound diff`
 > сравнивает `execution_contract_digest`, а не `index_build_id` — смена контента при
 > неизменном контракте разрешена как `content_change` с баннером и per-product
-> doc-delta (§12.5); `CorpusCoverage.complete` требует `observed_sources > 0`, а не
-> `expected_sources > 0` (§3.3/O2). Оба — `methodology_change`: на момент решения это был
+> doc-delta (§12.5); `CorpusCoverage.complete` решается **снятиями объявленных корней**
+> (`CorpusCoverage.roots`), а не `observed_sources` (§3.3/O2, план 20 F1). Оба — `methodology_change`: на момент решения это был
 > `METHODOLOGY_VERSION` 2.2.0 → 2.3.0, `golden-full` + одна пере-аннотация golden.
-> **Текущий пин — `0.1.0`** (сброс нумерации 26.10.2026, §12.5); номер версии здесь —
-> датировка решения, а не действующее значение.
+> **Текущий пин — `0.3.0`** (`core/domain/models.py:162`; сброс нумерации 26.10.2026, затем
+> `0.2.0` → `0.3.0` на F3 плана 20, §12.5); номер версии выше — датировка решения, а не
+> действующее значение.
 >
 > **Рамки:** `core/` остаётся категорийно-нейтральным; вся предметная специфика — данные
 > пакета (`packages/{case_id}/`). Слои: `pipeline ↛ adapters/store/cli`; `index_store/`
@@ -683,7 +680,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
   сеансовым фильтром были не видны. Какой источник сработал и сколько URL он дал — в
   `notes`, молчаливого выбора нет.
   Ремонт идёт **известными** depth-0 URL (`plan_repair_items`,
-  `core/pipeline/corpus_ingest.py:2949` → `Frontier.add_revalidate_seed`), а не BFS-корнями:
+  `core/pipeline/corpus_ingest.py:3154` → `Frontier.add_revalidate_seed`), а не BFS-корнями:
   провал глубокой страницы не становится seed-корнем и не тратит бюджет чужого корня;
   авторские корни под ремонтом **не дренятся**. Набор берётся ровно из переданного
   множества и **независимо от `ProductMode`**: у продукта, который сейчас `new`/`full`,
@@ -836,10 +833,10 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 | ID | Инвариант | Где обеспечивается | Статус |
 |---|---|---|---|
 | **O1** | Каждый продукт когорты имеет ≥ 1 `enabled` seed **или** `onboarding_state=pending_seeds`; `run` с `pending_seeds` блокируется | onboarding-префлайт (`preflight`) + `lint` | as-built |
-| **O2** | Продукт с `mode in (new, full)` не может завершить corpus с `expected_sources = 0`; это `failed`, не пустой `ok`. Сильнее: `complete` требует `observed_sources > 0` — корпус без единого наблюдения не доказывает отсутствия (2.3.0) | `build_corpus` (`derive_corpus_coverage`) | as-built |
+| **O2** | Продукт с `mode in (new, full)` не может завершить corpus с `expected_sources = 0`; это `failed`, не пустой `ok`. `complete` решается **снятиями объявленных корней** (`CorpusCoverage.roots`), а не `observed_sources`: проход без сети удостоверен датированным обходом, а `observed_sources` — диагностика (план 20 F1) | `build_corpus` (`derive_corpus_coverage`) | as-built |
 | **O3** | Для каждого продукта плана в прогоне существует строка `corpus_coverage`; отсутствие — аномалия, не «неизвестно» | `corpus` (`_persist_corpus_coverage`) + `evaluate` (`_coverage_for`) | as-built |
 | **O4** | `doc_version_id` детерминирован от `(product_id, content_hash, extractor_version, level)`; durable `chunk_id` — от `(doc_version_id, chunker_version, chunk_no)`; run-level `chunk_id` — от `(product_id, doc_version_id, chunk_no)` | `corpus` | **as-built**: `doc_version_id` — да (`incremental.doc_version_id:271`); durable-строка чанка — да (`chunk_row_id:285`); run-level `chunk_id` — да, `f"{product_id}:{doc_version_id}:{chunk_no}"` (`corpus_index._chunk_id:181`, вызовы — `corpus_ingest.py:1437`, `extract_consume.py:499`). Пространств идентификаторов **три**, и run-level намеренно не несёт `chunker_version`: грамматика `source_id` отдаёт 4-й сегмент под `build_id` (`ids.py:57`), а в одной прогонной БД `chunker_version` — константа контракта (§14.6 п. 11) |
-| **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate` (`_with_doc_versions`) / `carry_forward` | **as-built**: колонка `cell_evidence.doc_version_id` есть (аддитивно, `_ensure_columns`), адрес выводится из `chunk_id` ретривнутого чанка (`evaluate._with_doc_versions:2384`, вызов — `:2620`, единый эшелон для живого ответа и хита `eval_cache`; разбор — `core/util/ids.py:98`), перенос проверяет адрес **дополнительно** к `content_hash` (`_evidence_chain_valid`, `carry_forward.py:370`). Остаток назван точно: `registry`- и `inheritance`-evidence идут с `doc_version_id = NULL` (у них нет чанка-версии — `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` = «не записано», а не «любая версия» |
+| **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate` (`_with_doc_versions`) / `carry_forward` | **as-built**: колонка `cell_evidence.doc_version_id` есть (объявлена в `CREATE TABLE`, `core/store/sqlite.py:360`; шим `_ensure_columns` удалён), адрес выводится из `chunk_id` ретривнутого чанка (`evaluate._with_doc_versions:2656`, вызов — `core/pipeline/evaluate.py:2915`, единый эшелон для живого ответа и хита `eval_cache`; разбор — `core/util/ids.py:98`), перенос проверяет адрес **дополнительно** к `content_hash` (`_evidence_chain_valid`, `carry_forward.py:370`). Остаток назван точно: `registry`- и `inheritance`-evidence идут с `doc_version_id = NULL` (у них нет чанка-версии — `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` = «не записано», а не «любая версия» |
 | **O6** | `carried`-ячейка допустима только при совпадении `cell_reuse_key`, полном покрытии и неизменном **retrieved-наборе этой ячейки** (per-cell, 29.10.2026; не doc-set продукта) | `carry_forward_cell` (§10.2) | **as-built** (`core/pipeline/carry_forward.py`) |
 | **O7** | `❌` публикуется только при `coverage.complete` (или человеческой аттестации); `freshness != stale` — ➖ снято решением (поля нет) | `evaluate` (`_enforce_absence_coverage` → `check_absence_coverage`); класс отрицания решает, а не одна полнота (§11.2) | частично: `coverage.complete` + классы — as-built; `freshness` **не существует** (§11.1) |
 | **O8** | `index_build_id` прогона = `composition_id`; каждая партиция иммутабельна и адресуется `partition_build_id` | `composition` / `index_npy` | as-built |
@@ -858,8 +855,8 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 ## 4. Durable per-product state
 
 > **Статус раздела: ✅ сделано во всех пунктах (§4.1–§4.7); открыт только писатель двух
-> таблиц `state.db`.** `state.db` v5 с 15 таблицами; `cell_measurement` пишет Ш6
-> (`state.record_cell_measurements`, `core/pipeline/evaluate.py:3495`; adoption —
+> таблиц `state.db`.** `state.db` v12 с 20 таблицами; `cell_measurement` пишет Ш6
+> (`state.record_cell_measurements`, `core/pipeline/evaluate.py:4153`; adoption —
 > `core/pipeline/state_adopt.py:1600`), `profile_attestation` пишет **человек**
 > (`hound package profile attest`, §6.9). Писателя **по-прежнему нет** у `attestation`
 > (cell-level, I2b) и `cycle` — `grep -rn "INSERT INTO cycle" core/` пусто, adoption
@@ -875,7 +872,7 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 Раскладка (`core/config/paths.py`): поле `state: Path = Path("state")`, env
 `COHOUND_STATE_DIR`, приоритет как у остальных полей. Файл:
 `state/{package_id}/state.db` (+ `state.db-wal`, `state.db-shm`).
-Версия схемы — `STATE_SCHEMA_VERSION = "5"` (`core/store/state_sqlite.py:41`), хранится в
+Версия схемы — `STATE_SCHEMA_VERSION = "12"` (`core/store/state_sqlite.py:84`), хранится в
 `schema_meta`.
 
 **Почему per-package, а не глобальный `history.db`:**
@@ -888,17 +885,22 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 **Глобальными остаются:** `corpus_raw/{product_id}/` (content-addressed байты),
 `cache/http/`, `extract_cache/`, `eval_cache/`, `index_store/{package}/`.
 
-**Что действительно лежит в `state.db` (v5).** 15 таблиц, включая `schema_meta`
-(14 предметных): `product_state`, `seed_set`, `url_state`, `document_version`,
+**Что действительно лежит в `state.db` (v12).** 20 таблиц, включая `schema_meta`
+(19 предметных): `product_state`, `seed_set`, `url_state`, `document_version`,
 `chunk_store`, `chunk_meta`, `product_snapshot`, `cell_measurement`, `cycle`,
 `run_lineage`, `index_partition`, `index_composition`, `attestation`,
-`profile_attestation`. Источник истины — `STATE_DDL`
+`profile_attestation`, `crawl_policy`, `corpus_capture`, `corpus_capture_doc`,
+`container_state`, `capture`. Источник истины — `STATE_DDL`
 (`core/store/state_sqlite.py`); копия ниже — для чтения, и она **не** является
 контрактом. `profile_attestation` появилась в v4 вместе с полосой гейтов; **v5** добавила
 частичность извлечения в `document_version` (`extract_partial`/`extract_partial_reason`/
 `extract_pages_converted`/`extract_page_count` — `core/store/state_sqlite.py:145-150`);
 **v7** добавила смещения куска в `chunk_meta` (`char_start`/`char_end` — провенанс
-врезки, без которого переиспользованный chunk-set терял место куска в документе).
+врезки, без которого переиспользованный chunk-set терял место куска в документе);
+**v8–v11** (планы 19/20) добавили провенанс краула и датированного отсутствия:
+`crawl_policy` (v8), `corpus_capture`/`corpus_capture_doc` (v9), `container_state` (v10),
+`capture` (v11); **v12** меняет смысл `capture.policy_digest` (отпечаток пространства,
+а не поверхности решений), файл ≤ 11 отвергается гейтом версии.
 
 > **Дрейф-оговорка.** DDL-копия ниже однажды уже разошлась с кодом (в `run_lineage` не
 > хватало двух аддитивных колонок). Сверять нужно с `STATE_DDL`, а не с этим блоком.
@@ -1162,6 +1164,84 @@ CREATE TABLE profile_attestation (
     notes           TEXT
 );
 
+-- 12. Политика краула по областям (STATE 8, план 19 §4). Append-only через superseded_by.
+CREATE TABLE crawl_policy (
+    policy_id      INTEGER PRIMARY KEY,
+    product_id     TEXT NOT NULL,
+    scope_kind     TEXT NOT NULL CHECK (scope_kind IN ('product','host','root','path')),
+    host           TEXT,          -- NULL только при scope_kind='product'
+    path           TEXT,          -- NULL при 'product'/'host'; маска при 'path'
+    mode           TEXT NOT NULL CHECK (mode IN ('auto','on_request','scheduled','network_denied')),
+    interval_hours INTEGER,       -- обязателен при mode='scheduled', иначе NULL
+    note           TEXT,
+    actor          TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    superseded_by  INTEGER REFERENCES crawl_policy(policy_id)
+);
+
+-- 13. Запись снятия корпуса без сети (STATE 9, план 19 §P3). Append-only.
+CREATE TABLE corpus_capture (
+    capture_id        INTEGER PRIMARY KEY,
+    product_id        TEXT NOT NULL,
+    run_id            TEXT NOT NULL,
+    captured_at       TEXT NOT NULL,
+    capture_digest    TEXT NOT NULL,             -- набор корней + набор URL + seeds_digest
+    seeds_digest      TEXT NOT NULL,
+    source            TEXT NOT NULL CHECK (source IN ('bytes','chunks')),
+    coverage_complete INTEGER NOT NULL,
+    coverage_digest   TEXT,
+    doc_set_digest    TEXT NOT NULL
+);
+
+-- 14. Документы снятия и durable-группы дедупа: doc_hash → URL'ы одного документа.
+CREATE TABLE corpus_capture_doc (
+    capture_id     INTEGER NOT NULL REFERENCES corpus_capture(capture_id),
+    product_id     TEXT NOT NULL,
+    doc_hash       TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    reuse_kind     TEXT NOT NULL,
+    PRIMARY KEY (capture_id, url)
+);
+
+-- 15. Состояние контейнера (STATE 10, план 19 §E.7): URL → последний ретейнённый архив.
+CREATE TABLE container_state (
+    product_id           TEXT NOT NULL,
+    url                  TEXT NOT NULL,
+    normalized_url       TEXT NOT NULL,
+    archive_content_hash TEXT NOT NULL,          -- хеш байтов, не текста
+    raw_path             TEXT NOT NULL,
+    format               TEXT,
+    status               TEXT NOT NULL CHECK (
+        status IN ('planned','descended','unreadable','budget_exhausted')
+    ),
+    first_seen_run_id    TEXT NOT NULL,
+    last_seen_run_id     TEXT NOT NULL,
+    first_seen_at        TEXT NOT NULL,
+    last_seen_at         TEXT NOT NULL,
+    PRIMARY KEY (product_id, normalized_url)
+);
+
+-- 16. Снятие корня (STATE 11, план 20 §3/§4): один обход одного корня. На него ссылается
+-- url_state.capture_id. complete — исчерпан ли корень на дату снятия (adopted всегда 0).
+CREATE TABLE capture (
+    capture_id      TEXT PRIMARY KEY,
+    product_id      TEXT NOT NULL,
+    run_id          TEXT,
+    root_url        TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    complete        INTEGER NOT NULL,            -- 1 — обход исчерпан, 0 — нет
+    coverage_digest TEXT,
+    doc_set_digest  TEXT,
+    policy_digest   TEXT,                        -- отпечаток удостоверяемого пространства (STATE 12)
+    observed_how    TEXT NOT NULL CHECK (
+        observed_how IN ('live','revalidated','adopted','scheduled')
+    ),
+    actor           TEXT,
+    superseded_by   TEXT REFERENCES capture(capture_id)
+);
+
 CREATE INDEX idx_seed_product ON seed_set(product_id, state);
 CREATE INDEX idx_doc_product  ON document_version(product_id, status);
 CREATE INDEX idx_snapshot_product ON product_snapshot(product_id, created_at);
@@ -1173,13 +1253,15 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 
 > **Статус: ✅ сделано; схема версионируется (`SCHEMA_VERSION = "3.20.0"`), аддитивных
 > `ALTER TABLE` нет ни одного (волна S плана 17).** В `runs` есть
-> `cycle_id`/`previous_run_id`/`change_class` (`core/store/sqlite.py:89-91`),
-> `run_scope`/`product_plan_json` (`:94-95`), `embed_device` (`:74`) и таблица `run_product`
-> (`core/store/sqlite.py:488`; писатель — корпус, `core/pipeline/corpus_persist.py:540`;
-> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:1871`).
-> Полей `cohort_digest`/`seeds_digest` в `runs` **нет** — они живут в `run_id` и
-> `state.db.run_lineage` (§12.3); `RunManifest` несёт `cycle_id`/`previous_run_id`/
-> `change_class` и `run_scope`/`product_plan`.
+> `cycle_id`/`previous_run_id`/`change_class` (`core/store/sqlite.py:144-146`),
+> `run_scope`/`product_plan_json` (`core/store/sqlite.py:149-150`), `embed_device` (`core/store/sqlite.py:129`) и таблица `run_product`
+> (`core/store/sqlite.py:591`; писатель — корпус, `save_run_product` —
+> `core/pipeline/corpus.py:3879`, обёртка `core/pipeline/corpus_persist.py:588`;
+> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2064`).
+> `runs.cohort_digest` и `runs.seeds_digest` **есть** (колонки `core/store/sqlite.py:115-116`)
+> и заполняются из манифеста; они дублируют слагаемые `run_id` для диагностики diff, а
+> цепочка циклов живёт в `state.db.run_lineage` (§12.3). `RunManifest` несёт
+> `cycle_id`/`previous_run_id`/`change_class` и `run_scope`/`product_plan`.
 
 Фактическое содержимое run DB (`SCHEMA_VERSION = "3.20.0"`), **25** таблиц включая
 `schema_meta` (24 предметных; проверяется `connect(':memory:')` + `sqlite_master`; граница A
@@ -1287,12 +1369,12 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > включает `incremental`**. `_mode_for` (`core/pipeline/onboarding.py:277`) требует
 > `last_snapshot(scope=full).status == "complete"`, а снимок получает `status` из покрытия:
 > у всех продуктов `ru-pg-dbms` покрытие неполное, значит снимок `partial` → режим `full`.
-> Плюс ячейки не переносятся при расхождении `methodology_version` (2.4.0 в старых
-> прогонах против текущей 0.1.0), а без ячеек `baseline_complete=False`. Итог: сегодня
+> Плюс ячейки не переносятся при расхождении `methodology_version` (в старых прогонах
+> 2.4.0/0.1.0 против текущей **0.3.0**), а без ячеек `baseline_complete=False`. Итог: сегодня
 > adoption наполняет durable-субстрат (`document_version`, `chunk_store`/`chunk_meta`,
 > `url_state`, `index_partition`, снимок, lineage), но `--update` всё равно идёт полным
-> краулом (`new` → `full`; `plan_incremental` вызывается только для `incremental`,
-> `core/pipeline/corpus.py`, `_build_corpus`). Это честное следствие «нет ни одного complete-baseline»,
+> краулом (`new` → `full`; под сетью `plan_incremental` работает для `incremental`, а под
+> политикой без сети — и для `new`/`full`, `core/pipeline/corpus_ingest.py:3103-3111`). Это честное следствие «нет ни одного complete-baseline»,
 > а не дефект команды; записывать `complete` при неполном покрытии было бы ложью.
 >
 > **Критерий принятия продукта** — наличие строки `corpus_coverage` (зеркало
@@ -1659,10 +1741,11 @@ root (`core/cli/commands/run.py`), выполняемый между постр�
   вычисляет `ProductPlanSet` и блокирует неготовые продукты;
 - `g1` утверждает уже готовую когорту (человек видит, какие продукты new/full/incremental).
 
-**Куда префлайт пишет.** Ни `run_product`, ни `runs.product_plan_json` не существуют — ни
-таблицы, ни колонки нет ни в `core/store/sqlite.py`, ни где-либо ещё. Продукт-план живёт в
-памяти (`ProductPlanSet`), передаётся фазам и отражается в `--json`/`--dry-run` payload;
-durable-след прогона — снимки и рубежи в `state.db` (`record_run_outcome`, §4.4).
+**Куда префлайт пишет.** `run_product` (граница A) и `runs.product_plan_json` **есть и
+пишутся**: префлайт кладёт план продуктов в `--json`/`--dry-run` payload, снимок входов v2
+(`_snapshot_run_inputs`) и `runs.product_plan_json` (`core/store/sqlite_store.py:1244,1304`);
+строка `run_product` пишется корпусом на границе продукта (`core/pipeline/corpus.py:3879`,
+§4.3/§6.5). Durable-след измерения — снимки и рубежи в `state.db` (`record_run_outcome`, §4.4).
 
 **Гейт по `--until`.** Префлайт попадает в диапазон, если `--until` не раньше `g1`
 (`_onboarding_in_scope`): `--until plan` прогон **до** онбординга останавливает, и
@@ -1964,7 +2047,7 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
   `revalidation_queued == 0` ⇒ дренаж корня выходит **до** обхода (`:7436-7438`). Зарядка
   и постановка в очередь расцеплены: бюджет заплачен, работа не сделана.
   **Измерено на `pangolin`** (корень `pangolin.sbertech.ru`, потолок 600 —
-  `packages/ru-pg-dbms/domain_profiles.yaml:107`): 600 `fetched` = ровно потолок; в попытке 13:xx под этим
+  `packages/ru-pg-dbms/domain_profiles.yaml:147`): 600 `fetched` = ровно потолок; в попытке 13:xx под этим
   корнем **ноль** `fetched` и один `source_unavailable`. Следствие: `corpus_docs` 509,
   `corpus_chunks` **25** (и те — из двух других корней: `platformv` 1 документ,
   `sbertech.ru` 1), при том что чанк-сеты всех 509 версий **лежат** в `state.db`
@@ -1972,6 +2055,9 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
   данные не потеряны — не хватает только материализации в `corpus_chunks`/партицию.
   Покрытие при этом честно говорит `complete=0, truncated=1`, поэтому `❌` продукта
   демотированы: молчаливой лжи нет, но карта pangolin этим прогоном непригодна.
+  **Обновление 08.11.2026** (прогон `ru-pg-dbms-2a5b51af5778`): у `pangolin` **1 693**
+  документа и 21 015 чанков в `corpus_chunks`, корпус целиком — 8 115 док / 154 664 чанка /
+  5 партиций; числа 509/25/4935 выше — замер 29.10.2026.
   **Почему `digital_q_database` не пострадал — случайность, а не корректность.** У него
   зарядку забрал host-корень `https://database.diasoft.ru/` (prefix `/`, потолок 10):
   все 2402 пригодных элемента помечены `resume_counted` им, docs-корень получил
@@ -2058,7 +2144,7 @@ def evaluate_phase(ctx):
 
 > **Статус: ✅ сделано (граница A).** Per-product статус **в прогоне** пишется строкой
 > `run_product` (`RunProductStatus`, DDL — `core/store/sqlite.py:591`; писатель — корпус,
-> `core/pipeline/corpus_persist.py:540`; читатель — отчёт), а итоговый статус измерения —
+> `core/pipeline/corpus.py:3879`; обёртка — `core/pipeline/corpus_persist.py:588`; читатель — отчёт), а итоговый статус измерения —
 > снимком `state.db.product_snapshot` (`record_run_outcome`). Это две разные величины, а не
 > дубль: строка `run_product` несёт статус на границе `corpus`, снимок — результат
 > измерения продукта. Имена статусов ниже — из `product_snapshot.status`
@@ -2172,8 +2258,8 @@ RAM-потолка пишется в staging-файл и публикуется 
 > **Подключено срезом B3 — читать вместе с §6.7.1.** Прежняя редакция этой секции
 > утверждала, что спуск «не подключён к `pipeline`» и является «следующим шагом». Это
 > описание состояния до B3 и коду больше не соответствует: `ArchiveDescentWalker`
-> вызывается из фазы корпуса (`core/pipeline/corpus_drain.py:1172`), зонд артефакта —
-> `corpus_drain.py:1203`; отказ читателя контейнера виден как
+> вызывается из фазы корпуса (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:320`), зонд артефакта —
+> `core/pipeline/artifact_probe.py:67`; отказ читателя контейнера виден как
 > `archive_observations.status = unreadable` / `container_reader_unavailable`, а не как
 > тихое «не развернули». Подключение — инъекция `container_for` через `Ports.container`,
 > поэтому `pipeline` по-прежнему не импортирует `adapters`.
@@ -2504,7 +2590,7 @@ TextChunker.version`, `chunker_family.composite_chunker_version` — тот же
    (`subject_digest`) и с вердиктом `approved`. Это **приоритетный** путь: аудит-след и
    override на прогон;
 2. **аттестация профиля** — durable-таблица `profile_attestation` в
-   `state/{package_id}/state.db` (`STATE_SCHEMA_VERSION = "5"`): человек аттестует
+   `state/{package_id}/state.db` (`STATE_SCHEMA_VERSION = "12"`): человек аттестует
    `profile_digest` один раз, и прогоны с тем же содержимым профиля не требуют повторного
    решения (профиль квази-константен: 2–5 правок в год при еженедельных прогонах).
    Резолвер — `make_profile_gate` (`core/pipeline/profile_attestation.py`), подключён в CLI
@@ -3080,7 +3166,7 @@ def cell_reuse_key(*, product_id, param_id,
 `prompt_template_digest` — отпечаток **текущего** шаблона/правила (`compiled.template_version`
 + текст rule), а не `prev.prompt_hash`: иначе смена шаблона не инвалидировала бы перенос.
 `model_config_digest` — текущая конфигурация модели, а не `prev.model_id`.
-`coverage.digest()` — текущий; предыдущее значение используется только как данные
+`coverage_digest(coverage)` — свободная функция (`core/pipeline/digests.py:724`), текущий; предыдущее значение используется только как данные
 `prev`-строки для сравнения.
 
 **`retrieved_doc_set_digest` — не `doc_set_digest` продукта (решение 29.10.2026: per-cell).**
@@ -3103,8 +3189,8 @@ Retrieval при этом выполняется **всегда** — он и т
 а перенос в этом случае допустим (текст-то тот же). Если позже окажется, что порядок
 влияет на вердикт, в ключ войдёт `prompt_hash`, а не ранг.
 
-> **Важно:** `coverage.digest()` и `retrieved_doc_set_digest` обязаны быть **стабильными
-> между прогонами** при неизменном наблюдении. В `coverage.digest()` **не входят**
+> **Важно:** `coverage_digest(coverage)` и `retrieved_doc_set_digest` обязаны быть **стабильными
+> между прогонами** при неизменном наблюдении. В `coverage_digest` **не входят**
 > `computed_at`, `run_id`, `product_id`, `freshness` и счётчики `reused/revalidated/new`
 > (они меняются от того, был ли ответ 304 или 200 с тем же телом, — это не семантическое
 > изменение). Входят: `complete`, `expected`, `observed`, `blocked`, `unreadable_origins`,
@@ -3173,9 +3259,9 @@ for param in plan.params:
 
 **Правило допуска ``❌`` проходит тот же эшелон.** Перенесённая ячейка не публикуется мимо
 инвариантов: `_carried_rules_hold` вызывает те же `_enforce_absence_coverage` (I2c) и
-`_enforce_reuse_confirmed` (16 §8 п.4), что и живая оценка, и при нарушении перенос
+`_enforce_dated_absence` (I2d), что и живая оценка, и при нарушении перенос
 **отменяется** — ячейка измеряется обычным путём, и причина понижения рождается там же, где
-для живого вердикта. Поэтому `reused`/`stale`-корпус в текущем цикле снимает перенесённый
+для живого вердикта. Поэтому корпус без датированного носителя в текущем цикле снимает перенесённый
 ``❌`` ровно так же, как измеренный (тест
 `test_absent_verdict_is_not_carried_on_reused_corpus`).
 
@@ -3287,9 +3373,10 @@ for param in plan.params:
 ## 11. Coverage / честность
 
 > **Статус раздела: ✅ сделано; `freshness` — ➖ снято решением, не отложено.** Реальные
-> колонки покрытия — as-built (`corpus_coverage` содержит ровно 12 колонок, `freshness`
-> среди них нет); всё, что прежняя редакция строила на `freshness` (§11.2, §11.4),
-> исполняется через `corpus_docs.reuse_kind` (§3.1).
+> колонки покрытия — as-built (`corpus_coverage` содержит ровно **13** колонок, `freshness`
+> среди них нет; `roots_json` — носитель `complete`, план 20 §11.2); всё, что прежняя
+> редакция строила на `freshness` (§11.2, §11.4), исполняется через
+> `corpus_docs.reuse_kind` (§3.1).
 
 ### 11.1. Поля `corpus_coverage` — реализовано (реальный состав)
 
@@ -3307,6 +3394,7 @@ CREATE TABLE corpus_coverage (
     blocked_json      TEXT NOT NULL DEFAULT '{}',           -- {error_kind: count}
     unreadable_origins_json TEXT NOT NULL DEFAULT '[]',     -- ["origin", ...]
     partial_blocks_json     TEXT NOT NULL DEFAULT '{}',     -- {origin: {error_kind: count}}
+    roots_json        TEXT,                          -- снятия объявленных корней: [{root_url, capture_id, complete, ...}]
     truncated         INTEGER NOT NULL DEFAULT 0,
     computed_at       TEXT NOT NULL,
     reason            TEXT,                                  -- no_seeds|all_seeds_rejected|...|partial_extraction
@@ -3336,9 +3424,13 @@ CREATE TABLE corpus_coverage (
 - `unreadable_origins` — origin'ы, от которых не получено ничего (сортировано);
 - `partial_blocks` — `origin → {error_kind: count}` не-`not_found` сбои (аудит);
 - `truncated` — продукт попал в `truncated_products` сеанса;
+- `roots_json` — снятия **объявленных корней** продукта (`root_url`, `capture_id`,
+  `complete`, `observed_how`, `observed_at`); носитель `complete` (план 20 §11.2/F1);
 - `complete` — `False`, если краул усечён политикой, хотя бы один origin нечитаем, есть
-  `FAILED` с `error_kind` из `BLOCKING_FAILURE_KINDS`, **либо** `observed_sources == 0`
-  при `expected_sources > 0` (корпус без единого наблюдения не доказывает отсутствия).
+  `FAILED` с `error_kind` из `BLOCKING_FAILURE_KINDS`, **или** у объявленного корня нет
+  снятия с `complete=1`. `observed_sources == 0` **сам по себе больше не решает**:
+  проход без сети не имеет элементов сеанса, но удостоверен датированным обходом
+  прошлого прогона; `observed_sources` — диагностика, а не вердикт (I2d).
   Продукт, у которого все seed'ы вернули 404/410, — `complete=False`: отсутствие нельзя
   доказывать по исчезнувшему сайту без человеческой аттестации. Это усиливает определение
   §4.4, а не ослабляет его. `reason` при этом остаётся `null` (причина видна по счётчикам
@@ -3359,17 +3451,18 @@ CREATE TABLE corpus_coverage (
 > полноты краула. Код (`9ec346e`) считает иначе: условие зависит от **класса отрицания**
 > (`denial_strength`), а не от одной полноты. Ниже — as-built; правило объявлено в
 > `check_absence_coverage` (`core/domain/invariants.py:298`), исполняется в конвейере через
-> `_enforce_absence_coverage` (`core/pipeline/evaluate.py:1775`), и зеркало есть в отчёте.
+> `_enforce_absence_coverage` (`core/pipeline/evaluate.py:2068`), и зеркало есть в отчёте.
 
-`❌` публикуется, если `coverage.complete == True` **и** наблюдение подтверждено сервером в
-этом цикле (`corpus_docs.reuse_kind ∈ {live, revalidated}`, правило reuse — ниже). При
-**неполном** покрытии (`complete == False`) решает класс:
+`❌` публикуется при **датированном носителе** (I2d: `corpus_artifact.observed_at` для
+`explicit`/`authoritative`; снятие каждого объявленного корня `complete=1` для `bounded`) и
+прохождении I2c по классу отрицания. `corpus_docs.reuse_kind` — **провенанс**, а не условие
+публикации. При **неполном** покрытии (`complete == False`) решает класс:
 
 | `denial_strength` | Неполнота охвата | Почему |
 |---|---|---|
-| `explicit` | **не отменяет** `❌` | дословная цитата вендора — свидетельство, а не вывод из полноты корпуса |
-| `authoritative` | **не отменяет** `❌` | авторитетная энумерация по построению |
-| `bounded` | требует `scope_acceptance` | «нет» зависит от пространства; без принятия риска публиковать нельзя |
+| `explicit` | **не отменяет** `❌` | дословная цитата вендора — свидетельство, а не вывод из полноты корпуса; носитель — дата наблюдения документа |
+| `authoritative` | **не отменяет** `❌` | авторитетная энумерация по построению; носитель — дата наблюдения документа |
+| `bounded` | требует **снятия каждого корня `complete=1`** (I2d); `scope_acceptance` носитель **не** заменяет | «нет» зависит от пространства; подпись риска не даёт даты обхода |
 | `unobserved` / `not_stated` | `❌` **не дают вообще** | I2: это не «нет», это «не смотрели»/«не сказано» |
 
 `coverage is None` (записи покрытия нет — legacy/без краула) — проверка **неприменима**,
@@ -3391,9 +3484,9 @@ CREATE TABLE corpus_coverage (
 подписи ведёт себя ровно как выше. В `EXECUTION_CONTRACT_FIELDS` подпись не входит
 (авторизация, не измерение).
 
-`freshness=stale` (режим `offline`) — **➖ снято**: поля нет и не будет, режим `offline` сегодня
-деградирует до `revalidate` с видимой ошибкой на продукт (§2.4), поэтому публиковать
-«`❌` всегда понижается при stale» нечего — правило не исполняется.
+`freshness` (в том числе `stale`) — **➖ снято**: поля нет и не будет. `reuse_kind=stale`
+остаётся провенансом строки корпуса, а условие публикации `❌` — датированный носитель
+(I2d, врезка ниже); «`❌` всегда понижается при stale» — правило снятого дизайна.
 
 > **Аудит 29.10.2026: вопрос про `❌` на reused-корпусе — про проводку, а не про семантику.**
 > Различение «наблюдён в этом цикле» уже существует, но живёт **только** в durable-состоянии:
@@ -3403,7 +3496,7 @@ CREATE TABLE corpus_coverage (
 > `_validators` (`core/pipeline/corpus.py`, `partial` над планировщиком) отдаёт `If-None-Match`/`If-Modified-Since` из `url_state`,
 > 304 переиспользует версию документа **до** экстракции (`reuse_not_modified`,
 > `core/pipeline/corpus_ingest.py:727`), и в `state.db` живого прогона на снимке 29.10 09:20 таких
-> строк **467** из 5979.
+> строк **467** из 5979 (на 08.11.2026 `url_state` — **8 052** строки).
 >
 > В **прогонную** БД это не доезжало (дефект, который и закрыла граница A): у `corpus_docs`
 > не было ни `http_status`, ни флага reuse, и при 304 строка перезаписывалась
@@ -3433,8 +3526,9 @@ CREATE TABLE corpus_coverage (
 > Текст ниже сохранён как история решения 29.10.2026 и как объяснение, почему носитель
 > `reuse_kind` был верен для своего времени.
 
-Правило исполняется на
-двух уровнях, потому что у двух групп классов разный носитель утверждения:
+**История решения 29.10.2026 (снято F3 плана 20; действует I2d — врезка выше).**
+Правило исполнялось на двух уровнях, потому что у двух групп классов разный носитель
+утверждения:
 
 1. **Уровень evidence** (`explicit`, `authoritative`). «Нет» здесь держится на конкретном
    документе (цитата/энумерация), поэтому проверяется **каждый** документ, на который
@@ -3468,9 +3562,15 @@ CREATE TABLE corpus_coverage (
 (`state adopt`, `--update`) и для `offline`, а не механизм, который сегодня снимает `❌`.
 `revalidated` (304) правило **удовлетворяет**: сервер ответил, версия документа не изменилась.
 
-**Нарушение даёт тот же исход, что `absence_coverage_unsatisfied`:** ячейка остаётся `❓`
+> **Обновление замера (08.11.2026, прогон `ru-pg-dbms-2a5b51af5778`).** Числа 29.10 устарели:
+> корпус прогона — **8 115 документов / 154 664 чанка / 5 партиций**, у `pangolin` — **1 693**
+> документа (было 509), `chunk_meta` — **117 601** строка. Это другой прогон и другая дата;
+> прежние числа оставлены как история измерения 29.10.2026.
+
+**Нарушение давало тот же исход, что `absence_coverage_unsatisfied`:** ячейка оставалась `❓`
 (`not_stated`, I12) с машинной причиной `reuse_unconfirmed` в `evidence_scope.reason` **и**
-в `cells.validation_notes`; `absence_evidence=[]`. `failed` не годится по I4.
+в `cells.validation_notes`; `absence_evidence=[]`. `failed` не годился по I4. Токен
+`reuse_unconfirmed` читается в старых отчётах, но больше не производится.
 
 **Класс изменения — `methodology_version`, не `execution_change`.** Меняется условие
 публикации `❌`, то есть absence/evidence-модель — по `AGENTS.md` §13 это
@@ -3481,12 +3581,12 @@ CREATE TABLE corpus_coverage (
 границы A» — это была бы вторая версионная граница и второй `golden-full`. Оно вошло **в ту
 же границу**, что `corpus_docs.reuse_kind`, и подняло класс всей границы до
 `methodology_version`; один прогон golden-full на обе правки.
-✅ **Реализовано (правило снято F3 — см. врезку выше):** `_enforce_reuse_confirmed` рядом с `_enforce_absence_coverage`
-(`core/pipeline/evaluate.py`), наблюдение корпуса — один проход на продукт
-(`observe_corpus_reuse`), отчёт пишет аномалию `reuse_unconfirmed` строкой в
-`anomalies.csv`/`--json`. Документ ищется **в двух формах** — `product:content_hash`
-(`corpus_docs.doc_id`) и `dv_...` (`corpus_docs.doc_version_id`, его теперь несёт
-`chunk_id`); без второй формы правило снимало бы `❌` на подтверждённом наблюдении.
+✅ **Реализовано вместо снятого правила:** `_enforce_dated_absence`
+(`core/pipeline/evaluate.py:2155`) + `check_absence_dated`
+(`core/domain/invariants.py:386`); токен нарушения — `absence_undated`, `absence_as_of =
+min(дат носителей)` пишется в `cells.absence_as_of`. `_enforce_reuse_confirmed`,
+`CorpusReuseObservation` и токен `reuse_unconfirmed` **удалены** (токен читается в старых
+отчётах).
 
 ### 11.3. Ноль seed'ов / ноль источников (as-built)
 
@@ -3523,9 +3623,9 @@ CREATE TABLE corpus_coverage (
 ### 11.5. `scope_acceptance` (as-built; `attestation` — design-only)
 
 > **Имя сменилось.** Прежнее `scope_attested_by`/`scope_attestations` заменено на
-> `scope_acceptance` и в домене (`core/domain/models.py:1541-1764`, `:995`), и в манифесте
-> (`RunManifest.scope_acceptance`, `core/domain/models.py:1604`), и в run DB
-> (`cell_evidence.scope_acceptance`, `core/store/sqlite.py:276`; колонки `scope_attested_by`
+> `scope_acceptance` и в домене (`EvidenceScope` — `core/domain/models.py:918`, `CellEvidence` — `core/domain/models.py:1043`), и в манифесте
+> (`RunManifest.scope_acceptance`, `core/domain/models.py:1882`), и в run DB
+> (`cell_evidence.scope_acceptance`, `core/store/sqlite.py:357`; колонки `scope_attested_by`
 > в схеме 3.14.0 нет — старые run DB отвергаются гейтом версии, поэтому копирующей
 > миграции не существует). Причина в коде названа прямо: подпись — **принятие риска**
 > ненаблюдённой части, а не аттестация полноты. Старые манифесты читаются:
@@ -3539,10 +3639,10 @@ CREATE TABLE corpus_coverage (
   (`core/cli/package/parser.py:430-457`). Плюс per-instance
   `cell_evidence.scope_acceptance` в run DB. Именно эти носители читает проверка I2b/I2c.
 - **Канал проложен:** прогон читает подписи пакета (`load_scope_attestations`,
-  `core/pipeline/normalize.py:145` — имя сменилось вместе с `scope_attested_by` →
+  `core/pipeline/normalize.py:150` — имя сменилось вместе с `scope_attested_by` →
   `scope_acceptance`) и передаёт их в Ш6 как `scope_acceptance`
   **per product** (покрытие per product ⇒ подпись per product; чтение —
-  `core/pipeline/phases.py:1180`, передача — `core/pipeline/phases.py:1739`). Продукт без подписи ведёт себя ровно как раньше: `❌` при
+  `core/pipeline/phases.py:1180`, передача — `core/pipeline/phases.py:1477`). Продукт без подписи ведёт себя ровно как раньше: `❌` при
   неполном корпусе не публикуется (ячейка остаётся `pending`-кандидатом с `review_reason`).
 - **Почему не `gate_decisions`:** гейт per-run, а профиль/аттестация квази-константны
   (недельные прогоны; смена когорты/ролевой матрицы — 2–5 раз в год). Переписывать подпись
@@ -3603,8 +3703,9 @@ CREATE TABLE corpus_coverage (
 
 ### 12.2. `cohort_digest` и `seeds_digest`
 
-- `cohort_digest` входит в `run_id`, `execution_contract_digest` и в `state.db.run_lineage`
-  (в `runs` и в `RunManifest` его **нет**, см. §12.3).
+- `cohort_digest` входит в `run_id`, `execution_contract_digest`, `state.db.run_lineage`
+  **и** в `runs`/`RunManifest` (`core/store/sqlite.py:115`, `core/domain/models.py:1693`) —
+  последние два закрывают диагностику diff без открытия `state.db` (§12.3).
 - `seeds_digest` — тоже: смена seed-набора меняет корпус и coverage. Он **порядко-чувствителен**
   внутри продукта (§6.2): перестановка корней — другая идентичность, потому что другой
   корпус.
@@ -3622,7 +3723,7 @@ CREATE TABLE corpus_coverage (
 > колонки ⇒ версионная граница `runs` (см. §14.1), поэтому делается вместе с `run_product`,
 > а не отдельным патчем.
 >
-> **As-built:** `create_run` пишет `cfg.cohort_ref`, `build_manifest` берёт
+> **As-built:** `create_run` пишет `cfg.cohort_ref` (`core/store/sqlite_store.py:463-470`), `build_manifest` берёт
 > `run.cohort_ref` первым (а не `run.cohort`); без объявленной ревизии значение `None` —
 > подстановки имени файла больше нет, потому что «ревизия не объявлена» и «ревизия равна
 > имени файла» — разные факты. Тест различает два поля на одном входе.
@@ -3632,7 +3733,7 @@ CREATE TABLE corpus_coverage (
 > **Статус: ✅ сделано.** `RunManifest` несёт `cycle_id`, `previous_run_id`,
 > `change_class` (и они **заполняются** — до 29.10.2026 были объявлены и всегда `None`),
 > а `state.db.run_lineage` остаётся полной цепочкой. Те же три поля есть и в `runs`
-> (`core/store/sqlite.py:89-91`, объявлены в `CREATE TABLE`; схема версионируется —
+> (`core/store/sqlite.py:144-146`, объявлены в `CREATE TABLE`; схема версионируется —
 > `SCHEMA_VERSION = "3.20.0"`): провенанс прогона читается запросом, без открытия
 > `state.db`. Цепочка при этом остаётся свойством пакета: `runs` описывает один прогон,
 > `run_lineage` — переходы между ними.
@@ -3767,9 +3868,10 @@ golden**.
 > diff с баннером и doc-delta. Это `methodology_change`: `METHODOLOGY_VERSION` bump +
 > `golden-full` + пере-аннотация golden. **Реализовано** в истории версий как `2.3.0`
 > (правило diff) и `2.4.0` (декларированные оси), но **текущий пин —
-> `METHODOLOGY_VERSION = "0.1.0"`** (`core/domain/models.py:127`): 26.10.2026 владелец
+> `METHODOLOGY_VERSION = "0.3.0"`** (`core/domain/models.py:162`): 26.10.2026 владелец
 > сбросил нумерацию, потому что 2.x описывали методологию, по которой не получено ни
-> одного нормального результата, и служили ложной провенанс-записью «измерение по 2.4.0».
+> одного нормального результата, и служили ложной провенанс-записью «измерение по 2.4.0»;
+> затем `0.2.0` → `0.3.0` на F3 плана 20 (I2d, датированное отсутствие).
 > Историю 2.x в `models.py` **не переписывать** (аудит-след), а в текстах ссылаться на
 > правило, а не на номер: «правило 2.3.0» — это датировка решения, не текущая версия.
 > Практическое следствие: манифесты старых прогонов несут `2.4.0` и читаются как есть;
@@ -3779,7 +3881,8 @@ golden**.
 ### 12.6. Открытые решения человека
 
 > **Статус: ✅ решения приняты по всем пунктам.** Реализация каждого — там, где назван её
-> носитель: п. 1 (2.3.0), 3, 4, 8, 9 — в прогоне; п. 2 (правило `live|revalidated`) —
+> носитель: п. 1 (2.3.0), 3, 4, 8, 9 — в прогоне; п. 2 (правило `live|revalidated` —
+> **пересмотрено** F3 плана 20, действует I2d) —
 > граница A (`16` §8); п. 5 — export реализован (`cmd_package_seeds_export`,
 > `core/cli/package/commands.py:1403`); п. 6 (**per-cell**) и п. 10 (`run_scope`
 > персистится, политика не меняется) — решения 29.10.2026. Открытых вопросов в §18 не
@@ -3842,7 +3945,7 @@ golden**.
 
 Статус продукта материализуется в двух носителях: `product_snapshot.status` (`state.db`) —
 итог измерения продукта, и `run_product.status` (run DB) — статус на границе `corpus`
-(`running` → финальный, писатель — `core/pipeline/corpus_persist.py:540`). Имена ниже —
+(`running` → финальный, писатель — `core/pipeline/corpus.py:3879`). Имена ниже —
 из снимка:
 - `complete` — coverage complete; `pending`-ячейки допустимы (очередь ревью, не провал);
   `baseline_complete = (scope=full and evaluate_ok and cells_pending == 0)` управляет
@@ -3939,7 +4042,7 @@ golden**.
 > а не как долг.
 >
 > Фактическая схема run DB — 25 таблиц (`SCHEMA_VERSION = "3.20.0"`), фактическая схема
-> `state.db` — 15 таблиц (`STATE_SCHEMA_VERSION = "12"`); реальные колонки — §4.2/§4.3.
+> `state.db` — 20 таблиц (`STATE_SCHEMA_VERSION = "12"`); реальные колонки — §4.2/§4.3.
 > **`SCHEMA_VERSION` за всю эту работу не поднят ни разу**: все изменения аддитивны, а
 > гейт `_reject_foreign_schema` (`core/store/sqlite.py`) существует ради несовместимого
 > чтения, а не ради счётчика ревизий. Значит завершённые прогоны остаются читаемыми.
@@ -3957,7 +4060,7 @@ golden**.
 аддитивных `ALTER TABLE` нет, все колонки объявлены в `CREATE TABLE`, а файл прежней
 версии отвергается гейтом (`_reject_foreign_schema`) и пересоздаётся оператором:
 
-- `run_product` (граница A, `core/store/sqlite.py:488`);
+- `run_product` (граница A, `core/store/sqlite.py:591`);
 - `runs.{cycle_id, previous_run_id, change_class, run_scope, product_plan_json, embed_device}`;
 - `corpus_docs.{http_status, reuse_kind}`;
 - `corpus_doc_version` (таблица `doc_version_id → doc_id`);
@@ -4305,21 +4408,21 @@ state/state.db                                 # durable-состояние па
     **✅ сделано**: `eval_echo` расширен объявленным методологическим контекстом,
     `EVAL_CACHE_FORMAT` поднят до `2`, конверт формата 1 читается как промах (§10.5).
     Ключ **переноса ячеек** — отдельная величина и тоже существует:
-    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:507`,
+    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:557`,
     §10.1); прежняя редакция называла его несуществующим.
 11. `_chunk_id` (`core/pipeline/corpus_index.py:181`) — ✅ **сделано**: форма
     `f"{product_id}:{doc_version_id}:{chunk_no}"` (вызовы — `corpus_ingest.py:1437`,
     `extract_consume.py:499`); это закрывало корень частичного O4 (§3.3). Решение 29.10.2026:
     `chunker_version` в `chunk_id` **не входит**, и это не упущение.
     - **Грамматика `source_id` не даёт места.** `source_id` —
-      `product:doc:chunk_no[:build_id]` (`core/util/ids.py:33-44`), `parse_source_id`
-      принимает ровно 3 или 4 сегмента и четвёртый трактует как `build_id`
-      (`ids.py:57-74`). Пятый сегмент — отказ разбора; четвёртый под `chunker_version` —
+      `product:doc:chunk_no[:build_id]`; `parse_source_id` (`core/util/ids.py:60`)
+      принимает ровно 3 или 4 сегмента и четвёртый трактует как `build_id`.
+      Пятый сегмент — отказ разбора; четвёртый под `chunker_version` —
       подмена смысла `build_id`, то есть сломанный резолв I10/I15.
     - **В пределах одной прогонной БД `chunker_version` — константа.** Это поле
       `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py`), значит смена чанкера даёт
       новый `run_id` и новую БД. `corpus_chunks.chunk_id` — глобальный PK
-      (`core/store/sqlite.py:148`), но две версии чанкера в одном PK-пространстве не
+      (`core/store/sqlite.py:266`), но две версии чанкера в одном PK-пространстве не
       встречаются, а смена чанкера и так даёт новый `partition_build_id` (он
       `chunker_version` содержит, §8.2). То есть другой текст никогда не окажется под тем
       же `chunk_id` внутри одного измерения.
@@ -4363,7 +4466,7 @@ state/state.db                                 # durable-состояние па
 | T4 | `run --update` после T3 | preflight → `blocked`, `reason=product_not_ready`, сообщение с продуктом; нет cells/report | as-built (это CLI-префлайт, **не** фаза `onboarding` — §6.1) |
 | T5 | Новый продукт с 2 seed'ами | full crawl обоих; coverage `expected>0`; все ячейки `observed`; `last_completed_run_id` обновлён | as-built (`record_run_outcome` двигает рубежи) |
 | T6 | Два новых продукта за один update | оба `new`; старые `incremental`; композиция содержит все; старые партиции не пересобраны | as-built (reuse партиции — по `partition_build_id`, §6.3) |
-| T7 | Старый продукт, все URL → 304 | `docs_reused=all`; `cells_carried=all`; LLM/embed не вызваны; partition id не изменился | as-built: reuse документов/партиций и `embed_cache`; `cells_carried` — перенос ячеек (§10.2, тест `test_second_run_carries_cell_without_calling_evaluator`). Оговорка: `❌`-ячейка переносится только при `reuse_kind ∈ {live, revalidated}`, то есть при 304 — да, при `reused` — нет |
+| T7 | Старый продукт, все URL → 304 | `docs_reused=all`; `cells_carried=all`; LLM/embed не вызваны; partition id не изменился | as-built: reuse документов/партиций и `embed_cache`; `cells_carried` — перенос ячеек (§10.2, тест `test_second_run_carries_cell_without_calling_evaluator`). Оговорка: `❌`-ячейка переносится при датированном носителе (I2d); 304 его даёт, `reused` без даты — нет |
 | T8 | Старый продукт, один документ изменился | новый `doc_version`; новая партиция только этого продукта; переоценены ячейки, у которых изменился **их** retrieved-набор; остальные carried | as-built: новая партиция есть; per-cell — ключ содержит отпечаток retrieved-набора ячейки (`test_changed_document_set_prevents_carry` + `test_second_run_carries_cell_without_calling_evaluator`) |
 | T9 | Новый продукт недоступен (robots/timeout) | `run_product=failed`; coverage `complete=False`; cells `failed`/`status=null`; нет `❌`; exit error | as-built по coverage/cells; строка `run_product` пишется корпусом (`status=failed` на границе продукта, §13.1), итоговый статус измерения — снимок |
 | T10 | Повторный `run` после падения | resume того же `run_id`; `ok`-фазы пропущены; добытые doc-версии переиспользованы; нет дублей | as-built: `corpus_docs` пишутся инкрементально, `corpus_chunks` — на границе **продукта** (§4.7), провенанс спуска — write-through; теряется максимум незавершённый продукт и реестр (`index_manifest`/композиция), и реестр восстанавливается без пересборки (`pb` контент-адресуем) |
@@ -4446,12 +4549,12 @@ state/state.db                                 # durable-состояние па
 | Этап | Что | Риск | Ценность | Статус |
 |---|---|---|---|---|
 | **0. Контракты** | `seeds.yaml` schema, `ProductStatePort`, enum'ы, `state.db` DDL, `composition` формулы | низкий | фиксирует границы | ✅ сделано; enum'ы `MeasurementOrigin`/`RunProductStatus` — ✅ есть, `CoverageFreshness` — ➖ снят (§3.1) |
-| **1. Seeds + preflight (MVP-1)** | `add-product` пишет seeds; `run` читает seeds; preflight блокирует `pending_seeds`; coverage zero-source; `_coverage_for` anomaly | низкий | закрывает «тихий пустой продукт» | ✅ сделано, включая аномалию `coverage_missing` (`core/pipeline/evaluate.py:2196`) |
+| **1. Seeds + preflight (MVP-1)** | `add-product` пишет seeds; `run` читает seeds; preflight блокирует `pending_seeds`; coverage zero-source; `_coverage_for` anomaly | низкий | закрывает «тихий пустой продукт» | ✅ сделано, включая аномалию `coverage_missing` (`core/pipeline/evaluate.py:3960`) |
 | **2. Run identity + state (MVP-2)** | `derive_run_id` без products; `cycle_id`/`--update`; `state.db` (product/seed/snapshot/lineage); new/full/incremental | средний | продукт не теряется между прогонами | ✅ сделано; `run_product` — ✅ есть (граница A, §4.3) |
 | **3. Incremental corpus (MVP-3)** | `url_state`/`document_version`; conditional GET; reuse doc/chunks; per-product doc-set | средний | экономия сети/экстракции | ✅ сделано; чанки durable в run DB на границе продукта (§4.7) |
 | **4. Partitions + composition (MVP-4)** | `partition_build_id`; `composition_id`; `CompositionView`; retrieval/lexical | высокий (индексный контур) | добавление продукта не пересобирает старые | ✅ сделано (шаг 1 и шаг 2) |
 | **5. Carry-forward + coverage honesty (MVP-5)** | `cell_reuse_key`; `measurement_origin`; eval cache key; tests | высокий (методология) | экономия LLM + честный отчёт | ✅ **сделано**: перенос ячеек (§10, `tests/pipeline/test_carry_forward.py`), `cells_carried` в снимке/отчёте (§11.4), eval cache key (§10.5, `EVAL_CACHE_FORMAT = 2`). `coverage freshness` — ➖ снят: её роль исполняет `corpus_docs.reuse_kind` |
-| **Later** | per-cell invalidation, sitemap `lastmod`, `seeds` UX, state GC, **измерение** паритета `pb` local/split (шов `/v1/extract/*` и идентичность экстрактора в пространстве ядра — ✅ есть; паритет не измерен), embed cache — ✅ уже есть (`core/cli/context.py:2835`) | — | оптимизация | ⬜ не начато |
+| **Later** | per-cell invalidation, sitemap `lastmod`, `seeds` UX, state GC, **измерение** паритета `pb` local/split (шов `/v1/extract/*` и идентичность экстрактора в пространстве ядра — ✅ есть; паритет не измерен), embed cache — ✅ уже есть (`core/cli/context.py:2901`) | — | оптимизация | ⬜ roadmap — вне реестра секций (не «долг» ✅-строки §16) |
 
 ### 16.2. MVP (3–5 шагов)
 
@@ -4517,12 +4620,15 @@ state/state.db                                 # durable-состояние па
 4. **Durable per-product state — `state/{package}/state.db`** (не глобальный `history.db`):
    `product_state`, `seed_set`, `url_state`, `document_version`, `chunk_store`,
    `product_snapshot`, `run_lineage`, `index_partition`, `index_composition`,
-   `profile_attestation`. `cell_measurement` пишет Ш6 (§10.1); `attestation` — в DDL, но
+   `profile_attestation`, а также провенанс краула и датированного отсутствия —
+   `crawl_policy`, `corpus_capture`, `corpus_capture_doc`, `container_state`, `capture`
+   (всего 20 таблиц). `cell_measurement` пишет Ш6 (§10.1); `attestation` — в DDL, но
    **без писателя** (§4.2). — ✅ **реализовано** (кроме `attestation` и `cycle`)
 5. **«Новый» = нет `last_corpus_run_id`**, а не diff когорты; `full` = corpus был, eval
    нет; `incremental` = есть complete snapshot. — ✅ **реализовано**
 6. **Новый/неполный продукт — полный краул; существующий — conditional GET + reuse**
-   документов/чанков/эмбеддингов/партиций; `offline` — только для debug, `❌` запрещён.
+   документов/чанков/эмбеддингов/партиций; `offline` — отдельный проход без сети, `❌`
+   публикуется только при датированном носителе (I2d).
    — ✅ **реализовано** (durability чанков в run DB — на границе продукта, §4.7)
 7. **Индекс: per-product immutable partitions + cohort composition manifest**;
    `partition_build_id` не включает `params_token`/`snapshot_date`; `composition_id` —
@@ -4540,9 +4646,9 @@ state/state.db                                 # durable-состояние па
    переносе; `NULL` — только у `registry`/`inheritance`-evidence, у которых нет
    чанка-версии (см. §3.3)
 10. **Coverage пересчитывается всегда**; `reused` — переиспользование контента, не
-    отсутствие наблюдения; `complete` требует `expected>0`; `❌` требует complete +
-    non-stale (или аттестации). — ✅ **реализовано** в части `complete`/`expected>0`;
-    `non-stale`/`freshness` — ➖ **снято** (поля нет, §11.2)
+    отсутствие наблюдения; `complete` решается снятиями объявленных корней
+    (`CorpusCoverage.roots`); `❌` требует датированного носителя (I2d). — ✅
+    **реализовано**; `non-stale`/`freshness` — ➖ **снято** (поля нет, §11.2)
 11. **Eval cache key расширяется методологическими полями** — иначе кэш может вернуть
     вердикт по старым правилам. — ✅ **реализовано** (§10.5): `EVAL_CACHE_FORMAT = 2`,
     в ключе версии правил, политика расчёта, строка каталога и условия ретривала;
@@ -4568,11 +4674,13 @@ state/state.db                                 # durable-состояние па
 
 ## 18. Открытые вопросы / риски для решения человека
 
-> **Статус раздела: ✅ все 10 вопросов закрыты.** П. 2 (правило `❌` только при
-> `live|revalidated` исполнялось — `_enforce_reuse_confirmed`, `core/pipeline/evaluate.py:1953`;
-> **снято F3 плана 20**: `_enforce_dated_absence` + I2d)
-> и п. 6 (per-cell) закрыты решениями 29.10.2026; п. 10 — целиком 29.10.2026; п. 5 и 9 —
-> решениями владельца; п. 7 — механизмом waiver + линт. Открытых ⬜ нет.
+> **Статус раздела: ✅ все 10 вопросов закрыты.** П. 2 (условие публикации `❌`) закрыт
+> 29.10.2026 и **пересмотрен** F3 плана 20: правило `live|revalidated`
+> (`_enforce_reuse_confirmed`) снято, действует **I2d** — `_enforce_dated_absence`
+> (`core/pipeline/evaluate.py:2155`) + `check_absence_dated`
+> (`core/domain/invariants.py:386`). П. 6 (per-cell) закрыт решением 29.10.2026; п. 10 —
+> целиком 29.10.2026; п. 5 и 9 — решениями владельца; п. 7 — механизмом waiver + линт.
+> Открытых ⬜ нет.
 
 1. **Comparability/diff.** ~~Вводить ли `execution_contract_digest` и класс
    `content_change`…~~ **Решено и реализовано (2.3.0):** `hound diff` сравнивает
@@ -4580,13 +4688,14 @@ state/state.db                                 # durable-состояние па
    (§12.5). — ✅ **закрыт**
 2. **`❌` на reused-корпусе.** Требовать ли live-revalidation (304) в текущем цикле
    (рекомендуется, не меняет семантику §4.4) или разрешать `❌` на `stale` с аттестацией
-   (смена absence-семантики → `methodology_version`)? — ✅ **закрыт 29.10.2026: `❌`
-   публикуется только при `reuse_kind ∈ {live, revalidated}`** — сервер ответил в этом
-   цикле. `reused` (retained-байты без контакта, 502 из 2125 `fetched` в прогоне
-   29.10) и `stale` — `❌` не публикуется, ячейка остаётся `❓` с машинной причиной.
-   **Реализация не требует `freshness`** (её нет и не будет в этой волне): нужен признак
-   reuse в прогонной БД, то есть `corpus_docs.{http_status, reuse_kind}` — это состав
-   границы A (`16-runs-schema-boundary.md` §3.3). Прежняя редакция считала пункт
+   (смена absence-семантики → `methodology_version`)? — ✅ **закрыт 29.10.2026** правилом
+   `reuse_kind ∈ {live, revalidated}`; **правило снято F3 плана 20**: действует I2d —
+   `❌` требует **датированного носителя** (`corpus_artifact.observed_at` для
+   `explicit`/`authoritative`; снятие каждого корня `complete=1` для `bounded`), а `reused`
+   (retained-байты без контакта, 502 из 2125 `fetched` в прогоне 29.10) без даты даёт `❓`
+   с токеном `absence_undated`. **`freshness` не нужна** (её нет): носитель даты —
+   `corpus_artifact`/`capture`, а `corpus_docs.{http_status, reuse_kind}` остаются
+   провенансом. Прежняя редакция считала пункт
    зависящим от `freshness` — это было неверно: различение уже существует в
    `url_state.reuse_kind`, не хватало проводки до `corpus_docs`.
 3. **Поведение `add-product` при нуле seed'ов.** Писать `pending_seeds` + cohort и

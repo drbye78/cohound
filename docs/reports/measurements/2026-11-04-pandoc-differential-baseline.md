@@ -74,7 +74,7 @@ YAML-метаданные Pandoc держит в `meta`, а не в `blocks`, п
 | конструкция | класс | блоков | документов | пример |
 |---|---|---:|---:|---|
 | список без пустой строки перед ним | `sequence_length` | 40 | 8 | `docs/architecture/00-overview.md:409` |
-| цитата без пустой строки перед ней | `sequence_length` | 1 | 1 | `docs/architecture/09-product-onboarding-incremental-runs.md:4674` |
+| цитата без пустой строки перед ней | `sequence_length` | 1 | 1 | `docs/architecture/09-product-onboarding-incremental-runs.md:4783` |
 | абзац — остаток GFM-таблицы у Pandoc | `sequence_length` | 1 | 1 | `docs/reports/measurements/2026-11-03-md-chunk-geometry-tokens.md` |
 | лишние абзацы таблиц/HTML-div | `sequence_length` | 5 | 3 | `generated:multiline_table:2` |
 | example list `(@)` | `unparsed_construct` | 2 | 1 | `generated:example_list:1` |
@@ -106,7 +106,7 @@ Pandoc видит здесь один абзац с дефисами, `md_ast` �
 
 `blockquote_without_blank_line` — та же причина для цитаты: Pandoc
 (`blank_before_blockquote`) не начинает цитату внутри абзаца, CommonMark — начинает.
-Пример (`docs/architecture/09-product-onboarding-incremental-runs.md:4674`):
+Пример (`docs/architecture/09-product-onboarding-incremental-runs.md:4783`):
 
 ```markdown
 **`resolve_run_id`.** `--run-id` > resume незавершённого прогона того же
