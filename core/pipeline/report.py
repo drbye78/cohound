@@ -678,9 +678,9 @@ def crawl_control_digest(
 ) -> str | None:
     """Стабильный дайджест **разрешённой** конфигурации контроля краула (N6/§13).
 
-    Разрешает ``CrawlLimits`` цепочкой app (``deploy.yaml:crawl``) < run (``run.yaml:crawl``)
-    < per-site (``domain_profiles``) — по одному «входу на каждый site key» плюс
-    ``__default__`` (app<run без per-site). Канонизируется ``json.dumps(sort_keys=True)``
+    Разрешает ``CrawlLimits`` цепочкой app (``deploy.yaml:crawl``) < run (``run.yaml:crawl``) < per-site
+    (``domain_profiles``) — по одному «входу на каждый site key» плюс ``__default__`` (app<run без
+    per-site; темп ``rate_limit`` входит при объявлении на site/run слое, per-site перекрывает run-level). Канонизируется ``json.dumps(sort_keys=True)``
     и хешируется :func:`short_hash`. Смена осей на **любом** слое меняет дайджест → манифест
     помечает ``execution_change`` (§13), не ``methodology_change``.
 

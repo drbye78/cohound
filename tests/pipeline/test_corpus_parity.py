@@ -362,14 +362,34 @@ def _without_rate_limits(snapshot: dict[str, Any]) -> dict[str, Any]:
     ``rate_limit`` обязан его назвать, прогон без него — нет. Контент-паритет paced/plain
     сравнивает результаты, поэтому этот ключ из сравнения исключается, а его наличие
     проверяется отдельным утверждением (иначе исключение скрыло бы пропажу записи).
+
+    С 07.11.2026 ровно по той же причине исключается ``rate_limit`` внутри записей лимитов
+    (``truncation[*].limits`` и ``session_effective_limits.roots[*].limits``): темп объявлен
+    как условие измерения и входит в ``CrawlLimits.as_dict()`` (решение владельца; иначе
+    per-site значение перекрывало бы run-level ось, не сдвигая ``run_id``), поэтому записи
+    paced- и plain-прогона различаются **объявленным входом**, а не содержимым корпуса.
+    Наличие записи у paced-прогона и её отсутствие у plain проверяются в самом тесте.
     """
     clone = dict(snapshot)
     limits = dict(clone.get("session_effective_limits") or {})
-    roots = [dict(record) for record in (limits.get("roots") or [])]
-    for record in roots:
+    roots = []
+    for record in limits.get("roots") or []:
+        record = dict(record)
         record.pop("rate_limits", None)
+        record_limits = dict(record.get("limits") or {})
+        record_limits.pop("rate_limit", None)
+        record["limits"] = record_limits
+        roots.append(record)
     limits["roots"] = roots
     clone["session_effective_limits"] = limits
+    truncation = []
+    for record in clone.get("truncation") or []:
+        record = dict(record)
+        record_limits = dict(record.get("limits") or {})
+        record_limits.pop("rate_limit", None)
+        record["limits"] = record_limits
+        truncation.append(record)
+    clone["truncation"] = truncation
     return clone
 
 
@@ -688,13 +708,27 @@ def test_parity_pacing_content_neutral(tmp_path: Path) -> None:
     # Исключение ровно одно и оно объявленное: ``rate_limits`` в записи корня (F8, 17 §7.2
     # п.2) называет **объявленную** вежливость по host'ам, поэтому у paced-прогона ключ
     # есть, у plain — нет. Это вход измерения, а не результат: сравнивать его как контент
-    # значило бы требовать, чтобы провенанс молчал о политике прогона. Остальные поля
-    # (включая ``limits``/усечение/счётчики) обязаны совпасть, и это проверяется ниже.
+    # значило бы требовать, чтобы провенанс молчал о политике прогона. По той же причине
+    # из сравнения выводится ``truncation[*].limits.rate_limit`` (с 07.11.2026 темп —
+    # объявленное условие измерения). Остальные поля (включая ``limits``/усечение/счётчики)
+    # обязаны совпасть, и это проверяется ниже.
     _assert_parity(_without_rate_limits(paced_local), _without_rate_limits(plain_local))
     assert paced_local["session_effective_limits"]["roots"][0]["rate_limits"] == {
         "parity.test": {"min_s": 0.5, "max_s": 0.5}
     }
     assert "rate_limits" not in plain_local["session_effective_limits"]["roots"][0]
+    # Наличие записи темпа проверяется отдельно: исключение выше не должно её прятать.
+    assert paced_local["truncation"][0]["limits"]["rate_limit"] == (
+        "uniform(min=0.5,max=0.5)"
+    )
+    assert "rate_limit" not in plain_local["truncation"][0]["limits"]
+    assert paced_local["session_effective_limits"]["roots"][0]["limits"][
+        "rate_limit"
+    ] == "uniform(min=0.5,max=0.5)"
+    assert (
+        "rate_limit"
+        not in plain_local["session_effective_limits"]["roots"][0]["limits"]
+    )
     assert _build_of(paced_local_result).index_build_id == _build_of(
         plain_local_result
     ).index_build_id

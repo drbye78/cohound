@@ -7,13 +7,20 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
 from core.config.deploy import CrawlConfig, EmbedConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain.enums import EmbedDevice, PdfDevice
-from core.domain.models import CrawlRunConfig, EmbedRunConfig
+from core.domain.models import (
+    CrawlRunConfig,
+    EmbedRunConfig,
+    RateLimitSpec,
+    canonical_rate_limit,
+)
 from core.pipeline.crawl_frontier import (
     DUPLICATE_FORM_EXAMPLES_MAX,
     CrawlLimits,
@@ -25,6 +32,7 @@ from core.pipeline.crawl_frontier import (
     resolve_pdf_device,
     root_path_prefix,
 )
+from core.pipeline.fetch_plan import resolve_fetch_plan
 
 APP = CrawlConfig()
 URL = "https://example.com/docs/a"
@@ -90,6 +98,104 @@ def test_robots_changes_crawl_digest() -> None:
         run_crawl=None, app=CrawlConfig(robots=True), profiles=None
     )
     assert off != on
+
+
+# --------------------------------------------------------------------------- #
+# (g3) rate_limit: условие измерения, та же формула, что исполнение (07.11.2026)
+# --------------------------------------------------------------------------- #
+
+
+def test_rate_limit_uses_the_same_formula_as_fetch_plan() -> None:
+    """``CrawlLimits.rate_limit`` и ``FetchPlan.rate_limit`` — одна формула (site > run).
+
+    Три случая: сайт объявил, сайт молчит (действует run), сайт объявил другой диапазон.
+    Расхождение здесь означало бы, что дайджест описывает один темп, а лимитер исполняет
+    другой, поэтому сравнение идёт по :class:`RateLimitSpec`, а не по строке.
+    """
+    run_rate = RateLimitSpec(min_s=1.0, max_s=5.0)
+    run = CrawlRunConfig(rate_limit=run_rate)
+    declared = RateLimitSpec(min_s=0.05, max_s=0.2)
+    other = RateLimitSpec(min_s=0.5, max_s=2.0)
+    cases = (
+        ({"example.com": DomainProfile(rate_limit=declared)}, declared),
+        ({}, run_rate),
+        ({"example.com": DomainProfile(rate_limit=other)}, other),
+    )
+    for profiles, expected in cases:
+        plan = resolve_fetch_plan(URL, profiles, default_rate_limit=run.rate_limit)
+        limits = resolve_crawl_limits(URL, app=APP, run=run, profiles=profiles)
+        assert plan.rate_limit == expected
+        # ``CrawlLimits`` несёт каноническую строку (§13): сравниваем через тот же канон.
+        assert canonical_rate_limit(plan.rate_limit) == limits.rate_limit
+        assert limits.rate_limit_explicit is True
+
+
+def test_rate_limit_enters_as_dict_only_when_declared() -> None:
+    """Ключ ``rate_limit`` появляется только при объявлении оси (обратная совместимость).
+
+    Прогон без темпа обязан сохранить прежний ``crawl_config_digest``/``run_id``:
+    добавление оси не сдвигает остальной словарь ни на байт.
+    """
+    plain = resolve_crawl_limits(URL, app=APP)
+    assert plain.rate_limit is None and plain.rate_limit_explicit is False
+    payload = plain.as_dict()
+    assert "rate_limit" not in payload
+
+    run = CrawlRunConfig(rate_limit=RateLimitSpec(min_s=1.0, max_s=5.0))
+    declared = resolve_crawl_limits(URL, app=APP, run=run)
+    with_rate = declared.as_dict()
+    assert set(with_rate) - set(payload) == {"rate_limit"}
+    assert with_rate["rate_limit"] == "uniform(min=1.0,max=5.0)"
+    assert json.dumps(
+        {key: value for key, value in with_rate.items() if key != "rate_limit"},
+        sort_keys=True,
+    ) == json.dumps(payload, sort_keys=True)
+
+
+def test_site_rate_limit_changes_crawl_digest() -> None:
+    """Смена темпа **одного** site-ключа меняет ``crawl_config_digest`` (execution_change).
+
+    Per-site темп перекрывает run-level ось, поэтому иначе объявленный темп можно было бы
+    нейтрализовать для хоста, не сдвинув ``run_id``. Правка профиля, которую
+    ``CrawlLimits`` не несёт (``wait_for``), дайджест не двигает.
+    """
+    from core.pipeline.report import crawl_control_digest
+
+    def digest(example: DomainProfile) -> str | None:
+        return crawl_control_digest(
+            run_crawl=CrawlRunConfig(rate_limit=RateLimitSpec(min_s=1.0, max_s=5.0)),
+            app=APP,
+            profiles={
+                "example.com": example,
+                "other.test": DomainProfile(
+                    rate_limit=RateLimitSpec(min_s=0.1, max_s=0.3)
+                ),
+            },
+        )
+
+    slow = DomainProfile(rate_limit=RateLimitSpec(min_s=0.05, max_s=0.2))
+    fast = DomainProfile(rate_limit=RateLimitSpec(min_s=0.1, max_s=0.4))
+    assert digest(slow) != digest(fast)
+    # no-op для этого дайджеста: поле профиля, не входящее в ``CrawlLimits``.
+    assert digest(slow) == digest(
+        DomainProfile(rate_limit=RateLimitSpec(min_s=0.05, max_s=0.2), wait_for=".ready")
+    )
+
+
+def test_rate_limit_canonicalisation_gives_one_digest() -> None:
+    """Разная запись одного диапазона — один дайджест (канон ``repr(float)``)."""
+    from core.pipeline.report import crawl_control_digest
+
+    def digest(spec: RateLimitSpec) -> str | None:
+        return crawl_control_digest(
+            run_crawl=None,
+            app=APP,
+            profiles={"example.com": DomainProfile(rate_limit=spec)},
+        )
+
+    assert digest(RateLimitSpec(min_s=0.05, max_s=0.2)) == digest(
+        RateLimitSpec(min_s=5e-02, max_s=2e-01)
+    )
 
 
 def test_run_layer_overrides_app() -> None:

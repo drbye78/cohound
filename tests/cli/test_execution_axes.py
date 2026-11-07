@@ -349,7 +349,18 @@ def test_each_axis_changes_exactly_its_component(
         for item in dataclasses.fields(DeclaredExecutionAxes)
         if getattr(base, item.name) != getattr(mutated, item.name)
     }
-    assert changed == {field}
+    # ``rate_limit`` — единственная ось, которая честно живёт **в двух** компонентах:
+    # run-level канон объявлен отдельно (``crawl_rate_limit``, поле контракта), а
+    # разрешённый темп входит ещё и в ``crawl_config_digest`` через
+    # ``CrawlLimits.as_dict()`` — иначе per-site значение перекрывало бы объявленную ось,
+    # не сдвигая ``run_id`` (решение владельца 07.11.2026). Остальные оси обязаны
+    # оставаться в своём единственном компоненте.
+    expected = (
+        {"crawl_rate_limit", "crawl_config_digest"}
+        if field == "crawl_rate_limit"
+        else {field}
+    )
+    assert changed == expected
 
 
 def test_llm_scenarios_empty_without_active_slot(tmp_path: Path) -> None:

@@ -296,7 +296,8 @@ def test_root_record_carries_rate_limits_per_host_and_metric_uses_them(
             "h1.docs.test": {"min_s": H1_MIN, "max_s": H1_MIN},
         }
         # Пишется туда же, где живёт политика усечения, — в запись корня, не в ``limits``:
-        # вежливость не входит в ``crawl_config_digest`` и ``run_id`` не сдвигает.
+        # карта темпа — наблюдение сеанса, а в ``crawl_config_digest``/``run_id`` ось входит
+        # отдельно, через ``CrawlLimits.rate_limit``.
         assert "rate_limits" not in record["limits"]
         # Пин антидефекта: чанкер обязан быть вызван по порту, иначе ``TypeError``
         # глотается ``try`` вокруг нарезки и тест проверяет всё, кроме чанков.

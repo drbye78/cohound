@@ -82,6 +82,7 @@ from core.domain.models import (
     DEFAULT_MAX_RESPONSE_BYTES,
     CrawlRunConfig,
     RateLimitSpec,
+    canonical_rate_limit,
 )
 from core.pipeline.fetch_plan import select_domain_profile
 from core.pipeline.resources import workers_from_budget
@@ -224,6 +225,20 @@ class CrawlLimits:
     #: отмечает объявление на app/run слое: только тогда ключ попадает в ``as_dict``.
     host_concurrency: int | None = None
     host_concurrency_explicit: bool = False
+    #: Темп запросов (ось ``rate_limit``) в **канонической строковой** форме
+    #: (:func:`core.domain.models.canonical_rate_limit`). Это **условие измерения**, а не
+    #: рычаг расписания: per-site значение перекрывает объявленную run-level ось, то есть
+    #: может нейтрализовать ``run.yaml:crawl.rate_limit`` для конкретного хоста; кроме
+    #: того, темп решает исход ``429``/``5xx`` и взаимодействует с усечением
+    #: ``max_documents`` (сколько страниц успело попасть в очередь). Резолвится ровно той
+    #: же формулой, что исполнение (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`):
+    #: site > run, app-слой темпа не объявляет.
+    #:
+    #: ``rate_limit_explicit`` отмечает объявление на site/run слое: только тогда ключ
+    #: попадает в :meth:`as_dict` — прогон без темпа обязан сохранить прежний
+    #: ``crawl_config_digest``/``run_id`` (§13).
+    rate_limit: str | None = None
+    rate_limit_explicit: bool = False
     #: F6 (план 17, §4.3): watermark бэклога конверсии, МБ retained-файлов строк
     #: ``pending``+``claimed``. ``None`` — предел не объявлен (приём не приостанавливается,
     #: ``backlog_bytes`` всё равно публикуется числом). Это **условие измерения**, а не
@@ -359,6 +374,15 @@ class CrawlLimits:
         заданы**: ``None`` не добавляет ключ, поэтому дайджест ``crawl_config_digest``
         прогонов без этих осей не меняется (обратная совместимость §13).
 
+        ``rate_limit`` — тоже условие измерения, а не расписание: per-site значение
+        перекрывает объявленную run-level ось (``run.yaml:crawl.rate_limit``), поэтому без
+        него оператор мог бы нейтрализовать объявленную ось для конкретного хоста, не
+        сдвинув ``run_id``. Темп влияет на состав корпуса и на исход ``429``/``5xx``
+        (измеренный всплеск ``504`` на медленном хосте) и взаимодействует с усечением
+        ``max_documents`` — тот же довод, что у ``max_workers``. Ключ появляется **только
+        при объявлении**: прогон без темпа сохраняет прежний словарь, а run-level ось
+        по-прежнему видна отдельно как манифестное поле ``crawl_rate_limit``.
+
         ``robots`` — исключение: он попадает в словарь **всегда**, как ``max_depth``,
         потому что его дефолт — реальное поведение, а не отсутствующая ось. Гейт
         ``robots.txt`` меняет **состав корпуса** (какие документы вообще допущены), то
@@ -415,6 +439,11 @@ class CrawlLimits:
         # ``crawl_config_digest`` безусловно.
         if self.host_concurrency_explicit:
             payload["host_concurrency"] = self.host_concurrency
+        # Темп — условие измерения (перекрытие run-level оси, исход ``429``/``5xx``,
+        # взаимодействие с усечением ``max_documents``). Только при объявлении: иначе
+        # прогон без темпа получил бы новый ``run_id`` без изменения измерения (§13).
+        if self.rate_limit_explicit and self.rate_limit is not None:
+            payload["rate_limit"] = self.rate_limit
         # F6 (план 17, §4.3): watermark бэклога. Только при объявлении — иначе дайджест
         # прогонов без оси не меняется. При объявлении ключ честно меняет ``run_id``:
         # остановка приёма по бэклогу меняет состав корпуса, то есть измерение.
@@ -642,6 +671,20 @@ def resolve_crawl_limits(
         run_host_concurrency
         if run_host_concurrency is not None
         else app_host_concurrency
+    )
+    # Темп: цепочка **той же формулы**, что исполнение (``resolve_fetch_plan``) —
+    # ``site > run``, app-слой темпа не объявляет вовсе. Вторая копия правила разошлась бы
+    # с ``FetchPlan`` молча: ``CrawlLimits`` попал бы в дайджест с одним темпом, а
+    # лимитер исполнял бы другой (это проверяется тестом «одна формула»). Канонизация —
+    # ``canonical_rate_limit``: ``{min_s: 0.05, max_s: 0.2}`` и ``{5e-02, 2e-01}`` дают
+    # одну строку, то есть один дайджест.
+    run_rate_limit = getattr(run, "rate_limit", None) if run is not None else None
+    site_rate_limit = site_attr("rate_limit")
+    rate_limit_spec = (
+        site_rate_limit if site_rate_limit is not None else run_rate_limit
+    )
+    rate_limit = canonical_rate_limit(
+        rate_limit_spec if isinstance(rate_limit_spec, RateLimitSpec) else None
     )
     run_extract_workers = (
         getattr(run, "extract_workers", None) if run is not None else None
@@ -872,6 +915,12 @@ def resolve_crawl_limits(
         ),
         host_concurrency_explicit=_axis_explicit(
             app, "host_concurrency", run_host_concurrency, None
+        ),
+        # Темп: объявление на site/run слое включает ключ дайджеста. Значение уже
+        # канонизировано выше — сравнение строковое и не зависит от формата чисел.
+        rate_limit=rate_limit,
+        rate_limit_explicit=_axis_explicit(
+            app, "rate_limit", run_rate_limit, site_rate_limit
         ),
         extract_backlog_mb=(
             None
