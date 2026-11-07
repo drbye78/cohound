@@ -13,7 +13,7 @@
 |---|---|---|
 | `SCHEMA_VERSION` (run-DB) | `"3.20.0"` | `core/store/sqlite.py:86` |
 | `STATE_SCHEMA_VERSION` (state.db) | `"12"` | `core/store/state_sqlite.py:84` |
-| `EDGE_JOBS_SCHEMA_VERSION` | `"1"` | `core/edge/scheduler.py:183` |
+| `EDGE_JOBS_SCHEMA_VERSION` | `"1"` | `core/edge/scheduler.py:197` |
 | `METHODOLOGY_VERSION` | `"0.3.0"` | `core/domain/models.py:162` |
 | `SEAM_SCHEMA_VERSION` | `"1"` | `core/edge/seam_schema.py:68` |
 | `EXECUTION_CONTRACT_FIELDS` | 32 поля | `core/pipeline/digests.py:96` |

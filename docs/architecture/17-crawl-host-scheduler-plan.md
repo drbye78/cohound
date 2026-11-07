@@ -13,8 +13,8 @@ seed-root продукта, **узел** — процесс краула.
 ## 1. Границы подсистемы и контракт с соседями
 
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:988`),
-сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2459`), retention сырых байтов
-(`retain`, `core/pipeline/corpus_ingest.py:948`), durable per-URL состоянием (`crawl_session_items`,
+сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2458`), retention сырых байтов
+(`retain`, `core/pipeline/corpus_ingest.py:1037`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:357`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.
@@ -24,12 +24,12 @@ seed-root продукта, **узел** — процесс краула.
 
 **Единица работы** — один URL объявленного корня. **Результат** — файл в `corpus_raw` плюс элемент
 сеанса `FETCHED` с `raw_path`/`content_hash`; это durable-факт **до** конверсии, и порядок в коде
-такой: байты пишутся, затем `retain` ставит `FETCHED` (`core/pipeline/corpus_ingest.py:1017`), а
-вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:2750`).
+такой: байты пишутся, затем `retain` ставит `FETCHED` (`core/pipeline/corpus_ingest.py:1112`), а
+вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:2708`).
 
 **Соседи приходят двумя путями.** Конверсия — **потребитель** durable-факта (§4); SERP — наоборот,
 **производитель**: его находки входят в frontier путём sitemap-`<loc>` — блэклист, `max_documents`,
-дедуп (`core/pipeline/corpus_ingest.py:2276`). Краул не поглощает поиск, а принимает URL; поэтому
+дедуп (`core/pipeline/corpus_ingest.py:2275`). Краул не поглощает поиск, а принимает URL; поэтому
 масштабирование SERP и краула независимы — первый добавляет работы, второй её разбирает.
 
 **«Краул выполнен»** = элементы сеанса терминальны, frontier исчерпан, усечение записано. Это **не**
@@ -55,10 +55,10 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 
 | | `local` (сегодня) | `split` (сегодня) | `cluster` (цель) |
 |---|---|---|---|
-| носитель состояния | run-DB | `edge_jobs.db` (`core/edge/scheduler.py:465`) | store плоскости краула, один на узел |
+| носитель состояния | run-DB | `edge_jobs.db` (`core/edge/scheduler.py:522`) | store плоскости краула, один на узел |
 | владелец claim | потребитель той же фазы (`claimed_by`, F6) | edge-процесс | узел, объявленный на шард host'ов |
-| эксклюзивность host | тривиальна (один процесс) | внутрипроцессный лок (`core/edge/scheduler.py:1044`) | **статический шард**: disjoint по построению |
-| backpressure | байты на диске + сторож места (§4.3) | `queue_limit` по числу элементов (`core/edge/scheduler.py:638`) | байты на диске, публикуемое число (§4.3) |
+| эксклюзивность host | тривиальна (один процесс) | внутрипроцессный лок (`core/edge/scheduler.py:1085`) | **статический шард**: disjoint по построению |
+| backpressure | байты на диске + сторож места (§4.3) | `queue_limit` по числу элементов (`core/edge/scheduler.py:733`) | байты на диске, публикуемое число (§4.3) |
 | падение узла | `interrupted` + recovery-on-open (`core/pipeline/liveness.py:240`) | то же на edge | то же; host'ы шарда простаивают видимо |
 
 `local` не имеет живого worker'а: `hound crawl run --crawl-only` (F2) — отдельный **вход**, но всё
@@ -69,7 +69,7 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 (а) распределённая аренда на локальном одно-писательном SQLite невозможна — это уже зафиксировано
 в коде (`core/pipeline/liveness.py:5`), и «лиз» обещал бы больше носителя;
 (б) чужой хост не виден процессам (там же, `:13`), поэтому «мёртв» и «на другой ноде» неразличимы;
-(в) claim через conditional `UPDATE` (образец — `core/edge/scheduler.py:1070`) атомарен только под
+(в) claim через conditional `UPDATE` (образец — `core/edge/scheduler.py:1111`) атомарен только под
 внутрипроцессным локом.
 Следствие, которое надо назвать вслух: смерть узла **не** перераспределяет его host'ы
 автоматически. Они простаивают, элементы остаются `pending` без heartbeat, `hound crawl status`
@@ -93,7 +93,7 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 
 `split` — не «другой краул»: контракт шва уже описывает очередь краула (submit/status/cancel/collect,
 блоб-ссылки — `contracts/seam/crawl.schema.json`), а edge хранит контент отдельно от core-стора
-(`_blob_ref`, `core/edge/scheduler.py:1282`). Кластер — N таких плоскостей с disjoint-шардами.
+(`_blob_ref`, `core/edge/scheduler.py:1404`). Кластер — N таких плоскостей с disjoint-шардами.
 
 ## 3. Модель исполнения
 
@@ -105,8 +105,8 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 **Водитель — единственный мутатор состояния.** Полоса исполняет ровно
 `limiter.wait_reserved` (один резерв на фетч: pacing и метка попытки — один вызов) +
 `active.fetch`; контракт «никакой мутации состояния сеанса здесь нет» уже записан у
-`local_fetch` (`core/pipeline/corpus_ingest.py:2613`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2475`). Потоки не получают ни `Frontier`, ни
+`local_fetch` (`core/pipeline/corpus_ingest.py:2686`), а pre-fetch — чистая фаза
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2474`). Потоки не получают ни `Frontier`, ни
 стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:748`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 
@@ -186,9 +186,9 @@ claim (`expect=PENDING, claimed_by=<worker>`), без второго метод�
    (иначе I19-цепочка рвётся).
 3. `claimed` без heartbeat дольше объявленного порога ⇒ возврат в `pending` с `attempts += 1` и
    **видимой** записью, а не молчаливое воскрешение (образец recovery:
-   `core/edge/scheduler.py:1012`).
+   `core/edge/scheduler.py:1053`).
 4. Переход в `claimed` — conditional `UPDATE ... WHERE state='pending'` (образец
-   `core/edge/scheduler.py:1070`): два потребителя не берут один документ.
+   `core/edge/scheduler.py:1111`): два потребителя не берут один документ.
 5. `failed` терминален и перечисляет `error_kind`; повтор — только явной командой.
 6. Состояние меняется **только** через `StorePort.set_extract_state` (`rowcount == 0` ⇒ переход
    не состоялся: строку закрыли или увели). SQL по `extract_queue` вне стора — дефект слоя, а не
@@ -241,7 +241,7 @@ PDF, `docs/reports/measurements/2026-10-29-corpus-retention-footprint.md:37`). �
 
 ### 4.4 Что это меняет для памяти
 
-`ProductIngest` (`core/pipeline/corpus_ingest.py:565`) переезжает к потребителю: пик памяти становится
+`ProductIngest` (`core/pipeline/corpus_ingest.py:573`) переезжает к потребителю: пик памяти становится
 свойством конверсии, а не краула. Краул держит только in-flight страницы полос (ограничены пулом) и
 пишет байты на диск — это и есть «эффективен безотносительно конверсии».
 
@@ -290,7 +290,7 @@ host'ов» — последнее как факт, а не как тихое у
 тесты, а не замер на пакете. Демотирование — **отдельный акт** после F8: пока ось остаётся
 контрактной, это консервативно и честно.
 
-**`split`:** конкурентность — свойство edge-пулов (`core/edge/scheduler.py:908`), ядро её не исполняет.
+**`split`:** конкурентность — свойство edge-пулов (`core/edge/scheduler.py:1004`), ядро её не исполняет.
 Ось под `split` — видимый no-op с записью в `errors` (как остальные no-op предупреждения фазы), пока
 edge не примет её как `workers`.
 

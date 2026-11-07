@@ -207,7 +207,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 - ✅ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks`
   (`corpus_drain.py:168,171`), а не один enum. `bytes` появится в P3 — объявлять значение без
   исполнения значило бы обещать режим, которого нет.
-- ✅ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3149`, «продукт →
+- ✅ `chunks`-корень проходит обобщённый offline-путь (`corpus_ingest.py:3107`, «продукт →
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
   `incomplete_reasons` + `truncated_products` (`corpus_commit.py:105`) — тем же каналом, что
@@ -238,10 +238,10 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   (сверяет множество значений enum с ключами таблицы) и
   `test_dispatch_has_no_silent_default_for_unknown_policy`.
 - ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
-  (`corpus_ingest.py:3639`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
+  (`corpus_ingest.py:3597`, `frozen_bytes_product`). Ключ `extract_cache` — хеш **сырых байтов**
   (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
 - ✅ **Дрейф пере-извлечения виден**: промах кэша с другим `content_hash` → токен
-  `frozen_reextract_mismatch` (`corpus_ingest.py:4048`), документ **не публикуется** и в
+  `frozen_reextract_mismatch` (`corpus_ingest.py:4006`), документ **не публикуется** и в
   `document_version` не попадает: ложного `document_id`, ложного дедупа и другого
   `doc_set_digest` не возникает.
 - ✅ **Канонический адрес согласован и в `frozen`**: `crawl_session_items` не пишутся, дедуп

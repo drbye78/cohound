@@ -63,7 +63,7 @@
    `observed_how`, `actor`, `superseded_by` — append-only, как `crawl_policy` (план 19).
 2. `url_state` получает наблюдение: `observed_at`, `observed_how`, `capture_id`,
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
-   `last_checked_at` пишется при любом исходе, включая отказ (`corpus_ingest.py:890-907`).
+   `last_checked_at` пишется при любом исходе, включая отказ (`corpus_ingest.py:889-906`).
 3. Ручные артефакты (`hound package state adopt`, `state_adopt.py:703,1478`) создают снятие с
    `observed_how=adopted`, `complete=False` и `actor`. **`complete=False` — не осторожность, а
    факт**: предоставленный артефакт не является обходом и не может удостоверить исчерпание.

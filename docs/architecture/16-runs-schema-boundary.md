@@ -187,10 +187,10 @@ retained-байтов).
 публикуется; писатель границы всегда пишет значение.
 
 **Оба значения уже в руках у единственного писателя** — новой проводки не нужно:
-`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1227-1267`, рядом живут `reuse`
+`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1693`, рядом живут `reuse`
 (`:5197` `reused = active_reuse is not None`) и `page.status_code` (он же уже уходит в
-`url_state` как `last_http_status`, `:5217`; второй путь — `:5053`). Точка записи одна — `_persist_docs`
-(`core/pipeline/corpus_ingest.py:1227-1267`, докстринг сам это фиксирует).
+`url_state` как `last_http_status`, `:5217`; второй путь — `:5053`). Точка записи одна — `persist_docs`
+(`core/pipeline/corpus_ingest.py:1346`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
 `upsert_corpus_doc`. Прецедент в коде — `origin` (`core/pipeline/corpus_index.py:139-141`): это kwarg, а не
@@ -333,7 +333,7 @@ per-site (`core/pipeline/crawl_frontier.py:636-641`) — два уровня о�
 
 ### 5.1. `embed_device` в материале и в манифесте (**✅ as-built**)
 
-Материал `_derive_partition_build_id` (`core/pipeline/corpus_ingest.py:229-242`) получает `embed_device`
+Материал `_derive_partition_build_id` (`core/pipeline/corpus_ingest.py:228-241`) получает `embed_device`
 рядом с `embed_model_id`; манифест партиции — ключ `embed_device` в том же явном словаре
 (`core/adapters/index_npy.py:251-277`, где `extra` сливается на `:270`; второго места нет);
 проверка `_partition_reuse_reason` (`core/pipeline/corpus_index.py:609-662`) — в `expected` рядом с шестью

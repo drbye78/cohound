@@ -354,7 +354,7 @@ LLM-endpoint корп. облака — только в Z0.
    с бюджетом **8 MiB** (`_COLLECT_MAX_BYTES`), а клиент отвергает страницу больше
    `max_batch_bytes` = **50 MiB** (`MAX_RESPONSE_BYTES`). Staging крупных артефактов (presigned
    объект/чанки) отсутствует: PDF/архив больше лимита под `split` не доставляется. — ⬜ не
-   сделано: `core/edge/scheduler.py:163` (`_COLLECT_MAX_BYTES = 8 MiB`),
+   сделано: `core/edge/scheduler.py:186` (`_COLLECT_MAX_BYTES = 8 MiB`),
    `core/adapters/gateway_validate.py:53` (`MAX_RESPONSE_BYTES = 52_428_800`)
 3. **`crawl.document_level` под `split` не действует** — конвертеры строит edge сам, ось ядра
    на них не влияет. — ⬜ не сделано: `core/cli/wiring.py:2426` (явный комментарий «ось здесь не
