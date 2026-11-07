@@ -201,6 +201,10 @@ class RecordingRateLimiter(RateLimiter):
 
     Без реальных задержек: ``sleep`` — список-рекордер, ``rng`` — детерминированный
     ``random.Random(seed)`` (детерминизм §11.6).
+
+    Слот резервируется через ``wait_reserved`` (тот же резерв, что у ``wait``, плюс метка
+    разрешённого момента — её пишет провенанс попытки), поэтому запись ведётся на обоих
+    адресах: факт один и тот же, а адрес вызова — деталь слоя фетча.
     """
 
     def __init__(self, seed: int = 1234) -> None:
@@ -211,6 +215,10 @@ class RecordingRateLimiter(RateLimiter):
     def wait(self, host: str, spec: Any) -> float:
         self.waits.append((host, spec))
         return super().wait(host, spec)
+
+    def wait_reserved(self, host: str, spec: Any) -> str:
+        self.waits.append((host, spec))
+        return super().wait_reserved(host, spec)
 
 
 class StubRobotsGate:
@@ -1266,7 +1274,7 @@ def test_edge_no_pacing_when_rate_limit_absent(make_scheduler: Any) -> None:
 
 
 def test_edge_browser_not_double_paced(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§11.6.3: browser не пейсится дважды (голый адаптер + ровно один ``wait`` в обёртке)."""
+    """§11.6.3: browser не пейсится дважды (голый адаптер + ровно один резерв в обёртке)."""
     # ``crawler_factory`` строит BrowserCrawler голым ⇒ внутренний хук адаптера инертен.
     assert crawler_factory("browser")._rate_limiter is None
 

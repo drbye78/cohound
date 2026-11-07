@@ -210,3 +210,17 @@ def test_both_fetch_branches_share_the_same_retry_helper(branch: str) -> None:
     assert crawler.calls == 2
     assert limiter.reserves == [HOST, HOST]
     assert pacing.snapshot()["hosts"][HOST]["retries"] == 1
+
+
+def test_local_path_uses_the_shared_retry_helper() -> None:
+    """Локальный путь зовёт **тот же** цикл и константу, что edge-планировщик.
+
+    Повтор вынесен из локального модуля в :mod:`core.util.fetch_retry` именно затем,
+    чтобы у ``split`` не появилось второй реализации правила. Тест падает, если здесь
+    снова заведётся своя копия цикла или своё число попыток.
+    """
+    from core.pipeline import corpus_ingest
+    from core.util import fetch_retry
+
+    assert corpus_ingest.fetch_with_paced_retries is fetch_retry.fetch_with_paced_retries
+    assert corpus_ingest.FETCH_RETRY_TIMES is fetch_retry.FETCH_RETRY_TIMES

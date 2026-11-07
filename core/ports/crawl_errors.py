@@ -18,8 +18,12 @@
 свои константы исполнения.
 
 **Что здесь есть и чего нет.** Здесь — **только** те классы, которые пересекают границу
-транспорта (ловит вызывающий). Константы исполнения (потолки, таймауты, настройки
-движка, ``DEFAULT_MAX_RESPONSE_BYTES``) остаются в адаптерах: это параметры реализации.
+транспорта (ловит вызывающий) **и** один классификатор транзиентности
+(:func:`is_transient_fetch_error`): «повтор осмыслен» — свойство класса отказа, а не
+транспорта, и решение обязано быть одно на все пути краула (иначе копия правила — ровно
+тот дефект, из-за которого повтор загрузчика Scrapy обходил пейсинг, 07.11.2026).
+Константы исполнения (потолки, таймауты, настройки движка,
+``DEFAULT_MAX_RESPONSE_BYTES``) остаются в адаптерах: это параметры реализации.
 
 **Инварианты таксономии** (пинятся ``tests/test_crawl_error_taxonomy.py``):
 
@@ -45,18 +49,27 @@ from __future__ import annotations
 from core.domain.enums import FailureKind
 
 __all__ = [
+    "FETCH_RETRY_STATUSES",
     "NOT_FOUND_STATUSES",
+    "TERMINAL_FETCH_ERRORS",
     "CrawlError",
     "CrawlNotFound",
     "CrawlPayloadTooLarge",
     "CrawlRefused",
     "CrawlUnavailable",
     "CrawlUrlError",
+    "is_transient_fetch_error",
 ]
 
 #: HTTP-статусы определённого ответа «ресурса нет» (404/410). Классификация общая для
 #: всех транспортов, видящих статус ответа: HTTP, Scrapy и hybrid-путь браузера.
 NOT_FOUND_STATUSES: frozenset[int] = frozenset({404, 410})
+
+#: HTTP-статусы, повторяемые сверх 5xx: ``408`` (таймаут запроса) и ``429`` (rate limit) —
+#: не сбой источника, а просьба «попробуй позже»; слот лимитера и есть это «позже».
+#: Число попыток и сама механика повтора — :mod:`core.util.fetch_retry`; здесь только
+#: классификация ответа: повтор осмыслен или адресован тому, что уже ответило отказом.
+FETCH_RETRY_STATUSES: frozenset[int] = frozenset({408, 429})
 
 
 class CrawlError(Exception):
@@ -176,3 +189,43 @@ class CrawlUnavailable(CrawlError):
 
     Это не сбой источника и не отказ политики: ``http_status`` здесь всегда ``None``.
     """
+
+
+#: Классы отказа, которые повтор **не** лечит: отказ политики (robots), отклонённый SSRF,
+#: определённое «ресурса нет», превышение потолка, недоступный движок.
+TERMINAL_FETCH_ERRORS: tuple[type[BaseException], ...] = (
+    CrawlUrlError,
+    CrawlRefused,
+    CrawlUnavailable,
+    CrawlNotFound,
+    CrawlPayloadTooLarge,
+)
+
+
+def is_transient_fetch_error(exc: BaseException) -> bool:
+    """Несёт ли исход повод для повтора (транзиентность), а не терминальный ответ.
+
+    Повторяются ровно две вещи: **сетевой сбой до ответа** (``CrawlError`` без статуса —
+    так адаптеры оборачивают таймаут/обрыв/DNS) и **HTTP-ответ с ``http_status`` 5xx**
+    либо 408/429 (:data:`FETCH_RETRY_STATUSES`). Терминальные классы
+    (:data:`TERMINAL_FETCH_ERRORS`) и статусы ``4xx``/``403`` — нет: там повтор
+    адресован тому, что уже ответило отказом.
+
+    Транспорты (``http``/``scrapy``/``browser``) по контракту поднимают ``CrawlError``;
+    прочие исключения — дефект, а не сетевой исход, и трижды его повторять незачем.
+
+    **Одно правило на все пути краула.** Функция живёт здесь, а не в слое фетча, потому
+    что вопрос «повтор осмыслен» задаётся классу отказа; цикл повтора (сколько попыток и
+    что каждая берёт свой слот лимитера) — :func:`core.util.fetch_retry.
+    fetch_with_paced_retries`. Локальный путь и edge-планировщик передают в цикл **этот**
+    предикат: копия правила разошлась бы молча, как разошлись ретраи движка и пейсинг.
+    """
+    if isinstance(exc, TERMINAL_FETCH_ERRORS):
+        return False
+    if not isinstance(exc, CrawlError):
+        return False
+    status = getattr(exc, "http_status", None)
+    if isinstance(status, int):
+        return status >= 500 or status in FETCH_RETRY_STATUSES
+    # Статуса нет — ответ до нас не дошёл: таймаут, обрыв, DNS. Повтор осмыслен.
+    return True

@@ -117,14 +117,7 @@ from core.pipeline.manual_artifacts import (
 from core.pipeline.refresh_modes import dispatch_refresh
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
-from core.ports.crawl_errors import (
-    CrawlError,
-    CrawlNotFound,
-    CrawlPayloadTooLarge,
-    CrawlRefused,
-    CrawlUnavailable,
-    CrawlUrlError,
-)
+from core.ports.crawl_errors import is_transient_fetch_error
 from core.ports.crawl_executor import (
     ACTIVE_JOB_STATUSES,
     CrawlExecutorPort,
@@ -149,6 +142,12 @@ from core.util.document_formats import (
     unsupported_binary_reason,
 )
 from core.util.document_probe import CLASS_DOCUMENT
+
+# ``FETCH_RETRY_TIMES`` реэкспортируется намеренно (``X as X``): ``corpus_ingest.
+# FETCH_RETRY_TIMES`` — публичный адрес локального пути для его тестов, но значение у
+# него одно на оба пути фетча (edge берёт ту же константу из ``core.util.fetch_retry``).
+from core.util.fetch_retry import FETCH_RETRY_TIMES as FETCH_RETRY_TIMES
+from core.util.fetch_retry import FetchAttemptStats, fetch_with_paced_retries
 from core.util.hashing import content_hash, short_hash
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
@@ -2618,50 +2617,13 @@ def local_prefetch(
     )
 
 
-#: Сколько раз живой фетч повторяется на транзиентный исход (сверх первой попытки).
-#: Число совпадает с прежним ``RETRY_TIMES`` движка Scrapy (2), чтобы по числу попыток
-#: поведение не менялось — изменилось только то, что каждая попытка берёт свой слот
-#: лимитера (см. ``_fetch_with_paced_retries``). **Не** ось контракта: это исполнение, а
-#: не условие измерения, и в ``run_id``/``crawl_config_digest`` оно не входит.
-FETCH_RETRY_TIMES = 2
-
-#: HTTP-статусы, повторяемые сверх 5xx: ``408`` (таймаут запроса) и ``429`` (rate limit) —
-#: не сбой источника, а просьба «попробуй позже»; слот лимитера и есть это «позже».
-FETCH_RETRY_STATUSES: frozenset[int] = frozenset({408, 429})
-
-#: Классы отказа, которые повтор **не** лечит: отказ политики (robots), отклонённый SSRF,
-#: определённое «ресурса нет», превышение потолка, недоступный движок.
-_TERMINAL_FETCH_ERRORS: tuple[type[BaseException], ...] = (
-    CrawlUrlError,
-    CrawlRefused,
-    CrawlUnavailable,
-    CrawlNotFound,
-    CrawlPayloadTooLarge,
-)
-
-
-def _is_transient_fetch_error(exc: BaseException) -> bool:
-    """Несёт ли исход повод для повтора (транзиентность), а не терминальный ответ.
-
-    Повторяются ровно две вещи: **сетевой сбой до ответа** (``CrawlError`` без статуса —
-    так адаптеры оборачивают таймаут/обрыв/DNS) и **HTTP-ответ с ``http_status`` 5xx**
-    либо 408/429. Терминальные классы (:data:`_TERMINAL_FETCH_ERRORS`) и статусы
-    ``4xx``/``403`` — нет: там повтор адресован тому, что уже ответило отказом.
-
-    Транспорты (``http``/``scrapy``/``browser``) по контракту поднимают ``CrawlError``;
-    прочие исключения — дефект, а не сетевой исход, и трижды его повторять незачем.
-    """
-    if isinstance(exc, _TERMINAL_FETCH_ERRORS):
-        return False
-    if not isinstance(exc, CrawlError):
-        return False
-    status = getattr(exc, "http_status", None)
-    if isinstance(status, int):
-        return status >= 500 or status in FETCH_RETRY_STATUSES
-    # Статуса нет — ответ до нас не дошёл: таймаут, обрыв, DNS. Повтор осмыслен.
-    return True
-
-
+# Повторы живого фетча — **одно** правило на все пути краула: константа
+# (:data:`core.util.fetch_retry.FETCH_RETRY_TIMES`), цикл
+# (:func:`core.util.fetch_retry.fetch_with_paced_retries`) и классификатор отказа
+# (:func:`core.ports.crawl_errors.is_transient_fetch_error`) живут в своих слоях.
+# ``FETCH_RETRY_TIMES`` здесь только **реэкспортируется** (импорт выше): это публичный
+# адрес локального пути, своей копии числа у него нет — второй литерал означал бы два
+# разных правила повтора у двух путей фетча.
 def _fetch_with_paced_retries(
     desc: LocalFetch,
     *,
@@ -2672,9 +2634,11 @@ def _fetch_with_paced_retries(
 
     Один помощник на оба пути (пуловой :func:`local_fetch` и inline
     :func:`fetch_and_commit`): ретрай, живущий только в одном из них, — тот же дефект,
-    что был у движка, только незаметнее.
+    что был у движка, только незаметнее. Сам цикл живёт в
+    :func:`core.util.fetch_retry.fetch_with_paced_retries` — его же зовёт
+    edge-планировщик под ``split``, поэтому повторы у двух профилей исполнения одни.
 
-    Поведение:
+    Поведение (всё это делает общий помощник, здесь — только привязка к дескриптору):
 
     * **пауза между попытками** — не изобретённая экспонента, а сам ``RateLimiter``:
       ``wait_reserved`` перед каждой попыткой резервирует новый слот origin'а и спит до
@@ -2692,37 +2656,31 @@ def _fetch_with_paced_retries(
     * Повтор считается в приборе (``pacing.retry``): «сколько запросов было повтором»
       видно и без вычитания ``http_requests - items``.
     """
-    attempts = 1 + FETCH_RETRY_TIMES
-    started: float | None = None
+    stats = FetchAttemptStats()
     try:
-        for attempt in range(1, attempts + 1):
-            desc.fetch_started_at = limiter.wait_reserved(
-                desc.host, desc.fetch_plan.rate_limit
-            )
-            if started is None:
-                # Отсчёт начинается после первого резерва: ожидание слота — не работа
-                # фетча (та же граница, что у прежнего замера одной попытки).
-                started = time.perf_counter()
-            # Прибор темпа (провенанс, не контракт): учёт считает **только** сетевой
-            # вызов, ожидание лимитера в «в полёте» не входит — спящий поток к хосту не
-            # обращается. Попытка — отдельная запись: у повтора свой слот и своё время.
-            tracker = (
-                pacing.request(desc.pid, desc.host)
+        return fetch_with_paced_retries(
+            lambda: desc.active.fetch(desc.wu, desc.fetch_plan),
+            host=desc.host,
+            rate_limit=desc.fetch_plan.rate_limit,
+            limiter=limiter,
+            is_transient=is_transient_fetch_error,
+            stats=stats,
+            attempt_scope=(
+                (lambda: pacing.request(desc.pid, desc.host))
                 if pacing is not None
-                else contextlib.nullcontext()
-            )
-            with tracker:
-                try:
-                    return desc.active.fetch(desc.wu, desc.fetch_plan)
-                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                    if attempt >= attempts or not _is_transient_fetch_error(exc):
-                        raise
-                    if pacing is not None:
-                        pacing.retry(desc.pid, desc.host)
+                else None
+            ),
+            on_retry=(
+                (lambda: pacing.retry(desc.pid, desc.host))
+                if pacing is not None
+                else None
+            ),
+        )
     finally:
-        if started is not None:
-            desc.fetch_ms = int((time.perf_counter() - started) * 1000)
-    raise AssertionError("цикл повторов обязан вернуть страницу или поднять исключение")
+        # Тот же контракт, что раньше: живой фетч оставил след, только если резерв был.
+        if stats.started_at is not None:
+            desc.fetch_started_at = stats.started_at
+            desc.fetch_ms = stats.fetch_ms
 
 
 def local_fetch(

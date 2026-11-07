@@ -47,6 +47,18 @@ per-origin интервал внутри процесса, кросс-проце
 ни в одном профиле. ``rate_limit=None`` (дефолт) ⇒ ноль снов (дефолтные прогоны
 байт-идентичны).
 
+**Повторы (A2c) — общий помощник с локальным путём.** ``5xx``/``408``/``429``/сетевой сбой
+повторяются ``core.util.fetch_retry.FETCH_RETRY_TIMES`` раз, и **каждая** попытка берёт
+свой слот лимитера (:func:`core.util.fetch_retry.fetch_with_paced_retries` — тот же цикл,
+что у ``corpus_ingest.local_fetch``). Классификатор «повтор осмыслен» — порт
+(:func:`core.ports.crawl_errors.is_transient_fetch_error`), терминальные классы
+(``CrawlNotFound``/``CrawlRefused``/``CrawlUnavailable``/``CrawlPayloadTooLarge``/
+``CrawlUrlError``) не повторяются. До 07.11.2026 повтор под ``split`` делал движок внутри
+одного резерва, а после выноса повторов в слой фетча его здесь не было вовсе. Число
+повторов durable: ``edge_job_items.attempts`` (claim + повторы, пишет родитель —
+единственный писатель SQLite); наружу через ``crawl/status`` оно пока не публикуется —
+это правка опубликованной схемы шва, отдельное решение.
+
 **Robots (§10, A2b).** Edge — стателесс-фетчер: политику приносит ядро пер-элемент
 (``plan.robots``), а политику ``robots.txt`` edge строит сам (:func:`build_robots_gate`) и
 отдаёт краулерам. Фетч ``robots.txt`` происходит только когда ``plan.robots`` истинно.
@@ -72,6 +84,7 @@ from urllib.parse import urlsplit
 
 from core.edge.config import EdgeRuntimeConfig
 from core.edge.crawler_factory import build_robots_gate
+from core.ports.crawl_errors import is_transient_fetch_error
 from core.ports.crawler import CrawlerPort
 from core.ports.types import (
     CrawlStrategy,
@@ -80,6 +93,7 @@ from core.ports.types import (
     FetchPlan,
     RateLimitSpec,
 )
+from core.util.fetch_retry import FetchAttemptStats, fetch_with_paced_retries
 from core.util.hashing import content_hash
 from core.util.rate_limit import RateLimiter
 from core.util.robots import RobotsGate
@@ -219,6 +233,9 @@ CREATE TABLE IF NOT EXISTS edge_job_items (
     product_id   TEXT NOT NULL,
     url          TEXT NOT NULL,
     status       TEXT NOT NULL,
+    -- ``attempts`` — сколько раз элемент **фактически фетчился**: выдача воркеру (claim)
+    -- плюс пейсящиеся повторы (5xx/408/429/сетевой сбой). Каждый повтор берёт свой слот
+    -- лимитера, поэтому число — провенанс нагрузки на хост, а не «сколько раз клеймили».
     attempts     INTEGER NOT NULL DEFAULT 0,
     engine       TEXT,
     kind         TEXT,
@@ -337,35 +354,59 @@ def _fetch_host(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
 
 
-def _process_fetch(engine: str, url: str, plan: FetchPlan) -> dict[str, Any]:
-    """Воркер-процесс: пейсит, строит краулер и фетчит; возвращает picklable-результат.
+def _paced_fetch(
+    fetch: Callable[[], Any], url: str, plan: FetchPlan, limiter: RateLimiter
+) -> dict[str, Any]:
+    """Один элемент edge: пейсящиеся повторы **общим** помощником → picklable-результат.
 
-    Исключения **не** пробрасываются через границу процессов (их pickle/traceback
-    хрупок) — сводятся к строке ``error``. ``limiter.wait`` — до фетча (A2c, §11.2);
-    ``plan.rate_limit=None`` ⇒ без сна.
+    Повтор — тот же, что в локальном пути
+    (:func:`core.util.fetch_retry.fetch_with_paced_retries`): ``5xx``/``408``/``429`` и
+    сетевой сбой повторяются ``FETCH_RETRY_TIMES`` раз, и **каждая** попытка берёт свой
+    слот лимитера (``plan.rate_limit=None`` ⇒ без сна). До 07.11.2026 под ``split`` повтор
+    делал движок внутри одного резерва, а после выноса повторов в слой фетча его здесь не
+    стало вовсе — одиночный ``5xx`` не повторялся ни разу, тогда как локальный путь
+    повторял. Поэтому цикл не копируется, а зовётся: вторая копия правила разошлась бы
+    молча.
+
+    Исключения **не** пробрасываются через границу процессов (их pickle/traceback хрупок)
+    — сводятся к строке ``error``; ``retries`` возвращается и при сбое: число фактических
+    повторов — провенанс элемента (родитель пишет его в ``attempts``).
     """
-    _worker_limiter().wait(_fetch_host(url), plan.rate_limit)
+    stats = FetchAttemptStats()
     try:
-        page = _worker_crawler(engine).fetch(url, plan)
+        page = fetch_with_paced_retries(
+            fetch,
+            host=_fetch_host(url),
+            rate_limit=plan.rate_limit,
+            limiter=limiter,
+            is_transient=is_transient_fetch_error,
+            stats=stats,
+        )
     except BaseException as exc:  # noqa: BLE001 - сбой воркера → строковый результат
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    return {"ok": True, "page": page}
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "retries": stats.retries}
+    return {"ok": True, "page": page, "retries": stats.retries}
+
+
+def _process_fetch(engine: str, url: str, plan: FetchPlan) -> dict[str, Any]:
+    """Воркер-процесс: пейсящиеся повторы + краулер процесса; результат picklable."""
+    return _paced_fetch(
+        lambda: _worker_crawler(engine).fetch(url, plan),
+        url,
+        plan,
+        _worker_limiter(),
+    )
 
 
 def _thread_fetch(
     crawler: CrawlerPort, engine: str, url: str, plan: FetchPlan, limiter: RateLimiter
 ) -> dict[str, Any]:
-    """Воркер-поток (in-process): пейсит, фетчит инъецированным краулером; та же форма.
+    """Воркер-поток (in-process): тот же помощник повторов и та же форма результата.
 
-    ``limiter.wait`` — до фетча (A2c, §11.2, зеркало ``corpus_ingest.local_fetch``); при
-    ``plan.rate_limit=None`` :meth:`RateLimiter.wait` возвращает ``0.0`` **без** ``sleep``.
+    ``engine`` остаётся в подписи, хотя краулер уже инъецирован: подпись общая с
+    :func:`_process_fetch` (по ней воркер-пул выбирает ветку), и расхождение подписей
+    сделало бы выбор ветки и вызов двумя разными контрактами.
     """
-    limiter.wait(_fetch_host(url), plan.rate_limit)
-    try:
-        page = crawler.fetch(url, plan)
-    except BaseException as exc:  # noqa: BLE001 - единый контракт результата
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    return {"ok": True, "page": page}
+    return _paced_fetch(lambda: crawler.fetch(url, plan), url, plan, limiter)
 
 
 def _bool_int(value: Any, default: int = 0) -> int:
@@ -1195,6 +1236,8 @@ class EdgeScheduler:
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         with self._lock:
             self._inflight = max(0, self._inflight - 1)
+            if isinstance(result, Mapping):
+                self._record_retries(row, _bool_int(result.get("retries"), 0))
             if isinstance(result, Mapping) and result.get("ok"):
                 self._finish_fetched(row, result.get("page"))
             else:
@@ -1203,6 +1246,31 @@ class EdgeScheduler:
             self._recompute_job(self._conn, str(row["job_id"]))
         if not self._stopped:
             self._dispatch()
+
+    def _record_retries(self, row: sqlite3.Row, retries: int) -> None:
+        """Дописывает число пейсящихся повторов в durable-счётчик попыток элемента.
+
+        Носитель повтора под ``split`` — ``edge_job_items.attempts``: поле уже есть и уже
+        значит «сколько раз элемент фетчился» (claim выдаёт элемент воркеру, каждый повтор
+        — ещё одна фактическая попытка, тоже со своим слотом лимитера). Отдельной колонки
+        ``retries`` нет намеренно: она потребовала бы новой версии ``edge_jobs.db``
+        (``EDGE_JOBS_SCHEMA_VERSION``), а версия — объявленный факт, а не место для
+        тихого догона. Публикация числа наружу (``crawl/status``) потребовала бы правки
+        опубликованной схемы шва (``additionalProperties: false``) — это отдельное
+        решение, здесь считаем и храним.
+
+        Пишет только родитель (единственный писатель SQLite) и вне зависимости от исхода
+        фетча: повторы были запросами к хосту и остаются фактом нагрузки.
+        """
+        conn = self._conn
+        if conn is None or retries <= 0:  # pragma: no cover - защита от раннего сбоя
+            return
+        with conn:
+            conn.execute(
+                "UPDATE edge_job_items SET attempts = attempts + ?"
+                " WHERE job_id = ? AND product_id = ? AND url = ?",
+                (int(retries), row["job_id"], row["product_id"], row["url"]),
+            )
 
     def _finish_fetched(self, row: sqlite3.Row, page: Any) -> None:
         """Записывает блоб и метаданные успешного фетча (только если элемент ``running``).
