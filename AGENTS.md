@@ -38,7 +38,8 @@ Two consequences that are easy to forget: a rule that works for one product on o
 not yet a rule (per-product, per-host and per-language behaviour is the default assumption),
 and "no such construct in the corpus" is a statement about the pilot slice, not about the
 target — which is exactly why a construct is declared out of scope only after a census with a
-named instrument (`18-markdown-chunker-plan.md` §census), never because one regex found nothing.
+named instrument (`scripts/measure_md_chunking.py --census`; границы грамматик —
+`18-markdown-chunker-plan.md`), never because one regex found nothing.
 
 **Refactoring is open.** Until the owner revisits it, architecture may be reworked wherever
 that is reasonable, and backward compatibility is not required: the DB schema gate rejects
@@ -630,7 +631,7 @@ Browser smoke test (separate environment with browser binaries, exit codes 0 ok 
 **Environment.** Python **3.14** (pinned baseline; greenfield, controlled deployment, all stack
 deps ship cp314/abi3 wheels — `05-dependency-stack.md` §1). Base `dependencies` — пять:
 `pydantic`, `pyyaml`, `pypdfium2` (механизм `text_layer`, ось обязана быть исполнимой без
-extra), `markdown-it-py`+`mdit-py-plugins` (чанкер, план 18). `numpy` живёт в `retrieval`/
+extra), `markdown-it-py`+`mdit-py-plugins` (чанкер, `18`). `numpy` живёт в `retrieval`/
 `embed-lite` и импортируется лениво.
 
 ```bash
