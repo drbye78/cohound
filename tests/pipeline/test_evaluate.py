@@ -49,6 +49,7 @@ from core.pipeline.evaluate import (
     retrieve_for_cell,
     run_queries_for_cell,
 )
+from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.prompt import compile_prompt, render_queries
 from core.pipeline.retrieve import RetrievalResult
 from core.pipeline.validate import ValidationResult
@@ -1038,6 +1039,87 @@ def test_evaluate_batch_isolates_failures(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(outcomes) == 1
     assert len(errors) == 1
     assert "param_beta" in errors[0]
+
+
+# ---------------------------------------------------------------------------
+# min_retrieval_score: объявленная политика, а не значение «из головы» (план 15 §6.2 п.4)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluation_policy_spec_omits_unmeasured_threshold() -> None:
+    """Порог не измерен ⇒ ключа **нет**: иначе ``run_id`` поехал бы у всех прогонов."""
+    assert evaluation_policy_spec() == {"max_retries": 2}
+    assert "min_retrieval_score" not in evaluation_policy_spec()
+
+
+def test_evaluation_policy_spec_declares_threshold_only_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Объявленный порог попадает в контракт; выключенный — не попадает."""
+    import core.pipeline.evaluation_policy as module
+
+    monkeypatch.setattr(module, "EVALUATION_MIN_RETRIEVAL_SCORE", 0.25)
+    spec = evaluation_policy_spec()
+    assert spec["min_retrieval_score"] == 0.25
+    assert set(spec) == {"max_retries", "min_retrieval_score"}
+
+
+def test_evaluate_batch_passes_threshold_and_notes_low_score() -> None:
+    """Батч доносит порог до ячейки: заметка видна в ``validation_notes`` карты."""
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    param = _param(data)
+    chunks = [
+        RetrievedChunk(
+            chunk_id=c.chunk_id,
+            product_id=data["product_id"],
+            text=c.text,
+            content_hash=c.content_hash,
+            heading_path=c.heading_path,
+            build_id="build-1",
+            score=0.1,
+        )
+        for c in _chunks(data)
+    ]
+    outcomes, errors = evaluate_batch(
+        params=[param],
+        product_id=data["product_id"],
+        run_id=data["run_id"],
+        evaluator=evaluator,
+        chunks_by_param={param.param_id: chunks},
+        min_retrieval_score=0.5,
+    )
+    assert errors == []
+    notes = outcomes[0].cell.validation_notes
+    assert any("ниже порога" in note for note in notes)
+
+
+def test_evaluate_batch_without_threshold_writes_no_score_anomaly() -> None:
+    """Дефолт ``None`` — поведение байт-в-байт: заметки о скоре нет."""
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    param = _param(data)
+    chunks = [
+        RetrievedChunk(
+            chunk_id=c.chunk_id,
+            product_id=data["product_id"],
+            text=c.text,
+            content_hash=c.content_hash,
+            heading_path=c.heading_path,
+            build_id="build-1",
+            score=0.1,
+        )
+        for c in _chunks(data)
+    ]
+    outcomes, errors = evaluate_batch(
+        params=[param],
+        product_id=data["product_id"],
+        run_id=data["run_id"],
+        evaluator=evaluator,
+        chunks_by_param={param.param_id: chunks},
+    )
+    assert errors == []
+    assert not any("ниже порога" in n for n in outcomes[0].cell.validation_notes)
 
 
 # ---------------------------------------------------------------------------

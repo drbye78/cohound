@@ -311,7 +311,7 @@ def test_failed_cell_records_validation_notes() -> None:
 
 
 def test_ok_cell_keeps_validation_anomalies() -> None:
-    """Аномалии §10.4 (✅ на единственной цитате) раньше терялись — теперь в ячейке."""
+    """Аномалии §7.1 п. 4 (✅ на единственной цитате) раньше терялись — теперь в ячейке."""
     outcome = _evaluate(_ok_with_denial())
 
     assert any("единственную цитату" in note for note in outcome.cell.validation_notes)

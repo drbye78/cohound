@@ -1,8 +1,8 @@
-"""Тесты эшелона валидации Ш6 (T9.4, §7.1/§10/02 §C.2).
+"""Тесты эшелона валидации Ш6 (T9.4, §7.1 п. 4/02 §C.2).
 
 Проверяют: существование ``source_id`` (I10/I15), цитату-подстроку с нормализацией
 пробелов (strict), построение ``CellEvidence`` с детерминированным ``evidence_id`` (S8)
-и ``content_hash`` чанка (I19), резолв URL/hash через ``resolver``, аномалии §10.4
+и ``content_hash`` чанка (I19), резолв URL/hash через ``resolver``, аномалии §7.1 п. 4
 (заметки, не сбои), различие strict/preliminary и defensive-отказ N/A (I7).
 Фикстуры категорийно-нейтральны (§1.3); порты/модели — in-memory.
 """
@@ -265,7 +265,7 @@ def test_resolver_hash_mismatch_fails() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (4) аномалии §10.4 — заметки, не сбои
+# (4) аномалии §7.1 п. 4 — заметки, не сбои
 # ---------------------------------------------------------------------------
 
 
@@ -296,7 +296,9 @@ def test_low_retrieval_score_anomaly_note_not_failure() -> None:
         min_retrieval_score=0.5,
     )
     assert result.ok is True  # аномалия не валит ячейку
-    assert any("§10.4" in n for n in result.notes)
+    assert any("§7.1 п. 4" in n for n in result.notes)
+    # Именно пороговая заметка, а не единственная цитата: порог обязан называться.
+    assert any("ниже порога" in n for n in result.notes)
     assert result.resolved_evidence[0].index_build_id == "build-1"
 
 

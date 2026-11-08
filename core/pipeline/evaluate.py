@@ -100,6 +100,7 @@ from core.pipeline.eval_cache import (
     build_eval_key,
     catalog_row_digest,
 )
+from core.pipeline.evaluation_policy import EVALUATION_MIN_RETRIEVAL_SCORE
 from core.pipeline.exhaustion import ExhaustionFacts, build_protocols
 from core.pipeline.precedence import (
     PRECEDENCE_REVIEW_REASON,
@@ -2402,7 +2403,7 @@ def _evaluated_cell(
     """Собирает успешную ``evaluated``-ячейку (§2.2; I1/I2/I3/I4/I13-совместимую).
 
     ``validation_notes`` — свидетельство о дефектах оценки (ремонт шумовых полей
-    отрицания, аномалии §10.4, доказательство не о предмете): пишется в
+    отрицания, аномалии §7.1 п. 4, доказательство не о предмете): пишется в
     ``cells.validation_notes`` и переживает прогон, поэтому читается отчётом/ревью, а не
     только консолью. ``review_reason`` заполняется противоречием «наличие + прямое
     отрицание» (см. :func:`_present_status_denial`) и посторонним доказательством у ``✅``
@@ -2804,7 +2805,6 @@ def evaluate_cell(
     protected: Cell | None = None,
     coverage: CorpusCoverage | None = None,
     scope_acceptance: str | None = None,
-    extra_instructions: str = "",
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
@@ -2825,7 +2825,7 @@ def evaluate_cell(
     :param max_retries: число повторов сверх первой попытки (≤2 по регламенту §7.1).
     :param store: если задан — ячейка и её evidence персистятся (идемпотентно, S8).
     :param model_id: переопределение ``model_id`` (иначе берётся у оценщика, I21).
-    :param min_retrieval_score: порог аномалии §10.4 (заметка, не сбой).
+    :param min_retrieval_score: порог аномалии §7.1 п. 4 (заметка, не сбой).
     :param protected: ячейка более высокого источника для наложения (реестр/наследование,
         §2.2 п.7/п.8); ``None`` — обычная запись Ш6.
     :param coverage: покрытие корпуса продукта (Ф0). ``None`` — прочитать из store
@@ -2838,8 +2838,6 @@ def evaluate_cell(
         Не подставляется автоматически: это решение человека, переданное вызывающим.
         Нужно только там, где измерение не покрывает пространство (``bounded``);
         ``explicit`` с цитатой в нём не нуждается.
-    :param extra_instructions: дополнительный текст промпта (в ``prompt_hash`` §5 не
-        входит, но входит в текст и потому в ключ кэша вердиктов).
     :param eval_cache: межпрогонный кэш сырых вердиктов (:class:`EvalVerdictCache`).
         ``None`` ⇒ кэш выключен (поведение байт-в-байт прежнее). Хит отдаёт
         ``LLMCellOutput`` и проходит **весь** существующий эшелон заново; кэшируется
@@ -2891,7 +2889,6 @@ def evaluate_cell(
         product_id=product_id,
         chunks=chunks,
         satellites=satellites,
-        extra_instructions=extra_instructions,
     )
 
     # Пустой срез — факт о ретривале, а не вопрос к модели: вызова нет, ячейка ``❓`` с
@@ -2924,7 +2921,7 @@ def evaluate_cell(
     # Ключ кэша вердиктов: **отрендеренный** текст промпта, конфигурация оценщика и
     # правила, по которым вердикт считается (09 §10.5). ``prompt_hash`` (§5) входит ради
     # аудита, но не является ключом: он не покрывает
-    # product/title/satellites/extra_instructions/текст чанков. ``run_id``/``build_id``/
+    # product/title/satellites/текст чанков. ``run_id``/``build_id``/
     # ``strict``/coverage/resolver/прецедент намеренно вне ключа: они либо не меняют
     # вердикт, либо пере-исполняются на хите. Методологические условия — **в** ключе:
     # смена правил меняет вердикт, не меняя промпта.
@@ -3525,7 +3522,7 @@ def evaluate_batch(
     protected_by_param: Mapping[str, Cell] | None = None,
     coverage: CorpusCoverage | None = None,
     scope_acceptance: str | None = None,
-    extra_instructions: str = "",
+    min_retrieval_score: float | None = None,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
@@ -3583,6 +3580,12 @@ def evaluate_batch(
 
     ``llm_journal`` пробрасывается в :func:`evaluate_cell` как есть: строка журнала
     пишется на попытку вызова (см. :class:`LLMCallJournal`), батч её не агрегирует.
+
+    ``min_retrieval_score`` — порог аномалии §7.1 п. 4 (заметка, не сбой): пробрасывается
+    как есть. ``None`` — проверка выключена; значение по умолчанию задаёт фаза
+    (:func:`evaluate_phase`), читая одну объявленную константу
+    (:data:`~core.pipeline.evaluation_policy.EVALUATION_MIN_RETRIEVAL_SCORE`), а не
+    выдумывая своё.
 
     :raises ValueError: ``llm_concurrency < 1`` — «ноль вызовов в полёте» не исполнение.
     """
@@ -3672,7 +3675,7 @@ def evaluate_batch(
             protected=protected,
             coverage=coverage,
             scope_acceptance=scope_acceptance,
-            extra_instructions=extra_instructions,
+            min_retrieval_score=min_retrieval_score,
             eval_cache=eval_cache,
             eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
@@ -3803,6 +3806,7 @@ def evaluate_phase(
     cutoff_k: int | None = None,
     strict: bool = True,
     scope_acceptance: str | Mapping[str, str] | None = None,
+    min_retrieval_score: float | None = EVALUATION_MIN_RETRIEVAL_SCORE,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
     exhaustion_facts: ExhaustionFacts | None = None,
@@ -3850,6 +3854,10 @@ def evaluate_phase(
         per-product (покрытие per product). Оно нужно только классу ``bounded`` (измерение
         не покрывает пространство), поэтому продукт без подписи получает ``❓`` с причиной
         ``absence_unattested``, а не выпадает из карты.
+    :param min_retrieval_score: порог аномалии §7.1 п. 4 (заметка, не сбой). Дефолт —
+        объявленная константа :data:`~core.pipeline.evaluation_policy.EVALUATION_MIN_RETRIEVAL_SCORE`:
+        исполнение и провенанс читают одно число, а не два. ``None`` — проверка выключена
+        (значение не измерено, план 15 §6.2 п.4); включение — ``execution_change``.
     :param eval_cache: межпрогонный кэш сырых вердиктов оценщика; ``None`` ⇒ выключен
         (поведение байт-в-байт). Хит проходит все пост-шаги (валидация, класс отрицания,
         прецедент) заново — кэшируется только ``LLMCellOutput``, не ``Cell``.
@@ -4227,6 +4235,7 @@ def evaluate_phase(
             protected_by_param=protected_by_param,
             coverage=coverage,
             scope_acceptance=accepted,
+            min_retrieval_score=min_retrieval_score,
             eval_cache=eval_cache,
             eval_conditions=eval_conditions,
             prompt_archive=prompt_archive,
@@ -4810,6 +4819,9 @@ def _evaluate_cells_by_condition(
                 store=None,
                 coverage=coverage,
                 scope_acceptance=_accepted_risk(cell),
+                # План 15 §6.2 п.4: повтор идёт тем же порогом аномалии, что и фаза, —
+                # иначе повторная ячейка потеряла бы заметку о низком retrieval-скоре.
+                min_retrieval_score=EVALUATION_MIN_RETRIEVAL_SCORE,
                 eval_cache=eval_cache,
                 eval_conditions=eval_conditions,
                 prompt_archive=prompt_archive,

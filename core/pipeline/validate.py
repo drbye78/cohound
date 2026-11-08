@@ -1,13 +1,13 @@
-"""coHound — механический эшелон валидации цитат Ш6 (T9.4, §7.1/§10).
+"""coHound — механический эшелон валидации цитат Ш6 (T9.4, §7.1 п. 4).
 
-Эшелон §10 превращает сырой выход оценщика (``LLMCellOutput`` с ``source_id``+``quote``)
+Эшелон §7.1 п. 4 превращает сырой выход оценщика (``LLMCellOutput`` с ``source_id``+``quote``)
 в типизированный ``CellEvidence`` **только если** цитата механически подтверждается:
 
 1. ``source_id`` существует среди переданных чанков (I10/I15);
 2. цитата — подстрока **чистого** ``text`` чанка с нормализацией пробелов (strict);
 3. из подтверждённых цитат строится ``CellEvidence``: детерминированный ``evidence_id``
    (S8), ``content_hash`` чанка (**I19**), ``source_url`` через ``resolver`` (I10/I15);
-4. аномалии ревью (§10.4): ✅ при retrieval-скоре ниже порога и ✅ на единственной
+4. аномалии ревью (§7.1 п. 4): ✅ при retrieval-скоре ниже порога и ✅ на единственной
    цитате — **заметки**, не сбои. Автопонижение статуса запрещено (§2.2: равновесные
    трактовки → меньший статус решает **ревью**, а не эшелон).
 
@@ -64,7 +64,7 @@ ChunkLike = Chunk | RetrievedChunk
 #: ``documentation``. Web/distribution-происхождение уточняется на уровне корпуса (§5).
 DEFAULT_SOURCE_KIND = SourceKind.DOCUMENTATION
 
-#: Регулярка нормализации пробелов (§10 шаг 2): любые пробельные Unicode-последовательности.
+#: Регулярка нормализации пробелов (§7.1 п. 4, шаг 2): любые пробельные Unicode-последовательности.
 _WS_RE = re.compile(r"\s+")
 
 
@@ -91,11 +91,11 @@ if ValidationFailureKind.VALIDATION_FAILED.value != FailureKind.VALIDATION_FAILE
 
 @dataclass
 class ValidationResult:
-    """Результат механической валидации одной ячейки (§10, 02 §C.2).
+    """Результат механической валидации одной ячейки (§7.1 п. 4, 02 §C.2).
 
     ``ok`` — прошла ли цитатная валидация целиком. ``failure_kind`` — вид сбоя
     (``validation_failed``) в strict-режиме, иначе ``None`` (preliminary-кандидат).
-    ``notes`` — аномалии/пояснения (§10.4), не влияющие на ``ok``.
+    ``notes`` — аномалии/пояснения (§7.1 п. 4), не влияющие на ``ok``.
     ``resolved_evidence`` — типизированные доказательства из **подтверждённых** цитат
     (при частичном провале содержит валидные элементы — полезно preliminary-ветке).
     """
@@ -107,7 +107,7 @@ class ValidationResult:
 
 
 def normalize_quote_text(text: str) -> str:
-    """Нормализует пробелы для сверки цитаты (§10 шаг 2).
+    """Нормализует пробелы для сверки цитаты (§7.1 п. 4, шаг 2).
 
     Любая пробельная последовательность → один пробел, края обрезаются. Применяется
     **одинаково** к тексту чанка и к цитате — см. докстринг модуля.
@@ -273,14 +273,14 @@ def validate_output(
     min_retrieval_score: float | None = None,
     composition_id: str | None = None,
 ) -> ValidationResult:
-    """Механически валидирует выход оценщика и строит evidence (§10, 02 §C.2).
+    """Механически валидирует выход оценщика и строит evidence (§7.1 п. 4, 02 §C.2).
 
     :param output: разобранный выход оценщика (``status``/``justification``/``evidence``).
     :param chunks: чанки, переданные оценщику, по ``chunk_id`` (I17: только продукт-скоуп).
     :param product_id / param_id / run_id: ключ ячейки (для ``evidence_id``/``CellEvidence``).
     :param resolver: детерминированный резолвер ``source_id`` → URL (I10/I15); опционален.
     :param strict: strict-эшелон (``failure_kind`` при провале) vs preliminary-кандидат.
-    :param min_retrieval_score: порог retrieval-скора для аномалии §10.4 (заметка, не сбой).
+    :param min_retrieval_score: порог retrieval-скора для аномалии §7.1 п. 4 (заметка, не сбой).
     :param composition_id: ``RetrievalResult.build_id`` — композиция прогона (09 §8.1).
         Пишется в ``CellEvidence.index_build_id`` (R7: evidence привязан к сборке
         прогона); без неё остаётся id резолвера/чанка (legacy/unit-путь). Нужна и
@@ -363,12 +363,12 @@ def validate_output(
         )
         cited_chunks.append(chunk)
 
-    # (4) §10.4 аномалии: не сбои, только заметки для ревью.
+    # (4) §7.1 п. 4 аномалии: не сбои, только заметки для ревью.
     if output.status is Status.OK:
         if len(output.evidence) == 1:
             _note(
                 notes,
-                "§2.2/§10.4: ✅ опирается на единственную цитату — на ревью "
+                "§2.2/§7.1 п. 4: ✅ опирается на единственную цитату — на ревью "
                 "(автопонижение статуса не выполняется)",
             )
         if min_retrieval_score is not None:
@@ -376,7 +376,7 @@ def validate_output(
             if scores and max(scores) < min_retrieval_score:
                 _note(
                     notes,
-                    "§10.4: аномалия — ✅ при retrieval-скоре "
+                    "§7.1 п. 4: аномалия — ✅ при retrieval-скоре "
                     f"{max(scores):.4g} ниже порога {min_retrieval_score:.4g}",
                 )
 

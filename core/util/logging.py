@@ -5,7 +5,7 @@
 ``component``, ``level``, ``message``, ``ctx`` (произвольный словарь:
 ``product``/``param``/``chunk_id``/…), ``invariant`` (при нарушении инварианта).
 
-Уровни: ``DEBUG`` (retrieval-скоры), ``INFO`` (шаги фаз), ``WARN`` (аномалии §10.4),
+Уровни: ``DEBUG`` (retrieval-скоры), ``INFO`` (шаги фаз), ``WARN`` (аномалии §7.1 п. 4),
 ``ERROR`` (сбои).
 
 Контракт сериализации
@@ -268,7 +268,7 @@ class PhaseLogger:
         return self._convenience("INFO", message, ctx)
 
     def warn(self, message: str, **ctx: Any) -> dict[str, Any] | None:
-        """Запись уровня ``WARN`` (аномалии §10.4)."""
+        """Запись уровня ``WARN`` (аномалии §7.1 п. 4)."""
         return self._convenience("WARN", message, ctx)
 
     def error(self, message: str, **ctx: Any) -> dict[str, Any] | None:

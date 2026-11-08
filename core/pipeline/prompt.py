@@ -32,8 +32,8 @@ retrieval-пути строка отсутствует (это видимая г
 ``ValueError`` (шаблон и код рассинхронизированы — это ошибка сборки, не данных).
 
 **``prompt_hash``.** Ровно контракт :func:`core.util.hashing.prompt_hash`:
-``H(template_version, rule, absence_rule, sorted(chunk_ids))``. Сателлиты,
-``extra_instructions`` и отрендеренный текст в hash **не входят** — такова
+``H(template_version, rule, absence_rule, sorted(chunk_ids))``. Сателлиты, заголовок
+параметра и отрендеренный текст в hash **не входят** — такова
 фиксированная формула §5/01 §5. Полный текст сохраняется в каталоге аудита
 (``prompts/{sha256(text)}.json``), чтобы аудит мог сверить содержимое.
 
@@ -344,7 +344,6 @@ def compile_prompt(
     chunks: Sequence[ChunkLike],
     satellites: Sequence[Satellite] = (),
     absence_rule: AbsenceRuleType | None = None,
-    extra_instructions: str = "",
 ) -> CompiledPrompt:
     """Механически компилирует промпт оценщика и его ``prompt_hash`` (§7.1/§5).
 
@@ -353,7 +352,11 @@ def compile_prompt(
     :param chunks: переданные оценщику фрагменты (``Chunk``|``RetrievedChunk``).
     :param satellites: сателлиты; фильтруются по ``param.role_binding`` (если задан).
     :param absence_rule: переопределяет ``param.absence_rule`` (по умолчанию — из каталога).
-    :param extra_instructions: дополнительный текст (в hash не входит; сохраняется в тексте).
+
+    Слот ``{{EXTRA_INSTRUCTIONS}}`` шаблона подставляется **пустой строкой** и параметром
+    не является: значения у него нет ни в одном объявленном входе, а текст шаблонов
+    ``templates/evaluator_v{1..5}.txt`` менять нельзя — иначе поедет ``prompt_template``
+    и ``run_id``. Отрендеренный промпт обязан остаться байт-в-байт прежним.
 
     Чанки упорядочиваются по ``chunk_id`` (детерминизм R7); ``chunk_ids`` уходят в
     ``prompt_hash`` уже отсортированными, поэтому hash не зависит от порядка входа.
@@ -379,7 +382,10 @@ def compile_prompt(
         "ABSENCE_RULE": resolved_absence.value,
         "ABSENCE_GUIDANCE": ABSENCE_GUIDANCE[resolved_absence],
         "SATELLITES": _render_satellites(_relevant_satellites(param, satellites)),
-        "EXTRA_INSTRUCTIONS": extra_instructions,
+        # Слот шаблона существует (``{{EXTRA_INSTRUCTIONS}}`` в evaluator_v*.txt), но
+        # значения у него нет: параметра нет ни у одного вызывающего. Подстановка пустой
+        # строки сохраняет отрендеренный промпт байт-в-байт и не трогает текст шаблона.
+        "EXTRA_INSTRUCTIONS": "",
         "CHUNKS": _render_chunks(ordered_chunks),
     }
     text = _fill_template(_load_template(TEMPLATE_VERSION), mapping)

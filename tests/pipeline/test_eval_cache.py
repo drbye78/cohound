@@ -499,7 +499,6 @@ def _assert_prompt_hash_equal(data: dict, **second: object) -> None:
         product_id=second.get("product_id", data["product_id"]),
         chunks=second.get("chunks", _chunks(data)),
         satellites=second.get("satellites", ()),
-        extra_instructions=second.get("extra_instructions", ""),
     )
     assert changed.prompt_hash == baseline.prompt_hash
 
@@ -530,21 +529,6 @@ def test_title_change_busts_key_despite_equal_prompt_hash(tmp_path: Path) -> Non
     _evaluate(data, evaluator, cache)
     _assert_prompt_hash_equal(data, param=changed)
     _evaluate(data, evaluator, cache, param=changed)
-
-    assert len(evaluator.calls) == 2
-
-
-def test_extra_instructions_change_busts_key_despite_equal_prompt_hash(
-    tmp_path: Path,
-) -> None:
-    data = _data()
-    evaluator = _ScriptedEvaluator([_ok_output(data)])
-    cache = EvalVerdictCache(tmp_path / "cache")
-    extra = "Дополнительно: игнорировать маркетинговые формулировки."
-
-    _evaluate(data, evaluator, cache)
-    _assert_prompt_hash_equal(data, extra_instructions=extra)
-    _evaluate(data, evaluator, cache, extra_instructions=extra)
 
     assert len(evaluator.calls) == 2
 
