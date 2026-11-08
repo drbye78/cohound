@@ -404,7 +404,7 @@ LLM-endpoint корп. облака — только в Z0.
    конвейер по ним (`core/edge/extract_service.py:172` — `artifact_extractor_factory`,
    `text_layer` → pdfium, остальные уровни → docling), поэтому текст под `split` совпадает с
    `local` при тех же осях. Не действует **механизм** PDF: его выбирает edge, а не объявивший
-   его прогон (`core/cli/wiring.py:2437-2439` — комментарий «``pdf_pipeline`` под ``split`` не
+   его прогон (`core/cli/wiring.py:2473-2475` — комментарий «``pdf_pipeline`` под ``split`` не
    действует»). Поэтому `deploy_profile` и остаётся полем контракта.
 4. ⚠️ **Per-root слой осей `document_level`/`pdf_device` под `split` не виден** (расхождение,
    которого в прежней редакции этого блока не было). Под `local` оси разрешаются на каждом

@@ -375,7 +375,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 заменил `_enforce_reuse_confirmed` (удалён вместе с `_CONFIRMED_REUSE_KINDS` и двумя уровнями
 `_evidence_level_reuse_violations`/`_corpus_level_reuse_violations`), вызовы — Ш6
 (`core/pipeline/evaluate.py:3253`) и **перенос ячейки из прошлого прогона**
-(`_carried_rules_hold`, `core/pipeline/evaluate.py:431`: перенесённый `❌` проходит то же
+(`_carried_rules_hold`, `core/pipeline/evaluate.py:432`: перенесённый `❌` проходит то же
 правило, иначе carry-forward обходил бы F3);
 `core/pipeline/corpus_coverage.py:181` + источник `core/pipeline/corpus_coverage.py:611`
 (`iter_crawl_session_items` — сеанс, не снятия);

@@ -26,7 +26,7 @@
 | `search_failed` | Ш5/SERP | лог в `search_log`, ячейка → `failed` после retry | I4 |
 | `source_unavailable` | Ш5 краул | retention других источников; не роняет прогон | — |
 | `evaluation_failed` | Ш6 LLM | retry ≤2 → `failed` | §7, I4 |
-| `validation_failed` | Ш6 эшелон | strict → `failed`; preliminary → кандидат | §1.4, §10 |
+| `validation_failed` | Ш6 эшелон | strict → `failed`; preliminary → кандидат | §1.4, §7.1 п. 4 |
 | `parser_failed` | Ш5 экстракция | `extractor_version` фиксируется; возможен re-extract из raw | I19 |
 | `lint_*` | Ш1 | **блокирует** прогон (не failed ячейки) | §4.2 |
 
@@ -113,7 +113,7 @@
 - Формат: JSON-lines, `runs/{run_id}/logs/{phase}.jsonl`.
 - Поля: `ts`, `run_id`, `phase`, `component`, `level`, `message`, `ctx` (product/param/chunk_id),
   `invariant` (при нарушении).
-- Уровни: `DEBUG` (retrieval-скоры), `INFO` (шаги фаз), `WARN` (аномалии §10.4), `ERROR` (сбои).
+- Уровни: `DEBUG` (retrieval-скоры), `INFO` (шаги фаз), `WARN` (аномалии §7.1 п. 4), `ERROR` (сбои).
 
 ### B.2. Метрики прогона (в `run_manifest.yaml` и БД)
 
@@ -517,7 +517,8 @@ Backlog B — `runs.crawl_strategy`/`runs.crawl_rate_limit`, операцион�
 | §7 LLM-контуры | 1,2 | 1§3.1/3.4, 2C |
 | §8 человеко-машинные интерфейсы | 2,3 | 2A.2, 3B.1, 3E |
 | §9 артефакты | 2,3 | 2E.2, 3A.2 |
-| §10 защита | 2 | 2C.2, 07 |
+| §7.1 п. 4 эшелон | 2 | 2C.2 |
+| §10 защита | 2 | 07 |
 | §11 golden/CI | 2,4 | 2B.3, 4C |
 | §12 модель ошибок | 2,4 | 2C.2, 4A.1 |
 | §13 версионирование | 3 | 3C |

@@ -1034,7 +1034,7 @@ base64 по HTTP, `core/adapters/remote_extractor.py:187`) на объёме 10 
 ### Phase 0 — контракт и acceptance baseline — 🟡 частично
 
 Закрыто: `deploy_profile` фиксируется в манифесте (`core/cli/wiring.py:3367`); scope sitemap и
-source-wave semantics — `03` §D.2.1; fail-closed для robots (`core/util/robots.py:438`,
+source-wave semantics — `03` §D.2.1; fail-closed для robots (`core/util/robots.py:466`,
 `UNAVAILABLE` → отказ обхода); baseline focused tests на месте. Аренда строки очереди конверсии
 (`core/pipeline/extract_queue.py:54`) снимает часть (б).
 
