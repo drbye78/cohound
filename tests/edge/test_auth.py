@@ -287,7 +287,7 @@ def test_authorize_crawl_ops_require_crawl_scope() -> None:
 
 
 def test_authorize_extract_ops_require_extract_scope() -> None:
-    """Приём артефакта — отдельный scope (10 §5.4): краул не открывает извлечение."""
+    """Приём артефакта — отдельный scope (07 §8): краул не открывает извлечение."""
     for op in ("extract/upload", "extract/submit", "extract/collect", "extract/abort"):
         assert authorize(_principal({SCOPE_EXTRACT}), op) is True
         assert authorize(_principal({SCOPE_CRAWL}), op) is False

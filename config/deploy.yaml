@@ -46,7 +46,7 @@ extractor_zone: core           # edge | core | separate
 #     headless: false
 #
 crawl:
-  # Устройство моделей извлечения PDF (P9, `10` §3.4–3.6). Здесь, а не в run.yaml
+  # Устройство моделей извлечения PDF (P9, `docs/reports/measurements/2026-10-28-gpu-vs-cpu-extraction.md`). Здесь, а не в run.yaml
   # пакета: устройство принадлежит **хосту исполнения**, а не измерению продукта, и
   # per-site слоя у оси нет намеренно. Значения только `cpu` | `cuda` — `auto` не
   # существует (R5: объявленная ось обязана действовать).

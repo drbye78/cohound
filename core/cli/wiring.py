@@ -2465,7 +2465,7 @@ def build_extraction_pool(
 
         # P5/P9: ось ``document_level``/``pdf_device`` здесь не действует — она уже
         # объявлена на собранном ``RemoteExtractor`` и едет в ``extract/submit``
-        # (B3, 10 §5.4). ``pdf_pipeline`` под ``split`` не действует: механизм PDF
+        # (B3, 07 §8). ``pdf_pipeline`` под ``split`` не действует: механизм PDF
         # выбирает edge (R-S). Обе оси принимаются и игнорируются, чтобы подпись фабрики
         # совпадала с локальной.
         # F0: пик воркера не собирается — воркеры-threads живут в ядре, но их ``ru_maxrss``
@@ -3377,7 +3377,7 @@ def build_adapters(
             container=container_for,
             extractor=RemoteExtractor(
                 content_gateway,
-                # B1/B3 (10 §5.4): объявленные оси извлечения едут в ``extract/submit``,
+                # B1/B3 (07 §8): объявленные оси извлечения едут в ``extract/submit``,
                 # поэтому смена уровня/устройства меняет результат под ``split`` так же,
                 # как под ``local``. Резолв — та же цепочка app < run, что у локального
                 # композита (:func:`_build_local_ports`); per-root слой здесь не виден —

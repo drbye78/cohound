@@ -874,7 +874,7 @@ def _db_smoke() -> None:
     _assert({"session_id", "run_id", "profile", "status", "created_at", "started_at",
              "finished_at", "total", "pending", "running", "fetched", "failed",
              "cancelled", "options_json", "provenance_json"} <= sess_cols)
-    # F1 (schema 3.12.0): свидетельство живости сеанса — НЕ блокировка и НЕ lease (`10` §Д-6, К-4).
+    # F1 (schema 3.12.0): свидетельство живости сеанса — НЕ блокировка и НЕ lease (`24` §5.7).
     _assert({"owner", "heartbeat_at"} <= sess_cols)
     sess_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")
                if r["pk"]]

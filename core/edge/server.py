@@ -430,7 +430,7 @@ class EdgeGateway:
         ``poll(request) -> {entries, count, truncated}``. При ``None`` операция
         ``crawl/poll`` отвечает ``status=error`` (сервис недоступен на этом edge-узле).
     :param extract_service: необязательный сервис извлечения **по артефакту** (B1/B3;
-        10 §5.4) с методами ``upload/submit/collect/abort(payload)`` и, необязательно,
+        07 §8) с методами ``upload/submit/collect/abort(payload)`` и, необязательно,
         ``purge_expired()``/``close()``/``levels``/``devices``/``ttl_s``. При ``None``
         операции ``extract/*`` отвечают ``status=error``, а ``capabilities().extract``
         честно объявляет ``supports_artifact=false`` (а не «поддерживается, но не работает»).
@@ -488,7 +488,7 @@ class EdgeGateway:
     def capabilities(self) -> dict[str, Any]:
         """Версии edge-компонентов для манифеста (``/v1/capabilities``, 07 §3/§7).
 
-        Блок ``extract`` (аддитивный, 10 §5.4) — не «реклама возможностей», а вход ядра:
+        Блок ``extract`` (аддитивный, 07 §8) — не «реклама возможностей», а вход ядра:
         размер чанка ядро берёт **отсюда**, а не из своей константы, иначе оно упрётся в
         ``413`` на объявленном лимите тела. Уровни/устройства объявляются только те, что
         узел действительно исполнит (``off`` не извлекает — его здесь нет, хотя как
@@ -600,7 +600,7 @@ class EdgeGateway:
         """Чистая диспетчеризация по ``fetch``/``search``/``registry``/``capabilities``/``health``,
         crawl-операциям ``crawl/{submit,status,cancel,collect,poll}`` (Phase 3.1/Wave 5.1) и
         операциям извлечения по артефакту ``extract/{upload,submit,collect,abort}``
-        (B1/B3; 10 §5.4).
+        (B1/B3; 07 §8).
 
         Возвращает **payload** конверта (оборачивает ``envelope``). Неизвестный op →
         ``EdgeRequestError``. Сбои адаптеров становятся ``EdgeAdapterError``.
@@ -1004,7 +1004,7 @@ class EdgeGateway:
         if violations:
             raise EdgeRequestError("; ".join(violations))
 
-    # -- extract (B1/B3; 10 §5.4) ---------------------------------------------
+    # -- extract (B1/B3; 07 §8) ---------------------------------------------
 
     def _require_extract_service(self) -> Any:
         """Возвращает сервис извлечения по артефакту либо бросает ``EdgeError``."""

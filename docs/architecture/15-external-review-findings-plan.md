@@ -402,9 +402,9 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ P0 — все перечисленные обещания приведены к коду: `core/util/cache.py:1-12` (SERP-кэш
   теперь правда), `06-implementation-strategy.md:47` (`fusion` удалён), `AGENTS.md`
   (спуск: итеративный обход, цепочка 5000), `core/util/document_probe.py:11-14` (окна вместо
-  «по шапке»), `02-subsystems.md:610-622` (шапка фрагмента), `core/adapters/llm_local.py:18-29`.
+  «по шапке»), `02-subsystems.md:611-623` (шапка фрагмента), `core/adapters/llm_local.py:18-29`.
   ⬜ **остаток P0**: `core/adapters/llm_local.py:22` всё ещё перечисляет «достаточность» среди
-  механических проверок `validate.py`, тогда как `02-subsystems.md:640` уже говорит
+  механических проверок `validate.py`, тогда как `02-subsystems.md:641` уже говорит
   «НЕ реализовано как шаг эшелона» — одна из двух строк врёт (V1).
 - ✅ P1 — S1+S5+ось языка: `core/cli/wiring.py:735,740,742`, `core/util/cache.py:23-28`,
   `core/pipeline/search_log.py:394,432`. `EXECUTION_CONTRACT_FIELDS` не менялся (кэш — механизм R7).

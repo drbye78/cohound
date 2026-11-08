@@ -451,8 +451,7 @@ CREATE TABLE IF NOT EXISTS crawl_sessions (
     error         TEXT,
     options_json  TEXT,
     provenance_json TEXT,
-    -- F1 (schema 3.12.0): свидетельство живости, а **не** распределённая блокировка (`10` §Д-6,
-    -- К-4). ``owner`` — кто исполняет сеанс (host/pid/старт процесса), ``heartbeat_at`` — когда
+    -- F1 (schema 3.12.0): свидетельство живости, а **не** распределённая блокировка (`24` §5.7). ``owner`` — кто исполняет сеанс (host/pid/старт процесса), ``heartbeat_at`` — когда
     -- этот процесс последний раз подавал признаки жизни. SIGKILL/OOM не перехватываются, поэтому
     -- мёртвый сеанс распознаёт recovery-on-open (``core/pipeline/liveness.py``) и переводит его
     -- в ``interrupted``. Обе колонки — операционный провенанс, в ``run_id`` не входят.

@@ -8,7 +8,7 @@
   запрос+ответ операций ``POST /v1/*``;
 * ``crawl.schema.json`` — очередь краула ``POST /v1/crawl/*``;
 * ``extract.schema.json`` — извлечение **по артефакту** ``POST /v1/extract/*``
-  (B1/B2/B3; 10 §5.4): приём чанками, заказ, забор, уборка;
+  (B1/B2/B3; 07 §8): приём чанками, заказ, забор, уборка;
 * ``capabilities.schema.json`` / ``health.schema.json`` — ответы ``GET /v1/*``;
 * ``openapi.json`` — OpenAPI 3.1 по всем эндпоинтам (для DLP/IDS/IDP-политик, 07 §8).
 
@@ -71,7 +71,7 @@ SEAM_SCHEMA_VERSION = "1"
 SCHEMA_DIR: Path = Path(__file__).resolve().parents[2] / "contracts" / "seam"
 
 #: Операции протокола ``/v1/*`` (07 §3). Crawl-операции сохраняют слэш (``crawl/submit``);
-#: то же — для извлечения по артефакту (``extract/upload``, 10 §5.4).
+#: то же — для извлечения по артефакту (``extract/upload``, 07 §8).
 ENDPOINT_OPS: frozenset[str] = frozenset(
     {
         "fetch",
@@ -91,7 +91,7 @@ ENDPOINT_OPS: frozenset[str] = frozenset(
     }
 )
 
-#: Операции извлечения **по артефакту** (B1/B3; 10 §5.4): приём чанками, заказ извлечения,
+#: Операции извлечения **по артефакту** (B1/B3; 07 §8): приём чанками, заказ извлечения,
 #: забор результата, уборка брошенной загрузки.
 EXTRACT_OPS: frozenset[str] = frozenset(
     {"extract/upload", "extract/submit", "extract/collect", "extract/abort"}
@@ -425,7 +425,7 @@ def _validate_registry(payload: Any) -> list[str]:
 def _validate_capabilities(payload: Any) -> list[str]:
     """Payload ``GET /v1/capabilities`` (07 §3): версии edge-компонентов + блок ``extract``.
 
-    Блок ``extract`` (аддитивный, 10 §5.4) объявляет то, чего ядро иначе не знает:
+    Блок ``extract`` (аддитивный, 07 §8) объявляет то, чего ядро иначе не знает:
     размер чанка, который узел действительно примет; уровни и устройства, которые он
     исполнит; и факт поддержки извлечения **по артефакту**. Без него ядро выбирало бы
     размер чанка из собственной константы и получало ``413`` на объявленном лимите тела.
@@ -610,7 +610,7 @@ def _validate_crawl_poll_response(payload: Any) -> list[str]:
     return violations
 
 
-#: Статусы ответа ``POST /v1/extract/collect`` (10 §5.4): работа идёт / готова / упала /
+#: Статусы ответа ``POST /v1/extract/collect`` (07 §8): работа идёт / готова / упала /
 #: работы нет. ``unknown`` обязателен: «нет работы» ≠ «ещё не готово», иначе ядро ждало бы
 #: вечно артефакт, который никогда не загружали.
 EXTRACT_COLLECT_STATUSES: frozenset[str] = frozenset(
@@ -917,7 +917,7 @@ def _validate_rate_limit(violations: list[str], where: str, value: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# extract — запросы (B1/B3; 10 §5.4)
+# extract — запросы (B1/B3; 07 §8)
 # ---------------------------------------------------------------------------
 
 

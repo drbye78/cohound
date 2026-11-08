@@ -17,11 +17,10 @@
 **Смежное:** `05-dependency-stack.md` (реестр пакетов/лицензий/пинов), `06-implementation-strategy.md`
 (стратегия и план реализации), `07-deployment-topology.md` (доверенные зоны/DMZ),
 `09-product-onboarding-incremental-runs.md` (онбординг продукта, контейнеры, текстовые форматы,
-durable `state.db`, benchmark оценщика), `10-extraction-pipeline-architecture.md` (стадии
-извлечения и пост-извлечения: где живёт артефакт, что держит процесс, как размещение стадии
-выражается конфигурацией), `11-production-architecture-strategy.md` (порядок доведения до
-production-grade: фазы F0–F6, гейты, риски; пересматривает `10` §5 там, где та держалась
-только ради обратной совместимости).
+durable `state.db`, benchmark оценщика), `24-fleet-work-units.md` (единица работы, ёмкость узла,
+размещение; заменил `10-extraction-pipeline-architecture.md`, удалённый 08.11.2026),
+`11-production-architecture-strategy.md` (порядок доведения до
+production-grade: фазы F0–F6, гейты, риски).
 
 ---
 
@@ -85,7 +84,7 @@ G3/G4 — **точки интеграции**: решение приходит �
 расчёт, отчёты) и **Z1 EDGE/DMZ** (веб-эгрессия: краул, поиск, реестры). Извлечение контента
 сегодня исполняется **в ядре** (`extractor_zone` объявлено и не подключено — D-9, `07` §2);
 зона **Z2 PARSE** (hardening парсинга недоверенного контента) — roadmap, её целевой контракт
-описан в `10` §5.4. Взаимодействие — только через **application-layer firewall (L7)** по протоколу `/v1/*`:
+описан в `07` §3 (шов `extract/*`). Взаимодействие — только через **application-layer firewall (L7)** по протоколу `/v1/*`:
 8 POST-операций (`fetch`, `search`, `registry`, `crawl/submit`, `crawl/status`, `crawl/cancel`,
 `crawl/collect`, `crawl/poll`) и 2 GET (`capabilities`, `health`); публикуемые схемы —
 `contracts/seam/*.json` (+ `openapi.json`), тела запросов — `07` §3. Это усиливает **I18** (оценщик физически без маршрута в интернет) и
