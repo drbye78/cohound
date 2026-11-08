@@ -199,3 +199,34 @@ def test_fetcher_that_swallows_404_erases_the_observation() -> None:
 
     assert verdict.state is RobotsFeedState.UNAVAILABLE
     assert verdict.allowed is False
+
+
+def test_edge_robots_fetcher_reads_feed_by_page_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R8: edge-фетчер строит адрес ленты из схемы страницы, а не всегда из https.
+
+    http-only origin на https-ленту не отвечает, и наблюдение становилось
+    ``unavailable`` — origin выпадал целиком. Кэш при этом обязан различать схемы.
+    """
+    from core.edge import crawler_factory as factory_module
+
+    calls: list[str] = []
+
+    class _Page:
+        content = b""
+
+    class _Stub:
+        def fetch(self, url: str, plan: Any = None) -> Any:
+            calls.append(url)
+            return _Page()
+
+    monkeypatch.setattr(factory_module, "HttpCrawler", _Stub)
+    gate = factory_module.build_robots_gate("*")
+
+    assert gate.verdict("http://example.com/x").allowed is True
+    assert gate.verdict("https://example.com/x").allowed is True
+    assert calls == [
+        "http://example.com/robots.txt",
+        "https://example.com/robots.txt",
+    ]

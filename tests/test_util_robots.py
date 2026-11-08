@@ -109,7 +109,7 @@ def test_absent_robots_allows_everything_and_is_observation() -> None:
 def test_absent_statuses_are_not_found(status: int) -> None:
     """Статус ``not_found`` берётся из таксономии порта (``NOT_FOUND_STATUSES``)."""
 
-    def fetch(_host: str) -> str:
+    def fetch(_origin: str) -> str:
         raise CrawlNotFound(f"HTTP {status}", http_status=status)
 
     assert RobotsGate(fetch).verdict("https://example.com/x").state is (
@@ -147,8 +147,8 @@ def test_disabled_axis_reports_state_without_fetching() -> None:
     """Выключенная ось — состояние ``disabled`` и ни одного запроса к ленте."""
     calls: list[str] = []
 
-    def fetch(host: str) -> str:
-        calls.append(host)
+    def fetch(origin: str) -> str:
+        calls.append(origin)
         return DISALLOW
 
     verdict = RobotsGate(fetch).verdict("https://example.com/blocked", enabled=False)
@@ -170,14 +170,51 @@ def test_per_origin_observation_is_cached() -> None:
     """Один ``robots.txt`` на origin за прогон: повторные проверки не ходят в сеть."""
     calls: list[str] = []
 
-    def fetch(host: str) -> str:
-        calls.append(host)
+    def fetch(origin: str) -> str:
+        calls.append(origin)
         return DISALLOW
 
     gate = RobotsGate(fetch)
     for url in ("https://example.com/a", "https://example.com/b", "https://example.com/c"):
         gate.verdict(url)
-    assert calls == ["example.com"]
+    assert calls == ["https://example.com"]
+
+
+def test_scheme_of_page_selects_feed_and_cache_key() -> None:
+    """R8: лента читается по схеме страницы, и схемы одного хоста не смешиваются.
+
+    http-only origin выпадал целиком: https-лента не отвечала, наблюдение становилось
+    ``unavailable`` и по RFC 9309 §2.3.1.4 запрещало обход. Обратная ошибка — читать
+    https-ленту для http-страницы — тоже неверна: это политика другого пространства.
+    """
+    calls: list[str] = []
+
+    def fetch(origin: str) -> str:
+        calls.append(origin)
+        # Разные ленты по схемам: только на https запрещён путь.
+        return DISALLOW if origin.startswith("https://") else "User-agent: *\nDisallow:\n"
+
+    gate = RobotsGate(fetch)
+    assert gate.verdict("https://example.com/blocked").allowed is False
+    assert gate.observed_state("http://example.com/blocked") is RobotsFeedState.NOT_CHECKED
+    assert gate.verdict("http://example.com/blocked").allowed is True
+    assert calls == ["https://example.com", "http://example.com"]
+    # Кэш ключуется origin'ом: повторные проверки обеих схем ленту не перезапрашивают.
+    gate.verdict("https://example.com/other")
+    gate.verdict("http://example.com/other")
+    assert len(calls) == 2
+
+
+def test_schemeless_url_uses_https_feed() -> None:
+    """URL без схемы (``//host/…``) — прежнее поведение: лента по https."""
+    calls: list[str] = []
+
+    def fetch(origin: str) -> str:
+        calls.append(origin)
+        return DISALLOW
+
+    assert RobotsGate(fetch).verdict("//example.com/blocked").allowed is False
+    assert calls == ["https://example.com"]
 
 
 def test_disallow_refused() -> None:

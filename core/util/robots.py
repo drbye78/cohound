@@ -1,4 +1,4 @@
-"""coHound — per-host политика ``robots.txt`` (чистый stdlib; D1, §10).
+"""coHound — per-origin политика ``robots.txt`` (чистый stdlib; D1, §10).
 
 Единая реализация робот-этики: собственный разбор и матчинг ``robots.txt`` по RFC 9309 с
 **инъектируемым** фетчем текста ленты (в core нет сетевого I/O — в реальном пути ленту
@@ -14,6 +14,14 @@
 Матчинг — **линейный glob-матчер** (шаблон делится по ``*``, отрезки ищутся последовательным
 ``str.find``), без регулярных выражений: ``robots.txt`` — недоверенный вход (RFC 9309 §3),
 и вложенные звёздочки не должны вызывать катастрофический бэктрекинг при проверке каждого URL.
+
+**Семантика адреса ленты — схема страницы, не всегда https (R8).** Наблюдение ключуется
+**origin**'ом вида ``scheme://host``: лента читается там же, где лежит страница
+(``https``-страница → ``https://host/robots.txt``, ``http``-страница →
+``http://host/robots.txt``, RFC 9309 §2.1). Для http-only origin'а https-лента не ответит, и
+origin выпал бы целиком как ``unavailable``; обратная ошибка — читать https-ленту для
+http-страницы — тоже неверна: это политика другого пространства. Кэш наблюдений поэтому
+различает схемы одного хоста.
 
 **Семантика ленты — наблюдение, а не умолчание.** У каждого origin есть явное состояние
 :class:`RobotsFeedState`, и следствие выводится из состояния, а не из «правил нет»:
@@ -68,6 +76,9 @@ ROBOTS_UNAVAILABLE_REASON = "robots_unavailable"
 #: тестом (``tests/test_util_robots.py``), чтобы константы не разъехались: ``core.util``
 #: не импортирует контракты портов (направление зависимости ``ports → util``).
 _ROBOTS_ABSENT_STATUSES = frozenset({404, 410})
+
+#: Схемные умолчания порта: явный порт, совпадающий с ними, в origin не попадает.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 class RobotsFeedState(StrEnum):
@@ -282,7 +293,7 @@ def _parse(text: str) -> list[_Group]:
 
 
 class _Policy:
-    """Выбранные для нашего агента правила одного хоста."""
+    """Выбранные для нашего агента правила одного origin."""
 
     def __init__(self, groups: list[_Group]) -> None:
         self._rules: list[_Rule] = [rule for group in groups for rule in group.rules]
@@ -345,14 +356,41 @@ def _normalize_feed(feed: object) -> tuple[RobotsFeedState, str | None]:
     return RobotsFeedState.UNAVAILABLE, None
 
 
-class RobotsGate:
-    """Per-host политика ``robots.txt`` (собственный RFC 9309-матчер, инъектируемый фетч).
+def _origin(url: str) -> str:
+    """``scheme://host`` URL — ключ наблюдения и адрес ленты (пустая строка — хоста нет).
 
-    ``fetch(host)`` → текст ``robots.txt``, :class:`RobotsFeed` либо ``None``. ``None``
-    означает **отсутствие наблюдения** и трактуется по RFC 9309 §2.3.1.4 как полный запрет
-    обхода origin'а; ``404``/``410`` (исключение ``CrawlNotFound`` или
-    ``RobotsFeed(NOT_FOUND)``) — наоборот, разрешение: origin ответил, что ленты нет, и это
-    наблюдение, а не его отсутствие. Явный выигравший ``Disallow`` запрещает свой путь.
+    Схема приводится к нижнему регистру; пустая схема (или не ``http``/``https``) даёт
+    ``https`` — прежнее поведение, когда лента всегда читалась по https. Порт сохраняется,
+    только если он явный и не совпадает со схемным умолчанием: лента живёт на том же
+    authority, что и страница, иначе она описывала бы другое пространство (та же форма
+    origin'а, что у seed-корней в ``package_add_product``).
+    """
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        scheme = "https"
+    host = (parts.hostname or "").lower()
+    if not host:
+        return ""
+    try:
+        port = parts.port
+    except ValueError:  # нечисловой порт: схемой не притворяемся, хост остаётся
+        port = None
+    if port is not None and port != _DEFAULT_PORTS[scheme]:
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+class RobotsGate:
+    """Per-origin политика ``robots.txt`` (собственный RFC 9309-матчер, инъектируемый фетч).
+
+    ``fetch(origin)`` → текст ``robots.txt``, :class:`RobotsFeed` либо ``None``, где
+    ``origin`` — ``scheme://host`` запрашиваемого URL: лента читается по схеме страницы, а не
+    всегда по https (R8). ``None`` означает **отсутствие наблюдения** и трактуется по
+    RFC 9309 §2.3.1.4 как полный запрет обхода origin'а; ``404``/``410`` (исключение
+    ``CrawlNotFound`` или ``RobotsFeed(NOT_FOUND)``) — наоборот, разрешение: origin ответил,
+    что ленты нет, и это наблюдение, а не его отсутствие. Явный выигравший ``Disallow``
+    запрещает свой путь.
 
     :meth:`verdict` возвращает решение вместе с состоянием и машинным кодом причины;
     :meth:`allowed` оставлен как булево для мест, которым код не нужен.
@@ -365,19 +403,19 @@ class RobotsGate:
         self._user_agent = user_agent
         self._observations: dict[str, _Observation] = {}
 
-    def _observe(self, host: str) -> _Observation:
+    def _observe(self, origin: str) -> _Observation:
         """Наблюдение origin'а (кэшируется: один ``robots.txt`` на origin за прогон)."""
-        observation = self._observations.get(host)
+        observation = self._observations.get(origin)
         if observation is not None:
             return observation
-        observation = self._read(host)
-        self._observations[host] = observation
+        observation = self._read(origin)
+        self._observations[origin] = observation
         return observation
 
-    def _read(self, host: str) -> _Observation:
+    def _read(self, origin: str) -> _Observation:
         """Прочитать и разобрать ленту; любой сбой чтения — ``unavailable``."""
         try:
-            feed = self._fetch(host)
+            feed = self._fetch(origin)
         except Exception as exc:  # noqa: BLE001 — сбой чтения = отсутствие наблюдения
             return _Observation(_state_of_exception(exc), None)
         state, text = _normalize_feed(feed)
@@ -393,21 +431,22 @@ class RobotsGate:
 
     def state(self, url: str) -> RobotsFeedState:
         """Наблюдённое состояние ленты origin'а ``url`` (при необходимости — прочитать)."""
-        host = (urlsplit(url).hostname or "").lower()
-        if not host:
+        origin = _origin(url)
+        if not origin:
             return RobotsFeedState.NOT_CHECKED
-        return self._observe(host).state
+        return self._observe(origin).state
 
     def observed_state(self, url: str) -> RobotsFeedState:
         """Состояние **уже сделанного** наблюдения; ``not_checked`` — origin не спрашивали.
 
         Отличается от :meth:`state` тем, что не делает сетевого шага: это ответ на вопрос
-        «что мы знаем», а не «сходи и узнай».
+        «что мы знаем», а не «сходи и узнай». Origin — ``scheme://host`` URL, поэтому
+        наблюдения одного хоста по разным схемам не смешиваются.
         """
-        host = (urlsplit(url).hostname or "").lower()
-        if not host:
+        origin = _origin(url)
+        if not origin:
             return RobotsFeedState.NOT_CHECKED
-        observation = self._observations.get(host)
+        observation = self._observations.get(origin)
         return observation.state if observation is not None else RobotsFeedState.NOT_CHECKED
 
     def verdict(self, url: str, *, enabled: bool = True) -> RobotsVerdict:
@@ -419,10 +458,10 @@ class RobotsGate:
         """
         if not enabled:
             return RobotsVerdict(RobotsFeedState.DISABLED, True, None)
-        host = (urlsplit(url).hostname or "").lower()
-        if not host:
+        origin = _origin(url)
+        if not origin:
             return RobotsVerdict(RobotsFeedState.NOT_CHECKED, True, None)
-        observation = self._observe(host)
+        observation = self._observe(origin)
         if observation.state is RobotsFeedState.UNAVAILABLE:
             # RFC 9309 §2.3.1.4: недоступная лента = полный запрет origin'а. Отказ видим
             # вызывающему машинным кодом, а не выглядит как «правил нет».
@@ -497,11 +536,11 @@ class RobotsGate:
         явного ``rate_limit`` (явный лимит всегда важнее). Недоступная лента/сбой разбора →
         ``None`` (задержки не наблюдали — не выдумываем её).
         """
-        host = (urlsplit(url).hostname or "").lower()
-        if not host:
+        origin = _origin(url)
+        if not origin:
             return None
         try:
-            observation = self._observe(host)
+            observation = self._observe(origin)
         except Exception:  # noqa: BLE001 — сбой чтения robots не роняет краул
             return None
         policy = observation.policy

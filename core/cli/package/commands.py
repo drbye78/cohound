@@ -1835,14 +1835,17 @@ def _corpus_urls(db_path: str | Path) -> list[str]:
 def _make_robots_fetcher(http_crawler: Any) -> Any:
     """Фетчер ``robots.txt`` через HTTP-краулер (без кэша).
 
+    Аргумент — ``origin`` (``scheme://host``) страницы: схема выбирается страницей, а не
+    фиксированным https (R8).
+
     Четыре исхода различаются, потому что у них разные следствия (RFC 9309 §2.3.1.4):
     прочитано ⇒ текст (в т.ч. пустой — «разрешено всё»); ``404``/``410`` ⇒
     :class:`CrawlNotFound` пропускается наружу (гейт выведет ``not_found``); 5xx/сеть/таймаут
     ⇒ ``None`` ⇒ ``unavailable`` ⇒ origin не обходится. Зонд осей краула считает исходы так
     же, как живой прогон, иначе предложение осей измерялось бы на другой политике.
     """
-    def fetch(host: str) -> str | None:
-        url = f"https://{host}/robots.txt"
+    def fetch(origin: str) -> str | None:
+        url = f"{origin}/robots.txt"
         try:
             page = http_crawler.fetch(url, FetchPlan(FetchMode.HTTP))
         except CrawlNotFound:

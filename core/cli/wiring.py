@@ -1528,9 +1528,14 @@ def _crawl_discovery_enabled(
 def _robots_gate(http_crawler: CrawlerPort, *, user_agent: str | None) -> RobotsGate:
     """``RobotsGate`` поверх отдельного HTTP-краулера (фетч ``robots.txt``) — N1.
 
-    Фетч ``robots.txt`` — ленивый (при первом ``allowed(host)``) и происходит **внутри**
+    Фетч ``robots.txt`` — ленивый (при первом ``allowed(url)``) и происходит **внутри**
     ``fetch`` страницы, который corpus уже пейсит единым владельцем (:class:`RateLimiter`,
     P2-3): отдельного пейсера не заводим (иначе было бы два владельца).
+
+    Адрес ленты — ``origin`` (``scheme://host``) страницы, а не всегда ``https://`` (R8):
+    ``https``-страница читает ``https://host/robots.txt``, ``http``-страница —
+    ``http://host/robots.txt``; http-only origin на https-ленту не отвечает и выпал бы
+    из корпуса целиком как ``unavailable``.
 
     **Три исхода чтения ленты, а не два** (:class:`RobotsGate`, RFC 9309 §2.3.1.4): прочитано
     (в т.ч. пусто) ⇒ разрешено всё; ``404``/``410`` ⇒ :class:`CrawlNotFound` пропускается
@@ -1545,10 +1550,10 @@ def _robots_gate(http_crawler: CrawlerPort, *, user_agent: str | None) -> Robots
     документов. Политика, которая на пустом месте отнимает три хоста, — не осторожность.
     """
 
-    def fetch(host: str) -> str | None:
+    def fetch(origin: str) -> str | None:
         try:
             page = http_crawler.fetch(
-                f"https://{host}/robots.txt", FetchPlan(FetchMode.HTTP)
+                f"{origin}/robots.txt", FetchPlan(FetchMode.HTTP)
             )
         except CrawlNotFound:
             # ``404``/``410`` — **наблюдение** «ленты нет», а не отсутствие наблюдения.

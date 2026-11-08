@@ -36,7 +36,7 @@ __all__ = ["build_robots_gate", "crawler_factory"]
 def build_robots_gate(user_agent: str | None) -> RobotsGate:
     """``RobotsGate`` поверх отдельного HTTP-краулера (фетч ``robots.txt``) — зеркало N1.
 
-    Фетч ``robots.txt`` ленивый (при первом ``allowed(host)``) и идёт **внутри** ``fetch``
+    Фетч ``robots.txt`` ленивый (при первом ``allowed(url)``) и идёт **внутри** ``fetch``
     страницы, который планировщик уже пейсит (:class:`~core.util.rate_limit.RateLimiter`):
     отдельного пейсера не заводим. **Три исхода чтения ленты** (:class:`RobotsGate`):
     прочитано — разрешено всё; ``404``/``410`` (:class:`CrawlNotFound` пропускается наружу) —
@@ -46,14 +46,17 @@ def build_robots_gate(user_agent: str | None) -> RobotsGate:
     ``robots_unavailable``. ``user_agent`` — операционная настройка с ядра
     (``deploy.yaml:crawl.user_agent``); ``None``/пустое ⇒ ``"*"``.
 
+    Адрес ленты — ``origin`` (``scheme://host``) страницы, а не всегда ``https://`` (R8):
+    http-only origin не ответит на https-ленту и выпал бы из корпуса целиком.
+
     Module-level и picklable by reference (как :func:`crawler_factory`): воркер-процесс
     строит политику **сам** (``RobotsGate`` держит замыкание-фетчер и не picklable).
     """
     user_agent = (user_agent or "").strip() or "*"
 
-    def fetch(host: str) -> str | None:
+    def fetch(origin: str) -> str | None:
         try:
-            page = HttpCrawler().fetch(f"https://{host}/robots.txt", FetchPlan(FetchMode.HTTP))
+            page = HttpCrawler().fetch(f"{origin}/robots.txt", FetchPlan(FetchMode.HTTP))
         except CrawlNotFound:
             # ``404``/``410`` — ответ origin «ленты нет»; гейт выведет ``not_found``.
             # Глотать здесь значило бы запретить origin, про который сказано обратное.
