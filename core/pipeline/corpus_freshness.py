@@ -429,27 +429,29 @@ def build_corpus_freshness(
 
     for product_id in sorted(products):
         own = by_product.get(product_id, [])
-        dated = [row for row in own if row.instant is not None]
+        # Дата и артефакт держатся парой: ``None`` отфильтрован один раз при сборке,
+        # поэтому ниже ``instant`` уже ``datetime`` без повторных проверок.
+        dated: list[tuple[_dt.datetime, _Artifact]] = [
+            (row.instant, row) for row in own if row.instant is not None
+        ]
 
         product_as_of: dict[str, str] | None = None
         if dated:
             pairs: list[tuple[_dt.datetime, str]] = [
-                (row.instant, str(row.observed_at))
-                for row in dated
-                if row.instant is not None
+                (instant, str(row.observed_at)) for instant, row in dated
             ]
             earliest = min(pairs, key=lambda pair: pair[0])
             latest = max(pairs, key=lambda pair: pair[0])
             product_as_of = {"from": earliest[1], "to": latest[1]}
-        dated_instants = [row.instant for row in dated if row.instant is not None]
+        dated_instants = [instant for instant, _ in dated]
         product_reference = max(dated_instants) if dated_instants else None
 
         lags = (
             []
             if reference is None
             else [
-                (reference - row.instant).total_seconds() / 86400.0  # type: ignore[operator]
-                for row in dated
+                (reference - instant).total_seconds() / 86400.0
+                for instant, _ in dated
             ]
         )
 
@@ -492,10 +494,10 @@ def build_corpus_freshness(
         root_dates: dict[str, list[tuple[_dt.datetime, str]]] = {
             root: [] for root in roots_by_product.get(product_id, set())
         }
-        for row in dated:
+        for instant, row in dated:
             if row.root_url:
                 root_dates.setdefault(row.root_url, []).append(
-                    (row.instant, str(row.observed_at))  # type: ignore[arg-type]
+                    (instant, str(row.observed_at))
                 )
         stale_roots: list[dict[str, Any]] = []
         roots_without = 0

@@ -497,6 +497,6 @@ class GlmSearchAdapter:
                 "httpx не установлен: реальные вызовы поиска недоступны. "
                 "Установите extra 'crawl' (05) или внедрите http_post/http_get."
             )
-        import httpx  # type: ignore[import-not-found]
+        import httpx
 
         return httpx

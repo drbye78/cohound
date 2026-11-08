@@ -87,7 +87,7 @@ def numpy_available() -> bool:
 def _import_numpy() -> Any:
     """Ленивый импорт ``numpy``; понятная ошибка, если extra ``retrieval`` не установлен."""
     try:
-        import numpy as np  # type: ignore[import-not-found]
+        import numpy as np
     except ImportError as exc:  # pragma: no cover - зависит от окружения
         raise RuntimeError(
             "NpyIndexBuilder: требуется numpy (установите extra 'retrieval')"

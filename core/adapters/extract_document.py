@@ -345,7 +345,28 @@ class _DoclingConverter(Protocol):
     def convert(self, path: str) -> _DoclingResult: ...
 
 
-def _document_text(document: object) -> str:
+class _DoclingDocument(Protocol):
+    """Поверхность ``DoclingDocument``, которую берёт адаптер: экспорт в markdown.
+
+    Объявлена ровно одна операция: ``export_to_markdown`` с аргументами-политиками
+    (``escape_underscores``, ``page_no``). Полная подпись docling здесь не повторяется —
+    она принадлежит опциональной библиотеке и менялась между версиями; ``**kwargs``
+    фиксирует вызов, а не чужой контракт, и адаптер передаёт только те два аргумента,
+    которые объявлены его собственными политиками.
+
+    ``getattr``-поля (``pages``/``groups``) здесь не объявлены намеренно: они читаются
+    через ``getattr`` в :func:`_sheet_sections`, потому что у разных версий docling их
+    может не быть вовсе.
+    """
+
+    #: Только те два аргумента, которыми адаптер управляет через свои политики
+    #: (:data:`DOCLING_MARKDOWN_POLICY` и постраничный экспорт листов книги).
+    def export_to_markdown(
+        self, *, escape_underscores: bool = True, page_no: int | None = None
+    ) -> str: ...
+
+
+def _document_text(document: _DoclingDocument) -> str:
     """Текст документа: markdown **через объявленные политики** — экспорт и очистку.
 
     **Экспорт.** Экранирование подчёркиваний снято (``escape_underscores=False``): иначе
@@ -379,7 +400,7 @@ def _document_text(document: object) -> str:
     сопоставить не удалось, имена остаются видимой записью ``> sheet: <имя>`` в тексте
     и предупреждением в журнале — догадка вместо факта запрещена (A3).
     """
-    markdown = document.export_to_markdown(escape_underscores=False)  # type: ignore[attr-defined]
+    markdown = document.export_to_markdown(escape_underscores=False)
     sections = _sheet_sections(document)
     if sections is not None:
         layered = _sheet_markdown(document, sections, markdown)
@@ -433,7 +454,7 @@ def _sheet_sections(document: object) -> list[tuple[int, str]] | None:
 
 
 def _sheet_markdown(
-    document: object, sections: list[tuple[int, str]], whole: str
+    document: _DoclingDocument, sections: list[tuple[int, str]], whole: str
 ) -> str | None:
     """Markdown книги с заголовком ``## <лист>`` на каждый лист; ``None`` — не сошлось.
 
@@ -447,7 +468,7 @@ def _sheet_markdown(
     try:
         bodies = [
             str(
-                document.export_to_markdown(  # type: ignore[attr-defined]
+                document.export_to_markdown(
                     escape_underscores=False, page_no=page_no
                 )
             )
@@ -490,35 +511,35 @@ def _resolve_docling() -> bool:
         return _DOCLING_AVAILABLE
 
     try:  # тяжёлая необязательная зависимость: torch/transformers внутри
-        import docling  # noqa: F401  # type: ignore[import-not-found]
-        from docling.datamodel.base_models import (  # type: ignore[import-not-found]
+        import docling  # noqa: F401
+        from docling.datamodel.base_models import (
             InputFormat as _InputFormat,
         )
-        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+        from docling.datamodel.pipeline_options import (
             AcceleratorOptions as _AcceleratorOptions,
         )
-        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+        from docling.datamodel.pipeline_options import (
             NativePdfPipelineOptions as _NativePdfPipelineOptions,
         )
-        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+        from docling.datamodel.pipeline_options import (
             OcrAutoOptions as _OcrAutoOptions,
         )
-        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+        from docling.datamodel.pipeline_options import (
             PdfPipelineOptions as _PdfPipelineOptions,
         )
-        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+        from docling.datamodel.pipeline_options import (
             TableFormerMode as _TableFormerMode,
         )
-        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+        from docling.datamodel.pipeline_options import (
             TableStructureOptions as _TableStructureOptions,
         )
-        from docling.document_converter import (  # type: ignore[import-not-found]
+        from docling.document_converter import (
             DocumentConverter as _DocumentConverter,
         )
-        from docling.document_converter import (  # type: ignore[import-not-found]
+        from docling.document_converter import (
             NativePdfFormatOption as _NativePdfFormatOption,
         )
-        from docling.document_converter import (  # type: ignore[import-not-found]
+        from docling.document_converter import (
             PdfFormatOption as _PdfFormatOption,
         )
     except ImportError:  # pragma: no cover - зависит от окружения
@@ -608,7 +629,7 @@ def _probe_ocr_engine(pdf_options: object) -> object | None:
     :class:`_OcrProbeUnsupported` — это деградация проверки, не отказ извлечения.
     """
     try:
-        from docling.models.stages.ocr.auto_ocr_model import (  # type: ignore[import-not-found]
+        from docling.models.stages.ocr.auto_ocr_model import (
             OcrAutoModel,
         )
     except ImportError as exc:  # pragma: no cover - зависит от версии docling
@@ -626,7 +647,7 @@ def _probe_ocr_engine(pdf_options: object) -> object | None:
         # этой ветке (пакет — опциональный extra), а нужен из него один атрибут.
         docling_settings: Any = None
         try:
-            from docling.datamodel.settings import (  # type: ignore[import-not-found]
+            from docling.datamodel.settings import (
                 settings as docling_settings,
             )
         except ImportError:  # pragma: no cover - зависит от версии docling

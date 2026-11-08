@@ -379,7 +379,7 @@ class Artifacts:
 def _load_openpyxl() -> Any | None:
     """Ленивая загрузка ``openpyxl``; ``None``, если пакет недоступен (CSV-fallback)."""
     try:
-        import openpyxl  # type: ignore[import-not-found]
+        import openpyxl
     except ImportError:  # pragma: no cover - зависит от окружения
         return None
     return openpyxl

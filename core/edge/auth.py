@@ -394,7 +394,7 @@ class PyJWTVerifier:
     def __call__(self, token: str) -> VerifiedClaims:
         """Проверяет подпись токена; при ``pyjwt`` отсутствии — отказ."""
         try:
-            import jwt  # type: ignore[import-not-found]
+            import jwt
         except ImportError as exc:  # pragma: no cover - зависит от окружения
             raise TokenVerificationError(
                 "pyjwt не установлен: подпись OIDC-токена не может быть проверена "

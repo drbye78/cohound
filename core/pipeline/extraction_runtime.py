@@ -90,7 +90,10 @@ class _ExtractRequest:
     raw_path: str
     url: str
     fetched_at: str
-    fetch_mode: FetchMode
+    #: Ось получения в payload: ``None`` — получения не было (ручная подача артефакта).
+    #: Значение переносится в ``RawPage`` воркера как есть, поэтому сужать его здесь до
+    #: ``FetchMode`` значило бы заставить вызывающего выдумать ``http``.
+    fetch_mode: FetchMode | None
     lang: str | None
     status_code: int | None
     content_type: str | None

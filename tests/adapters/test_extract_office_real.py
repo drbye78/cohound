@@ -223,7 +223,7 @@ def test_xlsx_sheet_names_stand_before_their_own_content(tmp_path: Path) -> None
     assert "max_workers" in doc.text[first:second]
     assert "только с текстом" in doc.text[second:]
 
-    chunks = MarkdownChunker().chunk("doc-1", doc.text)
+    chunks = MarkdownChunker().chunk_text("doc-1", doc.text)
     paths = [chunk.heading_path for chunk in chunks]
     assert "Параметры" in paths
     assert "Параметры > Заметки" not in paths

@@ -23,14 +23,14 @@ from functools import lru_cache
 from core.util.cjk_lexical import cjk_terms, iter_cjk_runs
 
 try:  # необязательная зависимость: при отсутствии — эвристика по алфавиту
-    from langdetect import LangDetectException  # type: ignore[import-not-found]
+    from langdetect import LangDetectException
     from langdetect import detect as _langdetect
 
     _LANGDETECT_AVAILABLE = True
 except ImportError:  # pragma: no cover - зависит от окружения
     _LANGDETECT_AVAILABLE = False
     _langdetect = None
-    LangDetectException = Exception  # type: ignore[assignment,misc]
+    LangDetectException = Exception
 
 
 __all__ = [
@@ -112,7 +112,7 @@ def detect_language(text: str) -> TextLanguage:
     if not _LANGDETECT_AVAILABLE:
         return _detect_by_script(text)
     try:
-        lang = _langdetect(text)  # type: ignore[misc]
+        lang = _langdetect(text)
     except LangDetectException:
         return _detect_by_script(text)
     if lang == "ru":

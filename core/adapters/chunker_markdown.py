@@ -214,7 +214,7 @@ class MarkdownChunker:
 
     # -- public --------------------------------------------------------- #
 
-    def chunk(self, document_id: str, text: str) -> list[Chunk]:
+    def chunk_text(self, document_id: str, text: str) -> list[Chunk]:
         """Режет markdown на структурные куски; ``text`` куска — точный срез (P1).
 
         Инвариант проверяем: ``"".join(c.text for c in chunks)`` равно
@@ -624,21 +624,17 @@ def _heading_title(block: MdBlock) -> str:
 class MarkdownChunkerPort(MarkdownChunker):
     """Обёртка ``MarkdownChunker`` под контракт ``ChunkerPort`` (T7.3).
 
-    Порт (``core/ports/chunker.py``) объявляет ``chunk(doc: ExtractedDoc, document_id)``,
-    тогда как базовый :class:`MarkdownChunker` принимает ``chunk(document_id, text)``
-    и используется selfcheck. Обёртка переопределяет ``chunk`` под порт-сигнатуру и
-    оставляет базовый метод доступным как :meth:`chunk_text` — так адаптер реализует
-    ``ChunkerPort`` структурно, не ломая существующие вызовы.
+    Порт (``core/ports/chunker.py``) объявляет ``chunk(doc: ExtractedDoc, document_id)``;
+    базовый :class:`MarkdownChunker` режет по ``chunk_text(document_id, text)``, и он же
+    используется selfcheck. Две разные подписи носят разные имена, поэтому обёртка ничего
+    не переопределяет: адаптер реализует ``ChunkerPort`` структурно, а базовый вход остаётся
+    доступным как :meth:`chunk_text`.
 
     ``document_id`` — стабильный id документа (например, ``source_id``/``doc_id``);
     ``chunk_id`` детерминирован (``f"{document_id}#{no}"``), что сохраняет привязку
     чанка к сборке и идемпотентность (I19/S5).
     """
 
-    def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:  # type: ignore[override]
+    def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:
         """Порт-путь: ``ExtractedDoc`` + ``document_id`` → структурные чанки."""
         return self.chunk_text(document_id, doc.text)
-
-    def chunk_text(self, document_id: str, text: str) -> list[Chunk]:
-        """Чанкинг по markdown-тексту (сохранённый базовый вход)."""
-        return super().chunk(document_id, text)

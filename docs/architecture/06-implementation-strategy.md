@@ -711,7 +711,7 @@ P5), но строка помечена здесь как неактуальна
   `crawl_sources.py` (см. выше).
 - **Параллельная экстракция (P4, as-built).** Ось `crawl.extract_workers` (app < run < site,
   `CrawlLimits.extract_workers`, манифест-поле `crawl_extract_workers`) —
-  пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:128`), фабрика
+  пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:131`), фабрика
   `new_extract_pool` в `core/pipeline/corpus_ingest.py:5092`, воркер
   от composition root. `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
   воркер через `core/cli/wiring.py`), `split` — потоки поверх `RemoteExtractor`; шов

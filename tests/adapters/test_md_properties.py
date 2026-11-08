@@ -618,7 +618,7 @@ def _chunked(document: str, chunk_size: int, min_chunk_size: int, profile: str) 
     """Нормализованный вход чанкера и куски — ровно один разбор документа."""
     normalized, _ = normalize_text(document)
     chunker = MarkdownChunker(chunk_size=chunk_size, min_chunk_size=min_chunk_size, profile=profile)
-    return normalized, tuple(chunker.chunk("doc", document))
+    return normalized, tuple(chunker.chunk_text("doc", document))
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +860,7 @@ def test_tail_merge_path_is_reachable_and_lossless(monkeypatch) -> None:
 
     for chunk_size in CHUNK_SIZES:
         document = _tail_pair(chunk_size)
-        chunks = MarkdownChunker(chunk_size=chunk_size, min_chunk_size=60).chunk("doc", document)
+        chunks = MarkdownChunker(chunk_size=chunk_size, min_chunk_size=60).chunk_text("doc", document)
         assert "".join(chunk.text for chunk in chunks) == normalize_text(document)[0], (
             f"склейка хвоста потеряла символы при chunk_size={chunk_size}"
         )

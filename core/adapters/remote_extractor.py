@@ -319,10 +319,13 @@ class RemoteExtractor:
         извлечения — из аргумента ``route`` (резолвится в pipeline). ``wait_for`` не
         переносится: ``RawPage`` его не несёт.
         """
-        fetch = FetchMode(page.fetch_mode)
+        fetch = None if page.fetch_mode is None else FetchMode(page.fetch_mode)
         payload = {
             "url": page.url,
-            "fetch": fetch.value,
+            # ``fetch=None`` — ось получения не наблюдалась (ручная подача артефакта):
+            # выдать ``http`` значило бы объявить провенанс, которого не было. Шов
+            # принимает ``null`` (``fetch`` — опциональная enum-ось, 07 §3).
+            "fetch": None if fetch is None else fetch.value,
             "lang": page.lang,
             "extract": route.value,
             "wait_for": None,

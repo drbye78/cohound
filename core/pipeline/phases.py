@@ -1316,9 +1316,9 @@ def build_phases(
             )
         result = build_corpus(
             plan,
-            getattr(ctx.ports, "crawler", None),  # type: ignore[arg-type]
-            getattr(ctx.ports, "extractor", None),  # type: ignore[arg-type]
-            getattr(ctx.ports, "chunker", None),  # type: ignore[arg-type]
+            getattr(ctx.ports, "crawler", None),
+            getattr(ctx.ports, "extractor", None),
+            getattr(ctx.ports, "chunker", None),
             ctx.store,
             urls=urls or {},
             snapshot_date=snapshot_date,

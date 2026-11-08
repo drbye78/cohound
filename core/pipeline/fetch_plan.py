@@ -103,7 +103,9 @@ def _select_best[T](url: str, mapping: Mapping[str, T]) -> T | None:
             tie = best_rank is not None and rank == best_rank and (
                 best_key is not None and key < best_key
             )
-            if best is None or rank > best_rank or tie:  # type: ignore[operator]
+            # ``best`` и ``best_rank`` выставляются одной строкой: ``best_rank is None``
+            # означает «кандидатов ещё не было», поэтому сужение по рангу эквивалентно.
+            if best_rank is None or rank > best_rank or tie:
                 best, best_rank, best_key = value, rank, key
 
     return best

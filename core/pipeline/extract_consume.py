@@ -1502,7 +1502,7 @@ def _start_row(
         return job
     try:
         job.future = executor.submit(
-            scope.extraction_pool.worker,  # type: ignore[union-attr]
+            scope.extraction_pool.worker,
             _row_request(item, scope),
         )
     except Exception as exc:  # noqa: BLE001 — непиклящийся вход/сбой submit
@@ -1523,7 +1523,17 @@ def _page_with_raw_path(page: RawPage, raw_path: Path) -> RawPage:
 
 
 def _new_pool_for(job: _RowJob, scope: ConsumerScope) -> Any:
-    """Фабрика пула ключа ``(уровень, механизм PDF, окно)`` для этого задания."""
+    """Фабрика пула ключа ``(уровень, механизм PDF, окно)`` для этого задания.
+
+    ``scope.extraction_pool`` здесь не ``None`` по построению: вызов идёт только из
+    :func:`_start_row` после проверки ``scope.extraction_pool is not None`` (иначе строка
+    ушла бы inline-путём). Проверка повторена, а не приведена вслепую: пул без носителя
+    означает нарушение того же инварианта, и его надо видеть на месте, а не в ``partial``.
+    """
+    if scope.extraction_pool is None:
+        raise AssertionError(
+            "фабрика пула вызвана без пула экстракции (строка должна идти inline)"
+        )
     window = job.pool_key[2] if job.pool_key is not None else None
     return partial(
         new_extract_pool,
@@ -1705,7 +1715,7 @@ def _await_extraction(
         if remaining <= 0:
             raise TimeoutError()
         try:
-            return job.future.result(timeout=min(remaining, slice_s))  # type: ignore[union-attr]
+            return job.future.result(timeout=min(remaining, slice_s))
         except TimeoutError:
             if job.claimed and lease is not None:
                 lease.touch(job.item)
@@ -1748,6 +1758,11 @@ def _settle_row(
             failure_kind=job.error_kind or FailureKind.PARSER_FAILED,
         )
         return job, doc_id, job.error, False
+    # Инвариант отправки: ``future`` заполняется только вместе с ``pool_key``
+    # (:func:`_start_row`), поэтому при непустом ``future`` ключ не ``None``. Проверка
+    # фиксирует инвариант, а не вход: ``None`` здесь означал бы строку в пуле без ключа.
+    assert job.pool_key is not None  # noqa: S101 — инвариант пары future/pool_key
+    pool_key = job.pool_key
     try:
         _wait_started = time.perf_counter()
         try:
@@ -1773,12 +1788,12 @@ def _settle_row(
             extract_error="extraction timeout",
             failure_kind=FailureKind.EXTRACTION_TIMEOUT,
         )
-        dead = scope.pools.note_timeout(job.pool_key)  # type: ignore[arg-type]
+        dead = scope.pools.note_timeout(pool_key)
         if dead:
             # ``2 × timeout`` без единого завершения: пул мёртв — reap + bounded rebuild.
-            scope.pools.terminate(job.pool_key)  # type: ignore[arg-type]
+            scope.pools.terminate(pool_key)
             recover_extract_pool(
-                job.pool_key,  # type: ignore[arg-type]
+                pool_key,
                 f"{job.item.product_id}/{job.item.url}",
                 pools=scope.pools,
                 errors=scope.errors,
@@ -1795,7 +1810,7 @@ def _settle_row(
             failure_kind=None,
         )
         recover_extract_pool(
-            job.pool_key,  # type: ignore[arg-type]
+            pool_key,
             f"{job.item.product_id}/{job.item.url}",
             pools=scope.pools,
             errors=scope.errors,
@@ -1813,7 +1828,7 @@ def _settle_row(
             failure_kind=None,
         )
         return job, doc_id, error, False
-    scope.pools.note_completion(job.pool_key)  # type: ignore[arg-type]
+    scope.pools.note_completion(pool_key)
     # 09 §6.3: пул уже извлёк документ (экстракция не отменяется — она оплачена), но при
     # ``304`` нарезка переиспользуется: чанкер не зовётся.
     doc_id = _finish_extracted(

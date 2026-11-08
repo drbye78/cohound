@@ -324,7 +324,7 @@ def test_chunker_slices_evil_input_verbatim(src: str) -> None:
     """Продуктовая гарантия P1 на «злой» строке: чанки — дословные срезы, ничего не теряется."""
     text = src + "\n"
     with _deadline():
-        chunks = MarkdownChunker().chunk("doc", text)
+        chunks = MarkdownChunker().chunk_text("doc", text)
     assert chunks, "документ дал ноль чанков"
     for chunk in chunks:
         assert text[chunk.char_start : chunk.char_end] == chunk.text

@@ -126,7 +126,11 @@ class RawPage:
     url: str
     content: bytes
     fetched_at: str
-    fetch_mode: FetchMode = FetchMode.HTTP
+    #: Ось получения — **наблюдение**, а не дефолт: ``None`` означает «получения не было»
+    #: (ручная подача артефакта оператором: байты предъявил человек, сервер не отвечал).
+    #: Подставить ``http`` здесь значило бы записать ложный провенанс в ``corpus_docs``,
+    #: поэтому ``None`` — законное значение поля, а не «поле осталось незаполненным».
+    fetch_mode: FetchMode | None = FetchMode.HTTP
     lang: str | None = None
     status_code: int | None = None
     content_type: str | None = None

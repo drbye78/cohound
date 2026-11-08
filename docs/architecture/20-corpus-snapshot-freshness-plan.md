@@ -69,7 +69,7 @@
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
    `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:889-906`).
 3. Ручные артефакты (`hound package state adopt`: `plan_adoption` — `core/pipeline/state_adopt.py:706`,
-   `apply_adoption` — `core/pipeline/state_adopt.py:1481`, запись снятия —
+   `apply_adoption` — `core/pipeline/state_adopt.py:1487`, запись снятия —
    `core/pipeline/state_adopt.py:1626`) создают снятие с
    `observed_how=adopted`, `complete=False` и `actor`. **`complete=False` — не осторожность, а
    факт**: предоставленный артефакт не является обходом и не может удостоверить исчерпание.

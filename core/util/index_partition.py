@@ -139,7 +139,7 @@ def recompute_vector_digest(partition_dir: str | Path) -> str | None:
         return None
     chunk_ids, content_hashes = rows
     try:
-        import numpy as np  # type: ignore[import-not-found]
+        import numpy as np
     except ImportError:  # pragma: no cover - зависит от окружения
         return None
     try:

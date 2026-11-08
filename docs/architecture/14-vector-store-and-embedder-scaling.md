@@ -280,7 +280,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
   ✅ форма на месте (`core/config/deploy.py:677`, `LLMSlotConfig`), ⬜ переиспользована не
-  была: секция `embed` в `DeployConfig` есть (`core/config/deploy.py:773`), но несёт только
+  была: секция `embed` в `DeployConfig` есть (`core/config/deploy.py:781`), но несёт только
   `device`/`precision` (`EmbedConfig`, `:645`); `backend`/`base_url`/`model_version`
   отвергаются `extra="forbid"`.
 
@@ -288,7 +288,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 
 ⬜ не сделано (сверено 2026-11-07) — оформлена только спецификация в этом документе.
 Уточнение против записи 28.10: поле `embed` в `DeployConfig` **появилось**
-(`core/config/deploy.py:773`) и объявляет **две** оси — `device` и `precision` (`EmbedConfig`,
+(`core/config/deploy.py:781`) и объявляет **две** оси — `device` и `precision` (`EmbedConfig`,
 `core/config/deploy.py:645`; обе входят в контракт, `EmbedDevice`/`EmbedPrecision` —
 `core/domain/enums.py:561` и `:585`);
 `backend`/`base_url`/`model_version` по-прежнему отвергаются (`extra="forbid"`), а
@@ -344,7 +344,7 @@ embed:
    прогона и не должна происходить оттого, что «на хосте появился torch».
 
 **Статус правил 1–6 (сверено 2026-11-07):** ❔ не проверено — проверить нечем: секция `embed`
-существует (`core/config/deploy.py:773`), но несёт только `device`/`precision`, а правила 1–3
+существует (`core/config/deploy.py:781`), но несёт только `device`/`precision`, а правила 1–3
 и 5 адресуют `backend`/`base_url`/`model_version`, которых в схеме нет. Правило 4
 (`COHOUND_EMBED_API_KEY`) не объявлено ни в `.env.example`, ни в `03`. Правило 6 (дефолт
 `local`) держится **побочно** — дефолт и есть единственная реализация. Действует уже сейчас
@@ -587,7 +587,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 
 5. ◐ частично — `deploy.embed` + `RemoteEmbedder` за существующим портом, с пином
    `model_version` в `embed_model_id` (оговорка 1). Спецификация — §5.0. **Сделано:** секция
-   `embed` существует (`core/config/deploy.py:773`) и объявляет две оси — `device`
+   `embed` существует (`core/config/deploy.py:781`) и объявляет две оси — `device`
    (`EmbedConfig`, `:645`) и `precision` (`:674`). **Не сделано:** `backend`/`base_url`/
    `model_version` (отвергаются `extra="forbid"`), `RemoteEmbedder` не существует. Это
    единственный пункт §6, который требует **решения о появлении инстанса**, а не работы по коду.

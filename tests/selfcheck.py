@@ -555,7 +555,7 @@ def _chunker() -> None:
         "## H2\nтело второго раздела документа\n\n"
         "### H3\nтело третьего раздела документа\n"
     )
-    chunks = MarkdownChunker(chunk_size=100).chunk("doc1", md)
+    chunks = MarkdownChunker(chunk_size=100).chunk_text("doc1", md)
     _assert(chunks[0].heading_path == "H1")
     _assert(chunks[1].heading_path == "H1 > H2")
     _assert(chunks[2].heading_path == "H1 > H2 > H3")
@@ -564,7 +564,7 @@ def _chunker() -> None:
     _assert(all(len(c.content_hash) == 16 for c in chunks))
     # P1: текст не выбрасывается — короткая секция остаётся чанком целиком, включая
     # строку заголовка (md-heading-5), а не отбрасывается порогом фрагмента.
-    _assert([c.text for c in MarkdownChunker().chunk("doc2", "# H1\n|")] == ["# H1\n|"])
+    _assert([c.text for c in MarkdownChunker().chunk_text("doc2", "# H1\n|")] == ["# H1\n|"])
 
 
 def _pdf_extractor() -> None:

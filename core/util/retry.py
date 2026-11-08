@@ -151,7 +151,7 @@ def request_with_retry(
         attempt += 1
         try:
             response = request()
-        except transport_error as exc:  # type: ignore[misc]
+        except transport_error as exc:
             if attempt < max_attempts:
                 sleep(backoff_delay(attempt, None))
                 continue

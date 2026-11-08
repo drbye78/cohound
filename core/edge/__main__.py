@@ -132,9 +132,11 @@ class _EdgeExtractor:
 
     def __init__(self) -> None:
         self._html = HtmlExtractor()
-        self._documents = DoclingDocumentExtractor()
+        #: ``None`` — docling не установлен: документный путь деградирует видимой ошибкой,
+        #: текстовый/EPUB/HTML остаются рабочими (аннотация явная, иначе ``None`` теряется).
+        self._documents: DoclingDocumentExtractor | None = DoclingDocumentExtractor()
         if not self._documents.available:
-            self._documents = None  # type: ignore[assignment]
+            self._documents = None
         self._text = TextExtractor()
         self._epub = EpubExtractor(html=self._html)
         self.version = (

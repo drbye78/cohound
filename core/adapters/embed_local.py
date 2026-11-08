@@ -217,7 +217,7 @@ class LocalEmbedder:
         фактическую сборку (C11).
         """
         if self._model is None:
-            from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
+            from sentence_transformers import SentenceTransformer
 
             self._model = SentenceTransformer(
                 self._repo_id,

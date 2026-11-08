@@ -3693,7 +3693,9 @@ def _build_corpus(
             )
             revalidate_cap = None
             cap_applies = False
-        if cap_applies:
+        # ``cap_applies`` уже означает «потолок объявлен», но сужение через ``bool`` mypy
+        # не переносит: проверка повторяется явно, чтобы не приводить ``None`` вслепую.
+        if cap_applies and revalidate_cap is not None:
             (
                 revalidation_groups,
                 orphan_buckets,
@@ -3711,7 +3713,7 @@ def _build_corpus(
                 all_revalidation_groups,
                 all_orphan_buckets,
                 incremental_items,
-                int(revalidate_cap),  # type: ignore[arg-type]
+                int(revalidate_cap),
             )
         else:
             revalidation_groups = {

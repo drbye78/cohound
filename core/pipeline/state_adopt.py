@@ -944,26 +944,32 @@ def _coverage_from_row(
     blocked = _json_dict(_get(row, "blocked_json", "{}"))
     unreadable = _json_list(_get(row, "unreadable_origins_json", "[]"))
     partial_blocks = _json_dict(_get(row, "partial_blocks_json", "{}"))
-    base = {
-        "product_id": product_id,
-        "complete": bool(_get(row, "complete", 0)),
-        "expected_sources": int(_get(row, "expected_sources", 0) or 0),
-        "observed_sources": int(_get(row, "observed_sources", 0) or 0),
-        "unreadable_origins": unreadable,
-        "partial_blocks": partial_blocks,
-        "truncated": bool(_get(row, "truncated", 0)),
-        "computed_at": str(_get(row, "computed_at", "") or ""),
-        "resolved_manually": int(_get(row, "resolved_manually", 0) or 0),
-        "reason": _as_text(_get(row, "reason")),
-    }
+
+    # Поля перечислены явно, а не распакованы из ``dict[str, Any]``: распаковка теряет
+    # проверку соответствия модели, а именно её и надо сохранить.
+    def _build(blocked_map: dict[str, Any]) -> CorpusCoverage:
+        return CorpusCoverage(
+            product_id=product_id,
+            complete=bool(_get(row, "complete", 0)),
+            expected_sources=int(_get(row, "expected_sources", 0) or 0),
+            observed_sources=int(_get(row, "observed_sources", 0) or 0),
+            unreadable_origins=unreadable,
+            partial_blocks=partial_blocks,
+            truncated=bool(_get(row, "truncated", 0)),
+            computed_at=str(_get(row, "computed_at", "") or ""),
+            resolved_manually=int(_get(row, "resolved_manually", 0) or 0),
+            reason=_as_text(_get(row, "reason")),
+            blocked=blocked_map,
+        )
+
     try:
-        return CorpusCoverage(**base, blocked=blocked)  # type: ignore[arg-type]
+        return _build(blocked)
     except ValueError:
         warnings.append(
             f"coverage_blocked_unparsed:{product_id}: неизвестные error_kind в "
             "corpus_coverage.blocked — дайджест покрытия не совпадёт с прогонным"
         )
-        return CorpusCoverage(**base, blocked={})  # type: ignore[arg-type]
+        return _build({})
 
 
 def _json_dict(raw: Any) -> dict[str, Any]:

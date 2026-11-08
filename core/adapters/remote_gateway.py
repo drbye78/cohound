@@ -107,7 +107,7 @@ class RemoteContentError(RemoteProxyError):
 def _httpx_available() -> bool:
     """Ленивая проверка наличия ``httpx`` (без импорта на уровне модуля)."""
     try:
-        import httpx  # type: ignore[import-not-found]  # noqa: F401 - нужен только факт импорта
+        import httpx  # noqa: F401 - нужен только факт импорта
     except ImportError:  # pragma: no cover - зависит от окружения
         return False
     return True
@@ -245,7 +245,7 @@ class HttpContentGateway:
             raise GatewayTransportError(
                 "httpx не установлен: установите extra 'crawl' или внедрите transport"
             )
-        import httpx  # type: ignore[import-not-found]
+        import httpx
 
         url = f"{self._base_url.rstrip('/')}/v1/{op}"
         headers = {

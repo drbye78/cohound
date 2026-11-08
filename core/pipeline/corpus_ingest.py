@@ -1948,7 +1948,7 @@ def feed_manual_artifact(
         fetched_at=_now_iso(),
         # Получения не было: ``render_mode='http'`` был бы ложной провенанс-записью,
         # поэтому NULL + ``origin='manual'`` (два факта вместо одного неверного).
-        fetch_mode=None,  # type: ignore[arg-type]
+        fetch_mode=None,
         content_type=MEMBER_CONTENT_TYPES.get(document_suffix(url) or ""),
         engine=ORIGIN_MANUAL,
     )
@@ -3214,7 +3214,7 @@ def plan_repair_items(
         try:
             rows = {
                 row.normalized_url: row
-                for row in state.iter_url_state(product_id)  # type: ignore[union-attr]
+                for row in state.iter_url_state(product_id)
             }
         except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
             errors.append(
@@ -4904,10 +4904,19 @@ def apply_revalidation_cap(
     """
     flat_groups = {key: list(urls) for key, urls in groups.items()}
     flat_orphans = {key: list(urls) for key, urls in orphans.items()}
+    if state is None:
+        # Потолок выбирает из **известных** URL, а их список живёт в состоянии: без
+        # носителя выбирать не из чего. Прежний путь падал здесь ``AttributeError`` и
+        # выдавал его за сбой чтения состояния — ложная причина. Ось не применена, и это
+        # видимая запись: все известные URL идут в работу.
+        errors.append(
+            f"{product_id}: revalidate_max_documents: состояния нет (state=None) — "
+            "ось игнорируется (все известные URL)"
+        )
+        return flat_groups, flat_orphans, {}, {}, {}, {}, 0, 0, False
     try:
         rows = {
-            row.normalized_url: row
-            for row in state.iter_url_state(product_id)  # type: ignore[union-attr]
+            row.normalized_url: row for row in state.iter_url_state(product_id)
         }
     except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
         errors.append(
@@ -5001,7 +5010,7 @@ def apply_revalidation_cap(
         if row is None or row.reuse_kind == ReuseKind.STALE.value:
             continue
         try:
-            state.upsert_url_state(  # type: ignore[union-attr]
+            state.upsert_url_state(
                 replace(row, reuse_kind=ReuseKind.STALE.value)
             )
         except Exception as exc:  # noqa: BLE001 — изоляция state-записи
@@ -5094,7 +5103,7 @@ def resolve_target(
 
 def new_extract_pool(
     *,
-    extraction_pool: ExtractionPool | None,
+    extraction_pool: ExtractionPool,
     extract_window: int | None,
     level: DocumentLevel,
     pdf_pipeline: PdfPipeline,
@@ -5105,19 +5114,20 @@ def new_extract_pool(
     Поднята в область корня (F4a плана ``17``): пул нужен **двум**
     потребителям — страницам и членам контейнеров (B3/P4). ``pools.executor``
     кэширует исполнителя по ключу, поэтому тело исполняется один раз.
+
+    ``extraction_pool`` обязателен: фабрика строит пул **через** него, и «пула нет»
+    означает inline-путь, до этой функции не доходящий. Опциональный параметр обещал бы
+    ветку, которой нет и не должно быть (inline исполняется выше, в потребителе).
     """
-    if (
-        recycle_tasks is not None
-        and extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
-    ):
+    if recycle_tasks is not None and extraction_pool.supports_worker_recycling:
         # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
         # (initializer `_extract_worker_init` строит экстрактор заново).
-        return extraction_pool.pool_factory(  # type: ignore[union-attr]
+        return extraction_pool.pool_factory(
             extract_window, level, pdf_pipeline=pdf_pipeline,
             max_tasks_per_child=recycle_tasks,
         )
     # Счётчик рециклинга не задан — вызов без него (остальное то же).
-    return extraction_pool.pool_factory(  # type: ignore[union-attr]
+    return extraction_pool.pool_factory(
         extract_window, level, pdf_pipeline=pdf_pipeline
     )
 

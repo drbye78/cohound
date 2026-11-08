@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import re
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 __all__ = [
     "finalize_extracted_text",
@@ -56,13 +56,19 @@ __all__ = [
 # nh3 — основной путь (опциональная зависимость)
 # ---------------------------------------------------------------------------
 
-try:  # pragma: no cover - зависит от окружения
-    import nh3  # type: ignore[import-not-found]
+# ``mypy`` не выражает «модуль либо ``None``» для ``import``: объявление под
+# ``TYPE_CHECKING`` даёт типизированный модуль, а отсутствие на рантайме видно по
+# ``_NH3_AVAILABLE`` и проверке ``nh3 is not None`` в месте использования.
+_NH3_AVAILABLE = False
+if TYPE_CHECKING:  # pragma: no cover - статическая ветка
+    import nh3
+else:
+    try:  # pragma: no cover - зависит от окружения
+        import nh3
 
-    _NH3_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    nh3 = None  # type: ignore[assignment]
-    _NH3_AVAILABLE = False
+        _NH3_AVAILABLE = True
+    except ImportError:  # pragma: no cover
+        nh3 = None
 
 # Оболочка документа — НЕ активный контент, но обязательна для экстракции.
 # `nh3.clean` сериализует body-фрагмент, поэтому literal `<html>`/`<body>` он всё равно
@@ -197,8 +203,8 @@ try:  # pragma: no cover - зависит от окружения (приход�
     from lxml import etree as _lxml_etree
     from lxml import html as _lxml_html
 except ImportError:  # pragma: no cover
-    _lxml_etree = None  # type: ignore[assignment]
-    _lxml_html = None  # type: ignore[assignment]
+    _lxml_etree = None
+    _lxml_html = None
 
 # Активный контент: удаляется **вместе с содержимым** — это не проза-evidence,
 # а исполняемый код либо встроенный документ.

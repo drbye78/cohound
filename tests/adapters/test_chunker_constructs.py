@@ -519,7 +519,7 @@ CONTAINER_PARAMS = pytest.mark.parametrize(
 
 
 def _chunks(form: Form, budget: int = CHUNK_SIZE):
-    return MarkdownChunker(chunk_size=budget, profile=form.profile).chunk("doc", form.document)
+    return MarkdownChunker(chunk_size=budget, profile=form.profile).chunk_text("doc", form.document)
 
 
 def _continuation_chunks(form: Form):

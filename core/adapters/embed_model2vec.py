@@ -176,7 +176,7 @@ class LiteEmbedder:
             self._resolved_dir = self._model_path if self._model_path.is_dir() else None
             return self._resolved_dir
         try:
-            from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+            from huggingface_hub import snapshot_download
 
             self._resolved_dir = Path(
                 snapshot_download(
@@ -199,14 +199,14 @@ class LiteEmbedder:
                     f"({self.model_id!r}): оффлайн-инференс невозможен. "
                     "Задайте model_path/revision или передайте embed_fn."
                 )
-            from model2vec import StaticModel  # type: ignore[import-not-found]
+            from model2vec import StaticModel
 
             self._model = StaticModel.from_pretrained(str(local_dir))
 
         model = self._model
 
         def _encode(batch: list[str]) -> list[list[float]]:
-            import numpy as np  # type: ignore[import-not-found]
+            import numpy as np
 
             matrix = np.asarray(
                 model.encode(

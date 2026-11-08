@@ -263,7 +263,7 @@ class ExtractQueue:
         if self.durable:
             return bool(
                 self._store.set_extract_state(
-                    self._session_id,  # type: ignore[arg-type]
+                    self._session_id,
                     product_id,
                     url,
                     state,
@@ -442,7 +442,7 @@ class ExtractQueue:
         if self.durable:
             return list(
                 self._store.reclaim_stale_extract_claims(
-                    self._session_id,  # type: ignore[arg-type]
+                    self._session_id,
                     older_than=older_than,
                     now=now_iso,
                     max_attempts=max_attempts,

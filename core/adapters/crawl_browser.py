@@ -391,7 +391,7 @@ class _PlaywrightBackend:
                 "Установите extra 'crawl' (05) или внедрите backend."
             )
         try:
-            from playwright.sync_api import (  # type: ignore[import-not-found]
+            from playwright.sync_api import (
                 sync_playwright,
             )
 
@@ -958,6 +958,6 @@ class BrowserCrawler:
                 "httpx не установлен: hybrid-HTTP недоступен. Установите extra 'crawl' "
                 "(05) или внедрите http_get."
             )
-        import httpx  # type: ignore[import-not-found]
+        import httpx
 
         return httpx

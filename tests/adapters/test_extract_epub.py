@@ -241,7 +241,7 @@ def test_inner_headings_nest_under_the_chapter_heading(tmp_path: Path) -> None:
     doc = EpubExtractor(html=_markdown_html(markdown)).extract(_page(epub.read_bytes()))
 
     assert doc.error is None
-    chunks = MarkdownChunker(chunk_size=500).chunk("doc", doc.text)
+    chunks = MarkdownChunker(chunk_size=500).chunk_text("doc", doc.text)
     paths = [chunk.heading_path for chunk in chunks]
     assert "Глава 1 > Настоящий заголовок главы" in paths
     assert "Глава 1 > Настоящий заголовок главы > Подраздел" in paths

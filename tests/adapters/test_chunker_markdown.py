@@ -48,7 +48,7 @@ def _chunk(md: str, **kwargs: int):
     (``test_min_chunk_size_*``), а не «попутно».
     """
     kwargs.setdefault("min_chunk_size", 1)
-    return MarkdownChunker(**kwargs).chunk("doc", md)
+    return MarkdownChunker(**kwargs).chunk_text("doc", md)
 
 
 def _chunk_with(chunks, needle: str):
@@ -273,7 +273,7 @@ def test_pandoc_div_with_list_is_visible_and_exact() -> None:
     document = f"::: {{.note}}\n{body}\n:::\n"
     chunker = MarkdownChunker(chunk_size=200, profile="pandoc")
 
-    chunks = chunker.chunk("doc", document)
+    chunks = chunker.chunk_text("doc", document)
 
     assert chunks
     assert "".join(chunk.text for chunk in chunks) == document
@@ -343,13 +343,13 @@ def test_chunks_join_into_the_whole_document() -> None:
         "> цитата\n\n---\n\n<ta"
         "ble><tr><td>x</td></tr></table>\n\n[ref]: http://example.com\n"
     )
-    _assert_exact_join(md, MarkdownChunker(chunk_size=80).chunk("doc", md))
+    _assert_exact_join(md, MarkdownChunker(chunk_size=80).chunk_text("doc", md))
 
 
 def test_adjacent_chunks_do_not_overlap() -> None:
     """Перекрытия нет: соседние чанки не делят текст (P1 против ``chunk_overlap``)."""
     text = _words_text()
-    chunks = MarkdownChunker(chunk_size=120).chunk("doc", text)
+    chunks = MarkdownChunker(chunk_size=120).chunk_text("doc", text)
 
     assert len(chunks) > 10
     for previous, current in itertools.pairwise(chunks):
@@ -360,7 +360,7 @@ def test_split_does_not_break_words() -> None:
     """Куски режутся по пробелам: ни один кусок не содержит обрывка слова (C4)."""
     text = _words_text()
     words = set(text.split())
-    chunks = MarkdownChunker(chunk_size=120).chunk("doc", text)
+    chunks = MarkdownChunker(chunk_size=120).chunk_text("doc", text)
 
     assert len(chunks) > 10
     for chunk in chunks:
@@ -372,7 +372,7 @@ def test_cut_prefers_line_boundary() -> None:
     """Строки без пробелов: границы кусков — на переводах строк."""
     lines = [f"строка{index:03d}" for index in range(200)]
     text = "\n".join(lines)
-    chunks = MarkdownChunker(chunk_size=50).chunk("doc", text)
+    chunks = MarkdownChunker(chunk_size=50).chunk_text("doc", text)
 
     assert len(chunks) > 10
     for chunk in chunks:
@@ -382,8 +382,8 @@ def test_cut_prefers_line_boundary() -> None:
 
 def test_split_is_deterministic_for_long_text() -> None:
     """Границы кусков не вносят недетерминизма (R7)."""
-    first = MarkdownChunker(chunk_size=120).chunk("doc", _words_text())
-    second = MarkdownChunker(chunk_size=120).chunk("doc", _words_text())
+    first = MarkdownChunker(chunk_size=120).chunk_text("doc", _words_text())
+    second = MarkdownChunker(chunk_size=120).chunk_text("doc", _words_text())
     assert [(c.chunk_id, c.content_hash) for c in first] == [
         (c.chunk_id, c.content_hash) for c in second
     ]
@@ -393,7 +393,7 @@ def test_cjk_paragraph_is_cut_at_sentence_end_not_mid_phrase() -> None:
     """Иероглифы без пробелов: рез — по ``。``, а не по номеру символа (китайский)."""
     sentence = "数据库配置管理工具提供了备份功能。"
     text = "# 配置\n\n" + sentence * 40
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", text)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", text)
 
     assert len(chunks) > 3
     for chunk in chunks[1:]:
@@ -411,7 +411,7 @@ def test_table_continuation_carries_header_and_alignment() -> None:
     """Чанк, начавшийся внутри таблицы, несёт шапку с разделителем (P9)."""
     rows = "".join(f"| {index} | значение-{index} плюс текст |\n" for index in range(60))
     md = "# Таблица\n\n| id | смысл |\n|:--|--:|\n" + rows
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert len(chunks) > 3
     for chunk in chunks[1:]:
@@ -424,7 +424,7 @@ def test_table_continuation_carries_header_and_alignment() -> None:
 def test_fence_continuation_carries_info_string() -> None:
     """Продолжение fence несёт маркер и info string (P10)."""
     md = "# Код\n\n```sql\n" + "SELECT 1;\n" * 60 + "```\n"
-    chunks = MarkdownChunker(chunk_size=100).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=100).chunk_text("doc", md)
 
     assert len(chunks) > 3
     for chunk in chunks[1:]:
@@ -434,7 +434,7 @@ def test_fence_continuation_carries_info_string() -> None:
 def test_list_item_is_not_split_when_it_fits() -> None:
     """Элемент списка — минимальная единица: рез только между элементами (P2)."""
     items = "".join(f"- пункт {index} с текстом и хвостом\n" for index in range(40))
-    chunks = MarkdownChunker(chunk_size=150).chunk("doc", "# Список\n\n" + items)
+    chunks = MarkdownChunker(chunk_size=150).chunk_text("doc", "# Список\n\n" + items)
 
     assert len(chunks) > 2
     for chunk in chunks:
@@ -445,7 +445,7 @@ def test_list_item_is_not_split_when_it_fits() -> None:
 def test_heading_is_not_orphaned_from_its_first_paragraph() -> None:
     """Заголовок не отрывается от первой фразы: кусок короче половины бюджета — потеря."""
     md = "# Заголовок\n\n" + "слово " * 300
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert chunks[0].text.startswith("# Заголовок\n\nслово")
 
@@ -453,7 +453,7 @@ def test_heading_is_not_orphaned_from_its_first_paragraph() -> None:
 def test_blockquote_continuation_carries_marker() -> None:
     """Продолжение цитаты несёт ``> ``: одиночный абзац не читается как обычный текст."""
     md = "# Цитата\n\n> начало\n>\n" + "> строка текста\n" * 60
-    chunks = MarkdownChunker(chunk_size=150).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=150).chunk_text("doc", md)
 
     assert len(chunks) > 2
     assert all(chunk.context_prefix == "Цитата\n> " for chunk in chunks[1:])
@@ -463,7 +463,7 @@ def test_list_item_continuation_carries_marker() -> None:
     """Продолжение длинного пункта несёт ``- ``: иначе это читается как абзац."""
     items = "".join(f"- пункт {index} " + "слово " * 40 + "\n" for index in range(3))
     md = "# Список\n\n" + items
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert len(chunks) > 4
     continuations = [chunk for chunk in chunks if chunk.text.startswith("слово")]
@@ -482,7 +482,7 @@ def test_ordered_list_continuation_keeps_declared_number() -> None:
     """Нумерованный список с ``start``≠1: продолжение несёт свой номер, а не ``1.``."""
     items = "".join(f"{index + 3}. пункт " + "слово " * 40 + "\n" for index in range(3))
     md = "# Нумерация\n\n" + items
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     contexts = {chunk.context_prefix for chunk in chunks if chunk.text.startswith("слово")}
     assert "Нумерация\n3. " in contexts
@@ -501,7 +501,7 @@ def test_nested_list_continuation_keeps_indent_and_marker() -> None:
         "  - вложенный " + "слово " * 60 + "\n"
         "  - второй " + "слово " * 40 + "\n"
     )
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     contexts = {chunk.context_prefix for chunk in chunks}
     assert "Вложенность\n- " in contexts
@@ -519,7 +519,7 @@ def test_task_list_continuation_keeps_checkbox_without_touching_heading_path() -
         for index in range(3)
     )
     md = "# Задачи\n\n" + items
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert all(chunk.heading_path == "Задачи" for chunk in chunks)
     continuations = [chunk for chunk in chunks if chunk.text.startswith("слово")]
@@ -534,7 +534,7 @@ def test_task_list_continuation_keeps_checkbox_without_touching_heading_path() -
 def test_nested_blockquote_continuation_carries_each_marker() -> None:
     """Вложенная цитата: продолжение несёт всю цепочку ``> > ``."""
     md = "# Цитата\n\n> > вложенная цитата " + "слово " * 80 + "\n"
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert len(chunks) > 2
     for chunk in chunks[1:]:
@@ -547,7 +547,7 @@ def test_table_continuation_keeps_header_separator_and_column_count() -> None:
     """Продолжение таблицы несёт шапку с разделителем и тем же числом колонок (P9)."""
     rows = "".join(f"| {index} | значение-{index} плюс текст |\n" for index in range(60))
     md = "# Таблица\n\n| id | смысл |\n|:--|--:|\n" + rows
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert len(chunks) > 3
     for chunk in chunks[1:]:
@@ -563,7 +563,7 @@ def test_blockquoted_table_continuation_does_not_double_quote_marker() -> None:
     """Шапка таблицы уже несёт ``> `` в сыром виде: контекст не печатает ``> > ``."""
     rows = "".join(f"> | {index} | значение {index} плюс текст |\n" for index in range(30))
     md = "# Таблица\n\n> | a | b |\n> |:--|--:|\n" + rows
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert len(chunks) > 2
     for chunk in chunks[1:]:
@@ -575,7 +575,7 @@ def test_blockquoted_table_continuation_does_not_double_quote_marker() -> None:
 def test_blockquoted_fence_continuation_does_not_double_quote_marker() -> None:
     """Открывающая строка fence уже несёт ``> ``: контекст не печатает ``> > ```sql``."""
     md = "# Код\n\n> ```sql\n> " + "SELECT 1;\n> " * 60 + "```\n"
-    chunks = MarkdownChunker(chunk_size=100).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=100).chunk_text("doc", md)
 
     assert len(chunks) > 3
     for chunk in chunks[1:]:
@@ -595,7 +595,7 @@ def test_line_block_is_cut_by_lines_and_continuation_carries_marker() -> None:
         f"| строка номер {index:02d} с достаточно длинным содержимым" for index in range(12)
     ]
     md = "# Стихи\n\n" + "\n".join(lines) + "\n"
-    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk_text("doc", md)
 
     assert len(chunks) > 2
     _assert_exact_join(md, chunks)
@@ -615,7 +615,7 @@ def test_fancy_list_item_is_a_unit_and_marker_stays_in_context() -> None:
         f"{chr(ord('a') + index)}) пункт {index} " + "слово " * 40 + "\n" for index in range(3)
     )
     md = "# Список\n\n" + items
-    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk_text("doc", md)
 
     assert len(chunks) > 3
     _assert_exact_join(md, chunks)
@@ -637,7 +637,7 @@ def test_example_list_item_is_a_unit_and_label_stays_in_context() -> None:
         f"(@item{index}) пример {index} " + "слово " * 40 + "\n" for index in range(3)
     )
     md = "# Примеры\n\n" + items
-    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk_text("doc", md)
 
     assert len(chunks) > 3
     _assert_exact_join(md, chunks)
@@ -662,7 +662,7 @@ def test_grid_table_is_cut_between_rows_with_pipe_header_in_context() -> None:
         for index in range(25)
     )
     md = "# Таблица\n\n" + header + rows
-    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk_text("doc", md)
 
     assert len(chunks) > 3
     _assert_exact_join(md, chunks)
@@ -686,7 +686,7 @@ def test_table_caption_stays_attached_and_reaches_the_context() -> None:
         for index in range(25)
     )
     md = "# Таблица\n\n" + header + rows + "\nTable: подпись таблицы\n"
-    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=120, profile="pandoc").chunk_text("doc", md)
 
     assert len(chunks) > 3
     _assert_exact_join(md, chunks)
@@ -700,7 +700,7 @@ def test_raw_tex_is_cut_by_lines_and_continuation_carries_marker() -> None:
     """Raw TeX: единица — блок, при переполнении рез по строкам, маркер в контексте."""
     body = "\n".join(f"строка {index} с содержимым" for index in range(20))
     md = "# Раздел\n\n\\begin{verbatim}\n" + body + "\n\\end{verbatim}\n"
-    chunks = MarkdownChunker(chunk_size=100, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=100, profile="pandoc").chunk_text("doc", md)
 
     assert len(chunks) > 3
     _assert_exact_join(md, chunks)
@@ -715,7 +715,7 @@ def test_native_div_continuation_carries_opening_tag() -> None:
     """Нативный div: продолжение внутри контейнера несёт открывающий тег."""
     words = " ".join(f"слово{index}" for index in range(200))
     md = '<div class="x">\n\n' + words + "\n\n</div>\n"
-    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200, profile="pandoc").chunk_text("doc", md)
 
     assert len(chunks) > 2
     _assert_exact_join(md, chunks)
@@ -758,7 +758,7 @@ def test_new_pandoc_blocks_keep_p1_p4_p8_p13_on_a_mixed_document() -> None:
         "paragraph",
     ]
 
-    chunks = MarkdownChunker(chunk_size=80, profile="pandoc").chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=80, profile="pandoc").chunk_text("doc", md)
     assert "".join(chunk.text for chunk in chunks) == document.text
     for chunk in chunks:
         assert document.text[chunk.char_start : chunk.char_end] == chunk.text
@@ -784,7 +784,7 @@ def test_short_tail_is_absorbed_into_previous_chunk() -> None:
     """
     rows = "".join(f"| {index} | значение-{index} |\n" for index in range(30))
     md = "| id | смысл |\n|---|---|\n" + rows
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert all(len(chunk.text.strip()) >= MIN_CHUNK_SIZE for chunk in chunks)
     _assert_exact_join(md, chunks)
@@ -882,7 +882,7 @@ def _assert_spans_are_exact(text: str, chunks) -> None:
 )
 def test_chunk_offsets_are_exact_slices(name: str, md: str) -> None:
     """Куски любой конструкции несут смещения, и срез по ним равен тексту (L1b-2b)."""
-    chunks = MarkdownChunker(chunk_size=120).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=120).chunk_text("doc", md)
 
     assert len(chunks) > 2, f"{name}: конструкция должна разрезаться, иначе тест пуст"
     _assert_spans_are_exact(md, chunks)
@@ -891,10 +891,10 @@ def test_chunk_offsets_are_exact_slices(name: str, md: str) -> None:
 def test_offsets_do_not_change_the_chunk_set() -> None:
     """Смещения — провенанс: текст, ``chunk_id`` и ``content_hash`` от них не зависят."""
     md = "# H1\n\n" + " ".join(f"слово{index}" for index in range(300)) + "\n\n```sql\nSELECT 1;\n```\n"
-    chunks = MarkdownChunker(chunk_size=200).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=200).chunk_text("doc", md)
 
     assert [chunk.text for chunk in chunks] == [
-        chunk.text for chunk in MarkdownChunker(chunk_size=200).chunk("doc", md)
+        chunk.text for chunk in MarkdownChunker(chunk_size=200).chunk_text("doc", md)
     ]
     _assert_exact_join(md, chunks)
     _assert_spans_are_exact(md, chunks)
@@ -903,7 +903,7 @@ def test_offsets_do_not_change_the_chunk_set() -> None:
 def test_single_chunk_document_has_offsets() -> None:
     """Документ из одного куска тоже несёт диапазон — ``None`` здесь не «дефолт»."""
     md = "# H1\n\nкороткий текст раздела\n"
-    chunks = MarkdownChunker().chunk("doc", md)
+    chunks = MarkdownChunker().chunk_text("doc", md)
 
     assert len(chunks) == 1
     assert chunks[0].char_start == 0
@@ -932,7 +932,7 @@ def test_offsets_are_against_normalized_text_not_the_raw_input() -> None:
     assert doc_text != md, "вход обязан нормализоваться, иначе кейс не проверяет смещения"
     assert "\r" not in doc_text and not doc_text.startswith("\ufeff")
 
-    chunks = MarkdownChunker(chunk_size=120).chunk("doc", md)
+    chunks = MarkdownChunker(chunk_size=120).chunk_text("doc", md)
 
     assert len(chunks) > 2
     for chunk in chunks:

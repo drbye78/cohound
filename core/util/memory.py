@@ -83,7 +83,7 @@ def _load_malloc_trim() -> _MallocTrim | None:
         fn.restype = ctypes.c_int
     except Exception:  # noqa: BLE001 — система без glibc: рычага нет, это не ошибка
         return None
-    return fn  # type: ignore[no-any-return]
+    return fn
 
 
 def _malloc_trim() -> _MallocTrim | None:

@@ -419,10 +419,10 @@ def _default_install() -> Any:
     asyncio-реактор (``AsyncioSelectorReactor``) — требование scrapy-playwright (V5).
     Вызывается **в потоке воркера**, чтобы asyncio-event-loop принадлежал этому потоку.
     """
-    from scrapy.utils.reactor import install_reactor  # type: ignore[import-not-found]
+    from scrapy.utils.reactor import install_reactor
 
     install_reactor("twisted.internet.asyncioreactor.AsyncioSelectorReactor")
-    from twisted.internet import reactor  # type: ignore[import-not-found]
+    from twisted.internet import reactor
 
     return reactor
 
@@ -449,7 +449,7 @@ def _request_meta(spec: _CrawlSpec) -> dict[str, Any]:
     """
     meta: dict[str, Any] = {}
     if spec.fetch is FetchMode.BROWSER:
-        from scrapy_playwright.page import (  # type: ignore[import-not-found]
+        from scrapy_playwright.page import (
             PageMethod,
         )
 
@@ -480,10 +480,10 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
     следующий. ``Deferred`` срабатывает при закрытии паука (результат не важен —
     контент собирается в ``spec.collected``).
     """
-    from scrapy import Request, Spider  # type: ignore[import-not-found]
-    from scrapy.crawler import CrawlerRunner  # type: ignore[import-not-found]
+    from scrapy import Request, Spider
+    from scrapy.crawler import CrawlerRunner
 
-    class _SingleRequestSpider(Spider):  # type: ignore[misc, valid-type]
+    class _SingleRequestSpider(Spider):
         name = "cohound-fetch"
 
         async def start(self):  # noqa: ANN201 - сигнатура Scrapy 2.19
@@ -560,7 +560,7 @@ def _is_robots_refusal(failure: Any) -> bool:
     нет, отказать в robots-классификации безопаснее, чем угадывать.
     """
     try:
-        from scrapy.exceptions import IgnoreRequest  # type: ignore[import-not-found]
+        from scrapy.exceptions import IgnoreRequest
     except ImportError:
         return False
     value = _failure_value(failure)
@@ -579,7 +579,7 @@ OVERSIZE_BY_MESSAGE = "подстрока сообщения"
 def _download_cancelled_error() -> type[BaseException] | None:
     """Тип «загрузчик отменил загрузку» (``scrapy.exceptions.DownloadCancelledError``)."""
     try:
-        from scrapy.exceptions import (  # type: ignore[import-not-found]
+        from scrapy.exceptions import (
             DownloadCancelledError,
         )
     except ImportError:  # модуль импортируется и без Scrapy (см. шапку)
@@ -715,12 +715,12 @@ def _shared_robots_middleware_class() -> type:
     ``RedirectMiddleware`` (с похоповой SSRF-проверкой), итоговый ответ разбирается тем же
     ``ROBOTSTXT_PARSER``; ``404`` — «ленты нет» = разрешено, недоступность — нет.
     """
-    from scrapy.downloadermiddlewares.robotstxt import (  # type: ignore[import-not-found]
+    from scrapy.downloadermiddlewares.robotstxt import (
         RobotsTxtMiddleware,
     )
-    from scrapy.utils.httpobj import urlparse_cached  # type: ignore[import-not-found]
+    from scrapy.utils.httpobj import urlparse_cached
 
-    class _SharedRobotsTxtMiddleware(RobotsTxtMiddleware):  # type: ignore[misc]
+    class _SharedRobotsTxtMiddleware(RobotsTxtMiddleware):
         """``RobotsTxtMiddleware`` + общий кеш лент по ``(origin, user-agent)``."""
 
         def _cache_key(self, request: Any) -> tuple[str, str]:
@@ -775,7 +775,7 @@ def _http_audit_middleware_class() -> type:
         @classmethod
         def from_crawler(cls, crawler: Any) -> _HttpAuditMiddleware:
             """Берёт счётчик из настроек краулера; без него middleware не нужен."""
-            from scrapy.exceptions import NotConfigured  # type: ignore[import-not-found]
+            from scrapy.exceptions import NotConfigured
 
             audit = crawler.settings.get(_HTTP_AUDIT_SETTING)
             if audit is None:
@@ -810,11 +810,11 @@ def _redirect_guard_classes() -> tuple[type, type]:
     превышении стоковый код поднимает ``IgnoreRequest("max redirections reached")`` и
     классификация остаётся общей (``source_unavailable``) — это не SSRF-отказ.
     """
-    from scrapy.downloadermiddlewares.redirect import (  # type: ignore[import-not-found]
+    from scrapy.downloadermiddlewares.redirect import (
         MetaRefreshMiddleware,
         RedirectMiddleware,
     )
-    from scrapy.exceptions import IgnoreRequest  # type: ignore[import-not-found]
+    from scrapy.exceptions import IgnoreRequest
 
     def _guard(redirected: Any) -> None:
         """Проверяет цель хопа; при отказе — ``IgnoreRequest`` (запрос не выпущен).
@@ -834,7 +834,7 @@ def _redirect_guard_classes() -> tuple[type, type]:
     # ``super()._redirect`` здесь недоступен: базовые классы приходят из ленивого
     # импорта, и статический анализ не видит их ``_redirect``. Вызов базы по имени
     # явный и проверяемый (`mypy`-gate: «_redirect undefined in superclass»).
-    class _GuardedRedirectMiddleware(RedirectMiddleware):  # type: ignore[misc]
+    class _GuardedRedirectMiddleware(RedirectMiddleware):
         """``RedirectMiddleware`` + SSRF-проверка каждого ``Location`` (R10)."""
 
         def _redirect(self, redirected: Any, request: Any, reason: Any) -> Any:
@@ -842,7 +842,7 @@ def _redirect_guard_classes() -> tuple[type, type]:
             _guard(redirected)
             return RedirectMiddleware._redirect(self, redirected, request, reason)
 
-    class _GuardedMetaRefreshMiddleware(MetaRefreshMiddleware):  # type: ignore[misc]
+    class _GuardedMetaRefreshMiddleware(MetaRefreshMiddleware):
         """``MetaRefreshMiddleware`` + та же проверка (meta-refresh — второй путь ухода)."""
 
         def _redirect(self, redirected: Any, request: Any, reason: Any) -> Any:
@@ -861,7 +861,7 @@ def _is_unsafe_redirect(failure: Any) -> bool:
     класс и для дубликатов, и для offsite, и для ``HttpError``.
     """
     try:
-        from scrapy.exceptions import IgnoreRequest  # type: ignore[import-not-found]
+        from scrapy.exceptions import IgnoreRequest
     except ImportError:
         return False
     value = _failure_value(failure)
@@ -1199,7 +1199,7 @@ class ScrapyCrawler:
         if callable(fetch_attr):
             return cast(RawPage, fetch_attr(url, plan))
         if callable(fetcher):
-            return cast(RawPage, fetcher(url, plan))  # type: ignore[operator]
+            return cast(RawPage, fetcher(url, plan))
         raise CrawlError("внедрённый fetcher не callable и не имеет метода fetch")
 
     def _fetch_with_scrapy(

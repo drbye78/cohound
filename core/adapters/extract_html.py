@@ -28,18 +28,25 @@ import codecs
 import re
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 from core.util.hashing import content_hash
 from core.util.sanitize import finalize_extracted_text, strip_active_html
 
-try:  # необязательная зависимость
-    import trafilatura  # type: ignore[import-not-found]
+_TRAFILATURA_AVAILABLE = False
+# ``mypy`` не выражает «модуль либо ``None``» для ``import``: под ``TYPE_CHECKING``
+# модуль объявлен типизированным, а отсутствие на рантайме видно по
+# ``_TRAFILATURA_AVAILABLE`` и проверке ``trafilatura is None`` в месте использования.
+if TYPE_CHECKING:  # pragma: no cover - статическая ветка
+    import trafilatura
+else:
+    try:  # необязательная зависимость
+        import trafilatura
 
-    _TRAFILATURA_AVAILABLE = True
-except ImportError:  # pragma: no cover - зависит от окружения
-    trafilatura = None  # type: ignore[assignment]
-    _TRAFILATURA_AVAILABLE = False
+        _TRAFILATURA_AVAILABLE = True
+    except ImportError:  # pragma: no cover - зависит от окружения
+        trafilatura = None
 
 # ``extract_fn``: HTML (строка) → markdown/text или ``None``, если извлечение не удалось.
 ExtractFn = Callable[[str], "str | None"]

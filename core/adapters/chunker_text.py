@@ -217,7 +217,7 @@ def _split_spans(
 class TextChunker:
     """Абзацный чанкер plain text (``text-para-4``).
 
-    Сигнатура базовая — ``chunk(document_id, text)`` (как у
+    Сигнатура базовая — ``chunk_text(document_id, text)`` (как у
     :class:`core.adapters.chunker_markdown.MarkdownChunker`); порт-путь с ``ExtractedDoc``
     даёт :class:`TextChunkerPort`. Перекрытия (overlap) нет осознанно: дубли абзацев
     удваивают evidence-шум, а смысловая граница абзаца и так не рвётся.
@@ -245,7 +245,7 @@ class TextChunker:
         self.chunk_size = chunk_size
         self.min_chunk_size = min_chunk_size
 
-    def chunk(self, document_id: str, text: str) -> list[Chunk]:
+    def chunk_text(self, document_id: str, text: str) -> list[Chunk]:
         """Текст → абзацные чанки (``heading_path=""``, точные срезы, детерминизм)."""
         source = _normalize(text)
         if not source.strip():
@@ -461,16 +461,13 @@ def _context_prefix(text: str) -> str:
 class TextChunkerPort(TextChunker):
     """Обёртка ``TextChunker`` под контракт ``ChunkerPort`` (``chunk(doc, document_id)``).
 
-    Зеркалит :class:`core.adapters.chunker_markdown.MarkdownChunkerPort`: базовый вход
-    ``chunk(document_id, text)`` доступен как :meth:`chunk_text`, порт-вход принимает
-    ``ExtractedDoc``. ``document_id`` — стабильный id документа, поэтому ``chunk_id``
-    детерминирован (``f"{document_id}#{no}"``).
+    Зеркалит :class:`core.adapters.chunker_markdown.MarkdownChunkerPort`. Два входа не
+    спорят о подписи: базовый называется :meth:`chunk_text` (``document_id``, ``text``),
+    порт-вход — ``chunk`` (``ExtractedDoc``, ``document_id``), поэтому переопределения
+    с другой сигнатурой здесь нет. ``document_id`` — стабильный id документа, поэтому
+    ``chunk_id`` детерминирован (``f"{document_id}#{no}"``).
     """
 
-    def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:  # type: ignore[override]
+    def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:
         """Порт-путь: ``ExtractedDoc`` + ``document_id`` → абзацные чанки."""
         return self.chunk_text(document_id, doc.text)
-
-    def chunk_text(self, document_id: str, text: str) -> list[Chunk]:
-        """Чанкинг по plain-тексту (сохранённый базовый вход)."""
-        return super().chunk(document_id, text)

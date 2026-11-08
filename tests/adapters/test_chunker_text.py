@@ -82,7 +82,7 @@ def test_version_and_port_contract() -> None:
 
 
 def test_paragraphs_are_kept_whole() -> None:
-    chunks = TextChunker(chunk_size=1500).chunk("doc", _LONG)
+    chunks = TextChunker(chunk_size=1500).chunk_text("doc", _LONG)
 
     # Три абзаца умещаются в один чанк и не дробятся.
     assert len(chunks) == 1
@@ -91,7 +91,7 @@ def test_paragraphs_are_kept_whole() -> None:
 
 
 def test_heading_path_is_always_empty() -> None:
-    chunks = TextChunker(chunk_size=60).chunk("doc", _LONG)
+    chunks = TextChunker(chunk_size=60).chunk_text("doc", _LONG)
 
     assert chunks
     assert all(chunk.heading_path == "" for chunk in chunks)
@@ -100,7 +100,7 @@ def test_heading_path_is_always_empty() -> None:
 def test_blocks_merge_up_to_chunk_size() -> None:
     text = "\n\n".join(f"Абзац номер {index}." for index in range(6))
 
-    chunks = TextChunker(chunk_size=45).chunk("doc", text)
+    chunks = TextChunker(chunk_size=45).chunk_text("doc", text)
 
     assert len(chunks) > 1
     _assert_exact(text, chunks)
@@ -113,7 +113,7 @@ def test_blocks_merge_up_to_chunk_size() -> None:
 
 def test_fitting_block_is_never_split() -> None:
     block = "A" * 40
-    chunks = TextChunker(chunk_size=40).chunk("doc", block)
+    chunks = TextChunker(chunk_size=40).chunk_text("doc", block)
 
     assert [chunk.text for chunk in chunks] == [block]
     _assert_exact(block, chunks)
@@ -126,7 +126,7 @@ def test_oversized_block_falls_back_to_sentences() -> None:
         "Пятое предложение здесь."
     )
 
-    chunks = TextChunker(chunk_size=55).chunk("doc", text)
+    chunks = TextChunker(chunk_size=55).chunk_text("doc", text)
 
     assert len(chunks) > 1
     _assert_exact(text, chunks)
@@ -139,7 +139,7 @@ def test_oversized_block_falls_back_to_sentences() -> None:
 def test_endless_sentence_is_hard_split() -> None:
     text = "слово " * 200  # ни одной точки — предложение «бесконечное»
 
-    chunks = TextChunker(chunk_size=100).chunk("doc", text)
+    chunks = TextChunker(chunk_size=100).chunk_text("doc", text)
 
     assert len(chunks) > 1
     _assert_exact(text, chunks)
@@ -152,7 +152,7 @@ def test_endless_sentence_is_hard_split() -> None:
 def test_context_prefix_is_first_sentence_of_leading_block() -> None:
     text = "Заголовок раздела без точки. Второе предложение.\n\nДругой абзац."
 
-    chunks = TextChunker(chunk_size=1500).chunk("doc", text)
+    chunks = TextChunker(chunk_size=1500).chunk_text("doc", text)
 
     assert chunks[0].context_prefix == "Заголовок раздела без точки."
 
@@ -160,14 +160,14 @@ def test_context_prefix_is_first_sentence_of_leading_block() -> None:
 def test_context_prefix_is_bounded() -> None:
     text = "С" * (CONTEXT_PREFIX_MAX * 2)
 
-    chunks = TextChunker(chunk_size=1500).chunk("doc", text)
+    chunks = TextChunker(chunk_size=1500).chunk_text("doc", text)
 
     assert len(chunks[0].context_prefix) <= CONTEXT_PREFIX_MAX
 
 
 def test_chunk_ids_and_hashes_are_deterministic() -> None:
-    first = TextChunker(chunk_size=60).chunk("doc", _LONG)
-    second = TextChunker(chunk_size=60).chunk("doc", _LONG)
+    first = TextChunker(chunk_size=60).chunk_text("doc", _LONG)
+    second = TextChunker(chunk_size=60).chunk_text("doc", _LONG)
 
     assert first == second
     assert [chunk.chunk_id for chunk in first] == [
@@ -191,12 +191,12 @@ def test_port_path_chunks_extracted_doc() -> None:
 
 
 def test_empty_text_produces_no_chunks() -> None:
-    assert TextChunker().chunk("doc", "   \n\n  \n") == []
+    assert TextChunker().chunk_text("doc", "   \n\n  \n") == []
 
 
 def test_single_character_document_is_one_exact_chunk() -> None:
     """Документ из одного символа не выбрасывается: P1 запрещает терять вход."""
-    chunks = TextChunker().chunk("doc", "Я")
+    chunks = TextChunker().chunk_text("doc", "Я")
 
     assert len(chunks) == 1
     assert chunks[0].text == "Я"
@@ -210,7 +210,7 @@ def test_single_character_document_is_one_exact_chunk() -> None:
 
 
 def test_ru_paragraphs_are_exact_slices() -> None:
-    chunks = TextChunker(chunk_size=70).chunk("doc", _LONG)
+    chunks = TextChunker(chunk_size=70).chunk_text("doc", _LONG)
 
     assert len(chunks) > 1
     _assert_exact(_LONG, chunks)
@@ -218,7 +218,7 @@ def test_ru_paragraphs_are_exact_slices() -> None:
 
 
 def test_en_paragraphs_are_exact_slices() -> None:
-    chunks = TextChunker(chunk_size=70).chunk("doc", _LONG_EN)
+    chunks = TextChunker(chunk_size=70).chunk_text("doc", _LONG_EN)
 
     assert len(chunks) > 1
     _assert_exact(_LONG_EN, chunks)
@@ -231,7 +231,7 @@ def test_mixed_ru_en_cjk_is_exact_slices() -> None:
         "Хвост."
     )
 
-    chunks = TextChunker(chunk_size=45).chunk("doc", text)
+    chunks = TextChunker(chunk_size=45).chunk_text("doc", text)
 
     assert len(chunks) > 1
     _assert_exact(text, chunks)
@@ -240,7 +240,7 @@ def test_mixed_ru_en_cjk_is_exact_slices() -> None:
 def test_long_word_without_spaces_is_hard_split_without_loss() -> None:
     text = "x" * 5000
 
-    chunks = TextChunker(chunk_size=400).chunk("doc", text)
+    chunks = TextChunker(chunk_size=400).chunk_text("doc", text)
 
     assert len(chunks) > 1
     _assert_exact(text, chunks)
@@ -251,7 +251,7 @@ def test_leading_and_trailing_newlines_stay_in_the_document() -> None:
     """Ведущие/хвостовые переводы строк входят в крайние куски, а не отбрасываются."""
     text = "\n\n  Абзац один. Абзац два.\n\n\nАбзац три.   \n"
 
-    chunks = TextChunker(chunk_size=40).chunk("doc", text)
+    chunks = TextChunker(chunk_size=40).chunk_text("doc", text)
 
     _assert_exact(text, chunks)
     assert chunks[0].char_start == 0
@@ -263,7 +263,7 @@ def test_leading_and_trailing_newlines_stay_in_the_document() -> None:
 def test_crlf_is_normalized_and_offsets_point_at_normalized_text() -> None:
     text = "Первый абзац.\r\n\r\nВторой абзац про настройку.\r\n"
 
-    chunks = TextChunker(chunk_size=1500).chunk("doc", text)
+    chunks = TextChunker(chunk_size=1500).chunk_text("doc", text)
 
     expected = _normalized(text)
     assert expected == "Первый абзац.\n\nВторой абзац про настройку.\n"
@@ -274,7 +274,7 @@ def test_crlf_is_normalized_and_offsets_point_at_normalized_text() -> None:
 
 
 def test_empty_document_between_blank_lines_gives_no_chunks() -> None:
-    assert TextChunker(chunk_size=40).chunk("doc", "\n\n   \n\n\t\n") == []
+    assert TextChunker(chunk_size=40).chunk_text("doc", "\n\n   \n\n\t\n") == []
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ def test_short_document_is_kept_as_one_chunk_not_dropped() -> None:
     """
     text = "|\n\nЛистов 81"
 
-    chunks = TextChunker().chunk("doc", text)
+    chunks = TextChunker().chunk_text("doc", text)
 
     assert [chunk.text for chunk in chunks] == [text]
     _assert_exact(text, chunks)
@@ -307,7 +307,7 @@ def test_short_tail_is_absorbed_into_previous_chunk() -> None:
     """Хвост короче порога приклеивается к предыдущему куску — без потери символов."""
     text = "А" * 45 + "\n\nХвост."
 
-    chunks = TextChunker(chunk_size=50, min_chunk_size=20).chunk("doc", text)
+    chunks = TextChunker(chunk_size=50, min_chunk_size=20).chunk_text("doc", text)
 
     assert len(chunks) == 1
     assert chunks[0].text == text
@@ -333,7 +333,7 @@ def test_cjk_sentences_are_cut_without_whitespace() -> None:
     по номеру символа: чанк кончался посреди фразы, а цитата — посреди слова.
     """
     text = "".join(f"第{i}句话说明这个功能的行为与限制。" for i in range(40))
-    chunks = TextChunker(chunk_size=200).chunk("doc", text)
+    chunks = TextChunker(chunk_size=200).chunk_text("doc", text)
 
     assert len(chunks) > 1
     _assert_exact(text, chunks)
@@ -350,8 +350,8 @@ def test_separators_are_preserved_exactly() -> None:
     zh = "他说「你好。」然后走了。第二句在这里。" * 12
     ru = "Первое предложение тут. Второе предложение тоже. Третье." * 8
 
-    zh_chunks = TextChunker(chunk_size=120).chunk("d", zh)
-    ru_chunks = TextChunker(chunk_size=100).chunk("d", ru)
+    zh_chunks = TextChunker(chunk_size=120).chunk_text("d", zh)
+    ru_chunks = TextChunker(chunk_size=100).chunk_text("d", ru)
 
     assert "".join(c.text for c in zh_chunks) == zh
     assert "".join(c.text for c in ru_chunks) == ru
@@ -365,7 +365,7 @@ def test_separators_are_preserved_exactly() -> None:
 def test_clause_boundaries_are_the_second_level() -> None:
     """Предложение больше бюджета режется по клаузам, а не по номеру символа."""
     text = "这个功能提供了一个非常好的接口，" * 20 + "并且没有任何问题。"
-    chunks = TextChunker(chunk_size=80).chunk("doc", text)
+    chunks = TextChunker(chunk_size=80).chunk_text("doc", text)
 
     _assert_exact(text, chunks)
     # Кусок может превысить бюджет только на объявленную склейку короткого хвоста.
@@ -378,7 +378,7 @@ def test_clause_boundaries_are_the_second_level() -> None:
 def test_hard_cut_keeps_grapheme_clusters_whole() -> None:
     """Нет пунктуации вовсе — жёсткий разрез, но не внутри графемного кластера."""
     blob = "汉" * 500
-    chunks = TextChunker(chunk_size=100).chunk("doc", blob)
+    chunks = TextChunker(chunk_size=100).chunk_text("doc", blob)
 
     assert "".join(chunk.text for chunk in chunks) == blob
     assert all(len(chunk.text) <= 100 for chunk in chunks)
@@ -424,7 +424,7 @@ def test_cut_boundaries_are_pinned(
     сдвинет границу на фикстуре, где разделитель и так ровно ``\\n\\n``, тест обязан
     упасть — иначе «набор границ не изменился» осталось бы заявлением.
     """
-    chunks = TextChunker(chunk_size=chunk_size, min_chunk_size=0).chunk("doc", text)
+    chunks = TextChunker(chunk_size=chunk_size, min_chunk_size=0).chunk_text("doc", text)
 
     assert [(chunk.char_start, chunk.char_end) for chunk in chunks] == expected
     _assert_exact(text, chunks)
@@ -460,5 +460,5 @@ def test_pinned_boundaries_match_old_stripped_chunk_texts() -> None:
     for (text, chunk_size, _expected), texts in zip(
         _BOUNDARY_PINS, expected_texts, strict=True
     ):
-        chunks = TextChunker(chunk_size=chunk_size, min_chunk_size=0).chunk("doc", text)
+        chunks = TextChunker(chunk_size=chunk_size, min_chunk_size=0).chunk_text("doc", text)
         assert [chunk.text.strip() for chunk in chunks] == texts

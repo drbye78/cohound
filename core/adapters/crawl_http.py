@@ -782,6 +782,6 @@ class HttpCrawler:
                 "httpx не установлен: реальный HTTP-фетч недоступен. "
                 "Установите extra 'crawl' (05) или внедрите fetcher/http_get."
             )
-        import httpx  # type: ignore[import-not-found]
+        import httpx
 
         return httpx

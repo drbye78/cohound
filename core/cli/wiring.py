@@ -477,7 +477,7 @@ def seed_lexical_index(
     # отдельная правка порта, не эта полоса.
     index = TantivyLexicalIndex(
         hydrate=store.get_chunks,
-        view=view,  # type: ignore[arg-type]
+        view=view,
     )
 
     def _records() -> Iterable[LexicalChunk]:
@@ -2890,7 +2890,7 @@ def _build_local_ports(
         index_builder=index_builder,
         # Adapter/port mismatch (engine_version: property vs mutable attr) — статическая
         # несовместимость протокола; runtime_checkable проверяет методы, поведение корректно.
-        lexical_index=resolved_lexical_index,  # type: ignore[arg-type]
+        lexical_index=resolved_lexical_index,
         # Краулер корпуса: инстанцируется composition root'ом из ``deploy.crawl`` (R7/03
         # §D.5); без конфига остаётся ``None`` — прежнее поведение. SERP/discovery для
         # local включаются явной инъекцией портов (в CLI-конфиге нет запросов).

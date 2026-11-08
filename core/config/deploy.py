@@ -24,6 +24,7 @@ OI-совместимым API корпоративного облака — эт
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -590,8 +591,15 @@ class CrawlConfig(BaseModel):
             return SUPPORTED_ARCHIVE_FORMATS
         if isinstance(value, str):
             value = [value]
+        # Форма входа не объявлена: YAML может дать список, кортеж или множество. Требуется
+        # именно итерируемое, иначе ошибка будет названа здесь, а не ``TypeError`` из утилиты.
+        if not isinstance(value, Iterable):
+            raise ValueError(
+                "crawl.attachment_formats: ожидался список форматов контейнеров, "
+                f"получено {type(value).__name__}"
+            )
         try:
-            return normalize_attachment_formats(value)  # type: ignore[arg-type]
+            return normalize_attachment_formats(value)
         except ValueError as exc:
             raise ValueError(f"crawl.attachment_formats: {exc}") from exc
 
