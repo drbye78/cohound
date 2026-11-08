@@ -19,6 +19,9 @@
 попытка берёт свой слот лимитера), граница «параллельность внутри host ничего не даёт»
 измерена (`2026-11-07-crawl-rate-tirage.md`), `EXECUTION_CONTRACT_FIELDS` — **32** поля.
 
+**Впитал `08`** (удалён 08.11.2026): §9 — фазы платформы, §7.3 — приёмка; пять запретов
+платформы — `24` §9 (один дом, здесь только перечень в §8).
+
 Утверждения о поведении помечены `путь:строка` (гейт `scripts/check_doc_anchors.py`). Терминология: **host** —
 имя сайта без схемы и порта (это ключ вежливости, `core/util/rate_limit.py:55`), **корень** —
 seed-root продукта, **узел** — процесс краула.
@@ -872,6 +875,100 @@ host'ах, поэтому бюджет, собранный на одном зе�
    `http_status`. Класс виден, величина — нет: «отказ без числа» — тот же дефект, что §4.3
    запрещает для бюджета диска.
 
+### 7.3. Приёмка краул-платформы
+
+Перенесено из `08-crawl-platform-evolution-plan.md` 08.11.2026 (файл удалён); статусы и якоря —
+снимок 08.11.2026, HEAD `f14f866`.
+
+#### Enterprise control
+
+> ⬜ не сделано как группа (Phase 2 открыт). Держится часть: авторизация по op через IDP-scopes
+> (`core/edge/auth.py:121`), пересчёт `content_hash` ядром (`core/adapters/remote_gateway.py:348`),
+> отказ обхода при нечитаемой robots-ленте (`core/util/robots.py:64`). Нет обязательного
+> egress-контура, DLP-блока до парсера, browser subrequest interception и запрета прямого
+> Internet-route у Z0/worker.
+
+- Z0 не имеет произвольного Internet route.
+- Worker не имеет прямого Internet route.
+- Все navigation, redirect, download и browser subrequest проходят gateway.
+- IDS/DLP видит structured metadata и content stream.
+- DLP block предотвращает передачу в parser/core.
+- IDP scopes ограничивают operation/profile.
+- Gateway unavailable не вызывает direct-fetch fallback.
+- Core обнаруживает изменение body через rehash.
+- Конверт egress-запроса и поля решения — `07` §8.6.
+
+#### Cluster
+
+> ⬜ не сделано — распределённой координации нет: `owner`/`heartbeat_at` — свидетельство живости
+> сеанса, **не lease** (`core/pipeline/liveness.py:54`, `core/pipeline/liveness.py:66`); протухший
+> `running` становится `interrupted`, а не переисполняется. Shared queue/store/object storage
+> отсутствуют (Phase 3). Single-node аренда есть **только** у очереди конверсии
+> (`core/pipeline/extract_queue.py:54`);
+> у фетча и edge-задач её нет, поэтому duplicate-result idempotency и reclaim после lease expiry
+> проверить не на чем.
+
+- Две и более API replicas не теряют и не двойным образом не владеют task.
+- Worker crash приводит к reclaim после lease expiry.
+- Duplicate result commit идемпотентен.
+- Shared queue/store/object storage являются источником истины.
+- Queue age, leases, retries, DLQ и per-profile usage наблюдаемы.
+- Cluster execution эквивалентен single-node execution при одной policy.
+
+#### PDF
+
+> ⬜ не сделано как класс (Phase 5 частично). Тяжёлая PDF-экстракция идёт в том же пуле и той же
+> фазе (`core/pipeline/extraction_runtime.py:128`), независимого масштабирования text/layout/OCR
+> нет, отдельных очередей и deployment unit нет. Держится часть: retention сырья происходит до
+> экстракции, поэтому OOM парсера не теряет артефакт (I19); `partial` не превращается в пустой
+> документ (`core/ports/types.py:191`); артефакт и его члены извлекаются за швом по байтам
+> (`core/adapters/remote_extractor.py:214`).
+
+- Fetch worker не выполняет тяжёлую PDF extraction.
+- Text/layout/OCR pools масштабируются независимо.
+- Raw PDF сохраняется при parser crash/OOM/timeout.
+- Extractor version, source hash, result hash и resource usage записаны.
+- Parser worker не имеет Internet route.
+- Failed extraction не превращается в пустой документ или ложное отсутствие.
+
+#### Profiles
+
+> ⬜ не сделано — два профиля одновременно не запускаются (один прогон = одна когорта и один
+> `run.yaml`), квот и независимых очередей нет, `crawl_profile` как сущности в коде нет (`24` §2.2).
+> `split-hardened` — алиас `split` (`core/config/deploy.py:92-95`), а не отдельный профиль.
+
+- Два профиля запускаются одновременно.
+- Quotas, queues, cancellation и metrics независимы.
+- Profile policy выбирается server-side и авторизуется через IDP.
+- Browser state, credentials, egress identity и storage namespace изолированы.
+- Общая origin politeness действует между profiles.
+
+#### Методологическая честность
+
+> ✅ эта группа — единственная, которая держится **сейчас**, а не после фаз: она про поведение
+> уже исполняемого конвейера. Один пункт внутри неё всё же ⬜ — он про признак, а не про статус.
+
+- `partial`, truncation, blocked и failed видны в session provenance.
+  → ✅ `core/pipeline/crawl_session.py:113-116`, `core/pipeline/metrics.py:490`.
+- Ни один failed fetch не создаёт absence автоматически.
+  → ✅ `core/pipeline/evaluate.py:2095` (`_enforce_absence_coverage`); `failed` → `status=null` (I4).
+- Cached/raw reuse отличим от live fetch.
+  → ⬜ не как **признак источника байтов**: у `RawPage` есть `not_modified`
+  (`core/ports/types.py:136`), но это подтверждение `304`, а не «отдано из кэша»;
+  `_page_from_cache` его не выставляет (`core/adapters/crawl_http.py:732`), поэтому отличие
+  восстанавливается косвенно по `fetched_at` и счётчику `revalidation_fetched` — «на глаз», не полем.
+- Смена effective crawl policy создаёт execution change.
+  → ✅ `core/pipeline/digests.py:96` (`crawl_strategy`/`crawl_rate_limit`/`crawl_config_digest`
+  ⇒ новый `run_id`).
+- После технической приёмки всё ещё выполняются реальные PDF/Office, golden, adversarial и
+  manual-baseline проверки.
+  → ⬜ не сделано — технической приёмки не было (Phase 2–8 открыты); перечень — `06` §4/M2.
+  Инструменты есть (`hound golden`, `core/pipeline/adversarial.py`, `baselines.csv`), эталон
+  **пригоден**: пере-разметка `25cf2ab` (30.10.2026) дала 905 строк = 181 параметр × 5 продуктов,
+  ✅ 500 / ⚠️ 123 / ❌ 282 (`packages/ru-pg-dbms/golden.csv`). Прежняя оценка «негоден, 6.8 %
+  согласия» относится к набору **до** пере-разметки
+  (`docs/reports/measurements/2026-10-27-golden-reference-set-unusable.md`).
+
 ## 8. Что отвергнуто и что осталось неизвестным
 
 **Отвергнуто.** (B) «лиз host'а в durable-состоянии» как *аренда*: на локальном одно-писательном
@@ -881,6 +978,13 @@ SQLite нет арбитра времени и чужие процессы не 
 двумя смыслами. (E) Несколько браузерных полос: не измерено. (F) Поднимать `max_workers` вместо
 полос: опровергнуто замером (1/3/8 потоков к одному host — одно время). (G) Оставить конверсию
 inline «пока хватает»: это и есть текущая сцепка, из-за которой краул измеряется чужим временем.
+
+**Отвергнуто платформой (перенесено из `08` 08.11.2026) — пять пунктов, дом один: `24` §9.**
+Считать `profile` доказательством изоляции; передавать PDF как opaque object-store URL при
+требуемой DLP-инспекции; держать прямой Internet route «fallback» для gateway; смешивать PDF
+OCR/layout с HTTP-очередью; называть foreground `extract_workers` распределённой платформой.
+Развёрнутые причины с якорями — там, здесь не дублируются: все пять — про классы работы и
+изоляцию, а не про устройство краула.
 
 **Неизвестно.** Стоимость retention-I/O (см. §7.2; латентность host'ов измерена 07.11.2026 —
 там же); сколько host'ов
@@ -921,3 +1025,85 @@ base64 по HTTP, `core/adapters/remote_extractor.py:187`) на объёме 10 
 должно читаться как факт, а не как ошибка. (3) `_migrate`-шим `edge_jobs.db` снесён так же, как
 в двух других БД: это операционное состояние edge (задания в полёте), а не измерение, поэтому
 отказ «пересоздайте файл» дешевле миграции и честнее тихого догона.
+
+## 9. Фазы платформы: остаток и gate'ы
+
+Перенесено из `08-crawl-platform-evolution-plan.md` 08.11.2026 (файл удалён); статусы и якоря —
+снимок 08.11.2026, HEAD `f14f866`.
+
+### Phase 0 — контракт и acceptance baseline — 🟡 частично
+
+Закрыто: `deploy_profile` фиксируется в манифесте (`core/cli/wiring.py:3367`); scope sitemap и
+source-wave semantics — `03` §D.2.1; fail-closed для robots (`core/util/robots.py:438`,
+`UNAVAILABLE` → отказ обхода); baseline focused tests на месте. Аренда строки очереди конверсии
+(`core/pipeline/extract_queue.py:54`) снимает часть (б).
+
+Открыто: (а) `crawl_profile` как имя не зафиксировано — в коде 0 вхождений; (б') state machine
+fetch/extraction/attempt/**lease** как единая схема не описана: аренда есть у конверсии, но не у
+фетча, lease-порта в `core/ports/` нет, `owner`/`heartbeat_at` — свидетельство живости, не аренда
+(`core/pipeline/liveness.py:54`); (в) fail-closed policy для egress/DLP отсутствует вместе с
+контуром (Phase 2); (г) прежняя заметка «`max_depth > 0` под executor/split отвергается» уже
+неверна: executor-волны исполняются (`core/pipeline/corpus_drain.py:588`). **Gate:** схема
+состояний и acceptance matrix утверждены; нет противоречия между кодом, docs и тестами.
+
+### Phase 1 — фактическое enforcement на seam — ✅ сделано
+
+`route_request` — единый путь вокруг HTTP handler (`core/edge/server.py:1159`): аутентификация →
+авторизация по op → лимит тела → dispatch → аудит; собирается лаунчером из
+`config.auth`/`config.audit` (`core/edge/__main__.py:447`). Fail-fast: bind вне loopback без auth
+отвергается при старте (`core/edge/server.py:229`). Аудит пишется на allow/deny/error, включая
+401/403/413; endpoint-specific обхода нет. Тесты — `tests/edge/test_edge_middleware.py`,
+`tests/edge/test_auth.py`, `tests/edge/test_audit.py`. **Остаётся (эксплуатация, не код):** включить
+`auth.mode` и `audit.sink` в боевом `edge.yaml` (дефолт — `none`) и подключить SIEM. **Gate:** ✅
+unauthenticated/unauthorized request не достигает gateway; каждый allow/deny имеет audit event;
+oversized/invalid content не попадает дальше.
+
+### Phase 6 — unified fetch adapters — 🟡 частично
+
+`FetchAttemptResult` в коде нет (0 вхождений): транспортный контракт по-прежнему `RawPage`
+(`core/ports/crawler.py:50`). **Сделано:** retry вынесен из адаптеров в один цикл
+(`core/util/fetch_retry.py:55`, одна константа на `local` и `split`), классификация
+транзиентности — порт (`core/ports/crawl_errors.py:205`), ручной redirect-scope —
+`core/pipeline/corpus_ingest.py:2913` (включается `core/pipeline/corpus_drain.py:722`), process
+isolation браузера (`core/edge/scheduler.py:181`), единая robots-семантика. **Остаток:**
+`FetchAttemptResult` и resolved-IP validation/pinning (грепп `pinning` по `core/` даёт только
+certificate pinning, которого нет: `core/config/deploy.py:18`, `core/edge/auth.py:315`;
+IP-pinning отсутствует). **Gate:** одинаковый fake-server сценарий даёт одинаковую классификацию
+ошибок, redirects, robots decisions и provenance во всех выбранных транспортах.
+
+### Phase 8 — эксплуатация, миграция и документация — ⬜ не сделано
+
+Метрик очереди/возраста аренды/retries/DLQ/PDF RSS/DLP blocks/orphan blobs нет (грепп
+`queue_depth|dlq|lease_age` по `core/` — 0); команд `inspect`, `pause`, `reconcile`, `replay`,
+`explain-entry` нет. Подкоманды `hound crawl` на 08.11.2026 —
+`run|status|list|resume|restart|cancel` + `policy set|list|clear`
+(`core/cli/commands/crawl.py:1847`); `hound extract consume` (`core/cli/commands/extract.py:319`)
+это не `inspect`/`replay`. Наблюдаемость живого краула есть в другом объёме: `crawl_progress`/
+`crawl_product`, `--per-url`, `owner`/`heartbeat_at`/`stale_reason`. Документы уже описывают шов
+и профили, но deployment drill (две edge-реплики, отдельный PDF-пул, два профиля, proxy/DLP
+harness) не проводился. **Gate:** production-like deployment drill с двумя edge replicas,
+отдельным PDF pool, двумя crawl profiles и корпоративным proxy/DLP harness.
+
+### Phase 2–5, 7 — фазы со своим домом
+
+Статусы и остатки проверены по коду 08.11.2026; предмет каждой фазы изложен в доме, поэтому
+здесь остаётся только то, чего в доме нет (конверт egress-запроса — `07` §8.6), и gate.
+
+| Фаза | Статус и остаток | Дом |
+|---|---|---|
+| **2 — egress/content policy gateway** | ⬜ `EgressRequest`/`EgressDecision`/`ContentManifest`/`ContentChunk` в коде нет: грепп по `core/` и `contracts/` пуст, совпадения только в документах (`07` §8.6 — спецификация конверта, этот раздел — фаза); шов остаётся L7 JSON с 12 операциями (`core/edge/server.py:141`), fail-closed только у robots (`core/util/robots.py:64`). Gate: proxy/DLP harness видит structured request и полный stream; tampering ловится core rehash; bypass route отсутствует | `07` §8 |
+| **3 — distributed control plane** | ⬜ портов metadata store / task queue / object store / lease store нет (`core/ports/` — 20 модулей, все про per-run и per-product состояние); authoritative task state — edge-local SQLite (`core/edge/scheduler.py:608`); волна — локальный `_WaveEntry` (`core/pipeline/corpus_drain.py:105`); кластерных leases/reclaim/DLQ нет. Gate: две API replicas и два worker nodes на одном run; crash/reclaim/duplicate tests | `24` §5, §8 |
+| **4 — cluster scheduler и quotas** | ⬜ квот нет (`rg quota core/` — 0); на **узле** вежливость есть (`RateLimiter` + `Frontier`, `core/pipeline/corpus_driver.py:245` при `config/deploy.yaml:90`/`config/deploy.yaml:115`), между узлами — ничего; `host_concurrency` обязан стать прогон-широким бюджетом. Gate: concurrent load не нарушает per-origin limits; profile A не ест reserved capacity B | `24` §4, §7 |
+| **5 — asynchronous extraction plane** | 🟡 durable `extract_queue` + потребитель есть (`core/pipeline/extract_queue.py:54`, `core/cli/commands/extract.py:319`); члены контейнеров идут за шов (`core/adapters/remote_extractor.py:214`), оси `document_level`/`pdf_device` — в `extract/submit` (`core/adapters/remote_extractor.py:236`). Нет: очередей по классам, отдельного deployment, `extractor_zone` не подключён (`core/config/deploy.py:768`; D-9). Gate: OOM PDF worker не теряет raw artifact; layout queue масштабируется отдельно | `10` §5, §6 |
+| **7 — source waves и split parity** | ⬜ child waves нет (`core/pipeline/corpus_ingest.py:176`, `_SITEMAP_KIND` через `PollPort`); дедуп и различение отказов есть (`core/pipeline/crawl_frontier.py:1223`, `core/pipeline/crawl_frontier.py:1236`); паритет проверен только фейковым executor'ом (`tests/pipeline/test_corpus_parity.py:519`); `ssrf_rejected` как исход отсутствует — SSRF это одна проверка `validate_url`. Gate: local и split дают одинаковый accepted corpus при одной policy | `07` §6 |
+
+### Порядок приоритетов
+
+Порядок отражает **измеренные** узкие места, а не архитектурную симметрию: кластер не помогает,
+пока один узел не измерен и не оптимизирован. Пошаговый порядок — `06` §13, статусы — разделы
+выше, стены одного узла — `24` §3.2.
+
+До закрытия `24` §3.2 (single-node throughput) и Phase 2–5 проект — **single-node split MVP с
+вертикальной параллельностью**; после Phase 2–7 он может претендовать на кластерное исполнение;
+после Phase 8 и реальных acceptance runs — на подтверждённую эксплуатационную готовность для
+целевых когорт.

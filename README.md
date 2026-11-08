@@ -364,8 +364,10 @@ tests/                             # selfcheck, unit/property/contract/e2e tests
   компонентов и доверенных зон;
 - [`docs/architecture/06-implementation-strategy.md`](docs/architecture/06-implementation-strategy.md)
   — as-built и открытые работы;
-- [`docs/architecture/08-crawl-platform-evolution-plan.md`](docs/architecture/08-crawl-platform-evolution-plan.md)
-  — целевая платформа краулинга и fleet-масштабирование;
+- [`docs/architecture/17-crawl-host-scheduler-plan.md`](docs/architecture/17-crawl-host-scheduler-plan.md)
+  — краул как подсистема: host-полосы, фазы платформы и приёмка;
+- [`docs/architecture/24-fleet-work-units.md`](docs/architecture/24-fleet-work-units.md)
+  — единица работы, ёмкость узла и fleet-масштабирование;
 - [`docs/architecture/11-production-architecture-strategy.md`](docs/architecture/11-production-architecture-strategy.md)
   — порядок доведения до production-grade;
 - [`docs/architecture/14-vector-store-and-embedder-scaling.md`](docs/architecture/14-vector-store-and-embedder-scaling.md)
