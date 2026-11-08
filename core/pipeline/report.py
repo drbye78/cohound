@@ -1859,6 +1859,7 @@ def render_nda_questions(
     corpus_coverage_anomalies: Iterable[Mapping[str, Any]] | None = None,
     golden_exempt_anomalies: Iterable[Mapping[str, Any]] | None = None,
     absence_undated_anomalies: Iterable[Mapping[str, Any]] | None = None,
+    unrelated_support_anomalies: Iterable[Mapping[str, Any]] | None = None,
 ) -> Path:
     """Пишет ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры).
 
@@ -1892,6 +1893,13 @@ def render_nda_questions(
     хватило** (документ без даты наблюдения / корень без ``complete``-снятия). Текст
     берётся из причины ячейки как есть: отчёт не переписывает её в «устарело». Как и
     остальные, это **наблюдение**: ячейка уже ``❓``.
+
+    **V1 плана 15.** ``unrelated_support_anomalies`` — записи замера «о предмете ли
+    доказательство» (``support_overlap_scan``, артефакт ``outputs/support_quality.yaml``):
+    у ``✅``/``⚠️`` цитата есть, но предмета параметра в ней нет. Строки
+    ``anomaly_kind="unrelated_support"`` несут адрес и числа «цитат {quoted}, без предмета
+    {unrelated}». Это **наблюдение**, а не гейт: статус ячейки, Coverage, Capability и
+    публикуемость не меняются, новых порогов нет — решение остаётся за человеком.
     """
     rows: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
@@ -1959,6 +1967,24 @@ def render_nda_questions(
                 "anomaly_kind": "absence_undated",
             }
         )
+    # V1 плана 15: «доказательство не о предмете» — наблюдение поверх `support_quality.yaml`.
+    # Статус ячейки не меняется, поэтому строка живёт только в операторском CSV.
+    for anomaly in unrelated_support_anomalies or ():
+        rows.append(
+            {
+                "product_id": anomaly.get("product_id", ""),
+                "param_id": anomaly.get("param_id", ""),
+                "status": "unrelated_support",
+                "exhausted_contours": "",
+                "protocol_status": "",
+                "i3_anomaly": (
+                    "доказательство не о предмете: цитат "
+                    f"{anomaly.get('quoted', 0)}, без предмета "
+                    f"{anomaly.get('unrelated', 0)}"
+                ),
+                "anomaly_kind": "unrelated_support",
+            }
+        )
     return _write_csv(
         Path(out_path),
         [
@@ -1972,6 +1998,21 @@ def render_nda_questions(
         ],
         rows,
     )
+
+
+def _unrelated_support_anomalies(
+    support_payload: Mapping[str, Any] | None,
+) -> list[Mapping[str, Any]]:
+    """Адреса «доказательство не о предмете» из замера ``support_quality`` (V1 плана 15).
+
+    Замер может отсутствовать или не найти материала — тогда строк нет. Порядок записей
+    сохраняется: его задаёт :func:`core.pipeline.evaluate.support_overlap_scan`
+    (``product_id``, ``param_id``).
+    """
+    if not support_payload:
+        return []
+    overlap = support_payload.get("overlap") or {}
+    return list(overlap.get("cells") or ())
 
 
 def _i3_violations(cell: Any, exhaustion: Any) -> str:
@@ -3571,6 +3612,7 @@ def write_reports(
         corpus_coverage_anomalies=coverage_anomalies,
         golden_exempt_anomalies=golden_exempt_anomalies,
         absence_undated_anomalies=absence_undated_anomalies,
+        unrelated_support_anomalies=_unrelated_support_anomalies(support_payload),
     )
     preliminary = render_preliminary_findings(
         cell_list, outputs_dir / "preliminary_findings.xlsx"

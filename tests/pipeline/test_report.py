@@ -44,9 +44,11 @@ from core.domain.enums import (
     DenialStrength,
     DocumentLevel,
     EndpointKind,
+    EvidenceType,
     LLMScenario,
     RankingPolicy,
     RunMode,
+    SourceKind,
     StaleReason,
     Status,
     TerminationReason,
@@ -56,6 +58,7 @@ from core.domain.models import (
     METHODOLOGY_VERSION,
     CatalogRow,
     Cell,
+    CellEvidence,
     CorpusCoverage,
     CrawlProvenance,
     CrawlRunConfig,
@@ -1092,6 +1095,107 @@ def test_nda_questions_includes_crawl_truncation_rows(tmp_path: Path) -> None:
         r
         for r in _read_csv(path_without)
         if r.get("anomaly_kind") == "crawl_truncation"
+    ]
+
+
+def test_nda_questions_lists_unrelated_support_anomaly(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """V1 плана 15: ``✅`` с цитатой без предмета видна в CSV, вердикт не меняется.
+
+    Записи берутся из замера ``support_quality`` (``overlap.cells``): это **наблюдение**,
+    поэтому единственное, что появляется, — строка операторского CSV.
+    """
+    catalog = {
+        "param.jit": CatalogRow(
+            param_id="param.jit",
+            title="JIT-компиляция целых операторов",
+            module="m",
+            group="g",
+            importance="Кр",
+            param_type="fact",
+            rule="r",
+            absence_rule="explicit",
+        )
+    }
+    # Визитка продукта — ровно тот класс цитаты, который предмет параметра не упоминает.
+    header_quote = "Product 1.0 (2026-01-01, Upstream 18)"
+    cell = Cell(
+        run_id=RUN_ID,
+        product_id=PRODUCT_A,
+        param_id="param.jit",
+        state=CellState.EVALUATED,
+        status=Status.OK,
+        evidence=[LLMEvidence(source_id="src.1", quote=header_quote)],
+    )
+    _save(store, [cell])
+    store.add_evidence(
+        CellEvidence(
+            evidence_id="ev-unrelated",
+            run_id=RUN_ID,
+            product_id=PRODUCT_A,
+            param_id="param.jit",
+            source_kind=SourceKind.INHERITANCE,
+            evidence_type=EvidenceType.DERIVED,
+            source_id="src.1",
+            citation_quote=header_quote,
+        )
+    )
+    cells = list(store.iter_cells(RUN_ID))
+    bundle = compute(store=store, run_id=RUN_ID, catalog=catalog, module_weights={})
+
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=catalog,
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+        store=store,
+    )
+
+    # Производитель замера назвал адрес — CSV не выдумывает его сам.
+    summary = artifacts.support_quality_summary
+    assert summary is not None
+    overlap = summary["overlap"]
+    assert overlap["cells_flagged"] == 1
+    rows = _read_csv(artifacts.nda_questions)
+    anomaly_rows = [r for r in rows if r.get("anomaly_kind") == "unrelated_support"]
+    assert len(anomaly_rows) == 1
+    row = anomaly_rows[0]
+    assert (row["product_id"], row["param_id"]) == (PRODUCT_A, "param.jit")
+    assert row["status"] == "unrelated_support"
+    assert row["i3_anomaly"] == "доказательство не о предмете: цитат 1, без предмета 1"
+    # Наблюдение, а не гейт: ячейка как была ✅, так и осталась.
+    assert cells[0].status is Status.OK
+    assert store.get_cell(RUN_ID, PRODUCT_A, "param.jit").status is Status.OK
+
+    # Цитата, упоминающая предмет, снимает аномалию — строки нет.
+    store.add_evidence(
+        CellEvidence(
+            evidence_id="ev-related",
+            run_id=RUN_ID,
+            product_id=PRODUCT_A,
+            param_id="param.jit",
+            source_kind=SourceKind.INHERITANCE,
+            evidence_type=EvidenceType.DERIVED,
+            source_id="src.2",
+            citation_quote="JIT-компиляция целых операторов включена по умолчанию",
+        )
+    )
+    clean = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=catalog,
+        manifest=_manifest(),
+        out_dir=tmp_path / "clean",
+        run_id=RUN_ID,
+        store=store,
+    )
+    assert not [
+        r
+        for r in _read_csv(clean.nda_questions)
+        if r.get("anomaly_kind") == "unrelated_support"
     ]
 
 
