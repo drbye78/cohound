@@ -73,7 +73,7 @@ YAML-метаданные Pandoc держит в `meta`, а не в `blocks`, п
 
 | конструкция | класс | блоков | документов | пример |
 |---|---|---:|---:|---|
-| список без пустой строки перед ним | `sequence_length` | 40 | 8 | `docs/architecture/00-overview.md:409` |
+| список без пустой строки перед ним | `sequence_length` | 40 | 8 | `docs/architecture/00-overview.md:412` |
 | цитата без пустой строки перед ней | `sequence_length` | 1 | 1 | `docs/architecture/09-product-onboarding-incremental-runs.md:4783` |
 | абзац — остаток GFM-таблицы у Pandoc | `sequence_length` | 1 | 1 | `docs/reports/measurements/2026-11-03-md-chunk-geometry-tokens.md` |
 | лишние абзацы таблиц/HTML-div | `sequence_length` | 5 | 3 | `generated:multiline_table:2` |
@@ -93,7 +93,7 @@ YAML-метаданные Pandoc держит в `meta`, а не в `blocks`, п
 
 `list_without_blank_line`: Pandoc по умолчанию требует **пустую строку перед списком**
 (расширение `lists_without_preceding_blankline` выключено), markdown-it — нет. Пример
-(`docs/architecture/00-overview.md:409`):
+(`docs/architecture/00-overview.md:412`):
 
 ```markdown
 **ADR-реестр (детально — `04-reliability-adr.md` §E):**
@@ -101,8 +101,10 @@ YAML-метаданные Pandoc держит в `meta`, а не в `blocks`, п
 ```
 
 Pandoc видит здесь один абзац с дефисами, `md_ast` — абзац и список. То же в
-`docs/architecture/03-data-config-cli.md:680`, `docs/architecture/05-dependency-stack.md:330`
-и ещё пяти документах выборки.
+`docs/architecture/05-dependency-stack.md:329-330` (и ещё пяти документах выборки).
+Поправка 08.11.2026: прежний второй адрес — `03-data-config-cli.md:680` — указывал на
+лестницу `document_level`, а не на этот дефект; в `03` конструкций «жирная строка без
+пустой строки + список» нет вовсе (проверено по всему файлу).
 
 `blockquote_without_blank_line` — та же причина для цитаты: Pandoc
 (`blank_before_blockquote`) не начинает цитату внутри абзаца, CommonMark — начинает.

@@ -1,8 +1,17 @@
 # coHound — архитектура: развёртывание и доверенные зоны (DMZ)
 
-> **Статус открытых вопросов на 2026-10-28** (HEAD `f6100c7`): 3 закрыто, 5 открыто.
-> У каждого пункта в §2, §6 и §11 маркер ✅/⬜/➖/❔ с доказательством. Открытое — это
-> отсутствующий паритет `split` и Z2 (`extractor_zone` объявлен, но не потребляется).
+> **Статус открытых вопросов на 2026-11-08** (HEAD `f14f866`): **4 закрыто, 4 открыто**.
+> У каждого пункта в §2, §6 и §11 маркер ✅/⬜/➖/❔ с доказательством.
+>
+> **Закрыто (решение принято или механизм есть):** `split-hardened` как алиас `split` (§6,
+> решение D-8); классификация «инсталляции» — deployment-политика, не методология (§6);
+> IDP/DLP/IDS-аттестация — границы работы зафиксированы владельцем (§8, §11); члены
+> контейнеров извлекаются под `split` (§6 п.1, `ae0f933`).
+>
+> **Открыто:** **Z2 PARSE** — зоны в коде нет, `extractor_zone` объявлен и не потребляется
+> (§2); **staging крупных артефактов** под `split` (§6 п.2); **паритет `pdf_pipeline`** под
+> `split` (§6 п.3); **per-root слой** осей `document_level`/`pdf_device` под `split` не виден
+> (§6 п.4). Все четыре — названные ограничения MVP, а не сбой прибора.
 
 **Документ:** `docs/architecture/07-deployment-topology.md`
 **Статус:** принято (проектирование; итерация 7)
@@ -61,7 +70,7 @@ application-layer firewall (L7). Функционал, которому нуже
 |---|---|---|
 | **Z0 CORE** (доверенная) | **нет** веб-эгрессии; недоступна для входящих из DMZ; секретов эгрессии нет | `pipeline` (оркестратор, гейты), `domain`, `store`, индексы/ретривал, **клиент evaluator-LLM (I18)**, `compute`, `report` |
 | **Z1 EDGE / DMZ** (условно-доверенная) | есть веб-эгрессия; **считается компрометируемой**; процесс только отвечает, не инициирует в Z0 | `crawler` (Scrapy+playwright · **прямой Playwright/CDP** — honest/hybrid, альтернатива Scrapy), HTTP-fetch, `search`-адаптер (SERP), `registry`-фетчеры, `poller` (feed/channel/sitemap), discovery/concept-scout (search-enabled) |
-| **Z2 PARSE** (roadmap; **не реализована**) | hardening парсинга недоверенного контента | *пока ничего: экстрактор исполняется в ядре (§2, `extractor_zone`); целевой контракт — `10` §5.4* — ⬜ не сделано: зоны Z2 в коде нет, `EXTRACTOR_ZONES` (`core/config/deploy.py:90`) — только объявление |
+| **Z2 PARSE** (roadmap; **не реализована**) | hardening парсинга недоверенного контента | *пока ничего: экстрактор исполняется в ядре (§2, `extractor_zone`); целевой контракт — `10` §5.4* — ⬜ не сделано: зоны Z2 в коде нет, `EXTRACTOR_ZONES` (`core/config/deploy.py:97`) — только объявление |
 | **Зона LLM корп. облака** (внешняя, внутр. сеть) | [OI]-совместимый API; веса/движок — забота облака | evaluator-LLM (только Z0-originated трафик), discovery-LLM (search-enabled, Z1) |
 
 **Классификация портов (`Zone`):**
@@ -76,7 +85,7 @@ application-layer firewall (L7). Функционал, которому нуже
 | `ports/extractor.py` | **core** | обработка недоверенного контента; *декларативно может быть edge/Z2 — см. ниже* |
 | `ports/llm.py` (evaluator) | **core** | клиент корп. облака ([OI]-API), без веба (I18) |
 | `ports/{vector_index,lexical_index,index_builder,embedder}.py` | **core** | локальные вычисления |
-| `ports/{store,gate_store}.py` | **core** | доверенное хранилище |
+| `ports/store.py` (`StorePort`, `GateStore`) | **core** | доверенное хранилище |
 | `ports/state.py` | **core** | durable-состояние продукта |
 | `ports/chunker.py` | **core** | чистая функция над очищенным текстом |
 | `ports/gateway.py` | **core**→edge | транспорт к DMZ-сервису |
@@ -85,21 +94,24 @@ application-layer firewall (L7). Функционал, которому нуже
 > **`extractor_zone`: объявлено, не подключено.** `DeployConfig.extractor_zone` существует
 > (`edge|core|separate`, **дефолт `core`**), но **не потребляется** ни одним путём wiring'а:
 > экстрактор всегда собирается в ядре. Это декларация намерения, а не ручка — переключение
-> поля не переносит экстракцию в edge. Подключение имеет смысл только вместе с паритетом
-> `split` по артефактам/контейнерам (§6), которого нет; до этого классификация портов ниже
+> поля не переносит экстракцию в edge. Подключение имеет смысл только вместе с доставкой
+> крупных артефактов под `split` (§6 п.2), которой нет; до этого классификация портов ниже
 > описывает **где код исполняется сегодня**, а не где он мог бы исполняться.
 > Разбор разрывов `split` в извлечении (пере-фетч, провенанс, члены контейнеров, ось уровня) и
 > целевой контракт — `10-extraction-pipeline-architecture.md` §4 (Д-1), §5.4.
 >
-> ⬜ **не сделано (2026-10-28), подтверждено кодом:** `grep -rn extractor_zone core/` даёт только
-> `core/config/deploy.py:594` и валидатор `:607`; сборка экстрактора (
-> `core/cli/wiring.py:2202-2270` `build_worker_extractor`) на поле не смотрит.
+> ⬜ **не сделано (2026-10-28, перепроверено 2026-11-08):** `rg -n extractor_zone core/` даёт
+> только `core/config/deploy.py:768` (поле модели), `core/config/deploy.py:786-792` (валидатор)
+> и константу `EXTRACTOR_ZONES` (`core/config/deploy.py:97`); сборка экстрактора —
+> `core/cli/wiring.py:2211` (`build_worker_extractor`) — на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из
 > интернета — это основная поверхность атаки (парсеры/шрифты/архивы). Идея «вынести её в edge»
-> (defense-in-depth) остаётся в силе как **roadmap**: сегодня в `split` экстракция идёт через
-> шов только для страниц (`/v1/fetch` с осью `extract`), а члены контейнеров и документы по
-> `raw_path` — нет (§6).
+> (defense-in-depth) остаётся в силе как **roadmap**: сегодня экстракция идёт через шов для
+> страниц (`/v1/fetch` с осью `extract`) и **по байтам артефакта** (`/v1/extract/*`, `ae0f933`) —
+> включая документы по `raw_path` и членов контейнеров (§6 п.1). Что не сделано — не «доставка»,
+> а **зона**: экстрактор исполняется там, где его собрал composition root (в ядре), а не в
+> отдельной Z2, и поле `extractor_zone` этого не меняет.
 
 ---
 
@@ -175,6 +187,14 @@ content и не evidence (I19). Контент записей добываетс
 классом отказа `host`. Авторизация — scope `crawl` (см. §8.2).
 Расширение **аддитивно** и не меняет `schema_version` (остаётся `"1"`).
 
+**Передача артефакта `extract/*` (аддитивно, B1/B3, `ae0f933`).** Четыре POST-операции
+доставляют крупный артефакт (PDF/Office) и член контейнера в edge **по байтам**, а не по URL:
+`extract/upload` (приём чанков), `extract/submit` (работа уходит в фон), `extract/collect`
+(результат; `text` — контент, **не** evidence, I19), `extract/abort` (снять staging).
+Публикуемая схема — `contracts/seam/extract.schema.json`; авторизация — scope `extract`
+(§8.2). До 2026-11-08 перечень операций в этом разделе их не содержал — это был дефект
+документа, а не контракта: сервер публикует их в `contracts/seam/openapi.json`.
+
 **Оболочка:** `{schema_version, request_id, status, payload, error}`. `schema_version` — часть
 контракта; несовместимое изменение → bump версии (версионная граница §13).
 
@@ -197,7 +217,7 @@ content и не evidence (I19). Контент записей добываетс
 | `CrawlerPort` | `crawl_scrapy.py` (Scrapy+playwright) · `crawl_browser.py` (`BrowserCrawler`, прямой Playwright/CDP, honest/hybrid) | `RemoteCrawler(gateway)` |
 | `SearchAdapterPort` | `search_yandex.py` / `search_glm.py` | `RemoteSearch(gateway)` |
 | `RegistryFetcherPort` | `registry_generic.py` | `RemoteRegistry(gateway)` |
-| `ExtractorPort` | `extract_html.py` / `extract_document.py` | `RemoteExtractor(gateway)` — **`supports_source_path = False`**: по `raw_path` не работает (§6) |
+| `ExtractorPort` | `extract_html.py` / `extract_document.py` | `RemoteExtractor(gateway)` — **`supports_source_path = True`** (`core/adapters/remote_extractor.py:214`, `ae0f933`): принимает локальные байты, в том числе члена контейнера (§6 п.1) |
 | `PollPort` | `feed_poller.py` | op шва `crawl/poll` (`RemoteFeedPoller`) |
 | `CrawlExecutorPort` | `EdgeScheduler` + `crawler_factory`/`poller` | `remote_crawl_executor.py` (submit/status/cancel/collect) |
 | `ContainerPort` | — (edge не читает контейнеры) | — (спуск исполняется **в ядре**: байты архива в `corpus_raw`) |
@@ -218,18 +238,26 @@ retry/backoff, клиентская валидация ответа).
 `edge/` — второй composition root, допустимо зависит от `ports`+`adapters` (как `cli/`, см. 01 §1).
 Он **не содержит** доменной логики и не пишет в `store` — только исполняет контентные операции.
 
-**Локальный путь исполнения (as-built, `local`).** Две детали определяют, что означают `workers`
-и `max_workers`:
+**Локальный путь исполнения (as-built, `local`).** Три детали определяют, что означают
+`workers`, `max_workers` и `host_concurrency`:
 - **fetch-пул — per seed-root.** `CrawlLimits.max_workers` — размер волны сетевого фетча **одного
   корня**; `None`/`1` — прежний однопоточный путь, `> 1` — пул (процессы/forkserver при наличии
   фабрики, иначе потоки). Пул не общий на прогон: каждый seed-root получает свой.
+- **число одновременных корней — отдельная ось узла.** `crawl.host_concurrency`
+  (`core/config/deploy.py:470`) задаёт, сколько host'ов краул ведёт **одновременно** (полос):
+  `None`/`1` — строго по одному (`core/pipeline/corpus_driver.py:245`,
+  `lanes_limit = 1 if host_concurrency is None`). Per-site слоя у оси нет — это свойство узла,
+  как `pdf_device` (2026-11-07: `host_concurrency: 5`, `max_workers: 10` в `config/deploy.yaml`).
+  Два рычага разные: `max_workers` держит темп внутри одного хоста, `host_concurrency` режет
+  **сумму** времён хостов.
 - **браузерные элементы в пул не идут.** `BrowserCrawler` водит единственный браузер/контекст и
   **не потокобезопасен**, поэтому browser-элементы фетчатся **inline**, минуя пул; `max_workers`
   на них не действует. Параллелизм браузерного фетча задаётся числом процессов/контекстов, а не
   этой осью (в `split` — слотами движка `browser` в edge-планировщике).
 
-Отсюда: `workers` (edge, `{http, scrapy, browser}`) и `max_workers` (ядро, локальный пул) — **разные
-оси разных путей**; обосновывать одну другой нельзя.
+Отсюда: `workers` (edge, `{http, scrapy, browser}`), `max_workers` (ядро, локальный пул) и
+`host_concurrency` (ядро, число полос) — **разные оси разных путей**; обосновывать одну другой
+нельзя.
 
 **Ответственность за обработку (кто что делает):**
 ```
@@ -269,7 +297,7 @@ recovery-on-start возвращает застрявшие `running`-элеме
 
 | Поток | Направление | Политика L7 |
 |---|---|---|
-| core → edge | к DMZ app-порту (напр. 8443) | **ALLOW**: allowlist методов/путей (`/v1/fetch`, `/v1/search`, `/v1/registry`, `/v1/crawl/submit`, `/v1/crawl/status`, `/v1/crawl/cancel`, `/v1/crawl/collect`, `/v1/crawl/poll`, `/v1/health`, `/v1/capabilities`), JSON-schema-валидация, лимиты размера |
+| core → edge | к DMZ app-порту (напр. 8443) | **ALLOW**: allowlist методов/путей (`/v1/fetch`, `/v1/search`, `/v1/registry`, `/v1/crawl/submit`, `/v1/crawl/status`, `/v1/crawl/cancel`, `/v1/crawl/collect`, `/v1/crawl/poll`, `/v1/extract/upload`, `/v1/extract/submit`, `/v1/extract/collect`, `/v1/extract/abort`, `/v1/health`, `/v1/capabilities`), JSON-schema-валидация, лимиты размера |
 | edge → internet | 80/443 | **ALLOW** (опц. allowlist доменов; robots-enforcement; rate-limit) |
 | **core → internet** | любой | **DENY** (нет маршрута) — усиливает I18 |
 | **edge → core** | инициирование | **DENY** (edge только отвечает; не может дозвониться до сервисов ядра) |
@@ -305,8 +333,10 @@ edge-окружении выполняется `playwright install chromium` (п
 LLM-endpoint корп. облака — только в Z0.
 
 **Валидация входящего из edge (обязательно):** схема ответа; лимиты размера/глубины; **повторный
-`content_hash`** (не верить хэшу edge); санитайзинг (nh3/defusedxml); никакого автозапуска
-(контент — только данные). См. `04` §A и §10 регламента.
+`content_hash`** (не верить хэшу edge); **репорт** активного HTML (`sanitize`-нарушение
+предупреждает, но байты не мутирует — инспекция ≠ мутация, §8.5; сам санитайзинг исполняется на
+границе экстракции, `strip_active_html`); никакого автозапуска (контент — только данные). См. `04`
+§A и §10 регламента.
 
 ---
 
@@ -327,14 +357,15 @@ LLM-endpoint корп. облака — только в Z0.
 > Отличие от `split` — только проверка `is_split` (одинаковая для обоих) и **громкое
 > предупреждение** `profile_notices` (payload wiring'а и `hound deploy-check`): имя обещает
 > хардненинг, которого нет, поэтому молчаливое принятие запрещено. `config/deploy.yaml` это
-> значение не использует. Ступень «Z2 + egress-прокси» — **roadmap** (`08`), не текущая
-> функциональность. ➖ снято как открытый вопрос — это **решение D-8**, а не недоделка:
-> алиас принят, и предупреждение `profile_notices` о нём реализовано (`core/config/deploy.py:661`,
-> вызовы `core/cli/commands/run.py:610`, `core/cli/commands/plan.py:172`).
+> значение не использует. Ступень «Z2 + egress-прокси» — **roadmap** (контракт — §8 ниже;
+> порядок перехода — `24` §8), не текущая функциональность. ➖ снято как открытый вопрос — это **решение D-8**, а не недоделка:
+> алиас принят, и предупреждение `profile_notices` о нём реализовано (`core/config/deploy.py:844`,
+> вызовы `core/cli/commands/run.py:761`, `core/cli/commands/plan.py:249`).
 
 **Локальный путь исполнения (as-built).** При `local` краул идёт in-process; как устроены пулы
-(per-seed-root fetch-пул, browser-элементы вне пула) — §4. Отсюда: `workers` в `edge.yaml` и
-`max_workers` в `crawl` — **разные оси разных путей**, а не одно и то же число.
+(per-seed-root fetch-пул, число полос `host_concurrency`, browser-элементы вне пула) — §4.
+Отсюда: `workers` в `edge.yaml`, `max_workers` и `host_concurrency` в `crawl` — **разные оси
+разных путей**, а не одно и то же число.
 
 **Отображение профиля на транспорт краула.** `local` исполняет краул **in-process** (реальные
 адаптеры прямо в ядре). `split`/`split-hardened` маршрутизируют краул через шов: ядро подаёт работы
@@ -343,36 +374,51 @@ LLM-endpoint корп. облака — только в Z0.
 меняется подстановка адаптера (remote-прокси поверх `ContentGateway`); но из неизменности
 контракта **не** следует эквивалентность поведения — см. ниже.
 
-⚠️ **Паритета по корпусу нет: `split` остаётся уже `local` — но только по доставке крупных
-артефактов и по выбору механизма PDF.** Сверено по коду 2026-11-07 (HEAD `19d90af`); прежняя
-редакция этого блока перечисляла три расхождения, два из них закрыты.
+⚠️ **Паритета по корпусу нет: `split` остаётся уже `local` — по доставке крупных артефактов,
+по выбору механизма PDF и по per-root слою осей извлечения.** Сверено по коду 2026-11-08
+(HEAD `f14f866`); прежняя редакция этого блока перечисляла три расхождения: одно закрыто
+(`ae0f933`), два остаются, и добавляется третье остающееся — per-root слой, которого в ней
+не было вовсе.
 
 1. ✅ **Члены контейнеров извлекаются.** `RemoteExtractor.supports_source_path = True`
    (`core/adapters/remote_extractor.py:214`, `ae0f933`): ядро отдаёт **локальные байты**
    члена в `extract/submit`, а не URL. Проверка живёт в родителе —
-   `core/pipeline/extract_consume.py:300`: экстрактор без этого признака даёт видимый
+   `core/pipeline/extract_consume.py:303`: экстрактор без этого признака даёт видимый
    пропуск `extract_unavailable` (капитуляция явная, не тихая), экстрактор шва — нет.
    Спуск по контейнеру и раньше исполнялся в ядре (байты архива живут в `corpus_raw` — это
    локальный файл, не веб-эгресс).
-2. **Артефакт пересекает шов только inline-base64.** `crawl/collect` отдаёт сырьё в странице
+2. ⬜ **Артефакт пересекает шов только inline-base64.** `crawl/collect` отдаёт сырьё в странице
    с бюджетом **8 MiB** (`_COLLECT_MAX_BYTES`), а клиент отвергает страницу больше
    `max_batch_bytes` = **50 MiB** (`MAX_RESPONSE_BYTES`). Staging крупных артефактов (presigned
-   объект/чанки) отсутствует: PDF/архив больше лимита под `split` не доставляется. — ⬜ не
+   объект/чанки) отсутствует: PDF/архив больше лимита под `split` не доставляется. — не
    сделано: `core/edge/scheduler.py:186` (`_COLLECT_MAX_BYTES = 8 MiB`),
    `core/adapters/gateway_validate.py:53` (`MAX_RESPONSE_BYTES = 52_428_800`). Staging для
    **входящего** `extract/submit` при этом есть (`staging_ttl_s`, B1) — речь только о
    `crawl/collect`.
-3. ⚠️ **`crawl.document_level`/`pdf_device` под `split` действуют, `pdf_pipeline` — нет.**
-   Оси уровня и устройства объявлены на собранном `RemoteExtractor` и едут в `extract/submit`;
-   edge строит конвейер по ним (`core/edge/extract_service.py:172` — `artifact_extractor_factory`,
+3. ⚠️ **`crawl.document_level`/`pdf_device` под `split` действуют на уровне app+run;
+   `pdf_pipeline` — не действует.** Оси уровня и устройства объявлены на собранном
+   `RemoteExtractor` (`core/cli/wiring.py:3355-3356`) и едут в `extract/submit`; edge строит
+   конвейер по ним (`core/edge/extract_service.py:172` — `artifact_extractor_factory`,
    `text_layer` → pdfium, остальные уровни → docling), поэтому текст под `split` совпадает с
-   `local` при тех же осях. Не действует только **механизм** PDF: его выбирает edge, а не
-   объявивший его прогон (`core/cli/wiring.py:2428-2433` — комментарий «``pdf_pipeline`` под
-   ``split`` не действует»). Поэтому `deploy_profile` и остаётся полем контракта.
+   `local` при тех же осях. Не действует **механизм** PDF: его выбирает edge, а не объявивший
+   его прогон (`core/cli/wiring.py:2437-2439` — комментарий «``pdf_pipeline`` под ``split`` не
+   действует»). Поэтому `deploy_profile` и остаётся полем контракта.
+4. ⚠️ **Per-root слой осей `document_level`/`pdf_device` под `split` не виден** (расхождение,
+   которого в прежней редакции этого блока не было). Под `local` оси разрешаются на каждом
+   корне цепочкой app < run < site (`core/pipeline/corpus.py:1429`,
+   `profiles=domain_profiles`), поэтому `domain_profiles.yaml` переопределяет уровень для
+   конкретного хоста. Под `split` порты собираются **до** per-root резолва:
+   `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3300`) отдаёт
+   только app+run — и это сказано в самом коде: «per-root слой здесь не виден — порты
+   собираются до per-root резолва (то же ограничение, что у ``pdf_pipeline`` выше)»
+   (`core/cli/wiring.py:3352-3354`). Итог: под `split` действуют app+run, per-root
+   переопределение — нет; под `local` действует вся цепочка. Это не «тихий успех» (непринятое
+   значение нигде не выдаётся за применённое), но и не сообщается — поэтому пункт открыт, а не
+   выдан за сделанный.
 
 Поэтому `split` — не «та же функциональность за швом»: по корпусу он **уже** `local` в части
-доставки крупных артефактов и выбора механизма PDF. Это известное ограничение MVP; staging и
-паритет `pdf_pipeline` — в `08` (Phase 2/7).
+доставки крупных артефактов, выбора механизма PDF и per-root осей извлечения. Это известное
+ограничение MVP; staging крупных артефактов — `08` §8.0; паритет `pdf_pipeline` и per-root резолв — §6 выше.
 
 **«Инсталляция» — deployment-политика, а не методологический вопрос.** Под «инсталляцией» проекта
 понимается способ размещения контура, влияющий на §10 (применимость), 152-ФЗ и ops-бюджет, а не на
@@ -451,18 +497,25 @@ llm:                                # модели корпоративного 
   # для LLM-разведки: идентичность оценщика входит в execution_contract_digest, 03 §D.6)
   # api_key: env COHOUND_LLM_API_KEY; endpoint — [OI]-совместимый API внутри корп. периметра
 search:
-  budget: { ru: 5, en: 5 }          # симметрия I16
   adapter: yandex                   # провайдер поиска по умолчанию (Yandex Search API)
+  serp: { rounds: 0 }               # SERP-контур: 0 — выключен (низший уровень переключения)
   # by_language: { ru: yandex, en: glm }   # дифференциация по языку (I16)
+  # Бюджета здесь нет намеренно: единственный бюджет — объявленный вход прогона
+  # (`run.yaml: serp.budget`), потому что он определяет число запросов, то есть состав
+  # корпуса и `run_id`. Прежний `search.budget: {ru: 5, en: 5}` удалён (ключевался по
+  # языку, тогда как потребитель `SearchBudget` ключуется по фазе, и не ограничивал
+  # ничего); `extra="forbid"` отвергает его — проверено 2026-11-08 (`DeployConfig`).
   # режим запроса (sync | async) объявляется НЕ здесь и не в env, а во входе прогона
   # (`run.yaml: serp.mode` → ось контракта `serp_mode`): он определяет бэкенд провайдера,
   # значит состав находок и корпус. Env YANDEX_SEARCH_MODE — настройка разведки (03 §D.6)
 ```
 
-**Двух полей здесь сознательно нет.** `registry_fetchers` в модели отсутствует (реестровые
-фетчеры выбираются wiring'ом по профилю, не конфигом), а `audit.sink` — перечисление
+**Трёх полей здесь сознательно нет.** `registry_fetchers` в модели отсутствует (реестровые
+фетчеры выбираются wiring'ом по профилю, не конфигом), `audit.sink` — перечисление
 `AUDIT_SINKS = ("file", "syslog")`, не строка-шаблон: писать `"file|syslog"` нельзя (падает
-валидацией). Секция `crawl:` (операционная политика HTTP-краулинга) действует в обоих профилях.
+валидацией), а `search.budget` удалён — бюджет объявляется только во входе прогона
+(`run.yaml: serp.budget`). Секция `crawl:` (операционная политика HTTP-краулинга) действует в
+обоих профилях.
 
 Профиль `local` игнорирует `edge.*` (всё in-process). Секция `llm:` задаёт два слотовых идентификатора
 модели корпоративного облака (`cheap`/`flagship`); активный слот резолвится детерминированно
@@ -486,6 +539,9 @@ Runtime-конфигурация **edge-узла** отделена от `deploy
 | `workers` | `{http: 4, scrapy: 2, browser: 1}` | карта `движок → слоты`; определяет, какие движки собирает composition root |
 | `queue_limit` | `256` | back-pressure: потолок одновременно принятых задач |
 | `ttl_s` | `86400` | TTL блобов (сутки) |
+| `extract_dir` | `{state_dir}/extract` | staging извлечения **по артефакту** (принятые чанки и результат разбора); рядом с остальным состоянием, а не в `/tmp` |
+| `extract_ttl_s` | `3600` | TTL брошенной загрузки артефакта (час, а не сутки: передача занимает минуты) |
+| `extract_workers` | `1` | одновременных извлечений по артефакту; ограничение **по памяти** (пик docling), не по числу ядер |
 | `max_body_bytes` | **1 MiB** (`DEFAULT_MAX_BODY_BYTES`) | потолок тела запроса; **действует всегда** (413) |
 | `schema_version` | `"1"` | версия конверта шва (совпадает с `EDGE_SCHEMA_VERSION`) |
 | `auth.mode` | **`none`** | `none` \| `mtls` \| `oidc` — без auth допустим только на петле |
@@ -544,7 +600,7 @@ edge→core DENY, §5), поэтому одна точка инспекции п
 |---|---|
 | Только L7 HTTP + JSON | никаких protobuf/gRPC, кастомного бинарного фрейминга или payload-сжатия, скрывающего содержимое |
 | Явные поля контента | конверт несёт `raw.bytes_b64` (сырые байты) и `text.content` (очищенный markdown); DLP декодирует base64. **Метки класса данных в конверте нет** — см. §8.5 |
-| TLS-инспекция не блокируется | **никакого certificate pinning**; доверие к корпоративному CA (в т.ч. TLS break-and-inspect) настраивается через `deploy.yaml.tls.ca` |
+| TLS-инспекция не блокируется | **никакого certificate pinning**; доверие к корпоративному CA (в т.ч. TLS break-and-inspect) настраивается через `edge.tls.ca` в `deploy.yaml` |
 | Inline-инспекция | шов может завершаться на корпоративном TLS-инспектирующем прокси/LB — coHound это поддерживает |
 | Единая точка | весь cross-zone трафик — только через шов (§5), обходных каналов нет |
 | Метаданные для IDS | `request_id`, `op` (путь), `schema_version`, размеры — видны на L7 и в аудит-событии (§8.4) |
@@ -558,7 +614,7 @@ edge→core DENY, §5), поэтому одна точка инспекции п
 |---|---|
 | Атрибуция запроса (mTLS) | **Терминирующий прокси** (корп. PKI/IDP) проверяет клиентский сертификат и передаёт субъект в заголовке `auth.subject_header` (**дефолт `X-Client-Cert-Subject`**). coHound **доверяет этому заголовку** и сверяет субъект с реестром `auth.subjects: subject → [scopes]`. Отсюда жёсткое требование к развёртыванию: шов не должен быть достижим в обход прокси, иначе заголовок подделывается |
 | Атрибуция запроса (OIDC) | Bearer-JWT в `auth.token_header` (`Authorization`). Проверяются `iss` (`auth.issuer`), `aud` (`auth.audience`), `exp` и scopes; **подпись — через инъектируемый `verifier`** (composition root). Без `pyjwt` — **fail-closed**, а не «пропускаем» |
-| Авторизация по операции | allowlist `principal → scopes` по операции: `fetch`→`fetch`, `search`→`search`, `registry`→`registry`, `capabilities`→`capabilities`, все `crawl/*`→`crawl`; `health` — публичная диагностика. Отказ: **401** (не аутентифицирован) / **403** (scope нет), конверт `status="error"` |
+| Авторизация по операции | allowlist `principal → scopes` по операции: `fetch`→`fetch`, `search`→`search`, `registry`→`registry`, `capabilities`→`capabilities`, все `crawl/*`→`crawl`, все `extract/*`→`extract`; `health` — публичная диагностика. Отказ: **401** (не аутентифицирован) / **403** (scope нет), конверт `status="error"` |
 | Корреляция | `request_id` в каждом запросе/ответе; тот же id попадает в аудит-событие (второго идентификатора для вызова не существует) |
 | Ротация/отзыв | средствами IDP; coHound не держит «долгоживущих» аутентификационных секретов (эгрессионные креды — в edge, за IDP) |
 
@@ -571,8 +627,8 @@ edge→core DENY, §5), поэтому одна точка инспекции п
 
 - **OpenAPI + JSON-Schema** для всех `/v1/*` эндпоинтов, с явным `schema_version`. Публикуются в
   репозиторий — каталог **`contracts/seam/`**: `openapi.json` + `envelope/fetch/search/registry/
-  crawl/capabilities/health.schema.json` + `README.md` (таблица «механизм / когда действует /
-  дефолт», §8). Каталогов `docs/contracts/` и `edge/openapi.yaml` **нет**.
+  crawl/extract/capabilities/health.schema.json` + `README.md` (таблица «механизм / когда
+  действует / дефолт», §8). Каталогов `docs/contracts/` и `edge/openapi.yaml` **нет**.
 - IDP/DLP/IDS-политики пишутся **по опубликованным схемам**; используемая версия фиксируется в
   `run_manifest.yaml` (`edge_schema_version`) для воспроизводимости R7.
 - Любое **несовместимое** изменение контракта — **версионная граница** (bump `schema_version`), как

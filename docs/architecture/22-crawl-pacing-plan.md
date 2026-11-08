@@ -148,9 +148,10 @@
 ## 6. Что код не делает (проверено 07.11.2026, факты, не пожелания)
 
 - `Retry-After` разобран (`core/util/retry.py`), но его читают **только** поисковые
-  адаптеры. На корпусном пути он **недоступен по носителю**: `RawPage` заголовков не несёт
-  (`core/pipeline/corpus_ingest.py:2645`), поэтому повтор ждёт слот объявленного лимитера, а
-  не указание хоста. Шов отдаёт `retry_after` только как back-pressure **подачи** работы
+  адаптеры. На корпусном пути он **недоступен по носителю**: `RawPage` заголовков не несёт —
+  только `etag`/`last_modified`/`not_modified` (`core/ports/types.py:91-142`), поэтому повтор
+  ждёт слот объявленного лимитера (`core/util/fetch_retry.py:113` — `limiter.wait_reserved`),
+  а не указание хоста. Шов отдаёт `retry_after` только как back-pressure **подачи** работы
   (`core/adapters/remote_crawl_executor.py:186`, ответ `crawl/submit`), а не как ответ
   страницы, — то есть под `split` постраничный `Retry-After` тоже не читается.
 - `429` в HTTP-пути — **повторяется** (`core/util/fetch_retry.py`, `FETCH_RETRY_TIMES = 2`,

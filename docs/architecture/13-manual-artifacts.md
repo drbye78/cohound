@@ -1,9 +1,9 @@
 # Вручную предоставленные артефакты: закрывать пробел от robots, а не подписывать риск
 
-> **Статус реализации на 2026-11-07** (HEAD `19d90af`): сделано 5 из 9, снято 2, открыто 2
+> **Статус реализации на 2026-11-08** (HEAD `f14f866`): сделано 6 из 11, снято 1, открыто 4
 > (F3; типизированная пометка переноса — связь прогонов есть как `previous_run_id`).
-> Разбивка: **5 ✅ + 2 ➖ (снято решением) + 2 ⬜**.
-> Первая редакция — 2026-10-25; §10 — as-built 2026-10-27; сверено по коду 2026-11-07.
+> Разбивка: **6 ✅ + 1 ➖ (снято решением) + 4 ⬜**.
+> Первая редакция — 2026-10-25; §10 — as-built 2026-10-27; сверено по коду 2026-11-08.
 > Счёт по пунктам: §10 — 4 ✅ + 1 ➖ + 2 ⬜ (7 пунктов), §8 — 2 ✅ + 2 ⬜ (4 пункта).
 
 **Дата:** 2026-10-25
@@ -90,7 +90,7 @@ RawPage (core/ports/types.py:91-121)
 
 `RawPage` уже умеет всё нужное: `content`/`staged_path` (файл вместо RAM), и докстринг
 фиксирует принцип — **хеш от адаптера не принимается**, pipeline пере-хеширует сам
-(`ports/types.py:113-115`: «pipeline **сам** пере-хеширует файл (потоково) и публикует его
+(`core/ports/types.py:113-115`: «pipeline **сам** пере-хеширует файл (потоково) и публикует его
 в `corpus_raw`; хеш от адаптера не принимается»). Ручной артефакт — это `RawPage` с байтами
 оператора. Дальше ничего не меняется: тот же retention, тот же экстрактор, тот же чанкер,
 та же сборка индекса. Второго пути байтов в evidence не появляется — это и есть требование,
@@ -99,7 +99,7 @@ RawPage (core/ports/types.py:91-121)
 **Чего нельзя делать: переиспользовать `source_kind=manual`.** Оно уже занято и означает
 другое — провенанс **вердикта** человека, а не байтов (`core/domain/enums.py:20-26`,
 I22-исключение в `core/domain/invariants.py:510-512`). Более того, `MANUAL` **вне**
-`_CORPUS_SOURCE_KINDS` (`invariants.py:76-78`), поэтому для него I19 не требует
+`_CORPUS_SOURCE_KINDS` (`core/domain/invariants.py:76-78`), поэтому для него I19 не требует
 `content_hash`. Совместить два смысла в одном поле значило бы дать ручному байту
 opportunity пройти мимо хеширования. Поэтому признак происхождения байтов — отдельная
 колонка (§3.3), а `source_kind` не трогается.
@@ -131,10 +131,12 @@ provide:
 ### 3.2 `run_id` обязан знать про артефакты
 
 Новое поле в `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py`; на 25.10 в контракте
-было 19 полей, сейчас — **32**, `:96`): `manual_artifacts_digest` (`:171`).
+было 19 полей, сейчас — **32**, `core/pipeline/digests.py:96`): `manual_artifacts_digest`
+(`core/pipeline/digests.py:171`).
 
-Материал — по образцу `seeds_digest` (`digests.py:270-304`): отсортированные
-`(product_id, url, sha256)` (`manual_artifacts_digest` — `:375`, материал `:391`). **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
+Материал — по образцу `seeds_digest` (`core/pipeline/digests.py:270-304`): отсортированные
+`(product_id, url, sha256)` (`manual_artifacts_digest` — `core/pipeline/digests.py:375`, материал
+`core/pipeline/digests.py:391`). **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
 это провенанс записи, а не измерение (прецедент: `seeds_digest` исключает `source`/`added_*`;
 `scope_attested_by` не входит в контракт вовсе). Пустой набор даёт стабильный дайджест
 пустого множества, а не пустую строку — как у seeds.
@@ -162,10 +164,10 @@ provide:
 | краул отказано | `crawl_session_items` | `failed` + `robots_disallow` (не меняется) |
 | материал наблюдён | `corpus_docs` | новая колонка `origin = manual` |
 
-`corpus_docs` на 25.10 не различал происхождение (`core/store/sqlite.py:97-107` — 9 колонок,
-ни одной про источник). As-built: `origin TEXT NOT NULL DEFAULT 'crawl'` объявлен прямо в DDL
-(`core/store/sqlite.py:184-210`, `origin` — `:196`); схема при этом не «аддитивно дотянута», а
-версионирована гейтом — текущая **3.20.0** (`core/store/sqlite.py:29-35`, `:86`), шимов
+`corpus_docs` на 25.10 не различал происхождение (`core/store/sqlite.py:185-193` — те же
+9 колонок, ни одной про источник). As-built: `origin TEXT NOT NULL DEFAULT 'crawl'` объявлен прямо в DDL
+(`core/store/sqlite.py:184-210`, `origin` — `core/store/sqlite.py:196`); схема при этом не «аддитивно дотянута», а
+версионирована гейтом — текущая **3.20.0** (`core/store/sqlite.py:29-35`, `core/store/sqlite.py:86`), шимов
 `ALTER TABLE` при открытии нет ни одного.
 
 Плюс отдельная audit-таблица (или строка манифеста) `manual_artifacts`:
@@ -203,7 +205,8 @@ manual_artifacts:
 `digital_q_database` 61, `postgrespro` 18, `tantor` 2; по origin `database.diasoft.ru` 61,
 `postgrespro.ru` 15, `edu.postgrespro.ru` 3, `tantorlabs.ru` 2; исключено по классу
 `payload_too_large` 12, `not_found` 3, `source_unavailable` 2. Документов в корпусе того же
-прогона — **6 401** (`corpus_docs`), ручных (`origin='manual'`) — 0.
+прогона — **8 115** (`corpus_docs`, все `origin='crawl'`; замер 08.11.2026), ручных
+(`origin='manual'`) — 0.
 
 Число в манифесте делает подмену и асимметрию видимыми без запрета. Это тот же приём, что
 `requested` vs `computed` в ранжировании и `scope_attestations` в манифесте.
@@ -306,9 +309,13 @@ gaps:
 - **06.11.2026** (`docs/reports/measurements/2026-11-06-embedding-precision-cpu.md:130,153-154`):
   на **138 961** чанке — **6.4 ч** при 6.0 чанк/с (GPU fp32), **2.4 ч** на bf16, **55.7 ч** на
   CPU (0.692 чанк/с); fp16 даёт **2.6×** к fp32.
-- **07.11.2026** (живой прогон `ru-pg-dbms-2a5b51af5778`): фаза `corpus` — **6 321 с** на
-  **133 119** чанках (`runs/…/metrics.json`, `duration_by_phase.corpus`); в неё входит не
-  только эмбеддинг, поэтому с двумя предыдущими она сопоставима лишь по порядку величины.
+- **07.11.2026** (живой прогон `ru-pg-dbms-2a5b51af5778`): фаза `corpus` исполнялась четыре
+  раза — **6 321 с** (3 461 отказ чтения), затем 1 990 с, 846 с и закрывающие **982 с**
+  (24 отказа). Длительность берётся из `runs/…/logs/corpus.jsonl` (события `start`/`end`
+  с `ts`), а **не** из `metrics.json`: этот файл перезаписывается каждым вызовом `run`/`report`,
+  и после `report` в нём остаются только `g4`/`report`. В 6 321 с входит не только эмбеддинг,
+  поэтому с двумя предыдущими замерами она сопоставима лишь по порядку величины, а не как
+  цена эмбеддинга.
 
 Практический вывод: **цикл «увидел пробел → принёс файл → перезапустил» становится пригодным
 только после F3** (документ-ориентированный `pb`). Это не возражение против фичи, а порядок:
@@ -341,17 +348,17 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:314` — единственный writer, зовут
-   `core/pipeline/corpus.py:5276` и `core/pipeline/report.py:3530`; человеческая строка —
-   `core/pipeline/artifacts_gap.py:196`, сбор — `:219`). Ничего не меняет в семантике, сразу делает пробел
+   `core/pipeline/corpus.py:5306` и `core/pipeline/report.py:3573`; человеческая строка —
+   `core/pipeline/artifacts_gap.py:196`, сбор — `core/pipeline/artifacts_gap.py:219`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
-   (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `:108-127`; подача —
-   `core/pipeline/corpus.py:4206`; `origin` — `core/store/sqlite.py:196`;
+   (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
+   `core/pipeline/corpus.py:4205`; `origin` — `core/store/sqlite.py:196`;
    `resolved_manually` — `core/domain/models.py:2592` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1728`; дайджест — `core/pipeline/digests.py:171`, материал
-   `:391`).
+   `core/pipeline/digests.py:391`).
    As-built и расхождения — §10.
 3. ⬜ не сделано — **типизированной пометки** «этот артефакт перенесён из прогона X» нет;
    **связь между прогонами есть** и называется `previous_run_id`:
@@ -443,16 +450,18 @@ by_product}` из персистентного аудита; `share_of_corpus = 
 **Что осталось от документа (проверено на `19d90af`, 07.11.2026).**
 
 - ✅ **Вход байтов** — `core/pipeline/manual_artifacts.py:215` (`load_manual_artifacts`),
-  схема `manual_artifacts/1` (`:67`), путь от пакета (`:192-212`), сверка `sha256` (`:297-303`),
+  схема `manual_artifacts/1` (`core/pipeline/manual_artifacts.py:67`), путь от пакета
+  (`core/pipeline/manual_artifacts.py:192-212`), сверка `sha256` (`core/pipeline/manual_artifacts.py:297-303`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:5276`), и `report` (`core/pipeline/report.py:3530`); форма —
+  (`core/pipeline/corpus.py:5306`), и `report` (`core/pipeline/report.py:3573`); форма —
   `core/pipeline/artifacts_gap.py:219` (`collect_artifact_gaps`), человеческая строка —
-  `:196` (`human_line`).
+  `core/pipeline/artifacts_gap.py:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:132`); подача
-  живёт внутри `corpus` (`core/pipeline/corpus.py:4206`), т.е. §5 исполнен буквально.
+  живёт внутри `corpus` (`core/pipeline/corpus.py:4205`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:171`,
-  материал `(product_id, url, sha256)` — `:391`), считается даже при пустом наборе.
+  материал `(product_id, url, sha256)` — `core/pipeline/digests.py:391`), считается даже
+  при пустом наборе.
 - ⬜ **Типизированная пометка переноса** — не сделана (связь прогонов есть как
   `previous_run_id`): см. §8 п. 3.
 - ⬜ **F3** — не начат: см. §8 п. 4.

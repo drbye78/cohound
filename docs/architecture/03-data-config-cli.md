@@ -1,7 +1,7 @@
 # coHound — архитектура: Итерация 3 — данные, конфигурация, CLI
 
-> **Статус открытых вопросов на 2026-10-28** (HEAD `f6100c7`): 8 закрыто, 1 открыто.
-> У каждого пункта в §F–§G маркер ✅/⬜/➖/❔ с доказательством.
+> **Статус открытых вопросов на 2026-11-08** (HEAD `f14f866`): 8 закрыто, 1 открыто.
+> У каждого пункта в §F–§G маркер ✅/⬜/➖/❔ с доказательством; якоря сверены по содержимому строк (08.11.2026).
 
 **Документ:** `docs/architecture/03-data-config-cli.md`
 **Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
@@ -192,15 +192,12 @@ runs/{run_id}/
 
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
-Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
-(25 таблиц, включая `schema_meta`; индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.20.0`** (3.14.0 — гейт версии вместо аддитивных шимов — волна S плана 17; 3.17.0 —
-`crawl_policy_digest`, план 19; 3.18.0 — `runs.corpus_snapshot_json`, план 20 F1; 3.19.0 —
-`corpus_artifact`, F2; 3.20.0 — `corpus_coverage.roots_json` + `cells.absence_as_of`, F3/0.3.0;
-3.13.0 — свидетельство живости сеанса краула — `crawl_sessions.owner`/`heartbeat_at`,
-`interrupted` в `crawl_session_status`; B3: спуск в контейнеры — `corpus_members`/`archive_observations`
-(PK `(archive_content_hash, member_path, product_id)` с 3.13.0 — провенанс члена не перезаписывается
-другим продуктом); E2: дайджест спецификаций реестров; D3/D4/сеансы/провенанс краула/P1-самодостаточность; gates: `gate_decisions` с предметом решения) — версия **SQLite-схемы**, не регламента; колонки
+Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py` (**24** `CREATE TABLE` + `sqlite_sequence` (`AUTOINCREMENT` у `search_log.log_id`) = **25 таблиц** в `sqlite_master`, включая `schema_meta`; 15 объявленных `CREATE INDEX` (в `sqlite_master` их 38 — остальные автоиндексы PK/UNIQUE), 5 триггеров — I4/I6/I7/I13/I18 и `trg_evidence_source_id` (I10/I15); сверено 08.11.2026). Константа `SCHEMA_VERSION`
+= **`3.20.0`** (`core/store/sqlite.py:86`), `STATE_SCHEMA_VERSION` = **`"12"`**
+(`core/store/state_sqlite.py:84`). **Полная история версий и причина каждого bump'а — канонически
+в `16-runs-schema-boundary.md`** (баннер: 3.13.0 → 3.14.0 гейт вместо аддитивных шимов → … →
+3.20.0), здесь не дублируется: две копии истории расходятся, и тогда неизвестно, какая верна.
+Ниже — только **что в какой таблице** появилось, потому что это нужно для чтения DDL:
 `runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2),
 `runs.crawl_strategy` / `runs.crawl_rate_limit` (v3.3/Backlog B: операционные оси краула,
 границы `execution_change`, §13), `runs.registry_spec_digest` (v3.5/E2: дайджест package-scoped
@@ -222,8 +219,10 @@ runs/{run_id}/
 `schema_version: схема БД несовместима: … код ожидает '3.20.0' …` и возвращает `EXIT_USAGE`,
 вместо трейсбека или молчаливого апгрейда. Прогон переносится **пересозданием** каталога прогона,
 а не чтением старой БД: аддитивные дельты сделали бы «старую» строку неотличимой от «новой».
-Поэтому `_ensure_columns` теперь страховка от «полусозданной» БД **в пределах** объявленной
-версии, а не путь миграции старой.
+Поэтому шимов `_ensure_columns` (`ALTER TABLE … ADD COLUMN` при открытии) **нет ни одного**:
+колонки и индексы объявлены в `CREATE TABLE`, а колонка, которой там нет, — дефект DDL, а не повод
+досоздать её на открытии (решение владельца 01.11.2026; удаление — `core/store/sqlite.py:736-744`).
+Тихий догон объявил бы файл текущим, не будучи им.
 
 **Свидетельство живости (v3.12.0, `10` §Д-6).** `crawl_sessions.owner` (`host/pid/старт-процесса`)
 и `crawl_sessions.heartbeat_at` — **не** блокировка и не lease (SQLite — локальный одно-писательный
@@ -316,6 +315,18 @@ class SqliteStore:
 | `index_build_id`, `retrieval_profile` (per cell) | cells | provenance ячейки (R15) |
 | `prompt_hash` (per cell) | cells | воспроизводимость ячейки |
 | `stale_reason` (per cell) | cells | инвалидация при смене сборки/prompt-шаблона |
+
+Версии **хранилищ** — отдельный класс: они не описывают измерение, а гейтируют чтение
+файла, и несовпадение — видимый отказ (`SchemaVersionMismatch`, `EXIT_USAGE`), а не
+миграция (см. §B.1). Сверено 08.11.2026:
+
+| Версия | Носитель | Значение |
+|---|---|---|
+| `SCHEMA_VERSION` | `runs/{run_id}/cohound.db` | `"3.20.0"` (`core/store/sqlite.py:86`) |
+| `STATE_SCHEMA_VERSION` | `state/{package_id}/state.db` (durable-состояние оператора) | `"12"` (`core/store/state_sqlite.py:84`) |
+| `EDGE_JOBS_SCHEMA_VERSION` | `edge_jobs.db` (очередь DMZ) | `"1"` (`core/edge/scheduler.py:197`) |
+| `SEAM_SCHEMA_VERSION` | контракт `/v1/*` (`contracts/seam/*.json`); в манифесте — `edge_schema_version` (`DEFAULT_SCHEMA_VERSION`, `core/adapters/remote_gateway.py:54`) | `"1"` (`core/edge/seam_schema.py:68`) |
+| `METHODOLOGY_VERSION` | код (`core/domain/models.py:162`), ярлык пакета обязан ему **равняться** | `"0.3.0"` |
 
 #### C.1.1. Что входит в `run_id` (форкает ли прогон идентичность)
 
@@ -1426,7 +1437,8 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 > `commands/__init__.py:COMMANDS`), подкоманды `hound package` — в `core/cli/package/*`
 > (`add_package_parser`, `cmd_package_*`); `main.py` — тонкая точка входа, `package_commands.py` —
 > re-export-шим (обратная совместимость). Таблица ниже — его зеркало; при расхождении верен код.
-> Актуальный список команд см. также `./hound.py --help`.
+> **25 верхнеуровневых команд** (сверено 08.11.2026 по `build_parser()`), включая `backup`,
+> `restore`, `retry` и `extract consume`; актуальный список — `./hound.py --help`.
 
 | Команда | Назначение | Пишет |
 |---|---|---|
@@ -1434,19 +1446,23 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound status <run_id> [--runs-dir DIR]` | где прогон и что дальше: последняя исполненная фаза, гейт остановки и записанное решение (кто/почему), счётчики ячеек/корпуса и **готовая следующая команда** (`hound gate …` / `hound run …` / `hound report …`). Отсутствующий прогон → `EXIT_NOT_FOUND` (4) | — (только чтение) |
 | `hound resolve <source_id> --db PATH` | резолв `source_id` → URL по БД прогона (I10/I15), без сети | — (только чтение БД) |
 | `hound plan` | нормализация входов + линт + план прогона, когорта; принимает **те же оси краула**, что `run` (`--max-depth`/`--max-documents`/`--exclude-path`/`--exclude-document`/`--document-level`/`--pdf-pipeline`), плюс `--serp-rounds` и **контрактные флаги ретривала** `--retrieval-profile`/`--cutoff-k` — и печатает `run_id` вместе со слагаемыми контракта (`execution_contract_digest`, `crawl_config_digest`, `serp_rounds`/`serp_source`, `retrieval_profile`/`cutoff_K`). Инвентарь флагов один (`CONTRACT_FLAGS`/`CRAWL_AXIS_DESTS` в `core/cli/execution_axes.py`), паритет с `run` читают тесты по собранным парсерам | — (отчёт в stdout/`--json`; запись черновика `run.yaml`/`cohort.yaml` — roadmap W10. Флага `--dry-run` нет: `plan` и так ничего не пишет, а флаг обещал «есть и не-dry режим») |
-| `hound discover` | Discovery-агент | passports, run |
+| `hound discover` | Discovery-агент (Ш2/Ш5): внешний поиск → **кандидаты-гипотезы** (I19/G2); без LLM-конфигурации кандидаты не выдумываются | — (только печать: `--json`/текст) |
 | `hound passport-scout` | авто-генерация **черновика** паспорта продукта: краул `--url` (и, при поиске, URL выдачи) → tool-less LLM-разведка (`discovery_llm`) → консервативный черновик. Сателлиты — только `draft`/`not_found`; `relationship_evidence`/`upstream` — лишь при подтверждённом URL и дословной цитате (I10/I15, precision-first). Публикация только при `report.ok`; `--dry-run` не пишет. Кандидаты не выдумываются без LLM-конфигурации | `passports/{product_id}/…yaml` (+ sidecar кандидатов) |
 | `hound package scout` | веб-заземлённая разведка пакета категории: pipeline сам делает SERP+краул+extract, tool-less LLM синтезирует гипотезы → консервативный маппинг → кандидаты (`needs_human=True`; auto-approve нет, I18/I19/A3). Провайдер поиска резолвится из `config/deploy.yaml` (`search.adapter`/`search.by_language` по `--lang`) детерминированно; `--search-adapter` переопределяет (I16/I21/I23) | `packages/{case_id}/sources/scout/{date}.candidates.json` (+ `.provenance.json`, в т.ч. `search_provider`) |
-| `hound package {module\|role\|param\|baseline\|cohort\|scope\|golden\|run\|artifact} <действие>` | read/CRUD-плоскость управления пакетом. **Глаголы у подкоманд разные** (см. матрицу ниже); `--json` | — (read-only, кроме `*: add/update/remove/set/clear`) |
+| `hound package {module\|role\|param\|baseline\|cohort\|scope\|golden\|seeds\|run\|artifact\|profile} <действие>` | read/CRUD-плоскость управления пакетом. **Глаголы у подкоманд разные** (см. матрицу ниже); `--json` | — (read-only, кроме `*: add/update/remove/set/clear/attest`) |
 | `hound run [--until PHASE]` | конвейер Ш1–Ш9 (15 фаз) | БД, артефакты |
-| `hound crawl {run\|status\|list\|resume\|restart\|cancel}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики, resume/restart/cancel | `crawl_sessions`, `crawl_session_items` |
+| `hound crawl {run\|status\|list\|resume\|restart\|cancel\|policy}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики (`status --per-url`/`--per-host`), resume/restart/cancel; `policy {set\|list\|clear}` — режим обновления по области (§D.2.2) | `crawl_sessions`, `crawl_session_items`; `crawl_policy` (только `policy`) |
+| `hound extract consume --run-yaml … --package …` | довести durable-очередь `extract_queue` завершённого сеанса краула до корпуса: запускает **ту же** фазу Ш5 в режиме `consume_only` (сетевые шаги — дренаж корней, ревалидация, SERP — не исполняются), печатает наблюдённое (`done`/`failed`/`skipped`/`claimed`/`pending`, `backlog_bytes`); незакрытая очередь → `EXIT_ERROR`, не «ok». Пара к `crawl run --crawl-only` (F2): «краул выполнен» ≠ «корпус собран» | `corpus_docs`/`corpus_chunks` через фазу корпуса |
 | `hound review` | очередь ревью / preliminary-стол: `preliminary`-контур + `❓`-кандидаты (Ш7) — **только печать**, ячейки не меняет | — (только чтение БД) |
 | `hound report` | сборка артефактов | outputs |
 | `hound golden [--golden PATH \| --package DIR] [--tier fast\|full]` | прогон golden; источник эталона — явный `--golden` **или** объявление пакета `sources/golden_status.yaml` (`present` — сверка; `absent`/`declined` — «неприменимо», `EXIT_USAGE` с `error: golden_not_configured`, пороги не считались) | отчёт |
 | `hound sensitivity` | пост-хок по осям | отчёт |
 | `hound diff <run_a> <run_b>` | межцикловый diff (запрещён через major) | diff.md |
+| `hound backup --run-id ID [--dest PATH] [--include-state]` | zip-бандл прогона: `cohound.db` — согласованный снимок через `sqlite3.Connection.backup` (не копия файла: у живой БД есть `-wal`); `--include-state` добавляет снимок `state/{package_id}/state.db` отдельным членом `state/state.db`, его отсутствие — **видимая** строка, не тихий пропуск | архив `{runs_dir}/{run_id}.zip` (дефолт) |
+| `hound restore --archive PATH [--dest-dir DIR] [--state-into DIR] [--force]` | восстановление прогона из бандла: непустой каталог **не** перезаписывается (отказ с его именем); восстановление `state.db` — **явное** действие (`--state-into`), перезапись живой БД — только с `--force` | каталог прогона, `state.db` |
 | `hound promote --actor <вы> [--validated-only]` | preliminary → strict (переаттестация); `--actor` **обязателен** (I6/I7) | cells |
 | `hound revalidate` | пере-оценка **только** устаревших ячеек существующего прогона (§13/K2): селектор `select_stale_cells` берёт ячейки со `stale_reason` из store (не из `stale_cells.csv`) и **только** корпусного контура (`source_kind=documentation`, состояние `evaluated`/`preliminary`) — реестр/наследование/baselines не переписываются. Условия ячейки повторяются (её `retrieval_profile`/`cutoff_K`, принятие риска из `evidence_scope`), модель оценщика — из объявленных `llm_scenarios` прогона (`--llm-model` нет: другая модель — другой `run_id`). Пометка снимается **только** при вердикте по текущей сборке; `failed`/`preliminary` или чужая сборка → пометка остаётся. `run_id` не меняется (это не новое измерение); `--dry-run` — только селектор; повтор без изменений → `noop` с явным «пере-оценивать нечего» | cells (`stale_reason`/`index_build_id`/`validation_notes`) |
+| `hound retry [--dry-run] [--llm-concurrency N]` | повтор оценки ячеек **без вердикта** на существующем прогоне (план 25): селектор `select_failed_cells` берёт `failed` с повторяемым классом сбоя, дальше — тот же конвейер Ш6; модель оценщика — из объявленных `llm_scenarios` (`--llm-model` нет: другая модель — другой `run_id`). `run_id` **не меняется** и в `runs` команда не пишет: доведение прерванной Ш6 не меняет условий измерения (поэтому это не флаг `run`, который вошёл бы в `execution_contract_digest`). `--dry-run` — только селектор; журнал попыток — `logs/retry.jsonl` | cells (`validation_notes`, `failure_kind`), `logs/retry.jsonl` |
 | `hound gate --gate G1..G4 --actor <вы>` | запись решения гейта. G1/G2 — **внутренняя аттестация** профиля; G3/G4 — **точки интеграции** (вердикт приходит извне). `--source internal\|external`, `--verdict approved\|rejected`, `--subject-digest` (по умолчанию — из `runs/{run_id}/gates/{gate}-request.json`), `--external-ref` + `--notes` обязательны при `--source external` (S9/I6/I7) | `gate_decisions` |
 | `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) + неразрушающий зонд очереди краула (`crawl/status` → строка `crawl`; без подачи задания) | — (отчёт) |
 | `hound experiment retrieval` | прогон R0/R1/R2 на retrieval-golden и фиксация измеренного `retrieval_profile`/`retrieval_cutoff_K`/`embed_model_id`/`rrf_k` как `settings_provenance` со `source: measured` (A3, T8.6, I20). Фиксация — **только профиль**, и **только** при полном сравнении; частичное сравнение/`skipped` → `source: default`. Требует зафиксированную индексную сборку в `runs`; рассинхрон «эмбеддер запроса ↔ сборка» → отказ (§13), отсутствие предпосылки → `skipped` (N3) | `runs.settings_provenance_json`, `runs.retrieval_*` |
@@ -1455,11 +1471,11 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound baseline-agreement --annotations <csv>` | согласие независимых аннотаторов §11.5: Cohen's κ по полному набору меток **и отдельно** по бинарному решению N/A-vs-не-N/A (N/A задаёт знаменатель Coverage, I6/I7), + матрица расхождений и счётчики. Непарные ячейки исключаются и перечисляются; нулевая вариация маргиналов → `undefined` (не выдуманное число). Разметку не создаёт: это ручная работа человека | — (отчёт; артефакт разметки — вход) |
 | `hound package crawl-probe` | **измерение** оптимальных осей краула для каждого ключа `domain_profiles.yaml` (A3): лестница `http` → `browser/hybrid` → `browser/honest`; решение принимает исход **браузерного** яруса (`RawPage.fetch_mode`), а не текст ошибки — оба яруса провалились ⇒ `unresolved` с причиной (транзиентный сбой не выдаётся за `browser`); причина **диагностична**: сбой транспорта (`both_tiers_failed`) отличается от «транспорт дошёл, но экстракция дала 0 символов» (`extraction_empty` — смотреть экстрактор, не краулер; при расхождении ярусов в отчёте обе причины). Пригодность меряется **выходом реального экстрактора**, не размером байт. `wait_for`/`rate_limit` не выдумываются: только подсказка (`needs_confirmation`) и только при `429`. URL — `--urls` > `corpus_docs` (`--corpus-db`) > синтез `https://{host}{path}/` (`confidence: low`). По умолчанию **только предложение**; `--write` (требует `--actor`) правит `domain_profiles.yaml`, сохраняя шапку байт-в-байт и не тронутые блоки дословно, при отсутствии изменений — no-op. Смена осей краула — граница `execution_change` (§13), не `methodology_version` | `packages/{case_id}/sources/crawl_probe/{date}.proposal.yaml` |
 
-**Полный состав `hound package` — 27 подкоманд** (`hound package --help`): `new`, `show`,
-`validate`, `list`, `set-archetype`, `bump-version`, `module`, `role`, `param`,
-`infer-archetype`, `compose-baselines`, `baseline`, `cohort`, `scope`, `golden`, `seeds`,
-`state`, `run`, `artifact`, `suggest`, `candidates`, `apply`, `scout`, `crawl-probe`, `add-product`,
-`index-gc`, `builds-gc`.
+**Полный состав `hound package` — 28 подкоманд** (`hound package --help`, сверено
+08.11.2026): `new`, `show`, `validate`, `list`, `set-archetype`, `bump-version`, `module`,
+`role`, `param`, `infer-archetype`, `compose-baselines`, `baseline`, `cohort`, `scope`,
+`golden`, `seeds`, `state`, `run`, `artifact`, `suggest`, `candidates`, `apply`, `scout`,
+`crawl-probe`, `add-product`, `profile`, `index-gc`, `builds-gc`.
 
 Матрица «подкоманда → глаголы» (универсальной формулы `{get|list|show}` **нет**):
 
@@ -1475,6 +1491,8 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `seeds` | `list` · `add` · `disable` · `enable` · `export` |
 | `run` | `show` |
 | `artifact` | `list` · `get` |
+| `state` | `adopt` · `show` · `forget-product` |
+| `profile` | `attest` · `show` |
 
 Подкоманды без глаголов (собственные действия): `new` (из `packages/_template`), `show`
 (сводка), `validate` (линт без записи), `list` (обзор пакетов каталога), `set-archetype`
@@ -1497,10 +1515,16 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
   `--refresh {auto,revalidate,refresh,offline,frozen}` (`refresh_policy`), `--frozen-source
   {bytes,chunks}` (`frozen_source`, канонизируется в `n/a` вне `frozen`), `--only-failed` /
   `--only-product ID` (`run_scope`), `--cycle-id` / `--update` (`cycle_id`), `--profile
-  {local,split}` (`deploy_profile`), а также
-  `--llm-slot`, `--llm-model`, `--retrieval-profile`, `--cutoff-k`, `--document-level`,
-  `--max-depth`, `--max-documents`, `--exclude-path`, `--exclude-document` (оси контракта).
-  Частичный прогон — **другой прогон**, а не resume полного.
+  {local,split}` (`deploy_profile`), `--render-modes FILE` (`render_modes_digest`: браузер и
+  честный HTTP отдают разный текст) и `--passports-dir` (`passports_digest`), `--refresh-scope`
+  (`crawl_policy_digest`), а также `--llm-slot`, `--llm-model`, `--llm-reasoning-effort`
+  (`llm_scenarios`), `--retrieval-profile`, `--cutoff-k`, `--serp-rounds` (оси контракта) и
+  **все оси краула** `--max-depth`, `--max-documents`, `--exclude-path`, `--exclude-document`,
+  `--document-level`, `--pdf-pipeline`, `--document-timeout`, `--host-concurrency`,
+  `--extract-backlog` (через `crawl_config_digest`). Инвентарь — `CONTRACT_FLAGS`/
+  `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:484`, `core/cli/execution_axes.py:193`);
+  полный список флагов — `hound run --help`. Частичный прогон — **другой прогон**, а не
+  resume полного.
 * **Меняют объём работы, но не идентичность:** `--reset` (повторить фазы в обход resume;
   durable-сеанс краула **сохраняется** — `corpus` переоткрывает его и не фетчит заново URL
   с retained-байтами), `--from-scratch` (единственный, кто стирает сеанс краула, + живой
@@ -1509,13 +1533,18 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
   `--since-run ID` (явный predecessor для carry-forward/lineage; по умолчанию — последний
   прогон пакета из `state.db`).
 * **Операционные:** `--until PHASE`, `--dry-run`, `--follow`/`--watch` + `--interval S`,
-  `--run-id` (ручное переопределение), `--runs-dir`/`--db`, `--passports-dir`,
-  `--render-modes`, `--env-file`, `--json`.
+  `--run-id` (ручное переопределение идентичности целиком), `--runs-dir`/`--db`, `--node`
+  (узел карты шардов `deploy.yaml:crawl.shards`), `--llm-concurrency N` (ширина пула Ш6;
+  условие исполнения, не измерения), `--freshness-warn-days N` (порог предупреждения о
+  разбросе дат наблюдений), `--env-file`, `--json`.
 
 Оси контроля краула (D1/D2): `--max-depth D` (BFS-обход in-site ссылок; `0` — только seeds,
 дефолт), `--max-documents N` (`>0`; потолок добытых страниц на `(продукт, seed-root)`),
 `--exclude-path GLOB` и `--exclude-document GLOB` (повторяемые glob-блэклисты по пути URL и
-по basename), `--document-level LEVEL`. Флаги уточняют **run-слой** поверх `run.yaml:crawl`
+по basename), `--document-level LEVEL`, `--pdf-pipeline {structured,text_layer}`,
+`--document-timeout S`, `--host-concurrency N`, `--extract-backlog MB` — последние четыре
+объявлены в том же инвентаре (`core/cli/execution_axes.py:193`) и входят в
+`crawl_config_digest` **только при объявлении** (необъявленная ось = сегодняшнее поведение). Флаги уточняют **run-слой** поверх `run.yaml:crawl`
 (цепочка app < run < site);
 усечение (`max_documents`/`max_depth`) фиксируется честно — сеанс краула не рапортуется
 `COMPLETED` (→ `PARTIAL`), а absence `source_scope: exhaustive` поверх усечённого продукта
@@ -1530,9 +1559,13 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 предупреждением; реальные сбои сохраняют `EXIT_ERROR` (N4).
 
 У `hound crawl run` — свой набор: `--until` по умолчанию **`corpus`** (если `corpus` отсечён,
-краул не запускается); флаги краула те же (`--reset`/`--from-scratch`/`--only-*`/
-`--max-attempts`/`--max-depth`/`--max-documents`/`--exclude-*`/`--document-level`/`--follow`),
-плюс `--llm-slot`/`--llm-model`.
+краул не запускается); оси краула те же, что у `run` (`CRAWL_AXIS_DESTS`, плюс
+`--refresh-scope`/`--frozen-source`/`--node`), `--crawl-only` (F2) наполняет очередь
+`extract_queue` и **не конвертирует** — доводит её `hound extract consume`; `--crawl-only`
+отвергается `EXIT_USAGE`, если `--until` требует фаз после `corpus` (они читают собранный
+корпус). Модель оценщика объявляется теми же
+`--llm-slot`/`--llm-model`/`--llm-reasoning-effort`; `--llm-concurrency` — условие
+исполнения, не идентичности.
 
 Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и **`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
 несуществующий пакет — честный `EXIT_NOT_FOUND` (команды чтения fail-closed, а не ложный успех).
@@ -1563,10 +1596,13 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   печатает, что требуется. **G1/G2 — внутренняя аттестация:** человек утверждает содержимое
   профиля пакета-якоря (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь —
   durable-аттестация профиля (`profile_attestation` в `state/{package_id}/state.db`) —
-  объявлена и проверяется гейтом, но **производителя в прогоне нет** (design-only: строку
-  пишут только тесты), поэтому как работающий механизм её описывать нельзя. Рабочий путь
-  сегодня один — per-run строка `gate_decisions` (аудит-след и override), и она
-  **приоритетна**. **G3/G4 — точки интеграции:** coHound не решает ревью/публикацию, а
+  объявлена, проверяется гейтом (`make_profile_gate`, `core/pipeline/profile_attestation.py:313`;
+  проводка — `_profile_gate_resolver`, `core/cli/context.py:1650`)
+  и **имеет производителя — человека**: `hound package profile attest --gate G1|G2
+  --actor …` (`--dry-run` ничего не пишет и говорит об этом). Прогон её **только читает** и
+  никогда не пишет. Механизм рабочий, но замер 2026-10-30 — **ноль строк** во всех реальных
+  `state.db`: подписей нет. Пока их нет, рабочий путь один — per-run строка
+  `gate_decisions` (аудит-след и override), и она **приоритетна**. **G3/G4 — точки интеграции:** coHound не решает ревью/публикацию, а
   **получает** решение. На блоке
   пишется `runs/{run_id}/gates/{gate}-request.json` — детерминированный предмет +
   `subject_digest`; вердикт приходит извне и только записывается. Никаких автоматических
@@ -1618,10 +1654,10 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 
 | Шаг | Действие | Проверка | Статус |
 |---|---|---|---|
-| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ сделано (T1.2; `core/domain/enums.py:1` … `core/domain/anchors.py:1`) — монолит **удалён**, гейт `tests/selfcheck.py:1123` |
-| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ сделано (T1.3; `core/store/sqlite.py:21`) — монолит **удалён**, тот же гейт `tests/selfcheck.py:1123` |
-| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ сделано (`core/ports/` — 20 модулей портов, напр. `core/ports/store.py:1`; импорт-граф — `tests/selfcheck.py:948`) |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1185` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
+| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1142` (`_shims_removed`) |
+| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:94`, `SCHEMA_VERSION` — `core/store/sqlite.py:86`; тот же гейт `tests/selfcheck.py:1142` |
+| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:967` (`_import_graph`), вызов `tests/selfcheck.py:355` |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1185` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется
@@ -1641,10 +1677,18 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | I10/I15 | B.1 (resolve_source_url) |
 | Развёртывание/DMZ (07) | A.1 (`edge/`, `config/deploy.yaml`), D.5, E.3 |
 
-**Открытые вопросы к итерации 4:** формат импорт-графа CI — ✅ сделано (`tests/selfcheck.py:982-1024`,
-`_import_graph`, вызов `:354`; AST по `core.*`); структура логирования — ✅ сделано
-(`core/util/logging.py:1` — JSON-lines `runs/{run_id}/logs/{phase}.jsonl`, поля 04 §B.1); бэкап/
-восстановление прогона — ✅ сделано (`core/store/backup.py:173` `backup_run` + `:211` `restore_run` —
-zip-бандл + `sqlite3.Connection.backup`, не копирование файла); как считать `prompt`-шаблоны версиями — ✅ сделано
-(`core/pipeline/prompt.py:117` — по файлам `templates/{version}.txt`, версия входит в `prompt_hash`).
+**Открытые вопросы к итерации 4** (сверено 08.11.2026): формат импорт-графа CI — ✅ сделано
+(`tests/selfcheck.py:967` `_import_graph`, вызов `tests/selfcheck.py:355`; AST по `core.*`);
+структура логирования — ✅ сделано
+(`core/util/logging.py:1` — JSON-lines `runs/{run_id}/logs/{phase}.jsonl`, поля 04 §B.1;
+W12/T12.1, 2026-10-08); бэкап/
+восстановление прогона — ✅ сделано (`core/store/backup.py:173` `backup_run` +
+`core/store/backup.py:274` `restore_run` —
+zip-бандл + `sqlite3.Connection.backup`, не копирование файла; W12/T12.2, 2026-10-08);
+как считать `prompt`-шаблоны версиями — ✅ сделано
+(`core/pipeline/prompt.py:128` — `TEMPLATE_VERSION = "evaluator_v5"`, имя файла
+`templates/{version}.txt`, версия входит в `prompt_hash`; W9/T9.1, 2026-10-08).
 Отдельная корпусная БД — ➖ снято (S6, B.2; единая БД сохраняет FK).
+
+Единственный **открытый** пункт документа — шаг 4 §F (перенос правил `_enforce_invariants`
+в `domain/invariants.py`): он открыт по коду (правила продублированы), а не «забыт».

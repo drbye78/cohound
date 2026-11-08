@@ -1,6 +1,7 @@
 # coHound — стратегия реализации production-grade архитектуры
 
-> **Статус на 2026-11-08** (HEAD `b278b79`): F0 — ✅; F1 — ✅ по Exit (действующий носитель
+> **Статус на 2026-11-08** (HEAD `f14f866`; якоря сверены с кодом 08.11.2026, замеры датированы
+> в тексте): F0 — ✅; F1 — ✅ по Exit (действующий носитель
 > `ru-pg-dbms-c2e7b860ac17`, 06.11; исходный `3edf2b06097c` удалён с диска); F2 — 🟡
 > (κ 0.024 `off` / 0.056 `low`, 07.11; модель по κ не выбрана, A1-гейт не принят);
 > F3 — 🟡 (пакет стадий, `IndexBuild.docs` снят; документный `pb` и `memmap` — нет);
@@ -192,7 +193,7 @@ F2/F3/F4 частично; исполнение, ёмкость и размещ�
 `COHOUND_MEM_BUDGET_MB` (`03` §D.6). Закрывает Д-7.
 *Доказательство исполнения (HEAD `b278b79`):* блок собирается в прогоне
 (`core/cli/commands/run.py:1635` — `build_resources_block`) и пишется в `metrics.json`
-(`core/pipeline/metrics.py:547`); живой прогон его несёт —
+(`_normalize_resources` — `core/pipeline/metrics.py:403`; поле — `core/pipeline/metrics.py:498`); живой прогон его несёт —
 `runs/ru-pg-dbms-c2e7b860ac17/metrics.json` (`resources.budget.source = "available"`,
 `resources.phases.*.peak_rss_mb`). Распределение чанков по семействам наполняется фазой
 корпуса (`core/pipeline/resources.py:681` — `summarize_chunks_per_doc`), поэтому в прогоне без
@@ -246,7 +247,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:356-357,525,1089`), подключены в
 >   `core/pipeline/extract_consume.py:1208-1209`; видимая строка пропуска по бюджету —
->   `core/pipeline/archive_descent.py:828-844` (`SKIP_BUDGET`, константа `:113`).
+>   `core/pipeline/archive_descent.py:828-844` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:113`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
 >   `core/store/sqlite.py:621-640`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
@@ -277,7 +278,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   `ArchiveDescentWalker` получает два необязательных колбэка (`persist_observation`,
   `persist_member`), `None` — прежнее поведение байт-в-байт. Точки: наблюдение — `_record`
   (`core/pipeline/archive_descent.py:494`, вызовы `642`/`686`/`708`/`1059`), член — `_settle`
-  (`:745`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
+  (`core/pipeline/archive_descent.py:745`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
   `_record`/`_settle`. Финальную пачку сохранить как идемпотентный reconciliation-pass
   (дешёвый повторный upsert). Сбой записи изолируется в `errors` по образцу `persist_docs`
   (`core/pipeline/corpus_ingest.py:1346`) — отказ store не должен убивать спуск.
@@ -286,7 +287,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
   стоимость записи на горячем пути). **Per-member `SKIP_BUDGET` делать:** семантика таблицы уже
   включает пропущенные члены — `SKIP_CYCLE`/`SKIP_NESTED` пишутся через `_member_row` с
-  `skip_reason` и `doc_id=None` (`archive_descent.py:1128`); до фикса члены, срезанные бюджетом,
+  `skip_reason` и `doc_id=None` (`core/pipeline/archive_descent.py:1128`); до фикса члены, срезанные бюджетом,
   не давали строки вообще, и `archive_budget_exhausted` был виден только в `errors`.
   **Реализовано (2026-10-24):** синки `persist_observation`/`persist_member` в
   `ArchiveDescentWalker`, единая точка строки — `_emit_member`/`_emit_skipped_member`;
@@ -326,7 +327,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   3 продукта (`docs/reports/measurements/2026-11-07-evaluator-benchmark-first-kappa.md`):
 >   κ **0.024** `off` [−0.045; 0.091] / **0.056** `low` [−0.015; 0.133] — на уровне случайного
 >   согласия. Выбор модели по κ **не сделан**: обе слоты `deploy.yaml` несут одну модель
->   (`config/deploy.yaml:184`, `:207`) — модель объявлена, а не измерена (A3).
+>   (`config/deploy.yaml:184`, `config/deploy.yaml:207`) — модель объявлена, а не измерена (A3).
 > - **`base_url` в слот:** ✅ — `config/deploy.yaml:180` (`https://plusvibeapi.ru`); пустой слот
 >   означает «оценщик не поднимается», а не «endpoint берётся из env». Место исполнения
 >   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:172`, стенд RnD).
@@ -346,9 +347,14 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `unknown_share = (denominator − resolved)/denominator`
 >   (`core/domain/scoring.py:1281-1285`) — доля считается от веса знаменателя Coverage, а не
 >   от числа ячеек. По живому прогону `ru-pg-dbms-2a5b51af5778` (08.11,
->   `runs.publishability_json` в `cohound.db`): 905 ячеек (230 evaluated / 675 failed),
->   `unknown_share` **0.842**, `coverage` **0.158**, `klass: ANALYTICAL_ONLY` — по порогу 0.30
+>   `runs.publishability_json` в `cohound.db`, **перечитано 08.11 после закрытия цикла**):
+>   905 ячеек (✅263 / ⚠️247 / ❌20 / ❓375; `failed` — **0**, `failure_kind` NULL у всех 905),
+>   `unknown_share` **0.4339**, `coverage` **0.5661**, `klass: ANALYTICAL_ONLY` — по порогу 0.30
 >   карта не проходит. Решение владельца не принято.
+>   Прежние числа этого абзаца (230 evaluated / 675 failed, `unknown_share` 0.842,
+>   `coverage` 0.158) сняты: это снимок **до** перезапуска корпуса в том же `run_id`;
+>   `runs.publishability_json` перезаписывается `report`, поэтому цитировать его можно только
+>   с датой чтения. Вывод не изменился (0.4339 > 0.30), но доказательство было подложено.
 
 **Зачем.** Это A1-гейт. Если карта негодна, дальнейшее измерение оплачено без продукта — даже
 когда работы по размещению идут по своим причинам (требование развёртывания, решение 07.11).
@@ -412,12 +418,12 @@ retrieval-тесты байт-идентичны прежним при том ж
 > (`core/edge/extract_service.py`, `contracts/seam/extract.schema.json`:
 > `upload`/`submit`/`collect`/`abort`, staging TTL, `max_upload_chunk_bytes`), ось уровня
 > **не игнорируется**: `submit` несёт `level`/`device` (`core/adapters/remote_extractor.py:392-398`),
-> а `RemoteExtractor.supports_source_path = True` (`:214`) — прежняя ссылка `:42` на `False`
+> а `RemoteExtractor.supports_source_path = True` (`core/adapters/remote_extractor.py:214`) — прежняя ссылка на `False`
 > тоже устарела.
 >
 > **Exit не доказан:** (а) `pb`-паритет `local` vs `split` на одном корпусе не измерен;
-> (б) `extractor_declared` ядро присылает как `None` (`remote_extractor.py:402`), а edge на
-> расхождение только предупреждает (`extract_service.py:400-406`) — идентичность движка не
+> (б) `extractor_declared` ядро присылает как `None` (`core/adapters/remote_extractor.py:402`), а edge на
+> расхождение только предупреждает (`core/edge/extract_service.py:400-406`) — идентичность движка не
 > является гейтом допуска, то есть под одним `run_id` возможны две сборки docling;
 > (в) ось `pdf_pipeline` через шов **не едет**: `rg pdf_pipeline core/adapters/remote_extractor.py
 > core/edge/extract_service.py` = 0 вхождений, то есть выбор механизма PDF (docling/pdfium) на
@@ -534,13 +540,17 @@ docling, а не писатель. При 100 параллельных прог�
 
 *На 08.11 знаменатель закреплён кодом:* `unknown_share = (denominator − resolved)/denominator`
 (`core/domain/scoring.py:1281-1285`), то есть доля `❓` считается от веса знаменателя Coverage,
-а не от числа ячеек. Гейт стал вычислимым; на прогоне `2a5b51af5778` (08.11) `unknown_share`
-0.842 — порог 0.30 не пройден, решение владельца не принято.
+а не от числа ячеек. Гейт стал вычислимым; на прогоне `2a5b51af5778` (08.11, чтение
+`runs.publishability_json` после закрытия цикла) `unknown_share` **0.4339** — порог 0.30 не
+пройден, решение владельца не принято.
 
 **8.7. Оценки оптимистичны там, где проект исторически буксовал.** История: четыре прогона
 умерли, ни один не дошёл до `report`. Значит наиболее вероятный сценарий — не «F3 займёт
 неделю», а «F1 упрётся в пятую причину смерти, которую мы ещё не видели». Резерв +30 %
 заложен, но, вероятно, недостаточен.
+**➖ Поправка 08.11.2026:** посылка снята — цикл `ru-pg-dbms-2a5b51af5778` прошёл все 15 фаз
+до `report` (`state: done`, `g4: ok`, 12 артефактов). Оценка риска ниже сохранена как
+историческая: она объясняет, откуда взят резерв, а не предсказывает текущее состояние.
 
 *На 2026-11-08 первая половина утверждения — история: прогон `ru-pg-dbms-3edf2b06097c`
 (27.10) дошёл до `report` (каталог удалён с диска; действующий носитель — `c2e7b860ac17`,
@@ -579,8 +589,9 @@ docling, а не писатель. При 100 параллельных прог�
 > - **10.2 🟡 вычислим, решение не принято** — знаменатель **закреплён кодом**
 >   (`unknown_share = (denominator − resolved)/denominator`,
 >   `core/domain/scoring.py:1281-1285`). По живому прогону `ru-pg-dbms-2a5b51af5778` (08.11,
->   `runs.publishability_json`): 905 ячеек (230 evaluated / 675 failed), `unknown_share` 0.842,
->   `coverage` 0.158, `klass: ANALYTICAL_ONLY` ⇒ по порогу 0.30 карта не проходит. Решение
+>   `runs.publishability_json`, перечитано 08.11 после закрытия цикла): 905 ячеек
+>   (✅263/⚠️247/❌20/❓375, `failed` 0), `unknown_share` 0.4339, `coverage` 0.5661,
+>   `klass: ANALYTICAL_ONLY` ⇒ по порогу 0.30 карта не проходит. Решение
 >   владельца не принято; дефект формулировки снят, исход — измерение, а не ❔.
 > - **10.3 🟡 сделано частично** — `split` объявлен и работает (`profile: local` по умолчанию,
 >   `core/config/deploy.py`), но `pb`-паритетом с `local` не обладает (F4), поэтому следствие

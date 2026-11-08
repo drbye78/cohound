@@ -6,8 +6,8 @@
 `18-markdown-chunker-plan.md` (провенанс чанка), `23-corpus-dedup.md` (канонический адрес).
 **Отслеживание:** чеклист фаз F1–F4; маркеры — как в `README.md` каталога.
 
-**Статус на 07.11.2026: F1, F2, F3 исполнены и приняты замерами; F4 открыт и ждёт второго
-срока, а не кода.** Второй срок наступит 09–10.11.2026 (`due_at` двух `scheduled`-строк
+**Статус на 2026-11-08 (HEAD `f14f866`; сверено с кодом 2026-11-08): F1, F2, F3 исполнены и
+приняты замерами; F4 открыт и ждёт второго срока, а не кода.** Второй срок наступит 09–10.11.2026 (`due_at` двух `scheduled`-строк
 стенда), до него `missed_captures` остаётся нулевой точкой.
 
 ## 1. Зачем
@@ -24,7 +24,7 @@
 | где | что зашито |
 |---|---|
 | `core/domain/invariants.py:386` (`check_absence_dated`; на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`, снято фазой F3) | `❌` публикуется только если сервер ответил **в этом цикле** (сегодня — только если есть **датированный** носитель, I2d) |
-| `core/pipeline/corpus_coverage.py:206-215`, `:370` | полнота считается по элементам **этого** сеанса, `observed_sources > 0` |
+| `core/pipeline/corpus_coverage.py:206-215`, `core/pipeline/corpus_coverage.py:370` (на момент плана — по элементам сеанса; снято F1/F3) | полнота считалась по элементам **этого** сеанса, `observed_sources > 0` |
 | `docs/status-dictionary.yaml`, `ReuseKind` | `reused`/`stale` — «сеть не трогалась», а не «наблюдалось тогда-то» |
 
 Поэтому «прогон по старым данным» сейчас неизбежно превращает `❌` в `❓`: не потому что данные
@@ -67,8 +67,10 @@
    `observed_how`, `actor`, `superseded_by` — append-only, как `crawl_policy` (план 19).
 2. `url_state` получает наблюдение: `observed_at`, `observed_how`, `capture_id`,
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
-   `last_checked_at` пишется при любом исходе, включая отказ (`corpus_ingest.py:889-906`).
-3. Ручные артефакты (`hound package state adopt`, `state_adopt.py:703,1478`) создают снятие с
+   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:889-906`).
+3. Ручные артефакты (`hound package state adopt`: `plan_adoption` — `core/pipeline/state_adopt.py:706`,
+   `apply_adoption` — `core/pipeline/state_adopt.py:1481`, запись снятия —
+   `core/pipeline/state_adopt.py:1626`) создают снятие с
    `observed_how=adopted`, `complete=False` и `actor`. **`complete=False` — не осторожность, а
    факт**: предоставленный артефакт не является обходом и не может удостоверить исчерпание.
 4. Снимок пишется в манифест и `pb`: `corpus_snapshot_id`, `captures[]` (id, корень, даты,
@@ -318,7 +320,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 Решение владельца **29.10.2026** «`❌` требует `live|revalidated` в этом цикле»
 (as-built: `_enforce_reuse_confirmed`, два уровня — evidence для `explicit`/`authoritative`
 и корпус для `bounded`; токен `reuse_unconfirmed`. **Удалено в 0.3.0:** правило заменено
-`_enforce_dated_absence` (`core/pipeline/evaluate.py:2099`) с токеном `absence_undated` —
+`_enforce_dated_absence` (`core/pipeline/evaluate.py:2182`) с токеном `absence_undated` —
 см. §11.9).
 
 Оно было верным для своего носителя: тогда корпус был «один прогон = один снимок», и `reused`
@@ -358,7 +360,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 
 **Чего в носителях нет** (проверено разведкой, `файл:строка`):
 
-* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`models.py:1576-1578`: «политика названа
+* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`core/domain/models.py:1594-1596`: «политика названа
   один раз на прогон»). Для I2d это дефект: сверять надо **снятие** с объявленным, а не прогон с
   прогоном, иначе `scheduled`-снятие другого прогона нечем проверить. В `state.db` колонка есть,
   но её **никто не сравнивает** (0 попаданий `policy_digest ==` в `core/`).
@@ -369,18 +371,22 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 * `CorpusCoverage` не знает о снятиях: ни `capture_id`, ни дат, ни `policy_digest`.
 * Читателя, который сравнил бы `capture.policy_digest` с объявленным, сегодня нет ни одного.
 
-Кода, который **придётся** тронуть: `evaluate.py:1953` (`_enforce_reuse_confirmed` →
-`_enforce_dated_absence`; `_CONFIRMED_REUSE_KINDS` `:221` снимается), два уровня правила —
-`_evidence_level_reuse_violations` (`:1845-1905`) и `_corpus_level_reuse_violations`
-(`:1908-1933`), оба вызова — Ш6 (`:2772`) и **перенос ячейки из прошлого прогона** (`:386`:
-перенесённый `❌` проходит то же правило, иначе carry-forward обходил бы F3);
-`corpus_coverage.py:181` + источник `:611` (`iter_crawl_session_items` — сеанс, не снятия);
-`invariants.py:298` (`check_absence_coverage` + новый `check_absence_dated`); зеркало в
-`report.py:2214-2224`/`:2296-2306`; `docs/status-dictionary.yaml` (токен `absence_undated`;
+Код, который **был тронут** (F3): `_enforce_dated_absence` (`core/pipeline/evaluate.py:2182`)
+заменил `_enforce_reuse_confirmed` (удалён вместе с `_CONFIRMED_REUSE_KINDS` и двумя уровнями
+`_evidence_level_reuse_violations`/`_corpus_level_reuse_violations`), вызовы — Ш6
+(`core/pipeline/evaluate.py:3253`) и **перенос ячейки из прошлого прогона**
+(`_carried_rules_hold`, `core/pipeline/evaluate.py:431`: перенесённый `❌` проходит то же
+правило, иначе carry-forward обходил бы F3);
+`core/pipeline/corpus_coverage.py:181` + источник `core/pipeline/corpus_coverage.py:611`
+(`iter_crawl_session_items` — сеанс, не снятия);
+`core/domain/invariants.py:298` (`check_absence_coverage` + новый `check_absence_dated`);
+зеркало в `core/pipeline/report.py:2214-2224`/`core/pipeline/report.py:2296-2306`;
+`docs/status-dictionary.yaml` (токен `absence_undated`;
 `reuse_unconfirmed` больше не объявлен в коде (словаря он не касался — жил константой
-`evaluate.py`), но строки старых прогонов читаются как есть); `models.py:149`
-(`METHODOLOGY_VERSION` 0.2.0 → 0.3.0); `spec` §2.3/§4.2/§13 и **`AGENTS.md` §5** (`:156` таблица,
-`:166-189` проза I2c) — иначе документ будет утверждать снятое правило.
+`core/pipeline/evaluate.py`), но строки старых прогонов читаются как есть);
+`core/domain/models.py:162` (`METHODOLOGY_VERSION` 0.2.0 → 0.3.0); `spec` §2.3/§4.2/§13 и
+**`AGENTS.md` §5** (`AGENTS.md:181-185` — таблица I2/I2b/I2c/I2d) — иначе документ будет
+утверждать снятое правило.
 
 ### 11.6. Приёмка (та же, что в §7 F3, плюс измеримая)
 
@@ -401,11 +407,11 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 То есть сегодняшнее поведение жёстче, чем предполагал текст плана: `frozen` не понижает `❌`
 до `❓`, а **теряет ячейки целиком**. Отказ идёт раньше правила `reuse_unconfirmed` —
 `no_sources` срабатывает на `observed_sources = 0`, потому что покрытие считается по
-элементам **сеанса** (`corpus_coverage.py:181`), а у прохода без сети элементов нет. Снимок
+элементам **сеанса** (`core/pipeline/corpus_coverage.py:181`), а у прохода без сети элементов нет. Снимок
 при этом унаследовал то же удостоверяющее снятие (`complete=true`), и `corpus_as_of`
 совпал до микросекунды — провенанс был прав, а вердикт потерян. Перенос ячеек тоже
 отказывает (`cells_carried=0`), потому что `carry_forward` запинен на `coverage.complete`
-(`carry_forward.py:494`).
+(`core/pipeline/carry_forward.py:494`).
 
 Следствие для объёма F3: **одного I2d мало**. Пункт §7 F3 «`derive_corpus_coverage` —
 полнота по снятиям, а не по элементам сеанса» и гейт переноса — не сопутствующие правки,
@@ -417,7 +423,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 
 **Сверка.** `golden.csv` — 905 строк = 5 продуктов × 181 параметр; `tier=full` — 750 строк
 (`fast` 155); `❌` в golden 282 (243 `full` + 39 `fast`). Одна ячейка = **один** вызов оценщика
-(`evaluate.py:2682`), повтор только при провале валидации (`max_retries=2`) ⇒ **750–2250
+(`core/pipeline/evaluate.py:3109`), повтор только при провале валидации (`max_retries=2`) ⇒ **750–2250
 вызовов** на `golden-full`. Пустой срез вызовов не тратит.
 
 **Стоимость вызова измерена 07.11.2026** (`2026-11-07-reasoning-effort-matrix.md`, 50 ячеек,
@@ -440,15 +446,18 @@ R0/K=10, `deepseek-v4.1-flash-1017:yellow`, `max_tokens=16384`): **5 497** то�
 
 **Две вещи, которые меняют цену по существу (проверено):**
 
-1. **`golden-full` сегодня не сверка, а 724 строки `missing`.** Корпус есть у одного продукта из
-   пяти (`jatoba`, 56 документов / 9398 чанков); `postgrespro`/`tantor` пришли наследованием,
-   у `pangolin` корпуса нет (`2026-10-26-verdict-reproducibility.md:148-150`). Чтобы `tier=full`
-   стал сверкой, нужны 4 корпуса: объявленный SERP-бюджет `362 × 5 = 1810` запросов ≈ 2.7 ч при
-   5.3 с/запрос (`packages/ru-pg-dbms/run.yaml:38-52`) плюс краул и экстракция. Это цена **не
-   F3**, а любой полной сверки — но без неё F3 «по golden» не доказывается.
+1. **`golden-full` сегодня не сверка, а 724 строки `missing`.** На 05.11.2026 корпус был у
+   одного продукта из пяти (`jatoba`, 56 документов / 9398 чанков); `postgrespro`/`tantor`
+   пришли наследованием, у `pangolin` корпуса не было
+   (`2026-10-26-verdict-reproducibility.md:148-150`). **➖ Снято 08.11.2026:** после
+   перезапуска корпуса документы есть у всех пяти (8 115 документов / 154 664 чанка в
+   `cohound.db`), и цена полной сверки — **905 вызовов оценщика ≈ 63 мин** при
+   `--llm-concurrency 4` (4.2 с/ячейку, замер 08.11.2026), а не четыре краула с
+   SERP-бюджетом `362 × 5 = 1810` запросов. Цена остаётся ценой **не F3**, а любой полной
+   сверки — но препятствие теперь вызов оценщика, а не корпус.
 2. **`golden` не может удостоверить ветку `bounded` вообще.** Все 181 параметр каталога —
    `absence_rule: explicit` (и все `param_type: fact`), а `bounded` возникает **только** при
-   `parameter_reference|distribution_absence` **и** принятом риске (`evaluate.py:1650-1654`).
+   `parameter_reference|distribution_absence` **и** принятом риске (`core/pipeline/evaluate.py:1970-1974` — `finite_reference` + `scope_acceptance`).
    Значит `bounded`-ячеек в пилоте **ноль**, и §11.4 п.2 (ужесточение `scope_acceptance`) на
    golden не отражается ни одной строкой. Хуже: на живом корпусе измерено `❌ 0 из 119` ячеек
    (`2026-10-27-support-not-about-subject.md:64`) — флипов `❓→❌` там ждать неоткуда, и
