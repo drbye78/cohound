@@ -1121,6 +1121,7 @@ class ScrapyCrawler:
             content=content,
             fetched_at=self._cache_mtime_iso(url),
             fetch_mode=fetch,
+            from_cache=True,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:

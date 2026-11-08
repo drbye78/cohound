@@ -26,6 +26,8 @@ from typing import Any
 
 from test_corpus import (
     RUN_ID,
+    STATE_ETAG,
+    TS,
     URL_P1_A,
     URL_P2_A,
     SqliteStore,
@@ -57,6 +59,7 @@ from core.pipeline.corpus_index import (
     _partition_reuse_reason,
 )
 from core.ports.state import UrlStateRow
+from core.ports.types import FetchPlan, RawPage
 from core.store.state_store import SqliteStateStore
 from core.util.ids import parse_source_id
 from core.util.index_partition import CHUNK_IDS_FILE, VECTORS_FILE, partition_dir
@@ -502,6 +505,68 @@ def test_corpus_docs_record_observation_origin(tmp_path: Path) -> None:
         second_store.close()
         same_store.close()
         same_state.close()
+
+
+class _FromCacheCrawler(_Crawler):
+    """Краулер, отдающий страницу из локального R7-кэша: сеть не трогалась.
+
+    ``status_code``/``etag`` — как у настоящего кэш-хита: их восстанавливает сайдкар
+    кэша (статус и валидатор **прошлого** ответа), а не сервер этого цикла.
+    """
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
+        self.calls.append((url, plan))
+        return RawPage(
+            url=url,
+            content=self.pages[url],
+            fetched_at=TS,
+            fetch_mode=plan.fetch,
+            lang="en",
+            status_code=200,
+            etag=STATE_ETAG,
+            from_cache=True,
+        )
+
+
+def test_from_cache_page_is_reused_not_live(tmp_path: Path) -> None:
+    """Кэш-хит — ``reused``/``NULL``, а не ``live``/``200`` (16 §3.3, E.6).
+
+    Страницу отдал локальный R7-кэш: сервер в этом цикле не отвечал. Без маркера
+    ``RawPage.from_cache`` провенанс выводился бы из одного лишь переиспользования
+    версии, и кэш-хит объявлялся бы наблюдением — с чужим ``http_status`` и записью
+    в ``observed_urls`` (E.6), хотя наблюдения не было. То же расхождение обязано
+    отсутствовать и в durable-носителе: ``url_state.reuse_kind`` — та же
+    классификация, что у ``corpus_docs``.
+    """
+    state = SqliteStateStore(":memory:")
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path / "cache",
+            pages={URL_P1_A: b"cached page"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_FromCacheCrawler({URL_P1_A: b"cached page"}),
+            store=store,
+            state=state,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        # ``http_status`` — факт цикла: сервер не отвечал ⇒ NULL.
+        assert _doc_observation(store, URL_P1_A) == (None, ReuseKind.REUSED)
+        url_state = state.get_url_state("p1", URL_P1_A)
+        assert url_state is not None
+        assert url_state.reuse_kind == ReuseKind.REUSED.value, (
+            "url_state — та же классификация, что у corpus_docs: кэш-хит не наблюдение"
+        )
+        # ``last_http_status`` — последний **известный** ответ (сайдкар кэша: чем сервер
+        # ответил, когда байты добывались), а не ответ этого цикла: наблюдения нет,
+        # и это удостоверяет ``reuse_kind=reused``. Цикловой факт — ``corpus_docs.http_status``
+        # выше — пуст.
+        assert url_state.last_http_status == 200
+    finally:
+        store.close()
+        state.close()
 
 
 # --------------------------------------------------------------------------- #

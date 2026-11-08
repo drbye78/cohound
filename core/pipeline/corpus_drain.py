@@ -1849,11 +1849,14 @@ def root_lifecycle(
             return
         # 16 §3.3: происхождение наблюдения — из пути страницы этого прогона, а не из
         # ``url_state`` (там последняя классификация, в том числе из прошлого цикла).
-        # ``freshly_fetched=False`` — единственный путь без сети (``resume_page``);
-        # ``304`` — сервер ответил, версия не изменилась.
+        # ``freshly_fetched=False`` — путь без сети (``resume_page``); локальный
+        # R7-кэш (``page.from_cache``) — тоже без сети: шов не дёргался, значит
+        # наблюдения не было, и провенанс — ``reused`` (в ``observed_urls`` E.6 такая
+        # страница не попадает — это и есть правильное поведение). ``304`` — сервер
+        # ответил, версия не изменилась.
         reuse_kind = (
             ReuseKind.REUSED
-            if not freshly_fetched
+            if not freshly_fetched or page.from_cache
             else (
                 ReuseKind.REVALIDATED
                 if page.not_modified

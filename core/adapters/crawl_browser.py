@@ -931,6 +931,7 @@ class BrowserCrawler:
             content_type=str(content_type) if content_type else None,
             etag=str(etag) if etag else None,
             last_modified=str(last_modified) if last_modified else None,
+            from_cache=True,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:

@@ -85,12 +85,14 @@ def test_cache_miss_fetches_and_second_call_served_from_cache(tmp_path: Path) ->
 
     first = crawler.fetch(URL)
     assert first.content == b"fresh-body"
+    assert first.from_cache is False
     assert len(calls) == 1
     # Промах записал сырые байты под http_key(url).
     assert (tmp_path / "http" / f"{http_key(URL)}.bin").read_bytes() == b"fresh-body"
 
     second = crawler.fetch(URL)
     assert second.content == b"fresh-body"
+    assert second.from_cache is True
     assert len(calls) == 1  # второй вызов — из кэша, фетчер не дёргался
 
 
@@ -103,6 +105,7 @@ def test_cache_hit_skips_fetcher(tmp_path: Path) -> None:
     page = crawler.fetch(URL)
 
     assert page.content == b"cached-body"
+    assert page.from_cache is True
     assert fetcher.calls == []
 
 

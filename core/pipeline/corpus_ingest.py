@@ -878,8 +878,8 @@ def record_url_state(
 
     * ``FETCHED`` + новый/изменившийся документ → новый ``doc_version_id``,
       ``reuse_kind=live``, счётчик сбоев сброшен;
-    * ``FETCHED`` + ``304``/тот же ``content_hash`` → ``doc_version_id`` сохраняется,
-      ``reuse_kind=revalidated``;
+    * ``FETCHED`` + ``304``/тот же ``content_hash`` при живом ответе → ``doc_version_id``
+      сохраняется, ``reuse_kind=revalidated``; байты без сети (retained/R7-кэш) ⇒ ``reused``;
     * ``not_found`` → ``doc_version_id=NULL``, ``last_error_kind=not_found``, прежняя
       версия документа — ``superseded``;
     * прочие сбои (``robots_disallow``/``parser_failed``/``extraction_timeout``/
@@ -1825,9 +1825,13 @@ def finish_one(
         doc_hash=doc_hash,
         state_fields={
             "doc_version_id": dv_id,
-            "reuse_kind": (
-                ReuseKind.REVALIDATED.value if reused else ReuseKind.LIVE.value
-            ),
+            # 16 §3.3: происхождение — **авторитетное значение этого цикла** (``reuse_kind``
+            # нормализован выше: ``200`` с прежним ``content_hash`` повышает ``live`` до
+            # ``revalidated``, а ``reused`` не повышается). Выводить его из ``reused``
+            # нельзя: переиспользование версии ≠ сетевое наблюдение — кэш-хит R7
+            # записался бы ``live``/``revalidated`` и разошёлся с ``corpus_docs`` того же
+            # документа (два носителя одного факта).
+            "reuse_kind": reuse_kind.value,
             "etag": page.etag,
             "last_modified": page.last_modified,
             "last_http_status": page.status_code,

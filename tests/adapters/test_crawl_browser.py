@@ -354,6 +354,7 @@ def test_hybrid_cache_hit_skips_browser_and_http(tmp_path: Path) -> None:
     page = crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
 
     assert page.content == b"cached-hybrid"
+    assert page.from_cache is True
     assert page.fetch_mode is FetchMode.HTTP
     assert getter.calls == []
     assert backend.sessions == []
@@ -415,6 +416,7 @@ def test_hybrid_plain_2xx_cached(tmp_path: Path) -> None:
 
     assert page.fetch_mode is FetchMode.HTTP
     assert page.content == b"valid-http-content"
+    assert page.from_cache is False
     assert len(getter.calls) == 1
     assert cache.get_bytes("http", http_key(URL)) == b"valid-http-content"
 

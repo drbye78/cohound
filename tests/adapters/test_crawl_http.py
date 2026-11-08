@@ -268,6 +268,27 @@ def test_cache_hit_skips_fetcher(tmp_path: Path) -> None:
     assert calls == []
 
 
+def test_cache_hit_is_marked_from_cache(tmp_path: Path) -> None:
+    """Кэш-хит не притворяется сетевым наблюдением: ``from_cache`` — маркер провенанса.
+
+    Без него pipeline выводит происхождение из одного лишь факта переиспользования
+    версии, и страница, отданная локальным R7-кэшем, объявляется ``live`` — хотя сеть
+    в этом вызове не трогалась.
+    """
+    calls: list[str] = []
+    crawler = HttpCrawler(
+        _counting_fetcher(calls, b"fresh-body"),
+        cache=ContentAddressedCache(tmp_path),
+    )
+
+    miss = crawler.fetch(URL)
+    assert miss.from_cache is False
+
+    hit = crawler.fetch(URL)
+    assert hit.from_cache is True
+    assert calls == [URL]
+
+
 def test_without_cache_each_call_fetches() -> None:
     calls: list[str] = []
     crawler = HttpCrawler(_counting_fetcher(calls))

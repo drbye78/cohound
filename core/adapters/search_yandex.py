@@ -762,6 +762,7 @@ class YandexSearchAdapter:
             content=content,
             fetched_at=self._cache_mtime_iso(url),
             fetch_mode=FetchMode.HTTP,
+            from_cache=True,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:
