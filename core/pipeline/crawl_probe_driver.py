@@ -244,6 +244,7 @@ def _probe_tier_browser(
     url: str,
     source: ProbeSource,
     *,
+    browser: Any,
     ports: ProbePorts,
     pacer: _HostPacer,
     budget: _Budget,
@@ -251,6 +252,11 @@ def _probe_tier_browser(
 ) -> Observation:
     """Браузерный тир (``hybrid``/``honest``): ``RawPage`` либо ``raised``/``unavailable``.
 
+    ``browser`` — краулер браузерного тира, переданный вызывающим **после** проверки
+    ``ports.browser is None``: там же, где решается «браузерных тиров нет», и живёт
+    сужение. Читать ``ports.browser`` здесь значило бы полагаться на то, что проверка
+    когда-то была сделана выше (``Any | None`` в поле порта), и превращать отсутствие
+    краулера в ``AttributeError`` вместо видимого ``browser_unavailable``.
     ``wait_for`` — **авторское** JS-условие ключа (или ``None``); уходит в ``FetchPlan`` и
     отражается в наблюдении как ``wait_for_applied``. Условие не синтезируется здесь.
     """
@@ -267,7 +273,7 @@ def _probe_tier_browser(
         )
     pacer.wait(_host(url))
     try:
-        page = ports.browser.fetch(url, plan)
+        page = browser.fetch(url, plan)
     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
         return Observation(
             tier=tier,
@@ -323,6 +329,7 @@ def _probe_url(
         CrawlStrategy.HYBRID,
         url,
         source,
+        browser=ports.browser,
         ports=ports,
         pacer=pacer,
         budget=budget,
@@ -337,6 +344,7 @@ def _probe_url(
         CrawlStrategy.HONEST,
         url,
         source,
+        browser=ports.browser,
         ports=ports,
         pacer=pacer,
         budget=budget,

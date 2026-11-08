@@ -56,7 +56,7 @@ per-host статуса и без различения дискавери и о�
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`core/store/state_sqlite.py:137`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3784` | переиспользует **чанки**; при смене версии чанкера/пустом наборе/I19-расхождении и **наличных байтах** документ пересобирается текущим конвейером (`rebuild_from_stored_bytes`), байтов нет — `no_bytes`; не пишет `url_state`/`document_version` как «последнюю версию» — эту дисциплину наследует и `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
-| per-host[+path] оси и их digest в `run_id` | `core/config/domain_profiles.py:49`, `core/pipeline/report.py:672` | **не знает продукта** |
+| per-host[+path] оси и их digest в `run_id` | `core/config/domain_profiles.py:49`, `core/pipeline/report.py:673` | **не знает продукта** |
 | `product → host+path` слои | `core/config/crawl_sources.py:51`, `core/config/crawl_sources.py:77`, `core/config/crawl_sources.py:89` | digest информационный (`core/pipeline/crawl_session.py:133`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`core/cli/package/commands.py:2994`) | — образец для CLI политики |
 | видимые отказы корня/продукта | `out_of_scope_subdomains` (`core/pipeline/crawl_frontier.py:1236`), `product_skipped` (`core/pipeline/corpus.py:5187`), `incomplete_reasons` (`core/pipeline/corpus_coverage.py:541`) | нет токена «запрещено политикой» |
@@ -206,8 +206,8 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   `crawl_target` (`core/pipeline/corpus.py:3453`) и `expand_directory`
   (`core/pipeline/corpus.py:3459`), — и до сборки синтетических корней
   (`_synthetic_root_plans`, `core/pipeline/corpus.py:3303`). Гейт на постановке в очередь
-  фронтьера (`core/pipeline/crawl_frontier.py:1503`, `add_seed`;
-  `core/pipeline/crawl_frontier.py:1534`, `add_revalidate_seed`) недостаточен: он ниже
+  фронтьера (`core/pipeline/crawl_frontier.py:1532`, `add_seed`;
+  `core/pipeline/crawl_frontier.py:1563`, `add_revalidate_seed`) недостаточен: он ниже
   feed/sitemap-разворота. Порядок закреплён **AST-тестом**
   (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
   вызовов в теле генератора: генератор — это порядок исполнения, текст комментария — нет.
@@ -217,7 +217,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   (`core/pipeline/corpus_drain.py:169`, `core/pipeline/corpus_drain.py:172`), а не один enum. `bytes` исполняется осью прогона
   (`--refresh frozen --frozen-source bytes`, P3), а не значением `RootPlan`: объявленное
   значение без исполнения дало бы ложный `execution_change`.
-- ✅ `chunks`-корень проходит обобщённый offline-путь (`core/pipeline/corpus_ingest.py:3784`, «продукт →
+- ✅ `chunks`-корень проходит обобщённый offline-путь (`core/pipeline/corpus_ingest.py:3787`, «продукт →
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
   `incomplete_reasons` + `truncated_products` (`core/pipeline/corpus_commit.py:105`) — тем же каналом, что

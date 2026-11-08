@@ -66,54 +66,98 @@ class DeclaredAxesLike(Protocol):
     ``pipeline`` **не** импортирует ``cli`` (слои): конкретный носитель —
     :class:`core.cli.execution_axes.DeclaredExecutionAxes` (composition root). Здесь
     описан только контракт доступа: девять объявленных осей, без наблюдаемых величин.
+
+    **Все члены — read-only свойства, а не поля.** Носитель объявлен
+    ``@dataclass(frozen=True)``: его поля записывать нельзя, и порт с изменяемыми
+    полями ему структурно не соответствовал (mypy: «expected settable variable, got
+    read-only attribute») — при том что потребитель эти оси только читает. Свойство
+    в протоколе выражает ровно то, что нужно: «значение доступно для чтения».
+    Изменяемое поле у реализации свойство тоже удовлетворяет.
     """
 
-    crawl_strategy: str | None
-    crawl_rate_limit: str | None
-    crawl_config_digest: str | None
+    @property
+    def crawl_strategy(self) -> str | None: ...
+
+    @property
+    def crawl_rate_limit(self) -> str | None: ...
+
+    @property
+    def crawl_config_digest(self) -> str | None: ...
+
     #: I3/§5: число раундов SERP-контура (0 — контур выключен). Объявленная ось: раунд
     #: добавляет документы в корпус, поэтому входит в контракт, а не в провенанс.
-    serp_rounds: int | None
+    @property
+    def serp_rounds(self) -> int | None: ...
+
     #: I3/§5: режим запроса внешнего поиска (``sync``/``async``). Условие измерения:
     #: два бэкенда одного API дают разный состав находок, значит разный корпус.
-    serp_mode: str | None
-    registry_spec_digest: str | None
-    deploy_profile: str | None
-    edge_schema_version: str | None
-    chunker_version: str | None
+    @property
+    def serp_mode(self) -> str | None: ...
+
+    @property
+    def registry_spec_digest(self) -> str | None: ...
+
+    @property
+    def deploy_profile(self) -> str | None: ...
+
+    @property
+    def edge_schema_version(self) -> str | None: ...
+
+    @property
+    def chunker_version(self) -> str | None: ...
+
     #: C3: геометрия нарезки + состав входа эмбеддера (``composite_chunking_spec``).
     #: Отдельно от ``chunker_version``: метка не выводится из геометрии, поэтому правка
     #: ``chunk_size`` проходила под прежним ``run_id``.
-    chunking_spec: dict[str, Any] | None
+    @property
+    def chunking_spec(self) -> dict[str, Any] | None: ...
+
     #: V3: политика повтора оценщика (``max_retries``). Повтор переиздаёт запрос, значит
     #: вердикт зависит от истории сэмплов — это условие измерения.
-    evaluation_policy: dict[str, Any] | None
-    llm_scenarios: tuple[dict[str, Any], ...]
-    extractor_stack: str
+    @property
+    def evaluation_policy(self) -> dict[str, Any] | None: ...
+
+    @property
+    def llm_scenarios(self) -> tuple[dict[str, Any], ...]: ...
+
+    @property
+    def extractor_stack(self) -> str: ...
+
     #: 16-runs-schema-boundary §4.2: устройство эмбеддера (``cpu`` | ``cuda``). Место
     #: счёта — условие измерения: векторы CPU и CUDA численно разные, поэтому один
     #: ``run_id`` не может описывать оба исполнения. ``None`` — ось не передана.
-    embed_device: str | None = None
+    @property
+    def embed_device(self) -> str | None: ...
+
     #: 16 §4.1 (решение владельца 06.11.2026): точность счёта вектора (``fp32`` | ``fp16``)
     #: — отдельное условие измерения, а не свойство устройства: fp16- и fp32-векторы одной
     #: модели на одном устройстве численно разные. ``None`` — ось не передана.
-    embed_precision: str | None = None
+    @property
+    def embed_precision(self) -> str | None: ...
+
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов. Раунд подачи
     #: добавляет документы корпуса, то есть доказательства, — это **условие измерения**,
     #: а не провенанс записи: спрятать его значило бы дать корпусу измениться без
     #: изменения ``run_id``.
-    manual_artifacts_digest: str | None = None
+    @property
+    def manual_artifacts_digest(self) -> str | None: ...
+
     #: §11.1: объявленные входы **корпуса**, не входившие в идентичность: per-URL режим
     #: рендера (``--render-modes``) и содержимое паспортов (``--passports-dir``). Оба
     #: определяют, какие байты станут доказательствами, поэтому это условия измерения, а
     #: не провенанс хоста. ``--urls`` здесь **отсутствует** осознанно: он заменяет
     #: seed-набор и уже входит в ``seeds_digest`` — второе поле на тот же материал
     #: нарушило бы правило «одно поле — один материал».
-    render_modes_digest: str | None = None
-    passports_digest: str | None = None
+    @property
+    def render_modes_digest(self) -> str | None: ...
+
+    @property
+    def passports_digest(self) -> str | None: ...
+
     #: C8: объявленная схема лексического индекса (состав полей + цепочка анализатора).
     #: Меняет лексическую выдачу, значит вердикты; версия движка сюда не входит.
-    lexical_spec: dict[str, Any] | None = None
+    @property
+    def lexical_spec(self) -> dict[str, Any] | None: ...
 
 
 def _declared(declared: DeclaredAxesLike | None, name: str) -> Any:

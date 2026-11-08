@@ -949,7 +949,7 @@ request-файлы гейтов — `core/pipeline/gate_subject.py:427`); вер
 `core/util/fetch_retry.py`, один на `local` и `split`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано
 (`core/store/sqlite.py:89` `PRAGMA journal_mode = WAL` +
-`core/store/sqlite_store.py:92` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch`
+`core/store/sqlite_store.py:94` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch`
 `core/store/sqlite_store.py:646` — одна транзакция на пачку).
 
 **Что остаётся открытым, хотя в §H не значится:** шаг (3) эшелона — проверка следствия

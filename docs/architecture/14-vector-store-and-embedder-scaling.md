@@ -193,7 +193,7 @@ top-10 из 600** у близких соседей. Замер при едино
 («brute-force косинус… ANN (faiss/Qdrant)» — про будущее, не про код); в реестре зависимостей
 `docs/architecture/05-dependency-stack.md:114` `qdrant-client` стоит с вердиктом **c**
 («только идея», легенда `:17`) и обоснованием «требует сервиса; отложено по §14». Порт
-`VectorIndexPort` (`core/ports/vector_index.py:81-93`) по-прежнему без пути к файлу и без
+`VectorIndexPort` (`core/ports/vector_index.py:87-93`) по-прежнему без пути к файлу и без
 `numpy` — замена реализации не тронет ни `pipeline`, ни домен, как и обещано ниже.
 
 Этот раздел — **носитель решения**, а не отчёт о работе: «Qdrant не нужен при таком масштабе»
@@ -239,7 +239,7 @@ top-10 из 600** у близких соседей. Замер при едино
 проверено. Итого: решение держится на порогах 1–2 и не проверено по 3.
 
 **Что сделать вместо Qdrant — и это дешевле.** Порт уже правильной формы:
-`core/ports/vector_index.py:81-93` — `build_id`, `dim`, `search(q)`, `search_many`,
+`core/ports/vector_index.py:87-93` — `build_id`, `dim`, `search(q)`, `search_many`,
 `shard_ids(product_id)`.
 Ни одного пути к файлу, ни `numpy`, ни формата. Значит решение откладывается **без цены**:
 замена `NpyVectorIndex` на `QdrantVectorIndex` не тронет ни `pipeline`, ни домен. Это важно
@@ -275,7 +275,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
   модель** по-прежнему выбирается установкой: `backend`/`base_url`/`model_version` не
   объявлены, и внешний инстанс всё ещё требует `deploy.embed` целиком.
   **⬜ не сделано (сверено 2026-11-07):** функция на месте — `_resolve_embedder`,
-  `core/cli/wiring.py:2880`, вызов `:2813` — и приоритет по-прежнему «что установлено на
+  `core/cli/wiring.py:2911`, вызов `:2813` — и приоритет по-прежнему «что установлено на
   хосте». Это и есть открытый пункт 5 §6.
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
@@ -570,7 +570,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
    `(index_root, package, partition_build_id, product_id)` — `:76`.
 3. ✅ **Батч запросов по продукту** — `VectorIndexPort.search_many` + `batched_search`
    (дефолт через цикл `search`, поэтому существующие реализации не сломаны).
-   Проверено: `core/ports/vector_index.py:89` (`search_many` в порту), `:96-105`
+   Проверено: `core/ports/vector_index.py:95` (`search_many` в порту), `:96-105`
    (`batched_search` с `getattr`-фолбэком), `core/adapters/vector_npy.py:272` (реализация),
    вызывается из `core/pipeline/evaluate.py:1118`.
 4. ✅ **Мемоизация векторов запроса** + пре-компьют `query_vectors` до `evaluate`
@@ -610,7 +610,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
    (решение владельца 29.10.2026, `09` §14.1).
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`core/cli/wiring.py:2880`, вызов `:2813` — `model2vec_available()` →
+установки** (`core/cli/wiring.py:2911`, вызов `:2813` — `model2vec_available()` →
 `_module_installed("sentence_transformers")` → `None`). При появлении `deploy.embed`
 приоритет становится объявленным: `backend` из конфига, а наличие библиотек — предпосылка, а
 не решение. **Сверено 2026-11-07: не сделано** — логика прежняя.

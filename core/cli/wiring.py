@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from core.adapters import index_format
 from core.adapters.chunker_family import FamilyChunker
@@ -163,7 +163,7 @@ from core.ports.crawl_errors import CrawlError, CrawlNotFound
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.embedder import EmbedderPort
-from core.ports.extractor import ExtractorPort
+from core.ports.extractor import DocumentExtractorPort, ExtractorPort
 from core.ports.gateway import ContentGateway
 from core.ports.lexical_index import LexicalIndexPort
 from core.ports.llm import EvaluatorPort
@@ -495,7 +495,12 @@ def seed_lexical_index(
         # индекс, на котором поиск падал бы с «index() не вызван».
         index.close()
         return None
-    return index
+    # ``LexicalIndexPort`` объявляет ``engine_version`` **записываемым** атрибутом, а
+    # адаптер отдаёт его read-only свойством (``tantivy_engine_version()``): писать в
+    # штамп движка потребителю нечего, поэтому сужение верно по смыслу, а не глушит
+    # дефект. Настоящая правка — объявить свойство в порте (``core/ports``), отдельная
+    # полоса; до неё приведение типа с инвариантом «read-only реализация writable порта».
+    return cast(LexicalIndexPort, index)
 
 
 def _lexical_record(chunk: Chunk, product_id: str, build_id: str) -> LexicalChunk:
@@ -1504,8 +1509,11 @@ def _crawl_discovery_enabled(
     depths: list[int] = []
     if crawl.max_depth:
         depths.append(int(crawl.max_depth))
-    if run_crawl is not None and getattr(run_crawl, "max_depth", None):
-        depths.append(int(run_crawl.max_depth))
+    # ``max_depth`` слоя ``run.yaml`` объявлен как ``int | None``: сужаем до проверки,
+    # иначе ``int(None)`` отвергнут статически (а в рантайме недостижим — есть guard).
+    run_max_depth = getattr(run_crawl, "max_depth", None) if run_crawl is not None else None
+    if run_max_depth:
+        depths.append(int(run_max_depth))
     if cli_max_depth is not None:
         depths.append(int(cli_max_depth))
     for profile in (domain_profiles or {}).values():
@@ -1610,8 +1618,11 @@ def _declared_engine_uses(
                     _ENGINE_SOURCE_CRAWL_SOURCES,
                     f"sites[{product_id}][{host}]",
                 )
-    for host in sorted(domain_profiles or {}):
-        if domain_profiles[host].fetch is FetchMode.BROWSER:
+    # Пустой mapping вместо ``None``: индекс по ``domain_profiles[host]`` под ``None``
+    # не индексируется статически (в рантайме ветка недостижима — цикл пуст).
+    profiles = domain_profiles or {}
+    for host in sorted(profiles):
+        if profiles[host].fetch is FetchMode.BROWSER:
             note("browser", _ENGINE_SOURCE_PROFILE, host)
     return uses
 
@@ -1775,6 +1786,13 @@ def build_scout_crawler(
         return BrowserCrawler(
             **_browser_crawler_kwargs(config), cache=cache, robots=robots
         )
+    # Недостижимо: имя сверено с ``SUPPORTED_SCOUT_CRAWLERS`` выше. Явный отказ, а не
+    # «молча вернуть хоть что-то»: добавленное в кортеж имя без ветки сборки обязано
+    # падать здесь, а не подменять объявленный движок другим.
+    raise WiringError(
+        f"{ENV_SCOUT_CRAWLER}: краулер {name!r} объявлен в "
+        f"{SUPPORTED_SCOUT_CRAWLERS}, но ветки сборки у него нет"
+    )
 
 
 def _crawler_robots(
@@ -1986,7 +2004,7 @@ def _detect_document_filename(page: RawPage) -> str | None:
 
 
 def _extract_document(
-    documents: ExtractorPort, page: RawPage, filename: str
+    documents: DocumentExtractorPort, page: RawPage, filename: str
 ) -> ExtractedDoc:
     """Документ по пути retained-файла, иначе по байтам страницы (D2/I19).
 
@@ -2034,11 +2052,11 @@ class _LocalExtractor:
     def __init__(
         self,
         html: ExtractorPort,
-        documents: DoclingDocumentExtractor | None,
+        documents: DocumentExtractorPort | None,
         *,
         text: ExtractorPort | None = None,
         epub: ExtractorPort | None = None,
-        pdf: ExtractorPort | None = None,
+        pdf: DocumentExtractorPort | None = None,
         pdf_required: bool = False,
     ) -> None:
         """``text``/``epub``/``pdf`` — точки подмены (тесты/AB); по умолчанию реальные читатели.
@@ -2077,7 +2095,7 @@ class _LocalExtractor:
 
     def _document_backend(
         self, filename: str | None
-    ) -> ExtractorPort | None:
+    ) -> DocumentExtractorPort | None:
         """Механизм для документного файла: PDF → выбранный ``pdf_pipeline``, иначе docling.
 
         ``None`` — обслуживать нечем (docling не установлен и PDF-механизм не выбран):
@@ -2099,7 +2117,10 @@ class _LocalExtractor:
 
     def _resolve_target(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
-    ) -> tuple[str, ExtractorPort, str | None]:
+    ) -> (
+        tuple[Literal["html", "text", "epub"], ExtractorPort, None]
+        | tuple[Literal["document"], DocumentExtractorPort, str]
+    ):
         """Единственный диспетчер маршрута: ``(вид, адаптер, filename для документа)``.
 
         **Зачем отдельный метод, а не ветки внутри ``extract``.** Маршрут нужен в двух
@@ -2187,8 +2208,14 @@ class _LocalExtractor:
             # ``adapter`` — документный адаптер по построению ``_resolve_target``: docling
             # (уровень/Office) либо PDF-механизм ``text_layer``. Оба обслуживаются одной
             # обёрткой — протокол ``extract_path``/``extract_bytes`` у них общий.
-            return _extract_document(adapter, page, filename or "document.pdf")
-        return adapter.extract(page, route)
+            # Приведение, а не проверка: ветку решает маршрут, а не форма объекта;
+            # ``isinstance`` здесь сделал бы форму вторым решателем правила.
+            return _extract_document(
+                cast(DocumentExtractorPort, adapter), page, filename or "document.pdf"
+            )
+        # Обратный инвариант: всё, что не документ, обслуживает ``ExtractorPort``
+        # (``_html``/``_text``/``_epub``) — композит маршрутизирует, читатель извлекает.
+        return cast(ExtractorPort, adapter).extract(page, route)
 
     @property
     def options_provenance(self) -> dict[str, int | None]:
@@ -2256,8 +2283,8 @@ def build_worker_extractor(
     pipeline = PdfPipeline(pdf_pipeline)
     device = PdfDevice(pdf_device)
     require_pdf_device(device)
-    pdf: ExtractorPort | None = None
-    documents: DoclingDocumentExtractor | None = None
+    pdf: DocumentExtractorPort | None = None
+    documents: DocumentExtractorPort | None = None
     if level is not DocumentLevel.OFF:
         candidate = DoclingDocumentExtractor(
             level=level, document_timeout=document_timeout, pdf_device=device
@@ -2426,7 +2453,11 @@ def build_extraction_pool(
             pool_factory=_local_factory,
             worker=extract_worker,
             supports_worker_recycling=True,
-            worker_rss_dir=worker_rss_dir,
+            # ``ExtractionPool`` держит каталог строкой (внутри — ``Path(...)``), а
+            # фабрика принимает ``str | Path``: приводим здесь, один раз.
+            worker_rss_dir=(
+                str(worker_rss_dir) if worker_rss_dir is not None else None
+            ),
         )
     if profile == SPLIT_PROFILE and extractor is not None:
         def _remote_worker(request: Any) -> Any:
@@ -2781,7 +2812,7 @@ def _build_local_ports(
     )
     # P7: PDF-механизм — часть композита, а не «настройка внутри docling». ``structured``
     # (дефолт) — тот же docling: поведение и ``version`` байт-в-байт прежние.
-    pdf_adapter: ExtractorPort | None = None
+    pdf_adapter: DocumentExtractorPort | None = None
     if PdfPipeline(pdf_pipeline) is PdfPipeline.TEXT_LAYER:
         text_layer = PdfiumDocumentExtractor()
         if not text_layer.available:

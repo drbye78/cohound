@@ -36,11 +36,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-try:  # pragma: no cover - на Windows модуля нет; обещание «без падений» держим здесь
-    import resource as _resource
-except ImportError:  # pragma: no cover
-    _resource = None
-
 from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
 from core.util.document_formats import (
     document_suffix,
@@ -49,6 +44,18 @@ from core.util.document_formats import (
 )
 from core.util.gpu import cuda_available as _cuda_available
 from core.util.gpu import cuda_total_vram_mb as _cuda_total_vram_mb
+
+# ``_resource`` объявлен ``Any`` **до** импорта: без аннотации mypy выводит тип из
+# ``import resource`` (Module) и отвергает ветку ``None`` для платформ без модуля.
+# Тип здесь и правда ``Any``: потребитель трогает ровно ``getrusage``/``RUSAGE_SELF``,
+# которых в стабах нет на не-POSIX, а проверка «модуль есть» уже стоит на месте вызова.
+_resource: Any = None
+try:  # pragma: no cover - на Windows модуля нет; обещание «без падений» держим здесь
+    import resource as _resource_module
+
+    _resource = _resource_module
+except ImportError:  # pragma: no cover
+    pass
 
 __all__ = [
     "DOCLING_PEAK_MB",
@@ -753,10 +760,12 @@ def build_resources_block(
     durations = dict(phase_durations or {})
     phases: dict[str, dict[str, Any]] = {}
     for phase in sorted(set(peaks) | set(durations)):
+        # Значение читается один раз: ``peaks.get(phase) is not None`` не сужает
+        # ``peaks[phase]`` (это два разных выражения), поэтому проверка и приведение
+        # стояли бы на разных величинах.
+        peak = peaks.get(phase)
         phases[phase] = {
-            "peak_rss_mb": (
-                round(float(peaks[phase]), 1) if peaks.get(phase) is not None else None
-            ),
+            "peak_rss_mb": round(float(peak), 1) if peak is not None else None,
             "wall_s": _round_seconds(durations.get(phase)),
         }
     scheduling: dict[str, Any] = {

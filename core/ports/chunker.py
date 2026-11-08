@@ -16,6 +16,13 @@ from core.ports.types import Chunk, ExtractedDoc
 class ChunkerPort(Protocol):
     """Детерминированный чанкер. Дефолт — ``MarkdownChunker`` (heading_path)."""
 
-    version: str
+    #: Версия правил нарезки — **только читается**: у ``FamilyChunker`` она выводится
+    #: из состава композита (:func:`composite_chunker_version`), а не хранится. Поле
+    #: объявляло бы право записи, которого у композита нет, и порт с полем ему не
+    #: соответствовал структурно (mypy: «expected settable variable, got read-only
+    #: attribute»). Константный ``version`` у ``MarkdownChunker`` свойство тоже
+    #: удовлетворяет: записываемое поле совместимо с read-only контрактом.
+    @property
+    def version(self) -> str: ...
 
     def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]: ...

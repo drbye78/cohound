@@ -498,8 +498,8 @@ def gate_trail(
     """
     selected = gates if gates is not None else (Gate.G1, Gate.G2, Gate.G3, Gate.G4)
     last_by_gate: dict[Gate, GateDecision] = {}
-    for decision in store.iter_gate_decisions(run_id):
-        last_by_gate[decision.gate] = decision
+    for recorded in store.iter_gate_decisions(run_id):
+        last_by_gate[recorded.gate] = recorded
     trail: list[dict[str, Any]] = []
     for gate in selected:
         decision = last_by_gate.get(gate)

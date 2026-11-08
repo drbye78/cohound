@@ -15,6 +15,7 @@ re-extract без ре-фетча (A/B экстракторов, retention). С�
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
@@ -28,4 +29,38 @@ class ExtractorPort(Protocol):
 
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc: ...
+
+
+@runtime_checkable
+class DocumentExtractorPort(Protocol):
+    """Документный адаптер (docling / ``text_layer``) — **второй** вход экстракции.
+
+    Отдельный порт, а не ``ExtractorPort``, потому что это разные предметы:
+    ``ExtractorPort.extract(page, route)`` — маршрутизация ``RawPage`` (её делает
+    композит в composition root), а документный адаптер получает уже выбранный файл —
+    путь retained-файла (``extract_path``) либо байты (``extract_bytes``). Прежде
+    композит аннотировал документный адаптер как ``ExtractorPort``, и mypy честно
+    возражал: ``ExtractorPort`` не имеет ни ``extract_path``, ни ``extract_bytes``.
+    Аннотация была ложью об интерфейсе, а не «шумом типов».
+
+    ``version`` — read-only: реализации выводят штамп из уровня/устройства/сборки
+    движка (``docling-doc-3:<level>/<device>/…``, ``pdfium-text-2``), записывать его
+    потребителю нечего.
+
+    ``version_for(filename)`` намеренно **не** входит в порт: офисный и PDF-пути
+    штампуются разными строками, и метод есть только у docling. Композит спрашивает
+    его через ``getattr`` и падает обратно на ``version`` — отсутствие метода это
+    «один штамп на весь адаптер», а не ошибка.
+    """
+
+    @property
+    def version(self) -> str: ...
+
+    def extract_bytes(
+        self, content: bytes, filename: str = "document.pdf"
+    ) -> ExtractedDoc: ...
+
+    def extract_path(
+        self, path: str | Path, *, filename_hint: str | None = None
     ) -> ExtractedDoc: ...

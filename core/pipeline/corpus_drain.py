@@ -113,7 +113,10 @@ class _WaveEntry:
 
     pid: str
     wu: str
-    depth: int | None
+    #: Глубина узла frontier. Всегда известна: элемент волны строится из изъятого узла
+    #: (``frontier.next()`` отдаёт ``(url, depth)``), поэтому ``None`` здесь не значил бы
+    #: ничего — а как тип он протекал в коммит и запрещал расширение BFS по ссылкам.
+    depth: int
     kind: str
     desc: LocalFetch | None = None
     future: Any = None
@@ -800,16 +803,16 @@ def root_steps(
                     )
                     emit()
                     continue
-                desc = entry.desc
-                if desc is None:
+                entry_desc = entry.desc
+                if entry_desc is None:
                     # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись
                     # несёт desc — иначе коммитить нечего.
                     raise AssertionError(
                         f"{entry.pid}/{entry.wu}: запись волны без desc"
                     )
-                if desc.resume is not None or desc.reject is not None:
+                if entry_desc.resume is not None or entry_desc.reject is not None:
                     # Resume/reject: живого фетча нет — коммит локально без submit.
-                    outcome = commit_local(desc)
+                    outcome = commit_local(entry_desc)
                     _commit(entry.pid, entry.wu, entry.depth, outcome)
                     continue
                 result = collected.get((entry.pid, entry.wu))
@@ -845,12 +848,12 @@ def root_steps(
                     emit()
                     continue
                 # S1: применяемый движок — фактический транспорт из результата шва.
-                desc.engine_value = result.engine or desc.engine_value
+                entry_desc.engine_value = result.engine or entry_desc.engine_value
                 page = RawPage(
                     url=result.final_url or result.url,
                     content=result.raw_bytes,
                     fetched_at=result.fetched_at or "",
-                    fetch_mode=desc.fetch_plan.fetch,
+                    fetch_mode=entry_desc.fetch_plan.fetch,
                     lang=None,
                     status_code=result.http_status,
                     content_type=result.content_type,
@@ -863,7 +866,7 @@ def root_steps(
                     last_modified=result.last_modified,
                     not_modified=result.not_modified,
                 )
-                outcome = commit_local(desc, page=page)
+                outcome = commit_local(entry_desc, page=page)
                 _commit(entry.pid, entry.wu, entry.depth, outcome)
             # M2: предохранитель — BFS-guard, поэтому чисто
             # ревалидационная волна его не расходует.
@@ -971,20 +974,31 @@ def root_steps(
             if limits.max_documents is None
             else limits.max_documents - frontier.fetched
         )
+        # Ширина волны берётся **той же** формулой, которой драйвер полосы создал пул
+        # (:func:`lane_width`), а не ``limits.max_workers`` напрямую: пул и размер волны
+        # обязаны быть одним числом, и второй формулы здесь быть не должно. ``None``
+        # означал бы «пула нет», но эта ветка исполняется только при ``pool is not None``
+        # (последовательный путь уходит выше) — несовпадение было бы тихой деградацией,
+        # поэтому оно поднимается как ``AssertionError``, а не приводится к единице.
+        wave_width = lane_width(limits, executor=executor)
+        if wave_width is None:  # pragma: no cover - ветка требует пул
+            raise AssertionError(
+                f"{pid}: волна при пуле фетча, но lane_width={wave_width}"
+            )
         # M2: та же формула, что в executor-ветке: непрерывный
         # revalidation-блок + discovery-room, без роста batch.
         reval_n = min(
-            frontier.revalidation_head_count(max_workers),
-            int(max_workers) // 2,
+            frontier.revalidation_head_count(wave_width),
+            wave_width // 2,
         )
         room = (
-            int(max_workers)
+            wave_width
             if remaining is None
-            else min(int(max_workers), max(0, remaining))
+            else min(wave_width, max(0, remaining))
         )
         wave_size = min(
             len(frontier),
-            int(max_workers),
+            wave_width,
             max(reval_n, reval_n + room),
         )
         if wave_size <= 0:
@@ -993,14 +1007,14 @@ def root_steps(
             if len(frontier) and not frontier.has_capacity:
                 frontier.mark_truncated("max_documents")
             break
-        entries: list[_WaveEntry] = []
+        wave_entries: list[_WaveEntry] = []
         for _ in range(wave_size):
             node = frontier.next()
             if node is None:
                 break
             work_url, depth = node
             if frontier.blacklisted(work_url):
-                entries.append(
+                wave_entries.append(
                     _WaveEntry(pid, work_url, depth, "blacklisted")
                 )
                 continue
@@ -1015,7 +1029,7 @@ def root_steps(
                 and prior_item.attempts >= max_attempts
                 and terminal_failure_kind(prior_item) is None
             ):
-                entries.append(
+                wave_entries.append(
                     _WaveEntry(
                         pid, work_url, depth, "attempts", prior_item=prior_item
                     )
@@ -1045,19 +1059,19 @@ def root_steps(
                 raise AssertionError(
                     f"{desc.pid}/{desc.wu}: poolable без пула фетча"
                 )
-            entries.append(
+            wave_entries.append(
                 _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
             )
         # F8 (17 §7.2 п.2): та же карта для пул-волны — до выдачи плана драйверу,
         # чтобы объявленная вежливость не зависела от того, дошёл ли исход.
-        _note_wave_attempts(frontier, entries)
+        _note_wave_attempts(frontier, wave_entries)
         # Точка плана волны (F4b): корень отдаёт готовые записи **до** отправки, драйвер
         # решает допуск (право на host'ы), отправляет и ждёт. Коммит ниже остаётся
         # FIFO-порядком этого корня и исполняется на главном потоке сразу после того, как
         # драйвер вернёт исходы.
-        outcomes = yield _wave_plan(entries)
+        outcomes = yield _wave_plan(wave_entries)
         _commit_wave_results(
-            entries,
+            wave_entries,
             outcomes,
             commit_local=commit_local,
             commit=_commit,
@@ -1656,7 +1670,7 @@ def root_lifecycle(
         # оставлен пустым: пустой список читался бы как наблюдённый факт
         # «усечения не было».
 
-    def _extend_links(page: RawPage, depth: int | None, is_revalidation: bool) -> None:
+    def _extend_links(page: RawPage, depth: int, is_revalidation: bool) -> None:
         """D1: расширение BFS ссылками страницы — общий хвост обоих режимов.
 
         Вынесено в один носитель ради ``crawl_only`` (F2): режим «краул без конверсии»
@@ -1778,7 +1792,7 @@ def root_lifecycle(
     def _commit_outcome(
         pid: str,
         work_url: str,
-        depth: int | None,
+        depth: int,
         outcome: tuple[RawPage, Path, FetchPlan, bool] | None,
     ) -> None:
         """Пост-фетч коммит дренажа: retention-счётчики, пропуск, очередь, BFS.

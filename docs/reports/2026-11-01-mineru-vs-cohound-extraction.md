@@ -38,13 +38,13 @@
 |---|---|---|
 | Маршрут формата | `core/cli/wiring.py:2092` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:457`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
 | PDF `text_layer` | `core/adapters/extract_pdf_text.py:203` | pypdfium2, постранично, плоский текст; пустая страница → `error="no_text_layer"` (`:267`; 183 из 16 073 стр., 1.14 %) |
-| PDF `structured` | `core/adapters/extract_document.py:849` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
+| PDF `structured` | `core/adapters/extract_document.py:882` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
 | HTML | `core/adapters/extract_html.py:147` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
 | Санитайз | `core/util/sanitize.py:145,290,423` | вход HTML: структурный пре-клин `strip_active_html` (`:290`) — удаляется только активное, `class`/`id`/`role` остаются для `trafilatura`; allow-list `sanitize_html` (`:145`) — только на шве валидации (`gateway_validate.py:300`). Выход: `strip_control_chars` → `neutralize_prompt_injection_marks` в одной границе `finalize_extracted_text` (`:423`), её же вызывает документный путь (§10) |
 | Нарезка | `core/adapters/chunker_markdown.py:248` | 1500 символов без перекрытия, разрез по AST (CommonMark/GFM); заголовки считаются **относительно самого мелкого** уровня документа (`md-heading-5`, `:126`), `heading_path` из заголовков |
 | Кэш | `core/pipeline/extract_cache.py:113,343` | ключ `(sha256 байтов, extractor_version, level)`; кэшируются **только полные успехи** |
-| Порт | `core/ports/extractor.py:23` | `version` + `extract(page, route) -> ExtractedDoc`; механизм — значение оси `crawl.pdf_pipeline` |
+| Порт | `core/ports/extractor.py:24` | `version` + `extract(page, route) -> ExtractedDoc`; механизм — значение оси `crawl.pdf_pipeline` |
 
 Наши замеры (не цитаты):
 
@@ -218,7 +218,7 @@ y-кластеризация и склейка строк внутри блок�
    символов). Инвариант «одна граница до чанкинга/хеширования» (`core/util/sanitize.py:31`) на деле не
    был выполнен для двух путей из четырёх: один и тот же текст доходил до оценщика помеченным
    из `.txt` и дословным из `.docx`. Чинили не по одному пути, а одной границей —
-   `core/util/sanitize.finalize_extracted_text` (`:423`; вызовы — `extract_document.py:359`,
+   `core/util/sanitize.finalize_extracted_text` (`:423`; вызовы — `extract_document.py:387`,
    `extract_pdf_text.py:247`), и её версия вошла в провенанс: `docling-doc-3:…/<policy>/finalize-1`
    и `docling-office-1:<policy>/<build>/finalize-1`. Любой третий механизм теперь получает ту же
    границу, а не четвёртую дыру. Это меняет `text` → `content_hash` → доказательства, поэтому

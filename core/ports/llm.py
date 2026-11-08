@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from pydantic import BaseModel
+
 from core.domain import LLMCellOutput
 from core.domain.enums import ReasoningEffort
 
@@ -38,7 +40,11 @@ class LLMRequest:
     """Запрос к оценщику. ``scenario`` всегда evaluator для этого порта (I21)."""
 
     prompt: str
-    response_schema: type
+    #: Класс pydantic-модели выходного контракта — **не** произвольный ``type``.
+    #: Адаптер зовёт у него ``model_json_schema()`` (constrained decoding) и отвергает
+    #: не-модель видимой ошибкой; голый ``type`` объявлял контракт, которого нет, и
+    #: заставлял каждого потребителя либо глушить проверку, либо падать в рантайме.
+    response_schema: type[BaseModel]
     model_id: str
     model_version: str = ""
     seed: int | None = None

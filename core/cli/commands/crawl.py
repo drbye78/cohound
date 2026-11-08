@@ -696,6 +696,10 @@ def _execute_crawl_locked(
     # остаётся прежнего типа (``list[Any]``), поэтому форма payload'а не меняется.
     phase_errors = list(getattr(result, "errors", []) or [])
     phase_errors.sort()
+    # Заметки — один список на payload: N4-предупреждение ниже дописывается в него же,
+    # поэтому ``setdefault`` на типизированном литерале не нужен (и не сужается до
+    # ``list`` в union-типе словаря).
+    payload_notes: list[str] = [*notes, *_phase_notes(result)]
     payload = {
         "ok": phase_status == "ok",
         "mode": mode,
@@ -711,7 +715,7 @@ def _execute_crawl_locked(
         # 17 §7.2/§4: заметки фазы (полосы, браузерная очередь, границы продуктов) —
         # в том же payload, что и счётчики: иначе `crawl run` публикует числа, но не
         # называет, чем они получены.
-        "notes": [*notes, *_phase_notes(result)],
+        "notes": payload_notes,
         # F2 (17 §4): режим «краул без конверсии» и содержимое durable-очереди.
         # ``crawl_only=false`` в полном крауле — не украшение: по этому полю видно,
         # что корпус собирался, а не только добывался.
@@ -735,7 +739,7 @@ def _execute_crawl_locked(
             f"страниц={truncation.get('pages_fetched')}; "
             f"ревалидация={truncation.get('revalidation_fetched')}"
         )
-        payload.setdefault("notes", []).append(warning)
+        payload_notes.append(warning)
     if args.json:
         _print_json(payload)
     else:
@@ -1071,8 +1075,12 @@ def list_sessions(args: argparse.Namespace) -> int:
             lines.append(f"sessions: {len(sessions)}")
             for session in sessions:
                 suffix = ""
-                if session["stale_reason"]:
-                    suffix = f" stale({session['stale_reason'].split(':', 1)[0]})"
+                # Значение словаря-строки таблицы соседствует с числами, поэтому его тип —
+                # union; ``stale_reason`` по построению строка (``str`` — не преобразование
+                # смысла, а восстановление объявленного типа перед ``split``).
+                reason = str(session["stale_reason"] or "")
+                if reason:
+                    suffix = f" stale({reason.split(':', 1)[0]})"
                 lines.append(
                     f"  {session['session_id']} [{session['status']}]{suffix} "
                     f"total={session['total']} fetched={session['fetched']} "

@@ -69,11 +69,17 @@ class CompositionViewPort(Protocol):
     (матрица зависимостей 01 §1). Адаптеру нужны только эти три члена.
     """
 
-    composition_id: str
-    members: Mapping[str, str]
+    #: Оба члена — **только чтение**: вид композиции неизменяем (снимок состава), и
+    #: ``CompositionView`` объявляет их полями frozen-dataclass'а, то есть read-only.
+    #: Порт с изменяемыми полями ему не соответствовал структурно (mypy: «expected
+    #: settable variable, got read-only attribute»), хотя смысл обеих сторон совпадал.
+    @property
+    def composition_id(self) -> str: ...
+
+    @property
+    def members(self) -> Mapping[str, str]: ...
 
     def build_id_for(self, product_id: str) -> str: ...
-
     def product_ids(self) -> list[str]: ...
 
 

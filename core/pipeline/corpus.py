@@ -4146,29 +4146,29 @@ def _build_corpus(
         for origin, all_known_urls in all_orphan_buckets.items():
             selected_urls = orphan_buckets.get(origin, ())
             # Бакет уже дренирован полосой (``_synthetic_root_plans``): наблюдение — здесь.
-            frontier: Frontier | None = ctx.synthetic.get((_SYNTHETIC_ORPHAN, origin))
-            info: dict[str, Any] = {
+            orphan_frontier: Frontier | None = ctx.synthetic.get((_SYNTHETIC_ORPHAN, origin))
+            orphan_info: dict[str, Any] = {
                 "selected": (
-                    sum(1 for url in selected_urls if frontier.is_revalidation(url))
-                    if frontier is not None
+                    sum(1 for url in selected_urls if orphan_frontier.is_revalidation(url))
+                    if orphan_frontier is not None
                     else 0
                 ),
-                "fetched": frontier.revalidation_fetched if frontier is not None else 0,
+                "fetched": orphan_frontier.revalidation_fetched if orphan_frontier is not None else 0,
             }
             if revalidation_cap_fired:
                 # Отложенные orphan-URL — не «потеряны»: их число видно рядом с selected.
-                info["deferred"] = deferred_by_origin.get(origin, 0)
+                orphan_info["deferred"] = deferred_by_origin.get(origin, 0)
             if skipped_by_origin.get(origin):
-                info["skipped"] = skipped_by_origin[origin]
-            if frontier is not None and frontier.skipped_blacklisted:
-                info["skipped_blacklisted"] = list(frontier.skipped_blacklisted)
-            if frontier is not None and frontier.artifacts_outside_prefix_count:
+                orphan_info["skipped"] = skipped_by_origin[origin]
+            if orphan_frontier is not None and orphan_frontier.skipped_blacklisted:
+                orphan_info["skipped_blacklisted"] = list(orphan_frontier.skipped_blacklisted)
+            if orphan_frontier is not None and orphan_frontier.artifacts_outside_prefix_count:
                 # P6b: видимость обхода path-prefix — рядом с ``skipped_blacklisted``.
-                info["artifacts_outside_prefix"] = {
-                    "count": frontier.artifacts_outside_prefix_count,
-                    "examples": list(frontier.artifacts_outside_prefix),
+                orphan_info["artifacts_outside_prefix"] = {
+                    "count": orphan_frontier.artifacts_outside_prefix_count,
+                    "examples": list(orphan_frontier.artifacts_outside_prefix),
                 }
-            revalidation_orphans[f"{product_id}:{origin}"] = info
+            revalidation_orphans[f"{product_id}:{origin}"] = orphan_info
             counters.revalidation_orphan_total += len(all_known_urls)
             # Targets известных URL резолвятся лениво в корневом цикле
             # (``_resolve_target``) — предварительная резолюция не нужна.
@@ -4855,7 +4855,11 @@ def _build_corpus(
                     f"{product_id}: coverage captures: "
                     f"{type(exc).__name__}: {exc}"
                 )
-        if session is not None:
+        # ``run_id is not None`` — не новый отказ, а объявленный инвариант: сеанс
+        # создаётся только в ветке «``store`` + ``run_id`` известны» (см. создание
+        # ``session`` выше), и покрытие адресуется парой ``(run_id, product_id)``.
+        # mypy не переносит это сужение через присваивание, поэтому оно названо здесь.
+        if session is not None and run_id is not None:
             try:
                 written_coverage = _persist_corpus_coverage(
                     store,
@@ -5207,7 +5211,9 @@ def _build_corpus(
     # после финализации, чтобы провенанс/усечение уже были зафиксированы. Это факт о
     # корпусе, а не о статусе сеанса, поэтому остаётся на границе фазы (пишется поверх
     # per-product строк и закрывает продукты, вообще не вошедшие в цикл).
-    if session is not None:
+    # ``run_id is not None`` — тот же инвариант, что у границы продукта: сеанс без
+    # прогона не создаётся, а строка покрытия адресуется парой ``(run_id, product_id)``.
+    if session is not None and run_id is not None:
         # План 20 §11.2: полнота — по снятиям корней. Карта строится для всех продуктов
         # фазы: у продукта без элементов сеанса снятие прошлого прогона — единственный
         # носитель полноты (``frozen``/``offline``). Сбой чтения одного продукта не рушит

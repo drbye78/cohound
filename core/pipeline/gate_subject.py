@@ -277,7 +277,11 @@ def publication_subject(
     publish_digest = _digest_of(
         {"bundle": bundle.to_dict(), "cells": cell_rows}
     )
-    material = {
+    # ``dict[str, Any]`` явно: материал — разнородный словарь, который уходит в JSON и в
+    # отпечаток. Без аннотации mypy выводит объединение типов значений (``dict[str, object]``),
+    # и обращение к вложенному словарю ниже («artifacts») становится неиндексируемым —
+    # хотя ``_artifact_material`` возвращает ``dict[str, Any]``.
+    material: dict[str, Any] = {
         "run_id": run_id,
         "coverage": _coverage_material(bundle),
         "capability": _capability_material(bundle),
@@ -291,7 +295,7 @@ def publication_subject(
         "failure_rate": bundle.failure_rate,
         "publish": _artifact_material(outputs_dir, publish_digest),
     }
-    export = {
+    export: dict[str, Any] = {
         "run_id": run_id,
         "coverage": material["coverage"],
         "capability": material["capability"],

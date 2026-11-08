@@ -41,7 +41,10 @@ class DiscoveryLLMRequest:
     """
 
     prompt: str
-    response_schema: type
+    #: Класс pydantic-модели гипотезы — **не** произвольный ``type``: адаптер зовёт у него
+    #: ``model_json_schema()`` (constrained decoding) и ``__name__`` (имя схемы в запросе).
+    #: Голый ``type`` объявлял контракт, которого нет.
+    response_schema: type[BaseModel]
     model_id: str
     seed: int = 0
     temperature: float = 0.0

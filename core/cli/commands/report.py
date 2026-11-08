@@ -137,6 +137,9 @@ def run(args: argparse.Namespace) -> int:
             "манифест не заполнен (фаза report не завершалась): версии — заглушки; "
             "артефакты построены из текущего состояния ячеек"
         )
+    # Профиль публикуемости может отсутствовать (бандл без профиля): сужаем ``None``
+    # один раз, чтобы честная ветка «профиля нет» осталась видимой в payload.
+    publishability = getattr(bundle, "publishability", None)
     payload = {
         "ok": True,
         "run_id": run_id,
@@ -177,9 +180,7 @@ def run(args: argparse.Namespace) -> int:
         # выводе, а не только в шапке battle card. Отсутствие профиля не выдумывается
         # (``None``): синтетический бандл без профиля честно молчит.
         "publishability": (
-            bundle.publishability.to_dict()
-            if getattr(bundle, "publishability", None) is not None
-            else None
+            publishability.to_dict() if publishability is not None else None
         ),
         "notes": notes,
     }

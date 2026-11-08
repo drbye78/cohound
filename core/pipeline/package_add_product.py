@@ -1488,10 +1488,11 @@ def apply_add_product(
         for seed in plan.seeds
     ]
     merged = merge_seeds(seeds_config, plan.product_id, entries)
+    # Один ``get`` вместо двух: второе обращение не сужается первым (это разные
+    # выражения), и проверка «есть ли продукт» не защищала чтение ``.seeds``.
+    existing_product = seeds_config.products.get(plan.product_id)
     appended = len(merged.products[plan.product_id].seeds) > len(
-        seeds_config.products.get(plan.product_id).seeds
-        if seeds_config.products.get(plan.product_id) is not None
-        else []
+        existing_product.seeds if existing_product is not None else []
     )
     # No-op apply не перезаписывает seeds.yaml: байт-идентичный файл не должен попадать
     # в ``written_files`` (иначе аудит показывает «изменение», которого не было).

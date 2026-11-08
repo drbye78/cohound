@@ -277,7 +277,10 @@ def run(args: argparse.Namespace) -> int:
         ports = _resolve_ports(args, store, target)
         embedder = getattr(ports, "embedder", None)
         query_model_id = getattr(embedder, "model_id", None) if embedder is not None else None
-        if not query_model_id:
+        # ``embedder is None`` в условии — то же отсутствие, что и пустой ``model_id``
+        # (иначе ``query_model_id`` не был бы получен): отказ и причина прежние, но
+        # ``embedder`` сужается до не-``None`` для вызова ``embed``.
+        if embedder is None or not query_model_id:
             return _emit_skip(
                 args,
                 run_id,
@@ -338,23 +341,26 @@ def run(args: argparse.Namespace) -> int:
         )
         store.persist_manifest(run_id, updated)
 
-    metrics = json.loads(report.to_manifest_json())["metrics"]
-    payload: dict[str, Any] = {
-        "ok": True,
-        "status": "measured",
-        "run_id": run_id,
-        "package": target.package,
-        "index_build_id": target.build_id,
-        "embed_model_id": target.embed_model_id,
-        "cutoff_k": report.k,
-        "rrf_k": report.rrf_k,
-        "selected_profile": report.selected_profile,
-        "selection_basis": report.selection_basis,
-        "metrics": metrics,
-        "skipped": dict(report.skipped),
-        "experiment_id": experiment_id,
-        "provenance": "measured" if profile_measured else "default",
-    }
+        # Машинный вывод собирается здесь же: ``target`` сужен проверками выше и в
+        # пределах ``with`` (после закрытия БД mypy уже не видит его как
+        # ``ExperimentTarget``, а ``None`` в payload был бы выдумкой).
+        metrics = json.loads(report.to_manifest_json())["metrics"]
+        payload: dict[str, Any] = {
+            "ok": True,
+            "status": "measured",
+            "run_id": run_id,
+            "package": target.package,
+            "index_build_id": target.build_id,
+            "embed_model_id": target.embed_model_id,
+            "cutoff_k": report.k,
+            "rrf_k": report.rrf_k,
+            "selected_profile": report.selected_profile,
+            "selection_basis": report.selection_basis,
+            "metrics": metrics,
+            "skipped": dict(report.skipped),
+            "experiment_id": experiment_id,
+            "provenance": "measured" if profile_measured else "default",
+        }
     _emit_measured(args, payload)
     return EXIT_OK
 

@@ -78,6 +78,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -1207,7 +1208,10 @@ class EdgeScheduler:
             future = thread_pool.submit(
                 _thread_fetch, crawler, engine, str(row["url"]), plan, self._limiter
             )
-        future.add_done_callback(lambda fut, r=row: self._on_done(r, fut))
+        # ``partial`` вместо ``lambda fut, r=row: …``: захват строки через аргумент по
+        # умолчанию давал лямбду с двумя параметрами, тогда как ``add_done_callback``
+        # ждёт ``Callable[[Future], …]`` — тип колбэка не выводился.
+        future.add_done_callback(partial(self._on_done, row))
 
     def _plan_for(self, row: sqlite3.Row) -> FetchPlan:
         """Строит ``FetchPlan`` из осей элемента (мягкая деградация к дефолтам).

@@ -221,7 +221,7 @@ endpoint'а, а не узла. Глобальный ресурс имеет од
 Кластерные фазы описывают **другую** систему, чем та, что исполняется сегодня. Измеренные
 узкие места находятся **внутри** одного узла, и ни одно не решается добавлением реплик:
 реплики за LB не кластер, потому что состояние задач и блоб живут в edge-local SQLite
-(`core/edge/scheduler.py:608`). Итог на 2026-11-08: **🟡 частично** — сдвинулись четыре пункта
+(`core/edge/scheduler.py:609`). Итог на 2026-11-08: **🟡 частично** — сдвинулись четыре пункта
 (перекрытие фетча когорты, перекрытие фаз, батч `evaluate`, staging артефактов), открыты четыре
 (class-aware пулы, LPT, отдельная индекс-фаза, флот).
 
@@ -237,7 +237,7 @@ HEAD `f14f866`.
 | **Отдельная индекс-фаза** | Индексация идёт внутри `corpus`; отдельной фазы и ресурсного класса нет | ⬜ — `PHASES` (15 фаз) индекс-фазы не содержит (`core/pipeline/runner.py:132`); `index` как единица — §2.1, шаг — §8 (F8) |
 | **Батчинг `evaluate`** | Точка входа батча есть; в полёте по умолчанию один вызов | 🟡 — `evaluate_batch` (`core/pipeline/evaluate.py:3507`), ось `llm_concurrency` (дефолт **1**, в `EXECUTION_CONTRACT_FIELDS` не входит), кэш вердиктов — `EvalVerdictCache` (`core/pipeline/eval_cache.py:234`). Цена и потолок — `25`/`06` §4/M1; остаток — включить конкурентность, а не «написать батч». Почему узлы не помогают — §10 |
 | **Staging артефактов** | Документы идут чанками; inline остался только на `fetch.raw` | 🟡 — `extract/upload` + `extract/collect` есть в наборе операций (`core/edge/server.py:141`), размер чанка — `max_upload_chunk_bytes` (`core/edge/server.py:117`), inline-base64 — только страница `fetch` (`core/edge/server.py:674`). **Остаток:** страница `crawl/collect` ограничена 8 MiB (`core/edge/scheduler.py:186`), а клиент отвергает ответ больше `MAX_RESPONSE_BYTES` = 50 MiB (`core/adapters/gateway_validate.py:53`) — крупный артефакт через `crawl/collect` не проходит. Подробно — §7 (паритет `split`/`local`) |
-| **Fleet scheduler** | Общая очередь/leases/object storage для нескольких узлов | ⬜ — состояние задач в edge-local SQLite (`core/edge/scheduler.py:608`), lease-порта в `core/ports/` нет; single-node аренда — только у очереди конверсии (`core/pipeline/extract_queue.py:54`, heartbeat `core/pipeline/extract_queue.py:58`). Подробно — §2 и §5, шаг — §8 (F2) |
+| **Fleet scheduler** | Общая очередь/leases/object storage для нескольких узлов | ⬜ — состояние задач в edge-local SQLite (`core/edge/scheduler.py:609`), lease-порта в `core/ports/` нет; single-node аренда — только у очереди конверсии (`core/pipeline/extract_queue.py:54`, heartbeat `core/pipeline/extract_queue.py:58`). Подробно — §2 и §5, шаг — §8 (F2) |
 
 Порядок важнее пунктов: сначала **измерить** узел (стоимость `evaluate` — `25`, RAM-пик Pass B),
 затем снимать стены внутри узла (перекрытие фаз, class-aware пулы, LPT), и только потом флот —

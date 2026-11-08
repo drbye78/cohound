@@ -595,8 +595,12 @@ def _embed_batched(
     started = time.monotonic()
     # Размерность — часть проверки хитов: вектор другой размерности несовместим с моделью.
     # ``operator.index`` принимает и numpy-целые, иначе проверка молча выключилась бы.
+    raw_dim = getattr(embedder, "dim", None)
     try:
-        declared_dim = operator.index(getattr(embedder, "dim", None))
+        # ``None`` — «размерность не объявлена»: это тот же исход, что нечисловое
+        # значение (``declared_dim = 0`` ⇒ ``expected_dim = None``), но записанный явно,
+        # а не через исключение ``operator.index(None)``.
+        declared_dim = 0 if raw_dim is None else operator.index(raw_dim)
     except (TypeError, ValueError):
         declared_dim = 0
     expected_dim = declared_dim if declared_dim > 0 else None

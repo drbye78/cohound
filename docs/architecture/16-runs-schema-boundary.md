@@ -212,7 +212,7 @@ CREATE TABLE IF NOT EXISTS run_product (
 coverage)` (`core/pipeline/corpus_coverage.py:654`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: на момент
 границы переноса ячеек не было (`09` §10), а сегодня их считает отчёт из durable-ячеек
-(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3147`).
+(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3173`).
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — величины того же класса, что `product_end` пишет в `results[].notes` прогона
@@ -325,7 +325,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
   (`core/domain/models.py:614-620`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
   что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:488-509`).
-- Резолвер: `resolve_embed_device(app, run)` (`core/pipeline/crawl_frontier.py:510-538`) —
+- Резолвер: `resolve_embed_device(app, run)` (`core/pipeline/crawl_frontier.py:511-538`) —
   копия `resolve_pdf_device` без site-слагаемого.
   Дефолт `cpu`, значения только `cpu|cuda`, `auto` **нет** (R5: объявленная ось обязана
   действовать). Enum `EmbedDevice` — в `core/domain/enums.py` рядом с `PdfDevice`
@@ -353,7 +353,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 одного места — `core/pipeline/run_identity.py:379`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:2559-2611`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:2585-2611`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. `execution_change: embed_device` diff называет и тогда, когда
 поле есть только с одной стороны.
 ⚠️ **Сверено 08.11.2026 — оговорка к «старые прогоны читаются»:** совместимость чтения
@@ -364,7 +364,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 `RunManifest` (`core/domain/models.py:1667`) получает поле `embed_device`, и этого
 достаточно: `_contract_field_attr` (`core/pipeline/report.py:2554-2557`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
-(`core/pipeline/report.py:2537-2542`)
+(`core/pipeline/report.py:2563-2568`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
@@ -378,9 +378,9 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено» (**✅ as-built**)
 
-**До границы** `_resolve_embedder` (`core/cli/wiring.py:2880-2954`) выбирал по факту
+**До границы** `_resolve_embedder` (`core/cli/wiring.py:2911-2954`) выбирал по факту
 установки: `model2vec` → `LocalEmbedder` → `None`. Сегодня он принимает **объявленные**
-`device` и `precision` (`core/cli/wiring.py:2880-2954`) и исполняет таблицу ниже;
+`device` и `precision` (`core/cli/wiring.py:2911-2954`) и исполняет таблицу ниже;
 `LiteEmbedder` — NumPy/CPU by design
 (`core/adapters/embed_model2vec.py:4`), и ось он исполнить не может.
 
@@ -707,7 +707,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
      (`resume_retained` + `consumed += 1`, `core/pipeline/corpus_drain.py:1515-1527`) и
      дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
-     через `add_revalidate_seed` (`core/pipeline/crawl_frontier.py:1534`), чей work-set
+     через `add_revalidate_seed` (`core/pipeline/crawl_frontier.py:1563`), чей work-set
      гейтится режимом продукта (`plan_incremental_items` под сетью отдаёт `[]` для
      `new`/`full` — `core/pipeline/corpus_ingest.py:4798-4800`). Правило: **заряженный URL обязан быть и
      дренируемым** — каждый элемент, засчитанный в `consumed`, ставится depth-0 листом
@@ -862,7 +862,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2537` (первая редакция ссылалась на строку 1970 того же файла);
+`core/pipeline/report.py:2563` (первая редакция ссылалась на строку 1970 того же файла);
 `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:150` (первая редакция ссылалась на строку 93 — там комментарий);
 `_PARTITION_SCHEMA` —

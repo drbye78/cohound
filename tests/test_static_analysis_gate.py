@@ -64,10 +64,26 @@ def test_mypy_domain_gate_is_declared_and_checked() -> None:
 
 
 def test_baseline_contains_no_domain_errors() -> None:
-    """Запись ``core/domain/...`` в baseline — способ обойти гейт домена."""
+    """Запись ``core/domain/...`` в baseline — способ обойти гейт домена.
+
+    Пустой baseline допустим **только как измеренный ноль**, и это проверяется формой:
+    файл несёт шапку генератора с числом записей, а число обязано совпадать с
+    фактическим. Иначе пустой файл (обрезанный, созданный руками) читался бы как
+    «долга нет», хотя означает «долг не измерен» — ровно та подмена, против которой
+    написан тест. Когда долг действительно выбран до нуля (08.11.2026, 112 → 0),
+    требование «файл непустой» запрещало бы честный результат.
+    """
     assert BASELINE.is_file(), "baseline типов отсутствует: python3 scripts/mypy_gate.py --update"
+    text = BASELINE.read_text(encoding="utf-8")
+    declared = re.search(r"^# Записей: (\d+)$", text, re.MULTILINE)
+    assert declared is not None, (
+        "в baseline нет шапки генератора «# Записей: N» — файл создан не "
+        "`mypy_gate.py --update`, и пустота в нём ничего не измеряет"
+    )
     entries = _baseline_entries()
-    assert entries, "пустой baseline означает, что долг не измерен, а не что его нет"
+    assert int(declared.group(1)) == len(entries), (
+        f"шапка обещает {declared.group(1)} записей, фактически {len(entries)}"
+    )
     offenders = [e for e in entries if e.startswith("core/domain/")]
     assert not offenders, f"ошибки домена попали в baseline: {offenders[:3]}"
 

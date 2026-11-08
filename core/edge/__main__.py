@@ -176,9 +176,12 @@ class _EdgeExtractor:
             return self._text.extract(page, route)
         if is_epub(page.url, page.content_type):
             return self._epub.extract(page, route)
-        filename = _detect_document_filename(page)
-        if filename is not None and documents is not None:
-            return _extract_document(documents, page, filename)
+        # Отдельное имя: выше ``filename`` уже ``str`` (подставлен ``document.pdf``),
+        # и повторное использование имени делало ``str | None`` несовместимым с ним —
+        # хотя это две разные величины («как назвать документ» и «документ ли это»).
+        detected = _detect_document_filename(page)
+        if detected is not None and documents is not None:
+            return _extract_document(documents, page, detected)
         return self._html.extract(page, route)
 
 

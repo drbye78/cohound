@@ -512,8 +512,15 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
     deferred = runner.crawl(_SingleRequestSpider)
     _ACTIVE_RUNNERS.add(runner)
     # Снимаем ссылку на runner, когда краул завершился (успех или сбой), сохраняя
-    # результат/сбой без изменений.
-    deferred.addBoth(lambda result: (_ACTIVE_RUNNERS.discard(runner), result)[1])
+    # результат/сбой без изменений. Именованная функция, а не лямбда с кортежом:
+    # ``set.discard`` возвращает ``None``, и ``(discard(...), result)[1]`` был трюком
+    # ради одного выражения — он прятал и тип колбэка (``Callable[[Any], Any]`` не
+    # совпадал с ожидаемым ``addBoth``), и сам факт, что побочный эффект отдельный.
+    def _release_runner(result: Any) -> Any:
+        _ACTIVE_RUNNERS.discard(runner)
+        return result
+
+    deferred.addBoth(_release_runner)
     return deferred
 
 

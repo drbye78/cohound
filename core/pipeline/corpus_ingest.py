@@ -2995,7 +2995,10 @@ def commit_local(
     # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг). Замер попытки
     # (F6) едет тем же вызовом: ``FETCHED``-элемент обязан нести момент начала и
     # длительность, иначе §7.2 №1 (`observed_min_interval_s`) не посчитать.
-    raw_path = retain(
+    # Отдельное имя от ``raw_path`` выше: там — путь **уже** ретейненных байтов
+    # (resume, всегда ``Path``), здесь — результат retention (``Path | None``). Это две
+    # разные величины, и общее имя делало ``None`` несовместимым с ``Path``.
+    retained_path = retain(
         pid,
         wu,
         page,
@@ -3005,9 +3008,9 @@ def commit_local(
         fetch_ms=desc.fetch_ms,
         capture_id=desc.capture_id,
     )
-    if raw_path is None:
+    if retained_path is None:
         return None
-    return page, raw_path, fetch_plan, True
+    return page, retained_path, fetch_plan, True
 
 
 def process_local(

@@ -169,6 +169,40 @@ def _selected_params(
     return chosen, warnings
 
 
+def _require_identity_terms(
+    cycle_id: str | None,
+    cohort_digest: str | None,
+    seeds_digest: str | None,
+    execution_contract_digest: str | None,
+) -> tuple[str, str, str, str]:
+    """Четыре слагаемых ``run_id`` — или отказ со списком отсутствующих.
+
+    Проверка живёт здесь, а не списком-комprehension'ом на месте вызова: возвращаемый
+    ``tuple[str, str, str, str]`` — это и есть сужение, которое видит mypy. Сообщение
+    по-прежнему перечисляет **все** отсутствующие аргументы, а не первый: план без
+    ``cohort_digest`` и без ``seeds_digest`` должен назвать оба, иначе оператор чинит
+    вход по одному кругу за раз.
+    """
+    if (
+        cycle_id is None
+        or cohort_digest is None
+        or seeds_digest is None
+        or execution_contract_digest is None
+    ):
+        present = {
+            "cycle_id": cycle_id,
+            "cohort_digest": cohort_digest,
+            "seeds_digest": seeds_digest,
+            "execution_contract_digest": execution_contract_digest,
+        }
+        missing = [name for name, value in present.items() if value is None]
+        raise ValueError(
+            f"plan: для вывода run_id нужны аргументы {missing} "
+            "(либо передайте run_id явно)"
+        )
+    return cycle_id, cohort_digest, seeds_digest, execution_contract_digest
+
+
 def _renormalize(
     declared: dict[str, float], applicable: list[str]
 ) -> dict[str, float]:
@@ -247,21 +281,14 @@ def plan(
     warnings.extend(lint_run_inputs(inputs).warnings)
 
     if run_id is None:
-        missing = [
-            name
-            for name, value in (
-                ("cycle_id", cycle_id),
-                ("cohort_digest", cohort_digest),
-                ("seeds_digest", seeds_digest),
-                ("execution_contract_digest", execution_contract_digest),
-            )
-            if value is None
-        ]
-        if missing:
-            raise ValueError(
-                f"plan: для вывода run_id нужны аргументы {missing} "
-                "(либо передайте run_id явно)"
-            )
+        (
+            cycle_id,
+            cohort_digest,
+            seeds_digest,
+            execution_contract_digest,
+        ) = _require_identity_terms(
+            cycle_id, cohort_digest, seeds_digest, execution_contract_digest
+        )
         run_id = derive_run_id(
             inputs,
             cycle_id=cycle_id,

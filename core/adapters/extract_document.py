@@ -82,7 +82,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from core.domain.enums import DocumentLevel, PdfDevice
 from core.ports.types import ExtractedDoc
@@ -315,6 +315,34 @@ def docling_office_version() -> str:
         f"{DOCLING_OFFICE_ADAPTER_FAMILY}:{DOCLING_MARKDOWN_POLICY}/"
         f"{docling_engine_build()}/{DOCLING_TEXT_FINALIZE}"
     )
+
+
+class _DoclingResult(Protocol):
+    """Поверхность результата конвертации, которую берёт адаптер.
+
+    docling — опциональный extra: его типы нельзя импортировать на уровне модуля, а
+    ``object`` запрещал единственное обращение ``result.document``. Протокол объявляет
+    ровно то, что используется, и проверяется структурно.
+    """
+
+    @property
+    def document(self) -> Any: ...
+
+    #: Статус конвертации (``ConversionStatus`` docling). ``Any``: у значения читается
+    #: ``.name`` (или берётся ``str``), а сам enum принадлежит опциональной библиотеке.
+    @property
+    def status(self) -> Any: ...
+
+
+class _DoclingConverter(Protocol):
+    """Поверхность ``DocumentConverter``: один метод ``convert(path)``.
+
+    Остальное (``status``, ``input.page_count``, ``pages``) читается через ``getattr``
+    в :func:`_document_text`/:func:`_page_count` — там ``object`` и ``getattr`` уместны,
+    потому что поле может отсутствовать у другой версии docling.
+    """
+
+    def convert(self, path: str) -> _DoclingResult: ...
 
 
 def _document_text(document: object) -> str:
@@ -594,11 +622,16 @@ def _probe_ocr_engine(pdf_options: object) -> object | None:
     artifacts_path = getattr(pdf_options, "artifacts_path", None)
     if artifacts_path is None:
         # Как в BasePipeline: неявный путь артефактов — из настроек docling.
+        # ``Any`` — намеренно: объект принадлежит внешней библиотеке, известен только в
+        # этой ветке (пакет — опциональный extra), а нужен из него один атрибут.
+        docling_settings: Any = None
         try:
-            from docling.datamodel.settings import settings  # type: ignore[import-not-found]
+            from docling.datamodel.settings import (  # type: ignore[import-not-found]
+                settings as docling_settings,
+            )
         except ImportError:  # pragma: no cover - зависит от версии docling
-            settings = None
-        artifacts_path = getattr(settings, "artifacts_path", None)
+            docling_settings = None
+        artifacts_path = getattr(docling_settings, "artifacts_path", None)
 
     try:
         auto = OcrAutoModel(
@@ -1126,7 +1159,7 @@ class DoclingDocumentExtractor:
 
     def _convert(
         self,
-        converter: object,
+        converter: _DoclingConverter,
         path: str,
         *,
         version: str | None = None,
@@ -1178,7 +1211,7 @@ class DoclingDocumentExtractor:
             return self._error(f"docling: {exc}", stamp)
 
     def _partial(
-        self, result: object, status: str, *, version: str | None = None, office: bool = False
+        self, result: _DoclingResult, status: str, *, version: str | None = None, office: bool = False
     ) -> ExtractedDoc:
         """``PARTIAL_SUCCESS`` → документ с текстом **части** и видимой причиной.
 

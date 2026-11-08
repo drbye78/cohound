@@ -190,12 +190,28 @@ def _observed_retrieval(
         return None, None, None
     resolved_profile = next(iter(profiles))
 
-    stored = {cell.retrieval_params_json for cell in cells if cell.retrieval_params_json}
-    params_json = next(iter(stored)) if len(stored) == 1 else None
+    # ``str(...)`` — граница с неиндексированным стором: ``iter_cells`` отдаёт ``Any``,
+    # а значение поля — строка (JSON, записанный :func:`_retrieval_params_json`).
+    # Приведение к объявленному типу делает эту границу видимой, а не полагается на
+    # то, что ``Any`` молча пройдёт в ``json.loads``.
+    stored: set[str] = {
+        str(cell.retrieval_params_json)
+        for cell in cells
+        if cell.retrieval_params_json
+    }
+    params_json: str | None = next(iter(stored)) if len(stored) == 1 else None
     if params_json is None:
-        params_json = _retrieval_params_json(
+        serialized = _retrieval_params_json(
             {"retrieval_profile": resolved_profile, "retrieval_cutoff_K": cutoff}
         )
+        # ``resolved_profile`` отфильтрован по истинности выше, поэтому сериализатор
+        # вернуть ``None`` не может (его ``None`` — «оба поля пусты»). Падение видимое:
+        # пустая строка вместо параметров выдала бы неизмеренный профиль за записанный.
+        if serialized is None:  # pragma: no cover - недостижимо
+            raise AssertionError(
+                f"retrieval_params_json: пустой профиль {resolved_profile!r}"
+            )
+        params_json = serialized
     if cutoff is None:
         try:
             cutoff = _json.loads(params_json).get("cutoff_K")
@@ -880,6 +896,10 @@ def _observed_exhaustion_facts(
             except ValueError:
                 serp_termination[str(product)] = TerminationReason.ERROR
 
+    # Часы контекста: ``getattr`` с проверкой не сужает атрибут, поэтому сужение
+    # вынесено в локальное имя — то же условие, но проверяемое один раз.
+    clock = getattr(ctx, "clock", None)
+    exhausted_at = None if clock is None else clock.now_iso()
     return ExhaustionFacts(
         contours_run=contours_run(
             products,
@@ -896,9 +916,7 @@ def _observed_exhaustion_facts(
         queries_by_product=serp_queries,
         yielded_by_product=yielded,
         termination_by_product=serp_termination,
-        exhausted_at=(
-            ctx.clock.now_iso() if getattr(ctx, "clock", None) is not None else None
-        ),
+        exhausted_at=exhausted_at,
     )
 
 

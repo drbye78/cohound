@@ -70,6 +70,9 @@ def run(args: argparse.Namespace) -> int:
     # ``None`` недостижим — проверка это инвариант, а не путь отказа.
     assert bundle is not None  # noqa: S101 — сужение типа для недостижимого None
     report = bundle.sensitivity
+    # Профиль публикуемости может отсутствовать (синтетический бандл без профиля):
+    # сужаем ``None`` один раз, чтобы ветка отказа осталась видимой в payload.
+    publishability = getattr(bundle, "publishability", None)
     payload = {
         "ok": True,
         "run_id": run_id,
@@ -82,9 +85,7 @@ def run(args: argparse.Namespace) -> int:
         # A1/§6: тот же блок, что в ``hound report --json`` — класс публикуемости
         # считается тем же ``compute``, поэтому смена вывода не должна терять его.
         "publishability": (
-            bundle.publishability.to_dict()
-            if getattr(bundle, "publishability", None) is not None
-            else None
+            publishability.to_dict() if publishability is not None else None
         ),
         "notes": notes,
     }

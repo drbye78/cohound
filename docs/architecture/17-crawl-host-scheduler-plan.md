@@ -110,7 +110,7 @@ inline-путём и `ProductIngest`, копивший `docs`/`chunks` до Pass
 
 `split` — не «другой краул»: контракт шва уже описывает очередь краула (submit/status/cancel/collect,
 блоб-ссылки — `contracts/seam/crawl.schema.json`), а edge хранит контент отдельно от core-стора
-(`_blob_ref`, `core/edge/scheduler.py:1404`). Кластер — N таких плоскостей с disjoint-шардами.
+(`_blob_ref`, `core/edge/scheduler.py:1408`). Кластер — N таких плоскостей с disjoint-шардами.
 
 ## 3. Модель исполнения
 
@@ -213,7 +213,7 @@ claim (`expect=PENDING, claimed_by=<worker>`), без второго метод�
    (иначе I19-цепочка рвётся).
 3. `claimed` без heartbeat дольше объявленного порога ⇒ возврат в `pending` с `attempts += 1` и
    **видимой** записью, а не молчаливое воскрешение (образец recovery:
-   `core/edge/scheduler.py:1094`).
+   `core/edge/scheduler.py:1095`).
 4. Переход в `claimed` — conditional `UPDATE ... WHERE state='pending'` (образец
    `core/edge/scheduler.py:1165`): два потребителя не берут один документ.
 5. `failed` терминален и перечисляет `error_kind`; повтор — только явной командой.
@@ -1077,7 +1077,7 @@ IP-pinning отсутствует). **Gate:** одинаковый fake-server �
 `queue_depth|dlq|lease_age` по `core/` — 0); команд `inspect`, `pause`, `reconcile`, `replay`,
 `explain-entry` нет. Подкоманды `hound crawl` на 08.11.2026 —
 `run|status|list|resume|restart|cancel` + `policy set|list|clear`
-(`core/cli/commands/crawl.py:1847`); `hound extract consume` (`core/cli/commands/extract.py:319`)
+(`core/cli/commands/crawl.py:1855`); `hound extract consume` (`core/cli/commands/extract.py:319`)
 это не `inspect`/`replay`. Наблюдаемость живого краула есть в другом объёме: `crawl_progress`/
 `crawl_product`, `--per-url`, `owner`/`heartbeat_at`/`stale_reason`. Документы уже описывают шов
 и профили, но deployment drill (две edge-реплики, отдельный PDF-пул, два профиля, proxy/DLP
@@ -1092,7 +1092,7 @@ harness) не проводился. **Gate:** production-like deployment drill �
 | Фаза | Статус и остаток | Дом |
 |---|---|---|
 | **2 — egress/content policy gateway** | ⬜ `EgressRequest`/`EgressDecision`/`ContentManifest`/`ContentChunk` в коде нет: грепп по `core/` и `contracts/` пуст, совпадения только в документах (`07` §8.6 — спецификация конверта, этот раздел — фаза); шов остаётся L7 JSON с 12 операциями (`core/edge/server.py:141`), fail-closed только у robots (`core/util/robots.py:64`). Gate: proxy/DLP harness видит structured request и полный stream; tampering ловится core rehash; bypass route отсутствует | `07` §8 |
-| **3 — distributed control plane** | ⬜ портов metadata store / task queue / object store / lease store нет (`core/ports/` — 20 модулей, все про per-run и per-product состояние); authoritative task state — edge-local SQLite (`core/edge/scheduler.py:608`); волна — локальный `_WaveEntry` (`core/pipeline/corpus_drain.py:105`); кластерных leases/reclaim/DLQ нет. Gate: две API replicas и два worker nodes на одном run; crash/reclaim/duplicate tests | `24` §5, §8 |
+| **3 — distributed control plane** | ⬜ портов metadata store / task queue / object store / lease store нет (`core/ports/` — 20 модулей, все про per-run и per-product состояние); authoritative task state — edge-local SQLite (`core/edge/scheduler.py:609`); волна — локальный `_WaveEntry` (`core/pipeline/corpus_drain.py:105`); кластерных leases/reclaim/DLQ нет. Gate: две API replicas и два worker nodes на одном run; crash/reclaim/duplicate tests | `24` §5, §8 |
 | **4 — cluster scheduler и quotas** | ⬜ квот нет (`rg quota core/` — 0); на **узле** вежливость есть (`RateLimiter` + `Frontier`, `core/pipeline/corpus_driver.py:245` при `config/deploy.yaml:90`/`config/deploy.yaml:115`), между узлами — ничего; `host_concurrency` обязан стать прогон-широким бюджетом. Gate: concurrent load не нарушает per-origin limits; profile A не ест reserved capacity B | `24` §4, §7 |
 | **5 — asynchronous extraction plane** | 🟡 durable `extract_queue` + потребитель есть (`core/pipeline/extract_queue.py:54`, `core/cli/commands/extract.py:319`); члены контейнеров идут за шов (`core/adapters/remote_extractor.py:214`), оси `document_level`/`pdf_device` — в `extract/submit` (`core/adapters/remote_extractor.py:236`). Нет: очередей по классам, отдельного deployment, `extractor_zone` не подключён (`core/config/deploy.py:768`; D-9). Gate: OOM PDF worker не теряет raw artifact; layout queue масштабируется отдельно | `10` §5, §6 |
 | **7 — source waves и split parity** | ⬜ child waves нет (`core/pipeline/corpus_ingest.py:176`, `_SITEMAP_KIND` через `PollPort`); дедуп и различение отказов есть (`core/pipeline/crawl_frontier.py:1223`, `core/pipeline/crawl_frontier.py:1236`); паритет проверен только фейковым executor'ом (`tests/pipeline/test_corpus_parity.py:519`); `ssrf_rejected` как исход отсутствует — SSRF это одна проверка `validate_url`. Gate: local и split дают одинаковый accepted corpus при одной policy | `07` §6 |

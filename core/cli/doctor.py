@@ -36,6 +36,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -407,15 +408,21 @@ def _env_group() -> CheckGroup:
             "Оценщик env не читает: модель — deploy.llm.<slot>.model_id или --llm-model"
         ),
     )
+    def _env_status(env: str) -> tuple[str, str]:
+        """Статус переменной окружения: задана или действует дефолт.
+
+        Отдельная функция, а не ``lambda _env=env: …``: лямбда с аргументом по умолчанию
+        имела тип ``Callable[[str], …]``, тогда как ``builder.add`` ждёт ``Callable[[], …]``,
+        и захват переменной цикла через дефолт читался как ошибка типа, а не как приём.
+        """
+        return (OK, "задан") if _env_set(env) else (WARN, "не задан → дефолт")
+
     for name, env in (
         ("llm_decoder", ENV_LLM_DECODER),
         ("llm_timeout", ENV_LLM_TIMEOUT),
         ("llm_max_tokens", ENV_LLM_MAX_TOKENS),
     ):
-        builder.add(
-            name,
-            lambda _env=env: (OK, "задан") if _env_set(_env) else (WARN, "не задан → дефолт"),
-        )
+        builder.add(name, partial(_env_status, env))
 
     # -- Search-адаптеры -------------------------------------------------- #
     def _yandex() -> tuple[str, str]:
@@ -601,7 +608,7 @@ def _dirs_group(base: Path) -> CheckGroup:
     for rel in OPERATIONAL_DIRS:
         value = getattr(config, rel) if config is not None else Path(rel)
         target = _effective_dir(base, value)
-        builder.add(rel, lambda _t=target, _rel=rel: _dir_writable(_t, _rel))
+        builder.add(rel, partial(_dir_writable, target, rel))
     return builder.group
 
 
@@ -650,7 +657,7 @@ def _layout_group() -> CheckGroup:
         return OK, f"{value} (источник: {source})", hint
 
     for name in HARNESS_FIELDS:
-        builder.add(f"layout.{name}", lambda _f=name: _check(_f))
+        builder.add(f"layout.{name}", partial(_check, name))
     return builder.group
 
 

@@ -316,12 +316,20 @@ class Heartbeat:
         """
         if not self.enabled:
             return False
+        # Локальные имена вместо ``self._store``/``self._session_id``: условие то же, что у
+        # :attr:`enabled`, но записанное так, что типы сужаются. Иначе mypy видит
+        # ``Any | None`` на атрибуте (свойство не переносит сужение в метод), и проверка
+        # «включён» перестаёт защищать вызов ниже.
+        store = self._store
+        session_id = self._session_id
+        if store is None or session_id is None:  # pragma: no cover - тот же предикат
+            return False
         moment = self._clock()
         if not force and self._last is not None and moment - self._last < self._interval_s:
             return False
         try:
-            self._store.touch_crawl_session_heartbeat(
-                self._session_id, at=self._stamp(), owner=self._owner
+            store.touch_crawl_session_heartbeat(
+                session_id, at=self._stamp(), owner=self._owner
             )
         except Exception:  # noqa: BLE001 — наблюдаемость не роняет фазу краула
             return False

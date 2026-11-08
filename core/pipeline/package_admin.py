@@ -248,7 +248,10 @@ def _rebuild_manifest(manifest: PackageManifest, **updates: Any) -> PackageManif
 
 #: Поля ``run.yaml``, которые операция когорты меняет проекционно (без полной перезаписи).
 #: ``cohort_ref`` — ревизия состава когорты (§2.1 п. 4 док. 09): меняется вместе с составом.
-_RUN_PROJECTION_FIELDS = frozenset({"anchor", "products", "cohort_ref"})
+# ``set``, а не ``frozenset``: значение уходит в ``BaseModel.model_dump(exclude=...)``,
+# чей тип — ``IncEx`` (set/dict); frozenset там не объявлен, хотя по смыслу совместим.
+# Набор не мутируется, поэтому изменяемость ничего не ломает — это форма аргумента.
+_RUN_PROJECTION_FIELDS: set[str] = {"anchor", "products", "cohort_ref"}
 
 #: Строка ``cohort_ref:`` верхнего уровня ``run.yaml`` (значение + хвостовой комментарий).
 _COHORT_REF_LINE_RE = re.compile(

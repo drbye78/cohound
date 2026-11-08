@@ -346,7 +346,7 @@ tests/
 | объём индекса | ➖ снято замером | 133 119 чанков на **3** партиции (срез 07.11.2026 до перезапуска корпуса, `14` §1; воспроизводится только из `cohound.db.before-corpus-rerun`); закрытый цикл 08.11.2026 — **154 664** чанка / **8 115** док на 5 партиций, максимум партиции 108 614 против порога 3–5 млн (запас ≥ 27×). Мера (`.npy`-шарды) есть: `core/adapters/vector_npy.py:247` |
 | ANN-альтернатива | ➖ снято решением | решение — `14` §4: Qdrant отклонён (поиск продукт-скупед, I17, ANN по миллионам векторов не выполняется никогда), порт `VectorIndex` готов, ANN-адаптера нет; возврат — по условию строки выше, не по «на вырост» |
 | эмбеддинги на CPU | ✅ сделано | батчевый путь `core/adapters/embed_local.py:192` (нарезка входа `batch_size`); цена — 2.8–5.7 чанк/с продакшн-путь, fp16 — 15.40 чанк/с (06.11.2026, `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`) |
-| массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:89`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:92`, `save_cells_batch` — `core/store/sqlite_store.py:646`) |
+| массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:89`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:94`, `save_cells_batch` — `core/store/sqlite_store.py:646`) |
 | search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1383`, безлимит запрещён — `core/pipeline/corpus.py:1408`), кэш — `core/util/cache.py:133` |
 
 ### D.1. Память и OOM

@@ -1415,15 +1415,18 @@ SUBJECT_STOPWORDS: frozenset[str] = frozenset(
 #: Токен слова: латиница и кириллица обрабатываются одинаково (регистр снят заранее).
 _SUBJECT_WORD_RE = re.compile(r"[0-9a-zа-я]+")
 
-#: Состояние замера: хотя бы одна цитата пересекается с предметом.
-SUPPORT_STATE_SUPPORTED = "supported"
-#: Состояние замера: цитаты есть, ни одна не упоминает предмет.
-SUPPORT_STATE_UNRELATED = "unrelated_support"
-#: Состояние замера: прямых цитат нет — это не наша аномалия, её ловит I22.
-SUPPORT_STATE_NO_QUOTES = "no_quotes"
-
 #: Три состояния замера. Больше состояний нет: это классификация факта пересечения.
+#: Объявлен **до** констант: константы типизированы им, а не голым ``str`` — иначе
+#: ``state=SUPPORT_STATE_*`` в конструкторе сужался до ``str`` и проверка домена
+#: (``SupportSubjectOverlap.state``) переставала что-либо значить для читателя.
 SupportSubjectState = Literal["supported", "unrelated_support", "no_quotes"]
+
+#: Состояние замера: хотя бы одна цитата пересекается с предметом.
+SUPPORT_STATE_SUPPORTED: SupportSubjectState = "supported"
+#: Состояние замера: цитаты есть, ни одна не упоминает предмет.
+SUPPORT_STATE_UNRELATED: SupportSubjectState = "unrelated_support"
+#: Состояние замера: прямых цитат нет — это не наша аномалия, её ловит I22.
+SUPPORT_STATE_NO_QUOTES: SupportSubjectState = "no_quotes"
 
 
 def _subject_stems(text: str) -> frozenset[str]:

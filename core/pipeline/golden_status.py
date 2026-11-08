@@ -407,11 +407,17 @@ def read_golden_status(package_dir: str | Path) -> GoldenStatus:
     raw_state = data.get("state")
     if raw_state is None:
         raise _error(path, f"state обязателен: один из {list(GOLDEN_STATES)}")
-    state = str(raw_state).strip()
-    if state not in GOLDEN_STATES:
+    state_text = str(raw_state).strip()
+    if state_text not in GOLDEN_STATES:
         raise _error(
-            path, f"неизвестное состояние state={state!r}; допустимы {list(GOLDEN_STATES)}"
+            path,
+            f"неизвестное состояние state={state_text!r}; допустимы {list(GOLDEN_STATES)}",
         )
+    # ``cast`` — сужение после проверки вхождения: mypy не выводит ``Literal`` из
+    # проверки значения по кортежу. Приведение стоит **после** проверки, поэтому оно не
+    # обещание, а запись того, что проверка уже установила; второго списка допустимых
+    # состояний не появляется (``GOLDEN_STATES`` остаётся единственным).
+    state = cast(GoldenState, state_text)
 
     reason = _text(data.get("reason"))
     declined_by = _text(data.get("declined_by"))
@@ -463,7 +469,7 @@ def read_golden_status(package_dir: str | Path) -> GoldenStatus:
             )
 
     return GoldenStatus(
-        state=state,  # type: ignore[arg-type] — проверено выше
+        state=state,
         declared=True,
         file_present=file_present,
         reason=reason,

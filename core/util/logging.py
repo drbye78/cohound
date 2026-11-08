@@ -25,7 +25,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -62,10 +62,17 @@ def _json_dumps(obj: Any, **kwargs: Any) -> str:
 
 
 @lru_cache(maxsize=1)
-def _structlog_renderer() -> Callable[[Any, str, Mapping[str, Any]], str]:  # pragma: no cover
+def _structlog_renderer() -> Callable[  # pragma: no cover
+    [Any, str, MutableMapping[str, Any]], str | bytes
+]:
     """Ленивый ``structlog``-рендерер (JSON-lines), создаётся один раз.
 
     Сериализатор — тот же :func:`_json_dumps`, поэтому вывод backend-ов неотличим.
+
+    Возврат объявлен как ``str | bytes``, а не ``str``: это фактический контракт
+    ``JSONRenderer.__call__`` (structlog разрешает сериализатор, отдающий байты), и
+    сужать его в аннотации значило бы обещать больше, чем даёт сторонний тип. Сужение
+    до ``str`` делает :func:`_render_event` — там, где строка реально нужна.
     """
     import structlog
 
@@ -79,7 +86,12 @@ def _render_event(event: Mapping[str, Any]) -> str:
     прямой stdlib-путь. Форма вывода одинакова (см. :func:`_json_dumps`).
     """
     if HAS_STRUCTLOG:  # pragma: no cover - зависит от окружения (structlog опционален)
-        return _structlog_renderer()(None, "info", dict(event))
+        rendered = _structlog_renderer()(None, "info", dict(event))
+        # ``JSONRenderer`` объявляет ``str | bytes``; наш сериализатор — :func:`_json_dumps`,
+        # и он всегда отдаёт ``str``, поэтому bytes-ветка недостижима. Возвращается всё
+        # равно ``str`` по проверке, а не по обещанию: иначе аннотация ``-> str`` была бы
+        # сужением без основания.
+        return rendered if isinstance(rendered, str) else rendered.decode("utf-8")
     return _json_dumps(event)
 
 

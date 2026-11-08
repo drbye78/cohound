@@ -131,7 +131,7 @@ run.yaml:crawl.<ось> → CrawlRunConfig → app CrawlConfig → resolve_crawl
 
 1. **Ключ кэша уже параметризован.** `extractor_version_for` берёт `adapter.version`
    (`core/cli/wiring.py:2136-2152`), а `version` — единственное обязательное поле
-   `ExtractorPort` (`core/ports/extractor.py:23-31`). Новая реализация отдаёт свою
+   `ExtractorPort` (`core/ports/extractor.py:24-31`). Новая реализация отдаёт свою
    строку (`pdfium-text-1`), кэш экстракции разделяется сам, без правок в `corpus.py`.
 2. **Порт узкий.** `ExtractedDoc` — это `text`, `content_hash`, `extractor_version`,
    `page_count`, `error`, `family` (`core/ports/types.py:145-164`). Реализовать его

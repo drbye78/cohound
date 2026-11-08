@@ -1217,11 +1217,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 and getattr(ports, "search", None) is None
                 and "corpus" in _phases_until(args.until)
             ):
-                search_lang = (
-                    str(getattr(inputs.run, "languages", None)[0])
-                    if getattr(inputs.run, "languages", None)
-                    else "ru"
-                )
+                # Языки объявлены списком (``run.yaml: languages``); пусто/нет — ``ru``,
+                # как и прежде. Локальная переменная — сужение ``None`` до индексации.
+                languages = getattr(inputs.run, "languages", None)
+                search_lang = str(languages[0]) if languages else "ru"
                 try:
                     # R7 (P1): адаптер собирается с тем же кэшем, что краулеры, — pipeline
                     # кэширует ответы поиска (``cache/serp``) через него, без второй точки

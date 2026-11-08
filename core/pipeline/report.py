@@ -67,6 +67,7 @@ from core.domain.enums import (
     DenialStrength,
     MeasurementOrigin,
     RankingPolicy,
+    RunMode,
     SourceScope,
     Status,
 )
@@ -734,7 +735,11 @@ def compact_search_effort(facts: Any) -> dict[str, Any] | None:
     """
     if not isinstance(facts, Mapping) or not facts:
         return None
-    block = facts.get("serp") if isinstance(facts.get("serp"), Mapping) else facts
+    # ``Mapping.get`` возвращает ``Any | None``; ``block`` — словарь по факту
+    # (``isinstance`` это подтверждает), поэтому тип объявлен явно, а не выведен
+    # из тернарного выражения (иначе ``None`` протёк бы в ``.get``).
+    serp = facts.get("serp")
+    block: Mapping[Any, Any] = serp if isinstance(serp, Mapping) else facts
     rounds = block.get("rounds") or {}
     budget = block.get("budget") or {}
     accepted = block.get("accepted") or {}
@@ -1030,7 +1035,8 @@ def build_manifest(
     * I2b/I2c — ``scope_attestations`` (``product_id → attested_by``): подписи, которыми
       прогон авторизовал ``❌``. Информационный провенанс того же класса, что
       ``reviewed_by``: в ``EXECUTION_CONTRACT_FIELDS`` **не входит** (авторизация, не
-      измерение), поэтому смена подписанта не даёт новый ``run_id``.
+      измерение), поэтому смена подписанта не даёт новый ``run_id``. На манифест уходят
+      под актуальным именем поля — ``scope_acceptance``.
     * План 20 §5 — ``corpus_snapshot``: снимок корпуса (``corpus_snapshot_id``, снятия
       прогона, ``corpus_as_of``). Провенанс, а не объявленный вход: в ``run_id`` не входит
       (снимок известен только после краула). Приходит готовым из durable-носителя фазы
@@ -1373,11 +1379,28 @@ def build_manifest(
         else CorpusSnapshot.model_validate(corpus_snapshot)
     )
 
+    # Режим прогона — **обязательное** поле ``RunConfig`` (``RunMode``) и обязательное поле
+    # манифеста. Тип теряется только потому, что входы читаются через ``getattr`` (их
+    # собирают и в обход ``load_inputs``). Приведение к домену делает значение проверенным:
+    # неизвестный режим — видимая ошибка, а не подстановка дефолта (A3).
+    raw_mode = getattr(run, "mode", None)
+    if isinstance(raw_mode, RunMode):
+        declared_mode = raw_mode
+    elif raw_mode is None:
+        raise ValueError(
+            "манифест: run.mode обязателен (RunMode), но не задан — "
+            "манифест без режима описал бы прогон, которого не было"
+        )
+    else:
+        # Строка из YAML/словаря: конструктор перечисления проверяет домен, неизвестное
+        # значение даёт видимую ошибку с перечнем допустимых.
+        declared_mode = RunMode(str(raw_mode))
+
     return RunManifest(
         run_id=str(getattr(plan, "run_id", "")),
         case_id=str(getattr(run, "case_id", "")),
         created_at=str(created),
-        mode=getattr(run, "mode", None),  # type: ignore[arg-type] — обязателен в RunConfig/плане
+        mode=declared_mode,
         methodology_version=str(methodology_version),
         package_version=str(package_version),
         catalog_version=str(catalog_version),
@@ -1541,7 +1564,10 @@ def build_manifest(
         snapshot_date=snapshot_date,
         # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
         # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
-        scope_attestations=dict(scope_attestations or {}),
+        # Пишется **актуальное** имя поля (``scope_acceptance``): ``scope_attestations``
+        # читается только легаси-валидатором ``RunManifest`` ради старых манифестов,
+        # и новый код не вправе писать исторический ключ.
+        scope_acceptance=dict(scope_attestations or {}),
         **extra,
     )
 

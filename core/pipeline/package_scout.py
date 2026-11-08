@@ -744,7 +744,9 @@ def build_seed_from_hypotheses(
         if not product_id or product_id == "node" or product_id in seen_products:
             continue
         seen_products.add(product_id)
-        spec: dict[str, Any] = {
+        # Отдельное имя от ``spec`` выше (роль): в этой функции уже есть переменная
+        # цикла ролей, и переиспользование имени делало две разные записи одной.
+        member_spec: dict[str, Any] = {
             "product_id": product_id,
             "role_overlap": 0.5,
             "anchor_relation": "analog",
@@ -752,8 +754,8 @@ def build_seed_from_hypotheses(
         # A3: обоснование — только при наличии role_hint; иначе поле не выдумывается.
         role_hint = _clean(product.role_hint)
         if role_hint:
-            spec["selection_reason"] = role_hint
-        cohort_specs.append(spec)
+            member_spec["selection_reason"] = role_hint
+        cohort_specs.append(member_spec)
     if cohort_specs:
         profile["cohort_members"] = cohort_specs
 

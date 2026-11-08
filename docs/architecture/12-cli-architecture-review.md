@@ -589,7 +589,7 @@ JSON-артефакт** (БД не меняет:
 **Ссылочный счёт (сверено 07.11.2026).** Этот документ цитируется как обоснование из **12**
 файлов кода и тестов (в `README.md` до этой сверки стояло «9»): `core/pipeline/golden_status.py:34`,
 `core/store/sqlite.py:777`, `core/store/sqlite_store.py:1966`, `core/cli/commands/status.py:3`,
-`core/cli/commands/runs.py:4`, `core/cli/run_overview.py:4`, `core/cli/wiring.py:661`,
+`core/cli/commands/runs.py:4`, `core/cli/run_overview.py:4`, `core/cli/wiring.py:666`,
 `tests/cli/test_gate.py:347`, `tests/cli/test_runs_status.py:3`,
 `tests/store/test_read_only_connect.py:6`, `tests/cli/test_read_only_commands.py:3`,
 `tests/cli/test_plan_crawl_axes.py:18`. Удаление документа оставило бы висячие ссылки на

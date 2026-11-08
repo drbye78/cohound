@@ -543,7 +543,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:1767` (`render_battle_card`), `:1827`
+✅ сделано (проверено) — `core/pipeline/report.py:1793` (`render_battle_card`), `:1827`
 (`render_nda_questions`), `:2414` (`render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, 26.10) и
 `runs/ru-pg-dbms-c2e7b860ac17/outputs/` (**12** файлов, 06.11, включая `battle_card.xlsx`,

@@ -502,9 +502,10 @@ def resolve_pdf_device(app: object, run: object | None = None) -> PdfDevice:
     """
     run_value = getattr(run, "pdf_device", None) if run is not None else None
     value = _pick(getattr(app, "pdf_device", None), run_value, None)
-    # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``PdfDevice``
-    # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
-    return PdfDevice(PdfDevice.CPU if value is None else value)  # type: ignore[arg-type]
+    # ``app``/``run`` объявлены ``object`` (терпимость к контейнеру ``DeployConfig``),
+    # поэтому ``getattr`` даёт ``Any``; на самом слое значение — поле Pydantic
+    # ``PdfDevice``. ``PdfDevice(...)`` здесь канонизирует значение, а не проверяет тип.
+    return PdfDevice(PdfDevice.CPU if value is None else value)
 
 
 def resolve_embed_device(app: object, run: object | None = None) -> EmbedDevice:
@@ -533,9 +534,9 @@ def resolve_embed_device(app: object, run: object | None = None) -> EmbedDevice:
     run_layer = getattr(run, "embed", run) if run is not None else None
     run_value = getattr(run_layer, "device", None) if run_layer is not None else None
     value = _pick(getattr(app_layer, "device", None), run_value, None)
-    # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``EmbedDevice``
-    # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
-    return EmbedDevice(EmbedDevice.CPU if value is None else value)  # type: ignore[arg-type]
+    # Слои приходят из ``object``-параметра (``getattr`` → ``Any``), но на самом слое
+    # значение — поле Pydantic ``EmbedDevice``: канонизация, а не проверка типа.
+    return EmbedDevice(EmbedDevice.CPU if value is None else value)
 
 
 def resolve_embed_precision(app: object, run: object | None = None) -> EmbedPrecision:
@@ -562,13 +563,19 @@ def resolve_embed_precision(app: object, run: object | None = None) -> EmbedPrec
     run_layer = getattr(run, "embed", run) if run is not None else None
     run_value = getattr(run_layer, "precision", None) if run_layer is not None else None
     value = _pick(getattr(app_layer, "precision", None), run_value, None)
-    # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``EmbedPrecision``
-    # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
-    return EmbedPrecision(EmbedPrecision.FP32 if value is None else value)  # type: ignore[arg-type]
+    # Слои приходят из ``object``-параметра (``getattr`` → ``Any``), но на самом слое
+    # значение — поле Pydantic ``EmbedPrecision``: канонизация, а не проверка типа.
+    return EmbedPrecision(EmbedPrecision.FP32 if value is None else value)
 
 
-def _pick(app: object, run: object, site: object) -> object:
-    """Высший не-``None`` приоритет: site > run > app (application default)."""
+def _pick[T](app: T | None, run: T | None, site: T | None) -> T | None:
+    """Высший не-``None`` приоритет: site > run > app (application default).
+
+    Функция generic, а не «``object`` на входе и на выходе»: слои резолва типизированы
+    (``CrawlConfig``/``CrawlRunConfig``/``DomainProfile``), поэтому тип значения известен
+    из объявления поля. ``object`` на выходе не добавлял точности — он **стирал** её, и
+    каждая ось ниже приводилась к ``int``/``str`` вручную, хотя проверять там нечего.
+    """
     if site is not None:
         return site
     if run is not None:
@@ -658,8 +665,41 @@ def resolve_crawl_limits(
     """
     profile = select_domain_profile(url, profiles or {})
 
-    def site_attr(name: str) -> object:
-        return getattr(profile, name) if profile is not None else None
+    # Per-site слой читается **с типизированного профиля**, а не через ``getattr`` по
+    # имени-строке: имя стирало тип до ``object``, и каждая ось ниже приводилась к
+    # ``int``/``str`` вручную — то есть проверка типа подменялась приведением. Имена
+    # полей здесь те же, что объявлены в :class:`DomainProfile`, и это проверяет mypy.
+    site_max_workers = profile.max_workers if profile is not None else None
+    site_extract_workers = profile.extract_workers if profile is not None else None
+    site_extract_max_tasks = (
+        profile.extract_max_tasks_per_child if profile is not None else None
+    )
+    site_max_response_bytes = profile.max_response_bytes if profile is not None else None
+    site_max_depth = profile.max_depth if profile is not None else None
+    site_max_documents = profile.max_documents if profile is not None else None
+    site_revalidate_max_documents = (
+        profile.revalidate_max_documents if profile is not None else None
+    )
+    site_exclude_paths = profile.exclude_paths if profile is not None else None
+    site_exclude_documents = profile.exclude_documents if profile is not None else None
+    site_document_level = profile.document_level if profile is not None else None
+    site_pdf_pipeline = profile.pdf_pipeline if profile is not None else None
+    site_document_timeout = profile.document_timeout_s if profile is not None else None
+    site_max_artifact_bytes = profile.max_artifact_bytes if profile is not None else None
+    site_attachment_formats = profile.attachment_formats if profile is not None else None
+    site_archive_max_member_bytes = (
+        profile.archive_max_member_bytes if profile is not None else None
+    )
+    site_archive_max_uncompressed_bytes = (
+        profile.archive_max_uncompressed_bytes if profile is not None else None
+    )
+    site_archive_max_members = (
+        profile.archive_max_members if profile is not None else None
+    )
+    site_archive_max_total_uncompressed_bytes = (
+        profile.archive_max_total_uncompressed_bytes if profile is not None else None
+    )
+    site_archive_descent = profile.archive_descent if profile is not None else None
 
     run_max_workers = run.max_workers if run is not None else None
     # F1 (план 17): app < run, без per-site слоя — число полос есть свойство узла.
@@ -679,7 +719,7 @@ def resolve_crawl_limits(
     # ``canonical_rate_limit``: ``{min_s: 0.05, max_s: 0.2}`` и ``{5e-02, 2e-01}`` дают
     # одну строку, то есть один дайджест.
     run_rate_limit = getattr(run, "rate_limit", None) if run is not None else None
-    site_rate_limit = site_attr("rate_limit")
+    site_rate_limit = profile.rate_limit if profile is not None else None
     rate_limit_spec = (
         site_rate_limit if site_rate_limit is not None else run_rate_limit
     )
@@ -741,14 +781,14 @@ def resolve_crawl_limits(
         getattr(run, "archive_descent", None) if run is not None else None
     )
 
-    max_workers = _pick(app.max_workers, run_max_workers, site_attr("max_workers"))
+    max_workers = _pick(app.max_workers, run_max_workers, site_max_workers)
     # P5: уровень документной экстракции резолвится **до** окна извлечения: пик памяти —
     # функция уровня (``resources.DOCLING_PEAK_MB``), поэтому вывести воркеры без уровня
     # нельзя. Порядок резолва (app < run < site) от перестановки не меняется.
     document_level = _pick(
         getattr(app, "document_level", None),
         run_document_level,
-        site_attr("document_level"),
+        site_document_level,
     )
     resolved_level = (
         document_level
@@ -768,7 +808,7 @@ def resolve_crawl_limits(
     extract_workers = _pick(
         getattr(app, "extract_workers", None),
         run_extract_workers,
-        site_attr("extract_workers"),
+        site_extract_workers,
     )
     # F0: окно не объявлено ни на одном слое ⇒ вывести из бюджета памяти (только для
     # локального экстрактора — флаг ставит вызывающий). ``off`` исключён: воркеров не
@@ -787,10 +827,9 @@ def resolve_crawl_limits(
     extract_max_tasks = _pick(
         getattr(app, "extract_max_tasks_per_child", None),
         run_extract_max_tasks,
-        site_attr("extract_max_tasks_per_child"),
+        site_extract_max_tasks,
     )
     app_max_response_bytes = getattr(app, "max_response_bytes", None)
-    site_max_response_bytes = site_attr("max_response_bytes")
     max_response_bytes = _pick(
         app_max_response_bytes, run_max_response_bytes, site_max_response_bytes
     )
@@ -801,8 +840,8 @@ def resolve_crawl_limits(
         or run_max_response_bytes is not None
         or "max_response_bytes" in getattr(app, "model_fields_set", set())
     )
-    max_depth = _pick(app.max_depth, run_max_depth, site_attr("max_depth"))
-    effective_max_depth = 0 if max_depth is None else int(max_depth)  # type: ignore[arg-type]
+    max_depth = _pick(app.max_depth, run_max_depth, site_max_depth)
+    effective_max_depth = 0 if max_depth is None else int(max_depth)
     # D1/§10: egress-политика ``robots.txt``. Поле несёт только app-слой
     # (``deploy.yaml:crawl.robots``), поэтому цепочка app < run < site сводится к app;
     # ``getattr`` с дефолтом оставляет место для будущих слоёв без второй формулы.
@@ -820,23 +859,23 @@ def resolve_crawl_limits(
         else (effective_max_depth > 0 or bool(site_sitemap))
     )
     max_documents = _pick(
-        app.max_documents, run_max_documents, site_attr("max_documents")
+        app.max_documents, run_max_documents, site_max_documents
     )
     revalidate_max_documents = _pick(
         getattr(app, "revalidate_max_documents", None),
         run_revalidate_max_documents,
-        site_attr("revalidate_max_documents"),
+        site_revalidate_max_documents,
     )
     exclude_paths = _pick(
-        app.exclude_paths, run_exclude_paths, site_attr("exclude_paths")
+        app.exclude_paths, run_exclude_paths, site_exclude_paths
     )
     exclude_documents = _pick(
-        app.exclude_documents, run_exclude_documents, site_attr("exclude_documents")
+        app.exclude_documents, run_exclude_documents, site_exclude_documents
     )
     document_level = _pick(
         getattr(app, "document_level", None),
         run_document_level,
-        site_attr("document_level"),
+        site_document_level,
     )
     # P7: механизм извлечения PDF — та же цепочка app < run < site (site > run > app).
     run_pdf_pipeline = (
@@ -845,7 +884,7 @@ def resolve_crawl_limits(
     pdf_pipeline = _pick(
         getattr(app, "pdf_pipeline", None),
         run_pdf_pipeline,
-        site_attr("pdf_pipeline"),
+        site_pdf_pipeline,
     )
     # P8: таймаут документа — та же цепочка app < run < site. ``None`` на всех слоях =
     # ось не объявлена ⇒ действует прежнее зашитое значение (:data:`DEFAULT_DOCUMENT_TIMEOUT_S`),
@@ -853,7 +892,6 @@ def resolve_crawl_limits(
     run_document_timeout = (
         getattr(run, "document_timeout_s", None) if run is not None else None
     )
-    site_document_timeout = site_attr("document_timeout_s")
     document_timeout = _pick(
         getattr(app, "document_timeout_s", None),
         run_document_timeout,
@@ -861,17 +899,14 @@ def resolve_crawl_limits(
     )
     # P6: контейнеры. ``None`` на site/run — «наследовать»; app-дефолт всегда есть.
     app_max_artifact_bytes = getattr(app, "max_artifact_bytes", None)
-    site_max_artifact_bytes = site_attr("max_artifact_bytes")
     max_artifact_bytes = _pick(
         app_max_artifact_bytes, run_max_artifact_bytes, site_max_artifact_bytes
     )
     app_attachment_formats = getattr(app, "attachment_formats", None)
-    site_attachment_formats = site_attr("attachment_formats")
     attachment_formats = _pick(
         app_attachment_formats, run_attachment_formats, site_attachment_formats
     )
     app_archive_max_member_bytes = getattr(app, "archive_max_member_bytes", None)
-    site_archive_max_member_bytes = site_attr("archive_max_member_bytes")
     archive_max_member_bytes = _pick(
         app_archive_max_member_bytes,
         run_archive_max_member_bytes,
@@ -880,22 +915,17 @@ def resolve_crawl_limits(
     app_archive_max_uncompressed_bytes = getattr(
         app, "archive_max_uncompressed_bytes", None
     )
-    site_archive_max_uncompressed_bytes = site_attr("archive_max_uncompressed_bytes")
     archive_max_uncompressed_bytes = _pick(
         app_archive_max_uncompressed_bytes,
         run_archive_max_uncompressed_bytes,
         site_archive_max_uncompressed_bytes,
     )
     app_archive_max_members = getattr(app, "archive_max_members", None)
-    site_archive_max_members = site_attr("archive_max_members")
     archive_max_members = _pick(
         app_archive_max_members, run_archive_max_members, site_archive_max_members
     )
     app_archive_max_total_uncompressed_bytes = getattr(
         app, "archive_max_total_uncompressed_bytes", None
-    )
-    site_archive_max_total_uncompressed_bytes = site_attr(
-        "archive_max_total_uncompressed_bytes"
     )
     archive_max_total_uncompressed_bytes = _pick(
         app_archive_max_total_uncompressed_bytes,
@@ -903,15 +933,14 @@ def resolve_crawl_limits(
         site_archive_max_total_uncompressed_bytes,
     )
     app_archive_descent = getattr(app, "archive_descent", None)
-    site_archive_descent = site_attr("archive_descent")
     archive_descent = _pick(
         app_archive_descent, run_archive_descent, site_archive_descent
     )
 
     return CrawlLimits(
-        max_workers=None if max_workers is None else int(max_workers),  # type: ignore[arg-type]
+        max_workers=None if max_workers is None else int(max_workers),
         host_concurrency=(
-            None if host_concurrency is None else int(host_concurrency)  # type: ignore[arg-type]
+            None if host_concurrency is None else int(host_concurrency)
         ),
         host_concurrency_explicit=_axis_explicit(
             app, "host_concurrency", run_host_concurrency, None
@@ -925,7 +954,7 @@ def resolve_crawl_limits(
         extract_backlog_mb=(
             None
             if extract_backlog_mb is None
-            else int(extract_backlog_mb)  # type: ignore[call-overload]
+            else int(extract_backlog_mb)
         ),
         extract_backlog_mb_explicit=_axis_explicit(
             app, "extract_backlog_mb", run_extract_backlog_mb, None
@@ -934,7 +963,7 @@ def resolve_crawl_limits(
         # развёртыванию. ``None`` — не объявлена (дайджест и ``run_id`` прежние).
         host_shards=_declared_host_shards(app),
         extract_workers=(
-            None if extract_workers is None else int(extract_workers)  # type: ignore[arg-type]
+            None if extract_workers is None else int(extract_workers)
         ),
         # F0: ``True`` — окно выведено из бюджета памяти, а не объявлено оператором.
         # Наблюдаемость расписания (``metrics.json.resources.scheduling``); в дайджест
@@ -943,24 +972,24 @@ def resolve_crawl_limits(
         extract_max_tasks_per_child=(
             None
             if extract_max_tasks is None
-            else int(extract_max_tasks)  # type: ignore[arg-type]
+            else int(extract_max_tasks)
         ),
         max_response_bytes=(
             DEFAULT_MAX_RESPONSE_BYTES
             if max_response_bytes is None
-            else int(max_response_bytes)  # type: ignore[arg-type]
+            else int(max_response_bytes)
         ),
         max_response_bytes_explicit=max_response_bytes_explicit,
         max_artifact_bytes=(
             DEFAULT_MAX_ARTIFACT_BYTES
             if max_artifact_bytes is None
-            else int(max_artifact_bytes)  # type: ignore[arg-type]
+            else int(max_artifact_bytes)
         ),
         max_artifact_bytes_explicit=_axis_explicit(
             app, "max_artifact_bytes", run_max_artifact_bytes, site_max_artifact_bytes
         ),
         attachment_formats=normalize_attachment_formats(
-            attachment_formats  # type: ignore[arg-type]
+            attachment_formats
         ),
         attachment_formats_explicit=_axis_explicit(
             app,
@@ -971,7 +1000,7 @@ def resolve_crawl_limits(
         archive_max_member_bytes=(
             DEFAULT_ARCHIVE_MAX_MEMBER_BYTES
             if archive_max_member_bytes is None
-            else int(archive_max_member_bytes)  # type: ignore[arg-type]
+            else int(archive_max_member_bytes)
         ),
         archive_max_member_bytes_explicit=_axis_explicit(
             app,
@@ -982,7 +1011,7 @@ def resolve_crawl_limits(
         archive_max_uncompressed_bytes=(
             DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES
             if archive_max_uncompressed_bytes is None
-            else int(archive_max_uncompressed_bytes)  # type: ignore[arg-type]
+            else int(archive_max_uncompressed_bytes)
         ),
         archive_max_uncompressed_bytes_explicit=_axis_explicit(
             app,
@@ -991,7 +1020,7 @@ def resolve_crawl_limits(
             site_archive_max_uncompressed_bytes,
         ),
         archive_max_members=(
-            None if archive_max_members is None else int(archive_max_members)  # type: ignore[arg-type]
+            None if archive_max_members is None else int(archive_max_members)
         ),
         archive_max_members_explicit=_axis_explicit(
             app, "archive_max_members", run_archive_max_members, site_archive_max_members
@@ -999,7 +1028,7 @@ def resolve_crawl_limits(
         archive_max_total_uncompressed_bytes=(
             DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES
             if archive_max_total_uncompressed_bytes is None
-            else int(archive_max_total_uncompressed_bytes)  # type: ignore[arg-type]
+            else int(archive_max_total_uncompressed_bytes)
         ),
         archive_max_total_uncompressed_bytes_explicit=_axis_explicit(
             app,
@@ -1016,15 +1045,15 @@ def resolve_crawl_limits(
         max_depth=effective_max_depth,
         robots=robots,
         max_documents=(
-            None if max_documents is None else int(max_documents)  # type: ignore[arg-type]
+            None if max_documents is None else int(max_documents)
         ),
         revalidate_max_documents=(
             None
             if revalidate_max_documents is None
-            else int(revalidate_max_documents)  # type: ignore[arg-type]
+            else int(revalidate_max_documents)
         ),
-        exclude_paths=tuple(exclude_paths or ()),  # type: ignore[arg-type]
-        exclude_documents=tuple(exclude_documents or ()),  # type: ignore[arg-type]
+        exclude_paths=tuple(exclude_paths or ()),
+        exclude_documents=tuple(exclude_documents or ()),
         document_level=DocumentLevel(
             DocumentLevel.FULL if document_level is None else document_level
         ),
@@ -1035,7 +1064,7 @@ def resolve_crawl_limits(
         document_timeout_s=(
             DEFAULT_DOCUMENT_TIMEOUT_S
             if document_timeout is None
-            else float(document_timeout)  # type: ignore[arg-type]
+            else float(document_timeout)
         ),
         document_timeout_s_explicit=_axis_explicit(
             app, "document_timeout_s", run_document_timeout, site_document_timeout

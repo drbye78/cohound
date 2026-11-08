@@ -18,7 +18,7 @@ import json
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from core.domain import (
     ArchiveObservation,
@@ -41,6 +41,8 @@ from core.domain import (
     ExtractQueueState,
     Gate,
     GateDecision,
+    GateSource,
+    GateVerdict,
     IndexManifestEntry,
     LLMScenario,
     ProtocolExhaustion,
@@ -400,7 +402,9 @@ class SqliteStore:
     def __enter__(self) -> SqliteStore:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
+        # ``Literal[False]``, а не ``bool``: исключения не подавляются никогда, и
+        # ``bool`` обещал бы право вернуть ``True`` (проглотить исключение).
         self.close()
         return False
 
@@ -1030,6 +1034,15 @@ class SqliteStore:
 
         Неизвестное значение ``gate`` (например, из БД будущей версии) пропускается, а не
         роняет чтение: аудит-след чужого формата не должен делать прогон неоткрываемым.
+
+        ``source``/``verdict`` так не пропускаются: строка описывает решение по **известному**
+        гейту, и подставить вместо неизвестного значения дефолт значило бы переписать
+        аудит-след (неизвестный источник стал бы «человек внутри», неизвестный вердикт —
+        «одобрено», то есть гейт прошёл бы по подставленному значению). Поэтому значение
+        приводится конструктором перечисления, и неизвестное — видимая ошибка, как у
+        остальных enum-колонок (:meth:`save_cell` → ``Status(existing_status)``).
+        ``NULL``/пустая строка по-прежнему означают дефолт модели: строка legacy-формата
+        не несла этих колонок.
         """
         cursor = self.conn.execute(
             "SELECT decision_id, run_id, gate, target, actor, decided_at, notes,"
@@ -1051,9 +1064,9 @@ class SqliteStore:
                 decided_at=row["decided_at"],
                 notes=row["notes"],
                 subject_digest=row["subject_digest"] or None,
-                source=row["source"] or "internal",
+                source=GateSource(row["source"] or "internal"),
                 external_ref=row["external_ref"],
-                verdict=row["verdict"] or "approved",
+                verdict=GateVerdict(row["verdict"] or "approved"),
             )
 
     def iter_exhaustions(self, run_id: str) -> Iterator[ProtocolExhaustion]:

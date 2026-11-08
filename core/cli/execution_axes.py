@@ -82,7 +82,7 @@ import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from core.adapters.chunker_family import (
     composite_chunker_version,
@@ -610,11 +610,16 @@ def contract_flag_values(args: argparse.Namespace) -> dict[str, Any]:
     попадают: их ``dest`` не являются параметрами ``build_execution_contract``, и такой
     ``**kwargs`` был бы ``TypeError`` — «широкий» словарь здесь дефект, а не запас.
     """
-    return {
-        spec.contract_arg: getattr(args, spec.dest, None)
-        for spec in CONTRACT_FLAGS
-        if spec.material == MATERIAL_CONTRACT
-    }
+    values: dict[str, Any] = {}
+    for spec in CONTRACT_FLAGS:
+        if spec.material != MATERIAL_CONTRACT:
+            continue
+        # ``__post_init__`` не даёт создать запись материала ``contract`` без
+        # ``contract_arg`` (``ValueError`` на импорте инвентаря), поэтому здесь он не
+        # ``None``: приведение опирается на инвариант записи, а не на догадку. Проверка
+        # ``is not None`` вместо приведения молча выбросила бы флаг из контракта.
+        values[cast(str, spec.contract_arg)] = getattr(args, spec.dest, None)
+    return values
 
 
 @dataclass(frozen=True)
@@ -648,7 +653,11 @@ def identity_flag_values(args: argparse.Namespace) -> IdentityFlags:
     :data:`MATERIAL_CONTRACT` (материал контракта читает :func:`contract_flag_values`:
     он идёт в другой аргумент и под другим именем).
     """
-    values = {
+    # ``Any`` — намеренно: ``argparse.Namespace`` не типизирован, и типы полей
+    # ``IdentityFlags`` держит не ``getattr``, а объявление флагов (``action``/``type``).
+    # Предохранитель остаётся прежним: ``**kwargs`` падает ``TypeError``, если инвентарь
+    # завёл флаг идентичности, которого этот читатель не знает, — молчаливого пропуска нет.
+    values: dict[str, Any] = {
         spec.dest: getattr(args, spec.dest, None)
         for spec in CONTRACT_FLAGS
         if spec.material != MATERIAL_CONTRACT
