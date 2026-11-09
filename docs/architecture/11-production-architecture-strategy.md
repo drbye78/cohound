@@ -245,7 +245,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (сегменты `<level>/<device>/<build>/<policy>/<finalize>`; `cpu`/`cuda` — ось
 >   `crawl.pdf_device`, P9).
 > - ✅ воркеры из бюджета + уровень из профиля: `core/pipeline/resources.py:525`
->   (`workers_from_budget`), preflight `core/cli/wiring.py:2594`
+>   (`workers_from_budget`), preflight `core/cli/wiring.py:2659`
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:356-357,525,1089`), подключены в
@@ -326,7 +326,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > наполовину: κ посчитана, модель по ней не выбрана, A1-гейт не принят.
 > - **Оценщик:** `hound experiment evaluator-benchmark` реализован
 >   (`core/cli/commands/experiment.py:564`; метрики κ/abstention/`fabricated_support`/bootstrap —
->   `core/pipeline/evaluator_benchmark.py:989-1053`). Первый замер κ — 07.11.2026, 50 ячеек ×
+>   `core/pipeline/evaluator_benchmark.py:990-1054`). Первый замер κ — 07.11.2026, 50 ячеек ×
 >   3 продукта (`docs/reports/measurements/2026-11-07-evaluator-benchmark-first-kappa.md`):
 >   κ **0.024** `off` [−0.045; 0.091] / **0.056** `low` [−0.015; 0.133] — на уровне случайного
 >   согласия. Выбор модели по κ **не сделан**: обе слоты `deploy.yaml` несут одну модель
@@ -339,7 +339,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   дренажа (`core/pipeline/corpus.py:2255`); `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1553` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:140`), значение из
->   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1207`).
+>   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1218`).
 >   Оговорка: контур исполняется только при объявленных `rounds > 0` **и** бюджете; на живых
 >   прогонах 06–07.11 (`c2e7b860ac17`, `2a5b51af5778`) объявлено `rounds: 1`/`budget: 362`, но
 >   он не исполнялся — политика краула запретила сеть (`search_calls_by_phase = {}`).
@@ -417,7 +417,7 @@ retrieval-тесты байт-идентичны прежним при том ж
 
 > 🟡 **частично сделано (сверено по коду 07.11.2026).** Прежняя запись «⬜ не сделано — шов v2
 > отсутствует» **устарела**: `extract/upload|submit|collect|abort` есть в allowlist
-> (`core/edge/server.py:151-154`), передача артефакта чанками реализована
+> (`core/edge/server.py:152-155`), передача артефакта чанками реализована
 > (`core/edge/extract_service.py`, `contracts/seam/extract.schema.json`:
 > `upload`/`submit`/`collect`/`abort`, staging TTL, `max_upload_chunk_bytes`), ось уровня
 > **не игнорируется**: `submit` несёт `level`/`device` (`core/adapters/remote_extractor.py:392-398`),

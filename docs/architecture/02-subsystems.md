@@ -222,7 +222,7 @@ products × doc_domains
 Здесь поток описан как он есть. Конкретно под `split`: `RemoteExtractor` получает
 оси извлечения **из слота развёртывания**, а не per-root — порты собираются до per-root
 резолва, поэтому per-site `document_level`/`pdf_pipeline` в DMZ не видны
-(`core/cli/wiring.py:3349-3354`).
+(`core/cli/wiring.py:3387-3392`).
 
 **Путь краула (§3.2).** За `CrawlerPort` стоят **три** адаптера, выбор — сменой адаптера
 (сам порт не меняется):
@@ -643,7 +643,7 @@ prompt_hash = H(template_version, rule, absence_rule, sorted(chunk_ids))
 ```
 
 **Про шаг (4).** Порог `min_retrieval_score` — **объявленный вход**:
-`EVALUATION_MIN_RETRIEVAL_SCORE` (`core/pipeline/evaluation_policy.py:39`), проведён через
+`EVALUATION_MIN_RETRIEVAL_SCORE` (`core/pipeline/evaluation_policy.py:48`), проведён через
 `evaluate_batch`/`evaluate_phase` и путь повтора. Значение — `None`, потому что не измерено:
 при `None` аномалия недостижима, а `evaluation_policy_spec()` остаётся `{"max_retries": 2}`
 (ключ появляется только с порогом, иначе `run_id` поехал бы у всех). Включение — объявленная
@@ -659,7 +659,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 (I2/I2b/I2d) живут в доменных инвариантах, а не здесь.
 Регламент (§7.1) разрешает «частично механически» и требует следствия-*аномалии*, поэтому
 шаг присутствует в норме, но не в коде. Что существует вместо него: замер
-`support_subject_overlap` (`core/pipeline/evaluate.py:1493-1531`) — пересечение стемов параметра и цитаты
+`support_subject_overlap` (`core/pipeline/evaluate.py:1504-1542`) — пересечение стемов параметра и цитаты
 для ✅/⚠️; он **не меняет вердиктов**, пишет `cells.validation_notes`/`review_reason` и
 агрегируется в `outputs/support_quality.yaml`. Измеренный масштаб — в
 `docs/reports/measurements/2026-10-27-support-not-about-subject.md`: v2 публиковал 45 `✅`
@@ -958,8 +958,8 @@ request-файлы гейтов — `core/pipeline/gate_subject.py:427`); вер
 (`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1842-1853`,
 потребитель — `HttpCrawler` и поисковые адаптеры); политика ретраев и backoff —
 ✅ сделано (общая политика HTTP-адаптеров `core/util/retry.py:1-27`,
-`request_with_retry` `core/util/retry.py:129`, потребители — `core/adapters/search_glm.py:448` и
-`core/adapters/search_yandex.py:694`; у **краулера** свой цикл повторов —
+`request_with_retry` `core/util/retry.py:129`, потребители — `core/adapters/search_glm.py:486` и
+`core/adapters/search_yandex.py:724`; у **краулера** свой цикл повторов —
 `core/util/fetch_retry.py`, один на `local` и `split`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано
 (`core/store/sqlite.py:89` `PRAGMA journal_mode = WAL` +

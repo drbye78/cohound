@@ -378,9 +378,9 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено» (**✅ as-built**)
 
-**До границы** `_resolve_embedder` (`core/cli/wiring.py:2911-2954`) выбирал по факту
+**До границы** `_resolve_embedder` (`core/cli/wiring.py:2938-2981`) выбирал по факту
 установки: `model2vec` → `LocalEmbedder` → `None`. Сегодня он принимает **объявленные**
-`device` и `precision` (`core/cli/wiring.py:2911-2954`) и исполняет таблицу ниже;
+`device` и `precision` (`core/cli/wiring.py:2938-2981`) и исполняет таблицу ниже;
 `LiteEmbedder` — NumPy/CPU by design
 (`core/adapters/embed_model2vec.py:4`), и ось он исполнить не может.
 
@@ -650,7 +650,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
   (подмножество параметров проходит, но перечень вариантов надо расширить).
 - `tests/selfcheck.py:796-805` (список обязательных таблиц — `run_product` в него),
   `tests/selfcheck.py:819-833` (ассерты по колонкам `runs`/`corpus_docs`),
-  `tests/selfcheck.py:1669-1673` (round-trip
+  `tests/selfcheck.py:1670-1674` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml` — **✅ синхронизировано:** `pdf_device`
   (`docs/status-dictionary.yaml:439`), `embed_device`
@@ -765,7 +765,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
    пишет `persist_manifest` (`core/store/sqlite_store.py:1303-1304`).
 4. **Правило `❌` (часть той же полосы, `09` §11.2) — СНЯТО 05.11.2026 (F3 плана 20).**
    Проверка рядом с
-   `_enforce_absence_coverage` (`core/pipeline/evaluate.py:2095`): у `explicit`/
+   `_enforce_absence_coverage` (`core/pipeline/evaluate.py:2106`): у `explicit`/
    `authoritative` — каждый документ, на который опирается `❌`, обязан иметь
    `reuse_kind ∈ {live, revalidated}`; у корпусных классов — ни один документ корпуса
    продукта не `reused`/`stale`. Нарушение ⇒ ячейка `❓` (`not_stated`, I12) с причиной
@@ -931,7 +931,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
    функцией, что и код (`_chunk_id`), иначе он пинует прошлое.
    ➖ **Снято 05.11.2026** (F3 плана 20): правило «`❌` требует `live|revalidated` в этом
    цикле» отменено — `❌` держится датированным носителем (I2d,
-   `core/pipeline/evaluate.py:2182` `_enforce_dated_absence`). Отображение
+   `core/pipeline/evaluate.py:2193` `_enforce_dated_absence`). Отображение
    `corpus_doc_version`
    осталось носителем адреса, по которому I2d находит `corpus_artifact`.
 10. **`RunManifest` объявлял три lineage-поля, которых никто не заполнял.** `cycle_id`,

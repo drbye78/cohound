@@ -363,7 +363,7 @@ gaps:
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
    `core/pipeline/corpus.py:4206`; `origin` — `core/store/sqlite.py:196`;
    `resolved_manually` — `core/domain/models.py:2592` + `core/pipeline/corpus_coverage.py:281`;
-   доля — `core/pipeline/phases.py:1728`; дайджест — `core/pipeline/digests.py:171`, материал
+   доля — `core/pipeline/phases.py:1732`; дайджест — `core/pipeline/digests.py:171`, материал
    `core/pipeline/digests.py:391`).
    As-built и расхождения — §10.
 3. ➖ **неактуально (сверено 08.11.2026)** — типизированной пометки «этот артефакт перенесён

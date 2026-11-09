@@ -80,14 +80,14 @@ production-масштабе, — это четыре дефекта **нашег
 
 ## 2. Ключевой факт: поиск никогда не идёт по всему корпусу
 
-✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:1125`) объявляет
+✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:1136`) объявляет
 `product_ids: Sequence[str] | None = None` с докстрингом «по умолчанию `[product_id]`;
 сателлиты добавляет вызывающий (I17)», а `NpyVectorIndex.search_many`
 (`core/adapters/vector_npy.py:272-341`) обходит `for product_id in products` и читает
 партицию продукта. Номера строк в абзаце ниже сверены с кодом (2026-10-28):
-`core/pipeline/evaluate.py:1125`, `vector_npy.py:312-341`; смысл не изменился.
+`core/pipeline/evaluate.py:1136`, `vector_npy.py:312-341`; смысл не изменился.
 
-`core/pipeline/evaluate.py:1125` + `retrieve_for_cell` (`:1131`): `product_ids` — по
+`core/pipeline/evaluate.py:1136` + `retrieve_for_cell` (`:1131`): `product_ids` — по
 умолчанию `[product_id]`, сателлиты добавляет вызывающий (I17). В
 `core/adapters/vector_npy.py:312-341` цикл `for product_id in dict.fromkeys(q.product_ids)`
 читает **партицию продукта**, а не общий индекс.
@@ -277,7 +277,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
   модель** по-прежнему выбирается установкой: `backend`/`base_url`/`model_version` не
   объявлены, и внешний инстанс всё ещё требует `deploy.embed` целиком.
   **⬜ не сделано (сверено 2026-11-07):** функция на месте — `_resolve_embedder`,
-  `core/cli/wiring.py:2911`, вызов `:2813` — и приоритет по-прежнему «что установлено на
+  `core/cli/wiring.py:2938`, вызов `:2813` — и приоритет по-прежнему «что установлено на
   хосте». Это и есть открытый пункт 5 §6.
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
@@ -396,19 +396,19 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:293-306`).
+(`core/cli/wiring.py:299-314`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
 ✅ сделано (`precompute_query_vectors`, `DEFAULT_QUERY_EMBED_BATCH = 32`,
-`core/pipeline/evaluate.py:683`, `:1025-1033`; вызовы — `:3960` и `:4837`) — уникальные тексты
+`core/pipeline/evaluate.py:694`, `:1025-1033`; вызовы — `:3960` и `:4837`) — уникальные тексты
 запросов пакета эмбеддятся батчами **до** цикла продуктов, карта `text → vector` передаётся
 в ячейки; `_query_vector` (`:988-1005`) берёт вектор из карты и только вне фазы падает на
 одиночный `embed`. ⬜ durable text→vector кэш между пакетами не сделан: `embed_cache`
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`core/pipeline/evaluate.py:989-1006`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`core/pipeline/evaluate.py:1000-1017`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 
@@ -583,11 +583,11 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
    (дефолт через цикл `search`, поэтому существующие реализации не сломаны).
    Проверено: `core/ports/vector_index.py:95` (`search_many` в порту), `:96-105`
    (`batched_search` с `getattr`-фолбэком), `core/adapters/vector_npy.py:272` (реализация),
-   вызывается из `core/pipeline/evaluate.py:1118`.
+   вызывается из `core/pipeline/evaluate.py:1129`.
 4. ✅ **Мемоизация векторов запроса** + пре-компьют `query_vectors` до `evaluate`
    (`precompute_query_vectors`, батчи по 32; это же закрывает оговорку 2 — оценщик
    больше не ходит за векторами вовсе).
-   Проверено: `core/pipeline/evaluate.py:683` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:1025`
+   Проверено: `core/pipeline/evaluate.py:694` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:1025`
    (`precompute_query_vectors`), вызовы `:3868`, `:4746`; `_query_vector` (`:961`) читает
    карту первой.
 
@@ -623,7 +623,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
    (решение владельца 29.10.2026, `09` §14.1).
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`core/cli/wiring.py:2911`, вызов `:2813` — `model2vec_available()` →
+установки** (`core/cli/wiring.py:2938`, вызов `:2813` — `model2vec_available()` →
 `_module_installed("sentence_transformers")` → `None`). При появлении `deploy.embed`
 приоритет становится объявленным: `backend` из конфига, а наличие библиотек — предпосылка, а
 не решение. **Сверено 2026-11-07: не сделано** — логика прежняя; это же и есть **условие** §6 п. 5

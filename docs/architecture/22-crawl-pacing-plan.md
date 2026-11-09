@@ -156,16 +156,16 @@
   страницы, — то есть под `split` постраничный `Retry-After` тоже не читается.
 - `429` в HTTP-пути — **повторяется** (`core/util/fetch_retry.py`, `FETCH_RETRY_TIMES = 2`,
   то есть до трёх попыток, каждая берёт свой слот лимитера; `429` — транзиентный статус,
-  `core/ports/crawl_errors.py:72`); после исчерпания — `failed/source_unavailable`
+  `core/ports/crawl_errors.py:75`); после исчерпания — `failed/source_unavailable`
   (`crawl_http.py`). Класс по-прежнему не блокирующий (`core/domain/enums.py:203-212`),
   поэтому пачка отказов формально не портит покрытие — но теперь она **видна**: число
   повторов публикует `crawl status --per-host` (`pacing.retries`,
   `core/pipeline/crawl_pacing.py:49`). До `9a8440a`/`c3e5b8d` это была тихая деградация в
   счётчиках.
 - Браузерный `honest`-путь статус не наблюдает (`http_status=NULL`), `429` невидим;
-  `hybrid` видит `CHALLENGE_STATUSES` и повторяет 3 раза (`crawl_browser.py:679-730`).
+  `hybrid` видит `CHALLENGE_STATUSES` и повторяет 3 раза (`crawl_browser.py:718-769`).
 - robots `Crawl-delay` корпусным пейсингом не читается вовсе — только браузерным адаптером и
-  только при `rate_limit is None` (`crawl_browser.py:566-573`).
+  только при `rate_limit is None` (`crawl_browser.py:605-612`).
 
 ## 7. Границы и открытые вопросы
 

@@ -335,7 +335,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 Решение владельца **29.10.2026** «`❌` требует `live|revalidated` в этом цикле»
 (as-built: `_enforce_reuse_confirmed`, два уровня — evidence для `explicit`/`authoritative`
 и корпус для `bounded`; токен `reuse_unconfirmed`. **Удалено в 0.3.0:** правило заменено
-`_enforce_dated_absence` (`core/pipeline/evaluate.py:2182`) с токеном `absence_undated` —
+`_enforce_dated_absence` (`core/pipeline/evaluate.py:2193`) с токеном `absence_undated` —
 см. §11.9).
 
 Оно было верным для своего носителя: тогда корпус был «один прогон = один снимок», и `reused`
@@ -386,11 +386,11 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 * `CorpusCoverage` не знает о снятиях: ни `capture_id`, ни дат, ни `policy_digest`.
 * Читателя, который сравнил бы `capture.policy_digest` с объявленным, сегодня нет ни одного.
 
-Код, который **был тронут** (F3): `_enforce_dated_absence` (`core/pipeline/evaluate.py:2182`)
+Код, который **был тронут** (F3): `_enforce_dated_absence` (`core/pipeline/evaluate.py:2193`)
 заменил `_enforce_reuse_confirmed` (удалён вместе с `_CONFIRMED_REUSE_KINDS` и двумя уровнями
 `_evidence_level_reuse_violations`/`_corpus_level_reuse_violations`), вызовы — Ш6
-(`core/pipeline/evaluate.py:3253`) и **перенос ячейки из прошлого прогона**
-(`_carried_rules_hold`, `core/pipeline/evaluate.py:432`: перенесённый `❌` проходит то же
+(`core/pipeline/evaluate.py:3267`) и **перенос ячейки из прошлого прогона**
+(`_carried_rules_hold`, `core/pipeline/evaluate.py:443`: перенесённый `❌` проходит то же
 правило, иначе carry-forward обходил бы F3);
 `core/pipeline/corpus_coverage.py:181` + источник `core/pipeline/corpus_coverage.py:611`
 (`iter_crawl_session_items` — сеанс, не снятия);
@@ -438,7 +438,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 
 **Сверка.** `golden.csv` — 905 строк = 5 продуктов × 181 параметр; `tier=full` — 750 строк
 (`fast` 155); `❌` в golden 282 (243 `full` + 39 `fast`). Одна ячейка = **один** вызов оценщика
-(`core/pipeline/evaluate.py:3109`), повтор только при провале валидации (`max_retries=2`) ⇒ **750–2250
+(`core/pipeline/evaluate.py:3123`), повтор только при провале валидации (`max_retries=2`) ⇒ **750–2250
 вызовов** на `golden-full`. Пустой срез вызовов не тратит.
 
 **Стоимость вызова измерена 07.11.2026** (`2026-11-07-reasoning-effort-matrix.md`, 50 ячеек,
@@ -472,7 +472,7 @@ R0/K=10, `deepseek-v4.1-flash-1017:yellow`, `max_tokens=16384`): **5 497** то�
    сверки — но препятствие теперь вызов оценщика, а не корпус.
 2. **`golden` не может удостоверить ветку `bounded` вообще.** Все 181 параметр каталога —
    `absence_rule: explicit` (и все `param_type: fact`), а `bounded` возникает **только** при
-   `parameter_reference|distribution_absence` **и** принятом риске (`core/pipeline/evaluate.py:1970-1974` — `finite_reference` + `scope_acceptance`).
+   `parameter_reference|distribution_absence` **и** принятом риске (`core/pipeline/evaluate.py:1981-1985` — `finite_reference` + `scope_acceptance`).
    Значит `bounded`-ячеек в пилоте **ноль**, и §11.4 п.2 (ужесточение `scope_acceptance`) на
    golden не отражается ни одной строкой. Хуже: на живом корпусе измерено `❌ 0 из 119` ячеек
    (`2026-10-27-support-not-about-subject.md:64`) — флипов `❓→❌` там ждать неоткуда, и

@@ -166,9 +166,9 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 ✅ **Паритет `local` и `split` по извлечению закрыт по механизму (B1–B3, 2026-10-28).** Члены
 контейнеров извлекаются (`supports_source_path = True`, `core/adapters/remote_extractor.py:214`),
 артефакт пересекает шов чанками (`/v1/extract/{upload,submit,collect,abort}`,
-`core/edge/server.py:621-624`), оси `level`/`device` едут в `submit`. ⚠️ Остаток: паритет `pb`
+`core/edge/server.py:622-625`), оси `level`/`device` едут в `submit`. ⚠️ Остаток: паритет `pb`
 между профилями **измерением не подтверждён** (прогона двумя профилями не было), per-site слой
-`document_level` под `split` не действует (`core/cli/wiring.py:3352-3355` — порты собираются
+`document_level` под `split` не действует (`core/cli/wiring.py:3390-3393` — порты собираются
 до per-root резолва), `pdf_pipeline` выбирает edge. Детали — `24-fleet-work-units.md` F1.5
 (паритет `pb` — гейт флота) и §7 (размещение), `07` §6 (расхождения `split`).
 
@@ -255,9 +255,9 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
   ⚠️ «Поддержаны» ≠ «эквивалентны»: механизм паритета закрыт B1–B3 — члены контейнеров
   извлекаются (`supports_source_path = True`, `core/adapters/remote_extractor.py:214`), артефакт
   пересекает шов чанками (`/v1/extract/{upload,submit,collect,abort}`,
-  `core/edge/server.py:621-624`), оси `level`/`device` едут в `submit`
-  (`core/cli/wiring.py:3355`). **Не измерен** паритет `pb` между профилями; per-site слой
-  `document_level` под `split` не резолвится (`core/cli/wiring.py:3352-3355` — порты собираются
+  `core/edge/server.py:622-625`), оси `level`/`device` едут в `submit`
+  (`core/cli/wiring.py:3393`). **Не измерен** паритет `pb` между профилями; per-site слой
+  `document_level` под `split` не резолвится (`core/cli/wiring.py:3390-3393` — порты собираются
   до per-root резолва); `pdf_pipeline` выбирает edge (§2).
 - ✅ **Прогон до `report` состоялся:** `3edf2b06097c` (26.10), `c2e7b860ac17` (06.11, 12
   артефактов `outputs/`); живой оценщик — 07–08.11 (`2a5b51af5778`: 905 ячеек, **1923** вызова,
@@ -579,7 +579,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173`/`:274`/`:465` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3130`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3131`),
 но приёмочный контур не пройден: golden-full дал 6.8 % на наборе из 236 строк
 (`2026-10-27-golden-reference-set-unusable.md`), на переразмеченных 905 строках прогнан только
 срез 50 ячеек (07.11, κ 0.024/0.056); §11.5-baseline и кейсы 2–5 не делались.
@@ -753,8 +753,8 @@ P5), но строка помечена здесь как неактуальна
   (opt-in по `COHOUND_RUN_DOCLING_LEVELS=1`, в обычном CI не выполняется);
   churn `index_build_id`/дайджеста при дефолте — принят (R1). Пул — свойство корня
   (`pool_factory(W, level)`); память = `W × footprint(level)`. Под `split` ось едет в
-  `extract/submit` (`core/cli/wiring.py:3355`), но per-site слой не резолвится — порты
-  собираются до per-root резолва (`core/cli/wiring.py:3352-3355`). Новых зависимостей нет.
+  `extract/submit` (`core/cli/wiring.py:3393`), но per-site слой не резолвится — порты
+  собираются до per-root резолва (`core/cli/wiring.py:3390-3393`). Новых зависимостей нет.
 - **Текстовые форматы и EPUB (as-built).** `core/adapters/extract_text.py` (plain text/markdown,
   все расширенные варианты) и `extract_epub.py` (stdlib OCF) — **первый класс** наравне с HTML,
   не docling: свой читатель и свой чанкер. Диспетчер семейств — `core/adapters/chunker_family.py`
@@ -903,7 +903,7 @@ uv sync --frozen --extra dev
 | Дрейф контрактов портов | ср. | среднее | contract-tests + импорт-граф CI | расхождение адаптер/порт |
 | Компрометация DMZ (edge) | ср. | высокое | edge считается подозрительным: ядро валидирует вход (схема/лимиты/re-hash/санитайзинг); секреты эгрессии только в edge; L7-allowlist | аномалия на шве; инъекция из edge |
 | Шов ломает `local`-опыт | низк. | среднее | профиль `local` — дефолт без шва; `split` — опция | overhead в `local` |
-| Расхождение `split` и `local` по корпусу | выс. | высокое | известно и видимо: паритет `pb` **не измерен**, per-site `document_level` под `split` не резолвится; механизм передачи закрыт B1–B3 (`core/adapters/remote_extractor.py:214`, `core/edge/server.py:621-624`); staging крупных артефактов — 🟡 (`24` §3.2): `extract/{upload,collect}` есть, но страница `crawl/collect` ограничена 8 MiB (`core/edge/scheduler.py:186`) против `MAX_RESPONSE_BYTES` 50 MiB (`core/adapters/gateway_validate.py:53`) | прогон кейса под `split` даёт другой корпус |
+| Расхождение `split` и `local` по корпусу | выс. | высокое | известно и видимо: паритет `pb` **не измерен**, per-site `document_level` под `split` не резолвится; механизм передачи закрыт B1–B3 (`core/adapters/remote_extractor.py:214`, `core/edge/server.py:622-625`); staging крупных артефактов — 🟡 (`24` §3.2): `extract/{upload,collect}` есть, но страница `crawl/collect` ограничена 8 MiB (`core/edge/scheduler.py:186`) против `MAX_RESPONSE_BYTES` 50 MiB (`core/adapters/gateway_validate.py:53`) | прогон кейса под `split` даёт другой корпус |
 | Несовместимость шва с корп. IDP/DLP/IDS | ср. | высокое | L7-JSON, публикуемые схемы, TLS без пиннинга, OIDC/mTLS-идентичность, SIEM-аудит (07 §8). *Аттестация у заказчика — вне рамок этой работы* | средство не инспектирует/ломает шов |
 
 ---
@@ -962,7 +962,7 @@ uv sync --frozen --extra dev
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
    ✅ проверено на `2af6d1e`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
    канал в Ш6 — `core/pipeline/phases.py:1477`. Имя параметра сменилось: `scope_acceptance`
-   (принятие риска) — `core/pipeline/evaluate.py:2803` (`evaluate_cell`), `:535` (`_carry_one`),
+   (принятие риска) — `core/pipeline/evaluate.py:2814` (`evaluate_cell`), `:535` (`_carry_one`),
    `:1881` (`_resolve_denial`). Прежнее `scope_attested_by` живёт
    **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:327`)
    и как миграция колонки (`core/store/sqlite.py:357`); в сигнатуре оценщика алиаса нет —
@@ -1022,7 +1022,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
   не входит в `extractor_version`, `core/adapters/extract_document.py:252-284`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`
-  (`core/cli/context.py:1795` против `core/edge/server.py:1104`) **сводится в один замер** с
+  (`core/cli/context.py:1795` против `core/edge/server.py:1105`) **сводится в один замер** с
   паритетом `pb` `local`/`split` (§2): одна процедура — «один вход, два профиля, сравнить
   `index_build_id` и `registry_spec_digest`», — а не две.
   ➖ **A1 follow-up закрыт 07.11.2026:** мультиплексирование root/product — F4a/F4b
@@ -1036,7 +1036,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   условие измерения. Прежний подпункт «нет CLI-теста persist→read→digest» снят раньше — тест есть.
   Детализация — здесь, в §12; это единственный дом остатка `crawl-completion`.
   ➖ **снято как пункт, но не как факт:** под `split` процессной экстракции нет — это устройство
-  зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2480`), а не недоделка.
+  зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2507`), а не недоделка.
   Так же снят прежний остаток «`use_ocr=False` — мёртвый код»: решением P5 `full` несёт OCR,
   `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:909-926`),
   и документированное прежде «сканы дают пустой текст» было неверным.
@@ -1066,7 +1066,7 @@ DLP, набор IDS-правил) — design-требования зафикси
 4. **Паритет `split` — одним замером, до флота.** Открытыми висят два вопроса об одном и том же:
    совпадает ли `index_build_id` для одного входа под `local` и `split` (§2) и совпадает ли
    `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1795`, edge
-   выбирает фетчер по своей карте — `core/edge/server.py:1104`). Это **одна** процедура: один
+   выбирает фетчер по своей карте — `core/edge/server.py:1105`). Это **одна** процедура: один
    вход, два профиля, сравнить сборку и дайджест. Пока она не проведена, `split`-прогон нельзя
    публиковать наравне с `local`, и это дешевле любой строки из `24` §3.2: измерение, не разработка.
 5. **Fleet control plane.** Горизонтальное масштабирование edge (общая очередь/leases/object

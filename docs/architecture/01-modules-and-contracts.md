@@ -50,8 +50,8 @@
 (`tests/selfcheck.py:1011` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
 (`tests/selfcheck.py:1028` `_check_edge`), то есть проверка по принципу allow-list, отдельных
 «запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1035`
-`_neutrality` (§1.3), `tests/selfcheck.py:1142` `_shims_removed` (нет `core.schemas`/`core.db`),
-`tests/selfcheck.py:3205` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
+`_neutrality` (§1.3), `tests/selfcheck.py:1143` `_shims_removed` (нет `core.schemas`/`core.db`),
+`tests/selfcheck.py:3206` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
 по **всему** слою, а не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет
 сформулирован по запрещённым слоям, а не по файлам).
 
@@ -162,10 +162,10 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 остаётся `❓` (I12).
 
 **I2c — класс отрицания против наблюдённого охвата** (`check_absence_coverage`,
-`core/domain/invariants.py:298`; исполняется в Ш6: `core/pipeline/evaluate.py:2095-2179`
-`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2145`,
-применяется к ячейке на `core/pipeline/evaluate.py:3235`, токен причины
-`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:219`). Условие `❌` зависит от **класса**, а не от
+`core/domain/invariants.py:298`; исполняется в Ш6: `core/pipeline/evaluate.py:2106-2190`
+`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2156`,
+применяется к ячейке на `core/pipeline/evaluate.py:3249`, токен причины
+`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:230`). Условие `❌` зависит от **класса**, а не от
 одной полноты краула: `explicit` (цитата вендора) и `authoritative` (энумерация) неполнотой не
 отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` требует
 `scope_acceptance` (принятия риска человеком); `unobserved`/`not_stated` дают `❓`. Нарушение →
@@ -175,7 +175,7 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 
 **I2d — у `❌` есть датированный носитель** (`check_absence_dated`,
 `core/domain/invariants.py:386`; исполняется в Ш6 `_enforce_dated_absence`,
-`core/pipeline/evaluate.py:2182-2292`, применяется к ячейке на `core/pipeline/evaluate.py:3253`).
+`core/pipeline/evaluate.py:2193-2303`, применяется к ячейке на `core/pipeline/evaluate.py:3267`).
 `❌` — утверждение не о сегодняшнем дне, а о **событии с датой**: носитель зависит от класса
 отрицания — `explicit`/`authoritative` требуют записи наблюдения (`observed_at`) **каждого**
 цитируемого документа, `bounded` — снятия **каждого** объявленного корня с `complete=1` и датой
@@ -263,7 +263,7 @@ min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` 
 
 **`extractor_zone` объявлено, но не действует (D-9).** Значения `edge|core|separate`
 (`core/config/deploy.py:97`, поле `core/config/deploy.py:768`) валидируются, но выбора реализации
-не делают: `RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3347`), а не
+не делают: `RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3385`), а не
 по этой оси.
 Экстрактор всегда в ядре; в `split` ядро получает байты через шов `extract/{upload,submit,collect,abort}`.
 Ось оставлена как объявление намерения — описывать её как работающий механизм нельзя.
@@ -507,7 +507,7 @@ trafilatura) → EPUB (`extract_epub`, stdlib OCF, главы через тот 
 действуют) либо `text_layer` (собственный текстовый слой файла, `pypdfium2`, без моделей — уровням
 и устройству нечего объявлять). Композит получает отдельный `pdf`-адаптер (`extract_pdf_text`),
 который перехватывает **только** PDF-суффикс, оставляя Office docling'у
-(`core/cli/wiring.py:2266`). Явно выбранный `text_layer` при недоступном/сломанном бэкенде —
+(`core/cli/wiring.py:2288`). Явно выбранный `text_layer` при недоступном/сломанном бэкенде —
 `WiringError` → `EXIT_USAGE`, **не** тихая подмена (иначе `extractor_version` назвал бы движок,
 который не исполнялся).
 
@@ -577,7 +577,7 @@ class ContentGateway(Protocol):
 таймауты, retry, лимит размера ответа). В профиле `local` не используется.
 
 **Перечень операций шва — 12 POST + 2 GET** (`contracts/seam/openapi.json`, allowlist сервера
-`core/edge/server.py:141-159`):
+`core/edge/server.py:142-160`):
 
 | Метод | Пути |
 |---|---|
@@ -794,7 +794,7 @@ class DiscoveryLLMPort(Protocol):
 | `container_policy.py` | политика спуска в контейнеры: допуск членов, бюджеты, прогноз (чистая логика, B2) |
 | `memory.py` | `release_free_arenas` — `malloc_trim(0)` после документа; операционный рычаг, вне `EXECUTION_CONTRACT_FIELDS` (ADR 0022) |
 | `rate_limit.py` | пейсинг краула (политика, независимая от адаптеров) |
-| `fetch_retry.py` | пейсящиеся повторы фетча — **одно** правило на все пути краула (`FETCH_RETRY_TIMES`; транзиентность решает `is_transient_fetch_error`, `core/ports/crawl_errors.py:205`) |
+| `fetch_retry.py` | пейсящиеся повторы фетча — **одно** правило на все пути краула (`FETCH_RETRY_TIMES`; транзиентность решает `is_transient_fetch_error`, `core/ports/crawl_errors.py:219`) |
 | `robots.py`, `sitemap.py`, `html_links.py` | per-host `robots.txt`, парсер `sitemap.xml`, извлечение гиперссылок (stdlib) |
 | `feed.py` | чистый парсер фидов/каналов (`FeedEntry`) для `PollPort` |
 | `security.py`, `sanitize.py` | SSRF-защита URL и санитизация имён файлов; санитизация контента на границе экстракции |
@@ -907,8 +907,8 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 | Было | Стало | Статус |
 |---|---|---|
-| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1142` (`_shims_removed`) |
-| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:88` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1142` |
+| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1143` (`_shims_removed`) |
+| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:88` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1143` |
 | `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ✅ **закрыто** (29.10) — построчная сверка 111 утверждений (97 `check` + 14 `expect_raises`) с pytest-пирамидой: **94** имеют двойника (указан `путь:строка`), **8** держали покрытие в одиночку и дописаны тестами, **9** — структурные гейты над деревом, которым pytest-двойник противопоказан: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation`, `_domain_all_complete`, `_ports_contracts`, `_ports_i18`, `_ports_type_reuse`, полнота CLI-поверхности. Дописанные: конструктор `CellEvidence` (I19/R1/I10 — прежний тест проверял `check_evidence` на `model_construct`, то есть в обход валидатора), `core/util/text_utils` (язык, ё→е, нарезка, RU-токены), `core/util/security` (SSRF/allowlist/traversal/slug), `core/adapters/lexical_bm25` (**единственный адаптер без тестов**), `DoclingDocumentExtractor.supports`, `MarkdownChunkerPort`↔`ChunkerPort`. Пиксель-в-пиксель дублировать оставшиеся 94 не нужно и вредно: гейт над деревом и юнит-тест отвечают на разные вопросы. На 08.11 в selfcheck **113** утверждений (99 + 14) — два добавлены после сверки. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py`; `tests/domain` — 13 файлов / 172 функции / 183 кейса, `tests/store` — 20 файлов / 286 функций / 315 кейсов |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
@@ -940,8 +940,8 @@ pytest + `--cov` (`scripts/ci.sh:82-88`).
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:98` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
 `core/domain/models.py:1508`; структура `ProtocolExhaustion` — `core/domain/models.py:1345`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2797` (`max_retries`), цикл
-`core/pipeline/evaluate.py:3106`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2808` (`max_retries`), цикл
+`core/pipeline/evaluate.py:3120`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
-строит вызывающий (`core/pipeline/evaluate.py:2986`).
+строит вызывающий (`core/pipeline/evaluate.py:3000`).

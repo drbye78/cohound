@@ -36,7 +36,7 @@
 `cells.failure_kind` пишется **двумя** путями и не пишется третьим:
 
 - сбой ретривала — `_record_cell_failure(store, failed, SEARCH_FAILED)`
-  (`core/pipeline/evaluate.py:4115`);
+  (`core/pipeline/evaluate.py:4247`);
 - отсутствие источников — тот же вызов (`:4024`);
 - **сбой оценщика — не пишется вовсе.** `_unresolved_outcome` (`:3318-3357`) знает класс
   (`kind`) и возвращает его в `EvaluationOutcome.failure_kind`, но `_persist` в нём
@@ -185,17 +185,29 @@
   `test_retry_uses_the_same_prompt_as_phase` доказывает, что промпт — из
   `compile_prompt`, а не из второй копии.
 * `logs/retry.jsonl` — `RetryJournal` (`JsonlAppender`): строка на попытку с
-  `run_id/product_id/param_id/attempt/outcome/failure_kind/duration_s`; сбои записи —
-  в `errors`, не исключение. `logs/llm_calls.jsonl` и `prompts/` — те же файлы прогона.
+  `run_id/product_id/param_id/attempt/max_retries/outcome/failure_kind/duration_s`;
+  сбои записи — в `errors`, не исключение. `max_retries` — **фактически** исполненное
+  recovery-значение: без него смена числа повторов маскировалась бы под продолжение
+  прогона с прежними условиями. `logs/llm_calls.jsonl` и `prompts/` — те же файлы прогона.
 
 ### 7.3. CLI и видимость
 
 * `core/cli/commands/retry.py` — зеркало `revalidate.py`; зарегистрирована в
   `core/cli/commands/__init__.py` сразу после `revalidate`.
-* `--max-retries` по умолчанию — `EVALUATION_MAX_RETRIES` из
-  `core/pipeline/evaluation_policy.py`: это **та же** величина, которую
-  `evaluation_policy_spec()` кладёт в контракт (отдельной колонки в `runs` нет, второй
-  формулы не заводилось).
+* `--max-retries` — **recovery-кнут**, не условие измерения: фаза Ш6 исполняет
+  объявленное `evaluation_policy.max_retries` (то же число, что входит в `run_id`),
+  а флаг ремонтирует уже объявленный прогон и в identity не входит. Фактическое число
+  публикуется в `logs/retry.jsonl` и сводке `retry`; потолка нет и тихой подмены нет —
+  расхождение видно. Дефолт флага — `EVALUATION_MAX_RETRIES` из
+  `core/pipeline/evaluation_policy.py`.
+
+  **Названный пробел (09.11.2026).** Объявленное `evaluation_policy` **не персистится**:
+  в `runs` такой колонки нет, поэтому ни `retry`, ни `revalidate` не могут прочитать
+  политику прогона и берут константу модуля. Сегодня это одно и то же число (ось не
+  выводится из `run.yaml`), но в день, когда `max_retries` станет объявляемой осью,
+  пере-оценка молча разойдётся с identity. Первый шаг тогда — столбец
+  `runs.evaluation_policy_json` (схемная граница: SCHEMA bump), а не «прочитать из
+  манифеста», которого там нет.
 * `report.py:_write_cell_diagnostics` — колонка `failure_kind` (пусто = «не записано»);
   записанный класс сам по себе стал поводом попасть в файл.
 * `metrics.py` — блок `cells_by_failure_kind` рядом с `cells_by_state`; источник —

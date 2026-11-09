@@ -264,6 +264,16 @@ A URL is queued only if it (1) passes SSRF validation, (2) belongs to a **declar
 (3) fits the root path-prefix on a segment boundary, and (4) is not blacklisted. The SSRF
 check is **one** check — it is not a scope check.
 
+SSRF has two layers. `validate_url` is pure and rejects any **literal** IP that is not
+globally routable — including alternate IPv4 notations (`2130706433`, `0x7f000001`,
+`0177.0.0.1`, `127.1`), trailing-dot/percent-encoded forms, unspecified, link-local,
+CGNAT, multicast/reserved, and IPv4-mapped IPv6 (`::ffff:169.254.169.254`). The fetchers
+additionally call `resolve_and_validate` — production wiring injects the system resolver, so
+**every** resolved address must be global and a name pointing at loopback is refused; a
+test-only `resolver=None` keeps the literal-only behaviour. Connection pinning to the checked
+IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named in
+`core/util/security.py`. Redirects are checked hop by hop with the same function.
+
 - The root host is always in scope. A subdomain is in scope **only if declared** (product
   seed root, or a `domain_profiles.yaml` key). `www.` is equivalent to the bare host on both
   sides.

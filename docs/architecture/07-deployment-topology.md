@@ -106,7 +106,7 @@ application-layer firewall (L7). Функционал, которому нуже
 > ⬜ **не сделано (2026-10-28, перепроверено 2026-11-08):** `rg -n extractor_zone core/` даёт
 > только `core/config/deploy.py:768` (поле модели), `core/config/deploy.py:786-792` (валидатор)
 > и константу `EXTRACTOR_ZONES` (`core/config/deploy.py:97`); сборка экстрактора —
-> `core/cli/wiring.py:2211` (`build_worker_extractor`) — на поле не смотрит.
+> `core/cli/wiring.py:2238` (`build_worker_extractor`) — на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из
 > интернета — это основная поверхность атаки (парсеры/шрифты/архивы). Идея «вынести её в edge»
@@ -177,6 +177,13 @@ robots для элемента) и `rate_limit {min_s, max_s}` (пауза ме�
 `cursor` (стабильный порядок `(product_id, url)`), `done` — все элементы терминальны. Транспорт —
 тот же L7-JSON; авторизация — scope `crawl` (см. §8.2). Расширение **аддитивно** и не меняет
 `schema_version` (остаётся `"1"`).
+
+Классификация отказа при этом **не** переезжает через шов типом: edge сводит исключение к
+строке (код отказа + текст), поэтому ядро получает `CrawlError`-совместимый исход по коду, а
+не класс. Это осознанно: `CrawlResolutionError` (сбой DNS, транзиентный) и `CrawlUrlError`
+(отказ политики, терминальный) различаются по коду отказа, который edge обязан проставить из
+той же таксономии (`core/ports/crawl_errors.is_transient_fetch_error` зовётся на edge). Смена
+этого правила — версионная граница шва, не «улучшение формата».
 
 **Опрос фидов/каналов/sitemap `crawl/poll` (аддитивно, Wave 5.1/D3).** Пятая POST-операция
 семейства `crawl/*`: `url` + `kind` (`feed` — XML: RSS/Atom/RDF; `channel` — JSON/JSON-lines/
@@ -286,7 +293,11 @@ content-addressed блоб-хранилище (`{resolved_blob_dir}/{job_id}/{ha
 Playwright не форк-безопасен — краулер строится внутри воркера, а запись блобов/БД делает родитель).
 Back-pressure по `queue_limit`; `submit` идемпотентен по `(run_id, session_id, idempotency_key)`;
 recovery-on-start возвращает застрявшие `running`-элементы в `pending` (зеркало
-`store.recover_crawl_session`). SSRF-валидация каждого URL — на постановке (`util.security.validate_url`).
+`store.recover_crawl_session`). SSRF-валидация каждого URL — на постановке
+(`util.security.validate_url`); при заданном резолвере фетчер дополнительно проверяет
+**разрешённые** адреса перед запросом и на каждом хопе редиректа
+(`util.security.resolve_and_validate`). Пиннинг соединения на проверенный IP не
+реализован — остаточный TOCTOU/DNS-rebinding назван риском S9g.
 Диагностика числа воркеров не стартует: планировщик строится лениво.
 
 ---
@@ -400,21 +411,21 @@ LLM-endpoint корп. облака — только в Z0.
    `crawl/collect`.
 3. ⚠️ **`crawl.document_level`/`pdf_device` под `split` действуют на уровне app+run;
    `pdf_pipeline` — не действует.** Оси уровня и устройства объявлены на собранном
-   `RemoteExtractor` (`core/cli/wiring.py:3355-3356`) и едут в `extract/submit`; edge строит
+   `RemoteExtractor` (`core/cli/wiring.py:3393-3394`) и едут в `extract/submit`; edge строит
    конвейер по ним (`core/edge/extract_service.py:172` — `artifact_extractor_factory`,
    `text_layer` → pdfium, остальные уровни → docling), поэтому текст под `split` совпадает с
    `local` при тех же осях. Не действует **механизм** PDF: его выбирает edge, а не объявивший
-   его прогон (`core/cli/wiring.py:2473-2475` — комментарий «``pdf_pipeline`` под ``split`` не
+   его прогон (`core/cli/wiring.py:2500-2502` — комментарий «``pdf_pipeline`` под ``split`` не
    действует»). Поэтому `deploy_profile` и остаётся полем контракта.
 4. ⚠️ **Per-root слой осей `document_level`/`pdf_device` под `split` не виден** (расхождение,
    которого в прежней редакции этого блока не было). Под `local` оси разрешаются на каждом
    корне цепочкой app < run < site (`core/pipeline/corpus.py:1429`,
    `profiles=domain_profiles`), поэтому `domain_profiles.yaml` переопределяет уровень для
    конкретного хоста. Под `split` порты собираются **до** per-root резолва:
-   `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3300`) отдаёт
+   `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3338`) отдаёт
    только app+run — и это сказано в самом коде: «per-root слой здесь не виден — порты
    собираются до per-root резолва (то же ограничение, что у ``pdf_pipeline`` выше)»
-   (`core/cli/wiring.py:3352-3354`). Итог: под `split` действуют app+run, per-root
+   (`core/cli/wiring.py:3390-3392`). Итог: под `split` действуют app+run, per-root
    переопределение — нет; под `local` действует вся цепочка. Это не «тихий успех» (непринятое
    значение нигде не выдаётся за применённое), но и не сообщается — поэтому пункт открыт, а не
    выдан за сделанный.
@@ -648,6 +659,17 @@ edge→core DENY, §5), поэтому одна точка инспекции п
 - Любое **несовместимое** изменение контракта — **версионная граница** (bump `schema_version`), как
   в §13 регламента. **Аддитивные** расширения (новые операции/поля) совместимы и версию не меняют:
   так введены ось `strategy` в `/v1/fetch` и операции `crawl/*` — `schema_version` остаётся `"1"`.
+- **Framing: только `Content-Length`, и он читается строго.** Отвергаются `400` с закрытием
+  соединения **до** чтения тела: любой `Transfer-Encoding` (chunked, список кодировок, пустое
+  значение, `identity`) у **любого** метода; несколько заголовков `Content-Length` (два разных
+  значения дают двум звеньям разные границы); значение не по `1*DIGIT` (`1_0`, `+5`, `"5, 5"`,
+  пустое); объявленное тело у метода, кроме `POST`. `Content-Length: 0` разрешён и keep-alive не
+  ломает. Это снимает неоднозначность границы тела для прокси/LB впереди шва (классическая
+  предпосылка request smuggling): два звена не могут выбрать разные заголовки, а остаток потока
+  не разбирается как следующий запрос. Тесты — `tests/edge/test_edge_middleware.py`
+  (`test_handler_rejects_duplicate_content_length`,
+  `test_handler_rejects_non_rfc_content_length`,
+  `test_handler_rejects_body_on_get`, `test_handler_rejects_transfer_encoding_on_get`).
 
 ### 8.4. Аудит и SIEM
 

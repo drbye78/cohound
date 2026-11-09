@@ -157,7 +157,7 @@ F4b), поэтому «максимум по host'у» не считается: 
 корень. Ось `max_workers` остаётся размером пула и не приобретает второго смысла (§5).
 
 **Браузерный фетч — одна полоса-владелец** на узел: `BrowserCrawler` не потокобезопасен, backend
-создаётся лениво на первом вызове (`core/adapters/crawl_browser.py:894`), то есть поток первого
+создаётся лениво на первом вызове (`core/adapters/crawl_browser.py:944`), то есть поток первого
 фетча и есть владелец. Несколько браузерных полос — не измерено, в план не входят.
 
 ## 4. Durable hand-off в конверсию
@@ -894,11 +894,11 @@ host'ах, поэтому бюджет, собранный на одном зе�
 - `partial`, truncation, blocked и failed видны в session provenance.
   → ✅ `core/pipeline/crawl_session.py:113-116`, `core/pipeline/metrics.py:490`.
 - Ни один failed fetch не создаёт absence автоматически.
-  → ✅ `core/pipeline/evaluate.py:2095` (`_enforce_absence_coverage`); `failed` → `status=null` (I4).
+  → ✅ `core/pipeline/evaluate.py:2106` (`_enforce_absence_coverage`); `failed` → `status=null` (I4).
 - Cached/raw reuse отличим от live fetch.
   → ✅ **локально** (09.11.2026): `RawPage.from_cache` выставляется всеми пятью
-  `_page_from_cache` (`core/adapters/crawl_http.py:758`, `crawl_scrapy.py:1124`,
-  `crawl_browser.py:934`, `search_glm.py:468`, `search_yandex.py:765`) и превращается в
+  `_page_from_cache` (`core/adapters/crawl_http.py:957`, `crawl_scrapy.py:1202`,
+  `crawl_browser.py:985`, `search_glm.py:506`, `search_yandex.py:797`) и превращается в
   `reuse_kind=reused` на границе краула (`core/pipeline/corpus_drain.py:1850-1865`): страница
   из кэша больше не выдаёт себя за сетевое наблюдение, `http_status` у неё `NULL`
   (`core/pipeline/corpus_ingest.py:1784`), а в `observed_urls` (E.6) она не попадает
@@ -906,7 +906,7 @@ host'ах, поэтому бюджет, собранный на одном зе�
   документ), а `pacing.requests` по хосту — нет; расхождение этих двух чисел и есть видимый
   сигнал «обходили кэш, а не сайт». Замер цены дефекта до правки: в кэше стенда **2 800 из 5 593** записей без
   валидаторов (`postgrespro.ru` 1 534, `database.diasoft.ru` 1 225) — для них шорткат
-  `core/adapters/crawl_http.py:292-299` срабатывал всегда.
+  `core/adapters/crawl_http.py:495-502` срабатывал всегда.
   Остатки (⬜, оба названы): (1) под `split` признак через шов не переносится —
   `CrawlResultItem` поля не несёт, поэтому edge-путь кэш от живой отдачи не отличает;
   (2) `url_state.observed_how` по-прежнему `live` у кэш-хита (`CAPTURE_OBSERVED_*`,
@@ -974,7 +974,7 @@ OCR/layout с HTTP-очередью; называть foreground `extract_worker
 
 ### Phase 0 — контракт и acceptance baseline — 🟡 частично
 
-Закрыто: `deploy_profile` фиксируется в манифесте (`core/cli/wiring.py:3367`); scope sitemap и
+Закрыто: `deploy_profile` фиксируется в манифесте (`core/cli/wiring.py:3405`); scope sitemap и
 source-wave semantics — `03` §D.2.1; fail-closed для robots (`core/util/robots.py:466`,
 `UNAVAILABLE` → отказ обхода); baseline focused tests на месте. Аренда строки очереди конверсии
 (`core/pipeline/extract_queue.py:54`) снимает часть (б).
@@ -990,10 +990,10 @@ executor/split отвергается» уже неверна: executor-волн
 
 ### Phase 1 — фактическое enforcement на seam — ✅ сделано
 
-`route_request` — единый путь вокруг HTTP handler (`core/edge/server.py:1159`): аутентификация →
+`route_request` — единый путь вокруг HTTP handler (`core/edge/server.py:1160`): аутентификация →
 авторизация по op → лимит тела → dispatch → аудит; собирается лаунчером из
-`config.auth`/`config.audit` (`core/edge/__main__.py:447`). Fail-fast: bind вне loopback без auth
-отвергается при старте (`core/edge/server.py:229`). Аудит пишется на allow/deny/error, включая
+`config.auth`/`config.audit` (`core/edge/__main__.py:452`). Fail-fast: bind вне loopback без auth
+отвергается при старте (`core/edge/server.py:230`). Аудит пишется на allow/deny/error, включая
 401/403/413; endpoint-specific обхода нет. Тесты — `tests/edge/test_edge_middleware.py`,
 `tests/edge/test_auth.py`, `tests/edge/test_audit.py`. **Остаётся (эксплуатация, не код):** включить
 `auth.mode` и `audit.sink` в боевом `edge.yaml` (дефолт — `none`) и подключить SIEM. **Gate:** ✅
@@ -1005,7 +1005,7 @@ oversized/invalid content не попадает дальше.
 `FetchAttemptResult` в коде нет (0 вхождений): транспортный контракт по-прежнему `RawPage`
 (`core/ports/crawler.py:50`). **Сделано:** retry вынесен из адаптеров в один цикл
 (`core/util/fetch_retry.py:55`, одна константа на `local` и `split`), классификация
-транзиентности — порт (`core/ports/crawl_errors.py:205`), ручной redirect-scope —
+транзиентности — порт (`core/ports/crawl_errors.py:219`), ручной redirect-scope —
 `core/pipeline/corpus_ingest.py:2989` (включается `core/pipeline/corpus_drain.py:722`), process
 isolation браузера (`core/edge/scheduler.py:181`), единая robots-семантика. **Остаток:**
 `FetchAttemptResult` и resolved-IP validation/pinning (грепп `pinning` по `core/` даёт только
