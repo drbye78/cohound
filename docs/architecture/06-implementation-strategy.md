@@ -338,7 +338,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 ✅ сделано (проверено) — `core/store/sqlite.py:86` (`SCHEMA_VERSION = "3.20.0"`; **24** `CREATE TABLE`,
 включая `schema_meta`, + `sqlite_sequence` = 25 таблиц в БД),
 `core/store/state_sqlite.py:84` (`STATE_SCHEMA_VERSION = "12"`),
-`core/store/state_store.py:1590` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
+`core/store/state_store.py:1615` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
 
 - `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.20.0"`;
   гейт версии схемы — файл другой версии отвергается, `11` §2.6; свидетельство живости сеанса
@@ -359,7 +359,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
 `core/cli/context.py:1677` (`make_profile_gate` подключён в CLI).
 ✅ механизм durable-аттестации профиля есть, **подписей 0**: `save_profile_attestation` вызывается
-из CLI (`core/cli/package/commands.py:3083` → `core/store/state_store.py:1590`), команда —
+из CLI (`core/cli/package/commands.py:3083` → `core/store/state_store.py:1615`), команда —
 `hound package profile attest` (`core/cli/package/commands.py:2994`); строк в `profile_attestation`
 в `state.db` — **0**.
 
@@ -713,7 +713,7 @@ P5), но строка помечена здесь как неактуальна
 - **Параллельная экстракция (P4, as-built).** Ось `crawl.extract_workers` (app < run < site,
   `CrawlLimits.extract_workers`, манифест-поле `crawl_extract_workers`) —
   пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:131`), фабрика
-  `new_extract_pool` в `core/pipeline/corpus_ingest.py:5092`, воркер
+  `new_extract_pool` в `core/pipeline/corpus_ingest.py:5168`, воркер
   от composition root. `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
   воркер через `core/cli/wiring.py`), `split` — потоки поверх `RemoteExtractor`; шов
   (`/v1/*`, `SEAM_SCHEMA_VERSION`) **не** менялся. Воркер читает retained-`raw_path` (I19;
@@ -1027,7 +1027,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   `index_build_id` и `registry_spec_digest`», — а не две.
   ➖ **A1 follow-up закрыт 07.11.2026:** мультиплексирование root/product — F4a/F4b
   (`core/pipeline/corpus_driver.py`); нит `limiter.wait` внутри/вне `try` снят `9a8440a` — оба
-  пути (пуловой и inline) зовут один помощник `core/pipeline/corpus_ingest.py:2627`
+  пути (пуловой и inline) зовут один помощник `core/pipeline/corpus_ingest.py:2703`
   (`_fetch_with_paced_retries`).
   ➖ **E2 follow-up закрыт 31.10.2026:** вестигиальное `Ports.registry`/`DEFAULT_REGISTRY_ID` и
   параметры `registry`/`registry_id` у `build_adapters` сняты (читателей не было — Ш3 берёт только

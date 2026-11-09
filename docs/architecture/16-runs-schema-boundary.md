@@ -238,7 +238,7 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`resume_retained`, `core/pipeline/corpus_ingest.py:388-490`) — `reused`. Resume перечитывает и те документы, которые
+(`resume_retained`, `core/pipeline/corpus_ingest.py:392-494`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -252,11 +252,11 @@ retained-байтов).
 (что именно произошло с URL в этом прогоне), а не условием статуса.
 
 **Оба значения уже в руках у единственного писателя** — новой проводки не нужно:
-`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1693`, рядом живут `reuse`
-(`core/pipeline/corpus_ingest.py:1810` — `reused = active_reuse is not None`) и `page.status_code`
-(он же уже уходит в `url_state` как `last_http_status`, `core/pipeline/corpus_ingest.py:1833`;
-второй путь — `core/pipeline/corpus_ingest.py:1650`). Точка записи одна — `persist_docs`
-(`core/pipeline/corpus_ingest.py:1346`, докстринг сам это фиксирует).
+`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1769`, рядом живут `reuse`
+(`core/pipeline/corpus_ingest.py:1886` — `reused = active_reuse is not None`) и `page.status_code`
+(он же уже уходит в `url_state` как `last_http_status`, `core/pipeline/corpus_ingest.py:1909`;
+второй путь — `core/pipeline/corpus_ingest.py:1726`). Точка записи одна — `persist_docs`
+(`core/pipeline/corpus_ingest.py:1422`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
 `upsert_corpus_doc`. Прецедент в коде — `origin`
@@ -334,7 +334,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
   **явным параметром**: `core/pipeline/phases.py:1367-1368` → `core/pipeline/corpus.py:1688`
-  (объявление оси) и `core/pipeline/corpus.py:4663`/`core/pipeline/corpus.py:4738`
+  (объявление оси) и `core/pipeline/corpus.py:4664`/`core/pipeline/corpus.py:4739`
   (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
   (`core/pipeline/corpus.py:2330` — единственный источник этого значения).
 
@@ -427,7 +427,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 (`core/pipeline/corpus_index.py:911-923`; сегодня ключей **восемь**: шесть прежних плюс
 `embed_device` и `embed_precision`).
 
-`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4657`, а в тестах — с явными kwargs
+`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4658`, а в тестах — с явными kwargs
 (`tests/pipeline/test_corpus_phase_boundary.py:153-163`,
 `tests/pipeline/test_document_levels.py:574-585`): новый **обязательный** аргумент даёт там
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
@@ -493,14 +493,14 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 ## 6. `chunk_id` (run-level)
 
 `_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:181-199`, где
-`doc_hash` — `extracted.content_hash`, вызов — `core/pipeline/corpus_ingest.py:1437`) →
+`doc_hash` — `extracted.content_hash`, вызов — `core/pipeline/corpus_ingest.py:1513`) →
 **`f"{product_id}:{doc_version_id}:{chunk_no}"`**.
 Почему в этой границе: `chunk_id` — часть `LexicalChunk`/`RetrievedChunk` и адрес гидртации
 из store, поэтому смена формата и так требует пересборки партиций; делать её отдельным
 `content_change` после `partition-2` значило бы пересобирать дважды.
 
 `doc_version_id` = `"dv_" + short_hash(product, content_hash, extractor_version, level)`
-(`core/pipeline/incremental.py:279-290`) — **без двоеточий**, поэтому грамматика
+(`core/pipeline/incremental.py:280-291`) — **без двоеточий**, поэтому грамматика
 `source_id` (`product:doc:chunk_no[:build_id]`, `core/util/ids.py:46-58`;
 `parse_source_id` требует ровно 3 или 4 сегмента, `core/util/ids.py:60-95`) не меняется. Это не
 косметика: `doc_hash` не различает уровень извлечения и версию экстрактора, поэтому
@@ -525,7 +525,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 
 ### 6.2. Durable-пространство не меняется
 
-`chunk_row_id(doc_version_id, chunker_version, chunk_no)` (`core/pipeline/incremental.py:293-304`) уже
+`chunk_row_id(doc_version_id, chunker_version, chunk_no)` (`core/pipeline/incremental.py:294-305`) уже
 содержит и `dv_id`, и `chunker_version`. Два идентификатора остаются разными намеренно
 (`09` §14.6 п. 11).
 
@@ -709,17 +709,17 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed` (`core/pipeline/crawl_frontier.py:1563`), чей work-set
      гейтится режимом продукта (`plan_incremental_items` под сетью отдаёт `[]` для
-     `new`/`full` — `core/pipeline/corpus_ingest.py:4798-4800`). Правило: **заряженный URL обязан быть и
+     `new`/`full` — `core/pipeline/corpus_ingest.py:4874-4876`). Правило: **заряженный URL обязан быть и
      дренируемым** — каждый элемент, засчитанный в `consumed`, ставится depth-0 листом
      (`add_revalidate_seed`, вне бюджета discovery) **независимо от режима**; гейт
      `mode == INCREMENTAL` для этого набора неверен, его настоящее предусловие — «есть
      durable-элементы для дренажа». ✅ **As-built** (`core/pipeline/corpus_drain.py:1581-1597`:
      `charged_urls` → `add_revalidate_seed`, комментарий называет дефект 3 и `09` §6.3).
      Плюс приписывание владельцу — тем же предикатом, что
-     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:4753-4785`, вызов —
-     `core/pipeline/corpus.py:2608-2609`: побеждает самый специфичный
+     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:4829-4861`, вызов —
+     `core/pipeline/corpus.py:2609-2610`: побеждает самый специфичный
      `root_path_prefix`), а не «кто первый» (дефект 1); продукт-wide множество
-     `resume_counted` (`core/pipeline/corpus.py:3548`) остаётся — меняется правило
+     `resume_counted` (`core/pipeline/corpus.py:3549`) остаётся — меняется правило
      приписывания.
      **Почему нельзя сделать только приписывание:** измерено — у `digital_q_database`
      host-корень (prefix `/`, потолок 10) случайно забрал зарядку 2402 элементов, поэтому

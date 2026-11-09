@@ -80,15 +80,15 @@
 развалится.
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
-намерению: `retain` (`core/pipeline/corpus_ingest.py:1037`) — единственный writer сырых
-байтов, с единственным вызовом (`core/pipeline/corpus.py:2542`, `_commit_local`), в который
+намерению: `retain` (`core/pipeline/corpus_ingest.py:1113`) — единственный writer сырых
+байтов, с единственным вызовом (`core/pipeline/corpus.py:2543`, `_commit_local`), в который
 сходятся оба
 транспорта (локальный и executor).
 
 ```
 RawPage (core/ports/types.py:91-121)
-  → retain (core/pipeline/corpus_ingest.py:1037)   # сам хеширует байты, кладёт в corpus_raw
-    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1346,
+  → retain (core/pipeline/corpus_ingest.py:1113)   # сам хеширует байты, кладёт в corpus_raw
+    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1422,
       `persist_docs`)
 ```
 
@@ -354,14 +354,14 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:314` — единственный writer, зовут
-   `core/pipeline/corpus.py:5306` и `core/pipeline/report.py:3573`; человеческая строка —
+   `core/pipeline/corpus.py:5307` и `core/pipeline/report.py:3573`; человеческая строка —
    `core/pipeline/artifacts_gap.py:196`, сбор — `core/pipeline/artifacts_gap.py:219`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
-   `core/pipeline/corpus.py:4205`; `origin` — `core/store/sqlite.py:196`;
+   `core/pipeline/corpus.py:4206`; `origin` — `core/store/sqlite.py:196`;
    `resolved_manually` — `core/domain/models.py:2592` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1728`; дайджест — `core/pipeline/digests.py:171`, материал
    `core/pipeline/digests.py:391`).
@@ -411,7 +411,7 @@ gaps:
 
 **Цепочка.** `_build_corpus` подаёт объявленные файлы после дренажа продукта (отказы краула
 уже в элементах сеанса) и до Pass B (документы входят в ту же сборку): файл → `RawPage`
-(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1037`)
+(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1113`)
 → экстракция → чанкер → индекс. Второго
 пути байтов в evidence нет (I19): retained-файл называет хеш самих байтов, а хеш от
 декларации не принимается.
@@ -444,7 +444,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
    дренажа корня (пулы, окна, провенанс). Объявленный контейнер получает видимую запись
    `errors` и retained-байты; предоставлять нужно документы членов. Молчаливого «скормить
    архив экстрактору» нет.
-2. `RawPage` ручной подачи несёт `engine=ORIGIN_MANUAL` (`core/pipeline/corpus_ingest.py:1953`),
+2. `RawPage` ручной подачи несёт `engine=ORIGIN_MANUAL` (`core/pipeline/corpus_ingest.py:2029`),
    а `corpus_docs.origin` заведён **в дополнение** к движку: движок
    описывает транспорт, а происхождение байтов — отдельный факт, который нужен и без
    `RawPage` (после прогона). `render_mode` у ручной подачи — `NULL` (получения не было;
@@ -460,11 +460,11 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   (`core/pipeline/manual_artifacts.py:192-212`), сверка `sha256` (`core/pipeline/manual_artifacts.py:297-303`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:5306`), и `report` (`core/pipeline/report.py:3573`); форма —
+  (`core/pipeline/corpus.py:5307`), и `report` (`core/pipeline/report.py:3573`); форма —
   `core/pipeline/artifacts_gap.py:219` (`collect_artifact_gaps`), человеческая строка —
   `core/pipeline/artifacts_gap.py:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:132`); подача
-  живёт внутри `corpus` (`core/pipeline/corpus.py:4205`), т.е. §5 исполнен буквально.
+  живёт внутри `corpus` (`core/pipeline/corpus.py:4206`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:171`,
   материал `(product_id, url, sha256)` — `core/pipeline/digests.py:391`), считается даже
   при пустом наборе.

@@ -33,8 +33,8 @@
 ## 1. Границы подсистемы и контракт с соседями
 
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:1259`),
-сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2686`), retention сырых байтов
-(`retain`, `core/pipeline/corpus_ingest.py:1037`), durable per-URL состоянием (`crawl_session_items`,
+сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2762`), retention сырых байтов
+(`retain`, `core/pipeline/corpus_ingest.py:1113`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:464`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.
@@ -44,8 +44,8 @@
 
 **Единица работы** — один URL объявленного корня. **Результат** — файл в `corpus_raw` плюс элемент
 сеанса `FETCHED` с `raw_path`/`content_hash`; это durable-факт **до** конверсии, и порядок в коде
-такой: байты пишутся, затем `retain` ставит `FETCHED` (`core/pipeline/corpus_ingest.py:1112`), а
-вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:3010`).
+такой: байты пишутся, затем `retain` ставит `FETCHED` (`core/pipeline/corpus_ingest.py:1188`), а
+вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:3086`).
 
 **Соседи приходят двумя путями.** Конверсия — **потребитель** durable-факта (§4); SERP — наоборот,
 **производитель**: его находки входят в frontier путём sitemap-`<loc>` — блэклист, `max_documents`,
@@ -133,8 +133,8 @@ host'ами — линейно.
 `FETCH_RETRY_TIMES` (2) раз, и **каждая попытка берёт свой слот** лимитера со своей меткой
 (`core/util/fetch_retry.py:55`, одно правило на `local` и `split`; классификатор —
 `core/ports/crawl_errors.py`). Контракт «никакой мутации состояния сеанса здесь нет» уже записан у
-`local_fetch` (`core/pipeline/corpus_ingest.py:2686`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2482`). Потоки не получают ни `Frontier`, ни
+`local_fetch` (`core/pipeline/corpus_ingest.py:2762`), а pre-fetch — чистая фаза
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2558`). Потоки не получают ни `Frontier`, ни
 стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:823`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 
@@ -289,7 +289,7 @@ PDF, `docs/reports/measurements/2026-10-29-corpus-retention-footprint.md:37`). �
 
 ### 4.4 Что это меняет для памяти
 
-`ProductIngest` (`core/pipeline/corpus_ingest.py:573`) переезжает к потребителю: пик памяти становится
+`ProductIngest` (`core/pipeline/corpus_ingest.py:577`) переезжает к потребителю: пик памяти становится
 свойством конверсии, а не краула. Краул держит только in-flight страницы полос (ограничены пулом) и
 пишет байты на диск — это и есть «эффективен безотносительно конверсии».
 
@@ -326,8 +326,8 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 
 **Что публикуется о ширине.** Не preflight, а фаза: `lane_notes` (→ `notes`) называет по
 продукту число объявленных host'ов и предел «одновременно полос не больше N» — когда host'ов
-меньше объявленных полос (`core/pipeline/corpus.py:3798-3804`), — а также расхождение
-объявления по корням продукта (`core/pipeline/corpus.py:3806`); это факт, а не тихое усечение.
+меньше объявленных полос (`core/pipeline/corpus.py:3799-3805`), — а также расхождение
+объявления по корням продукта (`core/pipeline/corpus.py:3807`); это факт, а не тихое усечение.
 Ожидаемый критический путь **до** прогона не печатается: он
 считается после, из сеанса, как `wall ≥ max_host (бюджет_host × медиана интервала_host)`
 (`docs/reports/measurements/2026-11-02-crawl-cohort-parallel.md`: `docs.tantorlabs.ru`
@@ -352,7 +352,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 исполняет: при `executor` `lane_width` возвращает `None`, то есть пула нет
 (`core/pipeline/corpus_drain.py:1122`). Ось под `split` — видимый no-op: чередование не
 действует, и это публикуется строкой `lane_notes` («волну собирает шов одним блокирующим
-вызовом», `core/pipeline/corpus.py:3792`), а не `errors` — деградации нет, поэтому и ошибки нет.
+вызовом», `core/pipeline/corpus.py:3793`), а не `errors` — деградации нет, поэтому и ошибки нет.
 
 ## 6. Фазы
 
@@ -651,7 +651,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   До F9 `drive_roots` вызывался **внутри** цикла продуктов, поэтому волна не могла содержать
   корни двух продуктов и окна `fetch_started_at` продуктов не пересекались ни при какой оси
   `crawl.host_concurrency` (наблюдено: продукты когорты шли строго последовательно). Теперь
-  вызов **один на когорту** (`core/pipeline/corpus.py:5095`): поток планов содержит корни всех
+  вызов **один на когорту** (`core/pipeline/corpus.py:5096`): поток планов содержит корни всех
   продуктов в авторском порядке, а граница продукта — типизированный маркер
   `ProductBoundary` (`core/pipeline/corpus_driver.py:97`), а не «смена `product_id`». Маркер
   нужен потому, что смена pid не наступает у **последнего** продукта потока и у продукта без
@@ -659,10 +659,10 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **Единица права — host на всю когорту.** Реестр claim (`claimed`) один на вызов драйвера:
   волна корня допускается, только если её host'ы не заняты волной **любого** продукта. Поэтому
   synthetic-бакеты ревалидации (leftover каталога, orphan-бакеты) идут тем же потоком планов
-  (`core/pipeline/corpus.py:3303`), а не отдельным дренажом в хвосте продукта: одиночный
+  (`core/pipeline/corpus.py:3304`), а не отдельным дренажом в хвосте продукта: одиночный
   дренаж открыл бы второй реестр и пустил бы бакет на host, который уже держит сосед.
   **Хвост продукта — на главном потоке, при закрытии его последнего корня**
-  (`core/pipeline/corpus.py:4056`; сам вызов — `core/pipeline/corpus_driver.py:294`). Почему
+  (`core/pipeline/corpus.py:4057`; сам вызов — `core/pipeline/corpus_driver.py:294`). Почему
   там: run-DB — SQLite с **одним** писателем (§1), а драйвер — единственный мутатор состояния
   фазы (инвариант T5), значит конверсия, Pass B, покрытие и строка продукта обязаны исполняться
   там же, где коммитятся исходы корней, и не могут идти параллельно ни друг с другом, ни с
@@ -678,7 +678,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   объявленных входов F9 не вводит: объявление самой оси, как и до F9 (F1), даёт новый `run_id`
   штатным `crawl_config_digest`, а F9 меняет только расписание исполнения — то есть ни одного
   нового поля в `EXECUTION_CONTRACT_FIELDS`.
-  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:5108`): ось
+  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:5109`): ось
   объявлена на корень (`app < run < site`), поэтому продукт со строгим объявлением не получает
   полос «за компанию» с соседом; потолок когорты — максимум объявленных продуктовых значений.
   Продуктовые значения (накопитель, дедуп-множества, счётчик seed'ов, бакеты стадий, группы
@@ -901,7 +901,7 @@ host'ах, поэтому бюджет, собранный на одном зе�
   `crawl_browser.py:934`, `search_glm.py:468`, `search_yandex.py:765`) и превращается в
   `reuse_kind=reused` на границе краула (`core/pipeline/corpus_drain.py:1850-1865`): страница
   из кэша больше не выдаёт себя за сетевое наблюдение, `http_status` у неё `NULL`
-  (`core/pipeline/corpus_ingest.py:1708`), а в `observed_urls` (E.6) она не попадает
+  (`core/pipeline/corpus_ingest.py:1784`), а в `observed_urls` (E.6) она не попадает
   (`:1615`). Наблюдаемость: `pages_fetched` кэш-хит по-прежнему считает (он добавляет
   документ), а `pacing.requests` по хосту — нет; расхождение этих двух чисел и есть видимый
   сигнал «обходили кэш, а не сайт». Замер цены дефекта до правки: в кэше стенда **2 800 из 5 593** записей без
@@ -910,7 +910,7 @@ host'ах, поэтому бюджет, собранный на одном зе�
   Остатки (⬜, оба названы): (1) под `split` признак через шов не переносится —
   `CrawlResultItem` поля не несёт, поэтому edge-путь кэш от живой отдачи не отличает;
   (2) `url_state.observed_how` по-прежнему `live` у кэш-хита (`CAPTURE_OBSERVED_*`,
-  `core/pipeline/corpus_ingest.py:843-846`): честное значение — новый вид наблюдения в CHECK
+  `core/pipeline/corpus_ingest.py:847-850`): честное значение — новый вид наблюдения в CHECK
   `capture` (`core/store/state_sqlite.py:451-452`), то есть bump `STATE`. Дата при этом
   настоящая (`observed_at` = mtime кэша), поэтому на датированный носитель I2d это не влияет.
 - Смена effective crawl policy создаёт execution change.
@@ -1006,7 +1006,7 @@ oversized/invalid content не попадает дальше.
 (`core/ports/crawler.py:50`). **Сделано:** retry вынесен из адаптеров в один цикл
 (`core/util/fetch_retry.py:55`, одна константа на `local` и `split`), классификация
 транзиентности — порт (`core/ports/crawl_errors.py:205`), ручной redirect-scope —
-`core/pipeline/corpus_ingest.py:2913` (включается `core/pipeline/corpus_drain.py:722`), process
+`core/pipeline/corpus_ingest.py:2989` (включается `core/pipeline/corpus_drain.py:722`), process
 isolation браузера (`core/edge/scheduler.py:181`), единая robots-семантика. **Остаток:**
 `FetchAttemptResult` и resolved-IP validation/pinning (грепп `pinning` по `core/` даёт только
 certificate pinning, которого нет: `core/config/deploy.py:18`, `core/edge/auth.py:315`;

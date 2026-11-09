@@ -65,6 +65,22 @@ def _insert_observation(package: Path, url: str, checked_at: str) -> None:
         con.close()
 
 
+def _insert_next_check(
+    package: Path, url: str, next_check_at: str | None
+) -> None:
+    """Кладёт ``url_state.next_check_at`` — публикуемый срок (``None`` — без обязательства)."""
+    con = sqlite3.connect(_db_path(package))
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO url_state"
+            " (product_id, url, normalized_url, next_check_at) VALUES (?, ?, ?, ?)",
+            ("p1", url, url, next_check_at),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def _run(capsys: pytest.CaptureFixture[str], argv: list[str]) -> tuple[int, str, str]:
     code = main(argv)
     captured = capsys.readouterr()
@@ -500,6 +516,56 @@ def test_plan_conflict_is_exit_usage_with_both_records(
     assert "crawl_policy_conflict" in message
     assert "policy_id=1" in message and "policy_id=2" in message
     assert "auto" in message and "network_denied" in message
+
+
+def test_list_per_url_publishes_next_check_at_and_stays_read_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--per-url`` публикует сроки per-URL: агрегаты сходятся, ``state.db`` не изменён.
+
+    Срок — обязательство «не проверять раньше T», а не фильтр: команда только читает
+    (``mode=ro``) и не создаёт ``-wal``/``-shm``.
+    """
+    package = _package(tmp_path)
+    _set(capsys, package, mode="scheduled", extra=["--interval-hours", "168"])
+    now = _dt.datetime.now(_dt.UTC)
+    _insert_next_check(package, "https://p1.test/past", (now - _dt.timedelta(hours=5)).isoformat())
+    _insert_next_check(
+        package, "https://p1.test/future", (now + _dt.timedelta(hours=5)).isoformat()
+    )
+    _insert_next_check(package, "https://p1.test/undated", None)
+    db_path = _db_path(package)
+    stat_before = db_path.stat()
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+    code, out, _err = _run(capsys, _policy_argv(package, "list", "--per-url"))
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    per_url = payload["per_url"]
+    counts = per_url["products"][0]
+    assert counts["total"] == 3
+    assert counts["total"] == counts["due"] + counts["not_due"] + counts["undated"]
+    assert counts["undated"] == 1
+    rows = {row["url"]: row for row in per_url["rows"]}
+    assert rows["https://p1.test/past"]["due"] is True
+    assert rows["https://p1.test/past"]["overdue_by_seconds"] > 0
+    assert rows["https://p1.test/future"]["due"] is False
+    assert rows["https://p1.test/future"]["overdue_by_seconds"] < 0
+    assert rows["https://p1.test/undated"]["next_check_at"] is None
+    assert per_url["rows"][0]["url"] == "https://p1.test/past", "due — первым"
+
+    after = db_path.stat()
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before, (
+        "list --per-url читает state.db, но не пишет в него"
+    )
+    assert (after.st_mtime_ns, after.st_size) == (
+        stat_before.st_mtime_ns,
+        stat_before.st_size,
+    ), "файл state.db не тронут"
+
+    code, out, _err = _run(capsys, _policy_argv(package, "list"))
+    assert code == EXIT_OK
+    assert "per_url" not in json.loads(out), "без --per-url payload не меняется"
 
 
 def test_unknown_refresh_policy_is_an_error_not_auto() -> None:

@@ -186,6 +186,31 @@ def read_crawl_observations(db_path: str | Path) -> dict[tuple[str, str], str]:
     finally:
         conn.close()
 
+
+def read_url_next_checks(db_path: str | Path) -> list[UrlStateRow]:
+    """Все строки ``url_state`` (``mode=ro``) — для публикации сроков per-URL.
+
+    Читатель поля ``next_check_at``, которого до этого не было: срок — **опубликованное
+    обязательство** «не проверять URL раньше T», а не фильтр планировщика (план 19 §E.8),
+    поэтому единственный его потребитель — отчёт ``crawl policy list --per-url``.
+    Отсутствующий файл/битая база — ``[]``: сроки неизвестны, а не «обязательств нет».
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM url_state ORDER BY product_id, normalized_url"
+        )
+        return [SqliteStateStore._url_state_row(row) for row in rows]
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
+
+
 #: Колонки ``product_state`` в порядке записи (кроме ``product_id`` — он ключ).
 _PRODUCT_STATE_COLUMNS = (
     "canonical_name",

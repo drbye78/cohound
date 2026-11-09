@@ -41,8 +41,13 @@ from core.domain import (
     RunConfig,
     RunMode,
 )
-from core.domain.enums import CrawlPolicyMode, RefreshPolicy, RunProductStatus
-from core.pipeline import RunPlan
+from core.domain.enums import (
+    CrawlItemStatus,
+    CrawlPolicyMode,
+    RefreshPolicy,
+    RunProductStatus,
+)
+from core.pipeline import RunPlan, corpus_ingest
 from core.pipeline import corpus as corpus_mod
 from core.pipeline import crawl_policy as crawl_policy_mod
 from core.pipeline.corpus import IndexBuild, build_corpus
@@ -62,7 +67,7 @@ from core.ports.types import (
     RawPage,
 )
 from core.store.sqlite_store import SqliteStore
-from core.store.state_store import SqliteStateStore
+from core.store.state_store import SqliteStateStore, read_url_next_checks
 from core.util.hashing import content_hash
 
 RUN_ID = "run-crawl-policy"
@@ -1289,3 +1294,114 @@ def test_every_refresh_policy_value_round_trips_and_unknown_is_error() -> None:
         assert corpus_mod._as_refresh_policy(policy.value) is policy
     with pytest.raises(ValueError, match="неизвестная политика"):
         corpus_mod._as_refresh_policy("bogus")
+
+# --------------------------------------------------------------------------- #
+# 7. E.8 плана 19: next_check_at — опубликованное обязательство, не фильтр
+# --------------------------------------------------------------------------- #
+
+
+def _url_policy(mode: str, *, interval: int | None = None):
+    """Политика продукта ``p1`` в режиме ``mode`` (``scheduled`` — с тактом)."""
+    entry: dict[str, object] = {"mode": mode}
+    if interval is not None:
+        entry["interval_hours"] = interval
+    return resolve_crawl_policy(
+        package_policy=CrawlPolicyConfig.model_validate({"products": {"p1": entry}}),
+        operator_rows=[],
+        roots=[_root("https://docs.test/p1/index")],
+        now=NOW,
+        observed_at={},
+    )
+
+
+def _record(
+    db_path: Path,
+    *,
+    status: CrawlItemStatus,
+    fields: dict[str, Any],
+    policy: Any,
+    observation: dict[str, Any] | None = None,
+) -> list[str]:
+    """Один вызов писателя ``url_state`` (тот же, что зовёт :func:`mark`)."""
+    errors: list[str] = []
+    with SqliteStateStore(db_path) as state:
+        corpus_ingest.record_url_state(
+            "p1",
+            "https://docs.test/p1/doc",
+            status,
+            fields,
+            None,
+            state=state,
+            errors=errors,
+            observation=observation,
+            crawl_policy=policy,
+        )
+    return errors
+
+
+def _next_check(client: Path) -> str | None:
+    rows = read_url_next_checks(client)
+    assert len(rows) == 1, f"ожидалась одна строка url_state, получено {len(rows)}"
+    return rows[0].next_check_at
+
+
+def test_scheduled_policy_publishes_observed_at_plus_interval(tmp_path: Path) -> None:
+    """``FETCHED`` + наблюдение + ``scheduled 168`` ⇒ ``next_check_at = observed + 168 ч``.
+
+    Срок считается от **наблюдения версии**, а не от часов прогона: иначе проход без
+    сети продлевал бы обязательство, которого никто не подтверждал.
+    """
+    client = tmp_path / "client.db"
+    errors = _record(
+        client,
+        status=CrawlItemStatus.FETCHED,
+        fields={"raw_path": "x"},
+        policy=_url_policy("scheduled", interval=168),
+        observation={"observed_at": TS, "observed_how": "live"},
+    )
+    assert errors == []
+    expected = _dt.datetime.fromisoformat(TS) + _dt.timedelta(hours=168)
+    assert _next_check(client) == expected.isoformat()
+
+
+def test_auto_policy_erases_next_check_at(tmp_path: Path) -> None:
+    """Без объявленного такта обязательства нет: срок ``NULL``, а не прежний."""
+    client = tmp_path / "client.db"
+    _record(
+        client,
+        status=CrawlItemStatus.FETCHED,
+        fields={"raw_path": "x"},
+        policy=_url_policy("scheduled", interval=168),
+        observation={"observed_at": TS, "observed_how": "live"},
+    )
+    assert _next_check(client) is not None
+    _record(
+        client,
+        status=CrawlItemStatus.FETCHED,
+        fields={"raw_path": "x"},
+        policy=_url_policy("auto"),
+        observation={"observed_at": TS, "observed_how": "live"},
+    )
+    assert _next_check(client) is None
+
+
+def test_failed_outcome_keeps_the_previous_next_check_at(tmp_path: Path) -> None:
+    """Отказ не наблюдает версию: прежний опубликованный срок сохраняется."""
+    client = tmp_path / "client.db"
+    policy = _url_policy("scheduled", interval=168)
+    _record(
+        client,
+        status=CrawlItemStatus.FETCHED,
+        fields={"raw_path": "x"},
+        policy=policy,
+        observation={"observed_at": TS, "observed_how": "live"},
+    )
+    before = _next_check(client)
+    errors = _record(
+        client,
+        status=CrawlItemStatus.FAILED,
+        fields={"error_kind": "parser_failed"},
+        policy=policy,
+    )
+    assert errors == []
+    assert _next_check(client) == before

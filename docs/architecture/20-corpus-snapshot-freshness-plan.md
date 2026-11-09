@@ -67,7 +67,7 @@
    `observed_how`, `actor`, `superseded_by` — append-only, как `crawl_policy` (план 19).
 2. `url_state` получает наблюдение: `observed_at`, `observed_how`, `capture_id`,
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
-   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:889-906`).
+   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:943-960`).
 3. Ручные артефакты (`hound package state adopt`: `plan_adoption` — `core/pipeline/state_adopt.py:706`,
    `apply_adoption` — `core/pipeline/state_adopt.py:1487`, запись снятия —
    `core/pipeline/state_adopt.py:1626`) создают снятие с
@@ -226,10 +226,16 @@
   `capture` — ноль строк (13 снятий: 3 `adopted` 06.11 + 10 `live` 07.11). То есть это
   по-прежнему нулевая точка. Две оговорки к прибору, обе проверены по коду: (1) срок считается
   от `url_state.last_checked_at` (`core/store/state_store.py:161-187`), а он пишется при
-  **любом** исходе, включая отказ (`core/pipeline/corpus_ingest.py:958`), поэтому счётчик
+  **любом** исходе, включая отказ (`core/pipeline/corpus_ingest.py:1028`), поэтому счётчик
   отвечает «когда в последний раз касались URL», а не «когда последний раз видели версию»;
   (2) `adopted` не трогает `last_checked_at`, поэтому срок наступает на 3 суток раньше даты
   наблюдения adopted-артефактов.
+  **Решение владельца 09.11.2026:** второй срок снимается **только чтением** `state.db`
+  (`./hound.py crawl policy list --json`, `mode=ro`), без прогона — сети, снятий и новых
+  `run_id` эта проверка не требует: `due_at`/`overdue_by_seconds`/`missed_captures` считаются
+  из `url_state`, а не из результатов обхода. Ограничение названо: так проверяется, что срок
+  пришёл и сколько снятий пропущено, но **не** то, что `scheduled` на живом пути даёт `refresh`
+  и пишет снятие (эта ветка уже наблюдалась 07.11 как `reuse` до срока).
 
 ## 8. Риски
 

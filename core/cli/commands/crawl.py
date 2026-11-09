@@ -39,7 +39,7 @@ import argparse
 import datetime as _dt
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -132,9 +132,13 @@ from core.pipeline.run_identity import (
     resolve_run_scope,
 )
 from core.pipeline.runner import RunContext
-from core.ports.state import CrawlPolicyRow
+from core.ports.state import CrawlPolicyRow, UrlStateRow
 from core.store.state_sqlite import state_db_path
-from core.store.state_store import read_crawl_observations, read_crawl_policy_rows
+from core.store.state_store import (
+    read_crawl_observations,
+    read_crawl_policy_rows,
+    read_url_next_checks,
+)
 
 __all__ = [
     "cancel",
@@ -1294,6 +1298,87 @@ def _policy_due_payload(
     }
 
 
+def _next_check_datetime(raw: str | None) -> _dt.datetime | None:
+    """ISO-строка срока → aware ``datetime`` (UTC при отсутствии смещения) или ``None``.
+
+    Неразбираемое значение — ``None``: срок, который нельзя прочитать, не является
+    опубликованным сроком, и молча считать его «наступившим» было бы выдумкой.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_dt.UTC)
+    return parsed
+
+
+def _per_url_payload(
+    rows: Sequence[UrlStateRow], *, now: _dt.datetime
+) -> dict[str, Any]:
+    """Сроки ``next_check_at`` по URL: агрегат на продукт + строки (план 19 §E.8).
+
+    Это **публикация**, а не фильтр: планировщик по полю не отсекает URL, состав корпуса
+    и ``run_id`` от него не зависят (решение владельца 09.11.2026 после замера).
+
+    ``due`` = ``next_check_at <= now``; ``overdue_by_seconds`` **отрицателен**, когда срок
+    не наступил (та же конвенция, что у :func:`_policy_due_payload`). ``undated`` —
+    ``next_check_at IS NULL``: политика обязательства не объявляла
+    (``auto``/``on_request``/``network_denied``), и это «срока нет», а не «срок прошёл».
+    """
+    stats: dict[str, dict[str, int]] = {}
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        bucket = stats.setdefault(
+            row.product_id, {"total": 0, "due": 0, "not_due": 0, "undated": 0}
+        )
+        bucket["total"] += 1
+        due_at = _next_check_datetime(row.next_check_at)
+        if due_at is None:
+            bucket["undated"] += 1
+            items.append(
+                {
+                    "product_id": row.product_id,
+                    "url": row.url,
+                    "next_check_at": row.next_check_at,
+                    "overdue_by_seconds": None,
+                    "due": None,
+                }
+            )
+            continue
+        overdue = (now - due_at).total_seconds()
+        is_due = overdue >= 0
+        bucket["due" if is_due else "not_due"] += 1
+        items.append(
+            {
+                "product_id": row.product_id,
+                "url": row.url,
+                "next_check_at": row.next_check_at,
+                "overdue_by_seconds": round(overdue, 3),
+                "due": is_due,
+            }
+        )
+    # Сначала наступившие сроки, затем будущие по возрастанию, ``undated`` — в конце.
+    items.sort(
+        key=lambda item: (
+            0
+            if item["due"] is True
+            else (1 if item["due"] is False else 2),
+            str(item["next_check_at"] or ""),
+            str(item["url"]),
+        )
+    )
+    return {
+        "products": [
+            {"product_id": product_id, **counts}
+            for product_id, counts in sorted(stats.items())
+        ],
+        "rows": items,
+    }
+
+
 def _policy_mode_values(args: argparse.Namespace) -> tuple[CrawlPolicyMode, int | None]:
     """``--mode``/``--interval-hours`` с проверкой «интервал только у scheduled»."""
     raw = getattr(args, "mode", None)
@@ -1596,6 +1681,9 @@ def policy_list(args: argparse.Namespace) -> int:
     ``schema_version`` не переписывается. Для объявленных корней печатается **решение**
     (для ``scheduled`` — ``refresh``/``reuse``), а несовпавшие записи — отдельным
     списком ``crawl_policy_unmatched``.
+
+    ``--per-url`` публикует сроки ``next_check_at`` по URL: это **обязательство**, а не
+    фильтр — планировщик по полю не отсекает URL, состав корпуса не меняется.
     """
     package = _policy_package_dir(args)
     policy_path = Path(package) / CRAWL_POLICY_FILENAME
@@ -1662,6 +1750,10 @@ def policy_list(args: argparse.Namespace) -> int:
         ],
         "records": [_policy_row_payload(row) for row in rows],
     }
+    per_url: dict[str, Any] | None = None
+    if getattr(args, "per_url", False):
+        per_url = _per_url_payload(read_url_next_checks(db_path), now=now)
+        payload["per_url"] = per_url
     if args.json:
         _print_json(payload)
     else:
@@ -1710,6 +1802,17 @@ def policy_list(args: argparse.Namespace) -> int:
                 )
                 + f" mode={item.mode.value} source={item.source}"
             )
+        if per_url is not None:
+            for counts in per_url["products"]:
+                lines.append(
+                    f"per-URL: {counts['product_id']} total={counts['total']}"
+                    f" due={counts['due']} not_due={counts['not_due']}"
+                    f" undated={counts['undated']}"
+                )
+            for item in per_url["rows"]:
+                lines.append(
+                    f"  {item['next_check_at'] or 'undated'}  {item['url']}"
+                )
         sys.stdout.write("\n".join(lines) + "\n")
     return EXIT_OK
 
@@ -1957,6 +2060,12 @@ def configure(sub: Any) -> None:
         "list", help="эффективный режим и источник по объявленным корням (read-only)"
     )
     _add_policy_target_flags(p_pol_list, require_scope=False, actor=False)
+    p_pol_list.add_argument(
+        "--per-url",
+        dest="per_url",
+        action="store_true",
+        help="опубликовать сроки next_check_at по URL",
+    )
     _add_common(p_pol_list)
     p_pol_list.set_defaults(handler=policy_list)
 

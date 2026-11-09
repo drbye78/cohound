@@ -215,12 +215,18 @@ class PolicyExecution:
     гейт Ш5 **до** первого сетевого вызова. ``scope``/``reason`` — провенанс: ``None`` в
     обоих полях означает «политика этот корень не называла» (поведение прежнее:
     ``fetch`` + ``network``), а не «запрет по умолчанию».
+
+    ``mode``/``interval_hours`` — провенанс **обязательства** per-URL (``scheduled`` +
+    интервал): из них считается ``url_state.next_check_at``; на гейт они не влияют.
     """
 
     network_mode: CrawlNetworkMode = CrawlNetworkMode.FETCH
     corpus_source: CrawlCorpusSource = CrawlCorpusSource.NETWORK
     scope: str | None = None
     reason: str | None = None
+    #: Режим и интервал записи — провенанс обязательства per-URL (см. докстринг).
+    mode: CrawlPolicyMode | None = None
+    interval_hours: int | None = None
 
     @property
     def denied(self) -> bool:
@@ -314,6 +320,8 @@ class CrawlPolicyResolution:
             corpus_source=best.corpus_source,
             scope=best.scope,
             reason=best.reason,
+            mode=best.mode,
+            interval_hours=best.interval_hours,
         )
 
     def as_dict(self) -> dict[str, Any]:

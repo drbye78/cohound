@@ -13,7 +13,7 @@ import datetime as dt
 import pytest
 
 from core.config.crawl_policy import CrawlPolicyConfig
-from core.domain.enums import CrawlPolicyMode, CrawlPolicyScopeKind
+from core.domain.enums import CrawlNetworkMode, CrawlPolicyMode, CrawlPolicyScopeKind
 from core.pipeline.crawl_policy import (
     CrawlPolicyConflict,
     DeclaredRoot,
@@ -80,6 +80,37 @@ def _resolve(
         ),
         crawl_config_digest=crawl_config_digest,
     )
+
+
+def test_execution_for_carries_scheduled_mode_and_interval() -> None:
+    """``execution_for`` отдаёт режим и интервал записи — провенанс обязательства §E.8.
+
+    Гейт Ш5 читает ``network_mode`` × ``corpus_source``; ``mode``/``interval_hours``
+    нужны писателю ``url_state.next_check_at``: срок = наблюдение + объявленный такт.
+    """
+    config = _config(
+        sites={"p1": {"docs.test": {"mode": "scheduled", "interval_hours": 168}}}
+    )
+    execution = _resolve(config, [ROOT]).execution_for("p1", "https://docs.test/docs/api")
+    assert execution.mode is CrawlPolicyMode.SCHEDULED
+    assert execution.interval_hours == 168
+
+
+def test_execution_for_auto_declares_no_interval() -> None:
+    """``auto`` такта не объявляет: ``mode=AUTO``, ``interval_hours=None``."""
+    execution = _resolve(_config(defaults={"mode": "auto"}), [ROOT]).execution_for(
+        "p1", "https://docs.test/docs/api"
+    )
+    assert execution.mode is CrawlPolicyMode.AUTO
+    assert execution.interval_hours is None
+
+
+def test_execution_for_unmatched_address_has_no_mode() -> None:
+    """Адрес вне объявленных корней: политика его не называла ⇒ обязательства нет."""
+    execution = _resolve(_config(), [ROOT]).execution_for("p1", "https://other.test/x")
+    assert execution.mode is None
+    assert execution.interval_hours is None
+    assert execution.network_mode is CrawlNetworkMode.FETCH
 
 
 def test_priority_path_beats_root_host_product() -> None:

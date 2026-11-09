@@ -2532,6 +2532,7 @@ def _build_corpus(
         errors=errors,
         heartbeat=heartbeat,
         state=state,
+        crawl_policy=crawl_policy,
     )
     _retain = partial(
         corpus_ingest.retain,

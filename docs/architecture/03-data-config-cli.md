@@ -915,7 +915,7 @@ sites:
 ```
 
 **`kind` и директорные источники.** `kind` — свободная строка-данные; `web` — обычная страница.
-`feed`/`channel` — **директорные** виды (`_DIRECTORY_KINDS = {"feed","channel"}`): такой источник
+`feed`/`channel` — **директорные** виды (`DIRECTORY_KINDS = {"feed","channel"}`): такой источник
 **разворачивается в список ссылок-записей** (`FeedEntry`), а не индексируется сам. Ленты
 разбираются чистыми парсерами `core/util/feed.py` (`feed` — XML: RSS/Atom/RDF; `channel` —
 JSON/JSON-lines/список URL). Записи получают **провенанс каталога** (`kind` = `feed`/`channel`,
@@ -926,7 +926,7 @@ retention сырых байтов → extract → chunk → index (I19). Раз�
 
 **`sitemap` — не вид `crawl_sources.yaml` (D3).** Публичный sitemap задаётся **per-site** в
 `domain_profiles.yaml` (`DomainProfile.sitemap`, §D.2), а не в `crawl_sources.yaml`, и **не**
-входит в `_DIRECTORY_KINDS`. Транспорт опроса — тот же `PollPort`, но с отдельным `kind`
+входит в `DIRECTORY_KINDS`. Транспорт опроса — тот же `PollPort`, но с отдельным `kind`
 `"sitemap"` (`LocalFeedPoller` ‖ `RemoteFeedPoller` → шов `crawl/poll`); парсер —
 `core/util/sitemap.py` (`urlset`; `sitemapindex` — один уровень; gzip — по magic-байтам).
 

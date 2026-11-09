@@ -41,7 +41,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from core.config.crawl_sources import CrawlSourcesConfig
@@ -52,6 +52,7 @@ from core.domain import (
     CorpusChunk,
     CorpusDoc,
     CrawlItemStatus,
+    CrawlPolicyMode,
     CrawlSessionItem,
     CrawlStrategy,
     DocumentLevel,
@@ -151,6 +152,9 @@ from core.util.fetch_retry import FetchAttemptStats, fetch_with_paced_retries
 from core.util.hashing import content_hash, short_hash
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
+
+if TYPE_CHECKING:  # pragma: no cover - только для типов: импорт был бы циклом
+    from core.pipeline.crawl_policy import CrawlPolicyResolution
 
 #: Подкаталог ``raw_root`` для staging-файлов допущенных артефактов: тот же ФС, что
 #: и ``corpus_raw``, поэтому публикация — ``os.replace`` (переезд, не копия).
@@ -859,6 +863,48 @@ def capture_id_for(product_id: str, root_url: str, run_id: str | None) -> str:
     )
 
 
+def _next_check_at_iso(
+    pid: str,
+    url: str,
+    observed_at: str,
+    crawl_policy: CrawlPolicyResolution,
+    errors: list[str],
+    *,
+    previous: str | None = None,
+) -> str | None:
+    """``next_check_at`` = обязательство политики: ``observed_at + interval_hours``.
+
+    Поле — **опубликованный срок** («не проверять URL раньше T»), а не фильтр
+    планировщика (решение владельца 09.11.2026 после замера: при объявленных 168 ч
+    per-URL фильтр отсёк бы 8 052 из 8 052 URL, дублируя root-level ``scheduled``;
+    состав корпуса и ``run_id`` от поля не зависят).
+
+    ``None`` у режимов, такта не объявляющих (``auto``/``on_request``/
+    ``network_denied``): обязательства нет, поэтому прежнее значение **стирается**, а не
+    переносится — перенос выдавал бы срок, которого политика не обещала. Пересчёт
+    возможен только по свежему наблюдению версии: проход без наблюдения (отказ,
+    ``reused``, ``304`` без наблюдения) срока не обновляет, иначе отказ продлевал бы
+    обязательство, которого никто не подтверждал (см. :func:`record_url_state`).
+
+    Сбой разбора ``observed_at`` не глотается: он называется в ``errors``, а
+    возвращается ``previous`` — прежний срок, а не «обязательства нет».
+    """
+    try:
+        observed = _dt.datetime.fromisoformat(observed_at)
+    except ValueError as exc:
+        errors.append(
+            f"state: url_state({pid}/{url}): next_check_at не вычислен: {exc}"
+        )
+        return previous
+    execution = crawl_policy.execution_for(pid, url)
+    if (
+        execution.mode is not CrawlPolicyMode.SCHEDULED
+        or execution.interval_hours is None
+    ):
+        return None
+    return (observed + _dt.timedelta(hours=int(execution.interval_hours))).isoformat()
+
+
 def record_url_state(
     pid: str,
     url: str,
@@ -869,6 +915,7 @@ def record_url_state(
     state: ProductStatePort | None,
     errors: list[str],
     observation: Mapping[str, Any] | None = None,
+    crawl_policy: CrawlPolicyResolution | None = None,
 ) -> None:
     """Пишет ``url_state`` по исходу одного URL (09 §6.3) + наблюдение артефакта.
 
@@ -885,6 +932,13 @@ def record_url_state(
     * прочие сбои (``robots_disallow``/``parser_failed``/``extraction_timeout``/
       ``attempts_exhausted``/…) → ``last_error_kind``, ``consecutive_failures += 1``,
       прежняя версия сохраняется.
+
+    ``next_check_at`` — опубликованное обязательство «не проверять раньше T»
+    (план 19 §E.8), а не фильтр планировщика: ``FETCHED`` с наблюдением версии при
+    объявленном такте (``crawl_policy`` называет ``scheduled`` + ``interval_hours``)
+    получает ``observed_at + interval``; при режиме без такта — ``NULL`` (обязательства
+    нет, прежнее значение стирается); без наблюдения версии в этом цикле — прежнее
+    значение сохраняется (:func:`_next_check_at_iso`).
 
     ``observation`` (план 20 §3) — факт наблюдения **версии-артефакта**
     (``observed_at``/``observed_how``/``capture_id``/``observed_actor``). Он пишется
@@ -946,6 +1000,22 @@ def record_url_state(
         # отказом не стирается: ``None`` в колонке означает «писатель не передал», и
         # upsert сохраняет прежнее значение (COALESCE).
         received = observation if status is CrawlItemStatus.FETCHED else None
+        received_at = None if received is None else received.get("observed_at")
+        # ``next_check_at`` — обязательство политики (план 19 §E.8), а не перенос:
+        # без наблюдения версии в этом цикле или без политики прежний срок остаётся.
+        if received is None or crawl_policy is None:
+            next_check_at = base.next_check_at
+        elif received_at:
+            next_check_at = _next_check_at_iso(
+                pid,
+                url,
+                str(received_at),
+                crawl_policy,
+                errors,
+                previous=base.next_check_at,
+            )
+        else:
+            next_check_at = None
         state.upsert_url_state(
             UrlStateRow(
                 product_id=pid,
@@ -957,12 +1027,12 @@ def record_url_state(
                 last_http_status=current["last_http_status"],
                 last_checked_at=now,
                 last_changed_at=current["last_changed_at"],
-                next_check_at=base.next_check_at,
+                next_check_at=next_check_at,
                 consecutive_failures=failures,
                 last_error_kind=error_kind,
                 reuse_kind=current["reuse_kind"],
                 seed_id=base.seed_id,
-                observed_at=None if received is None else received.get("observed_at"),
+                observed_at=None if received is None else received_at,
                 observed_how=(
                     None if received is None else received.get("observed_how")
                 ),
@@ -991,6 +1061,7 @@ def mark(
     errors: list[str],
     heartbeat: Heartbeat,
     state: ProductStatePort | None,
+    crawl_policy: CrawlPolicyResolution | None = None,
     **fields: Any,
 ) -> None:
     """Помечает исход URL: сеанс краула (L1a) + durable ``url_state`` (09 §6.3).
@@ -999,6 +1070,10 @@ def mark(
     наличии ``state`` для **каждого** исхода URL. ``state_fields`` — поля исхода
     документа (``doc_version_id``/``reuse_kind``/валидаторы/``http_status``), которые
     нельзя пронести через ``CrawlSessionItem`` (у него нет таких колонок).
+
+    ``crawl_policy`` — разрешённая политика прогона: из неё
+    :func:`record_url_state` вычисляет опубликованный срок ``next_check_at``
+    (обязательство «не проверять раньше T»; планировщик по полю не фильтрует).
     """
     state_fields = fields.pop("state_fields", None)
     # Наблюдение артефакта (план 20 §3) — не поля элемента сеанса: вынимаются здесь,
@@ -1031,6 +1106,7 @@ def mark(
         state=state,
         errors=errors,
         observation=observation,
+        crawl_policy=crawl_policy,
     )
 
 

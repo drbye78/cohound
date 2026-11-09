@@ -182,7 +182,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 ### S3. Точная идентичность текста
 
 * **Вход:** финализированный текст (`finalize_extracted_text` → `content_hash` текста).
-* **Решение:** `doc_id = {product_id}:{text_hash}` (`core/pipeline/corpus_ingest.py:1607`); при совпадении
+* **Решение:** `doc_id = {product_id}:{text_hash}` (`core/pipeline/corpus_ingest.py:1683`); при совпадении
   второй адрес становится алиасом первого, победитель — `min(url)`.
 * **Экономия:** ноль (извлечение уже оплачено) — но это и есть цена: **дедуп стоит после
   конвертации**. S2 снимает повторные байты до неё.
@@ -190,7 +190,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 * **Публикует:** `IndexBuild.duplicates` (`core/pipeline/index_build.py:103`) → note фазы (`core/pipeline/phases.py:368`) →
   `results[].notes`. Перенести в ledger как отдельную строку (сейчас это нота в логе, а не
   счётчик в артефакте).
-* **Хук:** `core/pipeline/corpus_ingest.py:1619` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:428`,
+* **Хук:** `core/pipeline/corpus_ingest.py:1695` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:428`,
   пост-проход `canonicalize_doc_urls` (`core/pipeline/corpus.py:624`) — он группирует по
   `crawl_session_items.doc_hash` и ставит победителем `min(urls)` (`core/pipeline/corpus.py:721`).
 * **Дефект детерминизма (найден при разведке).** `canonicalize_doc_urls` покрывает только

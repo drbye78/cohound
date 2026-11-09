@@ -121,7 +121,7 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
 **У аттестации есть производитель** — `hound package profile attest`
 (`cmd_package_profile_attest`, `core/cli/package/commands.py:2994`; запись —
 `core/cli/package/commands.py:3083` → `save_profile_attestation`,
-`core/store/state_store.py:1590`; парсер — `core/cli/package/parser.py:1007`, `--gate`
+`core/store/state_store.py:1615`; парсер — `core/cli/package/parser.py:1007`, `--gate`
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
@@ -252,7 +252,7 @@ products × doc_domains
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
 | `max_workers` | **сетевой** fetch-пул (`httpx`) | в `_open` — открытии полосы корня (`core/pipeline/corpus_driver.py:351-372`); ширину даёт `lane_width` (`core/pipeline/corpus_drain.py:1111-1126`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5092-5119`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5168-5195`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул (`recycle_tasks` в `new_extract_pool`) | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
@@ -379,8 +379,8 @@ retained-байтами не фетчится заново
 
 **Источники-каталоги (`feed`/`channel`) — развёртка в записи.** Помимо обычных страниц, Ш5
 поддерживает **директорные** источники (`kind ∈ DIRECTORY_KINDS = {feed, channel}`,
-`core/pipeline/corpus_ingest.py:170`; `sitemap` в этот набор **не** входит — это per-site
-опция профиля домена, `_SITEMAP_KIND`, `core/pipeline/corpus_ingest.py:176`): такой URL не
+`core/pipeline/corpus_ingest.py:174`; `sitemap` в этот набор **не** входит — это per-site
+опция профиля домена, `_SITEMAP_KIND`, `core/pipeline/corpus_ingest.py:180`): такой URL не
 индексируется напрямую, а разворачивается в список
 ссылок-записей. Развёртка делегируется порту `ports/poller.py::PollPort`
 (`poll(url, *, kind, params, plan) → list[FeedEntry]`, `validate_params`): в профиле `local` —
@@ -398,13 +398,13 @@ retained-байтами не фетчится заново
 `failed`/`source_unavailable` → сеанс `partial` (не «тихо пусто»).
 
 **Когда именно идёт развёртка.** Каталог разворачивается **на постановке seed'ов, до
-краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2189-2228`) вызывается в
-цикле продукта (`core/pipeline/corpus.py:3459`), и каждая запись становится **отдельным
+краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2265-2304`) вызывается в
+цикле продукта (`core/pipeline/corpus.py:3460`), и каждая запись становится **отдельным
 seed-корнем глубины 0** — это и есть «один уровень развёртки». Под `split` сетевую часть
 (опрос каталога) исполняет DMZ через `RemoteFeedPoller`, логика развёртки остаётся в ядре.
 Волн «top-level URL → опрос каталогов → записи» нет: `split` подаёт исполнителю **волны
 фронтьера** размером `executor_wave_items` (`submit_collect`,
-`core/pipeline/corpus_ingest.py:2005-2057`),
+`core/pipeline/corpus_ingest.py:2081-2133`),
 и `idempotency_key` выводится из набора работ **этой** волны, а не из вида источника.
 
 #### Контейнеры: спуск
