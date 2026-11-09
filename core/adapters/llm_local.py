@@ -48,7 +48,7 @@ HTTP-клиент подтягивается только в реальном п
 к openai-совместимому ``/v1/chat/completions``.
 
 **Ошибки.** Невалидный JSON/форма/нарушение инвариантов модели (I1/I7) →
-``EvaluationError``; pipeline (T9.3) отображает его в ``evaluation_failed`` с retry ≤2
+``EvaluationError``; pipeline (T9.3) отображает его в ``evaluation_failed`` с retry ≤ ``max_retries``
 (§7.1). Отсутствие HTTP-зависимости без внедрённого ``generate`` → ``EvaluatorUnavailable``.
 Ошибка несёт провенанс ответа (``finish_reason``/``raw``/``usage``): по артефактам прогона
 видно, **что** вернула модель на отказе, а не только что JSON не разобрался.
@@ -144,7 +144,7 @@ GenerateFn = Callable[[str, type], str]
 class EvaluationError(RuntimeError):
     """Оценщик вернул невалидный JSON/форму или нарушил инварианты ячейки (§7.1).
 
-    Pipeline отображает ошибку в ``evaluation_failed`` с retry ≤2 (не в статус — I4).
+    Pipeline отображает ошибку в ``evaluation_failed`` с retry ≤ ``max_retries`` (дефолт 2; не в статус — I4).
 
     Отказ несёт **провенанс ответа** — что именно вернул провайдер: ``finish_reason``
     (метка остановки генерации), ``raw`` (сырой текст ответа, если он был) и ``usage``.
@@ -789,7 +789,7 @@ class LocalEvaluator:
 
         V5: ``finish_reason == "length"`` с пустым текстом — это **исчерпанный потолок
         генерации**, а не «невалидный JSON». Различать обязательно: иначе обрезание
-        уходит в ``validation_failed`` → retry ≤2 → ``failed``, и причина отказа не
+        уходит в ``validation_failed`` → retry ≤ ``max_retries`` → ``failed``, и причина отказа не
         называется ни в ячейке, ни в отчёте (так же поступает discovery-адаптер,
         ``llm_discovery.py:256-272``).
 

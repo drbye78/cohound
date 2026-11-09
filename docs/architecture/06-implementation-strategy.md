@@ -599,7 +599,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ⚠️ паритет `pb` `local`/`split` **не измерен** — общий остаток с W7 (§2).
 
 - `core/ports/gateway.py` (`ContentGateway`), `core/adapters/remote_{gateway,crawler,search,registry,extractor}.py`
-  (httpx, TLS без пиннинга, retry ≤2, лимит ответа, клиентская валидация).
+  (httpx, TLS без пиннинга, retry ≤ `max_retries`, лимит ответа, клиентская валидация).
 - `core/edge/*` — composition root Z1: `server.py`, `auth.py`, `audit.py`, `seam_schema.py`,
   `config.py` (`EdgeRuntimeConfig`), `__main__.py` (launcher `python -m core.edge serve`).
 - `core/config/deploy.py` + `config/deploy.yaml`; wiring профилей `local`/`split`;

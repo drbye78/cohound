@@ -25,7 +25,7 @@
 |---|---|---|---|
 | `search_failed` | Ш5/SERP | лог в `search_log`, ячейка → `failed` после retry | I4 |
 | `source_unavailable` | Ш5 краул | retention других источников; не роняет прогон | — |
-| `evaluation_failed` | Ш6 LLM | retry ≤2 → `failed` | §7, I4 |
+| `evaluation_failed` | Ш6 LLM | retry ≤ `max_retries` (дефолт 2) → `failed` | §7, I4 |
 | `validation_failed` | Ш6 эшелон | strict → `failed`; preliminary → кандидат | §1.4, §7.1 п. 4 |
 | `parser_failed` | Ш5 экстракция | `extractor_version` фиксируется; возможен re-extract из raw | I19 |
 | `lint_*` | Ш1 | **блокирует** прогон (не failed ячейки) | §4.2 |

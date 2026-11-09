@@ -672,7 +672,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 на корпусе, иначе превращается в порог из головы (A3).
 
 Каждый шаг возвращает `ValidationResult(ok, failure_kind, notes)`. Провал → `failure_kind` →
-retry ≤2 → `failed` (status=null, I4). В preliminary невалидная цитата → кандидат + `validation_notes`.
+retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (status=null, I4). В preliminary невалидная цитата → кандидат + `validation_notes`.
 
 **Evidence-объект.** По итогу валидации создаётся `CellEvidence` (`source_id`, `source_url` из
 резолва, `citation_quote`, `content_hash` чанка, `source_scope`/`scope_attested_by` для absence).
@@ -894,7 +894,7 @@ sequenceDiagram
     alt ok
         P->>S: save_cell + add_evidence
     else fail
-        P->>P: retry ≤2
+        P->>P: retry ≤ max_retries
         P->>S: save_cell(failed, status=null)  # I4
     end
 ```

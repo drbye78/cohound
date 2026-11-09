@@ -1,4 +1,4 @@
-"""Тесты фазы оценки Ш6 (T9.3, §5/§7.1): strict/preliminary, retry ≤2, I4/I13,
+"""Тесты фазы оценки Ш6 (T9.3, §5/§7.1): strict/preliminary, retry ≤ max_retries, I4/I13,
 композер ретривала I16/I17/I20 и персистенция.
 
 Оценщик — скриптованный in-memory ``EvaluatorPort`` (без сети, I18); чанки — нейтральные
