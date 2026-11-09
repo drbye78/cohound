@@ -1,0 +1,1422 @@
+{
+ "https://client.sbertech.ru/": {
+  "code": -1,
+  "final_url": "https://client.sbertech.ru/",
+  "kind": "unreachable"
+ },
+ "https://cloud.ru/offers/developers": {
+  "code": 200,
+  "final_url": "https://cloud.ru/offers/developers",
+  "kind": "live"
+ },
+ "https://database.diasoft.ru/#solution": {
+  "code": 206,
+  "final_url": "https://database.diasoft.ru/#solution",
+  "kind": "live"
+ },
+ "https://database.diasoft.ru/docs/ru/postgresql/versiya-174/": {
+  "code": 200,
+  "final_url": "https://database.diasoft.ru/docs/ru/postgresql/versiya-174/",
+  "kind": "live"
+ },
+ "https://database.diasoft.ru/docs/ru/postgresql/versiya-174/functions-json/": {
+  "code": 200,
+  "final_url": "https://database.diasoft.ru/docs/ru/postgresql/versiya-174/functions-json/",
+  "kind": "live"
+ },
+ "https://database.diasoft.ru/docs/ru/postgresql/versiya-174/monitoring-locks/": {
+  "code": 200,
+  "final_url": "https://database.diasoft.ru/docs/ru/postgresql/versiya-174/monitoring-locks/",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/14_17/se1c/sql-createstatistics.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/14_24/se1c/sql-createstatistics.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/15_12/certified/pg_integrity_verifier.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/15_19/certified/pg_integrity_verifier.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/15_12/se/citus.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/15_19/se/citus.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/15_12/se/orafce.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/15_19/se/orafce.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/16_10/certified/runtime-config-file-locations.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/16_15/certified/runtime-config-file-locations.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/16_8/se/pg_archive.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/16_15/se/pg_archive.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/16_8/se/pgbouncer.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/16_15/se/pgbouncer.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/16_8/se1c/ldap2pg.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/16_15/se1c/ldap2pg.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/be/backup.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/be/backup.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/app-pgdump.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/app-pgdump.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/autonomous-transactions.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/autonomous-transactions.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/backup-dump.html#25-1-3-%D0%BE%D0%B1%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B0-%D0%B1%D0%BE%D0%BB%D1%8C%D1%88%D0%B8%D1%85-%D0%B1%D0%B0%D0%B7-%D0%B4%D0%B0%D0%BD%D0%BD%D1%8B%D1%85": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/backup-dump.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/bgworker.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/bgworker.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/binary-download-execute.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/binary-download-execute.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/credcheck.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/credcheck.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/ddl-partitioning.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/ddl-partitioning.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/differences.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/differences.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/functions-json.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/functions-json.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/hstore.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/hstore.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/hydra.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/hydra.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/hypopg.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/hypopg.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/kernel-resources.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/kernel-resources.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/libpq-connect.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/libpq-connect.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/monitoring-locks.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/monitoring-locks.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/orafce.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/orafce.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/page_repair.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/page_repair.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pg-anon.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/differences.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pg_background.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pg_background.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pg_sec_check.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pg_sec_check.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pg_tde.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pg_tde.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pg_throttle.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pg_throttle.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pg_trace.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pg_trace.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pg_variables.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pg_variables.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pgaudit.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pgaudit.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/pgbouncer.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/pgbouncer.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/planner-optimizer.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/planner-optimizer.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/routine-vacuuming.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/routine-vacuuming.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/runtime-config-query.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/runtime-config-query.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/runtime-config-resource.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/runtime-config-resource.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/sql-createrule.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/sql-createrule.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/textsearch-dictionaries.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/textsearch-dictionaries.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/transp_anon.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/transp_anon.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/vector.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/vector.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se/wal-g.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se/wal-g.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tdb/ru/17_5/se1c/runtime-config-resource.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tdb/ru/17_11/se1c/runtime-config-resource.html",
+  "kind": "moved"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/admin_diagnostic_utility.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/admin_diagnostic_utility.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/admin_reports.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/admin_reports.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/admin_tokens.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/admin_tokens.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/admin_users.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/admin_users.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/backup_info.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/backup_info.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/group_page.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/group_page.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/ldap.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/ldap.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/admin/monitoring_with_prometheus_and_grafana.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/admin/monitoring_with_prometheus_and_grafana.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/index.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/index.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/DB_browser.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/DB_browser.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/activity.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/activity.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/activity.html#id4": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/activity.html#id4",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/admin_scheduler.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/admin_scheduler.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/charts.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/charts.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/instance_adding.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/instance_adding.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/overview.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/overview.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/param_groups.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/param_groups.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/pg_monitor/pg_m_Logs.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/pg_monitor/pg_m_Logs.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/pg_monitor/pg_monitor.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/pg_monitor/pg_monitor.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/query_profiler.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/query_profiler.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/replication.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/replication.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/instances/ug_clusters_pages.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/instances/ug_clusters_pages.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/platform_architecture.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/platform_architecture.html",
+  "kind": "live"
+ },
+ "https://docs.tantorlabs.ru/tp/6.0/requirements.html": {
+  "code": 206,
+  "final_url": "https://docs.tantorlabs.ru/tp/6.0/requirements.html",
+  "kind": "live"
+ },
+ "https://github.com/TantorLabs/pg_cluster/tree/master": {
+  "code": 206,
+  "final_url": "https://github.com/TantorLabs/pg_cluster/tree/master",
+  "kind": "live"
+ },
+ "https://github.com/wal-g/wal-g/blob/master/docs/STORAGES.md": {
+  "code": 206,
+  "final_url": "https://github.com/wal-g/wal-g/blob/master/docs/STORAGES.md",
+  "kind": "live"
+ },
+ "https://jatoba.ru/#gallery-75": {
+  "code": 200,
+  "final_url": "https://jatoba.ru/#gallery-75",
+  "kind": "live"
+ },
+ "https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificateFSTEK.jpg": {
+  "code": 404,
+  "final_url": "https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificateFSTEK.jpg",
+  "kind": "gone"
+ },
+ "https://jatoba.ru/download/documentationJatoba18.zip": {
+  "code": 206,
+  "final_url": "https://jatoba.ru/download/documentationJatoba18.zip",
+  "kind": "live"
+ },
+ "https://jatoba.ru/jatoba_vkcloud.pdf": {
+  "code": 206,
+  "final_url": "https://jatoba.ru/jatoba_vkcloud.pdf",
+  "kind": "live"
+ },
+ "https://jatoba.ru/Программа-ТП-2023.pdf": {
+  "code": -1,
+  "final_url": "https://jatoba.ru/Программа-ТП-2023.pdf",
+  "kind": "unreachable"
+ },
+ "https://lk-new.astralinux.ru/": {
+  "code": 206,
+  "final_url": "https://lk.astra.ru/",
+  "kind": "moved"
+ },
+ "https://machine.postgrespro.ru": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/products/machine",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/administration-guide/administration-scenarios": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/administration-guide/administration-scenarios",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/administration-guide/pangolin-tuner": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/administration-guide/pangolin-tuner/",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/extensions/pg_dbms_stats": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/extensions/pg_dbms_stats/",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/functional-administration/optimization-1c/1c-temp-tables-optimization": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/functional-administration/optimization-1c/1c-temp-tables-optimization",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/functional-administration/recovery-control/copywala": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/functional-administration/recovery-control/copywala",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/functional-administration/recovery-control/copywala/copywala-create-backup-generic-folder": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/functional-administration/recovery-control/copywala/copywala-create-backup-generic-folder",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/functional-administration/recovery-control/copywala/copywala-fuse": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/functional-administration/recovery-control/copywala/copywala-fuse",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/7/functional-administration/security/password-policies": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/7/functional-administration/security/password-policies",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/about/advantages": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/about/advantages",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/about/conceptual-model": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/about/conceptual-model",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/administration-guide/scenarios/copywala-delta-backups": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/administration-guide/scenarios/copywala-delta-backups",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/administration-guide/scenarios/copywala-restore": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/administration-guide/scenarios/copywala-restore",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/administration-guide/scenarios/copywala-retention-policy-set": {
+  "code": 404,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/copywala/1.2.0/administration-guide/scenarios/copywala-retention-policy-set",
+  "kind": "gone"
+ },
+ "https://pangolin.sbertech.ru/center/docs/kintsugi/1.9/administration-guide/administration-scenarios-custom-metrics": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/kintsugi/ent/administration-guide/administration-scenarios-custom-metrics/",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/docs/kintsugi/1.9/user-guide-dbcm/access#роли-пользователей": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/kintsugi/ent/user-guide-dbcm/access/",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/docs/kintsugi/1.9/user-guide-dbcm/description-metrics": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/kintsugi/ent/user-guide-dbcm/description-metrics/",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/docs/kintsugi/1.9/user-guide-dbcm/description-metrics#панель-мониторинга-логи": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/kintsugi/ent/user-guide-dbcm/description-metrics/",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/docs/kintsugi/1.9/user-guide-dbcm/description-settings-alerting": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/docs/kintsugi/ent/user-guide-dbcm/description-settings-alerting/",
+  "kind": "moved"
+ },
+ "https://pangolin.sbertech.ru/center/knowledge-base/": {
+  "code": 206,
+  "final_url": "https://pangolin.sbertech.ru/center/knowledge-base/",
+  "kind": "live"
+ },
+ "https://pgbackrest.org/command.html#command-check": {
+  "code": 206,
+  "final_url": "https://pgbackrest.org/command.html#command-check",
+  "kind": "live"
+ },
+ "https://pgbackrest.org/configuration.html#section-general/option-compress-type": {
+  "code": 206,
+  "final_url": "https://pgbackrest.org/configuration.html#section-general/option-compress-type",
+  "kind": "live"
+ },
+ "https://pgbackrest.org/user-guide.html": {
+  "code": 206,
+  "final_url": "https://pgbackrest.org/user-guide.html",
+  "kind": "live"
+ },
+ "https://platform-docs.v-serv.ru/online-documentation/home/user/data/pangolin-se/6.4.0": {
+  "code": 200,
+  "final_url": "https://platform-docs.v-serv.ru/online-documentation/home/user/data/pangolin-se/6.4.0",
+  "kind": "live"
+ },
+ "https://platform.gov.ru/dopolnitelnye-servisy/subd-postgres-pro-enterprise/": {
+  "code": -1,
+  "final_url": "https://platform.gov.ru/dopolnitelnye-servisy/subd-postgres-pro-enterprise/",
+  "kind": "unreachable"
+ },
+ "https://platformv.sbertech.ru/docs/public/DBM/1.9.1-std/common/": {
+  "code": 206,
+  "final_url": "https://platformv.sbertech.ru/docs/public/404.html",
+  "kind": "moved"
+ },
+ "https://platformv.sbertech.ru/docs/public/DBM/1.9.1/common/documents/administration-guide/metrics-mapping-on-save-request.html?h=promet": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/DBM/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/DBM/1.9.1/common/documents/user-guide-dbcm/description-clusters.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/DBM/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/DBM/1.9.1/common/documents/user-guide-dbcm/description-operations-center.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/DBM/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/DBM/1.9.1/common/documents/user-guide-dbcm/scenarios/instructions-bulk-load-monitoring-objects.html#id1": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/DBM/1.9.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/DBM/1.9.1/common/documents/user-guide-dbcm/scenarios/instructions-clusters-open-connect-db.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/DBM/1.9.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/": {
+  "code": 206,
+  "final_url": "https://platformv.sbertech.ru/docs/public/404.html",
+  "kind": "moved"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/about/functions.html?h=json_table": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/architecture-components/patroni/ha_multi_dc.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/architecture-components/patroni/patroni-main.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/architecture-components/patroni/watchdog.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/description-of-functionality/index.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/citus.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/ora2pg.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/pg_background.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/pg_cron.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/pg_profile.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/pg_stat_statements.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/pg_variables.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/pgse_backup.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/psql_bfile.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/psql_quotolin.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/rum.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/timescaledb.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/extensions/vector.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/authentication/authentication-proxy-pooler.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/authentication/authorization-ldap.html?h=ldap": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/diagnostic/blocks-monitoring.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/diagnostic/diagnostic-report.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/diagnostic/diff-time.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/diagnostic/req-plans.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/diagnostic/resource-consumptions-limit.html#id1": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/global-indexes.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/msq.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/native-partitioning.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/recovery-control/adress-load.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/recovery-control/copywala.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/recovery-control/db-integrity-control.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/recovery-control/wal-replica-integrity-control.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/security/audit.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/security/data-obfuscation.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/security/password-policies.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/security/privileged-users.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/security/req-masking.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/security/tde.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/functional-administration/trace-sessions.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/installation-guide/docker-image-pangolin.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/installation-guide/installation/installation-automatic.html": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/common/documents/installation-guide/other-information/description-rpm-packages.html#pangolin-manager": {
+  "code": 302,
+  "final_url": "https://platformv.sbertech.ru/docs/public/PSQ/7.1.1/404.html",
+  "kind": "gone"
+ },
+ "https://platformv.sbertech.ru/education/online-courses/subd-pangolin-dba-0-1": {
+  "code": 401,
+  "final_url": "https://platformv.sbertech.ru/education/online-courses/subd-pangolin-dba-0-1",
+  "kind": "auth"
+ },
+ "https://platformv.sbertech.ru/release-policy": {
+  "code": 401,
+  "final_url": "https://platformv.sbertech.ru/release-policy",
+  "kind": "auth"
+ },
+ "https://platformv.sbertech.ru/strapi/api/media/Sertifika_ot_07_11_2024_1d5305f4d5.pdf": {
+  "code": 404,
+  "final_url": "https://platformv.sbertech.ru/strapi/api/media/Sertifika_ot_07_11_2024_1d5305f4d5.pdf",
+  "kind": "gone"
+ },
+ "https://postgrespro.ru/docs": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/axe/1/postgres-pro-axe-overview": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/axe/1/postgres-pro-axe-overview",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/16/storage-toast": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/16/storage-toast",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/17/citus": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/17/citus",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/17/in-memory": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/17/in-memory",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/17/release-proee-17-7-1": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/17/release-proee-17-7-1",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/17/restrict-dbms-admin-data-access": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/17/restrict-dbms-admin-data-access",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/app-ldap2pg": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/app-ldap2pg",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/app-pgpro-tune": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/app-pgpro-tune",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/app-pgprobackup#PBK-COMPRESSION-OPTS": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/app-pgprobackup#PBK-COMPRESSION-OPTS",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/aqe": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/aqe",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/aqo": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/aqo",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/atx": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/atx",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/autoprepare": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/autoprepare",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/background-freezer": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/background-freezer",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/biha-architecture": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/biha-architecture",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/biha-architecture#BIHA-REFEREE": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/biha-architecture#BIHA-REFEREE",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/biha-solution": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/biha-solution",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/binary-installation-on-linux": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/binary-installation-on-linux",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/cfs": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/cfs",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/dbms-lob": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/dbms-lob",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/ddl-partitioning": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/ddl-partitioning",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/dump-stat": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/dump-stat",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/functions-json": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/functions-json",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/hypopg": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/hypopg",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/intro-pgpro-vs-pg": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/intro-pgpro-vs-pg",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/mamonsu": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/mamonsu",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/memory-purge-cert": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/memory-purge-cert",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/multimaster": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/multimaster",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pg-integrity-check": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pg-integrity-check",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pg-proaudit": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pg-proaudit",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pg-query-state": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pg-query-state",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pg-variables": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pg-variables",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pg-wait-sampling": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pg-wait-sampling",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-anonymizer": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-anonymizer",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-autopart": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-autopart",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-bfile": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-bfile",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-gbtree": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-gbtree",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-ilm": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-ilm",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-multiplan": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-multiplan",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-pwr": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-pwr",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-queue": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-queue",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-result-cache": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-result-cache",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-rp": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-rp",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-scheduler": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-scheduler",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-sfile": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-sfile",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-stats": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-stats",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgpro-usage": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-usage",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/pgtransfer": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/pgtransfer",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/plpgsql-package": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/plpgsql-package",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/proxima": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/proxima",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/proxima#PROXIMA-KVIK": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/proxima#PROXIMA-KVIK",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/release-proee-18-1-1": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/release-proee-18-1-1",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/routine-vacuuming": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/routine-vacuuming",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/rum": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/rum",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/runtime-config-resource": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/runtime-config-resource",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/sql-altertable#SQL-ALTERTABLE-MERGE-PARTITIONS": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/sql-altertable#SQL-ALTERTABLE-MERGE-PARTITIONS",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/sql-createprofile": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/sql-createprofile",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/sql-createtable": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/sql-createtable",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/tde": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/tde",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/wal-restoration": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/wal-restoration",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/enterprise/18/warm-standby": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/enterprise/18/warm-standby",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ora2pgpro/24/index": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ora2pgpro/24/index",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ora2pgpro/24/ora2pgpro-exporting-associative-arrays": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ora2pgpro/24/ora2pgpro-exporting-associative-arrays",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup#PBK-FUSE": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup#PBK-FUSE",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-key-features": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-key-features",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-new-features": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-new-features",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-restoring-a-cluster": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-restoring-a-cluster",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/postgrespro/current/monitoring-locks": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/postgrespro/current/monitoring-locks",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/postgrespro/current/textsearch-dictionaries": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/postgrespro/current/textsearch-dictionaries",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/index": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/index",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-activity": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-activity",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-alerts": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-alerts",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-architecture": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-architecture",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-authentication": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-authentication",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-backup": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-backup",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-clusters": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-clusters",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-configuration-presets": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-configuration-presets",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-control-center": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-control-center",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-databases": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-databases",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-extensions": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-extensions",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-features": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-features",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-instance-roles": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-instance-roles",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-instances": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-instances",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-integration-with-openldap-and-active-directory": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-integration-with-openldap-and-active-directory",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-message-log": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-message-log",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-metrics": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-metrics",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-profiler": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-profiler",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-query-plan-visualization": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-query-plan-visualization",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-schemas": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-schemas",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-sql-statistics": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-sql-statistics",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-tables": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-tables",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-tablespaces": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-tablespaces",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-task-console": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-task-console",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/ppem/2/ppem-user-management": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/ppem/2/ppem-user-management",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/docs/shardman/17/intro-whatis": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/docs/shardman/17/intro-whatis",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/education/cert": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/education/cert",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/education/courses": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/education/courses",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/products/PPEM": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/products/PPEM",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/products/postgrespro/enterprisecertified": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/products/postgrespro/enterprisecertified",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/products/progate": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/products/progate",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/release-policy": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/release-policy",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/roadmap": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru",
+  "kind": "moved"
+ },
+ "https://postgrespro.ru/services/support": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru/services/support",
+  "kind": "live"
+ },
+ "https://postgrespro.ru/support/sw": {
+  "code": 200,
+  "final_url": "https://postgrespro.ru:443/services/support/sw",
+  "kind": "moved"
+ },
+ "https://sbertech.ru/about/legal-info/klientam-i-partneram/moduli-tipovyh-uslovij": {
+  "code": 401,
+  "final_url": "https://sbertech.ru/about/legal-info/klientam-i-partneram/moduli-tipovyh-uslovij",
+  "kind": "auth"
+ },
+ "https://support.postgrespro.ru/": {
+  "code": 206,
+  "final_url": "https://support.postgrespro.ru/",
+  "kind": "live"
+ },
+ "https://support.postgrespro.ru/articles": {
+  "code": 206,
+  "final_url": "https://support.postgrespro.ru/articles",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/certified": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/certified",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/docs/support": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/docs/support",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/edu": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/edu",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/edu/atc-dbms": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/edu/atc-dbms",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/pgconfigurator": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/pgconfigurator",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/products/dbms": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/products/dbms",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/products/dlh": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/products/di",
+  "kind": "moved"
+ },
+ "https://tantorlabs.ru/products/xdata": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/products/xdata",
+  "kind": "live"
+ },
+ "https://tantorlabs.ru/tantor-se-1c/tpost/1ldz1eb691-tantor-labs-vipustila-visokoproizvoditel": {
+  "code": 200,
+  "final_url": "https://tantorlabs.ru/news/tpost/1ldz1eb691-tantor-labs-vipustila-visokoproizvoditel",
+  "kind": "moved"
+ },
+ "https://v8.1c.ru/platforma/krossplatformennost-rabota-s-razlichnymi-subd/": {
+  "code": 200,
+  "final_url": "https://v8.1c.ru/platforma/krossplatformennost-rabota-s-razlichnymi-subd/",
+  "kind": "live"
+ },
+ "https://v8.1c.ru/tekhnologii/systemnye-trebovaniya-1s-predpriyatiya-8/subd/": {
+  "code": 200,
+  "final_url": "https://v8.1c.ru/tekhnologii/systemnye-trebovaniya-1s-predpriyatiya-8/subd/",
+  "kind": "live"
+ },
+ "https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html": {
+  "code": 200,
+  "final_url": "https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html",
+  "kind": "live"
+ },
+ "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba": {
+  "code": 200,
+  "final_url": "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba",
+  "kind": "live"
+ },
+ "https://www.postgresql.org/community/contributors/": {
+  "code": 206,
+  "final_url": "https://www.postgresql.org/community/contributors/",
+  "kind": "live"
+ },
+ "https://www.rubackup.ru/documentation/certificates/": {
+  "code": 200,
+  "final_url": "https://www.rubackup.ru/documentation/certificates/",
+  "kind": "live"
+ }
+}
