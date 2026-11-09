@@ -36,7 +36,7 @@ import re
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from core.domain.enums import ContainerEncryption
 from core.util.document_formats import DOCUMENT_SUFFIXES, TEXTUAL_SUFFIXES
@@ -59,6 +59,7 @@ __all__ = [
     "SKIP_TOTAL_EXCEEDED",
     "MemberPlan",
     "MemberTooLarge",
+    "SkippedMember",
     "archive_forecast",
     "bounded_iter",
     "is_ingestible_member",
@@ -208,6 +209,23 @@ def is_ingestible_member(
     return bool(suffix) and suffix in _suffix_set(ingest_suffixes)
 
 
+class SkippedMember(NamedTuple):
+    """Пропущенный член плана: путь, причина и **заявленный** размер из индекса.
+
+    ``declared_size`` — тот же размер, по которому политика приняла решение (и который
+    у принятых членов уходит в ``corpus_members.declared_size``). Без него видимая строка
+    отказа отвечала бы «файла нет» без числа, на котором отказ основан, — а вопрос
+    «почему этого файла нет в корпусе» именно про это число.
+
+    Путь здесь нормализованный (:func:`normalize_member_path`), кроме отвергнутого пути
+    (``path_rejected``): его нормализовать нельзя, поэтому он остаётся сырым.
+    """
+
+    path: str
+    reason: str
+    declared_size: int
+
+
 @dataclass(frozen=True)
 class MemberPlan:
     """Результат планирования спуска по индексу контейнера.
@@ -217,8 +235,11 @@ class MemberPlan:
       нормализованному пути. Нормализованный путь — идентичность члена:
       ``normalize_member_path(member.path)``; она же пара к ``archive_content_hash``
       (``(archive_content_hash, normalized_member_path)``).
-    * ``skipped`` — ``(путь, причина)`` в том же порядке; путь — нормализованный, а для
-      отвергнутого пути (``path_rejected``) — сырой, потому что нормализовать его нельзя.
+    * ``skipped`` — :class:`SkippedMember` (путь, причина, заявленный размер) в том же
+      порядке; путь — нормализованный, а для отвергнутого пути (``path_rejected``) — сырой,
+      потому что нормализовать его нельзя. Заявленный размер — третий элемент намеренно:
+      по нему бюджетная причина объяснима в видимой строке отказа (``corpus_members``),
+      а не только в агрегате прогноза.
     * ``total_uncompressed`` — сумма **заявленных** размеров принятых членов.
     * ``truncated`` — план урезан бюджетом (``CAPACITY_REASONS``) либо индекс неполон
       (``ContainerListing.truncated``); «пропущено по природе» (каталог, не тот формат,
@@ -229,7 +250,7 @@ class MemberPlan:
     """
 
     accepted: tuple[MemberLike, ...]
-    skipped: tuple[tuple[str, str], ...]
+    skipped: tuple[SkippedMember, ...]
     total_uncompressed: int
     truncated: bool
     representative: str | None
@@ -255,6 +276,10 @@ def plan_members(
     содержательные отказы идут раньше бюджетных: иначе «не тот формат» маскировался бы
     под исчерпанный бюджет и прогноз врал бы о причине.
 
+    Каждый пропуск — :class:`SkippedMember`: путь, причина и **заявленный** размер. Размер
+    здесь не для арифметики (её делает план), а чтобы вызывающий мог опубликовать видимую
+    строку отказа (``corpus_members``) с тем числом, по которому отказ принят.
+
     Шифрование — свойство **контейнера** (в индексе нет флага на члена): при
     ``listing.encryption is ENCRYPTED`` ни один член не принимается, причина одна и та же —
     ``encrypted``. Спуск в зашифрованный архив без пароля — не «пустой архив».
@@ -271,37 +296,37 @@ def plan_members(
     suffixes = _suffix_set(ingest_suffixes)
 
     accepted: list[MemberLike] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[SkippedMember] = []
     total = 0
     truncated = bool(listing.truncated)
 
     for normalized, member in entries:
         display = normalized if normalized is not None else member.path
         if member.is_dir:
-            skipped.append((display, SKIP_IS_DIRECTORY))
+            skipped.append(SkippedMember(display, SKIP_IS_DIRECTORY, member.size))
             continue
         if normalized is None:
-            skipped.append((member.path, SKIP_PATH_REJECTED))
+            skipped.append(SkippedMember(member.path, SKIP_PATH_REJECTED, member.size))
             continue
         if listing.encryption is ContainerEncryption.ENCRYPTED:
-            skipped.append((display, SKIP_ENCRYPTED))
+            skipped.append(SkippedMember(display, SKIP_ENCRYPTED, member.size))
             continue
         if _member_suffix(normalized) not in suffixes:
-            skipped.append((display, SKIP_NOT_INGESTIBLE))
+            skipped.append(SkippedMember(display, SKIP_NOT_INGESTIBLE, member.size))
             continue
         if max_member_bytes is not None and member.size > max_member_bytes:
-            skipped.append((display, SKIP_MEMBER_TOO_LARGE))
+            skipped.append(SkippedMember(display, SKIP_MEMBER_TOO_LARGE, member.size))
             truncated = True
             continue
         if max_members is not None and len(accepted) >= max_members:
-            skipped.append((display, SKIP_MEMBER_LIMIT))
+            skipped.append(SkippedMember(display, SKIP_MEMBER_LIMIT, member.size))
             truncated = True
             continue
         if (
             max_total_uncompressed is not None
             and total + member.size > max_total_uncompressed
         ):
-            skipped.append((display, SKIP_TOTAL_EXCEEDED))
+            skipped.append(SkippedMember(display, SKIP_TOTAL_EXCEEDED, member.size))
             truncated = True
             continue
         accepted.append(member)
@@ -345,6 +370,9 @@ def archive_forecast(listing: ListingLike, plan: MemberPlan) -> dict:
       ``unknown`` виден и не выдают себя за «не зашифрован»);
     * ``skipped`` — ``{причина: {"count": N, "examples": [...]}}``, причины с нулём
       отсутствуют, примеры ограничены :data:`FORECAST_EXAMPLES_MAX` (счётчик — полный);
+      форма записи **не меняется** от того, что план несёт :class:`SkippedMember`:
+      в JSON уходят только ``item.path``/``item.reason``, поэтому персистентный
+      ``forecast_json`` остаётся байт-в-байт прежним (гейта версии у него нет);
     * ``truncated`` — план урезан бюджетом или индекс неполон;
     * ``representative`` — наименьший нормализованный путь среди принятых;
     * ``unreadable`` — причина, если листинг не удался (иначе ``null``).
@@ -353,11 +381,11 @@ def archive_forecast(listing: ListingLike, plan: MemberPlan) -> dict:
     меньше, чем «есть в архиве», и переживает отказ посреди извлечения.
     """
     buckets: dict[str, dict] = {}
-    for path, reason in plan.skipped:
-        bucket = buckets.setdefault(reason, {"count": 0, "examples": []})
+    for item in plan.skipped:
+        bucket = buckets.setdefault(item.reason, {"count": 0, "examples": []})
         bucket["count"] += 1
         if len(bucket["examples"]) < FORECAST_EXAMPLES_MAX:
-            bucket["examples"].append(path)
+            bucket["examples"].append(item.path)
     return {
         "format": listing.format,
         "members_total": len(listing.members),

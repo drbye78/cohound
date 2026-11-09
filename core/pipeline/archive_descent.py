@@ -34,6 +34,14 @@
 фиксируется в наблюдении раньше первого байта члена: он объясняет, почему спуск взял
 меньше, чем «есть в архиве», и переживает отказ посреди спуска.
 
+**Отказ плана — тоже виден.** Член, отвергнутый **планом** (бюджет: слишком большой,
+исчерпан потолок числа членов или заявленного объёма), получает строку
+``corpus_members`` с причиной и заявленным размером (:data:`PLAN_SKIP_ROW_REASONS`).
+Без неё отказ жил только в агрегате прогноза, и «почему этого файла нет в корпусе» не
+отвечал никто. Строки известны до обхода, поэтому идут пачкой фазы, а не построчной
+записью. Отказы «по природе» (каталог, чужой формат, шифрование контейнера) строк не
+дают: это структура архива и свойство контейнера, а не решение о файле.
+
 **Байты членов не ретейнятся.** Архив — сырьё (I19), член — производный вид (§6.7):
 член стримится в **один** временный файл и удаляется сразу после обработки; в БД остаётся
 идентичность ``(archive_content_hash, normalized_member_path, product_id)`` и путь архива,
@@ -68,6 +76,7 @@ from core.domain.enums import ArchiveDescent, ArchiveDescentStatus, ContainerEnc
 from core.domain.models import ArchiveObservation, CorpusMember
 from core.ports.container import ContainerPort
 from core.util.container_policy import (
+    CAPACITY_REASONS,
     FORECAST_EXAMPLES_MAX,
     INGEST_SUFFIXES,
     MemberTooLarge,
@@ -82,6 +91,7 @@ from core.util.hashing import short_hash
 __all__ = [
     "DESCENT_SUFFIXES",
     "ENCRYPTION_UNVERIFIED",
+    "PLAN_SKIP_ROW_REASONS",
     "SKIP_BUDGET",
     "SKIP_CONTAINER_READER",
     "SKIP_CYCLE",
@@ -129,6 +139,16 @@ SKIP_CONTAINER_READER = "container_reader_unavailable"
 #: контейнер без поддержки AES «падает позже» без причины в наблюдении — ровно тот
 #: дефект, из-за которого предикат стал три-состоянием.
 ENCRYPTION_UNVERIFIED = "encryption_unverified"
+
+#: Причины **плана**, дающие видимую строку ``corpus_members``, — ровно бюджетные оси
+#: (:data:`core.util.container_policy.CAPACITY_REASONS`). Отказы «по природе» (каталог,
+#: чужой формат, шифрование контейнера) остаются агрегатом прогноза: это структура
+#: архива и свойство контейнера, а не решение о конкретном файле, и по объёму они
+#: неограничены (101 каталог из 118 отказов пилота — не 101 строка «нет файла»).
+#: ``path_rejected`` тоже ждёт: строка требует колонки ``raw_member_path`` (bump схемы
+#: отложен), иначе ``member_path`` перестал бы быть нормализованным путём, а
+#: ``member_url`` ``{архив}!/<сырой путь>`` утверждал бы несуществующий адрес.
+PLAN_SKIP_ROW_REASONS: frozenset[str] = CAPACITY_REASONS
 
 
 @dataclass(frozen=True)
@@ -538,6 +558,7 @@ class ArchiveDescentWalker:
         stopped_reason: str | None,
         cycle_stops: int,
         partial: list[tuple[str, str]] | None = None,
+        members_skipped_rows: int = 0,
     ) -> dict[str, Any]:
         """Исход спуска: что сделано и почему остановились (видимо, не «молча»).
 
@@ -546,6 +567,12 @@ class ArchiveDescentWalker:
         отдельным счётчиком, потому что «член прочитан не целиком» — не то же самое,
         что «член прочитан». Причины и примеры — ``partial`` (по образцу ``skipped``):
         счёт полный, примеры ограничены.
+
+        ``members_skipped_rows`` — сколько строк ``corpus_members`` **опубликовано** по
+        отказам самого плана (бюджетные причины, :data:`PLAN_SKIP_ROW_REASONS`). Это
+        число, а не доля: оно отвечает на вопрос «сколько файлов получили видимую строку
+        отказа», и отдельно от ``members_skipped`` (тот считает причины, включая
+        структурные — каталог, формат, шифрование, — строк не дающие).
         """
         partial_entries = list(partial or ())
         return {
@@ -554,6 +581,7 @@ class ArchiveDescentWalker:
             "members_ingested": ingested,
             "members_failed": failed,
             "members_skipped": len(skipped),
+            "members_skipped_rows": int(members_skipped_rows),
             "members_partial": len(partial_entries),
             "partial": _bounded_histogram(partial_entries),
             "skipped": _bounded_histogram(skipped),
@@ -1048,8 +1076,27 @@ class ArchiveDescentWalker:
             _keep_window()
 
         _flush()
-        for path, reason in plan.skipped:
-            skipped.append((path, reason))
+        # План-отказы известны **до** обхода: бюджетные получают видимую строку
+        # ``corpus_members`` (пачкой — их пишет фаза в конце, см. ``durable`` ниже),
+        # остальные остаются агрегатом прогноза (``PLAN_SKIP_ROW_REASONS``).
+        members_skipped_rows = 0
+        for item in plan.skipped:
+            skipped.append((item.path, item.reason))
+            if item.reason not in PLAN_SKIP_ROW_REASONS:
+                continue
+            member_path_value = normalize_member_path(item.path) or item.path
+            self._emit_skipped_member(
+                archive_url=archive_url,
+                archive_content_hash=archive_content_hash,
+                archive_path=archive_path,
+                member_path=member_path_value,
+                suffix=PurePosixPath(member_path_value).suffix.lower(),
+                declared_size=item.declared_size,
+                reason=item.reason,
+                depth=depth,
+                durable=False,
+            )
+            members_skipped_rows += 1
 
         status = (
             ArchiveDescentStatus.BUDGET_EXHAUSTED
@@ -1073,20 +1120,27 @@ class ArchiveDescentWalker:
                 stopped_reason=stopped_reason,
                 cycle_stops=cycle_stops,
                 partial=partial_members,
+                members_skipped_rows=members_skipped_rows,
             ),
             reason=stopped_reason,
         )
 
-    def _emit_member(self, row: CorpusMember) -> None:
+    def _emit_member(self, row: CorpusMember, *, durable: bool = True) -> None:
         """Кладёт строку члена в список фазы и (если задан) сразу пишет её в store.
 
         Единственная точка появления строки ``corpus_members``: порядок обхода здесь —
         порядок списка, поэтому write-through не меняет наблюдаемый состав, только
         durable-момент. Синк не оборачивается в try/except — контракт: он не бросает
         (изоляция отказа стора — в фазе, ``corpus.py``).
+
+        ``durable=False`` — строка попадает только в список фазы. Это не «тихая»
+        запись: ``persist_member`` — одна транзакция **на строку**, а отказы **плана**
+        известны все сразу (до обхода), поэтому платить за них построчной записью
+        незачем — фаза пишет их одной пачкой (``save_corpus_members``) в конце. Список
+        фазы и есть носитель состава; durable-момент пачки — конец фазы.
         """
         self.members.append(row)
-        if self._persist_member is not None:
+        if durable and self._persist_member is not None:
             self._persist_member(row)
 
     def _emit_skipped_member(
@@ -1100,6 +1154,7 @@ class ArchiveDescentWalker:
         declared_size: int,
         reason: str,
         depth: int,
+        durable: bool = True,
     ) -> None:
         """Строка члена, который не дошёл до извлечения (бюджет/поток/чтение) — видимый пропуск.
 
@@ -1108,6 +1163,9 @@ class ArchiveDescentWalker:
         Без этой строки ``archive_budget_exhausted`` жил только в ``errors``, то есть
         срезанные члены не попадали в ``corpus_members`` вовсе; тот же разрыв был у
         ``member_read_failed`` («член не прочитан» выглядел как «члена не было»).
+
+        ``durable=False`` — отказ известен из плана (до обхода) и пишется пачкой фазы,
+        а не отдельной транзакцией (см. :meth:`_emit_member`).
         """
         self._emit_member(
             self._member_row(
@@ -1122,7 +1180,8 @@ class ArchiveDescentWalker:
                 doc_id=None,
                 skip_reason=reason,
                 depth=depth,
-            )
+            ),
+            durable=durable,
         )
 
     def _member_row(

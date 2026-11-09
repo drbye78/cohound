@@ -228,17 +228,17 @@ robots остаётся в аудите.
 
 **На 25.10 его не было.** Провалы фетчей попадали в отчёт только агрегатами
 (`core/domain/models.py:1541` — `CrawlSessionProvenance.failed: int`;
-`core/pipeline/report.py:1226-1280` — движки в шапке; `core/pipeline/report.py:2224-2255` —
+`core/pipeline/report.py:1240-1294` — движки в шапке; `core/pipeline/report.py:2238-2269` —
 `blocked = {error_kind: count}` и `unreadable_origins` от `derive_corpus_coverage`). Ни URL,
 ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 Сделано — §8 п. 1: файл пишется (`core/pipeline/artifacts_gap.py:314`).
 
-Ближайший образец формы — `core/pipeline/report.py:1853` `render_nda_questions`: единый
+Ближайший образец формы — `core/pipeline/report.py:1867` `render_nda_questions`: единый
 CSV, строка =
 аномалия, `anomaly_kind` из набора `i3_protocol`/`crawl_truncation`/`corpus_incomplete`/
-`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:1911-1985`,
+`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:1925-1999`,
 сверено 08.11.2026 — видов **шесть**). Тот же приём,
 другая таблица.
 
@@ -295,7 +295,7 @@ gaps:
 `run_lineage.previous_run_id` и `change_class` (`core/store/state_sqlite.py:266-270`; запись —
 `core/pipeline/state_adopt.py:1532,1807`). Прогон N+1, объявивший артефакты, попадает в эту
 цепочку автоматически, а `hound diff` называет смену `manual_artifacts_digest` осью
-расхождения (`core/pipeline/report.py:2580-2611`). Отдельная пометка на артефакте не нужна:
+расхождения (`core/pipeline/report.py:2594-2625`). Отдельная пометка на артефакте не нужна:
 состояния «артефакт перенесён из прогона X» нет — файл перечитывается каждый прогон, а
 перенос типизирован на уровне ячейки (`measurement_origin=carried` + `carried_from_run_id`);
 см. §8 п. 3.
@@ -354,7 +354,7 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:314` — единственный writer, зовут
-   `core/pipeline/corpus.py:5307` и `core/pipeline/report.py:3573`; человеческая строка —
+   `core/pipeline/corpus.py:5307` и `core/pipeline/report.py:3588`; человеческая строка —
    `core/pipeline/artifacts_gap.py:196`, сбор — `core/pipeline/artifacts_gap.py:219`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
@@ -375,7 +375,7 @@ gaps:
    `carried_from_run_id` (`core/domain/models.py:1270-1276`, схема `cell-reuse-2`); документ —
    `corpus_docs.reuse_kind` (`live|revalidated|reused|stale`). Связь прогонов при этом видна:
    `run_lineage.previous_run_id` + `change_class`, а `hound diff` называет смену
-   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2580-2611`).
+   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2594-2625`).
 4. ➖ **переехало** — документный `pb` (`F3`) ведётся как гейт флота в
    `24-fleet-work-units.md` F1.5; здесь не ведётся. Цена «шаг 2 стоит часы на продукт»
    остаётся фактом §6 этого документа.
@@ -460,7 +460,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   (`core/pipeline/manual_artifacts.py:192-212`), сверка `sha256` (`core/pipeline/manual_artifacts.py:297-303`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:5307`), и `report` (`core/pipeline/report.py:3573`); форма —
+  (`core/pipeline/corpus.py:5307`), и `report` (`core/pipeline/report.py:3588`); форма —
   `core/pipeline/artifacts_gap.py:219` (`collect_artifact_gaps`), человеческая строка —
   `core/pipeline/artifacts_gap.py:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:132`); подача

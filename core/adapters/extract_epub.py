@@ -59,16 +59,23 @@ from core.util.container_policy import (
 )
 from core.util.document_formats import FAMILY_EPUB
 from core.util.hashing import content_hash
+from core.util.sanitize import finalize_extracted_text
 
 __all__ = ["EPUB_READER_VERSION", "EpubExtractor"]
 
 #: Стабильная версия читателя (провенанс/``extractor_version`` документа).
 #:
+#: ``epub-3`` (было ``epub-2``): тела глав уже очищались через ``HtmlExtractor`` (он зовёт
+#: :func:`core.util.sanitize.finalize_extracted_text` в ``_postprocess``), но **не**
+#: очищались шапка главы (:func:`_chapter_title`), fallback-заголовок из ``href`` и
+#: заметки читателя («глава не прочитана/не извлечена»). Теперь единая граница очистки
+#: вызывается на итоговом тексте книги, то есть очищено всё, что читатель отдаёт наружу.
+#: Текст книги изменился ⇒ обязан измениться объявленный стек читателя, иначе
+#: ``extractor_version`` описывал бы текст, часть которого обошла границу очистки.
+#:
 #: ``epub-2`` (было ``epub-1``): заголовок главы опущен на уровень ``#``, а внутренние
-#: ATX-заголовки главы сдвинуты на +1 (:func:`_shift_chapter_headings`). Текст книги
-#: изменился ⇒ обязан измениться объявленный стек читателя, иначе ``extractor_version``
-#: описывал бы прежнюю разметку.
-EPUB_READER_VERSION = "epub-2"
+#: ATX-заголовки главы сдвинуты на +1 (:func:`_shift_chapter_headings`).
+EPUB_READER_VERSION = "epub-3"
 
 #: Путь контейнерного манифеста OCF — фиксирован стандартом (EPUB OCF §2.5.1).
 CONTAINER_XML = "META-INF/container.xml"
@@ -516,7 +523,11 @@ class EpubExtractor:
             return self._error(
                 f"epub: ни одна глава не прочитана ({len(blocks)} записей spine): {detail}"
             )
-        text = "\n\n".join(blocks).strip()
+        # Единая граница очистки — на **итоговом** тексте книги: тела глав приходят уже
+        # очищенными из ``HtmlExtractor``, а шапки глав, fallback-заголовки и заметки
+        # читатель собирает сам, и до этой строки они обходили ``finalize_extracted_text``.
+        # Обязательно до ``content_hash``: чанк и цитата считаются по одному тексту (I22).
+        text = finalize_extracted_text("\n\n".join(blocks).strip())
         return ExtractedDoc(
             text=text,
             content_hash=content_hash(text),

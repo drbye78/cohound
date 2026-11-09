@@ -241,16 +241,16 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:252`
 >   (`docling_extractor_version`), вид значения в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
->   контракте — `trafilatura-html-6+text-plain-2+epub-2+pdfium-text-2+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
+>   контракте — `trafilatura-html-6+text-plain-2+epub-3+pdfium-text-2+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
 >   (сегменты `<level>/<device>/<build>/<policy>/<finalize>`; `cpu`/`cuda` — ось
 >   `crawl.pdf_device`, P9).
 > - ✅ воркеры из бюджета + уровень из профиля: `core/pipeline/resources.py:525`
 >   (`workers_from_budget`), preflight `core/cli/wiring.py:2659`
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
->   (`core/pipeline/archive_descent.py:356-357,525,1089`), подключены в
+>   (`core/pipeline/archive_descent.py:376-377,525,1089`), подключены в
 >   `core/pipeline/extract_consume.py:1208-1209`; видимая строка пропуска по бюджету —
->   `core/pipeline/archive_descent.py:828-844` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:113`).
+>   `core/pipeline/archive_descent.py:856-872` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:123`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
 >   `core/store/sqlite.py:621-640`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
@@ -280,8 +280,8 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   (`core/pipeline/corpus.py:5493-5498`) ⇒ SIGKILL терял всё. Лечение — write-through:
   `ArchiveDescentWalker` получает два необязательных колбэка (`persist_observation`,
   `persist_member`), `None` — прежнее поведение байт-в-байт. Точки: наблюдение — `_record`
-  (`core/pipeline/archive_descent.py:494`, вызовы `642`/`686`/`708`/`1059`), член — `_settle`
-  (`core/pipeline/archive_descent.py:745`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
+  (`core/pipeline/archive_descent.py:514`, вызовы `642`/`686`/`708`/`1059`), член — `_settle`
+  (`core/pipeline/archive_descent.py:773`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
   `_record`/`_settle`. Финальную пачку сохранить как идемпотентный reconciliation-pass
   (дешёвый повторный upsert). Сбой записи изолируется в `errors` по образцу `persist_docs`
   (`core/pipeline/corpus_ingest.py:1422`) — отказ store не должен убивать спуск.
@@ -290,14 +290,20 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
   стоимость записи на горячем пути). **Per-member `SKIP_BUDGET` делать:** семантика таблицы уже
   включает пропущенные члены — `SKIP_CYCLE`/`SKIP_NESTED` пишутся через `_member_row` с
-  `skip_reason` и `doc_id=None` (`core/pipeline/archive_descent.py:1128`); до фикса члены, срезанные бюджетом,
+  `skip_reason` и `doc_id=None` (`core/pipeline/archive_descent.py:1187`); до фикса члены, срезанные бюджетом,
   не давали строки вообще, и `archive_budget_exhausted` был виден только в `errors`.
   **Реализовано (2026-10-24):** синки `persist_observation`/`persist_member` в
   `ArchiveDescentWalker`, единая точка строки — `_emit_member`/`_emit_skipped_member`;
   `SKIP_BUDGET`/`SKIP_STREAM_TOO_LARGE` теперь дают строку члена (видимый пропуск); синки
   подключаются в `core/pipeline/extract_consume.py:1208-1209`
   (`persist_observation_sync`/`persist_member_sync`, отказ стора → `errors`), финальная пачка
-  осталась reconciliation-pass'ом.
+  осталась reconciliation-pass'ом. **Дополнено 09.11.2026:** строка появилась и у отказов
+  **плана** — но только по бюджетным причинам (`member_too_large`/`member_limit_exceeded`/
+  `total_uncompressed_exceeded`, `PLAN_SKIP_ROW_REASONS`): они известны до обхода, поэтому идут
+  пачкой фазы, а не построчным синком (`durable=False`). Каталоги, шифрование и чужой формат
+  остаются агрегатом прогноза: это не члены-файлы, а структура/свойство контейнера; отвергнутый
+  путь ждёт колонку `raw_member_path` (схема 3.21.0, план 23). Число опубликованных план-строк
+  публикуется как `outcome.members_skipped_rows`.
 - **Дефект схемы — исправлен (2026-10-24, `SCHEMA_VERSION = 3.13.0`):** PK `corpus_members` =
   `(archive_content_hash, member_path, product_id)` (`core/store/sqlite.py`). `run_id` в ключе
   избыточен (БД прогона per-run — `runs/{run_id}/cohound.db`), а `product_id` был недостающим

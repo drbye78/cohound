@@ -61,7 +61,7 @@ repo/
   docs/architecture/*.md
   runs/{run_id}/             # пакет прогона (см. A.2)           ┐
   index_store/{package}/{build}/{product_id}/    # сборки (I17)  │
-  corpus_raw/{product_id}/{doc_hash}.bin         # сырые байты   │ операционные:
+  corpus_raw/{product_id}/{raw_hash}.bin         # сырые байты   │ операционные:
   cache/serp/{query_hash}.json                   # кэш SERP (R7) │ по умолчанию живут
   cache/http/{url_hash}.bin                      # кэш HTTP      │ в репозитории, при
   extract_cache/             # кэш экстракции                      │ настроенной раскладке —
@@ -78,6 +78,10 @@ repo/
 кода: `config/paths.yaml` (операторский файл; в репозитории только образец
 `config/paths.example.yaml`), env `COHOUND_<FIELD>_DIR`/`COHOUND_HOME` (см. §D.6) или CLI-флаг;
 приоритет — CLI > env > `paths.yaml` > дефолт (`core/config/paths.py`).
+
+Имя файла в `corpus_raw/` — `raw_hash`, sha256 **наблюдённых байтов** (не извлечённого текста и
+не `doc_hash`): это адрес носителя для I19, а `content_hash` текста живёт отдельно и меняется при
+смене экстрактора (`core/pipeline/corpus_ingest.py:1130`).
 
 #### A.1.2. Артефакты вне репозитория (раскладка хоста)
 
@@ -1599,7 +1603,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   профиля пакета-якоря (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь —
   durable-аттестация профиля (`profile_attestation` в `state/{package_id}/state.db`) —
   объявлена, проверяется гейтом (`make_profile_gate`, `core/pipeline/profile_attestation.py:313`;
-  проводка — `_profile_gate_resolver`, `core/cli/context.py:1650`)
+  проводка — `_profile_gate_resolver`, `core/cli/context.py:1653`)
   и **имеет производителя — человека**: `hound package profile attest --gate G1|G2
   --actor …` (`--dry-run` ничего не пишет и говорит об этом). Прогон её **только читает** и
   никогда не пишет. Механизм рабочий, но замер 2026-10-30 — **ноль строк** во всех реальных

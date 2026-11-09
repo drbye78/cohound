@@ -178,8 +178,8 @@
 | §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:3187`) и для `incremental`, и для прохода без сети (`no_network`, `core/pipeline/corpus_ingest.py:3179-3187`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
-| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:320`; зонд — `core/pipeline/artifact_probe.py:67`), семейство чанкеров — `chunker_family` |
-| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1650`), waiver-след (`core/pipeline/runner.py:476`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
+| §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:340`; зонд — `core/pipeline/artifact_probe.py:67`), семейство чанкеров — `chunker_family` |
+| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1653`), waiver-след (`core/pipeline/runner.py:476`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/store/backup.py:687`; вызов — `core/cli/package/commands.py:2394`) |
 | §9 | ✅ сделано | строка «Cell/evidence» описывает as-built перенос (§10): `measurement_origin`/`carried_from_run_id`, копии evidence с per-run `evidence_id` |
@@ -493,7 +493,7 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
    > **Уточнение к прежней редакции: прогон от этого не отказывал и не отказывает.**
    > `classify_change` (`core/pipeline/run_identity.py:382`) при росте состава даёт
    > `cohort_expansion` + `golden_required=full` + новый `run_id`; отказ живёт только в
-   > `hound diff` (`core/pipeline/report.py:2923`). Настоящий дефект был в **провенансе**: по
+   > `hound diff` (`core/pipeline/report.py:2937`). Настоящий дефект был в **провенансе**: по
    > `run_id`/манифесту нельзя было отличить «когорту расширили, объявив ревизию» от
    > «в `cohort.yaml` дописали строку».
    >
@@ -1264,7 +1264,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > `run_scope`/`product_plan_json` (`core/store/sqlite.py:149-150`), `embed_device` (`core/store/sqlite.py:129`) и таблица `run_product`
 > (`core/store/sqlite.py:591`; писатель — корпус, `save_run_product` —
 > `core/pipeline/corpus.py:3880`, обёртка `core/pipeline/corpus_persist.py:588`;
-> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2064`).
+> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2078`).
 > `runs.cohort_digest` и `runs.seeds_digest` **есть** (колонки `core/store/sqlite.py:115-116`)
 > и заполняются из манифеста; они дублируют слагаемые `run_id` для диагностики diff, а
 > цепочка циклов живёт в `state.db.run_lineage` (§12.3). `RunManifest` несёт
@@ -2267,7 +2267,7 @@ RAM-потолка пишется в staging-файл и публикуется 
 > **Подключено срезом B3 — читать вместе с §6.7.1.** Прежняя редакция этой секции
 > утверждала, что спуск «не подключён к `pipeline`» и является «следующим шагом». Это
 > описание состояния до B3 и коду больше не соответствует: `ArchiveDescentWalker`
-> вызывается из фазы корпуса (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:320`), зонд артефакта —
+> вызывается из фазы корпуса (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:340`), зонд артефакта —
 > `core/pipeline/artifact_probe.py:67`; отказ читателя контейнера виден как
 > `archive_observations.status = unreadable` / `container_reader_unavailable`, а не как
 > тихое «не развернули». Подключение — инъекция `container_for` через `Ports.container`,
@@ -2432,7 +2432,7 @@ RAM), поэтому адаптер извлекает **один** член в�
 получают trim арен glibc в `finally` воркера (`_extract_worker`) и входят в операторский
 счётчик «документов через пул»; отказ извлечения члена — по-прежнему видимый
 `extract_failed`, соседи не страдают, а отказ пула на `submit` деградирует до inline с
-явной записью в `errors` (`_defer_broken`, `core/pipeline/archive_descent.py:1026`), не
+явной записью в `errors` (`_defer_broken`, `core/pipeline/archive_descent.py:1054`), не
 теряя членов. Отказ воркера посреди спуска (`2 × timeout` без завершений) закрывает
 доводку **видимо**: остаток получает пропуск `extract_failed`
 (`state["dead"]`, `core/pipeline/extract_consume.py:1079`), а пул пересобирается
@@ -2498,7 +2498,7 @@ URL синтетический, фетчить его нельзя, а файл 
 | markdown | `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx`/`.mdc`/`.qmd`/`.rmd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-2`) | `MarkdownChunker` (`md-ast-1:…/policy-4`) |
 | plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-2`) | `TextChunker` (`text-para-4`) |
 | документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
-| EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-2`) | `MarkdownChunker` |
+| EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-3`) | `MarkdownChunker` |
 
 **Маршрут в композите** (`core/cli/wiring._LocalExtractor`, `core/edge/__main__._EdgeExtractor`):
 явный `HTML` → явный `DOCUMENT` → текстовое семейство (суффикс, затем `Content-Type`) →
@@ -2515,12 +2515,14 @@ CRLF/CR → LF, удаление NUL/управляющих символов (т
 промпт-инъекций, схлопывание >2 пустых строк до одной. Пустой/пробельный результат —
 видимая ошибка `"текст пуст"`, а не пустой успех. `page_count=None`.
 
-**EPUB через контейнерный субстрат** (`core/adapters/extract_epub.py`, `epub-2`; stdlib
+**EPUB через контейнерный субстрат** (`core/adapters/extract_epub.py`, `epub-3`; stdlib
 `zipfile` + `xml.etree`, без новых зависимостей): `META-INF/container.xml` → rootfile
 `full-path` → OPF → `manifest` (id → href, media-type) → `spine` (упорядоченные idref).
 Главы склеиваются **в порядке spine** (порядок чтения; `manifest` — инвентарь ресурсов),
 каждая — через тот же HTML-экстрактор (собственный HTML-ридер не дублируется), с
-заголовком `## <title>` (иначе — имя файла), чтобы `heading_path` был осмысленным.
+заголовком `# <title>` (иначе — имя файла), чтобы `heading_path` был осмысленным; внутренние
+ATX-заголовки главы сдвигаются на +1 (`epub-2`), и итоговый текст книги проходит единую
+границу очистки (`epub-3`).
 `href` разрешается относительно каталога OPF и percent-декодируется; выход за пространство
 имён архива отвергается (`normalize_member_path` → `None`). Потолки — оси
 `archive_max_member_bytes` и суммарный `archive_max_uncompressed_bytes` через
@@ -2603,7 +2605,7 @@ TextChunker.version`, `chunker_family.composite_chunker_version` — тот же
    `profile_digest` один раз, и прогоны с тем же содержимым профиля не требуют повторного
    решения (профиль квази-константен: 2–5 правок в год при еженедельных прогонах).
    Резолвер — `make_profile_gate` (`core/pipeline/profile_attestation.py`), подключён в CLI
-   (`_profile_gate_resolver`, `core/cli/context.py:1650`; вызов `make_profile_gate` — `core/cli/context.py:1677`). Аттестация применима **только** к
+   (`_profile_gate_resolver`, `core/cli/context.py:1653`; вызов `make_profile_gate` — `core/cli/context.py:1680`). Аттестация применима **только** к
    G1/G2; отозванная (`superseded_at`) действующей не считается. При расхождении дайджеста
    сообщение **называет** изменившийся компонент (`describe_subject_diff`), а не «гейт не
    пройден».
@@ -2962,7 +2964,7 @@ class CompositionView:
   `core/pipeline/embed_cache.py:166`); при хите вектор берётся из кэша, эмбеддится только
   новый текст. **Кэш реализован и подключён** (`core/pipeline/embed_cache.py`;
   инстанцируется в composition root — `EmbedCache(str(paths.embed_cache))`,
-  `core/cli/context.py:2902`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
+  `core/cli/context.py:2905`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
   параметр `embed_cache` у `_build_corpus`, `core/pipeline/corpus.py:1705`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
   до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и в
@@ -4010,7 +4012,7 @@ golden**.
   применяется (в `notes` — пояснение). `max_attempts` — потолок попыток по URL;
   исчерпание → терминальный `failed` (`attempts_exhausted`), не тихо.
   Межпрогонный вариант (по `url_state.consecutive_failures` предыдущего прогона) —
-  **реализован** (`_only_failed_work_set`, `core/cli/context.py:2167`): источник 1 —
+  **реализован** (`_only_failed_work_set`, `core/cli/context.py:2170`): источник 1 —
   `FAILED`-элементы текущего сеанса, источник 2 — `consecutive_failures` из `state.db`.
 - `run` без `--update` и с тем же `run_id` — resume: `Runner` пропускает `ok`-фазы;
   `corpus` переиспользует doc-версии и чанки завершённых продуктов (чанки пишутся на
@@ -4035,7 +4037,7 @@ golden**.
   `RunManifest`, и `report.py` его не выводил. Это было дефектом видимости, а не политики:
   `--only-product` меняет смысл среза, и он обязан быть виден в артефакте прогона.
   Теперь `run_scope` персистится (`runs.run_scope`, `RunManifest.run_scope`,
-  `core/pipeline/report.py:1399-1403`) и виден в `run_manifest.yaml` и `hound report --json`;
+  `core/pipeline/report.py:1413-1417`) и виден в `run_manifest.yaml` и `hound report --json`;
   политика **не изменилась** — scoped-прогон обрабатывает только выбранный продукт и не
   двигает `last_completed_run_id` (O10). Состав — `16-runs-schema-boundary.md` §3.1/§8.
 - Следующий полный прогон увидит `last_completed_run_id` от предыдущего полного прогона

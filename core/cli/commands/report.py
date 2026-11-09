@@ -168,6 +168,13 @@ def run(args: argparse.Namespace) -> int:
         "corpus_freshness": (
             getattr(artifacts, "corpus_freshness_summary", None) or None
         ),
+        # B3: члены контейнеров, не вошедшие в корпус, — **тот же** словарь, что строки
+        # ``outputs/corpus_members.csv``: счёт по продуктам и причинам пропуска. Отвечает
+        # на «почему этого файла из архива нет» без разбора таблицы; сводка и файл
+        # собраны одним расчётом.
+        "corpus_members": (
+            getattr(artifacts, "corpus_members_summary", None) or None
+        ),
         # Путь к таблице на диске: строки уже в payload, но артефакт без объявленного
         # пути — та же невидимость, что и его отсутствие. ``None`` — строк нет (файл
         # не создаётся: пустая таблица читалась бы как «продуктов нет»).

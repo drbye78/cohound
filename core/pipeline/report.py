@@ -19,6 +19,8 @@
 * ``outputs/corpus_freshness.yaml`` — даты актуальности артефактов корпуса (план 20 §7 F2):
   опорное наблюдение прогона, ``corpus_as_of``/``stale_roots`` и распределение возраста по
   продукту (медиана/p90/max); ``outputs/cell_freshness.csv`` — ``evidence_as_of`` ячеек.
+* ``outputs/corpus_members.csv`` — члены контейнеров, **не** попавшие в корпус, с причиной
+  пропуска (B3): «почему этого файла из архива нет» отвечается строкой, а не догадкой.
 
 Инварианты:
 
@@ -96,6 +98,10 @@ from core.pipeline.corpus_freshness import (
     collect_corpus_freshness,
     write_cell_freshness_rows,
     write_corpus_freshness_artifact,
+)
+from core.pipeline.corpus_members import (
+    corpus_members_summary,
+    write_corpus_members_artifact,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
@@ -369,6 +375,14 @@ class Artifacts:
     #: Тот же документ ``corpus_freshness.yaml`` — для ``--json`` payload: файл и машинный
     #: вывод собираются одним расчётом и разойтись не могут.
     corpus_freshness_summary: dict[str, Any] | None = None
+    #: ``outputs/corpus_members.csv`` — члены контейнеров, **не** вошедшие в корпус, с
+    #: причиной пропуска (B3): продукт, архив, путь члена, формат, заявленный размер,
+    #: ``skip_reason``, глубина, URL архива. ``None`` — пропусков нет (пустой файл не
+    #: артефакт: «контейнеров не было» и «ничего не пропущено» — разные факты).
+    corpus_members: Path | None = None
+    #: Блок ``corpus_members`` отчёта (те же строки, свёрнутые до продукта и причины) —
+    #: для ``--json`` payload: нули по продуктам плана видны без разбора CSV.
+    corpus_members_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -3570,8 +3584,9 @@ def write_reports(
         )
     except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
         partial_docs_path = None
+    planned_products = sorted({str(cell.product_id) for cell in cell_list})
     partial_summary = partial_docs_summary(
-        store, run_id, products=sorted({str(cell.product_id) for cell in cell_list})
+        store, run_id, products=planned_products
     )
     # A3: три замера качества поддержки получают производителя. До этого числа
     # существовали только в тестах либо вовсе не агрегировались: `support_overlap_scan`,
@@ -3602,6 +3617,22 @@ def write_reports(
     )
     cell_freshness_path = write_cell_freshness_rows(
         freshness.cell_rows, outputs_dir / "cell_freshness.csv"
+    )
+
+    # B3: члены контейнеров, не вошедшие в корпус — с причиной пропуска. Таблица прогона
+    # (``corpus_members``) отвечала на вопрос «почему этого файла из архива нет» только
+    # тому, кто знал, где искать; ``outputs/`` не называл ни файла, ни сводки. Файл и
+    # машинная сводка собираются из одного набора строк (один предикат ``skip_reason``),
+    # поэтому разойтись не могут. Сбой выгрузки отчёт не роняет: факт остаётся в БД,
+    # теряется лишь удобная таблица — ``Artifacts.corpus_members`` тогда ``None``.
+    try:
+        corpus_members_path = write_corpus_members_artifact(
+            store, run_id, outputs_dir / "corpus_members.csv"
+        )
+    except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
+        corpus_members_path = None
+    corpus_members_payload = corpus_members_summary(
+        store, run_id, products=planned_products
     )
 
     nda_questions = render_nda_questions(
@@ -3655,6 +3686,8 @@ def write_reports(
         corpus_freshness=corpus_freshness_path,
         cell_freshness=cell_freshness_path,
         corpus_freshness_summary=freshness.document,
+        corpus_members=corpus_members_path,
+        corpus_members_summary=corpus_members_payload,
         publishability=publishability_path,
         measurement_uncertainty=uncertainty_path,
         preliminary_findings=preliminary,

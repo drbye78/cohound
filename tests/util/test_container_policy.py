@@ -194,14 +194,18 @@ def test_plan_accepts_ingestible_members() -> None:
 def test_plan_reason_is_directory() -> None:
     """Каталог — не член: причина ``is_directory`` (даже если имя похоже на документ)."""
     plan = plan_members(_listing(_member("docs/", 0, is_dir=True), _member("docs/a.pdf")))
-    assert plan.skipped == (("docs", SKIP_IS_DIRECTORY),)
+    assert [(item.path, item.reason) for item in plan.skipped] == [
+        ("docs", SKIP_IS_DIRECTORY)
+    ]
     assert [m.path for m in plan.accepted] == ["docs/a.pdf"]
 
 
 def test_plan_reason_path_rejected_keeps_raw_path() -> None:
     """Отвергнутый путь показывается сырым: нормализовать его нельзя."""
     plan = plan_members(_listing(_member("../../etc/passwd.pdf", 10)))
-    assert plan.skipped == (("../../etc/passwd.pdf", SKIP_PATH_REJECTED),)
+    assert [(item.path, item.reason) for item in plan.skipped] == [
+        ("../../etc/passwd.pdf", SKIP_PATH_REJECTED)
+    ]
     assert plan.accepted == ()
 
 
@@ -212,14 +216,16 @@ def test_plan_reason_encrypted_covers_every_member() -> None:
     )
     plan = plan_members(listing)
     assert plan.accepted == ()
-    assert {reason for _, reason in plan.skipped} == {SKIP_ENCRYPTED}
+    assert {item.reason for item in plan.skipped} == {SKIP_ENCRYPTED}
     assert len(plan.skipped) == 2
 
 
 def test_plan_reason_not_ingestible() -> None:
     """Не тот формат — причина ``not_ingestible_format``."""
     plan = plan_members(_listing(_member("a.pdf"), _member("tool.exe")))
-    assert plan.skipped == (("tool.exe", SKIP_NOT_INGESTIBLE),)
+    assert [(item.path, item.reason) for item in plan.skipped] == [
+        ("tool.exe", SKIP_NOT_INGESTIBLE)
+    ]
     assert [m.path for m in plan.accepted] == ["a.pdf"]
 
 
@@ -229,7 +235,12 @@ def test_plan_reason_member_too_large_and_truncated() -> None:
         _listing(_member("big.pdf", 100), _member("small.pdf", 10)),
         max_member_bytes=50,
     )
-    assert plan.skipped == (("big.pdf", SKIP_MEMBER_TOO_LARGE),)
+    assert [(item.path, item.reason) for item in plan.skipped] == [
+        ("big.pdf", SKIP_MEMBER_TOO_LARGE)
+    ]
+    # Заявленный размер нужен видимой строке отказа: это то самое число, по которому
+    # политика отказала (``100 > 50``), а не пересчёт по прочитанным байтам.
+    assert plan.skipped[0].declared_size == 100
     assert [m.path for m in plan.accepted] == ["small.pdf"]
     assert plan.truncated is True
 
@@ -241,10 +252,11 @@ def test_plan_reason_member_limit() -> None:
         max_members=1,
     )
     assert [m.path for m in plan.accepted] == ["a.pdf"]
-    assert plan.skipped == (
+    assert [(item.path, item.reason) for item in plan.skipped] == [
         ("b.pdf", SKIP_MEMBER_LIMIT),
         ("c.pdf", SKIP_MEMBER_LIMIT),
-    )
+    ]
+    assert [item.declared_size for item in plan.skipped] == [10, 10]
     assert plan.truncated is True
 
 
@@ -258,10 +270,11 @@ def test_plan_bomb_guard_declared_total() -> None:
     plan = plan_members(listing, max_total_uncompressed=100)
     assert [m.path for m in plan.accepted] == ["a.pdf"]
     assert plan.total_uncompressed == 60
-    assert plan.skipped == (
+    assert [(item.path, item.reason) for item in plan.skipped] == [
         ("b.pdf", SKIP_TOTAL_EXCEEDED),
         ("c.pdf", SKIP_TOTAL_EXCEEDED),
-    )
+    ]
+    assert [item.declared_size for item in plan.skipped] == [60, 60]
     assert plan.truncated is True
 
 
@@ -275,7 +288,7 @@ def test_plan_non_capacity_skips_do_not_truncate() -> None:
         )
     )
     assert plan.truncated is False
-    assert {reason for _, reason in plan.skipped} <= {
+    assert {item.reason for item in plan.skipped} <= {
         SKIP_IS_DIRECTORY,
         SKIP_NOT_INGESTIBLE,
     }
@@ -350,7 +363,7 @@ def test_plan_reasons_cover_whole_taxonomy() -> None:
         max_member_bytes=100,
         max_members=1,
     )
-    reasons = {reason for _, reason in plan.skipped}
+    reasons = {item.reason for item in plan.skipped}
     assert reasons == {
         SKIP_IS_DIRECTORY,
         SKIP_PATH_REJECTED,
@@ -361,7 +374,7 @@ def test_plan_reasons_cover_whole_taxonomy() -> None:
     encrypted = plan_members(
         _listing(_member("a.pdf"), encryption=ContainerEncryption.ENCRYPTED)
     )
-    assert {reason for _, reason in encrypted.skipped} == {SKIP_ENCRYPTED}
+    assert {item.reason for item in encrypted.skipped} == {SKIP_ENCRYPTED}
 
 
 # --------------------------------------------------------------------------- #
@@ -436,7 +449,7 @@ def test_unknown_encryption_does_not_skip_members_but_is_recorded() -> None:
     forecast = archive_forecast(listing, plan)
 
     assert [member.path for member in plan.accepted] == ["a.pdf"]
-    assert SKIP_ENCRYPTED not in {reason for _, reason in plan.skipped}
+    assert SKIP_ENCRYPTED not in {item.reason for item in plan.skipped}
     assert forecast["encrypted"] is ContainerEncryption.UNKNOWN
     assert forecast["encrypted"] is not ContainerEncryption.NOT_ENCRYPTED
 
@@ -447,7 +460,7 @@ def test_three_encryption_states_stay_distinguishable() -> None:
         for state in ContainerEncryption
     }
     encrypted = states[ContainerEncryption.ENCRYPTED]
-    assert {reason for _, reason in encrypted.skipped} == {SKIP_ENCRYPTED}
+    assert {item.reason for item in encrypted.skipped} == {SKIP_ENCRYPTED}
     assert states[ContainerEncryption.NOT_ENCRYPTED].accepted
     assert states[ContainerEncryption.UNKNOWN].accepted
 

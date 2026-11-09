@@ -577,6 +577,44 @@ def test_member_over_ceiling_skipped_siblings_ingested(tmp_path: Path) -> None:
         assert root.forecast["skipped"]["member_too_large"]["examples"] == ["big.txt"]
 
 
+def test_plan_budget_skip_writes_visible_member_row(tmp_path: Path) -> None:
+    """Отказ **плана** по бюджету — строка ``corpus_members``, каталог — только агрегат.
+
+    Дефект: ``MemberPlan.skipped`` жил только агрегатом в прогнозе/исходе, поэтому
+    «почему этого файла нет в корпусе» не отвечал никто (118 отказов плана на пилоте —
+    0 строк). Видимыми становятся **бюджетные** причины (``member_too_large``,
+    ``member_limit_exceeded``, ``total_uncompressed_exceeded``): это решение о файле.
+    Каталог — структура архива, а не член: строки он не даёт, иначе ``corpus_members``
+    заполнялся бы деревьями каталогов.
+    """
+    archive = _zip({"big.txt": b"x" * 4096, "docs/": b"", "small.md": b"ok"})
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(archive_max_member_bytes=1024),
+    ) as (store, _result, _extractor):
+        rows = {row.member_path: row for row in _members(store)}
+        assert set(rows) == {"big.txt", "small.md"}, (
+            "отказ плана обязан иметь строку: иначе он неотличим от отсутствия файла"
+        )
+        big = rows["big.txt"]
+        assert big.skip_reason == "member_too_large"
+        assert big.doc_id is None
+        assert big.extracted_content_hash is None
+        # Заявленный размер — из индекса (то самое число, по которому отказано).
+        assert big.declared_size == 4096
+        assert big.member_format == "txt"
+        assert big.member_url == f"{ZIP_URL}!/big.txt"
+        assert rows["small.md"].doc_id is not None
+
+        root = _observations(store)[0]
+        # Каталог остаётся агрегатом прогноза и исхода, но строки не получает.
+        assert root.forecast["skipped"]["is_directory"]["count"] == 1
+        assert root.outcome["skipped"]["is_directory"]["count"] == 1
+        # Число реально опубликованных план-строк — факт исхода (не доля).
+        assert root.outcome["members_skipped_rows"] == 1
+
+
 # ---------------------------------------------------------------------------
 # (5) archive_descent=plan: листинг и прогноз без извлечения
 # ---------------------------------------------------------------------------

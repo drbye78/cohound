@@ -491,7 +491,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 ⬜ не сделано — поведение дословно прежнее (`core/cli/commands/report.py:134-141`): при
 незаполненном манифесте в `notes` уходит та же строка «версии — заглушки», а `ok` остаётся
 `True` (`"ok": True, … "manifest_partial": partial`, `core/cli/commands/report.py:141`), и функция
-заканчивается безусловным `return EXIT_OK` (`core/cli/commands/report.py:227`). Признак частичности
+заканчивается безусловным `return EXIT_OK` (`core/cli/commands/report.py:234`). Признак частичности
 есть, но он **не влияет на код выхода** и не отличает «готовый отчёт» от «отчёт с выдуманными версиями» для скрипта. Что
 осталось: `manifest_partial=True` должен менять `ok`/код выхода (или отказывать вовсе),
 иначе ложный провенанс остаётся успехом.
@@ -511,10 +511,10 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 ### Документация описывает не то, что делает код
 
 ✅ сделано (`35e4373`) — все три расхождения закрыты; сейчас
-`docs/architecture/03-data-config-cli.md:1447` (`resolve` — «резолв
-`source_id` → URL по БД прогона, без сети»), `docs/architecture/03-data-config-cli.md:1456`
+`docs/architecture/03-data-config-cli.md:1451` (`resolve` — «резолв
+`source_id` → URL по БД прогона, без сети»), `docs/architecture/03-data-config-cli.md:1460`
 (`review` — «**только печать**, ячейки не
-меняет») и `docs/architecture/03-data-config-cli.md:1469` (benchmark — «Пишет **только
+меняет») и `docs/architecture/03-data-config-cli.md:1473` (benchmark — «Пишет **только
 JSON-артефакт** (БД не меняет:
 `persist_manifest` есть лишь в ветке `retrieval`)»). Таблица ниже — запись дефекта в
 нумерации до правки.

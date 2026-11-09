@@ -212,7 +212,7 @@ CREATE TABLE IF NOT EXISTS run_product (
 coverage)` (`core/pipeline/corpus_coverage.py:654`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: на момент
 границы переноса ячеек не было (`09` §10), а сегодня их считает отчёт из durable-ячеек
-(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3173`).
+(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3187`).
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — величины того же класса, что `product_end` пишет в `results[].notes` прогона
@@ -353,7 +353,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 одного места — `core/pipeline/run_identity.py:379`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:2585-2611`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:2599-2625`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. `execution_change: embed_device` diff называет и тогда, когда
 поле есть только с одной стороны.
 ⚠️ **Сверено 08.11.2026 — оговорка к «старые прогоны читаются»:** совместимость чтения
@@ -362,9 +362,9 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
 `RunManifest` (`core/domain/models.py:1667`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2554-2557`) сопоставляет имя
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2568-2571`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
-(`core/pipeline/report.py:2563-2568`)
+(`core/pipeline/report.py:2577-2582`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
@@ -862,7 +862,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2563` (первая редакция ссылалась на строку 1970 того же файла);
+`core/pipeline/report.py:2577` (первая редакция ссылалась на строку 1970 того же файла);
 `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:150` (первая редакция ссылалась на строку 93 — там комментарий);
 `_PARTITION_SCHEMA` —

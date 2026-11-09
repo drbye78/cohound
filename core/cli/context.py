@@ -622,6 +622,9 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # отсутствие видно числом ``cells_without_dated_evidence`` в ``corpus_freshness``.
         "corpus_freshness": _path(getattr(artifacts, "corpus_freshness", None)),
         "cell_freshness": _path(getattr(artifacts, "cell_freshness", None)),
+        # B3: члены контейнеров без документа (причина пропуска) — путь к таблице.
+        # ``None`` — пропусков нет, файл не создавался; это отличается от «путь забыт».
+        "corpus_members": _path(getattr(artifacts, "corpus_members", None)),
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []
