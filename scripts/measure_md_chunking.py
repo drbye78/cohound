@@ -239,7 +239,7 @@ def _span_violations(document_text: str, chunks: Sequence[Chunk]) -> tuple[int, 
 
 def _measure(url: str, text: str, chunker: MarkdownChunker) -> DocResult:
     document = parse_markdown(text, chunker.profile)
-    chunks = chunker.chunk(url, text)
+    chunks = chunker.chunk_text(url, text)
     spans = _Spans.of(document)
     joined = "".join(chunk.text for chunk in chunks)
     breaks, boundaries = _mid_sentence_breaks(chunks, spans)

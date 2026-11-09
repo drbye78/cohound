@@ -1,0 +1,206 @@
+{
+  "profile": "gfm",
+  "chunk_size": 1500,
+  "min_chunk_size": 20,
+  "documents": 13,
+  "chars": 562612,
+  "chunks": 448,
+  "invariants": {
+    "p1_violations": 0,
+    "p4_violations": 0,
+    "p8_violations": 0,
+    "source_punct": 0,
+    "unknown_lines": 0,
+    "span_violations": 0
+  },
+  "geometry": {
+    "over_budget": 0,
+    "tiny": 0,
+    "without_heading": 245,
+    "with_context": 171,
+    "mid_sentence": 0,
+    "boundaries": 24,
+    "without_span": 0
+  },
+  "share": {
+    "over_budget": 0.0,
+    "tiny": 0.0,
+    "without_heading": 0.546875,
+    "with_context": 0.38169642857142855,
+    "mid_sentence": 0.0
+  },
+  "constructions": {
+    "table": 1,
+    "fence": 105,
+    "list": 74,
+    "blockquote": 0,
+    "code": 0,
+    "footnote_def": 0
+  },
+  "hosts": {
+    "postgrespro.ru": 13
+  },
+  "skipped": {
+    "no_raw": 0,
+    "non_html": 0,
+    "extract_error": 0,
+    "text_family": 0
+  },
+  "census": null,
+  "skeleton": null,
+  "tokens": {
+    "model_id": "BAAI/bge-m3",
+    "chunks": 448,
+    "text": {
+      "n": 448,
+      "p50": 384.5,
+      "p90": 472.3,
+      "p99": 561.6499999999999,
+      "max": 576,
+      "histogram": {
+        "<64": 15,
+        "64–128": 8,
+        "128–256": 13,
+        "256–512": 398,
+        "512–1024": 14,
+        "1024–2048": 0,
+        "2048–4096": 0,
+        ">4096": 0
+      },
+      "over_512": 14,
+      "over_window": 0,
+      "chars_per_token_median": 3.402061317677756
+    },
+    "prompt": {
+      "n": 448,
+      "p50": 426.0,
+      "p90": 2247.3,
+      "p99": 2383.12,
+      "max": 2398,
+      "histogram": {
+        "<64": 15,
+        "64–128": 2,
+        "128–256": 10,
+        "256–512": 267,
+        "512–1024": 13,
+        "1024–2048": 2,
+        "2048–4096": 139,
+        ">4096": 0
+      },
+      "over_512": 154,
+      "over_window": 0
+    },
+    "script": {
+      "LAT": {
+        "n": 448,
+        "p50": 384.5,
+        "p90": 472.3,
+        "p99": 561.6499999999999,
+        "max": 576,
+        "share": 1.0,
+        "chars_per_token_median": 3.402061317677756
+      }
+    },
+    "script_diagnostics": {
+      "threshold": 0.2,
+      "max_cjk_share": 0.0,
+      "chunks_with_cjk": 0
+    },
+    "context": {
+      "heading_chars": {
+        "n": 448,
+        "p50": 0.0,
+        "p90": 3668.0,
+        "p99": 3668.0,
+        "max": 3668
+      },
+      "heading_tokens": {
+        "n": 448,
+        "p50": 0.0,
+        "p90": 912.0,
+        "p99": 912.0,
+        "max": 912
+      },
+      "prefix_chars": {
+        "n": 448,
+        "p50": 3.0,
+        "p90": 3672.0,
+        "p99": 3672.0,
+        "max": 3672
+      },
+      "prefix_tokens": {
+        "n": 448,
+        "p50": 4.0,
+        "p90": 914.0,
+        "p99": 914.0,
+        "max": 914
+      },
+      "context_tokens": {
+        "n": 448,
+        "p50": 4.0,
+        "p90": 1824.0,
+        "p99": 1824.0,
+        "max": 1824
+      },
+      "heavy_chunks": 162,
+      "heavy_share": 0.36160714285714285,
+      "heavy_limit": 0.25,
+      "heading_over": {
+        "200": {
+          "chunks": 141,
+          "documents": 3,
+          "top": [
+            {
+              "document": "https://postgrespro.ru/docs/ora2pgpro/23/ch01?lang=ru-en",
+              "chunks": 112,
+              "max_heading_chars": 3668
+            },
+            {
+              "document": "https://postgrespro.ru/docs/ora2pgpro/23/ch01?lang=en",
+              "chunks": 15,
+              "max_heading_chars": 3668
+            },
+            {
+              "document": "https://postgrespro.ru/docs/ora2pgpro/23/ch01",
+              "chunks": 14,
+              "max_heading_chars": 3668
+            }
+          ]
+        },
+        "500": {
+          "chunks": 141,
+          "documents": 3,
+          "top": [
+            {
+              "document": "https://postgrespro.ru/docs/ora2pgpro/23/ch01?lang=ru-en",
+              "chunks": 112,
+              "max_heading_chars": 3668
+            },
+            {
+              "document": "https://postgrespro.ru/docs/ora2pgpro/23/ch01?lang=en",
+              "chunks": 15,
+              "max_heading_chars": 3668
+            },
+            {
+              "document": "https://postgrespro.ru/docs/ora2pgpro/23/ch01",
+              "chunks": 14,
+              "max_heading_chars": 3668
+            }
+          ]
+        }
+      }
+    }
+  },
+  "tokenizer": {
+    "model_id": "BAAI/bge-m3",
+    "tokenizer_class": "XLMRobertaTokenizer",
+    "tokenizer_json": "/home/roger/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181/tokenizer.json",
+    "tokenizer_json_sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
+    "vocab_size": 250002,
+    "vocabulary_size": 250002,
+    "path_seen_by_tokenizer": "BAAI/bge-m3",
+    "declared_embed_model_id": "BAAI/bge-m3",
+    "assumed": false,
+    "revision_pinned": false
+  }
+}
