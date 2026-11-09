@@ -1059,6 +1059,7 @@ _CRAWL_TAXONOMY = frozenset(
         "CrawlRefused",
         "CrawlNotFound",
         "CrawlPayloadTooLarge",
+        "CrawlResolutionError",
         "CrawlUnavailable",
         "NOT_FOUND_STATUSES",
     }

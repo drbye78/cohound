@@ -28,6 +28,7 @@ from core.adapters.crawl_scrapy import ScrapyCrawler
 from core.ports.crawl_errors import CrawlNotFound
 from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan
+from core.util.redirects import system_resolver
 from core.util.robots import RobotsGate
 
 __all__ = ["build_robots_gate", "crawler_factory"]
@@ -56,7 +57,9 @@ def build_robots_gate(user_agent: str | None) -> RobotsGate:
 
     def fetch(origin: str) -> str | None:
         try:
-            page = HttpCrawler().fetch(f"{origin}/robots.txt", FetchPlan(FetchMode.HTTP))
+            page = HttpCrawler(resolver=system_resolver).fetch(
+                f"{origin}/robots.txt", FetchPlan(FetchMode.HTTP)
+            )
         except CrawlNotFound:
             # ``404``/``410`` — ответ origin «ленты нет»; гейт выведет ``not_found``.
             # Глотать здесь значило бы запретить origin, про который сказано обратное.
@@ -82,7 +85,10 @@ def crawler_factory(
 
     ``http``/``scrapy``/``browser`` → соответствующий адаптер (регистронезависимо, со
     strip); неизвестный движок → ``ValueError`` (честный сбой воркера, без тихой
-    подмены движка).
+    подмены движка). ``scrapy``/``browser`` получают резолвер :func:`system_resolver`
+    (обёртку ``socket.getaddrinfo``):
+    пост-резолвная SSRF-проверка входного URL и целей редиректов — операторская настройка,
+    не условие измерения (``run_id`` не меняется).
 
     :param robots: опциональная per-host политика ``robots.txt`` (§10). Передаётся в
         ``HttpCrawler``/``BrowserCrawler``; ``ScrapyCrawler`` уже выставляет
@@ -91,9 +97,9 @@ def crawler_factory(
     """
     key = str(engine).strip().lower()
     if key == "http":
-        return HttpCrawler(robots=robots)
+        return HttpCrawler(robots=robots, resolver=system_resolver)
     if key == "scrapy":
-        return ScrapyCrawler()
+        return ScrapyCrawler(resolver=system_resolver)
     if key == "browser":
-        return BrowserCrawler(robots=robots)
+        return BrowserCrawler(robots=robots, resolver=system_resolver)
     raise ValueError(f"неизвестный движок краула: {engine!r}")

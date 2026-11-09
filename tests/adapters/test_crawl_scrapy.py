@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,6 +31,7 @@ from core.ports.crawl_errors import (
     CrawlNotFound,
     CrawlPayloadTooLarge,
     CrawlRefused,
+    CrawlResolutionError,
     CrawlUrlError,
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
@@ -946,7 +949,17 @@ def test_http_error_middleware_passes_304_with_our_settings() -> None:
 _HOSTILE = "http://10.0.0.1/secret"
 
 
-def _guard_middleware() -> object:
+def _host_resolver(mapping: dict[str, str]):
+    """Резолвер-заглушка: имя → адрес; неизвестное имя — публичный адрес. Сети нет."""
+
+    def resolve(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        address = mapping.get(hostname, "93.184.216.34")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    return resolve
+
+
+def _guard_middleware(resolver: Any = None) -> object:
     """Настоящий ``RedirectMiddleware``-подкласс с настройками как из ``_build_settings``.
 
     Проверка идёт на реальных классах Scrapy (``Settings``/``Request``/``Response``):
@@ -955,7 +968,7 @@ def _guard_middleware() -> object:
     pytest.importorskip("scrapy")
     from scrapy.settings import Settings
 
-    redirect_cls, _metarefresh_cls = _redirect_guard_classes()
+    redirect_cls, _metarefresh_cls = _redirect_guard_classes(resolver)
     middleware = redirect_cls(
         Settings(
             {
@@ -1045,6 +1058,74 @@ def test_meta_refresh_guard_rejects_private_target() -> None:
 
     with pytest.raises(exceptions.IgnoreRequest, match="rejected by SSRF validation"):
         middleware.process_response(request, response)
+
+
+def test_redirect_guard_rejects_dns_name_resolving_to_loopback() -> None:
+    """Имя в ``Location``, резолвящееся в петлю, отклоняется при заданном резолвере."""
+    exceptions = pytest.importorskip("scrapy.exceptions")
+    middleware = _guard_middleware(_host_resolver({"internal.example": "127.0.0.1"}))
+    request, response = _redirect_response("http://internal.example/secret")
+
+    with pytest.raises(exceptions.IgnoreRequest) as excinfo:
+        middleware.process_response(request, response)
+
+    message = str(excinfo.value)
+    assert message.startswith("cohound: redirect target rejected by SSRF validation")
+    assert "127.0.0.1" in message
+
+
+def test_redirect_guard_passes_public_dns_name() -> None:
+    """Публичный ответ резолвера — хоп проходит и резолвится штатно."""
+    middleware = _guard_middleware(_host_resolver({}))
+    request, response = _redirect_response("https://public.example/next")
+
+    redirected = middleware.process_response(request, response)
+
+    assert redirected.url == "https://public.example/next"
+    assert redirected.meta["redirect_times"] == 1
+
+
+def test_redirect_guard_resolution_failure_is_not_ssrf() -> None:
+    """Сбой DNS на хопе — не отказ SSRF: отдельная метка (транзиентный исход)."""
+
+    def broken(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        raise OSError("dns down")
+
+    exceptions = pytest.importorskip("scrapy.exceptions")
+    middleware = _guard_middleware(broken)
+    request, response = _redirect_response("https://unresolvable.example/next")
+
+    with pytest.raises(exceptions.IgnoreRequest) as excinfo:
+        middleware.process_response(request, response)
+
+    message = str(excinfo.value)
+    assert message.startswith("cohound: redirect target resolution failed")
+    assert not message.startswith("cohound: redirect target rejected")
+
+
+def test_fetch_rejects_source_url_resolving_internally() -> None:
+    """Входной URL, имя которого резолвится в петлю, отвергается до фетча."""
+    fetcher = _RecordingFetcher()
+    crawler = ScrapyCrawler(
+        fetcher, resolver=_host_resolver({"internal.example": "127.0.0.1"})
+    )
+
+    with pytest.raises(CrawlUrlError):
+        crawler.fetch("https://internal.example/page")
+
+    assert fetcher.calls == []
+
+
+def test_fetch_resolution_failure_is_resolution_error() -> None:
+    """Сбой DNS входного URL — ``CrawlResolutionError`` (повтор осмыслен), не SSRF."""
+
+    def broken(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        raise OSError("dns down")
+
+    crawler = ScrapyCrawler(_RecordingFetcher(), resolver=broken)
+
+    with pytest.raises(CrawlResolutionError):
+        crawler.fetch(URL)
 
 
 def test_redirect_guard_is_installed_in_settings() -> None:

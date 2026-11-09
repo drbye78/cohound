@@ -76,6 +76,7 @@ from core.util.document_formats import (
     is_epub,
     textual_family,
 )
+from core.util.redirects import system_resolver
 
 __all__ = ["crawler_factory", "main"]
 
@@ -199,12 +200,16 @@ def _build_crawlers(config: EdgeRuntimeConfig) -> dict[str, CrawlerPort]:
     них задано положительное число слотов; каждая сборка под guard — недоступность
     зависимости (``ImportError``/``CrawlError``) не валит узел, движок опускается.
     """
-    crawlers: dict[str, CrawlerPort] = {"http": HttpCrawler()}
+    crawlers: dict[str, CrawlerPort] = {
+        "http": HttpCrawler(resolver=system_resolver)
+    }
     for engine, factory in (("scrapy", ScrapyCrawler), ("browser", BrowserCrawler)):
         if int(config.workers.get(engine, 0)) <= 0:
             continue
         try:
-            crawlers[engine] = factory()
+            # Резолвер — операторская настройка (пост-резолвная SSRF-проверка входного
+            # URL и целей редиректов), не условие измерения: ``run_id`` не меняется.
+            crawlers[engine] = factory(resolver=system_resolver)
         except (ImportError, CrawlError):
             continue
     return crawlers

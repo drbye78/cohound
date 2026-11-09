@@ -191,8 +191,14 @@ from core.util.document_formats import (
 )
 from core.util.hashing import short_hash
 from core.util.logging import PhaseLogger
-from core.util.redirects import follow_validated_redirects
+from core.util.redirects import ResolverFn, follow_validated_redirects, system_resolver
 from core.util.robots import RobotsGate
+from core.util.security import (
+    ResolutionError,
+    SsrfError,
+    resolve_and_validate,
+    validate_url,
+)
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
 __all__ = [
@@ -750,12 +756,19 @@ def build_search_adapter(
     :param search_mode: объявленный режим запроса (``sync``/``async``, ``run.yaml:
         serp.mode``). ``None`` — не объявлено: адаптер возьмёт env/дефолт кода (путь
         разведки, чей выход — кандидаты, а не измерение).
+    Адаптер собирается с реальным резолвером :func:`system_resolver` (обёртка
+    ``socket.getaddrinfo``): ``fetch`` проверяет входную цель и каждый ``Location``
+    пост-резолвно (DNS-имя, ведущее внутрь периметра, отклоняется). Резолвер —
+    операторская настройка, а не условие измерения: ``run_id`` от него не зависит.
+
     :raises WiringError: неизвестный адаптер.
     """
     if adapter == "yandex":
-        return YandexSearchAdapter(cache=cache, search_mode=search_mode)
+        return YandexSearchAdapter(
+            cache=cache, search_mode=search_mode, resolver=system_resolver
+        )
     if adapter == "glm":
-        return GlmSearchAdapter(cache=cache)
+        return GlmSearchAdapter(cache=cache, resolver=system_resolver)
     raise WiringError(
         f"неизвестный поисковый адаптер: {adapter!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}"
@@ -1777,7 +1790,9 @@ def build_scout_crawler(
         # ScrapyCrawler уже выставляет ``ROBOTSTXT_OBEY`` в дефолтных настройках.
         config = deploy if deploy is not None else load_deploy_config(None)
         return ScrapyCrawler(
-            cache=cache, max_response_bytes=config.crawl.max_response_bytes
+            cache=cache,
+            max_response_bytes=config.crawl.max_response_bytes,
+            resolver=system_resolver,
         )
     if name == "browser":
         config = deploy if deploy is not None else load_deploy_config(None)
@@ -1923,7 +1938,9 @@ def build_scout_crawlers(
     if "scrapy" in referenced:
         try:
             crawlers["scrapy"] = ScrapyCrawler(
-                cache=cache, max_response_bytes=config.crawl.max_response_bytes
+                cache=cache,
+                max_response_bytes=config.crawl.max_response_bytes,
+                resolver=system_resolver,
             )
         except (WiringError, ImportError, CrawlError) as exc:
             build_errors["scrapy"] = f"{type(exc).__name__}: {exc}"
@@ -1947,10 +1964,17 @@ def _http_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
 
     Поля ``user_agent``/``timeout_s`` со значением ``None`` **не** передаются: адаптер
     подставит собственные дефолты (:data:`~core.adapters.crawl_http.DEFAULT_USER_AGENT`/
-    ``DEFAULT_TIMEOUT``). ``follow_redirects`` передаётся всегда (дефолт ``True``).
+    ``DEFAULT_TIMEOUT``). ``follow_redirects`` передаётся всегда (дефолт ``True``), как и
+    ``resolver`` (:func:`~core.util.redirects.system_resolver`): пост-резолвная проверка
+    не должна теряться от того, что поле не объявлено в конфиге.
     """
     crawl = deploy.crawl
-    kwargs: dict[str, Any] = {"follow_redirects": crawl.follow_redirects}
+    kwargs: dict[str, Any] = {
+        "follow_redirects": crawl.follow_redirects,
+        # Проводка, не поле конфига: пост-резолвная SSRF-проверка входного URL и целей
+        # редиректов. Операторская настройка — ``run_id`` от неё не зависит.
+        "resolver": system_resolver,
+    }
     if crawl.user_agent is not None:
         kwargs["user_agent"] = crawl.user_agent
     if crawl.timeout_s is not None:
@@ -1969,7 +1993,9 @@ def _browser_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
     * ``headless``/``timeout_ms`` — передаются всегда (у них конкретные дефолты в
       :class:`~core.config.deploy.CrawlBrowserConfig`);
     * ``cdp_url``/``user_data_dir``/``channel`` — только если не ``None``;
-    * ``user_agent`` — из ``deploy.crawl.user_agent``, только если не ``None``.
+    * ``user_agent`` — из ``deploy.crawl.user_agent``, только если не ``None``;
+    * ``resolver`` — всегда :func:`system_resolver` (проводка, не поле конфига):
+      пост-резолвная SSRF-проверка входного URL и целей редиректов.
 
     Декларативный ``browser.mode`` **не** передаётся: это селектор ветки подключения, а
     фактическую ветку (CDP vs persistent-профиль) выводит сам адаптер по ``cdp_url``/
@@ -1981,6 +2007,9 @@ def _browser_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "headless": browser.headless,
         "timeout_ms": browser.timeout_ms,
+        # Операторская настройка проводки, не поле конфига: адаптер проверяет входной URL
+        # и каждый ``Location`` пост-резолвно. Не условие измерения — ``run_id`` тот же.
+        "resolver": system_resolver,
     }
     if browser.cdp_url is not None:
         kwargs["cdp_url"] = browser.cdp_url
@@ -3035,7 +3064,16 @@ class _RegistryHttpClient:
     Форма ``get(url, headers, timeout) -> bytes`` ожидается
     :class:`~core.adapters.registry_generic.GenericRegistryFetcher`. Сеть не хардкодится:
     composition root/тесты могут подменить клиент (шов ``registry_http_get``).
+
+    ``resolver`` — резолвер хоста в форме ``socket.getaddrinfo`` (прод —
+    :func:`system_resolver`). Задан — входной URL и каждая цель редиректа проверяются
+    пост-резолвно; ``None`` — прежнее поведение (только литералы). Прод-сборка передаёт
+    :func:`system_resolver`; тесты — ``None`` или заглушку, поэтому реального DNS в тестах
+    нет.
     """
+
+    def __init__(self, resolver: ResolverFn | None = None) -> None:
+        self._resolver = resolver
 
     def get(
         self, url: str, headers: Mapping[str, str], timeout: float | None = None
@@ -3050,7 +3088,25 @@ class _RegistryHttpClient:
         видела бы уже готовый ответ. Отказ хопа — :class:`RegistryFetchError` с причиной
         «редирект на небезопасный адрес», чтобы вызывающий отличал SSRF-отказ от
         недоступности источника по тексту и типу.
+
+        **Входной URL проверяется здесь же.** ``follow_validated_redirects`` по контракту
+        стартовый URL не валидирует (его проверяет вызывающий), поэтому без этой проверки
+        первый запрос уходил бы непроверенным, а докстринг обещал бы обратное.
         """
+        try:
+            if self._resolver is None:
+                validate_url(url)
+            else:
+                resolve_and_validate(url, resolver=self._resolver)
+        except SsrfError as exc:
+            raise RegistryFetchError(
+                f"HTTP-запрос к реестру: небезопасный URL отклонён SSRF-валидацией: {exc}"
+            ) from exc
+        except ResolutionError as exc:
+            raise RegistryFetchError(
+                f"HTTP-запрос к реестру: хост не разрешился ({exc})"
+            ) from exc
+
         httpx = self._import_http()
 
         def _fetch_hop(current: str) -> Any:
@@ -3067,6 +3123,7 @@ class _RegistryHttpClient:
                 url,
                 error=RegistryFetchError,
                 label="HTTP-запрос к реестру",
+                resolver=self._resolver,
             )
             response.raise_for_status()
         except RegistryFetchError:
@@ -3245,7 +3302,9 @@ def build_adapters(
         resolved_specs = dict(registry_specs or {})
         local_registry_fetchers = _build_local_registry_fetchers(
             resolved_specs,
-            registry_http_get if registry_http_get is not None else _RegistryHttpClient(),
+            registry_http_get
+            if registry_http_get is not None
+            else _RegistryHttpClient(resolver=system_resolver),
         )
         # P7: PDF-механизм — та же цепочка app < run < site, что у остальных осей краула
         # (site-слой здесь недоступен: порты собираются до per-root резолва; корневой

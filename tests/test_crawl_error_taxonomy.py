@@ -26,8 +26,10 @@ from core.ports.crawl_errors import (
     CrawlNotFound,
     CrawlPayloadTooLarge,
     CrawlRefused,
+    CrawlResolutionError,
     CrawlUnavailable,
     CrawlUrlError,
+    is_transient_fetch_error,
 )
 
 
@@ -93,6 +95,7 @@ def test_hierarchy_and_machine_codes_are_preserved() -> None:
     assert issubclass(CrawlRefused, CrawlError)
     assert issubclass(CrawlNotFound, CrawlError)
     assert issubclass(CrawlPayloadTooLarge, CrawlError)
+    assert issubclass(CrawlResolutionError, CrawlError)
     assert issubclass(CrawlUnavailable, CrawlError)
 
     assert CrawlNotFound("gone").failure_kind == "not_found"
@@ -111,3 +114,13 @@ def test_probe_driver_recognises_engine_failure_by_type() -> None:
     # Посторонний класс с тем же именем: сравнение по имени дало бы True.
     foreign = type("CrawlUnavailable", (Exception,), {})
     assert _is_unavailable(foreign("чужой")) is False
+
+
+def test_resolution_failure_is_transient_but_not_engine_failure() -> None:
+    """Сбой DNS — транзиентный сетевой исход, а не «движок недоступен» и не отказ URL."""
+    exc = CrawlResolutionError("DNS недоступен")
+    assert exc.http_status is None
+    assert is_transient_fetch_error(exc) is True
+    assert _is_unavailable(exc) is False
+    assert is_transient_fetch_error(CrawlUnavailable("нет httpx")) is False
+    assert is_transient_fetch_error(CrawlUrlError("SSRF")) is False

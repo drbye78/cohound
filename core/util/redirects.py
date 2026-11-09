@@ -20,8 +20,9 @@
 Поведение:
 
 * каждый следующий хоп берётся у ``fetch_hop`` **только** после того, как ``Location``
-  разрешён относительно текущего URL (:func:`urllib.parse.urljoin`) и прошёл
-  ``validate_url``;
+  разрешён относительно текущего URL (:func:`urllib.parse.urljoin`) и прошёл проверку:
+  ``validate_url`` (литералы) либо — при заданном ``resolver`` — ``resolve_and_validate``
+  (ещё и каждый адрес, в который резолвится имя);
 * хоп — только ``301/302/303/307/308`` **с** ``Location`` (набор ``httpx``); ``3xx`` без
   ``Location`` остаётся обычным ответом, как и у ``httpx``;
 * небезопасная цель — **ошибка вызывающего**, чей тип передан параметром
@@ -34,29 +35,55 @@
   ``follow_redirects=False``) — выключенный по умолчанию режим внутри значил бы, что
   безопасность зависит от того, не забыл ли вызывающий её включить.
 
-**Чего модуль не делает.** Пост-резолвной проверки адреса (DNS-rebinding) здесь нет — это
-принятый риск S9g, записанный в :func:`core.util.security.validate_url`. Блокируются
-**литеральные** приватные/петлевые адреса в ``Location``, а не имя, резолвящееся в
-приватный IP. Тело промежуточного ответа читается вызывающим (один ``GET`` на хоп), как и
-раньше — ``httpx`` с ``follow_redirects`` тоже читал его и отбрасывал.
+**Что закрыто и чем.** Литеральные приватные/петлевые адреса в ``Location`` закрыты
+всегда: их видит ``validate_url`` без сети. Имя, резолвящееся в приватный IP, закрывается
+**только при переданном резолвере** (:func:`core.util.security.resolve_and_validate`
+резолвит хост и требует, чтобы каждый адрес был глобальным). ``resolver=None`` сохраняет
+прежнее поведение (литералы и ``allowed_domain``, без DNS): прод-сборка передаёт
+:func:`system_resolver` (обёртку ``socket.getaddrinfo``), а тесты — заглушку.
+
+**Чего модуль по-прежнему не делает.** Пиннинга адреса нет: между проверкой и фактическим
+соединением ответ DNS может измениться (TOCTOU/DNS-rebinding, принятый риск S9g,
+записанный в :func:`core.util.security.validate_url`). Пост-резолвная проверка сужает окно,
+но не устраняет его, а полное закрытие требует транспорта с пиннингом. Тело промежуточного
+ответа читается вызывающим (один ``GET`` на хоп), как и раньше — ``httpx`` с
+``follow_redirects`` тоже читал его и отбрасывал.
 
 Модуль категорийно нейтрален (§1.3): только stdlib и ``core.util.security``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import socket
+from collections.abc import Callable, Iterable
 from typing import Any
 from urllib.parse import urljoin
 
 from core.util.http_audit import note_request
-from core.util.security import validate_url
+from core.util.security import SsrfError, resolve_and_validate, validate_url
 
 __all__ = [
     "DEFAULT_MAX_REDIRECTS",
     "REDIRECT_STATUSES",
+    "ResolverFn",
     "follow_validated_redirects",
+    "system_resolver",
 ]
+
+#: Резолвер в форме ``socket.getaddrinfo`` (см. :func:`core.util.security.resolve_and_validate`).
+#: Прод-сборка передаёт :func:`system_resolver`; тесты — заглушку без сети.
+ResolverFn = Callable[[str], Iterable[Any]]
+
+
+def system_resolver(hostname: str) -> Iterable[Any]:
+    """Резолвер прод-сборки: штатный ``socket.getaddrinfo(hostname, None)``.
+
+    Отдельная обёртка обязательна: ``socket.getaddrinfo`` требует второй позиционный
+    аргумент (``port``), а контракт резолвера — ``(hostname) -> записи getaddrinfo``.
+    Передать сам ``getaddrinfo`` значило бы падать на каждом вызове (``TypeError``),
+    поэтому «реальный резолвер» в проводке — эта функция, а не голый builtin.
+    """
+    return socket.getaddrinfo(hostname, None)
 
 #: Потолок числа редиректов на один фетч — ровно дефолт ``httpx``
 #: (``httpx._config.DEFAULT_MAX_REDIRECTS``): ручной цикл не вводит нового поведения,
@@ -84,18 +111,27 @@ def follow_validated_redirects(
     error: type[Exception],
     label: str,
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    resolver: ResolverFn | None = None,
 ) -> tuple[Any, str]:
     """Проходит цепочку редиректов, валидируя каждый хоп; ``(ответ, финальный URL)``.
 
     :param fetch_hop: одна сетевая попытка: ``(url) -> ответ`` с ``status_code`` и
         ``headers``. Повторы/таймауты — внутри неё (это дело вызывающего).
     :param url: **запрошенный** URL; он же база для относительных ``Location``.
+        Сам он здесь не валидируется — это делает вызывающий (у поисковых адаптеров и
+        реестрового клиента ``fetch``/``get`` проверяет входную цель тем же
+        :func:`resolve_and_validate` при заданном резолвере).
     :param error: тип ошибки вызывающего (``SearchError``/``RegistryFetchError``/…):
         отказ хопа и превышение потолка поднимаются им, а не нейтральным ``RuntimeError``, —
         вызывающий продолжает ловить один класс на все сбои транспорта, а причина
         («редирект на небезопасный адрес») остаётся в сообщении.
     :param label: имя вызова для сообщения об ошибке (URL не хардкодится в шапке текста).
     :param max_redirects: потолок хопов; превышение — ошибка вызывающего.
+    :param resolver: резолвер в форме ``socket.getaddrinfo``. Задан — каждый ``Location``
+        дополнительно проверяется :func:`core.util.security.resolve_and_validate`
+        (DNS-имя, резолвящееся в не-глобальный адрес, отклоняется). ``None`` — прежнее
+        поведение: только литеральная проверка :func:`core.util.security.validate_url`.
+        Резолвер — операторская настройка, а не условие измерения: ``run_id`` не меняется.
     :returns: ответ последнего хопа и URL, на котором он получен.
     :raises error: небезопасная цель ``Location`` или превышение числа хопов.
     """
@@ -122,9 +158,16 @@ def follow_validated_redirects(
             raise error(f"{label}: превышено число редиректов ({max_redirects})")
         target = urljoin(current, location)
         try:
-            validate_url(target)
-        except ValueError as exc:
+            if resolver is None:
+                validate_url(target)
+            else:
+                resolve_and_validate(target, resolver=resolver)
+        except SsrfError as exc:
             raise error(
                 f"{label}: редирект на небезопасный адрес отклонён SSRF-валидацией: {exc}"
             ) from exc
+        # ``ResolutionError`` (сбой DNS) здесь намеренно не переводится в ``error``:
+        # это временная недоступность, а не отказ политики. Вызывающий решает сам —
+        # поисковые адаптеры/реестровый клиент оборачивают её своим классом сбоя
+        # транспорта, и запись «небезопасный адрес» не появляется.
         current = target

@@ -53,9 +53,12 @@ from core.cli.wiring import (
     LOCAL_PROFILE,
     SPLIT_PROFILE,
     WiringError,
+    _browser_crawler_kwargs,
+    _http_crawler_kwargs,
     build_adapters,
     build_scout_crawler,
     build_scout_crawlers,
+    build_search_adapter,
 )
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.deploy import CrawlBrowserConfig, CrawlConfig, DeployConfig
@@ -67,6 +70,7 @@ from core.pipeline import Ports
 from core.pipeline.normalize import RunInputs
 from core.util.cache import ContentAddressedCache
 from core.util.logging import PhaseLogger
+from core.util.redirects import system_resolver
 from tests.helpers.packages import run_argv, valid_package
 from tests.helpers.scout import clear_env
 
@@ -223,6 +227,7 @@ def test_build_scout_crawler_browser_threads_cache_and_config(
     assert crawler.supports_browser is True
     assert crawler._cache is cache
     assert crawler._cdp_url == "http://127.0.0.1:9222"
+    assert crawler._resolver is system_resolver
     assert crawler._headless is True
     assert crawler._timeout_ms == 12345
 
@@ -316,6 +321,8 @@ def test_build_adapters_threads_cache_and_profiles(
 
     assert isinstance(ports.crawler, ScrapyCrawler)
     assert ports.crawler._cache is cache
+    # Проводка, не конфиг: прод-сборка не теряет пост-резолвную проверку.
+    assert ports.crawler._resolver is system_resolver
 
 
 def test_build_adapters_http_threads_cache(
@@ -334,6 +341,7 @@ def test_build_adapters_http_threads_cache(
 
     assert isinstance(ports.crawler, HttpCrawler)
     assert ports.crawler._cache is cache
+    assert ports.crawler._resolver is system_resolver
 
 
 def test_build_adapters_without_deploy_keeps_crawler_none(
@@ -742,6 +750,41 @@ def test_build_adapters_local_builds_browser_when_referenced(
 
     assert ports.crawlers is not None
     assert isinstance(ports.crawlers.get("browser"), BrowserCrawler)
+
+
+def test_build_search_adapter_passes_real_resolver() -> None:
+    """Поисковые адаптеры прод-сборки получают реальный резолвер (не ``None``)."""
+    assert build_search_adapter("yandex")._resolver is system_resolver
+    assert build_search_adapter("glm")._resolver is system_resolver
+
+
+def test_crawler_kwargs_include_real_resolver() -> None:
+    """``HttpCrawler``/``BrowserCrawler`` получают резолвер от проводки, а не от конфига."""
+    deploy = DeployConfig(profile="local")
+
+    assert _http_crawler_kwargs(deploy)["resolver"] is system_resolver
+    assert _browser_crawler_kwargs(deploy)["resolver"] is system_resolver
+
+
+def test_build_adapters_wires_real_resolver_into_registry_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Реестровый HTTP-клиент прод-сборки получает реальный резолвер."""
+    captured: dict[str, Any] = {}
+
+    class _Recorder:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(wiring_mod, "_RegistryHttpClient", _Recorder)
+
+    build_adapters(
+        profile=LOCAL_PROFILE,
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+    )
+
+    assert captured.get("resolver") is system_resolver
 
 
 def test_build_adapters_split_has_no_local_crawlers() -> None:

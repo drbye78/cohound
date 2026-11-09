@@ -10,7 +10,11 @@
 
 * **SSRF-этика** — ``validate_url`` (``core.util.security``) до фетча; приватные/
   петлевые/metadata-цели отклоняются ``CrawlUrlError`` (подкласс ``CrawlError`` и
-  ``ValueError``);
+  ``ValueError``). При внедрённом ``resolver`` добавляется post-resolve проверка
+  (:func:`~core.util.security.resolve_and_validate`): имя, резолвящееся во внутренний
+  адрес, тоже отклоняется, но сбой резолва классифицируется иначе —
+  ``CrawlResolutionError`` (транзиентный сетевой исход, повтор осмыслен), а не
+  ``CrawlUrlError`` (постоянный отказ политики);
 * **redirects — похоповая валидация на транспорте** (R10). ``follow_redirects=False``
   для ``httpx``: цикл ``Location`` ведёт адаптер, и **каждый** хоп проходит
   ``validate_url`` до выпуска запроса (образец — ``crawl_browser.py``). Запрос на
@@ -19,8 +23,10 @@
   проверку. Потолок хопов — объявленный параметр ``max_redirects``
   (:data:`DEFAULT_MAX_REDIRECTS` = 20, ровно дефолт ``httpx``). ``RawPage.url`` —
   финальный URL (``str(response.url)``), ``status_code``/``content_type`` — из ответа.
-  Куки, поставленные хопом, переносятся в следующий — с привязкой к поставившему хосту
-  (``httpx``-клиент делал это сам, пока цикл был внутри одного вызова);
+  Куки, поставленные хопом, переносятся в следующий с соблюдением области действия
+  (``_CookieJar``): только тому же хосту либо ``Domain``-суффиксу, только на
+  подходящий ``Path``, ``Secure`` — лишь по https, протухшие не отправляются. Куки
+  не уходят ни на чужой хост, ни на отклонённый SSRF-хост;
 * **content-addressed кэш** — при внедрённом ``ContentAddressedCache`` попадание по
   ``http_key(url)`` отдаёт ``RawPage`` из байтов с mtime (детерминизм R7 между
   ``run_id``); промах → живой фетч + запись;
@@ -51,7 +57,9 @@ callable ``(url) -> bytes``. Если он задан, реальный ``httpx`
 **Ошибки.** Таксономия объявлена в порту — ``core.ports.crawl_errors`` (R5), и этот
 модуль её только поднимает: ``CrawlError`` — единый тип для всех транспортов (pipeline
 ловит один класс); отсутствие ``httpx`` — ``CrawlUnavailable(CrawlError)``. Отказ SSRF —
-``CrawlUrlError`` (и на входном URL, и на любом хопе редиректа). Ответ ``404``/``410`` —
+``CrawlUrlError`` (и на входном URL, и на любом хопе редиректа). Неразрешившийся хост при
+внедрённом ``resolver`` — ``CrawlResolutionError``: сбой резолва, а не отказ URL (повтор
+осмыслен, ``is_transient_fetch_error`` → ``True``). Ответ ``404``/``410`` —
 ``CrawlNotFound`` (``failure_kind="not_found"``): ресурса нет, а не источник недоступен.
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров/предметных терминов.
@@ -63,9 +71,10 @@ import contextlib
 import importlib.util
 import os
 import tempfile
-from collections.abc import Callable
-from dataclasses import replace
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any
@@ -78,6 +87,7 @@ from core.ports.crawl_errors import (
     CrawlNotFound,
     CrawlPayloadTooLarge,
     CrawlRefused,
+    CrawlResolutionError,
     CrawlUnavailable,
     CrawlUrlError,
 )
@@ -89,7 +99,12 @@ from core.util.document_formats import (
 )
 from core.util.http_audit import note_request
 from core.util.robots import RobotsGate
-from core.util.security import validate_url
+from core.util.security import (
+    ResolutionError,
+    SsrfError,
+    resolve_and_validate,
+    validate_url,
+)
 
 __all__ = [
     "DEFAULT_ACCEPT",
@@ -130,18 +145,98 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _host_of(url: str) -> str:
-    """Хост URL в нижнем регистре (пустая строка, если хост не читается)."""
-    return (urlsplit(url).hostname or "").lower()
+@dataclass(frozen=True, slots=True)
+class _JarCookie:
+    """Одна кука jar: имя, значение и **область действия** (RFC 6265 §5.3).
+
+    Заголовок ``Set-Cookie`` несёт не только пару ``name=value``: ``Domain``/``Path``
+    задают, куда её можно отправлять, ``Secure`` — только ли по https, ``Expires``/
+    ``Max-Age`` — до какого момента. Словарь ``name → value`` с ключом-хостом терял всё
+    это: ``Secure``-кука уезжала по http, ``Path=/admin`` — на ``/public``, истёкшая —
+    отправлялась, а ``Domain``-кука не доходила до поддомена.
+    """
+
+    name: str
+    value: str
+    domain: str
+    path: str
+    secure: bool
+    expires: datetime | None
 
 
-def _collect_cookies(response: Any, jar: dict[str, str]) -> None:
-    """Складывает ``Set-Cookie`` ответа в jar хоста ``name → value``.
+def _domain_match(host: str, domain: str) -> bool:
+    """Domain-match (RFC 6265 §5.1.3): точное совпадение или суффикс с точкой."""
+    host = host.lower().rstrip(".")
+    domain = domain.lower().lstrip(".").rstrip(".")
+    if not host or not domain:
+        return False
+    return host == domain or host.endswith(f".{domain}")
+
+
+def _default_cookie_path(url: str) -> str:
+    """Путь куки по умолчанию (RFC 6265 §5.1.4): каталог запроса, иначе ``/``."""
+    path = urlsplit(url).path
+    if not path or not path.startswith("/"):
+        return "/"
+    if path.count("/") <= 1:
+        return "/"
+    return path[: path.rfind("/")]
+
+
+def _path_match(request_path: str, cookie_path: str) -> bool:
+    """Path-match (RFC 6265 §5.1.4): совпадение, префикс на границе ``/`` или весь путь."""
+    if not request_path:
+        request_path = "/"
+    if request_path == cookie_path:
+        return True
+    if not request_path.startswith(cookie_path):
+        return False
+    if cookie_path.endswith("/"):
+        return True
+    return request_path[len(cookie_path) :][:1] == "/"
+
+
+def _cookie_expiry(morsel: Any) -> datetime | None:
+    """Момент истечения куки: ``Max-Age`` важнее ``Expires`` (RFC 6265 §5.3).
+
+    ``Max-Age <= 0`` — кука удаляется немедленно (представляется прошедшим моментом).
+    Неразборчивая дата — «срок не задан» (``None``): сессионная кука, а не вечная.
+    """
+    max_age = str(morsel["max-age"] or "").strip()
+    if max_age:
+        try:
+            seconds = int(max_age)
+        except ValueError:
+            seconds = 0
+        if seconds <= 0:
+            return datetime.min.replace(tzinfo=UTC)
+        return datetime.now(UTC) + timedelta(seconds=seconds)
+    expires = str(morsel["expires"] or "").strip()
+    if not expires:
+        return None
+    try:
+        parsed = parsedate_to_datetime(expires)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        # ``-0000``/усечённая дата: RFC 6265 велит читать такие метки как UTC.
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _collect_cookies(response: Any, url: str) -> list[_JarCookie]:
+    """Разбирает ``Set-Cookie`` ответа в куки с областью действия (stdlib, не регулярка).
 
     Разбирается stdlib-ом (:class:`http.cookies.SimpleCookie`), а не регуляркой: значение
     куки может содержать ``;``/``=`` внутри кавычек. ``get_list`` предпочитается
     ``get``: у ``httpx`` несколько ``Set-Cookie`` схлопываются в один заголовок с
     запятыми, а ``Expires`` их тоже содержит — разбор «по запятой» испортил бы значение.
+
+    ``url`` — URL ответа, поставившего куку: он задаёт домен/путь по умолчанию и
+    **проверку права** на ``Domain``-атрибут. Кука на чужой домен (``Domain``, которому
+    поставивший хост не domain-match) не принимается: иначе один хоп мог бы выписать
+    куку другому хосту. Протухшие куки возвращаются как есть — решение об удалении
+    принимает jar (он знает прежнюю запись).
     """
     headers = response.headers
     get_list = getattr(headers, "get_list", None)
@@ -150,6 +245,9 @@ def _collect_cookies(response: Any, jar: dict[str, str]) -> None:
     else:  # дублёр ответа в тестах (плоский dict)
         single = headers.get("Set-Cookie")
         raw_values = [str(single)] if single else []
+    setter_host = (urlsplit(url).hostname or "").lower()
+    default_path = _default_cookie_path(url)
+    cookies: list[_JarCookie] = []
     for raw in raw_values:
         parsed = SimpleCookie()
         try:
@@ -158,7 +256,72 @@ def _collect_cookies(response: Any, jar: dict[str, str]) -> None:
             # Битая кука не должна ронять фетч: она не относится к представлению.
             continue
         for name, morsel in parsed.items():
-            jar[name] = morsel.value
+            declared_domain = str(morsel["domain"] or "").strip().lstrip(".").lower()
+            if declared_domain and not _domain_match(setter_host, declared_domain):
+                # Чужой домен: кука не наша — не принимаем (иначе утечка на чужой хост).
+                continue
+            domain = declared_domain or setter_host
+            if not domain:
+                continue
+            cookies.append(
+                _JarCookie(
+                    name=name,
+                    value=morsel.value,
+                    domain=domain,
+                    path=str(morsel["path"] or "") or default_path,
+                    secure=bool(morsel["secure"]),
+                    expires=_cookie_expiry(morsel),
+                )
+            )
+    return cookies
+
+
+class _CookieJar:
+    """Маленький cookie-jar цепочки редиректов на stdlib (без новых зависимостей).
+
+    Хранит имя/значение и область действия, отдаёт ровно те куки, которые вправе
+    уехать на запрошенный URL: host совпадает (или domain-match по суффиксу с точкой),
+    path — префикс на границе ``/``, ``secure`` — только по https, протухшие не отдаются
+    и не пересылаются. Других хостов jar не знает по построению: ключ включает домен.
+    """
+
+    def __init__(self) -> None:
+        self._cookies: dict[tuple[str, str, str], _JarCookie] = {}
+
+    def collect(self, response: Any, url: str) -> None:
+        """Складывает ``Set-Cookie`` ответа в jar (обновляя запись с тем же ключом)."""
+        now = datetime.now(UTC)
+        for cookie in _collect_cookies(response, url):
+            key = (cookie.domain, cookie.path, cookie.name)
+            if cookie.expires is not None and cookie.expires <= now:
+                # Протухшая кука не хранится, а прежняя запись с тем же ключом удаляется
+                # (``Max-Age=0`` — это команда удаления, а не «кука со сроком в прошлом»).
+                self._cookies.pop(key, None)
+                continue
+            self._cookies[key] = cookie
+
+    def cookies_for(self, url: str) -> dict[str, str]:
+        """Куки, которые вправе уехать на ``url``: ``name → value`` для заголовка ``Cookie``."""
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        scheme = parts.scheme.lower()
+        path = parts.path or "/"
+        now = datetime.now(UTC)
+        result: dict[str, str] = {}
+        # Более специфичный путь (длиннее) побеждает при совпадении имени: у куки
+        # ``Path=/admin`` приоритет над ``Path=/`` (RFC 6265 §5.4).
+        ordered = sorted(self._cookies.items(), key=lambda item: len(item[0][1]))
+        for (domain, cookie_path, name), cookie in ordered:
+            if cookie.expires is not None and cookie.expires <= now:
+                continue
+            if cookie.secure and scheme != "https":
+                continue
+            if not _domain_match(host, domain):
+                continue
+            if not _path_match(path, cookie_path):
+                continue
+            result[name] = cookie.value
+        return result
 
 
 class HttpCrawler:
@@ -177,6 +340,11 @@ class HttpCrawler:
         оставляет ответ ``3xx`` как есть — хопов тогда нет и валидировать нечего.
     :param max_redirects: потолок числа хопов (дефолт :data:`DEFAULT_MAX_REDIRECTS`);
         превышение — ``CrawlError``, как ``TooManyRedirects`` у ``httpx``.
+    :param resolver: резолвер для post-resolve SSRF-проверки
+        (``socket.getaddrinfo``-подобный: ``hostname → итерируемое записей``); ``None``
+        (дефолт) — только литеральная проверка :func:`validate_url`, DNS не трогается.
+        Смысл инъекции: имя, резолвящееся во внутренний адрес, отвергается **до**
+        запроса; в тестах резолвер — заглушка, поэтому сеть не нужна.
     """
 
     version = "http-crawler-1"
@@ -199,6 +367,7 @@ class HttpCrawler:
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
         robots: RobotsGate | None = None,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        resolver: Callable[[str], Iterable[Any]] | None = None,
     ) -> None:
         if fetcher is not None and http_get is not None:
             raise ValueError("задайте только один шов: fetcher или http_get")
@@ -223,11 +392,48 @@ class HttpCrawler:
         # (обратная совместимость); тесты инъектят политику без сети.
         self._robots = robots
         self._max_response_bytes = int(max_response_bytes)
+        # SSRF post-resolve: ``None`` — не резолвить (прежнее поведение, DNS не трогается).
+        self._resolver = resolver
 
     @property
     def available(self) -> bool:
         """Готов ли краулер: внедрённый шов или установленный ``httpx``."""
         return self._fetcher is not None or _httpx_available()
+
+    # -- SSRF ----------------------------------------------------------------
+
+    def _ssrf_check(self, url: str) -> str:
+        """SSRF-проверка URL; возвращает его же при успехе.
+
+        Без ``resolver`` — литеральная проверка (:func:`validate_url`): DNS не трогается,
+        поведение прежнее. С резолвером — дополнительно post-resolve проверка каждого
+        адреса (:func:`resolve_and_validate`): имя, указывающее на внутренний адрес,
+        отвергается. Исключения не переводятся: ``SsrfError`` — отказ политики,
+        ``ResolutionError`` — сбой резолва; различает их :meth:`_validate_target`.
+        """
+        if self._resolver is None:
+            return validate_url(url)
+        return resolve_and_validate(url, resolver=self._resolver)
+
+    def _validate_target(self, url: str, *, prefix: str) -> str:
+        """Проверяет цель и переводит классы отказа в таксономию краула (R5).
+
+        Отказ политики (:class:`~core.util.security.SsrfError`) — постоянный:
+        ``CrawlUrlError`` (и ``CrawlError``, и ``ValueError``), повтор бессмыслен.
+        Сбой резолва (:class:`~core.util.security.ResolutionError`) — **не** приговор
+        URL: ``CrawlResolutionError`` (сетевой исход до ответа, повтор осмыслен), иначе
+        временный DNS-сбой записался бы как «небезопасный адрес» и выпал бы из карты как
+        отказ, а не как измерение. ``CrawlUnavailable`` здесь был бы неверен: движок
+        исправен, не разрешилось имя.
+        """
+        try:
+            return self._ssrf_check(url)
+        except SsrfError as exc:
+            raise CrawlUrlError(f"{prefix}: {exc}") from exc
+        except ResolutionError as exc:
+            raise CrawlResolutionError(
+                f"не удалось разрешить хост URL {url!r} ({exc}): повтор осмыслен"
+            ) from exc
 
     # -- публичный контракт ---------------------------------------------------
 
@@ -249,10 +455,7 @@ class HttpCrawler:
                 "HttpCrawler не поддерживает browser-рендер; "
                 "используйте ScrapyCrawler/playwright"
             )
-        try:
-            validate_url(url)
-        except ValueError as exc:
-            raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
+        self._validate_target(url, prefix="URL отклонён SSRF-валидацией")
 
         # D1/§10: robots.txt-запрет — отказ (не сбой). Персистентный отказ не латаем
         # кэшем: проверяем до обращения к кэшу (кэш мог быть добыт до появления правил).
@@ -394,10 +597,9 @@ class HttpCrawler:
         # сценарий «302 + Set-Cookie» (JS-challenge публичной страницы) оборвался бы на
         # первом хопе. Jar ключуется хостом: чужому хосту куки не отдаём, а отклонённому
         # (SSRF) — тем более.
-        jar: dict[str, dict[str, str]] = {}
+        jar = _CookieJar()
         try:
             while True:
-                hop_host = _host_of(current)
                 # Провенанс (07.11.2026): каждый хоп — отдельный запрос к своему хосту.
                 # Считается **до** ``httpx.stream``: отметка = запрос выпущен; хост берётся
                 # из фактического URL хопа, а не из хоста полосы (редирект на чужой хост —
@@ -409,7 +611,7 @@ class HttpCrawler:
                     timeout=self.timeout,
                     follow_redirects=False,
                     headers=headers,
-                    cookies=jar.get(hop_host) or None,
+                    cookies=jar.cookies_for(current) or None,
                 ) as response:
                     target = self._redirect_target(current, response)
                     if target is not None:
@@ -419,7 +621,7 @@ class HttpCrawler:
                                 f"превышено число редиректов ({self.max_redirects}) "
                                 f"при фетче {url!r}"
                             )
-                        _collect_cookies(response, jar.setdefault(hop_host, {}))
+                        jar.collect(response, current)
                         current = target
                         # ``continue`` выходит из ``with`` (поток закрывается) и берёт
                         # следующий хоп уже провалидированным.
@@ -501,9 +703,10 @@ class HttpCrawler:
         """Цель следующего хопа или ``None`` (это не редирект / редиректы выключены).
 
         Возвращает **уже провалидированный** абсолютный URL: ``Location`` разрешается
-        относительно ``current`` (:func:`urllib.parse.urljoin`) и проходит
-        ``validate_url``. Небезопасная цель — ``CrawlUrlError``: запрос на неё не
-        выпускается, её байты не читаются и не кэшируются (R10). Тип совпадает с
+        относительно ``current`` (:func:`urllib.parse.urljoin`) и проходит SSRF-проверку
+        хопа (:meth:`_validate_target`). Небезопасная цель — ``CrawlUrlError``: запрос на
+        неё не выпускается, её байты не читаются и не кэшируются (R10). Неразрешившийся
+        хост — ``CrawlResolutionError`` (сбой резолва, не отказ URL). Тип отказа совпадает с
         отказом браузерного транспорта (``crawl_browser._default_http_get``) и с
         отказом входного URL, поэтому pipeline ловит один класс на все три случая.
 
@@ -523,13 +726,9 @@ class HttpCrawler:
             # ``3xx`` без ``Location`` — не хоп: остаётся обычным ответом (как у httpx).
             return None
         target = urljoin(current, str(location))
-        try:
-            validate_url(target)
-        except ValueError as exc:
-            raise CrawlUrlError(
-                f"редирект на небезопасный URL отклонён SSRF-валидацией: {exc}"
-            ) from exc
-        return target
+        return self._validate_target(
+            target, prefix="редирект на небезопасный URL отклонён SSRF-валидацией"
+        )
 
     def _staging_path(
         self, plan: FetchPlan, *, url: str, content_type: str | None = None

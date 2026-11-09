@@ -69,6 +69,20 @@ Playwright при ``launch``/``launch_persistent_context`` добавляет ``
 **SSRF.** ``validate_url`` проверяет исходный URL до фетча. Hybrid-HTTP идёт с
 ``follow_redirects=False`` и ручным redirect-loop: каждый ``Location`` резолвится и
 повторно валидируется (приватный/metadata-хост в редиректе → ``CrawlUrlError``).
+Заданный ``resolver`` (прод — ``socket.getaddrinfo``) делает проверку входного URL,
+целей редиректов и финального ``page.url`` пост-резолвной: имя, резолвящееся в
+не-глобальный адрес, отклоняется так же, как литерал. ``resolver=None`` — прежнее
+поведение (только литералы).
+
+**Что браузерный транспорт закрыть не может (названная граница, а не недоделка).**
+Собственную навигацию страницы ведёт движок: ``_page.goto`` выпускает запрос, и только
+после него проверяется ``page.url``. Для редиректов браузера это **проверка до
+использования**, не «до запроса»: внутреннее имя или внутренний редирект уже получил
+запрос (blind SSRF). Hop-by-hop guard, как в ``http``/``scrapy``, здесь недостижим —
+перехват каждого хопа требует прокси внутри браузера. Баты отклонённой навигации в
+корпус не попадают (отказ до извлечения), поэтому это граница SSRF-эгресса, а не
+целостности корпуса; вместе с S9g (нет пиннинга адреса) она означает: браузерный
+транспорт — только для объявленных хостов с уже проверенным входным URL.
 
 **Ошибки.** Таксономия объявлена в порту — ``core.ports.crawl_errors`` (R5), модуль её
 только поднимает: ``CrawlError`` — базовая; ``CrawlUrlError`` — отказ SSRF;
@@ -101,14 +115,21 @@ from core.ports.crawl_errors import (
     CrawlError,
     CrawlNotFound,
     CrawlRefused,
+    CrawlResolutionError,
     CrawlUnavailable,
     CrawlUrlError,
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.rate_limit import RateLimiter, jittered_backoff
+from core.util.redirects import ResolverFn
 from core.util.robots import RobotsGate
-from core.util.security import validate_url
+from core.util.security import (
+    ResolutionError,
+    SsrfError,
+    resolve_and_validate,
+    validate_url,
+)
 
 __all__ = [
     "CHALLENGE_STATUSES",
@@ -258,10 +279,13 @@ def _navigate_page(
 class _PlaywrightSession:
     """Сессия поверх страницы Playwright (context общий, страница — на сессию)."""
 
-    def __init__(self, page: Any, context: Any, timeout_ms: int) -> None:
+    def __init__(
+        self, page: Any, context: Any, timeout_ms: int, resolver: ResolverFn | None = None
+    ) -> None:
         self._page = page
         self._context = context
         self._timeout_ms = timeout_ms
+        self._resolver = resolver
         self._closed = False
 
     def navigate(self, url: str, wait_for: str | None = None) -> tuple[str, bytes]:
@@ -269,7 +293,8 @@ class _PlaywrightSession:
 
         Возвращает ``(финальный URL, байты HTML)``: финальный URL — пост-редиректный
         ``page.url`` (A3), он же повторно валидируется (SSRF через редирект браузера не
-        обходит защиту).
+        обходит защиту). При заданном резолвере проверка пост-резолвная: браузерный
+        редирект на имя, ведущее внутрь периметра, отклоняется.
         """
         if self._closed:
             raise CrawlError("браузерная сессия уже закрыта")
@@ -277,10 +302,18 @@ class _PlaywrightSession:
             self._page.goto(url, wait_until="domcontentloaded", timeout=self._timeout_ms)
             final_url = str(getattr(self._page, "url", "") or url)
             try:
-                validate_url(final_url)
-            except ValueError as exc:
+                if self._resolver is None:
+                    validate_url(final_url)
+                else:
+                    resolve_and_validate(final_url, resolver=self._resolver)
+            except SsrfError as exc:
                 raise CrawlUrlError(
                     f"навигация завершилась на небезопасном URL: {exc}"
+                ) from exc
+            except ResolutionError as exc:
+                raise CrawlResolutionError(
+                    f"не удалось разрешить финальный URL {final_url!r} ({exc}): "
+                    "повтор осмыслен"
                 ) from exc
             if wait_for:
                 # ``wait_for`` — JS-условие (совместимо с ``plan.wait_for``/crawl_scrapy).
@@ -338,12 +371,14 @@ class _PlaywrightBackend:
         headless: bool,
         channel: str | None,
         timeout_ms: int,
+        resolver: ResolverFn | None = None,
     ) -> None:
         self._cdp_url = cdp_url
         self._user_data_dir = user_data_dir
         self._headless = headless
         self._channel = channel
         self._timeout_ms = timeout_ms
+        self._resolver = resolver
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
@@ -358,7 +393,9 @@ class _PlaywrightBackend:
     def open(self) -> BrowserSession:
         """Открывает новую страницу в общем контексте (контекст поднимается лениво)."""
         context = self._ensure_context()
-        return _PlaywrightSession(context.new_page(), context, self._timeout_ms)
+        return _PlaywrightSession(
+            context.new_page(), context, self._timeout_ms, self._resolver
+        )
 
     def _assert_owner_thread(self) -> None:
         """Движок трогает только поток-создатель; иначе — внятный отказ.
@@ -507,6 +544,7 @@ class BrowserCrawler:
         user_agent: str | None = DEFAULT_USER_AGENT,
         rate_limiter: RateLimiter | None = None,
         robots: RobotsGate | None = None,
+        resolver: ResolverFn | None = None,
     ) -> None:
         self._backend = backend
         self._http_get = http_get
@@ -518,6 +556,10 @@ class BrowserCrawler:
         self._timeout_ms = timeout_ms
         self._user_agent = user_agent
         self._rate_limiter = rate_limiter
+        # Резолвер — операторская настройка прод-сборки (``socket.getaddrinfo``), не
+        # условие измерения: ``run_id`` от неё не зависит. ``None`` — прежнее поведение
+        # (только литеральная SSRF-проверка).
+        self._resolver = resolver
         # D1/§10: per-host политика robots.txt (egress-слой). ``None`` → без проверки;
         # тесты инъектят политику без сети.
         self._robots = robots
@@ -543,9 +585,16 @@ class BrowserCrawler:
             raise CrawlError("BrowserCrawler закрыт: fetch после close() запрещён")
 
         try:
-            validate_url(url)
-        except ValueError as exc:
+            if self._resolver is None:
+                validate_url(url)
+            else:
+                resolve_and_validate(url, resolver=self._resolver)
+        except SsrfError as exc:
             raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
+        except ResolutionError as exc:
+            raise CrawlResolutionError(
+                f"не удалось разрешить хост URL {url!r} ({exc}): повтор осмыслен"
+            ) from exc
 
         # D1/§10: robots.txt-запрет — отказ (не сбой транспорта); элемент терминален, и
         # frontier от него не расширяется (обрабатывает pipeline). Гейт **условен**:
@@ -843,8 +892,10 @@ class BrowserCrawler:
         """Реальный GET через ``httpx`` с cookie-jar и ручным redirect-loop.
 
         ``follow_redirects=False``: каждый ``Location`` резолвится и повторно валидируется
-        (:func:`~core.util.security.validate_url`), чтобы редирект на приватный/metadata-хост
-        не обошёл SSRF-защиту. При отказе — ``CrawlUrlError``.
+        (:func:`~core.util.security.validate_url`; при заданном резолвере — ещё и
+        пост-резолвно, :func:`~core.util.security.resolve_and_validate`), чтобы редирект
+        на приватный/metadata-хост (в том числе по DNS-имени) не обошёл SSRF-защиту.
+        При отказе — ``CrawlUrlError``.
         """
         httpx = self._import_http()
         jar = {
@@ -870,10 +921,19 @@ class BrowserCrawler:
             if response.status_code in _REDIRECT_STATUSES and location:
                 current = urljoin(current, location)
                 try:
-                    validate_url(current)
-                except ValueError as exc:
+                    if self._resolver is None:
+                        validate_url(current)
+                    else:
+                        resolve_and_validate(current, resolver=self._resolver)
+                except SsrfError as exc:
                     raise CrawlUrlError(
                         f"редирект на небезопасный URL отклонён SSRF-валидацией: {exc}"
+                    ) from exc
+                except ResolutionError as exc:
+                    # Сбой DNS на хопе — транзиентный исход, а не отказ политики.
+                    raise CrawlResolutionError(
+                        f"не удалось разрешить цель редиректа {current!r} ({exc}): "
+                        "повтор осмыслен"
                     ) from exc
                 continue
             return response.status_code, response.content, dict(response.headers)
@@ -900,6 +960,7 @@ class BrowserCrawler:
                 headless=self._headless,
                 channel=self._channel,
                 timeout_ms=self._timeout_ms,
+                resolver=self._resolver,
             )
         return self._backend
 

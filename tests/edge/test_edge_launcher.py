@@ -28,6 +28,7 @@ from core.edge.config import (
 from core.edge.poller import FeedPollService
 from core.edge.server import EdgeGateway, serve
 from core.ports.types import ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
+from core.util.redirects import system_resolver
 
 # ---------------------------------------------------------------------------
 # Fake-адаптеры / gateway (без сети)
@@ -356,6 +357,10 @@ def test_crawler_factory_builds_expected_adapters() -> None:
     assert isinstance(edge_main.crawler_factory("http"), HttpCrawler)
     assert isinstance(edge_main.crawler_factory("scrapy"), ScrapyCrawler)
     assert isinstance(edge_main.crawler_factory("browser"), BrowserCrawler)
+    # Edge-воркер получает реальный резолвер: пост-резолвная SSRF-проверка не теряется
+    # при сборке внутри процесса (``run_id`` от этого не зависит).
+    for engine in ("http", "scrapy", "browser"):
+        assert edge_main.crawler_factory(engine)._resolver is system_resolver
     # Регистронезависимо (со strip); движок-атрибут совпадает с запрошенным (провенанс).
     assert edge_main.crawler_factory("HTTP").engine == "http"
     assert edge_main.crawler_factory("Scrapy").engine == "scrapy"

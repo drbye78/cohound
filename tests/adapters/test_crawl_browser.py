@@ -9,6 +9,7 @@ cookie-мост, родовую детекцию challenge (по статусу)
 
 from __future__ import annotations
 
+import socket
 import sys
 import types
 from pathlib import Path
@@ -26,6 +27,7 @@ from core.domain.models import RateLimitSpec
 from core.ports.crawl_errors import (
     CrawlError,
     CrawlNotFound,
+    CrawlResolutionError,
     CrawlUnavailable,
     CrawlUrlError,
 )
@@ -170,6 +172,16 @@ class _FakeHttpxModule:
         self.calls.append(url)
         index = min(len(self.calls) - 1, len(self._responses) - 1)
         return self._responses[index]
+
+
+def _host_resolver(mapping: dict[str, str]):
+    """Резолвер-заглушка: имя → адрес; неизвестное имя — публичный адрес. Сети нет."""
+
+    def resolve(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        address = mapping.get(hostname, "93.184.216.34")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    return resolve
 
 
 def _plan(
@@ -667,6 +679,69 @@ def test_default_http_get_too_many_redirects(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(CrawlError, match="редирект"):
         crawler._default_http_get(URL, {}, [])
+
+
+def test_default_http_get_rejects_dns_name_resolving_internally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DNS-имя в ``Location``, резолвящееся в петлю, отклоняется при резолвере."""
+    fake = _FakeHttpxModule(
+        [_FakeHttpxResponse(302, {"location": "http://internal.example/internal"})]
+    )
+    crawler = BrowserCrawler(
+        backend=FakeBackend(),
+        resolver=_host_resolver({"internal.example": "127.0.0.1"}),
+    )
+    monkeypatch.setattr(crawler, "_import_http", lambda: fake)
+
+    with pytest.raises(CrawlUrlError):
+        crawler._default_http_get(URL, {}, [])
+    assert fake.calls == [URL]  # до небезопасного хопа не дошли
+
+
+def test_default_http_get_follows_public_dns_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Публичный ответ резолвера — редирект проходит."""
+    fake = _FakeHttpxModule(
+        [
+            _FakeHttpxResponse(302, {"location": "https://public.example/final"}),
+            _FakeHttpxResponse(200, {"Content-Type": "text/html"}, b"final-body"),
+        ]
+    )
+    crawler = BrowserCrawler(backend=FakeBackend(), resolver=_host_resolver({}))
+    monkeypatch.setattr(crawler, "_import_http", lambda: fake)
+
+    status, body, _headers = crawler._default_http_get(URL, {}, [])
+
+    assert status == 200
+    assert body == b"final-body"
+    assert fake.calls == [URL, "https://public.example/final"]
+
+
+def test_fetch_rejects_source_url_resolving_internally() -> None:
+    """Входной URL, имя которого резолвится в петлю, отвергается до навигации."""
+    backend = FakeBackend()
+    crawler = BrowserCrawler(
+        backend=backend, resolver=_host_resolver({"example.com": "127.0.0.1"})
+    )
+
+    with pytest.raises(CrawlUrlError):
+        crawler.fetch(URL)
+
+    assert backend.sessions == []
+
+
+def test_fetch_resolution_failure_is_resolution_error() -> None:
+    """Сбой DNS входного URL — ``CrawlResolutionError`` (повтор осмыслен), не SSRF."""
+
+    def broken(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        raise OSError("dns down")
+
+    crawler = BrowserCrawler(backend=FakeBackend(), resolver=broken)
+
+    with pytest.raises(CrawlResolutionError):
+        crawler.fetch(URL)
 
 
 def test_available_true_with_injected_backend() -> None:

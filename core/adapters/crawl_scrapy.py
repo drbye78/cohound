@@ -23,8 +23,10 @@ I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``por
   лента — тем более (иначе сбой чтения стал бы вечным разрешением);
 * **похоповая валидация редиректов** (R10) — стоковые ``RedirectMiddleware`` и
   ``MetaRefreshMiddleware`` заменяются подклассами, которые проверяют цель каждого хопа
-  (``validate_url``) и при нарушении поднимают ``IgnoreRequest``, **не** выпуская запрос;
-  отказ доезжает до вызывающего как ``CrawlUrlError`` (см. ``_redirect_guard_classes``);
+  (``validate_url``, а при заданном резолвере — ещё и пост-резолвно
+  ``resolve_and_validate``) и при нарушении поднимают ``IgnoreRequest``, **не** выпуская
+  запрос; отказ доезжает до вызывающего как ``CrawlUrlError`` (см.
+  ``_redirect_guard_classes``);
 * **playwright per-request** — при ``plan.fetch is FetchMode.BROWSER`` запрос идёт с
   ``playwright``-meta (снимок после готовности JS, ``plan.wait_for``; V5-оговорки 05 §2.5);
 * **ретраи — не в движке, а в слое фетча.** ``RETRY_ENABLED=False``/``RETRY_TIMES=0``:
@@ -80,12 +82,14 @@ Twisted-реактор и не требуют браузеров. Если ``fet
 **Ошибки.** Таксономия сбоев объявлена в порту — ``core.ports.crawl_errors`` (R5):
 ``CrawlError``, ``CrawlNotFound`` (``failure_kind="not_found"``), ``CrawlUrlError``
 (``CrawlError`` + ``ValueError``), ``CrawlRefused`` (политика), ``CrawlPayloadTooLarge``,
-``CrawlUnavailable`` (движок не поднялся). Этот модуль их **не объявляет** — только
+``CrawlResolutionError`` (DNS: повтор осмыслен), ``CrawlUnavailable`` (движок не
+поднялся). Этот модуль их **не объявляет** — только
 поднимает. Сбой фетча здесь — ``CrawlError`` (pipeline изолирует по документу и
 отображает на ``source_unavailable``). Определённый ответ «ресурса нет» (HTTP 404/410)
 поднимает ``CrawlNotFound``: pipeline делает такой исход терминальным (без повторов) и
 не считает origin нечитаемым. Отклонённый SSRF-валидацией URL поднимает ``CrawlUrlError``
-— и на входе, и на любом хопе редиректа.
+— и на входе, и на любом хопе редиректа. Неразрешившийся хост — ``CrawlResolutionError``:
+это не отказ политики, а временная недоступность (тот же класс, что у HTTP-транспорта).
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров; профили — данные.
 """
@@ -112,12 +116,19 @@ from core.ports.crawl_errors import (
     CrawlNotFound,
     CrawlPayloadTooLarge,
     CrawlRefused,
+    CrawlResolutionError,
     CrawlUrlError,
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.http_audit import current_attempt
-from core.util.security import validate_url
+from core.util.redirects import ResolverFn
+from core.util.security import (
+    ResolutionError,
+    SsrfError,
+    resolve_and_validate,
+    validate_url,
+)
 
 #: Таксономия сбоев (``CrawlError`` и подклассы) объявлена в **порту** —
 #: ``core.ports.crawl_errors`` (R5), а не здесь: её ловит вызывающий, не зная транспорта.
@@ -259,7 +270,9 @@ class _CrawlSpec:
     ``unsafe_redirect`` — запрос не выпущен: цель редиректа отклонена SSRF-валидацией
     (R10). Отдельный флаг, а не ``error_kind``: ``FailureKind`` описывает наблюдения
     краула/конвейера, а это отказ транспорта до запроса — он поднимается как
-    ``CrawlUrlError``, ровно как отказ входного URL.
+    ``CrawlUrlError``, ровно как отказ входного URL. ``resolution_error`` — цель редиректа
+    не разрешилась (DNS): это не отказ политики, а транзиентный сетевой исход, поэтому
+    поднимается :class:`CrawlResolutionError` (повтор осмыслен).
 
     ``robots`` — **объявленная ось** ``FetchPlan.robots``: ``True`` (дефолт) — Scrapy
     соблюдает ``robots.txt``; ``False`` — запрос несёт ``dont_obey_robotstxt``, и лента не
@@ -277,6 +290,7 @@ class _CrawlSpec:
     error_kind: str | None = None
     http_status: int | None = None
     unsafe_redirect: bool = False
+    resolution_error: bool = False
     robots: bool = True
 
 
@@ -324,6 +338,11 @@ def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
         # ``error_kind`` не заполняется: это отказ транспорта до запроса, а не
         # наблюдение краула (см. ``_CrawlSpec.unsafe_redirect``).
         spec.unsafe_redirect = True
+        spec.error = f"Scrapy-краул {spec.url!r}: {_failure_value(failure)}"
+        return
+    if _is_resolution_failure(failure):
+        # Сбой DNS на хопе: транзиентный сетевой исход, а не отказ политики.
+        spec.resolution_error = True
         spec.error = f"Scrapy-краул {spec.url!r}: {_failure_value(failure)}"
         return
     if _is_robots_refusal(failure):
@@ -645,6 +664,11 @@ def _as_crawl_error(url: str, exc: BaseException) -> CrawlError:
 #: подстроке превратил бы в отказ любой отфильтрованный запрос (см. ``_is_robots_refusal``).
 _REDIRECT_GUARD_MARKER = "cohound: redirect target rejected by SSRF validation"
 
+#: Префикс сообщения ``IgnoreRequest``, которым redirect-middleware сообщает **сбой
+#: резолва** цели (DNS), а не отказ политики. Отдельная метка обязательна: сбой резолва
+#: транзиентен (:class:`CrawlResolutionError`), тогда как отказ SSRF терминален.
+_REDIRECT_RESOLUTION_MARKER = "cohound: redirect target resolution failed"
+
 #: Стоковые middleware редиректов Scrapy, которые заменяются нашими подклассами.
 #: Оба обязательны: meta-refresh — второй способ увести запрос на чужой адрес.
 _STOCK_REDIRECT_MIDDLEWARES: tuple[str, ...] = (
@@ -790,26 +814,50 @@ def _http_audit_middleware_class() -> type:
     return _HttpAuditMiddleware
 
 
-@lru_cache(maxsize=1)
-def _redirect_guard_classes() -> tuple[type, type]:
+def _redirect_guard_classes(
+    resolver: ResolverFn | None = None,
+) -> tuple[type, type]:
     """Строит подклассы redirect/meta-refresh middleware с **похоповой** валидацией (R10).
 
     Стоковый ``RedirectMiddleware`` резолвит ``Location`` и сразу возвращает запрос —
     единственная ``validate_url`` в адаптере стоит на входном URL, поэтому редирект на
     приватный/metadata-адрес обходил SSRF-защиту. Подкласс перехватывает
     ``_redirect`` (единственную точку, через которую проходят и обычный редирект, и
-    переход ``POST``→``GET``): цель проверяется ``validate_url`` до возврата запроса,
-    при нарушении поднимается ``IgnoreRequest`` с меткой :data:`_REDIRECT_GUARD_MARKER`
-    — запрос на небезопасный адрес **не выпускается**.
+    переход ``POST``→``GET``): цель проверяется до возврата запроса, при нарушении
+    поднимается ``IgnoreRequest`` с меткой :data:`_REDIRECT_GUARD_MARKER` — запрос на
+    небезопасный адрес **не выпускается**.
+
+    ``resolver`` задан — цель проверяется ещё и пост-резолвно
+    (:func:`core.util.security.resolve_and_validate`): имя, резолвящееся в не-глобальный
+    адрес, отклоняется так же, как литерал. ``None`` — прежнее поведение (литералы).
+    Резолв синхронный (``getaddrinfo`` в потоке реактора): это операторская настройка
+    прод-сборки, а не условие измерения.
 
     Scrapy-классы строятся лениво (модуль импортируется и без Scrapy), поэтому фабрика,
-    а не объявление на уровне модуля. ``lru_cache``: идентичность классов стабильна,
-    настройки Scrapy ссылаются на них напрямую.
+    а не объявление на уровне модуля. Без резолвера пара классов кэшируется
+    (``lru_cache``): её идентичность стабильна, настройки Scrapy ссылаются на неё напрямую.
+    С резолвером строится своя пара — она замыкает переданный резолвер и потому не может
+    быть общей.
 
     Потолок хопов не вводится: действует ``REDIRECT_MAX_TIMES`` (дефолт 20), при
     превышении стоковый код поднимает ``IgnoreRequest("max redirections reached")`` и
     классификация остаётся общей (``source_unavailable``) — это не SSRF-отказ.
     """
+    if resolver is None:
+        return _default_redirect_guard_classes()
+    return _build_redirect_guard_classes(resolver)
+
+
+@lru_cache(maxsize=1)
+def _default_redirect_guard_classes() -> tuple[type, type]:
+    """Пара guard-классов без резолвера — прежнее поведение (только литералы)."""
+    return _build_redirect_guard_classes(None)
+
+
+def _build_redirect_guard_classes(
+    resolver: ResolverFn | None,
+) -> tuple[type, type]:
+    """Собирает подклассы middleware, замыкая переданный резолвер (``None`` — без DNS)."""
     from scrapy.downloadermiddlewares.redirect import (
         MetaRefreshMiddleware,
         RedirectMiddleware,
@@ -827,9 +875,18 @@ def _redirect_guard_classes() -> tuple[type, type]:
         if not target:
             return
         try:
-            validate_url(str(target))
-        except ValueError as exc:
+            if resolver is None:
+                validate_url(str(target))
+            else:
+                resolve_and_validate(str(target), resolver=resolver)
+        except SsrfError as exc:
             raise IgnoreRequest(f"{_REDIRECT_GUARD_MARKER}: {target!r}: {exc}") from exc
+        except ResolutionError as exc:
+            # Сбой DNS — не отказ политики: отдельная метка, чтобы классификация не
+            # записала временную недоступность как «небезопасный адрес» (повтор осмыслен).
+            raise IgnoreRequest(
+                f"{_REDIRECT_RESOLUTION_MARKER}: {target!r}: {exc}"
+            ) from exc
 
     # ``super()._redirect`` здесь недоступен: базовые классы приходят из ленивого
     # импорта, и статический анализ не видит их ``_redirect``. Вызов базы по имени
@@ -851,6 +908,12 @@ def _redirect_guard_classes() -> tuple[type, type]:
             return MetaRefreshMiddleware._redirect(self, redirected, request, reason)
 
     return _GuardedRedirectMiddleware, _GuardedMetaRefreshMiddleware
+
+
+def _is_resolution_failure(failure: Any) -> bool:
+    """Отказал ли redirect-middleware сбоем резолва (а не SSRF-политикой)."""
+    value = _failure_value(failure)
+    return str(value).strip().startswith(_REDIRECT_RESOLUTION_MARKER)
 
 
 def _is_unsafe_redirect(failure: Any) -> bool:
@@ -1029,10 +1092,17 @@ class ScrapyCrawler:
         scrapy_settings: Mapping[str, Any] | None = None,
         worker: _ReactorWorker | None = None,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        resolver: ResolverFn | None = None,
     ) -> None:
         """``fetcher`` — тестовый шов; ``cache`` — глобальный кэш; ``scrapy_settings`` —
         переопределения настроек реального пути; ``worker`` — тестовый шов общего
-        реактор-воркера (по умолчанию — process-глобальный singleton).
+        реактор-воркера (по умолчанию — process-глобальный singleton); ``resolver`` —
+        резолвер хоста в форме ``socket.getaddrinfo``.
+
+        ``resolver`` задан — входной URL и каждая цель редиректа проверяются пост-резолвно
+        (:func:`core.util.security.resolve_and_validate`): имя, резолвящееся в
+        не-глобальный адрес, отклоняется. ``None`` — прежнее поведение (литералы).
+        Операторская настройка прод-сборки, не условие измерения (``run_id`` не меняется).
 
         Профили домена здесь **не** хранятся: план получения (``FetchPlan``) резолвится
         в pipeline (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`) и передаётся
@@ -1048,6 +1118,7 @@ class ScrapyCrawler:
         self._scrapy_settings = dict(scrapy_settings or {})
         self._worker = worker
         self._max_response_bytes = int(max_response_bytes)
+        self._resolver = resolver
 
     @property
     def available(self) -> bool:
@@ -1069,9 +1140,16 @@ class ScrapyCrawler:
         if plan is None:
             plan = FetchPlan()
         try:
-            validate_url(url)
-        except ValueError as exc:
+            if self._resolver is None:
+                validate_url(url)
+            else:
+                resolve_and_validate(url, resolver=self._resolver)
+        except SsrfError as exc:
             raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
+        except ResolutionError as exc:
+            raise CrawlResolutionError(
+                f"не удалось разрешить хост URL {url!r} ({exc}): повтор осмыслен"
+            ) from exc
 
         use_cache = plan.fetch is FetchMode.HTTP
         key = http_key(url)
@@ -1236,6 +1314,12 @@ class ScrapyCrawler:
         self._worker_instance().submit(settings, spec, fut, timeout_s)
 
         if spec.error:
+            if spec.resolution_error:
+                # Сбой резолва хопа — не приговор URL: отдельный класс, повтор осмыслен
+                # (:func:`core.ports.crawl_errors.is_transient_fetch_error`).
+                raise CrawlResolutionError(
+                    spec.error, http_status=spec.http_status
+                )
             if spec.unsafe_redirect:
                 # R10: редирект вёл на небезопасный адрес — запрос не выпускался.
                 # Тип тот же, что у отказа входного URL (``CrawlUrlError``): для
@@ -1385,20 +1469,20 @@ class ScrapyCrawler:
         middleware[_http_audit_middleware_class()] = _HTTP_AUDIT_MIDDLEWARE_PRIORITY
         settings["DOWNLOADER_MIDDLEWARES"] = middleware
 
-    @staticmethod
-    def _install_redirect_guard(settings: dict[str, Any]) -> None:
+    def _install_redirect_guard(self, settings: dict[str, Any]) -> None:
         """Ставит redirect-middleware с похоповой валидацией вместо стокового (R10).
 
         Стоковые ``RedirectMiddleware``/``MetaRefreshMiddleware`` заменяются подклассами
         с :func:`_redirect_guard_classes` на их же приоритетах (600/580), а сами стоковые
         отключаются (``None``) — иначе редирект проходил бы мимо проверки. Ставится
         **после** переопределений оператора: отказ от проверки не должен получаться
-        забывчивостью конфига (та же логика, что у ``304`` выше).
+        забывчивостью конфига (та же логика, что у ``304`` выше). Резолвер адаптера
+        передаётся в guard: каждая цель редиректа проверяется пост-резолвно, если он задан.
 
         ``None`` в ``DOWNLOADER_MIDDLEWARES`` — штатный способ Scrapy выключить
         middleware из ``DOWNLOADER_MIDDLEWARES_BASE``.
         """
-        guarded_redirect, guarded_metarefresh = _redirect_guard_classes()
+        guarded_redirect, guarded_metarefresh = _redirect_guard_classes(self._resolver)
         middleware = dict(settings.get("DOWNLOADER_MIDDLEWARES") or {})
         for name in _STOCK_REDIRECT_MIDDLEWARES:
             middleware[name] = None

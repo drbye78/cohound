@@ -29,6 +29,8 @@
 
 * ``CrawlUrlError`` — и ``CrawlError``, и ``ValueError`` (``security.validate_url``
   поднимает ``ValueError``; вызывающий ловит одним из двух, не зная про транспорт);
+* ``CrawlResolutionError`` — сбой DNS до ответа: не отказ политики и не «движок
+  недоступен», а транзиентная недоступность (``is_transient_fetch_error`` → ``True``);
 * ``CrawlRefused`` несёт ``refusal_reason`` — машинный код причины отказа по политике:
   ``robots_disallow`` (сайт запретил путь) либо ``robots_unavailable`` (ленту
   ``robots.txt`` прочитать не удалось, поэтому origin не обходится — RFC 9309 §2.3.1.4);
@@ -56,6 +58,7 @@ __all__ = [
     "CrawlNotFound",
     "CrawlPayloadTooLarge",
     "CrawlRefused",
+    "CrawlResolutionError",
     "CrawlUnavailable",
     "CrawlUrlError",
     "is_transient_fetch_error",
@@ -94,6 +97,17 @@ class CrawlUrlError(CrawlError, ValueError):
 
     Множественное наследование намеренно: вызывающий может ловить и как
     ``CrawlError``, и как ``ValueError`` (``validate_url`` поднимает ``ValueError``).
+    """
+
+
+class CrawlResolutionError(CrawlError):
+    """Хост URL не разрешился (DNS) — ответа не было, повтор осмыслен.
+
+    Отличается от :class:`CrawlUrlError` (отказ политики: адрес небезопасен, повтор
+    бессмыслен) и от :class:`CrawlUnavailable` (не поднялся движок/зависимость —
+    деградация транспорта). Здесь транспорт исправен, но имя не разрешилось:
+    временный сбой резолвера или сети. ``http_status`` — ``None``, поэтому
+    :func:`is_transient_fetch_error` относит класс к повторяемым, а не терминальным.
     """
 
 

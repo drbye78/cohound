@@ -212,11 +212,17 @@ def test_edge_robots_fetcher_reads_feed_by_page_scheme(
     from core.edge import crawler_factory as factory_module
 
     calls: list[str] = []
+    resolver_kwargs: list[Any] = []
 
     class _Page:
         content = b""
 
     class _Stub:
+        def __init__(self, resolver: Any = None) -> None:
+            # Пост-резолвная SSRF-проверка (09.11.2026): edge-фетчер ленты получает
+            # системный резолвер. Адрес конструкции изменился — проверяем, что он не пропал.
+            resolver_kwargs.append(resolver)
+
         def fetch(self, url: str, plan: Any = None) -> Any:
             calls.append(url)
             return _Page()
@@ -230,3 +236,4 @@ def test_edge_robots_fetcher_reads_feed_by_page_scheme(
         "http://example.com/robots.txt",
         "https://example.com/robots.txt",
     ]
+    assert resolver_kwargs and all(callable(r) for r in resolver_kwargs)

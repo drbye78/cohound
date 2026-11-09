@@ -15,12 +15,24 @@ metadata-эндпоинт, а SSRF-проверка видела бы уже г�
 
 from __future__ import annotations
 
+import socket
 from typing import Any
 
 import pytest
 
 from core.adapters.registry_generic import RegistryFetchError
 from core.cli.wiring import _RegistryHttpClient
+
+
+def _host_resolver(mapping: dict[str, str]):
+    """Резолвер-заглушка: имя → адрес; неизвестное имя — публичный адрес. Сети нет."""
+
+    def resolve(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        address = mapping.get(hostname, "93.184.216.34")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    return resolve
+
 
 URL = "https://registry.example/api/search/x"
 INTERNAL_URLS = (
@@ -115,6 +127,41 @@ def test_public_redirect_is_followed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all(kwargs["headers"] == {"Accept": "application/json"} for _u, kwargs in fake.calls)
     assert all(kwargs["timeout"] == 5.0 for _u, kwargs in fake.calls)
 
+def test_redirect_to_dns_name_resolving_internally_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DNS-имя в ``Location``, резолвящееся в петлю, отклоняется при резолвере."""
+    fake = _FakeHttpx(
+        [_FakeResponse(302, headers={"Location": "http://internal.example/secret"})]
+    )
+    _install(monkeypatch, fake)
+    client = _RegistryHttpClient(
+        resolver=_host_resolver({"internal.example": "127.0.0.1"})
+    )
+
+    with pytest.raises(RegistryFetchError) as err:
+        client.get(URL, {"Accept": "application/json"}, 5.0)
+
+    assert "редирект на небезопасный адрес" in str(err.value)
+    assert fake.urls == [URL]  # небезопасный хоп не запрошен
+
+
+def test_public_dns_resolution_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Публичный ответ резолвера — редирект проходит."""
+    fake = _FakeHttpx(
+        [
+            _FakeResponse(301, headers={"Location": "https://public.example/moved"}),
+            _FakeResponse(200, b'{"items": [{"name": "Example"}]}'),
+        ]
+    )
+    _install(monkeypatch, fake)
+
+    body = _RegistryHttpClient(resolver=_host_resolver({})).get(URL, {}, 5.0)
+
+    assert body == b'{"items": [{"name": "Example"}]}'
+    assert fake.urls == [URL, "https://public.example/moved"]
+
+
 def test_redirect_cap_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     from core.util.redirects import DEFAULT_MAX_REDIRECTS
 
@@ -140,6 +187,42 @@ def test_http_error_is_reported_as_registry_failure(
 
     with pytest.raises(RegistryFetchError):
         _RegistryHttpClient().get(URL, {}, 5.0)
+
+
+@pytest.mark.parametrize("internal", INTERNAL_URLS)
+def test_internal_entry_url_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, internal: str
+) -> None:
+    """Входной URL проверяется клиентом, а не только цели редиректов.
+
+    ``follow_validated_redirects`` стартовый URL по контракту не валидирует — без этой
+    проверки первый запрос уходил бы непроверенным, хотя докстринг обещал обратное.
+    """
+    fake = _FakeHttpx([_FakeResponse(200, b"{}")])
+    _install(monkeypatch, fake)
+
+    with pytest.raises(RegistryFetchError) as err:
+        _RegistryHttpClient().get(internal, {}, 5.0)
+
+    assert "небезопасный URL" in str(err.value)
+    assert fake.urls == []  # ни одного запроса
+
+
+def test_entry_url_resolving_internally_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """То же для DNS-имени: ``resolver`` делает проверку входного URL пост-резолвной."""
+    fake = _FakeHttpx([_FakeResponse(200, b"{}")])
+    _install(monkeypatch, fake)
+    client = _RegistryHttpClient(
+        resolver=_host_resolver({"registry.internal": "169.254.169.254"})
+    )
+
+    with pytest.raises(RegistryFetchError) as err:
+        client.get("https://registry.internal/api", {}, 5.0)
+
+    assert "небезопасный URL" in str(err.value)
+    assert fake.urls == []
 
 def test_redirect_without_location_is_a_plain_response(
     monkeypatch: pytest.MonkeyPatch,

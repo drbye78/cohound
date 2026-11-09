@@ -53,6 +53,16 @@ from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.redirects import DEFAULT_MAX_REDIRECTS
 
+
+def _host_resolver(mapping: dict[str, str]):
+    """Резолвер-заглушка: имя → адрес; неизвестное имя — публичный адрес. Сети нет."""
+    def resolve(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        address = mapping.get(hostname, "93.184.216.34")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    return resolve
+
+
 URL_A = "https://example.com/a"
 URL_B = "https://example.com/b"
 URL_C = "https://example.com/c"
@@ -693,6 +703,66 @@ def test_fetch_forwards_hop_by_hop_and_keeps_final_url(
     assert fake.get_calls == [URL_A, "https://example.com/moved"]  # относительный Location
     assert page.content == b"<html>final</html>"
     assert page.url == "https://example.com/moved"  # провенанс финального адреса
+
+
+def test_fetch_rejects_redirect_to_dns_name_resolving_internally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DNS-имя в ``Location``, резолвящееся в петлю, отклоняется при заданном резолвере."""
+    fake = _FakeHttpx(
+        get=[_FakeResponse(302, headers={"Location": "http://internal.example/secret"})]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    adapter = YandexSearchAdapter(
+        search_mode="sync",
+        resolver=_host_resolver({"internal.example": "127.0.0.1"}),
+    )
+
+    with pytest.raises(SearchError) as err:
+        adapter.fetch(URL_A)
+
+    assert "редирект на небезопасный адрес" in str(err.value)
+    assert fake.get_calls == [URL_A]  # небезопасный хоп не запрошен
+
+
+def test_fetch_allows_redirect_to_public_dns_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Публичный ответ резолвера — редирект проходит, финальный URL сохраняется."""
+    fake = _FakeHttpx(
+        get=[
+            _FakeResponse(302, headers={"Location": "/moved"}),
+            _FakeResponse(200, b"<html>final</html>"),
+        ]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    adapter = YandexSearchAdapter(search_mode="sync", resolver=_host_resolver({}))
+
+    page = adapter.fetch(URL_A)
+
+    assert page.url == "https://example.com/moved"
+    assert fake.get_calls == [URL_A, "https://example.com/moved"]
+
+
+def test_fetch_rejects_source_url_resolving_internally() -> None:
+    """Входной URL, имя которого резолвится в петлю, отвергается до запроса."""
+    adapter = YandexSearchAdapter(
+        search_mode="sync", resolver=_host_resolver({"example.com": "127.0.0.1"})
+    )
+
+    with pytest.raises(ValueError):
+        adapter.fetch(URL_A)
+
+
+def test_fetch_resolution_failure_is_search_error() -> None:
+    """Сбой DNS — сбой живого вызова (``SearchError``), а не отказ политики."""
+    def broken(hostname: str) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        raise OSError("dns down")
+
+    adapter = YandexSearchAdapter(search_mode="sync", resolver=broken)
+
+    with pytest.raises(SearchError, match="не удалось разрешить хост"):
+        adapter.fetch(URL_A)
 
 
 def test_fetch_redirect_loop_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:

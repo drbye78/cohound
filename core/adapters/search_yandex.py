@@ -80,7 +80,7 @@ from typing import Any
 from core.ports.search import SearchQuery, SearchResult, SearchTiming
 from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
-from core.util.redirects import follow_validated_redirects
+from core.util.redirects import ResolverFn, follow_validated_redirects
 from core.util.retry import (
     BASE_RETRY_DELAY,
     MAX_RETRY_ATTEMPTS,
@@ -89,7 +89,7 @@ from core.util.retry import (
     HttpRetryError,
     request_with_retry,
 )
-from core.util.security import validate_url
+from core.util.security import ResolutionError, resolve_and_validate, validate_url
 
 __all__ = [
     "BASE_RETRY_DELAY",
@@ -237,6 +237,12 @@ class YandexSearchAdapter:
     :param max_wait: общий таймаут ожидания async-операции, с (>0).
     :param cache: глобальный content-addressed кэш ``fetch`` (R7); ``None`` → без кэша.
     :param timeout: таймаут HTTP-запроса, с.
+    :param resolver: резолвер хоста в форме ``socket.getaddrinfo``; ``None`` — прежнее
+        поведение (только литеральная SSRF-проверка). Задан — входной URL и каждый
+        ``Location`` дополнительно проверяются пост-резолвно
+        (:func:`core.util.security.resolve_and_validate`): имя, резолвящееся в приватный
+        адрес, отклоняется. Операторская настройка, не условие измерения (``run_id`` не
+        меняется).
     """
 
     adapter_kind = "serp"
@@ -261,6 +267,7 @@ class YandexSearchAdapter:
         max_wait: float = DEFAULT_MAX_WAIT,
         cache: ContentAddressedCache | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        resolver: ResolverFn | None = None,
     ) -> None:
         if not base_url:
             raise ValueError("base_url обязан быть непустым")
@@ -312,6 +319,7 @@ class YandexSearchAdapter:
         self.max_wait = max_wait
         self._cache = cache
         self.timeout = timeout
+        self._resolver = resolver
 
     @property
     def endpoint(self) -> str:
@@ -403,10 +411,13 @@ class YandexSearchAdapter:
         """Загружает страницу по URL: SSRF-валидация → кэш → живой GET → кэш.
 
         ``validate_url`` поднимает ``ValueError`` на приватные/петлевые цели (SSRF);
-        при отказе живого запроса — ``SearchError``. Возвращает только сырые байты в
-        ``RawPage`` (retention I19); хэширование/нарезка — вне адаптера.
+        при заданном ``resolver`` входной URL проходит ещё и пост-резолвную проверку
+        (:func:`core.util.security.resolve_and_validate`): DNS-имя, ведущее внутрь
+        периметра, тоже отклоняется. При отказе живого запроса — ``SearchError``.
+        Возвращает только сырые байты в ``RawPage`` (retention I19);
+        хэширование/нарезка — вне адаптера.
         """
-        validate_url(url)
+        self._validate_target(url)
         key = http_key(url)
         if self._cache is not None:
             cached = self._cache.get_bytes("http", key)
@@ -420,6 +431,25 @@ class YandexSearchAdapter:
     # ------------------------------------------------------------------
     # Построение запроса / разбор ответа
     # ------------------------------------------------------------------
+
+    def _validate_target(self, url: str) -> None:
+        """SSRF-проверка цели: пост-резолвная при заданном резолвере, иначе литеральная.
+
+        Единая точка политики для входного URL (``fetch``): без ``resolver`` адаптер
+        ведёт себя как прежде, с резолвером — дополнительно отвергает имя, резолвящееся
+        в не-глобальный адрес.
+        """
+        if self._resolver is not None:
+            try:
+                resolve_and_validate(url, resolver=self._resolver)
+            except ResolutionError as exc:
+                # Сбой DNS — сбой живого вызова (pipeline: source_unavailable), а не
+                # отказ политики: ``SearchError`` того же класса, что и прочие сбои HTTP.
+                raise SearchError(
+                    f"не удалось разрешить хост URL {url!r}: {exc}"
+                ) from exc
+        else:
+            validate_url(url)
 
     def _build_payload(self, text: str, lang: str, limit: int) -> dict[str, Any]:
         """JSON-payload веб-поиска v2 (данные провайдера, без секретов)."""
@@ -718,7 +748,8 @@ class YandexSearchAdapter:
 
         ``follow_redirects=False`` у самого запроса: цикл ведёт
         :func:`core.util.redirects.follow_validated_redirects`, и каждый ``Location``
-        проходит ``validate_url`` **до** выпуска запроса. Прежде адаптер полагался на
+        проходит ``validate_url`` **до** выпуска запроса (при заданном ``resolver`` —
+        ещё и пост-резолвную проверку имени). Прежде адаптер полагался на
         ``follow_redirects=True`` — публичная страница могла увести фетч на
         ``127.0.0.1``/``10.0.0.1``/metadata-эндпоинт, и SSRF-проверка видела бы уже
         готовый ответ. Отказ хопа — :class:`SearchError` с причиной «редирект на
@@ -735,6 +766,7 @@ class YandexSearchAdapter:
                 url,
                 error=SearchError,
                 label=f"HTTP-фетч {url!r}",
+                resolver=self._resolver,
             )
             response.raise_for_status()
         except SearchError:

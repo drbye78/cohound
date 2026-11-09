@@ -11,6 +11,7 @@ content-addressed кэшем (промах → фетч → запись → п�
 from __future__ import annotations
 
 import contextlib
+import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,8 +26,10 @@ from core.ports.crawl_errors import (
     CrawlError,
     CrawlNotFound,
     CrawlPayloadTooLarge,
+    CrawlResolutionError,
     CrawlUnavailable,
     CrawlUrlError,
+    is_transient_fetch_error,
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
@@ -44,6 +47,35 @@ def _counting_fetcher(calls: list[str], content: bytes = BODY):
         return content
 
     return fetch
+
+
+def _resolver(*addresses: str):
+    """Резолвер-заглушка: ``getaddrinfo``-подобные записи для заданных адресов."""
+
+    def resolve(hostname: str) -> list[tuple[Any, ...]]:
+        return [
+            (
+                socket.AF_INET6 if ":" in address else socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                (address, 0),
+            )
+            for address in addresses
+        ]
+
+    return resolve
+
+
+def _public_except_private_name(private_host: str):
+    """Резолвер: ``private_host`` → ``127.0.0.1``, остальные имена — публичный адрес."""
+
+    def resolve(hostname: str) -> list[tuple[Any, ...]]:
+        if hostname == private_host:
+            return _resolver("127.0.0.1")(hostname)
+        return _resolver("93.184.216.34")(hostname)
+
+    return resolve
 
 
 class _FakeResponse:
@@ -224,6 +256,93 @@ def test_ssrf_error_is_crawl_error_too() -> None:
     assert issubclass(CrawlUrlError, ValueError)
 
 
+def test_resolver_none_keeps_literal_only_behaviour() -> None:
+    """Без резолвера поведение прежнее: DNS-имя не резолвится, фетч идёт как раньше."""
+    calls: list[str] = []
+    crawler = HttpCrawler(_counting_fetcher(calls))  # resolver=None — дефолт
+
+    page = crawler.fetch("https://internal.example/page")
+
+    assert page.content == BODY
+    assert calls == ["https://internal.example/page"]
+
+
+def test_resolver_rejecting_private_address_is_permanent_url_error() -> None:
+    """Имя, резолвящееся в ``127.0.0.1``, отклоняется **до** запроса как ``CrawlUrlError``.
+
+    ``validate_url`` такое имя пропускает (он не резолвит DNS); закрывает случай
+    post-resolve проверка. Класс отказа — постоянный: запрос не выпущен вовсе.
+    """
+    calls: list[str] = []
+    crawler = HttpCrawler(_counting_fetcher(calls), resolver=_resolver("127.0.0.1"))
+
+    with pytest.raises(CrawlUrlError) as excinfo:
+        crawler.fetch("https://internal.example/page")
+
+    assert "SSRF" in str(excinfo.value)
+    assert calls == []
+
+
+def test_resolver_allowing_public_address_lets_fetch_proceed() -> None:
+    """Имя, резолвящееся в публичный адрес, проходит и фетчится как обычно."""
+    calls: list[str] = []
+    crawler = HttpCrawler(_counting_fetcher(calls), resolver=_resolver("93.184.216.34"))
+
+    page = crawler.fetch(URL)
+
+    assert page.content == BODY
+    assert calls == [URL]
+
+
+def test_resolver_failure_is_not_a_url_rejection() -> None:
+    """Сбой резолва — ``CrawlResolutionError``, а не ``CrawlUrlError``.
+
+    Различие то самое, из-за которого правило существует: временный DNS-сбой не должен
+    попасть в карту как «небезопасный URL», иначе адрес выпал бы из измерения как отказ
+    политики. Класс отказа обязан быть другим, транзиентным (повтор осмыслен), и фетч,
+    разумеется, не выпускается.
+    """
+
+    def broken(hostname: str) -> list[tuple[Any, ...]]:
+        raise OSError("DNS недоступен")
+
+    calls: list[str] = []
+    crawler = HttpCrawler(_counting_fetcher(calls), resolver=broken)
+
+    with pytest.raises(CrawlResolutionError) as excinfo:
+        crawler.fetch("https://flaky.example/page")
+
+    assert not isinstance(excinfo.value, CrawlUrlError)
+    assert not isinstance(excinfo.value, CrawlUnavailable)
+    assert is_transient_fetch_error(excinfo.value) is True
+    assert "разрешить" in str(excinfo.value)
+    assert calls == []
+
+
+def test_redirect_hop_resolved_to_private_address_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Похоповая проверка работает и через резолвер: имя-редирект на приватный адрес — отказ."""
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(
+                url=URL, status_code=302, location="https://internal.example/final"
+            ),
+            _FakeResponse(url="https://internal.example/final", content=BODY, status_code=200),
+        ],
+        cache,
+        resolver=_public_except_private_name("internal.example"),
+    )
+
+    with pytest.raises(CrawlUrlError):
+        crawler.fetch(URL)
+
+    assert [call[0] for call in fake.calls] == [URL]
+    assert cache.get_bytes("http", http_key(URL)) is None
+
+
 @pytest.mark.parametrize("render", [FetchMode.BROWSER, "browser"])
 def test_browser_fetch_raises_honest_error(render: object) -> None:
     calls: list[str] = []
@@ -342,11 +461,13 @@ def _crawler_with_httpx(
     monkeypatch: pytest.MonkeyPatch,
     responses: list[_FakeResponse],
     cache: ContentAddressedCache,
+    *,
+    resolver: Any = None,
 ) -> tuple[HttpCrawler, _FakeHttpx]:
     """Краулер на фейковом ``httpx`` (сеть не используется)."""
     fake = _FakeHttpx(responses)
     monkeypatch.setattr(HttpCrawler, "_import_http", staticmethod(lambda: fake))
-    return HttpCrawler(cache=cache), fake
+    return HttpCrawler(cache=cache, resolver=resolver), fake
 
 
 def test_first_fetch_sends_no_conditional_headers_and_writes_meta(
@@ -908,6 +1029,146 @@ def test_redirect_does_not_forward_cookie_to_foreign_host(
             ),
         ],
         cache,
+    )
+
+    crawler.fetch(URL)
+
+    assert fake.calls[1][1].get("Cookie") is None
+
+
+def _two_hop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    set_cookie: str,
+    location: str,
+    second_url: str,
+    tag: str = "a",
+) -> tuple[HttpCrawler, _FakeHttpx]:
+    """Двухшаговая цепочка: хоп 1 ставит куку и редиректит на ``second_url``.
+
+    ``tag`` — отдельный подкаталог кэша: два прогона в одном тесте не должны делить
+    кэш (иначе второй прогон стал бы кэш-хитом и до сети не дошёл).
+    """
+    cache = ContentAddressedCache(tmp_path / tag)
+    return _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(
+                url=URL, status_code=302, location=location, set_cookie=set_cookie
+            ),
+            _FakeResponse(url=second_url, content=BODY, status_code=200),
+        ],
+        cache,
+    )
+
+
+def test_secure_cookie_is_not_sent_over_plain_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Secure`` соблюдается: https→http кука не уезжает; https→https — уезжает."""
+    crawler, fake = _two_hop(
+        monkeypatch,
+        tmp_path,
+        set_cookie="sid=abc; Secure; Path=/",
+        location="http://example.com/final",
+        second_url="http://example.com/final",
+    )
+
+    crawler.fetch(URL)
+
+    assert fake.calls[1][1].get("Cookie") is None
+
+    # Контроль: тот же ``Secure`` на https-хопе — кука отправляется (не потеряна вовсе).
+    crawler_https, fake_https = _two_hop(
+        monkeypatch,
+        tmp_path,
+        set_cookie="sid=abc; Secure; Path=/",
+        location="/final",
+        second_url="https://example.com/final",
+        tag="b",
+    )
+
+    crawler_https.fetch(URL)
+
+    assert fake_https.calls[1][1]["Cookie"] == "sid=abc"
+
+
+def test_cookie_path_scopes_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Path=/admin`` не уходит на ``/public``, но уходит в ``/admin``."""
+    crawler, fake = _two_hop(
+        monkeypatch,
+        tmp_path,
+        set_cookie="sid=abc; Path=/admin",
+        location="/public",
+        second_url="https://example.com/public",
+    )
+
+    crawler.fetch(URL)
+
+    assert fake.calls[1][1].get("Cookie") is None
+
+    # Контроль: внутри своей области (``/admin/panel``) кука отправляется.
+    crawler_admin, fake_admin = _two_hop(
+        monkeypatch,
+        tmp_path,
+        set_cookie="sid=abc; Path=/admin",
+        location="/admin/panel",
+        second_url="https://example.com/admin/panel",
+        tag="b",
+    )
+
+    crawler_admin.fetch(URL)
+
+    assert fake_admin.calls[1][1]["Cookie"] == "sid=abc"
+
+
+def test_expired_cookie_is_not_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Истёкшая кука (``Expires`` в прошлом) не отправляется на следующий хоп."""
+    crawler, fake = _two_hop(
+        monkeypatch,
+        tmp_path,
+        set_cookie="sid=abc; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Path=/",
+        location="/final",
+        second_url="https://example.com/final",
+    )
+
+    crawler.fetch(URL)
+
+    assert fake.calls[1][1].get("Cookie") is None
+
+
+def test_cookie_domain_attribute_reaches_subdomain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Domain=example.com`` — domain-match по суффиксу: поддомен получает куку."""
+    crawler, fake = _two_hop(
+        monkeypatch,
+        tmp_path,
+        set_cookie="sid=abc; Domain=.example.com; Path=/",
+        location="https://docs.example.com/final",
+        second_url="https://docs.example.com/final",
+    )
+
+    crawler.fetch(URL)
+
+    assert fake.calls[1][1]["Cookie"] == "sid=abc"
+
+
+def test_cookie_declared_for_foreign_domain_is_not_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Хоп не может выписать куку чужому домену: ``Domain`` вне поставившего хоста — отказ."""
+    crawler, fake = _two_hop(
+        monkeypatch,
+        tmp_path,
+        set_cookie="sid=abc; Domain=other.example.net; Path=/",
+        location="https://other.example.net/final",
+        second_url="https://other.example.net/final",
     )
 
     crawler.fetch(URL)
