@@ -801,7 +801,7 @@ class DiscoveryLLMPort(Protocol):
 | `xml_safe.py` | ленивый доступ к `defusedxml` (единственное место, знающее про extra) |
 | `text_utils.py` | многоязычные текстовые утилиты (RU/EN) |
 | `cjk_lexical.py` | сегментация CJK для лексического контура: биграммы внутри прогонов (без зависимостей) |
-| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:98` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
+| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:148` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
 | `agreement.py` | согласие аннотаторов: Cohen's κ (§11.5) |
 | `cache.py` | глобальный content-addressed кэш внешних вызовов (R7, ADR 0016) |
 | `retry.py` | bounded retry/backoff с уважением `Retry-After` (S6) — вынесен из поискового адаптера: политика повторов общая, а провайдер — commodity |
@@ -938,7 +938,7 @@ pytest + `--cov` (`scripts/ci.sh:82-88`).
 | `09` онбординг/инкремент | §3.10 (`ProductStatePort`), §3.9 (контейнеры), §4 (`run_isolated`, resume/N4) |
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
-`core/pipeline/retrieve.py:98` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
+`core/pipeline/retrieve.py:148` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
 `core/domain/models.py:1508`; структура `ProtocolExhaustion` — `core/domain/models.py:1345`;
 политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2808` (`max_retries`), цикл
 `core/pipeline/evaluate.py:3120`;

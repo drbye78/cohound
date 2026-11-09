@@ -44,7 +44,7 @@
 | `core/db.py` (был) | ✅ переехал в W1/T1.3 → `core/store/sqlite.py`; монолит **удалён** | DDL §4.4 + триггеры |
 | `core/util/text_utils.py` | готово (W1/W2/W8) | RU/EN-нормализация |
 | `core/util/security.py` | готово (W2/W7) | SSRF-защита URL, `sanitize_slug` |
-| `core/util/fusion.py` (был) | ✅ **удалён** (`aa4185b`): мёртвый дубль, не подключённый ни одним прод-путём; живое RRF — `core/pipeline/retrieve.py:98` (`rrf_fuse_chunks`) | RRF-слияние (реализация — в `retrieve.py`) |
+| `core/util/fusion.py` (был) | ✅ **удалён** (`aa4185b`): мёртвый дубль, не подключённый ни одним прод-путём; живое RRF — `core/pipeline/retrieve.py:148` (`rrf_fuse_chunks`) | RRF-слияние (реализация — в `retrieve.py`) |
 | `core/util/retrieval_eval.py` | готово; основа W8/T8.6 | retrieval-метрики |
 | `core/adapters/chunker_markdown.py` | готово; за портом W7/T7.3 | чанкер с `heading_path` |
 | `core/adapters/extract_document.py` | готово (PDF+Office); за портом W7/T7.2 | docling-экстрактор |
@@ -478,7 +478,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W8 — Ретривал и индекс — ✅ код done; ⚠️ фиксация не воспроизведена (KS-sweep нет)
 
-✅ сделано (код, проверено) — `core/pipeline/retrieve.py:98` (`rrf_fuse_chunks`),
+✅ сделано (код, проверено) — `core/pipeline/retrieve.py:148` (`rrf_fuse_chunks`),
 `core/cli/commands/experiment.py:101-170` (персист `retrieval_profile`/`K`/`rrf_k` + `settings_provenance`,
 и только при полном сравнении).
 ⚠️ не сделано — замер R0/R1/R2 + K-свип: KS-sweep в дереве отсутствует (`grep -rln "KS-sweep"

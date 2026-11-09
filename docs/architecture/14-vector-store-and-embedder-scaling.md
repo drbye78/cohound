@@ -122,7 +122,7 @@ Brute-force косинус, тот же код (`_cosine_scores`), 1024 dim. З�
 **Матмул — не проблема.** Проблема в трёх накладных расходах, которые берутся на **каждый**
 вызов `search`:
 
-1. `read_partition` (`core/adapters/index_format.py:169`) — `np.load` **без mmap**: 23.3 MB с
+1. `read_partition` (`core/adapters/index_format.py:185`) — `np.load` **без mmap**: 23.3 MB с
    диска на каждый запрос. 900 000 запросов × 23.3 MB = **21 TB чтений**.
 2. `np.asarray(partition.vectors, dtype=np.float32)` — конверсия всей партиции в fp32:
    **новая аллокация 46.7 MB** и 27.8 ms на каждый запрос (тогдашний `NpyVectorIndex.search`;
@@ -360,7 +360,7 @@ embed_model_id, embed_device, embed_precision)`): подключён в
 | аспект | правило |
 |---|---|
 | `embed(texts)` | один HTTP-вызов на батч; ответ — ровно `len(texts)` векторов |
-| неполный ответ | **ошибка**, не «сколько пришло»: иначе индекс соберётся короче `chunk_ids` и упадёт позже (`core/adapters/index_format.py:122-124`) |
+| неполный ответ | **ошибка**, не «сколько пришло»: иначе индекс соберётся короче `chunk_ids` и упадёт позже (`core/adapters/index_format.py:126-129`) |
 | число/порядок | порядок входа = порядок выхода (A3); батчи нарезает адаптер, а не вызывающий |
 | размерность | `dim` проверяется на каждом ответе, не только на первом |
 | ретраи | ≤2 на батч, только идемпотентно (повтор того же запроса); подмена модели запрещена |
@@ -375,7 +375,7 @@ embed_model_id, embed_device, embed_precision)`): подключён в
 ### Оговорка 1 (главная): версия модели обязана быть пином, а не надеждой
 
 ✅ локальная часть сделана — `LiteEmbedder` даёт `repo@sha`: `self.model_id = f"{model_id}@{revision}"
-if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то же объяснение в
+if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же объяснение в
 `core/adapters/embed_local.py:143-144` для `LocalEmbedder`).
 ⬜ внешняя часть не сделана — нет `RemoteEmbedder`, значит нет ни сверки `model_version` с
 объявленной, ни отказа на пустой пин (правило 1 §5.0).
@@ -456,7 +456,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 Локальный `LocalEmbedder` режет батчи сам; у HTTP-адаптера появятся свои ограничения: размер
 батча, rate limit, таймаут, частичный ответ. Нужен контракт: неполный батч — ошибка, не
 «сколько пришло» (иначе индекс соберётся короче `chunk_ids` и упадёт позже, в
-`vector_npy.py:176-181`). Ретраи — как у оценщика (≤2, `llm_local.py:48`), но с тем же
+`vector_npy.py:427-431`). Ретраи — как у оценщика (≤2, `llm_local.py:48`), но с тем же
 запретом: модель/версия не подменяется на «другую доступную».
 
 ### Оговорка 5: устройство и точность эмбеддера объявлены, `vector_digest` сверяется (as-built)
@@ -505,8 +505,8 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 (`core/pipeline/corpus_index.py:866`) на 29.10.2026 сверял шесть объявленных полей манифеста:
 `content_digest`, `chunker_version`, `embed_model_id`, `extractor_version`,
 `lexical_engine_version`, `vector_store`. `vector_digest` — полный отпечаток, включающий
-**байты векторов** (`core/adapters/index_npy.py:305`) — в этом списке отсутствовал, хотя
-сборщик его писал, а `_guard_immutable` (`:324`) его сверял. Разница существенна: при
+**байты векторов** (`core/adapters/index_npy.py:358`) — в этом списке отсутствовал, хотя
+сборщик его писал, а `_guard_immutable` (`:407`) его сверял. Разница существенна: при
 переиспользовании сборка не строится, значит `_guard_immutable` не исполняется, и партиция
 с чужими векторами принимается молча. Ось `pdf_device` такой лазейки не имеет только
 потому, что устройство уже в `extractor_version`.
@@ -563,13 +563,13 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 
 1. ✅ **top-k метаданных** — резолвить `top_k`, а не все чанки: 11 400 запросов в SQLite
    → 10 на поиск (`vector_npy.py:_ranked_rows`/`_resolve_top`).
-   Проверено: `core/adapters/vector_npy.py:351` (`_resolve_top`), `:517` (`_ranked_rows` —
+   Проверено: `core/adapters/vector_npy.py:351` (`_resolve_top`), `:529` (`_ranked_rows` —
    ленивый генератор, добор при неизвестном чанке), вызов резолвера — `:374`, `:383` (по
    кандидатам top-k, а не по всей партиции).
 2. ✅ **mmap + fp16 без конверсии** в `read_partition`; кэш партиции на продукт
    (`PartitionCache`, бюджет 256 MiB, ключ включает `partition_build_id`).
-   Проверено: `core/adapters/index_format.py:169` (`read_partition`), `:217-224`
-   (`_load_vectors`; `np.load(..., mmap_mode="r")` — `:221`), `core/adapters/vector_npy.py:90`
+   Проверено: `core/adapters/index_format.py:185` (`read_partition`), `:233-240`
+   (`_load_vectors`; `np.load(..., mmap_mode="r")` — `:237`), `core/adapters/vector_npy.py:90`
    (`DEFAULT_PARTITION_CACHE_BYTES = 256 * 1024 * 1024`), `:119` (`PartitionCache`), ключ
    `(index_root, package, partition_build_id, product_id)` — `:76`.
    ⚠️ **Остаток, перенесённый из `10` §6 (A2) при его удалении 08.11.2026:** бюджет кэша —
@@ -646,7 +646,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
   правило сработает только если §5.0 будет реализован как написано. Это повтор истории с
   `COHOUND_LLM_MODEL`: `run_id`/`pb` перестанут описывать, чем собраны векторы.
 - ✅ **Не заменять `embed_model_id` на «имя сервиса».** Держится: `embed_model_id` строится
-  адаптером из модели и ревизии (`core/adapters/embed_model2vec.py:111-112`) и пишется в
+  адаптером из модели и ревизии (`core/adapters/embed_model2vec.py:113`) и пишется в
   `pb`/манифест; поля «адрес сервиса» в провенансе нет.
   `bge-m3@<version>` — прибор; `embed.corp.internal` — адрес. В провенанс идёт первое.
 
@@ -713,7 +713,7 @@ GPU-пути. Продакшн не меняется: CPU-путь резерв�
 едет из адаптера в индекс как `list[list[float]]`: `matrix.tolist()` в
 `core/adapters/embed_local.py`, затем `[float(x) for x in row]` по всем 1024 компонентам в
 `_validate`, затем `np.asarray(vectors, dtype=np.float16)`
-(`core/adapters/index_npy.py:149`). На каждый чанк создаётся килобайт Python-объектов, которые
+(`core/adapters/index_npy.py:164`). На каждый чанк создаётся килобайт Python-объектов, которые
 сразу упаковываются обратно в fp16 — и всё это на главном потоке, до и после GPU. Кэш
 добавляет `_half(component)` по 1024 компонентам и запись с `fsync` (5.1 мс на `put`,
 `2026-10-25-embed-cache-footprint.md` §2). Замер: время главного потока на 1 чанк при

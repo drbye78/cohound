@@ -104,7 +104,7 @@ absence/evidence-модель, а значит по `AGENTS.md` §9 (класс�
 |---|---|---|
 | ось `embed_device` (`cpu\|cuda`) в контракте | до границы устройство эмбеддера выбирал torch, а `run_id` об этом не знал (`14` оговорка 5) | `execution_change` |
 | `embed_device` в материале `pb` и в проверке переиспользования партиции | иначе CPU-партиция молча переиспользуется CUDA-прогоном | `content_change` (следствие) |
-| `vector_digest` в проверке переиспользования | сборщик его пишет (`core/adapters/index_npy.py:305`), `_guard_immutable` сверяет (`core/adapters/index_npy.py:324`), но при переиспользовании сборка не строится — гард не исполняется | `content_change` |
+| `vector_digest` в проверке переиспользования | сборщик его пишет (`core/adapters/index_npy.py:358`), `_guard_immutable` сверяет (`core/adapters/index_npy.py:407`), но при переиспользовании сборка не строится — гард не исполняется | `content_change` |
 | `content_hash` в `chunk_ids.jsonl` | **необходимое условие** предыдущего пункта, см. §5 | формат партиции `partition-2` |
 | `embed_device` в ключе `embed_cache` | иначе CPU-прогон получит CUDA-векторы | стоимость, не идентичность |
 | `runs.cohort_ref` — писать `cfg.cohort_ref`, а не имя файла когорты (**✅ сделано**) | манифест показывает ревизию, которой в `run_id` не было (`09` §12.2) | провенанс, `run_id` **не** меняется |
@@ -396,10 +396,10 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 устройства — отказ, а не CPU (прецедент `require_pdf_device`).
 
 `LocalEmbedder` получает `device=` в конструктор и передаёт в
-`SentenceTransformer(...)` (`core/adapters/embed_local.py:144`, `core/adapters/embed_local.py:228`)
+`SentenceTransformer(...)` (`core/adapters/embed_local.py:145`, `core/adapters/embed_local.py:229`)
 — до границы
 аргумента не было, и устройство выбирал torch; теперь там же `precision=` (fp16 через
-`torch.autocast`, `core/adapters/embed_local.py:240`).
+`torch.autocast`, `core/adapters/embed_local.py:241`).
 
 ---
 
@@ -421,8 +421,8 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 
 Материал `_derive_partition_build_id` (`core/pipeline/corpus_index.py:86-151`) получает `embed_device`
 рядом с `embed_model_id`; манифест партиции — ключ `embed_device` в том же явном словаре
-(`core/adapters/index_npy.py:270-300`, где `extra` сливается на
-`core/adapters/index_npy.py:300`; второго места нет);
+(`core/adapters/index_npy.py:323-353`, где `extra` сливается на
+`core/adapters/index_npy.py:353`; второго места нет);
 проверка `_partition_reuse_reason` (`core/pipeline/corpus_index.py:866-949`) — в `expected`
 (`core/pipeline/corpus_index.py:911-923`; сегодня ключей **восемь**: шесть прежних плюс
 `embed_device` и `embed_precision`).
@@ -444,11 +444,11 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 
 `vector_digest` считается как хеш `chunk_ids` + `content_hashes` + байтов матрицы
 (`core/util/index_partition.py:107` — **одна** формула на сборщика и на пересчёт) и пишется
-в манифест (`core/adapters/index_npy.py:305`). До границы на диск `chunk_ids.jsonl` писал
+в манифест (`core/adapters/index_npy.py:358`). До границы на диск `chunk_ids.jsonl` писал
 **только** `{"chunk_id": …}`, и `content_hash` не сохранялся — пересчитать `vector_digest`
 из партиции было **нельзя**, поэтому проверка «просто добавить его в `expected`» не
 работала: сверять было бы нечего. Сегодня строка несёт `content_hash`, когда сборщик его
-передаёт (`core/adapters/index_format.py:143-146`).
+передаёт (`core/adapters/index_format.py:159-162`).
 
 Отсюда два шага, оба в `partition-2`:
 
