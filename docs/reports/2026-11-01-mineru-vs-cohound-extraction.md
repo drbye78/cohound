@@ -37,7 +37,7 @@
 | Стадия | Где | Существенное |
 |---|---|---|
 | Маршрут формата | `core/cli/wiring.py:2119` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:457`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
-| PDF `text_layer` | `core/adapters/extract_pdf_text.py:203` | pypdfium2, постранично, плоский текст; пустая страница → `error="no_text_layer"` (`:267`; 183 из 16 073 стр., 1.14 %) |
+| PDF `text_layer` | `core/adapters/extract_pdf_text.py:203` | pypdfium2, постранично, плоский текст; отказ `error="no_text_layer"` ставится, только когда слоя нет у **всего** документа (`:267`). Отдельных пустых страниц — **182 из 15 929** (1.14 %, замер 25.10.2026); такая страница сейчас исчезает без пометки (план `26`, O26) |
 | PDF `structured` | `core/adapters/extract_document.py:882` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
 | HTML | `core/adapters/extract_html.py:147` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |

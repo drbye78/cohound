@@ -514,9 +514,12 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   0 errors) and **0 VRAM** — a measured fact, not "unknown", since a native parser loads no
   models. That number drives the worker window, so `text_layer` gets the workers that
   docling's peak would deny. Its honest limits: tables are not rebuilt, scans are not read —
-  183 of 16 073 pages (1.14 %) carry no text layer and surface as `error="no_text_layer"`, a
-  visible extraction refusal, never an empty document; a failing page does not kill the
-  document (`partial=True`); control characters and `\r\n` are normalized, without which the
+  **182 of 15 929 pages (1.14 %) carry no text layer** (measured 25.10.2026,
+  `2026-10-25-pdf-backend-alternatives.md`; another 473 pages carry 1–39 characters).
+  `error="no_text_layer"` is raised only when the **whole document** has no text: an individual
+  empty page currently vanishes without a mark and does not set `partial` — the visibility fix
+  is plan `26` O26. A failing page does not kill the document (`partial=True`); control
+  characters and `\r\n` are normalized, without which the
   paragraph chunker matches nothing and the document becomes one chunk.
 - **There is no hybrid PDF pipeline, and that is a measurement decision, not an unfinished
   job**: pdfium lost 6.7 % of docling identifiers on a real book, and the only table detector
