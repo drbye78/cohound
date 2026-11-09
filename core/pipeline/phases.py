@@ -1530,6 +1530,10 @@ def build_phases(
             # Ось исполнения Ш6: число вызовов оценщика в полёте (не условие измерения,
             # поэтому в ``run_id`` не входит). Дефолт 1 — прежний последовательный путь.
             llm_concurrency=llm_concurrency,
+            # V3: объявленная политика повтора — **тот же** объект, что дал
+            # ``run_id`` (``DeclaredExecutionAxes.evaluation_policy``). Фаза исполняет
+            # его ``max_retries`` вместо литерала; ``None`` (оси нет) — дефолт модуля.
+            evaluation_policy=getattr(axes, "evaluation_policy", None),
         )
 
     # -- Ш7: ревью (advisory-очередь, ничего не решает за человека) ---------- #

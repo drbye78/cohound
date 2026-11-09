@@ -32,7 +32,7 @@ R0/R1/R2 (:func:`core.pipeline.experiments.run_retrieval_experiment`).
 
 **``experiment evaluator-benchmark``** (A3, Ш6) — второй вид: измеряет **модели оценщика**
 при фиксированном всём остальном (сборка, профиль/K/``rrf_k``, промпт, срез чанков,
-``seed=0``/``temperature=0.0``/``max_retries=2``/``strict``). Ретривал выполняется один раз
+``seed=0``/``temperature=0.0``/объявленный ``max_retries``/``strict``). Ретривал выполняется один раз
 до моделей, ``evaluate_cell`` идёт с ``store=None`` (измерение, не прогон). Модель берётся
 **только** из ``--model``: env ``COHOUND_LLM_*`` даёт лишь endpoint/ключ/декодер — run
 identity намеренно игнорирует env, и benchmark не должен воспроизводить это расхождение.

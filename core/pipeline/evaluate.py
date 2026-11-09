@@ -8,7 +8,7 @@ chunks  = caller-retrieval(product-scoped, top-K)   # I17/I20 — вне это�
 prompt  = compile_prompt(param, product, chunks, satellites)   # T9.1
 resp    = evaluator.complete(LLMRequest(prompt, LLMCellOutput, ...))   # I18: без веб-тула
 valid   = validate_output(resp.output, chunks_by_id, ...)              # T9.4/§10
-strict:      passed → evaluated · не прошёл → failed (retry ≤2)
+strict:      passed → evaluated · не прошёл → failed (retry ≤ max_retries)
 preliminary: passed → evaluated · не прошёл → preliminary-кандидат
 empty:       chunks=() → evaluated ❓, validation_notes=[no_fragments] — вызова модели нет
 ```
@@ -26,6 +26,13 @@ empty:       chunks=() → evaluated ❓, validation_notes=[no_fragments] — в
 Сбой вызова → ``evaluation_failed``; сбой цитатной валидации → ``validation_failed``.
 Исчерпание в strict → ``failed`` c ``status=None`` (**I4**: failed не несёт статус); в
 preliminary → ``preliminary``-кандидат c ``status=None`` (**I13**).
+
+**Объявленная политика против recovery-кнуба.** В фазе Ш6 ``max_retries`` — не
+литерал: фаза читает объявленное поле контракта ``evaluation_policy`` (то же, что вошло в
+``run_id``). У ``hound retry`` ``--max-retries`` — иное: ремонт уже объявленного прогона,
+поэтому число не входит в identity, а публикуется в провенансе (``logs/retry.jsonl``,
+сводка отчёта). Верхнего потолка нет ни у того, ни у другого: значение исполняется как
+объявлено и не подменяется тихим clamp'ом.
 
 **Провенанс промпта.** Модель ``Cell`` (``core/domain/models.py``) не несёт поля
 ``prompt_hash`` (колонка есть в БД, но не в доменной модели). Поэтому ``evaluate_cell``
@@ -100,7 +107,11 @@ from core.pipeline.eval_cache import (
     build_eval_key,
     catalog_row_digest,
 )
-from core.pipeline.evaluation_policy import EVALUATION_MIN_RETRIEVAL_SCORE
+from core.pipeline.evaluation_policy import (
+    EVALUATION_MAX_RETRIES,
+    EVALUATION_MIN_RETRIEVAL_SCORE,
+    declared_max_retries,
+)
 from core.pipeline.exhaustion import ExhaustionFacts, build_protocols
 from core.pipeline.precedence import (
     PRECEDENCE_REVIEW_REASON,
@@ -2798,7 +2809,7 @@ def evaluate_cell(
     resolver: SourceResolver | None = None,
     strict: bool = True,
     retrievals: RetrievalResult | Sequence[RetrievalResult] | None = None,
-    max_retries: int = 2,
+    max_retries: int = EVALUATION_MAX_RETRIES,
     store: StorePort | None = None,
     model_id: str | None = None,
     min_retrieval_score: float | None = None,
@@ -2822,7 +2833,10 @@ def evaluate_cell(
     :param resolver: резолвер ``source_id`` → URL (I10/I15); опционален.
     :param strict: strict (failed при исчерпании) vs preliminary (кандидат при провале).
     :param retrievals: провенанс сборки/профиля/K для ячейки (R7/I16/I20).
-    :param max_retries: число повторов сверх первой попытки (≤2 по регламенту §7.1).
+    :param max_retries: число повторов сверх первой попытки: объявленное политикой
+        ``evaluation_policy.max_retries`` (по умолчанию 2, §7.1). Значение исполняется
+        **как объявлено** — верхнего потолка и тихой подмены нет; политика входит в
+        ``run_id``, поэтому расхождение с контрактом было бы ложью об условиях замера.
     :param store: если задан — ячейка и её evidence персистятся (идемпотентно, S8).
     :param model_id: переопределение ``model_id`` (иначе берётся у оценщика, I21).
     :param min_retrieval_score: порог аномалии §7.1 п. 4 (заметка, не сбой).
@@ -3514,7 +3528,7 @@ def evaluate_batch(
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
-    max_retries: int = 2,
+    max_retries: int = EVALUATION_MAX_RETRIES,
     store: StorePort | None = None,
     retrievals_by_param: Mapping[
         str, RetrievalResult | Sequence[RetrievalResult]
@@ -3597,6 +3611,11 @@ def evaluate_batch(
         raise ValueError(
             f"llm_concurrency обязан быть ≥ 1, получено {llm_concurrency!r}"
         )
+    if max_retries < 0:
+        # То же условие, что в ``evaluate_cell``: батч не имеет права узнать об
+        # отрицательном числе только на первой ячейке (и уж тем более — молча
+        # исполнить одну попытку вместо объявленных нуля повторов).
+        raise ValueError(f"max_retries не может быть отрицательным, получено {max_retries!r}")
 
     outcomes: list[EvaluationOutcome | None] = [None] * len(params)
     errors: list[str] = []
@@ -3816,6 +3835,7 @@ def evaluate_phase(
     state: ProductStatePort | None = None,
     previous_store: StorePort | None = None,
     llm_concurrency: int = 1,
+    evaluation_policy: Mapping[str, Any] | None = None,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
 
@@ -3903,6 +3923,13 @@ def evaluate_phase(
         условие **исполнения**, а не измерения: в ``EXECUTION_CONTRACT_FIELDS`` оно не
         входит и ``run_id`` не меняет (пока замер не покажет, что вердикты меняются).
         Запись в store при этом остаётся однопоточной (см. :func:`evaluate_batch`).
+    :param evaluation_policy: **объявленная** политика повтора — то же поле контракта
+        ``evaluation_policy``, что вошло в ``run_id`` (composition root берёт его из
+        ``DeclaredExecutionAxes``). Фаза исполняет ``max_retries`` **отсюда**, а не
+        литерал: иначе объявленное и исполненное разъехались бы молча. ``None`` —
+        ось не передана (модульный вызов): действует :data:`EVALUATION_MAX_RETRIES`.
+        Значение не ограничивается сверху и не подменяется объявленным числом у
+        recovery-команды ``hound retry`` — у неё свой провенанс (``retry.jsonl``).
 
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
@@ -3928,6 +3955,13 @@ def evaluate_phase(
         raise ValueError(
             f"llm_concurrency обязан быть ≥ 1, получено {llm_concurrency!r}"
         )
+
+    # V3: число повторов — объявленная политика, а не литерал. Читается тем же
+    # помощником, которым пользуется контракт (``evaluation_policy_spec``): одно число на
+    # роль «условие измерения» и роль «что исполнять». Нечисло/отрицательное — отказ до
+    # цикла оценки; версия выше объявленной не режется потолком (A3: не ограничивать, а
+    # исполнять объявленное и показывать фактическое).
+    resolved_max_retries = declared_max_retries(evaluation_policy)
 
     cells: list[Cell] = []
     errors: list[str] = []
@@ -3955,6 +3989,11 @@ def evaluate_phase(
     # Ось исполнения: сколько вызовов оценщика было в полёте. Это провенанс исполнения
     # (в ``run_id`` не входит), но читатель отчёта обязан видеть, чем мерили по времени.
     log_entries.append(f"evaluate: llm_concurrency={llm_concurrency}")
+    # V3: фактическое число повторов вызова — в ``results[].notes`` (единственный канал:
+    # ``log_entries`` фазы не пишется ни в один файл, см. corpus_coverage). Без строки
+    # читатель отчёта не отличит прогон с объявленным ``max_retries=0`` от дефолта.
+    # Durable-копии нет; при необходимости её место — колонка прогона, а не лог фазы.
+    log_entries.append(f"evaluate: max_retries={resolved_max_retries}")
     # V7: аудит исполненных промптов. Архив живёт в фазе, а не в ячейке: путь артефакта —
     # свойство прогона, и ячейка не должна знать раскладку ``runs/``.
     prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
@@ -4244,6 +4283,8 @@ def evaluate_phase(
             carry=carry_ctx,
             reuse_conditions=reuse_conditions,
             llm_concurrency=llm_concurrency,
+            # V3: объявленная политика — тот же ``max_retries``, что в ``run_id``.
+            max_retries=resolved_max_retries,
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)
@@ -4754,7 +4795,7 @@ def _evaluate_cells_by_condition(
     strict: bool = True,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
-    max_retries: int = 2,
+    max_retries: int = EVALUATION_MAX_RETRIES,
     prompt_archive: PromptArchive | None = None,
     call_journal: LLMCallJournal | None = None,
     errors: list[str] | None = None,
@@ -4968,7 +5009,7 @@ def reevaluate_stale(
     strict: bool = True,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
-    max_retries: int = 2,
+    max_retries: int = EVALUATION_MAX_RETRIES,
     product_ids: Sequence[str] | None = None,
     param_ids: Sequence[str] | None = None,
     current_build_id: str | None = None,
@@ -5451,8 +5492,15 @@ class RetryJournal:
         outcome: str,
         failure_kind: str | None,
         duration_s: float,
+        max_retries: int,
     ) -> None:
-        """Дописывает одну попытку; сбой записи виден в :attr:`errors`, не бросается."""
+        """Дописывает одну попытку; сбой записи виден в :attr:`errors`, не бросается.
+
+        ``max_retries`` — **фактическое** число повторов вызова, с которым исполнялась
+        попытка: recovery-кнут ``hound retry --max-retries`` не меняет ``run_id``, поэтому
+        без этого поля изменение числа было бы неотличимо от продолжения прогона с
+        прежними условиями.
+        """
         self._writer.append(
             {
                 "run_id": self.run_id,
@@ -5462,6 +5510,7 @@ class RetryJournal:
                 "outcome": outcome,
                 "failure_kind": failure_kind,
                 "duration_s": round(float(duration_s), 3),
+                "max_retries": int(max_retries),
             }
         )
 
@@ -5489,6 +5538,9 @@ class RetryReport:
     :param failed_total: сколько ячеек прогона было ``failed`` на входе.
     :param retryable: сколько из них селектор признал повторяемыми.
     :param retried: сколько попыток реально исполнено.
+    :param max_retries: фактическое число повторов вызова внутри попытки
+        (recovery-кнут ``--max-retries``, в ``run_id`` не входит; видно в
+        ``logs/retry.jsonl`` и в сводке).
     :param recovered: сколько ячеек получили вердикт (``state=evaluated``).
     :param still_failed: сколько попыток вердикта не дали (I4/I13 — как и было).
     :param skipped: неотобранные ячейки с причиной (``product_id``/``param_id``/``reason``).
@@ -5504,6 +5556,7 @@ class RetryReport:
     failed_total: int = 0
     retryable: int = 0
     retried: int = 0
+    max_retries: int | None = None
     recovered: int = 0
     still_failed: int = 0
     skipped: list[dict[str, Any]] = field(default_factory=list)
@@ -5526,6 +5579,7 @@ class RetryReport:
             "failed_total": self.failed_total,
             "retryable": self.retryable,
             "retried": self.retried,
+            "max_retries": self.max_retries,
             "recovered": self.recovered,
             "still_failed": self.still_failed,
             "skipped": len(self.skipped),
@@ -5542,6 +5596,9 @@ def _retry_summary(report: RetryReport) -> str:
         f"без вердикта {report.failed_total}",
         f"повторяемо {report.retryable}",
         f"попыток {report.retried}",
+        # Recovery-кнут не входит в ``run_id``: фактическое число называется здесь и в
+        # ``retry.jsonl``, иначе смена числа выглядела бы продолжением прежних условий.
+        f"max_retries {report.max_retries}",
         f"вердикт получен {report.recovered}",
         f"осталось без вердикта {report.still_failed}",
     ]
@@ -5574,7 +5631,7 @@ def retry_failed_cells(
     strict: bool = True,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
-    max_retries: int = 2,
+    max_retries: int = EVALUATION_MAX_RETRIES,
     product_ids: Sequence[str] | None = None,
     param_ids: Sequence[str] | None = None,
     current_build_id: str | None = None,
@@ -5610,7 +5667,15 @@ def retry_failed_cells(
     :param llm_concurrency: вызовов оценщика в полёте (≥1, ось исполнения — в
         ``run_id`` не входит). Порядок записи — порядок ``(продукт, параметр)``.
     :param retry_journal: файл ``logs/retry.jsonl``; ``None`` — журнал не пишется.
+    :param max_retries: фактическое число повторов вызова внутри попытки (recovery-кнут
+        ``hound retry --max-retries``). Это **не** объявленная политика: ``run_id`` им не
+        переписывается, поэтому число публикуется в ``retry.jsonl`` и сводке отчёта;
+        верхнего потолка нет, отрицательное — отказ ``ValueError`` (не clamp).
     """
+    if max_retries < 0:
+        raise ValueError(
+            f"max_retries не может быть отрицательным, получено {max_retries!r}"
+        )
     selection = select_failed_cells(
         store, run_id, product_ids=product_ids, param_ids=param_ids
     )
@@ -5626,6 +5691,7 @@ def retry_failed_cells(
         status=RETRY_STATUS_NOOP,
         failed_total=selection.failed_total,
         retryable=len(selection.retryable_cells),
+        max_retries=max_retries,
         skipped=[dict(row) for row in selection.skipped],
     )
     if not selection.retryable_cells:
@@ -5744,6 +5810,7 @@ def retry_failed_cells(
                     outcome=str(attempt.error_kind),
                     failure_kind=kind,
                     duration_s=duration,
+                    max_retries=max_retries,
                 )
             continue
 
@@ -5788,6 +5855,7 @@ def retry_failed_cells(
                     outcome="recovered",
                     failure_kind=None,
                     duration_s=duration,
+                    max_retries=max_retries,
                 )
             continue
 
@@ -5829,6 +5897,7 @@ def retry_failed_cells(
                 outcome="no_verdict",
                 failure_kind=outcome.failure_kind,
                 duration_s=duration,
+                max_retries=max_retries,
             )
 
     report.status = RETRY_STATUS_RETRIED

@@ -49,7 +49,10 @@ from core.pipeline.evaluate import (
     retrieve_for_cell,
     run_queries_for_cell,
 )
-from core.pipeline.evaluation_policy import evaluation_policy_spec
+from core.pipeline.evaluation_policy import (
+    declared_max_retries,
+    evaluation_policy_spec,
+)
 from core.pipeline.prompt import compile_prompt, render_queries
 from core.pipeline.retrieve import RetrievalResult
 from core.pipeline.validate import ValidationResult
@@ -1062,6 +1065,40 @@ def test_evaluation_policy_spec_declares_threshold_only_when_set(
     spec = evaluation_policy_spec()
     assert spec["min_retrieval_score"] == 0.25
     assert set(spec) == {"max_retries", "min_retrieval_score"}
+
+
+def test_declared_max_retries_executes_declared_value_without_ceiling() -> None:
+    """Объявленное число исполняется как есть; ``None`` — дефолт модуля.
+
+    Верхнего потолка нет (A3): значение выше дефолта не режется, иначе объявленная
+    политика и исполнение разъехались бы молча.
+    """
+    assert declared_max_retries(None) == 2
+    assert declared_max_retries({}) == 2
+    assert declared_max_retries({"max_retries": 0}) == 0
+    assert declared_max_retries({"max_retries": 5}) == 5
+
+
+def test_declared_max_retries_rejects_negative_and_non_integer() -> None:
+    """Нечисло/отрицательное — отказ, а не тихий clamp."""
+    with pytest.raises(ValueError, match="отрицательным"):
+        declared_max_retries({"max_retries": -1})
+    with pytest.raises(ValueError, match="целым"):
+        declared_max_retries({"max_retries": "2"})
+
+
+def test_evaluate_batch_rejects_negative_max_retries() -> None:
+    """Батч отвергает отрицательное число до первой ячейки (не «одна попытка»)."""
+    data = _data()
+    with pytest.raises(ValueError, match="отрицательным"):
+        evaluate_batch(
+            params=[_param(data)],
+            product_id=data["product_id"],
+            run_id=data["run_id"],
+            evaluator=_ScriptedEvaluator([_ok_output(data)]),
+            chunks_by_param={_param(data).param_id: _chunks(data)},
+            max_retries=-1,
+        )
 
 
 def test_evaluate_batch_passes_threshold_and_notes_low_score() -> None:

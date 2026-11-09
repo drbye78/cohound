@@ -20,7 +20,9 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -389,6 +391,31 @@ def test_retry_success_clears_failure_kind_and_sets_build(store: SqliteStore) ->
     assert cell.stale_reason is None
     assert cell.index_build_id == NEW_BUILD
     assert _db_failure_kind(store) is None  # класс снят: ячейка измерена
+
+
+def test_retry_journal_records_actual_max_retries(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Строка ``retry.jsonl`` несёт фактическое число повторов (recovery-кнут)."""
+    _seed(store, _cell(), "evaluation_failed")
+    evaluator = _ScriptedEvaluator([_ok_output()])
+    ports = Ports(evaluator=evaluator, lexical_index=_LexicalStub(NEW_BUILD, [_chunk()]))
+    journal_path = tmp_path / "retry.jsonl"
+
+    report = retry_failed_cells(
+        store=store,
+        run_id=RUN_ID,
+        params={"param_alpha": _param()},
+        ports=ports,
+        max_retries=3,
+        retry_journal=journal_path,
+    )
+
+    rows = [json.loads(line) for line in journal_path.read_text("utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["max_retries"] == 3
+    assert report.max_retries == 3
+    assert "max_retries 3" in report.message
 
 
 def test_retry_uses_the_same_prompt_as_phase(store: SqliteStore) -> None:

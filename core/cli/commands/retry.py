@@ -152,7 +152,12 @@ def _current_build_id(store: Any, run_id: str) -> str | None:
 
 
 def _retries(raw: str) -> int:
-    """``argparse``-тип ``--max-retries``: целое ``≥ 0`` (0 — без повторов вызова)."""
+    """``argparse``-тип ``--max-retries``: целое ``≥ 0`` (0 — без повторов вызова).
+
+    Верхнего предела нет: recovery-кнут не условие измерения, и потолок «ради
+    безопасности» исказил бы исполнение молча. Отрицательное — usage-ошибка
+    (``EXIT_USAGE`` через ``argparse``), а не тихая подстановка нуля.
+    """
     try:
         value = int(raw)
     except ValueError as exc:
@@ -173,6 +178,8 @@ def _print_retry(payload: dict[str, Any]) -> None:
         f"failed_total: {payload['failed_total']}",
         f"retryable: {payload['retryable']}",
         f"retried: {payload['retried']}",
+        "max_retries: "
+        f"{payload.get('max_retries') if payload.get('max_retries') is not None else '—'}",
         f"recovered: {payload['recovered']}",
         f"still_failed: {payload['still_failed']}",
         f"skipped: {payload['skipped']}",
@@ -197,6 +204,15 @@ def _print_retry(payload: dict[str, Any]) -> None:
 
 def run(args: argparse.Namespace) -> int:
     """``retry``: повторить оценку ячеек без вердикта; ``run_id`` не меняется.
+
+    ``--max-retries`` — recovery-кнут, а **не** объявленная политика: он чинит уже
+    объявленный прогон, поэтому ``run_id`` не переписывается, а фактическое число
+    публикуется в ``logs/retry.jsonl`` и в сводке отчёта. Верхнего потолка нет
+    (значение исполняется как задано); отрицательное отвергается usage-ошибкой.
+    **Пробел назван:** объявленное ``evaluation_policy`` прогона не персистится
+    (``runs`` не несёт этой колонки), поэтому дефолт флага — константа модуля, а не
+    значение из манифеста; сегодня они совпадают, потому что ось не выводится из
+    ``run.yaml``. Если ось станет объявляемой — нужен столбец и чтение из него.
 
     :returns: :data:`EXIT_OK` — все отобранные получили вердикт, либо отбирать было
         нечего (в том числе частичный успех: остаток оператор видит и повторит);
@@ -254,6 +270,7 @@ def run(args: argparse.Namespace) -> int:
                 "retried": 0,
                 "recovered": 0,
                 "still_failed": 0,
+                "max_retries": args.max_retries,
                 "skipped": len(report.skipped),
                 "skipped_cells": list(report.skipped),
                 "cells": [],
@@ -280,6 +297,7 @@ def run(args: argparse.Namespace) -> int:
                     "retried": 0,
                     "recovered": 0,
                     "still_failed": 0,
+                    "max_retries": args.max_retries,
                     "skipped": len(selection.skipped),
                     "skipped_cells": list(selection.skipped),
                     "cells": [],
@@ -392,8 +410,10 @@ def configure(sub: Any) -> None:
         type=_retries,
         default=EVALUATION_MAX_RETRIES,
         metavar="N",
-        help="повторы вызова оценщика внутри попытки (дефолт — объявленная политика "
-        f"прогона: {EVALUATION_MAX_RETRIES})",
+        help="повторы вызова оценщика внутри попытки: recovery-кнут ремонта, в run_id не "
+        "входит и публикуется в logs/retry.jsonl. Дефолт — константа "
+        f"{EVALUATION_MAX_RETRIES}: объявленная политика прогона в манифесте не хранится, "
+        "поэтому прочитать её нельзя (названный пробел, plan 25 §7.3). Верхнего предела нет",
     )
     _add_llm_concurrency_flag(p_retry)
     _add_common(p_retry)

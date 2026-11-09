@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from core.cli.errors import EXIT_ERROR, EXIT_OK
+from core.cli.errors import EXIT_ERROR, EXIT_OK, EXIT_USAGE
 from core.cli.main import main
 from core.domain import (
     AbsenceRuleType,
@@ -275,6 +275,23 @@ def test_partial_success_returns_ok_with_numbers(
     ]
     assert [line["outcome"] for line in lines] == ["recovered", "no_verdict"]
     assert all(line["run_id"] == RUN_ID for line in lines)
+    # Recovery-кнут не входит в run_id: фактическое число — в каждой строке журнала и в
+    # сводке, иначе смена числа маскировалась бы под продолжение прежних условий.
+    assert all(line["max_retries"] == 0 for line in lines)
+    assert payload["max_retries"] == 0
+
+
+def test_negative_max_retries_is_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], spy: list[str]
+) -> None:
+    """``--max-retries -1`` — usage-ошибка (EXIT_USAGE), порты не собираются."""
+    db = _make_db(tmp_path, declare_model=True, params=["param_alpha"])
+
+    code = main(["retry", "--db", str(db), "--max-retries", "-1"])
+
+    assert code == EXIT_USAGE
+    assert "отрицательн" in capsys.readouterr().err
+    assert spy == []
 
 
 def test_undeclared_evaluator_model_refuses(

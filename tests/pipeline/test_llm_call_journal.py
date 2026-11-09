@@ -341,6 +341,44 @@ def test_evaluate_phase_writes_journal_under_the_run_directory(tmp_path: Path) -
     assert summary and "4 записей" in summary[0]
 
 
+def test_evaluate_phase_executes_declared_max_retries(tmp_path: Path) -> None:
+    """Фаза исполняет объявленное ``evaluation_policy.max_retries``, а не литерал.
+
+    Оценщик без scripted-выхода бросает на каждом вызове; при ``max_retries=0`` у
+    каждой из 4 ячеек ровно одна попытка. Литерал 2 дал бы 12 строк — тест ловит именно
+    расхождение «объявлено одно, исполнено другое».
+    """
+    store = _store()
+    plan = _plan()
+    evaluator = FakeEvaluator()
+    evaluator.model_id = "fake-model"  # type: ignore[attr-defined]
+    ports = Ports(
+        evaluator=evaluator,
+        embedder=_CountingEmbedder(),
+        vector_index=_RecordingVectorIndex(),
+    )
+    journal_path = tmp_path / plan.run_id / "logs" / "llm_calls.jsonl"
+    try:
+        result = evaluate_phase(
+            plan=plan,
+            ports=ports,
+            store=store,
+            run_id=plan.run_id,
+            profile="R1",
+            cutoff_k=3,
+            llm_journal=journal_path,
+            evaluation_policy={"max_retries": 0},
+        )
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    lines = _lines(journal_path)
+    assert len(lines) == 4
+    assert [line["attempt"] for line in lines] == [1, 1, 1, 1]
+    assert "evaluate: max_retries=0" in result.log_entries
+
+
 def test_journal_write_failure_is_visible_and_does_not_steal_verdicts(
     tmp_path: Path,
 ) -> None:

@@ -16,7 +16,8 @@
   :class:`CellCase`;
 * промпт: шаблон :data:`~core.pipeline.prompt.TEMPLATE_VERSION`; одинаковость входа
   доказывается совпадением ``prompt_hash`` по всем моделям (иначе — отказ, а не «ну почти»);
-* ``seed=0``, ``temperature=0.0``, ``max_retries=2``, ``strict=True``;
+* ``seed=0``, ``temperature=0.0``, ``max_retries`` = объявленная политика
+  (:data:`~core.pipeline.evaluation_policy.EVALUATION_MAX_RETRIES`), ``strict=True``;
 * golden-набор ожиданий (``golden.csv``) — один и тот же для всех моделей.
 
 **Что измеряется.** Валидность выхода (эшелон §10, переиспользуется как есть), согласие с
@@ -63,6 +64,7 @@ from core.pipeline.evaluate import (
     evaluate_cell,
     retrieve_for_cell,
 )
+from core.pipeline.evaluation_policy import EVALUATION_MAX_RETRIES
 from core.pipeline.golden_status import STATE_DECLINED, GoldenStatus
 from core.pipeline.prompt import TEMPLATE_VERSION
 from core.pipeline.retrieve import DEFAULT_RRF_K, RetrievalProfile, RetrievalResult
@@ -95,7 +97,10 @@ __all__ = [
 BENCHMARK_CONTRACT: dict[str, Any] = {
     "seed": 0,
     "temperature": 0.0,
-    "max_retries": 2,
+    # Политика повтора берётся из объявленной константы, а не литералом: смена политики —
+    # ``execution_change``, и опубликованные числа тогда несравнимы **видимо**, через
+    # изменившийся контракт, а не молча (литерал оставил бы старые числа «сравнимыми»).
+    "max_retries": EVALUATION_MAX_RETRIES,
     "strict": True,
     "prompt_template": TEMPLATE_VERSION,
     # I18: у порта оценщика структурно нет инструментов/веб-поиска.
