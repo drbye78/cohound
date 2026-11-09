@@ -350,9 +350,9 @@ class Artifacts:
     #: Блок ``partial_docs`` манифеста (те же числа, свёрнутые до продукта) — чтобы CLI
     #: мог назвать факт строкой, даже когда CSV не создан.
     partial_docs_summary: dict[str, Any] | None = None
-    #: ``outputs/support_quality.yaml`` — два замера качества поддержки карты: «о предмете
-    #: ли доказательство» и «сколько presence-ячеек держится на одной цитате». Наблюдения,
-    #: а не гейты. ``None`` — замер не нашёл материала (нет presence-ячеек).
+    #: ``outputs/support_quality.yaml`` — три замера качества поддержки карты: «о предмете
+    #: ли доказательство», «сколько presence-ячеек на одной цитате» и «сколько ``❌`` explicit
+    #: без маркера отрицания». Наблюдения, а не гейты; ``None`` — материала нет.
     support_quality: Path | None = None
     #: Те же числа свёрнутыми — чтобы CLI назвал факт строкой, даже когда файла нет.
     support_quality_summary: dict[str, Any] | None = None
@@ -3573,11 +3573,11 @@ def write_reports(
     partial_summary = partial_docs_summary(
         store, run_id, products=sorted({str(cell.product_id) for cell in cell_list})
     )
-    # A3: два замера качества поддержки получают производителя. До этого числа
-    # существовали только в тестах: `support_overlap_scan` и `support_concentration`
-    # считались, но ни один артефакт их не публиковал — то есть «поле есть, производителя
-    # нет». Это тот же дефект, что пустой `relevant_evidence_coverage`: измерение, которого
-    # не видно, не является измерением.
+    # A3: три замера качества поддержки получают производителя. До этого числа
+    # существовали только в тестах либо вовсе не агрегировались: `support_overlap_scan`,
+    # `support_concentration` и `_denial_without_markers` не публиковал ни один артефакт —
+    # «поле есть, производителя нет». Тот же дефект, что пустой `relevant_evidence_coverage`:
+    # измерение, которого не видно, не является измерением.
     try:
         support_payload = support_quality(
             cells=cell_list, catalog=catalog, store=store, run_id=run_id

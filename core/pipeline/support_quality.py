@@ -1,8 +1,9 @@
-"""Качество поддержки карты: два замера, которые раньше не имели производителя (A3).
+"""Качество поддержки карты: три замера, которые раньше не имели производителя (A3).
 
-Оба замера считаются в :mod:`core.pipeline.evaluate` и до этого модуля вызывались только
-из тестов: числа существовали, но их не видел ни один артефакт. Здесь они получают
-единственного производителя — отчёт Ш9.
+Все три замера опираются на :mod:`core.pipeline.evaluate`: два считаются там по цитатам, а
+третий агрегирует заметку, которую там же ставит выбор цитаты отрицания. До этого модуля
+они вызывались только из тестов либо не агрегировались вовсе: числа существовали, но их
+не видел ни один артефакт. Здесь они получают единственного производителя — отчёт Ш9.
 
 **Первый замер — «о предмете ли доказательство»** (:func:`support_overlap_scan`). I22
 требует непустую цитату, и строка шапки документа формально её исполняет. Живой прогон
@@ -17,7 +18,16 @@
 визитке. Карта при этом утверждает больше, чем доказала, и ``distinct_quotes = 1`` при
 ``max_share = 1.0`` говорит об этом одним числом, без порогов и без изменения вердиктов.
 
-Оба замера — **наблюдения**: они не меняют статус ячейки, не влияют на Capability,
+**Третий замер — «❌ explicit без распознанного маркера отрицания»**
+(:func:`_denial_without_markers`). Класс ``explicit`` публикуется по цитате, выбранной
+:func:`core.pipeline.evaluate._designated_denial_quote`; когда маркеров отрицания нет ни в
+одной подтверждённой цитате, выбор падает на прежнее правило (первая цитата), и основание
+уже публикуется заметкой :data:`core.pipeline.evaluate.DENIAL_QUOTE_WITHOUT_MARKERS` в
+``cells.validation_notes``. Агрегата при этом не было, а живой контроль дал ложные «нет»
+(2 из 12 ячеек). Замер называет масштаб класса числом: сколько ``❌``, опубликованных как
+``explicit``, не имеют распознанного маркера.
+
+Все три замера — **наблюдения**: они не меняют статус ячейки, не влияют на Capability,
 Coverage и публикуемость и не вводят порогов (A3: подобранное число было бы
 предположением). Публикуется величина и адреса, решение остаётся за человеком.
 """
@@ -30,7 +40,12 @@ from typing import Any
 
 import yaml
 
-from core.pipeline.evaluate import support_concentration, support_overlap_scan
+from core.domain import DenialStrength, Status
+from core.pipeline.evaluate import (
+    DENIAL_QUOTE_WITHOUT_MARKERS,
+    support_concentration,
+    support_overlap_scan,
+)
 
 __all__ = [
     "SUPPORT_QUALITY_ARTIFACT",
@@ -69,6 +84,74 @@ def _quotes_by_cell(store: Any, run_id: str) -> dict[tuple[str, str], list[str]]
     return grouped
 
 
+def _denial_without_markers(cells: Iterable[Any]) -> dict[str, Any]:
+    """Замер «``❌`` explicit опубликован без распознанного маркера отрицания».
+
+    Носитель — ``cells.validation_notes``: :func:`core.pipeline.evaluate._designated_denial_quote`
+    кладёт туда заметку с токеном
+    :data:`core.pipeline.evaluate.DENIAL_QUOTE_WITHOUT_MARKERS`, когда ни одна
+    подтверждённая цитата не содержит маркеров отрицания. Вердикт при этом **не
+    меняется** (это предмет ревью §2.2), поэтому замер только публикует масштаб класса.
+
+    Что считается:
+
+    * ``cells_absent`` — все ``❌`` прогона (знаменатель видим целиком);
+    * ``cells_considered`` — из них опубликованные как ``explicit``
+      (``evidence_scope.denial_strength``): вопрос «был ли маркер» имеет смысл только
+      для этой ветви — ``authoritative`` приходит от реестра, ``bounded`` опирается на
+      процедуру полноты, и выбор цитаты отрицания там не исполняется;
+    * ``cells_flagged`` — из рассмотренных те, у кого в ``validation_notes`` есть токен;
+    * ``share`` — ``cells_flagged / cells_considered`` (``0.0`` без знаменателя);
+    * ``cells_with_note_not_absent`` — токен найден у ячейки, которая **не** является
+      опубликованным ``❌`` (например, слитая заметка у ``✅``). В счётчик отрицаний она
+      не входит, но и молча не теряется: это свидетельство о несогласованности носителя;
+    * ``examples`` — адреса ``{product_id, param_id}`` помеченных ячеек, полным списком
+      (как ``overlap.cells``: предел примеров не вводится — A3, адресов не больше, чем
+      ячеек прогона).
+
+    :param cells: ячейки прогона.
+    :returns: JSON-совместимый словарь замера; ничего не пишет и не меняет.
+    """
+    absent = 0
+    considered = 0
+    flagged = 0
+    note_not_absent = 0
+    examples: list[dict[str, str]] = []
+    for cell in cells:
+        notes = [str(note) for note in (getattr(cell, "validation_notes", None) or ())]
+        marked = any(DENIAL_QUOTE_WITHOUT_MARKERS in note for note in notes)
+        status = getattr(cell, "status", None)
+        scope = getattr(cell, "evidence_scope", None)
+        strength = getattr(scope, "denial_strength", None)
+        if status is not Status.ABSENT:
+            if marked:
+                note_not_absent += 1
+            continue
+        absent += 1
+        if strength is not DenialStrength.EXPLICIT:
+            continue
+        considered += 1
+        if not marked:
+            continue
+        flagged += 1
+        examples.append(
+            {
+                "product_id": str(cell.product_id),
+                "param_id": str(cell.param_id),
+            }
+        )
+    examples.sort(key=lambda item: (item["product_id"], item["param_id"]))
+    return {
+        "measurement": DENIAL_QUOTE_WITHOUT_MARKERS,
+        "cells_absent": absent,
+        "cells_considered": considered,
+        "cells_flagged": flagged,
+        "cells_with_note_not_absent": note_not_absent,
+        "share": round(flagged / considered, 4) if considered else 0.0,
+        "examples": examples,
+    }
+
+
 def support_quality(
     *,
     cells: Iterable[Any],
@@ -76,15 +159,16 @@ def support_quality(
     store: Any = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Считает оба замера качества поддержки по прогону (JSON-совместимый словарь).
+    """Считает три замера качества поддержки по прогону (JSON-совместимый словарь).
 
     :param cells: ячейки прогона.
     :param catalog: каталог параметров (источник предмета замера).
-    :param store: источник цитат; без него оба замера не находят материала.
+    :param store: источник цитат; без него два замера по цитатам не находят материала.
     :param run_id: идентификатор прогона для чтения ``cell_evidence``.
-    :returns: ``{"overlap": …, "concentration": …}`` — два независимых замера, а не
-        сведённый балл: они отвечают на разные вопросы («цитата о том ли?» и «сколько
-        карт держится на одной цитате?»), и складывать их значило бы выдумать метрику.
+    :returns: ``{"overlap": …, "concentration": …, "denial_without_markers": …}`` — три
+        независимых замера, а не сведённый балл: они отвечают на разные вопросы («цитата
+        о том ли?», «сколько карт держится на одной цитате?», «был ли у ``❌`` explicit
+        маркер отрицания?»), и складывать их значило бы выдумать метрику.
     """
     material = list(cells)
     quotes = (
@@ -95,6 +179,7 @@ def support_quality(
     return {
         "overlap": support_overlap_scan(material, _params_by_id(catalog), quotes),
         "concentration": support_concentration(quotes, material),
+        "denial_without_markers": _denial_without_markers(material),
     }
 
 
@@ -104,15 +189,20 @@ def write_support_quality_artifact(
     *,
     run_id: str | None = None,
 ) -> Path | None:
-    """Пишет ``outputs/support_quality.yaml`` — оба замера рядом с их адресами.
+    """Пишет ``outputs/support_quality.yaml`` — три замера рядом с их адресами.
 
-    Файл пишется только когда есть что показать (хотя бы один presence-элемент): пустой
-    артефакт читался бы как «всё в порядке», хотя означает «замер не нашёл материала».
-    ``None`` — файла нет.
+    Файл пишется только когда есть что показать (хотя бы один presence-элемент либо
+    рассмотренный ``❌``): пустой артефакт читался бы как «всё в порядке», хотя означает
+    «замер не нашёл материала». ``None`` — файла нет.
     """
     overlap = payload.get("overlap") or {}
     concentration = payload.get("concentration") or {}
-    if not overlap.get("cells_considered") and not concentration.get("cells_present"):
+    denial = payload.get("denial_without_markers") or {}
+    if (
+        not overlap.get("cells_considered")
+        and not concentration.get("cells_present")
+        and not denial.get("cells_considered")
+    ):
         return None
     path = Path(out_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +214,7 @@ def write_support_quality_artifact(
         ),
         "overlap": dict(overlap),
         "concentration": dict(concentration),
+        "denial_without_markers": dict(denial),
     }
     if run_id is not None:
         document["run_id"] = run_id
@@ -137,9 +228,10 @@ def write_support_quality_artifact(
 def support_quality_line(payload: Mapping[str, Any]) -> str | None:
     """Одна строка для оператора: ``None`` — замерам нечего сказать.
 
-    Строка называет **оба** факта, потому что по отдельности каждый выглядит терпимо:
-    «14 цитат не о предмете» и «19 ячеек на одной цитате» — это разные дефекты одной
-    карты, и человеку нужен повод открыть файл.
+    Строка называет **все** факты, потому что по отдельности каждый выглядит терпимо:
+    «14 цитат не о предмете», «19 ячеек на одной цитате» и «❌ explicit без маркера
+    отрицания» — разные дефекты одной карты, и человеку нужен повод открыть файл.
+    Каждая часть — **наблюдение, а не гейт**: статусов и публикуемости она не меняет.
     """
     overlap = payload.get("overlap") or {}
     concentration = payload.get("concentration") or {}
@@ -166,5 +258,13 @@ def support_quality_line(payload: Mapping[str, Any]) -> str | None:
         parts.append(
             f"концентрация поддержки: {product_id} — {count} ячеек на одной цитате "
             f"(доля {share:.2f}, различных цитат {distinct})"
+        )
+    denial = payload.get("denial_without_markers") or {}
+    denial_flagged = int(denial.get("cells_flagged") or 0)
+    if denial_flagged:
+        denial_considered = int(denial.get("cells_considered") or 0)
+        parts.append(
+            "❌ explicit опубликовано без распознанного маркера отрицания: "
+            f"{denial_flagged} из {denial_considered} — наблюдение, не гейт"
         )
     return "; ".join(parts) if parts else None

@@ -9,8 +9,17 @@ from __future__ import annotations
 
 import yaml
 
-from core.domain import Cell, CellState, LLMEvidence, SourceKind, Status
+from core.domain import (
+    Cell,
+    CellState,
+    DenialStrength,
+    EvidenceScope,
+    LLMEvidence,
+    SourceKind,
+    Status,
+)
 from core.domain.models import CatalogRow
+from core.pipeline.evaluate import DENIAL_QUOTE_WITHOUT_MARKERS
 from core.pipeline.support_quality import (
     support_quality,
     support_quality_line,
@@ -34,7 +43,13 @@ def _param(param_id: str, title: str) -> CatalogRow:
     )
 
 
-def _cell(param_id: str, *, product: str = "p1", status: Status = Status.OK) -> Cell:
+def _cell(
+    param_id: str,
+    *,
+    product: str = "p1",
+    status: Status = Status.OK,
+    notes: tuple[str, ...] = (),
+) -> Cell:
     # I1: evaluated ✅/⚠️ требует evidence ≥ 1 — цитата-визитка предмет замера не меняет,
     # но ячейка без доказательства вообще не собирается (и это правильно).
     return Cell(
@@ -45,6 +60,30 @@ def _cell(param_id: str, *, product: str = "p1", status: Status = Status.OK) -> 
         status=status,
         source_kind=SourceKind.INHERITANCE,
         evidence=[LLMEvidence(source_id="chunk-1", quote=HEADER)],
+        validation_notes=list(notes),
+    )
+
+
+def _absent_cell(
+    param_id: str,
+    *,
+    product: str = "p1",
+    notes: tuple[str, ...] = (),
+) -> Cell:
+    """Опубликованный ``❌`` с ``explicit``-основанием — носитель замера отрицаний."""
+    return Cell(
+        run_id="run-1",
+        product_id=product,
+        param_id=param_id,
+        state=CellState.EVALUATED,
+        status=Status.ABSENT,
+        source_kind=SourceKind.DOCUMENTATION,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.EXPLICIT,
+            citation_quote="Функция не поддерживается в этой версии",
+            reason="прямое отрицание вендора",
+        ),
+        validation_notes=list(notes),
     )
 
 
@@ -197,3 +236,78 @@ def test_store_without_quote_reader_does_not_pretend(tmp_path) -> None:
     # `supported`.
     assert payload["concentration"]["cells_without_quotes"] == 1
     assert payload["overlap"]["cells_flagged"] == 0
+
+
+def test_denial_without_markers_counts_only_published_explicit_absent(
+    tmp_path,
+) -> None:
+    """Токен считается только у опубликованного ``❌`` explicit; вердикты не меняются."""
+    params = {
+        "p_marked": _param("p_marked", "Логическая репликация таблиц"),
+        "p_token": _param("p_token", "Параллельное создание индексов"),
+        "p_ok": _param("p_ok", "JIT-компиляция целых операторов"),
+    }
+    note = (
+        f"{DENIAL_QUOTE_WITHOUT_MARKERS}: ни одна подтверждённая цитата не содержит "
+        "маркеров отрицания — цитатой отрицания оставлена первая в evidence"
+    )
+    cells = [
+        # «Здоровый» explicit-❌: маркер в цитате распознан, токена в заметках нет.
+        _absent_cell("p_marked"),
+        # explicit-❌ без распознанного маркера — предмет замера.
+        _absent_cell("p_token", notes=(note,)),
+        # ✅ с тем же токеном: не «опубликованное нет», в счётчик отрицаний не входит.
+        _cell("p_ok", notes=(note,)),
+    ]
+
+    payload = support_quality(
+        cells=cells, catalog=params, store=_FakeStore([]), run_id="run-1"
+    )
+
+    denial = payload["denial_without_markers"]
+    assert denial["cells_absent"] == 2
+    assert denial["cells_considered"] == 2
+    assert denial["cells_flagged"] == 1
+    assert denial["share"] == 0.5
+    assert denial["examples"] == [{"product_id": "p1", "param_id": "p_token"}]
+    # Токен у ✅ не теряется молча: он назван отдельным счётчиком несогласованности.
+    assert denial["cells_with_note_not_absent"] == 1
+
+    path = write_support_quality_artifact(
+        payload, tmp_path / "outputs" / "support_quality.yaml", run_id="run-1"
+    )
+    assert path is not None
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert document["denial_without_markers"]["cells_flagged"] == 1
+
+    line = support_quality_line(payload)
+    assert line is not None
+    assert (
+        "❌ explicit опубликовано без распознанного маркера отрицания: "
+        "1 из 2 — наблюдение, не гейт" in line
+    )
+
+    # Наблюдение, а не гейт: вердикты ячеек не переписаны.
+    assert [cell.status for cell in cells] == [
+        Status.ABSENT,
+        Status.ABSENT,
+        Status.OK,
+    ]
+
+
+def test_denial_observation_alone_writes_artifact(tmp_path) -> None:
+    """Прогон только из ``❌`` — артефакт всё равно пишется: у замера есть материал."""
+    note = f"{DENIAL_QUOTE_WITHOUT_MARKERS}: маркеров нет"
+    payload = support_quality(
+        cells=[_absent_cell("p_token", notes=(note,))],
+        catalog={},
+        store=_FakeStore([]),
+        run_id="run-1",
+    )
+
+    assert payload["overlap"]["cells_considered"] == 0
+    assert payload["concentration"]["cells_present"] == 0
+    assert payload["denial_without_markers"]["cells_flagged"] == 1
+    assert (
+        write_support_quality_artifact(payload, tmp_path / "outputs/sq.yaml") is not None
+    )
