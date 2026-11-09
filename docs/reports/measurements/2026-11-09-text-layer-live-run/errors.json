@@ -1,0 +1,1558 @@
+{
+ "run_id": "ru-pg-dbms-48bf65507223",
+ "command": "--only-product postgrespro --pdf-pipeline text_layer --refresh frozen --frozen-source bytes --until corpus --reset",
+ "before_fix": {
+  "errors_total": 627,
+  "by_token": {
+   "NO_TOKEN": 1,
+   "extract_failed": 2,
+   "frozen": 436,
+   "frozen_container_empty": 35,
+   "frozen_reextract_mismatch": 153
+  },
+  "documents": [
+   {
+    "url": "https://edu.postgrespro.ru/advanced_sql.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "0526a2a623ef4b1f4d3ac0bd15a1c9f54ca50cade92a2c123f3a6a7a2555d35e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/bookings.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "1edc39553b600991cd2a4fa432c095fb0c5a36ba2573d9672a38f6459a666b2e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "054f95e0f5543feb8aac11fe93c2d0222b9688841afc69f361a43406e6c06938"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20190523.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "8fe94ee00d9e4efbe022e78b3750da5be8eee1e3d6d36ce85469ae3bb972184d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20190806.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "421e9198d5f85ad1e0429e9db9cefdede113fd0f309a472ae9d6f470b6d3f6d4"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20190816.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "2f49af561faca9329138a952f950df5679ba9f28cbe10c15140e0100d6631b8e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20210909.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "748c164825e16825ad47b7509a9a75bafba7a648a9e26156d0eb0b6d3b3d2885"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20240711.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "4ae75f368c840727e1d0a507c581653b8574a3822d1fbf9d7e3224eee7108142"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20250917.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "22bec06afeeb7f0c32e67a68ec1f5f24c1ff8c6a99cfb52b7e50e0fe209ba274"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_01_introduction.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c368e008992945b89d60b9bcefd2cb37666285de68e4ee33f7aca531f14f87ca"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_02_architecture.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "76d9de5ff3e0ea386d592f1db788c46087bfcae67d393bd0614d2a7d8ea80868"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_03_install.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "50519cf0d3afcdd595fc897c2704b18933ed668203a050dbc0323c388e3a5844"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_04_psql.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "97712e636339d90fa92b41528b102d273075586ab7ad9ff9fd46642b397afe87"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_05_databases.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "bb59f0b76ecbccca76a43d30925b9b5c5340205b739cb952c6f575c93c02d1f7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_06_tablespaces.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "7c46bec6d79bba38fed7422e424fde8980092e5912bfc54809db0db1ce5701b8"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_07_system_catalog.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "5c48a62e4a399971cd00ab68d9a7d0bc86b56bb70e65c935127bbdd65b7e928a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_08_objects.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "cf62488238aa8611d3086550a7907835bcf83d0082800eecbf54447088850fb1"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_09_roles.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "9fe725526bb25d61c08a19bb5275c371e4f9fa9d0e94e84989b272f9e7420d0e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_10_schemas.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "cd010b74cd34101bd671added14f00a19e6eb8c273510614a7446b1a6356b88b"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_11_privileges.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "4e5e8b22613cd4d76c1f205f7d8de21a8cab2e6af679e050fdc797fb806b13bc"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_12_configuration.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a7c60de1d4de0ccb2bd4d2e9b94dbd8d673fdd78b38d5d64698f0622741e33e4"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_13_authentication.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "6dcd79a67751d7188d4d13f482912c287827877282a46a523e123c9f6f087ba1"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_14_monitoring.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "2683e9c347e200a0b61b40d1edc28d45b97fd7eb0ea36420615a756bddc25820"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_15_maintenance.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c0ba9d087dc8483bb8833637dd66c3e22b5b968adb1015c8bd85844d327f4d0e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_16_logical_backup.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "65202d3d18dcfef94ebe1328cb694dc8cbc5d30bf5ed024347b88ee12621b5fc"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_17_physical_backup.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "2ee4963afb7d519539cdb140ebb14b12112916f6bdc0d00c9f4c0b65915877da"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_introduction.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c6662c828ddea212552f9d404ad5a86e7861cae97aebb77e3b38b47c23e3130b"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1_student_guide.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "5e363fb6aa4b5fd269153f49e3b254b225dca4d158e461e974fc856704006791"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba2-9.5/dba2_introduction.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "64aa980b14e560dec3f10077a9c91743dfb23c707a6e4c281df48b2f879bde98"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba_expert_10_13.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c78729d7542b069b7d4635ce8fb43469761b75fbc55ad84bba5ed787253f2f06"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbguide.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "8aef157f17cc58a4b19e5679fdd7c1b05613201ced33de823e93d9a79147fdd3"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech-20200106.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "f0fa753c274513c67326d4079ec366ad0c811c15a0bcc2dbcfdc1b7cbd60984d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "f0fa753c274513c67326d4079ec366ad0c811c15a0bcc2dbcfdc1b7cbd60984d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-1-intro.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b629a30a1ef8ea85e81b8661b16ca3d4f8c9eef594bbaee736967e114886d84a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-2-models-b.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "203b4baeee0ae255d188b47a113251bd0f74f68d33abf0937744530569180e8c"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-3-er-models.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "40d3e24deb612fed537482f29ea7fe503f2e596cd0636e25f3e58913bdc15410"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-4-sql-intro.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "3cfcca14de87f101216e2d28d8bf360763a20500d28bbccdec7815198683ae6c"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-5-sql-extras-indexes.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "26292ef098953a9d8366974b80520797d031dccdf781dafd6591f8981f45c8a5"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-6-rbac.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "ef0d533a255a107374aab8f371edf4b3b83528ccd78775368c096ebcf2f0d479"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-7-consistency.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "881a0ba93b4f74aa64e75f6bb47be6ac70eb026cec9a012c360381925dc79372"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-8-extend.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a0f65283edc56d64d6362410aa94782255093b0341ae3fc2899acb85045f0440"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1-20181203.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "3abcb98a05891a0dd1dda9f14cf553e50753b7c551ec95b5d2ed5649da949376"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1-20190110.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "eff316fee77bed0341c590d7ce38f5c0139e447ff4671e2e01b7ac35e17c54a6"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "eff316fee77bed0341c590d7ce38f5c0139e447ff4671e2e01b7ac35e17c54a6"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1_20180524.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "570d5f3072d68dcf9194ef4408f389cf6eb4446568ecc41805c3295269fc44d5"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/demo-20161013.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c51ff6ddf6220b57074f8faaa293cfb08e8e7fd0d7e89e132e5b7783a3edd1ac"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "e503003d3f180292d1dd15779cfbccf73e9ca47f055825dc205ede1e8df8f165"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v10.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "1bb366ccb6c43d0bb33a1e475edef85c9a4f64ac2050bf00419fe0f8dcce1cf2"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v10_uz.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "0e3aa9cd4dac1d009515fe203ccf659ef3b4a8df89d1e84abbc871fea68de193"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v11.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "72645456a46eddfed5843db57fc02895c67d367f4b98df33f34b577a333f4973"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v11_en.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "9a5e716a6a26dd91d1d1ea632d6feacf45a10f4aa5f598398590b68672f7fe47"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v12.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "800e3cb8cda090845886076891f00093d286168a72228b28d248d33e6e7b7f5d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v2.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c4ec6ba73cc35838beae4cb13651a6ce5a47adfd2eb7b4225ddd755f203ba3ea"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v3.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "fbaf7e734346d5332af05d34046f1801a579033dd0304f68730c0d207e6172d9"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v4.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "2accfa9f1da05f768a9f9cefb29da053630bdddf1bbc0e3494770d42186acc38"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v4_en.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "298b8059787ec88553dc1b4dfbfb64bb977176d081bccba162a14c0cb5cf154d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v5.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "fa77d39441d2babf4dbe4a7f2925c36f769bf2a42e798095803ec29321895775"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v6.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "81171c0ab8d71271d1387536b0171c6703315455fb72967cd0ea98bceb13caf7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v6_en.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "cd3e66cc3ebcab1a41412a4f1d4753b9495c449afd16c37f5c416dc1a7772a55"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v7.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "80e97061a49007d5eb3184b7680e33ce940bdb2cd659eba6a41a35d8d658f28a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v8.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c469b7a54e9e2b57b465e4d3802e4e7d929207d700db8420ccaf392394ec4e9a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v9.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "da384532122b17bb23c034eb5b41de01da4c3465b0dc289d8064d27ef2edad53"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v9_en.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "e740a985a016b77527e514cb49fc4862828cb75f5dbffec5fd62554bb391d7cf"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/monitoring.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "51820b687c859b1bddedacb819a503482cd59c288a755d6d95be39872ea3ba5f"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/openedu_sql/Prepare_for_SQL_MSU.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "c6e0eeb477d8c41ce27e870e0492eb8d659645576aa0d371fdf3182345f65f5d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql-9.5-ru.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "3424b333674cde09e0c5aef9ee287229ac4f43ac443cab7b18365d8d174f4909"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-14.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b56b4cfcec855b480299d0c6fc3e62205e1636f3260355729aa7def646662c00"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-15.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "42ecac3b4f55ff6dec280a90a3cee319a64982fb00706b3c4f026ff54987322e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-16.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "4c5c82f996e0f6e6596785c5f290723cbe00309dc63de0221c78993ae78d6e40"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-17.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "770bf1ee832514f7d0b06ca098cc9b03aeedffcc321c8a6074dd6f3769244a84"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-18.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "fd29f1673892b0ede8e2d4c9ecc70d8a5080bb76a10ea7889d33593a9c7a08eb"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/qptbook-16.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "5fae87de22f37c925b107506551af1b70f1a386cc368c606397ad59218070248"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/qptbook-18.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "572dc98844b78339ffe47f44731de93be4ed5d2cf38ee0f066db90ceb76827e7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "548dc3dafb2385e839c932779f89e0bd4036f970184928461c727363ff1ec7b4"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer_20170809.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "6d4e2d16d5321598ac2b8a55939dfb6196ec90a59017940bbf3443c58c027f8b"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer_20181112.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "accaa38bd8d289e2c1b4ae34da94a9b8e512483382d7dd2d38063c0d096a1ae7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer_20200628.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "548dc3dafb2385e839c932779f89e0bd4036f970184928461c727363ff1ec7b4"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/20/Mark_PG_Overview_short_16.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "066be77ed02abdda5ce1fbf82c4aae2cbe25d0faf639d561fe9a275464e6af85"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/20/vanila_features.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "5acf4b5276826acc2700a4ec9363e5578dbe4d84e86391e09a3eafd0ed8e5119"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/21/Mark_PostgresPro_Licensing_Final.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "9d4708ab8e5cb6c97a2c5f57d4fe08f3ee48fec87657a8bb319ba0cefab8ae06"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/21/Mark_nf16_meetup_v2.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b8361c85e217af679b2f17e026d40d6efb7e4856afc14523865119602d483d86"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/21/Table_Pg_Vanila_16.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "6fc2915a5c5104a8b82ccb5feca1de31596588ae921404987228d0910e9a7ca4"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/26/PostgresPro_Observability_BORIS_v12.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "89050599df0486e930cec1499ee58c86d3b4949e0ab4687ab9f5ebe8cc3d901b"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/28/%D0%92%D0%BE%D0%B7%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE%D1%81%D1%82%D0%B8%20%D0%A1%D0%A3%D0%91%D0%94%20Postgres%20Pro%20Enterprise%20%D0%B4%D0%BB%D1%8F%201%D0%A1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/28/Возможности СУБД Postgres Pro Enterprise для 1С.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/07/01/Oracle2PostgresPro16_Migration_v2.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "8482ddb6cecf010edbf10f2f1aaca551d9b32e523a1613bb346747e6683fc1b3"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/07/01/Shardman.03.2024.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "6b407a00b730b0f86d2926c6ae970d888a23b26117d7f39314b75fac3aea980d"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/07/10/240704-PgPro-Security-.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d1323434cdf33a8773512c1e81ea5465af975afa4dade197158c23abaf980597"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/08/05/%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%D0%91%D0%94%D0%B8%D0%B71%D0%A1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/08/05/МиграцияБДиз1С.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/11/25/PgPro_PCI-DSS_RU.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "22e11da6a0d21b02069d97ffac17e4f10a524c0c2afce234b0dba1c151e7c7fb"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/02/19/nf17.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "e2032a82ce1300bbd13418af2ca5b04f8419b82a3555dd99b943837a3f53406c"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/03/26/Puchkov_OFA.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "4f4e334695c7f018120a8145bca3b586b02741a955afd4e1561cc4cfa2a0b504"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/06/25/PostgresPROfor1%D0%A1_v_17-5.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/06/25/PostgresPROfor1С_v_17-5.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/10/20/Mark_OLTP_OLAP1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "42c95650f7aaf30841cf471bc1ac2748de1aa475000dce7d8bf7ceb755bbe6d7"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/10/20/Mark_PG_Overview_short_17.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "1dff9a35a8b8b56ded070c23c3039eba8c45ad1bbdb0c425f0b5cfe277cc86d5"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/%D0%98%D0%BD%D1%82%D0%B5%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%20PostgresPro%20%D1%81%D0%BE%20%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9%20%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3%D0%B0%20ALD%20Pro.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/01_AI Tengri Data platform.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/01_AI%20Tengri%20Data%20platform.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/Интеграция PostgresPro со службой каталога ALD Pro.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/28/%D0%BB%D0%B8%D1%81%D1%82%D0%BE%D0%B2%D0%BA%D0%B0%20%D0%BE%D1%82%D0%BB%D0%B8%D1%87%D0%B8%D1%8F%20Ent%20%D0%BE%D1%82%20PostgreSQL_final.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/28/листовка отличия Ent от PostgreSQL_final.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Kulaga_PG Pro AXE вебинар 18.11.2025.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Kulaga_PG%20Pro%20AXE%20%D0%B2%D0%B5%D0%B1%D0%B8%D0%BD%D0%B0%D1%80%2018.11.2025.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Mark_AXE.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "67b1476a7e52898c5944aaba01185db5d5a9c83d100f0b343f96ef11a0aa8ff9"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Mark_PG_Overview_short_18.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "3d1e3ab50503572c56af84ff551549e0057cfc0a8c8d610f4e14336d8958374e"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/25/PPEM_Overview_FULL_2025_v2.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a004cf3de133d27d5cc5d4acbe671301ed422a560cc573e700b63f0fcc717cae"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/03/05/260120_PgPro_SteppedSecurity_Gusakov.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d957390b98c4da96da90689c80d182ce66fafa6c7dd09d2e1af627d3c59414ad"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/03/05/260127_SecNF18.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "0305d2428568b09b0c5a8cdb821357bc17e009855aea19eda76dd31ff62fbf7b"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/03/13/intro_integraciya-postgrespro-enterprise-tde-so-stronghold.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "cbd5095de41ceb0df3dd34414dec8b349bbaceabf765f1e312e6022ee2aef72a"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/04/23/260421_PgPro_Cerified_Gusakov.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "3e9ea653d49a980bbeb58a9cc703669ed2573c3d03faa3bd449152b345aa12a9"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/10/22/PGPRO18.6_vs_PGSQL.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "9aa0be038ad9d970fbc5022b38b70183404311929964c066935e00ba0d981b2c"
+   },
+   {
+    "url": "https://postgrespro.ru/media/%D0%9F%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5%20%D0%BA%20%D0%BF%D1%80%D0%B8%D0%BA%D0%B0%D0%B7%D1%83%20_%D0%9F%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B0%20%D0%B2%20%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D0%B8%20%D0%BE%D0%B1%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B8%20%D1%84%D0%B0%D0%B9%D0%BB%D0%BE%D0%B2%20cookie_22.12.25.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "420b7a8c004d900cd56dab706a0cce7cc8533fc0bda201b5c096944aca83c474"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/20/Mark_PG_Overview_short_16.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "066be77ed02abdda5ce1fbf82c4aae2cbe25d0faf639d561fe9a275464e6af85"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/20/vanila_features.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "5acf4b5276826acc2700a4ec9363e5578dbe4d84e86391e09a3eafd0ed8e5119"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/21/Mark_PostgresPro_Licensing_Final.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "9d4708ab8e5cb6c97a2c5f57d4fe08f3ee48fec87657a8bb319ba0cefab8ae06"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/21/Mark_nf16_meetup_v2.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b8361c85e217af679b2f17e026d40d6efb7e4856afc14523865119602d483d86"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/21/Table_Pg_Vanila_16.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "6fc2915a5c5104a8b82ccb5feca1de31596588ae921404987228d0910e9a7ca4"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/26/PostgresPro_Observability_BORIS_v12.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "89050599df0486e930cec1499ee58c86d3b4949e0ab4687ab9f5ebe8cc3d901b"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/28/%D0%92%D0%BE%D0%B7%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE%D1%81%D1%82%D0%B8%20%D0%A1%D0%A3%D0%91%D0%94%20Postgres%20Pro%20Enterprise%20%D0%B4%D0%BB%D1%8F%201%D0%A1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/28/Возможности СУБД Postgres Pro Enterprise для 1С.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/07/01/Oracle2PostgresPro16_Migration_v2.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "8482ddb6cecf010edbf10f2f1aaca551d9b32e523a1613bb346747e6683fc1b3"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/07/01/Shardman.03.2024.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "6b407a00b730b0f86d2926c6ae970d888a23b26117d7f39314b75fac3aea980d"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/07/10/240704-PgPro-Security-.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d1323434cdf33a8773512c1e81ea5465af975afa4dade197158c23abaf980597"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/08/05/%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%D0%91%D0%94%D0%B8%D0%B71%D0%A1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/08/05/МиграцияБДиз1С.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/11/25/PgPro_PCI-DSS_RU.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "22e11da6a0d21b02069d97ffac17e4f10a524c0c2afce234b0dba1c151e7c7fb"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/02/19/nf17.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "e2032a82ce1300bbd13418af2ca5b04f8419b82a3555dd99b943837a3f53406c"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/03/26/Puchkov_OFA.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "4f4e334695c7f018120a8145bca3b586b02741a955afd4e1561cc4cfa2a0b504"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/06/25/PostgresPROfor1%D0%A1_v_17-5.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/06/25/PostgresPROfor1С_v_17-5.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/10/20/Mark_OLTP_OLAP1.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "42c95650f7aaf30841cf471bc1ac2748de1aa475000dce7d8bf7ceb755bbe6d7"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/10/20/Mark_PG_Overview_short_17.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "1dff9a35a8b8b56ded070c23c3039eba8c45ad1bbdb0c425f0b5cfe277cc86d5"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/11/privacy.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "4646f3404f595d0ec97a446ba128596b0bb954fe858c00f7fda490bde8bce6f8"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/%D0%98%D0%BD%D1%82%D0%B5%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%20PostgresPro%20%D1%81%D0%BE%20%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9%20%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3%D0%B0%20ALD%20Pro.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/01_AI Tengri Data platform.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/01_AI%20Tengri%20Data%20platform.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/Интеграция PostgresPro со службой каталога ALD Pro.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/28/%D0%BB%D0%B8%D1%81%D1%82%D0%BE%D0%B2%D0%BA%D0%B0%20%D0%BE%D1%82%D0%BB%D0%B8%D1%87%D0%B8%D1%8F%20Ent%20%D0%BE%D1%82%20PostgreSQL_final.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/28/листовка отличия Ent от PostgreSQL_final.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Kulaga_PG Pro AXE вебинар 18.11.2025.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Kulaga_PG%20Pro%20AXE%20%D0%B2%D0%B5%D0%B1%D0%B8%D0%BD%D0%B0%D1%80%2018.11.2025.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Mark_AXE.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "67b1476a7e52898c5944aaba01185db5d5a9c83d100f0b343f96ef11a0aa8ff9"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Mark_PG_Overview_short_18.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "3d1e3ab50503572c56af84ff551549e0057cfc0a8c8d610f4e14336d8958374e"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/25/PPEM_Overview_FULL_2025_v2.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "a004cf3de133d27d5cc5d4acbe671301ed422a560cc573e700b63f0fcc717cae"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/03/05/260120_PgPro_SteppedSecurity_Gusakov.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "d957390b98c4da96da90689c80d182ce66fafa6c7dd09d2e1af627d3c59414ad"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/03/05/260127_SecNF18.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "0305d2428568b09b0c5a8cdb821357bc17e009855aea19eda76dd31ff62fbf7b"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/03/13/intro_integraciya-postgrespro-enterprise-tde-so-stronghold.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "cbd5095de41ceb0df3dd34414dec8b349bbaceabf765f1e312e6022ee2aef72a"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/04/23/260421_PgPro_Cerified_Gusakov.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "3e9ea653d49a980bbeb58a9cc703669ed2573c3d03faa3bd449152b345aa12a9"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/10/22/PGPRO18.6_vs_PGSQL.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "9aa0be038ad9d970fbc5022b38b70183404311929964c066935e00ba0d981b2c"
+   },
+   {
+    "url": "https://postgrespro.ru/media/docs/enterprise/9.6/ru/postgres-A4-fop.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "cb9ef5bbd66ded3bea82f01c4dea66c0c2746f3a9927ff8f0c791ca270b8bf66"
+   },
+   {
+    "url": "https://postgrespro.ru/media/Приложение%20к%20приказу%20_Политика%20в%20отношении%20обработки%20файлов%20cookie_22.12.25.pdf",
+    "token": "frozen_reextract_mismatch",
+    "rebuilt_hash": "420b7a8c004d900cd56dab706a0cce7cc8533fc0bda201b5c096944aca83c474"
+   }
+  ]
+ },
+ "after_fix": {
+  "errors_total": 627,
+  "by_token": {
+   "NO_TOKEN": 1,
+   "extract_failed": 2,
+   "frozen": 436,
+   "frozen_container_empty": 35,
+   "reextract_engine_changed": 153
+  },
+  "documents": [
+   {
+    "url": "https://edu.postgrespro.ru/advanced_sql.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "0526a2a623ef4b1f4d3ac0bd15a1c9f54ca50cade92a2c123f3a6a7a2555d35e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/bookings.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "1edc39553b600991cd2a4fa432c095fb0c5a36ba2573d9672a38f6459a666b2e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "054f95e0f5543feb8aac11fe93c2d0222b9688841afc69f361a43406e6c06938"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20190523.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "8fe94ee00d9e4efbe022e78b3750da5be8eee1e3d6d36ce85469ae3bb972184d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20190806.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "421e9198d5f85ad1e0429e9db9cefdede113fd0f309a472ae9d6f470b6d3f6d4"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20190816.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "2f49af561faca9329138a952f950df5679ba9f28cbe10c15140e0100d6631b8e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20210909.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "748c164825e16825ad47b7509a9a75bafba7a648a9e26156d0eb0b6d3b3d2885"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20240711.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "4ae75f368c840727e1d0a507c581653b8574a3822d1fbf9d7e3224eee7108142"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/cert/contract-offer_20250917.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "22bec06afeeb7f0c32e67a68ec1f5f24c1ff8c6a99cfb52b7e50e0fe209ba274"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_01_introduction.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c368e008992945b89d60b9bcefd2cb37666285de68e4ee33f7aca531f14f87ca"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_02_architecture.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "76d9de5ff3e0ea386d592f1db788c46087bfcae67d393bd0614d2a7d8ea80868"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_03_install.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "50519cf0d3afcdd595fc897c2704b18933ed668203a050dbc0323c388e3a5844"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_04_psql.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "97712e636339d90fa92b41528b102d273075586ab7ad9ff9fd46642b397afe87"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_05_databases.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "bb59f0b76ecbccca76a43d30925b9b5c5340205b739cb952c6f575c93c02d1f7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_06_tablespaces.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "7c46bec6d79bba38fed7422e424fde8980092e5912bfc54809db0db1ce5701b8"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_07_system_catalog.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "5c48a62e4a399971cd00ab68d9a7d0bc86b56bb70e65c935127bbdd65b7e928a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_08_objects.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "cf62488238aa8611d3086550a7907835bcf83d0082800eecbf54447088850fb1"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_09_roles.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "9fe725526bb25d61c08a19bb5275c371e4f9fa9d0e94e84989b272f9e7420d0e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_10_schemas.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "cd010b74cd34101bd671added14f00a19e6eb8c273510614a7446b1a6356b88b"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_11_privileges.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "4e5e8b22613cd4d76c1f205f7d8de21a8cab2e6af679e050fdc797fb806b13bc"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_12_configuration.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a7c60de1d4de0ccb2bd4d2e9b94dbd8d673fdd78b38d5d64698f0622741e33e4"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_13_authentication.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "6dcd79a67751d7188d4d13f482912c287827877282a46a523e123c9f6f087ba1"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_14_monitoring.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "2683e9c347e200a0b61b40d1edc28d45b97fd7eb0ea36420615a756bddc25820"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_15_maintenance.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c0ba9d087dc8483bb8833637dd66c3e22b5b968adb1015c8bd85844d327f4d0e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_16_logical_backup.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "65202d3d18dcfef94ebe1328cb694dc8cbc5d30bf5ed024347b88ee12621b5fc"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_17_physical_backup.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "2ee4963afb7d519539cdb140ebb14b12112916f6bdc0d00c9f4c0b65915877da"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1-9.4/dba1_introduction.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c6662c828ddea212552f9d404ad5a86e7861cae97aebb77e3b38b47c23e3130b"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba1_student_guide.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "5e363fb6aa4b5fd269153f49e3b254b225dca4d158e461e974fc856704006791"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba2-9.5/dba2_introduction.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "64aa980b14e560dec3f10077a9c91743dfb23c707a6e4c281df48b2f879bde98"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dba_expert_10_13.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c78729d7542b069b7d4635ce8fb43469761b75fbc55ad84bba5ed787253f2f06"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbguide.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "8aef157f17cc58a4b19e5679fdd7c1b05613201ced33de823e93d9a79147fdd3"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech-20200106.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "f0fa753c274513c67326d4079ec366ad0c811c15a0bcc2dbcfdc1b7cbd60984d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "f0fa753c274513c67326d4079ec366ad0c811c15a0bcc2dbcfdc1b7cbd60984d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-1-intro.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b629a30a1ef8ea85e81b8661b16ca3d4f8c9eef594bbaee736967e114886d84a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-2-models-b.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "203b4baeee0ae255d188b47a113251bd0f74f68d33abf0937744530569180e8c"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-3-er-models.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "40d3e24deb612fed537482f29ea7fe503f2e596cd0636e25f3e58913bdc15410"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-4-sql-intro.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "3cfcca14de87f101216e2d28d8bf360763a20500d28bbccdec7815198683ae6c"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-5-sql-extras-indexes.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "26292ef098953a9d8366974b80520797d031dccdf781dafd6591f8981f45c8a5"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-6-rbac.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "ef0d533a255a107374aab8f371edf4b3b83528ccd78775368c096ebcf2f0d479"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-7-consistency.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "881a0ba93b4f74aa64e75f6bb47be6ac70eb026cec9a012c360381925dc79372"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech/dbtech-2018-msu-8-extend.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a0f65283edc56d64d6362410aa94782255093b0341ae3fc2899acb85045f0440"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1-20181203.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "3abcb98a05891a0dd1dda9f14cf553e50753b7c551ec95b5d2ed5649da949376"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1-20190110.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "eff316fee77bed0341c590d7ce38f5c0139e447ff4671e2e01b7ac35e17c54a6"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "eff316fee77bed0341c590d7ce38f5c0139e447ff4671e2e01b7ac35e17c54a6"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/dbtech_part1_20180524.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "570d5f3072d68dcf9194ef4408f389cf6eb4446568ecc41805c3295269fc44d5"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/demo-20161013.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c51ff6ddf6220b57074f8faaa293cfb08e8e7fd0d7e89e132e5b7783a3edd1ac"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "e503003d3f180292d1dd15779cfbccf73e9ca47f055825dc205ede1e8df8f165"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v10.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "1bb366ccb6c43d0bb33a1e475edef85c9a4f64ac2050bf00419fe0f8dcce1cf2"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v10_uz.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "0e3aa9cd4dac1d009515fe203ccf659ef3b4a8df89d1e84abbc871fea68de193"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v11.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "72645456a46eddfed5843db57fc02895c67d367f4b98df33f34b577a333f4973"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v11_en.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "9a5e716a6a26dd91d1d1ea632d6feacf45a10f4aa5f598398590b68672f7fe47"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v12.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "800e3cb8cda090845886076891f00093d286168a72228b28d248d33e6e7b7f5d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v2.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c4ec6ba73cc35838beae4cb13651a6ce5a47adfd2eb7b4225ddd755f203ba3ea"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v3.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "fbaf7e734346d5332af05d34046f1801a579033dd0304f68730c0d207e6172d9"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v4.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "2accfa9f1da05f768a9f9cefb29da053630bdddf1bbc0e3494770d42186acc38"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v4_en.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "298b8059787ec88553dc1b4dfbfb64bb977176d081bccba162a14c0cb5cf154d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v5.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "fa77d39441d2babf4dbe4a7f2925c36f769bf2a42e798095803ec29321895775"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v6.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "81171c0ab8d71271d1387536b0171c6703315455fb72967cd0ea98bceb13caf7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v6_en.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "cd3e66cc3ebcab1a41412a4f1d4753b9495c449afd16c37f5c416dc1a7772a55"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v7.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "80e97061a49007d5eb3184b7680e33ce940bdb2cd659eba6a41a35d8d658f28a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v8.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c469b7a54e9e2b57b465e4d3802e4e7d929207d700db8420ccaf392394ec4e9a"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v9.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "da384532122b17bb23c034eb5b41de01da4c3465b0dc289d8064d27ef2edad53"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/introbook_v9_en.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "e740a985a016b77527e514cb49fc4862828cb75f5dbffec5fd62554bb391d7cf"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/monitoring.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "51820b687c859b1bddedacb819a503482cd59c288a755d6d95be39872ea3ba5f"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/openedu_sql/Prepare_for_SQL_MSU.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "c6e0eeb477d8c41ce27e870e0492eb8d659645576aa0d371fdf3182345f65f5d"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql-9.5-ru.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "3424b333674cde09e0c5aef9ee287229ac4f43ac443cab7b18365d8d174f4909"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-14.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b56b4cfcec855b480299d0c6fc3e62205e1636f3260355729aa7def646662c00"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-15.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "42ecac3b4f55ff6dec280a90a3cee319a64982fb00706b3c4f026ff54987322e"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-16.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "4c5c82f996e0f6e6596785c5f290723cbe00309dc63de0221c78993ae78d6e40"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-17.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "770bf1ee832514f7d0b06ca098cc9b03aeedffcc321c8a6074dd6f3769244a84"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/postgresql_internals-18.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "fd29f1673892b0ede8e2d4c9ecc70d8a5080bb76a10ea7889d33593a9c7a08eb"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/qptbook-16.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "5fae87de22f37c925b107506551af1b70f1a386cc368c606397ad59218070248"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/qptbook-18.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "572dc98844b78339ffe47f44731de93be4ed5d2cf38ee0f066db90ceb76827e7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "548dc3dafb2385e839c932779f89e0bd4036f970184928461c727363ff1ec7b4"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer_20170809.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "6d4e2d16d5321598ac2b8a55939dfb6196ec90a59017940bbf3443c58c027f8b"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer_20181112.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "accaa38bd8d289e2c1b4ae34da94a9b8e512483382d7dd2d38063c0d096a1ae7"
+   },
+   {
+    "url": "https://edu.postgrespro.ru/sql_primer_20200628.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "548dc3dafb2385e839c932779f89e0bd4036f970184928461c727363ff1ec7b4"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/20/Mark_PG_Overview_short_16.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "066be77ed02abdda5ce1fbf82c4aae2cbe25d0faf639d561fe9a275464e6af85"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/20/vanila_features.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "5acf4b5276826acc2700a4ec9363e5578dbe4d84e86391e09a3eafd0ed8e5119"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/21/Mark_PostgresPro_Licensing_Final.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "9d4708ab8e5cb6c97a2c5f57d4fe08f3ee48fec87657a8bb319ba0cefab8ae06"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/21/Mark_nf16_meetup_v2.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b8361c85e217af679b2f17e026d40d6efb7e4856afc14523865119602d483d86"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/21/Table_Pg_Vanila_16.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "6fc2915a5c5104a8b82ccb5feca1de31596588ae921404987228d0910e9a7ca4"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/26/PostgresPro_Observability_BORIS_v12.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "89050599df0486e930cec1499ee58c86d3b4949e0ab4687ab9f5ebe8cc3d901b"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/28/%D0%92%D0%BE%D0%B7%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE%D1%81%D1%82%D0%B8%20%D0%A1%D0%A3%D0%91%D0%94%20Postgres%20Pro%20Enterprise%20%D0%B4%D0%BB%D1%8F%201%D0%A1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/06/28/Возможности СУБД Postgres Pro Enterprise для 1С.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/07/01/Oracle2PostgresPro16_Migration_v2.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "8482ddb6cecf010edbf10f2f1aaca551d9b32e523a1613bb346747e6683fc1b3"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/07/01/Shardman.03.2024.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "6b407a00b730b0f86d2926c6ae970d888a23b26117d7f39314b75fac3aea980d"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/07/10/240704-PgPro-Security-.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d1323434cdf33a8773512c1e81ea5465af975afa4dade197158c23abaf980597"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/08/05/%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%D0%91%D0%94%D0%B8%D0%B71%D0%A1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/08/05/МиграцияБДиз1С.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2024/11/25/PgPro_PCI-DSS_RU.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "22e11da6a0d21b02069d97ffac17e4f10a524c0c2afce234b0dba1c151e7c7fb"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/02/19/nf17.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "e2032a82ce1300bbd13418af2ca5b04f8419b82a3555dd99b943837a3f53406c"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/03/26/Puchkov_OFA.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "4f4e334695c7f018120a8145bca3b586b02741a955afd4e1561cc4cfa2a0b504"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/06/25/PostgresPROfor1%D0%A1_v_17-5.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/06/25/PostgresPROfor1С_v_17-5.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/10/20/Mark_OLTP_OLAP1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "42c95650f7aaf30841cf471bc1ac2748de1aa475000dce7d8bf7ceb755bbe6d7"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/10/20/Mark_PG_Overview_short_17.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "1dff9a35a8b8b56ded070c23c3039eba8c45ad1bbdb0c425f0b5cfe277cc86d5"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/%D0%98%D0%BD%D1%82%D0%B5%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%20PostgresPro%20%D1%81%D0%BE%20%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9%20%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3%D0%B0%20ALD%20Pro.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/01_AI Tengri Data platform.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/01_AI%20Tengri%20Data%20platform.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/20/Интеграция PostgresPro со службой каталога ALD Pro.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/28/%D0%BB%D0%B8%D1%81%D1%82%D0%BE%D0%B2%D0%BA%D0%B0%20%D0%BE%D1%82%D0%BB%D0%B8%D1%87%D0%B8%D1%8F%20Ent%20%D0%BE%D1%82%20PostgreSQL_final.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2025/11/28/листовка отличия Ent от PostgreSQL_final.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Kulaga_PG Pro AXE вебинар 18.11.2025.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Kulaga_PG%20Pro%20AXE%20%D0%B2%D0%B5%D0%B1%D0%B8%D0%BD%D0%B0%D1%80%2018.11.2025.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Mark_AXE.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "67b1476a7e52898c5944aaba01185db5d5a9c83d100f0b343f96ef11a0aa8ff9"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/20/Mark_PG_Overview_short_18.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "3d1e3ab50503572c56af84ff551549e0057cfc0a8c8d610f4e14336d8958374e"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/02/25/PPEM_Overview_FULL_2025_v2.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a004cf3de133d27d5cc5d4acbe671301ed422a560cc573e700b63f0fcc717cae"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/03/05/260120_PgPro_SteppedSecurity_Gusakov.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d957390b98c4da96da90689c80d182ce66fafa6c7dd09d2e1af627d3c59414ad"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/03/05/260127_SecNF18.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "0305d2428568b09b0c5a8cdb821357bc17e009855aea19eda76dd31ff62fbf7b"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/03/13/intro_integraciya-postgrespro-enterprise-tde-so-stronghold.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "cbd5095de41ceb0df3dd34414dec8b349bbaceabf765f1e312e6022ee2aef72a"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/04/23/260421_PgPro_Cerified_Gusakov.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "3e9ea653d49a980bbeb58a9cc703669ed2573c3d03faa3bd449152b345aa12a9"
+   },
+   {
+    "url": "https://postgrespro.ru/dmedia/2026/10/22/PGPRO18.6_vs_PGSQL.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "9aa0be038ad9d970fbc5022b38b70183404311929964c066935e00ba0d981b2c"
+   },
+   {
+    "url": "https://postgrespro.ru/media/%D0%9F%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5%20%D0%BA%20%D0%BF%D1%80%D0%B8%D0%BA%D0%B0%D0%B7%D1%83%20_%D0%9F%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B0%20%D0%B2%20%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D0%B8%20%D0%BE%D0%B1%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B8%20%D1%84%D0%B0%D0%B9%D0%BB%D0%BE%D0%B2%20cookie_22.12.25.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "420b7a8c004d900cd56dab706a0cce7cc8533fc0bda201b5c096944aca83c474"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/20/Mark_PG_Overview_short_16.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "066be77ed02abdda5ce1fbf82c4aae2cbe25d0faf639d561fe9a275464e6af85"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/20/vanila_features.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "5acf4b5276826acc2700a4ec9363e5578dbe4d84e86391e09a3eafd0ed8e5119"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/21/Mark_PostgresPro_Licensing_Final.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "9d4708ab8e5cb6c97a2c5f57d4fe08f3ee48fec87657a8bb319ba0cefab8ae06"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/21/Mark_nf16_meetup_v2.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b8361c85e217af679b2f17e026d40d6efb7e4856afc14523865119602d483d86"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/21/Table_Pg_Vanila_16.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "6fc2915a5c5104a8b82ccb5feca1de31596588ae921404987228d0910e9a7ca4"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/26/PostgresPro_Observability_BORIS_v12.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "89050599df0486e930cec1499ee58c86d3b4949e0ab4687ab9f5ebe8cc3d901b"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/28/%D0%92%D0%BE%D0%B7%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE%D1%81%D1%82%D0%B8%20%D0%A1%D0%A3%D0%91%D0%94%20Postgres%20Pro%20Enterprise%20%D0%B4%D0%BB%D1%8F%201%D0%A1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/06/28/Возможности СУБД Postgres Pro Enterprise для 1С.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "bda0980e4a1c03c5f52ca7023285226f078dd9289389b6722c7d4ac94eaed1e2"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/07/01/Oracle2PostgresPro16_Migration_v2.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "8482ddb6cecf010edbf10f2f1aaca551d9b32e523a1613bb346747e6683fc1b3"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/07/01/Shardman.03.2024.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "6b407a00b730b0f86d2926c6ae970d888a23b26117d7f39314b75fac3aea980d"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/07/10/240704-PgPro-Security-.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d1323434cdf33a8773512c1e81ea5465af975afa4dade197158c23abaf980597"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/08/05/%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%D0%91%D0%94%D0%B8%D0%B71%D0%A1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/08/05/МиграцияБДиз1С.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d38c4ad358d81c4e69d520297b3689c612a602ab55147be36650fa1af7fd4de0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2024/11/25/PgPro_PCI-DSS_RU.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "22e11da6a0d21b02069d97ffac17e4f10a524c0c2afce234b0dba1c151e7c7fb"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/02/19/nf17.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "e2032a82ce1300bbd13418af2ca5b04f8419b82a3555dd99b943837a3f53406c"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/03/26/Puchkov_OFA.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "4f4e334695c7f018120a8145bca3b586b02741a955afd4e1561cc4cfa2a0b504"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/06/25/PostgresPROfor1%D0%A1_v_17-5.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/06/25/PostgresPROfor1С_v_17-5.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d055f3322494a96b2cae718566b4c0f40ff5736d22d644788d8afb1c178eff72"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/10/20/Mark_OLTP_OLAP1.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "42c95650f7aaf30841cf471bc1ac2748de1aa475000dce7d8bf7ceb755bbe6d7"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/10/20/Mark_PG_Overview_short_17.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "1dff9a35a8b8b56ded070c23c3039eba8c45ad1bbdb0c425f0b5cfe277cc86d5"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/11/privacy.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "4646f3404f595d0ec97a446ba128596b0bb954fe858c00f7fda490bde8bce6f8"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/%D0%98%D0%BD%D1%82%D0%B5%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F%20PostgresPro%20%D1%81%D0%BE%20%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9%20%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3%D0%B0%20ALD%20Pro.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/01_AI Tengri Data platform.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/01_AI%20Tengri%20Data%20platform.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "f98dcf994fc7a6f29a346e1b8e323f6e32d1d7ae3fb1f65a85432d94cbafdcfa"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/20/Интеграция PostgresPro со службой каталога ALD Pro.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "428fed3569a1f8b65abf1a4f3a540f0a37090b1a2536443db98517f76452dadc"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/28/%D0%BB%D0%B8%D1%81%D1%82%D0%BE%D0%B2%D0%BA%D0%B0%20%D0%BE%D1%82%D0%BB%D0%B8%D1%87%D0%B8%D1%8F%20Ent%20%D0%BE%D1%82%20PostgreSQL_final.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2025/11/28/листовка отличия Ent от PostgreSQL_final.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "b632117dccf6a0d8d44aa3089043d6d0beb17310fac664aac94fd63fab3687d0"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Kulaga_PG Pro AXE вебинар 18.11.2025.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Kulaga_PG%20Pro%20AXE%20%D0%B2%D0%B5%D0%B1%D0%B8%D0%BD%D0%B0%D1%80%2018.11.2025.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a3b04af75874bb270d20c37b47718832191013d223cb219066b26a62ef880637"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Mark_AXE.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "67b1476a7e52898c5944aaba01185db5d5a9c83d100f0b343f96ef11a0aa8ff9"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/20/Mark_PG_Overview_short_18.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "3d1e3ab50503572c56af84ff551549e0057cfc0a8c8d610f4e14336d8958374e"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/02/25/PPEM_Overview_FULL_2025_v2.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "a004cf3de133d27d5cc5d4acbe671301ed422a560cc573e700b63f0fcc717cae"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/03/05/260120_PgPro_SteppedSecurity_Gusakov.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "d957390b98c4da96da90689c80d182ce66fafa6c7dd09d2e1af627d3c59414ad"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/03/05/260127_SecNF18.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "0305d2428568b09b0c5a8cdb821357bc17e009855aea19eda76dd31ff62fbf7b"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/03/13/intro_integraciya-postgrespro-enterprise-tde-so-stronghold.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "cbd5095de41ceb0df3dd34414dec8b349bbaceabf765f1e312e6022ee2aef72a"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/04/23/260421_PgPro_Cerified_Gusakov.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "3e9ea653d49a980bbeb58a9cc703669ed2573c3d03faa3bd449152b345aa12a9"
+   },
+   {
+    "url": "https://postgrespro.ru/media/2026/10/22/PGPRO18.6_vs_PGSQL.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "9aa0be038ad9d970fbc5022b38b70183404311929964c066935e00ba0d981b2c"
+   },
+   {
+    "url": "https://postgrespro.ru/media/docs/enterprise/9.6/ru/postgres-A4-fop.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "cb9ef5bbd66ded3bea82f01c4dea66c0c2746f3a9927ff8f0c791ca270b8bf66"
+   },
+   {
+    "url": "https://postgrespro.ru/media/Приложение%20к%20приказу%20_Политика%20в%20отношении%20обработки%20файлов%20cookie_22.12.25.pdf",
+    "token": "reextract_engine_changed",
+    "rebuilt_hash": "420b7a8c004d900cd56dab706a0cce7cc8533fc0bda201b5c096944aca83c474"
+   }
+  ]
+ }
+}
