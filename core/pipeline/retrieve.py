@@ -19,6 +19,10 @@ Tie-break детерминирован по ``chunk_id`` (R7). Модуль ка
 ``vector_index.build_id`` (композиция, 09 §8.4), у R0 — ``lexical_index.build_id``
 (заполняется засевом). ``engine_version`` в провенанс не попадает: это версия
 движка, а не сборки.
+
+R2 не сливает плечи **разных известных** сборок: это разные данные под одними
+идентификаторами, и слияние выдало бы провенанс одного плеча за оба
+(:class:`RetrievalBuildMismatch`).
 """
 
 from __future__ import annotations
@@ -36,10 +40,35 @@ from core.ports.vector_index import (
 
 __all__ = [
     "PROFILE_DESCRIPTIONS",
+    "RetrievalBuildMismatch",
     "RetrievalProfile",
     "retrieve",
     "rrf_fuse_chunks",
 ]
+
+
+class RetrievalBuildMismatch(ValueError):
+    """Плечи R2 описывают разные данные под одними идентификаторами — отказ, не выбор.
+
+    Наследуется от ``ValueError``: вызывающие уже ловят ``ValueError`` как нарушение
+    контракта ретривала (отсутствующий порт, отсутствующий вектор), поэтому смена класса
+    не потребовала правок у них.
+
+    Два случая:
+
+    - **разные сборки плеч** — лексический и dense-индексы построены из разных
+      ``composition_id``. Оба ``build_id`` известны и различаются, значит ``chunk_id``
+      из разных сборок могут указывать на разный текст, а ``RetrievalResult.build_id``
+      назвал бы одну сборку за обе;
+    - **расходящиеся метаданные одного ``chunk_id``** — ``content_hash`` и/или
+      ``product_id`` двух плеч не совпали. Это разные единицы доказательства под одним
+      идентификатором: выбрать «более авторитетное» плечо (dense) значило бы выдать
+      провенанс одного за провенанс обоих и нарушить цепочку
+      ``corpus_raw → extract → chunk → content_hash → index`` (I19).
+
+    Отказ виден, а не молчалив (A3): неизвестная сборка (пустая строка) отказом **не**
+    является — сравнивать нечего, и это честно остаётся «не удостоверено».
+    """
 
 
 class RetrievalProfile(StrEnum):
@@ -95,6 +124,27 @@ def _index_build_id(index: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _check_shared_chunk(
+    seen: RetrievedChunk, other: RetrievedChunk, what: str
+) -> None:
+    """Сверяет метаданные чанка, встреченного в двух источниках RRF.
+
+    Одинаковый ``chunk_id`` при разных ``content_hash``/``product_id`` означает, что
+    источники описывают разные данные под одним идентификатором: любой выбранный
+    провенанс был бы ложью про другой источник. Это отказ, а не повод предпочесть dense.
+    """
+    diverged: list[str] = []
+    if seen.content_hash != other.content_hash:
+        diverged.append(f"content_hash {seen.content_hash!r} != {other.content_hash!r}")
+    if seen.product_id != other.product_id:
+        diverged.append(f"product_id {seen.product_id!r} != {other.product_id!r}")
+    if diverged:
+        raise RetrievalBuildMismatch(
+            f"чанк {seen.chunk_id!r} встречен в {what} с расходящимися метаданными: "
+            + "; ".join(diverged)
+        )
+
+
 def rrf_fuse_chunks(
     lexical: Sequence[RetrievedChunk],
     dense: Sequence[RetrievedChunk],
@@ -111,15 +161,27 @@ def rrf_fuse_chunks(
     Провенанс (``content_hash``/``build_id``/``text``/``heading_path``/``product_id``)
     берётся из первого встреченного источника; при расхождении предпочитается dense
     (векторный индекс хранит точный ``build_id`` сборки).
+
+    Приоритет dense действует **только для согласованных данных**: если у одного и того
+    же ``chunk_id`` расходятся ``content_hash`` или ``product_id``, слияние отвергается
+    (:class:`RetrievalBuildMismatch`) — под общим идентификатором лежат разные единицы
+    доказательства, и выбрать одно плечо значило бы соврать про другое.
     """
     scores: dict[str, float] = {}
     provenance: dict[str, RetrievedChunk] = {}
     # Плечи в фиксированном порядке: сначала lexical, затем dense (детерминизм).
     for rank, chunk in enumerate(lexical, 1):
         scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + 1.0 / (rrf_k + rank)
-        provenance.setdefault(chunk.chunk_id, chunk)
+        seen = provenance.get(chunk.chunk_id)
+        if seen is None:
+            provenance[chunk.chunk_id] = chunk
+        else:
+            _check_shared_chunk(seen, chunk, "лексическом плече")
     for rank, chunk in enumerate(dense, 1):
         scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + 1.0 / (rrf_k + rank)
+        seen = provenance.get(chunk.chunk_id)
+        if seen is not None:
+            _check_shared_chunk(seen, chunk, "обоих плечах")
         # dense переопределяет провенанс: он несёт build_id сборки из векторного индекса.
         provenance[chunk.chunk_id] = chunk
 
@@ -171,8 +233,14 @@ def retrieve(
     :param rrf_k: RRF-константа (часть ``retrieval_params_json``, S1).
     :param lang: язык запроса (плечо BM25).
 
+    :raises RetrievalBuildMismatch: плечи R2 привязаны к разным **известным** сборкам
+        индекса, либо один ``chunk_id`` пришёл из двух источников с разными
+        ``content_hash``/``product_id``. Наследник ``ValueError``.
     :raises ValueError: неизвестный профиль; отсутствует нужный порт; для R1/R2 нет ни
         вектора, ни готового dense-плеча.
+
+    Пустая сборка (``build_id == ""``) у любого плеча отказом не является: неизвестная
+    сборка не удостоверяется, сравнивать нечего (A3 — отсутствие факта не факт отсутствия).
     """
     resolved = _as_profile(profile)
     products = list(product_ids)
@@ -205,6 +273,16 @@ def retrieve(
     else:  # R2 — RRF-гибрид обеих плеч.
         lexical = _required_index(lexical_index, "lexical_index", resolved)
         vectors = _required_index(vector_index, "vector_index", resolved)
+        # Сборки плеч сверяются до поиска: обе известны и различаются — это разные
+        # данные под одними chunk_id, и RRF выдал бы провенанс одной сборки за обе.
+        # Неизвестная сборка (``""``) не отказ: сравнивать нечего (A3).
+        lexical_build = _index_build_id(lexical)
+        dense_build = _index_build_id(vectors)
+        if lexical_build and dense_build and lexical_build != dense_build:
+            raise RetrievalBuildMismatch(
+                "плечи R2 привязаны к разным сборкам индекса: "
+                f"лексический {lexical_build!r}, dense {dense_build!r}"
+            )
         lexical_hits = lexical.search(query_text, products, top_k=cutoff_k, lang=lang)
         dense_leg = (
             list(dense_hits)

@@ -433,7 +433,9 @@ class _Lexical:
     """BM25-фейк: один хит на запрос, продукт-скоупед (I17)."""
 
     engine_version = "lex-fake-1"
-    build_id = "build-lex"
+    # Одна сборка на оба плеча: R2 отвергает слияние разных известных сборок
+    # (``RetrievalBuildMismatch``), а здесь проверяется батч-плечо, не провенанс.
+    build_id = "build-vec"
 
     def __init__(self, chunk_id: str) -> None:
         self.chunk_id = chunk_id
