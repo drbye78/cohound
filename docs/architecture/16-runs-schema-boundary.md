@@ -714,7 +714,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed` (`core/pipeline/crawl_frontier.py:1563`), чей work-set
      гейтится режимом продукта (`plan_incremental_items` под сетью отдаёт `[]` для
-     `new`/`full` — `core/pipeline/corpus_ingest.py:4874-4876`). Правило: **заряженный URL обязан быть и
+     `new`/`full` — `core/pipeline/corpus_ingest.py:3220-3225`). Правило: **заряженный URL обязан быть и
      дренируемым** — каждый элемент, засчитанный в `consumed`, ставится depth-0 листом
      (`add_revalidate_seed`, вне бюджета discovery) **независимо от режима**; гейт
      `mode == INCREMENTAL` для этого набора неверен, его настоящее предусловие — «есть

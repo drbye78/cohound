@@ -3509,9 +3509,11 @@ REUSE_BYTES_REBUILD = "reuse_bytes_rebuild"
 #: retention либо его хеш не совпал с записанным) — пересобрать нечем.
 REUSE_BYTES_MISSING = "reuse_bytes_missing"
 
-#: Токен видимого факта: пересборка дала **другой** ``content_hash``, чем записан в
-#: ``document_version``. Это не «контент изменился» (сети не было) — сменился движок
-#: извлечения; класс изменения — ``content_change``, и документ остаётся в корпусе.
+#: Токен видимого факта: пересборка дала **другой** ``content_hash`` при **том же**
+#: штампе движка. Это не «контент изменился» (сети не было) — это дрейф пере-извлечения;
+#: класс изменения — ``content_change``, и документ остаётся в корпусе. Другой штамп
+#: называется отдельно (:data:`REEXTRACT_ENGINE_CHANGED`): там условие объявлено входом,
+#: а не «поехало».
 REUSE_BYTES_REEXTRACT = "reuse_bytes_reextract"
 
 #: Пояснение к :data:`REUSE_BYTES_MISSING` (операторский канал).
@@ -3541,7 +3543,11 @@ class RebuiltDoc:
     :param chunks: чанки текущего чанкера в порядке ``chunk_no``.
     :param from_cache: ``ExtractedDoc`` взят из ``extract_cache`` (экстрактор не звался).
     :param extracted: экстрактор вызывался (даже если затем отказал).
-    :param content_changed: ``doc_hash`` разошёлся с durable-версией (дрейф извлечения).
+    :param content_changed: ``doc_hash`` разошёлся с durable-версией **того же** движка
+        (дрейф извлечения: тот же файл, тот же объявленный механизм, другой текст).
+    :param extractor_changed: durable-версию произвёл **другой** движок (объявленное
+        условие измерения: ``pdf_pipeline``/``document_level``). Текст расходится по
+        построению, и это не дрейф — см. :data:`REEXTRACT_ENGINE_CHANGED`.
     :param seconds: время попытки (экстракция + нарезка).
     """
 
@@ -3556,6 +3562,7 @@ class RebuiltDoc:
     from_cache: bool = False
     extracted: bool = False
     content_changed: bool = False
+    extractor_changed: bool = False
     seconds: float = 0.0
 
 
@@ -3640,6 +3647,22 @@ def _level_extractor(
     return built
 
 
+def _same_extractor(prior_doc: DocumentVersionRow, token: str) -> bool:
+    """Произведена ли durable-версия **тем же** движком, что работает сейчас.
+
+    ``True`` — да (или это неизвестно: пустой штамп с любой стороны). Различать
+    «другой движок» и «движок неизвестен» важно: первый факт объявлен входом прогона
+    (``extractor_stack`` → ``run_id``), второй — отсутствие факта. Отсутствие факта не
+    даёт права объявить пере-извлечение объявленным, поэтому неизвестный штамп остаётся
+    прежним путём: расхождение текста читается как дрейф и отклоняется под ``frozen``.
+    """
+    prior_token = str(getattr(prior_doc, "extractor_version", "") or "")
+    current = str(token or "")
+    if not prior_token or not current:
+        return True
+    return prior_token == current
+
+
 def rebuild_from_stored_bytes(
     product_id: str,
     url: str,
@@ -3679,10 +3702,21 @@ def rebuild_from_stored_bytes(
     суффикс ``.bin``, заголовка ответа в этом прогоне нет. Иначе PDF по бессуффиксному
     URL ушёл бы в HTML-ветку и дал ложный дрейф.
 
-    ``content_changed`` не отказ: смена текста при том же файле — ``content_change``
-    (движок извлечения — провенанс, а не ось контракта), и решает вызывающий: ``frozen``
-    называет это дрейфом измерения и отклоняет, фолбэк переиспользования принимает с
-    отдельным видимым токеном.
+    Два расхождения текста различаются по носителю, а не по величине:
+
+    - ``content_changed`` — тот же файл, **тот же** штамп движка, другой текст. Это дрейф
+      пере-извлечения; под ``frozen`` он отклоняется (``frozen_reextract_mismatch``),
+      потому что объявленное условие не изменилось, а результат изменился;
+    - ``extractor_changed`` — версию произвёл **другой** движок (``pdf_pipeline``/
+      ``document_level``). Текст расходится по построению, условие объявлено входом
+      прогона (``extractor_stack`` → ``run_id``), поэтому документ публикуется, а факт
+      называется :data:`REEXTRACT_ENGINE_CHANGED`. Отклонять его значило бы терять
+      доказательства, которые прогон объявил: измерено 09.11.2026 (план 26 O35) — 153 PDF
+      пропали как «дрейф» при смене ``pdf_pipeline``, из них 87 документов (16 327
+      страниц) вернулись в корпус после правки.
+
+    Неизвестный штамп (пустая строка с любой стороны) читается как «тот же»: отсутствие
+    факта не даёт права объявить пере-извлечение объявленным (A3).
 
     :returns: :class:`BytesRebuildOutcome`; ``doc`` заполнен только при успехе.
     """
@@ -3791,13 +3825,14 @@ def rebuild_from_stored_bytes(
             cache_hit=cache_hit,
             seconds=time.perf_counter() - started,
         )
+    token = str(getattr(extracted, "extractor_version", None) or "")
     return BytesRebuildOutcome(
         doc=RebuiltDoc(
             url=url,
             key=_state_url_key(url) or url,
             doc_hash=doc_hash,
             raw_path=raw_path,
-            extractor_token=str(getattr(extracted, "extractor_version", None) or ""),
+            extractor_token=token,
             level_text=str(level_text or ""),
             partial_fields=_partial_fields(extracted),
             chunks=sorted(
@@ -3805,8 +3840,24 @@ def rebuild_from_stored_bytes(
             ),
             from_cache=cache_hit,
             extracted=extracted_now,
+            # План 26 O35: дрейф — это «тот же движок, другой текст». Смена объявленного
+            # механизма (``pdf_pipeline``/``document_level``) даёт другой текст **по
+            # построению**, и называть это дрейфом значило бы отказывать объявленному
+            # пере-извлечению: на стенде ``frozen`` с ``pdf_pipeline=text_layer`` выбросил
+            # 153 PDF как «дрейф» (87 документов / 16 327 страниц вернулись в корпус после
+            # правки), хотя условие измерения было объявлено входом
+            # (``extractor_stack`` → ``run_id``). Два факта различаются
+            # по носителю: ``content_changed`` — расхождение при том же штампе,
+            # ``extractor_changed`` — расхождение из-за другого штампа.
             content_changed=bool(
-                prior_doc is not None and doc_hash != prior_doc.content_hash
+                prior_doc is not None
+                and doc_hash != prior_doc.content_hash
+                and _same_extractor(prior_doc, token)
+            ),
+            extractor_changed=bool(
+                prior_doc is not None
+                and doc_hash != prior_doc.content_hash
+                and not _same_extractor(prior_doc, token)
             ),
             seconds=time.perf_counter() - started,
         ),
@@ -3968,10 +4019,11 @@ def offline_reuse_product(
     **Пересборка — не наблюдение.** ``url_state`` не переписывается (наблюдения не
     было), а датированный носитель ``❌`` — прежнее durable-наблюдение URL
     (``corpus_artifact.observed_at`` из ``url_state``, I2d). Если текущий экстрактор дал
-    **другой** ``content_hash``, это ``content_change`` (движок — провенанс, не ось
-    контракта): документ остаётся в корпусе, а дрейф назван
-    :data:`REUSE_BYTES_REEXTRACT`. ``frozen`` тот же дрейф отклоняет: там он означает
-    расхождение измерения, здесь — что пересборка дала новый текст того же файла.
+    **другой** ``content_hash``, это ``content_change``: документ остаётся в корпусе, а
+    факт назван — :data:`REUSE_BYTES_REEXTRACT` при том же штампе движка,
+    :data:`REEXTRACT_ENGINE_CHANGED` при другом. ``frozen`` дрейф при том же штампе
+    отклоняет: там он означает расхождение измерения, здесь — что пересборка дала новый
+    текст того же файла.
 
     **Чего здесь нет намеренно.** Нет записи в ``url_state``: наблюдения не было, и
     ``reuse_kind``/``last_http_status`` прошлого цикла переписывать нельзя — иначе
@@ -4123,14 +4175,25 @@ def offline_reuse_product(
             # персистенции и чанк-гейта ниже остаются.
             del errors[errors_before_reuse:]
             if rebuilt_doc.content_changed:
-                # Тот же файл, другой текст: сменился движок извлечения, а не контент
-                # (сети не было). Класс изменения — ``content_change``; документ
+                # Тот же файл, **тот же** движок, другой текст: дрейф извлечения, а не
+                # контент (сети не было). Класс изменения — ``content_change``; документ
                 # остаётся в корпусе, но факт назван, а не спрятан.
                 errors.append(
                     f"{product_id}/{url}: {REUSE_BYTES_REEXTRACT}: content_hash "
                     f"пересборки {rebuilt_doc.doc_hash} != записанного "
                     f"{prior_doc.content_hash} — тот же файл, другой текст текущего "
                     "движка (наблюдения не было)"
+                )
+            elif rebuilt_doc.extractor_changed:
+                # Другой движок — объявленное пере-извлечение: текст расходится по
+                # построению. Документ остаётся, факт назван тем же токеном, что под
+                # ``frozen``, чтобы одно событие не описывалось двумя именами.
+                errors.append(
+                    f"{product_id}/{url}: {REEXTRACT_ENGINE_CHANGED}: content_hash "
+                    f"пересборки {rebuilt_doc.doc_hash} != записанного "
+                    f"{prior_doc.content_hash} — версию произвёл другой движок "
+                    f"({prior_doc.extractor_version or '—'} → "
+                    f"{rebuilt_doc.extractor_token or '—'})"
                 )
             report_rebuilt_seconds += outcome.seconds
             # Durable-группа: алиас тоже участвует в дедупе (как у переиспользования).
@@ -4282,6 +4345,16 @@ FROZEN_UNKNOWN_ROOTS = "unknown_roots"
 #: ``doc_set_digest``, а причина выглядела бы наблюдением.
 FROZEN_REEXTRACT_MISMATCH = "frozen_reextract_mismatch"
 
+#: Токен **объявленного** пере-извлечения: durable-версию произвёл другой движок
+#: (``pdf_pipeline``/``document_level``), поэтому текст расходится по построению. Это не
+#: дрейф и не ``content_change``: условие измерения объявлено входом прогона
+#: (``extractor_stack`` → ``run_id``), и корпус описывается им же. Отклонять документ
+#: здесь — значит терять доказательства, которые прогон объявил, а отказ выглядит как
+#: «документ исчез». Измерено 09.11.2026 (план 26 O35): ``frozen`` +
+#: ``pdf_pipeline=text_layer`` выбросил **106 PDF (16 824 страницы)** как «дрейф», хотя
+#: сменился объявленный механизм. Факт публикуется числом, а не молчанием.
+REEXTRACT_ENGINE_CHANGED = "reextract_engine_changed"
+
 #: Токены воспроизведения **контейнеров** (план 19 §E.7). У контейнера нет версии
 #: документа, поэтому проход без сети находил его в ``no_version`` и молча терял членов.
 #: ``frozen_container_replayed:{n}`` — сколько контейнеров воспроизведено из сохранённых
@@ -4325,7 +4398,11 @@ class FrozenBytesReport:
     :param stored_bytes_missing: известные URL без пригодных сохранённых байтов.
     :param no_version: известные URL без активной версии документа.
     :param reextract_mismatch: URL, чей пере-извлечённый ``content_hash`` не совпал с
-        записанным (дрейф пере-извлечения, а не смена контента).
+        записанным при **том же** штампе движка (дрейф пере-извлечения, а не смена
+        контента).
+    :param engine_changed: URL, чей ``content_hash`` разошёлся из-за **другого** штампа
+        движка — объявленное пере-извлечение (:data:`REEXTRACT_ENGINE_CHANGED`).
+        Документ в корпусе, факт назван.
     :param groups: durable-группы дедупа, которые проход использовал:
         ``(doc_hash, (url, ...))`` — кто был алиасом одного документа. Пишутся в запись
         снятия, чтобы следующий ``frozen`` выбрал тот же канонический адрес без
@@ -4347,6 +4424,7 @@ class FrozenBytesReport:
     stored_bytes_missing: tuple[str, ...] = ()
     no_version: tuple[str, ...] = ()
     reextract_mismatch: tuple[str, ...] = ()
+    engine_changed: tuple[str, ...] = ()
     containers: int = 0
     container_docs: int = 0
     container_chunks: int = 0
@@ -4375,7 +4453,8 @@ class FrozenBytesReport:
             f"{len(self.container_empty)}), нет байтов {len(self.stored_bytes_missing)}, "
             f"корней вне состояния {len(self.unknown_roots)}, без версии "
             f"{len(self.no_version)}, дрейф пере-извлечения "
-            f"{len(self.reextract_mismatch)}; "
+            f"{len(self.reextract_mismatch)}, объявленное пере-извлечение "
+            f"другим движком {len(self.engine_changed)}; "
             "сеть не трогалась, наблюдений этого прогона нет "
             "(❌ — только с датой носителя, I2d)"
         )
@@ -4457,6 +4536,7 @@ def frozen_bytes_product(
     stored_bytes_missing: list[str] = []
     no_version: list[str] = []
     reextract_mismatch: list[str] = []
+    engine_changed: list[str] = []
     cache_hits = 0
     reextracted = 0
     touched: list[str] = []
@@ -4692,6 +4772,19 @@ def frozen_bytes_product(
                 "движка (смена контента не наблюдалась)"
             )
             continue
+        if rebuilt.extractor_changed:
+            # Объявленное пере-извлечение: движок другой, поэтому текст другой по
+            # построению. Документ остаётся в корпусе (условие названо входом прогона),
+            # но факт публикуется числом — иначе смена механизма выглядела бы как
+            # «документ исчез».
+            engine_changed.append(url)
+            errors.append(
+                f"{product_id}/{url}: {REEXTRACT_ENGINE_CHANGED}: content_hash "
+                f"пере-извлечения {rebuilt.doc_hash} != записанного "
+                f"{prior_doc.content_hash} — версию произвёл другой движок "
+                f"({prior_doc.extractor_version or '—'} → "
+                f"{rebuilt.extractor_token or '—'}), это объявленное условие прогона"
+            )
         collected.append(rebuilt)
 
     # --- дедуп и канонический адрес ------------------------------------------- #
@@ -4771,6 +4864,7 @@ def frozen_bytes_product(
         stored_bytes_missing=tuple(stored_bytes_missing),
         no_version=tuple(no_version),
         reextract_mismatch=tuple(reextract_mismatch),
+        engine_changed=tuple(engine_changed),
         containers=containers_replayed,
         container_docs=container_docs,
         container_chunks=container_chunks,

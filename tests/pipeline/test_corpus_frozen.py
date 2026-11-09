@@ -43,6 +43,7 @@ from core.pipeline.corpus import (
 )
 from core.pipeline.corpus_ingest import (
     FROZEN_REEXTRACT_MISMATCH,
+    REEXTRACT_ENGINE_CHANGED,
     FrozenBytesReport,
 )
 from core.ports.types import (
@@ -98,9 +99,12 @@ class _FrozenExtractor:
 
     version = "extractor-1"
 
-    def __init__(self, *, hash_override: str | None = None) -> None:
+    def __init__(
+        self, *, hash_override: str | None = None, version: str | None = None
+    ) -> None:
         self.calls = 0
         self.hash_override = hash_override
+        self.version = version or type(self).version
 
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
@@ -428,6 +432,48 @@ def test_frozen_reextract_drift_is_a_named_token_not_a_new_document(
                 if isinstance(entry, dict) and entry.get("event") == "product_end"
             ]
             assert events[0]["frozen"]["reextract_mismatch"] == [ROOT]
+        finally:
+            store.close()
+
+
+def test_frozen_declared_engine_change_keeps_the_document(tmp_path: Path) -> None:
+    """Другой объявленный движок под ``frozen`` — документ в корпусе, факт назван.
+
+    План 26 O35: ``--pdf-pipeline text_layer --refresh frozen`` на стенде выбросил 106 PDF
+    (16 824 страницы) как «дрейф», хотя сменился **объявленный** механизм
+    (``extractor_stack`` → ``run_id``). Дрейф — это тот же штамп и другой текст; здесь
+    штамп другой, и текст расходится по построению.
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
+
+        result, store, crawler = _frozen_run(
+            tmp_path,
+            state,
+            roots=[ROOT],
+            extractor=_FrozenExtractor(
+                hash_override="1" * 64, version="pdfium-text-3:5.14.0"
+            ),
+        )
+        try:
+            assert crawler.calls == []
+            docs = _docs(store)
+            assert len(docs) == 1, "объявленное пере-извлечение публикует документ"
+            assert docs[0].extractor_version == "pdfium-text-3:5.14.0"
+            assert any(
+                REEXTRACT_ENGINE_CHANGED in error and ROOT in error
+                for error in result.errors
+            ), f"нет видимого токена объявленного пере-извлечения: {result.errors}"
+            assert not any(
+                FROZEN_REEXTRACT_MISMATCH in error for error in result.errors
+            ), "другой штамп — не дрейф"
+            events = [
+                entry
+                for entry in result.log_entries
+                if isinstance(entry, dict) and entry.get("event") == "product_end"
+            ]
+            assert events[0]["frozen"]["engine_changed"] == [ROOT]
+            assert events[0]["frozen"]["reextract_mismatch"] == []
         finally:
             store.close()
 

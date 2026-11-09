@@ -4564,6 +4564,10 @@ def _build_corpus(
                         "reextract_mismatch": list(
                             ctx.frozen_report.reextract_mismatch
                         ),
+                        # План 26 O35: объявленное пере-извлечение другим движком —
+                        # отдельный список, чтобы «дрейф» и «другое условие» не
+                        # смешивались в одном числе.
+                        "engine_changed": list(ctx.frozen_report.engine_changed),
                         # План 19 §E.7: контейнеры и их вклад в корпус — числа, а не
                         # пересказ: члены входят в ``docs``/``chunks`` этого же события.
                         "containers": ctx.frozen_report.containers,

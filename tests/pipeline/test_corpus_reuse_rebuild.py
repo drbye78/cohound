@@ -43,7 +43,11 @@ from core.domain import (
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import IndexBuild, build_corpus
-from core.pipeline.corpus_ingest import REUSE_BYTES_REEXTRACT, OfflineReuseReport
+from core.pipeline.corpus_ingest import (
+    REEXTRACT_ENGINE_CHANGED,
+    REUSE_BYTES_REEXTRACT,
+    OfflineReuseReport,
+)
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.normalize import load_inputs
@@ -558,16 +562,14 @@ def test_rebuilt_document_carries_the_durable_observation_date(
             store.close()
 
 
-def test_reextract_drift_is_named_but_the_document_stays(
-    tmp_path: Path,
-) -> None:
-    """Тот же файл, другой текст: ``content_change`` назван, документ остаётся.
+def _drifted_text_extractor(version: str) -> _CurrentExtractor:
+    """Экстрактор с заданным штампом и текстом, разошедшимся с записанным."""
 
-    Экстрактор — провенанс, а не ось контракта, поэтому смена текста при том же файле
-    не повод выбросить документ (иначе смена движка снова обнулила бы продукт). Факт
-    называется отдельным токеном — молчаливой подмены провенанса нет.
-    """
     class _DriftingExtractor(_CurrentExtractor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.version = version
+
         def extract(
             self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
         ) -> ExtractedDoc:
@@ -577,10 +579,28 @@ def test_reextract_drift_is_named_but_the_document_stays(
                 extracted, text=drifted, content_hash=content_hash(drifted)
             )
 
+    return _DriftingExtractor()
+
+
+def test_reextract_drift_is_named_but_the_document_stays(
+    tmp_path: Path,
+) -> None:
+    """Тот же файл, **тот же** движок, другой текст: дрейф назван, документ остаётся.
+
+    Экстрактор — провенанс, а не ось контракта, поэтому смена текста при том же файле
+    не повод выбросить документ (иначе смена движка снова обнулила бы продукт). Факт
+    называется отдельным токеном — молчаливой подмены провенанса нет.
+
+    Штамп здесь **совпадает** с записанным (``extractor-1``): только тогда расхождение
+    текста — дрейф. Другой штамп разбирается отдельным тестом ниже (план 26 O35).
+    """
     with SqliteStateStore(":memory:") as state:
         _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
         result, store, crawler = _reuse_run(
-            tmp_path, state, roots=[ROOT], extractor=_DriftingExtractor()
+            tmp_path,
+            state,
+            roots=[ROOT],
+            extractor=_drifted_text_extractor("extractor-1"),
         )
         try:
             assert crawler.calls == []
@@ -588,6 +608,42 @@ def test_reextract_drift_is_named_but_the_document_stays(
             assert any(REUSE_BYTES_REEXTRACT in error for error in result.errors), (
                 result.errors
             )
+            assert not any(
+                REEXTRACT_ENGINE_CHANGED in error for error in result.errors
+            ), "тот же штамп — это дрейф, а не объявленное пере-извлечение"
+        finally:
+            store.close()
+
+
+def test_declared_engine_change_is_named_and_the_document_stays(
+    tmp_path: Path,
+) -> None:
+    """Другой штамп движка — объявленное пере-извлечение, а не дрейф (план 26 O35).
+
+    Смена ``pdf_pipeline``/``document_level`` объявлена входом прогона
+    (``extractor_stack`` → ``run_id``), поэтому расхождение текста здесь ожидаемо по
+    построению. Считать его дрейфом значило бы выбрасывать документы, которые прогон
+    объявил: на стенде так пропали 106 PDF (16 824 страницы).
+    """
+    with SqliteStateStore(":memory:") as state:
+        _seed_substrate(tmp_path, state, pages={ROOT: BODY}, roots=[ROOT])
+        result, store, crawler = _reuse_run(
+            tmp_path,
+            state,
+            roots=[ROOT],
+            extractor=_drifted_text_extractor("pdfium-text-3:5.14.0"),
+        )
+        try:
+            assert crawler.calls == []
+            docs = _docs(store)
+            assert len(docs) == 1, "объявленное пере-извлечение публикует документ"
+            assert docs[0].extractor_version == "pdfium-text-3:5.14.0"
+            assert any(
+                REEXTRACT_ENGINE_CHANGED in error for error in result.errors
+            ), result.errors
+            assert not any(
+                REUSE_BYTES_REEXTRACT in error for error in result.errors
+            ), "другой штамп — не дрейф"
         finally:
             store.close()
 

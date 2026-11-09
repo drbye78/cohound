@@ -254,13 +254,23 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   (сверяет множество значений enum с ключами таблицы) и
   `test_dispatch_has_no_silent_default_for_unknown_policy`.
 - ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
-  (`core/pipeline/corpus_ingest.py:4344`, `frozen_bytes_product`; общий шаг — `rebuild_from_stored_bytes`
+  (`core/pipeline/corpus_ingest.py:4460`, `frozen_bytes_product`; общий шаг — `rebuild_from_stored_bytes`
   `core/pipeline/corpus_ingest.py:3603`, им же пользуется фолбэк переиспользования). Ключ `extract_cache` — хеш **сырых байтов**
   (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
-- ✅ **Дрейф пере-извлечения виден**: промах кэша с другим `content_hash` → токен
-  `frozen_reextract_mismatch` (`core/pipeline/corpus_ingest.py:4649`), документ **не публикуется** и в
+- ✅ **Дрейф пере-извлечения виден, а объявленное пере-извлечение — нет (план 26 O35).**
+  Промах кэша с другим `content_hash` при **том же** штампе движка → токен
+  `frozen_reextract_mismatch` (`core/pipeline/corpus_ingest.py:4766`), документ **не публикуется** и в
   `document_version` не попадает: ложного `document_id`, ложного дедупа и другого
-  `doc_set_digest` не возникает.
+  `doc_set_digest` не возникает. Если штамп **другой** (`pdf_pipeline`/`document_level`
+  объявлены входом прогона), текст расходится по построению: документ публикуется, а факт
+  называется `reextract_engine_changed` (`core/pipeline/corpus_ingest.py:4353`). До правки
+  09.11.2026 оба случая читались как дрейф: `--pdf-pipeline text_layer --refresh frozen`
+  выбросил **153 PDF** — из них **87 документов / 16 327 страниц** попали в корпус после
+  правки, остальные 66 — дубли текста (их хеш совпадает с документом под каноническим
+  `min(url)`: 44 `media/`↔`dmedia/`, 22 `edu.postgrespro.ru`);
+  «пропали документы» вместо «сменился механизм». Число записей `errors` при этом не
+  изменилось (627 → 627) — изменился их смысл. Регрессия:
+  `tests/pipeline/test_corpus_frozen.py::test_frozen_declared_engine_change_keeps_the_document`.
 - ✅ **Канонический адрес согласован и в `frozen`**: `crawl_session_items` не пишутся, дедуп
   идёт по durable-группам снятия (`corpus_capture_doc`, `doc_hash` → URL'ы), канонический
   адрес — `min(url)` **запросом**, а не гонкой готовности; результат не зависит от
