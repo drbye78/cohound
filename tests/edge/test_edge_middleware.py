@@ -130,15 +130,21 @@ def _invoke(
     *,
     path: str,
     method: str = "POST",
-    headers: dict[str, str] | None = None,
+    headers: dict[str, str | list[str]] | None = None,
     body: bytes = b"",
     reader_cls: type = _TrackingReader,
 ) -> Any:
-    """Создаёт handler без сокета и прогоняет один запрос через ``_dispatch``."""
+    """Создаёт handler без сокета и прогоняет один запрос через ``_dispatch``.
+
+    Значение заголовка может быть списком: повторяющиеся заголовки (два
+    ``Content-Length``) — часть проверяемого контракта framing'а, и ``dict`` их не
+    выражает. ``Message.__setitem__`` дописывает, а не заменяет — порядок сохраняется.
+    """
     handler = handler_cls.__new__(handler_cls)
     handler.headers = email.message.Message()
     for key, value in (headers or {}).items():
-        handler.headers[key] = value
+        for item in value if isinstance(value, list) else [value]:
+            handler.headers[key] = item
     handler.path = path
     handler.command = method
     handler.request_version = "HTTP/1.1"
@@ -376,7 +382,7 @@ def test_handler_rejects_declared_length_over_limit_without_reading() -> None:
     assert handler.close_connection is True
 
 
-def test_handler_caps_read_when_length_absent_and_chunked_body_is_oversized() -> None:
+def test_handler_rejects_transfer_encoding_before_reading_body() -> None:
     handler = _invoke(
         make_handler(_edge(), max_body_bytes=64),
         path="/v1/fetch",
@@ -384,11 +390,53 @@ def test_handler_caps_read_when_length_absent_and_chunked_body_is_oversized() ->
         body=b"x" * 4096,
     )
     status, headers, env = _response(handler)
-    assert status == 413
-    assert env is not None
-    # Чтение ограничено лимитом+1, а не объявленным/фактическим объёмом.
-    assert handler.rfile.read_sizes == [65]
+    assert status == 400
+    assert env is not None and env["status"] == "error"
+    # Тело не читалось вовсе: даже поток сверх лимита не даёт ни аллокации,
+    # ни 413 — framing отвергнут до границы тела.
+    assert handler.rfile.read_sizes == []
     assert headers["connection"] == "close"
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize(
+    "value", ["chunked", "gzip", "chunked, gzip", "identity", ""]
+)
+def test_handler_rejects_any_transfer_encoding_value(value: str) -> None:
+    handler = _invoke(
+        make_handler(_edge()),
+        path="/v1/fetch",
+        headers={"Transfer-Encoding": value},
+        body=_fetch_body(),
+    )
+    status, headers, _env = _response(handler)
+    assert status == 400
+    assert handler.rfile.read_sizes == []
+    assert headers["connection"] == "close"
+
+
+def test_handler_rejects_content_length_with_transfer_encoding_and_ignores_remainder() -> None:
+    # Классическая предпосылка request smuggling: CL и TE рядом. Шов обязан
+    # отвергнуть запрос целиком, не читая тело, и закрыть соединение — иначе
+    # остаток («0\r\n\r\nGET …») был бы разобран как следующий запрос.
+    smuggling = b"0\r\n\r\nGET /v1/health HTTP/1.1\r\nHost: seam.test\r\n\r\n"
+    handler = _invoke(
+        make_handler(_edge()),
+        path="/v1/fetch",
+        headers={"Content-Length": "5", "Transfer-Encoding": "chunked"},
+        body=_fetch_body() + b"\r\n\r\n" + smuggling,
+    )
+    status, headers, env = _response(handler)
+    assert status == 400
+    assert env is not None and env["status"] == "error"
+    # Тело не читалось: ни по CL, ни до лимита.
+    assert handler.rfile.read_sizes == []
+    assert headers["connection"] == "close"
+    assert handler.close_connection is True
+    # Второго ответа нет и «следующий запрос» не обработан.
+    written = handler.wfile.getvalue()
+    assert written.count(b"HTTP/1.") == 1
+    assert b"/v1/health" not in written
 
 
 def test_handler_rejects_lying_content_length_with_413() -> None:
@@ -405,6 +453,91 @@ def test_handler_rejects_lying_content_length_with_413() -> None:
     # Запрошено не больше объявленного и не больше лимита+1.
     assert handler.rfile.read_sizes == [16]
     assert headers["connection"] == "close"
+
+
+def test_handler_rejects_duplicate_content_length() -> None:
+    """Два разных ``Content-Length`` — разные границы тела у двух звеньев (smuggling).
+
+    ``headers.get()`` вернул бы первое значение (``5``): тело прочиталось бы на 5 байт,
+    остаток лёг бы на переиспользуемый сокет как следующий запрос.
+    """
+    handler = _invoke(
+        make_handler(_edge()),
+        path="/v1/fetch",
+        headers={"Content-Length": ["5", "100"]},
+        body=_fetch_body() + b" " * 200,
+    )
+    status, headers, env = _response(handler)
+    assert status == 400
+    assert env is not None and env["status"] == "error"
+    assert handler.rfile.read_sizes == []
+    assert headers["connection"] == "close"
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("value", ["1_0", "+5", "5, 5", "", "-1", "0x10", "5.0"])
+def test_handler_rejects_non_rfc_content_length(value: str) -> None:
+    """``Content-Length`` читается как ``1*DIGIT``, а не как «что съест ``int()``».
+
+    ``int()`` принимает ``1_0`` и ``+5``; прокси прочитает их иначе — это расхождение
+    границ. Пустое значение и список значений тоже не ``1*DIGIT``.
+    """
+    handler = _invoke(
+        make_handler(_edge()),
+        path="/v1/fetch",
+        headers={"Content-Length": value},
+        body=_fetch_body(),
+    )
+    status, headers, env = _response(handler)
+    assert status == 400
+    assert env is not None and env["status"] == "error"
+    assert handler.rfile.read_sizes == []
+    assert headers["connection"] == "close"
+
+
+def test_handler_rejects_body_on_get() -> None:
+    """GET с объявленным телом оставил бы непрочитанные байты в сокете."""
+    handler = _invoke(
+        make_handler(_edge()),
+        method="GET",
+        path="/v1/health",
+        headers={"Content-Length": "5"},
+        body=b"hello",
+    )
+    status, headers, _env = _response(handler)
+    assert status == 400
+    assert handler.rfile.read_sizes == []
+    assert headers["connection"] == "close"
+    assert handler.close_connection is True
+
+
+def test_handler_rejects_transfer_encoding_on_get() -> None:
+    """Framing-контракт един для всех методов: TE не «разрешён» вне POST."""
+    handler = _invoke(
+        make_handler(_edge()),
+        method="GET",
+        path="/v1/health",
+        headers={"Transfer-Encoding": "chunked"},
+    )
+    status, headers, _env = _response(handler)
+    assert status == 400
+    assert handler.rfile.read_sizes == []
+    assert headers["connection"] == "close"
+
+
+def test_handler_allows_get_with_zero_content_length() -> None:
+    """``Content-Length: 0`` — валидное «тела нет», и оно не ломает keep-alive."""
+    handler = _invoke(
+        make_handler(_edge()),
+        method="GET",
+        path="/v1/health",
+        headers={"Content-Length": "0"},
+    )
+    status, headers, env = _response(handler)
+    assert status == 200
+    assert env is not None and env["status"] == "ok"
+    assert headers.get("connection") != "close"
+    assert handler.close_connection is False
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -1292,26 +1293,43 @@ def route_request(
     return 200, envelope
 
 
-def _declared_content_length(headers: Any) -> int | None:
-    """``Content-Length`` запроса как ``int`` либо ``None`` (нет/битое/отрицательное).
+class _FramingError(ValueError):
+    """Граница тела запроса **неоднозначна** — нарушен framing-контракт шва.
 
-    Отсутствие отличается от нуля: ``None`` означает «клиент не объявил длину»
-    (нужен ограниченный дочитывающий путь), ``0`` — явно пустое тело.
+    Отдельный тип, а не «битый ``Content-Length`` → ``None``»: ``None`` значит «длины
+    нет», и разница между «не объявлено» и «объявлено противоречиво» решает, читать тело
+    или рвать соединение. Молчаливое приведение к ``None`` оставляло бы остаток потока
+    на переиспользуемом сокете, то есть ту же рассинхронизацию.
     """
-    raw = headers.get("Content-Length")
-    if raw is None or str(raw).strip() == "":
-        return None
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return None
-    return value if value >= 0 else None
 
 
-def _content_length(headers: Any) -> int:
-    """Content-Length запроса как неотрицательное ``int`` (0 на битое/отсутствие)."""
-    declared = _declared_content_length(headers)
-    return 0 if declared is None else declared
+#: ``Content-Length = 1*DIGIT`` (RFC 9112 §6.3). ``int()`` шире стандарта: принимает
+#: ``1_0`` и ``+5``, которые прокси прочитают иначе — это и есть расхождение границ.
+_CONTENT_LENGTH_RE = re.compile(r"\A[0-9]+\Z")
+
+
+def _declared_content_length(headers: Any) -> int | None:
+    """``Content-Length`` запроса как ``int`` либо ``None`` (заголовка нет).
+
+    Строго по RFC 9112 §6.3: **ровно один** заголовок, значение — ``1*DIGIT``. Иначе
+    :class:`_FramingError`: два разных ``Content-Length`` (``5`` и ``100``) или
+    нестандартная запись дают двум звеньям разные границы тела — предпосылка request
+    smuggling. Отсутствие (``None``) отличается от нуля: ``0`` — явно пустое тело.
+    """
+    values = headers.get_all("Content-Length") or []
+    if not values:
+        return None
+    if len(values) > 1:
+        raise _FramingError(
+            f"несколько заголовков Content-Length ({len(values)}): "
+            "граница тела неоднозначна"
+        )
+    raw = str(values[0]).strip()
+    if not _CONTENT_LENGTH_RE.match(raw):
+        raise _FramingError(
+            f"некорректный Content-Length {raw!r}: ожидается 1*DIGIT (RFC 9112 §6.3)"
+        )
+    return int(raw)
 
 
 def make_handler(
@@ -1336,6 +1354,13 @@ def make_handler(
     никогда. На 413 соединение закрывается (``Connection: close``): при
     ``HTTP/1.1`` сокет переиспользуется, и непрочитанное тело было бы разобрано
     как следующий запрос — это рассинхронизация, а не просто мусор в ответе.
+
+    **Framing задаёт только ``Content-Length``, и он читается строго.** Отвергаются с
+    ``400`` и закрытием соединения (до чтения тела): любой ``Transfer-Encoding`` у
+    любого метода; несколько заголовков ``Content-Length``; значение не по
+    ``1*DIGIT`` (``1_0``, ``+5``, пустое, ``"5, 5"``); объявленное тело у метода, кроме
+    ``POST``. Обоснование одно: два звена (шов и прокси/LB впереди) не должны выбирать
+    разные границы тела — это предпосылка request smuggling.
     """
 
     class _EdgeRequestHandler(BaseHTTPRequestHandler):
@@ -1384,7 +1409,53 @@ def make_handler(
             # здесь — конверт и аудит обязаны нести одно и то же значение.
             rid = self.headers.get(request_id_header) or gateway._new_id()
             op = _parse_op(self.path) or self.path or "unknown"
-            declared = _declared_content_length(self.headers)
+
+            # Framing-контракт шва — L7 JSON с единственным ``Content-Length``. Любой
+            # ``Transfer-Encoding`` (chunked, несколько кодировок, пустое значение,
+            # ``identity``) отвергается целиком и для **любого** метода: при reverse
+            # proxy (TLS терминируется прокси, 07 §8.1) граница тела становится
+            # неоднозначной — разные звенья выберут разные заголовки, а это классическая
+            # предпосылка request smuggling. Тело не читаем вовсе и закрываем соединение,
+            # чтобы остаток потока не был разобран как следующий запрос. Проверка стоит
+            # до разбора ``Content-Length``: при TE+CL важен сам факт двух механизмов.
+            if self.headers.get_all("Transfer-Encoding"):
+                self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
+                self._send_envelope(
+                    400,
+                    gateway.error_envelope(
+                        "Transfer-Encoding не поддерживается швом; "
+                        "используйте Content-Length",
+                        request_id=rid,
+                    ),
+                    close=True,
+                )
+                return
+
+            try:
+                declared = _declared_content_length(self.headers)
+            except _FramingError as exc:
+                self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
+                self._send_envelope(
+                    400, gateway.error_envelope(str(exc), request_id=rid), close=True
+                )
+                return
+
+            # Тело объявлено там, где его не бывает: по контракту шва тело несёт только
+            # POST. GET/HEAD/иное с ``Content-Length > 0`` оставило бы непрочитанные
+            # байты в сокете и было бы разобрано как следующий запрос — та же
+            # рассинхронизация, что и с TE, поэтому отвергаем, а не игнорируем.
+            if method != "POST" and declared not in (None, 0):
+                self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
+                self._send_envelope(
+                    400,
+                    gateway.error_envelope(
+                        f"тело у метода {method} не поддерживается швом "
+                        f"(Content-Length: {declared}); тело несёт только POST",
+                        request_id=rid,
+                    ),
+                    close=True,
+                )
+                return
 
             # Транспортный guard (ресурсная защита, раньше прикладного конвейера):
             # объявленная длина сверх лимита отвергается без чтения тела.
@@ -1401,43 +1472,15 @@ def make_handler(
                 return
 
             body = b""
-            if method == "POST":
-                transfer_encoding = self.headers.get("Transfer-Encoding")
-                if declared is None and transfer_encoding:
-                    # Framing chunked шов не поддерживает (контракт — L7 JSON с
-                    # Content-Length). Дочитываем не более лимита+1, чтобы не
-                    # аллоцировать по декларации, и закрываем соединение: остаток
-                    # chunked-потока иначе был бы разобран как следующий запрос.
-                    body = self.rfile.read(max_body_bytes + 1)
-                    if len(body) > max_body_bytes:
-                        self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
-                        self._send_envelope(
-                            413,
-                            gateway.error_envelope(
-                                f"тело запроса превышает лимит {max_body_bytes} байт",
-                                request_id=rid,
-                            ),
-                            close=True,
-                        )
-                        return
-                    self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
-                    self._send_envelope(
-                        400,
-                        gateway.error_envelope(
-                            "Transfer-Encoding: chunked не поддерживается швом; "
-                            "используйте Content-Length",
-                            request_id=rid,
-                        ),
-                        close=True,
-                    )
-                    return
-                if declared is not None and declared > 0:
-                    # Верхняя граница чтения — лимит+1 (защита от лживой/битой
-                    # декларации); объявленный сверх лимита уже отвергнут выше.
-                    body = self.rfile.read(min(declared, max_body_bytes + 1))
-                # Content-Length нет и chunked не объявлен → по HTTP/1.1 тела нет.
-                # «Дочитать на всякий случай» здесь нельзя: read(cap+1) на
-                # keep-alive соединении заблокировался бы до EOF.
+            if method == "POST" and declared is not None and declared > 0:
+                # Верхняя граница чтения — лимит+1 (защита от лживой/битой
+                # декларации); объявленный сверх лимита уже отвергнут выше, а
+                # Transfer-Encoding отвергнут ещё раньше — тело читается только
+                # по Content-Length.
+                body = self.rfile.read(min(declared, max_body_bytes + 1))
+            # Content-Length нет → по HTTP/1.1 тела нет. «Дочитать на всякий
+            # случай» здесь нельзя: read(cap+1) на keep-alive соединении
+            # заблокировался бы до EOF.
 
             code, envelope = route_request(
                 gateway,
