@@ -43,6 +43,7 @@ XLM-R токенизатор → RU+EN, ``dim = 256``; см. research ``embedder
 from __future__ import annotations
 
 import importlib.util
+import math
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -224,19 +225,35 @@ class LiteEmbedder:
         return _encode
 
     def _validate(self, vectors: Any, *, expected: int) -> list[list[float]]:
-        """Проверяет форму/размерность и приводит к ``list[list[float]]``."""
+        """Проверяет форму/размерность/числа и приводит к ``list[list[float]]``.
+
+        Кроме формы проверяется контракт порта: значения конечны (``nan``/``inf`` —
+        испорченный выход модели) и норма вектора не нулевая (нулевой вектор — сломанный
+        прибор или пустой текст, а не «нет сходства»). Единичная норма не требуется:
+        нормализация у моделей разная.
+        """
         rows = list(vectors)
         if len(rows) != expected:
             raise ValueError(
                 f"эмбеддер вернул {len(rows)} векторов на {expected} текстов"
             )
         result: list[list[float]] = []
-        for row in rows:
+        for index, row in enumerate(rows):
             values = [float(x) for x in row]
             if len(values) != self.dim:
                 raise ValueError(
                     f"размерность вектора {len(values)} ≠ dim={self.dim} "
                     f"(model_id={self.model_id!r}); dim и манифест должны совпадать"
+                )
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError(
+                    f"вектор #{index} содержит нечисловое значение (nan/inf) "
+                    f"(model_id={self.model_id!r}): такой вектор нельзя класть в индекс"
+                )
+            if all(value == 0.0 for value in values):
+                raise ValueError(
+                    f"вектор #{index} нулевой (model_id={self.model_id!r}): "
+                    "эмбеддер сломан или текст пуст"
                 )
             result.append(values)
         return result

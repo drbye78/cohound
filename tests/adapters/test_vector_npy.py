@@ -182,12 +182,32 @@ def test_equal_scores_tie_break_by_chunk_id(tmp_path: Path) -> None:
     assert [c.chunk_id for c in hits] == ["t1", "t2"]
 
 
-def test_zero_query_vector_yields_zero_scores_deterministically(tmp_path: Path) -> None:
+def test_zero_query_vector_is_refused_before_ranking(tmp_path: Path) -> None:
+    """Нулевой запрос — отказ прибора, а не «нет сходства» (решение владельца 09.11.2026).
+
+    Раньше нулевой вектор молча давал все баллы ``0.0``, и выдача выглядела корректным
+    ответом «сходства нет». Смысл прежнего теста сохранён на новом носителе: нулевой
+    вход по-прежнему не ломает ранжирование — он до него не доходит.
+    """
     _write(tmp_path, PRODUCT_A, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], ["b", "a"])
     index = NpyVectorIndex(tmp_path, PACKAGE, BUILD, 3, _lookup(["a", "b"]))
-    hits = index.search(VectorQuery(product_ids=[PRODUCT_A], top_k=5, vector=[0.0, 0.0, 0.0]))
-    assert [c.chunk_id for c in hits] == ["a", "b"]
-    assert all(c.score == 0.0 for c in hits)
+    with pytest.raises(ValueError, match="нулевой"):
+        index.search(VectorQuery(product_ids=[PRODUCT_A], top_k=5, vector=[0.0, 0.0, 0.0]))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "inf", "-inf"],
+)
+def test_non_finite_query_vector_is_refused(bad: float, tmp_path: Path) -> None:
+    """``nan``/``inf`` в запросе не «нет сходства»: ``_cosine_scores`` дал бы все нули."""
+    _write(tmp_path, PRODUCT_A, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], ["b", "a"])
+    index = NpyVectorIndex(tmp_path, PACKAGE, BUILD, 3, _lookup(["a", "b"]))
+    with pytest.raises(ValueError, match="нечисловое"):
+        index.search(
+            VectorQuery(product_ids=[PRODUCT_A], top_k=5, vector=[bad, 0.0, 0.0])
+        )
 
 
 # ---------------------------------------------------------------------------

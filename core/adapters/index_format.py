@@ -115,7 +115,11 @@ def write_partition(
     длительность удаления дерева файлов.
 
     :raises ValueError: если длины ``vectors`` и ``chunk_ids`` не совпадают (а также
-        ``content_hashes`` и ``chunk_ids``, когда ``content_hashes`` переданы).
+        ``content_hashes`` и ``chunk_ids``, когда ``content_hashes`` переданы), или если
+        после приведения к ``float16`` матрица содержит нечисловые значения
+        (``nan``/``inf``: переполнение — тоже испорченное число). Нефинитная матрица —
+        это порча артефакта, а не пустая партиция: запись не начинается, staging не
+        создаётся.
     """
     import numpy as np
 
@@ -128,14 +132,26 @@ def write_partition(
             f"content_hashes ({len(content_hashes)}) и chunk_ids ({len(chunk_ids)}) "
             "должны совпадать"
         )
+    # Конверсия и проверка чисел — **до** staging: иначе каталог-пустышка пришлось бы
+    # убирать, а «партиция не создана» доказывалось бы через уборку.
+    with np.errstate(over="ignore", invalid="ignore"):
+        matrix = np.asarray(vectors, dtype=np.float16)
+    if matrix.ndim != 2:
+        matrix = matrix.reshape(len(vectors), -1)
+    non_finite = ~np.isfinite(matrix)
+    if bool(non_finite.any()):
+        bad_rows = int(non_finite.any(axis=1).sum())
+        raise ValueError(
+            f"партиция {package}/{build_id}/{product_id}: "
+            f"{int(non_finite.sum())} нечисловых компонент (nan/inf) в {bad_rows} "
+            f"строках из {matrix.shape[0]} — это порча векторов, а не пустая "
+            "партиция: писать нечего"
+        )
     target = build_root(index_root, package, build_id, product_id)
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=str(target.parent)))
     trash: Path | None = None
     try:
-        matrix = np.asarray(vectors, dtype=np.float16)
-        if matrix.ndim != 2:
-            matrix = matrix.reshape(len(vectors), -1)
         np.save(staging / _VECTORS, matrix)
         with (staging / _CHUNK_IDS).open("w", encoding="utf-8") as fh:
             for index, chunk_id in enumerate(chunk_ids):

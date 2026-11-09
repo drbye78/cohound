@@ -133,6 +133,60 @@ def derive_build_id(
     return _BUILD_ID_PREFIX + short_hash(material, 24)
 
 
+def _validated_matrix(np: Any, vectors: Sequence[Sequence[float]]) -> Any:
+    """Проверяет матрицу векторов и возвращает её как ``float16``-ndarray.
+
+    Проверка — контракт партиции, а не украшение: рваные строки numpy отвергает своей
+    ошибкой (её легко прочитать как «партиция пустая»), а ``nan``/``inf``/переполнение
+    при приведении к ``float16`` делают косинус бессмысленным — партиция собирается, но
+    все баллы по ней ложны. Нулевая норма — сломанный прибор или пустой текст, а не
+    «нет сходства». Поэтому матрица проверяется **до** отпечатка и записи.
+
+    :raises ValueError: при рваных строках (с номерами строк), нечисловых значениях и
+        нулевой норме.
+    """
+    try:
+        lengths = [len(row) for row in vectors]
+    except TypeError as exc:  # строка — не вектор (плоский список чисел)
+        raise ValueError(
+            "NpyIndexBuilder: vectors обязан быть последовательностью векторов "
+            "(последовательность чисел на чанк), а не плоским списком чисел"
+        ) from exc
+    if len(set(lengths)) > 1:
+        first = lengths[0]
+        ragged = [index for index, size in enumerate(lengths) if size != first]
+        raise ValueError(
+            f"NpyIndexBuilder: рваные строки матрицы: длина строки 0 — {first}, "
+            f"отличаются строки {ragged} "
+            f"(длины {[lengths[index] for index in ragged]})"
+        )
+    with np.errstate(over="ignore", invalid="ignore"):
+        matrix = np.asarray(vectors, dtype=np.float16)
+    if matrix.ndim != 2:
+        raise ValueError(
+            f"NpyIndexBuilder: матрица векторов обязана быть двумерной, "
+            f"получена форма {matrix.shape}"
+        )
+    finite = np.isfinite(matrix)
+    if not bool(finite.all()):
+        bad_rows = np.flatnonzero(~finite.all(axis=1)).tolist()
+        raise ValueError(
+            f"NpyIndexBuilder: матрица содержит нечисловые значения (nan/inf) в "
+            f"{len(bad_rows)} строках из {matrix.shape[0]} "
+            f"(первые: {bad_rows[:5]}) — партиция не собирается"
+        )
+    # Нулевая норма ⇔ все компоненты строки нулевые: проверка точная и без временного
+    # fp32-массива на всю партицию (108 614 × 1024 — это ~445 MiB поверх матрицы).
+    zero_rows = np.flatnonzero(~matrix.any(axis=1)).tolist()
+    if zero_rows:
+        raise ValueError(
+            f"NpyIndexBuilder: нулевая норма у {len(zero_rows)} строк из "
+            f"{matrix.shape[0]} (первые: {zero_rows[:5]}); нулевой вектор — "
+            "сломанный эмбеддер или пустой текст"
+        )
+    return matrix
+
+
 def _content_digest(
     np: Any,
     chunk_ids: Sequence[str],
@@ -216,8 +270,9 @@ class NpyIndexBuilder:
         (``index_format.write_partition``).
 
         :raises RuntimeError: если ``numpy`` не установлен.
-        :raises ValueError: при пустой партиции, несовпадении длин или отсутствии
-            ``meta.product_id``/пакета.
+        :raises ValueError: при пустой партиции, несовпадении длин, рваных строках
+            (с номерами строк), нечисловых значениях (``nan``/``inf``), нулевой норме
+            вектора или отсутствии ``meta.product_id``/пакета.
         :raises ImmutableBuildError: если по ключу ``(package, build_id, product_id)`` уже
             есть сборка с другим содержимым (§13).
         """
@@ -242,8 +297,10 @@ class NpyIndexBuilder:
 
         chunk_ids = [chunk.chunk_id for chunk in chunks]
         content_hashes = [chunk.content_hash for chunk in chunks]
+        # Проверка чисел — один раз до отпечатка: дальше идёт уже проверенная матрица.
+        matrix = _validated_matrix(np, vectors)
         # Полный отпечаток (id/хеши + байты float16-матрицы) — защита иммутабельности.
-        digest = _content_digest(np, chunk_ids, content_hashes, vectors)
+        digest = _content_digest(np, chunk_ids, content_hashes, matrix)
 
         extra = dict(meta.extra or {})
         explicit = extra.get("partition_build_id")
@@ -262,11 +319,7 @@ class NpyIndexBuilder:
         key = (package, build_id, product_id)
         self._guard_immutable(key, digest)
 
-        dim = (
-            int(np.asarray(vectors[0], dtype=np.float16).reshape(-1).size)
-            if vectors
-            else 0
-        )
+        dim = int(matrix.shape[1])
         manifest: dict[str, Any] = {
             "build_id": build_id,
             "partition_build_id": build_id,
@@ -309,7 +362,7 @@ class NpyIndexBuilder:
             package,
             build_id,
             product_id,
-            vectors,
+            matrix,
             chunk_ids,
             manifest,
             # ``partition-2``: хеши текстов рядом с id — иначе ``vector_digest`` нельзя

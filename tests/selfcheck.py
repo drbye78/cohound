@@ -2445,7 +2445,9 @@ def _embed_local() -> None:
 
     def _fake(texts):
         batches.append(len(texts))
-        return [[0.0] * 3 for _ in texts]
+        # Ненулевые значения: нулевой вектор — отказ контракта порта, а проверяется
+        # здесь форма/размерность и нарезка батча, не «нулевой проходит».
+        return [[1.0] * 3 for _ in texts]
 
     emb = LocalEmbedder(embed_fn=_fake, model_id="m", dim=3, batch_size=2)
     if not isinstance(emb, EmbedderPort) or emb.model_id != "m" or emb.dim != 3:
@@ -2463,7 +2465,9 @@ def _embed_model2vec() -> None:
     from core.ports.embedder import EmbedderPort
 
     def _fake(texts):
-        return [[0.0] * 3 for _ in texts]
+        # Ненулевой вектор: проверяются форма/размерность и пин ревизии, а не
+        # «нулевой проходит» (нулевой теперь отвергается контрактом порта).
+        return [[1.0] * 3 for _ in texts]
 
     emb = LiteEmbedder(embed_fn=_fake, dim=3, revision="sha1")
     if not isinstance(emb, EmbedderPort) or emb.dim != 3:

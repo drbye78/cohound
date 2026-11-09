@@ -143,6 +143,40 @@ def test_vector_count_mismatch_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Контракт чисел: конечность и ненулевая норма (порт, §3.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("row", "fragment"),
+    [
+        ([float("nan"), 1.0], "нечисловое"),
+        ([float("inf"), 1.0], "нечисловое"),
+        ([float("-inf"), 1.0], "нечисловое"),
+        ([0.0, 0.0], "нулевой"),
+    ],
+    ids=["nan", "inf", "-inf", "zero"],
+)
+def test_non_finite_or_zero_vector_rejected(
+    row: list[float], fragment: str
+) -> None:
+    """Нечисловой/нулевой вектор — видимый отказ, а не тихая деградация индекса."""
+    emb = LiteEmbedder(lambda batch: [list(row) for _ in batch], dim=2)
+    with pytest.raises(ValueError) as excinfo:
+        emb.embed(["text"])
+    message = str(excinfo.value)
+    assert "вектор #0" in message
+    assert fragment in message
+    assert emb.model_id in message
+
+
+def test_normal_vector_still_accepted() -> None:
+    """Обычный (не единичной нормы) вектор проходит: единичной нормы порт не требует."""
+    emb = LiteEmbedder(lambda batch: [[0.5, 0.5] for _ in batch], dim=2)
+    assert emb.embed(["text"]) == [[0.5, 0.5]]
+
+
+# ---------------------------------------------------------------------------
 # Детерминизм
 # ---------------------------------------------------------------------------
 

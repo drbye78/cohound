@@ -216,6 +216,53 @@ def test_write_partition_rejects_content_hashes_length_mismatch(tmp_path: Path) 
 
 
 @requires_numpy
+@pytest.mark.parametrize(
+    "bad", [float("nan"), float("inf"), 1e40], ids=["nan", "inf", "overflow"]
+)
+def test_write_partition_rejects_non_finite_before_staging(
+    bad: float, tmp_path: Path
+) -> None:
+    """Нечисловой вектор — порча партиции; запись не начинается, staging не остаётся.
+
+    ``1e40`` здесь важен отдельно: приведение к ``float16`` само делает из него ``inf``,
+    то есть проверять надо **после** конверсии — иначе «валидный вход» просочился бы.
+    """
+    with pytest.raises(ValueError, match="нечисловых"):
+        index_format.write_partition(
+            tmp_path,
+            PKG,
+            BUILD,
+            PRODUCT,
+            [[1.0, 0.0], [bad, 0.0]],
+            ["c1", "c2"],
+            {"dim": 2},
+        )
+    assert not index_format.build_root(tmp_path, PKG, BUILD, PRODUCT).parent.exists()
+    assert list(tmp_path.rglob(".staging-*")) == []
+
+
+@requires_numpy
+def test_write_partition_non_finite_keeps_previous_partition(tmp_path: Path) -> None:
+    """Отказ не мутирует прежнюю сборку и не оставляет мусора (K2/§13)."""
+    _write(tmp_path, ["c1", "c2"])
+    with pytest.raises(ValueError, match="нечисловых"):
+        index_format.write_partition(
+            tmp_path,
+            PKG,
+            BUILD,
+            PRODUCT,
+            [[float("inf"), 0.0]],
+            ["c9"],
+            {"dim": 2},
+        )
+    assert index_format.read_partition(tmp_path, PKG, BUILD, PRODUCT).chunk_ids == [
+        "c1",
+        "c2",
+    ]
+    assert _leftovers(tmp_path) == []
+
+
+@requires_numpy
 def test_reader_accepts_both_chunk_id_forms(tmp_path: Path) -> None:
     """Читатель не требует ``content_hash``: обе формы дают те же ``chunk_ids``."""
     _write(tmp_path, ["c1", "c2"])

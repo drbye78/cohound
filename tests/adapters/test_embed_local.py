@@ -123,13 +123,53 @@ def test_vector_count_mismatch_raises() -> None:
 def test_mismatch_is_detected_per_batch() -> None:
     def fn(batch: list[str]) -> list[list[float]]:
         # Второй батч короче по размерности — ошибка обязана всплыть.
+        # Значения ненулевые: нулевой вектор сам по себе теперь отказ (контракт порта),
+        # и тест проверяет именно размерность, а не норму.
         width = 2 if batch[0] == "short" else 3
-        return [[0.0] * width for _ in batch]
+        return [[1.0] * width for _ in batch]
 
     emb = LocalEmbedder(fn, dim=3, batch_size=1)
     emb.embed(["ok"])
     with pytest.raises(ValueError, match="dim=3"):
         emb.embed(["short"])
+
+
+# ---------------------------------------------------------------------------
+# Контракт чисел: конечность и ненулевая норма (порт, §3.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("row", "fragment"),
+    [
+        ([float("nan"), 1.0], "нечисловое"),
+        ([float("inf"), 1.0], "нечисловое"),
+        ([float("-inf"), 1.0], "нечисловое"),
+        ([0.0, 0.0], "нулевой"),
+    ],
+    ids=["nan", "inf", "-inf", "zero"],
+)
+def test_non_finite_or_zero_vector_rejected(
+    row: list[float], fragment: str
+) -> None:
+    """Нечисловой/нулевой вектор — видимый отказ, а не тихая деградация индекса.
+
+    Сообщение обязано назвать модель и номер вектора: иначе в батче из 1024 чанков
+    неизвестно, какой именно текст дал испорченный выход.
+    """
+    emb = LocalEmbedder(lambda batch: [list(row) for _ in batch], dim=2)
+    with pytest.raises(ValueError) as excinfo:
+        emb.embed(["text"])
+    message = str(excinfo.value)
+    assert "вектор #0" in message
+    assert fragment in message
+    assert emb.model_id in message
+
+
+def test_normal_vector_still_accepted() -> None:
+    """Обычный (не единичной нормы) вектор проходит: единичной нормы порт не требует."""
+    emb = LocalEmbedder(lambda batch: [[0.5, 0.5] for _ in batch], dim=2)
+    assert emb.embed(["text"]) == [[0.5, 0.5]]
 
 
 # ---------------------------------------------------------------------------

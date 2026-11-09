@@ -450,6 +450,61 @@ def test_missing_product_id_raises(tmp_path: Path) -> None:
         NpyIndexBuilder(tmp_path).build(_chunks(), _vectors(), _meta(product_id=""))
 
 
+@requires_numpy
+@pytest.mark.parametrize(
+    "bad", [float("nan"), float("inf"), 1e40], ids=["nan", "inf", "overflow"]
+)
+def test_non_finite_vectors_refused_and_nothing_written(bad: float, tmp_path: Path) -> None:
+    """Нечисловые векторы — отказ **до** записи: партиции не появляется вовсе.
+
+    Раньше ``np.asarray(..., float16)`` превращал ``1e40`` в ``inf`` и писал партицию,
+    по которой все косинусы ложны. Теперь видимый ``ValueError`` и пустой ``index_store``.
+    """
+    vectors = [[1.0, 0.0, 0.0], [bad, 0.0, 0.0]]
+    with pytest.raises(ValueError, match="нечисловые"):
+        NpyIndexBuilder(tmp_path).build(_chunks("p1", 2), vectors, _meta())
+    assert index_format.list_build_ids(tmp_path, PKG) == []
+
+
+@requires_numpy
+def test_non_finite_vectors_keep_previous_build_intact(tmp_path: Path) -> None:
+    """Отказ не трогает уже зафиксированную сборку того же ключа (K2/§13)."""
+    chunks = _chunks("p1", 2)
+    meta = _meta(extra={"partition_build_id": "pb_fixed"})
+    NpyIndexBuilder(tmp_path).build(chunks, _vectors(2), meta)
+    with pytest.raises(ValueError, match="нечисловые"):
+        NpyIndexBuilder(tmp_path).build(
+            chunks, [[float("nan"), 1.0, 1.0], [1.0, 1.0, 1.0]], meta
+        )
+    data = index_format.read_partition(tmp_path, PKG, "pb_fixed", "p1")
+    assert data.chunk_ids == [chunk.chunk_id for chunk in chunks]
+
+
+@requires_numpy
+def test_ragged_vectors_refused_with_row_numbers(tmp_path: Path) -> None:
+    """Рваная матрица — ``ValueError`` с номерами строк, а не ошибка numpy внутри."""
+    with pytest.raises(ValueError) as excinfo:
+        NpyIndexBuilder(tmp_path).build(
+            _chunks("p1", 3),
+            [[1.0, 0.0], [1.0, 0.0, 0.0], [1.0]],
+            _meta(),
+        )
+    message = str(excinfo.value)
+    assert "рваные" in message
+    assert "[1, 2]" in message
+    assert index_format.list_build_ids(tmp_path, PKG) == []
+
+
+@requires_numpy
+def test_zero_norm_vector_refused(tmp_path: Path) -> None:
+    """Нулевой вектор — сломанный прибор/пустой текст, а не «нет сходства»."""
+    with pytest.raises(ValueError, match="нулевая норма"):
+        NpyIndexBuilder(tmp_path).build(
+            _chunks("p1", 2), [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], _meta()
+        )
+    assert index_format.list_build_ids(tmp_path, PKG) == []
+
+
 # --------------------------------------------------------------------------- #
 # commit / порт
 # --------------------------------------------------------------------------- #
