@@ -1037,8 +1037,9 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             # из них под /docs/public/PSQ/ **ноль** (дерево документации в карту не входит)
             # ⇒ sitemap был бы no-op плюс запись об отказе на каждом прогоне.
         },
-        # Sitemap 404 (advertised) ⇒ размер не измерен; 800 — потолок для крупного
-        # docs-портала (несколько версий документации), а не заявка на полноту.
+        # Sitemap 404 (advertised). Host-ключ обслуживает портал и страницу продукта;
+        # дерево документации `/docs` вынесено на path-ключ ниже — у него измеренная
+        # нижняя граница объёма, у портала её нет.
         "postgrespro.ru": {
             "fetch": "http",
             "extract": "auto",
@@ -1048,6 +1049,21 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             # **5.95 запроса/с**, ноль `429`/`5xx`, `in_flight_max` 10, `fetch` p50/p95
             # 231/1120 мс. Хост держит ту же пачку, что и мелкие деревья документации;
             # широкий `in_flight` — следствие пула (`max_workers` на узле), а не лимитера.
+            "rate_limit": {"min_s": 0.05, "max_s": 0.2},
+        },
+        # Дерево документации: sitemap не публикуется (advertised → 404), размер — из TOC.
+        # Замер 09.11.2026 (статика): индекс `/docs` перечисляет 55 редакций, TOC снят у
+        # 40 — сумма **3 667** страниц
+        # (`docs/reports/measurements/2026-11-09-crawl-root-size-static.md` §5, артефакт
+        # `postgrespro_editions.json`). 15 редакций не сняты ⇒ 3 667 — нижняя граница.
+        # Прежние 800 были ниже неё: прогон `2a5b51af5778` усечён
+        # (`truncated: max_documents`), и 121 ячейка эталона по этому корню —
+        # `in_scope_not_reached` при живых адресах.
+        "postgrespro.ru/docs": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 3667,
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
         # Sitemap намеренно НЕ на host-ключе (см. ловушку матчинга в докстринге):

@@ -1,0 +1,20 @@
+{
+ "jatoba":          {"url": "https://jatoba.ru/", "prefix": "/"},
+ "gazis_root":      {"url": "https://www.gaz-is.ru/", "prefix": "/"},
+ "gazis_jatoba":    {"url": "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", "prefix": "/produkty/inform-sistemy/subd-jatoba"},
+ "diasoft_root":    {"url": "https://database.diasoft.ru/", "prefix": "/"},
+ "diasoft180":      {"url": "https://database.diasoft.ru/docs/ru/q-database/versiya-180/", "prefix": "/docs/ru/q-database/versiya-180"},
+ "psq810":          {"url": "https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/", "prefix": "/docs/public/PSQ/8.1.0"},
+ "pangolin_root":   {"url": "https://pangolin.sbertech.ru/", "prefix": "/"},
+ "pangolin_mkt":    {"url": "https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/", "prefix": "/products/rabota-s-dannymi/pangolin"},
+ "sbertech_root":   {"url": "https://sbertech.ru/", "prefix": "/"},
+ "sbertech_docs":   {"url": "https://sbertech.ru/documents/platform-v-pangolin-se/", "prefix": "/documents/platform-v-pangolin-se"},
+ "pg_docs":         {"url": "https://postgrespro.ru/docs/", "prefix": "/docs"},
+ "pg_enterprise":   {"url": "https://postgrespro.ru/products/postgrespro/enterprise/", "prefix": "/products/postgrespro/enterprise"},
+ "pg_root":         {"url": "https://postgrespro.ru/", "prefix": "/"},
+ "edu":             {"url": "https://edu.postgrespro.ru/", "prefix": "/"},
+ "tantor_root":     {"url": "https://tantorlabs.ru/", "prefix": "/"},
+ "tantor_dbms":     {"url": "https://tantorlabs.ru/products/dbms/", "prefix": "/products/dbms"},
+ "tantor_tdb":      {"url": "https://docs.tantorlabs.ru/tdb/", "prefix": "/tdb"},
+ "astralinux":      {"url": "https://wiki.astralinux.ru/tandocs/", "prefix": "/tandocs"}
+}

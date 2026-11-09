@@ -1,0 +1,672 @@
+{
+ "jatoba": {
+  "static": {
+   "url": "https://jatoba.ru/",
+   "code": "200",
+   "effective": "https://jatoba.ru/",
+   "bytes": 121849,
+   "prefix": "/",
+   "toc_links": 7,
+   "toc_sample": [
+    "/",
+    "/Jatoba2026.pdf",
+    "/jatoba_vkcloud.pdf",
+    "/opisanie.pdf",
+    "/politic.pdf"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://jatoba.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 14,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://jatoba.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://jatoba.ru/sitemap.xml",
+   "loc": 2,
+   "feeds": 0
+  }
+ },
+ "gazis_root": {
+  "static": {
+   "url": "https://www.gaz-is.ru/",
+   "code": "200",
+   "effective": "https://www.gaz-is.ru/",
+   "bytes": 62930,
+   "prefix": "/",
+   "toc_links": 69,
+   "toc_sample": [
+    "/",
+    "/agreement",
+    "/ca.html",
+    "/importozameshchenie.html",
+    "/o-kompanii/contacty.html"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://www.gaz-is.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 53,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*"
+   ]
+  },
+  "sitemap": {
+   "url": "https://www.gaz-is.ru/sitemap.xml",
+   "code": "500",
+   "effective": "https://www.gaz-is.ru/index.php?option=com_xmap&view=xml&tmpl=component&id=1",
+   "loc": 0,
+   "feeds": 0
+  }
+ },
+ "gazis_jatoba": {
+  "static": {
+   "url": "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/",
+   "code": "200",
+   "effective": "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/",
+   "bytes": 139385,
+   "prefix": "/produkty/inform-sistemy/",
+   "toc_links": 3,
+   "toc_sample": [
+    "/produkty/inform-sistemy/monitor3s-2-0.html",
+    "/produkty/inform-sistemy/subd-jatoba.html",
+    "/produkty/inform-sistemy/subd-jatoba/"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://www.gaz-is.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 53,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*"
+   ]
+  },
+  "sitemap": {
+   "url": "https://www.gaz-is.ru/sitemap.xml",
+   "code": "500",
+   "effective": "https://www.gaz-is.ru/index.php?option=com_xmap&view=xml&tmpl=component&id=1",
+   "loc": 0,
+   "feeds": 0
+  }
+ },
+ "diasoft_root": {
+  "static": {
+   "url": "https://database.diasoft.ru/",
+   "code": "200",
+   "effective": "https://database.diasoft.ru/",
+   "bytes": 163023,
+   "prefix": "/",
+   "toc_links": 44,
+   "toc_sample": [
+    "/",
+    "/docs/",
+    "/images/%D0%9B%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D0%BE%D0%BD%D0%BD%D0%BE%D0%B5%20%D1%81%D0%BE%D0%B3%D0%BB%D0%B0%D1%88%D0%B5%D0%BD%D0%B8%D0%B5.pdf",
+    "/mediacenter/",
+    "/mediacenter/cases/moskovskaya-birzha-vybrala-subd-postgredb/"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://database.diasoft.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 36,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*"
+   ]
+  },
+  "sitemap": {
+   "url": "https://database.diasoft.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://database.diasoft.ru/sitemap.xml",
+   "loc": 8,
+   "feeds": 8,
+   "children": [
+    {
+     "feed": "https://database.diasoft.ru/sitemap-files.xml",
+     "code": "200",
+     "loc": 28
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-9.xml",
+     "code": "200",
+     "loc": 11
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-10.xml",
+     "code": "200",
+     "loc": 21
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-11.xml",
+     "code": "200",
+     "loc": 3
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-12.xml",
+     "code": "200",
+     "loc": 6
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-13.xml",
+     "code": "200",
+     "loc": 3
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-14.xml",
+     "code": "200",
+     "loc": 10
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-16.xml",
+     "code": "200",
+     "loc": 1
+    }
+   ],
+   "child_loc_total": 83
+  }
+ },
+ "diasoft180": {
+  "static": {
+   "url": "https://database.diasoft.ru/docs/ru/q-database/versiya-180/",
+   "code": "200",
+   "effective": "https://database.diasoft.ru/docs/ru/q-database/versiya-180/",
+   "bytes": 213571,
+   "prefix": "/docs/ru/q-database/",
+   "toc_links": 702,
+   "toc_sample": [
+    "/docs/ru/q-database/",
+    "/docs/ru/q-database/versiya-180/",
+    "/docs/ru/q-database/versiya-180/applevel-consistency/",
+    "/docs/ru/q-database/versiya-180/archive-module-callbacks/",
+    "/docs/ru/q-database/versiya-180/archive-module-init/"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://database.diasoft.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 36,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*"
+   ]
+  },
+  "sitemap": {
+   "url": "https://database.diasoft.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://database.diasoft.ru/sitemap.xml",
+   "loc": 8,
+   "feeds": 8,
+   "children": [
+    {
+     "feed": "https://database.diasoft.ru/sitemap-files.xml",
+     "code": "200",
+     "loc": 28
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-9.xml",
+     "code": "200",
+     "loc": 11
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-10.xml",
+     "code": "200",
+     "loc": 21
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-11.xml",
+     "code": "200",
+     "loc": 3
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-12.xml",
+     "code": "200",
+     "loc": 6
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-13.xml",
+     "code": "200",
+     "loc": 3
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-14.xml",
+     "code": "200",
+     "loc": 10
+    },
+    {
+     "feed": "https://database.diasoft.ru/sitemap-iblock-16.xml",
+     "code": "200",
+     "loc": 1
+    }
+   ],
+   "child_loc_total": 83
+  }
+ },
+ "psq810": {
+  "static": {
+   "url": "https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/",
+   "code": "200",
+   "effective": "https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/",
+   "bytes": 31378,
+   "prefix": "/docs/public/PSQ/",
+   "toc_links": 30,
+   "toc_sample": [
+    "/docs/public/PSQ/6.1.10/index.html",
+    "/docs/public/PSQ/6.2.0/index.html",
+    "/docs/public/PSQ/6.3.0/index.html",
+    "/docs/public/PSQ/6.4.0/index.html",
+    "/docs/public/PSQ/6.4.2-cve0/index.html"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://platformv.sbertech.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 32,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://platformv.sbertech.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://platformv.sbertech.ru/sitemap.xml",
+   "loc": 818,
+   "feeds": 0
+  }
+ },
+ "pangolin_root": {
+  "static": {
+   "url": "https://pangolin.sbertech.ru/",
+   "code": "401",
+   "effective": "https://pangolin.sbertech.ru/",
+   "bytes": 265,
+   "prefix": "/",
+   "toc_links": 0,
+   "toc_sample": [],
+   "body_head": "<!DOCTYPE html> <html><head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/> <link rel=\"icon\" href=\"data:,\"/> <meta name=\"referrer\" content=\"no-referrer\" /> <script src=\"/__qrator"
+  },
+  "robots": {
+   "url": "https://pangolin.sbertech.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 32,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://pangolin.sbertech.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://pangolin.sbertech.ru/sitemap.xml",
+   "loc": 25,
+   "feeds": 0
+  }
+ },
+ "pangolin_mkt": {
+  "static": {
+   "url": "https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/",
+   "code": "401",
+   "effective": "https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/",
+   "bytes": 265,
+   "prefix": "/products/rabota-s-dannymi/",
+   "toc_links": 0,
+   "toc_sample": [],
+   "body_head": "<!DOCTYPE html> <html><head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/> <link rel=\"icon\" href=\"data:,\"/> <meta name=\"referrer\" content=\"no-referrer\" /> <script src=\"/__qrator"
+  },
+  "robots": {
+   "url": "https://platformv.sbertech.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 32,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://platformv.sbertech.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://platformv.sbertech.ru/sitemap.xml",
+   "loc": 818,
+   "feeds": 0
+  }
+ },
+ "sbertech_root": {
+  "static": {
+   "url": "https://sbertech.ru/",
+   "code": "401",
+   "effective": "https://sbertech.ru/",
+   "bytes": 265,
+   "prefix": "/",
+   "toc_links": 0,
+   "toc_sample": [],
+   "body_head": "<!DOCTYPE html> <html><head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/> <link rel=\"icon\" href=\"data:,\"/> <meta name=\"referrer\" content=\"no-referrer\" /> <script src=\"/__qrator"
+  },
+  "robots": {
+   "url": "https://sbertech.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 32,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://sbertech.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://sbertech.ru/sitemap.xml",
+   "loc": 745,
+   "feeds": 0
+  }
+ },
+ "sbertech_docs": {
+  "static": {
+   "url": "https://sbertech.ru/documents/platform-v-pangolin-se/",
+   "code": "401",
+   "effective": "https://sbertech.ru/documents/platform-v-pangolin-se/",
+   "bytes": 265,
+   "prefix": "/documents/",
+   "toc_links": 0,
+   "toc_sample": [],
+   "body_head": "<!DOCTYPE html> <html><head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/> <link rel=\"icon\" href=\"data:,\"/> <meta name=\"referrer\" content=\"no-referrer\" /> <script src=\"/__qrator"
+  },
+  "robots": {
+   "url": "https://sbertech.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 32,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://sbertech.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://sbertech.ru/sitemap.xml",
+   "loc": 745,
+   "feeds": 0
+  }
+ },
+ "pg_docs": {
+  "static": {
+   "url": "https://postgrespro.ru/docs/",
+   "code": "200",
+   "effective": "https://postgrespro.ru/docs",
+   "bytes": 455787,
+   "prefix": "/",
+   "toc_links": 67,
+   "toc_sample": [
+    "/",
+    "/cases",
+    "/docs",
+    "/docs/axe/1/index",
+    "/docs/axe/2/index"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://postgrespro.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 4,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*"
+   ]
+  },
+  "sitemap": {
+   "url": "https://postgrespro.ru/sitemap.xml",
+   "code": "404",
+   "effective": "https://postgrespro.ru/sitemap.xml",
+   "loc": 0,
+   "feeds": 0
+  }
+ },
+ "pg_enterprise": {
+  "static": {
+   "url": "https://postgrespro.ru/products/postgrespro/enterprise/",
+   "code": "200",
+   "effective": "https://postgrespro.ru/products/postgrespro/enterprise",
+   "bytes": 373941,
+   "prefix": "/products/postgrespro/",
+   "toc_links": 1,
+   "toc_sample": [
+    "/products/postgrespro/enterprise"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://postgrespro.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 4,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*"
+   ]
+  },
+  "sitemap": {
+   "url": "https://postgrespro.ru/sitemap.xml",
+   "code": "404",
+   "effective": "https://postgrespro.ru/sitemap.xml",
+   "loc": 0,
+   "feeds": 0
+  }
+ },
+ "pg_root": {
+  "static": {
+   "url": "https://postgrespro.ru/",
+   "code": "200",
+   "effective": "https://postgrespro.ru/",
+   "bytes": 314058,
+   "prefix": "/",
+   "toc_links": 30,
+   "toc_sample": [
+    "/",
+    "/about",
+    "/blog/company/5972662",
+    "/cases",
+    "/cases/avito-infosoft"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://postgrespro.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 4,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*"
+   ]
+  },
+  "sitemap": {
+   "url": "https://postgrespro.ru/sitemap.xml",
+   "code": "404",
+   "effective": "https://postgrespro.ru/sitemap.xml",
+   "loc": 0,
+   "feeds": 0
+  }
+ },
+ "edu": {
+  "static": {
+   "url": "https://edu.postgrespro.ru/",
+   "code": "200",
+   "effective": "https://edu.postgrespro.ru/",
+   "bytes": 30494,
+   "prefix": "/",
+   "toc_links": 130,
+   "toc_sample": [
+    "/",
+    "/16/",
+    "/DBA1-student-13-20220403.ova",
+    "/DBA1-student-13-20220415.ova",
+    "/DBA1-student-13-20220506.ova"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://edu.postgrespro.ru/robots.txt",
+   "code": "404",
+   "disallow_total": 0,
+   "disallow_blocking_prefix": [],
+   "agents": []
+  },
+  "sitemap": {
+   "url": "https://edu.postgrespro.ru/sitemap.xml",
+   "code": "404",
+   "effective": "https://edu.postgrespro.ru/sitemap.xml",
+   "loc": 0,
+   "feeds": 0
+  }
+ },
+ "tantor_root": {
+  "static": {
+   "url": "https://tantorlabs.ru/",
+   "code": "200",
+   "effective": "https://tantorlabs.ru/",
+   "bytes": 1893925,
+   "prefix": "/",
+   "toc_links": 49,
+   "toc_sample": [
+    "/",
+    "/ack-user",
+    "/agreement",
+    "/articles/db-dev",
+    "/blog"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://tantorlabs.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 108,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://tantorlabs.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://tantorlabs.ru/sitemap.xml",
+   "loc": 61,
+   "feeds": 0
+  }
+ },
+ "tantor_dbms": {
+  "static": {
+   "url": "https://tantorlabs.ru/products/dbms/",
+   "code": "200",
+   "effective": "https://tantorlabs.ru/products/dbms/",
+   "bytes": 1686851,
+   "prefix": "/products/",
+   "toc_links": 9,
+   "toc_sample": [
+    "/products/compare",
+    "/products/dbms",
+    "/products/dbms/",
+    "/products/dbms/cve",
+    "/products/di"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://tantorlabs.ru/robots.txt",
+   "code": "200",
+   "disallow_total": 108,
+   "disallow_blocking_prefix": [],
+   "agents": [
+    "*",
+    "Yandex"
+   ]
+  },
+  "sitemap": {
+   "url": "https://tantorlabs.ru/sitemap.xml",
+   "code": "200",
+   "effective": "https://tantorlabs.ru/sitemap.xml",
+   "loc": 61,
+   "feeds": 0
+  }
+ },
+ "tantor_tdb": {
+  "static": {
+   "url": "https://docs.tantorlabs.ru/tdb/",
+   "code": "200",
+   "effective": "https://docs.tantorlabs.ru/tdb/ru/18_6/se/differences.html",
+   "bytes": 188682,
+   "prefix": "/",
+   "toc_links": 897,
+   "toc_sample": [
+    "/tdb/ru/18_6/se/acronyms.html",
+    "/tdb/ru/18_6/se/admin.html",
+    "/tdb/ru/18_6/se/amcheck.html",
+    "/tdb/ru/18_6/se/app-pgcontroldata.html",
+    "/tdb/ru/18_6/se/app-pgdump.html"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://docs.tantorlabs.ru/robots.txt",
+   "code": "404",
+   "disallow_total": 0,
+   "disallow_blocking_prefix": [],
+   "agents": []
+  },
+  "sitemap": {
+   "url": "https://docs.tantorlabs.ru/sitemap.xml",
+   "code": "404",
+   "effective": "https://tantorlabs.ru/docs/sitemap.xml",
+   "loc": 0,
+   "feeds": 0
+  }
+ },
+ "astralinux": {
+  "static": {
+   "url": "https://wiki.astralinux.ru/tandocs/",
+   "code": "200",
+   "effective": "https://wiki.astralinux.ru/tandocs/",
+   "bytes": 127933,
+   "prefix": "/",
+   "toc_links": 68,
+   "toc_sample": [
+    "/tandocs",
+    "/tandocs/",
+    "/tandocs/1s-oshibka-pg_dump-unknown-alignment-427821128.html",
+    "/tandocs/1s-oshibka-relation-_defaultsystemsettings-does-not-exist-347014382.html",
+    "/tandocs/1s-oshibka-subd-error-unrecognized-configuration-parameter-lc_collate-333810064.html"
+   ],
+   "body_head": ""
+  },
+  "robots": {
+   "url": "https://wiki.astralinux.ru/robots.txt",
+   "code": "404",
+   "disallow_total": 0,
+   "disallow_blocking_prefix": [],
+   "agents": []
+  },
+  "sitemap": {
+   "url": "https://wiki.astralinux.ru/sitemap.xml",
+   "code": "404",
+   "effective": "https://wiki.astralinux.ru/sitemap.xml",
+   "loc": 0,
+   "feeds": 0
+  }
+ }
+}

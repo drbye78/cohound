@@ -1,0 +1,42 @@
+{
+ "run": "ru-pg-dbms-2a5b51af5778",
+ "d3_run": "ru-pg-dbms-2e45c3557c23",
+ "run_items": 2063,
+ "run_unique_texts": 1168,
+ "run_by_class": {
+  "root": 1,
+  "flat": 894,
+  "edition:18_6": 1168
+ },
+ "flat_http_status": {
+  "200": 874,
+  "304": 20
+ },
+ "flat_unique_hashes": 1,
+ "flat_observed_from": "2026-11-07T10:09:27",
+ "edition_observed_from": "2026-11-07T06:47:11",
+ "d3_items": 1207,
+ "d3_by_class": {
+  "root": 1,
+  "flat": 0,
+  "edition:18_6": 1206
+ },
+ "d3_unique_texts": 1201,
+ "run_edition_urls": 1168,
+ "d3_edition_urls": 1206,
+ "in_both": 1168,
+ "only_d3": 38,
+ "only_run": 0,
+ "only_d3_examples": [
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-build-sql-delete.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-build-sql-insert.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-build-sql-update.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-cancel-query.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-close.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-error-message.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-fetch.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-get-connections.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-get-notify.html",
+  "https://docs.tantorlabs.ru/tdb/ru/18_6/se/contrib-dblink-get-pkey.html"
+ ]
+}

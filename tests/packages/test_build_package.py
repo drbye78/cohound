@@ -220,8 +220,13 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
 @pytest.mark.parametrize(
     ("url", "max_depth", "max_documents"),
     [
-        # seed-корень портала /docs без sitemap — бюджет-потолок для крупного docs-портала.
-        ("https://postgrespro.ru/docs/16/", 8, 800),
+        # Дерево документации: sitemap 404, размер — из TOC. Замер 09.11.2026 (статика):
+        # 55 индексов редакций, TOC снят у 40 — сумма 3 667 страниц (нижняя граница;
+        # 15 редакций не сняты). 800 было измеренным усечением прогона `2a5b51af5778`.
+        ("https://postgrespro.ru/docs/16/", 8, 3667),
+        # Host-ключ портала (и страницы продукта) сохраняет прежний бюджет: path-ключ
+        # `/docs` не должен протекать на соседние корни того же хоста.
+        ("https://postgrespro.ru/", 8, 800),
         # 23 URL, плоско — 60 покрывает с запасом.
         ("https://pangolin.sbertech.ru/", 8, 600),
         # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.

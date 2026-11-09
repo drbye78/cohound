@@ -1,0 +1,202 @@
+{
+ "axe/1": {
+  "code": "200",
+  "toc": 45,
+  "eff": "https://postgrespro.ru/docs/axe/1"
+ },
+ "axe/2": {
+  "code": "200",
+  "toc": 43,
+  "eff": "https://postgrespro.ru/docs/axe/2"
+ },
+ "enterprise/9.6": {
+  "code": "200",
+  "toc": 97,
+  "eff": "https://postgrespro.ru/docs/enterprise/9.6"
+ },
+ "enterprise/10": {
+  "code": "200",
+  "toc": 100,
+  "eff": "https://postgrespro.ru/docs/enterprise/10"
+ },
+ "enterprise/11": {
+  "code": "200",
+  "toc": 102,
+  "eff": "https://postgrespro.ru/docs/enterprise/11"
+ },
+ "enterprise/12": {
+  "code": "200",
+  "toc": 104,
+  "eff": "https://postgrespro.ru/docs/enterprise/12"
+ },
+ "enterprise/13": {
+  "code": "200",
+  "toc": 110,
+  "eff": "https://postgrespro.ru/docs/enterprise/13"
+ },
+ "enterprise/14": {
+  "code": "200",
+  "toc": 110,
+  "eff": "https://postgrespro.ru/docs/enterprise/14"
+ },
+ "enterprise/15": {
+  "code": "200",
+  "toc": 114,
+  "eff": "https://postgrespro.ru/docs/enterprise/15"
+ },
+ "enterprise/16": {
+  "code": "200",
+  "toc": 117,
+  "eff": "https://postgrespro.ru/docs/enterprise/16"
+ },
+ "enterprise/17": {
+  "code": "200",
+  "toc": 110,
+  "eff": "https://postgrespro.ru/docs/enterprise/17"
+ },
+ "enterprise/18": {
+  "code": "200",
+  "toc": 111,
+  "eff": "https://postgrespro.ru/docs/enterprise/18"
+ },
+ "postgrespro/10": {
+  "code": "200",
+  "toc": 98,
+  "eff": "https://postgrespro.ru/docs/postgrespro/10"
+ },
+ "postgrespro/11": {
+  "code": "200",
+  "toc": 99,
+  "eff": "https://postgrespro.ru/docs/postgrespro/11"
+ },
+ "postgrespro/12": {
+  "code": "200",
+  "toc": 101,
+  "eff": "https://postgrespro.ru/docs/postgrespro/12"
+ },
+ "postgrespro/13": {
+  "code": "200",
+  "toc": 106,
+  "eff": "https://postgrespro.ru/docs/postgrespro/13"
+ },
+ "postgrespro/14": {
+  "code": "200",
+  "toc": 107,
+  "eff": "https://postgrespro.ru/docs/postgrespro/14"
+ },
+ "postgrespro/15": {
+  "code": "200",
+  "toc": 110,
+  "eff": "https://postgrespro.ru/docs/postgrespro/15"
+ },
+ "postgrespro/16": {
+  "code": "200",
+  "toc": 111,
+  "eff": "https://postgrespro.ru/docs/postgrespro/16"
+ },
+ "postgrespro/17": {
+  "code": "200",
+  "toc": 105,
+  "eff": "https://postgrespro.ru/docs/postgrespro/17"
+ },
+ "postgrespro/18": {
+  "code": "200",
+  "toc": 106,
+  "eff": "https://postgrespro.ru/docs/postgrespro/18"
+ },
+ "postgresql/10": {
+  "code": "200",
+  "toc": 102,
+  "eff": "https://postgrespro.ru/docs/postgresql/10"
+ },
+ "postgresql/11": {
+  "code": "200",
+  "toc": 104,
+  "eff": "https://postgrespro.ru/docs/postgresql/11"
+ },
+ "postgresql/12": {
+  "code": "200",
+  "toc": 105,
+  "eff": "https://postgrespro.ru/docs/postgresql/12"
+ },
+ "postgresql/13": {
+  "code": "200",
+  "toc": 108,
+  "eff": "https://postgrespro.ru/docs/postgresql/13"
+ },
+ "postgresql/14": {
+  "code": "200",
+  "toc": 109,
+  "eff": "https://postgrespro.ru/docs/postgresql/14"
+ },
+ "postgresql/15": {
+  "code": "200",
+  "toc": 112,
+  "eff": "https://postgrespro.ru/docs/postgresql/15"
+ },
+ "postgresql/16": {
+  "code": "200",
+  "toc": 113,
+  "eff": "https://postgrespro.ru/docs/postgresql/16"
+ },
+ "postgresql/17": {
+  "code": "200",
+  "toc": 105,
+  "eff": "https://postgrespro.ru/docs/postgresql/17"
+ },
+ "postgresql/18": {
+  "code": "200",
+  "toc": 106,
+  "eff": "https://postgrespro.ru/docs/postgresql/18"
+ },
+ "shardman/14": {
+  "code": "200",
+  "toc": 90,
+  "eff": "https://postgrespro.ru/docs/shardman/14"
+ },
+ "shardman/17": {
+  "code": "200",
+  "toc": 105,
+  "eff": "https://postgrespro.ru/docs/shardman/17"
+ },
+ "shardman/18": {
+  "code": "200",
+  "toc": 108,
+  "eff": "https://postgrespro.ru/docs/shardman/18"
+ },
+ "ora2pgpro/23": {
+  "code": "200",
+  "toc": 2,
+  "eff": "https://postgrespro.ru/docs/ora2pgpro/23"
+ },
+ "ora2pgpro/24": {
+  "code": "200",
+  "toc": 38,
+  "eff": "https://postgrespro.ru/docs/ora2pgpro/24"
+ },
+ "ora2pgpro/26": {
+  "code": "200",
+  "toc": 46,
+  "eff": "https://postgrespro.ru/docs/ora2pgpro/26"
+ },
+ "pg_probackup3/3.5": {
+  "code": "200",
+  "toc": 59,
+  "eff": "https://postgrespro.ru/docs/pg_probackup3/3.5"
+ },
+ "otelcol/0.7": {
+  "code": "200",
+  "toc": 57,
+  "eff": "https://postgrespro.ru/docs/otelcol/0.7"
+ },
+ "ppem/2": {
+  "code": "200",
+  "toc": 92,
+  "eff": "https://postgrespro.ru/docs/ppem/2"
+ },
+ "progate/1": {
+  "code": "200",
+  "toc": 0,
+  "eff": "https://docs.postgrespro.ru/ru/progate/1.5.0/"
+ }
+}
