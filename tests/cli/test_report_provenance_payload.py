@@ -147,6 +147,29 @@ def test_report_json_payload_carries_manifest_and_run_product(
     assert run_product_path is not None
     assert Path(run_product_path).exists()
 
+    # O7: «сколько важного осталось неизвестным» — в машинном выводе, а не только в шапке
+    # battle card. Схема стабильна: все ключи присутствуют и при нулях (ячеек здесь нет).
+    critical = payload["critical_unknown"]
+    assert critical["unknown_total"] == 0
+    assert critical["critical_unknown"] == 0
+    assert set(critical) == {
+        "critical_unknown",
+        "unknown_total",
+        "unknown_by_importance_Кр",
+        "unknown_by_importance_Вж",
+        "unknown_by_importance_Баз",
+        "unknown_by_importance_Опц",
+        "unknown_by_importance_unmapped",
+    }
+
+    # O28: аномалии ``heading_path`` — блоком в машинном выводе. Здесь чанков в БД нет,
+    # поэтому честный исход — «не посчитано» с причиной, а **не** нулевые бакеты:
+    # ноль читался бы как «аномалий нет» на прогоне, где их не искали.
+    heading = payload["heading_anomalies"]
+    assert heading["written"] is False
+    assert heading["reason"]
+    assert heading["summary"] is None
+
 
 def test_report_human_output_names_scope_and_device(
     seeded_db: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]

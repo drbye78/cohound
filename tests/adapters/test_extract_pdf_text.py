@@ -31,8 +31,9 @@ from pathlib import Path
 import pytest
 
 from core.adapters.extract_pdf_text import (
-    PDFIUM_ADAPTER_VERSION,
+    PDFIUM_ADAPTER_FAMILY,
     PdfiumDocumentExtractor,
+    pdfium_engine_build,
     strip_control_characters,
 )
 from core.util.document_formats import FAMILY_TEXT
@@ -108,13 +109,57 @@ def _write(tmp_path: Path, name: str, pages: list[str]) -> Path:
 
 def test_version_and_support_are_declared() -> None:
     adapter = PdfiumDocumentExtractor()
-    assert adapter.version == PDFIUM_ADAPTER_VERSION == "pdfium-text-2"
+    # O24: штамп — не константа, а сборка движка: механизм + версия дистрибутива.
+    assert adapter.version == pdfium_engine_build()
+    assert adapter.version.startswith(f"{PDFIUM_ADAPTER_FAMILY}:")
+    assert adapter.version == PdfiumDocumentExtractor().version
     # Работает по пути, как docling: retained-файл читается адаптером (I19).
     assert adapter.supports_source_path is True
     assert adapter.supports("report.pdf") is True
     assert adapter.supports("report.PDF") is True
     assert adapter.supports("report.docx") is False
     assert adapter.supports("report") is False
+
+
+def test_two_distribution_versions_give_two_stamps_and_two_cache_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O24: сборка pdfium входит в штамп — апгрейд не переиспользует текст молча.
+
+    Дефект до правки: ``PDFIUM_ADAPTER_VERSION`` был константой ``pdfium-text-2``, поэтому
+    две версии дистрибутива давали **один** ``extractor_version``, а ключ
+    ``extract_cache`` = ``(content_hash, extractor_version, level)`` совпадал: текст,
+    прочитанный другим движком, обслуживался из кэша под прежним провенансом. Докстринг
+    модуля при этом обещал обратное.
+    """
+    import core.adapters.extract_pdf_text as module
+
+    versions = iter(["5.14.0", "5.15.0", "5.15.0"])
+    monkeypatch.setattr(module, "pdfium_library_version", lambda: next(versions))
+
+    first = module.pdfium_engine_build()
+    second = module.pdfium_engine_build()
+
+    assert first == f"{module.PDFIUM_ADAPTER_FAMILY}:5.14.0"
+    assert second == f"{module.PDFIUM_ADAPTER_FAMILY}:5.15.0"
+    assert first != second
+    # Штамп документа берётся из той же формулы, что и стек (Д-8: одна формула).
+    assert module.PdfiumDocumentExtractor().version == second
+
+
+def test_missing_distribution_metadata_is_unknown_not_invented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Нет метаданных дистрибутива — ``unknown``, а не правдоподобная версия (A3)."""
+    import core.adapters.extract_pdf_text as module
+
+    def _boom(_dist: str) -> str:
+        raise module.importlib.metadata.PackageNotFoundError("pypdfium2")
+
+    monkeypatch.setattr(module.importlib.metadata, "version", _boom)
+
+    assert module.pdfium_library_version() == "unknown"
+    assert module.pdfium_engine_build() == f"{module.PDFIUM_ADAPTER_FAMILY}:unknown"
 
 
 def test_extracted_family_is_text(tmp_path: Path) -> None:
@@ -127,7 +172,7 @@ def test_extracted_family_is_text(tmp_path: Path) -> None:
     assert doc.text == "Hello world"
     assert doc.page_count == 1
     assert doc.family == FAMILY_TEXT
-    assert doc.extractor_version == PDFIUM_ADAPTER_VERSION
+    assert doc.extractor_version == pdfium_engine_build()
 
 
 def test_page_count_is_document_pages(tmp_path: Path) -> None:
@@ -340,7 +385,7 @@ def test_non_pdf_is_rejected(tmp_path: Path) -> None:
 
     assert doc.text == ""
     assert doc.error is not None and "text_layer" in doc.error
-    assert doc.extractor_version == PDFIUM_ADAPTER_VERSION
+    assert doc.extractor_version == pdfium_engine_build()
 
     by_bytes = PdfiumDocumentExtractor().extract_bytes(b"PK\x03\x04", "table.docx")
     assert by_bytes.error == doc.error
@@ -461,6 +506,67 @@ def test_page_separator_survives_partial_join(
 
     assert "\r" not in doc.text
     assert doc.text == "первый\nабзац\n\nтретий"
+
+
+# ---------------------------------------------------------------------------
+# O26: лист без текстового слоя — видимая частичность, а не тихий успех
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_pages_without_text_layer_make_document_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``["текст", "", "текст"]`` — частичный документ с числом, а не полный успех.
+
+    До правки пустая страница не попадала ни в ``failed``, ни в счётчики: документ
+    выглядел прочитанным целиком, и молчание скана ниже по потоку читалось как
+    «вендор не заявил» → ``❌`` (I2/I2c).
+    """
+    monkeypatch.setitem(
+        sys.modules, "pypdfium2", _FakePdfium(["первая", "", "третья"])
+    )
+    path = _write(tmp_path, "mixed.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="mixed.pdf")
+
+    assert doc.error is None, "прочитанные страницы — документ, а не сбой"
+    assert doc.partial is True
+    assert doc.partial_reason is not None
+    assert "pages_without_text_layer" in doc.partial_reason
+    assert "1 из 3" in doc.partial_reason
+    # Реально прочитанных страниц две из трёх: лист без слоя не дал текста.
+    assert doc.pages_converted == 2
+    assert doc.page_count == 3
+    assert doc.text.split("\n\n")[0] == "первая"
+
+
+def test_all_pages_without_text_layer_stay_no_text_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Все страницы пусты → ``no_text_layer`` (отказ), а не ``partial`` без текста."""
+    monkeypatch.setitem(sys.modules, "pypdfium2", _FakePdfium(["", "", ""]))
+    path = _write(tmp_path, "scan.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="scan.pdf")
+
+    assert doc.error == "no_text_layer"
+    assert doc.partial is False
+    assert doc.pages_converted is None
+
+
+def test_document_with_text_on_every_page_is_not_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Нет пустых страниц — нет ложной частичности (счётчик пустых = 0)."""
+    monkeypatch.setitem(sys.modules, "pypdfium2", _FakePdfium(["a", "b"]))
+    path = _write(tmp_path, "clean.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="clean.pdf")
+
+    assert doc.partial is False
+    assert doc.partial_reason is None
+    assert doc.pages_converted is None
+    assert doc.page_count == 2
 
 
 # ---------------------------------------------------------------------------

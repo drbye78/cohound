@@ -26,6 +26,10 @@ from core.cli.errors import EXIT_OK
 from core.cli.wiring import build_store
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.gates import gate_trail
+from core.pipeline.heading_anomalies import human_line as heading_anomalies_human_line
+from core.pipeline.heading_anomalies import (
+    not_computed_note as heading_not_computed_note,
+)
 from core.pipeline.partial_docs import human_line as partial_docs_human_line
 from core.pipeline.report import manifest_payload, write_reports
 from core.pipeline.support_quality import support_quality_line
@@ -131,6 +135,16 @@ def run(args: argparse.Namespace) -> int:
     )
     if support_line:
         notes.append(support_line)
+    # План 26 O28: аномалии ``heading_path`` — строкой. Длинный контекст (3 668 симв.)
+    # до этого был виден только измерительным харнессом, то есть вне прогона.
+    heading_block = getattr(artifacts, "heading_anomalies_summary", None) or {}
+    heading_line = heading_anomalies_human_line(heading_block.get("summary"))
+    if heading_line:
+        notes.append(heading_line)
+    else:
+        missing = heading_not_computed_note(heading_block.get("reason"))
+        if missing:
+            notes.append(missing)
     partial = _manifest_partial(manifest)
     if partial:
         notes.append(
@@ -188,6 +202,15 @@ def run(args: argparse.Namespace) -> int:
         # (``None``): синтетический бандл без профиля честно молчит.
         "publishability": (
             publishability.to_dict() if publishability is not None else None
+        ),
+        # O7: «сколько важного осталось неизвестным» — тот же словарь, что строки шапки
+        # battle card (один сборщик ``critical_unknown_summary``), чтобы число не
+        # требовало открытия XLSX. Наблюдение: вердикты/Coverage не меняются.
+        "critical_unknown": dict(getattr(artifacts, "critical_unknown", None) or {}),
+        # План 26 O28: аномалии ``heading_path`` — блок (числа + причина «не посчитано»),
+        # чтобы длинный контекст был виден без открытия CSV.
+        "heading_anomalies": dict(
+            getattr(artifacts, "heading_anomalies_summary", None) or {}
         ),
         "notes": notes,
     }

@@ -625,6 +625,9 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # B3: члены контейнеров без документа (причина пропуска) — путь к таблице.
         # ``None`` — пропусков нет, файл не создавался; это отличается от «путь забыт».
         "corpus_members": _path(getattr(artifacts, "corpus_members", None)),
+        # План 26 O28: аномалии ``heading_path`` — путь к таблице. ``None`` — не
+        # посчитано (причина в блоке ``heading_anomalies``), а не «аномалий нет».
+        "heading_anomalies": _path(getattr(artifacts, "heading_anomalies", None)),
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []

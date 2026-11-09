@@ -12,6 +12,7 @@ Docling подменяется фейками: тест не грузит мод
 from __future__ import annotations
 
 import errno
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ from core.adapters.extract_document import (
     _OcrProbeUnsupported,
     _page_count,
     _probe_ocr_engine,
+    probe_ocr_engine,
 )
 from core.cli.execution_axes import extractor_stack_version
 from core.domain.enums import DocumentLevel, PdfDevice
@@ -156,6 +158,113 @@ def test_probe_without_ocr_options_is_unsupported() -> None:
     """Опции без ``ocr_options`` (смена внутреннего API) → деградация, не отказ."""
     with pytest.raises(_OcrProbeUnsupported):
         _probe_ocr_engine(object())
+    assert probe_ocr_engine(object()) == "unsupported"
+
+
+# --------------------------------------------------------------------------- #
+# O25: проба OCR не может пройти молча
+# --------------------------------------------------------------------------- #
+
+class _AutoOcrRenamed:
+    """``OcrAutoModel`` после переименования приватного поля: ``_engine`` больше нет."""
+
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+
+class _AutoOcrWithEngine:
+    def __init__(self, **_kwargs: object) -> None:
+        self._engine = object()
+
+
+class _AutoOcrWithoutEngine:
+    def __init__(self, **_kwargs: object) -> None:
+        self._engine = None
+
+
+def _fake_ocr_module(monkeypatch: pytest.MonkeyPatch, auto_cls: type) -> None:
+    """Подменяет модуль docling, из которого берётся ``OcrAutoModel``."""
+    monkeypatch.setitem(
+        sys.modules,
+        "docling.models.stages.ocr.auto_ocr_model",
+        SimpleNamespace(OcrAutoModel=auto_cls),
+    )
+
+
+def _fake_pdf_options() -> SimpleNamespace:
+    """PDF-опции с уже заданным ``artifacts_path``: импорт настроек docling не нужен."""
+    return SimpleNamespace(
+        ocr_options=object(),
+        accelerator_options=object(),
+        artifacts_path=Path("/tmp"),
+    )
+
+
+def test_probe_with_renamed_engine_is_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Переименование ``_engine`` — ``unsupported``, а не «проба прошла».
+
+    ``getattr(auto, "_engine", auto)`` возвращал сам ``OcrAutoModel`` (не ``None``), и
+    проверка «успешно» проходила, ничего не проверив. Отсутствие поля обязано быть
+    отличимо от «поле есть, движка нет».
+    """
+    _fake_ocr_module(monkeypatch, _AutoOcrRenamed)
+
+    with pytest.raises(_OcrProbeUnsupported):
+        _probe_ocr_engine(_fake_pdf_options())
+    assert probe_ocr_engine(_fake_pdf_options()) == "unsupported"
+
+
+def test_unsupported_probe_reaches_extracted_doc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Маркер ``unsupported`` доезжает до результата, а не остаётся в журнале."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(
+        DoclingDocumentExtractor, "_pdf_options", lambda self: _fake_pdf_options()
+    )
+    _fake_ocr_module(monkeypatch, _AutoOcrRenamed)
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.FULL)
+    doc = extractor.extract_bytes(b"%PDF-1.4", "report.pdf")
+
+    assert doc.ocr_probe == "unsupported"
+
+
+def test_successful_probe_is_ok_and_reaches_extracted_doc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Движок реально получен → ``ok`` (и это видно в результате)."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(
+        DoclingDocumentExtractor, "_pdf_options", lambda self: _fake_pdf_options()
+    )
+    _fake_ocr_module(monkeypatch, _AutoOcrWithEngine)
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.FULL)
+    doc = extractor.extract_bytes(b"%PDF-1.4", "report.pdf")
+
+    assert doc.ocr_probe == "ok"
+    assert probe_ocr_engine(_fake_pdf_options()) == "ok"
+
+
+def test_probe_without_engine_is_unavailable_and_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_engine is None`` — прежний отказ извлечения, тристейт лишь называет факт."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(
+        DoclingDocumentExtractor, "_pdf_options", lambda self: _fake_pdf_options()
+    )
+    _fake_ocr_module(monkeypatch, _AutoOcrWithoutEngine)
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.FULL)
+    with pytest.raises(OcrEngineUnavailableError, match="full"):
+        extractor.extract_bytes(b"%PDF-1.4", "report.pdf")
+
+    assert extractor._ocr_probe == "unavailable"
+    assert probe_ocr_engine(_fake_pdf_options()) == "unavailable"
 
 
 # --------------------------------------------------------------------------- #

@@ -12,19 +12,30 @@ Dense-плечо (R1/R2) требует вектор запроса. Он пол
 ``embed: Callable[[str], Sequence[float]]``. Если ``embed`` (или нужный порт) не передан,
 профиль **пропускается** с записанной причиной (``ExperimentReport.skipped``) — эксперимент
 не падает и не «выдумывает» вектор.
+
+**Неразрешённые id эталона (O4).** Отчёт несёт ``unresolved_expected_ids`` (число и
+примеры): голден, привязанный к ``chunk_id`` другой сборки, даёт ``recall@K = 0``,
+неотличимый от провала поиска. Число агрегируется по профилям: id считается
+неразрешённым, если он не входит в ``known_ids`` (передаёт вызывающий) и не встретился ни
+в одной выдаче ни одного профиля. Вход подозрителен — это наблюдение, а не отказ.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.pipeline.retrieve import DEFAULT_RRF_K, RetrievalProfile, retrieve
 from core.ports.lexical_index import LexicalIndexPort
 from core.ports.vector_index import VectorIndexPort
-from core.util.retrieval_eval import GoldenQuery, RetrievalReport, evaluate_retrieval
+from core.util.retrieval_eval import (
+    UNRESOLVED_EXAMPLE_LIMIT,
+    GoldenQuery,
+    RetrievalReport,
+    evaluate_retrieval,
+)
 
 __all__ = [
     "DEFAULT_PROFILES",
@@ -73,6 +84,11 @@ class ExperimentReport:
     :param per_query: ранг первого релевантного чанка по каждому профилю (диагностика).
     :param rrf_k: RRF-константа, использованная в эксперименте (часть ``retrieval_params_json``).
     :param skipped: пропущенные профили с причиной (например, нет ``embed`` для dense).
+    :param unresolved_expected_ids: сколько уникальных ожидаемых id эталона не разрешилось
+        ни в одной выдаче (O4) — видимый признак устаревшего/чужого голдена.
+    :param expected_ids_total: сколько всего уникальных ожидаемых id в голдене.
+    :param unresolved_expected_examples: до :data:`~core.util.retrieval_eval.
+        UNRESOLVED_EXAMPLE_LIMIT` примеров неразрешённых id.
     """
 
     k: int
@@ -82,6 +98,9 @@ class ExperimentReport:
     per_query: dict[str, list[int | None]] = field(default_factory=dict)
     rrf_k: int = DEFAULT_RRF_K
     skipped: dict[str, str] = field(default_factory=dict)
+    unresolved_expected_ids: int = 0
+    expected_ids_total: int = 0
+    unresolved_expected_examples: tuple[str, ...] = ()
 
     def to_manifest_json(self) -> str:
         """JSON для ``retrieval_params_json``/манифеста: профиль, K, ``rrf_k`` и метрики.
@@ -188,6 +207,7 @@ def _run_profile(
     vector_index: VectorIndexPort | None,
     embed: EmbedFn | None,
     rrf_k: int,
+    known_ids: Collection[str] | None = None,
 ) -> ProfileExperiment:
     """Прогоняет один профиль по golden и возвращает :class:`ProfileExperiment` (I20)."""
 
@@ -209,7 +229,7 @@ def _run_profile(
         )
         return [chunk.chunk_id for chunk in result.chunks]
 
-    report = evaluate_retrieval(golden, ranker, k=cutoff_k)
+    report = evaluate_retrieval(golden, ranker, k=cutoff_k, known_ids=known_ids)
     return ProfileExperiment(profile=profile.value, report=report, cutoff_k=cutoff_k)
 
 
@@ -271,6 +291,7 @@ def run_retrieval_experiment(
     embed: EmbedFn | None = None,
     rrf_k: int = DEFAULT_RRF_K,
     min_delta: float = 0.0,
+    known_ids: Collection[str] | None = None,
 ) -> ExperimentReport:
     """Прогоняет R0/R1/R2 на retrieval-golden и выбирает профиль измерением (T8.6, R9/R10).
 
@@ -282,6 +303,10 @@ def run_retrieval_experiment(
     :param embed: функция запрос→вектор для dense-плеча; без неё R1/R2 пропускаются.
     :param rrf_k: RRF-константа (версионируется в ``retrieval_params_json``, S1).
     :param min_delta: порог превосходства над baseline R0, ниже которого сохраняется R0 (A3).
+    :param known_ids: идентификаторы, существующие в оцениваемой сборке (O4). С ними
+        «не найден поиском» отличается от «нет в сборке»; без них неразрешённым считается
+        всякий ожидаемый id, не встретившийся ни в одной выдаче (см.
+        :func:`core.util.retrieval_eval.evaluate_retrieval`).
 
     :raises ValueError: ``cutoff_k <= 0``, ``min_delta < 0``, неизвестный профиль или
         ни один профиль не может быть оценён (все пропущены).
@@ -320,6 +345,7 @@ def run_retrieval_experiment(
                 vector_index=vector_index,
                 embed=embed,
                 rrf_k=rrf_k,
+                known_ids=known_ids,
             )
         )
 
@@ -331,6 +357,16 @@ def run_retrieval_experiment(
     per_query = {experiment.profile: list(experiment.report.per_query_rank) for experiment in evaluated}
     selected_profile, selection_basis = _select_profile(evaluated, min_delta=min_delta)
 
+    # O4: неразрешённые id считаются по **объединению** выдач всех профилей — профиль,
+    # который id не нашёл, не должен превращать существующий чанк в «несуществующий».
+    observed: frozenset[str] = frozenset().union(
+        *(experiment.report.observed_ids for experiment in evaluated)
+    )
+    present: set[str] = set(known_ids) if known_ids is not None else set()
+    present.update(observed)
+    expected_all = frozenset(cid for item in golden for cid in item.expected_ids)
+    unresolved = sorted(expected_all - present)
+
     return ExperimentReport(
         k=cutoff_k,
         by_profile=by_profile,
@@ -339,4 +375,7 @@ def run_retrieval_experiment(
         per_query=per_query,
         rrf_k=rrf_k,
         skipped=skipped,
+        unresolved_expected_ids=len(unresolved),
+        expected_ids_total=len(expected_all),
+        unresolved_expected_examples=tuple(unresolved[:UNRESOLVED_EXAMPLE_LIMIT]),
     )

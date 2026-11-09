@@ -35,6 +35,7 @@ from core.domain import (
     EndpointKind,
     Focus,
     Importance,
+    IndexManifestEntry,
     LLMCellOutput,
     LLMScenario,
     ParamType,
@@ -48,6 +49,7 @@ from core.pipeline import Ports
 from core.ports.llm import LLMRequest, LLMResponse
 from core.ports.vector_index import RetrievedChunk
 from core.store.sqlite_store import SqliteStore
+from tests.fakes.ports import FakeEmbedder, FakeVectorIndex
 
 RUN_ID = "run-retry-cli"
 BUILD = "cb_new"
@@ -309,3 +311,60 @@ def test_undeclared_evaluator_model_refuses(
     assert payload["status"] == "refused"
     assert "llm_scenarios" in payload["message"]
     assert spy == []
+
+
+def test_retry_cli_refuses_embedder_build_mismatch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O1 плана 26: путь ``hound retry`` — расхождение моделей даёт ``EXIT_USAGE``.
+
+    Ячейка объявлена ``R1`` (dense-плечо), сборка несёт другой ``embed_model_id`` —
+    повтор обязан отказаться до поиска, а не выдать скор под чужим эмбеддером.
+    """
+    from core.pipeline.retrieve import retrieval_params
+
+    db = _make_db(tmp_path, declare_model=True, params=["param_alpha"])
+    with SqliteStore(db) as store:
+        store.save_cell(
+            Cell(
+                run_id=RUN_ID,
+                product_id="p1",
+                param_id="param_alpha",
+                state=CellState.FAILED,
+                status=None,
+                source_kind=SourceKind.DOCUMENTATION,
+                index_build_id=BUILD,
+                retrieval_profile="R1",
+                retrieval_params_json=json.dumps(
+                    retrieval_params(profile="R1", cutoff_k=10, rrf_k=60),
+                    sort_keys=True,
+                ),
+            )
+        )
+        store.save_index_manifest(
+            IndexManifestEntry(
+                index_build_id=BUILD,
+                partition_build_id="pb_p1",
+                product_id="p1",
+                embed_model_id="other-model@rev2",
+            )
+        )
+
+    monkeypatch.setattr(
+        "core.cli.commands.retry.build_adapters",
+        lambda *args, **kwargs: Ports(
+            evaluator=_ScriptedEvaluator([_ok_output()]),
+            lexical_index=_LexicalStub(BUILD, [_chunk()]),
+            vector_index=FakeVectorIndex(docs=[_chunk()], build_id=BUILD),
+            embedder=FakeEmbedder(model_id="model@rev1"),
+        ),
+    )
+
+    code = main(["retry", "--db", str(db), "--json"])
+
+    assert code == EXIT_USAGE
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "model@rev1" in output and "other-model@rev2" in output

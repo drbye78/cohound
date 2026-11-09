@@ -77,6 +77,12 @@ from core.pipeline.exhaustion import ExhaustionFacts, contours_run
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.extraction_runtime import ExtractionPool
 from core.pipeline.gates import gate_trail
+from core.pipeline.heading_anomalies import (
+    human_line as heading_anomalies_human_line,
+)
+from core.pipeline.heading_anomalies import (
+    not_computed_note as heading_not_computed_note,
+)
 from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.manual_artifacts import (
     load_manual_artifacts,
@@ -1883,6 +1889,19 @@ def build_phases(
         partial_line = partial_docs_human_line(artifacts.partial_docs_summary)
         if partial_line:
             pending.append(f"отчёт: {partial_line} (список: outputs/partial_docs.csv)")
+        # План 26 O28: длинный ``heading_path`` — дефект извлечения, который до этого
+        # был виден только измерительным харнессом. Строка оператора называет число и
+        # документ-виновника; «не посчитано» называется причиной, а не нулём.
+        heading_block = getattr(artifacts, "heading_anomalies_summary", None) or {}
+        heading_line = heading_anomalies_human_line(heading_block.get("summary"))
+        if heading_line:
+            pending.append(
+                f"отчёт: {heading_line} (список: outputs/heading_anomalies.csv)"
+            )
+        else:
+            missing = heading_not_computed_note(heading_block.get("reason"))
+            if missing:
+                pending.append(f"отчёт: {missing}")
         if artifacts.stale_cells is not None:
             pending.append(
                 f"отчёт: {stale_count} ячеек исключены из расчёта как устаревшие "

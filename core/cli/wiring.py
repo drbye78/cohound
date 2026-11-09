@@ -158,6 +158,10 @@ from core.pipeline.resources import (
     vram_peak_mb,
     workers_from_budget,
 )
+from core.pipeline.retrieve import (
+    EmbedderBuildMismatch,
+    assert_embedder_matches_build,
+)
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawl_errors import CrawlError, CrawlNotFound
 from core.ports.crawler import CrawlerPort
@@ -420,7 +424,7 @@ def _lexical_engine_version() -> str:
     :func:`seed_lexical_index` возвращает ``None``, и ``experiments`` помечает R0/R2
     как ``skipped`` («нет lexical_index»), поэтому честное значение — **пустая
     строка**: «движка нет», а не «версия неизвестна». Заполненное значение — версия
-    движка, которая реально засеет лексический индекс этой сборки.
+    движка **и схемы**, которая реально засеет лексический индекс этой сборки.
     """
     if not tantivy_available():
         return ""
@@ -548,29 +552,9 @@ class ExperimentTarget:
     partition_by_product: Mapping[str, str] = field(default_factory=dict)
 
 
-class EmbedderBuildMismatch(WiringError):
-    """§13/I17 (NB1): запросный эмбеддер не совпадает со сборкой — эксперимент запрещён.
-
-    Несёт оба идентификатора (запроса и сборки), чтобы ошибка называла расхождение явно.
-    """
-
-    def __init__(self, query_model_id: str, build_model_id: str) -> None:
-        super().__init__(
-            f"эмбеддер запроса ({query_model_id!r}) не совпадает с эмбеддером сборки "
-            f"({build_model_id!r}): скор был бы бессмысленным (NB1/§13). "
-            "Пересоберите индекс тем же эмбеддером либо смените эмбеддер запроса."
-        )
-        self.query_model_id = query_model_id
-        self.build_model_id = build_model_id
-
-
-def assert_embedder_matches_build(query_model_id: str, build_model_id: str) -> None:
-    """Отказ при расхождении эмбеддера запроса и сборки (NB1; сравнение по id, не по dim).
-
-    :raises EmbedderBuildMismatch: ``query_model_id != build_model_id`` — называет оба id.
-    """
-    if query_model_id != build_model_id:
-        raise EmbedderBuildMismatch(query_model_id, build_model_id)
+# ``EmbedderBuildMismatch``/``assert_embedder_matches_build`` живут в ``core.pipeline.retrieve``
+# (проверка нужна и внутри фазы оценки, и в recovery-команде). Здесь — ре-экспорт для
+# прежних импортов ``core.cli.wiring``.
 
 
 def _build_embed_model_id(
@@ -2170,7 +2154,7 @@ class _LocalExtractor:
         **P7: PDF — отдельный механизм.** Внутри документной ветви PDF-суффикс уходит в
         выбранный ``pdf_pipeline`` (:meth:`_document_backend`), остальное — в docling.
         Поэтому версия для ключа ``extract_cache`` — версия реально работающего
-        адаптера (``pdfium-text-2``, ``docling-doc-3:<level>/…`` для PDF либо
+        адаптера (``pdfium-text-3:<версия дистрибутива>``, ``docling-doc-3:<level>/…`` для PDF либо
         ``docling-office-1:…`` для DOCX/PPTX/XLSX), а не композита.
 
         Порядок ветвей — контракт поведения (``.txt``/``.epub`` проверяются до фолбэка в

@@ -2,8 +2,11 @@
 
 Прогон фиксированного набора страниц (HTML/PDF/Office) против ``ExtractorPort``: для каждой
 страницы проверяется наличие обязательных подстрок, отсутствие запрещённых и минимальная
-длина текста. Это «нижний» golden-уровень качества экстракции (06 §6): он ловит потерю
-контента (особенно PDF-таблицы) до того, как она превратится в FN в отчёте.
+длина текста. Негативный кейс (``expect_error``) проверяет обратное — что экстрактор
+**отказал** именно ожидаемой ошибкой (например, скан без текстового слоя →
+``no_text_layer``), а не вернул пустой текст как успех. Это «нижний» golden-уровень
+качества экстракции (06 §6): он ловит потерю контента (особенно PDF-таблицы) до того, как
+она превратится в FN в отчёте.
 
 **Re-extract без ре-фетча (02 §B.1, I19).** Сырые байты — retention-единица; ``extractor_version``
 позволяет переизвлечь текст из тех же байтов. Смена ``extractor_version`` — версионная граница
@@ -75,6 +78,12 @@ class ExtractionGoldenCase:
     expected_substrings: list[str] = field(default_factory=list)
     forbidden_substrings: list[str] = field(default_factory=list)
     min_chars: int = 0
+    #: Ожидаемый отказ экстрактора (негативный кейс): кейс успешен **только** когда
+    #: ``ExtractedDoc.error`` равен этой строке. ``None`` — обычный кейс, где ошибка
+    #: означает провал. Нужен для «скана без текстового слоя» (``no_text_layer``):
+    #: отказ — правильное поведение, и golden обязан его требовать, а не молча
+    #: принимать пустой текст.
+    expect_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +97,10 @@ class ExtractionCaseResult:
     missing: list[str] = field(default_factory=list)
     forbidden_hits: list[str] = field(default_factory=list)
     error: str | None = None
+    #: Ожидаемый отказ кейса (``None`` — обычный кейс); публикуется, чтобы «ожидали
+    #: ``no_text_layer``, а получили текст» отличалось от «ожидали текст, а получили
+    #: ``no_text_layer``» без чтения исходного golden.
+    expected_error: str | None = None
 
 
 @dataclass
@@ -133,6 +146,7 @@ class ExtractionReport:
                     "missing": list(result.missing),
                     "forbidden_hits": list(result.forbidden_hits),
                     "error": result.error,
+                    "expected_error": result.expected_error,
                 }
                 for result in self.results
             ],
@@ -160,7 +174,8 @@ def load_extraction_golden(path: str | Path) -> list[ExtractionGoldenCase]:
             "raw_b64": "<base64>",          # либо "raw_path": "files/page.pdf"
             "expected_substrings": ["..."],
             "forbidden_substrings": ["..."],
-            "min_chars": 10
+            "min_chars": 10,
+            "expect_error": "no_text_layer"   # необязательный негативный кейс
           }
         ]
 
@@ -169,7 +184,8 @@ def load_extraction_golden(path: str | Path) -> list[ExtractionGoldenCase]:
 
     :raises ValueError: не JSON-список, элемент не объект, ``case_id`` пуст/дублируется,
         неизвестный формат, заданы оба/ни один источник байтов, битый base64,
-        списки подстрок не из строк, ``min_chars`` не целое >= 0.
+        списки подстрок не из строк, ``min_chars`` не целое >= 0, ``expect_error``
+        не непустая строка.
     """
     golden_path = Path(path)
     raw_text = golden_path.read_text(encoding="utf-8")
@@ -235,6 +251,12 @@ def load_extraction_golden(path: str | Path) -> list[ExtractionGoldenCase]:
         if isinstance(min_chars, bool) or not isinstance(min_chars, int) or min_chars < 0:
             raise ValueError(f"{where}.min_chars: ожидается целое >= 0")
 
+        expect_error = item.get("expect_error")
+        if expect_error is not None and (
+            not isinstance(expect_error, str) or not expect_error.strip()
+        ):
+            raise ValueError(f"{where}.expect_error: ожидается непустая строка")
+
         cases.append(
             ExtractionGoldenCase(
                 case_id=case_id,
@@ -244,6 +266,7 @@ def load_extraction_golden(path: str | Path) -> list[ExtractionGoldenCase]:
                 expected_substrings=list(expected),
                 forbidden_substrings=list(forbidden),
                 min_chars=min_chars,
+                expect_error=expect_error,
             )
         )
     return cases
@@ -286,7 +309,13 @@ def _result_error(case_id: str, *, version: str, error: str, chars: int = 0) -> 
 
 
 def _run_case(case: ExtractionGoldenCase, extractor: ExtractorPort) -> ExtractionCaseResult:
-    """Прогоняет один кейс с изоляцией ошибок: любой сбой → результат с ``error``, не исключение."""
+    """Прогоняет один кейс с изоляцией ошибок: любой сбой → результат с ``error``, не исключение.
+
+    Негативный кейс (``expect_error``) инвертирует проверку ошибки: успех — ровно
+    ожидаемый ``error``; текст при этом не проверяется (его может не быть вовсе).
+    Отсутствие ошибки или другая ошибка — провал кейса, и в результате видно
+    ``expected_error`` рядом с фактическим ``error``.
+    """
     fallback_version = str(getattr(extractor, "version", "") or "")
 
     try:
@@ -312,6 +341,16 @@ def _run_case(case: ExtractionGoldenCase, extractor: ExtractorPort) -> Extractio
     text = str(getattr(extracted, "text", "") or "")
 
     error = getattr(extracted, "error", None)
+    actual_error = str(error) if error else None
+    if case.expect_error is not None:
+        return ExtractionCaseResult(
+            case_id=case.case_id,
+            ok=actual_error == case.expect_error,
+            extractor_version=version,
+            chars=len(text),
+            error=actual_error,
+            expected_error=case.expect_error,
+        )
     if error:
         return _result_error(case.case_id, version=version, error=str(error), chars=len(text))
 
@@ -338,7 +377,8 @@ def run_extraction_golden(
 
     Для каждого кейса строится ``RawPage`` (байты из ``raw_b64``/``raw_path``, формат — из
     ``format``), вызывается ``extractor.extract(page)`` и проверяются ``expected_substrings``/
-    ``forbidden_substrings``/``min_chars``. Ошибка одного кейса не прерывает прогон.
+    ``forbidden_substrings``/``min_chars``; у негативного кейса — ``expect_error``.
+    Ошибка одного кейса не прерывает прогон.
     """
     return ExtractionReport(
         extractor_version=str(getattr(extractor, "version", "") or ""),

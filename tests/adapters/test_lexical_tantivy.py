@@ -297,6 +297,50 @@ def test_boundary_tie_wider_than_headroom_is_still_deterministic() -> None:
     assert asc == desc == ["d00", "d01", "d02", "d03", "d04"]
 
 
+@requires_tantivy
+def test_full_window_with_short_hydration_still_widens() -> None:
+    """Полное окно + короткая гидртация — не исчерпание окна, а повод расширить его.
+
+    Рассинхрон store↔индекс: в индексе 21 равный документ (окно ``top_k + запас`` =
+    5 + 16 = 21 **полно**), а в store есть только три из них. ``_hydrate_hits``
+    выбрасывает остальные, поэтому ``len(out) <= top_k`` выглядит как «движок отдал
+    всё», хотя окно заполнено. Признак исчерпания — ``len(hits.hits) < window``;
+    здесь он ложен, значит окно обязано вырасти.
+
+    Доказательство — повторный запрос движка с окном ``2*window`` (счётчик вызовов),
+    а не только размер результата: короткая выдача получилась бы и без расширения.
+    """
+    top_k = 5
+    index_records = [
+        LexicalChunk(chunk_id=f"x{i:02d}", product_id=PRODUCT_A, text="экспорт данных")
+        for i in range(21)
+    ]
+    store_records = index_records[:3]
+    windows: list[int] = []
+
+    class _CountingSearcher:
+        """Прокси searcher'а: фиксирует запрошенное окно, поведение не меняет."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def search(self, query: object, limit: int) -> object:
+            windows.append(limit)
+            return self._inner.search(query, limit)
+
+        def doc(self, address: object) -> object:
+            return self._inner.doc(address)
+
+    with TantivyLexicalIndex(hydrate=_provider(store_records)) as index:
+        index.index(index_records)
+        index._searcher = _CountingSearcher(index._searcher)
+        hits = index.search("экспорт", [PRODUCT_A], top_k=top_k)
+    # Первое окно полно (21 == 21), поэтому расширение обязательно; второе (42)
+    # движок уже не заполняет — это и есть настоящее исчерпание.
+    assert windows == [21, 42]
+    assert [c.chunk_id for c in hits] == ["x00", "x01", "x02"]
+
+
 # ---------------------------------------------------------------------------
 # Гидртация top-k вместо зеркала корпуса (A1/Д-3, R2)
 # ---------------------------------------------------------------------------

@@ -227,6 +227,11 @@ def test_experiment_measures_and_persists_provenance(
     assert payload["experiment_id"] == f"retrieval/{BUILD}/K3"
     assert payload["metrics"]["R1"]["recall_at_k"] == pytest.approx(1.0)
     assert payload["skipped"] == {}
+    # O4: эталон резолвится против хранилища — счётчик 0 и предупреждения нет.
+    assert payload["unresolved_expected_ids"] == 0
+    assert payload["expected_ids_total"] == 1
+    assert payload["unresolved_expected_examples"] == []
+    assert "warning" not in payload
 
     # Артефакт фиксации лёг в runs: измеренные поля + provenance=measured.
     with SqliteStore(db) as store:
@@ -438,3 +443,106 @@ def test_experiment_skips_when_build_lacks_embed_model_id(
     assert payload["skip_reason"] == "embedder_unverified"
 
 
+
+
+# ---------------------------------------------------------------------------
+# O4: нерезолвленные id эталона — число в --json и строка предупреждения
+# ---------------------------------------------------------------------------
+
+
+def _golden_with_stale_id(tmp_path: Path) -> Path:
+    """Голден, где один ожидаемый id есть в хранилище (``a0``), а второй — чужой."""
+    path = tmp_path / "retrieval_golden_stale.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "query": "alpha",
+                    "expected_ids": [
+                        "a0",
+                        "a:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:0",
+                    ],
+                    "lang": "en",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_experiment_reports_unresolved_golden_ids_in_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O4: устаревший id виден числом в payload; код возврата — ``EXIT_OK``.
+
+    Измерение состоялось, подозрителен вход: ``EXIT_USAGE`` превращал бы «старый эталон»
+    в «сломанный инструмент» и ломал бы CI-смоук на заведомо устаревшем голдене.
+    """
+    index_root = tmp_path / "index_store"
+    _write_build(index_root)
+    monkeypatch.setenv("COHOUND_INDEX_STORE_DIR", str(index_root))
+    db = tmp_path / "runs" / "run.u" / "cohound.db"
+    _store(db, "run.u")
+
+    with SqliteStore(db) as store:
+        ports = _ports(index_root, store, embedder=_fake_embedder())
+        code = main(
+            [
+                "experiment",
+                "retrieval",
+                "--db",
+                str(db),
+                "--run-id",
+                "run.u",
+                "--golden",
+                str(_golden_with_stale_id(tmp_path)),
+                "--cutoff-k",
+                "3",
+                "--json",
+            ],
+            ports=ports,
+        )
+    payload = json_out(capsys)
+    assert code == EXIT_OK
+    assert payload["status"] == "measured"
+    assert payload["unresolved_expected_ids"] == 1
+    assert payload["expected_ids_total"] == 2
+    assert payload["unresolved_expected_examples"] == [
+        "a:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:0"
+    ]
+    assert "1/2 не разрешены" in payload["warning"]
+    assert "a:ce3107fa…:0" in payload["warning"]  # пример усечён, адрес узнаваем
+
+
+def test_experiment_prints_unresolved_line_for_human(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O4: человек видит «N/M не разрешены» строкой, а не только в ``--json``."""
+    index_root = tmp_path / "index_store"
+    _write_build(index_root)
+    monkeypatch.setenv("COHOUND_INDEX_STORE_DIR", str(index_root))
+    db = tmp_path / "runs" / "run.h" / "cohound.db"
+    _store(db, "run.h")
+
+    with SqliteStore(db) as store:
+        ports = _ports(index_root, store, embedder=_fake_embedder())
+        code = main(
+            [
+                "experiment",
+                "retrieval",
+                "--db",
+                str(db),
+                "--run-id",
+                "run.h",
+                "--golden",
+                str(_golden_with_stale_id(tmp_path)),
+                "--cutoff-k",
+                "3",
+            ],
+            ports=ports,
+        )
+    out = capsys.readouterr().out
+    assert code == EXIT_OK
+    assert "status: measured" in out
+    assert "unresolved_expected_ids: 1/2 не разрешены" in out

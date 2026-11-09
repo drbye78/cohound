@@ -23,6 +23,7 @@ import datetime as _dt
 import json
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -51,6 +52,7 @@ from core.pipeline.evaluate import (
     RETRY_SKIP_UNRECORDED,
     RETRY_STATUS_NOOP,
     RETRY_STATUS_RETRIED,
+    _cell_condition,
     evaluate_batch,
     retry_failed_cells,
     select_failed_cells,
@@ -591,3 +593,56 @@ def test_cell_diagnostics_publishes_failure_kind(
     by_param = {row["param_id"]: row for row in rows if row["kind"] == "cell"}
     assert by_param["param_a"]["failure_kind"] == "evaluation_failed"
     assert by_param["param_b"]["failure_kind"] == ""  # «не записано» ≠ «нет сбоя»
+
+
+# ---------------------------------------------------------------------------
+# 7. O2 плана 26: повтор исполняет ``rrf_k`` из провенанса ячейки
+# ---------------------------------------------------------------------------
+
+
+def _cell_with_params(rrf_k: int | None) -> Cell:
+    params: dict[str, Any] = {"profile": "R0", "cutoff_K": 10}
+    if rrf_k is not None:
+        params["rrf_k"] = rrf_k
+    return Cell(
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param_alpha",
+        state=CellState.FAILED,
+        status=None,
+        source_kind=SourceKind.DOCUMENTATION,
+        index_build_id=NEW_BUILD,
+        retrieval_profile="R0",
+        retrieval_params_json=json.dumps(params, sort_keys=True),
+    )
+
+
+def test_cell_condition_reads_rrf_k_with_default_for_old_cells() -> None:
+    """``rrf_k`` из JSON; ячейка без поля (старый прогон) — дефолт 60."""
+    assert _cell_condition(_cell_with_params(77))[3] == 77
+    assert _cell_condition(_cell_with_params(None))[3] == 60
+
+
+def test_retry_passes_rrf_k_from_cell_provenance(
+    store: SqliteStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Повтор зовёт ``retrieve_for_cell`` с тем же ``rrf_k``, что записан в ячейке."""
+    import core.pipeline.evaluate as evaluate_mod
+
+    captured: dict[str, Any] = {}
+    original = evaluate_mod.retrieve_for_cell
+
+    def _spy(param, **kwargs):
+        captured["rrf_k"] = kwargs.get("rrf_k")
+        return original(param, **kwargs)
+
+    monkeypatch.setattr(evaluate_mod, "retrieve_for_cell", _spy)
+    _seed(store, _cell_with_params(77), "evaluation_failed")
+    evaluator = _ScriptedEvaluator([_ok_output()])
+    ports = Ports(evaluator=evaluator, lexical_index=_LexicalStub(NEW_BUILD, [_chunk()]))
+
+    retry_failed_cells(
+        store=store, run_id=RUN_ID, params={"param_alpha": _param()}, ports=ports
+    )
+
+    assert captured["rrf_k"] == 77

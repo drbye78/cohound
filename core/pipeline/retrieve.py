@@ -27,8 +27,10 @@ R2 не сливает плечи **разных известных** сборо
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from enum import StrEnum
+from typing import Any
 
 from core.ports.lexical_index import LexicalIndexPort
 from core.ports.vector_index import (
@@ -39,12 +41,53 @@ from core.ports.vector_index import (
 )
 
 __all__ = [
+    "DEFAULT_CROSS_QUERY_FUSION",
+    "DEFAULT_POOL_MULTIPLIER",
+    "DEFAULT_RRF_K",
+    "MAX_QUERIES",
     "PROFILE_DESCRIPTIONS",
+    "EmbedderBuildMismatch",
     "RetrievalBuildMismatch",
     "RetrievalProfile",
+    "assert_embedder_matches_build",
+    "retrieval_params",
+    "retrieval_params_json",
     "retrieve",
     "rrf_fuse_chunks",
 ]
+
+
+class EmbedderBuildMismatch(ValueError):
+    """§13/I17 (NB1): эмбеддер запроса не совпадает с эмбеддером сборки.
+
+    Отказ, а не выбор: два *одинаково размерных* эмбеддера (другая ревизия, другой
+    снапшот) дают численно разные векторы, и скор был бы бессмысленным — но неотличимым
+    от настоящего. Поэтому сверяется именно ``model_id``, а не ``dim``.
+
+    Класс живёт в ``pipeline``, а не в composition root: проверка нужна и внутри фазы
+    оценки (``evaluate``), и в recovery-команде (``retry``), а не только в CLI-эксперименте.
+    Наследник ``ValueError`` — ``main`` переводит его в ``EXIT_USAGE`` (это отказ
+    конфигурации, а не сбой измерения). ``core.cli.wiring`` ре-экспортирует класс для
+    прежних импортов.
+    """
+
+    def __init__(self, query_model_id: str, build_model_id: str) -> None:
+        super().__init__(
+            f"эмбеддер запроса ({query_model_id!r}) не совпадает с эмбеддером сборки "
+            f"({build_model_id!r}): скор был бы бессмысленным (NB1/§13). "
+            "Пересоберите индекс тем же эмбеддером либо смените эмбеддер запроса."
+        )
+        self.query_model_id = query_model_id
+        self.build_model_id = build_model_id
+
+
+def assert_embedder_matches_build(query_model_id: str, build_model_id: str) -> None:
+    """Отказ при расхождении эмбеддера запроса и сборки (NB1; сравнение по id, не по dim).
+
+    :raises EmbedderBuildMismatch: ``query_model_id != build_model_id`` — называет оба id.
+    """
+    if query_model_id != build_model_id:
+        raise EmbedderBuildMismatch(query_model_id, build_model_id)
 
 
 class RetrievalBuildMismatch(ValueError):
@@ -88,6 +131,80 @@ PROFILE_DESCRIPTIONS: dict[RetrievalProfile, str] = {
 
 #: RRF-константа по умолчанию (версионируется в ``retrieval_params_json``, S1).
 DEFAULT_RRF_K = 60
+
+#: Максимум запросов на ячейку (S13/I16): title + концепт-термины ru → en.
+#: Живёт рядом с прочими параметрами ретривала: это исполняемое значение, а не деталь
+#: фазы оценки, и оно входит в ``retrieval_params_json`` → ``run_id``.
+MAX_QUERIES = 3
+
+#: Множитель пула dense-плеча. Сегодня пул равен ``cutoff_K`` (множителя нет), поэтому
+#: исполняемое значение — ``1``. Это **объявление исполняемого**, а не ось настройки:
+#: настраиваемость пула — план 26 O12 (нужен замер на эталоне).
+DEFAULT_POOL_MULTIPLIER = 1
+
+#: Слияние результатов нескольких запросов ячейки. Сегодня — union с победителем по
+#: ``max`` скора (``evaluate.retrieve_for_cell``). Как и пул, это объявление
+#: исполняемого: альтернативы (RRF/Borda) — план 26 O13, после замера.
+DEFAULT_CROSS_QUERY_FUSION = "max"
+
+
+def retrieval_params(
+    *,
+    profile: str | None,
+    cutoff_k: int | None,
+    rrf_k: int | None = DEFAULT_RRF_K,
+    pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
+    max_queries: int = MAX_QUERIES,
+    cross_query_fusion: str = DEFAULT_CROSS_QUERY_FUSION,
+) -> dict[str, Any]:
+    """Параметры ретривала, которые **реально исполнены** (условие измерения).
+
+    Это ровно те значения, от которых зависят доказательства, а значит и вердикты:
+    смена любого из них — ``execution_change``, а не провенанс исполнения. ``profile``
+    и ``cutoff_k`` приходят из объявленных входов и остаются ``None``, если не объявлены
+    (отличимо от подставленного дефолта); ``rrf_k``/``pool_multiplier``/``max_queries``/
+    ``cross_query_fusion`` — константы кода, которые исполняются всегда.
+
+    Один сериализатор на все носители (контракт ``run_id``, провенанс ячейки, ключ
+    переноса): иначе «что исполнено» описывалось бы по-разному в разных местах.
+    """
+    return {
+        "profile": profile,
+        "cutoff_K": cutoff_k,
+        "rrf_k": rrf_k,
+        "pool_multiplier": pool_multiplier,
+        "max_queries": max_queries,
+        "cross_query_fusion": cross_query_fusion,
+    }
+
+
+def retrieval_params_json(
+    *,
+    profile: str | None,
+    cutoff_k: int | None,
+    rrf_k: int | None = DEFAULT_RRF_K,
+    pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
+    max_queries: int = MAX_QUERIES,
+    cross_query_fusion: str = DEFAULT_CROSS_QUERY_FUSION,
+) -> str:
+    """``retrieval_params`` как строка — тот же формат, что у провенанса ячейки.
+
+    ``sort_keys=True``/``ensure_ascii=False`` — не косметика: ``run_id`` считается по
+    канонической сериализации, и порядок ключей не должен давать ложный
+    ``execution_change``.
+    """
+    return json.dumps(
+        retrieval_params(
+            profile=profile,
+            cutoff_k=cutoff_k,
+            rrf_k=rrf_k,
+            pool_multiplier=pool_multiplier,
+            max_queries=max_queries,
+            cross_query_fusion=cross_query_fusion,
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _required_index[T](
@@ -303,4 +420,7 @@ def retrieve(
         profile=resolved.value,
         cutoff_K=cutoff_k,
         build_id=build_id or "",
+        # Исполненное значение, а не аргумент «на будущее»: по нему повтор ячейки
+        # восстановит то же слияние (план 26 O2).
+        rrf_k=rrf_k,
     )

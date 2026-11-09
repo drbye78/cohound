@@ -30,6 +30,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import pathlib
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -155,7 +156,7 @@ def test_put_get_roundtrip_stores_two_bytes_per_axis(tmp_path: Path) -> None:
     raw = path.read_bytes()
     header, separator, payload = raw.partition(b"\n")
     assert separator == b"\n"
-    assert b'"format":2' in header and b'"dim":4' in header
+    assert b'"format":3' in header and b'"dim":4' in header
     assert b'"embed_device":"cpu"' in header
     assert b'"embed_precision":"fp32"' in header  # точность — в заголовке, не только в пути
     assert len(payload) == 4 * 2  # fp16, а не JSON-числа
@@ -227,6 +228,7 @@ def test_entry_without_embed_device_is_a_miss(tmp_path: Path) -> None:
             {
                 "byteorder": "little",
                 "content_hash": key,
+                "crc32": zlib.crc32(payload) & 0xFFFFFFFF,
                 "dim": 2,
                 "dtype": "float16",
                 "embed_model_id": MODEL,
@@ -436,6 +438,84 @@ def test_corrupt_or_mismatched_entries_are_misses(tmp_path: Path) -> None:
         embed_device=DEVICE, embed_precision=PRECISION,
     )
     assert len(embedder.calls) == 1
+
+
+def test_payload_bit_flip_is_a_miss_and_counted_as_corruption(tmp_path: Path) -> None:
+    """Подмена одного байта payload — промах и рост ``corrupt``, а не подмена вектора.
+
+    Заголовок при этом остаётся валидным, ``dim`` и длина payload — верными, а
+    получившееся half-число — конечным. Без суммы такой файл обслуживался бы как
+    попадание с чужим вектором: партиция собралась бы из чисел, которых эмбеддер не
+    выдавал, и это было бы ложью о содержимом индекса.
+    """
+    cache = EmbedCache(tmp_path / "embed_cache")
+    key = content_hash("текст")
+    vector = [0.5, -0.25, 0.125, 1.0]
+    cache.put(key, MODEL, vector, embed_device=DEVICE, embed_precision=PRECISION, dim=4)
+
+    path = _entry(tmp_path / "embed_cache", key)
+    header, separator, payload = path.read_bytes().partition(b"\n")
+    assert separator == b"\n"
+    flipped = bytearray(payload)
+    flipped[0] ^= 0x01  # старший бит половины первого компонента
+    path.write_bytes(header + b"\n" + bytes(flipped))
+
+    assert cache.get(key, MODEL, embed_device=DEVICE, embed_precision=PRECISION, dim=4) is None
+    stats = cache.stats()
+    assert stats["corrupt"] == 1
+    assert stats["misses"] == 1
+    assert stats["hits"] == 0
+
+    # Порча не мешает прогону: промах уходит в эмбеддер и запись переписывается.
+    cache.put(key, MODEL, vector, embed_device=DEVICE, embed_precision=PRECISION, dim=4)
+    assert cache.get(key, MODEL, embed_device=DEVICE, embed_precision=PRECISION, dim=4) == (
+        np.asarray(vector, dtype=np.float16).astype(float).tolist()
+    )
+    assert cache.stats()["corrupt"] == 1  # перезапись не добавляет порчи
+
+
+def test_old_envelope_format_is_a_miss_and_is_overwritten(tmp_path: Path) -> None:
+    """Конверт формата 2 (без ``crc32``) — промах, а не падение и не хит.
+
+    Ключ и путь от версии формата не зависят, поэтому старые записи остаются на месте и
+    проверяются только версией в заголовке. Проверить их целостность нечем, а выдать
+    непроверенное за попадание кэш не имеет права (A3): первый ``put`` по тому же ключу
+    перезаписывает запись, и следующий ``get`` — уже попадание.
+    """
+    root = tmp_path / "embed_cache"
+    cache = EmbedCache(root)
+    key = content_hash("текст")
+    path = _entry(root, key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = np.asarray([0.5, 0.25, -0.5, 2.0], dtype=np.float16).tobytes()
+    # Ровно то, что писал формат 2: все поля есть, ``crc32`` нет.
+    path.write_bytes(
+        json.dumps(
+            {
+                "byteorder": "little",
+                "content_hash": key,
+                "dim": 4,
+                "dtype": "float16",
+                "embed_device": DEVICE,
+                "embed_model_id": MODEL,
+                "embed_precision": PRECISION,
+                "format": 2,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+        + payload
+    )
+
+    assert cache.get(key, MODEL, embed_device=DEVICE, embed_precision=PRECISION, dim=4) is None
+    assert cache.stats()["corrupt"] == 1
+    assert cache.stats()["misses"] == 1
+
+    # Перезапись форматом 3 — и та же запись снова обслуживается.
+    cache.put(key, MODEL, [0.5, 0.25, -0.5, 2.0], embed_device=DEVICE, embed_precision=PRECISION, dim=4)
+    assert cache.get(key, MODEL, embed_device=DEVICE, embed_precision=PRECISION, dim=4) == [0.5, 0.25, -0.5, 2.0]
+    assert cache.stats()["hits"] == 1
 
 
 def test_invalid_key_is_a_miss_not_a_crash(tmp_path: Path) -> None:

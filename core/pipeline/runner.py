@@ -84,6 +84,7 @@ from core.pipeline.gates import (
     record_decision,
 )
 from core.pipeline.profile_attestation import ProfileGateResult
+from core.pipeline.retrieve import EmbedderBuildMismatch
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_executor import CrawlExecutorPort
@@ -860,6 +861,12 @@ class Runner:
             )
         try:
             result = fn(ctx)
+        except EmbedderBuildMismatch:
+            # Отказ **условия измерения** (план 26 O1), а не сбой фазы: запросный эмбеддер
+            # не совпал со сборкой, и скор был бы бессмысленным. Записать это в
+            # ``failed``-фазу значило бы выдать отказ конфигурации за провал инструмента.
+            # Пробрасывается до composition root → ``EXIT_USAGE`` (``main``).
+            raise
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             return PhaseResult(
                 status="failed",

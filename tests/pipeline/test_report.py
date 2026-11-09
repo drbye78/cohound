@@ -77,6 +77,7 @@ from core.pipeline.compute import ScoreBundle, compute, publish_warnings
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.normalize import load_inputs
 from core.pipeline.report import (
+    COVERAGE_INSUFFICIENT_THRESHOLD,
     DIFF_BOUNDARY_FIELDS,
     EXECUTION_FIELDS,
     FALLBACK_ORDER_LABEL,
@@ -284,6 +285,24 @@ def _artifact_text(path: Path) -> str:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as fh:
         return list(csv.DictReader(fh))
+
+
+def _header_values(path: Path) -> dict[str, str]:
+    """Пары ``field → value`` из шапки battle card (XLSX-лист ``header`` или CSV-секция)."""
+    if path.suffix == ".xlsx":
+        openpyxl = pytest.importorskip("openpyxl")
+        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        worksheet = workbook["header"]
+        values: dict[str, str] = {}
+        for row in worksheet.iter_rows(min_row=2, values_only=True):
+            if row and row[0] is not None:
+                values[str(row[0])] = "" if row[1] is None else str(row[1])
+        return values
+    values = {}
+    for row in _read_csv(path):
+        if row["section"] == "header":
+            values[row["field"]] = row["value"]
+    return values
 
 
 def _matrix_product_order(path: Path) -> list[str]:
@@ -2654,3 +2673,133 @@ def test_placeholder_version_survives_only_without_a_source() -> None:
         created_at="2026-01-01T00:00:00Z",
     )
     assert explicit.catalog_version == "cat-9"
+
+
+# ---------------------------------------------------------------------------
+# O7: «сколько важного осталось неизвестным» в шапке battle card
+# ---------------------------------------------------------------------------
+
+
+def _critical_unknown_cells() -> list[Cell]:
+    """Фикстура: неизвестность всех классов + N/A и preliminary как контроль.
+
+    * ``param.p1`` (Кр) — ``❓``: критическое неизвестное;
+    * ``param.unknown``/``param.u2`` (Вж) — ``❓``, ``param.fail`` (Вж) — ``failed``;
+    * ``param.prelim`` (Баз, ``preliminary``) и ``param.na`` (Баз, ``N/A``) —
+      **не** неизвестность (I13 вне расчёта, I6/I7 — решение человека);
+    * ``param.not-in-catalog`` — ячейки нет в каталоге: важность не выдумывается.
+    """
+    return [
+        _cell(PRODUCT_A, "param.ok", Status.OK),  # Кр, известен
+        _cell(PRODUCT_A, "param.p1", Status.UNKNOWN),  # Кр ❓
+        _cell(PRODUCT_A, "param.unknown", Status.UNKNOWN),  # Вж ❓
+        _cell(PRODUCT_A, "param.u2", Status.UNKNOWN),  # Вж ❓
+        _cell(PRODUCT_A, "param.fail", None, CellState.FAILED),  # Вж failed (status None, I4)
+        _cell(PRODUCT_A, "param.prelim", None, CellState.PRELIMINARY),  # Баз, вне Coverage
+        _cell(PRODUCT_A, "param.na", Status.NOT_APPLICABLE),  # Баз, N/A человеком
+        _cell(PRODUCT_B, "param.not-in-catalog", Status.UNKNOWN),  # каталог не знает
+    ]
+
+
+def test_battle_card_header_reports_critical_unknowns(store: SqliteStore, tmp_path: Path) -> None:
+    """O7: шапка несёт число неизвестных и разбивку по важности каталога.
+
+    Число сверяется с подсчётом по БД (не с литералом): ``❓`` + ``failed`` — 5 ячеек,
+    из них Кр 1 (``critical_unknown``), Вж 3, unmapped 1; ``preliminary``/``N/A`` не в счёт.
+    """
+    cells_in = _critical_unknown_cells()
+    _save(store, cells_in)
+    cells = list(store.iter_cells(RUN_ID))
+    unknown = [
+        cell
+        for cell in cells
+        if cell.state is CellState.FAILED or cell.status is Status.UNKNOWN
+    ]
+    catalog = _catalog()
+    bundle = compute(store=store, run_id=RUN_ID, catalog=catalog, module_weights={})
+
+    path = render_battle_card(bundle, cells, catalog, tmp_path / "battle_card.xlsx")
+    header = _header_values(path)
+
+    assert len(unknown) == 5
+    assert header["unknown_total"] == str(len(unknown))
+    assert header["critical_unknown"] == "1"
+    assert header["unknown_by_importance_Кр"] == "1"
+    assert header["unknown_by_importance_Вж"] == "3"
+    assert header["unknown_by_importance_Баз"] == "0"
+    assert header["unknown_by_importance_Опц"] == "0"
+    assert header["unknown_by_importance_unmapped"] == "1"
+    # ``failed`` — не статус (I4), но именно он входит в знаменатель Coverage (I5):
+    # терять его из счётчика нельзя.
+    failed = [cell for cell in cells if cell.state is CellState.FAILED]
+    assert len(failed) == 1 and failed[0].status is None
+
+
+def test_critical_unknown_block_does_not_change_scores(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """O7: блок — наблюдение. Capability/Coverage/``coverage_insufficient`` те же."""
+    _save(store, _critical_unknown_cells())
+    cells = list(store.iter_cells(RUN_ID))
+    catalog = _catalog()
+    bundle = compute(store=store, run_id=RUN_ID, catalog=catalog, module_weights={})
+    capability = bundle.capability.value
+    coverage = bundle.coverage.value or 0.0
+    denominator = bundle.coverage.denominator
+    n_used = bundle.coverage.n_used
+
+    path = render_battle_card(bundle, cells, catalog, tmp_path / "battle_card.xlsx")
+    header = _header_values(path)
+
+    # Шапка публикует ровно то, что посчитал compute, — блок ничего не переопределяет.
+    assert float(header["capability"]) == pytest.approx(round(capability, 6))
+    assert float(header["coverage"]) == pytest.approx(round(coverage, 6))
+    assert int(header["coverage_denominator"]) == denominator
+    assert int(header["coverage_n_used"]) == n_used
+    assert header["coverage_insufficient"] == str(
+        coverage < COVERAGE_INSUFFICIENT_THRESHOLD
+    )
+    # Рендер не мутирует вход: повторный compute даёт те же числа.
+    again = compute(store=store, run_id=RUN_ID, catalog=catalog, module_weights={})
+    assert (again.capability.value, again.coverage.value) == (
+        capability,
+        bundle.coverage.value,
+    )
+
+
+def test_critical_unknown_in_report_json_payload(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """O7: тот же словарь уходит в ``--json`` отчёта (не требует открытия XLSX)."""
+    _save(store, _critical_unknown_cells())
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    cells = list(store.iter_cells(RUN_ID))
+    manifest = _manifest()
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=_catalog(),
+        manifest=manifest,
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+    )
+    assert artifacts.critical_unknown["unknown_total"] == 5
+    assert artifacts.critical_unknown["critical_unknown"] == 1
+    assert artifacts.critical_unknown["unknown_by_importance_unmapped"] == 1
+
+
+def test_critical_unknown_in_csv_fallback(
+    store: SqliteStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O7: CSV-fallback (openpyxl нет) несёт тот же блок — шапка не зависит от формата."""
+    monkeypatch.setattr("core.pipeline.report._load_openpyxl", lambda: None)
+    _save(store, _critical_unknown_cells())
+    cells = list(store.iter_cells(RUN_ID))
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+
+    path = render_battle_card(bundle, cells, _catalog(), tmp_path / "battle_card.xlsx")
+    assert path.suffix == ".csv"
+    header = _header_values(path)
+    assert header["unknown_total"] == "5"
+    assert header["critical_unknown"] == "1"
+    assert header["unknown_by_importance_Вж"] == "3"

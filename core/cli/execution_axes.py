@@ -97,7 +97,7 @@ from core.adapters.extract_document import (
 )
 from core.adapters.extract_epub import EPUB_READER_VERSION
 from core.adapters.extract_html import HtmlExtractor
-from core.adapters.extract_pdf_text import PDFIUM_ADAPTER_VERSION
+from core.adapters.extract_pdf_text import pdfium_engine_build
 from core.adapters.extract_text import TextExtractor
 from core.adapters.lexical_tantivy import lexical_schema_spec
 from core.adapters.llm_local import (
@@ -742,7 +742,7 @@ def extractor_stack_version(
 
     Формат: ``<html>+<text>+<epub>+<pdfium>+<office>+<docling>/<device>/<build>/<policy>/<finalize>``.
 
-    Пример: ``trafilatura-html-6+text-plain-2+epub-3+pdfium-text-2+docling-office-1+
+    Пример: ``trafilatura-html-6+text-plain-2+epub-3+pdfium-text-3:5.14.0+docling-office-1+
     docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1``.
 
     **Почему здесь все читатели, а не только HTML и docling.** Поле объявлено ради
@@ -785,7 +785,7 @@ def extractor_stack_version(
     device = PdfDevice(pdf_device)
     return (
         f"{HtmlExtractor.version}+{TextExtractor.version}+{EPUB_READER_VERSION}"
-        f"+{PDFIUM_ADAPTER_VERSION}+{DOCLING_OFFICE_ADAPTER_FAMILY}"
+        f"+{pdfium_engine_build()}+{DOCLING_OFFICE_ADAPTER_FAMILY}"
         f"+{DOCLING_ADAPTER_FAMILY}/{device.value}/"
         f"{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}/{DOCLING_TEXT_FINALIZE}"
     )

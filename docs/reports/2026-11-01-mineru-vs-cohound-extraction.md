@@ -36,14 +36,14 @@
 
 | Стадия | Где | Существенное |
 |---|---|---|
-| Маршрут формата | `core/cli/wiring.py:2119` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:457`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
-| PDF `text_layer` | `core/adapters/extract_pdf_text.py:203` | pypdfium2, постранично, плоский текст; отказ `error="no_text_layer"` ставится, только когда слоя нет у **всего** документа (`:267`). Отдельных пустых страниц — **182 из 15 929** (1.14 %, замер 25.10.2026); такая страница сейчас исчезает без пометки (план `26`, O26) |
+| Маршрут формата | `core/cli/wiring.py:2103` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:457`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
+| PDF `text_layer` | `core/adapters/extract_pdf_text.py:266` | pypdfium2, постранично, плоский текст; отказ `error="no_text_layer"` ставится, только когда слоя нет у **всего** документа (`:350`). Отдельных пустых страниц — **182 из 15 929** (1.14 %, замер 25.10.2026); такая страница сейчас исчезает без пометки (план `26`, O26) |
 | PDF `structured` | `core/adapters/extract_document.py:882` | docling; выход — **markdown-строка** (`_document_text`, `:354`); уровни меняют опции конвейера (`_pdf_options`) |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
 | HTML | `core/adapters/extract_html.py:147` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
 | Санитайз | `core/util/sanitize.py:145,290,423` | вход HTML: структурный пре-клин `strip_active_html` (`:290`) — удаляется только активное, `class`/`id`/`role` остаются для `trafilatura`; allow-list `sanitize_html` (`:145`) — только на шве валидации (`gateway_validate.py:300`). Выход: `strip_control_chars` → `neutralize_prompt_injection_marks` в одной границе `finalize_extracted_text` (`:423`), её же вызывает документный путь (§10) |
 | Нарезка | `core/adapters/chunker_markdown.py:248` | 1500 символов без перекрытия, разрез по AST (CommonMark/GFM); заголовки считаются **относительно самого мелкого** уровня документа (`md-heading-5`, `:126`), `heading_path` из заголовков |
-| Кэш | `core/pipeline/extract_cache.py:113,343` | ключ `(sha256 байтов, extractor_version, level)`; кэшируются **только полные успехи** |
+| Кэш | `core/pipeline/extract_cache.py:115,358` | ключ `(sha256 байтов, extractor_version, level)`; кэшируются **только полные успехи** |
 | Порт | `core/ports/extractor.py:24` | `version` + `extract(page, route) -> ExtractedDoc`; механизм — значение оси `crawl.pdf_pipeline` |
 
 Наши замеры (не цитаты):
@@ -219,7 +219,7 @@ y-кластеризация и склейка строк внутри блок�
    был выполнен для двух путей из четырёх: один и тот же текст доходил до оценщика помеченным
    из `.txt` и дословным из `.docx`. Чинили не по одному пути, а одной границей —
    `core/util/sanitize.finalize_extracted_text` (`:423`; вызовы — `extract_document.py:387`,
-   `extract_pdf_text.py:247`), и её версия вошла в провенанс: `docling-doc-3:…/<policy>/finalize-1`
+   `extract_pdf_text.py:352`), и её версия вошла в провенанс: `docling-doc-3:…/<policy>/finalize-1`
    и `docling-office-1:<policy>/<build>/finalize-1`. Любой третий механизм теперь получает ту же
    границу, а не четвёртую дыру. Это меняет `text` → `content_hash` → доказательства, поэтому
    смена версий — `execution_change` и отдельный акт, а не побочная правка.
@@ -238,7 +238,7 @@ y-кластеризация и склейка строк внутри блок�
    разных `run_id` при одном корпусе), либо тихое действие оси. `text_layer` решил это отказом от
    уровней — третий механизм обязан объявить то же самое явно.
 5. **Тихий фолбэк на «объявленный» экстрактор.** `corpus_ingest.py:1849-1861`,
-   `extract_consume.py:854-864`: если фабрика механизма бросила, документ извлекается **другим**
+   `core/pipeline/extract_consume.py:858-868`: если фабрика механизма бросила, документ извлекается **другим**
    (docling) экстрактором, а предупреждение уходит строкой в `errors`. Для оси, весь смысл которой
    — механизм, это подмена провенанса, а не деградация.
 6. **`extractor_version` должен нести личность весов.** Кэш адресуется `extractor_version`, а не

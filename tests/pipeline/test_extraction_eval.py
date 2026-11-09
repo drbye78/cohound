@@ -10,6 +10,7 @@ extraction-golden-фикстур. Проверяют: загрузку/вали�
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import pathlib
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from core.adapters.extract_pdf_text import PdfiumDocumentExtractor
 from core.pipeline.extraction_eval import (
     ExtractionGoldenCase,
     ExtractionReport,
@@ -30,6 +32,8 @@ from core.util.hashing import content_hash
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 GOLDEN_PATH = FIXTURES / "extraction_golden.json"
+GOLDEN_FILES = FIXTURES / "extraction_golden"
+GENERATOR_PATH = FIXTURES / "make_extraction_golden.py"
 
 
 class FakeExtractor:
@@ -86,14 +90,29 @@ def _case(case_id: str, raw: bytes, *, fmt: str = "html", **kwargs) -> Extractio
 
 def test_load_golden_fixture() -> None:
     cases = load_extraction_golden(GOLDEN_PATH)
-    assert [case.case_id for case in cases] == ["case_html", "case_pdf", "case_docx"]
-    assert [case.format for case in cases] == ["html", "pdf", "docx"]
-    assert all(case.raw_b64 is not None for case in cases)
-    assert all(case.raw_path is None for case in cases)
-    assert cases[0].expected_substrings == ["Alpha heading", "beta body"]
-    assert cases[0].forbidden_substrings == ["Gamma"]
-    assert cases[0].min_chars == 10
-    assert cases[2].min_chars == 0
+    assert [case.case_id for case in cases] == [
+        "case_html",
+        "case_pdf",
+        "case_pdf_scan",
+        "case_docx",
+    ]
+    assert [case.format for case in cases] == ["html", "pdf", "pdf", "docx"]
+    html, pdf, scan, docx = cases
+    # HTML-кейс остаётся встроенным; PDF/Office — реальные файлы рядом с golden.
+    assert html.raw_b64 is not None and html.raw_path is None
+    assert all(case.raw_b64 is None and case.raw_path is not None for case in cases[1:])
+    assert all(Path(case.raw_path).is_file() for case in cases[1:] if case.raw_path)
+    assert html.expected_substrings == ["Alpha heading", "beta body"]
+    assert html.forbidden_substrings == ["Gamma"]
+    assert html.min_chars == 10
+    # PDF-кейс проверяет содержание документа, а не служебное слово структуры PDF.
+    assert pdf.expected_substrings == ["distinctive alpha sentence", "omega conclusion"]
+    assert "Catalog" not in pdf.expected_substrings
+    assert "Catalog" in pdf.forbidden_substrings
+    assert pdf.min_chars == 250
+    assert scan.expect_error == "no_text_layer"
+    assert docx.expected_substrings == ["unique word kumquat", "narwhal"]
+    assert docx.min_chars == 80
 
 
 def test_load_golden_resolves_raw_path_relative_to_file(tmp_path: Path) -> None:
@@ -104,6 +123,27 @@ def test_load_golden_resolves_raw_path_relative_to_file(tmp_path: Path) -> None:
     )
     (case,) = load_extraction_golden(golden)
     assert case.raw_path == str((tmp_path / "files" / "page.pdf").resolve())
+
+
+def test_golden_fixtures_match_generator(tmp_path: Path) -> None:
+    """Закоммиченные фикстуры совпадают с пересборкой генератором (побайтово).
+
+    Бинарная фикстура без такой сверки устаревает молча: генератор меняют, файл — нет,
+    и golden продолжает проверять старые байты. Пересобрать:
+    ``.venv/bin/python tests/pipeline/fixtures/make_extraction_golden.py``.
+    """
+    spec = importlib.util.spec_from_file_location("make_extraction_golden", GENERATOR_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    built = module.build_all(tmp_path)
+    assert sorted(built) == ["document.docx", "document.pdf", "scan.pdf"]
+    for name, data in built.items():
+        committed = GOLDEN_FILES / name
+        assert committed.is_file(), f"нет закоммиченной фикстуры {name}"
+        assert committed.read_bytes() == data, (
+            f"{name} устарел: пересоберите tests/pipeline/fixtures/make_extraction_golden.py"
+        )
 
 
 @pytest.mark.parametrize(
@@ -121,6 +161,8 @@ def test_load_golden_resolves_raw_path_relative_to_file(tmp_path: Path) -> None:
         '[{"case_id": "c", "format": "pdf", "raw_b64": "AA==", "forbidden_substrings": [1]}]',  # не строки
         '[{"case_id": "c", "format": "pdf", "raw_b64": "AA==", "min_chars": -1}]',  # отрицательное
         '[{"case_id": "c", "format": "pdf", "raw_b64": "AA==", "min_chars": true}]',  # bool
+        '[{"case_id": "c", "format": "pdf", "raw_b64": "AA==", "expect_error": 1}]',  # не строка
+        '[{"case_id": "c", "format": "pdf", "raw_b64": "AA==", "expect_error": ""}]',  # пустая
         "not json",  # не JSON
     ],
 )
@@ -201,6 +243,99 @@ def test_min_chars_fails() -> None:
     assert result.ok is False
     assert result.chars == 5
     assert result.error is None
+
+
+# -- реальные фикстуры: содержание, а не служебные слова --------------------- #
+
+
+def _golden_case(case_id: str) -> ExtractionGoldenCase:
+    (case,) = [case for case in load_extraction_golden(GOLDEN_PATH) if case.case_id == case_id]
+    return case
+
+
+class _DocumentPort:
+    """``ExtractorPort``-обёртка документного адаптера — как композит в composition root.
+
+    Документный порт получает уже выбранный файл (``extract_bytes``), а golden зовёт
+    ``extract(page)``; обёртка передаёт байты и имя с суффиксом, по которому адаптер
+    проверяет формат. Это ровно то, что делает ``_LocalExtractor``.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.version = str(getattr(inner, "version", ""))
+
+    def extract(self, page: RawPage, route: Any = None) -> ExtractedDoc:
+        filename = page.url.rsplit("/", 1)[-1]
+        return self._inner.extract_bytes(_page_bytes(page), filename=filename)
+
+
+def test_pdf_case_rejects_service_word_instead_of_content() -> None:
+    """Старый дефект: вместо текста пришло служебное слово PDF ``Catalog`` → кейс красный."""
+    pdf_case = _golden_case("case_pdf")
+    extractor = FakeExtractor("fake-1", texts={"case_pdf": "Catalog"})
+    result = run_extraction_golden([pdf_case], extractor).results[0]
+    assert result.ok is False
+    assert result.missing == ["distinctive alpha sentence", "omega conclusion"]
+    assert result.forbidden_hits == ["Catalog"]
+
+
+def test_pdf_case_rejects_empty_text() -> None:
+    """Пустой текст на PDF-кейсе — провал, а не «прочитали и ничего не нашли»."""
+    pdf_case = _golden_case("case_pdf")
+    extractor = FakeExtractor("fake-1", texts={"case_pdf": ""})
+    result = run_extraction_golden([pdf_case], extractor).results[0]
+    assert result.ok is False
+    assert result.chars == 0
+    assert result.missing == ["distinctive alpha sentence", "omega conclusion"]
+
+
+def test_expected_error_case_requires_that_error() -> None:
+    """Негативный кейс зелёный только при ожидаемой ошибке; текст её не заменяет."""
+    scan_case = _golden_case("case_pdf_scan")
+
+    raised = FakeExtractor("fake-1", errors={"case_pdf_scan": "no_text_layer"})
+    passed = run_extraction_golden([scan_case], raised).results[0]
+    assert passed.ok is True
+    assert passed.error == "no_text_layer"
+    assert passed.expected_error == "no_text_layer"
+
+    silent = FakeExtractor("fake-1", texts={"case_pdf_scan": "some text"})
+    missed = run_extraction_golden([scan_case], silent).results[0]
+    assert missed.ok is False
+    assert missed.error is None
+    assert missed.expected_error == "no_text_layer"
+
+    wrong = FakeExtractor("fake-1", errors={"case_pdf_scan": "pdfium: сбой"})
+    mismatched = run_extraction_golden([scan_case], wrong).results[0]
+    assert mismatched.ok is False
+    assert mismatched.error == "pdfium: сбой"
+    assert mismatched.expected_error == "no_text_layer"
+
+
+def test_golden_pdf_cases_with_real_pdfium() -> None:
+    """``pypdfium2`` (базовая зависимость) читает обе PDF-фикстуры как задумано.
+
+    Без этого теста фикстура проверяла бы только фейк: реальный механизм ``text_layer``
+    обязан вернуть содержание страниц и отказать скану без слоя.
+    """
+    pdf_cases = [case for case in load_extraction_golden(GOLDEN_PATH) if case.format == "pdf"]
+    report = run_extraction_golden(pdf_cases, _DocumentPort(PdfiumDocumentExtractor()))
+    assert [result.case_id for result in report.results] == ["case_pdf", "case_pdf_scan"]
+    assert report.passed == report.total == 2
+
+
+def test_golden_docx_case_with_real_docling() -> None:
+    """Минимальный DOCX читается офисным бэкендом docling и даёт ожидаемый текст."""
+    pytest.importorskip("docling", reason="офисный бэкенд docling не установлен")
+    from core.adapters.extract_document import DoclingDocumentExtractor
+
+    docx_case = _golden_case("case_docx")
+    report = run_extraction_golden([docx_case], _DocumentPort(DoclingDocumentExtractor()))
+    result = report.results[0]
+    assert result.ok is True, result
+    assert result.error is None
+    assert result.chars >= 80
 
 
 def test_error_isolation_between_cases() -> None:

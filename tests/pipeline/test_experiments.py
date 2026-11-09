@@ -379,3 +379,102 @@ def test_default_profiles_and_dataclasses() -> None:
         cutoff_k=3,
     )
     assert experiment.cutoff_k == 3 and experiment.profile == "R0"
+
+
+# -- O4: неразрешённые id эталона — видимое число, не «recall 0» ----------- #
+
+
+def test_stale_golden_ids_are_reported_not_hidden_as_zero_recall() -> None:
+    """O4: 17 ожидаемых id чужой грамматики → «17/17 не разрешены», а не тихий recall 0.
+
+    Фикстура воспроизводит форму реального ``packages/*/sources/retrieval_golden.json``:
+    ``product:<64 hex>:<chunk_no>`` — id, которого в сборке с ``product:dv_…:<n>`` нет.
+    """
+    golden = [
+        GoldenQuery(query=f"q{i}", expected_ids=frozenset({f"p:{i:064x}:0"}))
+        for i in range(17)
+    ]
+    lexical = FakeLexical({f"q{i}": ["c1"] for i in range(17)})
+    report = run_retrieval_experiment(
+        golden,
+        product_ids=["p1"],
+        cutoff_k=5,
+        profiles=(RetrievalProfile.R0,),
+        lexical_index=lexical,
+    )
+    assert report.expected_ids_total == 17
+    assert report.unresolved_expected_ids == 17
+    # Примеры ограничены: голден может быть большим, оператору нужен адрес, не список.
+    assert len(report.unresolved_expected_examples) == 5
+    assert report.unresolved_expected_examples[0] == f"p:{0:064x}:0"
+    assert report.by_profile["R0"].recall_at_k == 0.0
+    assert report.by_profile["R0"].unresolved_expected_ids == 17
+
+
+def test_resolved_golden_has_no_unresolved_ids() -> None:
+    """Полное совпадение: счётчик = 0, примеров нет (предупреждение не печатается)."""
+    golden = load_retrieval_golden(GOLDEN_PATH)
+    lexical, vector, embed = _hybrid_setup()
+    report = run_retrieval_experiment(
+        golden,
+        product_ids=["p1"],
+        cutoff_k=3,
+        lexical_index=lexical,
+        vector_index=vector,
+        embed=embed,
+    )
+    assert report.expected_ids_total == 3
+    assert report.unresolved_expected_ids == 0
+    assert report.unresolved_expected_examples == ()
+
+
+def test_known_ids_separate_missing_from_not_retrieved() -> None:
+    """``known_ids``: id есть в сборке, но поиск его не вернул — это НЕ «не разрешён».
+
+    Без множества известных id функция честно не различает два случая и считает
+    неразрешённым всё, что ни разу не пришло в выдаче.
+    """
+    golden = [GoldenQuery(query="q", expected_ids=frozenset({"c9"}))]
+    lexical = FakeLexical({"q": ["c1"]})
+
+    without = run_retrieval_experiment(
+        golden,
+        product_ids=["p1"],
+        cutoff_k=3,
+        profiles=(RetrievalProfile.R0,),
+        lexical_index=lexical,
+    )
+    assert without.unresolved_expected_ids == 1
+    assert without.unresolved_expected_examples == ("c9",)
+
+    with_known = run_retrieval_experiment(
+        golden,
+        product_ids=["p1"],
+        cutoff_k=3,
+        profiles=(RetrievalProfile.R0,),
+        lexical_index=lexical,
+        known_ids={"c9"},
+    )
+    assert with_known.unresolved_expected_ids == 0
+    assert with_known.unresolved_expected_examples == ()
+    # Метрика не изменилась: поиск по-прежнему не нашёл (recall 0) — это разные факты.
+    assert with_known.by_profile["R0"].recall_at_k == 0.0
+
+
+def test_observed_ids_are_union_of_profiles() -> None:
+    """O4: id, найденный хотя бы одним профилем, не считается неразрешённым."""
+    golden = [GoldenQuery(query="q", expected_ids=frozenset({"c9"}))]
+    lexical = FakeLexical({"q": ["c1"]})
+    vectors = {"q": [1.0, 0.0]}
+    vector = FakeVector({(1.0, 0.0): ["c9"]})
+    report = run_retrieval_experiment(
+        golden,
+        product_ids=["p1"],
+        cutoff_k=3,
+        lexical_index=lexical,
+        vector_index=vector,
+        embed=_embedder(vectors),
+    )
+    assert report.unresolved_expected_ids == 0
+    # Но лексический профиль этот id не нашёл — его собственный счётчик честно 1.
+    assert report.by_profile["R0"].unresolved_expected_ids == 1

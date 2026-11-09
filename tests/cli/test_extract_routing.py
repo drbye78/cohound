@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from core.adapters.extract_pdf_text import pdfium_engine_build
 from core.cli.wiring import WiringError, _LocalExtractor
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 
@@ -520,10 +521,12 @@ def test_worker_extractor_selects_pdfium_for_text_layer(monkeypatch: pytest.Monk
 
     composite = build_worker_extractor(DocumentLevel.FULL, PdfPipeline.TEXT_LAYER)
 
-    assert composite.extractor_version_for(_page()) == "pdfium-text-2"
-    assert composite.version.endswith("+pdfium-text-2")
+    # O24: штамп — сборка движка (механизм + версия дистрибутива), а не константа.
+    expected = pdfium_engine_build()
+    assert composite.extractor_version_for(_page()) == expected
+    assert composite.version.endswith(f"+{expected}")
     # Дефолтная сборка — прежний docling (проверка в тестах версии композита).
-    assert build_worker_extractor().extractor_version_for(_page()) != "pdfium-text-2"
+    assert build_worker_extractor().extractor_version_for(_page()) != expected
 
 
 def test_worker_extractor_fails_visibly_without_pdfium(
@@ -552,8 +555,8 @@ def test_build_adapters_honours_explicit_pdf_pipeline() -> None:
     ports = build_adapters(profile="local", pdf_pipeline=PdfPipeline.TEXT_LAYER)
 
     assert ports.extractor is not None
-    assert ports.extractor.extractor_version_for(_page()) == "pdfium-text-2"
+    assert ports.extractor.extractor_version_for(_page()) == pdfium_engine_build()
     # Без явной оси — прежний docling (дефолт ``structured``).
     default = build_adapters(profile="local")
     assert default.extractor is not None
-    assert default.extractor.extractor_version_for(_page()) != "pdfium-text-2"
+    assert default.extractor.extractor_version_for(_page()) != pdfium_engine_build()

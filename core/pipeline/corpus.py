@@ -2329,12 +2329,13 @@ def _build_corpus(
     )
     embed_model_id = str(getattr(embedder, "model_id", "") or "")
     # Провенанс движков берётся у **сборщика**: composition root передаёт в
-    # ``NpyIndexBuilder`` фактический лексический движок прогона (``tantivy-<ver>``,
-    # §13:676). Пустая строка здесь — не «неизвестная версия», а «лексического плеча
-    # в прогоне нет» (без tantivy R0/R2 пропускаются, ``experiments`` → ``skipped``)
-    # либо инъектированный duck-typed сборщик без атрибута (тесты/DI). Hard-fail на
-    # пустом значении сломал бы легитимную dense-only сборку (N3), поэтому это не
-    # ошибка прогона; ``getattr`` оставлен именно для duck-typed случая.
+    # ``NpyIndexBuilder`` наблюдаемую строку лексического контура прогона
+    # (``tantivy-<ver>+schema-<v>``, §13:676). Пустая строка здесь — не «неизвестная
+    # версия», а «лексического плеча в прогоне нет» (без tantivy R0/R2 пропускаются,
+    # ``experiments`` → ``skipped``) либо инъектированный duck-typed сборщик без
+    # атрибута (тесты/DI). Hard-fail на пустом значении сломал бы легитимную
+    # dense-only сборку (N3), поэтому это не ошибка прогона; ``getattr`` оставлен
+    # именно для duck-typed случая.
     lexical_engine_version = str(getattr(index_builder, "lexical_engine_version", "") or "")
     vector_store = str(getattr(index_builder, "vector_store", "") or "")
 

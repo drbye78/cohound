@@ -2,9 +2,10 @@
 
 Собирает публикуемые артефакты прогона:
 
-* ``battle_card.xlsx`` — шапка (Capability / Coverage / Comparability), матрица
-  (статус + обоснование + primary citation, «+N источников»), сателлиты, модульное
-  покрытие, sensitivity-приложение;
+* ``battle_card.xlsx`` — шапка (Capability / Coverage / Comparability + «сколько важного
+  осталось неизвестным»: ``critical_unknown`` и разбивка ``❓``/``failed`` по важности,
+  O7), матрица (статус + обоснование + primary citation, «+N источников»), сателлиты,
+  модульное покрытие, sensitivity-приложение;
 * ``preliminary_findings.xlsx`` — кандидаты с маркером «не публикация»;
 * ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры) плюс
   строки-наблюдения оператора: ``crawl_truncation`` (усечённый краул),
@@ -67,6 +68,7 @@ from core.domain.enums import (
     CellState,
     ChangeClass,
     DenialStrength,
+    Importance,
     MeasurementOrigin,
     RankingPolicy,
     RunMode,
@@ -118,6 +120,9 @@ from core.pipeline.digests import (
     seeds_digest as _seeds_digest,
 )
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
+from core.pipeline.heading_anomalies import (
+    write_heading_anomalies_artifact,
+)
 from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
 from core.pipeline.onboarding import load_effective_seeds as _load_effective_seeds
 from core.pipeline.partial_docs import (
@@ -383,6 +388,19 @@ class Artifacts:
     #: Блок ``corpus_members`` отчёта (те же строки, свёрнутые до продукта и причины) —
     #: для ``--json`` payload: нули по продуктам плана видны без разбора CSV.
     corpus_members_summary: dict[str, Any] | None = None
+    #: O7: «сколько важного осталось неизвестным» — ``❓``/``failed`` по важности каталога.
+    #: **Тот же** словарь, что строки шапки battle card (один сборщик —
+    #: :func:`critical_unknown_summary`), для ``--json`` payload. Наблюдение, не гейт:
+    #: вердикты/Coverage/Comparability не меняются.
+    critical_unknown: dict[str, Any] = field(default_factory=dict)
+    #: O28: ``outputs/heading_anomalies.csv`` — аномалии ``heading_path`` (план 26):
+    #: доля чанков с длинным контекстом, документы-виновники, «контекст длиннее текста».
+    #: ``None`` — не посчитано (сборка не разрешилась, чанки не прочитались): причина
+    #: названа в ``heading_anomalies_summary["reason"]``, а не выдана за ноль.
+    heading_anomalies: Path | None = None
+    #: Тот же агрегат для ``--json``/``notes``: ``{written, reason, summary}``. Числа
+    #: публикуются строкой оператора, даже когда CSV не записан.
+    heading_anomalies_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1625,12 +1643,87 @@ def write_run_manifest(manifest: RunManifest, out_dir: str | Path) -> Path:
 # battle_card
 # ---------------------------------------------------------------------------
 
+#: Поле шапки: сколько неизвестных ячеек важности ``Кр`` (O7) — «критических».
+CRITICAL_UNKNOWN_FIELD = "critical_unknown"
+#: Поле шапки: сколько неизвестных ячеек всего (``❓`` + ``failed``).
+UNKNOWN_TOTAL_FIELD = "unknown_total"
+#: Ведро для ячеек без строки каталога: важность не выдумывается (O7).
+UNMAPPED_IMPORTANCE = "unmapped"
+
+
+def _is_unknown_cell(cell: Any) -> bool:
+    """Ячейка «неизвестна»: ``❓`` по статусу либо ``failed`` по состоянию (O7).
+
+    ``failed`` — **не статус** (I4: ``status is None``), но именно он входит в
+    знаменатель Coverage (I5) и означает «важное осталось неизвестным»: измерение не
+    состоялось. ``N/A`` (I7: только человек) и ``preliminary`` (I13: вне расчёта) —
+    не неизвестность, а объявленное решение/черновик, поэтому в счётчик не идут.
+    """
+    state = getattr(cell, "state", None)
+    if state is CellState.FAILED or str(state) == CellState.FAILED.value:
+        return True
+    status = getattr(cell, "status", None)
+    return status is Status.UNKNOWN or str(status) == Status.UNKNOWN.value
+
+
+def critical_unknown_summary(
+    cells: Iterable[Any],
+    catalog: Mapping[str, CatalogRow] | Iterable[CatalogRow],
+) -> dict[str, Any]:
+    """Считает «сколько важного осталось неизвестным»: ``❓`` + ``failed`` по важности (O7).
+
+    Карта публиковала Coverage, но не отвечала на вопрос «сколько **важного** осталось
+    неизвестным»: 375 ``❓`` на карте читаются как однородная масса, хотя ``❓`` у
+    ``Кр``-параметра и у ``Опц`` — разные риски. Блок строится из каталога
+    (``param_id → importance``), а не из порядка ячеек.
+
+    Неизвестность считается по двум носителям:
+
+    * ``status == ❓`` — оценка не состоялась по существу;
+    * ``state == failed`` — измерение отказало (``status is None``, I4). Ячейка входит в
+      знаменатель Coverage (I5), поэтому терять её из счётчика нельзя: это ровно
+      «важное неизвестное», а не пропуск.
+    * ``N/A`` (I6/I7 — решение человека) и ``preliminary`` (I13 — вне расчёта и вне
+      Coverage) **не** неизвестность: они объявлены, а не потеряны.
+
+    Ячейка без строки каталога попадает в ``unknown_by_importance_unmapped``: важность
+    не выдумывается (A3 — отсутствие факта не факт отсутствия).
+
+    Ключи стабильны и присутствуют всегда (нулевые тоже): шапка — схема, а не отчёт о
+    найденном. ``critical_unknown`` == ``unknown_by_importance_Кр`` по построению.
+    """
+    catalog_map = _catalog_map(catalog)
+    by_importance: dict[str, int] = {importance.value: 0 for importance in Importance}
+    unmapped = 0
+    total = 0
+    for cell in cells:
+        if not _is_unknown_cell(cell):
+            continue
+        total += 1
+        row = catalog_map.get(str(getattr(cell, "param_id", "")))
+        if row is None:
+            unmapped += 1
+            continue
+        key = str(row.importance)
+        by_importance[key] = by_importance.get(key, 0) + 1
+
+    summary: dict[str, Any] = {
+        CRITICAL_UNKNOWN_FIELD: by_importance[Importance.CRITICAL.value],
+        UNKNOWN_TOTAL_FIELD: total,
+    }
+    for importance in Importance:
+        summary[f"unknown_by_importance_{importance.value}"] = by_importance[importance.value]
+    summary[f"unknown_by_importance_{UNMAPPED_IMPORTANCE}"] = unmapped
+    return summary
+
 
 def _battle_card_header(
     bundle: ScoreBundle,
     fallback: bool,
     insufficient: bool,
     *,
+    cells: Iterable[Any] = (),
+    catalog: Mapping[str, CatalogRow] | Iterable[CatalogRow] | None = None,
     crawl_provenance: CrawlProvenance | None = None,
 ) -> list[tuple[str, Any]]:
     """Шапка battle card: метрики + аннотации (приглушение/fallback) + провенанс краула."""
@@ -1652,6 +1745,10 @@ def _battle_card_header(
         ("computed_ranking", bundle.computed_ranking),
         ("coverage_insufficient", insufficient),
     ]
+    # O7: «сколько важного осталось неизвестным» — рядом с Capability/Coverage.
+    # Это наблюдение, а не гейт: вердикты, Coverage, Comparability и publishability
+    # не меняются (блок только читает ячейки и каталог).
+    rows.extend(critical_unknown_summary(cells, catalog or {}).items())
     # A1/§6: баннер публикуемости — **класс и причина**, а не только «coverage
     # INSUFFICIENT». Строки добавляются, если бандл несёт профиль (синтетические бандлы
     # тестов его не несут — класс тогда не выдумывается).
@@ -1713,8 +1810,14 @@ def _battle_card_sheets(
 
     header_rows: list[list[Any]] = [["field", "value"]]
     header_rows.extend(
-        [name, value] for name, value in _battle_card_header(
-            bundle, fallback, insufficient, crawl_provenance=crawl_provenance
+        [name, value]
+        for name, value in _battle_card_header(
+            bundle,
+            fallback,
+            insufficient,
+            cells=cells,
+            catalog=catalog,
+            crawl_provenance=crawl_provenance,
         )
     )
 
@@ -3588,6 +3691,20 @@ def write_reports(
     partial_summary = partial_docs_summary(
         store, run_id, products=planned_products
     )
+    # O28: аномалии ``heading_path`` (3 668 симв. на страницу-виновника) были видны
+    # только отдельным харнессом — в отчёте прогона их не называл никто. Чтение чанков
+    # идёт через ``cb_``→``pb_``-резолв внутри писателя; неразрешённая сборка даёт
+    # **причину**, а не ноль (иначе «не посчитали» читалось бы как «аномалий нет»).
+    # Обрезание длинного ``heading_path`` не вводится: это дефект извлечения, и отчёт
+    # его показывает.
+    heading_anomalies_result = write_heading_anomalies_artifact(
+        store, run_id, outputs_dir / "heading_anomalies.csv"
+    )
+    heading_anomalies_path = (
+        Path(heading_anomalies_result["path"])
+        if heading_anomalies_result.get("written")
+        else None
+    )
     # A3: три замера качества поддержки получают производителя. До этого числа
     # существовали только в тестах либо вовсе не агрегировались: `support_overlap_scan`,
     # `support_concentration` и `_denial_without_markers` не публиковал ни один артефакт —
@@ -3688,6 +3805,9 @@ def write_reports(
         corpus_freshness_summary=freshness.document,
         corpus_members=corpus_members_path,
         corpus_members_summary=corpus_members_payload,
+        critical_unknown=critical_unknown_summary(cell_list, catalog),
+        heading_anomalies=heading_anomalies_path,
+        heading_anomalies_summary=heading_anomalies_result,
         publishability=publishability_path,
         measurement_uncertainty=uncertainty_path,
         preliminary_findings=preliminary,

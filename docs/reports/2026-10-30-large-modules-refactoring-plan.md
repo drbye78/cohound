@@ -550,7 +550,7 @@ _partition_reuse_reason 2926-3005
    владельца, §0 п. 3). Миграция как таковая: **+61 / −39**, и в ней **ни одной**
    изменённой строки `assert` — проверено `git diff -U0 tests/ | grep '^[+-].*assert '`
    (пусто). Единственная не-импортная правка — `tests/selfcheck.py`, где локальное
-   `_DIRECTORY_KINDS` стало `DIRECTORY_KINDS`: это тот же объект (`core/pipeline/corpus_ingest.py:174` — определение `DIRECTORY_KINDS`;
+   `_DIRECTORY_KINDS` стало `DIRECTORY_KINDS`: это тот же объект (`core/pipeline/corpus_ingest.py:180` — определение `DIRECTORY_KINDS`;
    алиас `_DIRECTORY_KINDS = DIRECTORY_KINDS`, о котором говорит раздел, в модуле
    снят, адрес сверен 09.11.2026),
    сравнение и текст сообщения не тронуты. Перенесено 22 приватных имени (48
@@ -558,11 +558,11 @@ _partition_reuse_reason 2926-3005
    `corpus`** — `_serp_note`, `_serp_disabled_observation`, `_stage_timings_aggregate`:
    они там **определены** (`corpus.py:1009/765/714`), переезжать некуда.
    **Три `monkeypatch`-адреса оставлены на `corpus` намеренно и доказанно**: это шов, а не
-   долг. `_ingest_member_doc` (`corpus.py:2929`) и `_persist_docs` (`corpus.py:275`, `:2639`)
+   долг. `_ingest_member_doc` (`corpus.py:2930`) и `_persist_docs` (`corpus.py:275`, `:2639`)
    связываются в `partial` в кадре `_build_corpus`, поэтому подмена на модуле-владельце не
    доехала бы до кода. Доказательство прогоном в обе стороны: raise-спай на
    `corpus_ingest.persist_docs` тест **не** роняет, на `corpus._persist_docs` — роняет.
-   `_EXECUTOR_MAX_WAVES_PER_ROOT` читается в `corpus.py:2611` — подмена реального дефолта
+   `_EXECUTOR_MAX_WAVES_PER_ROOT` читается в `corpus.py:2612` — подмена реального дефолта
    на `1000` роняет тест на `assert 2 == 1`.
    **Суммарно по `tests/` коммит даёт 24 файла, +2056 / −69** — разница с 19/+61/−39 не
    относится к миграции: 4 файла новые (`test_corpus_offline.py` 11 тестов,
@@ -605,4 +605,4 @@ _partition_reuse_reason 2926-3005
     `ruff` чист; `check_doc_anchors.py` — **0 проблем / 15 предупреждений** (после
     перенумерации 143 якорей и трёх ручных исправлений: `corpus_index.py:86`
     `_derive_partition_build_id`, `_PARTITION_SCHEMA` `partition-1 → partition-2`,
-    `evaluate.py:2664/2846-2874` для `max_retries`).
+    `evaluate.py:2682/2846-2874` для `max_retries`).

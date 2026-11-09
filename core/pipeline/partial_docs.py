@@ -48,6 +48,12 @@ CSV_COLUMNS: tuple[str, ...] = (
     "chars",
 )
 
+#: Машинный токен причины «страница прочитана, но текстового слоя в ней нет» (план 26,
+#: O26). Строка живёт в ``ExtractedDoc.partial_reason`` читателя ``text_layer``; отчёт
+#: считает по ней **число страниц**, потерянных именно так, а не смешивает с отказами
+#: pdfium («страниц не прочитано N из M» — другой факт: страница не открылась).
+PAGES_WITHOUT_TEXT_LAYER = "pages_without_text_layer"
+
 
 def _partial_docs(store: Any, run_id: str | None) -> list[Any]:
     """Документы корпуса с ``partial=True`` (детерминированно), сбои чтения → ``[]``.
@@ -92,6 +98,12 @@ def partial_docs_summary(
         "pages_converted": None,
         "pages_declared": None,
         "chars": None,
+        # O26: страницы без текстового слоя — отдельным числом, чтобы «скан прочитан»
+        # не смешивалось с «страница не открылась».
+        "pages_without_text_layer": {
+            "documents": 0,
+            "pages": None,
+        },
     }
     docs = _partial_docs(store, run_id)
     if not docs:
@@ -123,7 +135,37 @@ def partial_docs_summary(
         "pages_converted": pages_converted if has_converted else None,
         "pages_declared": pages_declared if has_declared else None,
         "chars": chars if has_chars else None,
+        "pages_without_text_layer": _pages_without_text_layer(docs),
     }
+
+
+def _pages_without_text_layer(docs: Iterable[Any]) -> dict[str, Any]:
+    """Сколько страниц потеряно **без текстового слоя** (O26) — по машинному токену.
+
+    Считаются только документы, чья ``partial_reason`` несёт
+    :data:`PAGES_WITHOUT_TEXT_LAYER`. Потеря страниц = ``page_count - pages_converted``
+    **внутри этих документов**: у них причина называет ровно этот класс, и разница
+    покрыта им (страницы, не открывшиеся вовсе, дают отдельную причину, и такой документ
+    без токена сюда не попадает — смешивать два факта нельзя).
+
+    Разница берётся, только когда **оба** числа измерены: ``None`` у документа — «не
+    измерено», а не ноль (A3). Нет ни одного измеренного документа — ``pages: None``,
+    то есть «документы без слоя есть, страниц не сосчитали», а не «потерь нет».
+    """
+    documents = 0
+    lost = 0
+    measured = False
+    for doc in docs:
+        reason = str(getattr(doc, "partial_reason", None) or "")
+        if PAGES_WITHOUT_TEXT_LAYER not in reason:
+            continue
+        documents += 1
+        declared = getattr(doc, "page_count", None)
+        converted = getattr(doc, "pages_converted", None)
+        if isinstance(declared, int) and isinstance(converted, int):
+            lost += max(0, declared - converted)
+            measured = True
+    return {"documents": documents, "pages": lost if measured else None}
 
 
 def _any_measured(docs: Iterable[Any], field: str) -> bool:
@@ -195,6 +237,14 @@ def human_line(summary: Mapping[str, Any] | None) -> str | None:
     chars = summary.get("chars")
     if isinstance(chars, int):
         details.append(f"символов {chars}")
+    # O26: страницы без текстового слоя — отдельным фактом, иначе «скан прочитан»
+    # неотличим от «страница прочитана» и потеря текста не видна оператору.
+    without_layer = summary.get("pages_without_text_layer") or {}
+    layer_docs = int(without_layer.get("documents") or 0)
+    if layer_docs > 0:
+        pages = without_layer.get("pages")
+        tail_pages = f", страниц без слоя {pages}" if isinstance(pages, int) else ""
+        details.append(f"документов без текстового слоя {layer_docs}{tail_pages}")
     tail = f" ({', '.join(details)})" if details else ""
     return (
         f"частичное извлечение: документов прочитано не целиком {documents}{tail}; "

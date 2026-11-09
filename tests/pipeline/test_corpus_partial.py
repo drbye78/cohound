@@ -27,6 +27,7 @@ from core.domain import (
     Cohort,
     CohortEntry,
     CorpusCoverage,
+    CorpusDoc,
     CrawlItemStatus,
     CrawlSessionItem,
     DenialStrength,
@@ -284,6 +285,39 @@ def test_partial_document_reaches_corpus_and_coverage(tmp_path: Path) -> None:
         assert any("частично" in note for note in notes), notes
     finally:
         store.close()
+
+def test_pdfium_pages_without_text_layer_reach_corpus_doc() -> None:
+    """Число из ``text_layer`` доезжает до ``CorpusDoc``: пара счётчиков и причина.
+
+    Новое число (страницы без текстового слоя) публикуется через уже существующее
+    ``pages_converted``; схема БД не меняется — проверяется перенос, а не колонка.
+    """
+    from core.pipeline.corpus_ingest import _partial_fields
+
+    extracted = ExtractedDoc(
+        text="первая\n\nтретья",
+        content_hash=content_hash("первая\n\nтретья"),
+        extractor_version="pdfium-text-2",
+        page_count=3,
+        family="text",
+        partial=True,
+        partial_reason=(
+            "pdfium: pages_without_text_layer: 1 из 3 (2); текст прочитанных страниц"
+        ),
+        pages_converted=2,
+    )
+
+    doc = CorpusDoc(
+        doc_id="p1:deadbeef",
+        product_id="p1",
+        url=URL,
+        **_partial_fields(extracted),
+    )
+
+    assert (doc.page_count, doc.pages_converted) == (3, 2)
+    assert "pages_without_text_layer" in (doc.partial_reason or "")
+    assert doc.partial is True
+
 
 def test_full_document_keeps_coverage_complete(tmp_path: Path) -> None:
     """Документ без частичности не блокирует корпус зря (регресс-защита).

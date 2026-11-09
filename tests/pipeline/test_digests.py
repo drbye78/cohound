@@ -25,6 +25,14 @@ from core.pipeline.digests import (
     execution_contract_digest,
     seeds_digest,
 )
+from core.pipeline.retrieve import (
+    DEFAULT_CROSS_QUERY_FUSION,
+    DEFAULT_POOL_MULTIPLIER,
+    DEFAULT_RRF_K,
+    MAX_QUERIES,
+    retrieval_params,
+    retrieval_params_json,
+)
 
 
 def _entry(
@@ -275,3 +283,50 @@ def test_embed_precision_is_a_contract_condition() -> None:
     fp16 = _contract_values()
     fp16["embed_precision"] = "fp16"
     assert execution_contract_digest(fp32) != execution_contract_digest(fp16)
+
+
+# ---------------------------------------------------------------------------
+# O2 плана 26: retrieval_params_json = исполненные параметры
+# ---------------------------------------------------------------------------
+
+
+def test_retrieval_params_serializer_declares_exactly_executed_values() -> None:
+    """Сериализатор называет ровно исполняемые параметры (и не выдумывает новых)."""
+    params = retrieval_params(profile="R2", cutoff_k=10)
+    assert set(params) == {
+        "profile",
+        "cutoff_K",
+        "rrf_k",
+        "pool_multiplier",
+        "max_queries",
+        "cross_query_fusion",
+    }
+    assert params["rrf_k"] == DEFAULT_RRF_K == 60
+    assert params["pool_multiplier"] == DEFAULT_POOL_MULTIPLIER == 1
+    assert params["max_queries"] == MAX_QUERIES == 3
+    assert params["cross_query_fusion"] == DEFAULT_CROSS_QUERY_FUSION == "max"
+    # Необъявленный K остаётся ``None`` — это отличимо от подставленного дефолта.
+    assert params["cutoff_K"] == 10
+    assert retrieval_params(profile=None, cutoff_k=None)["cutoff_K"] is None
+
+
+def test_retrieval_rrf_k_changes_contract_digest() -> None:
+    """Смена ``rrf_k`` меняет ``run_id``: это условие измерения, а не провенанс."""
+    base = _contract_values()
+    base["retrieval_params_json"] = retrieval_params_json(profile="R2", cutoff_k=10)
+    other = dict(base)
+    other["retrieval_params_json"] = retrieval_params_json(
+        profile="R2", cutoff_k=10, rrf_k=77
+    )
+    assert execution_contract_digest(base) != execution_contract_digest(other)
+
+
+def test_null_retrieval_params_is_not_the_defaults() -> None:
+    """``null`` (старый контракт) отличим от явного набора исполненных параметров."""
+    old = _contract_values()
+    old["retrieval_params_json"] = None
+    explicit = dict(old)
+    explicit["retrieval_params_json"] = retrieval_params_json(
+        profile=None, cutoff_k=None
+    )
+    assert execution_contract_digest(old) != execution_contract_digest(explicit)

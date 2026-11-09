@@ -77,6 +77,7 @@ from core.pipeline.corpus_index import _chunk_id, _CorpusStageTimings
 from core.pipeline.corpus_ingest import (
     MEMBER_CONTENT_TYPES,
     ProductIngest,
+    _log_ocr_probe,
     _partial_fields,
     _state_url_key,
     artifact_is_terminal,
@@ -442,6 +443,9 @@ def ingest_member_doc(
         task.product_id, doc_hash, member_extractor_token, _as_text(level)
     )
 
+    # «OCR не проверен» у члена контейнера — тот же факт, что у страницы: пока у него
+    # нет колонки в схеме, единственный канал видимости — журнал корпуса.
+    _log_ocr_probe(extracted, f"{task.product_id}/{task.member_url}")
     doc = CorpusDoc(
         doc_id=document_id,
         product_id=task.product_id,

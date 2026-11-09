@@ -436,7 +436,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 | 0008 | Иммутабельные индексные сборки, версии в манифесте | §13 | accepted |
 | 0009 | Кэш внешних вызовов для R7 | R7 | accepted |
 | 0010 | `failed` — состояние ячейки, не исключение | I4/I5 | accepted |
-| 0011 | Гейты G1–G4 — только человеческие решения | I6/I7 | **ЗАМЕНЕНО** решением владельца 26.10.2026: G1/G2/G3 **не блокируют** прогон — фаза идёт `skipped` и пишет waiver с `actor="policy"` (`core/pipeline/gates.py:79` `NON_BLOCKING_GATES`, `core/pipeline/runner.py:533`); блокируют только G4 и явный `rejected` — см. 0023 |
+| 0011 | Гейты G1–G4 — только человеческие решения | I6/I7 | **ЗАМЕНЕНО** решением владельца 26.10.2026: G1/G2/G3 **не блокируют** прогон — фаза идёт `skipped` и пишет waiver с `actor="policy"` (`core/pipeline/gates.py:79` `NON_BLOCKING_GATES`, `core/pipeline/runner.py:534`); блокируют только G4 и явный `rejected` — см. 0023 |
 | 0012 | Расщепление бывших `core/schemas.py`/`core/db.py` на слои | чистота слоёв | accepted · **реализовано** (M0/W1, шимы удалены; слой гейтится `tests/selfcheck.py:355` `_import_graph`) |
 | 0013 | Гранулярность индексной сборки и provenance ячеек | R7/R15, §13 | accepted · уточнён 0021 |
 | 0014 | SERP-петля vs иммутабельность: append-only раунды сборок | I19, §13, K2 | accepted · **частично**: код append-only раундов есть, живой SERP-раунд в прогоне кейса не выполнялся (`docs/architecture/06-implementation-strategy.md:190`, W11: код ✅, живой раунд ⏳) |
@@ -566,9 +566,9 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   `core/store/backup.py:274` `restore_run`; снапшот через `sqlite3.Connection.backup`, не
   копирование файла);
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
-  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:283`; маркер
-  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:194`; профиль публикуемости
-  `outputs/publishability.yaml` — `core/pipeline/report.py:3019`);
+  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:291`; маркер
+  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:199`; профиль публикуемости
+  `outputs/publishability.yaml` — `core/pipeline/report.py:3682`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через
   `read_prior_llm_usage`/`merge_llm_usage`, а не «последняя инвокация»; запись —

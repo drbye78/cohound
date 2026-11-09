@@ -52,7 +52,8 @@ class IndexBuilderPort(Protocol):
 
     #: Метка физического векторного хранилища (например, ``"npy-fp16"``).
     vector_store: str
-    #: Версия лексического движка, обслуживающего R0/R2 (например, ``"tantivy-0.26.2"``).
+    #: Наблюдаемая строка лексического контура, обслуживающего R0/R2: версия движка и
+    #: схема, например ``"tantivy-0.26.2+schema-single-body-stem-ru-en-zh-2"``.
     lexical_engine_version: str
 
     def build(

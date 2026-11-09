@@ -258,7 +258,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 
 * **Вход:** тексты чанков партиции.
 * **Решение:** `embed_cache` уже адресуется текстом
-  (`content_hash + model + device + precision`, `core/adapters/embed_cache.py:166`). **Реализовано 07.11.2026
+  (`content_hash + model + device + precision`, `core/pipeline/embed_cache.py:187`). **Реализовано 07.11.2026
   (P0-B):** (а) входной батч группируется по `content_hash`, эмбеддер вызывается на каждый
   уникальный текст один раз, вектор раскладывается по позициям (`core/pipeline/corpus_index.py:603`);
   (б) `corpus_chunks.embedded_at` заполняется одним ISO-8601 (UTC) временем на продукт-цикл
@@ -283,8 +283,8 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 * **Публикует:** `collapsed_text`, `collapsed_family`, `slots_freed`; call `hound diff` обязан
   назвать параметры.
 * **Контракт:** все параметры (τ, режим, роли) — в `retrieval_params_json`, которое **уже**
-  входит в `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:107`) и в `cell_reuse_key`
-  (`core/pipeline/digests.py:766`) ⇒ новое поле контракта не нужно, перенос ячеек инвалидируется по
+  входит в `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:115`) и в `cell_reuse_key`
+  (`core/pipeline/digests.py:774`) ⇒ новое поле контракта не нужно, перенос ячеек инвалидируется по
   построению.
 * **Не делать:** порог «не более N на семью» без замера; удаление кандидатов из индекса.
 
@@ -429,7 +429,7 @@ CREATE TABLE dedup_ledger (
 |---|---|---|---|
 | S0 | нет (уже) | — | — |
 | S1, S2 | **нет** — чистая функция байт | провенанс + ledger | — |
-| S3 | да (уже) | `doc_id`, `corpus_doc_set_digest` (`core/pipeline/digests.py:563`) | уже действует |
+| S3 | да (уже) | `doc_id`, `corpus_doc_set_digest` (`core/pipeline/digests.py:571`) | уже действует |
 | S5 (роль) | да — ранжирование | `retrieval_params_json` | `execution_change` |
 | S7 (схлопывание) | да — набор доказательств | `retrieval_params_json` | `execution_change` |
 | S8 | нет — даты и reuse | `corpus_snapshot`, `reuse_kind` | провенанс |
@@ -614,3 +614,11 @@ S7 в `retrieval_params_json` (новый `run_id`, `execution_change`). Вор�
 Обратной ссылки в 26 нет ни к одному пункту этого документа, кроме O2 (оговорка про нового
 тенанта добавлена там же). P0b (схема 3.21.0: `member_content_hash`, `dedup_ledger`,
 `raw_member_path`) остаётся заблокированным условием «пустая машина» — это записано в §3 и §9.
+
+**К списку 3.21.0 добавлена колонка OCR-пробы (план 26 O25, 09.11.2026).** В 26 пункт O25
+исполнен в пределах, не требующих схемы: тристейт пробы доезжает до `ExtractedDoc.ocr_probe` и
+конверта `extract_cache`, а **публикации в манифесте нет** — она требует колонок
+(`runs`/`index_manifest`), а колонка вне объявленного бампа запрещена. Поэтому бамп 3.21.0
+обязан нести четвёртую колонку — исход OCR-пробы (`ok|unavailable|unsupported|unknown`) —
+иначе она появится вне объявленного изменения схемы. Агрегат «сколько документов прогона с
+непроверенным OCR» ждёт этой же колонки.

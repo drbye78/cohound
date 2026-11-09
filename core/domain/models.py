@@ -1793,8 +1793,11 @@ class RunManifest(BaseModel):
     crawl_provenance: CrawlProvenance = Field(default_factory=CrawlProvenance)
     #: Частичное извлечение — **числом**, а не потолком: ``{"documents": n, "by_product":
     #: {...}, "reasons": {...}, "pages_converted": x, "pages_declared": y, "chars": z,
-    #: "by_product_pages": {...}}``. Документ, прочитанный на 7 страницах из 2763,
-    #: обязан быть виден в манифесте, а не растворяться в числе документов корпуса.
+    #: "by_product_pages": {...}, "pages_without_text_layer": {"documents": n, "pages": x}}``.
+    #: Документ, прочитанный на 7 страницах из 2763, обязан быть виден в манифесте, а не
+    #: растворяться в числе документов корпуса. ``pages_without_text_layer`` (план 26, O26)
+    #: считает потери «страница прочитана, но текста в ней нет» отдельно от отказов
+    #: pdfium: это разные факты и лечатся они по-разному.
     #: Наблюдение (как ``crawl_provenance``): в границы версий §13 не входит — это факт
     #: о том, что прибор прочитал, а не смена условий измерения.
     partial_docs: dict[str, Any] = Field(default_factory=dict)

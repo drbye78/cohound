@@ -36,6 +36,7 @@ from core.adapters import extract_document
 from core.adapters.chunker_markdown import MarkdownChunker
 from core.adapters.chunker_text import TextChunker
 from core.adapters.extract_document import DoclingDocumentExtractor
+from core.adapters.extract_pdf_text import pdfium_engine_build
 from core.cli import execution_axes
 from core.cli.errors import CliError
 from core.cli.execution_axes import (
@@ -141,8 +142,8 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     second = _resolve(package)
     assert first == second
     assert first.extractor_stack.startswith(
-        "trafilatura-html-6+text-plain-2+epub-3+pdfium-text-2+docling-office-1"
-        "+docling-doc-3/cpu/docling-"
+        "trafilatura-html-6+text-plain-2+epub-3+"
+        f"{pdfium_engine_build()}+docling-office-1+docling-doc-3/cpu/docling-"
     )
     # Объявленные оси — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего поиска
     # меняет состав корпуса, то есть условие измерения; + ``manual_artifacts_digest``:

@@ -475,10 +475,10 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:1055`, `core/store/sqlite_store.py:1977`,
+✅ сделано (`core/cli/commands/crawl.py:1060`, `core/store/sqlite_store.py:1977`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
-текстовом выводе (`core/cli/commands/crawl.py:1069-1070`), и в JSON
-(`core/cli/commands/crawl.py:1062`). Докстринг `iter_crawl_sessions` прямо
+текстовом выводе (`core/cli/commands/crawl.py:1074-1075`), и в JSON
+(`core/cli/commands/crawl.py:1067`). Докстринг `iter_crawl_sessions` прямо
 называет
 этот дефект причиной фильтра.
 
@@ -488,10 +488,10 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `report` пишет артефакты с заглушками и говорит `ok: true`
 
-⬜ не сделано — поведение дословно прежнее (`core/cli/commands/report.py:134-141`): при
+⬜ не сделано — поведение дословно прежнее (`core/cli/commands/report.py:139-146`): при
 незаполненном манифесте в `notes` уходит та же строка «версии — заглушки», а `ok` остаётся
-`True` (`"ok": True, … "manifest_partial": partial`, `core/cli/commands/report.py:141`), и функция
-заканчивается безусловным `return EXIT_OK` (`core/cli/commands/report.py:234`). Признак частичности
+`True` (`"ok": True, … "manifest_partial": partial`, `core/cli/commands/report.py:146`), и функция
+заканчивается безусловным `return EXIT_OK` (`core/cli/commands/report.py:239`). Признак частичности
 есть, но он **не влияет на код выхода** и не отличает «готовый отчёт» от «отчёт с выдуманными версиями» для скрипта. Что
 осталось: `manifest_partial=True` должен менять `ok`/код выхода (или отказывать вовсе),
 иначе ложный провенанс остаётся успехом.
@@ -540,7 +540,7 @@ JSON-артефакт** (БД не меняет:
 единственный названный способ.
 
 Ш3 (`registry`), Ш4 (`inheritance`) и Ш8 (`compute`) существуют только как фазы
-(`core/pipeline/runner.py:132`). Отдельной команды нет. Для Ш8 есть только пост-хок
+(`core/pipeline/runner.py:133`). Отдельной команды нет. Для Ш8 есть только пост-хок
 `sensitivity`, а для Ш4 — черновик `package compose-baselines`, который в пакет не пишет.
 То есть регламент описывает девять сценариев, а вызывать можно шесть.
 
@@ -589,7 +589,7 @@ JSON-артефакт** (БД не меняет:
 **Ссылочный счёт (сверено 07.11.2026).** Этот документ цитируется как обоснование из **12**
 файлов кода и тестов (в `README.md` до этой сверки стояло «9»): `core/pipeline/golden_status.py:34`,
 `core/store/sqlite.py:777`, `core/store/sqlite_store.py:1966`, `core/cli/commands/status.py:3`,
-`core/cli/commands/runs.py:4`, `core/cli/run_overview.py:4`, `core/cli/wiring.py:670`,
+`core/cli/commands/runs.py:4`, `core/cli/run_overview.py:4`, `core/cli/wiring.py:654`,
 `tests/cli/test_gate.py:347`, `tests/cli/test_runs_status.py:3`,
 `tests/store/test_read_only_connect.py:6`, `tests/cli/test_read_only_commands.py:3`,
 `tests/cli/test_plan_crawl_axes.py:18`. Удаление документа оставило бы висячие ссылки на

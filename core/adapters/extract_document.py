@@ -85,7 +85,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.domain.enums import DocumentLevel, PdfDevice
-from core.ports.types import ExtractedDoc
+from core.ports.types import (
+    OCR_PROBE_OK,
+    OCR_PROBE_UNAVAILABLE,
+    OCR_PROBE_UNSUPPORTED,
+    ExtractedDoc,
+)
 from core.util.document_formats import DOCUMENT_SUFFIXES, PDF_SUFFIX
 from core.util.sanitize import finalize_extracted_text
 
@@ -663,7 +668,41 @@ def _probe_ocr_engine(pdf_options: object) -> object | None:
         )
     except (TypeError, AttributeError) as exc:  # pragma: no cover - смена API docling
         raise _OcrProbeUnsupported(f"OcrAutoModel несовместим: {exc}") from exc
-    return getattr(auto, "_engine", auto)
+    # Признак «поля больше нет» обязан быть **проверяемым**, а не угадываемым.
+    # ``getattr(auto, "_engine", auto)`` при переименовании возвращал сам ``OcrAutoModel``
+    # (не ``None``) ⇒ проба «успешно» проходила, ничего не проверив. Поэтому отсутствие
+    # атрибута отделяется от «атрибут есть, но движка нет» сентинелом: ``None`` у
+    # ``_engine`` — законный факт «OCR недоступен», а не смена API.
+    missing = object()
+    engine = getattr(auto, "_engine", missing)
+    if engine is missing or engine is auto:
+        raise _OcrProbeUnsupported(
+            "OcrAutoModel._engine недоступен: внутренний API docling переименован — "
+            "наличие OCR-движка проверить нельзя"
+        )
+    return engine
+
+
+def probe_ocr_engine(pdf_options: object) -> str:
+    """Явный тристейт проверки OCR: ``ok`` | ``unavailable`` | ``unsupported``.
+
+    «Не проверено» ≠ «проверено и работает»: результат называется, а не только пишется
+    в журнал. ``unavailable`` — docling отверг всех кандидатов (движка нет);
+    ``unsupported`` — внутренний API docling не позволил проверить (переименование).
+    Отказ по ``unavailable`` остаётся отказом извлечения (см.
+    :meth:`DoclingDocumentExtractor._require_working_ocr`); тристейт лишь **называет**
+    факт, ради провенанса результата.
+    """
+    try:
+        engine = _probe_ocr_engine(pdf_options)
+    except _OcrProbeUnsupported:
+        return OCR_PROBE_UNSUPPORTED
+    return _probe_status_from_engine(engine)
+
+
+def _probe_status_from_engine(engine: object | None) -> str:
+    """Движок пробы → статус тристейта (``None`` — OCR фактически недоступен)."""
+    return OCR_PROBE_UNAVAILABLE if engine is None else OCR_PROBE_OK
 
 
 #: §6 (P5): щедрый per-level ``document_timeout`` (секунды). ``full`` — ``None``
@@ -845,6 +884,12 @@ class DoclingDocumentExtractor:
         self._converter = None
         #: OCR проверен (``full``): повторные PDF не пере-строят auto-OCR.
         self._ocr_checked = False
+        #: Исход проверки OCR (``ok``/``unavailable``/``unsupported``) либо ``None`` —
+        #: проверка к документу не применима (не PDF либо уровень без OCR). Хранится на
+        #: инстансе, потому что конвертер строится один раз на много документов, а
+        #: ``ExtractedDoc`` собирается позже — провенанс результата не должен зависеть от
+        #: того, попал ли warning в лог.
+        self._ocr_probe: str | None = None
 
     def version_for(self, filename: str) -> str:
         """Версия **фактического** документа: PDF и Office штампуются по-разному.
@@ -1040,21 +1085,30 @@ class DoclingDocumentExtractor:
         return converter
 
     def _require_working_ocr(self, pdf_options: object) -> None:
-        """``full`` обязан иметь рабочий OCR; иначе — отказ, а не текст «как full»."""
+        """``full`` обязан иметь рабочий OCR; иначе — отказ, а не текст «как full».
+
+        Исход проверки сохраняется на инстансе (:attr:`_ocr_probe`) и уходит в
+        ``ExtractedDoc.ocr_probe``: деградация проверки (переименование внутренностей
+        docling) не вправе остаться только строкой журнала — иначе результат выглядит
+        проверенным, хотя ничего не проверялось.
+        """
         if self._ocr_checked:
             return
         try:
             engine = _probe_ocr_engine(pdf_options)
         except _OcrProbeUnsupported as exc:
             # docling переименовал внутренности: проверка невозможна. Это не повод
-            # ломать извлечение — фиксируем предупреждением (version-tolerant).
+            # ломать извлечение — фиксируем предупреждением (version-tolerant), но
+            # исход называется машинно: ``unsupported``, а не «ok по умолчанию».
             _log.warning(
                 "document_level=full: не удалось проверить OCR-движок docling (%s) — "
                 "проверка пропущена",
                 exc,
             )
+            self._ocr_probe = OCR_PROBE_UNSUPPORTED
             self._ocr_checked = True
             return
+        self._ocr_probe = _probe_status_from_engine(engine)
         if engine is None:
             raise OcrEngineUnavailableError(
                 "document_level=full требует OCR, но docling не нашёл ни одного "
@@ -1098,7 +1152,9 @@ class DoclingDocumentExtractor:
                 converter, tmp_path, version=version, office=suffix != PDF_SUFFIX
             )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
-            return self._error(f"docling: {exc}", version)
+            return self._error(
+                f"docling: {exc}", version, ocr_probe=self._ocr_probe_for(suffix)
+            )
         finally:
             if tmp_path is not None:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -1143,7 +1199,20 @@ class DoclingDocumentExtractor:
                     converter, str(staged), version=version, office=suffix != PDF_SUFFIX
                 )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
-            return self._error(f"docling: {exc}", version)
+            return self._error(
+                f"docling: {exc}", version, ocr_probe=self._ocr_probe_for(suffix)
+            )
+
+    def _ocr_probe_for(self, suffix: str) -> str | None:
+        """Исход проверки OCR для документа этого формата: ``None`` — не применимо.
+
+        OCR проверяется только на PDF уровня ``full`` (``_require_working_ocr``). Для
+        офисного документа и для уровней, где OCR выключен осознанно, проба не
+        выполнялась — приписывать им ``ok``/``unsupported`` от прошлого PDF нельзя.
+        """
+        if suffix != PDF_SUFFIX or self._level is not DocumentLevel.FULL:
+            return None
+        return self._ocr_probe
 
     def _precheck(self, suffix: str) -> ExtractedDoc | None:
         """Общие проверки обоих входов; ``None`` — можно конвертировать.
@@ -1206,11 +1275,17 @@ class DoclingDocumentExtractor:
         уровень, которого у офисного пути нет.
         """
         stamp = self.version if version is None else version
+        # OCR относится только к PDF-ветви: офисному документу проверка не выполнялась, и
+        # приписывать ему исход пробы от прошлого PDF (``ok``/``unsupported``) значило бы
+        # выдать чужое наблюдение за его собственное. ``None`` = «не применимо».
+        probe = None if office else self._ocr_probe
         try:
             result = converter.convert(path)
             status = getattr(result.status, "name", str(result.status))
             if status == PARTIAL_SUCCESS_STATUS:
-                doc = self._partial(result, status, version=stamp, office=office)
+                doc = self._partial(
+                    result, status, version=stamp, office=office, ocr_probe=probe
+                )
                 if doc.error is None:
                     # Операционная видимость: артефакт прогона признак частичности пока не
                     # несёт (его место — ``corpus_docs``/манифест), поэтому факт «документ
@@ -1219,7 +1294,9 @@ class DoclingDocumentExtractor:
                     _log.warning("частичное извлечение %s: %s", path, doc.partial_reason)
                 return doc
             if status != "SUCCESS":
-                return self._error(f"docling: статус конвертации {status}", stamp)
+                return self._error(
+                    f"docling: статус конвертации {status}", stamp, ocr_probe=probe
+                )
             text = _document_text(result.document)
             pages = _page_count(result)
             return ExtractedDoc(
@@ -1227,12 +1304,19 @@ class DoclingDocumentExtractor:
                 content_hash=_sha256(text),
                 extractor_version=stamp,
                 page_count=pages,
+                ocr_probe=probe,
             )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
-            return self._error(f"docling: {exc}", stamp)
+            return self._error(f"docling: {exc}", stamp, ocr_probe=probe)
 
     def _partial(
-        self, result: _DoclingResult, status: str, *, version: str | None = None, office: bool = False
+        self,
+        result: _DoclingResult,
+        status: str,
+        *,
+        version: str | None = None,
+        office: bool = False,
+        ocr_probe: str | None = None,
     ) -> ExtractedDoc:
         """``PARTIAL_SUCCESS`` → документ с текстом **части** и видимой причиной.
 
@@ -1254,12 +1338,17 @@ class DoclingDocumentExtractor:
         ``office=True`` — офисный документ: у него нет уровня (``SimplePipeline``), поэтому
         причина частичности не называет ни уровня, ни обещания структуры. Иначе DOCX
         получил бы в провенанс ``full``-обещание, которого никто не давал.
+
+        ``ocr_probe`` — исход проверки OCR **этого** документа (``None`` — не применимо):
+        частичность и непроверенный OCR — разные факты, и второй не должен теряться при
+        первом.
         """
         text = _document_text(result.document)
         if not text.strip():
             return self._error(
                 f"docling: статус конвертации {status} без текста",
                 self.version if version is None else version,
+                ocr_probe=ocr_probe,
             )
         total = _page_count(result)
         converted = _converted_page_count(result)
@@ -1298,19 +1387,29 @@ class DoclingDocumentExtractor:
             partial=True,
             partial_reason=reason,
             pages_converted=converted,
+            ocr_probe=ocr_probe,
         )
 
-    def _error(self, message: str, version: str | None = None) -> ExtractedDoc:
+    def _error(
+        self,
+        message: str,
+        version: str | None = None,
+        *,
+        ocr_probe: str | None = None,
+    ) -> ExtractedDoc:
         """Грациозная деградация: пустой текст, хеш пустой строки, ``error``.
 
         ``version`` — штамп фактической ветви (PDF/Office); по умолчанию PDF-версия
-        инстанса (прямые вызовы и тесты).
+        инстанса (прямые вызовы и тесты). ``ocr_probe`` — исход проверки OCR для
+        **этого** документа (``None`` — не применимо): отказ извлечения не отменяет
+        факта, что проверка не удалась, и «не проверено» остаётся видимым.
         """
         return ExtractedDoc(
             text="",
             content_hash=_sha256(""),
             extractor_version=self.version if version is None else version,
             error=message,
+            ocr_probe=ocr_probe,
         )
 
 

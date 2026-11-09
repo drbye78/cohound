@@ -70,6 +70,7 @@ from core.config.deploy import DeployConfig
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.normalize import load_inputs
 from core.pipeline.onboarding import load_effective_seeds
+from core.pipeline.retrieve import retrieval_params_json
 from core.pipeline.run_identity import build_execution_contract
 from tests.helpers.packages import valid_package
 
@@ -477,15 +478,54 @@ def test_plan_names_deploy_profile_from_deploy_config(
     assert _payload(capsys)["run_id"] == split["run_id"]
 
 
+def test_plan_prints_executed_retrieval_params(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """План называет **все** исполненные параметры ретривала, не только профиль/K.
+
+    ``rrf_k``/пул/запросы/слияние входят в ``run_id`` (план 26 O2), поэтому оператор
+    обязан видеть их до прогона — и в ``--json``, и в человекочитаемой строке.
+    """
+    package = valid_package(tmp_path)
+    common = _common(package)
+
+    assert main(["plan", *common]) == EXIT_OK
+    payload = _payload(capsys)
+    assert payload["retrieval_params"] == {
+        "profile": None,
+        "cutoff_K": None,
+        "rrf_k": 60,
+        "pool_multiplier": 1,
+        "max_queries": 3,
+        "cross_query_fusion": "max",
+    }
+
+    text_common = [arg for arg in common if arg != "--json"]
+    assert main(["plan", *text_common]) == EXIT_OK
+    line = next(
+        row
+        for row in capsys.readouterr().out.splitlines()
+        if row.startswith("retrieval:")
+    )
+    for token in (
+        "rrf_k=60",
+        "pool_multiplier=1",
+        "max_queries=3",
+        "cross_query_fusion=max",
+    ):
+        assert token in line
+
+
 def test_plan_absent_flags_do_not_change_contract(
     tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Без флагов контракт считает **``null``** в обоих полях — прежнее поведение.
+    """Без флагов контракт несёт **``null``** в профиле и K — и исполненные параметры.
 
     Ожидание строится независимо: та же чистая функция контракта вызывается с явными
-    ``retrieval_profile=None``/``cutoff_K=None``. Это и есть «``run_id`` прежний»: правка
-    добавила приём флагов, а не значение по умолчанию (дефолт Ш6 в контракт не едет —
-    ``run_id`` описывает объявленное).
+    ``retrieval_profile=None``/``cutoff_K=None``. ``None`` в профиле/K означает «флаг не
+    объявлен» (дефолт Ш6 в контракт не едет), но ``retrieval_params_json`` с планa 26 O2
+    объявляет **исполненные** ``rrf_k``/пул/запросы/слияние: они меняют доказательства,
+    поэтому входят в ``run_id`` даже без флагов.
     """
     package = valid_package(tmp_path)
     common = _common(package)
@@ -515,6 +555,10 @@ def test_plan_absent_flags_do_not_change_contract(
         status_dict_version=declared_status_dict_version(),
         retrieval_profile=None,
         cutoff_K=None,
+        retrieval_params_json=retrieval_params_json(
+            profile=None,
+            cutoff_k=None,
+        ),
         crawl_policy_digest=_crawl_policy_resolution(
             args, inputs, seed_config
         ).digest,

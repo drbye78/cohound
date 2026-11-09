@@ -165,3 +165,77 @@ def test_human_line_is_silent_without_partial_documents() -> None:
     """Нет частичных — нет строки: норма не превращается в замечание."""
     assert human_line({"documents": 0, "by_product": {"p1": 0}}) is None
     assert human_line(None) is None
+
+
+# ---------------------------------------------------------------------------
+# O26: страницы без текстового слоя — отдельным числом
+# ---------------------------------------------------------------------------
+
+
+def _no_layer_doc(
+    doc_id: str = "p1:scan",
+    product_id: str = "p1",
+    *,
+    page_count: int | None = 3,
+    pages_converted: int | None = 2,
+) -> CorpusDoc:
+    """Документ, частичность которого вызвана **пустыми страницами**, а не отказом pdfium."""
+    return _partial_doc(
+        doc_id=doc_id,
+        product_id=product_id,
+        partial_reason=(
+            "pdfium: pages_without_text_layer: 1 из 3 (2); текст прочитанных страниц"
+        ),
+        page_count=page_count,
+        pages_converted=pages_converted,
+    )
+
+
+def test_summary_counts_pages_without_text_layer_separately() -> None:
+    """O26: потери «без текстового слоя» — отдельный счётчик, а не смесь с отказами pdfium.
+
+    Смешивать нельзя: «страница не открылась» (отказ pdfium) и «страница прочитана, но
+    в ней скан» — разные факты, и лечатся они по-разному (повтор чтения против OCR).
+    """
+    store = _FakeStore(
+        [
+            _no_layer_doc("p1:scan-a", page_count=3, pages_converted=2),
+            _no_layer_doc("p1:scan-b", page_count=10, pages_converted=4),
+            # Частичность по другой причине — в этот счётчик не попадает.
+            _partial_doc(doc_id="p1:refused"),
+        ]
+    )
+
+    summary = partial_docs_summary(store, RUN_ID, products=["p1"])
+
+    block = summary["pages_without_text_layer"]
+    assert block["documents"] == 2
+    # (3-2) + (10-4) = 7 — только внутри документов с этим токеном причины.
+    assert block["pages"] == 7
+
+
+def test_pages_without_text_layer_is_none_when_pages_not_measured() -> None:
+    """Документы без слоя есть, страницы не измерены ⇒ ``None``, а не ноль (A3)."""
+    store = _FakeStore([_no_layer_doc(page_count=None, pages_converted=None)])
+
+    summary = partial_docs_summary(store, RUN_ID, products=["p1"])
+
+    assert summary["pages_without_text_layer"] == {"documents": 1, "pages": None}
+
+
+def test_pages_without_text_layer_is_zero_documents_without_the_token() -> None:
+    """Нет документов с этим токеном — нули (факт «таких нет»), а не ``None``."""
+    summary = partial_docs_summary(_FakeStore([_partial_doc()]), RUN_ID, products=["p1"])
+
+    assert summary["pages_without_text_layer"] == {"documents": 0, "pages": None}
+
+
+def test_human_line_names_documents_without_text_layer() -> None:
+    """Оператор видит «без текстового слоя» строкой, а не только в CSV."""
+    summary = partial_docs_summary(_FakeStore([_no_layer_doc()]), RUN_ID, products=["p1"])
+
+    line = human_line(summary)
+
+    assert line is not None
+    assert "документов без текстового слоя 1" in line
+    assert "страниц без слоя 1" in line

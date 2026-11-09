@@ -77,7 +77,7 @@
 | Отрицание и охват | `AbsenceRuleType` (`explicit`, `parameter_reference`, `distribution_absence`, `registry_absence`) · `SourceScope` (`exhaustive`, `partial`, `unknown`) · `DenialStrength` (`authoritative`, `explicit`, `bounded`, `unobserved`, `not_stated`, `instrument_failed`) · `DenialClaim` (`explicit`, `not_stated`) |
 | Сбои | `FailureKind` — **17**: 5 классов сбоя ячейки (`search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`) + 11 наблюдаемых исходов краула (`not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`) + `partial_extraction` (документ получен, прочитана часть страниц — блокирующий класс корпуса) |
 | Пропуск фазы | `SkipReason` — **7**: `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external`, `gate_not_blocking` (последний — не блокирующий гейт: фаза идёт дальше, в `gate_decisions` ложится waiver-строка `actor=policy`) |
-| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:2332`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `ExtractQueueState` (`pending`, `claimed`, `done`, `failed`, `skipped`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
+| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:2335`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `ExtractQueueState` (`pending`, `claimed`, `done`, `failed`, `skipped`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
 | Извлечение | `ExtractionRoute` (`auto`, `html`, `document`) · `DocumentLevel` (`off`, `text`, `layout`, `layout_tables`, `full`) · `PdfPipeline` (`structured`, `text_layer`) · `PdfDevice` (`cpu`, `cuda`) |
 | Контейнеры | `ArchiveDescent` (`plan`, `full` — ось `crawl.archive_descent`) · `ArchiveDescentStatus` (`planned`, `descended`, `unreadable`, `budget_exhausted`) · `ContainerEncryption` (`encrypted`, `not_encrypted`, `unknown` — три состояния, а не булево: «предикат молчит» неотличим от «не зашифрован») |
 | Гейты | `Gate` (G1–G4) · `GateSource` (`internal`, `external`) · `GateVerdict` (`approved`, `rejected`) · `GatePolicy` (`external`, `waived`) |
@@ -89,11 +89,11 @@
 **Почему `interrupted` терминален.** Протухший `running` при открытии сеанса становится
 `interrupted`: тело краула не финализировано, поэтому это не `failed` и не `cancelled`. Без него в
 множестве терминальных `--follow` ждал бы вечно сеанс, который уже никто не исполняет
-(`core/cli/context.py:2332`).
+(`core/cli/context.py:2335`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
 (`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1214,1220`, `gate_delegated_external`/
-`gate_not_blocking` — `core/pipeline/runner.py:624,568`, `no_embedder` — на уровне CLI,
+`gate_not_blocking` — `core/pipeline/runner.py:625,568`, `no_embedder` — на уровне CLI,
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
 URL сейчас выражается не пропуском фазы, а zero-source причиной продукта (`ZERO_SOURCE_NO_URLS_ENTRY`,
@@ -162,10 +162,10 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 остаётся `❓` (I12).
 
 **I2c — класс отрицания против наблюдённого охвата** (`check_absence_coverage`,
-`core/domain/invariants.py:298`; исполняется в Ш6: `core/pipeline/evaluate.py:2106-2190`
-`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2156`,
-применяется к ячейке на `core/pipeline/evaluate.py:3249`, токен причины
-`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:230`). Условие `❌` зависит от **класса**, а не от
+`core/domain/invariants.py:298`; исполняется в Ш6: `core/pipeline/evaluate.py:2124-2208`
+`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2174`,
+применяется к ячейке на `core/pipeline/evaluate.py:3267`, токен причины
+`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:234`). Условие `❌` зависит от **класса**, а не от
 одной полноты краула: `explicit` (цитата вендора) и `authoritative` (энумерация) неполнотой не
 отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` требует
 `scope_acceptance` (принятия риска человеком); `unobserved`/`not_stated` дают `❓`. Нарушение →
@@ -175,7 +175,7 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 
 **I2d — у `❌` есть датированный носитель** (`check_absence_dated`,
 `core/domain/invariants.py:386`; исполняется в Ш6 `_enforce_dated_absence`,
-`core/pipeline/evaluate.py:2193-2303`, применяется к ячейке на `core/pipeline/evaluate.py:3267`).
+`core/pipeline/evaluate.py:2211-2321`, применяется к ячейке на `core/pipeline/evaluate.py:3285`).
 `❌` — утверждение не о сегодняшнем дне, а о **событии с датой**: носитель зависит от класса
 отрицания — `explicit`/`authoritative` требуют записи наблюдения (`observed_at`) **каждого**
 цитируемого документа, `bounded` — снятия **каждого** объявленного корня с `complete=1` и датой
@@ -263,7 +263,7 @@ min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` 
 
 **`extractor_zone` объявлено, но не действует (D-9).** Значения `edge|core|separate`
 (`core/config/deploy.py:97`, поле `core/config/deploy.py:768`) валидируются, но выбора реализации
-не делают: `RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3385`), а не
+не делают: `RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3369`), а не
 по этой оси.
 Экстрактор всегда в ядре; в `split` ядро получает байты через шов `extract/{upload,submit,collect,abort}`.
 Ось оставлена как объявление намерения — описывать её как работающий механизм нельзя.
@@ -365,7 +365,7 @@ def batched_search(index: VectorIndexPort,
 
 **`search_many` и `batched_search` — батч-путь, а не второй контракт.** Порт объявляет
 `search_many`, но реализации без своего батч-пути его не пишут: `batched_search` берёт метод
-через `getattr` и откатывается на цикл `search` (`core/ports/vector_index.py:110`). Смысл батча —
+через `getattr` и откатывается на цикл `search` (`core/ports/vector_index.py:117`). Смысл батча —
 прочитать партицию **один раз на набор запросов**; там, где реализация этого не умеет, вызовы
 эквивалентны поштучным, поэтому расширение контракта не ломает ни одну существующую реализацию
 (структурная типизация). `pipeline` вызывает только `batched_search` — одна точка вызова.
@@ -507,7 +507,7 @@ trafilatura) → EPUB (`extract_epub`, stdlib OCF, главы через тот 
 действуют) либо `text_layer` (собственный текстовый слой файла, `pypdfium2`, без моделей — уровням
 и устройству нечего объявлять). Композит получает отдельный `pdf`-адаптер (`extract_pdf_text`),
 который перехватывает **только** PDF-суффикс, оставляя Office docling'у
-(`core/cli/wiring.py:2288`). Явно выбранный `text_layer` при недоступном/сломанном бэкенде —
+(`core/cli/wiring.py:2272`). Явно выбранный `text_layer` при недоступном/сломанном бэкенде —
 `WiringError` → `EXIT_USAGE`, **не** тихая подмена (иначе `extractor_version` назвал бы движок,
 который не исполнялся).
 
@@ -729,10 +729,10 @@ class DiscoveryLLMPort(Protocol):
 §3.2 — `evaluate.py` его только исполняет, не выбирая.
 
 **Гейты как фазы (дельта после мержа гейтов).** `PHASES` — **15 фаз** в порядке исполнения
-(`core/pipeline/runner.py:132-148`): `normalize`, `lint`, `plan`, `g1`, `discovery`, `g2`,
+(`core/pipeline/runner.py:133-149`): `normalize`, `lint`, `plan`, `g1`, `discovery`, `g2`,
 `registry`, `inheritance`, `corpus`, `evaluate`, `review`, `g3`, `compute`, `g4`, `report`.
-`GATE_PHASES` (`core/pipeline/runner.py:151-156`) связывает имя фазы с доменным `Gate`: `g1`→G1, `g2`→G2, `g3`→G3,
-`g4`→G4; вложенность проверяется инвариантом (`core/pipeline/runner.py:160-163`).
+`GATE_PHASES` (`core/pipeline/runner.py:152-157`) связывает имя фазы с доменным `Gate`: `g1`→G1, `g2`→G2, `g3`→G3,
+`g4`→G4; вложенность проверяется инвариантом (`core/pipeline/runner.py:161-164`).
 * **Что блокирует прогон.** `NON_BLOCKING_GATES = {G1, G2, G3}` (`core/pipeline/gates.py:79`):
   нет действующего решения — фаза идёт дальше, а в `gate_decisions` пишется строка-политика
   (`actor=policy`, `external_ref=waiver:policy:nonblocking:{gate}`), которая в следе манифеста
@@ -742,7 +742,7 @@ class DiscoveryLLMPort(Protocol):
 * G1/G2 — **внутренняя аттестация** содержимого профиля пакета-якоря. Рабочий путь —
   per-run строка `gate_decisions` (аудит-след и override). Второй путь — durable
   `profile_attestation` в `state/{package}/state.db` (`core/pipeline/profile_attestation.py:313`,
-  `make_profile_gate` подключён в CLI, `core/cli/context.py:1653`): производитель у него есть —
+  `make_profile_gate` подключён в CLI, `core/cli/context.py:1656`): производитель у него есть —
   **человек** (`hound package profile attest`, `core/cli/package/commands.py:2997`), прогон строку
   только читает. Замер 30.10.2026: в реальных `state.db` — 0 строк, поэтому рабочим остаётся
   per-run путь; выдавать подпись за существующую нельзя, но и «производителя нет» уже неверно.
@@ -801,7 +801,7 @@ class DiscoveryLLMPort(Protocol):
 | `xml_safe.py` | ленивый доступ к `defusedxml` (единственное место, знающее про extra) |
 | `text_utils.py` | многоязычные текстовые утилиты (RU/EN) |
 | `cjk_lexical.py` | сегментация CJK для лексического контура: биграммы внутри прогонов (без зависимостей) |
-| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:148` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
+| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:265` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
 | `agreement.py` | согласие аннотаторов: Cohen's κ (§11.5) |
 | `cache.py` | глобальный content-addressed кэш внешних вызовов (R7, ADR 0016) |
 | `retry.py` | bounded retry/backoff с уважением `Retry-After` (S6) — вынесен из поискового адаптера: политика повторов общая, а провайдер — commodity |
@@ -938,10 +938,10 @@ pytest + `--cov` (`scripts/ci.sh:82-88`).
 | `09` онбординг/инкремент | §3.10 (`ProductStatePort`), §3.9 (контейнеры), §4 (`run_isolated`, resume/N4) |
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
-`core/pipeline/retrieve.py:148` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
+`core/pipeline/retrieve.py:265` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
 `core/domain/models.py:1508`; структура `ProtocolExhaustion` — `core/domain/models.py:1345`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2808` (`max_retries`), цикл
-`core/pipeline/evaluate.py:3120`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2826` (`max_retries`), цикл
+`core/pipeline/evaluate.py:3138`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
-строит вызывающий (`core/pipeline/evaluate.py:3000`).
+строит вызывающий (`core/pipeline/evaluate.py:3018`).

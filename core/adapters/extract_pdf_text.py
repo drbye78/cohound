@@ -22,12 +22,14 @@
 C1, включая ``\\f`` 0x0C) снимает единая граница очистки
 :func:`~core.util.sanitize.finalize_extracted_text` — она же нейтрализует каркас
 промпт-инъекций; вторая, своя чистка здесь разошлась бы с ней по набору символов и по
-порядку. Замер по корпусу: **2** управляющих символа на 16 073 страницы (``0x02`` —
+порядку. Замер по корпусу: **2** управляющих символа на 15 929 страниц (``0x02`` —
 ноль); символ не пробел и не буква, слово распадается на обрывки, а цитата evidence не
-находится по нормализованному тексту.
+находится по нормализованному тексту (25.10.2026,
+``2026-10-25-pdf-backend-alternatives.md``).
 
 **Пустая страница — видимый исход, а не пустой документ.** Замер по тому же корпусу:
-**183** страницы из 16 073 (**1.14 %**) не несут текстового слоя (сканы, векторная
+**182** страницы из 15 929 (**1.14 %**, 25.10.2026, ``2026-10-25-pdf-backend-alternatives.md``)
+не несут текстового слоя (сканы, векторная
 графика). Механизм ``text_layer`` их не читает, и
 молча вернуть пустой текст нельзя: документ «есть», а текста нет — это отказ извлечения
 (``error="no_text_layer"``), который фаза переводит в видимую запись, а не тихий ноль в
@@ -46,11 +48,15 @@ C1, включая ``\\f`` 0x0C) снимает единая граница оч
 :attr:`PdfiumDocumentExtractor.available` достаточно, а импорт на уровне модуля привязывал
 бы к бинарю pdfium любой процесс, который лишь импортировал composition root.
 
-Версия: ``pdfium-text-2`` (``-1`` → ``-2``: 02.11.2026 добавлена единая очистка текста
-до ``content_hash``, то есть изменился текст, а не только способ его чтения). Она —
-единственный штамп провенанса этого механизма и входит в ключ ``extract_cache``
-(``(content_hash, extractor_version, level)``), поэтому текст, произведённый другой
-сборкой pdfium **или другой очисткой**, не переиспользуется молча.
+Версия: ``pdfium-text-3:<версия pypdfium2>`` (:func:`pdfium_engine_build`). Ступени:
+``-1`` → ``-2`` (02.11.2026) — добавлена единая очистка текста до ``content_hash``, то есть
+изменился текст, а не только способ чтения; ``-2`` → ``-3`` (09.11.2026, план 26 O24) — в
+штамп добавлена **сборка движка**. До этого докстринг обещал защиту от «другой сборки
+pdfium», которой не было: апгрейд ``pypdfium2`` давал тот же ключ ``extract_cache``, и
+текст, прочитанный другим движком, переиспользовался молча. Штамп входит в ключ
+``extract_cache`` (``(content_hash, extractor_version, level)``) и в ``extractor_stack``
+(слагаемое ``run_id``), поэтому текст, произведённый другой сборкой pdfium **или другой
+очисткой**, не переиспользуется молча.
 
 Нейтрален (§1.3): библиотека упомянута как факт исполнения, не как предметная семантика.
 """
@@ -58,6 +64,7 @@ C1, включая ``\\f`` 0x0C) снимает единая граница оч
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import tempfile
 from pathlib import Path
@@ -67,19 +74,39 @@ from core.util.document_formats import FAMILY_TEXT, PDF_SUFFIX
 from core.util.sanitize import finalize_extracted_text
 
 __all__ = [
+    "PDFIUM_ADAPTER_FAMILY",
     "PDFIUM_ADAPTER_VERSION",
+    "PDFIUM_DISTRIBUTION",
     "PdfiumDocumentExtractor",
+    "pdfium_engine_build",
+    "pdfium_library_version",
     "strip_control_characters",
 ]
 
-#: Штамп версии механизма ``text_layer`` (провенанс + ключ ``extract_cache``).
+#: Семейство механизма ``text_layer`` — **префикс** штампа, а не полная версия.
+#:
+#: Полная версия — :func:`pdfium_engine_build` (``pdfium-text-3:<версия дистрибутива>``):
+#: одна и та же формула идёт в ``extractor_version`` (ключ ``extract_cache``/``pb``) и в
+#: ``extractor_stack`` (слагаемое ``run_id``), иначе две формулы разошлись бы молча (Д-8).
 #:
 #: ``-2`` (02.11.2026): текст механизма меняется — добавлена единая очистка
-#: (:func:`~core.util.sanitize.finalize_extracted_text`) **до** ``content_hash``. Без смены
-#: штампа конверт ``extract_cache`` прежней очистки обслуживался бы под тем же ключом:
-#: кэш вернул бы неочищенный текст, а провенанс назвал бы экстрактор, который такого
-#: текста уже не производит (Д-8). Смена штампа — однократный промах кэша, а не ошибка.
-PDFIUM_ADAPTER_VERSION = "pdfium-text-2"
+#: (:func:`~core.util.sanitize.finalize_extracted_text`) **до** ``content_hash``.
+#: ``-3`` (09.11.2026, план 26 O24): в штамп добавлена **сборка движка**. До этого
+#: константа обещала защиту от «другой сборки pdfium», которой не было: апгрейд
+#: ``pypdfium2`` давал тот же ключ кэша, и текст, прочитанный другим движком, молча
+#: переиспользовался. Смена штампа — однократный промах кэша, а не ошибка.
+PDFIUM_ADAPTER_FAMILY = "pdfium-text-3"
+
+#: Прежнее имя полной версии механизма — сохранено как **алиас семейства**.
+#:
+#: Читатели, которым нужна только «какая это ступень механизма» (докстринги, отчёты),
+#: продолжают называть константу; значение полной версии даёт :func:`pdfium_engine_build`.
+#: Держать здесь полную строку нельзя: она зависит от установленного дистрибутива, то есть
+#: от хоста, а константа модуля — нет.
+PDFIUM_ADAPTER_VERSION = PDFIUM_ADAPTER_FAMILY
+
+#: Имя дистрибутива, чья версия входит в штамп (``importlib.metadata``, без импорта).
+PDFIUM_DISTRIBUTION = "pypdfium2"
 
 #: Разделитель страниц: пустая строка — граница абзаца для абзацного чанкера
 #: (``FamilyChunker`` → ``TextChunker`` при ``family="text"``).
@@ -108,6 +135,39 @@ def strip_control_characters(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def pdfium_library_version() -> str:
+    """Версия установленного дистрибутива ``pypdfium2`` — **единственный** источник (O24).
+
+    Читаются метаданные (``importlib.metadata``), а не ``import pypdfium2``: импорт грузит
+    нативный бинарь и недопустим ни на старте прогона, ни в воркере ради строки версии.
+    Отсутствие пакета — честный ``"unknown"``: версия не выдумывается (A3), и значение
+    попадает в штамп как есть.
+
+    Почему это вообще в штампе. До 09.11.2026 ``PDFIUM_ADAPTER_VERSION`` был константой,
+    а докстринг модуля обещал, что текст «другой сборки pdfium» не переиспользуется
+    молча. Обещания не было: две версии дистрибутива давали **один** ключ
+    ``extract_cache``, и апгрейд движка переиспользовал старый текст под прежним
+    провенансом. Штамп без сборки — это не «неточность», а ложная запись о том, чем
+    прочитан документ.
+    """
+    try:
+        return importlib.metadata.version(PDFIUM_DISTRIBUTION)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+    except Exception:  # noqa: BLE001 — битые метаданные не роняют резолв версии
+        return "unknown"
+
+
+def pdfium_engine_build() -> str:
+    """Сборка механизма: ``pdfium-text-3:<версия дистрибутива>`` (план 26, O24).
+
+    Одна формула на два носителя — ``extractor_version`` документа (ключ
+    ``extract_cache``, слагаемое ``pb``) и ``extractor_stack`` (слагаемое ``run_id``):
+    две независимые формулы разошлись бы молча (Д-8).
+    """
+    return f"{PDFIUM_ADAPTER_FAMILY}:{pdfium_library_version()}"
+
+
 def pdfium_installed() -> bool:
     """Есть ли ``pypdfium2`` в окружении — проверка **без импорта** (``find_spec``)."""
     try:
@@ -123,13 +183,16 @@ class PdfiumDocumentExtractor:
     ``extract_path`` — рабочие входы, обёртка маршрута — :class:`core.cli.wiring._LocalExtractor`
     (та же схема, что у docling).
 
-    :param version: штамп провенанса; по умолчанию :data:`PDFIUM_ADAPTER_VERSION`.
+    :param version: штамп провенанса; по умолчанию :func:`pdfium_engine_build` — то же
+        значение, что уходит в ``extractor_stack``. Резолв идёт в конструкторе, а не в
+        дефолте аргумента: дефолт вычислился бы при импорте модуля и застыл бы до конца
+        процесса, тогда как сборка дистрибутива — свойство хоста.
     """
 
     supports_source_path = True
 
-    def __init__(self, *, version: str = PDFIUM_ADAPTER_VERSION) -> None:
-        self.version = version
+    def __init__(self, *, version: str | None = None) -> None:
+        self.version = version if version is not None else pdfium_engine_build()
 
     @property
     def available(self) -> bool:
@@ -211,6 +274,15 @@ class PdfiumDocumentExtractor:
         текстом: пустые страницы — часть документа, и скрывать их значило бы завышать
         долю прочитанного.
 
+        **Лист без текстового слоя — видимая частичность, а не тихий успех.** Прочитанная
+        страница с пустым текстом не попадает в ``failed`` (pdfium не отказал), но и не
+        даёт текста; без отдельного счётчика документ «прочитано 7 из 2763» был бы
+        неотличим от прочитанного целиком. Поэтому такие страницы считаются, документ
+        получает ``partial=True`` с ``pages_without_text_layer`` в причине, а
+        ``pages_converted`` вычитает их. Документ, где пусты **все** страницы, остаётся
+        ``no_text_layer`` (``partial`` без текста запрещён инвариантом). OCR-fallback здесь
+        не вводится: это отдельный замер (план 26, O35), а не следствие видимости.
+
         **Очистка — до ``content_hash``.** Склеенный текст проходит
         :func:`~core.util.sanitize.finalize_extracted_text` (управляющие символы +
         нейтрализация каркаса промпт-инъекций) — ту же единую границу, что у HTML,
@@ -223,6 +295,13 @@ class PdfiumDocumentExtractor:
         pdf = pdfium.PdfDocument(path)
         pages: list[str] = []
         failed: list[int] = []
+        # Страница **прочитана**, но текстового слоя в ней нет (``get_text_range()``
+        # вернул пустую строку). Это не отказ pdfium и не отсутствие страницы: лист
+        # сканирован. Считать такие страницы обязательно: пустая строка в склейке
+        # неотличима от отсутствующей, поэтому без счётчика «прочитано 7 из 2763»
+        # выглядело бы как «прочитано всё», а молчание страницы ниже по потоку
+        # превратилось бы в «вендор не заявил» → ``❌`` (I2/I2c).
+        pages_without_text_layer: list[int] = []
         try:
             page_count = len(pdf)
             for index in range(page_count):
@@ -231,7 +310,7 @@ class PdfiumDocumentExtractor:
                     try:
                         textpage = page.get_textpage()
                         try:
-                            pages.append(textpage.get_text_range())
+                            chunk = textpage.get_text_range()
                         finally:
                             textpage.close()
                     finally:
@@ -242,6 +321,10 @@ class PdfiumDocumentExtractor:
                     # с ``error``, то есть прочитанные страницы терялись целиком. Страницы
                     # без текстового слоя сюда не попадают — у них текст пустой, а не отказ.
                     failed.append(index + 1)
+                    continue
+                pages.append(chunk)
+                if not chunk.strip():
+                    pages_without_text_layer.append(index + 1)
         finally:
             pdf.close()
         text = finalize_extracted_text(
@@ -256,9 +339,9 @@ class PdfiumDocumentExtractor:
                     f"pdfium: страниц не прочитано {len(failed)} из {page_count} "
                     f"({_page_list(failed)}), текстового слоя нет"
                 )
-            # Страницы без текстового слоя — 183 из 16 073 (1.14% корпуса): молчаливый
-            # пустой документ
-            # сделал бы их неотличимыми от «прочитали и ничего не нашли».
+            # Страницы без текстового слоя — 182 из 15 929 (1.14 % якорного PDF-корпуса,
+            # замер 25.10.2026, `2026-10-25-pdf-backend-alternatives.md`): молчаливый
+            # пустой документ сделал бы их неотличимыми от «прочитали и ничего не нашли».
             return ExtractedDoc(
                 text="",
                 content_hash=_sha256(""),
@@ -267,10 +350,23 @@ class PdfiumDocumentExtractor:
                 error="no_text_layer",
                 family=FAMILY_TEXT,
             )
-        if failed:
+        if failed or pages_without_text_layer:
             # Частичный результат — документ, а не отказ (симметрия с docling
             # ``PARTIAL_SUCCESS``): текст прочитанных страниц обязан попасть в корпус, но
             # частичность видна, чтобы «прочитано 3 из 665» не выдавалось за полный документ.
+            # Две причины называются раздельно, потому что это разные факты: страница не
+            # прочиталась (отказ pdfium) и страница прочитана без текстового слоя (скан).
+            reasons: list[str] = []
+            if failed:
+                reasons.append(
+                    f"страниц не прочитано {len(failed)} из {page_count} "
+                    f"({_page_list(failed)})"
+                )
+            if pages_without_text_layer:
+                reasons.append(
+                    f"pages_without_text_layer: {len(pages_without_text_layer)} из "
+                    f"{page_count} ({_page_list(pages_without_text_layer)})"
+                )
             return ExtractedDoc(
                 text=text,
                 content_hash=_sha256(text),
@@ -279,12 +375,15 @@ class PdfiumDocumentExtractor:
                 family=FAMILY_TEXT,
                 partial=True,
                 partial_reason=(
-                    f"pdfium: страниц не прочитано {len(failed)} из {page_count} "
-                    f"({_page_list(failed)}); текст прочитанных страниц"
+                    "pdfium: " + "; ".join(reasons) + "; текст прочитанных страниц"
                 ),
-                # Число прочитанных страниц — измеренная величина (документ минус
-                # отказы), а не оценка: без неё «частично» не отличить от «почти всё».
-                pages_converted=page_count - len(failed),
+                # Число прочитанных страниц — измеренная величина (документ минус отказы
+                # минус листы без слоя), а не оценка: без неё «частично» не отличить от
+                # «почти всё». Пустая страница здесь именно вычитается — она не дала
+                # текста, и считать её прочитанной значило бы завысить объём.
+                pages_converted=(
+                    page_count - len(failed) - len(pages_without_text_layer)
+                ),
             )
         return ExtractedDoc(
             text=text,

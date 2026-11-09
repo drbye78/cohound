@@ -414,7 +414,7 @@ M0 должен давать **сквозной вертикальный сре�
   иммутабельные сборки; кэш внешних вызовов; `failed` как состояние ячейки.
 - **0011 — заменён** решением владельца 26.10.2026: G1/G2/G3 **не блокируют** прогон (фаза
   пишет waiver с `actor="policy"` — `core/pipeline/gates.py:79` `NON_BLOCKING_GATES`,
-  `core/pipeline/runner.py:533`); блокируют только G4 и явный `rejected` — см. 0023, `04` §E.
+  `core/pipeline/runner.py:534`); блокируют только G4 и явный `rejected` — см. 0023, `04` §E.
 - 0012 — accepted и **реализовано** (T1.2/T1.3): расщепление бывших `core/schemas.py`/`core/db.py`
   на слои (`domain/`, `store/`); transitional-шимы удалены.
 - 0013–0017 — accepted (ревью-гейт): гранулярность индексной сборки и provenance ячеек; SERP-петля
@@ -444,7 +444,7 @@ M0 должен давать **сквозной вертикальный сре�
   публикуется (`cells.absence_as_of`) — `04` §E.
 
 ✅ проверено на `2af6d1e` (код-носители): 0001–0010 — `core/ports/*` + `core/domain/*`;
-0011 — `core/pipeline/gates.py:79` + `core/pipeline/runner.py:533`;
+0011 — `core/pipeline/gates.py:79` + `core/pipeline/runner.py:534`;
 0012 — шимы `core/schemas.py`/`core/db.py` **удалены** (`ls` → No such file); 0018/0019 —
 `core/edge/server.py`, `contracts/seam/openapi.json`; 0020 — знаменатель `scope_universe`
 (`core/pipeline/compute.py:184`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);

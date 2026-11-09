@@ -133,6 +133,40 @@ def test_legacy_envelope_without_family_reads_as_markdown_compatible(tmp_path: P
     assert restored.family is None
 
 
+def test_legacy_envelope_without_ocr_probe_reads_unknown(tmp_path: Path) -> None:
+    """Конверт без поля — «не проверено», а не «проверено и работает».
+
+    Отсутствие факта не является фактом: старый конверт писался до появления пробы, и
+    читать его как ``ok`` значило бы снова спрятать деградацию проверки. Бампа формата
+    не требуется: поле аддитивное.
+    """
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A))
+
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.ocr_probe == "unknown"
+
+
+def test_round_trip_preserves_ocr_probe(tmp_path: Path) -> None:
+    """Исход пробы переживает кэш: иначе хит выдавал бы себя за проверенный."""
+    cache = ExtractionCache(tmp_path / "cache")
+    doc = ExtractedDoc(
+        text="pdf text",
+        content_hash=content_hash("pdf text"),
+        extractor_version="ext-1",
+        page_count=3,
+        ocr_probe="unsupported",
+    )
+
+    cache.put(doc, level="full", content_hash=RAW_A)
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.ocr_probe == "unsupported"
+
+
 def test_round_trip_keeps_text_hash_separate_from_key(tmp_path: Path) -> None:
     """Ключ (хеш сырья) и ``doc_content_hash`` (хеш текста) — разные величины."""
     cache = ExtractionCache(tmp_path / "cache")

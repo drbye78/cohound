@@ -10,17 +10,23 @@
   {
     "case_id": "case_pdf",
     "format": "pdf",
-    "raw_b64": "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyA+PgplbmRvYmoKdHJhaWxlcgo8PCAvUm9vdCAxIDAgUiA+PgolJUVPRgo=",
-    "expected_substrings": ["Catalog"],
-    "forbidden_substrings": [],
-    "min_chars": 1
+    "raw_path": "extraction_golden/document.pdf",
+    "expected_substrings": ["distinctive alpha sentence", "omega conclusion"],
+    "forbidden_substrings": ["Catalog", "/Type", "endobj"],
+    "min_chars": 250
+  },
+  {
+    "case_id": "case_pdf_scan",
+    "format": "pdf",
+    "raw_path": "extraction_golden/scan.pdf",
+    "expect_error": "no_text_layer"
   },
   {
     "case_id": "case_docx",
     "format": "docx",
-    "raw_b64": "UEsDBBQAAABmYWtlLW9mZmljZS1wYXlsb2FkLWZvci1nb2xkZW4=",
-    "expected_substrings": [],
+    "raw_path": "extraction_golden/document.docx",
+    "expected_substrings": ["unique word kumquat", "narwhal"],
     "forbidden_substrings": [],
-    "min_chars": 0
+    "min_chars": 80
   }
 ]

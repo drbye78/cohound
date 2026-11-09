@@ -59,6 +59,7 @@ from core.pipeline.digests import (
 from core.pipeline.eval_cache import EvalConditions, catalog_row_digest
 from core.pipeline.idempotency import evidence_id_for
 from core.pipeline.prompt import TEMPLATE_VERSION
+from core.pipeline.retrieve import retrieval_params
 from core.ports.state import CellMeasurementRow, ProductStatePort
 from core.ports.store import StorePort
 from core.ports.vector_index import RetrievalResult
@@ -292,8 +293,14 @@ def _retrieval_key_parts(
         return None, None, None, None
     profile = retrieval.profile or None
     cutoff = int(retrieval.cutoff_K) if retrieval.cutoff_K else None
+    # Тот же сериализатор, что у провенанса ячейки (``evaluate._provenance``): иначе
+    # ключ переноса и ячейка описывали бы условия по-разному (план 26 O2).
     params = json.dumps(
-        {"profile": retrieval.profile, "cutoff_K": retrieval.cutoff_K},
+        retrieval_params(
+            profile=retrieval.profile,
+            cutoff_k=retrieval.cutoff_K,
+            rrf_k=retrieval.rrf_k,
+        ),
         ensure_ascii=False,
         sort_keys=True,
     )

@@ -37,7 +37,7 @@ from core.cli.wiring import (
     build_lite_embedder,
     build_store,
 )
-from core.domain import Gate, LLMCellOutput, ProductScope, Status
+from core.domain import Gate, IndexManifestEntry, LLMCellOutput, ProductScope, Status
 from core.pipeline import (
     GATE_PHASES,
     IMPLEMENTED_PHASES,
@@ -1117,6 +1117,7 @@ def test_cmd_run_rerun_contract_carries_adopted_retrieval(tmp_path: Path) -> Non
     from core.pipeline.digests import cohort_digest, seeds_digest
     from core.pipeline.normalize import load_inputs
     from core.pipeline.onboarding import load_effective_seeds
+    from core.pipeline.retrieve import retrieval_params_json
     from core.pipeline.run_identity import build_execution_contract
 
     package = valid_package(tmp_path)
@@ -1159,10 +1160,18 @@ def test_cmd_run_rerun_contract_carries_adopted_retrieval(tmp_path: Path) -> Non
         "crawl_policy_digest": policy_digest,
     }
     adopted = build_execution_contract(
-        inputs, retrieval_profile="R2", cutoff_K=7, **common
+        inputs,
+        retrieval_profile="R2",
+        cutoff_K=7,
+        retrieval_params_json=retrieval_params_json(profile="R2", cutoff_k=7),
+        **common,
     )
     unadopted = build_execution_contract(
-        inputs, retrieval_profile=None, cutoff_K=None, **common
+        inputs,
+        retrieval_profile=None,
+        cutoff_K=None,
+        retrieval_params_json=retrieval_params_json(profile=None, cutoff_k=None),
+        **common,
     )
     assert manifest.retrieval_profile == "R2"
     assert manifest.execution_contract_digest == adopted
@@ -1266,6 +1275,52 @@ def test_cmd_run_rerun_adopts_measured_fixation_into_cells(tmp_path: Path) -> No
     assert manifest.retrieval_profile == "R2"
     assert manifest.retrieval_cutoff_K == 7
     assert manifest.settings_provenance["retrieval_profile"]["source"] == "measured"
+
+
+def test_cmd_run_until_evaluate_refuses_embedder_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """O1 плана 26: ``run --until evaluate`` (корпус уже ``ok``) — видимый ``EXIT_USAGE``.
+
+    Дыра была именно здесь: фаза корпуса пропущена, запросный эмбеддер никем не сверялся
+    со сборкой. Отказ обязан быть usage-ошибкой (``EmbedderBuildMismatch``), а не
+    ``failed``-фазой или ячейкой.
+    """
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    run_id = "embed-mismatch"
+    setup = run_argv(
+        package, run_id=run_id, db=db, runs_dir=runs_dir, until="plan"
+    )
+    assert main(setup) == EXIT_OK
+    with build_store(db) as store:
+        # Корпус уже ``ok`` — ровно случай, когда `--until evaluate` его не повторяет.
+        for phase in ("g1", "discovery", "g2", "registry", "inheritance", "corpus"):
+            store.set_phase_state(run_id, phase, "ok")
+        store.save_index_manifest(
+            IndexManifestEntry(
+                index_build_id="ib_fake",
+                partition_build_id="pb_fake",
+                product_id="p1",
+                embed_model_id="other-model@rev2",
+            )
+        )
+
+    ports = _retrieval_ports()
+    ports.embedder = FakeEmbedder(model_id="model@rev1")
+    argv = run_argv(
+        package,
+        run_id=run_id,
+        db=db,
+        runs_dir=runs_dir,
+        until="evaluate",
+        extra=("--retrieval-profile", "R1"),
+    )
+    assert main(argv, ports=ports) == EXIT_USAGE
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "model@rev1" in output and "other-model@rev2" in output
 
 
 def test_cmd_run_injected_profile_reaches_cells(tmp_path: Path) -> None:

@@ -644,6 +644,17 @@ def _retrieval_eval() -> None:
     _assert(abs(report.hit_at_k - 2 / 3) < 1e-9)     # c1 ранк2, c2 ранк1, c9 нет
     _assert(abs(report.recall_at_k - 2 / 3) < 1e-9)
     _assert(report.mrr > 0.0)
+    # O4: c9 не встретился ни в одной выдаче → неразрешённый ожидаемый id (1 из 3).
+    # Без ``known_ids`` это «ни разу не пришёл», а не «нет в сборке» — см. докстринг.
+    _assert(report.expected_ids_total == 3)
+    _assert(report.unresolved_expected_ids == 1)
+    _assert(report.unresolved_expected_examples == ("c9",))
+    # С известным множеством сборки c9 существует, просто не найден → неразрешённых нет.
+    known = evaluate_retrieval(
+        queries, lambda q, k: ranking.get(q, []), k=5, known_ids={"c9"}
+    )
+    _assert(known.unresolved_expected_ids == 0)
+    _assert(known.recall_at_k == report.recall_at_k)  # метрика не подменена
     # I20: cut-off K усекает ранжирование.
     short = evaluate_retrieval(queries, lambda q, k: ranking.get(q, []), k=1)
     _assert(abs(short.hit_at_k - 1 / 3) < 1e-9)      # только c2 на ранке 1

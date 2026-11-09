@@ -129,7 +129,7 @@ from core.pipeline.resources import (
     build_resources_block,
     mem_budget_provenance,
 )
-from core.pipeline.retrieve import RetrievalProfile
+from core.pipeline.retrieve import RetrievalProfile, retrieval_params_json
 from core.pipeline.run_identity import (
     RunIdentity,
     build_execution_contract,
@@ -798,6 +798,13 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         declared=declared,
         retrieval_profile=getattr(args, "retrieval_profile", None),
         cutoff_K=getattr(args, "cutoff_k", None),
+        # План 26 O2: параметры, которые **реально исполнены** (rrf_k/пул/запросы/
+        # слияние), а не только объявленные профиль/K. Это условие измерения: смена
+        # любого меняет доказательства, поэтому поле входит в ``run_id``.
+        retrieval_params_json=retrieval_params_json(
+            profile=getattr(args, "retrieval_profile", None),
+            cutoff_k=getattr(args, "cutoff_k", None),
+        ),
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,
         # План 19 §6.3: ось ``frozen_source`` — объявленный вход, канонизируемый в ``n/a``
@@ -845,6 +852,12 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 declared=declared,
                 retrieval_profile=args.retrieval_profile,
                 cutoff_K=args.cutoff_k,
+                # План 26 O2: та же формула, что у первого вызова, — иначе усыновлённый
+                # профиль/K описал бы контракт, но не исполненные параметры.
+                retrieval_params_json=retrieval_params_json(
+                    profile=args.retrieval_profile,
+                    cutoff_k=args.cutoff_k,
+                ),
                 status_dict_version=status_dict_version,
                 crawl_policy_digest=policy_resolution.digest,
                 frozen_source=getattr(args, "frozen_source", None),

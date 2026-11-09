@@ -126,8 +126,11 @@ from core.pipeline.prompt import (
 )
 from core.pipeline.retrieve import (
     DEFAULT_RRF_K,
+    MAX_QUERIES,
+    EmbedderBuildMismatch,
     RetrievalProfile,
     RetrievalResult,
+    retrieval_params,
     retrieve,
 )
 from core.pipeline.runner import PhaseResult, Ports
@@ -156,6 +159,7 @@ __all__ = [
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
     "DENIAL_QUOTE_WITHOUT_MARKERS",
+    "EMBED_BUILD_UNVERIFIED_REASON",
     "LLM_CALL_OUTCOMES",
     "NO_FRAGMENTS_REASON",
     "RETRYABLE_FAILURE_KINDS",
@@ -675,8 +679,12 @@ _NOISE_DENIAL_STRENGTHS: frozenset[DenialStrength] = frozenset(
 #: ``input_value`` и легко достигает килобайтов, после чего артефакт перестаёт читаться.
 VALIDATION_NOTE_LIMIT = 400
 
-#: Максимум запросов на ячейку (S13/I16): title + концепт-термины ru → en.
-MAX_QUERIES = 3
+#: Маркер «эмбеддер процесса не сверен со сборкой партиции» (план 26 O1).
+#: Пишется в ``validation_notes`` ячеек, а не в статус: пустой ``model_id`` с любой
+#: стороны — **отсутствие факта**, а не факт отсутствия (A3), поэтому это наблюдение,
+#: а не отказ. Расхождение двух известных id — наоборот, отказ
+#: (:class:`EmbedderBuildMismatch`).
+EMBED_BUILD_UNVERIFIED_REASON = "embed_build_unverified"
 
 #: Дефолтный профиль ретривала фазы оценки, если оркестратор его не задал (I16).
 #: В проде профиль фиксируется в ``RunConfig``/манифесте; здесь — безопасный baseline.
@@ -1205,6 +1213,9 @@ def retrieve_for_cell(
         profile=resolved_profile.value,
         cutoff_K=cutoff_k,
         build_id=build_id,
+        # Исполненная RRF-константа: обратное чтение (``_cell_condition``) вернёт её в
+        # повтор, а не подставит дефолт (план 26 O2).
+        rrf_k=rrf_k,
     )
 
 
@@ -1228,8 +1239,15 @@ def _provenance(
         return None, None, None
     build_id = next((r.build_id for r in items if r.build_id), None)
     first = items[0]
+    # Один сериализатор исполненных параметров (план 26 O2): ключ переноса и провенанс
+    # ячейки описывают условия одинаково. ``rrf_k`` — из среза: повтор обязан исполнить
+    # то же значение, а не константу модуля.
     params = json.dumps(
-        {"profile": first.profile, "cutoff_K": first.cutoff_K},
+        retrieval_params(
+            profile=first.profile,
+            cutoff_k=first.cutoff_K,
+            rrf_k=first.rrf_k,
+        ),
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -3994,6 +4012,19 @@ def evaluate_phase(
     # читатель отчёта не отличит прогон с объявленным ``max_retries=0`` от дефолта.
     # Durable-копии нет; при необходимости её место — колонка прогона, а не лог фазы.
     log_entries.append(f"evaluate: max_retries={resolved_max_retries}")
+    # План 26 O1: сверка «эмбеддер процесса = сборка партиции» — **до** любых
+    # ``precompute_*`` и вне их ``except Exception``. Внутри try отказ был бы проглочен и
+    # стал бы строкой в ``errors``, а поиск молча пошёл бы поштучно под чужим эмбеддером.
+    # R0 dense-плечо не использует — проверка не применяется (``None``).
+    embed_note = assert_embedder_matches_partition(
+        getattr(ports, "embedder", None),
+        getattr(ports, "vector_index", None),
+        store,
+        str(run_id),
+        profile=resolved_profile,
+    )
+    if embed_note is not None:
+        log_entries.append(f"evaluate: {embed_note}")
     # V7: аудит исполненных промптов. Архив живёт в фазе, а не в ячейке: путь артефакта —
     # свойство прогона, и ячейка не должна знать раскладку ``runs/``.
     prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
@@ -4370,6 +4401,20 @@ def evaluate_phase(
     log_entries.append(
         f"evaluate: cells_measured={measured_total} cells_carried={carried_total}"
     )
+    # План 26 O1: маркер «эмбеддер не сверен со сборкой» — на ячейки **этого** прогона.
+    # Перенесённую ячейку не трогаем: она не ретривалась здесь, и запись о сверке
+    # описывала бы чужое измерение. Ячейку высокого источника (реестр/наследование)
+    # тоже не трогаем — её писал не Ш6.
+    if embed_note is not None:
+        for index, cell in enumerate(cells):
+            if cell.measurement_origin is MeasurementOrigin.CARRIED:
+                continue
+            if (cell.product_id, cell.param_id) in protected_cells:
+                continue
+            updated = _with_embed_note(cell, embed_note)
+            if updated is not cell:
+                cells[index] = updated
+                store.save_cell(updated)
 
     return PhaseResult(
         status="ok",
@@ -4629,15 +4674,20 @@ def _revalidation_summary(report: RevalidationReport) -> str:
     return "; ".join(parts)
 
 
-def _cell_condition(cell: Cell) -> tuple[str, str, int]:
-    """Условия измерения **самой ячейки**: ``(product_id, профиль, cutoff_K)``.
+def _cell_condition(cell: Cell) -> tuple[str, str, int, int]:
+    """Условия измерения **самой ячейки**: ``(product_id, профиль, cutoff_K, rrf_k)``.
 
     Пере-оценка не вводит новых условий: она повторяет условия, под которыми ячейка была
     получена (``retrieval_profile``/``retrieval_params_json``, R7/I16/I20). Профиль из
     манифеста — лишь fallback для исторических строк без полей.
+
+    ``rrf_k`` читается из ``retrieval_params_json`` (план 26 O2): без этого повтор всегда
+    исполнял бы константу модуля и описывал бы в JSON одно, а исполнял другое. Ячейка без
+    поля (старый прогон) получает :data:`DEFAULT_RRF_K` — то, что исполнялось тогда.
     """
     profile = str(cell.retrieval_profile or DEFAULT_RETRIEVAL_PROFILE.value)
     cutoff = DEFAULT_RETRIEVAL_CUTOFF_K
+    rrf_k = DEFAULT_RRF_K
     raw = cell.retrieval_params_json
     if raw:
         try:
@@ -4648,7 +4698,10 @@ def _cell_condition(cell: Cell) -> tuple[str, str, int]:
             value = parsed.get("cutoff_K")
             if isinstance(value, int) and value > 0:
                 cutoff = int(value)
-    return str(cell.product_id), profile, cutoff
+            value = parsed.get("rrf_k")
+            if isinstance(value, int) and value > 0:
+                rrf_k = int(value)
+    return str(cell.product_id), profile, cutoff, rrf_k
 
 
 def _accepted_risk(cell: Cell) -> str | None:
@@ -4673,6 +4726,100 @@ def _current_build_id(store: StorePort, run_id: str) -> str | None:
     except Exception:  # noqa: BLE001 — чтение провенанса не должно ронять команду
         return None
     return getattr(ref, "index_build_id", None) or None
+
+
+def _build_embed_model_ids(
+    store: StorePort,
+    run_id: str,
+    vector_index: VectorIndexPort | None,
+) -> list[str]:
+    """``embed_model_id`` продукт-партиций текущей сборки (пусто — сборка не удостоверена).
+
+    Источник — ``index_manifest`` в БД: ``vector_index.build_id`` — композиция (``cb_…``),
+    а её строки несут ``embed_model_id`` каждой партиции. Если порт называет не
+    композицию (legacy: один ``build_id`` на все продукты), берётся
+    ``runs.index_build_id`` прогона. Сбой чтения — «не удостоверено», а не отказ: это
+    отсутствие факта, и оно видно маркером, а не выдуманным совпадением (A3).
+    """
+    lister = getattr(store, "iter_index_manifest", None)
+    if not callable(lister):
+        return []
+    candidates: list[str] = []
+    port_build = str(getattr(vector_index, "build_id", "") or "")
+    if port_build:
+        candidates.append(port_build)
+    run_build = _current_build_id(store, run_id)
+    if run_build and run_build not in candidates:
+        candidates.append(run_build)
+    for build_id in candidates:
+        try:
+            entries = list(lister(build_id))
+        except Exception:  # noqa: BLE001, S112 — сбой чтения = «не удостоверено»
+            continue
+        models = [
+            str(entry.embed_model_id)
+            for entry in entries
+            if getattr(entry, "embed_model_id", None)
+        ]
+        if models:
+            return models
+    return []
+
+
+def assert_embedder_matches_partition(
+    embedder: EmbedderPort | None,
+    vector_index: VectorIndexPort | None,
+    store: StorePort | None,
+    run_id: str,
+    *,
+    profile: RetrievalProfile | str | None,
+) -> str | None:
+    """Сверяет эмбеддер процесса с эмбеддером сборки **перед** dense-плечом (план 26 O1).
+
+    Проверка стоит в точке, где dense-плечо реально используется, а не только в CLI
+    эксперимента: ``run --until evaluate`` и ``retry`` пропускают фазу корпуса, и
+    запросное плечо там никем не сверялось. Два одинаково размерных эмбеддера давали
+    бы скор под чужим ``run_id`` молча.
+
+    Правила (A3):
+
+    - ``R0`` dense-плечо не использует — проверка не применяется вовсе (иначе отказ
+      был бы ложным: эмбеддер не участвует в измерении);
+    - оба id известны и различаются — :class:`EmbedderBuildMismatch` (отказ,
+      ``EXIT_USAGE``-класс), не ``failed``-ячейка и не ``❓``;
+    - пустой ``model_id`` с **любой** стороны или неизвестная сборка (``build_id`` пуст,
+      манифеста нет, у store нет ``iter_index_manifest``) — не отказ: отсутствие факта
+      не факт отсутствия. Возвращается маркер
+      :data:`EMBED_BUILD_UNVERIFIED_REASON`, который пишется в ``validation_notes``.
+
+    :returns: ``None`` — сверка прошла или не требуется; маркер — сверить нечем.
+    """
+    resolved = _as_profile(
+        profile if profile is not None else DEFAULT_RETRIEVAL_PROFILE
+    )
+    if resolved is RetrievalProfile.R0:
+        return None
+    query_model = str(getattr(embedder, "model_id", "") or "")
+    if store is None:
+        return EMBED_BUILD_UNVERIFIED_REASON
+    build_models = _build_embed_model_ids(store, str(run_id), vector_index)
+    if not query_model or not build_models:
+        return EMBED_BUILD_UNVERIFIED_REASON
+    for build_model in build_models:
+        if build_model != query_model:
+            raise EmbedderBuildMismatch(query_model, build_model)
+    return None
+
+
+def _with_embed_note(cell: Cell, note: str | None) -> Cell:
+    """Добавляет маркер сверки эмбеддера в ``validation_notes`` (идемпотентно)."""
+    if not note or note in cell.validation_notes:
+        return cell
+    return cell.model_copy(
+        update={
+            "validation_notes": _compact_notes([*cell.validation_notes, note])
+        }
+    )
 
 
 def _no_material_reason(
@@ -4781,6 +4928,9 @@ class _CellAttempt:
     detail: str | None = None
     retrieval_s: float = 0.0
     evaluation_s: float = 0.0
+    #: Маркер «эмбеддер не сверен со сборкой» (план 26 O1); ``None`` — сверка прошла или
+    #: dense-плечо не используется (R0). Пишется вызывающим в ``validation_notes``.
+    embed_note: str | None = None
 
 
 def _evaluate_cells_by_condition(
@@ -4828,13 +4978,18 @@ def _evaluate_cells_by_condition(
         # Вызывающие проверяют это до входа (``refused``), но шаг не имеет права
         # молча оценивать «без прибора»: отсутствие оценщика — отказ, а не пустой исход.
         raise ValueError("оценщик не сконфигурирован: ретривал без оценки невозможен")
-    groups: dict[tuple[str, str, int], list[Cell]] = {}
+    groups: dict[tuple[str, str, int, int], list[Cell]] = {}
     for cell in targets:
         groups.setdefault(_cell_condition(cell), []).append(cell)
 
     # I2d: даты наблюдения артефактов — один снимок на продукт и на вызов (группы
     # одного продукта различаются профилем/K, корпус у них общий).
     dates_by_product: dict[str, CorpusArtifactDates | None] = {}
+    # План 26 O1: сверка «эмбеддер процесса = сборка партиции» — один раз на профиль,
+    # **до** ``precompute_*`` и вне их ``except Exception``: иначе отказ стал бы строкой
+    # в ``errors`` и поиск молча пошёл бы поштучно под чужим эмбеддером. ``R0`` сюда не
+    # доходит по существу (``assert_embedder_matches_partition`` вернёт ``None``).
+    embed_notes: dict[str, str | None] = {}
 
     def _evaluate_one(
         cell: Cell,
@@ -4884,10 +5039,19 @@ def _evaluate_cells_by_condition(
             evaluation_s=time.monotonic() - started,
         )
 
-    for product_id, profile, cutoff in sorted(groups):
+    for product_id, profile, cutoff, rrf_k in sorted(groups):
         group = sorted(
-            groups[(product_id, profile, cutoff)], key=lambda c: str(c.param_id)
+            groups[(product_id, profile, cutoff, rrf_k)], key=lambda c: str(c.param_id)
         )
+        if profile not in embed_notes:
+            embed_notes[profile] = assert_embedder_matches_partition(
+                getattr(ports, "embedder", None),
+                getattr(ports, "vector_index", None),
+                store,
+                str(run_id),
+                profile=profile,
+            )
+        embed_note = embed_notes[profile]
         group_params = [catalog[str(cell.param_id)] for cell in group]
         try:
             query_vectors = precompute_query_vectors(
@@ -4944,6 +5108,7 @@ def _evaluate_cells_by_condition(
                     embedder=getattr(ports, "embedder", None),
                     query_vectors=query_vectors,
                     dense_by_query=dense_by_query,
+                    rrf_k=rrf_k,
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(
@@ -4954,6 +5119,7 @@ def _evaluate_cells_by_condition(
                     error_kind="retrieval_failed",
                     detail=f"{type(exc).__name__}: {exc}",
                     retrieval_s=time.monotonic() - started,
+                    embed_note=embed_note,
                 )
                 continue
             prepared.append((cell, param, retrieval, time.monotonic() - started))
@@ -4995,7 +5161,7 @@ def _evaluate_cells_by_condition(
                 errors.append(
                     f"{product_id}/{attempt.cell.param_id}: evaluate: {attempt.detail}"
                 )
-            yield attempt
+            yield replace(attempt, embed_note=embed_note)
 
 
 def reevaluate_stale(
@@ -5146,7 +5312,10 @@ def reevaluate_stale(
 
         keep_reason = _keep_stale_reason(outcome, resolved_build)
         if keep_reason is None:
-            fresh = outcome.cell.model_copy(update={"stale_reason": None})
+            fresh = _with_embed_note(
+                outcome.cell.model_copy(update={"stale_reason": None}),
+                attempt.embed_note,
+            )
             _persist(
                 store,
                 fresh,
@@ -5170,7 +5339,10 @@ def reevaluate_stale(
         detail = outcome.failure_kind or next(
             (note for note in reversed(outcome.validation.notes) if note), None
         )
-        kept = _kept_stale_cell(cell, reason=keep_reason, detail=detail)
+        kept = _with_embed_note(
+            _kept_stale_cell(cell, reason=keep_reason, detail=detail),
+            attempt.embed_note,
+        )
         store.save_cell(kept)
         report.remaining.append(
             {
@@ -5777,6 +5949,7 @@ def retry_failed_cells(
                     *cell.validation_notes,
                     f"{attempt.error_kind}: {attempt.detail}",
                     marker,
+                    *([attempt.embed_note] if attempt.embed_note else []),
                 ]
             )
             updated = cell.model_copy(update={"validation_notes": notes})
@@ -5816,11 +5989,15 @@ def retry_failed_cells(
 
         outcome = attempt.outcome
         if outcome.cell.state is CellState.EVALUATED:
-            fresh = outcome.cell.model_copy(
-                update={
-                    "stale_reason": None,
-                    "index_build_id": resolved_build or outcome.cell.index_build_id,
-                }
+            fresh = _with_embed_note(
+                outcome.cell.model_copy(
+                    update={
+                        "stale_reason": None,
+                        "index_build_id": resolved_build
+                        or outcome.cell.index_build_id,
+                    }
+                ),
+                attempt.embed_note,
             )
             _persist(
                 store,
@@ -5865,6 +6042,7 @@ def retry_failed_cells(
                 *cell.validation_notes,
                 *outcome.cell.validation_notes,
                 marker,
+                *([attempt.embed_note] if attempt.embed_note else []),
             ]
         )
         unchanged = outcome.cell.model_copy(update={"validation_notes": notes})

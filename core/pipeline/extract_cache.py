@@ -18,7 +18,9 @@
 ``family`` (семейство формата — вход выбора чанкера; поле аддитивное, в старых конвертах
 отсутствует и читается как ``None`` = markdown-совместимое семейство),
 ``doc_content_hash`` — хеш **извлечённого текста** (поле ``ExtractedDoc.content_hash``) — и
-аддитивные поля частичности ``partial``/``partial_reason``/``pages_converted`` (v5).
+аддитивные поля частичности ``partial``/``partial_reason``/``pages_converted`` (v5), а
+также ``ocr_probe`` — исход проверки OCR-движка (поле аддитивное: конверт без него
+читается как ``unknown`` — «не проверено», а не ``ok``; ``null`` — проверка не применима).
 Два хеша различны по смыслу и оба обязательны: ключ адресует сырьё, ``doc_content_hash``
 восстанавливает ровно тот ``ExtractedDoc``, который вернул экстрактор (по нему pipeline
 делает дедуп и строит ``doc_id``). Несовпадение ``content_hash``/``extractor_version``/
@@ -82,7 +84,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from core.ports.types import ExtractedDoc
+from core.ports.types import OCR_PROBE_UNKNOWN, OCR_PROBE_VALUES, ExtractedDoc
 
 __all__ = ["ENVELOPE_FORMAT", "ExtractionCache"]
 
@@ -294,6 +296,18 @@ class ExtractionCache:
             self._misses += 1
             return None
 
+        # Провенанс OCR-пробы — аддитивное поле. Конверт без него писался до появления
+        # проверки, поэтому читается как ``unknown`` («не проверено»), а **не** как ``ok``:
+        # отсутствие факта не является фактом «проверено и работает». Явный ``null`` в
+        # конверте означает «не применимо» и остаётся ``None``.
+        ocr_probe = envelope.get("ocr_probe", OCR_PROBE_UNKNOWN)
+        if ocr_probe is not None and (
+            not isinstance(ocr_probe, str) or ocr_probe not in OCR_PROBE_VALUES
+        ):
+            self._corrupt += 1
+            self._misses += 1
+            return None
+
         self._hits += 1
         if partial:
             self._partial_hits += 1
@@ -307,6 +321,7 @@ class ExtractionCache:
             partial=partial,
             partial_reason=partial_reason if partial else None,
             pages_converted=pages_converted if partial else None,
+            ocr_probe=ocr_probe,
         )
 
     # ------------------------------------------------------------------ #
@@ -380,6 +395,9 @@ class ExtractionCache:
             "page_count": page_count,
             "family": getattr(doc, "family", None),
             "doc_content_hash": doc_hash,
+            # Аддитивное поле: конверты без него читаются как ``unknown``, поэтому бамп
+            # ``ENVELOPE_FORMAT`` не нужен — старый конверт честно говорит «не проверено».
+            "ocr_probe": getattr(doc, "ocr_probe", None),
         }
         # Детерминированные байты: одинаковый вход → одинаковый файл (полезно для diff/аудита).
         payload = json.dumps(

@@ -94,6 +94,7 @@ from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.plan import plan as build_plan
+from core.pipeline.retrieve import retrieval_params, retrieval_params_json
 from core.pipeline.run_identity import (
     build_execution_contract,
     check_update_scope,
@@ -127,6 +128,10 @@ def _declared_payload(
     хеша. ``None`` — флаг не объявлен: план не подставляет дефолт Ш6, иначе показывал бы
     значение, которого в измерении нет.
 
+    ``retrieval_params`` — исполненные параметры целиком (план 26 O2): ``rrf_k``,
+    множитель пула, число запросов и кросс-запросное слияние входят в ``run_id``, и
+    оператор обязан видеть их до прогона, а не только после.
+
     ``deploy_profile`` печатается рядом с прочими «чем я измеряю», потому что он —
     **слагаемое контракта** (``local`` и ``split`` исполняют работу в разных зонах и
     паритета между ними нет), а не провенанс хоста.
@@ -142,6 +147,11 @@ def _declared_payload(
         "serp_source": declared.serp_source,
         "retrieval_profile": contract_flags.get("retrieval_profile"),
         "cutoff_K": contract_flags.get("cutoff_K"),
+        # План 26 O2: те же исполненные параметры, что ушли в контракт.
+        "retrieval_params": retrieval_params(
+            profile=contract_flags.get("retrieval_profile"),
+            cutoff_k=contract_flags.get("cutoff_K"),
+        ),
         "cycle_id": cycle_id,
         "run_scope": run_scope,
         "refresh_policy": refresh_policy,
@@ -185,6 +195,10 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
             *policy_lines,
             "contract: — (run_id задан явно, оси не считались)",
         ]
+    retrieval = payload.get("retrieval_params") or retrieval_params(
+        profile=payload.get("retrieval_profile"),
+        cutoff_k=payload.get("cutoff_K"),
+    )
     return [
         *policy_lines,
         f"contract: {digest}",
@@ -193,7 +207,11 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
         f"serp: rounds={payload.get('serp_rounds')} "
         f"(source: {payload.get('serp_source') or '—'})",
         f"retrieval: profile={payload.get('retrieval_profile') or '—'} "
-        f"cutoff_K={payload.get('cutoff_K') if payload.get('cutoff_K') is not None else '—'}",
+        f"cutoff_K={payload.get('cutoff_K') if payload.get('cutoff_K') is not None else '—'} "
+        f"rrf_k={retrieval.get('rrf_k')} "
+        f"pool_multiplier={retrieval.get('pool_multiplier')} "
+        f"max_queries={retrieval.get('max_queries')} "
+        f"cross_query_fusion={retrieval.get('cross_query_fusion')}",
         f"identity: cycle={payload.get('cycle_id')} scope={payload.get('run_scope')} "
         f"refresh={payload.get('refresh_policy')}",
     ]
@@ -382,6 +400,13 @@ def run(args: argparse.Namespace) -> int:
             # инвентаря флагов. ``None`` — флаг не объявлен: контракт пишет ``null``,
             # а не дефолт Ш6 (``run_id`` описывает объявленное).
             **contract_flags,
+            # План 26 O2: исполненные параметры (rrf_k/пул/запросы/слияние) — условие
+            # измерения. Без них ``retrieval_params_json`` всегда был ``null``, и смена
+            # ``rrf_k`` не меняла ``run_id``.
+            retrieval_params_json=retrieval_params_json(
+                profile=contract_flags.get("retrieval_profile"),
+                cutoff_k=contract_flags.get("cutoff_K"),
+            ),
         )
         result = build_plan(
             inputs,

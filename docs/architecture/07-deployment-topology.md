@@ -106,7 +106,7 @@ application-layer firewall (L7). Функционал, которому нуже
 > ⬜ **не сделано (2026-10-28, перепроверено 2026-11-08):** `rg -n extractor_zone core/` даёт
 > только `core/config/deploy.py:768` (поле модели), `core/config/deploy.py:786-792` (валидатор)
 > и константу `EXTRACTOR_ZONES` (`core/config/deploy.py:97`); сборка экстрактора —
-> `core/cli/wiring.py:2238` (`build_worker_extractor`) — на поле не смотрит.
+> `core/cli/wiring.py:2222` (`build_worker_extractor`) — на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из
 > интернета — это основная поверхность атаки (парсеры/шрифты/архивы). Идея «вынести её в edge»
@@ -411,21 +411,21 @@ LLM-endpoint корп. облака — только в Z0.
    `crawl/collect`.
 3. ⚠️ **`crawl.document_level`/`pdf_device` под `split` действуют на уровне app+run;
    `pdf_pipeline` — не действует.** Оси уровня и устройства объявлены на собранном
-   `RemoteExtractor` (`core/cli/wiring.py:3393-3394`) и едут в `extract/submit`; edge строит
+   `RemoteExtractor` (`core/cli/wiring.py:3377-3378`) и едут в `extract/submit`; edge строит
    конвейер по ним (`core/edge/extract_service.py:172` — `artifact_extractor_factory`,
    `text_layer` → pdfium, остальные уровни → docling), поэтому текст под `split` совпадает с
    `local` при тех же осях. Не действует **механизм** PDF: его выбирает edge, а не объявивший
-   его прогон (`core/cli/wiring.py:2500-2502` — комментарий «``pdf_pipeline`` под ``split`` не
+   его прогон (`core/cli/wiring.py:2484-2486` — комментарий «``pdf_pipeline`` под ``split`` не
    действует»). Поэтому `deploy_profile` и остаётся полем контракта.
 4. ⚠️ **Per-root слой осей `document_level`/`pdf_device` под `split` не виден** (расхождение,
    которого в прежней редакции этого блока не было). Под `local` оси разрешаются на каждом
    корне цепочкой app < run < site (`core/pipeline/corpus.py:1429`,
    `profiles=domain_profiles`), поэтому `domain_profiles.yaml` переопределяет уровень для
    конкретного хоста. Под `split` порты собираются **до** per-root резолва:
-   `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3338`) отдаёт
+   `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3322`) отдаёт
    только app+run — и это сказано в самом коде: «per-root слой здесь не виден — порты
    собираются до per-root резолва (то же ограничение, что у ``pdf_pipeline`` выше)»
-   (`core/cli/wiring.py:3390-3392`). Итог: под `split` действуют app+run, per-root
+   (`core/cli/wiring.py:3374-3376`). Итог: под `split` действуют app+run, per-root
    переопределение — нет; под `local` действует вся цепочка. Это не «тихий успех» (непринятое
    значение нигде не выдаётся за применённое), но и не сообщается — поэтому пункт открыт, а не
    выдан за сделанный.

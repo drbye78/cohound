@@ -34,6 +34,7 @@ import datetime as _dt
 import errno
 import hashlib
 import json
+import logging
 import os
 import shutil
 import time
@@ -135,7 +136,12 @@ from core.ports.state import (
     ProductStatePort,
     UrlStateRow,
 )
-from core.ports.types import FetchMode, FetchPlan, RawPage
+from core.ports.types import (
+    OCR_PROBE_UNSUPPORTED,
+    FetchMode,
+    FetchPlan,
+    RawPage,
+)
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
     document_suffix,
@@ -1332,6 +1338,30 @@ def ingest_one(
 PARTIAL_REASON_UNSTATED = "извлечение частичное: причина экстрактором не сообщена"
 
 
+#: Журнал корпуса: единственный канал видимости OCR-пробы, у которой пока нет колонки.
+_log = logging.getLogger(__name__)
+
+
+def _log_ocr_probe(extracted: Any, subject: str) -> None:
+    """Деградация проверки OCR — в журнал прогона.
+
+    ``ExtractedDoc.ocr_probe == "unsupported"`` означает «проверить не удалось», а не
+    «проверено и работает»: внутренний API docling переименован, и проба ничего не
+    подтвердила. Персистенции у признака пока нет — ``corpus_docs`` не имеет колонки, а
+    заводить её вне объявленного бампа схемы (3.21.0) запрещено (§9). Поэтому видимость
+    ограничена результатом извлечения, конвертом ``extract_cache`` и этой строкой журнала;
+    ``unknown`` (старый конверт кэша) не логируется, чтобы отсутствие факта не читалось
+    как деградация.
+    """
+    if getattr(extracted, "ocr_probe", None) != OCR_PROBE_UNSUPPORTED:
+        return
+    _log.warning(
+        "OCR не проверен (внутренний API docling изменился): %s — наличие OCR-движка "
+        "не подтверждено",
+        subject,
+    )
+
+
 def _partial_fields(extracted: Any) -> dict[str, Any]:
     """Поля частичности ``ExtractedDoc`` → ``CorpusDoc`` (общая точка обоих путей).
 
@@ -1655,6 +1685,9 @@ def finish_one(
             )
             return None
 
+        # «OCR не проверен» — факт провенанса, а не только строка журнала адаптера;
+        # пока у него нет колонки, единственный канал — журнал корпуса.
+        _log_ocr_probe(extracted, f"{product_id}/{url}")
         doc_hash = str(getattr(extracted, "content_hash", "") or "")
         if not doc_hash:
             errors.append(

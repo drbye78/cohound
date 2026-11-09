@@ -125,6 +125,7 @@ from core.pipeline.liveness import interrupt_session, stale_reason
 from core.pipeline.normalize import load_inputs
 from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.plan import derive_run_id
+from core.pipeline.retrieve import retrieval_params_json
 from core.pipeline.run_identity import (
     build_execution_contract,
     resolve_cycle_id,
@@ -473,6 +474,10 @@ def _execute_crawl_locked(
         cohort_digest=cohort_d,
         seeds_digest=seeds_d,
         declared=declared,
+        # План 26 O2: ``crawl`` не объявляет профиль/K ретривала, но поле контракта
+        # обязано быть тем же, что у ``plan``/``run`` при тех же входах, — иначе
+        # ``crawl run`` адресовал бы другой ``run_id``, чем ``run``.
+        retrieval_params_json=retrieval_params_json(profile=None, cutoff_k=None),
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,
         frozen_source=getattr(args, "frozen_source", None),

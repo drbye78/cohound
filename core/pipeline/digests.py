@@ -104,6 +104,14 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     "llm_scenarios",
     "retrieval_profile",
     "cutoff_K",
+    # План 26 O2: **исполненные** параметры ретривала одной строкой — ``profile``,
+    # ``cutoff_K``, ``rrf_k``, ``pool_multiplier``, ``max_queries``,
+    # ``cross_query_fusion`` (``core.pipeline.retrieve.retrieval_params``). Поле было в
+    # контракте с рождения, но ни один вызывающий его не передавал ⇒ всегда ``null``, и
+    # смена ``rrf_k`` (60 зашит в код) меняла доказательства, не меняя ``run_id``. Это
+    # условие измерения, а не провенанс исполнения: значения вычислимы из кода/аргументов
+    # **до** сборки портов. ``null`` читается как «не объявлено» (старые прогоны), а не
+    # как «взяты дефолты».
     "retrieval_params_json",
     "chunker_version",
     "extractor_stack",

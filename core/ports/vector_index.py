@@ -52,12 +52,19 @@ class RetrievedChunk:
 
 @dataclass(frozen=True)
 class RetrievalResult:
-    """Результат ретривала: fused top-K, профиль и сборка (I16/I19/I20)."""
+    """Результат ретривала: fused top-K, профиль и сборка (I16/I19/I20).
+
+    ``rrf_k`` — исполненная RRF-константа (``None`` — результат построен не ретривалом
+    с известным ``rrf_k``, например ручным двойником в тесте). Поле нужно для обратного
+    чтения: повтор ячейки обязан исполнить **тот же** ``rrf_k``, иначе JSON описывал бы
+    не то, что исполнено (план 26 O2).
+    """
 
     chunks: list[RetrievedChunk] = field(default_factory=list)
     profile: str = ""
     cutoff_K: int = 0
     build_id: str = ""
+    rrf_k: int | None = None
 
 
 @runtime_checkable

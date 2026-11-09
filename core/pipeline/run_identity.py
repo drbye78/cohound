@@ -364,6 +364,10 @@ def build_execution_contract(
         "llm_scenarios": _declared(declared, "llm_scenarios"),
         "retrieval_profile": retrieval_profile,
         "cutoff_K": cutoff_K,
+        # План 26 O2: исполненные параметры ретривала (``retrieval_params``), а не только
+        # объявленные профиль/K. Смена ``rrf_k``/пула/числа запросов меняет доказательства
+        # ⇒ это условие измерения. ``None`` — ось не передана (чистые вызовы): «не
+        # объявлено» отличимо от «объявлены дефолты».
         "retrieval_params_json": retrieval_params_json,
         "chunker_version": _declared(declared, "chunker_version"),
         # C3/V3: геометрия нарезки и политика повтора. ``None`` (ось не передана) —

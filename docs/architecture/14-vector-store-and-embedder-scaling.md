@@ -80,14 +80,14 @@ production-масштабе, — это четыре дефекта **нашег
 
 ## 2. Ключевой факт: поиск никогда не идёт по всему корпусу
 
-✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:1136`) объявляет
+✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:1144`) объявляет
 `product_ids: Sequence[str] | None = None` с докстрингом «по умолчанию `[product_id]`;
 сателлиты добавляет вызывающий (I17)», а `NpyVectorIndex.search_many`
 (`core/adapters/vector_npy.py:272-341`) обходит `for product_id in products` и читает
 партицию продукта. Номера строк в абзаце ниже сверены с кодом (2026-10-28):
-`core/pipeline/evaluate.py:1136`, `vector_npy.py:312-341`; смысл не изменился.
+`core/pipeline/evaluate.py:1144`, `vector_npy.py:312-341`; смысл не изменился.
 
-`core/pipeline/evaluate.py:1136` + `retrieve_for_cell` (`:1131`): `product_ids` — по
+`core/pipeline/evaluate.py:1144` + `retrieve_for_cell` (`:1139`): `product_ids` — по
 умолчанию `[product_id]`, сателлиты добавляет вызывающий (I17). В
 `core/adapters/vector_npy.py:312-341` цикл `for product_id in dict.fromkeys(q.product_ids)`
 читает **партицию продукта**, а не общий индекс.
@@ -130,7 +130,7 @@ Brute-force косинус, тот же код (`_cosine_scores`), 1024 dim. З�
 3. `for chunk_id, score in zip(...): meta = self._lookup(chunk_id)` — резолвер
    метаданных вызывается для **всех** 11 400 чанков, хотя нужны только `top_k=10`. В
    composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:416`,
-   `core/cli/context.py:2024`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
+   `core/cli/context.py:2027`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
    point-lookup в БД прогона: 4 мкс ⇒ 42 ms на поиск.
 
 Сумма на один поиск при масштабе: 23.3 MB чтения + 27.8 ms конверсии + 4.5 ms матмула +
@@ -185,7 +185,7 @@ top-10 из 600** у близких соседей. Замер при едино
 `_resolve_top` по-прежнему зовёт `self._lookup(chunk_id)` на каждого кандидата
 (`core/adapters/vector_npy.py:374` и `:383`; тип резолвера — `:73`), а композиционный корень
 передаёт поштучный `store.get_chunk` (`core/cli/commands/run.py:416`,
-`core/cli/context.py:2024`). Это не дефект §6, а названный следующий шаг: цена
+`core/cli/context.py:2027`). Это не дефект §6, а названный следующий шаг: цена
 **5.29 ms/поиск** держится, пока батч не подключён.
 
 ## 4. Вывод по Qdrant
@@ -195,7 +195,7 @@ top-10 из 600** у близких соседей. Замер при едино
 («brute-force косинус… ANN (faiss/Qdrant)» — про будущее, не про код); в реестре зависимостей
 `docs/architecture/05-dependency-stack.md:114` `qdrant-client` стоит с вердиктом **c**
 («только идея», легенда `:17`) и обоснованием «требует сервиса; отложено по §14». Порт
-`VectorIndexPort` (`core/ports/vector_index.py:87-93`) по-прежнему без пути к файлу и без
+`VectorIndexPort` (`core/ports/vector_index.py:94-100`) по-прежнему без пути к файлу и без
 `numpy` — замена реализации не тронет ни `pipeline`, ни домен, как и обещано ниже.
 
 Этот раздел — **носитель решения**, а не отчёт о работе: «Qdrant не нужен при таком масштабе»
@@ -213,7 +213,7 @@ top-10 из 600** у близких соседей. Замер при едино
 | HNSW/IVF по 17 млн | **нет**: поиск продукт-скоупед, 108.6 тыс. на крупнейшей партиции — brute force быстрее ANN |
 | Квантование int8 (4× меньше) | частично: 93 GB → 23 GB, но fp16 уже даёт 2×, а диск не узкое место |
 | Фильтрация (payload) | **нет**: фильтр — это `product_id`, он и так задаёт партицию |
-| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id, embed_device, embed_precision)`; подключён в `core/cli/context.py:2448`) |
+| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id, embed_device, embed_precision)`; подключён в `core/cli/context.py:2451`) |
 | Общий индекс для нескольких нод | **да** — единственное настоящее преимущество, см. ниже |
 | Одновременные читатели/писатели | **нет**: у нас модель «иммутабельная сборка», читателей несколько, писатель один на прогон |
 
@@ -237,11 +237,11 @@ top-10 из 600** у близких соседей. Замер при едино
 **Статус на 2026-11-07:** порог 1 не срабатывает (108 614 против 200 000, запас 1.84×, §1);
 порог 2 — второго читателя индекса нет: индекс лежит в файловой партиции на одном хосте, а
 `split` разводит по зонам **краул и извлечение**, не индекс (`07-deployment-topology.md`
-§6, `core/pipeline/digests.py:149-163`); порог 3 на нужном масштабе не измерен — ❔ не
+§6, `core/pipeline/digests.py:157-171`); порог 3 на нужном масштабе не измерен — ❔ не
 проверено. Итого: решение держится на порогах 1–2 и не проверено по 3.
 
 **Что сделать вместо Qdrant — и это дешевле.** Порт уже правильной формы:
-`core/ports/vector_index.py:87-93` — `build_id`, `dim`, `search(q)`, `search_many`,
+`core/ports/vector_index.py:94-100` — `build_id`, `dim`, `search(q)`, `search_many`,
 `shard_ids(product_id)`.
 Ни одного пути к файлу, ни `numpy`, ни формата. Значит решение откладывается **без цены**:
 замена `NpyVectorIndex` на `QdrantVectorIndex` не тронет ни `pipeline`, ни домен. Это важно
@@ -277,7 +277,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
   модель** по-прежнему выбирается установкой: `backend`/`base_url`/`model_version` не
   объявлены, и внешний инстанс всё ещё требует `deploy.embed` целиком.
   **⬜ не сделано (сверено 2026-11-07):** функция на месте — `_resolve_embedder`,
-  `core/cli/wiring.py:2938`, вызов `:2813` — и приоритет по-прежнему «что установлено на
+  `core/cli/wiring.py:2922`, вызов `:2797` — и приоритет по-прежнему «что установлено на
   хосте». Это и есть открытый пункт 5 §6.
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
@@ -353,7 +353,7 @@ embed:
 `local`) держится **побочно** — дефолт и есть единственная реализация. Действует уже сейчас
 только кэш векторов по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash,
 embed_model_id, embed_device, embed_precision)`): подключён в
-`core/cli/context.py:2895-2904` и в раскладку `core/config/paths.py:79`.
+`core/cli/context.py:2898-2907` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -396,19 +396,19 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:299-314`).
+(`core/cli/wiring.py:303-318`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
 ✅ сделано (`precompute_query_vectors`, `DEFAULT_QUERY_EMBED_BATCH = 32`,
-`core/pipeline/evaluate.py:694`, `:1025-1033`; вызовы — `:3960` и `:4837`) — уникальные тексты
+`core/pipeline/evaluate.py:702`, `:1033-1041`; вызовы — `:3978` и `:4987`) — уникальные тексты
 запросов пакета эмбеддятся батчами **до** цикла продуктов, карта `text → vector` передаётся
 в ячейки; `_query_vector` (`:988-1005`) берёт вектор из карты и только вне фазы падает на
 одиночный `embed`. ⬜ durable text→vector кэш между пакетами не сделан: `embed_cache`
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`core/pipeline/evaluate.py:1000-1017`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`core/pipeline/evaluate.py:1008-1025`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 
@@ -581,13 +581,13 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    предположением. Вынос телеметрии в метрики — отдельный пункт, а не «сделано».
 3. ✅ **Батч запросов по продукту** — `VectorIndexPort.search_many` + `batched_search`
    (дефолт через цикл `search`, поэтому существующие реализации не сломаны).
-   Проверено: `core/ports/vector_index.py:95` (`search_many` в порту), `:96-105`
+   Проверено: `core/ports/vector_index.py:102` (`search_many` в порту), `:103-112`
    (`batched_search` с `getattr`-фолбэком), `core/adapters/vector_npy.py:272` (реализация),
-   вызывается из `core/pipeline/evaluate.py:1129`.
+   вызывается из `core/pipeline/evaluate.py:1137`.
 4. ✅ **Мемоизация векторов запроса** + пре-компьют `query_vectors` до `evaluate`
    (`precompute_query_vectors`, батчи по 32; это же закрывает оговорку 2 — оценщик
    больше не ходит за векторами вовсе).
-   Проверено: `core/pipeline/evaluate.py:694` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:1025`
+   Проверено: `core/pipeline/evaluate.py:702` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:1033`
    (`precompute_query_vectors`), вызовы `:3868`, `:4746`; `_query_vector` (`:961`) читает
    карту первой.
 
@@ -606,7 +606,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 6. ➖ снято — Qdrant «только при срабатывании порога §4». Снято **измерением**, а не
    решением человека: на 2026-11-07 максимальная партиция — **108 614** чанков против порога
    200 000 (**запас 1.84×**; на 28.10 было 32 647 — запас 6.1×), нод одна, `vector_store` в
-   манифесте — наблюдаемое поле прогона (`core/pipeline/report.py:230`), и альтернативной
+   манифесте — наблюдаемое поле прогона (`core/pipeline/report.py:235`), и альтернативной
    реализации индекса в коде нет. Пункт остаётся условием пересмотра, но не работой в плане;
    порог публикуется числом, чтобы возврат к нему не был предметом памяти.
 
@@ -623,7 +623,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    (решение владельца 29.10.2026, `09` §14.1).
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`core/cli/wiring.py:2938`, вызов `:2813` — `model2vec_available()` →
+установки** (`core/cli/wiring.py:2922`, вызов `:2797` — `model2vec_available()` →
 `_module_installed("sentence_transformers")` → `None`). При появлении `deploy.embed`
 приоритет становится объявленным: `backend` из конфига, а наличие библиотек — предпосылка, а
 не решение. **Сверено 2026-11-07: не сделано** — логика прежняя; это же и есть **условие** §6 п. 5

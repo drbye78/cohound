@@ -30,6 +30,14 @@ R0/R1/R2 (:func:`core.pipeline.experiments.run_retrieval_experiment`).
 возврата ``0`` (пропуск — INFO, не WARN); ранжирование не фабрикуется и команда не падает.
 `core/` остаётся категорийно-нейтральным (§1.3): идентификаторы моделей — данные адаптеров.
 
+**Нерезолвленный эталон (O4).** Эталон привязан к ``chunk_id`` конкретной сборки. Когда
+сборка пересобрана, а голден — нет, ``recall@K`` даёт честный ноль, неотличимый от провала
+поиска. Команда различает это по хранилищу прогона: id, которого там нет, не разрешится
+никогда, и печатает ``unresolved_expected_ids: N/M не разрешены`` (пример + число в
+``--json``). Код возврата остаётся ``0``: **измерение состоялось**, подозрителен вход.
+``EXIT_USAGE`` превращал бы «старый эталон» в «сломанный инструмент» и ломал бы CI-смоук на
+заведомо устаревшем голдене; пересборка эталона — O14 (нужна человеческая разметка).
+
 **``experiment evaluator-benchmark``** (A3, Ш6) — второй вид: измеряет **модели оценщика**
 при фиксированном всём остальном (сборка, профиль/K/``rrf_k``, промпт, срез чанков,
 ``seed=0``/``temperature=0.0``/объявленный ``max_retries``/``strict``). Ретривал выполняется один раз
@@ -208,6 +216,40 @@ def _emit_skip(
     return exit_code
 
 
+def _short_id(cid: str) -> str:
+    """Короткая форма ``chunk_id`` для предупреждения: ``product:hash[:8]…:chunk_no``.
+
+    Полный id — 64 hex-символа; в строке предупреждения он вытесняет само число.
+    Форма грамматики ``product:<doc_version_id>:<chunk_no>`` сохраняется, чтобы адрес
+    оставался узнаваемым, а hash — усечён.
+    """
+    parts = cid.split(":")
+    if len(parts) == 3 and len(parts[1]) > 8:
+        return f"{parts[0]}:{parts[1][:8]}…:{parts[2]}"
+    if len(cid) <= 32:
+        return cid
+    return f"{cid[:20]}…{cid[-8:]}"
+
+
+def _unresolved_warning(report: Any) -> str | None:
+    """Строка-предупреждение о неразрешённых id эталона (O4) либо ``None``.
+
+    Это **наблюдение о входе**, а не отказ: измерение состоялось, и код возврата остаётся
+    ``EXIT_OK``. Молчать нельзя — иначе устаревший голден выглядит как провал поиска.
+    """
+    unresolved = int(getattr(report, "unresolved_expected_ids", 0) or 0)
+    if unresolved <= 0:
+        return None
+    total = int(getattr(report, "expected_ids_total", 0) or 0)
+    examples = tuple(getattr(report, "unresolved_expected_examples", ()) or ())
+    example = f" (пример: {_short_id(examples[0])})" if examples else ""
+    return (
+        f"unresolved_expected_ids: {unresolved}/{total} не разрешены{example} — "
+        "ожидаемых id нет в корпусе прогона: recall@K описывает рассинхрон эталона, "
+        "а не качество поиска (O4/O14)"
+    )
+
+
 def _emit_measured(args: argparse.Namespace, payload: dict[str, Any]) -> None:
     """Печатает результат измерения (человеку либо ``--json``)."""
     if args.json:
@@ -232,6 +274,8 @@ def _emit_measured(args: argparse.Namespace, payload: dict[str, Any]) -> None:
         )
     for name, reason in sorted(payload.get("skipped", {}).items()):
         lines.append(f"skipped {name}: {reason}")
+    if payload.get("warning"):
+        lines.append(f"warning: {payload['warning']}")
     lines.append(f"experiment_id: {payload['experiment_id']}")
     sys.stdout.write("\n".join(lines) + "\n")
 
@@ -315,6 +359,12 @@ def run(args: argparse.Namespace) -> int:
             )
 
         golden = load_retrieval_golden(args.golden)
+        # O4: эталон привязан к ``chunk_id`` сборки. Спрашиваем хранилище прогона об
+        # ожидаемых id — без этого «поиск не нашёл» и «такого id нет» неразличимы, и
+        # устаревший голден выглядит как recall 0. Вопрос точечный (N ≤ размера голдена),
+        # а не выгрузка корпуса.
+        expected_ids = sorted({cid for item in golden for cid in item.expected_ids})
+        known_ids = set(store.get_chunks(expected_ids)) if expected_ids else set()
         cutoff_k = args.cutoff_k or manifest.retrieval_cutoff_K or DEFAULT_RETRIEVAL_CUTOFF_K
         report = run_retrieval_experiment(
             golden,
@@ -325,6 +375,7 @@ def run(args: argparse.Namespace) -> int:
             embed=lambda text: embedder.embed([text])[0],
             rrf_k=DEFAULT_RRF_K,
             min_delta=args.min_delta,
+            known_ids=known_ids,
         )
 
         experiment_id = f"retrieval/{target.build_id}/K{report.k}"
@@ -345,6 +396,7 @@ def run(args: argparse.Namespace) -> int:
         # пределах ``with`` (после закрытия БД mypy уже не видит его как
         # ``ExperimentTarget``, а ``None`` в payload был бы выдумкой).
         metrics = json.loads(report.to_manifest_json())["metrics"]
+        warning = _unresolved_warning(report)
         payload: dict[str, Any] = {
             "ok": True,
             "status": "measured",
@@ -358,9 +410,17 @@ def run(args: argparse.Namespace) -> int:
             "selection_basis": report.selection_basis,
             "metrics": metrics,
             "skipped": dict(report.skipped),
+            # O4: эталон ↔ сборка. Число и примеры — в машинном выводе, а не только
+            # в предупреждении: «17/17 не разрешены» — факт измерения, который
+            # потребитель обязан увидеть, не разбирая человеческую строку.
+            "unresolved_expected_ids": report.unresolved_expected_ids,
+            "expected_ids_total": report.expected_ids_total,
+            "unresolved_expected_examples": list(report.unresolved_expected_examples),
             "experiment_id": experiment_id,
             "provenance": "measured" if profile_measured else "default",
         }
+        if warning is not None:
+            payload["warning"] = warning
     _emit_measured(args, payload)
     return EXIT_OK
 

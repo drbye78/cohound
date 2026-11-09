@@ -282,7 +282,7 @@ PDF, `docs/reports/measurements/2026-10-29-corpus-retention-footprint.md:37`). �
 **Если потребителя нет вовсе:** краул не встаёт молча и не врёт `completed` — при достижении
 предела он **останавливает приём**, закрывает сеанс `partial` (причина `extract_backlog_full` для
 оси, `disk_low_headroom` для сторожа) и публикует числа (`hound crawl status`,
-`core/cli/commands/crawl.py:943`). Продолжение — `hound crawl resume`, и вот в чём разница причин:
+`core/cli/commands/crawl.py:948`). Продолжение — `hound crawl resume`, и вот в чём разница причин:
 очередь **разбирается**, поэтому после работы потребителя `resume` имеет смысл; свободное место не
 возвращается, поэтому после `disk_low_headroom` `resume` упрётся в то же число, пока носитель не
 освободит оператор. «Видимая остановка» выбрана сознательно вместо «тихо ждать потребителя».
@@ -326,8 +326,8 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 
 **Что публикуется о ширине.** Не preflight, а фаза: `lane_notes` (→ `notes`) называет по
 продукту число объявленных host'ов и предел «одновременно полос не больше N» — когда host'ов
-меньше объявленных полос (`core/pipeline/corpus.py:3799-3805`), — а также расхождение
-объявления по корням продукта (`core/pipeline/corpus.py:3807`); это факт, а не тихое усечение.
+меньше объявленных полос (`core/pipeline/corpus.py:3800-3806`), — а также расхождение
+объявления по корням продукта (`core/pipeline/corpus.py:3808`); это факт, а не тихое усечение.
 Ожидаемый критический путь **до** прогона не печатается: он
 считается после, из сеанса, как `wall ≥ max_host (бюджет_host × медиана интервала_host)`
 (`docs/reports/measurements/2026-11-02-crawl-cohort-parallel.md`: `docs.tantorlabs.ru`
@@ -352,7 +352,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 исполняет: при `executor` `lane_width` возвращает `None`, то есть пула нет
 (`core/pipeline/corpus_drain.py:1122`). Ось под `split` — видимый no-op: чередование не
 действует, и это публикуется строкой `lane_notes` («волну собирает шов одним блокирующим
-вызовом», `core/pipeline/corpus.py:3793`), а не `errors` — деградации нет, поэтому и ошибки нет.
+вызовом», `core/pipeline/corpus.py:3794`), а не `errors` — деградации нет, поэтому и ошибки нет.
 
 ## 6. Фазы
 
@@ -381,7 +381,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
   идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:624`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
-  артефакта (`sorted_error_lines`, `core/pipeline/runner.py:166`), без дедупликации.
+  артефакта (`sorted_error_lines`, `core/pipeline/runner.py:167`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,
   `test_dedup_canonical_url.py`, `test_errors_are_sorted.py`. Эталон порядка записи
   (`tests/pipeline/test_corpus_write_order.py`) пересобран **осознанно**, с причинами у констант:
@@ -651,7 +651,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   До F9 `drive_roots` вызывался **внутри** цикла продуктов, поэтому волна не могла содержать
   корни двух продуктов и окна `fetch_started_at` продуктов не пересекались ни при какой оси
   `crawl.host_concurrency` (наблюдено: продукты когорты шли строго последовательно). Теперь
-  вызов **один на когорту** (`core/pipeline/corpus.py:5096`): поток планов содержит корни всех
+  вызов **один на когорту** (`core/pipeline/corpus.py:5097`): поток планов содержит корни всех
   продуктов в авторском порядке, а граница продукта — типизированный маркер
   `ProductBoundary` (`core/pipeline/corpus_driver.py:97`), а не «смена `product_id`». Маркер
   нужен потому, что смена pid не наступает у **последнего** продукта потока и у продукта без
@@ -659,10 +659,10 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **Единица права — host на всю когорту.** Реестр claim (`claimed`) один на вызов драйвера:
   волна корня допускается, только если её host'ы не заняты волной **любого** продукта. Поэтому
   synthetic-бакеты ревалидации (leftover каталога, orphan-бакеты) идут тем же потоком планов
-  (`core/pipeline/corpus.py:3304`), а не отдельным дренажом в хвосте продукта: одиночный
+  (`core/pipeline/corpus.py:3305`), а не отдельным дренажом в хвосте продукта: одиночный
   дренаж открыл бы второй реестр и пустил бы бакет на host, который уже держит сосед.
   **Хвост продукта — на главном потоке, при закрытии его последнего корня**
-  (`core/pipeline/corpus.py:4057`; сам вызов — `core/pipeline/corpus_driver.py:294`). Почему
+  (`core/pipeline/corpus.py:4058`; сам вызов — `core/pipeline/corpus_driver.py:294`). Почему
   там: run-DB — SQLite с **одним** писателем (§1), а драйвер — единственный мутатор состояния
   фазы (инвариант T5), значит конверсия, Pass B, покрытие и строка продукта обязаны исполняться
   там же, где коммитятся исходы корней, и не могут идти параллельно ни друг с другом, ни с
@@ -678,7 +678,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   объявленных входов F9 не вводит: объявление самой оси, как и до F9 (F1), даёт новый `run_id`
   штатным `crawl_config_digest`, а F9 меняет только расписание исполнения — то есть ни одного
   нового поля в `EXECUTION_CONTRACT_FIELDS`.
-  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:5109`): ось
+  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:5110`): ось
   объявлена на корень (`app < run < site`), поэтому продукт со строгим объявлением не получает
   полос «за компанию» с соседом; потолок когорты — максимум объявленных продуктовых значений.
   Продуктовые значения (накопитель, дедуп-множества, счётчик seed'ов, бакеты стадий, группы
@@ -894,14 +894,14 @@ host'ах, поэтому бюджет, собранный на одном зе�
 - `partial`, truncation, blocked и failed видны в session provenance.
   → ✅ `core/pipeline/crawl_session.py:113-116`, `core/pipeline/metrics.py:490`.
 - Ни один failed fetch не создаёт absence автоматически.
-  → ✅ `core/pipeline/evaluate.py:2106` (`_enforce_absence_coverage`); `failed` → `status=null` (I4).
+  → ✅ `core/pipeline/evaluate.py:2124` (`_enforce_absence_coverage`); `failed` → `status=null` (I4).
 - Cached/raw reuse отличим от live fetch.
   → ✅ **локально** (09.11.2026): `RawPage.from_cache` выставляется всеми пятью
   `_page_from_cache` (`core/adapters/crawl_http.py:957`, `crawl_scrapy.py:1202`,
   `crawl_browser.py:985`, `search_glm.py:506`, `search_yandex.py:797`) и превращается в
   `reuse_kind=reused` на границе краула (`core/pipeline/corpus_drain.py:1850-1865`): страница
   из кэша больше не выдаёт себя за сетевое наблюдение, `http_status` у неё `NULL`
-  (`core/pipeline/corpus_ingest.py:1784`), а в `observed_urls` (E.6) она не попадает
+  (`core/pipeline/corpus_ingest.py:1817`), а в `observed_urls` (E.6) она не попадает
   (`:1615`). Наблюдаемость: `pages_fetched` кэш-хит по-прежнему считает (он добавляет
   документ), а `pacing.requests` по хосту — нет; расхождение этих двух чисел и есть видимый
   сигнал «обходили кэш, а не сайт». Замер цены дефекта до правки: в кэше стенда **2 800 из 5 593** записей без
@@ -974,7 +974,7 @@ OCR/layout с HTTP-очередью; называть foreground `extract_worker
 
 ### Phase 0 — контракт и acceptance baseline — 🟡 частично
 
-Закрыто: `deploy_profile` фиксируется в манифесте (`core/cli/wiring.py:3405`); scope sitemap и
+Закрыто: `deploy_profile` фиксируется в манифесте (`core/cli/wiring.py:3389`); scope sitemap и
 source-wave semantics — `03` §D.2.1; fail-closed для robots (`core/util/robots.py:466`,
 `UNAVAILABLE` → отказ обхода); baseline focused tests на месте. Аренда строки очереди конверсии
 (`core/pipeline/extract_queue.py:54`) снимает часть (б).
@@ -1019,7 +1019,7 @@ IP-pinning отсутствует). **Gate:** одинаковый fake-server �
 `queue_depth|dlq|lease_age` по `core/` — 0); команд `inspect`, `pause`, `reconcile`, `replay`,
 `explain-entry` нет. Подкоманды `hound crawl` на 08.11.2026 —
 `run|status|list|resume|restart|cancel` + `policy set|list|clear`
-(`core/cli/commands/crawl.py:1854`); `hound extract consume` (`core/cli/commands/extract.py:319`)
+(`core/cli/commands/crawl.py:1859`); `hound extract consume` (`core/cli/commands/extract.py:319`)
 это не `inspect`/`replay`. Наблюдаемость живого краула есть в другом объёме: `crawl_progress`/
 `crawl_product`, `--per-url`, `owner`/`heartbeat_at`/`stale_reason`. Документы уже описывают шов
 и профили, но deployment drill (две edge-реплики, отдельный PDF-пул, два профиля, proxy/DLP
