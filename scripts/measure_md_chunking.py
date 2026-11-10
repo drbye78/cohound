@@ -526,16 +526,78 @@ def _median_or_none(values: Sequence[float]) -> float | None:
 
 
 @dataclass
+class CharGeometry:
+    """Геометрия ``heading_path``/``context_prefix`` **в символах** — без токенизатора.
+
+    Отделена от :class:`TokenGeometry` намеренно: символьный замер не зависит от модели,
+    а раньше жил внутри токенной и публиковался только с ``--tokens``. Следствие было
+    не косметическим: опубликованное число «3 668 символов / 112 чанков» не
+    воспроизводилось на хосте без локального кэша токенизатора, хотя ничего от модели
+    не требует. Здесь считается всегда.
+    """
+
+    heading_chars: list[int] = field(default_factory=list)
+    prefix_chars: list[int] = field(default_factory=list)
+    #: Порог в символах → по документам (URL) ``(число чанков, самый длинный heading_path)``.
+    #: Состав нужен потому, что публикуется «чанков на документах»: без него хвост не
+    #: отличить от одного файла, а без длины — не назвать, какой документ его держит.
+    heading_over: dict[int, dict[str, tuple[int, int]]] = field(default_factory=dict)
+
+    def add(self, chunk: Chunk, document: str = "") -> None:
+        """Добавляет длины ``heading_path``/``context_prefix`` и хвост по порогам."""
+        heading = chunk.heading_path or ""
+        prefix = chunk.context_prefix or ""
+        self.heading_chars.append(len(heading))
+        self.prefix_chars.append(len(prefix))
+        for threshold in HEADING_CHAR_BUCKETS:
+            if len(heading) > threshold:
+                per_document = self.heading_over.setdefault(threshold, {})
+                key = document or chunk.chunk_id
+                chunks, longest = per_document.get(key, (0, 0))
+                per_document[key] = (chunks + 1, max(longest, len(heading)))
+
+    def summary(self) -> dict[str, Any]:
+        """Распределения длин и состав хвоста по порогам (нули публикуются нулями)."""
+        return {
+            "heading_chars": _distribution(self.heading_chars),
+            "prefix_chars": _distribution(self.prefix_chars),
+            "heading_over": {
+                str(threshold): {
+                    "chunks": sum(chunks for chunks, _longest in per_document.values()),
+                    "documents": len(per_document),
+                    # Детерминированно: при равном числе чанков порядок задаёт URL.
+                    "top": [
+                        {
+                            "document": document,
+                            "chunks": chunks,
+                            "max_heading_chars": longest,
+                        }
+                        for document, (chunks, longest) in sorted(
+                            per_document.items(), key=lambda pair: (-pair[1][0], pair[0])
+                        )[:HEADING_BUCKET_TOP]
+                    ],
+                }
+                for threshold in HEADING_CHAR_BUCKETS
+                for per_document in (self.heading_over.get(threshold, {}),)
+            },
+        }
+
+
+@dataclass
 class TokenGeometry:
-    """Геометрия чанков в токенах: текст (вход эмбеддера) и промпт (нижняя граница)."""
+    """Геометрия чанков в токенах: текст (вход эмбеддера) и промпт (нижняя граница).
+
+    Символьная часть (:class:`CharGeometry`) — **внутри** как отдельный носитель: она
+    считается всегда, а токенная только при переданном счётчике, и смешивать их нельзя
+    (символьное число не выдаётся за токены — A3).
+    """
 
     model_id: str
+    chars: CharGeometry = field(default_factory=CharGeometry)
     text_tokens: list[int] = field(default_factory=list)
     prompt_tokens: list[int] = field(default_factory=list)
     context_tokens: list[int] = field(default_factory=list)
-    heading_chars: list[int] = field(default_factory=list)
     heading_tokens: list[int] = field(default_factory=list)
-    prefix_chars: list[int] = field(default_factory=list)
     prefix_tokens: list[int] = field(default_factory=list)
     chars_per_token: list[float] = field(default_factory=list)
     script_tokens: dict[str, list[int]] = field(default_factory=dict)
@@ -543,10 +605,6 @@ class TokenGeometry:
     max_cjk_share: float = 0.0
     chunks_with_cjk: int = 0
     context_heavy: int = 0
-    #: Порог в символах → по документам (URL) ``(число чанков, самый длинный heading_path)``.
-    #: Состав нужен потому, что публикуется «чанков на документах»: без него хвост не
-    #: отличить от одного файла, а без длины — не назвать, какой документ его держит.
-    heading_over: dict[int, dict[str, tuple[int, int]]] = field(default_factory=dict)
 
     def add(self, chunk: Chunk, count: Callable[[str], int], document: str = "") -> None:
         """Добавляет чанк: токены текста, промпта, контекста и класс письменности."""
@@ -562,16 +620,9 @@ class TokenGeometry:
         self.text_tokens.append(text_tokens)
         self.prompt_tokens.append(count(prompt))
         self.context_tokens.append(context_tokens)
-        self.heading_chars.append(len(heading))
         self.heading_tokens.append(heading_tokens)
-        self.prefix_chars.append(len(prefix))
         self.prefix_tokens.append(prefix_tokens)
-        for threshold in HEADING_CHAR_BUCKETS:
-            if len(heading) > threshold:
-                per_document = self.heading_over.setdefault(threshold, {})
-                key = document or chunk.chunk_id
-                chunks, longest = per_document.get(key, (0, 0))
-                per_document[key] = (chunks + 1, max(longest, len(heading)))
+        self.chars.add(chunk, document)
         if text_tokens:
             self.chars_per_token.append(len(chunk.text) / text_tokens)
         if context_tokens > CONTEXT_SHARE_LIMIT * text_tokens:
@@ -590,6 +641,7 @@ class TokenGeometry:
     def summary(self) -> dict[str, Any]:
         """Сводка: распределения, гистограмма, разрез по письменности, контекст."""
         chunks = len(self.text_tokens)
+        chars = self.chars.summary()
         text = _distribution(self.text_tokens)
         text.update(
             {
@@ -632,33 +684,16 @@ class TokenGeometry:
                 "chunks_with_cjk": self.chunks_with_cjk,
             },
             "context": {
-                "heading_chars": _distribution(self.heading_chars),
+                # Символьная часть берётся у :class:`CharGeometry` — она считается всегда.
+                "heading_chars": chars["heading_chars"],
+                "prefix_chars": chars["prefix_chars"],
+                "heading_over": chars["heading_over"],
                 "heading_tokens": _distribution(self.heading_tokens),
-                "prefix_chars": _distribution(self.prefix_chars),
                 "prefix_tokens": _distribution(self.prefix_tokens),
                 "context_tokens": _distribution(self.context_tokens),
                 "heavy_chunks": self.context_heavy,
                 "heavy_share": self.context_heavy / (chunks or 1),
                 "heavy_limit": CONTEXT_SHARE_LIMIT,
-                "heading_over": {
-                    str(threshold): {
-                        "chunks": sum(chunks for chunks, _longest in per_document.values()),
-                        "documents": len(per_document),
-                        # Детерминированно: при равном числе чанков порядок задаёт URL.
-                        "top": [
-                            {
-                                "document": document,
-                                "chunks": chunks,
-                                "max_heading_chars": longest,
-                            }
-                            for document, (chunks, longest) in sorted(
-                                per_document.items(), key=lambda pair: (-pair[1][0], pair[0])
-                            )[:HEADING_BUCKET_TOP]
-                        ],
-                    }
-                    for threshold in HEADING_CHAR_BUCKETS
-                    for per_document in (self.heading_over.get(threshold, {}),)
-                },
             },
         }
 
@@ -1271,6 +1306,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     resolution: dict[str, Any] = {}
     provenance: dict[str, Any] = {}
     geometry: TokenGeometry | None = None
+    # Символьная геометрия считается **всегда**: она не зависит от модели, и именно её
+    # числа публикуются («3 668 символов на 112 чанках»). Без неё опубликованное число
+    # не воспроизводилось на хосте без кэша токенизатора.
+    char_geometry = CharGeometry()
     if args.tokens:
         requested = args.tokenizer_model or _default_tokenizer_model()
         try:
@@ -1280,7 +1319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"measure: {exc}", file=sys.stderr)
             return 2
         provenance = _tokenizer_provenance(requested, tokenizer)
-        geometry = TokenGeometry(model_id=requested)
+        geometry = TokenGeometry(model_id=requested, chars=char_geometry)
         counter = partial(_count_tokens, tokenizer)
 
     chunker = MarkdownChunker(chunk_size=args.chunk_size, min_chunk_size=args.min_chunk_size, profile=args.profile)
@@ -1312,9 +1351,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # корпусе такая конструкция» не зависит от того, как её нарезали.
         if args.census:
             census.add(item.url, extracted.text)
-        if geometry is not None and counter is not None:
-            for chunk in result.chunks:
+        for chunk in result.chunks:
+            if geometry is not None and counter is not None:
+                # Токенный путь добавляет и символьную часть (общий носитель).
                 geometry.add(chunk, counter, document=result.url)
+            else:
+                char_geometry.add(chunk, document=result.url)
         if args.skeleton:
             for chunk in result.chunks:
                 skeletons.add(chunk.text)
@@ -1379,6 +1421,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "census": census.as_dict() if args.census else None,
             "skeleton": skeleton_summary,
             "tokens": token_summary,
+            # Символьная геометрия — отдельным ключом и **всегда**: одинаковый ответ на
+            # вопрос «сколько у нас длинных heading_path» не должен требовать модели.
+            "chars_geometry": {
+                "chunks": len(char_geometry.heading_chars),
+                **char_geometry.summary(),
+            },
             "tokenizer": (
                 {**provenance, **resolution} if token_summary is not None else None
             ),

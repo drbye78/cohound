@@ -311,3 +311,38 @@ def test_heading_path_buckets_are_zero_not_missing() -> None:
         "200": {"chunks": 0, "documents": 0, "top": []},
         "500": {"chunks": 0, "documents": 0, "top": []},
     }
+
+
+def test_char_geometry_needs_no_tokenizer() -> None:
+    """Символьная геометрия считается без счётчика: число публикуется без модели.
+
+    Опубликованное «3 668 символов на 112 чанках» не воспроизводилось на хосте без кэша
+    токенизатора, хотя замер символьный: он жил внутри токенной геометрии и попадал в
+    отчёт только с ``--tokens``. Здесь закреплено разделение: ``CharGeometry`` отвечает
+    на вопрос «сколько длинных ``heading_path``» без модели, а ``TokenGeometry`` без
+    счётчика не строится вовсе.
+    """
+    chars = MEASURE.CharGeometry()  # type: ignore[attr-defined]
+    chars.add(_heading_chunk("к" * 201), document="a")
+    chars.add(_heading_chunk("к" * 3000), document="b")
+    chars.add(_heading_chunk(""), document="c")
+
+    summary = chars.summary()
+    assert summary["heading_chars"]["max"] == 3000
+    assert summary["heading_over"]["200"]["chunks"] == 2
+    assert summary["heading_over"]["500"]["top"] == [
+        {"document": "b", "chunks": 1, "max_heading_chars": 3000}
+    ]
+
+
+def test_token_geometry_shares_the_char_carrier() -> None:
+    """Один поток чанков — один символьный носитель: числа не расходятся между путями."""
+    chars = MEASURE.CharGeometry()  # type: ignore[attr-defined]
+    geometry = MEASURE.TokenGeometry(model_id="fake", chars=chars)  # type: ignore[attr-defined]
+    geometry.add(_heading_chunk("к" * 700), lambda _text: 1, document="a")
+
+    # Символьная часть видна из обоих путей и совпадает с отдельным носителем.
+    context = geometry.summary()["context"]
+    assert context["heading_chars"] == chars.summary()["heading_chars"]
+    assert context["heading_over"] == chars.summary()["heading_over"]
+    assert chars.heading_chars == [700]
