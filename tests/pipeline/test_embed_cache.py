@@ -278,7 +278,8 @@ def test_full_miss_embeds_everything_and_fills_the_cache(tmp_path: Path) -> None
         embedder, chunks, cache=cache, embed_model_id=MODEL, embed_device=DEVICE, embed_precision=PRECISION
     )
 
-    assert vectors == FakeEmbedder(dim=4).embed([c.text for c in chunks])
+    # Накопитель держит float16 (как и сам артефакт партиции): сверка в тех же единицах.
+    assert _fp16(vectors) == _fp16(FakeEmbedder(dim=4).embed([c.text for c in chunks]))
     assert [len(call) for call in embedder.calls] == [EMBED_BATCH_CHUNKS, 1]
     stats = cache.stats()
     assert stats["misses"] == len(chunks)
@@ -312,7 +313,7 @@ def test_mixed_batch_keeps_chunk_order(tmp_path: Path) -> None:
     live = FakeEmbedder(dim=4).embed([c.text for c in chunks])
     for index, vector in enumerate(vectors):
         if index % 2 == 0:
-            assert vector == [float(index)] * 4
+            assert _fp16(vector) == _fp16([float(index)] * 4)
         else:
             assert _fp16(vector) == _fp16(live[index])
 

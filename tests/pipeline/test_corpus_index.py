@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 from core.domain import CorpusChunk
 from core.pipeline.corpus_index import (
@@ -33,6 +34,7 @@ from core.pipeline.corpus_index import (
     _EmbedCensus,
     _EmbedThroughput,
     _make_embed_reporter,
+    _VectorMatrix,
 )
 from core.pipeline.embed_cache import EmbedCache
 from core.util.hashing import content_hash
@@ -296,3 +298,53 @@ def test_embed_and_build_stamps_embedded_at() -> None:
     assert len(stamps) == 1
     parsed = _dt.datetime.fromisoformat(next(iter(stamps)))
     assert parsed.tzinfo is not None and parsed.utcoffset() == _dt.timedelta(0)
+
+# -- накопитель векторов: байты партиции не меняются (план 26 O10) -----------
+
+
+#: Значения, на которых приведение к ``float16`` различает «почти» и «точно»:
+#: обычная дробь (0.1 не представима), субнормаль, крайние значения нормального
+#: диапазона fp16 и точка ровно между двумя fp16-соседями (round-half-to-even).
+_ADVERSARIAL_ROWS: list[list[float]] = [
+    [1 / 3, -2 / 3, 0.1, 1e-8],
+    [65504.0, -65504.0, 6.103515625e-05, 5.960464477539063e-08],
+    [1.0, 1.0 + 2**-11, 1.0 + 3 * 2**-11, 0.0],
+    [-1.0, -1.0 - 2**-11, 0.5, -0.5],
+]
+
+
+def test_vector_matrix_is_byte_identical_to_the_plain_list_cast() -> None:
+    """Накопитель обязан дать те же байты, что прежний путь «список списков → fp16».
+
+    Это и есть условие, при котором смена носителя не является ``content_change``:
+    ``vectors.fp16.npy`` собирает сборщик через ``np.asarray(vectors, dtype=np.float16)``,
+    и если накопитель приводит к ``float16`` раньше, но над теми же числами, байты
+    обязаны совпасть. Значения выбраны так, чтобы разошлось при любом отличии в
+    округлении (субнормали, граница 65504, точка ровно между соседями fp16).
+    """
+    total = len(_ADVERSARIAL_ROWS)
+    sink = _VectorMatrix(total, dim=4)  # type: ignore[attr-defined]
+    for row in _ADVERSARIAL_ROWS:
+        sink.add([row])
+
+    matrix = sink.matrix()
+    reference = np.asarray(_ADVERSARIAL_ROWS, dtype=np.float16)
+    assert matrix.shape == reference.shape == (total, 4)
+    assert matrix.dtype == np.float16
+    assert matrix.tobytes() == reference.tobytes()
+
+
+def test_vector_matrix_rejects_ragged_rows_instead_of_padding() -> None:
+    """Вектор другой длины — отказ, а не нули: иначе косинус по партиции ложен."""
+    sink = _VectorMatrix(2, dim=3)  # type: ignore[attr-defined]
+    sink.add([[1.0, 2.0, 3.0]])
+    with pytest.raises(ValueError, match="рваных строк"):
+        sink.add([[1.0, 2.0]])
+
+
+def test_vector_matrix_learns_the_dim_from_the_first_vector() -> None:
+    """Размерность не объявлена эмбеддером — берётся у первого вектора, не выдумывается."""
+    sink = _VectorMatrix(2, dim=None)  # type: ignore[attr-defined]
+    sink.add([[1.0, 2.0]])
+    sink.add([[3.0, 4.0]])
+    assert sink.matrix().tolist() == [[1.0, 2.0], [3.0, 4.0]]

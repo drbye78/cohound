@@ -535,6 +535,96 @@ def _make_embed_reporter(
 
     return _report
 
+class _VectorMatrix:
+    """Накопитель векторов партиции: одна ``float16``-матрица вместо списка списков.
+
+    **Почему не список.** Вектор приходит списком ``float``: 1024 компоненты — это ~8 КиБ
+    значений, 8 КиБ указателей и ~24 КиБ самих объектов ``float``, то есть ~32 КиБ на
+    вектор (замер 09.11.2026, план 26 O10). Партиция 108 614 чанков — **3.4 ГиБ**, 200 000 —
+    **6.4 ГиБ**; именно этот пик 09.11.2026 и убил живой прогон OOM-killer'ом на
+    ``MemAvailable`` 209 MB.
+
+    **Почему ``float16``, а не ``float32``.** Сборщик индекса всё равно пишет
+    ``vectors.fp16.npy``: приведение к ``float16`` делает
+    :func:`core.adapters.index_format.write_partition` (``np.asarray(vectors,
+    dtype=np.float16)``). Делать ту же операцию здесь — над теми же числами и с тем же
+    округлением (round-half-to-even), только раньше: матрица партиции остаётся **побайтово
+    прежней**, а память падает до 2 байт на компоненту (400 МиБ на 200 000 × 1024).
+
+    **Порядок строк — порядок чанков (A3).** Строка адресуется номером чанка, а не
+    порядком ответа эмбеддера; внешний батч лишь ограничивает, сколько строк пишется за
+    один заход.
+
+    Размерность берётся у эмбеддера, если он её объявляет (``expected_dim``); иначе — у
+    первого вектора. Рваные строки отвергаются **на записи** (а не молчаливым
+    выравниванием): вектор другой длины — сломанный прибор, и нули вместо компонент
+    сделали бы косинус бессмысленным.
+    """
+
+    def __init__(self, total: int, dim: int | None) -> None:
+        self._total = total
+        self._dim = dim
+        self._np: Any = None
+        self._matrix: Any = None
+        self._filled = 0
+
+    def _numpy(self) -> Any:
+        """numpy грузится лениво: без ``retrieval``/``embed-lite`` он не нужен модулю."""
+        if self._np is None:
+            import numpy as np  # noqa: PLC0415 — ленивый импорт, см. докстринг модуля
+
+            self._np = np
+        return self._np
+
+    def add(self, rows: Sequence[Any]) -> None:
+        """Дописывает очередной батч векторов в матрицу (порядок входа = порядок строк).
+
+        ``Any``, а не ``Sequence[float]``, честнее типа: строка приходит из трёх мест —
+        ответа эмбеддера, попадания в кэш (там она уже могла быть приведена) и строки
+        самой матрицы (дедуп по тексту). Приводит их к одной форме эта функция, и она же
+        отвергает рваные строки.
+        """
+        if not rows:
+            return
+        np = self._numpy()
+        if self._matrix is None:
+            dim = self._dim if self._dim else len(rows[0])
+            if dim <= 0:
+                raise ValueError(
+                    "эмбеддер вернул вектор нулевой длины — матрицу партиции собрать нечем"
+                )
+            self._matrix = np.empty((self._total, dim), dtype=np.float16)
+        matrix = self._matrix
+        # Переполнение fp16 — не повод падать здесь: это число, а не форма. Отказ с
+        # внятным сообщением ставит проверка сборщика (``_validated_matrix``), куда
+        # значение и приходит; warning от приведения был бы шумом в журнале фазы.
+        with np.errstate(over="ignore", invalid="ignore"):
+            for offset, row in enumerate(rows):
+                if len(row) != matrix.shape[1]:
+                    raise ValueError(
+                        f"эмбеддер вернул вектор длины {len(row)} на позиции "
+                        f"{self._filled + offset}, ожидалась {matrix.shape[1]}: "
+                        "матрица партиции не собирается из рваных строк"
+                    )
+                matrix[self._filled + offset] = row
+        self._filled += len(rows)
+
+    def row(self, index: int) -> Any:
+        """Готовая строка матрицы (``float16``) — для дедупа по тексту без второй копии."""
+        return self._matrix[index]
+
+    def matrix(self) -> Any:
+        """Матрица партиции ``(N, dim)`` в ``float16``; пустой вход — ``(0, 0)``."""
+        np = self._numpy()
+        if self._matrix is None:
+            return np.empty((0, 0), dtype=np.float16)
+        if self._filled != self._total:  # pragma: no cover — позиция заполняется всегда
+            raise ValueError(
+                f"накопитель векторов заполнен на {self._filled} из {self._total} строк"
+            )
+        return self._matrix
+
+
 def _embed_batched(
     embedder: EmbedderPort,
     chunks: Sequence[CorpusChunk],
@@ -546,16 +636,24 @@ def _embed_batched(
     embed_device: str,
     embed_precision: str,
     census: _EmbedCensus | None = None,
-) -> list[list[float]]:
+) -> Sequence[Sequence[float]]:
     """Эмбеддинг чанков внешними батчами; порядок входа = порядок выхода (детерминизм, A3).
 
     Один батч — один вызов ``embed`` и одна точка наблюдения (:data:`EMBED_BATCH_CHUNKS`).
     Тексты собираются **по батчу**, а не списком на весь продукт: ``[c.text for c in chunks]``
     держал рядом с полным накопителем векторов ещё и полный список текстов.
 
-    Возвращается полный список векторов: партицию собирает ``IndexBuilderPort.build(chunks,
-    vectors, meta)`` целиком, поэтому пик «все векторы» задан контрактом порта, а не циклом.
-    Батч лишь ограничивает **второй** материализуемый список (тексты) и даёт наблюдение.
+    Возвращается матрица векторов (:class:`_VectorMatrix`): партицию собирает
+    ``IndexBuilderPort.build(chunks, vectors, meta)`` целиком, поэтому «все векторы» заданы
+    контрактом порта. Батч ограничивает **второй** материализуемый список (тексты) и даёт
+    наблюдение.
+
+    **Накопитель — ``float16``-матрица, а не список списков** (план 26 O10): сборщик всё
+    равно пишет ``float16``, поэтому приведение здесь — та же операция над теми же числами,
+    только раньше. Пик на партицию падает с ~32 КиБ на вектор (108 614 чанков — 3.4 ГиБ,
+    200 000 — 6.4 ГиБ) до 2 байт на компоненту (200 000 × 1024 — 400 МиБ). Байты
+    ``vectors.fp16.npy`` при этом **не меняются** — это проверяется тестом на реальной
+    сборке, а не заявляется.
 
     **Кэш векторов (опция).** При ``cache`` каждый чанк батча сначала спрашивается у кэша
     по ключу ``(content_hash текста, embed_model_id, embed_device, embed_precision)``;
@@ -591,7 +689,6 @@ def _embed_batched(
     :param census: счётчики per продукт (хиты/посчитанные); ``None`` — не считать.
     """
     total = len(chunks)
-    vectors: list[list[float]] = []
     started = time.monotonic()
     # Размерность — часть проверки хитов: вектор другой размерности несовместим с моделью.
     # ``operator.index`` принимает и numpy-целые, иначе проверка молча выключилась бы.
@@ -606,8 +703,13 @@ def _embed_batched(
     expected_dim = declared_dim if declared_dim > 0 else None
     # Тексты, уже обслуженные в этом вызове, — только для пути без кэша: при кэше ту же
     # роль играет ``cache.get`` (вектор записан сразу после эмбеддинга батча), и попадание
-    # остаётся фактом диска, а не памятью процесса.
-    known: dict[str, list[float]] = {}
+    # остаётся фактом диска, а не памятью процесса. Хранится **строка матрицы**
+    # (``float16``-view), а не исходный список: иначе дедуп держал бы вторую полную копию
+    # всех векторов и пик вернулся бы к прежнему (план 26 O10).
+    known: dict[str, Any] = {}
+    # Накопитель создаётся после того, как известна размерность: она либо объявлена
+    # эмбеддером, либо берётся у первого вектора.
+    sink = _VectorMatrix(total, expected_dim)
     for start in range(0, total, batch_size):
         batch = chunks[start : start + batch_size]
         slots: list[list[float] | None] = [None] * len(batch)
@@ -625,6 +727,9 @@ def _embed_batched(
                 unkeyed.append(position)
         # ``(ключ, позиции, текст)`` на каждый уникальный текст батча.
         pending: list[tuple[str, list[int], str]] = []
+        #: Ключи, обслуженные в этом батче без кэша: ``(content_hash, позиция в батче)``.
+        #: Строка матрицы берётся после записи батча — так дедуп не держит вторую копию.
+        fresh_rows: list[tuple[str, int]] = []
         cached_now = 0
         # Сколько позиций ушло бы в эмбеддер без дедупа: ровно это и есть измеряемая
         # экономия. Кэш-хиты сюда не входят — они и так не считаются.
@@ -686,7 +791,9 @@ def _embed_batched(
                 if key:
                     if cache is None:
                         # Без кэша повтор того же текста в следующем батче берётся отсюда.
-                        known[key] = vector
+                        # Запоминается **позиция**, а не вектор: строка матрицы появится
+                        # только после ``sink.add``, и ссылка на неё не держит копию.
+                        fresh_rows.append((key, positions[0]))
                     else:
                         # Пишем ровно то, что вернула модель: квантизация в fp16 — забота
                         # кэша, и она тождественна той, что делает сборщик индекса.
@@ -715,10 +822,13 @@ def _embed_batched(
         for value in slots:
             if value is None:  # pragma: no cover — позиция заполняется всегда
                 raise ValueError("батч эмбеддинга оставил чанк без вектора")
-            vectors.append(value)
+        sink.add(slots)
+        if fresh_rows:
+            for key, position in fresh_rows:
+                known[key] = sink.row(start + position)
         if on_batch is not None:
             on_batch(start + len(batch), total, time.monotonic() - started)
-    return vectors
+    return sink.matrix()
 
 def _embed_and_build(
     embedder: EmbedderPort,

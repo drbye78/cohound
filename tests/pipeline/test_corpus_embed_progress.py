@@ -28,6 +28,7 @@ import pathlib
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from core.domain import (
@@ -249,6 +250,12 @@ class _CountsStore:
         return dict(self._counts)
 
 
+
+def _fp16(values: Any) -> bytes:
+    """Байты ``float16``-матрицы: та же величина, что уходит в ``vectors.fp16.npy``."""
+    return np.asarray(values, dtype=np.float16).tobytes()
+
+
 # --------------------------------------------------------------------------- #
 # 1. Батчевый эмбеддинг: побитовое равенство одному вызову, порядок, память
 # --------------------------------------------------------------------------- #
@@ -268,8 +275,10 @@ def test_batched_embedding_is_bitwise_equal_to_a_single_call() -> None:
         embedder, chunks, embed_device="cpu", embed_precision="fp32", on_batch=_mark
     )
 
-    # Побитовое равенство одному вызову на том же входе (тем же адаптером).
-    assert vectors == FakeEmbedder(dim=4).embed([c.text for c in chunks])
+    # Побитовое равенство одному вызову на том же входе (тем же адаптером). Сверка — в
+    # единицах артефакта: накопитель держит `float16`, как и `vectors.fp16.npy` (план 26
+    # O10), поэтому «побитово» здесь означает байты fp16, а не равенство `list == list`.
+    assert _fp16(vectors) == _fp16(FakeEmbedder(dim=4).embed([c.text for c in chunks]))
     # Нарезка: два полных батча и остаток, порядок — по порядку чанков.
     assert [len(call) for call in embedder.calls] == [
         EMBED_BATCH_CHUNKS,
