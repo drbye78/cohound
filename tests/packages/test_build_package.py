@@ -220,39 +220,46 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
 @pytest.mark.parametrize(
     ("url", "max_depth", "max_documents"),
     [
-        # Дерево документации: sitemap 404, размер — из TOC. Замер 09.11.2026 (статика):
-        # 55 индексов редакций, TOC снят у 40 — сумма 3 667 страниц (нижняя граница;
-        # 15 редакций не сняты). 800 было измеренным усечением прогона `2a5b51af5778`.
-        ("https://postgrespro.ru/docs/16/", 8, 3667),
+        # Дерево документации: sitemap 404. Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд,
+        # `--crawl-only --run-id recon-pg_docs`): 18 939 документов, `truncated: false`;
+        # 800 усекало корень в 23 раза (прогон `2a5b51af5778`: 949 + `max_documents`).
+        ("https://postgrespro.ru/docs/16/", 8, 20000),
         # Host-ключ портала (и страницы продукта) сохраняет прежний бюджет: path-ключ
-        # `/docs` не должен протекать на соседние корни того же хоста.
+        # `/docs` не должен протекать на соседние корни того же хоста. Проба 10.11.2026
+        # взяла 3 996 документов и была остановлена хостом (980 × `429` на `/list/*`):
+        # 800 — выбор приоритета, не измеренный размер.
         ("https://postgrespro.ru/", 8, 800),
-        # 23 URL, плоско — 60 покрывает с запасом.
-        ("https://pangolin.sbertech.ru/", 8, 600),
+        # Статическая нижняя граница корня 3 025 (`/center/docs/7` 2 307 + kintsugi 227 +
+        # copywala 491); живой краул 12.11.2026 не завершён (572 за 40 мин, browser
+        # сериализован) ⇒ 3 500 — выше нижней границы, `truncated: false` не подтверждён.
+        ("https://pangolin.sbertech.ru/", 8, 3500),
         # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.
         ("https://www.gaz-is.ru/", 0, 10),
-        # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...) — обход уместен.
-        ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 200),
-        # path-ключ приоритетнее host-ключа (sitemap только здесь); в scope seed'а ~22 URL
-        # pangolin (502 чужих документа отсекает scope-фильтр), 60 — запас.
-        ("https://sbertech.ru/documents/platform-v-pangolin-se", 4, 600),
+        # Продуктовый путь jatoba: измерено 1 HTML в scope + 17 отказов `robots_disallow`
+        # (`Disallow: *.pdf$` закрывает документы продукта) ⇒ 50 выше измерения.
+        ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 50),
+        # path-ключ приоритетнее host-ключа (sitemap только здесь); в scope seed'а 27 URL
+        # pangolin (замер 09.11.2026 по `sbertech.ru/sitemap.xml`), 100 — запас.
+        ("https://sbertech.ru/documents/platform-v-pangolin-se", 4, 100),
         # host-ключ: без sitemap и без discovery (иначе BFS тянет 89 продуктов, I17).
         ("https://sbertech.ru/", 0, 10),
         # seed — глубокий путь, 8 уровней запаса.
         ("https://platformv.sbertech.ru/products/pangolin", 8, 300),
-        # path-ключ внутри sitemap-хоста; весь хост — 283 URL.
-        ("https://tantorlabs.ru/products/dbms/", 8, 200),
-        # host-ключ: 3 уровня on-host, 283 URL ⇒ 300 с запасом.
+        # path-ключ внутри sitemap-хоста; измерено 3 документа, `truncated: false`.
+        ("https://tantorlabs.ru/products/dbms/", 8, 50),
+        # host-ключ: проба 10.11.2026 взяла 9 162 документа (прервана таймаутом); 300 —
+        # граница I17 (host-корень затягивает чужие продукты), а не размер сайта.
         ("https://tantorlabs.ru/", 3, 300),
-        # 2 URL (1 PDF) ⇒ 50 покрывает сайт.
+        # Измерено 7 документов, `truncated: false` ⇒ 50 покрывает сайт.
         ("https://jatoba.ru/", 2, 50),
-        # sitemap 404, крупный docs-хост: 800 было измеренным усечением (22.10 — ровно
-        # 800 при потолке 800), 5000 — проба размера (решение владельца 01.11).
-        ("https://docs.tantorlabs.ru/", 8, 5000),
+        # sitemap 404. Размер ИЗМЕРЕН 12.11.2026: 1 207 документов, `truncated: false`
+        # (одна редакция `ru/18_6/se`; плоские `/tdb/*.html` — 301-алиасы).
+        ("https://docs.tantorlabs.ru/", 8, 1500),
         # Host-root общего справочного центра Astra — не продуктовый корень (I17).
         ("https://wiki.astralinux.ru/", 0, 10),
-        # Тантор-контент — Confluence-пространство TANDOCS (стабильный префикс /tandocs).
-        ("https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", 8, 300),
+        # Тантор-контент — Confluence-пространство TANDOCS. Измерено статически 73 страницы
+        # (13.11.2026); 403 прогона 07.11 — свойство Scrapy User-Agent, не закрытый корень.
+        ("https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", 8, 150),
     ],
 )
 def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: int) -> None:
@@ -326,7 +333,7 @@ def test_www_gaz_is_host_root_does_not_discover() -> None:
     assert product_profile is not None, "продуктовый path-ключ jatoba обязан матчиться"
     assert product_profile.fetch is FetchMode.HTTP
     assert product_profile.max_depth == 8
-    assert product_profile.max_documents == 200
+    assert product_profile.max_documents == 50
 
 
 def test_corpus_urls_jatoba_seed_is_live_product_page() -> None:
@@ -372,7 +379,7 @@ def test_wiki_astralinux_host_root_does_not_discover_tandocs_is_scoped() -> None
     assert space_profile is not None
     assert space_profile is not host_profile
     assert space_profile.max_depth == 8
-    assert space_profile.max_documents == 300
+    assert space_profile.max_documents == 150
 
     # Канонический Confluence-путь пространства не попадает под /tandocs-префикс.
     assert select_domain_profile("https://wiki.astralinux.ru/display/TANDOCS", profiles) is (
@@ -400,7 +407,7 @@ def test_sitemap_declared_only_on_most_specific_sbertech_key() -> None:
     assert path_profile is not None
     assert path_profile.sitemap == "https://sbertech.ru/sitemap.xml"
     assert path_profile.max_depth == 4
-    assert path_profile.max_documents == 600
+    assert path_profile.max_documents == 100
 
 
 @pytest.mark.parametrize("host", MULTI_PRODUCT_HOST_ROOTS)
@@ -501,9 +508,9 @@ def test_edu_subdomain_is_declared_root_with_own_capped_profile() -> None:
     До 22.10 хост не был объявлен нигде: он попадал в партицию как «любой поддомен»
     ``postgrespro.ru`` и наследовал его профиль (``max_documents: 800``), израсходовав
     664 элемента бюджета корня. Теперь у него свой корень (``corpus_urls.yaml``) и свой
-    потолок — 700: выше измеренных 664 (потолок ниже объявил бы весь продукт
-    ``truncated`` из-за вспомогательного хоста) и ниже унаследованных 800 (это бюджет
-    портала, не заявка на размер edu).
+    потолок — 1 500: выше измеренных 900 (12.11.2026, ``truncated: false``; потолок ниже
+    объявил бы весь продукт ``truncated`` из-за вспомогательного хоста) и не унаследован
+    от портала (800 — бюджет портала, не заявка на размер edu).
     """
     from core.config.passports import load_passports, passport_urls
 
@@ -517,7 +524,7 @@ def test_edu_subdomain_is_declared_root_with_own_capped_profile() -> None:
     edu = profiles["edu.postgrespro.ru"]
     assert edu.fetch is FetchMode.HTTP
     assert edu.max_depth == 8
-    assert edu.max_documents == 700
+    assert edu.max_documents == 1500
     assert edu.max_documents != profiles["postgrespro.ru"].max_documents, (
         "потолок edu обязан быть собственным, а не унаследованным от postgrespro.ru"
     )
@@ -526,4 +533,4 @@ def test_edu_subdomain_is_declared_root_with_own_capped_profile() -> None:
         "https://edu.postgrespro.ru/dba2_06_mvcc_autovacuum.html", profiles
     )
     assert selected is not None
-    assert selected.max_documents == 700
+    assert selected.max_documents == 1500

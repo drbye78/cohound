@@ -33,12 +33,16 @@ database.diasoft.ru/docs/ru/q-database/versiya-180:
   # Корень документации продукта. Замер 28.10: TOC `/versiya-180/` ссылается на **700**
   # уникальных страниц (`/versiya-180/<page>/`), sitemap документации не публикует
   # (`sitemap-files.xml` — 1 URL `/docs/`, iblock-карты — 0 страниц `/docs/`), поэтому
-  # глубина 8 — единственный ориентир, а размер берётся из TOC. Замер 01.11 (живой
-  # прогон): при потолке 800 получено ровно 800 документов и `queue_remaining: 387` —
-  # реальный размер **≥ 1187**, фронт не был исчерпан (`truncated_reason:
-  # max_documents`); резал бюджет документов, а не глубина. Потолок 5000 — **проба
-  # размера** (решение владельца 01.11): размер не измерен, до прогона с
-  # `truncated: false` любое число — нижняя граница.
+  # глубина 8 — единственный ориентир, а размер берётся из TOC.
+  #
+  # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд `stands/root-recon`, бюджет 20000):
+  # `crawl run --crawl-only --run-id recon-diasoft180 --from-scratch` ⇒ **1 226 элементов,
+  # из них 1 184 страницы**, `truncated: false` (фронт исчерпан). 42 элемента — `mailto:`,
+  # отбитые SSRF; 59 попыток `?PAGEN_1=2` — `robots_disallow` (`Disallow: /*PAGEN`), при
+  # этом все страницы первой страницы TOC получены. Независимый статический BFS (4 curl-
+  # воркера, ≥0.1 с) даёт ровно те же 1 184 адреса — расхождение 0.
+  # Бюджет 1 500 — выше измерения (запас на пагинацию, если robots её откроет).
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1.
   #
   # Лимит измерен 07.11.2026 (тираж, план 22 §9): 200 документов на `{0.05, 0.2}` за 33 с
   # = **6.12 запроса/с**, ноль `429`/`5xx`, `fetch` p50/p95 147/197 мс, `in_flight_max` 4;
@@ -46,29 +50,33 @@ database.diasoft.ru/docs/ru/q-database/versiya-180:
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 5000
+  max_documents: 1500
   rate_limit:
     max_s: 0.2
     min_s: 0.05
 docs.tantorlabs.ru:
-  # sitemap 404 (advertised). Замер 22.10: добыто **ровно 800** документов при потолке
-  # 800 — это усечение, а не полнота.
-  # Замер 09.11.2026 (сеанс прогона `2a5b51af5778`, `truncated: false`): корень исчерпан —
-  # **2 063 адреса = 1 168 документов** (`crawl_session_items`, уникальный `content_hash`;
-  # `docs/reports/measurements/2026-11-09-crawl-root-size-static.md` §4). Из них **894** —
-  # плоские `/tdb/<page>.html`, отдающие одну и ту же страницу входа (один `content_hash`,
-  # один ETag): это алиасы, а не документы. Покрыта **одна** редакция (`18_6`); `17_11`
-  # (TOC 893) в корпусе отсутствует, поэтому «размер корня» называется документами, а
-  # 5 000 остаётся бюджетом, а не заявкой на полноту.
+  # sitemap 404 (advertised). Размер ИЗМЕРЕН 12.11.2026 (изолированный стенд, бюджет
+  # 20000): `crawl run --crawl-only --run-id recon-tantor_tdb --from-scratch` ⇒
+  # **1 207 документов** (`truncated: false`), все — `/tdb/ru/18_6/se/`; статический BFS
+  # того же дерева — 1 210 адресов. Сид `/tdb/` отдаёт 301 на
+  # `…/tdb/ru/18_6/se/differences.html`, дальше обход идёт по относительным ссылкам
+  # страницы и остаётся внутри `ru/18_6/se`: перекрёстных ссылок на `en/`, `se1c/`, `be/`
+  # в странице **0 из 1 068** `href`. Поэтому корень покрывает **одну** редакцию;
+  # `se1c` (865) и `be` (848) достижимы только отдельными сидами.
+  #
+  # Плоские `/tdb/<page>.html` (895 адресов в цикле `2a5b51af5778`) — все 301 на ту же
+  # `differences.html` и один `content_hash`: алиасы, а не документы. Корпус того цикла
+  # держал 1 168 документов, а не 2 063 элемента.
   #
   # Сид — `/tdb/`, а не корень: с миграции сайта корень отдаёт 301 на
   # `https://tantorlabs.ru/docs/` (чужая область ⇒ ноль документов, `redirect_out_of_scope`).
   # Проверено 07.11.2026 (`curl -L`: `/` → 301 → маркетинговая страница; `/tdb/` → 200,
   # `…/tdb/ru/18_6/se/differences.html`).
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1, §5.2.
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 5000
+  max_documents: 1500
   # Лимит этого хоста измерен, а не унаследован: три панели по 250–300 документов
   # (`--crawl-only`, 07.11.2026, `docs/reports/measurements/2026-11-07-crawl-rate-tantor.md`).
   # Лимит измерен на **всём корне**, а не на выборке (07.11.2026): 1207 документов за
@@ -87,22 +95,27 @@ edu.postgrespro.ru:
   # попадал в партицию postgrespro только как «любой поддомен» корня postgrespro.ru и
   # израсходовал 664 элемента из 800 его бюджета (569 добыто), а docs-корень продукта не
   # получил ни одного своего элемента — прогон до него не дошёл.
-  # Потолок 700 — **выше** измеренных 664 и **ниже** унаследованных 800: потолок ниже
-  # измеренного объёма объявил бы весь продукт `truncated: max_documents` из-за
-  # вспомогательного хоста (ложная аномалия exhaustive-отсутствия I2/I2b), а 800 — это
-  # бюджет корпоративного портала, а не заявка на размер edu. 700 даёт ~5 % запаса к
-  # измеренному набору и жёстко ограничивает хост. Стоимость обхода по времени
-  # нейтрализована порядком: edu объявлен последним корнем (docs → продукт → портал → edu),
-  # поэтому ценные корни дренируются раньше и от edu не зависят.
+  #
+  # Размер ИЗМЕРЕН 12.11.2026 (изолированный стенд, бюджет 20000): `crawl run --crawl-only
+  # --run-id recon-edu --from-scratch` ⇒ **900 документов**, `truncated: false` (фронт
+  # исчерпан). Состав: 383 `.html`, 252 `.pdf`, 140 `.zip`, 74 `.txt`, 33 HTML-каталога,
+  # 6 `.sql`, 2 `.md`; 12 отказов `payload_too_large` (потолок страницы 20 MiB — дефект
+  # контейнеров, не темп) и 3 `source_unavailable`. Прежние 700 резали корень; 1 500 —
+  # выше измерения с запасом на новые раздатки.
+  # Статика (638 HTML-ссылок) — нижняя граница, живой краул её превысил за счёт вложений.
+  #
+  # Стоимость обхода по времени нейтрализована порядком: edu объявлен последним корнем
+  # (docs → продукт → портал → edu), поэтому ценные корни дренируются раньше.
   #
   # Лимит объявлен 07.11.2026 тем же значением, что у быстрых хостов, но темпа он здесь
   # **не задаёт**: упор в сам хост — 200 запросов дали 0.90 запроса/с при `fetch` p50
   # 3.47 с / p95 17.9 с и `in_flight_max` 10 (очередь копилась в пуле). Отказов хоста 0;
   # 7 элементов — `payload_too_large` (потолок страницы 20 MiB, дефект контейнеров, не темп).
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1.
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 700
+  max_documents: 1500
   rate_limit:
     max_s: 0.2
     min_s: 0.05
@@ -126,15 +139,25 @@ gaz-is.ru/produkty/inform-sistemy/subd-jatoba:
   # 07.11.2026 (тираж): 17 из 18 элементов — `robots_disallow`, обход закрыт лентой ⇒
   # `rate_limit` НЕ объявляется: темп здесь ничего не измеряет, отказ виден в покрытии
   # (`complete=False`), а не в лимите.
+  #
+  # Размер ИЗМЕРЕН 10.11.2026 (изолированный стенд): `crawl run --crawl-only
+  # --run-id recon-gazis_jatoba` ⇒ **1 HTML в scope** + 17 отказов `robots_disallow`.
+  # Статика: 3 ссылки TOC, 2 в scope; `robots.txt` закрывает `*.pdf$`, а PDF продукта
+  # (сертификаты, «Jatoba Security Vision») — это и есть его документы. Бюджет 50 —
+  # выше измерения (2 HTML + запас), 200 не подтверждались ничем.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1, §5.5.
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 200
+  max_documents: 50
 jatoba.ru:
-  # 2 URL, из них 1 PDF — бюджет 50 заведомо покрывает сайт. Глубина 2: sitemap даёт
-  # depth-0 seeds, максимальная глубина пути на сайте — 1.
+  # Глубина 2: sitemap даёт depth-0 seeds, максимальная глубина пути на сайте — 1.
+  # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд): `crawl run --crawl-only
+  # --run-id recon-jatoba` ⇒ **7 документов**, `truncated: false`; 9 запросов, единственный
+  # отказ — `Jatoba2026.pdf` (`404`, терминальный). 50 — выше измерения, менять нечего.
   # Лимит измерен 07.11.2026: 8 × `200` + 1 × `404` (терминальный), 1.33 запроса/с, отказов
   # темпа 0; `fetch` p95 5.7 с — хост медленный на отдельных страницах.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1.
   extract: auto
   fetch: http
   max_depth: 2
@@ -144,12 +167,20 @@ jatoba.ru:
     min_s: 0.05
   sitemap: https://jatoba.ru/sitemap.xml
 pangolin.sbertech.ru:
-  # 23 URL, плоско — depth 1 + один хоп на документ. 60 покрывает 23 с запасом;
-  # 600/8 размером сайта не подтверждены.
+  # Размер ИЗМЕРЕН статически 13.11.2026 (BFS по `curl`, 4 воркера, ≥0.08 с):
+  # `/center/docs/7/` — **2 307** страниц, `/center/docs/kintsugi/` — **227**,
+  # `/center/docs/copywala/` — **491**; сумма **3 025** — нижняя граница корня.
+  # Живой краул 12.11.2026 (`--crawl-only --run-id recon-pangolin_root`) не завершён:
+  # **572** документа за 40 мин, `in_flight_max == 1` (browser-фетч сериализован), 69
+  # отказов `robots_disallow` (`Disallow: /*?*` — фильтры `/certificates?active=…`).
+  # Бюджет 3 500 — выше статической нижней границы; цена обхода при 4.2 с/док ≈ 4 ч на
+  # корень, поэтому полнота здесь стоит времени, а не памяти. `truncated: false` этим
+  # краулом НЕ подтверждён — подтверждается прогоном до конца.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1, §3.
   extract: auto
   fetch: browser
   max_depth: 8
-  max_documents: 600
+  max_documents: 3500
   sitemap: https://pangolin.sbertech.ru/sitemap.xml
   strategy: honest
   wait_for: () => document.body && document.body.innerText.length > 200
@@ -181,7 +212,7 @@ platformv.sbertech.ru/docs/public/PSQ:
   extract: auto
   fetch: http
   max_depth: 8
-  # Бюджет выше измерения, а не «по ощущению» (замер 29.10.2026, дерево версии 8.1.0 —
+  # Историческая нижняя оценка (замер 29.10.2026, дерево версии 8.1.0 —
   # той, что объявлена в паспорте: `version: Pangolin 8.1`):
   #   нижняя граница 1299 страниц = сумма ссылок 15 разделов
   #   `common/documents/<sec>/index.html` (about 12, administration-guide 113,
@@ -190,12 +221,16 @@ platformv.sbertech.ru/docs/public/PSQ:
   #    instructions-and-notes 12, programming-guide 222, reference-guide 50,
   #    reference-guide-postgresql 123, reference-guide-sql 206, what-is-new 6).
   # Выборочная проверка страниц даёт ещё несколько ссылок (перекрёстные), то есть 1299 —
-  # нижняя граница, а не итог. Потолок ниже измерения объявил бы весь продукт
-  # `truncated: max_documents` и снял бы все его ❌ (ложная аномалия I2/I2b). Потолок
-  # 5000 — **проба размера** (решение владельца 01.11): нижняя граница 1299 слишком
-  # близка к прежним 2000, а размер дерева не измерен; до прогона с `truncated: false`
-  # любое значение — нижняя граница, а не заявка на полноту.
-  max_documents: 5000
+  # нижняя граница, а не итог.
+  #
+  # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд, бюджет 20000): `crawl run --crawl-only
+  # --run-id recon-psq810 --from-scratch` ⇒ **1 155 документов**, `truncated: false`
+  # (фронт исчерпан). Статический BFS того же дерева — 1 159 адресов; разница 4 —
+  # страницы, схлопнутые по `content_hash`. Статическая сумма 1 299 была завышена
+  # перекрёстными ссылками: страницы соседних разделов считались дважды.
+  # Бюджет 1 500 — выше измерения.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1.
+  max_documents: 1500
   # Лимит измерен 07.11.2026 (тираж): 200 документов на `{0.05, 0.2}` = **6.48 запроса/с**,
   # ноль отказов, `fetch` p50/p95 88/351 мс, `in_flight_max` 5 — самое быстрое дерево
   # документации из измеренных.
@@ -209,6 +244,14 @@ postgrespro.ru:
   # Лимит портала измерен 07.11.2026 (тираж): 200 документов на `{0.05, 0.2}` = **5.95 запроса/с**,
   # ноль `429`/`5xx`, `fetch` p50/p95 231/1120 мс, `in_flight_max` 10 — это ширина пула
   # узла (`max_workers`), а не следствие лимитера.
+  #
+  # Размер портала НЕ измерен и бюджетом не является заявкой на полноту: проба 10.11.2026
+  # (`--run-id recon-pg_root`, бюджет 20000) взяла **3 996** документов за 23 мин и была
+  # остановлена самим хостом — **980 ответов `429`** на `/list/*`. 3 996 — нижняя граница
+  # сайта, а не корня продукта. 800 — выбор приоритета (портал не документация продукта),
+  # а не измеренный размер; поднимать его имеет смысл только вместе с `max_depth` и
+  # отдельным темпом, иначе портал съедает бюджет и время у `/docs`.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §3, §4.
   extract: auto
   fetch: http
   max_depth: 8
@@ -225,15 +268,20 @@ postgrespro.ru/docs:
   #   curl -sSL "https://postgrespro.ru/docs/<edition>/<version>/index" \
   #     | grep -o 'href="/docs/<edition>/<version>/[^"]*"' | sort -u | wc -l
   # 15 редакций (`otelcol` 5, `pg_probackup3` 5, `postgrespro/9.5`, `postgrespro/9.6`,
-  # `postgresql/9.4`, `9.5`, `9.6`) не сняты ⇒ 3 667 — **нижняя граница, истинная выше**.
-  # Прежние 800 были ниже неё: прогон `2a5b51af5778` усечён (`truncated: max_documents`),
-  # и 121 ячейка эталона по этому корню — `in_scope_not_reached` при живых адресах.
-  # 3 667 — измеренная граница, а не заявка на полноту: прогон с `truncated: false`
-  # уточнит её вверх.
+  # `postgresql/9.4`, `9.5`, `9.6`) не сняты ⇒ 3 667 — нижняя граница.
+  #
+  # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд, бюджет 20000): `crawl run --crawl-only
+  # --run-id recon-pg_docs --from-scratch` ⇒ **18 939 документов**, `truncated: false`
+  # (фронт исчерпан, `queue_remaining = 0`); 18 912 из них — HTML-страницы дерева.
+  # Прежние 800 усекали корень в 23 раза: прогон `2a5b51af5778` получил 949 документов и
+  # `truncated: max_documents`, отсюда 121 ячейка эталона `in_scope_not_reached`
+  # (в частности `enterprise/18`: живых 1 267 страниц, в корпусе 12).
+  # Бюджет 20 000 — выше измерения (18 939) и ниже 2×, чтобы новая редакция не срезалась.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1.
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 3667
+  max_documents: 20000
   rate_limit:
     max_s: 0.2
     min_s: 0.05
@@ -257,20 +305,30 @@ sbertech.ru:
 sbertech.ru/documents:
   # Path-scope: host-wide sitemap содержит 748 <loc>, из них 502 — /documents (501
   # /documents/{slug}/{version} + индекс) на 89 продуктов. Фильтр scope (дефект B) оставляет
-  # только <loc> поддерева seed'а /documents/platform-v-pangolin-se/ — 22 URL pangolin;
-  # бюджет 60 покрывает их с запасом. 800 относился бы к 502 чужим документам, которых в
-  # этой партиции быть не должно (I17).
+  # только <loc> поддерева seed'а /documents/platform-v-pangolin-se/ — **27 URL pangolin**
+  # (замер 09.11.2026, `sbertech.ru/sitemap.xml`: 745 `<loc>`, pangolin 27).
   # Глубина 2 достаточна: sitemap даёт документы subordinate seeds на depth 0, +1 хоп;
   # depth 4 покрытия не добавляет.
+  # Бюджет 100 — выше измерения (27) с запасом на новые редакции; 600 относился бы к 502
+  # чужим документам, которых в этой партиции быть не должно (I17).
+  # Живой краул этого корня не проводился: `platformv`/`sbertech` отдают 401 обычному HTTP,
+  # а browser-фетч сериализован. 27 — статическая нижняя граница, не `truncated: false`.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §2, §4.
   extract: auto
   fetch: browser
   max_depth: 4
-  max_documents: 600
+  max_documents: 100
   sitemap: https://sbertech.ru/sitemap.xml
   strategy: honest
 tantorlabs.ru:
-  # 283 URL (sitemap-индекс: 58 <loc> + дочерние фиды), 3 уровня on-host; sitemap —
-  # индекс фидов, off-host habr не берём. 300 покрывает 283 с запасом.
+  # Размер хоста НЕ исчерпан и бюджетом не является заявкой на полноту: проба 10.11.2026
+  # (`--run-id recon-tantor_root`, бюджет 20000, depth 3) взяла **9 162** документа за
+  # 39 мин и была прервана таймаутом прибора (20×`504`). Прежняя оценка «283 URL по
+  # sitemap-индексу» была нижней границей карты, а не размером сайта.
+  # 300 — граница **I17**, а не размера: host-корень затягивает `/perseydb`, `/pipelinedb`,
+  # `/polardb`, `/patroni`, `/tp`, `/dlh`, `/xdata` — чужие продукты. Для полноты нужны
+  # явные продуктовые сиды (`/products/dbms/`, `/tdb/…`), а не подъём этого бюджета.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1, §3, §9.
   extract: auto
   fetch: browser
   max_depth: 3
@@ -281,11 +339,14 @@ tantorlabs.ru/products/dbms:
   # Seed — глубокий путь внутри sitemap-хоста ⇒ нужен запас глубины.
   # Sitemap намеренно не задан: path-scoped seed внутри host-wide sitemap (58 <loc>,
   # в scope 3) ⇒ почти no-op; host-ключ tantorlabs.ru свой sitemap сохраняет.
-  # 200 — потолок продукта; 800 не подтверждён (весь хост — 283 URL).
+  # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд): `crawl run --crawl-only
+  # --run-id recon-tantor_dbms` ⇒ **3 документа**, `truncated: false`; статика даёт те же 3.
+  # Бюджет 50 — выше измерения; 200 не подтверждался ничем (весь хост — 283 URL).
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1, §2.
   extract: auto
   fetch: browser
   max_depth: 8
-  max_documents: 200
+  max_documents: 50
   strategy: honest
 wiki.astralinux.ru:
   # Host-root seed (https://wiki.astralinux.ru/) — корень общего справочного центра
@@ -303,9 +364,17 @@ wiki.astralinux.ru/tandocs:
   # Обход — только внутри пространства TANDOCS (sitemap 404 → глубина как ориентир).
   # 07.11.2026 (тираж): сид отвечает **403** обычному HTTP (1 элемент, `source_unavailable`)
   # ⇒ `rate_limit` НЕ объявляется: корень закрыт для клиента, это факт покрытия, а не темпа.
-  # 09.11.2026 (статика): тот же сид отвечает **200** (68 уникальных `/tandocs`-ссылок).
-  # Оба кода с датами; причина смены не установлена, 403 не воспроизведён.
+  # 13.11.2026 (матрица User-Agent, один и тот же URL): `Scrapy/2.19.0 (+https://scrapy.org)`
+  # → **403**, `coHound-crawler/0.1` → **200**, `Mozilla/5.0 … Chrome/120` → **200**.
+  # `COHOUND_SCOUT_CRAWLER=scrapy` в `.env`, а `DEFAULT_SCRAPY_SETTINGS` не задаёт
+  # `USER_AGENT` (`core/adapters/crawl_scrapy.py`), поэтому Scrapy отправляет свой дефолт;
+  # HTTP/browser-краулеры отправляют `coHound-crawler/0.1`. 403 — дефект провенанса
+  # User-Agent, а не свойство сайта.
+  # Размер ИЗМЕРЕН статически 13.11.2026 (BFS по `curl`, UA `coHound-crawler/0.1`):
+  # **73 страницы** (`truncated: false` по фронту); TOC — 66 уникальных ссылок.
+  # Бюджет 150 — выше измерения; 300 был пробой.
+  # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §2, §5.1.
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 300
+  max_documents: 150
