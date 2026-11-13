@@ -1374,7 +1374,16 @@ def test_pool_shutdown_waits_and_cancels_futures(tmp_path: Path) -> None:
         store.close()
 
 
-def test_extract_pool_rebuild_exhaustion_is_terminal_no_inline(tmp_path: Path) -> None:
+def test_extract_pool_rebuild_exhaustion_leaves_rows_pending(tmp_path: Path) -> None:
+    """Исчерпание пересборок — отказ **пула**: остаток строк остаётся ``pending``.
+
+    Abandon — свойство пула, а не документа. Прежняя редакция этого теста требовала
+    терминального ``parser_failed`` на остатке корня и тем самым пинила ложную
+    провенанс-запись: документов, которых не извлекали, «отказом экстрактора» объявлять
+    нельзя — это уничтожает покрытие (I2c). Теперь проверяется обратное: строки остаются
+    ``pending`` (работа следующего исполнения), элемента сеанса не трогают, а фаза
+    называет число оставленных строк одним входом в ``errors``.
+    """
     store = SqliteStore(":memory:")
     try:
         _make_run(store)
@@ -1387,7 +1396,8 @@ def test_extract_pool_rebuild_exhaustion_is_terminal_no_inline(tmp_path: Path) -
 
         pool = ExtractionPool(pool_factory=always_crash, worker=_reconstruct_worker)
         # Девять страниц > трёх волн по 2: после исчерпания пересборок остаётся остаток,
-        # который должен стать терминальным ``parser_failed``, а не уйти в inline docling.
+        # который обязан остаться работой очереди, а не уйти ни в inline docling, ни в
+        # выдуманный ``parser_failed``.
         pages = {
             ROOT: (
                 "<html>"
@@ -1406,19 +1416,29 @@ def test_extract_pool_rebuild_exhaustion_is_terminal_no_inline(tmp_path: Path) -
             extraction_pool=pool,
         )
         items = _session_items(store)
+        rows = {row.url: row for row in store.iter_extract_queue(SESSION_ID)}
 
-        # Пересборки ограничены; после исчерпания остаток корня доводится терминально
-        # (parser_failed), а не inline docling'ом в родителе.
+        # Пересборки ограничены; inline docling в родителе не включается (иначе остаток
+        # корня дал бы документы и лишний пул).
         assert len(created) == _EXTRACT_MAX_POOL_REBUILDS + 1
-        assert any(
-            "терминально" in e and "inline" in e for e in result.errors
-        )
-        assert any(
-            "extraction pool exhausted" in (i.error or "")
-            for i in items.values()
-        )
-        assert all(
-            i.status is not CrawlItemStatus.FETCHED for i in items.values()
+        assert _build_of(result).doc_count == 0
+        # Строки abandon'енного ключа остались работой очереди, а не отказом.
+        pending = [url for url, row in rows.items() if row.state.value == "pending"]
+        assert pending, rows
+        # Элементы сеанса этих строк не помечены ``failed``: извлечения не было.
+        for url in pending:
+            assert items[("p1", url)].status is not CrawlItemStatus.FAILED
+            assert items[("p1", url)].error_kind is None
+        # Один вход в ``errors`` на ключ — с числом оставленных строк (не на документ).
+        named = [e for e in result.errors if "abandon'ен" in e]
+        assert len(named) == 1, result.errors
+        assert f"оставлено pending {len(pending)}" in named[0]
+        # Обещание «остаток прогона терминально FAILED (parser_failed)» код больше не
+        # выполняет — и не произносит: иначе сообщение врало бы о том, чего нет.
+        assert not any("терминально FAILED" in e for e in result.errors)
+        assert not any("FAILED (parser_failed)" in e for e in result.errors)
+        assert not any(
+            "extraction pool exhausted" in (i.error or "") for i in items.values()
         )
     finally:
         store.close()

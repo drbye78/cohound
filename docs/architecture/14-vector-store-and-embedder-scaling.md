@@ -543,7 +543,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    от переиспользования, а не тихой подменой прибора.
 
 `corpus_chunks.embedded_at`: чанк собирался с `embedded_at=None` (`core/pipeline/corpus_ingest.py:1539`,
-`core/pipeline/extract_consume.py:515`) и в Pass B не переписывался — колонка без писателя, и
+`core/pipeline/extract_consume.py:546`) и в Pass B не переписывался — колонка без писателя, и
 «не эмбеддилось» по ней не читалось. С 07.11.2026 её заполняет `_embed_and_build`
 (`core/pipeline/corpus_index.py:816`): одно ISO-8601 (UTC) время эмбеддинга на продукт-цикл,
 часы читает оркестратор, а не чистый `_embed_batched`; запись — `core/store/sqlite_store.py:1640`.

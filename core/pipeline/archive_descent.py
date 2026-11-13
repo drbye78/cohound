@@ -98,6 +98,7 @@ __all__ = [
     "SKIP_EXTRACT_FAILED",
     "SKIP_EXTRACT_UNAVAILABLE",
     "SKIP_NESTED",
+    "SKIP_NOT_ATTEMPTED",
     "SKIP_READ_FAILED",
     "SKIP_STREAM_TOO_LARGE",
     "ArchiveDescentWalker",
@@ -125,6 +126,10 @@ SKIP_BUDGET = "archive_budget_exhausted"
 SKIP_EXTRACT_FAILED = "extract_failed"
 #: Экстрактор не умеет работать с локальными байтами (``split``: DMZ-путь по URL).
 SKIP_EXTRACT_UNAVAILABLE = "extract_unavailable"
+#: Члена **не извлекали**: пул экстракции исчерпал пересборки (отказ прибора, не документа).
+#: Отличается от ``extract_failed`` принципиально: там экстрактор вернул отказ по конкретным
+#: байтам, здесь извлечение не начиналось — спуск повторится, когда пул будет собран заново.
+SKIP_NOT_ATTEMPTED = "not_attempted"
 #: Поток члена пробил жёсткий байтовый потолок (второй гейт bomb-guard).
 SKIP_STREAM_TOO_LARGE = "member_stream_too_large"
 #: Член-контейнер спущен (его содержимое — отдельное наблюдение, не документ).

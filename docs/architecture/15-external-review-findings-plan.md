@@ -172,7 +172,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
 | F1 | «потолка глубины нет, конечность — цикл+бюджет» — обоснование ложно; цепочка различных архивов упирается в рекурсию | ПОДТВЕРЖДЕНО (замером) | `archive_descent.py:813-818` (`_walk` рекурсивен, вне `try`), `:314-317` (RecursionError гасится в «не распознан»), `container_policy.py:195` | нет: максимум 3 уровня (`tests/pipeline/test_corpus_descent.py:374`) | М/Б | **P4** |
-| F2 | тест зависит от числа CPU хоста | ПОДТВЕРЖДЕНО (замер: `cpu_count=2` → `assert 2 == 3`) | `tests/pipeline/test_corpus_extract_pool.py:1907` без `cpu_cap`; режет `resources.py:441` | тест сам дефект | Г | **P4** |
+| F2 | тест зависит от числа CPU хоста | ПОДТВЕРЖДЕНО (замер: `cpu_count=2` → `assert 2 == 3`) | `tests/pipeline/test_corpus_extract_pool.py:1958` — ныне `monkeypatch` `cpu_parallelism_cap` (на момент аудита вызова не было); режет `resources.py:441` | тест сам дефект | Г | **P4** |
 | F3 | 6 тестов проверяют **реальное** отсутствие `py7zr`/`rarfile`; с extra `extract-archives` они падают | ПОДТВЕРЖДЕНО (замер: 6 failed / 19 passed при подмене бэкенда) | `test_container_7z.py:36-38` (`_no_backend`), тесты `:46`,`:55`,`:68`, `test_container_rar.py:55,63,74` | — | Г | **P4** |
 | F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3334`), синхронно в фазе | только корректность (`tests/selfcheck.py:3990-3997`) | Д/Г | P4 |
 | F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
@@ -184,7 +184,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 - ✅ F1 — обход итеративен явным стеком кадров: `core/pipeline/archive_descent.py:595-645`;
   цепочка 5000 различных zip — `tests/pipeline/test_corpus_descent.py:449`.
-- ✅ F2 — потолок CPU инъектируется: `tests/pipeline/test_corpus_extract_pool.py:1889`
+- ✅ F2 — потолок CPU инъектируется: `tests/pipeline/test_corpus_extract_pool.py:1958`
   (`monkeypatch` `cpu_parallelism_cap`), `tests/pipeline/test_resources.py:105`.
 - ✅ F3 — отсутствие бэкенда инъектируется, а не предполагается: `tests/adapters/test_container_7z.py:38`.
 - ✅ F4 — чтение окнами (1 MiB шапка + 1 MiB хвост), файл целиком — только если он в них
@@ -410,7 +410,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   а не превратиться в лимит. Явный стек снимает предел интерпретатора; конечность остаётся
   за циклом по хешу и кумулятивным бюджетом, как и было обещано.
   Тест: цепочка 5000 различных архивов проходит и даёт видимый исход, а не падение фазы.
-- F2 — инъекция `cpu_cap` в тест (`tests/pipeline/test_corpus_extract_pool.py:1907`).
+- F2 — инъекция `cpu_cap` в тест (`tests/pipeline/test_corpus_extract_pool.py:1958`).
 - F3 — переписать 6 тестов «бэкенда нет» на инъекцию отсутствия (`backend_module → None`),
   чтобы установка extra не делала их красными.
 - F6 — один предикат «ось не задана» на модуль (`is not None`). 

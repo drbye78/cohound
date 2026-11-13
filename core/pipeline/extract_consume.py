@@ -66,6 +66,7 @@ from core.domain import (
 from core.pipeline.archive_descent import (
     SKIP_EXTRACT_FAILED,
     SKIP_EXTRACT_UNAVAILABLE,
+    SKIP_NOT_ATTEMPTED,
     ArchiveDescentWalker,
     DescentBudget,
     MemberDeferral,
@@ -288,6 +289,27 @@ def member_extract_request(
         cache_max_bytes=cache_max_bytes,
         cache_key=task.content_hash,
         rss_dir=rss_dir,
+    )
+
+
+def member_pool_exhausted_outcome(pool_key: _ExtractPoolKey) -> MemberOutcome:
+    """Член не извлечён: пул ключа исчерпал пересборки — извлечение **не пытались**.
+
+    Abandon — свойство пула, а не документа. ``SKIP_EXTRACT_FAILED`` здесь был бы ложной
+    провенанс-записью: он утверждает отказ экстрактора по конкретным байтам, тогда как
+    ни один воркер этих байтов не видел. Спуск при этом не провалился — строка контейнера
+    остаётся работой следующего исполнения (байты архива ретейнены, I19).
+
+    Отдельная функция, а не литерал в месте вызова: решение «какой исход у невиденного
+    члена» обязано быть проверяемым без сборки целого потребителя.
+    """
+    return MemberOutcome(
+        skip_reason=SKIP_NOT_ATTEMPTED,
+        detail=(
+            f"пул экстракции {pool_key[0].value}/{pool_key[1].value}/W={pool_key[2]} "
+            f"исчерпал пересборки ({_EXTRACT_MAX_POOL_REBUILDS}) — член не извлекали "
+            "(inline после отказа пула запрещён); спуск повторится"
+        ),
     )
 
 
@@ -897,19 +919,25 @@ def recover_extract_pool(
     pools: _ExtractPools,
     errors: list[str],
 ) -> None:
-    """Отравленный пул: discard + bounded rebuild; исчерпание — терминальный отказ.
+    """Отравленный пул: discard + bounded rebuild; исчерпание — отказ **пула**, не строк.
 
     Повторное использование мёртвого пула запрещено; авто-ретрая нет. Inline после
     исчерпания не включается: на memory-constrained хосте docling в родителе — худший
     режим, а тихая деградация скрыла бы дефект.
+
+    Исчерпание пересборок — свойство **пула** (``_ExtractPoolSlot.abandoned``), а не
+    документа: строки этого ключа дренаж больше не берёт, они остаются ``pending``
+    (см. :func:`consume`). Поэтому здесь нельзя обещать «остаток прогона терминально
+    FAILED»: такого исхода код не пишет, а «извлечение провалилось» о документе, которого
+    не видели, — ложная провенанс-запись (A3), и она уничтожает покрытие (I2c).
     """
     if pools.rebuild(pool_key):
         return
     errors.append(
         f"{label}: пул экстракции {pool_key[0].value}/{pool_key[1].value}"
-        f"/W={pool_key[2]} исчерпал "
-        f"пересборки ({_EXTRACT_MAX_POOL_REBUILDS}) — остаток прогона терминально "
-        "FAILED (parser_failed), без inline-экстракции"
+        f"/W={pool_key[2]} исчерпал пересборки ({_EXTRACT_MAX_POOL_REBUILDS}) — строки "
+        "этого ключа больше не берутся в работу и остаются pending без исхода (inline "
+        "после отказа пула запрещён); повтор без сети — `hound extract consume`"
     )
 
 
@@ -978,6 +1006,11 @@ class _RowJob:
     #: повтор терминальной строки (Pass B обязан получить документ заново): такая строка
     #: закрывается тем же состоянием, а не через claim.
     claimed: bool = False
+    #: Ключ пула исчерпал пересборки: извлечения по этой строке **не было**. Такую строку
+    #: нельзя закрывать исходом (``failed``/``done``) — она возвращается в ``pending``, и её
+    #: берёт следующее исполнение (``extract consume``). Исчерпание — свойство пула, а не
+    #: документа: «не пытались» ≠ «извлечение провалилось» (A3, I2c).
+    not_attempted: bool = False
 
 
 def _conversion_failure(
@@ -1092,13 +1125,11 @@ def _descend_container(
             if scope.pools.abandoned(pool_key):
                 # Как у страниц: пул исчерпал пересборки — inline запрещён
                 # (docling в родителе на memory-constrained хосте = худший режим).
-                return MemberOutcome(
-                    skip_reason=SKIP_EXTRACT_FAILED,
-                    detail=(
-                        "extraction pool exhausted after "
-                        f"{_EXTRACT_MAX_POOL_REBUILDS} rebuilds — inline disabled"
-                    ),
-                )
+                # Член при этом **не извлекали**: исход — «не пытались»
+                # (:data:`SKIP_NOT_ATTEMPTED`), а не ``extract_failed``. Отказ
+                # извлечения описывал бы невиденные байты, и спуск объявил бы себя
+                # провалившимся там, где не начинался.
+                return member_pool_exhausted_outcome(pool_key)
             executor = scope.pools.executor(pool_key, new_pool)
             return executor.submit(
                 member_pool.worker,
@@ -1422,6 +1453,13 @@ def _start_row(
         work_url=work_url,
         errors_before=len(scope.errors),
         claimed=claimed,
+        # Ключ фазового пула известен **до** спуска: контейнер извлекает своих членов тем
+        # же ключом, поэтому исчерпание пула обязано быть видно и ему (``not_attempted``).
+        pool_key=(
+            (level, pdf_pipeline, window)
+            if window is not None and scope.extraction_pool is not None
+            else None
+        ),
     )
     # B3: допущенный терминальный артефакт (документ **или** контейнер) проходит
     # **зонд** до экстракции: класс/формат/размер по байтам, ``page_count`` PDF по
@@ -1459,6 +1497,16 @@ def _start_row(
                 archive_format=probe.artifact.format,
             )
             job.done = True
+            if (
+                job.error is None
+                and job.pool_key is not None
+                and scope.pools.abandoned(job.pool_key)
+            ):
+                # Пул исчерпал пересборки во время спуска: члены **не извлекали**
+                # («не пытались»), поэтому контейнер не закрывается — строка возвращается
+                # в ``pending`` и будет спущена заново (байты архива ретейнены, I19).
+                job.done = False
+                job.not_attempted = True
             return job
     # 09 §6.3: ``304`` переиспользует версию документа **до** экстракции (экстрактор/
     # чанкер не вызываются). Неудача reuse (нет версии/чанков, I19-расхождение) — видимая
@@ -1469,15 +1517,14 @@ def _start_row(
         # ловит его отказ в тот же ``parser_failed``, что и пул).
         _finish_inline_row(job, scope=scope, operations=operations, product=product)
         return job
-    job.pool_key = (level, pdf_pipeline, window)
-    if scope.pools.abandoned(job.pool_key):
-        # Пул исчерпал пересборки: никакой inline-экстракции. Документ ретейнён, но
-        # исход терминален и видим (parser_failed).
-        job.error = (
-            "extraction pool exhausted after "
-            f"{_EXTRACT_MAX_POOL_REBUILDS} rebuilds — inline disabled"
-        )
-        job.error_kind = FailureKind.PARSER_FAILED
+    # Ключ не ``None`` по построению: он заполнен выше ровно тогда, когда есть и окно, и
+    # пул (иначе строка ушла бы inline-путём и вернулась бы раньше).
+    pool_key = job.pool_key
+    assert pool_key is not None  # noqa: S101 — инвариант окна/пула выше
+    if scope.pools.abandoned(pool_key):
+        # Пул исчерпал пересборки: inline запрещён, и извлечения по этой строке **не
+        # было**. Исход не пишется: строка возвращается в ``pending`` (см. :func:`consume`).
+        job.not_attempted = True
         return job
     # C1/L4: проба ``extract_cache`` — **в родителе**, до submit. Хит идёт путём «готовый
     # текст», не занимая слот воркера и не оплачивая инициализатор. Ключ родителя и
@@ -1497,7 +1544,7 @@ def _start_row(
             job.done = True
             return job
     try:
-        executor = scope.pools.executor(job.pool_key, _new_pool_for(job, scope))
+        executor = scope.pools.executor(pool_key, _new_pool_for(job, scope))
     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
         scope.errors.append(
             f"{pid}/{item.url}: extract pool: {type(exc).__name__}: {exc} — inline"
@@ -1738,7 +1785,8 @@ def _settle_row(
 
     :returns: ``(doc_id, причина отказа, пул признан мёртвым)``. Мёртвый пул — сигнал
         вызывающему: остаток очереди этого ключа получает видимый отказ, а не ожидание
-        по таймауту.
+        по таймауту. У строки, извлечение которой не начиналось (``not_attempted``),
+        ни ``doc_id``, ни причины отказа нет: вызывающий возвращает её в ``pending``.
 
     ``BrokenProcessPool`` — воркер умер (краш/OOM): пул discard+rebuild (bounded) либо
     терминальный отказ. Таймаут — **per-artifact**: терминально помечается только это
@@ -1750,18 +1798,17 @@ def _settle_row(
     """
     if job.done:
         return job, job.doc_id, job.error, False
+    if job.not_attempted:
+        # Пул ключа исчерпал пересборки: извлечения не было — исхода писать нечего.
+        # Строку вернёт в ``pending`` вызывающий (:func:`_release_row`), а не
+        # ``_finish_extracted``: «не пытались» — не отказ документа.
+        return job, None, None, False
     if job.future is None:
-        # Начатая строка без отправки: пул исчерпал пересборки. Inline запрещён.
-        doc_id = _finish_extracted(
-            job,
-            None,
-            scope=scope,
-            operations=operations,
-            product=product,
-            extract_error=job.error or "extraction pool exhausted",
-            failure_kind=job.error_kind or FailureKind.PARSER_FAILED,
-        )
-        return job, doc_id, job.error, False
+        # Начатая строка без отправки: задание в пул не ушло, значит извлечения не было.
+        # Тот же исход, что у abandon: строка возвращается в ``pending``, а не закрывается
+        # ``parser_failed`` (иначе «не пытались» выдавалось бы за отказ экстрактора).
+        job.not_attempted = True
+        return job, None, None, False
     # Инвариант отправки: ``future`` заполняется только вместе с ``pool_key``
     # (:func:`_start_row`), поэтому при непустом ``future`` ключ не ``None``. Проверка
     # фиксирует инвариант, а не вход: ``None`` здесь означал бы строку в пуле без ключа.
@@ -1882,6 +1929,15 @@ def consume(
     ``(уровень, механизм PDF, окно)``. Ожидание — FIFO: ``future.result`` вызывается в
     порядке строк, поэтому порядок записи документов не зависит от того, какой воркер
     ответил первым.
+
+    **Исчерпание пула — не исход документа.** Ключ, который исчерпал пересборки
+    (:data:`core.pipeline.extraction_runtime._EXTRACT_MAX_POOL_REBUILDS`), abandon'ится:
+    его строки **не забираются** (``pending``), а уже забранные возвращаются в ``pending``
+    (:func:`_release_row`). Исхода по ним нет — извлечение не начиналось либо отменено
+    вместе с пулом, — поэтому ``parser_failed`` здесь был бы ложной провенанс-записью и
+    уничтожил бы покрытие (I2c): строка остаётся работой следующего исполнения
+    (``hound extract consume`` без сети), а фаза кончается видимо — одна запись в
+    ``errors`` на ключ с числом оставленных строк и ``pending > 0`` в отчёте.
     """
     reports: list[ConsumerReport] = []
     #: F6/§4.3: строки, по которым берётся объявленный предел бэклога (ось у них одна).
@@ -1914,7 +1970,10 @@ def consume(
         #: Ожидающие доводки строки **этого** продукта в порядке постановки (FIFO).
         pending: deque[_RowJob] = deque()
         window_seen: int | None = None
-        dead_pool = False
+        #: Строки, оставленные ``pending`` из-за abandon'а пула, по ключу: видимость —
+        #: одна запись в ``errors`` на ключ (16 770 одинаковых строк на документ
+        #: ``errors`` не читают).
+        not_attempted: dict[_ExtractPoolKey, int] = {}
         #: F6: аренда глазами этого прохода — продлевается между срезами ожидания.
         lease = _Lease(queue=queue, worker=worker)
         for item in rows:
@@ -1936,6 +1995,28 @@ def consume(
             # F6 (§4.2 п.4): claim — условный переход ``pending → claimed``. ``False``
             # значит «строку уже взял/закрыл другой потребитель»: это **не** ошибка и не
             # наша работа — идём дальше, документ не конвертируется дважды.
+            #
+            # Ключ пула резолвится **до** аренды: abandon — свойство пула, а не документа,
+            # и строку abandon'енного ключа забирать нельзя вовсе (claim → возврат
+            # записывал бы «взял и бросил» на 16 770 адресах, из которых ни один не
+            # извлекали).
+            limits = scope.limits_for(item.url)
+            window = _row_window(limits, scope, f"{product_id}/{item.url}")
+            level = _enum_or(DocumentLevel, item.level, DocumentLevel.FULL)
+            pdf_pipeline = _enum_or(
+                PdfPipeline, item.pdf_pipeline, PdfPipeline.STRUCTURED
+            )
+            row_key: _ExtractPoolKey | None = (
+                (level, pdf_pipeline, window)
+                if window is not None and scope.extraction_pool is not None
+                else None
+            )
+            if row_key is not None and scope.pools.abandoned(row_key):
+                # Пул ключа исчерпал пересборки: строки остаются ``pending`` — извлечение
+                # не пытались. Видимость — один вход в ``errors`` на ключ (не на
+                # документ), число оставленных строк считается ниже.
+                not_attempted[row_key] = not_attempted.get(row_key, 0) + 1
+                continue
             was_claimed = False
             if item.state is ExtractQueueState.PENDING:
                 if not queue.claim(item, worker):
@@ -1949,18 +2030,12 @@ def consume(
                     # ``reclaim_stale`` следующего прохода — видимо, а не по-тихому.
                     lost += 1
                     continue
-            limits = scope.limits_for(item.url)
             # Наблюдаемость расписания: ось объявлена, а окно — провенанс (не входит в
             # ``CrawlLimits.as_dict()``), поэтому публикуется, а не входит в ``run_id``.
             operations.note_scheduling(limits)
-            window = _row_window(limits, scope, f"{product_id}/{item.url}")
             scope.timings.note_extract_window(window)
             if window is not None and (window_seen is None or window > window_seen):
                 window_seen = window
-            level = _enum_or(DocumentLevel, item.level, DocumentLevel.FULL)
-            pdf_pipeline = _enum_or(
-                PdfPipeline, item.pdf_pipeline, PdfPipeline.STRUCTURED
-            )
             extractor = _extractor_for(
                 scope, level, pdf_pipeline, cache=extractors
             )
@@ -1982,67 +2057,46 @@ def consume(
             pending.append(job)
             # Окно: не более ``W`` экстракций этого продукта «в полёте» (доводка FIFO).
             while window is not None and len(pending) >= window:
-                settled, doc_id, error, dead_pool = _settle_row(
+                done, failed, lost = _settle_and_record(
                     pending.popleft(),
-                    scope=scope,
-                    operations=operations,
-                    product=product,
-                    lease=lease,
-                )
-                done, failed, lost = _record_outcome(
-                    queue,
-                    settled,
-                    doc_id,
-                    error,
-                    done=done,
-                    failed=failed,
-                    lost=lost,
-                    worker=worker,
-                )
-                if dead_pool:
-                    done, failed, lost = _abort_pending(
-                        pending,
-                        error or "extraction pool terminated",
-                        queue=queue,
-                        scope=scope,
-                        operations=operations,
-                        product=product,
-                        done=done,
-                        failed=failed,
-                        lost=lost,
-                        worker=worker,
-                    )
-        while pending:
-            settled, doc_id, error, dead_pool = _settle_row(
-                pending.popleft(),
-                scope=scope,
-                operations=operations,
-                product=product,
-                lease=lease,
-            )
-            done, failed, lost = _record_outcome(
-                queue,
-                settled,
-                doc_id,
-                error,
-                done=done,
-                failed=failed,
-                lost=lost,
-                worker=worker,
-            )
-            if dead_pool:
-                done, failed, lost = _abort_pending(
-                    pending,
-                    error or "extraction pool terminated",
                     queue=queue,
                     scope=scope,
                     operations=operations,
                     product=product,
+                    lease=lease,
+                    worker=worker,
+                    pending=pending,
+                    not_attempted=not_attempted,
                     done=done,
                     failed=failed,
                     lost=lost,
-                    worker=worker,
                 )
+        while pending:
+            done, failed, lost = _settle_and_record(
+                pending.popleft(),
+                queue=queue,
+                scope=scope,
+                operations=operations,
+                product=product,
+                lease=lease,
+                worker=worker,
+                pending=pending,
+                not_attempted=not_attempted,
+                done=done,
+                failed=failed,
+                lost=lost,
+            )
+        for pool_key, left_pending in not_attempted.items():
+            # Один вход на ключ, а не на документ: «пул abandon'ен, строки не брали» —
+            # факт фазы, и он называет число, а не повторяется 16 770 раз.
+            scope.errors.append(
+                f"{product_id}: пул экстракции {pool_key[0].value}/"
+                f"{pool_key[1].value}/W={pool_key[2]} abandon'ен (исчерпал "
+                f"{_EXTRACT_MAX_POOL_REBUILDS} пересборки) — оставлено pending "
+                f"{left_pending} строк(и) без исхода: извлечение не начинали либо оно "
+                "отменено вместе с пулом (inline после отказа пула запрещён); повтор "
+                "без сети — `hound extract consume`"
+            )
         left = queue.pending(product_id)
         report = ConsumerReport(
             product_id=product_id,
@@ -2160,6 +2214,10 @@ def _abort_pending(
 
     Прежнее поведение (до F5 плана ``17``) было ровно таким: прерывание коммитило все
     in-flight задания как ``FAILED`` — «не измерено» с причиной, а не тихое исчезновение.
+
+    Сюда попадает только **пересобранный** пул: задания были отправлены, и воркер по ним
+    упал. Исчерпание пересборок идёт другим путём (:func:`_release_pending`): там пул
+    abandon'ен, извлечения по остатку не будет вовсе — исход писать не о чем.
     """
     while pending:
         job = pending.popleft()
@@ -2183,6 +2241,128 @@ def _abort_pending(
             worker=worker,
         )
     return done, failed, lost
+
+
+def _release_row(queue: ExtractQueue, job: _RowJob, *, worker: str) -> bool:
+    """Вернуть забранную строку в ``pending``: извлечения не было — исхода не пишем.
+
+    Переход условный (``claimed → pending``) и только для **своей живой** аренды: если
+    строку успели вернуть или закрыть, она уже не наша, и трогать её нечего. Поля краула
+    не меняются ни на одном носителе; ``error_kind`` очищается, а в ``error`` остаётся
+    причина возврата — «исхода нет», а не отказ документа.
+
+    ``claimed_by`` не очищается: отдельного перехода «отпустить аренду» у очереди нет, а
+    ``pending`` с ``claimed_by`` — провенанс последней аренды (следующая аренда его
+    перезапишет). Строку это не блокирует: ``claim`` требует ``state = pending``.
+
+    :returns: ``True`` — переход в ``pending`` состоялся; ``False`` — аренды у нас нет
+        (строку уже вернули/закрыли), трогать нечего.
+    """
+    if not job.claimed:
+        return False
+    return queue.set_state(
+        job.item,
+        ExtractQueueState.PENDING,
+        expect=ExtractQueueState.CLAIMED,
+        expect_claimed_by=worker,
+        error=(
+            "пул экстракции исчерпал пересборки — исход не получен, строка возвращена "
+            "в pending (повтор без сети: `hound extract consume`)"
+        ),
+    )
+
+
+def _release_pending(
+    pending: deque[_RowJob],
+    *,
+    queue: ExtractQueue,
+    worker: str,
+) -> int:
+    """Остаток «в полёте» вернуть в ``pending``: пул abandon'ен, извлечения не будет.
+
+    В отличие от :func:`_abort_pending` (пул умер, но пересобран — исход пишется), здесь
+    пул **исчерпал** пересборки: ни это исполнение, ни его остаток извлекать не будут.
+    ``parser_failed`` тут был бы ложью — документ не видели. Строка остаётся работой
+    следующего исполнения (``hound extract consume``), а не отказом.
+
+    :returns: сколько строк реально возвращено в ``pending``.
+    """
+    released = 0
+    while pending:
+        job = pending.popleft()
+        job.not_attempted = True
+        if _release_row(queue, job, worker=worker):
+            released += 1
+    return released
+
+
+def _settle_and_record(
+    job: _RowJob,
+    *,
+    queue: ExtractQueue,
+    scope: ConsumerScope,
+    operations: ConsumerOperations,
+    product: ProductScope,
+    lease: _Lease,
+    worker: str,
+    pending: deque[_RowJob],
+    not_attempted: dict[_ExtractPoolKey, int],
+    done: int,
+    failed: int,
+    lost: int,
+) -> tuple[int, int, int]:
+    """Довести строку и учесть исход — включая исход «не пытались».
+
+    Три пути, и разница между ними — не косметика:
+
+    * ``not_attempted`` — пул abandon'ен, извлечения не было: строка возвращается в
+      ``pending`` и считается по ключу (одна запись в ``errors`` на ключ, не на документ);
+    * пул мёртв **и** abandon'ен — остаток «в полёте» тоже возвращается в ``pending``;
+    * пул мёртв, но пересобран — прежний путь (:func:`_abort_pending`): задания были
+      отправлены, воркер по ним упал, исход называется.
+
+    :param not_attempted: счётчик строк, оставленных ``pending``, по ключу пула.
+    """
+    settled, doc_id, error, dead_pool = _settle_row(
+        job, scope=scope, operations=operations, product=product, lease=lease
+    )
+    if settled.not_attempted:
+        if _release_row(queue, settled, worker=worker) and settled.pool_key is not None:
+            not_attempted[settled.pool_key] = (
+                not_attempted.get(settled.pool_key, 0) + 1
+            )
+        return done, failed, lost
+    done, failed, lost = _record_outcome(
+        queue,
+        settled,
+        doc_id,
+        error,
+        done=done,
+        failed=failed,
+        lost=lost,
+        worker=worker,
+    )
+    if not dead_pool:
+        return done, failed, lost
+    key = settled.pool_key
+    if key is not None and scope.pools.abandoned(key):
+        # Пул исчерпал пересборки: остаток «в полёте» — невиденные документы, не отказы.
+        released = _release_pending(pending, queue=queue, worker=worker)
+        if released:
+            not_attempted[key] = not_attempted.get(key, 0) + released
+        return done, failed, lost
+    return _abort_pending(
+        pending,
+        error or "extraction pool terminated",
+        queue=queue,
+        scope=scope,
+        operations=operations,
+        product=product,
+        done=done,
+        failed=failed,
+        lost=lost,
+        worker=worker,
+    )
 
 
 def _backlog_limit_mb(
@@ -2236,6 +2416,7 @@ __all__ = [
     "ingest_member_doc",
     "member_extract_request",
     "member_extract_unavailable",
+    "member_pool_exhausted_outcome",
     "persist_member_sync",
     "persist_observation_sync",
     "recover_extract_pool",
