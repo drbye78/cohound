@@ -7,10 +7,12 @@
 было нечем заполнить — ни один писатель не читал её, а локального файла как источника
 байтов не существовало.
 
-**Что это.** Загрузчик/валидатор/дайджест объявленного входа §3.1. Байты оператора
-попадают в корпус **единственным** путём I19 (``RawPage`` → ``_retain`` → экстракция →
-чанкер → индекс, ``core/pipeline/corpus.py``); этот модуль байтов не публикует и
-evidence не создаёт — он только читает декларацию и считает её отпечаток.
+**Что это.** Загрузчик/валидатор/дайджест объявленного входа §3.1 **и** писатель
+декларации (:func:`write_manual_artifacts`). Байты оператора попадают в корпус
+**единственным** путём I19 (``RawPage`` → ``_retain`` → экстракция → чанкер → индекс,
+``core/pipeline/corpus.py``); этот модуль байтов не публикует и evidence не создаёт — он
+читает декларацию, считает её отпечаток и дописывает в неё записи (байты кладёт
+:mod:`core.pipeline.artifact_fetch`).
 
 **Почему файл, а не флаг** (§3.1). Ось, заданная флагом, теряется в следующем вызове:
 ``run_id`` перестал бы описывать корпус. Пакет — носитель авторских входов, и этот вход
@@ -46,6 +48,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from core.pipeline.digests import manual_artifacts_digest
+from core.util.atomic_write import atomic_write_text
 from core.util.security import validate_url
 
 __all__ = [
@@ -54,10 +57,12 @@ __all__ = [
     "ORIGIN_CRAWL",
     "ORIGIN_MANUAL",
     "ManualArtifact",
+    "ManualArtifactEntry",
     "ManualArtifacts",
     "artifact_record",
     "load_manual_artifacts",
     "manual_artifacts_summary",
+    "write_manual_artifacts",
 ]
 
 #: Путь декларации относительно каталога пакета (03 §A.1, ``sources/``).
@@ -125,6 +130,11 @@ class ManualArtifact:
     reason: str | None = None
     provided_by: str | None = None
     provided_at: str | None = None
+    #: Подача сделана человеком **вместо** отказа инструмента по политике (§10).
+    #: Флаг — провенанс записи, а не измерение: в ``manual_artifacts_digest`` не входит
+    #: (материал — ``(product_id, url, sha256)``), поэтому его наличие/отсутствие в старых
+    #: файлах ``run_id`` не меняет.
+    robots_override: bool = False
 
     @property
     def digest_row(self) -> tuple[str, str, str]:
@@ -301,6 +311,14 @@ def load_manual_artifacts(package_dir: str | Path | None) -> ManualArtifacts:
                 f"{declared_hash.lower()!r}, вычислено {digest_value!r} "
                 f"({declared_path!r})"
             )
+        robots_override = item.get("robots_override", False)
+        if not isinstance(robots_override, bool):
+            # Строка ``"false"`` истинна в Python: тихо принять её значило бы записать
+            # противоположный факт. Схема файла та же — меняется только проверка типа.
+            raise ValueError(
+                f"{where}: robots_override обязан быть bool, получено "
+                f"{type(robots_override).__name__} ({robots_override!r})"
+            )
         entries.append(
             ManualArtifact(
                 product_id=product_id,
@@ -312,11 +330,182 @@ def load_manual_artifacts(package_dir: str | Path | None) -> ManualArtifacts:
                 reason=_optional(item.get("reason")),
                 provided_by=_optional(item.get("provided_by")),
                 provided_at=_optional(item.get("provided_at")),
+                robots_override=robots_override,
             )
         )
 
     entries.sort(key=lambda entry: (entry.product_id, entry.url))
     return ManualArtifacts(entries=tuple(entries), path=path)
+
+
+@dataclass(frozen=True)
+class ManualArtifactEntry:
+    """Желаемое состояние одной записи декларации — вход :func:`write_manual_artifacts`.
+
+    Отличается от :class:`ManualArtifact` тем, что здесь нет байтов: ``path`` — как
+    объявлено (относительно пакета), ``sha256`` — необязательная сверка. Писатель не
+    читает файл и не считает хеш: он пишет объявление, а сверку делает загрузчик —
+    иначе объявленный хеш стал бы основанием доверия (§3.1).
+
+    ``None`` в необязательном поле означает «не объявлять» (поле остаётся таким, каким
+    было в файле), а не «стереть»: писатель дополняет декларацию, и потеря
+    провенанса при правке одного поля была бы тихой подменой аудита.
+    """
+
+    product_id: str
+    url: str
+    path: str
+    sha256: str | None = None
+    reason: str | None = None
+    provided_by: str | None = None
+    provided_at: str | None = None
+    robots_override: bool = False
+
+
+def _entry_payload(entry: ManualArtifactEntry) -> dict[str, Any]:
+    """Поля записи, которыми владеет писатель (``None`` — поле не объявляется)."""
+    payload: dict[str, Any] = {
+        "product_id": str(entry.product_id),
+        "url": str(entry.url),
+        "path": str(entry.path),
+    }
+    for name in ("sha256", "reason", "provided_by", "provided_at"):
+        value = getattr(entry, name)
+        if value is not None:
+            payload[name] = str(value)
+    if entry.robots_override:
+        payload["robots_override"] = True
+    return payload
+
+
+def _read_declaration(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Текущий документ и его ``provide`` (неизвестные ключи сохраняются как есть)."""
+    if not path.is_file():
+        return {"schema": MANUAL_ARTIFACTS_SCHEMA}, []
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as exc:  # noqa: BLE001 — понятная ошибка важнее типа
+        raise ValueError(f"не удалось прочитать {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"некорректный YAML в {path}: {exc}") from exc
+    if loaded is None:
+        return {"schema": MANUAL_ARTIFACTS_SCHEMA}, []
+    if not isinstance(loaded, dict):
+        raise ValueError(
+            f"{MANUAL_ARTIFACTS_FILE}: ожидался YAML-словарь, получено "
+            f"{type(loaded).__name__}"
+        )
+    schema = _optional(loaded.get("schema"))
+    if schema != MANUAL_ARTIFACTS_SCHEMA:
+        # Файл чужой схемы не переписывается: «дописать» в него значило бы объявить
+        # его текущим, не будучи им.
+        raise ValueError(
+            f"{MANUAL_ARTIFACTS_FILE}: schema={schema!r}, ожидается "
+            f"{MANUAL_ARTIFACTS_SCHEMA!r} — файл другой схемы не переписывается"
+        )
+    raw = loaded.get("provide")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"{MANUAL_ARTIFACTS_FILE}: provide обязан быть списком, получено "
+            f"{type(raw).__name__}"
+        )
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{MANUAL_ARTIFACTS_FILE}: provide[{index}]: обязан быть словарём, "
+                f"получено {type(item).__name__}"
+            )
+        records.append(item)
+    return loaded, records
+
+
+def write_manual_artifacts(
+    package_dir: str | Path,
+    entries: Iterable[ManualArtifactEntry],
+    *,
+    dry_run: bool = False,
+) -> tuple[Path, int]:
+    """Дописывает/обновляет записи в ``sources/manual_artifacts.yaml`` пакета.
+
+    **Слияние, а не перезапись.** Записи сопоставляются по ``(product_id, url)``;
+    существующие записи и **неизвестные ключи** — верхнего уровня и внутри записи —
+    сохраняются: файл может нести поля будущих схем, и писатель не имеет права их
+    выбрасывать. Обновляются только поля :class:`ManualArtifactEntry`; ``None`` в
+    необязательном поле означает «не трогать».
+
+    **Комментарии не сохраняются.** Файл пишется как данные
+    (``safe_dump(..., allow_unicode=True, sort_keys=True)``): заголовок шаблона — авторский
+    текст, а не данные, и восстанавливать его значило бы притворяться, что файл остался
+    шаблоном. Порядок записей — ``(product_id, url)``, порядок ключей — алфавитный.
+
+    **Атомарность и самопроверка.** Запись идёт через temp + ``os.replace``; после неё
+    :func:`load_manual_artifacts` обязан пройти. Не прошёл — прежнее содержимое
+    возвращается, а наружу летит ``ValueError``: оставить невалидную декларацию писатель
+    не вправе, иначе следующий прогон упадёт на входе без следа того, кто её испортил.
+
+    :param package_dir: каталог пакета; файл создаётся при отсутствии.
+    :param entries: желаемые записи (порядок не важен).
+    :param dry_run: ничего не писать; ``changed`` при этом считается.
+    :returns: ``(путь файла, число записей с изменённым хотя бы одним полем)``.
+        Новая запись считается изменённой.
+    :raises ValueError: файл чужой схемы/не разбирается, либо запись сделала бы декларацию
+        невалидной (тогда файл восстановлен).
+    """
+    root = Path(package_dir).resolve()
+    path = root / MANUAL_ARTIFACTS_FILE
+    wanted = list(entries)
+    existed = path.is_file()
+    previous = path.read_text(encoding="utf-8") if existed else None
+
+    document, records = _read_declaration(path)
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in records:
+        key = (str(record.get("product_id") or ""), str(record.get("url") or ""))
+        if key in index:
+            raise ValueError(
+                f"{MANUAL_ARTIFACTS_FILE}: дубликат подачи {key!r} — один URL продукта, "
+                "один файл (писатель не выбирает между двумя строками)"
+            )
+        index[key] = record
+
+    changed = 0
+    for entry in wanted:
+        key = (str(entry.product_id), str(entry.url))
+        old = index.get(key)
+        merged = dict(old or {})
+        merged.update(_entry_payload(entry))
+        if old is None or merged != old:
+            changed += 1
+        index[key] = merged
+
+    if not index and not existed:
+        # Пустая подача в отсутствующий файл — не повод создавать файл: «нет декларации»
+        # и «декларация без подач» дают один отпечаток, но второе — уже след операции.
+        return path, 0
+
+    document["provide"] = [index[key] for key in sorted(index)]
+    text = yaml.safe_dump(
+        document, allow_unicode=True, sort_keys=True, default_flow_style=False
+    )
+    if dry_run:
+        return path, changed
+
+    atomic_write_text(path, text)
+    try:
+        load_manual_artifacts(root)
+    except ValueError as exc:
+        if previous is None:
+            path.unlink(missing_ok=True)
+        else:
+            atomic_write_text(path, previous)
+        raise ValueError(
+            f"{MANUAL_ARTIFACTS_FILE}: запись сделала бы декларацию невалидной ({exc}); "
+            "прежнее содержимое восстановлено"
+        ) from exc
+    return path, changed
 
 
 def artifact_record(
@@ -347,6 +536,10 @@ def artifact_record(
         "provided_at": entry.provided_at,
         "byte_size": int(entry.size),
         "created_at": created_at,
+        # Подача вместо отказа инструмента по политике (§10). Ключ не входит в схему
+        # таблицы аудита (``manual_artifacts``) — он публикуется там, где строку читают
+        # как словарь, и не теряет факт «человек сделал это сам».
+        "robots_override": bool(entry.robots_override),
     }
 
 
@@ -372,7 +565,12 @@ def manual_artifacts_summary(
     * ``bytes`` — сумма размеров **предъявленных** байтов, ставших документами;
     * ``by_reason`` — почему краул не смог, по актам: ``reason`` объявлен, аудит;
     * ``by_product`` — документы по продуктам, **включая нули** для всех продуктов плана:
-      правило симметрии должно быть видно, а не подразумеваться.
+      правило симметрии должно быть видно, а не подразумеваться;
+    * ``robots_override`` — сколько документов подано человеком **вместо** отказа
+      инструмента по политике (§10). Число читается из строк аудита; колонки в таблице
+      ``manual_artifacts`` пока нет (схема БД не мигрирует), поэтому поле публикуется
+      нулём до аддитивного расширения схемы — это видимое ограничение, а не «флаг не
+      ставился».
 
     Читает **персистентный** аудит (``manual_artifacts``), а не память прогона: на resume
     ``holder`` пуст, а манифест обязан называть тот же факт. Сбой чтения не роняет отчёт
@@ -389,6 +587,7 @@ def manual_artifacts_summary(
         "bytes": 0,
         "by_reason": {},
         "by_product": {str(product): 0 for product in products},
+        "robots_override": 0,
     }
     if store is None or not run_id:
         return empty
@@ -406,11 +605,16 @@ def manual_artifacts_summary(
     by_product: dict[str, int] = {str(product): 0 for product in products}
     by_reason: dict[str, int] = {}
     total_bytes = 0
+    overrides = 0
     for row in resolved.values():
         product_id = str(row.get("product_id") or "")
         by_product[product_id] = by_product.get(product_id, 0) + 1
         reason = str(row.get("reason") or "unspecified")
         by_reason[reason] = by_reason.get(reason, 0) + 1
+        # Отсутствие ключа в старых строках — ``False`` (поле additive: строка аудита,
+        # записанная до появления флага, не утверждает «человек обошёл политику»).
+        if row.get("robots_override"):
+            overrides += 1
         try:
             total_bytes += int(row.get("byte_size") or 0)
         except (TypeError, ValueError):
@@ -428,4 +632,5 @@ def manual_artifacts_summary(
         "bytes": total_bytes,
         "by_reason": dict(sorted(by_reason.items())),
         "by_product": dict(sorted(by_product.items())),
+        "robots_override": overrides,
     }

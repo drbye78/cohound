@@ -10,6 +10,7 @@ argparse) и :func:`run` (тело команды). :data:`COMMANDS` фикси�
 from __future__ import annotations
 
 from core.cli.commands import (
+    artifacts,
     backup,
     baseline,
     crawl,
@@ -44,6 +45,9 @@ COMMANDS = (
     plan,
     run,
     crawl,
+    # ``artifacts`` стоит сразу за ``crawl``: это ответ на его же отказы — что именно
+    # краул не взял и как объявить байты, добытые человеком (§10).
+    artifacts,
     extract,
     diff,
     sensitivity,

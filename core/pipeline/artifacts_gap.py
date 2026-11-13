@@ -55,6 +55,7 @@ __all__ = [
     "ArtifactsGapReport",
     "artifacts_gap_path",
     "collect_artifact_gaps",
+    "latest_failures",
     "read_run_items",
     "write_artifacts_gap",
 ]
@@ -109,9 +110,14 @@ def _counts(values: Iterable[str]) -> dict[str, int]:
 class ArtifactGap:
     """Один недоступный артефакт: факт отказа + заготовка входа следующего прогона.
 
-    ``attempts``/``last_attempt``/``http_status`` — провенанс попытки из
+    ``attempts``/``last_attempt``/``http_status``/``depth`` — провенанс попытки из
     ``crawl_session_items``; ``provide`` — поля, которые заполняет человек, и ничего
     больше: ``reason`` уже назван машиной (это аудит, а не решение оператора).
+
+    ``depth`` — глубина URL в BFS-frontier корня (``None`` — запись её не несла). В
+    :meth:`as_record` поле **не** входит: схема ``artifacts_gap/1`` и форма файла не
+    меняются, глубина нужна рабочему списку отказов (``core/pipeline/blocked_artifacts.py``),
+    а не входам следующего прогона.
     """
 
     product_id: str
@@ -119,6 +125,7 @@ class ArtifactGap:
     error_kind: FailureKind
     origin: str
     http_status: int | None = None
+    depth: int | None = None
     attempts: int = 0
     last_attempt: str | None = None
 
@@ -216,16 +223,21 @@ class ArtifactsGapReport:
         )
 
 
-def collect_artifact_gaps(
-    items: Iterable[CrawlSessionItem], *, run_id: str
-) -> ArtifactsGapReport:
-    """Делит терминальные ``failed`` на пробелы (блокирующие) и исключённые классы.
+def latest_failures(
+    items: Iterable[CrawlSessionItem],
+) -> dict[tuple[str, str], CrawlSessionItem]:
+    """Дедуплицированные терминальные отказы: ``(product_id, url) → элемент``.
 
-    Дубли ``(product_id, url)`` из разных сеансов одного прогона схлопываются по
-    **последней** попытке (``last_attempt``, затем ``attempts``, затем ``session_id``) —
-    файл описывает URL, а не строку таблицы, и порядок обхода на выбор не влияет.
-    Элементы вне ``FAILED`` (``pending``/``running``/``cancelled``/``fetched``) не
-    рассматриваются: отчёт про отказы, а не про очередь.
+    Дубли одного URL из разных сеансов схлопываются по **последней** попытке
+    (``last_attempt``, затем ``attempts``, затем ``session_id``) — и файл
+    (``artifacts_gap.yaml``), и рабочий список отказов описывают URL, а не строку
+    таблицы, поэтому порядок обхода на выбор не влияет. Элементы вне ``FAILED``
+    (``pending``/``running``/``cancelled``/``fetched``) не рассматриваются: оба носителя
+    про отказы, а не про очередь. Значение вне :class:`FailureKind` не классифицируется
+    и в набор не попадает (см. :func:`_failure_kind`).
+
+    Вынесено из :func:`collect_artifact_gaps` как единственная реализация дедупа: вторая
+    копия ранжирования разошлась бы с первой молча.
     """
     latest: dict[tuple[str, str], CrawlSessionItem] = {}
     for item in items:
@@ -237,6 +249,21 @@ def collect_artifact_gaps(
         previous = latest.get(key)
         if previous is None or _attempt_rank(item) > _attempt_rank(previous):
             latest[key] = item
+    return latest
+
+
+def collect_artifact_gaps(
+    items: Iterable[CrawlSessionItem], *, run_id: str
+) -> ArtifactsGapReport:
+    """Делит терминальные ``failed`` на пробелы (блокирующие) и исключённые классы.
+
+    Дубли ``(product_id, url)`` из разных сеансов одного прогона схлопываются по
+    **последней** попытке (:func:`latest_failures`) — файл описывает URL, а не строку
+    таблицы, и порядок обхода на выбор не влияет. Элементы вне ``FAILED``
+    (``pending``/``running``/``cancelled``/``fetched``) не рассматриваются: отчёт про
+    отказы, а не про очередь.
+    """
+    latest = latest_failures(items)
 
     gaps: list[ArtifactGap] = []
     excluded: dict[str, int] = {}
@@ -253,6 +280,7 @@ def collect_artifact_gaps(
                     error_kind=kind,
                     origin=_origin(str(item.url)),
                     http_status=item.http_status,
+                    depth=item.depth,
                     attempts=int(item.attempts),
                     last_attempt=item.last_attempt,
                 )

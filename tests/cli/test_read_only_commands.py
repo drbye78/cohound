@@ -55,6 +55,10 @@ _READ_ONLY_COMMANDS = [
     ("diff", ["diff", "--db", "{db}", RUN_ID, RUN_ID]),
     ("crawl status", ["crawl", "status", "--run-id", RUN_ID, "--db", "{db}"]),
     ("crawl list", ["crawl", "list", "--db", "{db}"]),
+    # ``artifacts fetch`` сюда НЕ входит: он скачивает и пишет декларацию пакета
+    # (``sources/manual_artifacts.yaml``), то есть пишущая команда. Проверяется только
+    # читатель — ``list``.
+    ("artifacts list", ["artifacts", "list", "--db", "{db}"]),
 ]
 
 

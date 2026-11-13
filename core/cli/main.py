@@ -116,7 +116,9 @@ __all__ = [
 #: флага подставляется resolved ``paths.runs`` (composition root — единственная точка).
 #: ``runs``/``status`` входят сюда же: список прогонов и состояние прогона адресуются тем
 #: же каталогом, что и ``run``, иначе читатель смотрел бы не туда, куда писал писатель.
-_RUNS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "diff", "runs", "status"})
+_RUNS_DIR_COMMANDS: frozenset[str] = frozenset(
+    {"run", "diff", "runs", "status", "artifacts"}
+)
 #: Команды, чей ``--passports-dir`` — операционный дефолт раскладки: без флага —
 #: resolved ``paths.passports``. ``discover`` сюда не входит: его ``--passports-dir`` —
 #: opt-in seed-источник запросов (I19), а не каталог-дефолт.

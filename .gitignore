@@ -23,6 +23,10 @@ reports/*.csv
 # Индексные сборки (.npy-шарды) — иммутабельны, но велики
 index_store/
 
+# Байты, скачанные вручную (`hound artifacts fetch`): декларация
+# `sources/manual_artifacts.yaml` версионируется, сами байты — данные хоста.
+packages/*/sources/manual/
+
 # Сырой корпус (байты страниц) — retention локально
 corpus_raw/
 

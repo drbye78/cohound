@@ -222,6 +222,63 @@ app-слое (`core/config/deploy.py:555-559`), у `CrawlRunConfig` её нет,
 не должен становиться обходным путём к тому же результату: он даёт **документ**, а отказ по
 robots остаётся в аудите.
 
+### 3.5 Кто кладёт файл в пакет: `hound artifacts` (14.11.2026)
+
+Заготовку `provide` до этого заполнял человек руками: скачивал файл браузером, придумывал
+путь, копировал в пакет, вписывал `url`/`sha256`. Это не «удобство» — это место, где
+провенанс теряется: путь, придуманный руками, не переезжает с пакетом, а `sha256` вписывают
+из чужого вывода.
+
+**Две подкоманды, и обе — про одно и то же действие человека.**
+
+```bash
+# что краул не взял: источник — БД прогона, не файл отчёта
+hound artifacts list --run-id {run_id} [--product P] [--root URL] [--path /docs] \
+  [--mask '*.pdf'] [--kind robots_disallow] [--json]
+hound artifacts list --package {case_id}        # последний читаемый прогон пакета
+
+# скачать и объявить (байты → sources/manual/, декларация → sources/manual_artifacts.yaml)
+hound artifacts fetch --run-id {run_id} --mask '*.pdf' --actor {кто} [--reason robots_disallow]
+hound artifacts fetch --package {case_id} --product P --actor {кто} --dry-run
+hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
+```
+
+**Источник `list` — БД, а не `artifacts_gap.yaml`.** Файл вторичен: его перезаписывает
+следующий `report`, и «список отказов» читался бы из артефакта, который мог устареть.
+Отбор и дедуп — те же, что у файла (`collect_artifact_gaps`, `latest_failures`), поэтому
+два носителя одного факта не расходятся.
+
+**`fetch` не обходит robots — он делает действие человека видимым.** Скачивание идёт
+адаптером **без** `RobotsGate` (при `robots=None` адаптер не спрашивает ленту вовсе,
+`core/adapters/crawl_http.py:465`), то есть ровно так, как это сделал бы браузер оператора.
+Дальше срабатывает то, что и должно: SSRF-валидация входа и каждого редиректа
+(`system_resolver`), scope объявленных хостов продукта (подача **не** расширяет scope),
+блэклист, потолок `crawl.max_artifact_bytes` — тот же, на котором краулер отказал бы этому
+файлу. Контейнеры (`zip`/`7z`/`rar`) отвергаются видимо: спуск живёт в дренаже корня,
+предоставлять нужно членов (§10, расхождение 1).
+
+**Что остаётся на диске.** Байты — `sources/manual/{product_id}/{путь URL}` (каталог в
+`.gitignore`: декларация переезжает с пакетом, байты — данные хоста). Декларация —
+`sources/manual_artifacts.yaml`, поля `sha256`/`provided_by`/`provided_at`/`reason` и
+`robots_override: true`. Повторный запуск идемпотентен: совпавший `sha256` даёт `unchanged`,
+декларация не переписывается (`changed: 0`).
+
+**`run_id` двигает только материал.** `manual_artifacts_digest` считается по
+`(product_id, url, sha256)` (`core/pipeline/digests.py:383`), поэтому `provided_at` и
+`provided_by` в идентичность не входят. Команда различает два исхода и говорит их разными
+словами: `digest_changed: true` → «следующий прогон получит новый `run_id`
+(`execution_change`)»; `changed > 0` при неизменном материале → «декларация переписана,
+материал тот же ⇒ `run_id` прежний».
+
+**`robots_override` — аудит, а не разрешение.** Поле не читает ни фаза корпуса, ни
+`feed_manual_artifact`: байты входят в корпус той же цепочкой I19, что и любая подача, а
+`crawl_session_items` по-прежнему несёт `failed`/`robots_disallow`. Флаг отвечает на вопрос
+«этот файл человек взял, зная о запрете?» — и ничего не разрешает задним числом.
+
+**Чего `fetch` не делает.** Не скачивает по маске то, что не было отказом (набор берётся из
+отказов прогона либо из явных `--url`; явные URL и отбор **не складываются**), не спускает
+контейнеры, не пишет в `corpus_raw` (это делает прогон), не трогает `crawl_session_items`.
+
 ## 4. Отчёт о недоступном — отдельно и первым
 
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
@@ -455,9 +512,9 @@ by_product}` из персистентного аудита; `share_of_corpus = 
 
 **Что осталось от документа (проверено на `19d90af`, 07.11.2026).**
 
-- ✅ **Вход байтов** — `core/pipeline/manual_artifacts.py:215` (`load_manual_artifacts`),
-  схема `manual_artifacts/1` (`core/pipeline/manual_artifacts.py:67`), путь от пакета
-  (`core/pipeline/manual_artifacts.py:192-212`), сверка `sha256` (`core/pipeline/manual_artifacts.py:297-303`),
+- ✅ **Вход байтов** — `core/pipeline/manual_artifacts.py:225` (`load_manual_artifacts`),
+  схема `manual_artifacts/1` (`core/pipeline/manual_artifacts.py:72`), путь от пакета
+  (`core/pipeline/manual_artifacts.py:202`), сверка `sha256` (`core/pipeline/manual_artifacts.py:308`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
   (`core/pipeline/corpus.py:5308`), и `report` (`core/pipeline/report.py:3691`); форма —
