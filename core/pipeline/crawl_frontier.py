@@ -101,6 +101,7 @@ __all__ = [
     "SCOPE_IN",
     "SCOPE_OUT",
     "CrawlLimits",
+    "EmbedSpec",
     "Frontier",
     "blacklist_match",
     "decoded_scope_path",
@@ -109,6 +110,7 @@ __all__ = [
     "resolve_crawl_limits",
     "resolve_embed_device",
     "resolve_embed_precision",
+    "resolve_embed_spec",
     "resolve_pdf_device",
     "root_path_prefix",
     "url_form_key",
@@ -577,6 +579,62 @@ def resolve_embed_precision(app: object, run: object | None = None) -> EmbedPrec
     # Слои приходят из ``object``-параметра (``getattr`` → ``Any``), но на самом слое
     # значение — поле Pydantic ``EmbedPrecision``: канонизация, а не проверка типа.
     return EmbedPrecision(EmbedPrecision.FP32 if value is None else value)
+
+
+@dataclass(frozen=True)
+class EmbedSpec:
+    """Объявленная пара «модель + ревизия весов» (``embed.model_id``/``embed.revision``).
+
+    Пара, а не два независимых поля: ``revision`` без ``model_id`` ничего не адресует, а
+    ``model_id`` без ``revision`` описывает «какую-то» версию весов. Поэтому объявленная
+    ось — именно ``model_id@revision`` (свойство :attr:`spec`), и ``None`` здесь значит
+    «dense-ветвь не объявлена»: тогда эмбеддер не собирается вовсе (план 26 O6), а не
+    «возьмём первый доступный».
+    """
+
+    model_id: str | None = None
+    revision: str | None = None
+
+    @property
+    def spec(self) -> str | None:
+        """Каноническая строка объявленной оси: ``repo@sha`` либо ``None``."""
+        if self.model_id is None or self.revision is None:
+            return None
+        return f"{self.model_id}@{self.revision}"
+
+
+def resolve_embed_spec(app: object, run: object | None = None) -> EmbedSpec:
+    """Модель и ревизия эмбеддера по объявленным слоям: app < run (план 26 O6).
+
+    Цепочка та же, что у :func:`resolve_embed_device`/:func:`resolve_embed_precision`, и
+    **без** per-site слагаемого: модель — свойство стека/хоста исполнения, а не сайта.
+
+    Дефолта нет **намеренно** (в отличие от ``cpu``/``fp32``): модель, выбранная хостом
+    (составом extras/env), и есть тот дефект, ради которого ось вводится — ``run_id``
+    описывал бы не те веса, которыми посчитаны векторы. Поэтому ``None`` здесь —
+    объявленное «dense-ветвь не собрана», и это видно в журнале wiring и в контракте
+    (``embed_spec: null``).
+
+    Функция чистая: доступность загрузчика проверяется там, где собирается порт
+    (:func:`core.cli.wiring._resolve_embedder`), — недоступность объявленного обязана
+    быть отказом, а не подменой.
+
+    :param app: app-слой (:class:`core.config.deploy.EmbedConfig`). Допускается и
+        контейнер (:class:`DeployConfig`): тогда берётся его секция ``embed`` — та же
+        терпимость, что у соседних осей (иначе вызов с ``deploy`` вернул бы «не
+        объявлено» и dense-ветвь молча не собралась бы).
+    :param run: run-слой (:class:`core.domain.models.EmbedRunConfig`) или ``None``.
+    """
+    app_layer = getattr(app, "embed", app)
+    run_layer = getattr(run, "embed", run) if run is not None else None
+    run_model = getattr(run_layer, "model_id", None) if run_layer is not None else None
+    run_revision = getattr(run_layer, "revision", None) if run_layer is not None else None
+    model_id = _pick(getattr(app_layer, "model_id", None), run_model, None)
+    revision = _pick(getattr(app_layer, "revision", None), run_revision, None)
+    return EmbedSpec(
+        model_id=None if model_id is None else str(model_id),
+        revision=None if revision is None else str(revision),
+    )
 
 
 def _pick[T](app: T | None, run: T | None, site: T | None) -> T | None:

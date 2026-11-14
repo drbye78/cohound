@@ -144,6 +144,7 @@ from core.pipeline.crawl_frontier import (
     resolve_crawl_limits,
     resolve_embed_device,
     resolve_embed_precision,
+    resolve_embed_spec,
     resolve_pdf_device,
 )
 from core.pipeline.extraction_runtime import ExtractionPool
@@ -300,21 +301,59 @@ class WiringError(ValueError):
     """Ошибка сборки зависимостей: неизвестный или ещё не реализованный профиль."""
 
 
-def build_lite_embedder() -> LiteEmbedder:
-    """Собирает оффлайн-эмбеддер ``model2vec`` из env-данных (P4a, A3).
+def build_lite_embedder(
+    model_id: str | None = None,
+    revision: str | None = None,
+    notices: list[str] | None = None,
+) -> LiteEmbedder:
+    """Собирает оффлайн-эмбеддер ``model2vec`` из объявленной оси либо env (P4a, A3).
 
-    Модель/ревизия/локальный путь — **данные** оператора (env, ``05`` §2.3), не предметная
-    категория (§1.3): дефолты берёт сам адаптер. Ревизия попадает в ``model_id``
-    (``repo@sha``) и, как следствие, в ``index_build_id``/манифест (§13, ``execution``-граница).
+    Модель/ревизия/локальный путь — **данные** оператора (``05`` §2.3), не предметная
+    категория (§1.3). Ревизия попадает в ``model_id`` (``repo@sha``) и, как следствие, в
+    ``index_build_id``/манифест (§13, ``execution``-граница).
+
+    **Объявленный вход сильнее окружения** (план 26 O6; тот же приём, что
+    ``llm_env_notices`` у оценщика): когда ``model_id`` передан, env
+    ``COHOUND_EMBED_LITE_MODEL``/``_REVISION`` **не читается** вовсе — иначе прогон
+    объявлял бы одну модель, а грузил другую, и ``embed_spec``/``run_id`` описывали бы
+    веса, которых не было. Расхождение с env при этом **видно** заметкой (не тишиной):
+    оператор должен знать, что его переменная не подействовала.
+
+    Env остаётся рабочим путём **только** для вызова без оси (тесты, легаси, ручная
+    сборка) — и это тоже попадает в заметку, чтобы «взято из окружения» нельзя было
+    спутать с «объявлено».
+
     Вызывающий обязан проверить ``available`` прежде чем использовать порт: отсутствие
     снапшота/зависимости не подменяется выдуманными векторами.
     """
-    model_id = os.environ.get(ENV_EMBED_LITE_MODEL) or None
-    revision = os.environ.get(ENV_EMBED_LITE_REVISION) or None
+    env_model = os.environ.get(ENV_EMBED_LITE_MODEL) or None
+    env_revision = os.environ.get(ENV_EMBED_LITE_REVISION) or None
     model_path = os.environ.get(ENV_EMBED_LITE_PATH) or None
-    kwargs: dict[str, Any] = {"revision": revision, "model_path": model_path}
-    if model_id:
+    kwargs: dict[str, Any] = {"revision": None, "model_path": model_path}
+    if model_id is not None:
         kwargs["model_id"] = model_id
+        kwargs["revision"] = revision
+        if (
+            notices is not None
+            and (env_model is not None or env_revision is not None)
+            and (env_model, env_revision) != (model_id, revision)
+        ):
+            notices.append(
+                f"embed.model_id/revision объявлены ({model_id}@{revision}): env "
+                f"{ENV_EMBED_LITE_MODEL}/{ENV_EMBED_LITE_REVISION} "
+                f"({env_model}@{env_revision}) не прочитаны — объявленный вход "
+                "сильнее окружения"
+            )
+        return LiteEmbedder(**kwargs)
+    if notices is not None and (env_model is not None or env_revision is not None):
+        notices.append(
+            f"эмбеддер собран из окружения ({env_model}@{env_revision}), а не из "
+            "объявленной оси embed.model_id/embed.revision: так работает только вызов "
+            "без оси (тесты/легаси) — прогон обязан объявить модель в deploy.yaml"
+        )
+    if env_model:
+        kwargs["model_id"] = env_model
+    kwargs["revision"] = env_revision
     return LiteEmbedder(**kwargs)
 
 
@@ -2785,6 +2824,8 @@ def _build_local_ports(
     pdf_device: PdfDevice = PdfDevice.CPU,
     embed_device: EmbedDevice | str = EmbedDevice.CPU,
     embed_precision: EmbedPrecision | str = EmbedPrecision.FP32,
+    embed_model_id: str | None = None,
+    embed_revision: str | None = None,
     embed_notices: list[str] | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
@@ -2815,6 +2856,14 @@ def _build_local_ports(
     ось того же резолва. ``fp16`` исполняется ``torch.autocast``, поэтому тоже исключает
     ``LiteEmbedder`` и требует torch-путь; ``fp32`` — прежний приоритет. Точность, которую
     выбранный эмбеддер не исполнит, — отказ, а не тихий fp32 (:func:`_resolve_embedder`).
+
+    **Модель эмбеддера (``embed.model_id``/``embed.revision``, план 26 O6).**
+    ``embed_model_id``/``embed_revision`` — третья и четвёртая объявленные оси того же
+    резолва. Без объявленной модели dense-ветвь **не собирается** (``embedder=None`` и
+    видимая заметка): модель, выбранная составом extras/env, не описана в
+    ``embed_spec``/``run_id``, то есть это чужие веса под объявленной идентичностью.
+    Объявленная модель собирается точно она, а недоступность — отказ
+    (:func:`_resolve_embedder`).
 
     **Dense- и лексическое плечи (P4a, I17).** ``vector_index``/``lexical_index`` строятся
     :func:`build_vector_index`/:func:`seed_lexical_index` только при наличии предпосылок
@@ -2877,7 +2926,11 @@ def _build_local_ports(
         embedder
         if embedder is not None
         else _resolve_embedder(
-            embed_device, precision=embed_precision, notices=embed_notices
+            embed_device,
+            precision=embed_precision,
+            model_id=embed_model_id,
+            revision=embed_revision,
+            notices=embed_notices,
         )
     )
     index_builder = (
@@ -2947,29 +3000,40 @@ def _resolve_embedder(
     device: EmbedDevice | str = EmbedDevice.CPU,
     *,
     precision: EmbedPrecision | str = EmbedPrecision.FP32,
+    model_id: str | None = None,
+    revision: str | None = None,
     notices: list[str] | None = None,
 ) -> EmbedderPort | None:
-    """Выбирает эмбеддер по **объявленным** устройству и точности (P4a + ``embed.*``).
+    """Собирает эмбеддер **ровно объявленной** модели (план 26 O6) под объявленные оси.
 
-    Таблица ``16`` §4.3 — минимальная, backend остаётся недекларированным:
+    Три объявленные оси, и выбор адаптера — следствие их, а не состава extras:
 
-    * ``cpu`` — как сегодня: ``LiteEmbedder`` (``model2vec``, NumPy/CPU без ``torch``) →
-      ``LocalEmbedder`` (bge-m3, ``sentence-transformers``) → ``None``. Обе реализации
-      CPU-честны, поэтому приоритет не меняется;
-    * ``cuda`` — ``LiteEmbedder`` **исключается** с видимой заметкой (``model2vec``
-      NumPy/CPU by design и ось исполнить не может), берётся ``LocalEmbedder(device="cuda")``;
-      недоступен стек — :class:`WiringError` (``EXIT_USAGE``), а не CPU-векторы.
+    * ``embed.model_id`` + ``embed.revision`` — **какие веса**. Ось обязательна для
+      dense-ветви: без неё порт не собирается вовсе (см. ниже);
+    * ``embed.device`` — где считается вектор;
+    * ``embed.precision`` — с какой точностью.
 
-    Тихого фолбэка нет ни в одну сторону: прогон, объявивший ``cuda``, не должен получить
-    CPU-векторы под тем же ``run_id``.
+    **Модель не объявлена ⇒ dense-ветвь не собирается** (``None`` + видимая заметка).
+    Прежнее поведение («ищем первый доступный адаптер») и было дефектом: на ``cpu`` тихо
+    выходила одна модель, на ``cuda`` — другая, и ``run_id``/``pb`` не описывали веса,
+    которыми посчитаны векторы. Теперь модель выбирает вход, а не хост.
 
-    **Точность (``embed.precision``, решение владельца 06.11.2026).** ``fp32`` — прежний
-    путь. ``fp16`` исполняется ``torch.autocast(device_type=<устройство>,
-    dtype=float16)`` вокруг вызова модели (:class:`~core.adapters.embed_local.LocalEmbedder`),
-    поэтому эмбеддер без torch (``LiteEmbedder``/``model2vec`` — NumPy/CPU by design)
-    точность исполнить **не может** и исключается с видимой заметкой; недоступен
-    torch-путь — :class:`WiringError`. Тихий fp32 запрещён: объявленная точность вошла бы
-    в ``run_id``/``pb``/ключ ``embed_cache``, а считалась бы другая — ложный провенанс.
+    **Модель объявлена ⇒ собирается точно она.** Порядок попыток — по **загрузчику**, а
+    не по модели: каждая попытка грузит объявленный ``model_id@revision``, и неудача
+    загрузчика (нет модуля/снапшота/не тот формат) ведёт к следующему загрузчику, а не к
+    другой модели. ``cpu``/``fp32`` — сначала ``LiteEmbedder`` (``model2vec``, без
+    ``torch``), затем ``LocalEmbedder``; ``cuda`` или ``fp16`` — только ``LocalEmbedder``,
+    потому что ``LiteEmbedder`` (NumPy/CPU by design) эти оси исполнить не может, и это
+    **видно** заметкой.
+
+    **Сверка после сборки.** ``built.model_id`` обязан равняться объявленному
+    ``repo@sha``: расхождение — :class:`WiringError` с обоими значениями. Это защита от
+    того, что адаптер тихо подставит свой дефолт (именно так дефект и выглядел).
+
+    Объявлено, но ни один загрузчик не смог — :class:`WiringError` (``EXIT_USAGE``) с
+    инструкцией. Тихого фолбэка нет ни в одну сторону: ни на другую модель, ни на fp32,
+    ни на CPU. Прогон, объявивший ось, не должен получить чужие векторы под тем же
+    ``run_id``.
 
     Замер, на котором стоит ``fp16`` (``2026-11-06-embedding-precision-cpu.md``, cuda,
     bge-m3): 15.40/13.82 чанка/с против 6.02/4.99 у fp32, худший чанк ``1−cos = 8.3e-05``,
@@ -2978,12 +3042,37 @@ def _resolve_embedder(
 
     :param device: объявленное устройство (:class:`EmbedDevice` или строка).
     :param precision: объявленная точность (:class:`EmbedPrecision` или строка).
+    :param model_id: объявленный HF-идентификатор модели (``embed.model_id``);
+        ``None`` — dense-ветвь не объявлена.
+    :param revision: объявленный пин ревизии — HF **sha** (``embed.revision``).
     :param notices: список для видимых замечаний выбора (пишутся в журнал wiring).
-    :raises WiringError: ``cuda`` без ``sentence-transformers``/``LocalEmbedder``;
-        ``fp16`` без torch-пути (``sentence-transformers``).
+    :raises WiringError: объявленная модель не собирается ни одним загрузчиком; ``cuda``
+        без ``sentence-transformers``/``LocalEmbedder``; ``fp16`` без torch-пути;
+        собранный адаптер назвал другую модель, чем объявлено.
     """
     resolved = EmbedDevice(device)
     resolved_precision = EmbedPrecision(precision)
+    if model_id is None:
+        # Ось не объявлена — dense-ветвь не собирается. Это **видимое** состояние, а не
+        # молчаливая дыра: без эмбеддера композиция не собирается, ``index_manifest``/
+        # ``index_store`` не пишутся (реестр утверждал бы «партиция на диске» без
+        # коммита), ``embed_model_id`` пуст, а R0 работает лексически.
+        if notices is not None:
+            notices.append(
+                "embed.model_id не объявлен ⇒ dense-ветвь не собрана: модель выбрал бы "
+                "хост, а embed_spec/run_id её не описал бы; композиция и index_manifest "
+                "не пишутся, R0 работает лексически; объявить embed.model_id + "
+                "embed.revision (HF sha, не тег) в deploy.yaml"
+            )
+        return None
+    declared_spec = f"{model_id}@{revision}"
+    if revision is None:
+        # Неполная пара — тот же класс, что тихий дефолт: ``repo@None`` не адресует байты.
+        raise WiringError(
+            "embed.model_id объявлен без embed.revision: пин ревизии обязателен "
+            "(решение владельца 09.11.2026) — объявить embed.revision = HF sha "
+            "(D3, 15.11.2026: sha, а не тег)"
+        )
     if resolved_precision is not EmbedPrecision.FP32:
         # Точность исполняется только через ``torch.autocast``: эмбеддер без torch её не
         # исполнит. Исключение видимое (журнал), а отсутствие пути — отказ, не fp32.
@@ -2991,7 +3080,7 @@ def _resolve_embedder(
             notices.append(
                 f"embed.precision={resolved_precision.value}: LiteEmbedder исключён — он "
                 "NumPy/CPU by design и объявленную точность исполнить не может; выбран "
-                "LocalEmbedder (bge-m3) с torch.autocast"
+                f"LocalEmbedder ({declared_spec}) с torch.autocast"
             )
         if not _module_installed("sentence_transformers"):
             raise WiringError(
@@ -3002,12 +3091,20 @@ def _resolve_embedder(
                 "embed.precision=fp32. Тихий fp32 запрещён — прогон объявил точность, "
                 "которая вошла бы в embed_precision/партицию/ключ embed_cache"
             )
-        return LocalEmbedder(device=resolved.value, precision=resolved_precision.value)
+        return _verify_embed_spec(
+            LocalEmbedder(
+                model_id=model_id,
+                revision=revision,
+                device=resolved.value,
+                precision=resolved_precision.value,
+            ),
+            declared_spec,
+        )
     if resolved is EmbedDevice.CUDA:
         if notices is not None and model2vec_available():
             notices.append(
                 "embed.device=cuda: LiteEmbedder исключён — он NumPy/CPU by design и ось "
-                "исполнить не может; выбран LocalEmbedder (bge-m3) на cuda"
+                f"исполнить не может; выбран LocalEmbedder ({declared_spec}) на cuda"
             )
         if not _module_installed("sentence_transformers"):
             raise WiringError(
@@ -3016,28 +3113,65 @@ def _resolve_embedder(
                 "embed.device=cpu. Тихий фолбэк на CPU запрещён — прогон объявил cuda, "
                 "и CPU-векторы разошлись бы с embed_device/партицией/ключом embed_cache"
             )
-        return LocalEmbedder(device=resolved.value, precision=resolved_precision.value)
+        return _verify_embed_spec(
+            LocalEmbedder(
+                model_id=model_id,
+                revision=revision,
+                device=resolved.value,
+                precision=resolved_precision.value,
+            ),
+            declared_spec,
+        )
+    # ``cpu``/``fp32``: порядок — по загрузчику (Lite дешевле и без torch), но **обе**
+    # попытки грузят объявленный ``model_id@revision``. Неудача загрузчика — переход к
+    # следующему загрузчику, а не к другой модели.
+    skipped: list[str] = []
     if model2vec_available():
         try:
-            lite = build_lite_embedder()
+            lite = build_lite_embedder(model_id, revision, notices)
         except Exception:  # noqa: BLE001 — сборка портов не бросает (грациозная деградация)
             lite = None
+            skipped.append("model2vec: адаптер не собрался")
         if lite is not None and lite.available:
-            return lite
+            return _verify_embed_spec(lite, declared_spec)
+        skipped.append(f"model2vec: снапшот {declared_spec} недоступен локально")
+    else:
+        skipped.append("model2vec: extra 'embed-lite' не установлен")
     if _module_installed("sentence_transformers"):
-        return LocalEmbedder(device=resolved.value, precision=resolved_precision.value)
-    # Нет ни одной ветви — это **видимое** состояние, а не молчаливая дыра: без эмбеддера
-    # композиция не собирается, ``index_manifest``/``index_store`` не пишутся (реестр
-    # утверждал бы «партиция на диске» без коммита), ``embed_model_id`` пуст, а R0
-    # работает лексически. Пишется в журнал wiring; ``None`` сам по себе молчал бы.
-    if notices is not None:
-        notices.append(
-            "эмбеддер не найден (ни model2vec, ни sentence-transformers): dense-ветвь не "
-            "собрана — композиция и index_manifest не пишутся, embed_model_id пуст, R0 "
-            "работает лексически; dense-оценка недоступна (`uv sync --extra embed-lite` "
-            "или --extra embed)"
+        return _verify_embed_spec(
+            LocalEmbedder(
+                model_id=model_id,
+                revision=revision,
+                device=resolved.value,
+                precision=resolved_precision.value,
+            ),
+            declared_spec,
         )
-    return None
+    skipped.append("sentence-transformers: extra 'embed' не установлен")
+    raise WiringError(
+        f"объявленная модель эмбеддера {declared_spec} не собирается ни одним загрузчиком "
+        f"({'; '.join(skipped)}): установите extra 'embed' "
+        "(`uv sync --frozen --extra embed`) или 'embed-lite' и локальный снапшот этой "
+        "ревизии. Подмена другой моделью запрещена — embed_spec/run_id описали бы веса, "
+        "которыми векторы не считались"
+    )
+
+
+def _verify_embed_spec(built: EmbedderPort, declared_spec: str) -> EmbedderPort:
+    """Сверяет названную адаптером модель с объявленной (``repo@sha``).
+
+    Адаптер обязан **назвать** то, что объявлено: расхождение означает тихий дефолт
+    внутри загрузчика, и тогда ``embed_model_id`` (провенанс) и ``embed_spec``
+    (идентичность) описывали бы разные веса. Это отказ, а не заметка.
+    """
+    built_spec = str(getattr(built, "model_id", "") or "")
+    if built_spec != declared_spec:
+        raise WiringError(
+            f"собранный эмбеддер называет модель {built_spec!r}, а объявлено "
+            f"{declared_spec!r}: загрузчик подставил свой дефолт. Прогон объявил веса, "
+            "которыми векторы не считались бы — отказ вместо ложного провенанса"
+        )
+    return built
 
 
 def registry_specs_digest(specs: Mapping[str, RegistryConfig]) -> str | None:
@@ -3346,6 +3480,13 @@ def build_adapters(
             (deploy.embed if deploy is not None else EmbedConfig()),
             run_embed,
         )
+        # Модель и ревизия весов — та же цепочка ``app < run`` и без per-site слоя.
+        # ``None`` здесь законен: dense-ветвь не объявлена, и тогда она не собирается
+        # (видимая заметка), а не «берём первый доступный адаптер» (план 26 O6).
+        embed_spec = resolve_embed_spec(
+            (deploy.embed if deploy is not None else EmbedConfig()),
+            run_embed,
+        )
         require_embed_device(embed_device)
         embed_notices: list[str] = []
         ports = _build_local_ports(
@@ -3371,6 +3512,8 @@ def build_adapters(
             pdf_device=crawl_limits.pdf_device,
             embed_device=embed_device,
             embed_precision=embed_precision,
+            embed_model_id=embed_spec.model_id,
+            embed_revision=embed_spec.revision,
             embed_notices=embed_notices,
         )
         # Выбор эмбеддера под объявленное устройство виден в журнале wiring (тот же

@@ -12,7 +12,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from core.config.deploy import CrawlConfig, EmbedConfig
+from core.config.deploy import CrawlConfig, DeployConfig, EmbedConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain.enums import EmbedDevice, PdfDevice
 from core.domain.models import (
@@ -29,6 +29,7 @@ from core.pipeline.crawl_frontier import (
     is_blacklisted,
     resolve_crawl_limits,
     resolve_embed_device,
+    resolve_embed_spec,
     resolve_pdf_device,
     root_path_prefix,
 )
@@ -971,6 +972,57 @@ def test_embed_device_rejects_auto() -> None:
         EmbedRunConfig(device="auto")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         EmbedConfig(device="auto")  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# План 26 O6: модель и ревизия весов (embed.model_id/embed.revision) — app < run
+# --------------------------------------------------------------------------- #
+
+_MODEL = "org/model"
+_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_embed_spec_defaults_to_not_declared() -> None:
+    """Ось не объявлена — ``None``: дефолта модели нет, его выбирал бы хост (O6)."""
+    assert resolve_embed_spec(EmbedConfig(), None).spec is None
+    assert resolve_embed_spec(EmbedConfig(), EmbedRunConfig()).spec is None
+
+
+def test_embed_spec_run_layer_overrides_app() -> None:
+    """``run.yaml:embed.*`` побеждает app-слой; ``None`` на run-слое его не отменяет."""
+    assert (
+        resolve_embed_spec(
+            EmbedConfig(),
+            EmbedRunConfig(model_id=_MODEL, revision=_SHA),
+        ).spec
+        == f"{_MODEL}@{_SHA}"
+    )
+    assert (
+        resolve_embed_spec(
+            EmbedConfig(model_id=_MODEL, revision=_SHA),
+            EmbedRunConfig(model_id="run/model", revision="b" * 40),
+        ).spec
+        == f"run/model@{'b' * 40}"
+    )
+    assert (
+        resolve_embed_spec(
+            EmbedConfig(model_id=_MODEL, revision=_SHA), EmbedRunConfig()
+        ).spec
+        == f"{_MODEL}@{_SHA}"
+    )
+
+
+def test_embed_spec_accepts_container_deploy_config() -> None:
+    """Контейнер ``DeployConfig`` тоже принимается: иначе ось молча «не объявлена»."""
+    container = DeployConfig(embed=EmbedConfig(model_id=_MODEL, revision=_SHA))
+    assert resolve_embed_spec(container, None).spec == f"{_MODEL}@{_SHA}"
+
+
+def test_embed_spec_has_no_site_layer() -> None:
+    """Профиль домена не объявляет модель эмбеддера (``extra="forbid"``)."""
+    assert not hasattr(DomainProfile(), "model_id")
+    with pytest.raises(ValidationError):
+        DomainProfile(model_id=_MODEL)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #

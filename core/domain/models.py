@@ -512,15 +512,21 @@ def canonical_rate_limit(spec: RateLimitSpec | None) -> str | None:
 
 
 class EmbedRunConfig(BaseModel):
-    """``run.yaml`` → секция ``embed``: run-слой осей эмбеддера (``device``/``precision``).
+    """``run.yaml`` → секция ``embed``: run-слой осей эмбеддера
+    (``device``/``precision``/``model_id``/``revision``).
 
-    Оба поля — ``None`` = не задано на этом слое: резолв берёт app-дефолт (``cpu`` /
-    ``fp32``). Не ``cpu``/``fp32`` по умолчанию — по той же причине, что у
+    Все поля — ``None`` = не задано на этом слое: резолв берёт app-дефолт (``cpu`` /
+    ``fp32`` / ось модели). Не ``cpu``/``fp32`` по умолчанию — по той же причине, что у
     ``CrawlRunConfig.pdf_device``: дефолт run-слоя перекрыл бы app-слой в цепочке
     ``_pick``, и объявленный ``deploy.yaml:embed.*`` молча не действовал бы (R5).
 
-    Per-site слоя нет: и устройство, и точность — свойства **хоста исполнения** и его
-    стека, а не сайта (тот же довод, что в
+    Пара ``model_id``/``revision`` (план 26 O6) — та же природа: ``None`` значит
+    «не задано **на этом слое**», а не «dense не объявлен»: объявленный
+    ``deploy.yaml:embed.model_id`` обязан действовать. Правила пина — те же, что у
+    :class:`core.config.deploy.EmbedConfig` (``revision`` = HF sha, не тег).
+
+    Per-site слоя нет: и устройство, и точность, и модель — свойства **хоста исполнения**
+    и его стека, а не сайта (тот же довод, что в
     :func:`core.pipeline.crawl_frontier.resolve_pdf_device`).
     """
 
@@ -530,6 +536,54 @@ class EmbedRunConfig(BaseModel):
     #: Точность счёта (ось ``embed.precision``). Механизм исполнения — ``torch.autocast``
     #: объявленного устройства; эмбеддер, который её не исполняет, не выбирается вовсе.
     precision: EmbedPrecision | None = None
+    #: HF-идентификатор модели (ось ``embed.model_id``); ``None`` — не задано на этом слое.
+    model_id: str | None = None
+    #: Пин ревизии весов (ось ``embed.revision``) — HF sha, не тег.
+    revision: str | None = None
+
+    @model_validator(mode="after")
+    def _check_model_pin(self) -> EmbedRunConfig:
+        """Тот же инвариант пары, что в app-слое: целиком или никак.
+
+        Слой отдельный, правило одно: иначе ``run.yaml: embed.model_id`` без ревизии
+        прошёл бы валидацию, а объявленная ось не описывала бы байты весов.
+        """
+        if self.model_id is not None:
+            self.model_id = self.model_id.strip()
+        if self.revision is not None:
+            self.revision = self.revision.strip()
+        if self.revision is not None and not self.revision:
+            raise ValueError(
+                "embed.revision пуст: пин ревизии объявляется непустым HF sha "
+                "(D3, 15.11.2026 — sha, а не тег); убрать ключ или указать sha"
+            )
+        if self.model_id is not None and not self.model_id:
+            raise ValueError(
+                "embed.model_id пуст: объявить HF-идентификатор модели либо убрать ключ "
+                "(пустая строка — не «модель по умолчанию», а необъявленная ось; "
+                "ревизия пина — HF sha, не тег, D3 15.11.2026)"
+            )
+        if self.revision is not None and self.model_id is None:
+            raise ValueError(
+                "embed.revision объявлен без embed.model_id: ревизия без модели ничего не "
+                "адресует — объявить embed.model_id вместе с embed.revision "
+                "(sha, а не тег; D3, 15.11.2026)"
+            )
+        if self.model_id is not None and self.revision is None:
+            raise ValueError(
+                "embed.model_id объявлен без embed.revision: пин ревизии обязателен "
+                "(решение владельца 09.11.2026) — иначе объявленная ось не описывает "
+                "байты весов. Объявить embed.revision = HF sha (D3, 15.11.2026: sha, а не "
+                "тег) либо убрать embed.model_id"
+            )
+        return self
+
+    @property
+    def embed_spec(self) -> str | None:
+        """Объявленная пара ``model_id@revision`` либо ``None`` (на этом слое не задана)."""
+        if self.model_id is None or self.revision is None:
+            return None
+        return f"{self.model_id}@{self.revision}"
 
 
 class CrawlRunConfig(BaseModel):

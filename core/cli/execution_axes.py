@@ -136,6 +136,7 @@ from core.domain.models import CrawlRunConfig, canonical_rate_limit
 from core.pipeline.crawl_frontier import (
     resolve_embed_device,
     resolve_embed_precision,
+    resolve_embed_spec,
     resolve_pdf_device,
 )
 from core.pipeline.digests import passports_digest, render_modes_digest
@@ -708,6 +709,14 @@ class DeclaredExecutionAxes:
     #: (поле ``embed_precision``), потому что fp16- и fp32-векторы — разные числа: без оси
     #: ``run_id`` не описывал бы, с какой точностью посчитан индекс.
     embed_precision: str | None = None
+    #: Модель и ревизия весов эмбеддера (оси ``embed.model_id``/``embed.revision``):
+    #: каноническая строка ``repo@sha`` из той же цепочки ``app < run``, что увидит
+    #: исполнение (:func:`core.pipeline.crawl_frontier.resolve_embed_spec`). Входит в
+    #: контракт (поле ``embed_spec``), потому что две ревизии одной модели дают численно
+    #: разные векторы: без оси ``run_id`` не описывал бы, какими весами посчитан индекс.
+    #: ``None`` — dense-ветвь не объявлена (и тогда она не собирается), а не «взяты
+    #: дефолты»: это тоже условие измерения, отличимое от объявленного.
+    embed_spec: str | None = None
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов
     #: (``sources/manual_artifacts.yaml``). Объявленный вход (файл пакета), поэтому
     #: вычислим до сборки портов; материал — ``(product_id, url, sha256)``, где
@@ -1126,6 +1135,14 @@ def resolve_declared_axes(
             config.embed,
             getattr(getattr(inputs, "run", None), "embed", None),
         ).value,
+        # Ось ``embed.model_id``/``embed.revision`` — той же формулой ``app < run``:
+        # объявленные **веса** (``repo@sha``). Доступность загрузчика здесь не
+        # проверяется (это сборка портов): идентичность описывает объявленное, а не
+        # доступное, иначе ``run_id`` стал бы функцией хоста.
+        embed_spec=resolve_embed_spec(
+            config.embed,
+            getattr(getattr(inputs, "run", None), "embed", None),
+        ).spec,
         # 13-manual-artifacts §3.2: ручные артефакты объявлены файлом пакета, поэтому
         # отпечаток — функция входа (как seeds_digest), а не наблюдение прогона.
         manual_artifacts_digest=_manual_artifacts_digest(args),

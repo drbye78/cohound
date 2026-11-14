@@ -67,6 +67,7 @@ from core.pipeline.digests import (
     execution_contract_digest,
 )
 from core.pipeline.normalize import load_inputs
+from core.pipeline.plan import derive_run_id
 from core.pipeline.plan import plan as build_plan
 from core.pipeline.report import build_manifest
 from core.pipeline.run_identity import build_execution_contract
@@ -165,6 +166,10 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         # 16 §4.1 (решение 06.11.2026): точность счёта вектора — отдельное условие
         # измерения (fp16- и fp32-векторы — разные числа), поэтому отдельная ось.
         "embed_precision",
+        # План 26 O6 (09.11.2026, sha — 15.11.2026): объявленные веса
+        # (``model_id@revision``) — условие измерения: две ревизии одной модели дают
+        # численно разные векторы.
+        "embed_spec",
         "serp_rounds",
         "serp_source",
         # I3/§5: режим запроса поиска — отдельное условие измерения (какой бэкенд
@@ -1363,6 +1368,108 @@ def test_embed_precision_changes_the_contract_digest(tmp_path: Path) -> None:
     assert fp32_digest != fp16_digest
 
 
+# ---------------------------------------------------------------------------
+# План 26 O6: ось ``embed.model_id``/``embed.revision`` — объявленные веса
+# ---------------------------------------------------------------------------
+
+
+def _with_embed_model(package: Path, *, model_id: str, revision: str) -> Path:
+    """Дописывает ``embed.model_id``/``embed.revision`` в ``run.yaml`` пакета."""
+    run_yaml = package / "run.yaml"
+    data = yaml.safe_load(run_yaml.read_text(encoding="utf-8"))
+    data["embed"] = {"model_id": model_id, "revision": revision}
+    run_yaml.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return package
+
+
+def test_embed_spec_axis_defaults_to_none(tmp_path: Path) -> None:
+    """Ось не объявлена — ``None``: у модели **нет** дефолта (его выбирал бы хост)."""
+    assert _resolve(_package(tmp_path)).embed_spec is None
+
+
+def test_embed_spec_run_layer_overrides_deploy(tmp_path: Path) -> None:
+    """``run.yaml:embed.*`` сильнее ``deploy.embed.*`` (app < run) — как у прочих осей."""
+    package = _with_embed_model(
+        _package(tmp_path), model_id="run/model", revision="b" * 40
+    )
+    declared = _resolve(
+        package,
+        deploy=DeployConfig(
+            embed=EmbedConfig(model_id="deploy/model", revision="a" * 40)
+        ),
+    )
+    assert declared.embed_spec == f"run/model@{'b' * 40}"
+
+    # app-слой действует, когда run-слой ось не объявляет.
+    app_only = _resolve(
+        _package(tmp_path, name="app"),
+        deploy=DeployConfig(
+            embed=EmbedConfig(model_id="deploy/model", revision="a" * 40)
+        ),
+    )
+    assert app_only.embed_spec == f"deploy/model@{'a' * 40}"
+
+
+def test_embed_spec_value_is_json_serializable(tmp_path: Path) -> None:
+    """Поле контракта — строка ``repo@sha`` (или ``null``), а не объект модели."""
+    package = _with_embed_model(
+        _package(tmp_path), model_id="org/model", revision="c" * 40
+    )
+    declared = _resolve(package)
+    assert json.loads(json.dumps({"embed_spec": declared.embed_spec})) == {
+        "embed_spec": f"org/model@{'c' * 40}"
+    }
+
+
+def test_embed_spec_changes_the_contract_digest(tmp_path: Path) -> None:
+    """Две ревизии одной модели — разные векторы, значит разные условия измерения.
+
+    Без оси в контракте прогон на другой ревизии получил бы тот же ``run_id`` и
+    сравнивался бы с собой, хотя числа векторов другие.
+    """
+    first_pkg = _with_embed_model(
+        _package(tmp_path, name="rev-a"), model_id="org/model", revision="a" * 40
+    )
+    second_pkg = _with_embed_model(
+        _package(tmp_path, name="rev-b"), model_id="org/model", revision="b" * 40
+    )
+    first = _resolve(first_pkg)
+    second = _resolve(second_pkg)
+    assert first.embed_spec != second.embed_spec
+    first_digest = build_execution_contract(
+        _inputs(first_pkg), cohort_digest="c", seeds_digest="s", declared=first
+    )
+    second_digest = build_execution_contract(
+        _inputs(second_pkg), cohort_digest="c", seeds_digest="s", declared=second
+    )
+    assert first_digest != second_digest
+    # ``run_id`` выводится из контракта: две ревизии — два прогона, а не один.
+    first_run_id = derive_run_id(
+        _inputs(first_pkg),
+        cycle_id="2026-11-15",
+        cohort_digest="c",
+        seeds_digest="s",
+        execution_contract_digest=first_digest,
+    )
+    second_run_id = derive_run_id(
+        _inputs(second_pkg),
+        cycle_id="2026-11-15",
+        cohort_digest="c",
+        seeds_digest="s",
+        execution_contract_digest=second_digest,
+    )
+    assert first_run_id != second_run_id
+    # Тот же вход даёт тот же контракт (детерминизм резолва, не случайность).
+    assert (
+        build_execution_contract(
+            _inputs(first_pkg), cohort_digest="c", seeds_digest="s", declared=first
+        )
+        == first_digest
+    )
+
+
 def test_local_embedder_receives_declared_precision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1371,10 +1478,18 @@ def test_local_embedder_receives_declared_precision(
         monkeypatch, model2vec=False, sentence_transformers=True
     )
     resolved = wiring_mod._resolve_embedder(  # noqa: SLF001
-        EmbedDevice.CPU, precision=EmbedPrecision.FP16
+        EmbedDevice.CPU,
+        precision=EmbedPrecision.FP16,
+        model_id=EMBED_MODEL,
+        revision=EMBED_REVISION,
     )
     assert isinstance(resolved, _FakeEmbedder)
-    assert seen["local_kwargs"] == {"device": "cpu", "precision": "fp16"}
+    assert seen["local_kwargs"] == {
+        "model_id": EMBED_MODEL,
+        "revision": EMBED_REVISION,
+        "device": "cpu",
+        "precision": "fp16",
+    }
 
 
 def test_fp16_without_torch_path_is_wiring_error(
@@ -1389,7 +1504,11 @@ def test_fp16_without_torch_path_is_wiring_error(
     _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=False)
     with pytest.raises(wiring_mod.WiringError) as excinfo:
         wiring_mod._resolve_embedder(  # noqa: SLF001
-            EmbedDevice.CPU, precision=EmbedPrecision.FP16, notices=notices
+            EmbedDevice.CPU,
+            precision=EmbedPrecision.FP16,
+            model_id=EMBED_MODEL,
+            revision=EMBED_REVISION,
+            notices=notices,
         )
     assert "precision=fp16" in str(excinfo.value)
     # Исключение LiteEmbedder — видимое, а не молчаливое.
@@ -1397,16 +1516,20 @@ def test_fp16_without_torch_path_is_wiring_error(
 
 
 # ---------------------------------------------------------------------------
-# 16 §4.3: выбор эмбеддера по объявленному устройству
+# 16 §4.3 / план 26 O6: выбор эмбеддера по объявленной модели
 # ---------------------------------------------------------------------------
+
+#: Объявленная пара осей (данные, не предметная категория): ``repo@sha``.
+EMBED_MODEL = "example/embed-model"
+EMBED_REVISION = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
 
 
 class _FakeEmbedder:
-    """Подмена порта эмбеддера: запоминает переданное устройство."""
+    """Подмена порта эмбеддера: запоминает переданное устройство и названную модель."""
 
-    def __init__(self, device: str = "cpu") -> None:
+    def __init__(self, device: str = "cpu", model_id: str = "fake") -> None:
         self.device = device
-        self.model_id = "fake"
+        self.model_id = model_id
         self.dim = 4
         self.available = True
 
@@ -1417,19 +1540,49 @@ def _stub_embed_stack(
     model2vec: bool,
     sentence_transformers: bool,
 ) -> dict[str, Any]:
-    """Подменяет availability-предикаты и ``LocalEmbedder`` в wiring."""
+    """Подменяет availability-предикаты и сами адаптеры (не загрузчик wiring).
+
+    ``LiteEmbedder`` подменяется классом, а **не** ``build_lite_embedder``: так остаётся
+    живым настоящий провод «объявленная ось сильнее env» и его заметки. Обе подмены
+    **называют** ту модель, которую им передали (``repo@sha``): так проверяется сверка
+    после сборки, а не доверие адаптеру. Веса не грузятся — ни сети, ни снапшотов.
+    """
     seen: dict[str, Any] = {}
 
     class _Local(_FakeEmbedder):
         def __init__(self, **kwargs: Any) -> None:
-            super().__init__(device=kwargs.get("device", "<не передан>"))
+            super().__init__(
+                device=kwargs.get("device", "<не передан>"),
+                model_id=f"{kwargs['model_id']}@{kwargs['revision']}",
+            )
             seen["local_kwargs"] = dict(kwargs)
 
+    class _Lite(_FakeEmbedder):
+        def __init__(self, **kwargs: Any) -> None:
+            seen["lite_kwargs"] = dict(kwargs)
+            model_id = kwargs.get("model_id")
+            revision = kwargs.get("revision")
+            super().__init__(
+                model_id=(
+                    f"{model_id}@{revision}" if revision is not None else model_id
+                )
+                or "<дефолт адаптера>"
+            )
+
+    # Окружение — часть входа теста: иначе хост с ``COHOUND_EMBED_LITE_*`` сдвинул бы
+    # ожидания (путь снапшота попадает в kwargs).
+    for name in (
+        wiring_mod.ENV_EMBED_LITE_MODEL,
+        wiring_mod.ENV_EMBED_LITE_REVISION,
+        wiring_mod.ENV_EMBED_LITE_PATH,
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(wiring_mod, "model2vec_available", lambda: model2vec)
     monkeypatch.setattr(
         wiring_mod, "_module_installed", lambda name: sentence_transformers
     )
     monkeypatch.setattr(wiring_mod, "LocalEmbedder", _Local)
+    monkeypatch.setattr(wiring_mod, "LiteEmbedder", _Lite)
     return seen
 
 
@@ -1442,17 +1595,23 @@ def test_cuda_excludes_lite_embedder_with_visible_note(
     ради которого ось вводится. Заметка обязательна: решение не должно быть тихим.
     """
     seen = _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
-    lite = _FakeEmbedder()
-    monkeypatch.setattr(wiring_mod, "build_lite_embedder", lambda: lite)
 
     notices: list[str] = []
     resolved = wiring_mod._resolve_embedder(  # noqa: SLF001 — таблица §4.3 проверяется напрямую
-        EmbedDevice.CUDA, notices=notices
+        EmbedDevice.CUDA,
+        model_id=EMBED_MODEL,
+        revision=EMBED_REVISION,
+        notices=notices,
     )
 
-    assert resolved is not lite
     assert isinstance(resolved, _FakeEmbedder) and resolved.device == "cuda"
-    assert seen["local_kwargs"] == {"device": "cuda", "precision": "fp32"}
+    assert resolved.model_id == f"{EMBED_MODEL}@{EMBED_REVISION}"
+    assert seen["local_kwargs"] == {
+        "model_id": EMBED_MODEL,
+        "revision": EMBED_REVISION,
+        "device": "cuda",
+        "precision": "fp32",
+    }
     assert len(notices) == 1
     assert "LiteEmbedder исключён" in notices[0]
     assert "cuda" in notices[0]
@@ -1465,7 +1624,9 @@ def test_cuda_without_sentence_transformers_is_usage_error(
     _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=False)
 
     with pytest.raises(wiring_mod.WiringError) as excinfo:
-        wiring_mod._resolve_embedder(EmbedDevice.CUDA)  # noqa: SLF001
+        wiring_mod._resolve_embedder(  # noqa: SLF001
+            EmbedDevice.CUDA, model_id=EMBED_MODEL, revision=EMBED_REVISION
+        )
     message = str(excinfo.value)
     assert "embed.device" in message
     assert "embed.device=cpu" in message
@@ -1473,12 +1634,20 @@ def test_cuda_without_sentence_transformers_is_usage_error(
 
 
 def test_cpu_keeps_lite_embedder_priority(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``cpu``: прежний приоритет (Lite → Local) — обе реализации CPU-честны."""
-    _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
-    lite = _FakeEmbedder()
-    monkeypatch.setattr(wiring_mod, "build_lite_embedder", lambda: lite)
+    """``cpu``: Lite дешевле и без torch — но грузит **объявленную** модель."""
+    seen = _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
 
-    assert wiring_mod._resolve_embedder(EmbedDevice.CPU) is lite  # noqa: SLF001
+    resolved = wiring_mod._resolve_embedder(  # noqa: SLF001
+        EmbedDevice.CPU, model_id=EMBED_MODEL, revision=EMBED_REVISION
+    )
+
+    assert isinstance(resolved, _FakeEmbedder)
+    assert seen["lite_kwargs"] == {
+        "model_id": EMBED_MODEL,
+        "revision": EMBED_REVISION,
+        "model_path": None,
+    }
+    assert resolved.model_id == f"{EMBED_MODEL}@{EMBED_REVISION}"
 
 
 def test_local_embedder_receives_declared_device(
@@ -1487,13 +1656,141 @@ def test_local_embedder_receives_declared_device(
     """``LocalEmbedder`` получает ``device`` из оси — устройство не выбирает библиотека."""
     seen = _stub_embed_stack(monkeypatch, model2vec=False, sentence_transformers=True)
 
-    cpu = wiring_mod._resolve_embedder(EmbedDevice.CPU)  # noqa: SLF001
+    cpu = wiring_mod._resolve_embedder(  # noqa: SLF001
+        EmbedDevice.CPU, model_id=EMBED_MODEL, revision=EMBED_REVISION
+    )
     assert isinstance(cpu, _FakeEmbedder) and cpu.device == "cpu"
-    assert seen["local_kwargs"] == {"device": "cpu", "precision": "fp32"}
+    assert seen["local_kwargs"]["device"] == "cpu"
+    assert seen["local_kwargs"]["precision"] == "fp32"
 
-    cuda = wiring_mod._resolve_embedder("cuda")  # noqa: SLF001 — строка тоже принимается
+    cuda = wiring_mod._resolve_embedder(  # noqa: SLF001 — строка тоже принимается
+        "cuda", model_id=EMBED_MODEL, revision=EMBED_REVISION
+    )
     assert isinstance(cuda, _FakeEmbedder) and cuda.device == "cuda"
-    assert seen["local_kwargs"] == {"device": "cuda", "precision": "fp32"}
+    assert seen["local_kwargs"]["device"] == "cuda"
+
+
+def test_declared_model_without_any_loader_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Объявленная модель без загрузчика — отказ, а не ``None`` и не другая модель (O6)."""
+    _stub_embed_stack(monkeypatch, model2vec=False, sentence_transformers=False)
+
+    with pytest.raises(wiring_mod.WiringError) as excinfo:
+        wiring_mod._resolve_embedder(  # noqa: SLF001
+            EmbedDevice.CPU, model_id=EMBED_MODEL, revision=EMBED_REVISION
+        )
+    message = str(excinfo.value)
+    assert f"{EMBED_MODEL}@{EMBED_REVISION}" in message
+    assert "embed-lite" in message
+    assert "Подмена другой моделью запрещена" in message
+
+
+def test_undeclared_model_builds_no_dense_branch_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ось не объявлена ⇒ ``None`` + видимая заметка: модель не выбирает хост (O6).
+
+    Даже когда оба загрузчика доступны: «первый доступный адаптер» и был дефектом —
+    ``run_id``/``embed_spec`` не описали бы веса.
+    """
+    _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
+
+    notices: list[str] = []
+    assert (
+        wiring_mod._resolve_embedder(EmbedDevice.CPU, notices=notices)  # noqa: SLF001
+        is None
+    )
+    assert len(notices) == 1
+    assert "embed.model_id не объявлен" in notices[0]
+    assert "dense-ветвь не собрана" in notices[0]
+    assert "embed.revision" in notices[0]
+
+
+def test_built_adapter_must_name_the_declared_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сверка, а не доверие: адаптер, подставивший свой дефолт, — отказ."""
+    _stub_embed_stack(monkeypatch, model2vec=False, sentence_transformers=True)
+
+    class _DefaultsToOwn(_FakeEmbedder):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(device=kwargs.get("device", "cpu"), model_id="someone/else")
+
+    monkeypatch.setattr(wiring_mod, "LocalEmbedder", _DefaultsToOwn)
+    with pytest.raises(wiring_mod.WiringError) as excinfo:
+        wiring_mod._resolve_embedder(  # noqa: SLF001
+            EmbedDevice.CPU, model_id=EMBED_MODEL, revision=EMBED_REVISION
+        )
+    message = str(excinfo.value)
+    assert "someone/else" in message
+    assert f"{EMBED_MODEL}@{EMBED_REVISION}" in message
+
+
+def test_declared_model_without_revision_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Неполная пара на пути сборки — отказ: ``repo@None`` не адресует байты весов."""
+    _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
+    with pytest.raises(wiring_mod.WiringError) as excinfo:
+        wiring_mod._resolve_embedder(  # noqa: SLF001
+            EmbedDevice.CPU, model_id=EMBED_MODEL
+        )
+    assert "embed.revision" in str(excinfo.value)
+
+
+def test_declared_axis_wins_over_env_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Объявленная ось сильнее окружения; расхождение с env — **видимая** заметка.
+
+    Иначе прогон объявлял бы одну модель, а грузил другую (env ``COHOUND_EMBED_LITE_*``
+    читается только вызовом без оси) — тот же класс, что чтение модели оценщика из env.
+    """
+    _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
+    monkeypatch.setenv(wiring_mod.ENV_EMBED_LITE_MODEL, "env/model")
+    monkeypatch.setenv(wiring_mod.ENV_EMBED_LITE_REVISION, "e" * 40)
+
+    notices: list[str] = []
+    resolved = wiring_mod._resolve_embedder(  # noqa: SLF001
+        EmbedDevice.CPU,
+        model_id=EMBED_MODEL,
+        revision=EMBED_REVISION,
+        notices=notices,
+    )
+
+    assert isinstance(resolved, _FakeEmbedder)
+    assert resolved.model_id == f"{EMBED_MODEL}@{EMBED_REVISION}"
+    assert any("не прочитаны" in note for note in notices)
+
+
+def test_lite_embedder_ignores_env_when_axis_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сам сборщик: с объявленной осью env не читается (провод, а не только заметка)."""
+    monkeypatch.setenv(wiring_mod.ENV_EMBED_LITE_MODEL, "env/model")
+    monkeypatch.setenv(wiring_mod.ENV_EMBED_LITE_REVISION, "e" * 40)
+    monkeypatch.delenv(wiring_mod.ENV_EMBED_LITE_PATH, raising=False)
+    seen = _stub_embed_stack(monkeypatch, model2vec=True, sentence_transformers=True)
+    monkeypatch.setenv(wiring_mod.ENV_EMBED_LITE_MODEL, "env/model")
+    monkeypatch.setenv(wiring_mod.ENV_EMBED_LITE_REVISION, "e" * 40)
+
+    notices: list[str] = []
+    built = wiring_mod.build_lite_embedder(EMBED_MODEL, EMBED_REVISION, notices)
+    assert seen["lite_kwargs"] == {
+        "model_id": EMBED_MODEL,
+        "revision": EMBED_REVISION,
+        "model_path": None,
+    }
+    assert built.model_id == f"{EMBED_MODEL}@{EMBED_REVISION}"
+    assert any("не прочитаны" in note for note in notices)
+
+    # Без оси env по-прежнему действует (тесты/легаси), но это видно заметкой.
+    legacy_notices: list[str] = []
+    legacy = wiring_mod.build_lite_embedder(notices=legacy_notices)
+    assert legacy.model_id == f"env/model@{'e' * 40}"
+    assert any("из окружения" in note for note in legacy_notices)
+
 
 
 def test_require_embed_device_passes_cpu_always() -> None:

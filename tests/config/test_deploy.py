@@ -958,6 +958,83 @@ def test_embed_device_has_no_site_layer() -> None:
 
 
 # ---------------------------------------------------------------------------
+# План 26 O6: объявленные веса (``embed.model_id``/``embed.revision``)
+# ---------------------------------------------------------------------------
+
+_MODEL = "org/model"
+_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_embed_model_pair_parsed_from_deploy_yaml(tmp_path: Path) -> None:
+    """Пара ``model_id@revision`` читается из секции ``embed`` и даёт ``embed_spec``."""
+    cfg = load_deploy_config(
+        _write(
+            tmp_path,
+            "profile: local\n"
+            "embed:\n"
+            f"  model_id: {_MODEL}\n"
+            f"  revision: {_SHA}\n",
+        )
+    )
+    assert cfg.embed.model_id == _MODEL
+    assert cfg.embed.revision == _SHA
+    assert cfg.embed.embed_spec == f"{_MODEL}@{_SHA}"
+
+
+def test_embed_spec_is_none_without_declared_model() -> None:
+    """Отсутствие секции — не «модель по умолчанию», а необъявленная dense-ветвь."""
+    assert EmbedConfig().embed_spec is None
+    assert EmbedRunConfig().embed_spec is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"model_id": _MODEL}, id="model-without-revision"),
+        pytest.param({"revision": _SHA}, id="revision-without-model"),
+        pytest.param({"model_id": _MODEL, "revision": ""}, id="empty-revision"),
+        pytest.param({"model_id": "", "revision": _SHA}, id="empty-model"),
+        pytest.param({"model_id": "   ", "revision": _SHA}, id="blank-model"),
+    ],
+)
+def test_embed_incomplete_pin_is_refused(payload: dict[str, str]) -> None:
+    """Неполный пин — отказ (решения 09.11.2026 и 15.11.2026): пара или ничего.
+
+    ``model_id`` без ревизии не описывает байты весов; ревизия без модели ничего не
+    адресует; пустая строка — не «дефолт», а необъявленная ось. Сообщение обязано
+    назвать, что править в ``deploy.yaml``, и что пин — sha, а не тег.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        EmbedConfig.model_validate(payload)
+    message = str(excinfo.value)
+    assert "embed." in message
+    assert "sha" in message
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"model_id": _MODEL}, id="model-without-revision"),
+        pytest.param({"revision": _SHA}, id="revision-without-model"),
+        pytest.param({"model_id": _MODEL, "revision": ""}, id="empty-revision"),
+    ],
+)
+def test_embed_run_layer_incomplete_pin_is_refused(payload: dict[str, str]) -> None:
+    """Тот же инвариант на run-слое: ``run.yaml: embed.*`` не может быть половинчатым."""
+    with pytest.raises(ValidationError) as excinfo:
+        EmbedRunConfig.model_validate(payload)
+    assert "embed." in str(excinfo.value)
+
+
+def test_embed_pair_is_stripped() -> None:
+    """Пробелы вокруг значений не доезжают до загрузчика весов."""
+    cfg = EmbedConfig(model_id=f" {_MODEL} ", revision=f" {_SHA} ")
+    assert cfg.embed_spec == f"{_MODEL}@{_SHA}"
+    run = EmbedRunConfig(model_id=f" {_MODEL} ", revision=f" {_SHA} ")
+    assert run.embed_spec == f"{_MODEL}@{_SHA}"
+
+
+# ---------------------------------------------------------------------------
 # F7 (17 §2): реестр шардов узлов краула — ``crawl.shards``
 # ---------------------------------------------------------------------------
 

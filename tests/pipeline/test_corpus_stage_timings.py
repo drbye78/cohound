@@ -80,10 +80,15 @@ CHILD_B = "https://docs.test/b"
 #: ``execution_contract_digest``. ``content_digest`` **не** изменился: точность —
 #: условие счёта векторов, а не содержимого чанков. Это снова объявленная смена
 #: идентичности (``execution_change``), а не дрейф инструментирования.
+#: Переснято 15.11.2026 планом 26 (O6, ось ``embed.model_id@embed.revision``): в контракт
+#: вошло 33-е поле ``embed_spec``, поэтому сдвинулся синтетический
+#: ``execution_contract_digest``. ``pb``/``content_digest``/``index_build_id`` **не**
+#: изменились: объявленная ось — условие измерения, а ``pb`` строится из **наблюдаемой**
+#: строки ``embed_model_id`` (провенанс), которой в этом прогоне нет вовсе.
 PINNED_PARTITION_BUILD_ID = "pb_b633e90996b4f36fd2a6b6e9"
 PINNED_CONTENT_DIGEST = "f26d9da9face8cc0662b9b6d"
 PINNED_INDEX_BUILD_ID = "cb_197ae68483e35f9d8f3ce976"
-PINNED_EXECUTION_CONTRACT_DIGEST = "668225494775d76549a4c65f"
+PINNED_EXECUTION_CONTRACT_DIGEST = "3481c21f7da94478c397367d"
 
 #: Поля, которые обязана нести строка продукта (``product_end``) и её Pass B-продолжение.
 CRAWL_BUCKETS = ("fetch_wait_s", "extract_wait_s", "chunk_s")

@@ -659,14 +659,31 @@ class CrawlConfig(BaseModel):
 
 
 class EmbedConfig(BaseModel):
-    """Секция ``embed`` deploy-конфига: где и с какой точностью считается вектор.
+    """Секция ``embed`` deploy-конфига: **какими весами** и где считается вектор.
 
-    Две объявленные оси: ``device`` (``embed.device``) и ``precision``
-    (``embed.precision``). Обе входят в ``EXECUTION_CONTRACT_FIELDS``, в материал ``pb`` и
-    в ключ ``embed_cache``, поэтому объявлены в конфиге, а не читаются у эмбеддера.
+    Три объявленные оси: ``model_id`` + ``revision`` (какие веса) и ``device`` /
+    ``precision`` (где и с какой точностью счёт). Все входят в
+    ``EXECUTION_CONTRACT_FIELDS`` (``embed_spec``/``embed_device``/``embed_precision``),
+    в материал ``pb`` и в ключ ``embed_cache``, поэтому объявлены в конфиге, а не
+    читаются у эмбеддера.
 
-    Намеренно **только** эти две: ``backend``/``base_url``/``model_version``
-    (``14`` §6 п. 5) остаются недекларированными до решения о появлении инстанса.
+    **Модель объявлена потому, что она меняет векторы** (план 26 O6, решение владельца
+    09.11.2026; 15.11.2026 — пин ревизии это HF **sha**, а не тег). До этого модель
+    выбирал состав установленных extras и env ``COHOUND_EMBED_LITE_*``: на ``cpu`` тихо
+    выходила одна модель (dim 256), на ``cuda`` — другая (dim 1024), то есть
+    ``run_id``/``pb`` не описывали веса, которыми посчитаны векторы. Пара
+    ``model_id@revision`` (свойство :attr:`embed_spec`) — объявленная ось; наблюдаемая
+    строка ``embed_model_id`` остаётся провенансом (тот же приём, что
+    ``extractor_stack``/``extractor_version``).
+
+    Неполный пин — отказ: ``revision`` без ``model_id`` и ``model_id`` без ``revision``
+    (неполная пара не описывает байты весов, а «какая-то» версия — это ложный
+    провенанс). Оба ``None`` — законно: dense-ветвь **не объявлена**, и тогда эмбеддер
+    не собирается вовсе (R0 работает лексически), а не «первый доступный адаптер».
+
+    Намеренно **не** объявлены: ``backend``/``base_url`` (``14`` §6 п. 5) — остаются
+    недекларированными до решения о появлении инстанса. Разница существенна: адрес
+    инстанса — место, где лежат веса, а модель — сами веса.
 
     ``precision`` — решение владельца 06.11.2026 (fp16); за ним замер
     ``docs/reports/measurements/2026-11-06-embedding-precision-cpu.md``: 15.40/13.82
@@ -677,7 +694,8 @@ class EmbedConfig(BaseModel):
     ``extra="forbid"``: ключ без модели отвергается, а не игнорируется молча — иначе
     ``deploy.yaml`` с ``embed: {backend: ...}`` создавал бы впечатление объявленного
     backend'а, которого никто не исполняет. Секции ``embed:`` в ``config/deploy.yaml``
-    может не быть: дефолты ``cpu``/``fp32`` и есть отсутствие секции.
+    может не быть: дефолты ``cpu``/``fp32`` и есть отсутствие секции (модель при этом
+    не объявлена — см. выше).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -688,6 +706,62 @@ class EmbedConfig(BaseModel):
     #: который её не исполняет (``model2vec``/NumPy), исключается, а при отсутствии
     #: torch-пути — ``WiringError``. Тихий fp32 запрещён: это ложный провенанс.
     precision: EmbedPrecision = EmbedPrecision.FP32
+    #: HF-идентификатор модели (``repo``, данные — не предметная категория). ``None`` —
+    #: dense-ветвь **не объявлена**: эмбеддер не собирается (модель выбрал бы хост, а
+    #: ``embed_spec``/``run_id`` её не описал бы). Объявлено — собирается **ровно** это.
+    model_id: str | None = None
+    #: Пин ревизии весов — HF **sha**, не тег (решение владельца 15.11.2026): тег
+    #: переезжает, и два прогона под одним ``embed_spec`` считали бы разные байты.
+    #: Обязателен при объявленной модели и непуст при любом объявлении.
+    revision: str | None = None
+
+    @model_validator(mode="after")
+    def _check_model_pin(self) -> EmbedConfig:
+        """Пара ``model_id@revision`` объявляется целиком либо не объявляется вовсе.
+
+        Неполная пара — отказ, а не догадка: ``model_id`` без ``revision`` описал бы
+        «какую-то» версию весов, а ``revision`` без ``model_id`` вообще не адресует
+        байты. Пустая строка — то же, что отсутствие значения, но объявленное молча:
+        поэтому она тоже отказ. Пробельная строка — тот же случай: модель у этой секции
+        не объявляет ``str_strip_whitespace``, поэтому значения нормализуются здесь
+        (иначе ``" "`` доехало бы до загрузчика весов как идентификатор).
+        """
+        if self.model_id is not None:
+            self.model_id = self.model_id.strip()
+        if self.revision is not None:
+            self.revision = self.revision.strip()
+        if self.revision is not None and not self.revision:
+            raise ValueError(
+                "embed.revision пуст: пин ревизии объявляется непустым HF sha "
+                "(D3, 15.11.2026 — sha, а не тег); убрать ключ или указать sha"
+            )
+        if self.model_id is not None and not self.model_id:
+            raise ValueError(
+                "embed.model_id пуст: объявить HF-идентификатор модели либо убрать ключ "
+                "(пустая строка — не «модель по умолчанию», а необъявленная ось; "
+                "ревизия пина — HF sha, не тег, D3 15.11.2026)"
+            )
+        if self.revision is not None and self.model_id is None:
+            raise ValueError(
+                "embed.revision объявлен без embed.model_id: ревизия без модели ничего не "
+                "адресует — объявить embed.model_id вместе с embed.revision "
+                "(sha, а не тег; D3, 15.11.2026)"
+            )
+        if self.model_id is not None and self.revision is None:
+            raise ValueError(
+                "embed.model_id объявлен без embed.revision: пин ревизии обязателен "
+                "(решение владельца 09.11.2026) — иначе объявленная ось не описывает "
+                "байты весов. Объявить embed.revision = HF sha (D3, 15.11.2026: sha, а не "
+                "тег) либо убрать embed.model_id (тогда dense-ветвь не собирается)"
+            )
+        return self
+
+    @property
+    def embed_spec(self) -> str | None:
+        """Объявленная пара ``model_id@revision`` либо ``None`` (dense не объявлен)."""
+        if self.model_id is None or self.revision is None:
+            return None
+        return f"{self.model_id}@{self.revision}"
 
 
 class LLMSlotConfig(BaseModel):

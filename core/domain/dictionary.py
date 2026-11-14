@@ -121,6 +121,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "embed_device",
         # 16 §4.1 (решение 06.11.2026): точность счёта вектора (embed.precision).
         "embed_precision",
+        # План 26 O6 (09.11.2026, sha — 15.11.2026): объявленная модель весов
+        # (embed.model_id@embed.revision) — какое перечисление/значение принимает поле.
+        "embed_spec",
         # §7.4: усилие рассуждения оценщика (llm.reasoning_effort) — объявленный вход.
         "reasoning_effort",
         # 16 §3.2: статус продукта в прогоне (носитель — таблица run_product).

@@ -135,6 +135,14 @@ class DeclaredAxesLike(Protocol):
     @property
     def embed_precision(self) -> str | None: ...
 
+    #: План 26 O6 (решения 09.11.2026 и 15.11.2026): **какие веса** считают векторы —
+    #: объявленная пара ``model_id@revision`` (ревизия — HF sha, не тег). Отдельное
+    #: условие измерения: две ревизии одной модели дают численно разные векторы, поэтому
+    #: без оси ``run_id`` описывал бы не те веса. ``None`` — ось не передана/не объявлена
+    #: (dense-ветвь не собрана), и это отличимо от объявленного значения.
+    @property
+    def embed_spec(self) -> str | None: ...
+
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов. Раунд подачи
     #: добавляет документы корпуса, то есть доказательства, — это **условие измерения**,
     #: а не провенанс записи: спрятать его значило бы дать корпусу измениться без
@@ -390,6 +398,11 @@ def build_execution_contract(
         # сборки портов, поэтому остаётся «функцией входа». ``None`` — ось не передана
         # (чистые вызовы): «не объявлено» отличимо от «объявлено ``fp32``».
         "embed_precision": _declared(declared, "embed_precision"),
+        # План 26 O6: объявленные веса (``embed.model_id@embed.revision``) — тем же
+        # правом, что устройство и точность. ``None`` — ось не передана/не объявлена, и
+        # это отличимо от объявленного значения: «dense не собирали» — тоже условие
+        # измерения, а не отсутствие поля.
+        "embed_spec": _declared(declared, "embed_spec"),
         "crawl_strategy": _declared(declared, "crawl_strategy"),
         "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),
         "crawl_config_digest": _declared(declared, "crawl_config_digest"),

@@ -34,7 +34,6 @@ from core.cli.wiring import (
     SPLIT_PROFILE,
     WiringError,
     build_adapters,
-    build_lite_embedder,
     build_store,
 )
 from core.domain import Gate, IndexManifestEntry, LLMCellOutput, ProductScope, Status
@@ -99,10 +98,11 @@ def test_local_adapters_set_safe_ports_and_skip_missing_heavy() -> None:
     assert ports.vector_index is None
     # Лексическое плечо симметрично: без store/сборки порт не поднимается (P4a, N3).
     assert ports.lexical_index is None
-    # Эмбеддер (P4a): оффлайн-lite при готовой модели → качественный bge-m3 при
-    # sentence-transformers → иначе ``None`` (адаптер не фабрикуется, A3/I19).
-    lite_ready = _has_module("model2vec") and build_lite_embedder().available
-    assert (ports.embedder is not None) is (lite_ready or _has_module("sentence_transformers"))
+    # Эмбеддер (P4a, план 26 O6): ось ``embed.model_id`` не объявлена ⇒ dense-ветвь
+    # **не собирается**, даже когда загрузчик установлен: модель, выбранную составом
+    # extras, не описал бы ``embed_spec``/``run_id``. Это видимое состояние (заметка в
+    # журнале wiring), а не молчаливая дыра; выдуманных векторов нет (A3/I19).
+    assert ports.embedder is None
     assert (ports.index_builder is not None) is _has_module("numpy")
 
 

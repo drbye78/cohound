@@ -285,11 +285,30 @@ def test_embed_precision_is_a_contract_condition() -> None:
     assert execution_contract_digest(fp32) != execution_contract_digest(fp16)
 
 
+def test_embed_spec_is_a_contract_condition() -> None:
+    """``embed.model_id@embed.revision`` — условие измерения (план 26 O6).
+
+    Две ревизии одной модели дают численно разные векторы, поэтому смена пина обязана
+    менять ``run_id``: иначе два разных измерения жили бы под одним именем. Наблюдаемая
+    строка ``embed_model_id`` при этом остаётся провенансом — тот же приём, что
+    ``extractor_stack``/``extractor_version``.
+    """
+    assert "embed_spec" in EXECUTION_CONTRACT_FIELDS
+    first = _contract_values()
+    first["embed_spec"] = "org/model@" + "a" * 40
+    second = _contract_values()
+    second["embed_spec"] = "org/model@" + "b" * 40
+    assert execution_contract_digest(first) != execution_contract_digest(second)
+
+    # «Dense не объявлен» отличимо от «объявлен»: ``null`` — тоже значение контракта.
+    absent = _contract_values()
+    absent["embed_spec"] = None
+    assert execution_contract_digest(absent) != execution_contract_digest(first)
+
+
 # ---------------------------------------------------------------------------
 # O2 плана 26: retrieval_params_json = исполненные параметры
 # ---------------------------------------------------------------------------
-
-
 def test_retrieval_params_serializer_declares_exactly_executed_values() -> None:
     """Сериализатор называет ровно исполняемые параметры (и не выдумывает новых)."""
     params = retrieval_params(profile="R2", cutoff_k=10)
