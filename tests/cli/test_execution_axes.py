@@ -142,7 +142,7 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     second = _resolve(package)
     assert first == second
     assert first.extractor_stack.startswith(
-        "trafilatura-html-6+text-plain-2+epub-3+"
+        "trafilatura-html-7+text-plain-2+epub-3+"
         f"{pdfium_engine_build()}+docling-office-1+docling-doc-4/cpu/docling-"
     )
     # Объявленные оси — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего поиска

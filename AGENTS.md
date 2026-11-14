@@ -481,7 +481,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   0.000 → 0.845, `edu.postgrespro.ru` 0.024 → 0.939, `tantorlabs.ru` 0.000 → 0.782; five
   marker-bearing hosts unchanged to the last digit
   (`docs/reports/measurements/2026-11-02-html-headings-main-region.md`). Reader version is
-  `trafilatura-html-6`; D1/D2/D3 are all `execution_change` because the corpus text changes.
+  `trafilatura-html-7`; D1–D4 are all `execution_change` because the corpus text changes.
 - **A definition list is not a section.** `trafilatura` 2.3.1 rewrites `<dl>/<ol>/<ul>` into
   its own `<list>` and `dt`/`dd`/`li` into `<item>`, which the markdown serializer prints as
   **one line**: a `<h3>` inside a `<dd>` arrives as `- текст ### Примечание текст`, so the
@@ -496,6 +496,20 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   the postgrespro acronyms page without it). Measured 03.11.2026 on 2 379 pages: defect lines
   88 → 59, headings +47 with zero losses, longest heading 1 076 → 381 characters, characters
   +406 (`docs/reports/measurements/2026-11-03-html-definition-lists.md`).
+- **A pseudo-tag is text, not markup.** `trafilatura` 2.3.1 (`main_extractor.handle_quotes`)
+  creates a new element named after a tag it found, and `lxml` refuses a colon in that name
+  (`ValueError: Invalid tag name 'cluster_id:14841639068965178418'`). The exception is caught
+  in `core.bare_extraction` as "junk", so the **whole document** is discarded:
+  `extract()` → `None` → `parser_failed`, on a page holding 140 KB of text. `_escape_pseudo_tags`
+  (`core/adapters/extract_html.py`) escapes `<` before a name containing a colon — nothing
+  else: prose `<`, closing tags, comments and ordinary elements are untouched, so a document
+  without such a construct passes **byte for byte**. It runs **last** among the input fixes
+  because D2/D3 round-trip through `lxml` and would put the pseudo-tag back. Measured
+  14.11.2026 over all 44 626 `corpus_raw` files (12 GB): the construct occurs in 248 files,
+  10 of them HTML — **4** gave 0 characters and now give 150 596 (a docs page whose `<pre>`
+  holds `header:<cluster_id:…>` log output), **6** had their code samples torn apart
+  (`<my:a>` inside `SELECT xpath(…)` became an element and split the sample across two code
+  fences) and now come out whole (32 215 → 32 843 characters).
 - PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
   **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:505`).
   - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The

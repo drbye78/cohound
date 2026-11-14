@@ -59,12 +59,13 @@ def test_extract_returns_extracted_doc() -> None:
 
 
 def test_extractor_version_is_stable() -> None:
-    # Версия менялась трижды: 02.11.2026 D1 — входной пре-клин заменён allow-list на
+    # Версия менялась четырежды: 02.11.2026 D1 — входной пре-клин заменён allow-list на
     # структуросохраняющий (``trafilatura-html-4``); D2 — страница без объявленного
     # основного блока получает ``<main>`` (``trafilatura-html-5``); 03.11.2026 D3 —
-    # списки определений разворачиваются до ``trafilatura`` (``trafilatura-html-6``).
+    # списки определений разворачиваются до ``trafilatura`` (``trafilatura-html-6``);
+    # 14.11.2026 D4 — псевдо-тег ``<name:…>`` экранируется (``trafilatura-html-7``).
     # Каждый раз меняется объявленный стек (``extractor_stack``), а не только реализация.
-    assert HtmlExtractor.version == "trafilatura-html-6"
+    assert HtmlExtractor.version == "trafilatura-html-7"
 
 
 def test_extract_passes_decoded_html_to_fn() -> None:
@@ -401,6 +402,74 @@ def test_page_without_body_is_passed_unchanged() -> None:
     fn, calls = _capturing("ok")
     HtmlExtractor(extract_fn=fn).extract(_page(b"<html><head><title>t</title></head></html>"))
     assert "<main>" not in calls[0]
+
+
+# ---------------------------------------------------------------------------
+# D4: псевдо-теги — текст, а не разметка
+# ---------------------------------------------------------------------------
+
+
+def test_d4_escapes_pseudo_tags_before_extraction() -> None:
+    """``<name:…>`` доходит до ``trafilatura`` экранированным.
+
+    Без экранирования ``lxml`` создаёт элемент с именем ``cluster_id:1484…``, а
+    ``trafilatura`` при копировании узла падает на ``Invalid tag name`` и объявляет
+    **весь** документ мусором: страница с 140 КБ текста уходила в ``parser_failed``
+    (замер 14.11.2026, ``database.diasoft.ru/docs/ru/q-database/versiya-180/qdb-etcd``).
+    """
+    fn, calls = _capturing("ok")
+    HtmlExtractor(extract_fn=fn).extract(
+        _page(b"<html><body><pre>header:<cluster_id:14841639068965178418 member_id:1></pre></body></html>")
+    )
+    assert "&lt;cluster_id:14841639068965178418" in calls[0]
+
+
+def test_d4_leaves_ordinary_markup_and_prose_untouched() -> None:
+    """Правило узкое: закрывающие теги, комментарии, проза и обычные элементы целы."""
+    fn, calls = _capturing("ok")
+    page = (
+        "<html><body><main><p>a &lt; b, x &gt; y</p><!-- note -->"
+        "<pre>SELECT 1;</pre></main></body></html>"
+    )
+    HtmlExtractor(extract_fn=fn).extract(_page(page.encode()))
+    sent = calls[0]
+    assert "</p>" in sent and "<!-- note -->" in sent
+    assert "a &lt; b" in sent
+    assert "&lt;/" not in sent
+
+
+def test_d4_does_not_touch_a_document_without_pseudo_tags() -> None:
+    """Нет конструкции — вход совпадает с выходом D2/D3 байт в байт."""
+    import core.adapters.extract_html as module
+
+    html = "<html><body><div><h2>Т</h2><p>текст</p></div></body></html>"
+    assert module._escape_pseudo_tags(html) == html
+
+
+def test_d4_recovers_a_page_trafilatura_discarded() -> None:
+    """Приёмка D4: страница с логом в ``<pre>`` больше не теряется целиком.
+
+    На прежнем коде (``trafilatura-html-6``) ``extract`` возвращал ``None`` и документ
+    помечался ``parser_failed`` — при том что текста в нём десятки килобайт.
+    """
+    import core.adapters.extract_html as module
+
+    if not module._TRAFILATURA_AVAILABLE:
+        pytest.skip("trafilatura не установлена (extra extract)")
+
+    body = "".join(
+        f"<p>Абзац про etcd номер {i}: кластер, кворум, журнал и снимок состояния.</p>"
+        for i in range(20)
+    )
+    page = (
+        "<html><body><div class='docsPage'><h1>qdb-etcd</h1>"
+        + body
+        + "<pre>sent: header:<cluster_id:14841639068965178418 revision:15 > kvs:<key:\"abc\">"
+        "</pre></div></body></html>"
+    )
+    doc = HtmlExtractor().extract(_page(page.encode()))
+    assert doc.error is None, doc.error
+    assert "кворум" in doc.text
 
 
 def test_d2_keeps_atx_headings_on_a_page_without_marker() -> None:
