@@ -111,6 +111,8 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `passports/{product_id}/` | Product passports. |
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
+| `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — every number an architecture document cites lives there) and incident traces. Per §1.2: the artifact outranks the document. |
+| `scripts/measure_*.py`, `scripts/conformance_*.py` | **Named instruments** of measurements and censuses (A3): a claim is out of scope only after a census with one of these, and a re-measurement cites the script + date. |
 | `.env.example` | Environment variables and external keys (LLM, scout, search adapters), no secrets. |
 
 ### 3.1 Artifacts are data, not repository files
@@ -392,7 +394,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
 ## 9. Run identity, declared axes, versioning
 
 - `run_id` is a function of **declared inputs only**: 32 fields in
-  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:88`). Host-observed values
+  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:96`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
 - **Anything that changes the corpus or the verdicts must be a declared input.** Precedents
@@ -404,7 +406,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   `rate_limit` (site > run, same formula as execution, key only when declared) — a per-site
   value overrides the run-level axis, so leaving it out let a host be re-paced without a new
   `run_id`. Add a new operator axis to the single inventory `CRAWL_AXIS_DESTS`
-  (`core/cli/execution_axes.py:190`) so `plan` and `run` pick it up together — flag parity is
+  (`core/cli/execution_axes.py:193`) so `plan` and `run` pick it up together — flag parity is
   tested. Changing an axis gives a **new `run_id`** (`execution_change`), not an edit of the
   current run; otherwise two different corpora become one measurement.
 - **Crawl policy is identity, its execution is provenance.** `crawl_policy_digest`
@@ -460,7 +462,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   docling. **Office** (docx/pptx/xlsx) goes through docling; **PDF** goes through whichever
   mechanism the `crawl.pdf_pipeline` axis declares.
 - **The HTML input is pre-cleaned, not allow-listed.** `strip_active_html`
-  (`core/util/sanitize.py:290`) removes active content (`script`/`style`/`noscript`/`iframe`/
+  (`core/util/sanitize.py:296`) removes active content (`script`/`style`/`noscript`/`iframe`/
   `object`/`embed`/`svg`/`template`), `on*` handlers and `javascript:`/`vbscript:`/
   `data:text/html` URLs **together with their bodies**, but keeps `class`/`id`/`role` — the
   attributes `trafilatura` uses to tell an article from chrome. The `nh3` allow-list
@@ -511,7 +513,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   (`<my:a>` inside `SELECT xpath(…)` became an element and split the sample across two code
   fences) and now come out whole (32 215 → 32 843 characters).
 - PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
-  **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:505`).
+  **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:519`).
   - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The
     only mechanism where `crawl.document_level` (`off|text|layout|layout_tables|full`)
     applies.
@@ -622,7 +624,10 @@ re-fetch URLs that have retained bytes); only `--from-scratch` wipes the crawl s
 adds a live re-fetch bypassing the R7 cache.
 
 Crawl sessions: `./hound.py crawl run|status|list|resume|restart|cancel` (`resume` is
-idempotent: same `session_id`, already-`FETCHED` items are not re-fetched). Liveness
+idempotent: same `session_id`, already-`FETCHED` items are not re-fetched). Refresh policy
+per scope is set with `./hound.py crawl policy set|list|clear` and consumed per run via
+`--refresh`/`--frozen-source`/`--refresh-scope` (semantics §6.1; operator reference —
+`03-data-config-cli.md` §D.2.2). Liveness
 (`crawl_sessions.owner`/`heartbeat_at`): a stale `running` becomes `interrupted` on session
 open — not `failed`/`cancelled`, because the crawl body is not finalized; `crawl cancel` demotes
 `running` to `interrupted` with `cancelled_by_operator`. `interrupted` **must** stay in
@@ -675,6 +680,9 @@ extra), `markdown-it-py`+`mdit-py-plugins` (чанкер, `18`). `numpy` жив�
 uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract --extra extract-pdf
 #   + --extra extract-archives for 7z/rar, --extra embed / embed-lite for embeddings,
 #     --extra safety (prompt-injection guards), --extra ops (retry/structured logs).
+# A REAL RUN also needs an embedder extra (embed or embed-lite): without one the
+# composition does not build and R0 refuses the run (measured 05.11.2026; the README
+# quick-start commands already include it).
 ./hound.py doctor      # groups: core/retrieval/crawl/extract/extract-pdf/extract-archives/safety/ops/embed/embed-lite/ann/pdf-measure/dev + env/config/layout/dirs/cli
 ```
 
