@@ -475,14 +475,17 @@ def test_noop_path_sitemaps_dropped_host_sitemaps_kept() -> None:
 if __name__ == "__main__":  # pragma: no cover - локальный запуск
     raise SystemExit(pytest.main([__file__, "-q"]))
 
-def test_postgrespro_seed_order_is_authored_docs_first_edu_last() -> None:
+def test_postgrespro_seed_order_is_authored_docs_first_portal_last() -> None:
     """Порядок seed-корней postgrespro — **авторский** (execution_change §13).
 
     Корни дренятся в этом порядке, и каждый — свой бюджет. ``docs`` первым (высшая
-    ценность для карты возможностей), ``edu`` последним (вспомогательные учебные
-    материалы, 664 измеренных элемента). Пин ловит и ре-сортировку файла, и расхождение
-    с деривацией паспорта: ``sorted()`` снова поставил бы ``postgrespro.ru/`` (портал)
-    перед ``postgrespro.ru/docs/`` — ровно дефект живого прогона 22.10.
+    ценность для карты возможностей), портал последним (вспомогательное и объёмное).
+    Пин ловит и ре-сортировку файла, и расхождение с деривацией паспорта: ``sorted()``
+    снова поставил бы ``postgrespro.ru/`` (портал) перед ``postgrespro.ru/docs/`` —
+    ровно дефект живого прогона 22.10.
+
+    Список — из трёх корней: учебный ``edu`` выведен 14.11.2026 (решение владельца,
+    см. ``test_edu_subdomain_is_excluded_from_corpus_and_scope``).
     """
     from core.config.passports import load_passports, passport_urls
 
@@ -491,7 +494,6 @@ def test_postgrespro_seed_order_is_authored_docs_first_edu_last() -> None:
         "https://postgrespro.ru/docs/",
         "https://postgrespro.ru/products/postgrespro/enterprise/",
         "https://postgrespro.ru/",
-        "https://edu.postgrespro.ru/",
     ]
     assert seeds["postgrespro"] != sorted(seeds["postgrespro"]), (
         "пин: порядок авторский — sorted() поставил бы портал перед docs"
@@ -502,35 +504,66 @@ def test_postgrespro_seed_order_is_authored_docs_first_edu_last() -> None:
     }
     assert seeds == derived, "corpus_urls.yaml обязан совпадать с деривацией из паспортов"
 
-def test_edu_subdomain_is_declared_root_with_own_capped_profile() -> None:
-    """``edu.postgrespro.ru`` — объявленный корень и профиль со **своим** потолком (B/C).
 
-    До 22.10 хост не был объявлен нигде: он попадал в партицию как «любой поддомен»
-    ``postgrespro.ru`` и наследовал его профиль (``max_documents: 800``), израсходовав
-    664 элемента бюджета корня. Теперь у него свой корень (``corpus_urls.yaml``) и свой
-    потолок — 1 500: выше измеренных 900 (12.11.2026, ``truncated: false``; потолок ниже
-    объявил бы весь продукт ``truncated`` из-за вспомогательного хоста) и не унаследован
-    от портала (800 — бюджет портала, не заявка на размер edu).
+def test_edu_subdomain_is_excluded_from_corpus_and_scope() -> None:
+    """``edu.postgrespro.ru`` выведен из корпуса и из scope — пин исключения, не удаление.
+
+    История: до 22.10 хост не был объявлен нигде и попадал в партицию как «любой поддомен»
+    ``postgrespro.ru``, унаследовав его профиль (``max_documents: 800``): 664 элемента
+    бюджета корня ушли на учебные раздатки, а docs-корень не начался. Тогда edu стал
+    отдельным корнем со своим потолком. **14.11.2026** владелец вывел его из корпуса:
+    2 939 документов / 87 803 чанка (34,7 % чанков прогона ``ru-pg-dbms-145ad66ca3f9``)
+    при **0** ячеек, опирающихся на его свидетельство, — во всех прогонах стенда, включая
+    два полных (905 ячеек: ``2a5b51af5778``, ``c2e7b860ac17``). То есть исключение не
+    отзывает ни одной ячейки и не требует пере-разметки эталона.
+
+    Пин держит **обе** половины исключения, потому что половина = лазейка: без seed-корня
+    edu вернулся бы discovery/sitemap, а ключ ``domain_profiles.yaml`` объявляет хост в
+    scope (``Frontier.host_in_scope``) сам по себе. Последняя проверка — поведенческая:
+    на объявленных корнях продукта edu вне scope, то есть исключение не косметическое.
     """
+    from urllib.parse import urlsplit
+
     from core.config.passports import load_passports, passport_urls
+    from core.pipeline.crawl_frontier import CrawlLimits, Frontier, normalize_scope_host
 
     seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
-    assert "https://edu.postgrespro.ru/" in seeds["postgrespro"]
-    assert "https://edu.postgrespro.ru/" in passport_urls(
-        load_passports(ROOT / "passports")["postgrespro"]
-    ), "edu обязан быть в doc_domains паспорта (иначе регенерация его потеряет)"
-
+    passport = load_passports(ROOT / "passports")["postgrespro"]
     profiles = load_domain_profiles(ON_DISK_PROFILES)
-    edu = profiles["edu.postgrespro.ru"]
-    assert edu.fetch is FetchMode.HTTP
-    assert edu.max_depth == 8
-    assert edu.max_documents == 1500
-    assert edu.max_documents != profiles["postgrespro.ru"].max_documents, (
-        "потолок edu обязан быть собственным, а не унаследованным от postgrespro.ru"
+
+    # 1. Нет seed-корня.
+    assert "https://edu.postgrespro.ru/" not in seeds["postgrespro"]
+    # 2. Нет в паспорте — иначе регенерация `corpus_urls.yaml` вернёт корень.
+    assert "https://edu.postgrespro.ru/" not in passport_urls(passport), (
+        "edu обязан отсутствовать в doc_domains паспорта: corpus_urls — его деривация"
     )
-    # Профиль резолвится на учебной странице (без ключа edu наследовался бы профиль предка).
-    selected = select_domain_profile(
-        "https://edu.postgrespro.ru/dba2_06_mvcc_autovacuum.html", profiles
+    # 3. Нет ключа профиля — иначе хост остаётся объявленным в scope без всякого seed.
+    assert "edu.postgrespro.ru" not in profiles
+
+    # 4. Поведенческий пин: scope корней продукта считается **как в фазе corpus**
+    # (`core/pipeline/corpus.py`: объявленные хосты = seed-хосты + ключи профилей,
+    # минус собственные хосты продукта). Обход учебной страницы из корня портала
+    # отвергается — и через `host_in_scope`, и через `in_scope` на самом URL.
+    declared_hosts = {
+        normalize_scope_host(urlsplit(str(url)).hostname or "")
+        for product_urls in seeds.values()
+        for url in product_urls
+    } | {
+        normalize_scope_host(str(key).split("/", 1)[0]) for key in profiles
+    }
+    own_hosts = {
+        normalize_scope_host(urlsplit(str(url)).hostname or "")
+        for url in seeds["postgrespro"]
+    }
+    frontier = Frontier(
+        "https://postgrespro.ru/",
+        CrawlLimits(max_depth=3),
+        scope_hosts=declared_hosts - own_hosts,
     )
-    assert selected is not None
-    assert selected.max_documents == 1500
+    assert frontier.host_in_scope("edu.postgrespro.ru") is False, (
+        "edu объявлен в scope: seed-корень или ключ профиля вернулся"
+    )
+    assert (
+        frontier.in_scope("https://edu.postgrespro.ru/dba2_06_mvcc_autovacuum.html") is False
+    )
+
