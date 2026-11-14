@@ -421,7 +421,7 @@ document_level:
 
 # P7. Механизм извлечения PDF (crawl.pdf_pipeline): ось объявляет **механизм**, а не
 # библиотеку — конкретная реализация и её сборка записываются в `extractor_version`
-# (`docling-doc-3:<level>/<device>/docling-<build>` либо `pdfium-text-1`; устройство —
+# (`docling-doc-4:<level>/<device>/docling-<build>` либо `pdfium-text-1`; устройство —
 # ось P9 ниже), поэтому смена библиотеки
 # внутри механизма видна в провенансе и ключе `extract_cache`, но не меняет смысл оси.
 # Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря.
@@ -436,7 +436,7 @@ pdf_pipeline:
 # layout-модели/таблицы/OCR. Значения только cpu | cuda — `auto` НЕ существует
 # намеренно (R5): объявленная ось обязана действовать, а `auto` = «устройство выбрало
 # окружение», то есть тот же класс дефекта, что чтение модели оценщика из env (§7.4).
-# Устройство входит в `extractor_version` (`docling-doc-3:<level>/<device>/docling-<build>`)
+# Устройство входит в `extractor_version` (`docling-doc-4:<level>/<device>/docling-<build>`)
 # и в `extractor_stack` — значит меняет ключ `extract_cache` и `run_id` (execution_change).
 # Дефолт — cpu. `cuda` при недоступном CUDA — отказ (EXIT_USAGE) с числами, не фолбэк.
 # Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря.

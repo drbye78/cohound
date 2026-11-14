@@ -27,7 +27,7 @@
 (HTML-адаптер + семейство docling-адаптера + фактическая версия установленной
 библиотеки ``docling``). Сборка движка (``docling-<version>``) берётся из
 :func:`core.adapters.extract_document.docling_engine_build` — **того же** вызова, из
-которого строится ``extractor_version`` документа (``docling-doc-3:<level>/<device>/docling-<build>/<policy>``,
+которого строится ``extractor_version`` документа (``docling-doc-4:<level>/<device>/docling-<build>/<policy>``,
 ключ ``extract_cache`` и слагаемое ``pb``). Две независимые формулы разошлись бы, и
 ``run_id`` объявлял бы движок, которого не было (Д-8, §2.5). ``extractor_version`` при
 этом остаётся наблюдаемой величиной и в контракт не входит: в ``run_id`` едет только
@@ -743,7 +743,7 @@ def extractor_stack_version(
     Формат: ``<html>+<text>+<epub>+<pdfium>+<office>+<docling>/<device>/<build>/<policy>/<finalize>``.
 
     Пример: ``trafilatura-html-6+text-plain-2+epub-3+pdfium-text-3:5.14.0+docling-office-1+
-    docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1``.
+    docling-doc-4/cpu/docling-2.135.0/md-plain-underscore/finalize-1``.
 
     **Почему здесь все читатели, а не только HTML и docling.** Поле объявлено ради
     одного: смена текста не имеет права пройти под прежним ``run_id`` (Д-8, A3). До

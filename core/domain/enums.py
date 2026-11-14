@@ -520,7 +520,7 @@ class PdfPipeline(StrEnum):
     """P7: **механизм** извлечения PDF (ось ``crawl.pdf_pipeline``).
 
     Ось называет механизм, а не библиотеку: конкретная реализация и её сборка
-    записываются в ``extractor_version`` документа (``docling-doc-3:full/cpu/docling-<build>/<policy>``
+    записываются в ``extractor_version`` документа (``docling-doc-4:full/cpu/docling-<build>/<policy>/<finalize>/ocr-cyrillic-v5``
     либо ``pdfium-text-1``). Поэтому замена библиотеки **внутри** того же механизма видна
     в провенансе и в ключе ``extract_cache`` (``(content_hash, extractor_version,
     level)``), но не меняет смысл оси: прогон остаётся «тем же механизмом».
@@ -558,7 +558,7 @@ class PdfDevice(StrEnum):
     хоста. ``cuda`` требует доступного CUDA-устройства: недоступность — отказ
     (``EXIT_USAGE``) с числами, **не** тихий фолбэк на CPU.
 
-    Устройство входит в ``extractor_version`` (``docling-doc-3:<level>/<device>/
+    Устройство входит в ``extractor_version`` (``docling-doc-4:<level>/<device>/
     docling-<build>/<policy>``) и в ``extractor_stack``: текст документа зависит от устройства
     (численные различия моделей), поэтому ключ ``extract_cache``
     (``(content_hash, extractor_version, level)``) обязан различать пару. Смена оси —

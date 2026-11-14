@@ -88,7 +88,7 @@ F2/F3/F4 частично; исполнение, ёмкость и размещ�
 | 2.2 | Две фазы чанкинга: `build_id = NULL` → `UPDATE` → зачистка | `pb` неизвестен до полноты набора чанков | `pb` известен из документов **до** чанкинга ⇒ одна запись с финальным `pb`, без `NULL`, без `UPDATE`, без зачистки |
 | 2.3 | `_PARTITION_SCHEMA` не трогать | инвалидация сборок | бамп формулы; все партиции пересобираются один раз — это и есть корректное поведение |
 | 2.4 | Схемы шва — только аддитивно (`schema_version: "1"`) | совместимость с уже развёрнутым edge | шов проектируется заново как v2: передача артефакта, `submit`/`collect`/`abort` |
-| 2.5 | `extractor_version` = `docling-doc-3:<level>` (Д-8) | смена ломала ключ кэша и `pb` | `docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>` — движок, уровень, устройство и политика названы, кэш не может соврать, `digests.py` перестаёт утверждать неверное |
+| 2.5 | `extractor_version` = `docling-doc-4:<level>` (Д-8) | смена ломала ключ кэша и `pb` | `docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>` — движок, уровень, устройство и политика названы, кэш не может соврать, `digests.py` перестаёт утверждать неверное |
 | 2.6 | DDL только аддитивно | старые БД | схема пересоздаётся, совместимость не сохраняется (решение владельца 01.11.2026). **Реализовано (волна S плана 17):** аддитивные шимы снесены (`_ensure_columns` в `cohound.db`, `_migrate`/`_ADDITIVE_COLUMNS` в `state.db`, `_migrate` в `edge_jobs.db`), все колонки/индексы объявлены в `CREATE TABLE`; версия читается **до** DDL, несовпадение → `SchemaVersionMismatch` с путём файла → `EXIT_USAGE` с `schema_version: …`. Все три БД гейтятся одинаково. Цена названа прямо: файл прежней версии отвергается и пересоздаётся оператором, а не догоняется молча |
 | 2.7 | `IndexBuild.docs` в `PhaseResult` | публичное поле | **снято (08.11):** поля `docs` нет; документы читаются из store (`corpus_docs`) — почему они не едут в результате, объясняет докстринг `core/pipeline/index_build.py:30-33` |
 | 2.8 | `corpus.py` — монолит ~7200 строк (23.10) | правки на месте дешевле | пакет стадий: 9 модулей `core/pipeline/corpus_*.py` (30.10–01.11) — `ingest`/`drain`/`index`/`persist`/`state`/`commit`/`driver`/`coverage`/`freshness`; `corpus.py` (5870 строк, 08.11) остался фасадом с публичной `build_corpus` |
@@ -238,7 +238,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > ✅ **закрыто по Exit** (5 из 6 пунктов; открыт один — изоляция памяти).
 > M0.5 в `06` §4 — механика ✅ (26.10) и приёмка ⬜; F1 закрыт по своему Exit, приёмка отчёта
 > человеком в Exit не входила.
-> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:252`
+> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:336`
 >   (`docling_extractor_version`), вид значения в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
 >   контракте — `trafilatura-html-6+text-plain-2+epub-3+pdfium-text-3:5.14.0+docling-office-1+docling-doc-3/cpu/docling-2.135.0/md-plain-underscore/finalize-1`

@@ -134,7 +134,7 @@ host'ами — линейно.
 (`core/util/fetch_retry.py:55`, одно правило на `local` и `split`; классификатор —
 `core/ports/crawl_errors.py`). Контракт «никакой мутации состояния сеанса здесь нет» уже записан у
 `local_fetch` (`core/pipeline/corpus_ingest.py:2762`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2558`). Потоки не получают ни `Frontier`, ни
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2641`). Потоки не получают ни `Frontier`, ни
 стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:823`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 

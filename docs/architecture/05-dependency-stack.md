@@ -101,7 +101,7 @@ index+sources и есть единственная декларативная о
 (R5, `24-fleet-work-units.md` §2): объявленная ось обязана действовать, а
 `auto` = «устройство выбрал движок», тот же класс, что чтение модели оценщика из env (§7.4).
 Устройство подставляется в `accelerator_options` конвертера, входит в `extractor_version`
-(`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`) и в `extractor_stack` — значит меняет
+(`docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`) и в `extractor_stack` — значит меняет
 ключ `extract_cache` и `run_id` (`execution_change`, §13). `pdf_device: cuda` при
 недоступном устройстве — `EXIT_USAGE` с числами, **не** тихий CPU.
 
@@ -216,7 +216,7 @@ pdfium) GPU **не ускоряет** — отсюда обе механизмы
 |---|---|---|---|---|
 | `trafilatura` | 2.3.x | Apache-2.0 ✅ | **a** | main-content → markdown, заголовки/списки/таблицы |
 | `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **обязателен**: extra `[format-office]` его не покрывает, а цепочка импорта `DocumentConverter` (`pipeline→models.factories→base_ocr_model→datamodel.spatial`) требует `rtree` — поэтому он объявлен в extra `extract` явно (`pyproject.toml`), а `doctor` проверяет его в группе `deps:extract`; группа опциональна — отсутствие даёт `warn`, а не `fail` (`core/cli/doctor.py:121,354-365`) |
-| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (из индексов `pytorch-cu130`/`pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0). OCR-движок `rapidocr` (Apache-2.0) держится прямым пином `>=3.9.1,<3.10` (`pyproject.toml:71`): 3.10.0 удалил `PP_OCRV6_LANGS` из `rapidocr.utils.model_resolver`, а метаданные docling (`rapidocr<4,>=3.9.1`) пропускают 3.10.0 — и OCR при `document_level=full` молча выключается |
+| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (из индексов `pytorch-cu130`/`pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0). OCR-движок `rapidocr` (Apache-2.0) держится прямым пином `>=3.9.1,<3.10` (`pyproject.toml:71`): 3.10.0 удалил `PP_OCRV6_LANGS` из `rapidocr.utils.model_resolver`, а метаданные docling (`rapidocr<4,>=3.9.1`) пропускают 3.10.0 — и OCR при `document_level=full` молча выключается. `onnxruntime` (MIT, `>=1.32,<2`) объявлен там же прямым пином: кириллическая rec-модель в колесе `rapidocr` есть **только** в onnx-виде, а torch-бэкенд тянет `.pth` с modelscope по сети (замер 14.11.2026 — таймаут; с onnxruntime та же страница даёт 719 символов и 558 кириллицы вместо 176 символов латинской транслитерации) |
 | `lxml` | 6.1.x | BSD-3 ✅ | **a** (транзитивно) | уже в дереве trafilatura/Scrapy |
 | `openpyxl` | 3.1.x | MIT ✅ | **a** | XLSX-отчёты; Office-бэкенд docling |
 | `python-docx` / `python-pptx` | 1.2.x / 1.0.x | MIT ✅ | **b** (через docling) | отдельно не нужны |
@@ -300,7 +300,7 @@ commodity-слой (A2): замена читателя контейнеров н
 `_EXTRACT_TASK_TIMEOUT_S = 1800` (866 с на 665 стр.).
 
 Класс изменения — **`execution_change`** (§13), не `methodology_change`: `extractor_version`
-(`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`) **не включает** эту ручку и от замера не меняется,
+(`docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`) **не включает** эту ручку и от замера не меняется,
 поэтому записи `extract_cache/` (ключ — `(sha256 байтов, extractor_version, level)`)
 **остаются валидными**, `golden-full` не требуется. Значение ручки публикуется в `settings_provenance` манифеста
 (`document_extract.queue_max_size`, `source: measured`) — провенанс замера, не граница
@@ -619,7 +619,7 @@ copyright, перечень изменений. Такой реестр нель
 |---|---|---|
 | `embed_model_id`, `lexical_engine_version`, `vector_store`, `extractor_version` | **`content_change`** | наблюдаемые величины: **вне** контракта (не выводятся из входа — per-product композит корпуса, диск, wheel'ы). Новая `index_build_id`, diff **разрешён** с баннером и doc-delta |
 | `chunker_version`, `extractor_stack` | **`execution_change`** | входят в контракт → новый `run_id`, diff блокируется; `methodology_version` **не** меняется |
-| `crawl.document_level` | **`execution_change`** | входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full`) → `crawl_config_digest` → новый `run_id`. Дополнительно наблюдается в `extractor_version` (`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`) → новая сборка; но идентичность разошлась раньше, поэтому класс — `execution_change` |
+| `crawl.document_level` | **`execution_change`** | входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full`) → `crawl_config_digest` → новый `run_id`. Дополнительно наблюдается в `extractor_version` (`docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`) → новая сборка; но идентичность разошлась раньше, поэтому класс — `execution_change` |
 | `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (`rrf_k`/fusion) | **`execution_change`** | входят в контракт; `index_build_id` **не** меняется (ретривал-конфиг не влияет на чанкинг/векторы), обязателен retrieval-golden |
 | `scoring_policy_version`, `status_dict_version`, `capability_policy`, `unknown_policy`, `partial_score` (`METHODOLOGY_FIELDS`) | **`methodology_change`** | bump `methodology_version` + `golden-full` **и пере-аннотация golden** (§13) |
 | модель под сценарий оценщика (`llm_scenarios`) | **`execution_change`** | новый `run_id`; `methodology_version` не меняется (`core/config/deploy.py`) |
@@ -630,7 +630,7 @@ copyright, перечень изменений. Такой реестр нель
 
 **Апгрейд `docling` внутри диапазона `>=2.135,<3` — что происходит с `extract_cache`.** Пин
 задан диапазоном, поэтому минорное обновление проходит без правки кода; `extractor_version`
-документа — `docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`, где `<build>` — версия установленной
+документа — `docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`, где `<build>` — версия установленной
 библиотеки (единственный источник — `docling_engine_build()` в
 `core/adapters/extract_document.py`). Отсюда: (1) `extractor_stack` (в контракте) меняется ⇒
 новый `run_id` — прогон честно объявляет новый движок; (2) та же сборка входит в ключ
@@ -650,7 +650,7 @@ copyright, перечень изменений. Такой реестр нель
 | V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Подтверждён кодом: `core/adapters/lexical_tantivy.py:904-907` (`stemmer("russian")` + `stopword("russian")`). Внешний `snowballstemmer` не нужен |
 | V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. Подтверждён установкой: `uv.lock` (08.11.2026) держит ровно эти версии. См. `pyproject.toml` |
 | V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10. ⬜ **ОТКРЫТО (08.11.2026)** — `bge-m3` зафиксирован кодом как дефолт (`core/adapters/embed_local.py:75`), но **сравнения с RU-файнтюнами не было**: ни одного замера по `USER-bge-m3`/`RoSBERTa` в `docs/reports/measurements/` нет |
-| V4 | docling offline-веса в контуре + лицензии весов | ⬜ **ОТКРЫТО (08.11.2026), но посылка прежней записи ложна:** `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 **читается** — `env_prefix="DOCLING_"` (`.venv/…/docling/datamodel/settings.py:62-71`), а `BasePipeline` берёт `settings.artifacts_path` как fallback (`…/docling/pipeline/base_pipeline.py:67-68`). Механика офлайн-бандла исполниме: env → `artifacts_path`; `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. coHound передаёт `artifacts_path` только в OCR-пробу (`core/adapters/extract_document.py:643-660`). Остаётся: лицензии весов и `repo_id`/`revision` в манифесте |
+| V4 | docling offline-веса в контуре + лицензии весов | ⬜ **ОТКРЫТО (08.11.2026), но посылка прежней записи ложна:** `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 **читается** — `env_prefix="DOCLING_"` (`.venv/…/docling/datamodel/settings.py:62-71`), а `BasePipeline` берёт `settings.artifacts_path` как fallback (`…/docling/pipeline/base_pipeline.py:67-68`). Механика офлайн-бандла исполниме: env → `artifacts_path`; `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. coHound передаёт `artifacts_path` только в OCR-пробу (`core/adapters/extract_document.py:797-814`). Остаётся: лицензии весов и `repo_id`/`revision` в манифесте |
 | V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | ✅ **закрыт smoke-тестом (2026-10-08):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14). Smoke `tests/smoke_scrapy_playwright.py` пройден на Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright **1.63.0** (chromium + firefox) → **оставляем с диапазоном `playwright>=1.63,<2`** (пина `==` нет); связка 1.63/2.19 подтверждена, фолбэк 1.57 не нужен. Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
 
 ---
@@ -685,7 +685,7 @@ air-gap) сетевого доступа к HF нет — либо загруз�
 `extractor_stack` (константы + версия docling, `core/pipeline/run_identity.py:92`), но **не**
 repo_id/revision/лицензию весов; env-переключатель `DOCLING_ARTIFACTS_PATH` есть, но остаётся
 передать `artifacts_path` в `PdfPipelineOptions` экстракции явно, чтобы путь был объявленным
-входом, а не env (`core/adapters/extract_document.py:643-660` — сегодня только OCR-проба).
+входом, а не env (`core/adapters/extract_document.py:797-814` — сегодня только OCR-проба).
 
 **Что делать (план, закрывает V4):**
 1. **Предзакачать** нужные веса (`docling-tools models download`) на машине с доступом к сети →

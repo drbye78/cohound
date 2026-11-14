@@ -598,9 +598,9 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 2. **`embed_device` в контракте — тесты есть, но не там, где обещала граница.**
    `tests/pipeline/test_run_identity.py` поля `embed_device` не касается вовсе (и
    `len(EXECUTION_CONTRACT_FIELDS)` не пинуется нигде). Фактическое покрытие:
-   `tests/cli/test_execution_axes.py:1284` (дефолт `cpu`),
-   `tests/cli/test_execution_axes.py:1289` (run > deploy),
-   `tests/cli/test_execution_axes.py:1303` (поле JSON-сериализуемо);
+   `tests/cli/test_execution_axes.py:1286` (дефолт `cpu`),
+   `tests/cli/test_execution_axes.py:1291` (run > deploy),
+   `tests/cli/test_execution_axes.py:1305` (поле JSON-сериализуемо);
    `tests/pipeline/test_report.py:2433`, `tests/pipeline/test_report.py:2465`
    (манифест несёт значение как объявлено), `tests/pipeline/test_report.py:2492` (diff называет
    `execution_change: embed_device`, а не «недоступно»). **Прямого теста «`cpu`→`cuda`
@@ -609,7 +609,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
    `PINNED_EXECUTION_CONTRACT_DIGEST` (`tests/pipeline/test_corpus_stage_timings.py:86`)
    фиксирует значение для `cpu`. Это названный пробел, а не «покрыто». ⬜ Остаток на
    08.11.2026: для точности такой тест **есть**
-   (`tests/cli/test_execution_axes.py:1341` — `test_embed_precision_changes_the_contract_digest`),
+   (`tests/cli/test_execution_axes.py:1343` — `test_embed_precision_changes_the_contract_digest`),
    для устройства — нет.
 3. `tests/config/test_deploy.py` — `deploy.embed.device` объявлен; неизвестный ключ в
    `embed:` отвергается (`extra="forbid"`, там уже есть параметризация
@@ -994,7 +994,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 **Что осталось открытым на 08.11.2026 (не выдаётся за закрытое):**
 
 - **⬜ Прямого теста «`cpu` → `cuda` меняет `execution_contract_digest`» нет** (§7 п. 2).
-  Для `embed_precision` такой тест есть (`tests/cli/test_execution_axes.py:1341`), для
+  Для `embed_precision` такой тест есть (`tests/cli/test_execution_axes.py:1343`), для
   устройства — нет; разница держится материалом дайджеста и пином под `cpu`.
 - **⬜ Писателя `run_lineage.status='running'|'aborted'` нет** (§10 п. 15): прерванный прогон
   не оставляет строки в линии циклов, и `previous_run_of` шагает через него к предыдущему

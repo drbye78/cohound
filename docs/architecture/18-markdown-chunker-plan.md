@@ -136,7 +136,7 @@ shortcodes. Это не «никогда»: нет грамматики — не
   (`strip_control_chars`): `'a\rb'` → `'ab'` — CR-only markdown теряет всю строчную
   структуру до чанкера. **Решено не в финализации, как записано здесь изначально:**
   `finalize-2` не появился, действует `DOCLING_TEXT_FINALIZE = "finalize-1"`
-  (`core/adapters/extract_document.py:182`), а `strip_control_chars` по-прежнему удаляет
+  (`core/adapters/extract_document.py:207`), а `strip_control_chars` по-прежнему удаляет
   `\r`, а не нормализует. Нормализация `\r\n|\r` → `\n` стоит на границе чанкера
   (`md_ast.normalize_text`, `core/adapters/md_ast.py:147`) и в читателях текста/PDF
   (`core/adapters/extract_text.py:63`, `core/adapters/extract_pdf_text.py:135`); факт

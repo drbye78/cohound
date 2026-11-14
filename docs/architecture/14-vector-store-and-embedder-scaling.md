@@ -495,7 +495,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 
 **Дефект 1 — провенанс (закрыт).** `embed_model_id` = `BAAI/bge-m3`, без сегмента
 устройства. Для экстрактора ровно этот класс закрыт: `pdf_device` входит в
-`extractor_version` (`docling-doc-3:layout_tables/cuda/…`) и в `extractor_stack`. На
+`extractor_version` (`docling-doc-4:layout_tables/cuda/…`) и в `extractor_stack`. На
 29.10.2026 у эмбеддера такой оси **не было**: прогон на CPU и прогон на CUDA давали
 одинаковый `embed_model_id`, то есть одинаковый `pb`. Сейчас `embed_device` и
 `embed_precision` — объявленные оси материала `pb`

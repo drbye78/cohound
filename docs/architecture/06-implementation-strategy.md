@@ -744,7 +744,7 @@ P5), но строка помечена здесь как неактуальна
   мёртвый `use_ocr`/дока-«ложь» исправлены). `off` — документы не извлекаются (pre-fetch по
   суффиксу / post-fetch по `Content-Type`; видимые `document_skips` + канал аномалии усечения;
   сессионный статус не перезаписывается, skip ≠ `FAILED`). Уровень входит в
-  `extractor_version` (`docling-doc-3:<level>`) ⇒ `index_build_id` (сборки иммутабельны).
+  `extractor_version` (`docling-doc-4:<level>`) ⇒ `index_build_id` (сборки иммутабельны).
   Класс — `execution_change`: `crawl_document_level` входит и в `EXECUTION_FIELDS`
   (`core/pipeline/report.py`), и в `CrawlLimits.as_dict()` → `crawl_config_digest`; дефолт
   контент не меняет. Байт-идентичность якоря
@@ -1020,7 +1020,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
   materialize core/` даёт только локальную переменную `core/pipeline/report.py:2234-2240`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
-  не входит в `extractor_version`, `core/adapters/extract_document.py:252-284`), E1 follow-up
+  не входит в `extractor_version`, `core/adapters/extract_document.py:336-372`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`
   (`core/cli/context.py:1801` против `core/edge/server.py:1105`) **сводится в один замер** с
   паритетом `pb` `local`/`split` (§2): одна процедура — «один вход, два профиля, сравнить
@@ -1038,7 +1038,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   ➖ **снято как пункт, но не как факт:** под `split` процессной экстракции нет — это устройство
   зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2491`), а не недоделка.
   Так же снят прежний остаток «`use_ocr=False` — мёртвый код»: решением P5 `full` несёт OCR,
-  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:909-926`),
+  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:1221-1230`),
   и документированное прежде «сканы дают пустой текст» было неверным.
 
 ---

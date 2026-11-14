@@ -527,13 +527,21 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   Materials and detectors are preserved there for further experiments; the revision condition
   is labelled pages, or a recall-1.0 classifier with real savings.
 - **`crawl.pdf_device`** (`cpu|cuda`, no `auto`): device is part of `extractor_version`
-  (`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`; Office carries no
+  (`docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`, plus
+  `/ocr-cyrillic-v5` at `full` only; Office carries no
   level/device at all — `docling-office-1:<policy>/docling-<build>/<finalize>`) and `extractor_stack`, so it changes the
   `extract_cache` key and `run_id` once, explicitly. `cuda` with no usable device is
   `EXIT_USAGE` with numbers, **never** a silent CPU fallback. Measured 8–12× on document
   extraction (`docs/reports/measurements/2026-10-28-gpu-vs-cpu-extraction.md`); a second
   worker on one card gave 1.10× at +2.3 GB RSS, hence window 1 there — a consequence of
-  measurement, not a ceiling set on faith.
+  measurement, not a ceiling set on faith. **The OCR alphabet is part of the same key**: at
+  `full` docling's auto-OCR picks `lang=['ch']` and Cyrillic arrives as Latin
+  transliteration (measured 14.11.2026: 176 chars, 0 Cyrillic) while the page is reported as
+  read (`error=None`). `docling-doc-4` declares `cyrillic` + the rec model shipped in the
+  `rapidocr` wheel and executes it on `onnxruntime`; a missing model is a visible
+  `OcrEngineUnavailableError`, never a silent fallback to `ch`. Text that is nothing but
+  `<!-- image -->` markers is `EMPTY_TEXT_REASON` (`FailureKind.EMPTY_DOCUMENT`), not a
+  document.
 - **Containers** (`zip`/`7z`/`rar`) are opened by `archive_descent.py`. There is **no depth
   ceiling**, and that is held by **mechanics, not budget alone**: descent is iterative (an
   explicit stack of frame generators), so depth never hits the interpreter stack. Finiteness

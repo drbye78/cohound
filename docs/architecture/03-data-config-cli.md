@@ -693,7 +693,7 @@ basename пути (`*.pdf`); применяются и к seeds, и к обна�
 координаты; без reading order/заголовков/таблиц); `layout` — только layout-модель (без
 таблиц и OCR); `layout_tables` — layout + `TableFormer FAST`, **OCR off**; `full` — OCR on
 (OCR включён только на верхнем уровне — distinguishes `full`). Уровень входит в
-`extractor_version` (`docling-doc-3:<level>`) и потому в `index_build_id`: смена уровня
+`extractor_version` (`docling-doc-4:<level>`) и потому в `index_build_id`: смена уровня
 **не может** молча дать ту же сборку (сборки иммутабельны — новый уровень = новая сборка).
 Класс изменения — **`execution_change`** (§13), не `methodology_change`; дефолт контент не
 меняет (кроме churn `index_build_id`/`crawl_config_digest`). Идентичность форкается
@@ -750,7 +750,7 @@ basename/path без знания content-type); «полная» экономи
 env (§7.4). Цепочка — `app < run`, **без** per-site слоя: устройство принадлежит хосту
 исполнения, а не сайту. CLI-флага нет по той же причине. Отдельного значения в
 `crawl_config_digest` ось **не** получает: материал уже назван `extractor_stack`
-(`docling-doc-3/<device>/docling-<build>`) и `extractor_version` документа, а второе поле на
+(`docling-doc-4/<device>/docling-<build>`) и `extractor_version` документа, а второе поле на
 тот же материал не дало бы различить расхождение прогонов; `run_id` меняется через стек —
 `execution_change` (§13), один раз. `cuda` при недоступном устройстве — `EXIT_USAGE` с
 числами (версия torch, `cuda_available`, объём карты), **не** тихий CPU: иначе провенанс

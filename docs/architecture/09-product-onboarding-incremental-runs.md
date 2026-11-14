@@ -175,7 +175,7 @@
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277`, `core/pipeline/onboarding.py:310`), вызов — `preflight` из `core/cli/commands/run.py:917`, `core/cli/commands/run.py:1052` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
-| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:3267`) и для `incremental`, и для прохода без сети (`no_network`, `core/pipeline/corpus_ingest.py:3259-3263`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
+| §6.3 | ✅ сделано | `plan_incremental` вызывается корпусом (`plan_incremental_items` → `plan_incremental`, `core/pipeline/corpus_ingest.py:3267`) и для `incremental`, и для прохода без сети (`no_network`, `core/pipeline/corpus_ingest.py:3265-3269`); reuse партиции — по `pb`+диск, `snapshot.partition_build_id` источником не служит |
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
 | §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:340`; зонд — `core/pipeline/artifact_probe.py:67`), семейство чанкеров — `chunker_family` |
@@ -1383,7 +1383,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > adoption наполняет durable-субстрат (`document_version`, `chunk_store`/`chunk_meta`,
 > `url_state`, `index_partition`, снимок, lineage), но `--update` всё равно идёт полным
 > краулом (`new` → `full`; под сетью `plan_incremental` работает для `incremental`, а под
-> политикой без сети — и для `new`/`full`, `core/pipeline/corpus_ingest.py:3259-3263`). Это честное следствие «нет ни одного complete-baseline»,
+> политикой без сети — и для `new`/`full`, `core/pipeline/corpus_ingest.py:3265-3269`). Это честное следствие «нет ни одного complete-baseline»,
 > а не дефект команды; записывать `complete` при неполном покрытии было бы ложью.
 >
 > **Критерий принятия продукта** — наличие строки `corpus_coverage` (зеркало
@@ -2458,7 +2458,7 @@ URL синтетический, фетчить его нельзя, а файл 
 описание до среза B1/B3 и коду не соответствует.
 
 **Идентичность экстрактора под `split` — в пространстве имён ядра.** `extractor_version`
-приходит в ответе `extract/collect` (`docling-doc-3:<level>/<device>/docling-<build>`), а не
+приходит в ответе `extract/collect` (`docling-doc-4:<level>/<device>/docling-<build>`), а не
 подменяется строкой вида `remote-extractor-1` (`core/edge/extract_service.py`, докстринг
 модуля; `RemoteExtractor.__init__` — `version` остаётся идентичностью **прокси**). Это снимает
 прежнюю предпосылку «паритет `pb` local/split невозможен по построению»: `pb` включает
@@ -2835,8 +2835,8 @@ products:
 (`core/pipeline/corpus.py`): sorted `(chunk_id, content_hash)`.
 
 **`extractor_version` — не константа: в неё входит устройство (P9).** Строка имеет вид
-`docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>`
-(`core/adapters/extract_document.py:252-284`), где
+`docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`
+(`core/adapters/extract_document.py:336-372`), где
 `<device>` — объявленная ось `crawl.pdf_device` (`cpu|cuda`, `core/domain/enums.py:531`,
 резолв — `resolve_pdf_device` в `core/pipeline/crawl_frontier.py`). Поэтому `pb` различает
 `cpu` и `cuda` **явно**, а не через «повезло/не повезло с железом»; сама ось входит в
@@ -3849,7 +3849,7 @@ diff — инкрементальность была полезна только
   > `index_build_id` — то есть попадает в разрешённый класс `content_change`, а не
   > форкает `run_id`. Вместо `extractor_version` объявлен **`extractor_stack`**
   > (константы стека извлечения + версия библиотеки docling + **устройство**:
-  > `docling-doc-3:<level>/<device>/docling-<build>`; ось `crawl.pdf_device` — объявленный
+  > `docling-doc-4:<level>/<device>/docling-<build>`; ось `crawl.pdf_device` — объявленный
   > вход, поэтому `cpu`↔`cuda` — `execution_change`, §13). Прежняя редакция этого
   > документа перечисляла здесь четыре наблюдаемые версии — это было неверно; ещё более
   > ранняя называла «19 полей» — тоже неверно (девять полей не были названы:
@@ -4091,7 +4091,7 @@ golden**.
 | Поле | Почему не заводим |
 |---|---|
 | `corpus_docs.doc_version_id` | Связь «документ ↔ версия» уже есть таблицей `corpus_doc_version(doc_version_id, product_id, doc_id)` (`core/store/sqlite.py:238`). Колонка дублировала бы связь и могла бы с ней разойтись — в двух местах, молча |
-| `corpus_docs.level` | `level` уже второй сегмент `extractor_version` (`docling-doc-3:<level>/<device>/<build>`) и входит слагаемым в `doc_version_id`. Отдельная колонка — третий носитель |
+| `corpus_docs.level` | `level` уже второй сегмент `extractor_version` (`docling-doc-4:<level>/<device>/<build>`) и входит слагаемым в `doc_version_id`. Отдельная колонка — третий носитель |
 | `corpus_docs.doc_status` | Run DB **иммутабельна на прогон**: строка корпуса прогона не меняет статус никогда. `active|superseded` живёт в `state.db.document_version` (там, где версии действительно сменяются), а `evicted` снят решением §4.5 вместе с retention-осью |
 | `corpus_docs.reused_from_run_id` | Переиспользование идёт из **durable-субстрата** (`url_state`/`document_version`/`chunk_store`), а не «из прогона»: у retained-байтов и переиспользованного чанка нет прогона-источника как свойства. `reuse_kind=reused` уже называет факт, `docs_reused` — считает |
 | `corpus_chunks.doc_version_id` | `chunk_id` = `f"{product_id}:{doc_version_id}:{chunk_no}"` (§14.6 п. 11), разбирается `parse_source_id`. Колонка дублировала бы собственный первичный ключ |
