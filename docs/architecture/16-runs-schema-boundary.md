@@ -329,14 +329,14 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
   копия `resolve_pdf_device` без site-слагаемого.
   Дефолт `cpu`, значения только `cpu|cuda`, `auto` **нет** (R5: объявленная ось обязана
   действовать). Enum `EmbedDevice` — в `core/domain/enums.py` рядом с `PdfDevice`
-  (`core/domain/enums.py:561`).
+  (`core/domain/enums.py:575`).
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1367-1368` → `core/pipeline/corpus.py:1688`
-  (объявление оси) и `core/pipeline/corpus.py:4665`/`core/pipeline/corpus.py:4740`
+  **явным параметром**: `core/pipeline/phases.py:1367-1368` → `core/pipeline/corpus.py:1690`
+  (объявление оси) и `core/pipeline/corpus.py:4714`/`core/pipeline/corpus.py:4789`
   (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
-  (`core/pipeline/corpus.py:2330` — единственный источник этого значения).
+  (`core/pipeline/corpus.py:2339` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
@@ -427,7 +427,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 (`core/pipeline/corpus_index.py:911-923`; сегодня ключей **восемь**: шесть прежних плюс
 `embed_device` и `embed_precision`).
 
-`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4659`, а в тестах — с явными kwargs
+`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4708`, а в тестах — с явными kwargs
 (`tests/pipeline/test_corpus_phase_boundary.py:153-163`,
 `tests/pipeline/test_document_levels.py:574-585`): новый **обязательный** аргумент даёт там
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
@@ -498,7 +498,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 ## 6. `chunk_id` (run-level)
 
 `_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:181-199`, где
-`doc_hash` — `extracted.content_hash`, вызов — `core/pipeline/corpus_ingest.py:1513`) →
+`doc_hash` — `extracted.content_hash`, вызов — `core/pipeline/corpus_ingest.py:1550`) →
 **`f"{product_id}:{doc_version_id}:{chunk_no}"`**.
 Почему в этой границе: `chunk_id` — часть `LexicalChunk`/`RetrievedChunk` и адрес гидртации
 из store, поэтому смена формата и так требует пересборки партиций; делать её отдельным
@@ -721,10 +721,10 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
      durable-элементы для дренажа». ✅ **As-built** (`core/pipeline/corpus_drain.py:1581-1597`:
      `charged_urls` → `add_revalidate_seed`, комментарий называет дефект 3 и `09` §6.3).
      Плюс приписывание владельцу — тем же предикатом, что
-     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:4829-4861`, вызов —
-     `core/pipeline/corpus.py:2610-2611`: побеждает самый специфичный
+     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5003-5037`, вызов —
+     `core/pipeline/corpus.py:2619-2620`: побеждает самый специфичный
      `root_path_prefix`), а не «кто первый» (дефект 1); продукт-wide множество
-     `resume_counted` (`core/pipeline/corpus.py:3550`) остаётся — меняется правило
+     `resume_counted` (`core/pipeline/corpus.py:3559`) остаётся — меняется правило
      приписывания.
      **Почему нельзя сделать только приписывание:** измерено — у `digital_q_database`
      host-корень (prefix `/`, потолок 10) случайно забрал зарядку 2402 элементов, поэтому

@@ -81,7 +81,7 @@
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
 намерению: `retain` (`core/pipeline/corpus_ingest.py:1113`) — единственный writer сырых
-байтов, с единственным вызовом (`core/pipeline/corpus.py:2544`, `_commit_local`), в который
+байтов, с единственным вызовом (`core/pipeline/corpus.py:2553`, `_commit_local`), в который
 сходятся оба
 транспорта (локальный и executor).
 
@@ -411,14 +411,14 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:314` — единственный writer, зовут
-   `core/pipeline/corpus.py:5308` и `core/pipeline/report.py:3691`; человеческая строка —
+   `core/pipeline/corpus.py:5390` и `core/pipeline/report.py:3691`; человеческая строка —
    `core/pipeline/artifacts_gap.py:196`, сбор — `core/pipeline/artifacts_gap.py:219`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
-   `core/pipeline/corpus.py:4207`; `origin` — `core/store/sqlite.py:196`;
+   `core/pipeline/corpus.py:4231`; `origin` — `core/store/sqlite.py:196`;
    `resolved_manually` — `core/domain/models.py:2595` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1732`; дайджест — `core/pipeline/digests.py:179`, материал
    `core/pipeline/digests.py:399`).
@@ -517,11 +517,11 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   (`core/pipeline/manual_artifacts.py:202`), сверка `sha256` (`core/pipeline/manual_artifacts.py:308`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:5308`), и `report` (`core/pipeline/report.py:3691`); форма —
+  (`core/pipeline/corpus.py:5390`), и `report` (`core/pipeline/report.py:3691`); форма —
   `core/pipeline/artifacts_gap.py:219` (`collect_artifact_gaps`), человеческая строка —
   `core/pipeline/artifacts_gap.py:196` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:133`); подача
-  живёт внутри `corpus` (`core/pipeline/corpus.py:4207`), т.е. §5 исполнен буквально.
+  живёт внутри `corpus` (`core/pipeline/corpus.py:4231`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:179`,
   материал `(product_id, url, sha256)` — `core/pipeline/digests.py:399`), считается даже
   при пустом наборе.

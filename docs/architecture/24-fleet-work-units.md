@@ -57,7 +57,7 @@ RTX 3050 4 GB).
 
 ### 1.3 Окно экстракции = 1, и это склейка двух разных вещей
 
-`extract_consume.py:828-834`: если объявлен `extract_max_tasks_per_child` и пул умеет
+`extract_consume.py:834-840`: если объявлен `extract_max_tasks_per_child` и пул умеет
 рециклинг — вернуть `1`. В `packages/ru-pg-dbms/run.yaml:110` стоит `25`. Следствие:
 `submit → result() → submit`, одна единица в полёте на весь прогон. Рециклинг — это
 **жизненный цикл воркера**, окно — **конкурентность**; `ProcessPoolExecutor(
@@ -259,10 +259,10 @@ HEAD `f14f866`.
 
 | Пункт | Что именно | Статус |
 |---|---|---|
-| **Per-product Pass B** | Фетч когорты перекрывается; последовательна **конверсия/Pass B** на хвосте продукта | 🟡 — фетч: `core/pipeline/corpus.py:4007` (`_cohort_root_plans`), граница продукта — `core/pipeline/corpus_driver.py:97` (`ProductBoundary`); конверсия по продуктам: `core/pipeline/corpus.py:2307`. Причина барьера и его цена — §1.1, снятие — §8 (F4) |
-| **Перекрытие фаз** | Волны двух продуктов в полёте, но `evaluate` стартует только после корпуса целиком | 🟡 — фетч перекрыт (`core/pipeline/corpus.py:4007`; ширина полос — `config/deploy.yaml:115`), фазы линейны: `PHASES` — кортеж (`core/pipeline/runner.py:133`). Почему линейность куплена памятью — §1.1; перекрытие стадий — §8 (F5) |
+| **Per-product Pass B** | Фетч когорты перекрывается; последовательна **конверсия/Pass B** на хвосте продукта | 🟡 — фетч: `core/pipeline/corpus.py:4031` (`_cohort_root_plans`), граница продукта — `core/pipeline/corpus_driver.py:97` (`ProductBoundary`); конверсия по продуктам: `core/pipeline/corpus.py:2309`. Причина барьера и его цена — §1.1, снятие — §8 (F4) |
+| **Перекрытие фаз** | Волны двух продуктов в полёте, но `evaluate` стартует только после корпуса целиком | 🟡 — фетч перекрыт (`core/pipeline/corpus.py:4031`; ширина полос — `config/deploy.yaml:115`), фазы линейны: `PHASES` — кортеж (`core/pipeline/runner.py:133`). Почему линейность куплена памятью — §1.1; перекрытие стадий — §8 (F5) |
 | **Class-aware pools** | Пул экстракции один; docling-воркер и воркер, которому PDF не достался, стоят в одной очереди | ⬜ — пул фазовый по ключу `(уровень, механизм, окно)`, класс ресурса очередь не разделяет (`core/pipeline/extraction_runtime.py:133`); цена классов — §2.2, подробно — §1.3, план — §8 (F0) |
-| **LPT-упорядочивание** | Порядок продуктов лексикографический, а не «сначала крупные»: длинный хвост стартует последним и определяет wall-clock | ⬜ — `products = sorted(url_map) if url_map else declared` (`core/pipeline/corpus.py:2307`) |
+| **LPT-упорядочивание** | Порядок продуктов лексикографический, а не «сначала крупные»: длинный хвост стартует последним и определяет wall-clock | ⬜ — `products = sorted(url_map) if url_map else declared` (`core/pipeline/corpus.py:2309`) |
 | **Отдельная индекс-фаза** | Индексация идёт внутри `corpus`; отдельной фазы и ресурсного класса нет | ⬜ — `PHASES` (15 фаз) индекс-фазы не содержит (`core/pipeline/runner.py:133`); `index` как единица — §2.1, шаг — §8 (F8) |
 | **Батчинг `evaluate`** | Точка входа батча есть; в полёте по умолчанию один вызов | 🟡 — `evaluate_batch` (`core/pipeline/evaluate.py:3539`), ось `llm_concurrency` (дефолт **1**, в `EXECUTION_CONTRACT_FIELDS` не входит), кэш вердиктов — `EvalVerdictCache` (`core/pipeline/eval_cache.py:234`). Цена и потолок — `25`/`06` §4/M1; остаток — включить конкурентность, а не «написать батч». Почему узлы не помогают — §10 |
 | **Staging артефактов** | Документы идут чанками; inline остался только на `fetch.raw` | 🟡 — `extract/upload` + `extract/collect` есть в наборе операций (`core/edge/server.py:142`), размер чанка — `max_upload_chunk_bytes` (`core/edge/server.py:118`), inline-base64 — только страница `fetch` (`core/edge/server.py:675`). **Остаток:** страница `crawl/collect` ограничена 8 MiB (`core/edge/scheduler.py:186`), а клиент отвергает ответ больше `MAX_RESPONSE_BYTES` = 50 MiB (`core/adapters/gateway_validate.py:53`) — крупный артефакт через `crawl/collect` не проходит. Подробно — §7 (паритет `split`/`local`) |

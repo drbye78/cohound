@@ -293,7 +293,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 Уточнение против записи 28.10: поле `embed` в `DeployConfig` **появилось**
 (`core/config/deploy.py:781`) и объявляет **две** оси — `device` и `precision` (`EmbedConfig`,
 `core/config/deploy.py:645`; обе входят в контракт, `EmbedDevice`/`EmbedPrecision` —
-`core/domain/enums.py:561` и `:585`);
+`core/domain/enums.py:575` и `:585`);
 `backend`/`base_url`/`model_version` по-прежнему отвергаются (`extra="forbid"`), а
 `RemoteEmbedder` не существует и маршрута `embed` в контурах шва нет (`contracts/seam/`:
 `capabilities`, `crawl`, `envelope`, `extract`, `fetch`, `health`, `openapi`, `registry`,
@@ -583,7 +583,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    (дефолт через цикл `search`, поэтому существующие реализации не сломаны).
    Проверено: `core/ports/vector_index.py:102` (`search_many` в порту), `:103-112`
    (`batched_search` с `getattr`-фолбэком), `core/adapters/vector_npy.py:272` (реализация),
-   вызывается из `core/pipeline/evaluate.py:1137`.
+   вызывается из `core/pipeline/evaluate.py:1213`.
 4. ✅ **Мемоизация векторов запроса** + пре-компьют `query_vectors` до `evaluate`
    (`precompute_query_vectors`, батчи по 32; это же закрывает оговорку 2 — оценщик
    больше не ходит за векторами вовсе).

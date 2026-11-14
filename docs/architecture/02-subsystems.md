@@ -399,7 +399,7 @@ retained-байтами не фетчится заново
 
 **Когда именно идёт развёртка.** Каталог разворачивается **на постановке seed'ов, до
 краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2265-2304`) вызывается в
-цикле продукта (`core/pipeline/corpus.py:3461`), и каждая запись становится **отдельным
+цикле продукта (`core/pipeline/corpus.py:3470`), и каждая запись становится **отдельным
 seed-корнем глубины 0** — это и есть «один уровень развёртки». Под `split` сетевую часть
 (опрос каталога) исполняет DMZ через `RemoteFeedPoller`, логика развёртки остаётся в ядре.
 Волн «top-level URL → опрос каталогов → записи» нет: `split` подаёт исполнителю **волны
@@ -588,7 +588,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
 - **Выход:** `LLMCellOutput` (status, justification, evidence[{source_id, quote}]).
 - **Схема:** constrained decoding как **объявленная ось**, а не догадка. Метка `Decoder`
   (`core/domain/enums.py:400-415`) — `none` | `json_object` | `json_schema`; дефолт модуля
-  `none` (`DEFAULT_DECODER`, `core/adapters/llm_local.py:100`), в живом слоте объявлено
+  `none` (`DEFAULT_DECODER`, `core/adapters/llm_local.py:101`), в живом слоте объявлено
   `json_object` (`config/deploy.yaml`, `llm.cheap.decoder`). Провенанс пишет **фактический** механизм
   провода (`decoder_wire_type`, `core/adapters/llm_local.py:373-387`), а не запрошенную
   метку — до правки V4 манифест объявлял `json_object`, тогда как по проводам шёл
@@ -659,7 +659,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 (I2/I2b/I2d) живут в доменных инвариантах, а не здесь.
 Регламент (§7.1) разрешает «частично механически» и требует следствия-*аномалии*, поэтому
 шаг присутствует в норме, но не в коде. Что существует вместо него: замер
-`support_subject_overlap` (`core/pipeline/evaluate.py:1522-1560`) — пересечение стемов параметра и цитаты
+`support_subject_overlap` (`core/pipeline/evaluate.py:1601-1641`) — пересечение стемов параметра и цитаты
 для ✅/⚠️; он **не меняет вердиктов**, пишет `cells.validation_notes`/`review_reason` и
 агрегируется в `outputs/support_quality.yaml`. Измеренный масштаб — в
 `docs/reports/measurements/2026-10-27-support-not-about-subject.md`: v2 публиковал 45 `✅`
@@ -689,7 +689,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
   на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:654-691`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
-  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1413-1418`);
+  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1415-1420`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
   Раунды входят в
   `EXECUTION_CONTRACT_FIELDS` (`serp_rounds`): поиск добавляет документы в корпус, то есть

@@ -397,7 +397,7 @@ LLM-endpoint корп. облака — только в Z0.
 1. ✅ **Члены контейнеров извлекаются.** `RemoteExtractor.supports_source_path = True`
    (`core/adapters/remote_extractor.py:214`, `ae0f933`): ядро отдаёт **локальные байты**
    члена в `extract/submit`, а не URL. Проверка живёт в родителе —
-   `core/pipeline/extract_consume.py:303`: экстрактор без этого признака даёт видимый
+   `core/pipeline/extract_consume.py:304`: экстрактор без этого признака даёт видимый
    пропуск `extract_unavailable` (капитуляция явная, не тихая), экстрактор шва — нет.
    Спуск по контейнеру и раньше исполнялся в ядре (байты архива живут в `corpus_raw` — это
    локальный файл, не веб-эгресс).
@@ -419,7 +419,7 @@ LLM-endpoint корп. облака — только в Z0.
    действует»). Поэтому `deploy_profile` и остаётся полем контракта.
 4. ⚠️ **Per-root слой осей `document_level`/`pdf_device` под `split` не виден** (расхождение,
    которого в прежней редакции этого блока не было). Под `local` оси разрешаются на каждом
-   корне цепочкой app < run < site (`core/pipeline/corpus.py:1429`,
+   корне цепочкой app < run < site (`core/pipeline/corpus.py:1431`,
    `profiles=domain_profiles`), поэтому `domain_profiles.yaml` переопределяет уровень для
    конкретного хоста. Под `split` порты собираются **до** per-root резолва:
    `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3322`) отдаёт
