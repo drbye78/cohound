@@ -172,7 +172,7 @@ gates: {g3: external, g4: external}
 | `max_response_bytes` | Максимальный размер одного ответа, положительные байты. |
 | `max_artifact_bytes` | Максимальный размер одного принимаемого контейнера, положительные байты. |
 | `attachment_formats` | Поддерживаемые форматы контейнеров; нормализуются загрузчиком. |
-| `archive_max_member_bytes`, `archive_max_uncompressed_bytes`, `archive_max_members` | Положительные границы на один контейнер/его члены. |
+| `archive_max_member_bytes`, `archive_max_uncompressed_bytes`, `archive_max_members` | Положительные границы на один контейнер/его члены (потолок члена-контейнера — отдельная ось). |
 | `archive_max_total_uncompressed_bytes` | Положительные кумулятивные байты на корень спуска. |
 | `archive_descent` | Необязательная политика спуска в контейнеры; допустимые значения определяет enum в текущем коде. |
 | `max_depth` | Глубина обхода, целое ≥0; 0 означает только seed-корни. |
@@ -227,6 +227,7 @@ Legacy `sources/corpus_urls.yaml` — простой mapping `{product_id: ["htt
 | `max_response_bytes`, `max_artifact_bytes` | Необязательные положительные байты одного ответа и одного контейнера. |
 | `attachment_formats` | Необязательный нормализуемый список форматов контейнеров. |
 | `archive_max_member_bytes`, `archive_max_uncompressed_bytes`, `archive_max_members` | Необязательные положительные границы одного контейнера. |
+| `archive_max_container_bytes` | Необязательный потолок **члена-контейнера** (вложенного архива); `None` — без потолка, конечность держат распакованный объём контейнера и бюджет корня. |
 | `archive_max_total_uncompressed_bytes` | Положительная кумулятивная граница на корень спуска. |
 | `archive_descent` | Необязательная стратегия допуска/спуска; enum из кода. |
 | `max_depth` | Целое ≥0, глубина обхода in-site ссылок. |

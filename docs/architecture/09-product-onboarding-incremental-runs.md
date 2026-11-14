@@ -2235,7 +2235,8 @@ scope-допуска). Обход **видим**: счётчик + ограни�
 | `crawl.max_response_bytes` | **RAM**-потолок страницы (прежняя семантика) | 20 MiB |
 | `crawl.max_artifact_bytes` | потоковый потолок терминального артефакта (staging-файл, не RAM) | 250 MiB |
 | `crawl.attachment_formats` | позитивная вселенная форматов-контейнеров | `zip`, `7z`, `rar` |
-| `crawl.archive_max_member_bytes` | потолок одного члена контейнера (спуск) | 64 MiB |
+| `crawl.archive_max_member_bytes` | потолок одного **документа**-члена контейнера (спуск) | 64 MiB |
+| `crawl.archive_max_container_bytes` | потолок члена-**контейнера** (вложенного архива) | не задан |
 | `crawl.archive_max_uncompressed_bytes` | потолок суммарного распакованного объёма (спуск) | 256 MiB |
 | `crawl.archive_max_members` | потолок числа членов (спуск) | не задан |
 | `crawl.archive_descent` | `plan` — только состав, `full` — спуск | `full` |
@@ -2294,8 +2295,9 @@ RAM), поэтому адаптер извлекает **один** член в�
 `py7zr` всё равно распаковывает блок целиком.
 
 **Bomb-guard — политика, не библиотека.** Заявленный размер — только **первый** гейт (он
-врёт: zip может объявить одно, отдать другое). Оси `archive_max_member_bytes` /
-`archive_max_uncompressed_bytes` / `archive_max_members` (§6.6) отсекают по индексу,
+врёт: zip может объявить одно, отдать другое). Оси `archive_max_member_bytes` (документы) /
+`archive_max_container_bytes` (вложенные архивы) / `archive_max_uncompressed_bytes` /
+`archive_max_members` (§6.6) отсекают по индексу,
 а `container_policy.bounded_iter(chunks, limit)` — **второй** гейт: он считает фактические
 байты и поднимает типизированный `MemberTooLarge` на первом чанке, выводящем сумму за
 потолок. Пробивший чанк не отдаётся: частичное тело выглядело бы как успешный
