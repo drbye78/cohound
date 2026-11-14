@@ -942,6 +942,17 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "max_depth": 0,
             "max_documents": 10,
+            # `document_level: full` — на host-ключе, а не на path-ключе ниже, потому что
+            # документы продукта здесь — PDF, закрытые `robots.txt` (`Disallow: *.pdf$`):
+            # они входят в корпус ручной подачей (`hound artifacts fetch`), а её URL
+            # (`/files/products/jatoba/*.pdf`) лежат ВНЕ path-ключа
+            # `/produkty/inform-sistemy/subd-jatoba`. Замер 14.11.2026 на 17 поданных
+            # сканах: `layout_tables` даёт 0 полезных символов у 15 из 17 (текст — одни
+            # маркеры `<!-- image -->`, `error=None`); `full` с кириллическим OCR —
+            # читаемый русский у 17 из 17 (582–2058 символов, 70–81 % кириллицы), 18
+            # страниц ≈ 74 с CPU. Цена ограничена хостом: остальной корпус остаётся на
+            # оси прогона (`layout_tables`).
+            "document_level": "full",
         },
         # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...: robots.txt
         # перечисляет /produkty/inform-sistemy/subd-jotoba, он 302 → .../subd-jatoba).

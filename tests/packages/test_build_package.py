@@ -218,52 +218,62 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
 
 
 @pytest.mark.parametrize(
-    ("url", "max_depth", "max_documents"),
+    ("url", "max_depth", "max_documents", "document_level"),
     [
         # Дерево документации: sitemap 404. Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд,
         # `--crawl-only --run-id recon-pg_docs`): 18 939 документов, `truncated: false`;
         # 800 усекало корень в 23 раза (прогон `2a5b51af5778`: 949 + `max_documents`).
-        ("https://postgrespro.ru/docs/16/", 8, 20000),
+        ("https://postgrespro.ru/docs/16/", 8, 20000, DocumentLevel.LAYOUT_TABLES),
         # Host-ключ портала (и страницы продукта) сохраняет прежний бюджет: path-ключ
         # `/docs` не должен протекать на соседние корни того же хоста. Проба 10.11.2026
         # взяла 3 996 документов и была остановлена хостом (980 × `429` на `/list/*`):
         # 800 — выбор приоритета, не измеренный размер.
-        ("https://postgrespro.ru/", 8, 800),
+        ("https://postgrespro.ru/", 8, 800, DocumentLevel.LAYOUT_TABLES),
         # Статическая нижняя граница корня 3 025 (`/center/docs/7` 2 307 + kintsugi 227 +
         # copywala 491); живой краул 12.11.2026 не завершён (572 за 40 мин, browser
         # сериализован) ⇒ 3 500 — выше нижней границы, `truncated: false` не подтверждён.
-        ("https://pangolin.sbertech.ru/", 8, 3500),
+        ("https://pangolin.sbertech.ru/", 8, 3500, DocumentLevel.LAYOUT_TABLES),
         # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.
-        ("https://www.gaz-is.ru/", 0, 10),
+        ("https://www.gaz-is.ru/", 0, 10, DocumentLevel.FULL),
         # Продуктовый путь jatoba: измерено 1 HTML в scope + 17 отказов `robots_disallow`
         # (`Disallow: *.pdf$` закрывает документы продукта) ⇒ 50 выше измерения.
-        ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 50),
+        # Уровень — прогонный: site-слой резолвится **одним** наиболее специфичным
+        # ключом, а не слиянием с host-ключом, поэтому `full` хоста сюда не протекает.
+        ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 50, DocumentLevel.LAYOUT_TABLES),
         # path-ключ приоритетнее host-ключа (sitemap только здесь); в scope seed'а 27 URL
         # pangolin (замер 09.11.2026 по `sbertech.ru/sitemap.xml`), 100 — запас.
-        ("https://sbertech.ru/documents/platform-v-pangolin-se", 4, 100),
+        ("https://sbertech.ru/documents/platform-v-pangolin-se", 4, 100, DocumentLevel.LAYOUT_TABLES),
         # host-ключ: без sitemap и без discovery (иначе BFS тянет 89 продуктов, I17).
-        ("https://sbertech.ru/", 0, 10),
+        ("https://sbertech.ru/", 0, 10, DocumentLevel.LAYOUT_TABLES),
         # seed — глубокий путь, 8 уровней запаса.
-        ("https://platformv.sbertech.ru/products/pangolin", 8, 300),
+        ("https://platformv.sbertech.ru/products/pangolin", 8, 300, DocumentLevel.LAYOUT_TABLES),
         # path-ключ внутри sitemap-хоста; измерено 3 документа, `truncated: false`.
-        ("https://tantorlabs.ru/products/dbms/", 8, 50),
+        ("https://tantorlabs.ru/products/dbms/", 8, 50, DocumentLevel.LAYOUT_TABLES),
         # host-ключ: проба 10.11.2026 взяла 9 162 документа (прервана таймаутом); 300 —
         # граница I17 (host-корень затягивает чужие продукты), а не размер сайта.
-        ("https://tantorlabs.ru/", 3, 300),
+        ("https://tantorlabs.ru/", 3, 300, DocumentLevel.LAYOUT_TABLES),
         # Измерено 7 документов, `truncated: false` ⇒ 50 покрывает сайт.
-        ("https://jatoba.ru/", 2, 50),
+        ("https://jatoba.ru/", 2, 50, DocumentLevel.LAYOUT_TABLES),
         # sitemap 404. Размер ИЗМЕРЕН 12.11.2026: 1 207 документов, `truncated: false`
         # (одна редакция `ru/18_6/se`; плоские `/tdb/*.html` — 301-алиасы).
-        ("https://docs.tantorlabs.ru/", 8, 1500),
+        ("https://docs.tantorlabs.ru/", 8, 1500, DocumentLevel.LAYOUT_TABLES),
         # Host-root общего справочного центра Astra — не продуктовый корень (I17).
-        ("https://wiki.astralinux.ru/", 0, 10),
+        ("https://wiki.astralinux.ru/", 0, 10, DocumentLevel.LAYOUT_TABLES),
         # Тантор-контент — Confluence-пространство TANDOCS. Измерено статически 73 страницы
         # (13.11.2026); 403 прогона 07.11 — свойство Scrapy User-Agent, не закрытый корень.
-        ("https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", 8, 150),
+        ("https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", 8, 150, DocumentLevel.LAYOUT_TABLES),
     ],
 )
-def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: int) -> None:
-    """Резолв лимитов (app < run < site) даёт значения gate §3 для репрезентативных URL."""
+def test_resolve_crawl_limits_per_site(
+    url: str, max_depth: int, max_documents: int, document_level: DocumentLevel
+) -> None:
+    """Резолв лимитов (app < run < site) даёт значения gate §3 для репрезентативных URL.
+
+    ``document_level`` — четвёртый пин: ось объявлена и **на профиле** (`gaz-is.ru: full`,
+    потому что документы продукта — сканы, закрытые robots, и попадают в корпус ручной
+    подачей). Остальные ключи остаются на оси прогона: пин держит оба конца, иначе
+    «профиль сильнее» молча стало бы «профиль равен прогону».
+    """
     cfg = load_run_config(ON_DISK_RUN)
     profiles = load_domain_profiles(ON_DISK_PROFILES)
 
@@ -278,7 +288,7 @@ def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: 
     assert limits.max_workers is None
     assert limits.host_concurrency is None
     assert limits.extract_workers is RUN_CRAWL_EXTRACT_WORKERS
-    assert limits.document_level is DocumentLevel.LAYOUT_TABLES
+    assert limits.document_level is document_level
     assert list(limits.exclude_paths) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
 
