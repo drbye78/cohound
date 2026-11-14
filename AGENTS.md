@@ -672,7 +672,9 @@ re-point a moved symbol **by content**, not by arithmetic.
 ```
 
 CI runs workers as `min(4, nproc)`; `COHOUND_CI_WORKERS=N` overrides, `COHOUND_CI_WORKERS=auto`
-restores `-n auto` (meaningful only with RAM headroom).
+restores `-n auto` (meaningful only with RAM headroom). Spot-run the tests you touched first
+(`.venv/bin/python -m pytest tests/pipeline/test_x.py::test_name` or `-k pattern`) — the full
+suite runs once, after all lanes are reconciled.
 
 Browser smoke test (separate environment with browser binaries, exit codes 0 ok / 1 fail /
 2 skip when deps are absent): `python3 tests/smoke_scrapy_playwright.py`.
@@ -724,12 +726,12 @@ re-checked 2026-11-15 (`rg` 15.2.0, `py-spy` 0.4.3, `bat` 0.26.1 — the host up
 | Code **structure** (callers, decorators, rewrites) | `ast-grep` 0.45.3 | `ast-grep run -p '$OBJ.insert($$$)' -l python core/` · `ast-grep outline -l python file.py` |
 | Literal / regex substitution with a reviewable diff | `sd` 1.0.0 | `sd -p -F 'old' 'new' $(rg -l -F 'old' -t py core/)` |
 | JSON | `jq` 1.6 | `jq -r '.results[].notes' run.json` |
-| "Where is X implemented" without knowing the name | `zg` 0.2.2 (`zvec-grep`) | `zg status` · `zg query "where is crawl scope decided"` · `zg query --fts host_in_scope` |
 | YAML / XML | `yq` 4.54.1 | `yq '.crawl' config/deploy.yaml` · `yq -o json …` |
 | SQLite (runs, state) | `litecli` 1.17.1 | `litecli db.sqlite -e "select …"` |
+| GitHub CI status / logs (repo is public) | `gh` 2.103.3 | `gh run list` · `gh run view --log-failed` — CI debugging without webfetch |
 | Profiling a live process | `py-spy` 0.4.3 | `py-spy record -d 3 -r 50 -f speedscope -o /tmp/p.json -- .venv/bin/python …` |
 | Structural diff (did the move change behaviour?) | `difftastic` 0.71.0 | `difft --color never --display inline /tmp/old new` |
-| Symbols / usages / diff effects (structure, not text) | `brokk` (bifrost MCP; measured 2026-11-14) | `scan_usages_by_location` (target = the declaration **token**) · `search_symbols(patterns=[…])` · `get_summaries` / `get_symbol_sources` (file outline without reading 5 000-line monoliths) · `analyze_diff` / `cyclomatic_complexity` (delta base→worktree) |
+| Symbols / usages / diff effects (structure, not text) | `brokk` (bifrost MCP; measured 2026-11-14) | `scan_usages_by_location` (target = the declaration **token**) · `search_symbols(patterns=[…])` · `get_summaries` / `get_symbol_sources` (file outline without reading 5 000-line monoliths) · `analyze_diff` / `cyclomatic_complexity` (delta base→worktree) · `blast_radius` (tests reachable from changed files, ~123 ms — first stop for "what does this patch touch") |
 | Readable unified diff (presentation only) | `delta` 0.20.1 | `git diff \| delta --paging=never` |
 | Reading files with syntax highlighting | `bat` 0.26.1 | `bat -p --line-range 100:160 file.py` |
 
@@ -756,17 +758,11 @@ Traps that cost time:
   needs no privileges. For a hung run, `sudo py-spy dump --pid <pid>` beats guessing from
   logs.
 - `litecli` argument order matters: options must precede the database path.
+- Counting and locating are `rg -c` / `rg -l` (or `-m N` to cap): a bare grep that dumps
+  every match fills the tool-output cap, and the truncated tail is the part you never see.
 - `pgrep -f 'core.cli run'` matches **its own** command line — a false ALIVE. Use
   `pgrep -f '[c]ore.cli run'`. Likewise `pkill -f "python -m pytest"` kills the wrapping shell
   command too.
-- `zg` answers only what it has indexed: `zg status` first. Measured 2026-10-31 on this tree:
-  89 % coverage, 554/625 files; **2026-11-15: 38 % (310/809), 187 added / 312 modified /
-  3 deleted** — after four days of edits the index is mostly stale, so a "not found" from
-  `zg` means "not indexed", not "not present" (`zg index` to refresh). It is a **semantic
-  entry point** ("where is X implemented" when the name is unknown), not a replacement for
-  `rg` (exact text) or `ast-grep` (structure). The index is derived and host-specific
-  (`.zvec-grep/index.zvec`, gitignored); the embedding model is local
-  (`local/potion-code-16m-v2`), so no external key is involved.
 - `brokk` answers are verified-or-honest: it either returns exact results or names its
   incompleteness (`forward_reference_incomplete`, `unresolvable_import_boundary`) — verified
   against `rg` on 2026-11-14. Re-measured 2026-11-15 (`timeout.execution: 180000` in place):
