@@ -104,8 +104,8 @@ application-layer firewall (L7). Функционал, которому нуже
 > §6 этого документа; целевой контракт шва — §3.
 >
 > ⬜ **не сделано (2026-10-28, перепроверено 2026-11-08):** `rg -n extractor_zone core/` даёт
-> только `core/config/deploy.py:768` (поле модели), `core/config/deploy.py:786-792` (валидатор)
-> и константу `EXTRACTOR_ZONES` (`core/config/deploy.py:97`); сборка экстрактора —
+> только `core/config/deploy.py:784` (поле модели), `core/config/deploy.py:802-808` (валидатор)
+> и константу `EXTRACTOR_ZONES` (`core/config/deploy.py:98`); сборка экстрактора —
 > `core/cli/wiring.py:2222` (`build_worker_extractor`) — на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из

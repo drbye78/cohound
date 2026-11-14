@@ -248,9 +248,9 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`workers_from_budget`), preflight `core/cli/wiring.py:2643`
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
->   (`core/pipeline/archive_descent.py:376-377,525,1089`), подключены в
->   `core/pipeline/extract_consume.py:1208-1209`; видимая строка пропуска по бюджету —
->   `core/pipeline/archive_descent.py:856-872` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:123`).
+>   (`core/pipeline/archive_descent.py:392-393,562,1168`), подключены в
+>   `core/pipeline/extract_consume.py:1270-1271`; видимая строка пропуска по бюджету —
+>   `core/pipeline/archive_descent.py:873-889` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:127`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
 >   `core/store/sqlite.py:621-640`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —

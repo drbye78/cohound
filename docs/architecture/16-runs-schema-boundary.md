@@ -712,7 +712,7 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
      (`resume_retained` + `consumed += 1`, `core/pipeline/corpus_drain.py:1515-1527`) и
      дренаж уже добытого расцеплены: URL
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
-     через `add_revalidate_seed` (`core/pipeline/crawl_frontier.py:1563`), чей work-set
+     через `add_revalidate_seed` (`core/pipeline/crawl_frontier.py:1595`), чей work-set
      гейтится режимом продукта (`plan_incremental_items` под сетью отдаёт `[]` для
      `new`/`full` — `core/pipeline/corpus_ingest.py:3220-3225`). Правило: **заряженный URL обязан быть и
      дренируемым** — каждый элемент, засчитанный в `consumed`, ставится depth-0 листом

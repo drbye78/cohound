@@ -213,7 +213,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   (`core/pipeline/corpus.py:3470`), — и до сборки синтетических корней
   (`_synthetic_root_plans`, `core/pipeline/corpus.py:3314`). Гейт на постановке в очередь
   фронтьера (`core/pipeline/crawl_frontier.py:1532`, `add_seed`;
-  `core/pipeline/crawl_frontier.py:1563`, `add_revalidate_seed`) недостаточен: он ниже
+  `core/pipeline/crawl_frontier.py:1595`, `add_revalidate_seed`) недостаточен: он ниже
   feed/sitemap-разворота. Порядок закреплён **AST-тестом**
   (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
   вызовов в теле генератора: генератор — это порядок исполнения, текст комментария — нет.
