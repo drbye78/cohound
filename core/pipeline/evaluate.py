@@ -746,12 +746,19 @@ class EvaluationOutcome:
     #: Маршрут §7.4/I21 (``evaluator``), по которому получен вердикт; ``None`` — модель не
     #: вызывалась. В вердикт не входит: это провенанс исполнения.
     llm_scenario: str | None = field(default=None)
+    #: Машинная строка «удостоверение оценщика отвергнуто» (``auth_error``:
+    #: ``401``/``402``/``403``) — ``None``, если такого отказа не было. Несёт класс,
+    #: HTTP-статус и текст провайдера. Нужна батчу и фазе: отказ удостоверения — свойство
+    #: **прогона**, а не ячейки, поэтому первое же вхождение завершает фазу ``failed``,
+    #: а не оставляет 905 одинаковых ``failed``-ячеек под видом ``status="ok"``.
+    auth_failure: str | None = field(default=None)
 
 
 #: Исходы вызова оценщика в журнале (``logs/llm_calls.jsonl``). Машинные токены, чтобы
 #: разбор отказа не зависел от текста сообщения: ``length`` — потолок генерации,
 #: ``invalid_json`` — ответ не разобран/не та форма, ``quote_not_substring`` — ответ
 #: разобран, но цитата не подтверждена (I22), ``http_error`` — транспорт/сервер,
+#: ``auth_error`` — удостоверение/счёт отвергнуты (``401``/``402``/``403``),
 #: ``exception`` — прочий сбой адаптера, ``validation_failed`` — иной отказ §10.
 LLM_CALL_OUTCOMES: tuple[str, ...] = (
     "ok",
@@ -760,8 +767,17 @@ LLM_CALL_OUTCOMES: tuple[str, ...] = (
     "quote_not_substring",
     "validation_failed",
     "http_error",
+    "auth_error",
     "exception",
 )
+
+#: HTTP-статусы, при которых отказ **терминален**: это свойство удостоверения или счёта,
+#: а не пропускной способности. ``401`` — ключ отсутствует/неверен, ``402`` — средства
+#: исчерпаны, ``403`` — доступ запрещён. Повтор с тем же ключом вернёт то же самое:
+#: ждать и повторять здесь нечего (в отличие от ``429``/``5xx``, где отказ говорит о
+#: темпе). Класс отдельный, а не «просто 4xx»: ``400``/``404``/``422`` — отказ **запроса**,
+#: и его повтор остаётся как был.
+TERMINAL_HTTP_STATUSES: frozenset[int] = frozenset({401, 402, 403})
 
 
 def _error_outcome(error: BaseException) -> str:
@@ -772,7 +788,15 @@ def _error_outcome(error: BaseException) -> str:
     объявляет ``reason``/``raw``/``finish_reason``, и этих атрибутов достаточно. Чужое
     исключение (таймаут транспорта, ошибка шва) — ``exception``; ``reason`` неизвестен,
     но сырой ответ есть — ``invalid_json`` (модель ответила, разбор не удался).
+
+    ``auth_error`` проверяется **первым**: у 401/402/403 ``reason`` тоже ``http_error``,
+    и без отдельной проверки статуса они попадали в класс «повторить», то есть тратили
+    три попытки на ячейку при мёртвом ключе (замер 14.11.2026: паузы 1.07 с и 2.19 с,
+    3 попытки на ``401``).
     """
+    status_code = getattr(error, "status_code", None)
+    if isinstance(status_code, int) and status_code in TERMINAL_HTTP_STATUSES:
+        return "auth_error"
     reason = getattr(error, "reason", None)
     if reason == "length":
         return "length"
@@ -783,6 +807,27 @@ def _error_outcome(error: BaseException) -> str:
     if getattr(error, "raw", None) is not None:
         return "invalid_json"
     return "exception"
+
+
+def _auth_failure_detail(error: BaseException) -> str:
+    """Машинная строка «удостоверение оценщика отвергнуто» для ``errors`` фазы.
+
+    Класс (``auth_error``) + HTTP-статус + текст провайдера — то, что обязано быть видно
+    в отчёте прогона, а не только в ``logs/llm_calls.jsonl``. Тело ответа
+    (``provider_body``) предпочтительнее текста исключения: он содержит объяснение
+    провайдера («Отсутствует или неверный API-ключ»), тогда как ``str(error)`` может
+    быть уже обёрнут формулировкой адаптера. Ключ и заголовки сюда не попадают: их нет
+    ни в теле, ни в тексте исключения.
+    """
+    status_code = getattr(error, "status_code", None)
+    detail = (
+        f"auth_error: HTTP {status_code}"
+        if isinstance(status_code, int)
+        else "auth_error"
+    )
+    body = getattr(error, "provider_body", None)
+    tail = body.strip() if isinstance(body, str) and body.strip() else str(error).strip()
+    return f"{detail}: {tail}" if tail else detail
 
 
 def _validation_outcome(validation: ValidationResult) -> str:
@@ -809,6 +854,14 @@ _ANSWER_SIDE_OUTCOMES: frozenset[str] = frozenset(
     {"length", "invalid_json", "validation_failed", "quote_not_substring"}
 )
 
+#: Классы отказа, которые **не повторяются вовсе**: ответ по существу (ждать нечего,
+#: повтор детерминированного оценщика даст тот же ответ) плюс отказ удостоверения
+#: (``auth_error``: 401/402/403 — свойство ключа/счёта, а не документа, поэтому повтор с
+#: тем же ключом вернёт то же самое). Множество отдельное, а не расширение
+#: :data:`_ANSWER_SIDE_OUTCOMES`: причины разные (непригодный ответ против отвергнутого
+#: удостоверения), и это должно читаться в коде, а не выводиться из состава.
+_NO_RETRY_OUTCOMES: frozenset[str] = _ANSWER_SIDE_OUTCOMES | {"auth_error"}
+
 
 def _retry_pause(
     attempt: int,
@@ -833,7 +886,9 @@ def _retry_pause(
     неизвестном сбое адаптера (``http_error``/``exception``). Отказ по существу ответа
     (``length``/``invalid_json``/``validation_failed``/``quote_not_substring``) паузы не
     получает: провайдер ответил, ждать нечего, а повтор детерминированного оценщика дал бы
-    тот же ответ (см. :data:`_ANSWER_SIDE_OUTCOMES`).
+    тот же ответ (см. :data:`_ANSWER_SIDE_OUTCOMES`). Отказ удостоверения (``auth_error``:
+    ``401``/``402``/``403``) паузы не получает по другой причине — он не про темп, а про
+    ключ/счёт (см. :data:`_NO_RETRY_OUTCOMES`), и повтор здесь не назначается вовсе.
 
     :param attempt: номер только что завершившейся попытки (1-based).
     :param max_retries: сколько повторов объявлено сверх первой попытки.
@@ -842,7 +897,7 @@ def _retry_pause(
     :returns: ``(пауза, причина, Retry-After_секунды)``; ``(None, None, None)`` — следующей
         попытки нет либо пауза не нужна.
     """
-    if attempt > max_retries or outcome in _ANSWER_SIDE_OUTCOMES:
+    if attempt > max_retries or outcome in _NO_RETRY_OUTCOMES:
         return None, None, None
     raw_retry_after = getattr(error, "retry_after", None) if error is not None else None
     retry_after = raw_retry_after if isinstance(raw_retry_after, str) else None
@@ -852,6 +907,13 @@ def _retry_pause(
     # от паузы «наш собственный backoff» по ``retry_after_s``, а не по тексту.
     reason = f"{outcome}:retry_after" if parsed is not None else outcome
     return delay, reason, parsed
+
+
+#: Потолок текста отказа в журнале вызовов, символов. Тело HTTP-отказа провайдера уже
+#: усечено адаптером (``PROVIDER_BODY_LIMIT``); здесь второй рубеж — на случай чужого
+#: исключения с длинным сообщением. Полная диагностика не нужна: журнал отвечает на
+#: «какого класса отказ», а не заменяет консоль прогона.
+JOURNAL_ERROR_MESSAGE_LIMIT = 500
 
 
 @dataclass
@@ -902,12 +964,21 @@ class LLMCallJournal:
         retry_wait_s: float | None = None,
         retry_reason: str | None = None,
         retry_after_s: float | None = None,
+        status_code: int | None = None,
+        error_message: str | None = None,
     ) -> None:
         """Дописывает одну попытку вызова (не одну ячейку: повторы видны поштучно).
 
         ``response_raw`` — полный текст ответа модели; ``None`` — ответа не было (HTTP
         не ответил, исключение шва). ``response_sha256``/``response_len`` выводятся из
         него, чтобы адрес ответа не расходился с самим текстом.
+
+        ``status_code``/``error_message`` — провенанс **отказа**: HTTP-статус (``None`` у
+        не-HTTP отказа и у успеха) и текст исключения, усечённый до
+        :data:`JOURNAL_ERROR_MESSAGE_LIMIT`. До правки строка отказа несла только
+        ``outcome``: 401 и 503 были неотличимы, хотя лечатся по-разному. Ключ и
+        заголовки сюда не попадают — сообщение исключения их не содержит (адаптер
+        кладёт в него только статус и тело ответа).
 
         ``reasoning`` — текст рассуждения, если провайдер его отдал. Правило записи:
         ``reasoning_len``/``reasoning_sha256`` пишутся **всегда** (это дешёвый признак
@@ -958,6 +1029,10 @@ class LLMCallJournal:
                 "retry_wait_s": retry_wait_s,
                 "retry_reason": retry_reason,
                 "retry_after_s": retry_after_s,
+                # Провенанс отказа: статус и текст. У успеха — ``None`` (поле есть в
+                # каждой строке: форма записи одна, а не «есть, если был отказ»).
+                "status_code": status_code,
+                "error_message": error_message,
             }
         )
 
@@ -3011,6 +3086,10 @@ def evaluate_cell(
     last_validation: ValidationResult | None = None
     last_kind: str | None = None
     cache_hit = False
+    #: Отказ удостоверения (``auth_error``) — строка «класс + статус + текст провайдера».
+    #: Поднимается **один раз** и завершает цикл: 401/402/403 — свойство ключа/счёта,
+    #: а не документа, поэтому повтор и остальные ячейки смысла не имеют.
+    auth_failure: str | None = None
 
     def _validate(response: LLMResponse) -> ValidationResult:
         """Единый эшелон §10 для живого ответа и для кэшированного вердикта."""
@@ -3133,6 +3212,19 @@ def evaluate_cell(
                 retry_wait_s=retry_wait_s,
                 retry_reason=retry_reason,
                 retry_after_s=retry_after_s,
+                # Провенанс отказа: HTTP-статус и текст исключения. У успеха и у отказа
+                # валидации (``error is None``) — ``None``: статуса не было, а «почему
+                # ответ непригоден» уже сказано ``outcome`` и ``response_raw``.
+                status_code=(
+                    getattr(error, "status_code", None)
+                    if error is not None
+                    else None
+                ),
+                error_message=(
+                    str(error)[:JOURNAL_ERROR_MESSAGE_LIMIT]
+                    if error is not None
+                    else None
+                ),
             )
 
         for attempt in range(1, max_retries + 2):
@@ -3165,6 +3257,13 @@ def evaluate_cell(
                     notes=[f"{EVALUATOR_UNAVAILABLE_NOTE} {type(exc).__name__}: {exc}"],
                     resolved_evidence=[],
                 )
+                if outcome == "auth_error":
+                    # Удостоверение отвергнуто: ждать и повторять нечего, а остальные
+                    # ячейки тратить нельзя — ключ/счёт не станут верными от времени.
+                    # Выход из цикла **без** паузы: _retry_pause уже вернул (None, None,
+                    # None), но ``continue`` ниже всё равно запросил бы следующую попытку.
+                    auth_failure = _auth_failure_detail(exc)
+                    break
                 if pause is not None:
                     sleep(pause)
                 continue
@@ -3377,6 +3476,7 @@ def evaluate_cell(
             else None
         ),
         llm_scenario=LLMScenario.EVALUATOR.value,
+        auth_failure=auth_failure,
     )
 
 
@@ -3397,6 +3497,7 @@ def _unresolved_outcome(
     model_id: str | None = None,
     justification: str | None = None,
     llm_scenario: str | None = None,
+    auth_failure: str | None = None,
 ) -> EvaluationOutcome:
     """Собирает исход несостоявшейся валидации: ``failed`` (I4) либо preliminary (I13).
 
@@ -3459,6 +3560,9 @@ def _unresolved_outcome(
         raw=raw,
         justification=justification,
         llm_scenario=llm_scenario,
+        # Отказ удостоверения переживает исход: фаза по нему завершается ``failed``,
+        # а не публикует карту, в которой каждая ячейка «просто не удалась».
+        auth_failure=auth_failure,
     )
 
 
@@ -3590,6 +3694,12 @@ def evaluate_batch(
     публикуется в журнале вызовов. Без неё несколько вызовов в полёте превращали лимит
     провайдера в шторм повторов. ``sleep`` внедряется тестами (по умолчанию
     ``time.sleep``).
+
+    **Отказ удостоверения останавливает батч.** ``auth_error`` (``401``/``402``/``403``)
+    — свойство ключа/счёта, а не документа: :func:`evaluate_cell` его не повторяет, а
+    батч, увидев первый такой исход (``EvaluationOutcome.auth_failure``), прекращает
+    работу. Порога «N подряд» здесь нет и не должно быть: первое вхождение доказывает,
+    что мерить нечем, а выдуманное число было бы порогом из головы (A3).
 
     **Контракт ``chunks_by_param``.** Ключ обязан быть на каждый параметр: пустой срез —
     это наблюдённый факт («ретривал отработал и ничего не нашёл»), а отсутствие ключа —
@@ -3760,6 +3870,13 @@ def evaluate_batch(
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
+                continue
+            measured = outcomes[index]
+            if measured is not None and measured.auth_failure is not None:
+                # Удостоверение отвергнуто — работа остальных ячеек бессмысленна:
+                # ключ/счёт не станут верными от ещё 900 вызовов. Остальные параметры
+                # не тратятся (см. ``EvaluationOutcome.auth_failure``).
+                break
         return [outcome for outcome in outcomes if outcome is not None], errors
 
     #: Готовая к вызову работа: (индекс в ``params``, параметр, чанки, провенанс
@@ -3827,6 +3944,12 @@ def evaluate_batch(
                 errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
                 continue
             outcomes[index] = outcome
+            if outcome.auth_failure is not None:
+                # Удостоверение отвергнуто: уже отправленные вызовы отменить нельзя, но
+                # ещё не начатые — да (``cancel_futures``). Фаза завершится ``failed``,
+                # а не потратит остаток пакета на тот же 401.
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
 
     return [outcome for outcome in outcomes if outcome is not None], errors
 
@@ -4055,6 +4178,11 @@ def evaluate_phase(
     # заморожен (registry → inheritance → corpus → evaluate), поэтому карта стабильна.
     # Читаем один раз на главном потоке — не в воркерах ретривала/оценки.
     protected_cells = collect_protected_cells(store, run_id)
+
+    #: Отказ удостоверения оценщика (``auth_error``) — первое вхождение завершает фазу
+    #: ``failed``. Это не «ошибка одной ячейки»: ключ/счёт общий на прогон, и продолжать
+    #: значило бы записать 905 ``failed``-ячеек и назвать это ``status="ok"``.
+    auth_rejection: str | None = None
 
     for product_id in plan.products:
         # I2b/I2c: подпись аттестации per product (покрытие per product). Строка —
@@ -4319,6 +4447,23 @@ def evaluate_phase(
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)
+        # A2: отказ удостоверения — свойство **прогона**. Первое вхождение завершает
+        # фазу: остальные продукты и параметры не тратятся, а причина называется в
+        # ``errors`` (класс + HTTP-статус + текст провайдера), чтобы читатель отчёта
+        # не открывал ``logs/llm_calls.jsonl``. Порога «N подряд» нет: 401/402/403 —
+        # свойство ключа/счёта, а не документа (A3).
+        rejected = next(
+            (
+                outcome.auth_failure
+                for outcome in outcomes
+                if outcome.auth_failure is not None
+            ),
+            None,
+        )
+        if rejected is not None:
+            auth_rejection = rejected
+            errors.append(f"evaluate: оценщик отверг удостоверение: {rejected}")
+            break
         # 09 §10.1: индекс переноса пишется одной пачкой на продукт, здесь, а не в батче:
         # ``state.db`` — одно соединение и один владелец записи. Пишутся и ``observed``,
         # и ``carried``: иначе цепочка рвётся на втором цикле.
@@ -4417,7 +4562,7 @@ def evaluate_phase(
                 store.save_cell(updated)
 
     return PhaseResult(
-        status="ok",
+        status="failed" if auth_rejection is not None else "ok",
         phase="evaluate",
         cells=cells,
         log_entries=log_entries,

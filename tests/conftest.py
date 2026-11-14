@@ -86,6 +86,25 @@ def _isolated_operational_caches(tmp_path_factory: pytest.TempPathFactory) -> No
     os.environ.setdefault("COHOUND_PASSPORTS_DIR", str(ROOT / "passports"))
 
 
+@pytest.fixture(autouse=True)
+def _no_network_llm_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Проба ключа оценщика в тестах не ходит в сеть (A5).
+
+    ``run`` проверяет ключ оценщика **до** фаз (это спасает многочасовой краул от мёртвого
+    ключа). Endpoint при этом объявлен в ``config/deploy.yaml`` — данные хоста, а не теста,
+    и ключа тестам не выдают: без подмены каждый ``main(["run", …])`` уходил бы в реальную
+    сеть и зависел бы от внешнего сервиса. Поэтому подменяется **точка вызова** в
+    composition root, а не адаптер: сама проба и её HTTP-путь проверяются напрямую
+    (``tests/adapters/test_llm_local_auth.py``, ``tests/cli/test_llm_probe.py``), где сеть
+    перехвачена или порты инъецированы. Тест, которому нужна настоящая проба в прогоне,
+    восстанавливает функцию сам (``_REAL_PROBE`` в ``tests/cli/test_llm_probe.py``) —
+    исключение видно в коде теста, а не прячется в фикстуре.
+    """
+    from core.cli.commands import run as run_module
+
+    monkeypatch.setattr(run_module, "_probe_llm_key", lambda *args, **kwargs: None)
+
+
 @pytest.fixture
 def isolated_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

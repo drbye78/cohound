@@ -20,6 +20,7 @@ from typing import Any
 
 from core.adapters.index_npy import numpy_available
 from core.adapters.lexical_tantivy import tantivy_available
+from core.adapters.llm_local import EvaluationError
 from core.cli.context import (
     _acquire_package_lock,
     _add_common,
@@ -580,6 +581,80 @@ def _attach_phase_note(report: Any, phase: str, note: str) -> None:
         if result.phase == phase:
             result.log_entries.append(note)
             return
+
+
+def _probe_llm_key(
+    ports: Any, *, until: str | None, notices: list[str]
+) -> dict[str, Any] | None:
+    """Предпроверка ключа оценщика **до** краула: health-check, не условие измерения.
+
+    Зачем до корпуса. Прогон начинается с многочасовой сети, а мёртвый ключ
+    обнаруживался только на Ш6 — то есть после того, как корпус уже скачан (замер
+    14.11.2026: провайдер отвечает ``401`` и объясняет причину в теле). Это ошибка
+    **входа**, а не исполнения: начинать шестичасовой краул с заведомо неработающим
+    оценщиком незачем.
+
+    Проба не входит ни в ``run_id``, ни в ``llm_scenarios``, ни в манифест: она ничего не
+    измеряет и не пишет в кэш/БД. Её результат публикуется в payload прогона
+    (``llm_probe``), чтобы «ключ был жив в начале» осталось наблюдённым фактом.
+
+    Условия запуска: (а) оценщик сконфигурирован (``ports.evaluator``), (б) фаза
+    ``evaluate`` входит в план (``--until`` не заканчивается раньше неё). ``--until
+    corpus`` предпроверку не запускает — оценщик там не понадобится.
+
+    :param ports: порты прогона (``evaluator`` — адаптер оценщика).
+    :param until: значение ``--until`` (``None`` — до последней фазы).
+    :param notices: список предупреждений прогона — пополняется, если проба невозможна
+        (адаптер без ``probe``: например, инъецированный тестовый порт).
+    :returns: ``{"ok": True, "latency_ms": …, "model_id": …}`` при успехе; ``None`` —
+        проба не запускалась (нечего проверять либо адаптер не объявляет ``probe``).
+    :raises CliError: ключ/endpoint отвергнуты (``llm``/``EXIT_USAGE``) — с HTTP-статусом
+        и текстом провайдера, чтобы оператор не искал причину в логе краула.
+    """
+    if "evaluate" not in _phases_until(until):
+        return None
+    evaluator = getattr(ports, "evaluator", None)
+    if evaluator is None:
+        return None
+    probe = getattr(evaluator, "probe", None)
+    if not callable(probe):
+        # Инъецированный порт (тестовый шов) может не объявлять пробу. Молчать об этом
+        # нельзя: «предпроверка прошла» и «предпроверки не было» — разные факты.
+        notices.append(
+            "llm_probe: адаптер оценщика не объявляет probe — предпроверка ключа "
+            "не выполнялась"
+        )
+        return None
+    started = time.monotonic()
+    try:
+        probe()
+    except EvaluationError as exc:
+        status = getattr(exc, "status_code", None)
+        body = getattr(exc, "provider_body", None)
+        if isinstance(body, str) and body.strip():
+            detail = (
+                f"HTTP {status}: {body.strip()}"
+                if isinstance(status, int)
+                else body.strip()
+            )
+        elif isinstance(status, int) and status >= 400:
+            detail = f"HTTP {status}"
+        else:
+            # Не-HTTP отказ (``200`` без ``choices``, не-JSON тело): текст исключения —
+            # единственное объяснение, и оно обязано дойти до оператора.
+            detail = str(exc).strip() or "причина не названа"
+        raise CliError(
+            "оценщик недоступен до начала прогона: "
+            f"{detail} (предпроверка ключа; модель "
+            f"{getattr(evaluator, 'model_id', '—')})",
+            code="llm",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    return {
+        "ok": True,
+        "latency_ms": round((time.monotonic() - started) * 1000.0, 3),
+        "model_id": getattr(evaluator, "model_id", None),
+    }
 
 
 def run(args: argparse.Namespace) -> int:
@@ -1158,6 +1233,11 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         # обращение к необъявленному имени на пути исключения было бы NameError вместо
         # исходной ошибки.
         previous_store: Any = None
+        #: A5: результат предпроверки ключа оценщика (health-check) — публикуется в
+        #: payload прогона. Объявлено здесь, т.к. заполняется внутри ``try``, а читается
+        #: в payload после него; ``None`` — проба не запускалась (оценщика нет, или
+        #: ``--until`` заканчивается раньше ``evaluate``).
+        llm_probe: dict[str, Any] | None = None
         #: ``--only-failed``: work-set ремонта (``product_id → [url]``) — отдельный вход Ш5.
         #: Провал глубокой страницы не становится seed-корнем: ремонт идёт известными
         #: depth-0 URL, авторские корни не обходятся (см. ``_only_failed_work_set``).
@@ -1215,6 +1295,13 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 no_cache=from_scratch,
                 store=store,
                 run_id=run_id,
+            )
+            # A5: ключ/endpoint оценщика проверяются **до** фазы ``corpus`` (то есть до
+            # краула): мёртвый ключ обнаруживался только на Ш6, после многочасовой сети
+            # (замер 14.11.2026: ``401`` на первой же ячейке). Проба — health-check, а не
+            # условие измерения: в ``run_id``/``llm_scenarios``/манифест она не входит.
+            llm_probe = _probe_llm_key(
+                ports, until=args.until, notices=config_notices
             )
             # I3/§5: SERP-контур исполняется в фазе корпуса и требует адаптера внешнего
             # поиска. В ``split`` он приходит швом из портов; в ``local`` сетевые порты не
@@ -1673,6 +1760,10 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         payload = _run_report_payload(run_id, run_report, db_path)
         payload["session_id"] = session_id
         payload["session_status"] = final_status
+        # A5: наблюдённый факт предпроверки ключа (health-check). Не условие измерения:
+        # в ``run_id``/манифест не входит, но «ключ был жив на старте» видно в payload.
+        if llm_probe is not None:
+            payload["llm_probe"] = llm_probe
         # B3: аномалии (I3 ❓-протокол + crawl-усечение) — из артефактов фазы report, если она
         # отработала; видны в run/--json payload (не только в nda_questions.csv).
         artifacts_obj = next(

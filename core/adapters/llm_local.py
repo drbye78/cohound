@@ -63,6 +63,7 @@ HTTP-клиент подтягивается только в реальном п
 from __future__ import annotations
 
 import importlib.util
+import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -117,6 +118,30 @@ DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_TIMEOUT = 120.0
 #: Openai-совместимый путь генерации (дописывается к канонической базе).
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+#: Потолок тела HTTP-отказа в тексте исключения/атрибуте ``provider_body``, символов.
+#: Тело объясняет причину (401 — «неверный ключ», 402 — «средства исчерпаны»), но
+#: целиком в сообщение его класть нельзя: провайдер вправе ответить HTML-страницей на
+#: сотни килобайт, и такое сообщение уедет в ``validation_notes`` каждой ячейки.
+PROVIDER_BODY_LIMIT = 500
+
+
+def provider_body_text(response: Any) -> str | None:
+    """Тело HTTP-отказа как одна строка: без переводов строк, усечённое, либо ``None``.
+
+    Читается **только тело**: ключ и заголовки запроса в отказ не попадают ни при каких
+    условиях (это уже так, и это не должно измениться). Пустое тело — ``None``, чтобы
+    вызывающий не склеивал сообщение с ``": "`` и пустотой.
+    """
+    try:
+        text = response.text
+    except Exception:  # noqa: BLE001 — декодирование тела не должно подменять отказ
+        return None
+    if not isinstance(text, str):
+        return None
+    flat = " ".join(text.split())
+    if not flat:
+        return None
+    return flat[:PROVIDER_BODY_LIMIT]
 
 
 def normalize_api_base(base_url: str) -> str:
@@ -159,6 +184,12 @@ class EvaluationError(RuntimeError):
     HTTP-date, как есть — разбирает вызывающий), а статус (``429``/``5xx``) называет
     причину. Без них повтор шёл бы немедленно, и при нескольких вызовах в полёте лимит
     провайдера превратился бы в шторм повторов.
+
+    ``provider_body`` — **тело** HTTP-отказа (усечённое до :data:`PROVIDER_BODY_LIMIT`
+    и без переводов строк). Провайдер объясняет отказ именно там: замер 14.11.2026 на
+    ``HTTP 401`` тело было ``{"error":{"message":"Отсутствует или неверный API-ключ.",…}}``,
+    а до правки оно выбрасывалось и 401 был неотличим от 403/402 по артефактам. Ключ и
+    заголовки сюда не попадают: читается только тело ответа.
     """
 
     def __init__(
@@ -171,6 +202,7 @@ class EvaluationError(RuntimeError):
         usage: TokenUsage | None = None,
         status_code: int | None = None,
         retry_after: str | None = None,
+        provider_body: str | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
@@ -181,6 +213,8 @@ class EvaluationError(RuntimeError):
         self.status_code = status_code
         #: Заголовок ``Retry-After`` **как есть** (``None`` — провайдер паузу не назвал).
         self.retry_after = retry_after
+        #: Тело HTTP-отказа (``None`` — отказ не HTTP либо тело пусто).
+        self.provider_body = provider_body
         #: Текст рассуждения, если провайдер успел его отдать. Заполняется путями отказа
         #: (:meth:`LocalEvaluator._extract`) и :meth:`LocalEvaluator.complete`: на отказе
         #: это единственный диагностический след, и журнал пишет его целиком.
@@ -620,6 +654,81 @@ class LocalEvaluator:
         )
 
     # ------------------------------------------------------------------
+    # Предпроверка ключа (health-check, не измерение)
+    # ------------------------------------------------------------------
+
+    def probe(self) -> None:
+        """Проверяет живость ключа/endpoint'а **одним** минимальным вызовом.
+
+        Зачем отдельный метод, если есть :meth:`complete`. Прогон начинается с
+        многочасового краула, и мёртвый ключ обнаруживался только на Ш6 — после того как
+        корпус уже скачан (замер 14.11.2026: провайдер отвечает ``401`` на отсутствующий
+        ключ, и это выяснялось на первой ячейке). Предпроверка переводит такую ошибку в
+        ошибку **входа**: прогон не должен начинаться, если мерить нечем.
+
+        Путь — тот же, что у боевого вызова: тот же URL (:meth:`_completions_url`), те же
+        заголовки (:meth:`_headers`), та же объявленная модель и тот же уровень
+        рассуждения. Отличается только объём: ``max_tokens=1`` и механический промпт —
+        проба не претендует на ответ и ничего не пишет ни в кэш, ни в БД.
+
+        :raises EvaluationError: отказ провайдера — со ``status_code``/``provider_body``,
+            как у боевого вызова; ответ ``200`` без ``choices`` — тоже отказ (пустой
+            ответ не доказывает, что ключ принят и модель отвечает).
+        """
+        payload: dict[str, Any] = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": "ping"}],
+            "temperature": 0.0,
+            "max_tokens": 1,
+            "stream": False,
+        }
+        # Уровень рассуждения — та же ось, что у боевого вызова: проба, отправившая
+        # другой провод, проверяла бы другую конфигурацию.
+        payload.update(reasoning_wire(self.model_id, self.reasoning_effort))
+        client = self._http_client()
+        try:
+            response = client.post(
+                self._completions_url(),
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 — транспортный сбой — тоже провал пробы
+            raise EvaluationError(
+                f"проверка ключа оценщика не удалась: {type(exc).__name__}: {exc}",
+                reason="http_error",
+            ) from exc
+        if response.status_code >= 400:
+            body = provider_body_text(response)
+            detail = f"HTTP {response.status_code}"
+            if body:
+                detail = f"{detail}: {body}"
+            raise EvaluationError(
+                f"проверка ключа оценщика не удалась: {detail}",
+                reason="http_error",
+                status_code=response.status_code,
+                retry_after=retry_after_header(response),
+                provider_body=body,
+            )
+        try:
+            data = response.json()
+        except Exception as exc:  # noqa: BLE001 — не-JSON ответ не доказывает живость
+            raise EvaluationError(
+                f"проверка ключа оценщика не удалась: тело ответа не JSON: {exc}",
+                reason="invalid_json",
+                status_code=response.status_code,
+            ) from exc
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not choices:
+            raise EvaluationError(
+                "проверка ключа оценщика не удалась: ответ без choices "
+                "(ключ принят, но модель не ответила)",
+                reason="invalid_json",
+                status_code=response.status_code,
+                raw=json.dumps(data, ensure_ascii=False) if data is not None else None,
+            )
+
+    # ------------------------------------------------------------------
     # Разбор / валидация
     # ------------------------------------------------------------------
 
@@ -671,9 +780,7 @@ class LocalEvaluator:
         :class:`ReasoningWireUnsupported` **до** отправки: тихий пропуск параметра выдал бы
         «уровень не выбран» за «уровень объявлен».
         """
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers = self._headers()
         model_id = req.model_id or self.model_id
         effort = (
             req.reasoning_effort
@@ -710,7 +817,7 @@ class LocalEvaluator:
         client = self._http_client()
         try:
             response = client.post(
-                f"{normalize_api_base(self.base_url)}{CHAT_COMPLETIONS_PATH}",
+                self._completions_url(),
                 json=payload,
                 headers=headers,
                 timeout=self.timeout,
@@ -724,11 +831,21 @@ class LocalEvaluator:
             # Статус и ``Retry-After`` едут в отказе: вызывающий (Ш6) по ним отличает
             # «подожди и повтори» (``429``/``5xx``) от «ответ по существу» и ставит паузу,
             # а не повторяет немедленно. Текст сообщения — без заголовков и ключей.
+            #
+            # Тело ответа — тоже в отказе: провайдер объясняет причину именно там
+            # (замер 14.11.2026: ``401`` + ``{"error":{"message":"Отсутствует или неверный
+            # API-ключ.",…}}``). Без тела 401/402/403 неотличимы по артефактам, а
+            # оператор ищет причину в консоли. Тело добавляется, только если оно непусто.
+            body = provider_body_text(response)
+            detail = f"HTTP {response.status_code}"
+            if body:
+                detail = f"{detail}: {body}"
             raise EvaluationError(
-                f"HTTP-вызов оценщика не удался: HTTP {response.status_code}",
+                f"HTTP-вызов оценщика не удался: {detail}",
                 reason="http_error",
                 status_code=response.status_code,
                 retry_after=retry_after_header(response),
+                provider_body=body,
             )
         try:
             data = response.json()
@@ -739,6 +856,25 @@ class LocalEvaluator:
                 status_code=response.status_code,
             ) from exc
         return self._extract(data)
+
+    def _completions_url(self) -> str:
+        """Адрес генерации: каноническая база + ``/v1/chat/completions``.
+
+        Одна формула на боевой вызов и на :meth:`probe`: предпроверка ключа обязана идти
+        **тем же** путём, иначе она проверяет не то, чем меряют.
+        """
+        return f"{normalize_api_base(self.base_url)}{CHAT_COMPLETIONS_PATH}"
+
+    def _headers(self) -> dict[str, str]:
+        """Заголовки запроса: JSON + bearer, если ключ объявлен.
+
+        Одна формула на боевой вызов и на :meth:`probe` — по той же причине, что и у
+        :meth:`_completions_url`. Ключ живёт только в заголовке и никуда не логируется.
+        """
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def _http_client(self) -> Any:
         """Ленивый единый HTTP-клиент адаптера (пул соединений на все вызовы).
