@@ -510,6 +510,14 @@ class CrawlConfig(BaseModel):
     # P6: границы спуска в контейнер (исполняет следующий слой). Значения нужны уже
     # сейчас: они входят в провенанс/дайджест и определяют допуск артефакта.
     archive_max_member_bytes: int = Field(default=DEFAULT_ARCHIVE_MAX_MEMBER_BYTES, gt=0)
+    #: Потолок **члена-контейнера** (вложенного архива), байты. Отдельная ось, а не та же
+    #: ``archive_max_member_bytes``: та измерена по документам (заявленный максимум
+    #: 25.1 MB) и отвечает на вопрос «влезет ли файл в извлечение», а до открытия
+    #: контейнера его состав неизвестен (замер 15.11.2026: архив 132.2 MB → 57 PDF и ещё
+    #: два уровня контейнеров). ``None`` — ось не задана: контейнер не ограничен **этим**
+    #: потолком, а конечность держат ``archive_max_uncompressed_bytes`` (распакованный
+    #: объём самого контейнера) и ``archive_max_total_uncompressed_bytes`` (корень).
+    archive_max_container_bytes: int | None = Field(default=None, gt=0)
     archive_max_uncompressed_bytes: int = Field(
         default=DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES, gt=0
     )

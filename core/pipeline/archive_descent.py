@@ -77,8 +77,10 @@ from core.domain.models import ArchiveObservation, CorpusMember
 from core.ports.container import ContainerPort
 from core.util.container_policy import (
     CAPACITY_REASONS,
+    CONTAINER_SUFFIXES,
     FORECAST_EXAMPLES_MAX,
     INGEST_SUFFIXES,
+    SKIP_CONTAINER_TOO_LARGE,
     MemberTooLarge,
     archive_forecast,
     bounded_iter,
@@ -94,6 +96,7 @@ __all__ = [
     "PLAN_SKIP_ROW_REASONS",
     "SKIP_BUDGET",
     "SKIP_CONTAINER_READER",
+    "SKIP_CONTAINER_TOO_LARGE",
     "SKIP_CYCLE",
     "SKIP_EXTRACT_FAILED",
     "SKIP_EXTRACT_UNAVAILABLE",
@@ -158,16 +161,24 @@ PLAN_SKIP_ROW_REASONS: frozenset[str] = CAPACITY_REASONS
 
 @dataclass(frozen=True)
 class DescentBudget:
-    """Границы спуска: три оси **контейнера** + одна кумулятивная ось **корня**.
+    """Границы спуска: оси **контейнера** + кумулятивная ось **корня**.
 
     ``None`` — ось не задана (без потолка). ``max_total_uncompressed_bytes`` — сумма
     фактически прочитанных байт по **всему** корню спуска (все уровни вложенности).
+
+    ``max_member_bytes`` относится к **документам**; ``max_container_bytes`` — к членам
+    **контейнерам** (вложенным архивам). Разделение — по измеренной причине: до открытия
+    контейнера его состав неизвестен, поэтому «файл больше N» к нему не применимо
+    (замер 15.11.2026: 132.2 MB архив → 57 PDF и ещё два уровня контейнеров). Конечность
+    для контейнера держат ``max_uncompressed_bytes`` (распакованный объём самого
+    контейнера) и ``max_total_uncompressed_bytes`` (корень).
     """
 
     max_member_bytes: int | None = None
     max_uncompressed_bytes: int | None = None
     max_members: int | None = None
     max_total_uncompressed_bytes: int | None = None
+    max_container_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -699,6 +710,7 @@ class ArchiveDescentWalker:
             max_member_bytes=self.budget.max_member_bytes,
             max_total_uncompressed=self.budget.max_uncompressed_bytes,
             ingest_suffixes=DESCENT_SUFFIXES,
+            max_container_bytes=self.budget.max_container_bytes,
         )
         # Прогноз фиксируется **до** любого чтения байтов члена (решение владельца).
         forecast = archive_forecast(listing, plan)
@@ -880,7 +892,14 @@ class ArchiveDescentWalker:
                 continue
             limits = [
                 value
-                for value in (self.budget.max_member_bytes, remaining)
+                for value in (
+                    (
+                        self.budget.max_container_bytes
+                        if suffix in CONTAINER_SUFFIXES
+                        else self.budget.max_member_bytes
+                    ),
+                    remaining,
+                )
                 if value is not None
             ]
             member_limit = min(limits) if limits else None
@@ -972,7 +991,7 @@ class ArchiveDescentWalker:
             member_hash = hasher.hexdigest()
             url = member_url(archive_url, normalized)
 
-            if suffix in {f".{fmt}" for fmt in SUPPORTED_ARCHIVE_FORMATS}:
+            if suffix in CONTAINER_SUFFIXES:
                 # Вложенный архив: спуск без потолка глубины, конечность — цикл + бюджет.
                 # Окно доводится **до** записи строки и вложенного спуска: члены
                 # вложенного архива коммитятся после всех предшествующих соседей, как при

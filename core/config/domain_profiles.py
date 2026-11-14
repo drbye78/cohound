@@ -79,6 +79,8 @@ class DomainProfile(BaseModel):
     max_artifact_bytes: int | None = Field(default=None, gt=0)
     attachment_formats: list[str] | None = None
     archive_max_member_bytes: int | None = Field(default=None, gt=0)
+    #: Потолок члена-контейнера на этом слое; ``None`` = не задано (наследуется run/app).
+    archive_max_container_bytes: int | None = Field(default=None, gt=0)
     archive_max_uncompressed_bytes: int | None = Field(default=None, gt=0)
     archive_max_members: int | None = Field(default=None, gt=0)
     # B3: кумулятивный потолок распакованного объёма на **корень спуска** (байты).

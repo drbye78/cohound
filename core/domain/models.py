@@ -585,6 +585,10 @@ class CrawlRunConfig(BaseModel):
     attachment_formats: list[str] | None = None
     # P6: границы спуска в контейнер (для следующего слоя; входят в провенанс).
     archive_max_member_bytes: int | None = Field(default=None, gt=0)
+    #: Потолок **члена-контейнера** (вложенного архива), байты. Отдельная ось: до
+    #: открытия контейнера его состав неизвестен, поэтому «файл больше N» к нему не
+    #: применимо. ``None`` — наследовать app-слой.
+    archive_max_container_bytes: int | None = Field(default=None, gt=0)
     archive_max_uncompressed_bytes: int | None = Field(default=None, gt=0)
     archive_max_members: int | None = Field(default=None, gt=0)
     #: B3: кумулятивный потолок распакованного объёма **на корень спуска** (байты).

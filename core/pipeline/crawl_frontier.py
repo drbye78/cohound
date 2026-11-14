@@ -144,10 +144,14 @@ DUPLICATE_FORM_EXAMPLES_MAX = 10
 #: канонический порядок входа Pass B — ``(product_id, url, chunk_no)``. Победитель
 #: контент-дедупа поэтому перестал зависеть от порядка фетча: он равен ``min(url)`` среди
 #: равных ``doc_hash`` (то же правило, что и в пост-проходе ``canonicalize_doc_urls``) — то
-#: есть **семантика корпуса изменилась**, и это измерение, а не оптимизация. Bump — при
-#: следующей смене семантики обхода/дедупа, одной строкой и вместе с golden-переаннотацией
-#: (``execution_change``, §9).
-CRAWL_SEMANTICS = "crawl-3"
+#: есть **семантика корпуса изменилась**, и это измерение, а не оптимизация. ``crawl-4``
+#: (15.11.2026) — потолок «одного файла» больше не применяется к члену-**контейнеру**:
+#: вложенный архив меряется своей осью (``archive_max_container_bytes``), потому что до
+#: открытия его состав неизвестен. Это меняет **состав корпуса** при тех же осях
+#: (замер: ветка архива jatoba 132.2 MB отсекалась целиком — 57 PDF / 3 990 страниц),
+#: поэтому слаг меняется, а не остаётся прежним. Bump — при следующей смене семантики
+#: обхода/дедупа, одной строкой и вместе с golden-переаннотацией (``execution_change``, §9).
+CRAWL_SEMANTICS = "crawl-4"
 
 
 def url_form_key(url: str) -> str:
@@ -283,6 +287,11 @@ class CrawlLimits:
     #: P6: границы спуска в контейнер (провенанс/дайджест; исполняет следующий слой).
     archive_max_member_bytes: int = DEFAULT_ARCHIVE_MAX_MEMBER_BYTES
     archive_max_member_bytes_explicit: bool = False
+    #: Потолок **члена-контейнера** (вложенного архива), байты. Отдельная ось: до
+    #: открытия контейнера его состав неизвестен, поэтому «файл больше N» (ось выше,
+    #: измеренная по документам) к нему не применима. ``None`` — ось не задана.
+    archive_max_container_bytes: int | None = None
+    archive_max_container_bytes_explicit: bool = False
     archive_max_uncompressed_bytes: int = DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES
     archive_max_uncompressed_bytes_explicit: bool = False
     archive_max_members: int | None = None
@@ -470,6 +479,8 @@ class CrawlLimits:
             payload["attachment_formats"] = list(self.attachment_formats)
         if self.archive_max_member_bytes_explicit:
             payload["archive_max_member_bytes"] = self.archive_max_member_bytes
+        if self.archive_max_container_bytes_explicit and self.archive_max_container_bytes is not None:
+            payload["archive_max_container_bytes"] = self.archive_max_container_bytes
         if self.archive_max_uncompressed_bytes_explicit:
             payload["archive_max_uncompressed_bytes"] = (
                 self.archive_max_uncompressed_bytes
@@ -690,6 +701,9 @@ def resolve_crawl_limits(
     site_archive_max_member_bytes = (
         profile.archive_max_member_bytes if profile is not None else None
     )
+    site_archive_max_container_bytes = (
+        profile.archive_max_container_bytes if profile is not None else None
+    )
     site_archive_max_uncompressed_bytes = (
         profile.archive_max_uncompressed_bytes if profile is not None else None
     )
@@ -761,6 +775,9 @@ def resolve_crawl_limits(
     )
     run_archive_max_member_bytes = (
         getattr(run, "archive_max_member_bytes", None) if run is not None else None
+    )
+    run_archive_max_container_bytes = (
+        getattr(run, "archive_max_container_bytes", None) if run is not None else None
     )
     run_archive_max_uncompressed_bytes = (
         getattr(run, "archive_max_uncompressed_bytes", None)
@@ -912,6 +929,12 @@ def resolve_crawl_limits(
         run_archive_max_member_bytes,
         site_archive_max_member_bytes,
     )
+    app_archive_max_container_bytes = getattr(app, "archive_max_container_bytes", None)
+    archive_max_container_bytes = _pick(
+        app_archive_max_container_bytes,
+        run_archive_max_container_bytes,
+        site_archive_max_container_bytes,
+    )
     app_archive_max_uncompressed_bytes = getattr(
         app, "archive_max_uncompressed_bytes", None
     )
@@ -1007,6 +1030,15 @@ def resolve_crawl_limits(
             "archive_max_member_bytes",
             run_archive_max_member_bytes,
             site_archive_max_member_bytes,
+        ),
+        archive_max_container_bytes=(
+            None if archive_max_container_bytes is None else int(archive_max_container_bytes)
+        ),
+        archive_max_container_bytes_explicit=_axis_explicit(
+            app,
+            "archive_max_container_bytes",
+            run_archive_max_container_bytes,
+            site_archive_max_container_bytes,
         ),
         archive_max_uncompressed_bytes=(
             DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES

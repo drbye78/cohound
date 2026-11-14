@@ -39,17 +39,24 @@ from pathlib import PurePosixPath
 from typing import NamedTuple, Protocol
 
 from core.domain.enums import ContainerEncryption
-from core.util.document_formats import DOCUMENT_SUFFIXES, TEXTUAL_SUFFIXES
+from core.util.document_formats import (
+    DOCUMENT_SUFFIXES,
+    SUPPORTED_ARCHIVE_FORMATS,
+    TEXTUAL_SUFFIXES,
+)
 
 __all__ = [
+    "AXIS_MAX_CONTAINER_BYTES",
     "AXIS_MAX_MEMBERS",
     "AXIS_MAX_MEMBER_BYTES",
     "AXIS_MAX_UNCOMPRESSED",
     "CAPACITY_REASONS",
+    "CONTAINER_SUFFIXES",
     "DESCENT_HTML_SUFFIXES",
     "DESCENT_TEXT_SUFFIXES",
     "FORECAST_EXAMPLES_MAX",
     "INGEST_SUFFIXES",
+    "SKIP_CONTAINER_TOO_LARGE",
     "SKIP_ENCRYPTED",
     "SKIP_IS_DIRECTORY",
     "SKIP_MEMBER_LIMIT",
@@ -72,6 +79,16 @@ __all__ = [
 AXIS_MAX_MEMBER_BYTES = "archive_max_member_bytes"
 AXIS_MAX_UNCOMPRESSED = "archive_max_uncompressed_bytes"
 AXIS_MAX_MEMBERS = "archive_max_members"
+#: Отдельная ось для **члена-контейнера** (вложенный архив). Причина отдельности —
+#: измеренная: «заявленный максимум документа 25.1 MB» описывает документы, а вложенный
+#: архив измеряется другой величиной и другого вопроса. Замер 15.11.2026 (байты архива
+#: jatoba): при ``archive_max_member_bytes`` = 64 MiB ветка
+#: ``documentationJatoba18_6.zip!/…JDS_2.13.zip`` (132.2 MB) отсекается целиком —
+#: 57 PDF / 3 990 страниц, а внутри неё ещё два уровня контейнеров. До открытия
+#: содержимое контейнера неизвестно, поэтому потолок «одного файла» к нему не применим:
+#: конечность держат :data:`AXIS_MAX_UNCOMPRESSED` (распакованный объём **самого**
+#: контейнера) и кумулятивный бюджет корня (``archive_max_total_uncompressed_bytes``).
+AXIS_MAX_CONTAINER_BYTES = "archive_max_container_bytes"
 
 #: HTML-цели спуска: разметка, которую штатно разбирает HTML-экстрактор (trafilatura).
 DESCENT_HTML_SUFFIXES: tuple[str, ...] = (".html", ".htm")
@@ -87,19 +104,26 @@ DESCENT_TEXT_SUFFIXES: tuple[str, ...] = TEXTUAL_SUFFIXES + DESCENT_HTML_SUFFIXE
 #: Документная часть **не** дублируется: она берётся из реестра форматов.
 INGEST_SUFFIXES: tuple[str, ...] = DOCUMENT_SUFFIXES + DESCENT_TEXT_SUFFIXES
 
+#: Суффиксы **членов-контейнеров**: такой член не документ, а следующий уровень спуска.
+#: Набор не дублируется — он выводится из реестра форматов контейнеров.
+CONTAINER_SUFFIXES: frozenset[str] = frozenset(
+    f".{fmt}" for fmt in SUPPORTED_ARCHIVE_FORMATS
+)
+
 #: Причины пропуска члена (словарь видимых пропусков; текст — часть провенанса).
 SKIP_IS_DIRECTORY = "is_directory"
 SKIP_PATH_REJECTED = "path_rejected"
 SKIP_ENCRYPTED = "encrypted"
 SKIP_NOT_INGESTIBLE = "not_ingestible_format"
 SKIP_MEMBER_TOO_LARGE = "member_too_large"
+SKIP_CONTAINER_TOO_LARGE = "container_too_large"
 SKIP_MEMBER_LIMIT = "member_limit_exceeded"
 SKIP_TOTAL_EXCEEDED = "total_uncompressed_exceeded"
 
 #: Причины, означающие «план урезан бюджетом» (а не «член не подходит по природе»):
 #: именно они поднимают ``MemberPlan.truncated``.
 CAPACITY_REASONS: frozenset[str] = frozenset(
-    {SKIP_MEMBER_TOO_LARGE, SKIP_MEMBER_LIMIT, SKIP_TOTAL_EXCEEDED}
+    {SKIP_MEMBER_TOO_LARGE, SKIP_CONTAINER_TOO_LARGE, SKIP_MEMBER_LIMIT, SKIP_TOTAL_EXCEEDED}
 )
 
 #: Сколько примеров пропусков на причину попадает в прогноз (как
@@ -263,6 +287,7 @@ def plan_members(
     max_member_bytes: int | None = None,
     max_total_uncompressed: int | None = None,
     ingest_suffixes: Iterable[str] = INGEST_SUFFIXES,
+    max_container_bytes: int | None = None,
 ) -> MemberPlan:
     """Решить судьбу каждого члена по индексу (без чтения тел).
 
@@ -271,10 +296,19 @@ def plan_members(
     поэтому одинаковый индекс даёт одинаковый план при любом порядке записей в архиве.
 
     Прецедент причин (первая подходящая побеждает): ``is_directory`` →
-    ``path_rejected`` → ``encrypted`` → ``not_ingestible_format`` → ``member_too_large`` →
-    ``member_limit_exceeded`` → ``total_uncompressed_exceeded``. Структурные и
-    содержательные отказы идут раньше бюджетных: иначе «не тот формат» маскировался бы
-    под исчерпанный бюджет и прогноз врал бы о причине.
+    ``path_rejected`` → ``encrypted`` → ``not_ingestible_format`` → ``member_too_large``
+    (для члена-контейнера — ``container_too_large``) → ``member_limit_exceeded`` →
+    ``total_uncompressed_exceeded``. Структурные и содержательные отказы идут раньше
+    бюджетных: иначе «не тот формат» маскировался бы под исчерпанный бюджет и прогноз
+    врал бы о причине.
+
+    **Потолок члена-контейнера — отдельная ось.** ``max_member_bytes`` отвечает на
+    вопрос «влезет ли этот файл в извлечение» и измерен по **документам** (25.1 MB).
+    Вложенный архив — не документ: до его открытия состав неизвестен, и «файл слишком
+    велик» к нему не применимо (замер 15.11.2026: архив 132.2 MB содержит 57 PDF и ещё
+    два уровня контейнеров). Поэтому контейнер ограничивает ``max_container_bytes``
+    (``None`` — не ограничен), а конечность спуска держат распакованный объём **самого**
+    контейнера (``max_total_uncompressed``) и кумулятивный бюджет корня.
 
     Каждый пропуск — :class:`SkippedMember`: путь, причина и **заявленный** размер. Размер
     здесь не для арифметики (её делает план), а чтобы вызывающий мог опубликовать видимую
@@ -314,8 +348,18 @@ def plan_members(
         if _member_suffix(normalized) not in suffixes:
             skipped.append(SkippedMember(display, SKIP_NOT_INGESTIBLE, member.size))
             continue
-        if max_member_bytes is not None and member.size > max_member_bytes:
-            skipped.append(SkippedMember(display, SKIP_MEMBER_TOO_LARGE, member.size))
+        # Член-контейнер меряется своей осью: «слишком большой файл» и «неизвестно, что
+        # внутри» — разные вопросы, и один потолок на оба отсекал ветки целиком.
+        is_container = _member_suffix(normalized) in CONTAINER_SUFFIXES
+        size_limit = max_container_bytes if is_container else max_member_bytes
+        if size_limit is not None and member.size > size_limit:
+            skipped.append(
+                SkippedMember(
+                    display,
+                    SKIP_CONTAINER_TOO_LARGE if is_container else SKIP_MEMBER_TOO_LARGE,
+                    member.size,
+                )
+            )
             truncated = True
             continue
         if max_members is not None and len(accepted) >= max_members:

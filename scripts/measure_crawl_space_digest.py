@@ -51,6 +51,7 @@ from pathlib import Path
 import yaml
 
 from core.config.crawl_policy import CrawlPolicyConfig, load_crawl_policy
+from core.pipeline.crawl_frontier import CRAWL_SEMANTICS
 from core.pipeline.crawl_policy import declared_roots, resolve_crawl_policy
 from core.pipeline.digests import crawl_space_digest, short_hash
 from core.pipeline.onboarding import load_effective_seeds
@@ -66,7 +67,9 @@ _BASE_LIMITS: dict[str, object] = {
     "exclude_paths": [],
     "exclude_documents": [],
     "robots": True,
-    "semantics": "crawl-3",
+    # Слаг берётся из кода, а не литералом: правило обхода — часть **условия измерения**,
+    # и зашитая копия тихо разъезжается с `CRAWL_SEMANTICS` при каждом bump (§13).
+    "semantics": CRAWL_SEMANTICS,
 }
 
 

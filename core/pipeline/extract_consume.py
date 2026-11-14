@@ -1231,6 +1231,7 @@ def _descend_container(
         descent=limits.archive_descent,
         budget=DescentBudget(
             max_member_bytes=limits.archive_max_member_bytes,
+            max_container_bytes=limits.archive_max_container_bytes,
             max_uncompressed_bytes=limits.archive_max_uncompressed_bytes,
             max_members=limits.archive_max_members,
             max_total_uncompressed_bytes=(
@@ -1373,6 +1374,7 @@ def descend_frozen_container(
         descent=limits.archive_descent,
         budget=DescentBudget(
             max_member_bytes=limits.archive_max_member_bytes,
+            max_container_bytes=limits.archive_max_container_bytes,
             max_uncompressed_bytes=limits.archive_max_uncompressed_bytes,
             max_members=limits.archive_max_members,
             max_total_uncompressed_bytes=(

@@ -24,6 +24,7 @@ from core.ports.container import ContainerListing, ContainerMember
 from core.util.container_policy import (
     CAPACITY_REASONS,
     INGEST_SUFFIXES,
+    SKIP_CONTAINER_TOO_LARGE,
     SKIP_ENCRYPTED,
     SKIP_IS_DIRECTORY,
     SKIP_MEMBER_LIMIT,
@@ -245,6 +246,59 @@ def test_plan_reason_member_too_large_and_truncated() -> None:
     assert plan.truncated is True
 
 
+def test_plan_nested_container_is_not_limited_by_member_bytes() -> None:
+    """Вложенный архив меряется своей осью, а не потолком «одного файла».
+
+    Измеренный дефект 15.11.2026: при ``archive_max_member_bytes`` = 64 MiB ветка
+    архива jatoba (``…JDS_2.13.zip``, 132.2 MB) отсекалась целиком — 57 PDF / 3 990
+    страниц. До открытия контейнера его состав неизвестен, поэтому «файл больше N» к
+    нему не применимо: ``None`` — оси нет, контейнер принимается.
+    """
+    plan = plan_members(
+        _listing(_member("docs.zip", 100), _member("small.pdf", 10)),
+        max_member_bytes=50,
+        ingest_suffixes=(*INGEST_SUFFIXES, ".zip"),
+    )
+    assert [m.path for m in plan.accepted] == ["docs.zip", "small.pdf"]
+    assert plan.skipped == ()
+    # Потолок «одного файла» продолжает действовать на документ — это не отмена оси.
+    assert plan.truncated is False
+
+
+def test_plan_document_over_member_bytes_still_rejected() -> None:
+    """Потолок документа остался прежним: разделение осей его не ослабило."""
+    plan = plan_members(
+        _listing(_member("big.pdf", 100), _member("docs.zip", 100)),
+        max_member_bytes=50,
+        ingest_suffixes=(*INGEST_SUFFIXES, ".zip"),
+    )
+    assert [m.path for m in plan.accepted] == ["docs.zip"]
+    assert [(item.path, item.reason) for item in plan.skipped] == [
+        ("big.pdf", SKIP_MEMBER_TOO_LARGE)
+    ]
+
+
+def test_plan_container_over_its_own_axis_is_visible() -> None:
+    """Заданная ось контейнера отсекает его **своей** причиной, а не ``member_too_large``.
+
+    Причина отдельная намеренно: «файл слишком велик для извлечения» и «вложенный архив
+    не пропущен по своему потолку» — разные решения, и строка ``corpus_members`` обязана
+    называть принятое.
+    """
+    plan = plan_members(
+        _listing(_member("docs.zip", 100), _member("a.pdf", 100)),
+        max_member_bytes=10_000,
+        max_container_bytes=50,
+        ingest_suffixes=(*INGEST_SUFFIXES, ".zip"),
+    )
+    assert [m.path for m in plan.accepted] == ["a.pdf"]
+    assert [(item.path, item.reason) for item in plan.skipped] == [
+        ("docs.zip", SKIP_CONTAINER_TOO_LARGE)
+    ]
+    assert plan.truncated is True
+    assert SKIP_CONTAINER_TOO_LARGE in CAPACITY_REASONS
+
+
 def test_plan_reason_member_limit() -> None:
     """Исчерпанный потолок числа членов — причина ``member_limit_exceeded``."""
     plan = plan_members(
@@ -292,9 +346,11 @@ def test_plan_non_capacity_skips_do_not_truncate() -> None:
         SKIP_IS_DIRECTORY,
         SKIP_NOT_INGESTIBLE,
     }
-    # Бюджетные причины — ровно три оси: всё остальное «по природе».
+    # Бюджетные причины — ровно четыре оси (потолок документа, потолок контейнера,
+    # число членов, распакованный объём): всё остальное «по природе».
     assert {
         SKIP_MEMBER_TOO_LARGE,
+        SKIP_CONTAINER_TOO_LARGE,
         SKIP_MEMBER_LIMIT,
         SKIP_TOTAL_EXCEEDED,
     } == CAPACITY_REASONS

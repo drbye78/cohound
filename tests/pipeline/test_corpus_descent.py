@@ -577,6 +577,51 @@ def test_member_over_ceiling_skipped_siblings_ingested(tmp_path: Path) -> None:
         assert root.forecast["skipped"]["member_too_large"]["examples"] == ["big.txt"]
 
 
+def test_nested_archive_is_not_limited_by_member_ceiling(tmp_path: Path) -> None:
+    """Вложенный архив не меряется потолком **документа**: его члены доходят до корпуса.
+
+    Измеренный дефект 15.11.2026 (архив jatoba): ``archive_max_member_bytes`` = 64 MiB
+    отсекал вложенный архив 132.2 MB целиком — 57 PDF / 3 990 страниц и ещё два уровня
+    контейнеров. Потолок «одного файла» отвечает на вопрос «влезет ли файл в
+    извлечение», а до открытия контейнера его состав неизвестен.
+    """
+    inner = _zip({"deep.md": b"deep text"})
+    archive = _zip({"nested.zip": inner, "big.txt": b"x" * 4096})
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(archive_max_member_bytes=1024),
+    ) as (store, _result, _extractor):
+        urls = [doc.url for doc in _docs(store)]
+        assert f"{ZIP_URL}!/nested.zip!/deep.md" in urls, (
+            "член вложенного архива обязан дойти до корпуса: потолок документа к "
+            "контейнеру не применяется"
+        )
+        rows = {row.member_path: row for row in _members(store)}
+        # Контейнер — спуск, а не документ; документ сверх потолка — по-прежнему отказ.
+        assert rows["nested.zip"].skip_reason == "nested_descended"
+        assert rows["big.txt"].skip_reason == "member_too_large"
+        assert rows["deep.md"].doc_id is not None
+
+
+def test_container_ceiling_has_its_own_reason(tmp_path: Path) -> None:
+    """Заданная ось контейнера отбивает его ``container_too_large`` — видимой строкой."""
+    inner = _zip({"deep.md": b"deep text"})
+    archive = _zip({"nested.zip": inner})
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(
+            archive_max_member_bytes=1024 * 1024,
+            archive_max_container_bytes=16,
+        ),
+    ) as (store, _result, _extractor):
+        rows = {row.member_path: row for row in _members(store)}
+        assert rows["nested.zip"].skip_reason == "container_too_large"
+        assert rows["nested.zip"].declared_size > 16
+        assert _docs(store) == []
+
+
 def test_plan_budget_skip_writes_visible_member_row(tmp_path: Path) -> None:
     """Отказ **плана** по бюджету — строка ``corpus_members``, каталог — только агрегат.
 
