@@ -395,10 +395,15 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
 
 ## 9. Run identity, declared axes, versioning
 
-- `run_id` is a function of **declared inputs only**: 32 fields in
+- `run_id` is a function of **declared inputs only**: 33 fields in
   `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:96`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
+  `embed_spec` (`model_id@revision`) is the declared twin of `embed_model_id`, exactly as
+  `extractor_stack` is of `extractor_version`: the weights are a measurement condition, the
+  observed string is provenance. No declared model ⇒ **no dense branch** (`embed_spec: null`,
+  visible wiring notice, R0 lexical) — the model is never picked from what an extra happened
+  to install; a declared model that cannot be built is `EXIT_USAGE`, not a fallback (O6).
 - **Anything that changes the corpus or the verdicts must be a declared input.** Precedents
   that were once silently outside the contract: `--max-depth`/`--max-documents`,
   `chunk_size`, `prompt_template`, `evaluation_policy`, `render_modes`, `passports`.
@@ -691,11 +696,14 @@ extra), `markdown-it-py`+`mdit-py-plugins` (чанкер, `18`). `numpy` жив�
 uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract --extra extract-pdf
 #   + --extra extract-archives for 7z/rar, --extra embed / embed-lite for embeddings,
 #     --extra safety (prompt-injection guards), --extra ops (retry/structured logs).
-# A REAL RUN also needs an embedder extra (embed or embed-lite): without one the dense
-# branch is not built — embedder=None, no index_manifest/index_store, empty embed_model_id,
-# R0 runs lexically with a visible wiring notice. The run is NOT refused (wiring.py:3035,
-# evaluate.py:1150); only a declared embed.device=cuda / embed.precision=fp16 without the
-# torch path is (WiringError). The README quick-start already includes the extra.
+# A REAL RUN also needs a DECLARED embedder model: embed.model_id + embed.revision in
+# deploy.yaml (revision = HF sha, D3 15.11.2026) and the extra that can load it (embed or
+# embed-lite). Without a declared model the dense branch is NOT built — embedder=None, no
+# index_manifest/index_store, empty embed_model_id, embed_spec=null, R0 runs lexically with a
+# visible wiring notice. The run is NOT refused for that (wiring.py, evaluate.py); it IS
+# refused when the declared model cannot be built (missing extra/snapshot, embed.device=cuda
+# without a device, embed.precision=fp16 without the torch path) — WiringError, never a
+# silent substitution of another model or of fp32. The README quick-start includes the extra.
 ./hound.py doctor      # groups: runtime + deps:core/retrieval/crawl/extract/extract-pdf/extract-archives/safety/ops/embed/embed-lite/ann/pdf-measure/dev + env/config/layout/dirs/cli/foundation
 ```
 

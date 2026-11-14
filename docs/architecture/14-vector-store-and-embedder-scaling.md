@@ -273,18 +273,20 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
   (`deploy.embed.device` < `run.yaml:embed.device`), резолвится
   :func:`core.pipeline.crawl_frontier.resolve_embed_device` и передаётся в
   `SentenceTransformer(device=…)` явным параметром; `LiteEmbedder` под `cuda` исключается
-  с видимой заметкой, а `cuda` без устройства — `EXIT_USAGE`, не тихий CPU. Но **какая
-  модель** по-прежнему выбирается установкой: `backend`/`base_url`/`model_version` не
-  объявлены, и внешний инстанс всё ещё требует `deploy.embed` целиком.
-  **⬜ не сделано (сверено 2026-11-07):** функция на месте — `_resolve_embedder`,
-  `core/cli/wiring.py:2922`, вызов `:2797` — и приоритет по-прежнему «что установлено на
-  хосте». Это и есть открытый пункт 5 §6.
+  с видимой заметкой, а `cuda` без устройства — `EXIT_USAGE`, не тихий CPU. **Какая модель**
+  с 15.11.2026 тоже объявлена (`embed.model_id` + `embed.revision`, O6 плана 26): объявленный
+  `repo@sha` собирается точно, недоступность — `EXIT_USAGE`, а не «первый доступный»; без
+  объявленной модели dense-ветвь не собирается вовсе (`embed_spec: null`, видимая заметка).
+  `backend`/`base_url` остаются необъявленными: внешнего инстанса нет, а модель без инстанса
+  объявляема — она меняет векторы, транспорт нет.
+  **⬜ не сделано (условие — появится инстанс):** удалённый эмбеддер (`RemoteEmbedder`) и
+  маршрут `embed` в шве; это и есть остаток пункта 5 §6.
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
-  ✅ форма на месте (`core/config/deploy.py:677`, `LLMSlotConfig`), ⬜ переиспользована не
-  была: секция `embed` в `DeployConfig` есть (`core/config/deploy.py:789`), но несёт только
-  `device`/`precision` (`EmbedConfig`, `:645`); `backend`/`base_url`/`model_version`
-  отвергаются `extra="forbid"`.
+  ✅ форма на месте (`core/config/deploy.py:677`, `LLMSlotConfig`), частично переиспользована:
+  секция `embed` в `DeployConfig` есть (`core/config/deploy.py:789`) и с O6 несёт
+  `device`/`precision`/`model_id`/`revision` (`EmbedConfig`); `backend`/`base_url`/
+  `model_version` отвергаются `extra="forbid"`.
 
 ### 5.0 Спецификация `deploy.embed` (оформлено; реализация — по появлении инстанса)
 
@@ -396,7 +398,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:303-318`).
+(`core/cli/wiring.py:304-358`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 

@@ -160,7 +160,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
    **разрешения `scheduled`-режимов в `refresh|reuse`** (due решается по часам, поэтому
    входит в материал как решение, а не как намерение); сортировка —
    **7-кортеж** `(product_id, scope_kind, host, path, network_mode, corpus_source, decision)`
-   (`core/pipeline/digests.py:458-471`). `note`, `actor`, `created_at`,
+   (`core/pipeline/digests.py:465-475`). `note`, `actor`, `created_at`,
    `policy_id`, `interval_hours` в материал **не входят** (режим и решение — входят); несовпавшие
    строки — тоже. Отдельного поля для `--refresh-scope` нет: это тот же материал (правило
    «одно поле — один материал», `core/pipeline/digests.py:194-204`).
@@ -212,7 +212,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   `crawl_target` (`core/pipeline/corpus.py:3464`) и `expand_directory`
   (`core/pipeline/corpus.py:3470`), — и до сборки синтетических корней
   (`_synthetic_root_plans`, `core/pipeline/corpus.py:3314`). Гейт на постановке в очередь
-  фронтьера (`core/pipeline/crawl_frontier.py:1532`, `add_seed`;
+  фронтьера (`core/pipeline/crawl_frontier.py:1622`, `add_seed`;
   `core/pipeline/crawl_frontier.py:1595`, `add_revalidate_seed`) недостаточен: он ниже
   feed/sitemap-разворота. Порядок закреплён **AST-тестом**
   (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
@@ -231,7 +231,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `core/pipeline/corpus.py:5349` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
-  (`core/cli/execution_axes.py:206`), паритет `plan`/`run`/`crawl run` по построению; значение
+  (`core/cli/execution_axes.py:207`), паритет `plan`/`run`/`crawl run` по построению; значение
   входит в `crawl_policy_digest` через оси исполнения (7-кортеж решения), отдельного поля нет.
 - ✅ Наблюдаемость: `crawl_network_denied`, `crawl_on_request_not_requested`,
   `crawl_policy_skipped`, `policy_scope` (+ `policy_skips` в `product_end`) и строки в

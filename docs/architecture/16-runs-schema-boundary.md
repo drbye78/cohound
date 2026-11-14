@@ -317,9 +317,13 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
   (`core/config/deploy.py`; `extra="forbid"`, поэтому ключ без модели отвергается — секция
   появилась вместе с полем, как и требовалось). ✅ **As-built:** обе модели существуют
   (`EmbedConfig`, `EmbedRunConfig`); `DeployConfig` теперь несёт
-  `profile`/`edge`/`extractor_zone`/`search`/`crawl`/`llm`/`embed`, и секция несёт **только**
-  оси `device` и `precision` — внешний backend (`backend`/`base_url`/`model_version`) не
-  объявлен и остаётся решением `14` §6 п. 5.
+  `profile`/`edge`/`extractor_zone`/`search`/`crawl`/`llm`/`embed`, и секция несёт оси
+  `device`/`precision`/`model_id`+`revision` — внешний backend (`backend`/`base_url`/
+  `model_version`) не объявлен и остаётся решением `14` §6 п. 5. **O6 (15.11.2026):** модель
+  объявлена, потому что она меняет векторы: `embed_spec = model_id@revision` входит в
+  контракт, пин ревизии — HF **sha** (D3), `model_id` без `revision` — отказ загрузки
+  конфига, отсутствие `model_id` — dense-ветвь не собирается (`embed_spec: null`, видимая
+  заметка wiring), недоступность объявленной модели — `EXIT_USAGE`, а не другой адаптер.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
   `core/domain/models.py:514`), дефолт `None` — по той же причине, что у `pdf_device`
   (`core/domain/models.py:614-620`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
@@ -344,7 +348,10 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
 добавляется `embed_device` рядом с `extractor_stack` (та же природа: устройство как условие
 измерения). «29» — размер **на момент границы**; на 08.11.2026 полей **32**
 (`core/pipeline/digests.py:96`), остальные добавлены осями планов 19–23 (`embed_precision`,
-`crawl_policy_digest` и др.). Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:254`)
+`crawl_policy_digest` и др.); на 15.11.2026 — **33**: `embed_spec` (`model_id@revision`,
+O6) рядом с `embed_precision`, той же природой, что `extractor_stack` при
+`extractor_version`: объявленный вход — стек/веса, наблюдаемая строка `embed_model_id` —
+провенанс. Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:254`)
 из `DeclaredExecutionAxes` — там же, где `extractor_stack`
 (`core/cli/execution_axes.py:687-694`).
 
@@ -658,16 +665,16 @@ per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня о�
   `tests/selfcheck.py:1684-1686` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml` — **✅ синхронизировано:** `pdf_device`
-  (`docs/status-dictionary.yaml:439`), `embed_device`
-  (`docs/status-dictionary.yaml:456`), `embed_precision`
-  (`docs/status-dictionary.yaml:472`), `reuse_kind`
-  (`docs/status-dictionary.yaml:761`), `run_scope`
-  (`docs/status-dictionary.yaml:790`), перечень статусов продукта прогона `run_product_status`
-  (`docs/status-dictionary.yaml:804`). Проверка —
+  (`docs/status-dictionary.yaml:443`), `embed_device`
+  (`docs/status-dictionary.yaml:460`), `embed_precision`
+  (`docs/status-dictionary.yaml:476`), `reuse_kind`
+  (`docs/status-dictionary.yaml:775`), `run_scope`
+  (`docs/status-dictionary.yaml:804`), перечень статусов продукта прогона `run_product_status`
+  (`docs/status-dictionary.yaml:818`). Проверка —
   `core/domain/dictionary.py:80` `assert_dictionary_integrity`, `required`-список
   (`core/domain/dictionary.py:121` `embed_device`,
-  `core/domain/dictionary.py:127` `run_product_status`), `checks`-таблица
-  (`core/domain/dictionary.py:202`, `core/domain/dictionary.py:216`);
+  `core/domain/dictionary.py:130` `run_product_status`), `checks`-таблица
+  (`core/domain/dictionary.py:187`, `core/domain/dictionary.py:219`);
   словарь грузится selfcheck'ом.
 
 ---

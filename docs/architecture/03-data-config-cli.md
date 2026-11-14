@@ -1119,12 +1119,36 @@ crawl:                         # операционная политика HTTP-
     headless: false
     channel: null              # канал браузера (напр. установленный дистрибутив)
     timeout_ms: 30000
+embed:                         # O6: объявленные оси эмбеддера (условия измерения)
+  device: cuda                 # cpu | cuda (auto нет: объявленная ось обязана действовать)
+  precision: fp16              # fp32 | fp16 (исполняется torch.autocast)
+  model_id: BAAI/bge-m3        # HF-repo весов; без него dense-ветвь НЕ собирается
+  revision: 5617a9f6…          # пин ревизии: HF **sha**, не тег (D3, 15.11.2026)
 ```
 
 Профиль `local` игнорирует `edge.*`. Секция `crawl` действует в обоих профилях: она
 переопределяет операционные параметры лёгкого `HttpCrawler` (`user_agent`/`timeout_s`/
 `follow_redirects`); при `None`/отсутствии поля берётся дефолт адаптера — обратная
 совместимость профиля `local` без файла.
+
+**Оси эмбеддера (`embed.*`, O6).** Три объявленных оси: `device`, `precision`,
+`model_id`+`revision`. Модель объявлена потому, что она **меняет векторы**, а значит и
+вердикты: до 15.11.2026 её выбирало окружение (какой extra установлен), и на `cpu` это был
+`potion-128M` (dim 256), а на `cuda` — `bge-m3` (dim 1024) под одним и тем же `run_id`.
+Правила:
+
+- `model_id` без `revision` (и наоборот) — отказ загрузки конфига: пин обязателен
+  (решение владельца 09.11.2026), иначе объявленная ось не описывает веса;
+- **нет `model_id` ⇒ dense-ветвь не собирается**: `embed_spec` в контракте `null`,
+  композиция и `index_manifest` не пишутся, R0 работает лексически, причина видна в
+  журнале wiring. Модель «по факту установленного extra» не подставляется: это и был дефект;
+- `model_id` объявлен ⇒ собирается **точно он**, и недоступность (нет `sentence-transformers`,
+  нет снапшота) — `EXIT_USAGE` с инструкцией, а не тихий фолбэк на другую модель или на `fp32`;
+- сборщик сверяет `embedder.model_id` с объявленным `repo@sha`: расхождение — отказ, а не
+  запись чужого провенанса;
+- env `COHOUND_EMBED_LITE_MODEL`/`_REVISION` действует **только** когда ось не объявлена;
+  при объявленной оси расхождение с env печатается заметкой (объявленный вход сильнее
+  окружения — та же асимметрия, что у оценщика, §7.4).
 
 **Терминальный артефакт и два потолка (P6/P6b).** Класс ответа определяется не «размером», а
 поведением навигации: **страница** продолжает обход (её RAM-потолок —
@@ -1260,7 +1284,7 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `COHOUND_PACKAGES_DIR` / `COHOUND_PASSPORTS_DIR` / `COHOUND_RUNS_DIR` / `COHOUND_INDEX_STORE_DIR` / `COHOUND_CORPUS_RAW_DIR` / `COHOUND_CACHE_DIR` / `COHOUND_EXTRACT_CACHE_DIR` / `COHOUND_EVAL_CACHE_DIR` / `COHOUND_EMBED_CACHE_DIR` / `COHOUND_REPORTS_DIR` / `COHOUND_STATE_DIR` | переопределение отдельного каталога раскладки (§A.1); все 11 полей `HARNESS_FIELDS` | опц. | `paths.yaml`, иначе дефолт модели | `core/config/paths.py`; приоритет CLI > env > `paths.yaml` > дефолт. **Per-field env сильнее `COHOUND_HOME`** — поэтому «увести всё» делается домом, а не одиннадцатью переменными |
 | `COHOUND_LIVE_RUNS_DIR` | каталог, где лежат `runs/{run_id}/` **живых** прогонов — только для проверки на реальном прогоне (`tests/pipeline/test_publishability.py`) | опц. | resolved-раскладка | тест, не `core/`; без значения проверка скипается. Отдельная переменная, потому что набор тестов намеренно не читает операторское окружение (`COHOUND_NO_DOTENV=1`) |
 | `COHOUND_EDGE_STATE_DIR` | каталог durable-состояния edge (DMZ) | опц. | `state_dir` из edge-конфига | `edge/config.py` (`EdgeRuntimeConfig`) |
-| `COHOUND_EMBED_LITE_MODEL` / `COHOUND_EMBED_LITE_REVISION` / `COHOUND_EMBED_LITE_PATH` | модель/пин ревизии (sha/тег)/явный локальный каталог снапшота для `embed-lite` | опц. | `minishlab/potion-multilingual-128M`; ревизия не задана ⇒ `model_id` без `@sha`; путь — HF-кэш | `wiring` (сборка `embed_model2vec`); ревизия входит в `embed_model_id` как `repo@sha` |
+| `COHOUND_EMBED_LITE_MODEL` / `COHOUND_EMBED_LITE_REVISION` / `COHOUND_EMBED_LITE_PATH` | модель/пин ревизии (sha/тег)/явный локальный каталог снапшота для `embed-lite` | опц. | `minishlab/potion-multilingual-128M`; ревизия не задана ⇒ `model_id` без `@sha`; путь — HF-кэш | `wiring` (сборка `embed_model2vec`); ревизия входит в `embed_model_id` как `repo@sha`. **O6:** при объявленной оси `embed.model_id`/`revision` env **не читается** (модель — объявленный вход); расхождение печатается заметкой |
 | `PLAYWRIGHT_DOWNLOAD_HOST` / `PLAYWRIGHT_BROWSERS_PATH` | зеркало CDN браузеров и каталог их установки (закрытый контур) | опц. | CDN Playwright / штатный кэш | сам `playwright` (внешний механизм; код ядра их **не** читает) |
 | `HF_HOME` / `DOCLING_ARTIFACTS_PATH` / `HF_HUB_OFFLINE` | офлайн-веса docling (V4, `05` §7) | опц. | HF-кэш / — | `docling` (внешний механизм) |
 
