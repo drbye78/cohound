@@ -93,7 +93,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 |---|---|
 | `cohound-spec-v2.md` | Regulation v2.1: semantics, invariants I1–I23, architecture. |
 | `docs/status-dictionary.yaml` | Statuses and every enum value. Single source for all `StrEnum`s; schemas mirror it. |
-| `docs/architecture/` | As-built design, plans, ADR registry, measurements index (`README.md`). |
+| `docs/architecture/` | As-built design, plans, ADR registry, document index (`README.md`). |
 | `docs/templates/registries/` | Registry specification templates. |
 | `core/` | The engine. **Category-neutral** (§4, rule 1). |
 | `core/domain/` | Enums, models, invariants, scoring, R-2, anchors, dictionary. Pure Python, no I/O. |
@@ -107,11 +107,11 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `core/edge/` | Composition root Z1/DMZ: seam server, auth, audit, seam schema, crawl scheduler, poller, crawler factory, runtime config, launcher. |
 | `scripts/ci.sh` | Single CI entry point (spec §11.6). `scripts/check_doc_anchors.py` gates `path:line` anchors in `docs/`, `README.md`, `AGENTS.md`. |
 | `tests/selfcheck.py` | Autonomous foundation check (no pytest): dictionary, DDL, invariants, import graph §1, neutrality §1.3. |
-| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `scope_attestation.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes); optional `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
+| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `scope_attestation.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`); optional `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
 | `passports/{product_id}/` | Product passports. |
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
-| `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — every number an architecture document cites lives there) and incident traces. Per §1.2: the artifact outranks the document. |
+| `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — a published number lives there with its date and instrument) and incident traces. Per §1.2: the artifact outranks the document, and a number cited in `docs/architecture/` **without** an entry here is a hypothesis, not a proof. Measured 2026-11-15: **34** lines across `docs/architecture/*.md` cite a "замер DD.MM" with no report reference — reading one of them means re-measuring or treating it as dated hearsay. |
 | `scripts/measure_*.py`, `scripts/conformance_*.py` | **Named instruments** of measurements and censuses (A3): a claim is out of scope only after a census with one of these, and a re-measurement cites the script + date. |
 | `.env.example` | Environment variables and external keys (LLM, scout, search adapters), no secrets. |
 
@@ -184,7 +184,7 @@ declared but **not wired**: the extractor always runs in the core (D-9). See
 | | Rule |
 |---|---|
 | **I1** | evaluated ✅/⚠️ → at least one evidence item. |
-| **I2/I2b** | evaluated ❌ → absence-evidence. `parameter_reference`/`distribution_absence` need `source_scope: exhaustive` **and** `scope_attested_by`. `registry_absence` needs `exhaustive` recorded (checked by `_has_exhaustive_scope`) but no human attestation — a registry is an authoritative enumeration. `explicit` needs no `source_scope` (but see I2c). |
+| **I2/I2b** | evaluated ❌ → absence-evidence. `parameter_reference`/`distribution_absence` are provable only as `bounded`, which requires `scope_acceptance` (a human accepting the risk, `scope_attestation.yaml` per product) **and** a declared package procedure (`check_absence_attestation`); without either the cell is `❓` (`not_stated`), not `❌`. `registry_absence` derives its class from the declared rule (`EvidenceScope.for_registry_absence` → `denial_strength=authoritative`, `enumerated=True`) and needs no attestation — a registry is an authoritative enumeration. `explicit` needs no scope (but see I2c). The pre-`9ec346e` scalar `source_scope: exhaustive` and the checker `_has_exhaustive_scope` no longer exist (legacy rows are still readable). |
 | **I2d** | `❌` → **датированный носитель**, и дата публикуется: `explicit`/`authoritative` — запись наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`; `adopted` допускается, дата не обязана быть в этом цикле); `bounded` — снятие **каждого** объявленного корня `complete=1` с датой и совпадающим `policy_digest` (отпечаток **пространства**: объявленные режимы + `crawl_config_digest`, без решения по часам; `adopted` исчерпание **не** удостоверяет); `registry_absence` — как I2b. `absence_as_of = min(дат носителей)` → `cells.absence_as_of` + `cell_freshness.csv`. Носителя нет → `❓` + токен `absence_undated` (`evidence_scope.reason` и `validation_notes`), протокол отсутствия не публикуется. Перенесённый `❌` проходит то же правило. |
 | **I3** | strict `❓` → **full** exhaustion protocol (`corpus` + `serp` + `registry` + `inheritance`) **or** `reviewed_by ≠ null`. An incomplete protocol is a report anomaly, not a status change. The protocol is written from **observed** facts and names only circuits that actually ran — a run without the SERP circuit keeps `❓` as an anomaly; that is a correct signal, not a defect to silence. |
 | **I4** | `failed` → `status = null`, never a status. |
@@ -279,7 +279,7 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
 - The root host is always in scope. A subdomain is in scope **only if declared** (product
   seed root, or a `domain_profiles.yaml` key). `www.` is equivalent to the bare host on both
   sides.
-- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1203`). This is
+- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1288`). This is
   **different** semantics from `fetch_plan._host_matches`: there a subdomain **inherits
   profile axes** (`fetch`/`extract`/limits), which is correct and needed. Inheriting axes ≠
   the right to spend another seed root's budget.
@@ -343,9 +343,10 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   (`make_profile_gate`, `core/pipeline/profile_attestation.py:313`, wired through
   `_profile_gate_resolver` in `core/cli/context.py`) and **has a producer — a human**:
   `hound package profile attest --gate G1|G2 --actor …` (`--dry-run` writes nothing and says
-  so). A run **never writes it**, only reads it. Measured 2026-10-30: **zero rows** in every
-  real `state.db` — the mechanism exists, nothing is signed. Until rows exist the only working
-  path is the per-run `gate_decisions` row, and it takes precedence.
+  so). A run **never writes it**, only reads it. Measured 2026-10-30 and re-checked
+  2026-11-15: **zero rows** in every real `state.db` (three files, incl. the stand) — the
+  mechanism exists, nothing is signed. Until rows exist the only working path is the per-run
+  `gate_decisions` row, and it takes precedence.
 - **G3/G4 are integration points.** coHound does not decide review or publication: on a block
   it writes `runs/{run_id}/gates/{gate}-request.json` (deterministic subject +
   `subject_digest`), and the decision arrives from outside and is only recorded.
@@ -356,8 +357,9 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   with `skip_reason=gate_delegated_external`, a waiver row in `gate_decisions`, and
   `gate_waivers` in the run manifest (the manifest is a **row in `cohound.db`**;
   `report` exports `run_manifest.yaml` separately). An invisible waiver is forbidden.
-- `hound gate` requires `--subject-digest` (defaulted from the request file); `--source
-  external` also requires `--external-ref` and `--notes`.
+- `hound gate` needs a subject digest: `--subject-digest`, else the one in
+  `runs/{run_id}/gates/{gate}-request.json`; with neither it fails `EXIT_USAGE`
+  (`gate_subject`). `--source external` also requires `--external-ref` and `--notes`.
 - **Gate policy is process, not a measurement condition**: it is not in
   `EXECUTION_CONTRACT_FIELDS` (otherwise changing the procedure would change `run_id` and
   break the cross-cycle diff).
@@ -638,6 +640,13 @@ queued" from "lost"). "Why does this product have zero sources" is answered by
 `results[].notes` in `run --json`, along with `product_start`/`product_end`/`product_skipped`;
 for a live crawl use `./hound.py crawl status --per-url`.
 
+Blocked bytes the crawler was not allowed to take (robots, auth) enter the corpus as a
+**declared** input, never by editing `corpus_raw`: `./hound.py artifacts list …` shows the
+refusals, `./hound.py artifacts fetch --mask '*.pdf' --actor {who} [--reason robots_disallow]
+[--dry-run]` downloads and appends to `sources/manual_artifacts.yaml`. That file's
+`manual_artifacts_digest` is a contract field, so fetching a file is a **new `run_id`**
+(`13-manual-artifacts.md` §3.5).
+
 ### 11.2 Development and CI
 
 ```bash
@@ -680,10 +689,12 @@ extra), `markdown-it-py`+`mdit-py-plugins` (чанкер, `18`). `numpy` жив�
 uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract --extra extract-pdf
 #   + --extra extract-archives for 7z/rar, --extra embed / embed-lite for embeddings,
 #     --extra safety (prompt-injection guards), --extra ops (retry/structured logs).
-# A REAL RUN also needs an embedder extra (embed or embed-lite): without one the
-# composition does not build and R0 refuses the run (measured 05.11.2026; the README
-# quick-start commands already include it).
-./hound.py doctor      # groups: core/retrieval/crawl/extract/extract-pdf/extract-archives/safety/ops/embed/embed-lite/ann/pdf-measure/dev + env/config/layout/dirs/cli
+# A REAL RUN also needs an embedder extra (embed or embed-lite): without one the dense
+# branch is not built — embedder=None, no index_manifest/index_store, empty embed_model_id,
+# R0 runs lexically with a visible wiring notice. The run is NOT refused (wiring.py:3035,
+# evaluate.py:1150); only a declared embed.device=cuda / embed.precision=fp16 without the
+# torch path is (WiringError). The README quick-start already includes the extra.
+./hound.py doctor      # groups: runtime + deps:core/retrieval/crawl/extract/extract-pdf/extract-archives/safety/ops/embed/embed-lite/ann/pdf-measure/dev + env/config/layout/dirs/cli/foundation
 ```
 
 `uv lock --check` passes; if you change dependencies, update the lock in the same commit or
@@ -703,11 +714,12 @@ the DMZ seam in `07-deployment-topology.md`; seam schemas in `contracts/seam/`. 
 
 ## 12. Tooling
 
-Host utilities, chosen by task rather than by habit. Measured 2026-10-31.
+Host utilities, chosen by task rather than by habit. Behaviour measured 2026-10-31; versions
+re-checked 2026-11-15 (`rg` 15.2.0, `py-spy` 0.4.3, `bat` 0.26.1 — the host upgrades them).
 
 | Task | Tool | Invocation |
 |---|---|---|
-| Exact text / literal / non-code (yaml, sql, md) | `rg` 13.0.0 | `rg -n -t py 'pattern' core/` · `rg -F 'literal'` · `rg -e 'a|b'` |
+| Exact text / literal / non-code (yaml, sql, md) | `rg` 15.2.0 | `rg -n -t py 'pattern' core/` · `rg -F 'literal'` · `rg -e 'a|b'` |
 | Files by extension/name/content | `fdfind` 8.6.0 (`fd` is a symlink) | `fdfind -e py -t f root_drain core/` · `fdfind -x rg -n 'pat' {}` |
 | Code **structure** (callers, decorators, rewrites) | `ast-grep` 0.45.3 | `ast-grep run -p '$OBJ.insert($$$)' -l python core/` · `ast-grep outline -l python file.py` |
 | Literal / regex substitution with a reviewable diff | `sd` 1.0.0 | `sd -p -F 'old' 'new' $(rg -l -F 'old' -t py core/)` |
@@ -715,11 +727,11 @@ Host utilities, chosen by task rather than by habit. Measured 2026-10-31.
 | "Where is X implemented" without knowing the name | `zg` 0.2.2 (`zvec-grep`) | `zg status` · `zg query "where is crawl scope decided"` · `zg query --fts host_in_scope` |
 | YAML / XML | `yq` 4.54.1 | `yq '.crawl' config/deploy.yaml` · `yq -o json …` |
 | SQLite (runs, state) | `litecli` 1.17.1 | `litecli db.sqlite -e "select …"` |
-| Profiling a live process | `py-spy` 0.4.2 | `py-spy record -d 3 -r 50 -f speedscope -o /tmp/p.json -- .venv/bin/python …` |
+| Profiling a live process | `py-spy` 0.4.3 | `py-spy record -d 3 -r 50 -f speedscope -o /tmp/p.json -- .venv/bin/python …` |
 | Structural diff (did the move change behaviour?) | `difftastic` 0.71.0 | `difft --color never --display inline /tmp/old new` |
 | Symbols / usages / diff effects (structure, not text) | `brokk` (bifrost MCP; measured 2026-11-14) | `scan_usages_by_location` (target = the declaration **token**) · `search_symbols(patterns=[…])` · `get_summaries` / `get_symbol_sources` (file outline without reading 5 000-line monoliths) · `analyze_diff` / `cyclomatic_complexity` (delta base→worktree) |
 | Readable unified diff (presentation only) | `delta` 0.20.1 | `git diff \| delta --paging=never` |
-| Reading files with syntax highlighting | `bat` 0.22.1 | `bat -p --line-range 100:160 file.py` |
+| Reading files with syntax highlighting | `bat` 0.26.1 | `bat -p --line-range 100:160 file.py` |
 
 Traps that cost time:
 
@@ -747,26 +759,40 @@ Traps that cost time:
 - `pgrep -f 'core.cli run'` matches **its own** command line — a false ALIVE. Use
   `pgrep -f '[c]ore.cli run'`. Likewise `pkill -f "python -m pytest"` kills the wrapping shell
   command too.
-- `zg` answers only what it has indexed: `zg status` first (measured 2026-10-31 on this tree —
-  89 % coverage, 554/625 files, already 62 files behind). It is a **semantic entry point**
-  ("where is X implemented" when the name is unknown), not a replacement for `rg` (exact
-  text) or `ast-grep` (structure). The index is derived and host-specific
+- `zg` answers only what it has indexed: `zg status` first. Measured 2026-10-31 on this tree:
+  89 % coverage, 554/625 files; **2026-11-15: 38 % (310/809), 187 added / 312 modified /
+  3 deleted** — after four days of edits the index is mostly stale, so a "not found" from
+  `zg` means "not indexed", not "not present" (`zg index` to refresh). It is a **semantic
+  entry point** ("where is X implemented" when the name is unknown), not a replacement for
+  `rg` (exact text) or `ast-grep` (structure). The index is derived and host-specific
   (`.zvec-grep/index.zvec`, gitignored); the embedding model is local
   (`local/potion-code-16m-v2`), so no external key is involved.
 - `brokk` answers are verified-or-honest: it either returns exact results or names its
   incompleteness (`forward_reference_incomplete`, `unresolvable_import_boundary`) — verified
-  against `rg` on 2026-11-14. But: `usage_graph`/`missing_tests` exhausted the 60 s MCP budget
-  (3/3 and 2/2 attempts, even after `refresh`; `timeout.execution` raised to 180 s on
-  15.11 — not retested yet); "who calls X" is `scan_usages_by_location`, and its target must
-  be the **declaration token** (any other line/column → `invalid_location` with a recovery
-  hint). `rename_symbol` and rewrite tools **write files** and know nothing about parallel
-  lanes — do not run them over the shared tree (same rule as `ast-grep` rewrite mode).
-- Heredocs are **not analyzable** by OpenCode's portable shell scanner: the command fails
-  with `Portable shell scanner cannot analyze command: heredoc` (measured 2026-11-15,
-  opencode 2.2.7). Write files with the `write`/`edit` tools, run scripts as
-  `python3 -c '<one-liner>'` or a temp `.py` file — heredocs are never needed in agent shell
-  commands. This constrains agent commands, not the repository: heredocs in `scripts/*.sh`
-  are fine.
+  against `rg` on 2026-11-14. Re-measured 2026-11-15 (`timeout.execution: 180000` in place):
+  - **`usage_graph` is not dead, but scope decides.** With `paths` naming one file it answers
+    (`core/pipeline/gates.py`, depth 1: **52 edges / 22 nodes in 213 ms**); the **whole
+    workspace** (`paths` omitted) still dies — `usage_graph exhausted its 60s request budget`.
+    That budget is the **server's**, not the client's: raising `timeout.execution` cannot help,
+    so "3/3 attempts failed" was a scoping defect as much as a budget one. The first call of a
+    session is also cold and can hit a **4.5 s** internal budget (measured: `gates.py` failed
+    at 4 638 ms, then answered in 213 ms) — a retry after `refresh` is the cheap fix.
+  - `missing_tests` answers too: **49.6 s**, `complete`, 0 candidates on a docs-only diff
+    (nothing to analyse — so this is a proof it runs, not that it scales to a code diff).
+  - `blast_radius` (file-level test reachability from changed files) is **123 ms** and needs no
+    warm-up; use it instead of `usage_graph` when the question is "which tests are in reach".
+  - "Who calls X" is still `scan_usages_by_location`, and its target must be the **declaration
+    token** (any other line/column → `invalid_location` with a recovery hint). Measured 15.11:
+    `host_in_scope` → `no_external_usages` in 24 s, which matches the code (only
+    `scope_admission` inside the same class calls it).
+  - `rename_symbol` and rewrite tools **write files** and know nothing about parallel lanes —
+    do not run them over the shared tree (same rule as `ast-grep` rewrite mode).
+- Heredocs **work** in this shell tool: `cat <<'EOF'`, `bash -s <<'EOF'` and
+  `python - <<'PY'` all ran (measured 2026-11-15, opencode 2.2.7, including nested `$()`,
+  single and double quotes). An earlier note here claimed the opposite ("Portable shell
+  scanner cannot analyze command: heredoc") — it is **not reproducible** on this host and
+  was removed rather than kept as a superstition. Heredocs are fine for one-off scripts;
+  files you intend to keep belong in `write`/`edit`.
 - A code-graph MCP server is not part of the toolchain: its call-graph and dead-code answers
   were measured as wrong on this repo, while its complexity ranking and raw cypher were fine.
   It was removed from the opencode config on 2026-11-15; its niche is taken by `brokk` (above),
