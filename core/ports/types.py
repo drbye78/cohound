@@ -171,6 +171,15 @@ OCR_PROBE_VALUES: frozenset[str] = frozenset(
     {OCR_PROBE_OK, OCR_PROBE_UNAVAILABLE, OCR_PROBE_UNSUPPORTED, OCR_PROBE_UNKNOWN}
 )
 
+#: Причина отказа :class:`ExtractedDoc`: документ **добыт**, но текста в нём нет.
+#:
+#: Объявлена рядом с носителем, потому что структурированного признака «пустой артефакт»
+#: у ``ExtractedDoc`` нет: любой отказ адаптера возвращает пустой ``text`` и заполненный
+#: ``error``, поэтому отличить «нечего разбирать» от «парсер сломался» можно только по
+#: причине. Классификация (:attr:`core.domain.FailureKind.EMPTY_DOCUMENT`) сравнивает
+#: причину именно с этой константой — вторая копия строки разошлась бы с первой молча.
+EMPTY_TEXT_REASON = "текст пуст"
+
 
 @dataclass(frozen=True)
 class ExtractedDoc:

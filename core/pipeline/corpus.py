@@ -230,6 +230,7 @@ from core.pipeline.corpus_commit import PhaseLifecycle
 # (``__all__``; тесты и ``selfcheck`` адресуют его по ``corpus`` — ``noqa: F401``).
 from core.pipeline.corpus_coverage import (  # noqa: F401
     HOST_OUT_OF_SHARD_REASON,
+    NO_CRAWL_IN_EXECUTION,
     ONLY_FAILED_REPAIR_REASON,
     ZERO_SOURCE_ALL_SEEDS_REJECTED,
     ZERO_SOURCE_NO_SEEDS,
@@ -276,6 +277,7 @@ from core.pipeline.corpus_ingest import persist_docs as _persist_docs
 from core.pipeline.corpus_persist import (
     emit_product,
     emit_progress,
+    execution_has_no_crawl,
     persist_manual_audit,
     save_run_product,
 )
@@ -2320,6 +2322,13 @@ def _build_corpus(
     #: измеренные числа уже закрытых — второй расчёт той же величины разошёлся бы с первым.
     run_products_written: set[str] = set()
 
+    #: Продукты, чью измеренную строку ``run_product``/``corpus_coverage`` это исполнение
+    #: не переписывает: объявленных URL нет, документов и конвертированных строк очередь
+    #: этот проход не дал, а корпус прогона уже есть (:func:`execution_has_no_crawl`).
+    #: Причина не в «лени»: ``run_id`` исполняется несколькими проходами (краул → его
+    #: повтор → ``extract consume``); проход без работы затирал нулями и ``no_seeds``.
+    preserved_products: set[str] = set()
+
     package = _resolve_package_id(plan, package_id)
     snapshot = _resolve_snapshot_date(plan, snapshot_date)
     resolved_chunker_version = (
@@ -3880,16 +3889,31 @@ def _build_corpus(
         )
         #: Живая граница продукта: до первого дренажа (продукт может идти часами).
         emit_product("start", ctx.product_id, on_product=on_product)
-        save_run_product(
+        # Продукт, которого это исполнение не обходит, но чей корпус прогона уже
+        # измерен: строку ``running`` не пишем. ``running`` с ``docs_total=0`` — это и
+        # есть затирание измеренного числа нулём (16 §3.2: строка несёт числа корпуса,
+        # а не объём прохода); «продукт начат» для него заменит строка прохода в отчёте
+        # (``product_no_crawl``), а не статус, опровергаемый тем же файлом БД.
+        if execution_has_no_crawl(
             ctx.product_id,
             store=store,
-            run_id=run_id,
-            run_scope=run_scope,
-            product_modes=product_modes,
-            run_products_written=run_products_written,
-            errors=errors,
-            status=RunProductStatus.RUNNING,
-        )
+            declared_urls=url_map.get(ctx.product_id) or (),
+            # До Pass A и до конверсии по продукту ещё ничего не сделано — «этот проход»
+            # на границе начала равен нулю.
+            produced_docs=0,
+        ):
+            preserved_products.add(ctx.product_id)
+        else:
+            save_run_product(
+                ctx.product_id,
+                store=store,
+                run_id=run_id,
+                run_scope=run_scope,
+                product_modes=product_modes,
+                run_products_written=run_products_written,
+                errors=errors,
+                status=RunProductStatus.RUNNING,
+            )
         # 09 §6.3/план 19 §P3: корпус без сети — работа **границы продукта**, а не
         # предпрохода. Проход наполняет ``ingest.docs`` и персистит документы: держать
         # его результат до закрытия продукта — это и есть продуктовый носитель, а не
@@ -4363,6 +4387,28 @@ def _build_corpus(
             if item.status in (CrawlItemStatus.FAILED, CrawlItemStatus.CANCELLED)
         )
         product_reason: str | None = None
+        #: Этот проход по продукту **не работал**, а корпус прогона уже измерен раньше
+        #: (:func:`execution_has_no_crawl`). Тогда хвост не пишет ни строку продукта, ни
+        #: покрытие: оба носителя описывают корпус прогона (16 §3.2, Ф0), а не объём
+        #: исполнения. Нули и ``no_seeds`` здесь — утверждение, опровергаемое тем же
+        #: файлом БД (14.11.2026: 21 015 чанков у продукта с ``no_seeds``).
+        no_crawl_here = execution_has_no_crawl(
+            product_id,
+            store=store,
+            declared_urls=url_map.get(product_id) or (),
+            # Документы этого прохода: Pass A + конверсия очереди уже прошли.
+            produced_docs=len(ingest.docs),
+            # Строки очереди, конвертированные **этим** проходом: конверсия — работа
+            # продукта даже там, где краула нет вовсе (``consume_only``).
+            converted_rows=(
+                0 if conversion is None else conversion.done + conversion.failed
+            ),
+        )
+        if no_crawl_here:
+            preserved_products.add(product_id)
+            product_events.append(
+                {"event": "product_no_crawl", "product_id": product_id}
+            )
         if no_network:
             # 09 §6.3/план 19 §P3: прогон **не наблюдал ничего** — ни одного сетевого
             # вызова. Это не ``no_seeds`` (seed'ы есть) и не «продукт пуст» (документы
@@ -4416,6 +4462,9 @@ def _build_corpus(
             session is not None
             and not product_items
             and not manual_resolved
+            # Проход без работы по продукту с уже измеренным корпусом — не zero-source:
+            # корпус есть, и объявлять его отсутствие запрещено (см. ``no_crawl_here``).
+            and not no_crawl_here
             # План 19 §P2: пустой сеанс из-за политики — не zero-source. Здесь
             # ``BLOCKED`` означал бы «измерение не состоялось», а политический пропуск —
             # решение с известной причиной: продукт остаётся на карте (I4), покрытие
@@ -4867,7 +4916,7 @@ def _build_corpus(
         # создаётся только в ветке «``store`` + ``run_id`` известны» (см. создание
         # ``session`` выше), и покрытие адресуется парой ``(run_id, product_id)``.
         # mypy не переносит это сужение через присваивание, поэтому оно названо здесь.
-        if session is not None and run_id is not None:
+        if session is not None and run_id is not None and not no_crawl_here:
             try:
                 written_coverage = _persist_corpus_coverage(
                     store,
@@ -5032,32 +5081,39 @@ def _build_corpus(
         # :func:`_final_product_status`. ``cells_total``/``cells_pending`` остаются нулями:
         # на границе ``corpus`` ячеек ещё нет (их считает Ш6), и переписывать колонку из
         # другой фазы нельзя — она означает «на границе corpus столько».
+        #
+        # Строка **не пишется**, если проход продукт не обходил, а корпус прогона уже
+        # измерен (``no_crawl_here``): числа строки описывают корпус, а не объём работы
+        # исполнения, и нули поверх измеренного — та же ложь, что ``no_seeds`` при
+        # непустом корпусе. Отсутствие строки читатель отличает от «ноль документов» по
+        # ``updated_at`` и по строке прохода в ``results[].notes``.
         _product_counters = doc_counters.get(product_id) or {}
         _docs_reused = int(_product_counters.get("reused", 0))
-        save_run_product(
-            product_id,
-            store=store,
-            run_id=run_id,
-            run_scope=run_scope,
-            product_modes=product_modes,
-            run_products_written=run_products_written,
-            errors=errors,
-            status=_final_product_status(
-                zero_source_reason=product_reason,
-                physical_ok=physical_ok,
-                coverage=product_coverage,
-            ),
-            coverage_complete=(
-                None if product_coverage is None else product_coverage.complete
-            ),
-            docs_total=product_docs_total,
-            # «Новое» = всё, что не переиспользовано: члены контейнеров и ручные
-            # артефакты проходят экстракцию в этом прогоне, и отдельного счётчика
-            # «reused» у них нет (``count_doc`` вызывается только для страниц).
-            docs_new=max(0, product_docs_total - _docs_reused),
-            docs_reused=_docs_reused,
-            error_kind=product_reason,
-        )
+        if not no_crawl_here:
+            save_run_product(
+                product_id,
+                store=store,
+                run_id=run_id,
+                run_scope=run_scope,
+                product_modes=product_modes,
+                run_products_written=run_products_written,
+                errors=errors,
+                status=_final_product_status(
+                    zero_source_reason=product_reason,
+                    physical_ok=physical_ok,
+                    coverage=product_coverage,
+                ),
+                coverage_complete=(
+                    None if product_coverage is None else product_coverage.complete
+                ),
+                docs_total=product_docs_total,
+                # «Новое» = всё, что не переиспользовано: члены контейнеров и ручные
+                # артефакты проходят экстракцию в этом прогоне, и отдельного счётчика
+                # «reused» у них нет (``count_doc`` вызывается только для страниц).
+                docs_new=max(0, product_docs_total - _docs_reused),
+                docs_reused=_docs_reused,
+                error_kind=product_reason,
+            )
 
         # Retention-провенанс не зависит от индексной сборки и уже персистенчен
         # инкрементально: единственная точка ``ingest.docs.append`` — ``_finish_one``,
@@ -5214,6 +5270,23 @@ def _build_corpus(
     # композиция) ниже на терминальный статус уже не влияет.
     # F6: конверсия чужой очереди сеанс не закрывает (см. границу продукта).
 
+    # Продукты, закрытые циклом без работы, уже названы в ``preserved_products`` на своей
+    # границе; здесь добавляются те, что в цикл вообще не входили (``--only-product``/
+    # ``--only-failed`` сузили ``urls``): у них границы не было, а корпус прогона уже
+    # измерен. Считается **до** записи покрытия: та же карта закрывает обе таблицы —
+    # иначе покрытие обнулилось бы там, где строка продукта сохранилась.
+    for pid in sorted(set(declared) | set(products)):
+        if pid in run_products_written or pid in preserved_products:
+            continue
+        if execution_has_no_crawl(
+            pid,
+            store=store,
+            declared_urls=url_map.get(pid) or (),
+            produced_docs=0,
+        ):
+            preserved_products.add(pid)
+            product_events.append({"event": "product_no_crawl", "product_id": pid})
+
     # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
     # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
     # после финализации, чтобы провенанс/усечение уже были зафиксированы. Это факт о
@@ -5263,6 +5336,9 @@ def _build_corpus(
                 declared_space_digest=(
                     None if crawl_policy is None else crawl_policy.space_digest
                 ),
+                # Измеренные строки продуктов, которых это исполнение не обходило, не
+                # переписываются нулями (см. ``preserved_products``).
+                skip_products=preserved_products,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(
@@ -5278,6 +5354,12 @@ def _build_corpus(
             # начав продукт; ``failed`` был бы утверждением о сбое, которого не было).
             for pid in sorted(set(declared) | set(products)):
                 if pid in run_products_written:
+                    continue
+                # Продукт, которого это исполнение не обходило, а корпус прогона уже
+                # измерен: строку не пишем — ``pending``/``blocked`` с нулями затёрли бы
+                # измеренные числа (``preserved_products``). Факт прохода назван строкой
+                # ``product_no_crawl`` в ``results[].notes``.
+                if pid in preserved_products:
                     continue
                 # Причина zero-source считается циклом только для вошедших в него
                 # продуктов; здесь её отсутствие у объявленного продукта означает ровно

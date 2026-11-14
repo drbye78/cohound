@@ -236,9 +236,11 @@ def derive_corpus_coverage(
     **Блокирующий сбой** — любой ``FAILED`` элемент с ``error_kind`` из
     :data:`core.domain.enums.BLOCKING_FAILURE_KINDS` (``robots_disallow``,
     ``parser_failed``, ``extraction_timeout``, ``attempts_exhausted``,
-    ``dlp_blocked``, ``quarantined``): часть материала продукта осталась ненаблюдённой,
-    и ``❌`` на таком корпусе не является доказательством отсутствия. Причина видна в
-    ``blocked``/``partial_blocks`` и в производном :attr:`CorpusCoverage.blocking_failures`.
+    ``dlp_blocked``, ``quarantined``, ``empty_document``): часть материала продукта
+    осталась ненаблюдённой, и ``❌`` на таком корпусе не является доказательством
+    отсутствия. Причина видна в ``blocked``/``partial_blocks`` и в производном
+    :attr:`CorpusCoverage.blocking_failures`. ``empty_document`` — документ добыт, но
+    текста в нём нет: класс остаётся видимым (``blocked``), а не исчезает из покрытия.
 
     Явно **не** блокируют ``complete``:
 
@@ -409,6 +411,19 @@ HOST_OUT_OF_SHARD_REASON = "host_out_of_shard"
 собран», и непокрытый host нельзя выдавать за ``exhaustive`` (I2b/I2c: ``❌`` из
 неполного корпуса недоказуем). Значение то же, что ``Frontier.truncated_reason`` и
 машинный токен провенанса сеанса, — один словарь на причину, а не три написания."""
+NO_CRAWL_IN_EXECUTION = "no_crawl_in_execution"
+"""Это исполнение не обходило продукт, и его корпус прогона уже измерен раньше.
+
+Машинный токен **операционного** канала (``product_events`` → ``results[].notes``):
+строка ``run_product``/``corpus_coverage`` в этом случае **не пишется** — измеренные
+числа и полноту сохраняет предыдущий проход (краул), а не конверсия очереди
+(``hound extract consume``), у которой по продукту нет ни URL, ни элементов сеанса.
+Смысл токена ровно один и отрицательный: «здесь не смотрели», а не «корпуса нет».
+Поэтому он никогда не попадает в ``error_kind`` и не выдаётся за ``no_seeds``:
+``no_seeds`` — утверждение о корпусе, а этот токен — о проходе (измерено 14.11.2026:
+``no_seeds`` на продукте с 21 015 чанками в том же файле БД). ``reason`` покрытия —
+наблюдательное поле, а не перечисление ``docs/status-dictionary.yaml`` (см. выше),
+поэтому словарь статусов не расширяется."""
 
 
 def _product_notes(events: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -433,7 +448,19 @@ def _product_notes(events: Sequence[Mapping[str, Any]]) -> list[str]:
     notes: list[str] = []
     for event in events:
         kind = event.get("event")
-        if kind == "product_skipped":
+        if kind == "product_no_crawl":
+            # Операционный след прохода, который продукт не обходил. Строки
+            # ``run_product``/``corpus_coverage`` в этом случае не пишутся (измеренные
+            # числа остаются за прежним обходом), поэтому единственное место, где факт
+            # виден оператору, — эта строка. Она называет и то, что **не** произошло:
+            # ``no_seeds`` здесь был бы утверждением о корпусе, а не о проходе.
+            notes.append(
+                f"corpus: продукт {event.get('product_id')} не обходился в этом "
+                f"исполнении ({NO_CRAWL_IN_EXECUTION}): объявленных URL нет, элементов "
+                "сеанса нет, документов этот проход не добыл; корпус прогона по продукту "
+                "уже есть — измеренная строка продукта сохранена, no_seeds не заявляется"
+            )
+        elif kind == "product_skipped":
             notes.append(
                 f"corpus: продукт {event.get('product_id')} пропущен — нет записи в "
                 "urls (фильтр --only-product/--only-failed или пустой seed-набор)"
@@ -542,6 +569,7 @@ def _persist_corpus_coverage(
     declared_roots: Mapping[str, Iterable[str]] | None = None,
     captures: Mapping[str, Iterable[CaptureRow]] | None = None,
     declared_space_digest: str | None = None,
+    skip_products: Iterable[str] | None = None,
 ) -> dict[str, CorpusCoverage]:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
 
@@ -605,8 +633,17 @@ def _persist_corpus_coverage(
         писателю ``run_product`` (16 §3.2): ``coverage_complete`` — та же величина, что
         легла в ``corpus_coverage``, а не второй её расчёт (два носителя одной величины
         разошлись бы). Вызывающий, которому покрытие не нужно, возврат игнорирует.
+
+    ``skip_products`` — продукты, чью измеренную строку это исполнение переписывать не
+    вправе (:func:`core.pipeline.corpus_persist.execution_has_no_crawl`): обхода по ним
+    не было, а корпус прогона уже есть. Для них строка **не пишется вовсе** — прежняя
+    сохраняется целиком, вместе с ``expected``/``observed``/``truncated``. Запись
+    ``expected=0, observed=0, truncated=1`` вместо неё была бы не «нулём», а ложью о
+    корпусе (измерено 14.11.2026: ``no_seeds`` у продукта с 21 015 чанками). Пустое
+    множество — поведение прежнее.
     """
     written: dict[str, CorpusCoverage] = {}
+    preserved = {str(product_id) for product_id in (skip_products or ())}
     by_product: dict[str, list[CrawlSessionItem]] = {}
     for item in store.iter_crawl_session_items(session_id):
         by_product.setdefault(item.product_id, []).append(item)
@@ -617,6 +654,11 @@ def _persist_corpus_coverage(
     #: Продукты, которые этот прогон по построению не наблюдал целиком (ремонт провалов).
     scope_incomplete = dict(incomplete_reasons or {})
     for product_id in sorted(planned | set(by_product)):
+        if product_id in preserved:
+            # Измеренная строка продукта остаётся как есть: этот проход по продукту
+            # ничего не обошёл (см. ``skip_products``). Возврат её не содержит — и
+            # вызывающий не примет «нет строки» за «покрытие посчитано».
+            continue
         items = by_product.get(product_id, [])
         # Полнота — **один** путь для обоих случаев: снятие корня удостоверяет корпус и
         # когда сеанс пуст (проход без сети), и когда он полон. Второй предикат для

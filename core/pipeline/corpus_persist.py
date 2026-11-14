@@ -267,6 +267,54 @@ def find_doc_version(
         return None
 
 
+#: Причины, по которым версия документа **не** переиспользуется. Машинные токены:
+#: 304-фолбэк публикует их агрегированно (одна строка с числом URL на причину), поэтому
+#: строки стабильны и не зависят от текста исключения. Один источник классификации —
+#: :func:`reuse_plan_with_reason`; вызывающий не выводит причину из текста ``errors``.
+REUSE_MISS_NO_DOC_VERSION = "no_doc_version"
+REUSE_MISS_VERSION_NOT_ACTIVE = "version_not_active"
+REUSE_MISS_CHUNK_SET_REJECTED = "chunk_set_rejected"
+
+
+def reuse_plan_with_reason(
+    pid: str,
+    url: str,
+    doc_version: DocumentVersionRow | None,
+    *,
+    state: ProductStatePort | None,
+    errors: list[str],
+    chunker_version: str,
+) -> tuple[DocReuse | None, str | None]:
+    """То же, что :func:`reuse_plan`, но называет **причину** отказа машинным токеном.
+
+    Различение идёт по фактическому состоянию (нет строки версии / версия не ``active`` /
+    отвергнут chunk-set), а не по тексту ошибки: текст ``load_reused_chunks`` описывает
+    *что* не сошлось, а вызывающему для счётчика нужен класс. Второй источник правды здесь
+    недопустим — классификация и решение об отказе обязаны быть одной функцией.
+
+    :returns: ``(reuse, None)`` при успехе; ``(None, REUSE_MISS_*)`` при отказе.
+    """
+    if doc_version is None:
+        # Строки версии нет вовсе: прежнее наблюдение не дало версии документа
+        # (извлечение упало/не дало текста) либо URL её никогда не имел.
+        return None, REUSE_MISS_NO_DOC_VERSION
+    if state is None:
+        # Durable-субстрата нет — переиспользовать нечего, и это не «версия не active».
+        return None, REUSE_MISS_NO_DOC_VERSION
+    if doc_version.status != _DOC_ACTIVE:
+        return None, REUSE_MISS_VERSION_NOT_ACTIVE
+    chunks = load_reused_chunks(
+        state,
+        doc_version,
+        chunker_version=chunker_version,
+        where=f"{pid}/{url}",
+        errors=errors,
+    )
+    if chunks is None:
+        return None, REUSE_MISS_CHUNK_SET_REJECTED
+    return DocReuse(doc_version=doc_version, chunks=chunks), None
+
+
 def reuse_plan(
     pid: str,
     url: str,
@@ -277,20 +325,15 @@ def reuse_plan(
     chunker_version: str,
 ) -> DocReuse | None:
     """Проверенный chunk-set версии документа либо ``None`` (не переиспользуем)."""
-    if state is None or doc_version is None:
-        return None
-    if doc_version.status != _DOC_ACTIVE:
-        return None
-    chunks = load_reused_chunks(
-        state,
+    reuse, _miss = reuse_plan_with_reason(
+        pid,
+        url,
         doc_version,
-        chunker_version=chunker_version,
-        where=f"{pid}/{url}",
+        state=state,
         errors=errors,
+        chunker_version=chunker_version,
     )
-    if chunks is None:
-        return None
-    return DocReuse(doc_version=doc_version, chunks=chunks)
+    return reuse
 
 
 def supersede_document(
@@ -583,6 +626,64 @@ def mark_session(
             f"{pid}/{u}: crawl_session_item {_as_text(status)}: "
             f"{type(exc).__name__}: {exc}"
         )
+
+
+def execution_has_no_crawl(
+    product_id: str,
+    *,
+    store: Any,
+    declared_urls: Sequence[str],
+    produced_docs: int,
+    converted_rows: int = 0,
+) -> bool:
+    """Это исполнение **не обходило** продукт, у которого корпус прогона уже есть.
+
+    Зачем предикат. Фаза корпуса исполняется несколько раз на один ``run_id``: краул,
+    его повтор после падения, затем ``hound extract consume`` (только конверсия очереди).
+    Проход, у которого по продукту нет ни объявленных URL, ни конвертированных строк
+    очереди и который не произвёл ни одного документа, ничего не измеряет — но раньше он
+    всё равно писал строку ``run_product``/``corpus_coverage`` и затирал измеренные числа
+    нулями и причиной ``no_seeds``. Измерено 14.11.2026 на ``run-dbms-145ad66ca3f9``:
+    ``run_product.docs_total=0`` и ``error_kind=no_seeds`` при 1 693 документах и
+    21 015 чанках того же продукта в том же файле БД — утверждение, опровергаемое
+    артефактом, на который оно ссылается.
+
+    Почему именно эти условия (и почему не шире):
+
+    * ``declared_urls`` — объявленные seed'ы продукта: есть они — исполнение обязано
+      отчитаться, даже если ничего не добыло (``all_seeds_rejected`` — честный исход);
+    * ``produced_docs`` — документы, добытые **этим** проходом (Pass A + конверсия);
+    * ``converted_rows`` — строки очереди, конвертированные **этим** проходом: это работа
+      продукта, даже когда краула не было вовсе (``consume_only``);
+    * ``has_corpus_docs`` — носитель прошлого измерения: документы прогона. Проба
+      существования (``LIMIT 1``), а не счётчик: вопрос здесь один бит — «есть ли что
+      терять». Второго источника правды о числе документов не заводится: строка не
+      пишется вовсе, и число остаётся тем, которое записал обход.
+
+    **Элементы сеанса сюда намеренно не входят.** ``crawl_session_items`` durable и
+    переживают проход: продукт, обойдённый в первом исполнении, имеет элементы и во
+    втором, где по нему не работали. Признак «работали в этом исполнении» обязан быть
+    фактом исполнения, а не сеанса — иначе нули снова перепишут измеренное.
+
+    Store без пробы (duck-typed двойники) даёт ``False``: «неизвестно» не выдаётся за
+    факт (A3), и поведение остаётся прежним.
+
+    Пустой корпус (пакет без URL, ``--only-product`` по продукту без seed'ов) даёт
+    ``False``: ``no_seeds`` там — правда, и её запрещено тихо отменять.
+    """
+    if declared_urls:
+        return False
+    if produced_docs:
+        return False
+    if converted_rows:
+        return False
+    probe = getattr(store, "has_corpus_docs", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe(product_id))
+    except Exception:  # noqa: BLE001 — проба провенанса не роняет фазу
+        return False
 
 
 def save_run_product(

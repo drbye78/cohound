@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
@@ -82,6 +82,7 @@ from core.pipeline.corpus_ingest import (
     _partial_fields,
     _state_url_key,
     artifact_is_terminal,
+    conversion_failure_kind,
     new_extract_pool,
 )
 from core.pipeline.corpus_persist import DocReuse, _now_iso
@@ -639,6 +640,11 @@ class ConsumerScope:
     #: (план 19 §E.7). ``None`` — прогон без состояния: провенанс остаётся только в списках
     #: фазы, а проход без сети контейнер не воспроизведёт (видимая причина у него есть).
     state: ProductStatePort | None = None
+    #: Промахи ``304`` по причине (:data:`core.pipeline.corpus_persist.REUSE_MISS_*`) →
+    #: число URL. Нормальный фолбэк, а не ошибка: публикуется **одной** строкой на продукт
+    #: (:func:`_flush_reuse_misses`), иначе он забивает ``errors`` построчно (измерено
+    #: 14.11.2026: 590 строк на прогоне). Накопитель фазы; чистится на границе продукта.
+    reuse_304_misses: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass(frozen=True)
@@ -1028,6 +1034,19 @@ def _conversion_failure(
         if line.startswith(prefix) or line.startswith(f"I19: {product_id}/{url}"):
             return line
     return None
+
+
+def _failure_reason(line: str) -> str:
+    """Причина из строки ``errors`` конверсии (``{pid}/{url}: extract: {reason}``).
+
+    Класс отказа (:func:`core.pipeline.corpus_ingest.conversion_failure_kind`) различает
+    «текста нет» и «парсер сломался» по причине, поэтому префикс адреса снимается явно:
+    в URL есть свои ``:`` (``https://``), и разбиение по первому двоеточию ошиблось бы.
+    Строка без маркера возвращается как есть — тогда причина и есть вся строка.
+    """
+    marker = ": extract: "
+    idx = line.rfind(marker)
+    return line[idx + len(marker) :] if idx >= 0 else line
 
 
 def _descend_container(
@@ -1509,9 +1528,12 @@ def _start_row(
                 job.not_attempted = True
             return job
     # 09 §6.3: ``304`` переиспользует версию документа **до** экстракции (экстрактор/
-    # чанкер не вызываются). Неудача reuse (нет версии/чанков, I19-расхождение) — видимая
-    # запись уже сделана, дальше обычный путь экстракции.
-    job.reuse = operations.reuse_for_page(pid, work_url, page)
+    # чанкер не вызываются). Неудача reuse (нет версии/чанков, I19-расхождение) —
+    # нормальный фолбэк: причина уходит в накопитель фазы и публикуется одной строкой на
+    # продукт, дальше обычный путь экстракции.
+    job.reuse = operations.reuse_for_page(
+        pid, work_url, page, misses=scope.reuse_304_misses
+    )
     if window is None or scope.extraction_pool is None:
         # Inline: извлечение на главном потоке (``ingest_one`` сам зовёт экстрактор и
         # ловит его отказ в тот же ``parser_failed``, что и пул).
@@ -1622,7 +1644,10 @@ def _finish_inline_row(
     )
     if failure is not None:
         job.error = failure
-        job.error_kind = FailureKind.PARSER_FAILED
+        # Класс — по причине: «текста нет» (``empty_document``) отличается от отказа
+        # разбора. Здесь доступна только строка ``errors``: ``ExtractedDoc`` уничтожен
+        # внутри ``ingest_one``, и это единственный канал причины.
+        job.error_kind = conversion_failure_kind(_failure_reason(failure))
 
 
 def _finish_inline(
@@ -1885,14 +1910,39 @@ def _settle_row(
     doc_id = _finish_extracted(
         job, extracted, scope=scope, operations=operations, product=product
     )
-    return job, doc_id, _conversion_failure(
+    failure = _conversion_failure(
         scope.errors[job.errors_before :], job.item.product_id, job.item.url
-    ), False
+    )
+    if failure is not None:
+        # Класс пишется в строку очереди: «пустой документ» не должен читаться как
+        # «парсер сломался» (повтор такого документа бессмысленен).
+        job.error_kind = conversion_failure_kind(_failure_reason(failure))
+    return job, doc_id, failure, False
 
 
 # --------------------------------------------------------------------------- #
 # Единственная точка входа потребителя
 # --------------------------------------------------------------------------- #
+
+
+def _flush_reuse_misses(product_id: str, scope: ConsumerScope) -> None:
+    """Публикует промахи ``304`` **одной** строкой на продукт (причина → число URL).
+
+    Промах — факт нормального фолбэка, а не ошибка: документ извлечён заново, корпус
+    полон. Строка нужна, чтобы фолбэк не был тихим, но построчная запись превращала
+    ``errors`` в шум (измерено 14.11.2026: 590 строк, из них настоящих ошибок — единицы).
+    Порядок причин — алфавитный: одинаковый набор даёт одинаковую строку.
+    """
+    misses = scope.reuse_304_misses
+    if not misses:
+        return
+    parts = ", ".join(f"{misses[reason]} {reason}" for reason in sorted(misses))
+    total = sum(misses.values())
+    scope.errors.append(
+        f"{product_id}: 304 без переиспользуемой версии: {parts} — обычная экстракция "
+        f"(переиспользование невозможно, документ извлечён заново); всего {total} URL"
+    )
+    misses.clear()
 
 
 def consume(
@@ -2097,6 +2147,8 @@ def consume(
                 "отменено вместе с пулом (inline после отказа пула запрещён); повтор "
                 "без сети — `hound extract consume`"
             )
+        # Граница продукта: промахи ``304`` публикуются одной строкой на продукт.
+        _flush_reuse_misses(product_id, scope)
         left = queue.pending(product_id)
         report = ConsumerReport(
             product_id=product_id,

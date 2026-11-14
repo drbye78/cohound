@@ -5096,6 +5096,10 @@ def test_blocking_failure_kinds_are_canonical() -> None:
         # I2/I2c: документ получен, но прочитана часть страниц — непрочитанное есть
         # ненаблюдённый материал, поэтому охват не может объявляться полным.
         "partial_extraction",
+        # Документ добыт, но текста в нём нет: материал не наблюдён по той же причине
+        # (14.11.2026: пустой ``Readme.md`` назывался ``parser_failed`` — класс врал о
+        # приборе, но охват обязан оставаться неполным и класс — видимым).
+        "empty_document",
     }
     assert FailureKind.NOT_FOUND not in BLOCKING_FAILURE_KINDS
     assert FailureKind.SOURCE_UNAVAILABLE not in BLOCKING_FAILURE_KINDS

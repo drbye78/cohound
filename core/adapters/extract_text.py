@@ -35,7 +35,7 @@ from core.adapters.extract_html import (
     _charset_from_content_type,
     _decode_bytes,
 )
-from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
+from core.ports.types import EMPTY_TEXT_REASON, ExtractedDoc, ExtractionRoute, RawPage
 from core.util.document_formats import FAMILY_TEXT, textual_family
 from core.util.hashing import content_hash
 from core.util.sanitize import finalize_extracted_text
@@ -107,7 +107,9 @@ class TextExtractor:
 
         text = normalize_text(_decode(content, page.content_type))
         if not text.strip():
-            return self._error("текст пуст")
+            # Причина — константа порта: по ней классификация отличает «нечего
+            # разбирать» (``empty_document``) от «парсер сломался» (``parser_failed``).
+            return self._error(EMPTY_TEXT_REASON)
         return ExtractedDoc(
             text=text,
             content_hash=content_hash(text),

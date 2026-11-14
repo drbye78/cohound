@@ -38,6 +38,7 @@ import logging
 import os
 import shutil
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, field, replace
@@ -69,6 +70,7 @@ from core.pipeline.artifact_probe import probe_artifact
 from core.pipeline.corpus_index import _chunk_id, _CorpusStageTimings
 from core.pipeline.corpus_persist import (
     CLEAR_SESSION_FIELD,
+    REUSE_MISS_NO_DOC_VERSION,
     DocReuse,
     _now_iso,
     as_product_mode,
@@ -78,6 +80,7 @@ from core.pipeline.corpus_persist import (
     manual_host_scope,
     mark_session,
     reuse_plan,
+    reuse_plan_with_reason,
     sitemap_url_for,
     supersede_document,
     write_document_state,
@@ -137,6 +140,7 @@ from core.ports.state import (
     UrlStateRow,
 )
 from core.ports.types import (
+    EMPTY_TEXT_REASON,
     OCR_PROBE_UNSUPPORTED,
     FetchMode,
     FetchPlan,
@@ -228,6 +232,22 @@ def _state_url_key(url: str) -> str | None:
         return normalize_seed_url(str(url or ""))
     except ValueError:
         return None
+
+
+def conversion_failure_kind(reason: str | None) -> FailureKind:
+    """Класс отказа конверсии по причине: «текста нет» ≠ «парсер сломался».
+
+    Структурированного признака у :class:`core.ports.types.ExtractedDoc` нет: любой отказ
+    адаптера возвращает пустой ``text`` и заполненный ``error``, поэтому «нечего
+    разбирать» отличимо только по причине. Сравнение строки неизбежно на путях, где
+    ``ExtractedDoc`` уже уничтожен: inline-доводка получает только строку ``errors``.
+    Обе стороны (адаптер и эта функция) берут **одну** константу
+    (:data:`core.ports.types.EMPTY_TEXT_REASON`), иначе классификация молча разошлась бы
+    с тем, что пишет читатель.
+    """
+    if reason is not None and reason.strip() == EMPTY_TEXT_REASON:
+        return FailureKind.EMPTY_DOCUMENT
+    return FailureKind.PARSER_FAILED
 
 
 def _work_set_idempotency_key(work: Sequence[CrawlWorkItem]) -> str:
@@ -741,18 +761,25 @@ def reuse_not_modified(
     state: ProductStatePort | None,
     errors: list[str],
     chunker_version: str,
-) -> DocReuse | None:
+) -> tuple[DocReuse | None, str | None]:
     """Переиспользование по ``304`` — **до** экстракции (её вызов не нужен).
 
     ``content_hash`` документа известен из ``url_state.doc_version_id``: сервер
-    подтвердил, что представление не изменилось. Нет версии/чанков — ``None``
-    (вызывающий идёт обычным путём экстракции).
+    подтвердил, что представление не изменилось. Нет версии/чанков — ``(None, причина)``:
+    вызывающий идёт обычным путём экстракции и **считает** причину
+    (:data:`core.pipeline.corpus_persist.REUSE_MISS_*`), а не пишет строку на каждый URL.
+
+    Деталь отказа ``reuse_plan`` собирается в локальный список: на 304-пути она описывает
+    нормальный фолбэк («переиспользовать нечего, документ извлечён заново»), и построчная
+    запись именно её делала ``errors`` нечитаемым (измерено 14.11.2026: 184 из 590 строк).
+    Настоящий сбой state-чтения по-прежнему идёт в ``errors`` и возвращает причину
+    ``None`` — он уже назван, агрегировать нечего.
     """
     if state is None:
-        return None
+        return None, REUSE_MISS_NO_DOC_VERSION
     key = _state_url_key(url)
     if key is None:
-        return None
+        return None, REUSE_MISS_NO_DOC_VERSION
     try:
         prior = state.get_url_state(pid, key)
         prior_doc = (
@@ -764,17 +791,18 @@ def reuse_not_modified(
         errors.append(
             f"{pid}/{url}: state: reuse(304): {type(exc).__name__}: {exc}"
         )
-        return None
+        return None, None
     if classify_reuse(
         prior=prior, prior_doc=prior_doc, not_modified=True, content_hash=None
     ) is not ReuseKind.REVALIDATED:
-        return None
-    return reuse_plan(
+        return None, REUSE_MISS_NO_DOC_VERSION
+    detail: list[str] = []
+    return reuse_plan_with_reason(
         pid,
         url,
         prior_doc,
         state=state,
-        errors=errors,
+        errors=detail,
         chunker_version=chunker_version,
     )
 
@@ -787,25 +815,34 @@ def reuse_for_page(
     state: ProductStatePort | None,
     errors: list[str],
     chunker_version: str,
+    misses: Counter[str] | None = None,
 ) -> DocReuse | None:
-    """Переиспользование по ``304`` с видимой записью, если версии нет.
+    """Переиспользование по ``304``; промах **считается**, а не пишется построчно.
 
-    ``304`` без известной версии (или с отвергнутым chunk-set) — не повод молчать:
-    сервер подтвердил «не изменилось», а переиспользовать нечего, поэтому прогон
-    идёт обычной экстракцией, а факт фиксируется в ``errors``. Конкретная причина
-    отказа уже записана :func:`reuse_not_modified` — дублирующая запись не нужна.
+    ``304`` без переиспользуемой версии — нормальный фолбэк: сервер подтвердил «не
+    изменилось», переиспользовать нечего, документ извлекается заново. Построчная запись
+    забивала ``errors`` (измерено 14.11.2026 на ``ru-pg-dbms-145ad66ca3f9``: 590 строк —
+    406 без версии + 184 отвергнутых chunk-set), поэтому причина идёт машинным токеном в
+    накопитель ``misses``, а итог публикует одна строка на продукт
+    (:func:`core.pipeline.extract_consume._flush_reuse_misses`).
+
+    ``misses is None`` (прямой вызов вне конвейера) сохраняет прежнюю построчную запись:
+    агрегировать некуда, а молчать о фолбэке нельзя.
     """
     if not page.not_modified:
         return None
-    before = len(errors)
-    reuse = reuse_not_modified(
-            pid, url, state=state, errors=errors, chunker_version=chunker_version
-        )
-    if reuse is None and len(errors) == before:
+    reuse, miss = reuse_not_modified(
+        pid, url, state=state, errors=errors, chunker_version=chunker_version
+    )
+    if reuse is not None or miss is None:
+        return reuse
+    if misses is None:
         errors.append(
-            f"{pid}/{url}: 304 без переиспользуемой версии документа — "
+            f"{pid}/{url}: 304 без переиспользуемой версии документа ({miss}) — "
             "обычная экстракция"
         )
+    else:
+        misses[miss] += 1
     return reuse
 
 
@@ -1679,7 +1716,10 @@ def finish_one(
                 product_id,
                 url,
                 CrawlItemStatus.FAILED,
-                error_kind=FailureKind.PARSER_FAILED.value,
+                # «Текста нет» — свойство артефакта, а не отказ разбора: класс берётся
+                # из фактической причины (``empty_document``), а не приравнивается к
+                # ``parser_failed``. Семантика покрытия та же: оба класса блокирующие.
+                error_kind=conversion_failure_kind(reason).value,
                 error=reason,
                 raw_path=str(raw_path),
             )
