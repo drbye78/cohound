@@ -60,7 +60,7 @@ upstream-факте в **измерение** с датой, цитатой и �
 | CRUD строк с линтом (`package_admin.py:1394,1440`) | ✅ `hound package baseline …` |
 | кандидаты `kind="baseline"` → `package apply` (`package_candidates.py:274`) | ✅ |
 | черновик из эвристик профиля (`package_discovery.py:241`) | ✅ (ничего не пишет) |
-| **`baselines.csv` в `run_id`** | ❌ нет `baselines_digest` в контракте (32 поля) |
+| **`baselines.csv` в `run_id`** | ❌ нет `baselines_digest` в контракте (33 поля) |
 | **per-параметр evidence** | ❌ `_derived_evidence` (`inheritance.py:152`) берёт **одну** цитату из `passport.upstream.evidence` |
 | **reference-продукт как сущность** | ❌ `baseline_id` — строка; за ней нет продукта, версии, корпуса |
 | **несколько предков у продукта** | ❌ `Passport.upstream` — одно поле (`models.py:459`), 3 места использования в `inheritance.py` |

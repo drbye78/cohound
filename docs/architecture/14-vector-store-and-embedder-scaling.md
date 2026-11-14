@@ -474,8 +474,8 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 :func:`core.pipeline.crawl_frontier.resolve_embed_device`; передаётся в
 `SentenceTransformer(..., device=…)` **явным параметром** (`core/adapters/embed_local.py`),
 а не спрашивается у адаптера. Ось входит в `EXECUTION_CONTRACT_FIELDS` (28 → 29; текущий
-размер контракта — 32 поля после `frozen_source` и `embed_precision`, планы 19 §P3 и
-`16` §4.1), в материал
+размер контракта — 33 поля после `frozen_source`, `embed_precision` и `embed_spec` (O6),
+планы 19 §P3, `16` §4.1 и `26`), в материал
 `pb`, в манифест партиции и в ключ `embed_cache` — CPU- и CUDA-прогон больше не могут
 обменяться векторами. `vector_digest` пересчитывается с диска при проверке переиспользования
 (`core/util/index_partition.py:123`, `recompute_vector_digest`), поэтому партиция с чужими

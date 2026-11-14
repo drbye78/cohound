@@ -3800,7 +3800,7 @@ diff — инкрементальность была полезна только
 **Реализовано (методология 2.3.0).**
 
 - `execution_contract_digest` — отпечаток **условий измерения**, без контента. Ровно
-  **32 поля** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
+  **33 поля** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
   механически (`len(EXECUTION_CONTRACT_FIELDS)`), а не по памяти:
 
   | Группа | Поля |
@@ -4821,7 +4821,7 @@ state_store.reconcile_seed_set(product_id, rows)               # seeds.yaml → 
 onboarding = preflight(args.package, products, state=state_store)   # режимы продуктов
 sync_product_state(state_store, ...)                           # рубежи last_*_run_id
 cycle_id = resolve_cycle_id(...)                               # без неявного today()
-contract_digest = build_execution_contract(...)                # 32 поля, §12.5
+contract_digest = build_execution_contract(...)                # 33 поля, §12.5
 run_id = derive_run_id(..., cycle_id, contract_digest, run_scope, refresh_policy)
 previous = previous_run_of(state_store, package_id, run_id=run_id, explicit=args.since_run)
 previous_run_id = previous.run_id if previous else None        # resume ⇒ None
