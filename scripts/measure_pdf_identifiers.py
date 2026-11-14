@@ -141,7 +141,11 @@ def cached_docling_text(
     if envelope.get("level") != level:
         return None
     version = str(envelope.get("extractor_version") or "")
-    if not version.startswith("docling-doc-3:"):
+    # Семейство docling принимается **любое** (`docling-doc-3`, `docling-doc-4`, …):
+    # прибор обязан назвать, чем получен текст, а не подогнать его под сегодняшний
+    # штамп (см. докстринг). Отсекается только чужая ветвь — pdfium-разбор, у которого
+    # другой текст и другая страница сравнения.
+    if not version.startswith("docling-"):
         return None
     pages = envelope.get("page_count")
     return str(envelope.get("text") or ""), version, pages if isinstance(pages, int) else None

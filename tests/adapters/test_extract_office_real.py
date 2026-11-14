@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 
 from core.adapters.extract_document import (
+    DOCLING_ADAPTER_FAMILY,
+    DOCLING_OCR_SEGMENT,
     DOCLING_TEXT_FINALIZE,
     DoclingDocumentExtractor,
     docling_office_version,
@@ -275,7 +277,9 @@ def test_office_stamp_names_neither_level_nor_device(tmp_path: Path) -> None:
 
     assert doc.extractor_version == docling_office_version()
     assert doc.extractor_version.startswith("docling-office-1:")
-    assert "docling-doc-3" not in doc.extractor_version
+    # Признак PDF-ветви проверяется константой, а не подстрокой «docling-doc-3»: после
+    # смены номера семейства литерал перестал бы ловить утечку PDF-штампа в офисный.
+    assert DOCLING_ADAPTER_FAMILY not in doc.extractor_version
     assert "/cpu/" not in doc.extractor_version
     assert "/cuda/" not in doc.extractor_version
     assert all(
@@ -306,7 +310,9 @@ def test_extractor_version_for_office_matches_stamp_and_pdf_keeps_axes(
     pdf_predicted = composite.extractor_version_for(
         _page(tmp_path / "cache.bin", name="report.pdf", content_type="application/pdf")
     )
-    assert pdf_predicted.startswith("docling-doc-3:")
+    assert pdf_predicted.startswith(f"{DOCLING_ADAPTER_FAMILY}:")
     assert "/cpu/" in pdf_predicted or "/cuda/" in pdf_predicted
-    assert pdf_predicted.endswith(f"/{DOCLING_TEXT_FINALIZE}")
+    # Дефолтный уровень краула — ``full``: OCR-сегмент идёт после финализации
+    # (``.../<finalize>/<ocr>``), поэтому последним слагаемым является он, а не финализация.
+    assert pdf_predicted.endswith(f"/{DOCLING_TEXT_FINALIZE}/{DOCLING_OCR_SEGMENT}")
     assert pdf_predicted != predicted

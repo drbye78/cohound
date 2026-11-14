@@ -28,7 +28,9 @@ from core.adapters.extract_document import (
     probe_ocr_engine,
 )
 from core.cli.execution_axes import extractor_stack_version
-from core.domain.enums import DocumentLevel, PdfDevice
+from core.domain.enums import DocumentLevel, FailureKind, PdfDevice
+from core.pipeline.corpus_ingest import conversion_failure_kind
+from core.ports.types import EMPTY_TEXT_REASON
 from core.util.hashing import content_hash
 
 
@@ -286,6 +288,118 @@ def test_pdf_options_set_queue_max_size_for_pdf_pipelines() -> None:
     ):
         options = DoclingDocumentExtractor(level)._pdf_options()
         assert options.queue_max_size == 1, level
+
+
+# --------------------------------------------------------------------------- #
+# OCR уровня full: алфавит и rec-модель объявлены, а не выбраны библиотекой
+# --------------------------------------------------------------------------- #
+
+
+def test_full_pdf_options_declare_cyrillic_ocr_model() -> None:
+    """``full`` строит RapidOCR с **объявленным** алфавитом и явным файлом rec-модели.
+
+    Замер 14.11.2026: авто-OCR docling (``lang=['ch']``) даёт на скане 176 символов и
+    **0** кириллицы — латинскую транслитерацию при ``error=None``; та же страница с
+    кириллической rec-моделью — 719 символов и 558 кириллицы. Поэтому проверяются все три
+    слагаемых условия: движок (``onnxruntime``, без torch), алфавит и **путь** к модели
+    (``lang=['cyrillic']`` без пути упирается в разрешение имени внутри rapidocr).
+    """
+    options = DoclingDocumentExtractor(DocumentLevel.FULL)._pdf_options()
+    ocr = options.ocr_options
+
+    assert type(ocr).__name__ == "RapidOcrOptions"
+    assert ocr.backend == "onnxruntime"
+    assert ocr.lang == [extract_document.DOCLING_OCR_LANG]
+    assert ocr.rec_model_path is not None
+    model_path = Path(ocr.rec_model_path)
+    assert model_path.name == extract_document.DOCLING_OCR_REC_MODEL
+    # Модель резолвится от пакета, а не от раскладки ``.venv``: файл существует.
+    assert model_path.is_file()
+    assert "rapidocr" in model_path.parts
+
+
+def test_levels_without_ocr_do_not_declare_an_alphabet() -> None:
+    """``layout``/``layout_tables`` OCR **выключают**: алфавит им не назначается.
+
+    Иначе версия уровня обещала бы распознаватель, которого уровень не запускает, —
+    ровно та ложь, из-за которой сегмент OCR есть только у ``full``.
+    """
+    for level in (DocumentLevel.LAYOUT, DocumentLevel.LAYOUT_TABLES):
+        options = DoclingDocumentExtractor(level)._pdf_options()
+        assert options.do_ocr is False, level
+        assert extract_document.DOCLING_OCR_LANG not in getattr(
+            options.ocr_options, "lang", []
+        ), level
+
+
+def test_missing_ocr_model_is_a_visible_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Модели нет — отказ с именем файла, а не тихий откат на алфавит ``ch``."""
+    monkeypatch.setattr(extract_document, "_rapidocr_rec_model_path", lambda: None)
+
+    with pytest.raises(OcrEngineUnavailableError, match="cyrillic_PP-OCRv5_rec_mobile"):
+        DoclingDocumentExtractor(DocumentLevel.FULL)._pdf_options()
+
+
+def test_full_probe_checks_the_declared_engine_not_auto_selection() -> None:
+    """Проба ``full`` строит **объявленный** движок (RapidOCR), а не авто-выбор.
+
+    Иначе ``ocr_probe=ok`` могло бы прийти от easyocr/nemotron, тогда как пайплайн
+    исполняет RapidOCR: тристейт называл бы чужое наблюдение. Проверяется тип
+    построенного движка, а не только статус.
+    """
+    options = DoclingDocumentExtractor(DocumentLevel.FULL)._pdf_options()
+
+    engine = _probe_ocr_engine(options)
+
+    assert engine is not None
+    assert type(engine).__name__ == "RapidOcrModel"
+    assert probe_ocr_engine(options) == "ok"
+
+
+def _fake_ocr_factory(monkeypatch: pytest.MonkeyPatch, *, error: Exception) -> None:
+    """Подменяет фабрику OCR: ``create_instance`` падает заданным исключением."""
+
+    class _Factory:
+        def create_instance(self, **_kwargs: object) -> object:
+            raise error
+
+    monkeypatch.setitem(
+        sys.modules,
+        "docling.models.factories",
+        SimpleNamespace(get_ocr_factory=lambda **_kw: _Factory()),
+    )
+
+
+def test_declared_engine_build_failure_is_unavailable_and_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Объявленный движок не построился → ``unavailable`` **и** отказ извлечения.
+
+    Отказ постройки (нет файла модели, нет ``onnxruntime``) — это не «проба прошла»:
+    статус обязан назвать факт, а ``full`` — отказать, иначе транслитерированный текст
+    получил бы штамп ``full``.
+    """
+    options = DoclingDocumentExtractor(DocumentLevel.FULL)._pdf_options()
+    _fake_ocr_factory(monkeypatch, error=FileNotFoundError("нет модели"))
+
+    assert probe_ocr_engine(options) == "unavailable"
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.FULL)
+    with pytest.raises(OcrEngineUnavailableError, match="full"):
+        extractor._require_working_ocr(options)  # noqa: SLF001
+    assert extractor._ocr_probe == "unavailable"
+
+
+def test_renamed_factory_is_unsupported_not_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Переименование фабрики — ``unsupported`` (деградация проверки), не «OCR нет»."""
+    options = DoclingDocumentExtractor(DocumentLevel.FULL)._pdf_options()
+    _fake_ocr_factory(monkeypatch, error=TypeError("сигнатура изменилась"))
+
+    assert probe_ocr_engine(options) == "unsupported"
 
 
 def test_text_level_has_no_queue_max_size_knob() -> None:
@@ -762,18 +876,24 @@ def test_resolve_docling_uses_injected_symbols_without_importing(
 
 
 def test_extractor_version_names_level_and_engine_build() -> None:
-    """``docling-doc-3:<level>/<device>/<build>/<policy>/<finalize>``: все слагаемые видны.
+    """``docling-doc-4:<level>/<device>/<build>/<policy>/<finalize>[/<ocr>]``: всё видно.
 
-    Все обязательны: уровень различает сборки на оси ``document_level``, устройство
-    — на оси ``pdf_device`` (P9), сборка — версию установленного парсера. Без сборки
-    прогон мог бы объявить ``docling-2.140`` и переиспользовать текст ``docling-2.135``
-    (Д-8); без устройства CUDA-прогон нашёл бы в ``extract_cache`` CPU-текст (Д-8 в
-    новом виде); без политики экспорта и финализации — текст с другим экранированием
-    или без очистки.
+    Все слагаемые обязательны: уровень различает сборки на оси ``document_level``,
+    устройство — на оси ``pdf_device`` (P9), сборка — версию установленного парсера. Без
+    сборки прогон мог бы объявить ``docling-2.140`` и переиспользовать текст
+    ``docling-2.135`` (Д-8); без устройства CUDA-прогон нашёл бы в ``extract_cache``
+    CPU-текст (Д-8 в новом виде); без политики экспорта и финализации — текст с другим
+    экранированием или без очистки.
+
+    **Сегмент OCR есть только у ``full``.** Там OCR включён и алфавит
+    (:data:`extract_document.DOCLING_OCR_LANG`) меняет текст; у ``layout``/
+    ``layout_tables``/``text`` OCR выключен, и сегмент ``ocr-none`` объявлял бы
+    распознаватель, которого уровень не обещает.
     """
     build = f"docling-{extract_document.docling_library_version()}"
     policy = extract_document.DOCLING_MARKDOWN_POLICY
     finalize = extract_document.DOCLING_TEXT_FINALIZE
+    ocr = extract_document.DOCLING_OCR_SEGMENT
     for level in (
         DocumentLevel.OFF,
         DocumentLevel.TEXT,
@@ -782,9 +902,14 @@ def test_extractor_version_names_level_and_engine_build() -> None:
         DocumentLevel.FULL,
     ):
         version = DoclingDocumentExtractor(level).version
-        assert version == f"docling-doc-3:{level.value}/cpu/{build}/{policy}/{finalize}"
-        assert version.startswith(f"docling-doc-3:{level.value}/cpu/")
-        assert version.endswith(f"/{build}/{policy}/{finalize}")
+        base = f"docling-doc-4:{level.value}/cpu/{build}/{policy}/{finalize}"
+        if level is DocumentLevel.FULL:
+            assert version == f"{base}/{ocr}", version
+            assert "/ocr-cyrillic-v5" in version
+        else:
+            assert version == base, version
+            assert "ocr-" not in version, version
+        assert version.startswith(f"docling-doc-4:{level.value}/cpu/")
 
 
 def test_extractor_version_differs_by_device() -> None:
@@ -981,9 +1106,10 @@ def test_engine_build_reflects_installed_library_version(
     assert extract_document.docling_engine_build() == "docling-2.140.1"
     assert (
         DoclingDocumentExtractor(DocumentLevel.FULL).version
-        == "docling-doc-3:full/cpu/docling-2.140.1/"
+        == "docling-doc-4:full/cpu/docling-2.140.1/"
         f"{extract_document.DOCLING_MARKDOWN_POLICY}/"
-        f"{extract_document.DOCLING_TEXT_FINALIZE}"
+        f"{extract_document.DOCLING_TEXT_FINALIZE}/"
+        f"{extract_document.DOCLING_OCR_SEGMENT}"
     )
     # Офисная ветвь берёт ту же сборку, но без уровня и устройства.
     assert (
@@ -1005,12 +1131,21 @@ def test_markdown_policy_is_the_same_in_version_and_stack() -> None:
     Сегмент финализации (:data:`extract_document.DOCLING_TEXT_FINALIZE`) назван в обоих
     носителях и в одном порядке: политика — затем финализация. Оба сегмента меняют текст
     корпуса, поэтому обязаны менять и ключ ``extract_cache``, и ``run_id``.
+
+    Сегмент OCR (:data:`extract_document.DOCLING_OCR_SEGMENT`) стоит **после** финализации
+    и только в ``extractor_version``: ``extractor_stack`` называет **читатели**, а алфавит
+    OCR — условие одного читателя на одном уровне. Смена алфавита всё равно меняет
+    ``run_id``: она идёт через семейство адаптера (``docling-doc-4``), которое входит в
+    стек.
     """
     version = DoclingDocumentExtractor(DocumentLevel.FULL).version
     stack = extractor_stack_version(PdfDevice.CPU)
 
     assert f"/{extract_document.DOCLING_MARKDOWN_POLICY}/" in version
-    assert version.endswith(f"/{extract_document.DOCLING_TEXT_FINALIZE}")
+    assert version.endswith(
+        f"/{extract_document.DOCLING_TEXT_FINALIZE}"
+        f"/{extract_document.DOCLING_OCR_SEGMENT}"
+    )
     assert stack.endswith(
         f"/{extract_document.DOCLING_MARKDOWN_POLICY}"
         f"/{extract_document.DOCLING_TEXT_FINALIZE}"
@@ -1029,9 +1164,10 @@ def test_missing_library_does_not_invent_a_build(
     assert extract_document.docling_library_version() == "unknown"
     assert (
         DoclingDocumentExtractor(DocumentLevel.FULL).version
-        == "docling-doc-3:full/cpu/docling-unknown/"
+        == "docling-doc-4:full/cpu/docling-unknown/"
         f"{extract_document.DOCLING_MARKDOWN_POLICY}/"
-        f"{extract_document.DOCLING_TEXT_FINALIZE}"
+        f"{extract_document.DOCLING_TEXT_FINALIZE}/"
+        f"{extract_document.DOCLING_OCR_SEGMENT}"
     )
     assert (
         extract_document.docling_office_version()
@@ -1159,7 +1295,13 @@ def test_partial_reason_does_not_promise_structure_for_text_level() -> None:
 def test_partial_success_without_text_is_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Частичного успеха без текста не бывает: пустой результат — прежний ``_error``."""
+    """Частичного успеха без текста не бывает: пустой результат — «текста нет».
+
+    Причина — :data:`EMPTY_TEXT_REASON`, а не «частичный успех без текста»: класс отказа
+    тот же, что у пустого документа (:func:`conversion_failure_kind` →
+    ``FailureKind.EMPTY_DOCUMENT``). Иначе «прочитали частично» стало бы способом
+    вернуть пустой документ в корпус под видом провала парсера.
+    """
     result = _StatusConvertResult(
         status="PARTIAL_SUCCESS",
         markdown="   \n\t ",
@@ -1169,8 +1311,8 @@ def test_partial_success_without_text_is_error(
 
     doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
 
-    assert doc.error is not None
-    assert "PARTIAL_SUCCESS" in doc.error
+    assert doc.error == EMPTY_TEXT_REASON
+    assert conversion_failure_kind(doc.error) is FailureKind.EMPTY_DOCUMENT
     assert doc.text == ""
     assert doc.partial is False
     assert doc.partial_reason is None
@@ -1236,6 +1378,87 @@ def test_converted_page_count_is_result_pages_not_document_size() -> None:
 
     assert extract_document._converted_page_count(result) == 3
     assert _page_count(result) == 665
+
+
+# --------------------------------------------------------------------------- #
+# «Текст» — это не «непустая строка»: маркеры изображений текстом не считаются
+# --------------------------------------------------------------------------- #
+#
+# Дефект (замер 14.11.2026): скан при ``layout_tables`` (OCR выключен) даёт markdown из
+# одних ``<!-- image -->`` и пустых табличных строк. ``strip()`` непуст, ``error=None`` —
+# и мусорный документ входил в корпус как доказательство. Цель — ``FailureKind.
+# EMPTY_DOCUMENT`` («нечего разбирать»), а не ``PARSER_FAILED``.
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "<!-- image -->",
+        "<!-- image -->\n\n<!-- image -->\n",
+        "| | |\n| | |\n",
+        "<!-- image -->\n\n| | |\n",
+    ],
+)
+def test_markers_only_text_is_an_empty_document(
+    monkeypatch: pytest.MonkeyPatch, markdown: str
+) -> None:
+    """Одни маркеры изображений/каркас таблиц → «текста нет», а не документ."""
+    result = _StatusConvertResult(
+        status="SUCCESS",
+        markdown=markdown,
+        total_pages=2,
+        converted_pages=2,
+    )
+
+    doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
+
+    assert doc.error == EMPTY_TEXT_REASON, markdown
+    assert conversion_failure_kind(doc.error) is FailureKind.EMPTY_DOCUMENT
+    assert doc.text == ""
+    assert doc.partial is False
+
+
+def test_markers_only_partial_text_is_an_empty_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Тот же предикат на частичном пути: ``PARTIAL_SUCCESS`` с маркерами — не текст."""
+    result = _StatusConvertResult(
+        status="PARTIAL_SUCCESS",
+        markdown="<!-- image -->\n\n| | |\n",
+        total_pages=18,
+        converted_pages=18,
+    )
+
+    doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
+
+    assert doc.error == EMPTY_TEXT_REASON
+    assert conversion_failure_kind(doc.error) is FailureKind.EMPTY_DOCUMENT
+    assert doc.text == ""
+    assert doc.partial is False
+
+
+def test_document_with_text_and_image_marker_stays_a_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Правило узкое: настоящий текст + маркер изображения — документ, маркер цел.
+
+    Предикат **ничего не вычищает**: иначе правка меняла бы корпус шире, чем требует
+    дефект (как и ``_neutralize_definition_lists`` трогает только списки с заголовком).
+    """
+    markdown = "# Заголовок\n\n<!-- image -->\n\nТаблица:\n\n| параметр | значение |\n|---|---|\n| a | 1 |"
+    result = _StatusConvertResult(
+        status="SUCCESS",
+        markdown=markdown,
+        total_pages=1,
+        converted_pages=1,
+    )
+
+    doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
+
+    assert doc.error is None
+    assert doc.text == markdown
+    assert "<!-- image -->" in doc.text
+    assert doc.content_hash == content_hash(markdown)
 
 
 @pytest.mark.parametrize(

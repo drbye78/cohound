@@ -178,6 +178,16 @@ class _LevelExtractor:
         self.level = DocumentLevel(level)
         self.version = f"html-2+docling-doc-3:{self.level.value}"
 
+    @property
+    def document_level(self) -> DocumentLevel:
+        """Уровень документного адаптера — как у реального композита (``_LocalExtractor``).
+
+        Без него ядро не может отличить «переданный экстрактор уже нужного уровня» от
+        «переданный собран на run-level оси»: per-site ось сильнее, и профиль ``full``
+        поверх прогона ``layout_tables`` обязан пересобрать экстрактор фабрикой.
+        """
+        return self.level
+
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
@@ -271,11 +281,12 @@ def _build(
     extraction_pool: ExtractionPool | None = None,
     extractor_factory: Any = None,
     plan_products: list[str] | None = None,
+    base_level: DocumentLevel = DocumentLevel.FULL,
 ):
     return build_corpus(
         plan or _plan(plan_products),
         _Crawler(pages),
-        _LevelExtractor(DocumentLevel.FULL),
+        _LevelExtractor(base_level),
         _Chunker(),
         store,
         urls=urls or {"p1": [ROOT]},
@@ -543,7 +554,7 @@ def test_extractor_version_carries_level(tmp_path: Path) -> None:
     for level, token in versions.items():
         # Уровень и сборка движка (Д-8): обе половины в ключе extract_cache.
         assert token == docling_extractor_version(level)
-        assert token.startswith(f"docling-doc-3:{level.value}/")
+        assert token.startswith(f"docling-doc-4:{level.value}/")
         assert level.value in token
 
     # _product_extractor_token различает уровни (композит версий документов продукта).
@@ -584,6 +595,41 @@ def test_extractor_version_carries_level(tmp_path: Path) -> None:
     assert _derive_partition_build_id(
         extractor_version="docling-doc-3:full", **common
     ) != _derive_partition_build_id(extractor_version="docling-doc-3:text", **common)
+
+
+def test_site_full_rebuilds_document_extractor_over_run_layout_tables(
+    tmp_path: Path,
+) -> None:
+    """Per-site `full` поверх прогона `layout_tables` обязан пересобрать экстрактор.
+
+    Замер 14.11.2026: ядро при `full`+`structured` брало **переданный** экстрактор,
+    считая его «тем самым», но переданный собран на run-level оси. Профиль `full` над
+    прогоном `layout_tables` исполнялся как `layout_tables`, тогда как
+    `extractor_version` называл `full` — провенанс описывал движок, которого не было.
+    Правило одно на оба пути: `extract_consume._extractor_for` и
+    `corpus_ingest.feed_manual_artifact` сравнивают уровень переданного экстрактора с
+    запрошенным.
+    """
+    calls: list[DocumentLevel] = []
+
+    def factory(level: DocumentLevel, pdf_pipeline: Any = None) -> _LevelExtractor:
+        calls.append(level)
+        return _LevelExtractor(level)
+
+    result = _build(
+        tmp_path,
+        pages={DOC_URL: (DOC_BYTES, PDF_CONTENT_TYPE)},
+        urls={"p1": [DOC_URL]},
+        crawl_defaults=CrawlRunConfig(document_level=DocumentLevel.LAYOUT_TABLES),
+        domain_profiles={"docs.test": DomainProfile(document_level=DocumentLevel.FULL)},
+        extractor_factory=factory,
+        base_level=DocumentLevel.LAYOUT_TABLES,
+    )
+    assert result.status == "ok"
+    # Фабрика звана ровно за профильным уровнем, а не за run-level.
+    assert calls == [DocumentLevel.FULL]
+    # И провенанс документа называет тот уровень, который исполнялся.
+    assert "docling-doc-3:full" in str(_build_of(result).entries[0].extractor_version)
 
 
 def test_index_build_id_stable_same_level(tmp_path: Path) -> None:

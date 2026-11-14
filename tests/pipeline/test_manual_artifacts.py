@@ -27,17 +27,20 @@ from typing import Any
 
 import pytest
 
+from core.config.domain_profiles import DomainProfile
 from core.domain import (
     AnchorRelation,
     CatalogRow,
     Cohort,
     CohortEntry,
     CrawlItemStatus,
+    CrawlRunConfig,
     CrawlSessionItem,
     FailureKind,
     RunConfig,
     RunMode,
 )
+from core.domain.enums import DocumentLevel
 from core.pipeline import RunPlan
 from core.pipeline.corpus import build_corpus, derive_corpus_coverage
 from core.pipeline.crawl_session import default_session_id
@@ -209,17 +212,24 @@ def _build(
     store: SqliteStore,
     crawler: _Crawler | None = None,
     manual_artifacts: ManualArtifacts | None = None,
+    extractor: Any = None,
+    extractor_factory: Any = None,
+    domain_profiles: dict[str, Any] | None = None,
+    crawl_defaults: Any = None,
 ):
     return build_corpus(
         _plan(),
         crawler or _Crawler(pages),
-        _Extractor(),
+        extractor if extractor is not None else _Extractor(),
         _Chunker(),
         store,
         urls=urls,
         raw_root=tmp_path,
         run_id=RUN_ID,
         manual_artifacts=manual_artifacts,
+        extractor_factory=extractor_factory,
+        domain_profiles=domain_profiles,
+        crawl_defaults=crawl_defaults,
     )
 
 
@@ -345,6 +355,54 @@ def test_refusal_row_survives_manual_provision(tmp_path: Path) -> None:
         assert _origin(store, doc.doc_id) == ORIGIN_MANUAL
         # Сеанс остался честным: ``fetched`` не появился из воздуха.
         assert not [i for i in _items(store) if i.status is CrawlItemStatus.FETCHED]
+    finally:
+        store.close()
+
+
+def test_manual_artifact_uses_profile_level_over_run_level(tmp_path: Path) -> None:
+    """Подача идёт уровнем **профиля**, а не переданного экстрактора (run-level).
+
+    Тот же дефект, что в конвейере (``extract_consume._extractor_for``): при
+    ``full``+``structured`` ядро брало переданный экстрактор как «тот самый», но он собран
+    на run-level оси. Профиль ``full`` над прогоном ``layout_tables`` исполнялся бы как
+    ``layout_tables``, а ``extractor_version`` назвал бы ``full``.
+    """
+    calls: list[Any] = []
+
+    class _LeveledExtractor(_Extractor):
+        def __init__(self, level: Any) -> None:
+            self.level = level
+            self.version = f"extractor-{level.value}"
+
+        @property
+        def document_level(self) -> Any:
+            return self.level
+
+    def factory(level: Any, pdf_pipeline: Any = None) -> _LeveledExtractor:
+        calls.append(level)
+        return _LeveledExtractor(level)
+
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path, url=URL_MANUAL)
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_MANUAL]},
+            store=store,
+            manual_artifacts=ManualArtifacts(entries=(entry,)),
+            extractor=_LeveledExtractor(DocumentLevel.LAYOUT_TABLES),
+            extractor_factory=factory,
+            domain_profiles={
+                "docs.test": DomainProfile(document_level=DocumentLevel.FULL)
+            },
+            crawl_defaults=CrawlRunConfig(document_level=DocumentLevel.LAYOUT_TABLES),
+        )
+        assert result.status == "ok", result.errors
+        assert calls == [DocumentLevel.FULL]
+        doc = _docs(store)[URL_MANUAL]
+        assert doc.extractor_version == "extractor-full"
     finally:
         store.close()
 

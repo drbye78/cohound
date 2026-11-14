@@ -966,8 +966,15 @@ def _extractor_for(
         return cached
     factory = scope.extractor_factory
     chosen = scope.extractor
+    # Уровень переданного экстрактора сравнивается с запрошенным: per-site ось сильнее
+    # run-level, поэтому «переданный» не значит «тот самый». Профиль ``full`` поверх
+    # прогона ``layout_tables`` иначе исполнялся бы как ``layout_tables`` под объявленным
+    # ``full`` — провенанс назвал бы движок, которого не было. ``document_level=None``
+    # (порт уровня не объявляет) сохраняет прежнее поведение: фабрика не зовётся.
+    own_level = getattr(scope.extractor, "document_level", None)
     if factory is not None and (
-        level is not DocumentLevel.FULL or pdf_pipeline is not PdfPipeline.STRUCTURED
+        pdf_pipeline is not PdfPipeline.STRUCTURED
+        or (own_level is not None and own_level is not level)
     ):
         try:
             chosen = factory(level, pdf_pipeline)

@@ -514,9 +514,10 @@ def test_same_engine_build_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         page_count=3,
     )
     assert doc.extractor_version == (
-        "docling-doc-3:full/cpu/docling-2.135.0/"
+        "docling-doc-4:full/cpu/docling-2.135.0/"
         f"{extract_document.DOCLING_MARKDOWN_POLICY}/"
-        f"{extract_document.DOCLING_TEXT_FINALIZE}"
+        f"{extract_document.DOCLING_TEXT_FINALIZE}/"
+        f"{extract_document.DOCLING_OCR_SEGMENT}"
     )
 
     cache.put(doc, level=DocumentLevel.FULL, content_hash=RAW_A)
@@ -575,9 +576,10 @@ def test_pre_build_key_envelope_is_not_served(
 
     upgraded = DoclingDocumentExtractor(DocumentLevel.FULL)
     assert upgraded.version == (
-        "docling-doc-3:full/cpu/docling-2.135.0/"
+        "docling-doc-4:full/cpu/docling-2.135.0/"
         f"{extract_document.DOCLING_MARKDOWN_POLICY}/"
-        f"{extract_document.DOCLING_TEXT_FINALIZE}"
+        f"{extract_document.DOCLING_TEXT_FINALIZE}/"
+        f"{extract_document.DOCLING_OCR_SEGMENT}"
     )
     assert cache.get(RAW_A, upgraded.version, "full") is None
     assert cache.stats()["misses"] == 1

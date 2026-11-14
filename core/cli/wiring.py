@@ -2111,6 +2111,23 @@ class _LocalExtractor:
             parts.append(str(getattr(pdf, "version", "")))
         self.version = "+".join(part for part in parts if part)
 
+    @property
+    def document_level(self) -> DocumentLevel | None:
+        """Уровень документного адаптера композита (``None`` — адаптер его не объявляет).
+
+        Зачем свойство, если уровень известен composition root. Per-site ось
+        ``document_level`` **сильнее** run-level. Ядро (``extract_consume._extractor_for``,
+        ``corpus_ingest.feed_manual_artifact``) при ``full``+``structured`` брало
+        переданный экстрактор как «тот самый», но переданный собран на **run-level** оси:
+        профиль ``full`` поверх прогона ``layout_tables`` исполнялся как ``layout_tables``,
+        а ``extractor_version`` называл ``full`` — движок, которого не было. Свойство даёт
+        ядру сравнить уровни, не зная класса композита.
+
+        ``None`` — уровень не объявлен (тестовый порт, ``text_layer``): ядро тогда
+        сохраняет прежнее поведение и фабрику не зовёт.
+        """
+        return getattr(self._documents, "level", None)
+
     def _document_backend(
         self, filename: str | None
     ) -> DocumentExtractorPort | None:
@@ -2145,16 +2162,16 @@ class _LocalExtractor:
         местах: чтобы извлечь документ и чтобы **заранее** назвать движок, который это
         сделает (ключ ``extract_cache``). Пока правило жило только внутри ``extract``,
         вызывающий мог лишь догадываться о движке — и догадывался неверно: брал
-        композитную версию (``trafilatura-html-6+docling-doc-3:full/…``), тогда как
+        композитную версию (``trafilatura-html-6+docling-doc-4:full/…``), тогда как
         документ штампуется версией **своего** адаптера (``trafilatura-html-6`` для
-        страницы, ``docling-doc-3:full/…`` для PDF). Кэш от такого ключа не давал ни
+        страницы, ``docling-doc-4:full/…`` для PDF). Кэш от такого ключа не давал ни
         одного попадания: он был write-only. Один диспетчер исключает расхождение по
         построению, а не по дисциплине.
 
         **P7: PDF — отдельный механизм.** Внутри документной ветви PDF-суффикс уходит в
         выбранный ``pdf_pipeline`` (:meth:`_document_backend`), остальное — в docling.
         Поэтому версия для ключа ``extract_cache`` — версия реально работающего
-        адаптера (``pdfium-text-3:<версия дистрибутива>``, ``docling-doc-3:<level>/…`` для PDF либо
+        адаптера (``pdfium-text-3:<версия дистрибутива>``, ``docling-doc-4:<level>/…`` для PDF либо
         ``docling-office-1:…`` для DOCX/PPTX/XLSX), а не композита.
 
         Порядок ветвей — контракт поведения (``.txt``/``.epub`` проверяются до фолбэка в
@@ -2192,7 +2209,7 @@ class _LocalExtractor:
         набор движков всего композита, а не движок конкретного документа.
 
         **Версия зависит от формата.** У docling две ветви провенанса: PDF штампуется
-        уровнем и устройством (``docling-doc-3:<level>/<device>/…``), офисный документ —
+        уровнем и устройством (``docling-doc-4:<level>/<device>/…``), офисный документ —
         отдельной строкой без них (``docling-office-1:…``): у DOCX/PPTX/XLSX нет ни
         ``document_level``, ни ``pdf_device``. Поэтому адаптер, умеющий ответить по имени
         файла (:meth:`core.adapters.extract_document.DoclingDocumentExtractor.version_for`),

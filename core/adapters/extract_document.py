@@ -8,8 +8,9 @@
 **P5 — уровень извлечения.** Качество PDF-экстракции задаётся осью
 ``crawl.document_level`` (:class:`~core.domain.enums.DocumentLevel`), а не «случайным»
 дефолтом пустого ``DocumentConverter()``. Уровень входит в ``version`` экстрактора
-(``docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>``) и тем самым — в
-``index_build_id`` иммутабельной сборки (§13): смена уровня не может молча дать ту же сборку.
+(``docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>``, у ``full`` —
+ещё ``/<ocr>``) и тем самым — в ``index_build_id`` иммутабельной сборки (§13): смена
+уровня не может молча дать ту же сборку.
 
 **Офисная ветвь провенанса.** DOCX/PPTX/XLSX читает ``SimplePipeline``: ни уровня
 (``document_level`` — лестница PDF-конвейера), ни устройства (``pdf_device`` — место
@@ -17,7 +18,8 @@
 (``docling-office-1:<policy>/<build>/<finalize>``,
 :func:`docling_office_version`), а версия конкретного файла берётся :meth:`version_for`.
 До 02.11.2026 DOCX объявлялся как ``docling-doc-3:layout_tables/cpu/…`` — условие
-измерения, которого не было.
+измерения, которого не было (номер семейства в той фразе — исторический факт: сегодня
+PDF-ветвь называется ``docling-doc-4``).
 
 **Сборка движка в версии экстрактора (Д-8).** ``<build>`` — версия установленной
 библиотеки ``docling``, полученная :func:`docling_engine_build` (единственный источник;
@@ -29,10 +31,12 @@
 меняются: они описывают **фактически прочитанный** текст, а не предполагаемый движок.
 
 * ``full`` (**дефолт**) — сегодняшнее эффективное поведение: layout Heron + таблицы
-  TableFormer ``ACCURATE`` + ``do_cell_matching=True`` + авто-OCR (``OcrAutoOptions``),
+  TableFormer ``ACCURATE`` + ``do_cell_matching=True`` + OCR **с объявленным алфавитом**
+  (:data:`DOCLING_OCR_LANG`: RapidOCR, ``onnxruntime``, rec-модель из колеса ``rapidocr``),
   ``images_scale=1.0``; энричменты выключены. Это дефолты ``DocumentConverter()``, кроме
   замеренной ручки памяти ``queue_max_size=1`` (см. :meth:`DoclingDocumentExtractor._pdf_options`:
-  −44% peak RSS при байт-в-байт идентичном markdown).
+  −44% peak RSS при байт-в-байт идентичном markdown) и алфавита OCR (авто-OCR docling
+  ставит ``lang=['ch']``, и кириллица приходит латинской транслитерацией — замер 14.11.2026).
 * ``layout_tables`` — layout + ``TableFormer FAST`` + cell-matching, **OCR выключен**.
 * ``layout`` — только layout-модель (без таблиц, без OCR).
 * ``text`` — моделе-независимый ``NativePdfPipeline`` (текст + координаты; без reading
@@ -45,11 +49,13 @@
 docling гонял RapidOCR. Теперь параметр удалён, а поведение (OCR включён при ``full``)
 описано честно.
 
-**OCR при ``full`` проверяется, а не предполагается.** docling выбирает OCR-движок
-лениво (``OcrAutoModel``), и при несовместимой установке ``rapidocr`` все кандидаты
-отвергаются: конвертер молча работает без OCR, а текст помечается ``full``. Поэтому
-``_build_converter`` для ``full`` строит auto-OCR для опций уровня и требует непустой
-``_engine``; иначе — :class:`OcrEngineUnavailableError` (фаза фиксирует
+**OCR при ``full`` проверяется, а не предполагается.** Движок больше не выбирается
+авто-OCR (``OcrAutoOptions`` ставит ``lang=['ch']``: кириллица приходит латинской
+транслитерацией при ``error=None`` — замер 14.11.2026). Для ``full`` адаптер строит
+``RapidOcrOptions`` с объявленным алфавитом (:data:`DOCLING_OCR_LANG`) и файлом
+rec-модели из колеса ``rapidocr``; нет модели — :class:`OcrEngineUnavailableError`
+(видимая ошибка, тихого отката на ``ch`` нет). Затем ``_build_converter`` **проверяет**
+постройку того же движка, что сделает пайплайн, и без движка отказывает (фаза фиксирует
 ``parser_failed``). Уровни ``layout``/``layout_tables``/``text`` OCR выключают явно и
 проверку не выполняют.
 
@@ -76,9 +82,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import importlib.resources
 import importlib.util
 import logging
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -86,6 +94,7 @@ from typing import Any, Protocol
 
 from core.domain.enums import DocumentLevel, PdfDevice
 from core.ports.types import (
+    EMPTY_TEXT_REASON,
     OCR_PROBE_OK,
     OCR_PROBE_UNAVAILABLE,
     OCR_PROBE_UNSUPPORTED,
@@ -115,6 +124,11 @@ NativePdfPipelineOptions: Any = None
 TableStructureOptions: Any = None
 TableFormerMode: Any = None
 OcrAutoOptions: Any = None
+#: ``RapidOcrOptions`` — опции OCR с **объявленным алфавитом** (``full``). Не входит в
+#: :data:`_DOCLING_SYMBOLS` по той же причине, что и ``AcceleratorOptions``: контракт
+#: инъекции — про конвертер и опции пайплайна, а тесты подменяют их, не подменяя OCR.
+#: Заполняется тем же импортом; ``None`` — docling не импортирован.
+RapidOcrOptions: Any = None
 #: P9: ``AcceleratorOptions`` — не входит в :data:`_DOCLING_SYMBOLS` (это не часть
 #: контракта инъекции: тесты подменяют конвертер/опции, а устройство проверяют отдельно),
 #: но заполняется тем же импортом. ``None`` — docling не импортирован (или подменён):
@@ -139,7 +153,13 @@ _DOCLING_SYMBOLS: tuple[str, ...] = (
 #: composition root через ``wiring``, поэтому второй копии строки не нужно — копия
 #: разошлась бы с реальностью молча). Уровень извлечения — отдельная операционная ось
 #: ``crawl.document_level``, уже входящая в ``crawl_config_digest``.
-DOCLING_ADAPTER_FAMILY = "docling-doc-3"
+#:
+#: Почему ``docling-doc-4``, а не 3. Смена номера — не косметика: изменилось **и**
+#: содержание текста (алфавит OCR, :data:`DOCLING_OCR_LANG`), **и** классификация
+#: результата (текст из одних маркеров изображений теперь «текста нет», а не документ).
+#: Оба факта меняют ``content_hash``/``extract_cache``, поэтому ключ обязан смениться —
+#: иначе прежний мусорный текст находился бы под новым ключом.
+DOCLING_ADAPTER_FAMILY = "docling-doc-4"
 
 #: Семейство **офисной** ветви docling (docx/pptx/xlsx) — отдельное от PDF.
 #:
@@ -147,7 +167,7 @@ DOCLING_ADAPTER_FAMILY = "docling-doc-3"
 #: ``SimplePipeline``: у него **нет** ни оси ``crawl.document_level`` (нет layout-модели,
 #: таблиц-моделей и OCR — структуру даёт сам файл), ни оси ``crawl.pdf_device``
 #: (моделей, которым нужен тензорный ускоритель, нет вовсе). Штамповать офисному
-#: документу ``docling-doc-3:layout_tables/cpu/…`` значило бы **объявить условие
+#: документу ``docling-doc-4:layout_tables/cpu/…`` значило бы **объявить условие
 #: измерения, которого не было**: уровень ``layout_tables`` обещает восстановление
 #: структуры моделями, а устройство — место их вычисления. Провенанс не вправе называть
 #: исполнение, которого не было (A3), поэтому у офисной ветви своё семейство и своя
@@ -185,6 +205,38 @@ DOCLING_MARKDOWN_POLICY = "md-plain-underscore"
 #: находиться под новым ключом ``extract_cache`` (02.11.2026: очистка не применялась на
 #: документном пути вовсе — до правки версии отличать было нечего).
 DOCLING_TEXT_FINALIZE = "finalize-1"
+
+#: Алфавит OCR-распознавателя уровня ``full`` — **слагаемое идентичности текста**.
+#:
+#: Почему алфавит обязан быть объявлен, а не оставлен дефолту docling. Авто-OCR
+#: (``OcrAutoOptions``) ставит ``lang=['ch']``, и кириллица приходит латинской
+#: транслитерацией: замер 14.11.2026 на скане — 176 символов и **0** кириллицы, с
+#: кириллической rec-моделью та же страница — 719 символов и 558 кириллицы.
+#:
+#: Почему алфавит обязан быть в версии. Одинаковые байты PDF, одинаковый уровень
+#: ``full`` и **разный алфавит** дают **разный текст** — а ключ ``extract_cache``
+#: (``(content_hash, extractor_version, level)``) у них был бы один. Тогда прогон с
+#: ``ch`` вернул бы из кэша транслитерированный мусор под объявленным кириллическим
+#: алфавитом (или наоборот), и провенанс назвал бы распознаватель, которого не было
+#: (A3). Поэтому алфавит и rec-модель названы константами, а не аргументом по месту.
+DOCLING_OCR_LANG = "cyrillic"
+
+#: Имя файла rec-модели **внутри установленного колеса** ``rapidocr``
+#: (``rapidocr/models/``, версия 3.9.2). Путь резолвится от пакета
+#: (:func:`_rapidocr_rec_model_path`), а не хардкодится: ``.venv`` — свойство хоста, а не
+#: измерения. Модель названа явно, потому что ``lang=['cyrillic']`` без пути опирается на
+#: разрешение имени внутри rapidocr и на PP-OCR-версию по умолчанию: замер 14.11.2026 —
+#: такое разрешение падает (``Unsupported rec.lang_type='cyrillic' for PP-OCRv6 small
+#: model``), а torch-бэкенд тянет ``.pth`` с modelscope и падает по таймауту.
+DOCLING_OCR_REC_MODEL = "cyrillic_PP-OCRv5_rec_mobile.onnx"
+
+#: Сегмент версии, называющий OCR-условие уровня ``full``: алфавит + поколение модели.
+#:
+#: Стоит **только** у ``full``: у ``layout``/``layout_tables``/``text`` OCR выключен
+#: явно (``do_ocr=False``), и сегмент ``ocr-none`` был бы ложью про обещание уровня —
+#: ровно того класса, ради которого у офисной ветви своё семейство. Смена алфавита или
+#: rec-модели обязана менять этот сегмент (см. :data:`DOCLING_OCR_LANG`).
+DOCLING_OCR_SEGMENT = "ocr-cyrillic-v5"
 
 #: Имена дистрибутивов, под которыми ставится одна и та же библиотека: полный ``docling``
 #: (с torch) и лёгкий ``docling-slim`` (тот же код без torch; 05-dependency-stack).
@@ -254,13 +306,42 @@ def docling_engine_build() -> str:
     return f"{_DOCLING_BUILD_PREFIX}{docling_library_version()}"
 
 
+def _rapidocr_rec_model_path() -> Path | None:
+    """Файл rec-модели кириллицы в установленном колесе ``rapidocr`` (``None`` — нет).
+
+    Путь резолвится **от пакета** (``importlib.resources.files``), а не от ``.venv``:
+    раскладка виртуального окружения — свойство хоста, а не измерения, и хардкод
+    ``.venv/lib/python3.14/…`` сломался бы на любой другой установке (контейнер, чужая
+    машина) ровно в тот момент, когда кэш уже набит прежним текстом.
+
+    Модель названа явно, а не через ``lang=['cyrillic']`` без пути: замер 14.11.2026 —
+    разрешение имени внутри rapidocr упирается в поколение PP-OCR по умолчанию
+    (``Unsupported rec.lang_type='cyrillic' for PP-OCRv6 small model``), а torch-бэкенд
+    тянет ``.pth`` с modelscope и падает по таймауту. Явный файл — это объявленное
+    условие, а не надежда на порядок разрешения внутри библиотеки.
+
+    ``None`` — модель недоступна (пакет не установлен, ресурс не файл: zipped-установка).
+    Вызывающий обязан сделать это **видимой** ошибкой: тихого отката на ``ch`` нет.
+    """
+    try:
+        resource = (
+            importlib.resources.files("rapidocr") / "models" / DOCLING_OCR_REC_MODEL
+        )
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover — нет пакета rapidocr
+        return None
+    path = Path(str(resource))
+    return path if path.is_file() else None
+
+
 def docling_extractor_version(
     level: DocumentLevel | str, pdf_device: PdfDevice | str = PdfDevice.CPU
 ) -> str:
     """``extractor_version`` **PDF**-документа:
-    ``docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>``.
+    ``docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>``, у уровня
+    ``full`` — ещё ``/<ocr>``.
 
-    Пример: ``docling-doc-3:full/cuda/docling-2.135.0/md-plain-underscore/finalize-1``.
+    Примеры: ``docling-doc-4:full/cuda/docling-2.135.0/md-plain-underscore/finalize-1/ocr-cyrillic-v5``
+    и ``docling-doc-4:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1``.
     Уровень кодирует ось ``crawl.document_level`` (P5), устройство — ``crawl.pdf_device``
     (P9), сборка — фактически установленную библиотеку, политика — экспорт
     (:data:`DOCLING_MARKDOWN_POLICY`), финализация — очистку текста
@@ -268,6 +349,13 @@ def docling_extractor_version(
     (``(content_hash, extractor_version, level)``): после апгрейда docling, смены
     устройства, политики экспорта **или очистки** старый текст получается только под
     **старым** ключом и потому не находится.
+
+    **Почему алфавит OCR — только у ``full``.** OCR включён единственно на этом уровне
+    (``layout``/``layout_tables`` объявляют ``do_ocr=False``, ``text`` идёт нативным
+    парсером). У остальных уровней сегмент отсутствует, а не пишется как ``ocr-none``:
+    ``ocr-none`` — утверждение о распознавателе, которого у уровня нет вовсе, то есть та
+    же ложь о обещании, что и офисный штамп с уровнем. У ``full`` алфавит меняет текст
+    (транслитерация вместо кириллицы), поэтому обязан менять и ключ кэша.
 
     Почему устройство обязательно в ключе (Д-8 в новом виде). Текст документа не
     бит-в-бит независим от устройства: layout/таблицы считаются тензорными ядрами, и
@@ -283,11 +371,17 @@ def docling_extractor_version(
     :class:`PdfDevice`, поэтому два пути не могут дать разные строки для одного входа.
     """
     device = PdfDevice(pdf_device)
-    return (
-        f"{DOCLING_ADAPTER_FAMILY}:{DocumentLevel(level).value}/"
+    normalized = DocumentLevel(level)
+    version = (
+        f"{DOCLING_ADAPTER_FAMILY}:{normalized.value}/"
         f"{device.value}/{docling_engine_build()}/{DOCLING_MARKDOWN_POLICY}/"
         f"{DOCLING_TEXT_FINALIZE}"
     )
+    if normalized is DocumentLevel.FULL:
+        # OCR существует только здесь: у остальных уровней сегмента нет вовсе
+        # (``ocr-none`` объявлял бы распознаватель, которого уровень не обещает).
+        version = f"{version}/{DOCLING_OCR_SEGMENT}"
+    return version
 
 
 def docling_office_version() -> str:
@@ -424,6 +518,47 @@ def _document_text(document: _DoclingDocument) -> str:
     return finalize_extracted_text(markdown)
 
 
+#: Маркер изображения в markdown docling: ``<!-- image -->``. Появляется на месте
+#: картинки/страницы без текстового слоя — в том числе на **скане**, где OCR не прочитал
+#: ничего.
+#:
+#: Сопоставление узкое, как у ``_neutralize_definition_lists``: только маркер изображения
+#: (с допустимыми пробелами внутри), ничего больше. Задача — не «вычистить разметку», а
+#: отличить «текста нет» от «текст есть»; широкая чистка (все HTML-комментарии, любые
+#: разделители) съела бы настоящий текст документа, а правило здесь работает **только**
+#: как предикат и текст не меняет.
+_IMAGE_MARKER_RE = re.compile(r"<!--\s*image\s*-->")
+
+
+def _has_no_text(text: str) -> bool:
+    """В тексте нет ничего, кроме маркеров изображений и символов таблиц.
+
+    Зачем отдельный предикат, если есть ``text.strip()``. Скан при
+    ``document_level=layout_tables`` (OCR выключен) даёт markdown **из одних**
+    ``<!-- image -->`` и пустых табличных строк (``| | |``): после ``strip()`` строка
+    непуста, документ входил в корпус как прочитанный, ``error=None`` — и мусорный
+    документ попадал в корпус как доказательство. Замер 14.11.2026: 17 сканов из 17
+    дали такой текст.
+
+    Поэтому «текст» здесь — это то, что остаётся после удаления маркеров изображений и
+    символов ``|`` (каркас таблицы без ячеек). Остались только пробелы/переводы строк —
+    текста нет, и вызывающий обязан вернуть :data:`~core.ports.types.EMPTY_TEXT_REASON`
+    (``conversion_failure_kind`` → ``FailureKind.EMPTY_DOCUMENT``: «нечего разбирать», а
+    не «парсер сломался»).
+
+    Символы разделителя таблицы (``-``/``:``) намеренно **не** вычищаются: объявленное
+    правило — маркеры изображений и ``|``, потому что измеренный дефект (14.11.2026, 17
+    сканов из 17) даёт ровно их. Расширять правило «на всякий случай» запрещено: строка
+    ``---`` — законный markdown-разделитель, и предикат, съедающий её, объявил бы пустым
+    документ, у которого текст есть.
+
+    Предикат **ничего не вычищает** из результата: документ с настоящим текстом и
+    маркером изображения внутри остаётся документом, маркер остаётся в тексте. Иначе
+    правка меняла бы корпус шире, чем требует дефект.
+    """
+    return not _IMAGE_MARKER_RE.sub(" ", text).replace("|", " ").strip()
+
+
 #: Имя ``GroupLabel``, которым офисный бэкенд помечает группу листа книги (XLSX).
 _SHEET_GROUP_LABEL = "sheet"
 
@@ -533,6 +668,9 @@ def _resolve_docling() -> bool:
             PdfPipelineOptions as _PdfPipelineOptions,
         )
         from docling.datamodel.pipeline_options import (
+            RapidOcrOptions as _RapidOcrOptions,
+        )
+        from docling.datamodel.pipeline_options import (
             TableFormerMode as _TableFormerMode,
         )
         from docling.datamodel.pipeline_options import (
@@ -563,6 +701,7 @@ def _resolve_docling() -> bool:
             "TableFormerMode": _TableFormerMode,
             "OcrAutoOptions": _OcrAutoOptions,
             "AcceleratorOptions": _AcceleratorOptions,
+            "RapidOcrOptions": _RapidOcrOptions,
         }
     )
     _DOCLING_AVAILABLE = True
@@ -606,12 +745,15 @@ _log = logging.getLogger(__name__)
 
 
 class OcrEngineUnavailableError(RuntimeError):
-    """``document_level=full`` требует рабочий OCR, но docling его не нашёл.
+    """``document_level=full`` требует рабочий OCR, но его нечем исполнить.
 
-    Поднимается из :meth:`DoclingDocumentExtractor._build_converter`: молчаливое
-    извлечение без OCR, помеченное как ``full``, — ложь о качестве текста. Ошибка
-    доходит до фазы как ``parser_failed`` (видимая запись ``errors``), а не превращается
-    в пустой/неполный текст.
+    Два входа: объявленная rec-модель отсутствует в колесе ``rapidocr`` (отказ в
+    :meth:`DoclingDocumentExtractor._ocr_options`) либо объявленный движок не строится
+    (отказ в :meth:`DoclingDocumentExtractor._require_working_ocr`). Молчаливое
+    извлечение без OCR, помеченное как ``full``, — ложь о качестве текста: с авто-OCR
+    docling сканы давали латинскую транслитерацию кириллицы при ``error=None`` (замер
+    14.11.2026). Ошибка доходит до фазы как ``parser_failed`` (видимая запись ``errors``),
+    а не превращается в пустой/неполный текст.
     """
 
 
@@ -623,15 +765,27 @@ class _OcrProbeUnsupported(RuntimeError):
 
 
 def _probe_ocr_engine(pdf_options: object) -> object | None:
-    """Строит auto-OCR для PDF-опций уровня и возвращает выбранный движок.
+    """Строит OCR **того движка, который выберет пайплайн**, и возвращает его.
 
-    ``None`` — docling отверг всех кандидатов (``OcrAutoModel._engine is None``): OCR
-    фактически недоступен. Проверяется именно тот выбор, который сделает пайплайн
-    (``OcrAutoModel``), но **без** инициализации тяжёлых layout/table-моделей: для
-    офисного документа цена проверки не должна быть ценой PDF-конвейера.
+    ``None`` — OCR фактически недоступен (авто-выбор отверг всех кандидатов, либо
+    объявленный движок не построился): молчаливого «текст как ``full``» быть не должно.
+    Проверяется именно тот путь, которым пойдёт пайплайн, но **без** инициализации
+    тяжёлых layout/table-моделей: для офисного документа цена проверки не должна быть
+    ценой PDF-конвейера.
 
-    Если docling переименует внутренности (``OcrAutoModel``/``_engine``), поднимается
-    :class:`_OcrProbeUnsupported` — это деградация проверки, не отказ извлечения.
+    Два пути, потому что их два у пайплайна (``get_ocr_factory().create_instance``):
+
+    * ``OcrAutoOptions`` (уровни без объявленного алфавита) — авто-выбор
+      (``OcrAutoModel``), проверяется его ``_engine``;
+    * **объявленный** движок (:class:`_pdf_options` для ``full`` отдаёт
+      ``RapidOcrOptions`` с алфавитом и файлом модели) — строится тем же фабричным
+      вызовом, что и в ``StandardPdfPipeline._make_ocr_model``. Проверять здесь авто-выбор
+      было бы ложью: он мог бы «пройти» через easyocr, тогда как пайплайн исполняет
+      RapidOCR — и ``ocr_probe=ok`` называл бы чужое наблюдение.
+
+    Если docling переименует внутренности (``OcrAutoModel``/``_engine``/фабрику),
+    поднимается :class:`_OcrProbeUnsupported` — это деградация проверки, не отказ
+    извлечения.
     """
     try:
         from docling.models.stages.ocr.auto_ocr_model import (
@@ -659,6 +813,13 @@ def _probe_ocr_engine(pdf_options: object) -> object | None:
             docling_settings = None
         artifacts_path = getattr(docling_settings, "artifacts_path", None)
 
+    if getattr(ocr_options, "kind", "auto") != "auto":
+        return _probe_declared_ocr_engine(
+            ocr_options=ocr_options,
+            artifacts_path=artifacts_path,
+            accelerator_options=accelerator_options,
+        )
+
     try:
         auto = OcrAutoModel(
             enabled=True,
@@ -683,12 +844,59 @@ def _probe_ocr_engine(pdf_options: object) -> object | None:
     return engine
 
 
+def _probe_declared_ocr_engine(
+    *,
+    ocr_options: Any,
+    artifacts_path: object,
+    accelerator_options: object,
+) -> object | None:
+    """Движок **объявленных** OCR-опций — тем же фабричным вызовом, что у пайплайна.
+
+    ``ocr_options`` типизирован ``Any`` намеренно: объект принадлежит внешней библиотеке
+    (``RapidOcrOptions``), а ``BaseOptions`` docling на уровне модуля не импортируется —
+    импорт docling здесь ленивый.
+
+    ``StandardPdfPipeline._make_ocr_model`` строит движок через
+    ``get_ocr_factory().create_instance(options=…)``; повторять здесь другую логику
+    значило бы проверять не то, что исполняется. Успешная постройка и есть «движок есть»:
+    у ``RapidOcrModel`` нет поля ``_engine`` (оно принадлежит авто-выбору), а его
+    ``__init__`` открывает ONNX-сессии и падает, если файла модели нет.
+
+    Отказ постройки (нет ``onnxruntime``, нет файла модели, язык не поддержан) — это
+    ``None`` («OCR недоступен»), а не исключение: вызывающий превращает его в отказ
+    извлечения (``_require_working_ocr``). ``TypeError``/``AttributeError``/отсутствие
+    фабрики — смена внутреннего API docling, то есть ``unsupported``.
+    """
+    try:
+        from docling.models.factories import get_ocr_factory
+    except ImportError as exc:  # pragma: no cover - зависит от версии docling
+        raise _OcrProbeUnsupported(f"нет get_ocr_factory: {exc}") from exc
+    try:
+        factory = get_ocr_factory(allow_external_plugins=False)
+        return factory.create_instance(
+            options=ocr_options,
+            enabled=True,
+            artifacts_path=artifacts_path,
+            accelerator_options=accelerator_options,
+        )
+    except (TypeError, AttributeError) as exc:  # pragma: no cover - смена API docling
+        raise _OcrProbeUnsupported(f"фабрика OCR несовместима: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 — отказ движка, а не смена API
+        _log.warning(
+            "document extract: объявленный OCR-движок не построился (%s) — %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 def probe_ocr_engine(pdf_options: object) -> str:
     """Явный тристейт проверки OCR: ``ok`` | ``unavailable`` | ``unsupported``.
 
     «Не проверено» ≠ «проверено и работает»: результат называется, а не только пишется
-    в журнал. ``unavailable`` — docling отверг всех кандидатов (движка нет);
-    ``unsupported`` — внутренний API docling не позволил проверить (переименование).
+    в журнал. ``unavailable`` — движка нет (авто-выбор отверг всех кандидатов либо
+    объявленный движок не построился); ``unsupported`` — внутренний API docling не
+    позволил проверить (переименование).
     Отказ по ``unavailable`` остаётся отказом извлечения (см.
     :meth:`DoclingDocumentExtractor._require_working_ocr`); тристейт лишь **называет**
     факт, ради провенанса результата.
@@ -847,8 +1055,9 @@ class DoclingDocumentExtractor:
     ``level`` задаёт уровень извлечения **PDF** (P5), ``pdf_device`` — устройство моделей
     PDF (P9). ``version`` — инстансный и кодирует уровень, устройство, сборку движка,
     политику экспорта и очистку текста
-    (``docling-doc-3:<level>/<device>/docling-<build>/<policy>/<finalize>``,
-    :func:`docling_extractor_version`), чтобы смена уровня, устройства или апгрейд docling
+    (``docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>``, у ``full`` —
+    ещё ``/<ocr>``; :func:`docling_extractor_version`), чтобы смена уровня, устройства,
+    алфавита OCR или апгрейд docling
     была видна и в ``index_build_id``, и в ключе ``extract_cache``. Классовый ``version`` —
     дефолт ``full``/``cpu`` (обратная совместимость по атрибуту).
 
@@ -962,7 +1171,7 @@ class DoclingDocumentExtractor:
         документах; статус docling — ``SUCCESS``, страниц 665/665 (частичных нет).
 
         Класс изменения — ``execution_change`` (§13), **не** ``methodology_change``:
-        ``extractor_version`` (``docling-doc-3:<level>/<device>/docling-<build>``) не
+        ``extractor_version`` (``docling-doc-4:<level>/<device>/docling-<build>``) не
         включает эту ручку и от замера не меняется, поэтому записи ``extract_cache/``
         остаются валидными (замер не инвалидирует извлечённый корпус). ``golden-full``
         не требуется.
@@ -1021,9 +1230,51 @@ class DoclingDocumentExtractor:
                 do_ocr=False,
                 **common,
             )
-        # ``full`` — байт-в-байт дефолты docling (OCR включён, таблицы ACCURATE), кроме
-        # ``queue_max_size`` (см. docstring: замер −44% RSS, markdown идентичен).
-        return PdfPipelineOptions(**common)
+        # ``full`` — дефолты docling (OCR включён, таблицы ACCURATE), кроме
+        # ``queue_max_size`` (см. docstring: замер −44% RSS, markdown идентичен) и
+        # алфавита OCR (:meth:`_ocr_options`: авто-OCR docling ставит ``ch``).
+        return PdfPipelineOptions(ocr_options=self._ocr_options(), **common)
+
+    def _ocr_options(self) -> object:
+        """``RapidOcrOptions`` с **объявленным** алфавитом и явной rec-моделью (``full``).
+
+        Почему не ``OcrAutoOptions`` (дефолт docling). Авто-OCR подбирает движок и язык
+        сам, а для RapidOCR ставит ``lang=['ch']``. Замер 14.11.2026 на скане: текст —
+        176 символов и **0** кириллицы (латинская транслитерация), при этом
+        ``error=None``, то есть мусор входил в корпус как документ. С кириллической
+        rec-моделью та же страница даёт 719 символов и 558 кириллицы, читаемый русский.
+
+        Почему путь к модели явный (:data:`DOCLING_OCR_REC_MODEL`). ``lang=['cyrillic']``
+        без пути опирается на разрешение имени внутри rapidocr и на поколение PP-OCR по
+        умолчанию; замер 14.11.2026 — такое разрешение падает, а torch-бэкенд тянет
+        ``.pth`` с modelscope и падает по таймауту. ``onnxruntime`` + файл из колеса
+        работают офлайн (extra ``extract-pdf``).
+
+        Модели нет — :class:`OcrEngineUnavailableError` с именем ожидаемого файла.
+        Тихого отката на ``ch`` нет: он вернул бы транслитерацию под объявленным
+        кириллическим алфавитом в :func:`docling_extractor_version`, то есть провенанс
+        назвал бы распознаватель, которого не было (A3).
+        """
+        if RapidOcrOptions is None:  # pragma: no cover — docling не разрешён
+            raise OcrEngineUnavailableError(
+                "document_level=full: RapidOcrOptions недоступен (docling не "
+                "импортирован или символы подменены) — объявленный алфавит OCR "
+                f"{DOCLING_OCR_LANG!r} исполнить нечем"
+            )
+        model_path = _rapidocr_rec_model_path()
+        if model_path is None:
+            raise OcrEngineUnavailableError(
+                "document_level=full: rec-модель OCR "
+                f"{DOCLING_OCR_REC_MODEL!r} (алфавит {DOCLING_OCR_LANG!r}) не найдена в "
+                "пакете rapidocr — объявленный алфавит исполнить нечем; тихий откат на "
+                "алфавит по умолчанию ('ch') запрещён: кириллица пришла бы латинской "
+                "транслитерацией (замер 14.11.2026)"
+            )
+        return RapidOcrOptions(
+            backend="onnxruntime",
+            lang=[DOCLING_OCR_LANG],
+            rec_model_path=str(model_path),
+        )
 
     def _accelerator_options(self) -> object:
         """``AcceleratorOptions`` с **объявленным** устройством (P9).
@@ -1114,8 +1365,10 @@ class DoclingDocumentExtractor:
                 "document_level=full требует OCR, но docling не нашёл ни одного "
                 "OCR-движка: установленный rapidocr/onnxruntime несовместим "
                 "(docling 2.135 импортирует PP_OCRV6_LANGS, удалённый в rapidocr "
-                "3.10.0; нужен rapidocr>=3.9.1,<3.10). Извлечение остановлено, чтобы "
-                "не выдать текст без OCR за уровень full."
+                "3.10.0; нужен rapidocr>=3.9.1,<3.10). Объявленный алфавит "
+                f"{DOCLING_OCR_LANG!r} и его rec-модель проверяются раньше, в "
+                "_ocr_options: сюда доходит только отказ самого движка. Извлечение "
+                "остановлено, чтобы не выдать текст без OCR за уровень full."
             )
         self._ocr_checked = True
 
@@ -1265,6 +1518,13 @@ class DoclingDocumentExtractor:
           провал: ``_error``;
         * любой другой статус — ``_error`` (прежняя строка ошибки).
 
+        **«Текст» — это не «непустая строка».** Скан при ``layout_tables`` (OCR выключен)
+        даёт markdown из одних ``<!-- image -->`` и пустых табличных строк: ``strip()``
+        непуст, а текста нет. Такой результат — :data:`~core.ports.types.EMPTY_TEXT_REASON`
+        (:func:`_has_no_text`), и ``conversion_failure_kind`` классифицирует его как
+        ``FailureKind.EMPTY_DOCUMENT`` — «нечего разбирать», а не «парсер сломался».
+        До этой правки мусорный документ входил в корпус с ``error=None``.
+
         Любой сбой конвертации — грациозная деградация ``docling: <причина>`` (прежняя
         строка ошибки), а не исключение.
 
@@ -1298,6 +1558,10 @@ class DoclingDocumentExtractor:
                     f"docling: статус конвертации {status}", stamp, ocr_probe=probe
                 )
             text = _document_text(result.document)
+            if _has_no_text(text):
+                # Маркеры изображений и каркас таблиц — не текст: документ не прочитан,
+                # и входить в корпус как доказательство он не вправе (I19).
+                return self._error(EMPTY_TEXT_REASON, stamp, ocr_probe=probe)
             pages = _page_count(result)
             return ExtractedDoc(
                 text=text,
@@ -1332,8 +1596,15 @@ class DoclingDocumentExtractor:
           описывает движок и ось уровня, а не объём проделанной работы).
 
         Пустой текст при частичном статусе — это не частичный успех: страницы, которых нет
-        в результате, не дали ничего. Тогда — прежняя строка ``_error``, чтобы «прочитали
-        частично» не стало способом вернуть пустой документ в корпус.
+        в результате, не дали ничего. Тогда — :data:`~core.ports.types.EMPTY_TEXT_REASON`
+        (та же классификация, что у полного успеха: ``FailureKind.EMPTY_DOCUMENT``), чтобы
+        «прочитали частично» не стало способом вернуть пустой документ в корпус.
+
+        **Пустота считается не по ``strip()``.** Скан при ``layout_tables`` отдаёт
+        ``<!-- image -->`` и пустые табличные строки: строка непуста, текста нет. Поэтому
+        предикат один на оба пути (:func:`_has_no_text`): маркеры изображений и каркас
+        таблиц текстом не считаются. Иначе частичный скан входил бы в корпус как
+        прочитанная часть документа.
 
         ``office=True`` — офисный документ: у него нет уровня (``SimplePipeline``), поэтому
         причина частичности не называет ни уровня, ни обещания структуры. Иначе DOCX
@@ -1344,9 +1615,17 @@ class DoclingDocumentExtractor:
         первом.
         """
         text = _document_text(result.document)
-        if not text.strip():
+        if _has_no_text(text):
+            # Статус сохраняем в журнале: в самой причине его нет (``EMPTY_TEXT_REASON``
+            # — общая классификация «нечего разбирать»), а «частично» и «пусто» —
+            # разные наблюдения.
+            _log.warning(
+                "частичное извлечение без текста: статус конвертации %s, "
+                "текст — только маркеры изображений/каркас таблиц",
+                status,
+            )
             return self._error(
-                f"docling: статус конвертации {status} без текста",
+                EMPTY_TEXT_REASON,
                 self.version if version is None else version,
                 ocr_probe=ocr_probe,
             )

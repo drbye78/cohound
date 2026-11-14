@@ -143,7 +143,7 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     assert first == second
     assert first.extractor_stack.startswith(
         "trafilatura-html-6+text-plain-2+epub-3+"
-        f"{pdfium_engine_build()}+docling-office-1+docling-doc-3/cpu/docling-"
+        f"{pdfium_engine_build()}+docling-office-1+docling-doc-4/cpu/docling-"
     )
     # Объявленные оси — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего поиска
     # меняет состав корпуса, то есть условие измерения; + ``manual_artifacts_digest``:
@@ -677,7 +677,7 @@ def test_extractor_stack_names_the_declared_device(
     finalize = extract_document.DOCLING_TEXT_FINALIZE
     assert cpu.split("/")[-3:] == ["docling-9.9.9", policy, finalize]
     assert cuda.split("/")[-3:] == ["docling-9.9.9", policy, finalize]
-    assert "+docling-doc-3/cpu/" in cpu and "+docling-doc-3/cuda/" in cuda
+    assert "+docling-doc-4/cpu/" in cpu and "+docling-doc-4/cuda/" in cuda
     assert cpu != cuda
     # Устройство и сборка не смешиваются: сборка у обоих одна, политика — тоже.
     assert cpu.split("/")[-3] == cuda.split("/")[-3]
@@ -702,12 +702,14 @@ def test_extractor_stack_and_extractor_version_share_the_engine_build(
     assert stack.split("/")[-3] == "docling-9.9.9"
     assert (
         version
-        == "docling-doc-3:full/cpu/docling-9.9.9/md-plain-underscore/finalize-1"
+        == "docling-doc-4:full/cpu/docling-9.9.9/md-plain-underscore/finalize-1/"
+        f"{extract_document.DOCLING_OCR_SEGMENT}"
     )
     # Одна и та же строка сборки в обоих идентификаторах (политика и финализация — тоже).
-    assert stack.split("/")[-3] == version.split("/")[-3]
-    assert stack.split("/")[-2] == version.split("/")[-2]
-    assert stack.split("/")[-1] == version.split("/")[-1]
+    # Хвост ``extractor_stack`` — ``<build>/<policy>/<finalize>``; в ``extractor_version``
+    # эти три слагаемых идут сразу после устройства, а за ними — сегмент OCR (только у
+    # ``full``: там OCR включён, и алфавит меняет текст).
+    assert stack.split("/")[-3:] == version.split("/")[2:5]
 
 
 def test_engine_build_does_not_enter_execution_contract() -> None:

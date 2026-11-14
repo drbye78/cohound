@@ -2073,9 +2073,15 @@ def feed_manual_artifact(
     fetch_plan = target.plan
     level = limits.document_level
     extractor_obj: ExtractorPort = extractor
+    # Per-site ось сильнее run-level: переданный экстрактор собран на run-level оси,
+    # поэтому при объявленном профиле другого уровня его надо пересобрать фабрикой
+    # (иначе ``full`` из профиля исполнился бы как ``layout_tables`` прогона, а
+    # ``extractor_version`` назвал бы движок, которого не было). См.
+    # ``extract_consume._extractor_for`` — правило одно.
+    own_level = getattr(extractor, "document_level", None)
     if extractor_factory is not None and (
-        level is not DocumentLevel.FULL
-        or limits.pdf_pipeline is not PdfPipeline.STRUCTURED
+        limits.pdf_pipeline is not PdfPipeline.STRUCTURED
+        or (own_level is not None and own_level is not level)
     ):
         # Зеркало пути корня (P5): уровень/механизм — свойство настройки, а не
         # «какой экстрактор случайно передали». Отказ фабрики — видимая деградация.
