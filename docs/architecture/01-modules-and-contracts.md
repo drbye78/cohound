@@ -1,7 +1,7 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
 > **Статус на 2026-11-08** (HEAD `f14f866`): сверены все якоря `путь:строка` по содержимому,
-> матрица §1 — построчно с `tests/selfcheck.py:967` `_import_graph` (сходится), перечни
+> матрица §1 — построчно с `tests/selfcheck.py:978` `_import_graph` (сходится), перечни
 > enum-значений и версии схем — с `core/`. §10 закрыт (5 из 5, сигнатуры перепроверены);
 > §9 закрыт — миграция `tests/selfcheck.py` сверена 29.10 (94 двойника / 8 дописанных тестов /
 > 9 структурных гейтов), на 08.11 в selfcheck **113** утверждений (99 `check` + 14
@@ -45,13 +45,13 @@
 (`core/edge/extract_service.py:59`, `core/edge/seam_schema.py:41`); дублировать словарь значило бы
 дать ему разойтись с доменом.
 
-**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:967` `_import_graph`
+**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:978` `_import_graph`
 разбирает импорты **статически** (`ast`, без исполнения), включая резолв relative-импортов
-(`tests/selfcheck.py:1011` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
-(`tests/selfcheck.py:1028` `_check_edge`), то есть проверка по принципу allow-list, отдельных
-«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1035`
-`_neutrality` (§1.3), `tests/selfcheck.py:1143` `_shims_removed` (нет `core.schemas`/`core.db`),
-`tests/selfcheck.py:3206` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
+(`tests/selfcheck.py:1022` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
+(`tests/selfcheck.py:1039` `_check_edge`), то есть проверка по принципу allow-list, отдельных
+«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1046`
+`_neutrality` (§1.3), `tests/selfcheck.py:1154` `_shims_removed` (нет `core.schemas`/`core.db`),
+`tests/selfcheck.py:3221` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
 по **всему** слою, а не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет
 сформулирован по запрещённым слоям, а не по файлам).
 
@@ -907,8 +907,8 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 | Было | Стало | Статус |
 |---|---|---|
-| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1143` (`_shims_removed`) |
-| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:88` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1143` |
+| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1154` (`_shims_removed`) |
+| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:88` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1154` |
 | `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ✅ **закрыто** (29.10) — построчная сверка 111 утверждений (97 `check` + 14 `expect_raises`) с pytest-пирамидой: **94** имеют двойника (указан `путь:строка`), **8** держали покрытие в одиночку и дописаны тестами, **9** — структурные гейты над деревом, которым pytest-двойник противопоказан: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation`, `_domain_all_complete`, `_ports_contracts`, `_ports_i18`, `_ports_type_reuse`, полнота CLI-поверхности. Дописанные: конструктор `CellEvidence` (I19/R1/I10 — прежний тест проверял `check_evidence` на `model_construct`, то есть в обход валидатора), `core/util/text_utils` (язык, ё→е, нарезка, RU-токены), `core/util/security` (SSRF/allowlist/traversal/slug), `core/adapters/lexical_bm25` (**единственный адаптер без тестов**), `DoclingDocumentExtractor.supports`, `MarkdownChunkerPort`↔`ChunkerPort`. Пиксель-в-пиксель дублировать оставшиеся 94 не нужно и вредно: гейт над деревом и юнит-тест отвечают на разные вопросы. На 08.11 в selfcheck **113** утверждений (99 + 14) — два добавлены после сверки. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py`; `tests/domain` — 13 файлов / 172 функции / 183 кейса, `tests/store` — 20 файлов / 286 функций / 315 кейсов |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:

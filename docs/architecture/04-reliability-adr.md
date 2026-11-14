@@ -573,7 +573,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 
 **Открытые вопросы (закрыть до/в ходе M0):**
 - формат импорт-графа CI (статический анализ импортов `core.*`) — ✅ сделано
-  (`tests/selfcheck.py:967` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:355`;
+  (`tests/selfcheck.py:978` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:355`;
   тот же шаг в CI — `scripts/ci.sh:50`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
   итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1345` и `core/domain/models.py:1508`; производитель
