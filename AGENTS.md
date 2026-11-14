@@ -709,6 +709,7 @@ Host utilities, chosen by task rather than by habit. Measured 2026-10-31.
 | SQLite (runs, state) | `litecli` 1.17.1 | `litecli db.sqlite -e "select …"` |
 | Profiling a live process | `py-spy` 0.4.2 | `py-spy record -d 3 -r 50 -f speedscope -o /tmp/p.json -- .venv/bin/python …` |
 | Structural diff (did the move change behaviour?) | `difftastic` 0.71.0 | `difft --color never --display inline /tmp/old new` |
+| Symbols / usages / diff effects (structure, not text) | `brokk` (bifrost MCP; measured 2026-11-14) | `scan_usages_by_location` (target = the declaration **token**) · `search_symbols(patterns=[…])` · `get_summaries` / `get_symbol_sources` (file outline without reading 5 000-line monoliths) · `analyze_diff` / `cyclomatic_complexity` (delta base→worktree) |
 | Readable unified diff (presentation only) | `delta` 0.20.1 | `git diff \| delta --paging=never` |
 | Reading files with syntax highlighting | `bat` 0.22.1 | `bat -p --line-range 100:160 file.py` |
 
@@ -744,8 +745,24 @@ Traps that cost time:
   text) or `ast-grep` (structure). The index is derived and host-specific
   (`.zvec-grep/index.zvec`, gitignored); the embedding model is local
   (`local/potion-code-16m-v2`), so no external key is involved.
+- `brokk` answers are verified-or-honest: it either returns exact results or names its
+  incompleteness (`forward_reference_incomplete`, `unresolvable_import_boundary`) — verified
+  against `rg` on 2026-11-14. But: `usage_graph`/`missing_tests` exhausted the 60 s MCP budget
+  (3/3 and 2/2 attempts, even after `refresh`; `timeout.execution` raised to 180 s on
+  15.11 — not retested yet); "who calls X" is `scan_usages_by_location`, and its target must
+  be the **declaration token** (any other line/column → `invalid_location` with a recovery
+  hint). `rename_symbol` and rewrite tools **write files** and know nothing about parallel
+  lanes — do not run them over the shared tree (same rule as `ast-grep` rewrite mode).
+- Heredocs are **not analyzable** by OpenCode's portable shell scanner: the command fails
+  with `Portable shell scanner cannot analyze command: heredoc` (measured 2026-11-15,
+  opencode 2.2.7). Write files with the `write`/`edit` tools, run scripts as
+  `python3 -c '<one-liner>'` or a temp `.py` file — heredocs are never needed in agent shell
+  commands. This constrains agent commands, not the repository: heredocs in `scripts/*.sh`
+  are fine.
 - A code-graph MCP server is not part of the toolchain: its call-graph and dead-code answers
   were measured as wrong on this repo, while its complexity ranking and raw cypher were fine.
+  It was removed from the opencode config on 2026-11-15; its niche is taken by `brokk` (above),
+  whose usage answers must still be verified against `rg` when a whole-module claim is made.
 
 ## 13. Code conventions
 
