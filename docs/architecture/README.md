@@ -12,7 +12,7 @@
 
 | Что | Значение | Где в коде |
 |---|---|---|
-| `SCHEMA_VERSION` (run-DB) | `"3.22.0"` | `core/store/sqlite.py:104` |
+| `SCHEMA_VERSION` (run-DB) | `"3.23.0"` | `core/store/sqlite.py:112` |
 | `STATE_SCHEMA_VERSION` (state.db) | `"12"` | `core/store/state_sqlite.py:84` |
 | `EDGE_JOBS_SCHEMA_VERSION` | `"1"` | `core/edge/scheduler.py:198` |
 | `METHODOLOGY_VERSION` | `"0.3.0"` | `core/domain/models.py:164` |

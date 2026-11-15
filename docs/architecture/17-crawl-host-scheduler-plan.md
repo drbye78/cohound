@@ -35,7 +35,7 @@
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:1259`),
 сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2791`), retention сырых байтов
 (`retain`, `core/pipeline/corpus_ingest.py:1158`), durable per-URL состоянием (`crawl_session_items`,
-`core/store/sqlite.py:513`), расширением ссылок из **сырых байтов** (`extract_links`,
+`core/store/sqlite.py:528`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.
 
@@ -62,7 +62,7 @@ level, pdf_pipeline)` плюс провенанс получения. Потре
 состояние меняет только потребитель, upsert запрещён.
 
 **Носитель состояния зависит от топологии:** run-DB — SQLite с одним писателем (читатель открывает
-файл `mode=ro`, `core/store/sqlite.py:872`); двух писателей в один файл не бывает, значит «кластер
+файл `mode=ro`, `core/store/sqlite.py:887`); двух писателей в один файл не бывает, значит «кластер
 краула» не может разделять одну run-DB (§2).
 
 **RAM-сцепка снята (F5).** Окно `extract_pending` с барьером, флаг `counters.defer_extract` с
@@ -135,7 +135,7 @@ host'ами — линейно.
 `core/ports/crawl_errors.py`). Контракт «никакой мутации состояния сеанса здесь нет» уже записан у
 `local_fetch` (`core/pipeline/corpus_ingest.py:2791`), а pre-fetch — чистая фаза
 (`local_prefetch`, `core/pipeline/corpus_ingest.py:2670`). Потоки не получают ни `Frontier`, ни
-стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:872`), поэтому
+стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:887`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 
 **Ключ — host, и он один: и для вежливости, и для эксклюзивности.** Лимитер нормализует ключ до
@@ -188,7 +188,7 @@ claim (`expect=PENDING, claimed_by=<worker>`), без второго метод�
 
 **Очередь принадлежит производителю, доставка — потребителю.** Это главное следствие требования
 «краул эффективен безотносительно конверсии», и оно снимает вопрос «где очередь при `cluster`».
-`extract_queue` живёт в плоскости **краула** (его run-DB, один писатель, `core/store/sqlite.py:872`),
+`extract_queue` живёт в плоскости **краула** (его run-DB, один писатель, `core/store/sqlite.py:887`),
 а транспорт выбирается топологией:
 
 * `local` — потребитель в том же процессе: очередь читает пул извлечения, `claimed` → `done`;

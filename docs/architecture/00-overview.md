@@ -449,7 +449,7 @@ M0 должен давать **сквозной вертикальный сре�
 `core/edge/server.py`, `contracts/seam/openapi.json`; 0020 — знаменатель `scope_universe`
 (`core/pipeline/compute.py:184`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);
 0022 — `core/util/memory.py` (`malloc_trim`); 0023 — `core/pipeline/gate_subject.py` + `gates/*-request.json`;
-0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:104`) + `cells.absence_as_of` (`core/store/sqlite.py:379`).
+0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:112`) + `cells.absence_as_of` (`core/store/sqlite.py:394`).
 
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).

@@ -335,7 +335,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W3 — Store — ✅ done
 
-✅ сделано (проверено) — `core/store/sqlite.py:104` (`SCHEMA_VERSION = "3.22.0"`; **24** `CREATE TABLE`,
+✅ сделано (проверено) — `core/store/sqlite.py:112` (`SCHEMA_VERSION = "3.23.0"`; **24** `CREATE TABLE`,
 включая `schema_meta`, + `sqlite_sequence` = 25 таблиц в БД),
 `core/store/state_sqlite.py:84` (`STATE_SCHEMA_VERSION = "12"`),
 `core/store/state_store.py:1615` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
@@ -357,7 +357,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ✅ сделано (проверено) — `core/pipeline/runner.py:185` (`PhaseResult` c
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
-`core/cli/context.py:1690` (`make_profile_gate` подключён в CLI).
+`core/cli/context.py:1693` (`make_profile_gate` подключён в CLI).
 ✅ механизм durable-аттестации профиля есть, **подписей 0**: `save_profile_attestation` вызывается
 из CLI (`core/cli/package/commands.py:3083` → `core/store/state_store.py:1615`), команда —
 `hound package profile attest` (`core/cli/package/commands.py:2994`); строк в `profile_attestation`
@@ -544,7 +544,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:1927` (`render_battle_card`), `:1827:1930`
+✅ сделано (проверено) — `core/pipeline/report.py:1990` (`render_battle_card`), `:1827:1930`
 (`render_nda_questions`), `:2414` (`render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, 26.10) и
 `runs/ru-pg-dbms-c2e7b860ac17/outputs/` (**12** файлов, 06.11, включая `battle_card.xlsx`,
@@ -579,7 +579,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173`/`:274`/`:465` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3214`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3218`),
 но приёмочный контур не пройден: golden-full дал 6.8 % на наборе из 236 строк
 (`2026-10-27-golden-reference-set-unusable.md`), на переразмеченных 905 строках прогнан только
 срез 50 ячеек (07.11, κ 0.024/0.056); §11.5-baseline и кейсы 2–5 не делались.
@@ -617,7 +617,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ⚠️ частично: Д-2…Д-8, A1–A6, B1–B4, группа 0 закрыты; остаток — документный `pb`, `memmap`,
 B2, B6 (`24` F1.5, `07` §6). Документный `pb` ещё не введён: `core/pipeline/corpus_index.py:153`
 (`_product_content_token`) считает токен по `(chunk_id, content_hash)`; `pooled` как размещение
-отсутствует (`grep -c pooled core/` → 0); `grep "F3\b" core/` **не пусто** (`core/ports/store.py:350`,
+отсутствует (`grep -c pooled core/` → 0); `grep "F3\b" core/` **не пусто** (`core/ports/store.py:361`,
 `core/store/sqlite.py:79`) — прежнее «пусто» было ложным.
 
 - **Проект:** `24-fleet-work-units.md` — единица работы, ёмкость узла, размещение (§8 —
@@ -945,7 +945,7 @@ uv sync --frozen --extra dev
 6. **Публикация отчётов** (T10.3) — ✅ артефакты пишутся в `runs/{run_id}/outputs/`; `battle_card`
    эмитится и при низком Coverage — с баннером `ANALYTICAL_ONLY` (06.11: coverage 0.2666,
    12 артефактов), а блокируется только при `denominator == 0`
-   (`core/pipeline/report.py:588` — `_coverage_absent`).
+   (`core/pipeline/report.py:632` — `_coverage_absent`).
    Адресация в отдельный `reports/` — не введена (не требуется).
 7. **Детерминизм инференса** (T9.2) — ✅ `core/adapters/llm_local.py` (seed/greedy; constrained
    decoding — забота [OI]-серверa).
@@ -961,11 +961,11 @@ uv sync --frozen --extra dev
    Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
    ✅ проверено на `2af6d1e`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
-   канал в Ш6 — `core/pipeline/phases.py:1478`. Имя параметра сменилось: `scope_acceptance`
+   канал в Ш6 — `core/pipeline/phases.py:1480`. Имя параметра сменилось: `scope_acceptance`
    (принятие риска) — `core/pipeline/evaluate.py:2819` (`evaluate_cell`), `:551` (`_carry_one`),
    `:1881` (`_resolve_denial`). Прежнее `scope_attested_by` живёт
    **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:327`)
-   и как миграция колонки (`core/store/sqlite.py:406`); в сигнатуре оценщика алиаса нет —
+   и как миграция колонки (`core/store/sqlite.py:421`); в сигнатуре оценщика алиаса нет —
    прежняя редакция выдавала желаемое за сделанное.
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой
@@ -1018,11 +1018,11 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
   Открыто **пять** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
-  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2251-2257`),
+  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2322-2328`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
   не входит в `extractor_version`, `core/adapters/extract_document.py:338-374`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`
-  (`core/cli/context.py:1808` против `core/edge/server.py:1105`) **сводится в один замер** с
+  (`core/cli/context.py:1811` против `core/edge/server.py:1105`) **сводится в один замер** с
   паритетом `pb` `local`/`split` (§2): одна процедура — «один вход, два профиля, сравнить
   `index_build_id` и `registry_spec_digest`», — а не две.
   ➖ **A1 follow-up закрыт 07.11.2026:** мультиплексирование root/product — F4a/F4b
@@ -1065,7 +1065,7 @@ DLP, набор IDS-правил) — design-требования зафикси
    раньше, чем помогает «больше железа».
 4. **Паритет `split` — одним замером, до флота.** Открытыми висят два вопроса об одном и том же:
    совпадает ли `index_build_id` для одного входа под `local` и `split` (§2) и совпадает ли
-   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1808`, edge
+   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1811`, edge
    выбирает фетчер по своей карте — `core/edge/server.py:1105`). Это **одна** процедура: один
    вход, два профиля, сравнить сборку и дайджест. Пока она не проведена, `split`-прогон нельзя
    публиковать наравне с `local`, и это дешевле любой строки из `24` §3.2: измерение, не разработка.

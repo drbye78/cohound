@@ -212,7 +212,7 @@ pdfium) GPU **не ускоряет** — отсюда обе механизмы
 по умолчанию выключен»; проверено 15.11.2026 — в `core/ports/` его нет (19 модулей + `__init__.py`, `__all__` без
 `rerank`), а пять попаданий на слово `rerank` в `core/` описывают **место под число**, не
 механизм: `SearchLogEntry.rerank_score` (`core/domain/models.py:1398`), колонка
-`rerank_score REAL` (`core/store/sqlite.py:448`), её сериализация (`core/store/sqlite_store.py:232,918`)
+`rerank_score REAL` (`core/store/sqlite.py:463`), её сериализация (`core/store/sqlite_store.py:232,918`)
 и докстринг `core/pipeline/search_log.py:267` о переносе именованных скоров. Поле всегда `None`:
 производителя нет. Это O23 плана 26 — **измерение, а не решение** (триггер возврата в
 `cohound-spec-v2.md:940`: измеренный прирост precision на retrieval-golden).
