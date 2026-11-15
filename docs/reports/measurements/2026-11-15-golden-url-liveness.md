@@ -7,13 +7,14 @@
 `curl` того же дня отдавал `206`.
 
 **Прибор:** `scripts/measure_golden_liveness.py` (новый, нейтрален к предметной категории:
-читает только `source_url` из CSV). Одна проба на адрес: `GET` с `Range: bytes=0-1023`
+читает только `source_url` из листа — XLSX или CSV, формат по расширению; на дату замера
+лист был CSV, 15.11 переведён в XLSX). Одна проба на адрес: `GET` с `Range: bytes=0-1023`
 (тело не скачивается), до 5 хопов **вручную**, таймаут 20 с на хоп, 4 потока.
 Классы — те же пять, что в замере 09.11, чтобы файлы сравнивались.
 
 ```bash
 .venv/bin/python scripts/measure_golden_liveness.py \
-  --candidate packages/ru-pg-dbms/sources/retrieval_golden_docs.candidate.csv \
+  --candidate packages/ru-pg-dbms/sources/retrieval_golden_docs.candidate.xlsx \
   --out docs/reports/measurements/2026-11-15-golden-url-liveness.json
 ```
 

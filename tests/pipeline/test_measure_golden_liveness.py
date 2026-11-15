@@ -91,3 +91,36 @@ def test_non_http_scheme_is_refused_without_request() -> None:
     assert result.code == -1
     assert result.kind == "unreachable"
     assert "http" in (result.error or "")
+
+
+def test_urls_are_read_from_xlsx_and_csv_alike(tmp_path: Path) -> None:
+    """Лист читается в обоих форматах: XLSX для разметки, CSV — машинный отчёт.
+
+    Иначе «проверить живость» можно было бы только по одной из двух форм одного и того же
+    листа, и вторая тихо отставала бы (тот самый класс: число из документа вместо
+    артефакта).
+    """
+    import csv
+
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["product_id", "source_url", "decision"])
+    sheet.append(["p1", "https://a.test/x", ""])
+    sheet.append(["p1", "https://a.test/y", ""])
+    sheet.append(["p1", "https://a.test/x", ""])  # дубль адреса — не второй адрес
+    xlsx = tmp_path / "sheet.xlsx"
+    book.save(xlsx)
+
+    csv_path = tmp_path / "sheet.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(["product_id", "source_url", "decision"])
+        writer.writerow(["p1", "https://a.test/x", ""])
+        writer.writerow(["p1", "https://a.test/y", ""])
+        writer.writerow(["p1", "https://a.test/x", ""])
+
+    expected = ["https://a.test/x", "https://a.test/y"]
+    assert LIVE._urls(xlsx) == expected  # type: ignore[attr-defined]
+    assert LIVE._urls(csv_path) == expected  # type: ignore[attr-defined]

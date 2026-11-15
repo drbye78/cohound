@@ -7,18 +7,26 @@
 чанкера и переэкстракции), а ``doc_id`` — это лишь его резолв **в конкретном
 корпусе** (``doc_id = product_id:content_hash``, то есть меняется вместе с текстом).
 
-Три подкоманды:
+Подкоманды:
 
 ``build``
-    Строит ``retrieval_golden_docs.candidate.csv``: одна строка на пару
-    ``(product_id, source_url)`` из ``golden_00_cells.csv``. URL резолвится в документ
+    Строит машинный отчёт по всем парам ``(product_id, source_url)`` из
+    ``golden_00_cells.csv`` (CSV: одна строка на пару). URL резолвится в документ
     корпуса **по БД прогона**, а не по похожести строк. Три машинных исхода:
     ``resolved`` (ровно один документ), ``ambiguous`` (несколько), ``missing`` (нет).
     Ничего не додумывается: ``missing`` остаётся ``missing``.
 
+``annotate``
+    Пересобирает **лист на разметку** — тот, в котором работает человек. Выход по
+    расширению: ``.xlsx`` (шапка с фильтром, выпадающий список решений, залитые строки,
+    где решение не механическое, второй лист с инструкцией) или CSV. Дописывает
+    подсказки: ``titles``/``claims`` (что утверждает ячейка) и ``cited_from`` (откуда
+    цитата фактически взята). Решения человека из прежнего листа переносятся.
+
 ``compile``
-    Превращает кандидатный CSV (после правки человеком) в JSON-эталон. Включаются
-    только строки с ``decision=accept``; нерезолвленная строка с ``accept`` — отказ.
+    Превращает лист (XLSX или CSV — формат по расширению) после правки человеком в
+    JSON-эталон. Включаются только строки с ``decision=accept``; нерезолвленная строка
+    с ``accept`` — отказ.
 
 ``validate``
     Проверяет готовый JSON против БД прогона: строгая схема, существование каждого
@@ -27,7 +35,9 @@
     пропуск.
 
 ``batches``
-    Печатает пачки на подтверждение (``URL | документ | ячеек | статус``) по ~50 строк.
+    Печатает пачки на подтверждение (``URL | документ | что утверждается | цитата
+    фактически из | ячеек | статус``) по ~50 строк — тот же лист, но читаемый в
+    терминале и в переписке.
 
 Почему скрипт, а не ``core/util/retrieval_eval.py``: это подготовка входа, а не
 оценка. Формат ещё не принят пайплайном (файл-кандидат в пайплайн не подключён), а
@@ -75,6 +85,12 @@ CANDIDATE_FIELDS = [
 #: Колонки-подсказки для разметчика (`annotate`): что именно утверждает ячейка.
 #: Не вход `compile` — это чтение для человека, а не решение; `compile` их игнорирует.
 ANNOTATION_FIELDS = ["titles", "claims", "cited_from"]
+
+#: Колонки, которые заполняет **человек**. `comment` отделена от `note` намеренно:
+#: `note` машинная (для `moved` там `moved_from=…`, для `ambiguous` — два `doc_id`), и
+#: пересборка листа её перезаписывает. Одна колонка на два владельца означала бы, что
+#: комментарий разметчика исчезает при первом же `annotate`.
+HUMAN_FIELDS = ["decision", "comment"]
 
 #: Значения ``decision``, которые пишет человек. Пусто = ещё не рассмотрено.
 DECISIONS = {"accept", "reject"}
@@ -466,13 +482,221 @@ def _print_summary(rows: list[dict[str, str]], cells: list[CellRow], out: Path) 
 # ---------------------------------------------------------------------------
 # compile
 # ---------------------------------------------------------------------------
+#: Колонки листа в порядке чтения: сначала то, по чему принимается решение (адреса и
+#: уровень совпадения), затем две человеческие колонки рядом, затем машинный `note` и
+#: подсказки. `compile` читает по именам, порядок нужен только глазам.
+ALL_FIELDS = [
+    *CANDIDATE_FIELDS[: CANDIDATE_FIELDS.index("decision")],
+    "decision",
+    "comment",
+    *CANDIDATE_FIELDS[CANDIDATE_FIELDS.index("decision") + 1 :],
+    *ANNOTATION_FIELDS,
+]
+
+
 def read_candidate(path: Path) -> list[dict[str, str]]:
+    """Лист на разметку → строки. Формат — по расширению: ``.xlsx`` или CSV.
+
+    XLSX — рабочий формат разметчика (Excel: выпадающий список решений, фильтр,
+    закреплённая шапка), CSV — формат обмена и диффа в git. Оба читаются здесь, чтобы
+    `compile` и `batches` не знали, в чём именно размечали: иначе выбор формата протекал
+    бы в валидатор и в отчёт.
+    """
+    if path.suffix.lower() == ".xlsx":
+        return _read_xlsx(path)
     with path.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         missing = [field for field in CANDIDATE_FIELDS if field not in (reader.fieldnames or [])]
         if missing:
             raise SystemExit(f"{path}: нет колонок {missing}")
         return list(reader)
+
+
+def _openpyxl() -> object:
+    """`openpyxl` — зависимость extra `extract` (её тянет Office-путь docling).
+
+    Импорт ленивый и с внятным отказом: скрипт обязан работать в окружении без extra
+    `extract` (CSV-путь), а не падать на импорте при запуске `build`/`validate`.
+    """
+    try:
+        import openpyxl
+    except ImportError as error:  # pragma: no cover - зависит от окружения
+        raise SystemExit(
+            "XLSX требует openpyxl (extra `extract`: uv sync --extra extract); "
+            "без него используйте CSV"
+        ) from error
+    return openpyxl
+
+
+def _read_xlsx(path: Path) -> list[dict[str, str]]:
+    """XLSX → строки листа. Первая строка — шапка, значения читаются как текст.
+
+    Числа и пустые ячейки приводятся к строке: `compile` сравнивает `decision` со
+    множеством значений и не должен зависеть от того, как Excel сохранил ячейку.
+    """
+    openpyxl = _openpyxl()
+    book = openpyxl.load_workbook(path, read_only=True, data_only=True)  # type: ignore[attr-defined]
+    try:
+        sheet = book.worksheets[0]
+        rows = sheet.iter_rows(values_only=True)
+        try:
+            header = [("" if cell is None else str(cell)).strip() for cell in next(rows)]
+        except StopIteration:
+            raise SystemExit(f"{path}: пустой лист") from None
+        missing = [field for field in CANDIDATE_FIELDS if field not in header]
+        if missing:
+            raise SystemExit(f"{path}: нет колонок {missing}")
+        out: list[dict[str, str]] = []
+        for values in rows:
+            if not any(value not in (None, "") for value in values):
+                continue
+            row = {name: "" for name in header if name}
+            for index, name in enumerate(header):
+                if not name or index >= len(values):
+                    continue
+                value = values[index]
+                row[name] = "" if value is None else str(value).strip()
+            out.append(row)
+        return out
+    finally:
+        book.close()
+
+
+def _write_xlsx(path: Path, rows: list[dict[str, str]]) -> None:
+    """Строки листа → XLSX, пригодный для разметки руками.
+
+    Что делает файл рабочим, а не «CSV в обёртке»:
+
+    * шапка закреплена и с фильтром — 102 строки иначе листаются вслепую;
+    * колонка `decision` — выпадающий список ``accept``/``reject``: значение нельзя
+      напечатать с опечаткой, а `compile` отказывает именно на неизвестном решении;
+    * строки, где решение **не** механическое (адрес переехал, документ неоднозначен,
+      совпадение не точное), залиты цветом — это те 14 строк, которые требуют человека;
+    * `titles`/`claims`/`cited_from` переносятся по словам и имеют ширину: иначе
+      подсказка обрезана и разметка превращается в угадывание.
+
+    Второй лист — инструкция: что означает `accept` и что делать с переехавшими
+    адресами. Она в файле, а не в переписке, потому что файл живёт дольше переписки.
+    """
+    openpyxl = _openpyxl()
+    from openpyxl.styles import Alignment, Font, PatternFill  # noqa: PLC0415 - ленивый импорт
+    from openpyxl.worksheet.datavalidation import DataValidation  # noqa: PLC0415
+
+    book = openpyxl.Workbook()  # type: ignore[attr-defined]
+    sheet = book.active
+    sheet.title = "лист"
+    sheet.append(ALL_FIELDS)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:{_column_letter(len(ALL_FIELDS))}1"
+
+    # Ширины по назначению колонки, а не «по умолчанию»: адреса длинные, решения короткие.
+    widths = {
+        "product_id": 18,
+        "param_ids": 40,
+        "cells": 7,
+        "source_url": 55,
+        "status": 11,
+        "match": 17,
+        "corpus_url": 55,
+        "doc_id": 30,
+        "decision": 12,
+        "comment": 34,
+        "note": 30,
+        "live_kind": 10,
+        "live_code": 10,
+        "live_url": 55,
+        "titles": 45,
+        "claims": 30,
+        "cited_from": 55,
+    }
+    for index, name in enumerate(ALL_FIELDS, start=1):
+        sheet.column_dimensions[_column_letter(index)].width = widths.get(name, 16)
+    wrap = {"param_ids", "titles", "claims", "cited_from", "note", "comment", "doc_id"}
+    decision_index = ALL_FIELDS.index("decision") + 1
+
+    needs_human = PatternFill("solid", start_color="FFF2CC")
+    for row_index, row in enumerate(rows, start=2):
+        sheet.append([row.get(name, "") for name in ALL_FIELDS])
+        for index, name in enumerate(ALL_FIELDS, start=1):
+            if name in wrap:
+                sheet.cell(row=row_index, column=index).alignment = Alignment(
+                    wrap_text=True, vertical="top"
+                )
+        if _needs_human(row):
+            for index in range(1, len(ALL_FIELDS) + 1):
+                sheet.cell(row=row_index, column=index).fill = needs_human
+
+    validation = DataValidation(
+        type="list",
+        formula1=f'"{",".join(sorted(DECISIONS))}"',
+        allow_blank=True,
+        showDropDown=False,
+    )
+    validation.error = "решение — accept или reject; пусто = ещё не рассмотрено"
+    validation.errorTitle = "Неизвестное решение"
+    sheet.add_data_validation(validation)
+    last = max(2, len(rows) + 1)
+    validation.add(
+        f"{_column_letter(decision_index)}2:{_column_letter(decision_index)}{last}"
+    )
+
+    guide = book.create_sheet("как размечать")
+    for line in _GUIDE_LINES:
+        guide.append([line])
+    guide.column_dimensions["A"].width = 110
+    for cell in guide["A"]:
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    book.save(path)
+
+
+#: Что означает решение. Лежит вторым листом книги: файл переживает переписку.
+_GUIDE_LINES: tuple[str, ...] = (
+    "Размечается ОДНА колонка — decision: accept или reject (выпадающий список). "
+    "Пусто = ещё не рассмотрено. Рядом колонка comment — для ваших пометок; "
+    "note — машинная (её пишет build), не правьте её: при пересборке листа она "
+    "пересчитывается, а при правке на месте остаётся как была.",
+    "",
+    "accept значит: документ корпуса (corpus_url) — это тот самый документ, на который "
+    "ссылается ячейка таблицы (source_url), и он должен попасть в top-K. Это утверждение "
+    "про адрес источника, а не про то, нравится ли страница.",
+    "",
+    "titles/claims — что утверждает ячейка (параметр и записанное значение).",
+    "cited_from — откуда цитата фактически взята в прогоне. Совпадения с corpus_url "
+    "меньшинство: доказательство часто лежит в другом документе. Это справка; решение "
+    "принимается по corpus_url.",
+    "live_kind — живость адреса на дату замера: live / moved (переехал) / gone / auth.",
+    "",
+    "Залитые строки — те, где решение не механическое:",
+    "  moved — адрес переехал. Тот же раздел, но другой текст: решает человек.",
+    "  canonical_query (ambiguous) — две редакции одного раздела. При accept впишите в "
+    "колонку doc_id один из двух (они в колонке note).",
+    "  canonical — совпало после канонизации (фрагмент #..., хвостовой слэш, http/https, "
+    "%кодирование). Обычно accept; reject — если фрагмент указывает на другой раздел.",
+    "",
+    "Дальше — одна команда (compile сам прогонит валидатор и откажет на нерезолвленном "
+    "doc_id, чужом продукте и несовпавшем URL).",
+)
+
+
+def _column_letter(index: int) -> str:
+    """1 → ``A``, 27 → ``AA`` (openpyxl такой утилиты в публичном API не даёт)."""
+    letters = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def _needs_human(row: dict[str, str]) -> bool:
+    """Решение не механическое: переезд адреса, неоднозначность, неточное совпадение."""
+    if (row.get("status") or "") != "resolved":
+        return True
+    if (row.get("live_kind") or "") == "moved":
+        return True
+    return (row.get("match") or "") != "exact"
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
@@ -755,6 +979,13 @@ def cmd_annotate(args: argparse.Namespace) -> int:
     текст лежит в исходном CSV.
     """
     rows = read_candidate(Path(args.candidate))
+    # Строки `missing` не размечаются: документа нет в корпусе, и решение по ним было бы
+    # решением о покрытии, а не об эталоне. Раньше это отсекалось руками — то есть
+    # правило жило в переписке, а не в приборе. `--keep-missing` возвращает их, если
+    # нужен полный машинный отчёт в том же формате.
+    total = len(rows)
+    if not args.keep_missing:
+        rows = [row for row in rows if (row.get("status") or "") != "missing"]
     cells = _read_cells(Path(args.cells))
     cited = _read_citations(Path(args.run_db)) if args.run_db else {}
     missing: list[str] = []
@@ -780,14 +1011,25 @@ def cmd_annotate(args: argparse.Namespace) -> int:
                 if url not in urls:
                     urls.append(url)
         row["cited_from"] = " ; ".join(urls)
-    fields = list(CANDIDATE_FIELDS) + ANNOTATION_FIELDS
     out = Path(args.out)
-    with out.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: row.get(key, "") for key in fields})
+    carried = _carry_decisions(out, rows)
+    if out.suffix.lower() == ".xlsx":
+        _write_xlsx(out, rows)
+    else:
+        fields = list(ALL_FIELDS)
+        with out.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: row.get(key, "") for key in fields})
     print(f"written: {out} ({len(rows)} строк, колонки {', '.join(ANNOTATION_FIELDS)})")
+    if len(rows) != total:
+        print(
+            f"отброшено {total - len(rows)} строк status=missing — документов нет в корпусе; "
+            "это провал покрытия, а не эталона (вернуть: --keep-missing)"
+        )
+    if carried:
+        print(f"сохранено решений из прежнего листа: {carried} (decision/comment)")
     if args.run_db:
         with_citation = sum(1 for row in rows if row.get("cited_from"))
         print(f"цитата есть у {with_citation} из {len(rows)} строк (адрес — в cited_from)")
@@ -802,6 +1044,50 @@ def cmd_annotate(args: argparse.Namespace) -> int:
 
 #: Потолок длины подсказки в листе: колонка читается глазами, полный текст — в исходном CSV.
 MAX_ANNOTATION_CHARS = 160
+
+
+def _carry_decisions(out: Path, rows: list[dict[str, str]]) -> int:
+    """Переносит решения человека из прежнего листа в новый; возвращает их число.
+
+    Зачем. `annotate` пересобирает подсказки после смены корпуса или прибора, и без
+    переноса повторный запуск стёр бы разметку — работу, которую машина не повторяет.
+    Ключ — ``(product_id, source_url)``: он же единица листа. Строка, которой в новом
+    листе нет, просто не переносится (её документ выпал из корпуса) — и это видно по
+    счётчику, а не молча.
+
+    Переносится ``decision`` и ``comment``. ``doc_id`` — только у строк, где машина его не
+    выбрала (``status != resolved``): там его вписал человек (выбор редакции при
+    ``ambiguous``), и потерять его значит потерять решение. У ``resolved`` значение
+    пересчитывается `build` заново, и перенос старого закрепил бы устаревший адрес.
+
+    ``note`` здесь **не** трогается: он машинный, и его источник — `build`. При правке
+    листа на месте (кандидат = выход) он просто читается и записывается обратно; при
+    пересборке из свежего `build` он пересчитывается вместе со всей строкой. Поэтому
+    правило для разметчика — «`note` не править», а не «`annotate` его обновит».
+    """
+    if not out.exists():
+        return 0
+    try:
+        previous = read_candidate(out)
+    except SystemExit:
+        return 0
+    by_key = {(row["product_id"], row["source_url"]): row for row in previous}
+    carried = 0
+    for row in rows:
+        old = by_key.get((row["product_id"], row["source_url"]))
+        if old is None:
+            continue
+        for field in HUMAN_FIELDS:
+            value = (old.get(field) or "").strip()
+            if value:
+                row[field] = value
+        if (old.get("status") or "") != "resolved":
+            pinned = (old.get("doc_id") or "").strip()
+            if pinned:
+                row["doc_id"] = pinned
+        if (row.get("decision") or "").strip() or (row.get("comment") or "").strip():
+            carried += 1
+    return carried
 
 
 def _one_line(text: str) -> str:
@@ -916,6 +1202,11 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--candidate", required=True)
     annotate.add_argument("--cells", required=True)
     annotate.add_argument("--out", required=True)
+    annotate.add_argument(
+        "--keep-missing",
+        action="store_true",
+        help="не отбрасывать строки status=missing (по умолчанию они не размечаются)",
+    )
     annotate.add_argument(
         "--run-db",
         default=None,

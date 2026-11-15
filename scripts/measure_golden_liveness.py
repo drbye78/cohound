@@ -27,7 +27,7 @@
 Использование:
 
     .venv/bin/python scripts/measure_golden_liveness.py \\
-        --candidate packages/ru-pg-dbms/sources/retrieval_golden_docs.candidate.csv \\
+        --candidate packages/ru-pg-dbms/sources/retrieval_golden_docs.candidate.xlsx \\
         --out docs/reports/measurements/2026-11-15-golden-url-liveness.json
 
 Дальше лист пересобирается с этими колонками:
@@ -179,12 +179,47 @@ def probe(url: str) -> Probe:
         return Probe(-1, origin, "unreachable", hops, str(error))
 
 
+def _sheet_rows(candidate: Path) -> list[dict[str, str]]:
+    """Строки листа на разметку; формат — по расширению (``.xlsx`` или CSV).
+
+    Лист живёт в XLSX (в нём размечает человек), а `build` пишет машинный отчёт в CSV.
+    Прибор обязан читать оба: иначе «проверить живость» можно только по одной из двух
+    форм одного и того же листа, и вторая тихо отстаёт.
+    """
+    if candidate.suffix.lower() != ".xlsx":
+        with candidate.open(encoding="utf-8", newline="") as handle:
+            return list(csv.DictReader(handle))
+    try:
+        import openpyxl
+    except ImportError as error:  # pragma: no cover - зависит от окружения
+        raise SystemExit(
+            "XLSX требует openpyxl (extra `extract`); без него используйте CSV"
+        ) from error
+    book = openpyxl.load_workbook(candidate, read_only=True, data_only=True)
+    try:
+        values = book.worksheets[0].iter_rows(values_only=True)
+        try:
+            header = [("" if cell is None else str(cell)).strip() for cell in next(values)]
+        except StopIteration:
+            return []
+        rows: list[dict[str, str]] = []
+        for line in values:
+            rows.append(
+                {
+                    name: ("" if index >= len(line) or line[index] is None else str(line[index]))
+                    for index, name in enumerate(header)
+                    if name
+                }
+            )
+        return rows
+    finally:
+        book.close()
+
+
 def _urls(candidate: Path) -> list[str]:
     """Уникальные адреса листа в порядке первого вхождения."""
-    with candidate.open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
     seen: dict[str, None] = {}
-    for row in rows:
+    for row in _sheet_rows(candidate):
         url = (row.get("source_url") or "").strip()
         if url:
             seen.setdefault(url, None)
