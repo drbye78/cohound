@@ -67,7 +67,7 @@
    `observed_how`, `actor`, `superseded_by` — append-only, как `crawl_policy` (план 19).
 2. `url_state` получает наблюдение: `observed_at`, `observed_how`, `capture_id`,
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
-   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:943-960`).
+   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:944-961`).
 3. Ручные артефакты (`hound package state adopt`: `plan_adoption` — `core/pipeline/state_adopt.py:706`,
    `apply_adoption` — `core/pipeline/state_adopt.py:1487`, запись снятия —
    `core/pipeline/state_adopt.py:1626`) создают снятие с
@@ -226,7 +226,7 @@
   `capture` — ноль строк (13 снятий: 3 `adopted` 06.11 + 10 `live` 07.11). То есть это
   по-прежнему нулевая точка. Две оговорки к прибору, обе проверены по коду: (1) срок считается
   от `url_state.last_checked_at` (`core/store/state_store.py:161-187`), а он пишется при
-  **любом** исходе, включая отказ (`core/pipeline/corpus_ingest.py:1028`), поэтому счётчик
+  **любом** исходе, включая отказ (`core/pipeline/corpus_ingest.py:1029`), поэтому счётчик
   отвечает «когда в последний раз касались URL», а не «когда последний раз видели версию»;
   (2) `adopted` не трогает `last_checked_at`, поэтому срок наступает на 3 суток раньше даты
   наблюдения adopted-артефактов.
@@ -375,7 +375,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 
 **Чего в носителях нет** (проверено разведкой, `файл:строка`):
 
-* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`core/domain/models.py:1596-1598`: «политика названа
+* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`core/domain/models.py:1666-1668`: «политика названа
   один раз на прогон»). Для I2d это дефект: сверять надо **снятие** с объявленным, а не прогон с
   прогоном, иначе `scheduled`-снятие другого прогона нечем проверить. В `state.db` колонка есть,
   но её **никто не сравнивает** (0 попаданий `policy_digest ==` в `core/`).
@@ -395,12 +395,12 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 `core/pipeline/corpus_coverage.py:181` + источник `core/pipeline/corpus_coverage.py:611`
 (`iter_crawl_session_items` — сеанс, не снятия);
 `core/domain/invariants.py:298` (`check_absence_coverage` + новый `check_absence_dated`);
-зеркало в `core/pipeline/report.py:2415` (`collect_crawl_truncation_anomalies`)/
-`core/pipeline/report.py:2302` (`collect_absence_undated_anomalies`);
+зеркало в `core/pipeline/report.py:2433` (`collect_crawl_truncation_anomalies`)/
+`core/pipeline/report.py:2320` (`collect_absence_undated_anomalies`);
 `docs/status-dictionary.yaml` (токен `absence_undated`;
 `reuse_unconfirmed` больше не объявлен в коде (словаря он не касался — жил константой
 `core/pipeline/evaluate.py`), но строки старых прогонов читаются как есть);
-`core/domain/models.py:164` (`METHODOLOGY_VERSION` 0.2.0 → 0.3.0); `spec` §2.3/§4.2/§13 и
+`core/domain/models.py:165` (`METHODOLOGY_VERSION` 0.2.0 → 0.3.0); `spec` §2.3/§4.2/§13 и
 **`AGENTS.md` §5** (`AGENTS.md:184-186` — таблица I1/I2/I2b/I2d) — иначе документ будет
 утверждать снятое правило.
 

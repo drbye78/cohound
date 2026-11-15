@@ -238,7 +238,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > ✅ **закрыто по Exit** (5 из 6 пунктов; открыт один — изоляция памяти).
 > M0.5 в `06` §4 — механика ✅ (26.10) и приёмка ⬜; F1 закрыт по своему Exit, приёмка отчёта
 > человеком в Exit не входила.
-> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:338`
+> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:339`
 >   (`docling_extractor_version`), вид значения в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
 >   контракте — `trafilatura-html-7+text-plain-2+epub-3+pdfium-text-4:5.14.0+docling-office-1+docling-doc-4/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
@@ -249,10 +249,10 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:392-393,562,1168`), подключены в
->   `core/pipeline/extract_consume.py:1273-1274`; видимая строка пропуска по бюджету —
+>   `core/pipeline/extract_consume.py:1276-1277`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:873-889` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:127`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
->   `core/store/sqlite.py:685-704`.
+>   `core/store/sqlite.py:711-730`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
@@ -284,7 +284,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   (`core/pipeline/archive_descent.py:773`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
   `_record`/`_settle`. Финальную пачку сохранить как идемпотентный reconciliation-pass
   (дешёвый повторный upsert). Сбой записи изолируется в `errors` по образцу `persist_docs`
-  (`core/pipeline/corpus_ingest.py:1427`) — отказ store не должен убивать спуск.
+  (`core/pipeline/corpus_ingest.py:1428`) — отказ store не должен убивать спуск.
   Идемпотентность уже обеспечена: `observation_id` детерминирован (`run|product|root|hash|depth`),
   `corpus_members` — UPSERT. **Не делать в первом патче:** предварительное observation «контейнер
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
@@ -295,7 +295,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   **Реализовано (2026-10-24):** синки `persist_observation`/`persist_member` в
   `ArchiveDescentWalker`, единая точка строки — `_emit_member`/`_emit_skipped_member`;
   `SKIP_BUDGET`/`SKIP_STREAM_TOO_LARGE` теперь дают строку члена (видимый пропуск); синки
-  подключаются в `core/pipeline/extract_consume.py:1211-1212`
+  подключаются в `core/pipeline/extract_consume.py:1214-1215`
   (`persist_observation_sync`/`persist_member_sync`, отказ стора → `errors`), финальная пачка
   осталась reconciliation-pass'ом. **Дополнено 09.11.2026:** строка появилась и у отказов
   **плана** — но только по бюджетным причинам (`member_too_large`/`member_limit_exceeded`/

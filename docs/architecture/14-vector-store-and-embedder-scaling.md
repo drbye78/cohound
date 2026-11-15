@@ -130,7 +130,7 @@ Brute-force косинус, тот же код (`_cosine_scores`), 1024 dim. З�
 3. `for chunk_id, score in zip(...): meta = self._lookup(chunk_id)` — резолвер
    метаданных вызывается для **всех** 11 400 чанков, хотя нужны только `top_k=10`. В
    composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:416`,
-   `core/cli/context.py:2037`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
+   `core/cli/context.py:2041`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
    point-lookup в БД прогона: 4 мкс ⇒ 42 ms на поиск.
 
 Сумма на один поиск при масштабе: 23.3 MB чтения + 27.8 ms конверсии + 4.5 ms матмула +
@@ -181,11 +181,11 @@ top-10 из 600** у близких соседей. Замер при едино
 600 запросов (30 %). Рычаг реализован, но не подключён: батч-чтение уже есть в порту
 (`StorePort.get_chunks(ids)`, `core/ports/store.py:705` — заведено ровно под гидратацию
 ретривала, A1/Д-3) и в хранилище (`SqliteStore.get_chunks`,
-`core/store/sqlite_store.py:3334`; `IN (...)` пачками по `_CHUNK_ID_BATCH = 500`, `:3206`).
+`core/store/sqlite_store.py:3375`; `IN (...)` пачками по `_CHUNK_ID_BATCH = 500`, `:3206`).
 `_resolve_top` по-прежнему зовёт `self._lookup(chunk_id)` на каждого кандидата
 (`core/adapters/vector_npy.py:374` и `:383`; тип резолвера — `:73`), а композиционный корень
 передаёт поштучный `store.get_chunk` (`core/cli/commands/run.py:416`,
-`core/cli/context.py:2037`). Это не дефект §6, а названный следующий шаг: цена
+`core/cli/context.py:2041`). Это не дефект §6, а названный следующий шаг: цена
 **5.29 ms/поиск** держится, пока батч не подключён.
 
 ## 4. Вывод по Qdrant
@@ -213,7 +213,7 @@ top-10 из 600** у близких соседей. Замер при едино
 | HNSW/IVF по 17 млн | **нет**: поиск продукт-скоупед, 108.6 тыс. на крупнейшей партиции — brute force быстрее ANN |
 | Квантование int8 (4× меньше) | частично: 93 GB → 23 GB, но fp16 уже даёт 2×, а диск не узкое место |
 | Фильтрация (payload) | **нет**: фильтр — это `product_id`, он и так задаёт партицию |
-| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id, embed_device, embed_precision)`; подключён в `core/cli/context.py:2461`) |
+| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id, embed_device, embed_precision)`; подключён в `core/cli/context.py:2465`) |
 | Общий индекс для нескольких нод | **да** — единственное настоящее преимущество, см. ниже |
 | Одновременные читатели/писатели | **нет**: у нас модель «иммутабельная сборка», читателей несколько, писатель один на прогон |
 
@@ -355,7 +355,7 @@ embed:
 `local`) держится **побочно** — дефолт и есть единственная реализация. Действует уже сейчас
 только кэш векторов по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash,
 embed_model_id, embed_device, embed_precision)`): подключён в
-`core/cli/context.py:2939-2941` и в раскладку `core/config/paths.py:79`.
+`core/cli/context.py:2943-2945` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -544,11 +544,11 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 3. `vector_digest` в `_partition_reuse_reason` — «чужие векторы» становятся видимым отказом
    от переиспользования, а не тихой подменой прибора.
 
-`corpus_chunks.embedded_at`: чанк собирался с `embedded_at=None` (`core/pipeline/corpus_ingest.py:1563`,
-`core/pipeline/extract_consume.py:549`) и в Pass B не переписывался — колонка без писателя, и
+`corpus_chunks.embedded_at`: чанк собирался с `embedded_at=None` (`core/pipeline/corpus_ingest.py:1564`,
+`core/pipeline/extract_consume.py:552`) и в Pass B не переписывался — колонка без писателя, и
 «не эмбеддилось» по ней не читалось. С 07.11.2026 её заполняет `_embed_and_build`
 (`core/pipeline/corpus_index.py:816`): одно ISO-8601 (UTC) время эмбеддинга на продукт-цикл,
-часы читает оркестратор, а не чистый `_embed_batched`; запись — `core/store/sqlite_store.py:1733`.
+часы читает оркестратор, а не чистый `_embed_batched`; запись — `core/store/sqlite_store.py:1761`.
 `NULL` остаётся при полном переиспользовании партиции (эмбеддинга в цикле не было) —
 это «в этом цикле вектора не считали», а не мёртвая колонка. Фактический признак сборки
 по-прежнему `vectors.fp16.npy` в партиции.
@@ -608,7 +608,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 6. ➖ снято — Qdrant «только при срабатывании порога §4». Снято **измерением**, а не
    решением человека: на 2026-11-07 максимальная партиция — **108 614** чанков против порога
    200 000 (**запас 1.84×**; на 28.10 было 32 647 — запас 6.1×), нод одна, `vector_store` в
-   манифесте — наблюдаемое поле прогона (`core/pipeline/report.py:243`), и альтернативной
+   манифесте — наблюдаемое поле прогона (`core/pipeline/report.py:247`), и альтернативной
    реализации индекса в коде нет. Пункт остаётся условием пересмотра, но не работой в плане;
    порог публикуется числом, чтобы возврат к нему не был предметом памяти.
 

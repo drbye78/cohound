@@ -449,12 +449,12 @@ M0 должен давать **сквозной вертикальный сре�
 `core/edge/server.py`, `contracts/seam/openapi.json`; 0020 — знаменатель `scope_universe`
 (`core/pipeline/compute.py:184`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);
 0022 — `core/util/memory.py` (`malloc_trim`); 0023 — `core/pipeline/gate_subject.py` + `gates/*-request.json`;
-0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:112`) + `cells.absence_as_of` (`core/store/sqlite.py:394`).
+0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:112`) + `cells.absence_as_of` (`core/store/sqlite.py:420`).
 
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).
   ✅ закрыто — батч-запись: `save_cells_batch` / `add_evidence_batch` через `executemany`
-  (`core/store/sqlite_store.py:544`, `:779`).
+  (`core/store/sqlite_store.py:545`, `:779`).
 - Формат и версионирование `prompt_hash` при смене шаблона (итерация 2).
   ✅ закрыто — контракт `H(template_version, rule, absence_rule, sorted(chunk_ids))`
   (`core/pipeline/prompt.py:34`); машинный токен «тот же hash — другой текст» — `:79`.

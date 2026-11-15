@@ -257,14 +257,17 @@ mismatch forces `complete=False`; an unknown digest (either side) does not — a
 is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
 term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
 `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.23.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
+`SCHEMA_VERSION` 3.24.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
 `corpus_docs.page_map` at 3.21.0 — the page map, from which a chunk's page number is a
 **function**, not a column: a copy would have to be maintained on every chunk-write path and
 one missed path would give a silently wrong page; `corpus_docs.ocr_probe`/`pages_ocr`/
 `pages_failed`, `runs.ocr_probe`, `index_manifest.ocr_probe` at 3.22.0 — recognition
 provenance, §10; `runs.page_provenance_json` at 3.23.0 — the page of a **quote**: how many
 citations name a page and why the others cannot (`mapped`/`no_page_map`/`no_char_span`/
-`no_chunk`/`no_doc`), a run observation rather than a measurement condition); STATE `12`
+`no_chunk`/`no_doc`), a run observation rather than a measurement condition; `corpus_docs.tables`
++ `runs.tables_json` at 3.24.0 — a table as an **object** (`table_id`/`page_no`/`caption`/
+`header`/`rows`; `NULL` = the reader gives no tables, `[]` = looked and found none), not a
+string in `context_prefix`; chunking does not depend on it); STATE `12`
 (`capture.policy_digest`
 changed meaning ⇒ old files are rejected by the version gate).
 
