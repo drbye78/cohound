@@ -19,7 +19,11 @@ import pytest
 from core.adapters import extract_document
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.domain import DocumentLevel
-from core.pipeline.extract_cache import ENVELOPE_FORMAT, ExtractionCache
+from core.pipeline.extract_cache import (
+    ENVELOPE_FORMAT,
+    EVICT_CHECK_BYTES_DIVISOR,
+    ExtractionCache,
+)
 from core.ports.types import ExtractedDoc
 from core.util.hashing import content_hash
 
@@ -165,6 +169,55 @@ def test_round_trip_preserves_ocr_probe(tmp_path: Path) -> None:
 
     assert restored is not None
     assert restored.ocr_probe == "unsupported"
+
+
+def test_legacy_envelope_without_page_outcomes_reads_none(tmp_path: Path) -> None:
+    """Конверт без счётчиков OCR — «не измерено», а не ноль (O38a).
+
+    Ноль означал бы «распознавание применили и ни одна страница не дала текста» — другое
+    наблюдение. Отсутствие факта не является фактом, бамп ``ENVELOPE_FORMAT`` не нужен:
+    поле аддитивное.
+    """
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A))
+
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert (restored.pages_ocr, restored.pages_failed) == (None, None)
+
+
+def test_round_trip_preserves_page_outcomes(tmp_path: Path) -> None:
+    """Счётчики страниц переживают кэш: иначе хит терял бы единственный признак OCR."""
+    cache = ExtractionCache(tmp_path / "cache")
+    doc = ExtractedDoc(
+        text="pdf text",
+        content_hash=content_hash("pdf text"),
+        extractor_version="ext-1",
+        page_count=5,
+        ocr_probe="ok",
+        pages_ocr=2,
+        pages_failed=1,
+    )
+
+    cache.put(doc, level="full", content_hash=RAW_A)
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert (restored.pages_ocr, restored.pages_failed) == (2, 1)
+
+
+def test_corrupt_page_outcomes_are_a_miss(tmp_path: Path) -> None:
+    """Порченое значение счётчика — промах со счётчиком порчи, а не исключение.
+
+    По такому числу отчёт назвал бы «страницы с OCR» догадкой; «не обслуживаем запись» —
+    тот же ответ, что у порченой карты страниц.
+    """
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A), pages_ocr=-2)
+
+    assert cache.get(RAW_A, "ext-1", "full") is None
+    assert cache.stats()["corrupt"] == 1
 
 
 def test_round_trip_keeps_text_hash_separate_from_key(tmp_path: Path) -> None:
@@ -439,6 +492,49 @@ def test_entry_larger_than_budget_is_evicted(tmp_path: Path) -> None:
     assert cache.stats()["evicted"] == 1
 
 
+def test_eviction_scan_is_amortized_by_written_bytes(tmp_path: Path) -> None:
+    """Обход каталога — не на каждой записи, а раз в 1/16 бюджета записанных байтов.
+
+    Замер 15.11.2026 (``scripts/measure_extract_cache.py``): обход 44 796 файлов —
+    0.293 с, запись без обхода — 0.002 с. При проверке на каждой записи прогон на
+    8 115 документов платил бы 39.6 мин; при пороге 1/16 — единицы обходов.
+    """
+    root = tmp_path / "cache"
+    probe = ExtractionCache(root)
+    probe.put(_doc("entry"), level="full", content_hash=RAW_A)
+    size = _entry(root, RAW_A).stat().st_size
+    _entry(root, RAW_A).unlink()
+
+    # Порог == ровно один размер записи: каждая запись закрывает порог, проверка — на каждой.
+    cache = ExtractionCache(root, max_bytes=EVICT_CHECK_BYTES_DIVISOR * size)
+    for index in range(8):
+        cache.put(_doc("entry"), level="full", content_hash=f"{index:064x}")
+
+    stats = cache.stats()
+    assert stats["writes"] == 8
+    assert stats["scans"] == 8
+    assert stats["evicted"] == 0  # вытеснять нечего: сумма в бюджете
+
+
+def test_eviction_keeps_budget_within_one_threshold(tmp_path: Path) -> None:
+    """Амортизация не отменяет бюджет: перебор не больше порога плюс одна запись."""
+    root = tmp_path / "cache"
+    probe = ExtractionCache(root)
+    probe.put(_doc("entry"), level="full", content_hash=RAW_A)
+    size = _entry(root, RAW_A).stat().st_size
+    _entry(root, RAW_A).unlink()
+
+    budget = 64 * size
+    cache = ExtractionCache(root, max_bytes=budget)
+    for index in range(80):
+        cache.put(_doc("entry"), level="full", content_hash=f"{index:064x}")
+
+    threshold = max(1, budget // EVICT_CHECK_BYTES_DIVISOR)
+    assert _total_bytes(root) <= budget + threshold
+    assert cache.stats()["scans"] < cache.stats()["writes"]
+    assert cache.stats()["evicted"] > 0
+
+
 def test_negative_budget_rejected(tmp_path: Path) -> None:
     try:
         ExtractionCache(tmp_path / "cache", max_bytes=-1)
@@ -493,6 +589,8 @@ def test_stats_snapshot_has_stable_keys(tmp_path: Path) -> None:
         "invalid_key",
         # v5: хиты, отдавшие частичное наблюдение (подмножество ``hits``).
         "partial_hits",
+        # v6: полные обходы каталога ради вытеснения (амортизированы по бюджету).
+        "scans",
     }
     assert all(isinstance(value, int) for value in stats.values())
 
