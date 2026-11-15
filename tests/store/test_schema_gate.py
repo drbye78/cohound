@@ -297,8 +297,14 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     функция от карты и ``char_start`` (``core.domain.page_map.page_number_for``), а копию
     пришлось бы поддерживать на каждом пути записи чанка. Шимов нет: прогоны ≤ 3.20.0
     отвергаются гейтом версии.
+
+    3.22.0 (O25-остаток + O38a плана ``26``) — провенанс распознавания: ``corpus_docs``
+    получил ``ocr_probe``/``pages_ocr``/``pages_failed`` (исход пробы и счётчики страниц у
+    **документа**), ``runs`` и ``index_manifest`` — ``ocr_probe`` (**худший** исход по
+    прогону и по продукт-партиции). Одна работа — один бамп, потому что носитель факта
+    общий. Шимов нет: прогоны ≤ 3.21.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.21.0"
+    assert SCHEMA_VERSION == "3.22.0"
 
     conn = connect(":memory:")
     try:
@@ -316,6 +322,13 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
         assert {"http_status", "reuse_kind"} <= docs_cols
         # 3.21.0 (O36): карта страниц — колонка; номера страницы у чанка нет намеренно.
         assert "page_map" in docs_cols
+        # 3.22.0 (O25-остаток/O38a): провенанс распознавания — у документа и в агрегатах.
+        assert {"ocr_probe", "pages_ocr", "pages_failed"} <= docs_cols
+        assert "ocr_probe" in runs_cols
+        manifest_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")
+        }
+        assert "ocr_probe" in manifest_cols
 
         chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
         assert {"char_start", "char_end"} <= chunk_cols

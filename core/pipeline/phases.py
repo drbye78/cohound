@@ -89,6 +89,7 @@ from core.pipeline.manual_artifacts import (
     manual_artifacts_summary,
 )
 from core.pipeline.normalize import load_scope_attestations
+from core.pipeline.ocr_provenance import run_ocr_probe
 from core.pipeline.partial_docs import (
     human_line as partial_docs_human_line,
 )
@@ -1779,6 +1780,11 @@ def build_phases(
             partial_docs=partial_docs_summary(
                 ctx.store, plan.run_id, products=plan.products
             ),
+            # O25-остаток (план 26, схема 3.22.0): **худший** исход проверки OCR-движка по
+            # корпусу прогона — в манифест и ``runs.ocr_probe``. Источник — персистентный
+            # корпус (как у ``partial_docs``), поэтому resume публикует тот же факт. Именно
+            # худший: провал пробы не должен тонуть в большинстве проверенных ``ok``.
+            ocr_probe=run_ocr_probe(ctx.store, plan.run_id),
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,

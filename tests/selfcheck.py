@@ -363,6 +363,7 @@ def main() -> int:
     check("Ф0: ❌ при неполном корпусе требует аттестации (I2c)", lambda: _corpus_coverage_invariant())
     check("F3: ❌ требует датированного носителя (I2d)", lambda: _absence_dated_invariant())
     check("частичное извлечение делает охват неполным (I2/I2c)", lambda: _partial_extraction())
+    check("исходы OCR: значения и границы у документа и агрегата (O25/O38a)", lambda: _ocr_provenance())
     check("смещения куска: пара целиком и по длине text (L1b-2b)", lambda: _corpus_chunk_span())
     check("derived-evidence требует hash/резолв (I1/I10/I15/I19, K5)", lambda: _domain_derived())
     check("source_id round-trip + резолв с hash (I10/I15/I19)", lambda: _domain_anchors())
@@ -865,6 +866,13 @@ def _db_smoke() -> None:
     # Номер страницы чанка колонкой НЕ становится: это функция от карты и ``char_start``
     # (``core.domain.page_map``), и копию пришлось бы поддерживать на каждом пути записи.
     _assert("page_map" in docs_cols)
+    # O25-остаток/O38a (schema 3.22.0): провенанс распознавания — исход пробы у документа,
+    # постраничные счётчики, и агрегаты (худший исход) на прогоне и на продукт-партиции.
+    # Без колонок факт «OCR не смог» остаётся строкой журнала и в артефакт не попадает.
+    _assert({"ocr_probe", "pages_ocr", "pages_failed"} <= docs_cols)
+    _assert("ocr_probe" in runs_cols)
+    manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
+    _assert("ocr_probe" in manifest_cols)
     chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
     _assert("page_number" not in chunk_map_cols)
     product_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_product)")}
@@ -1325,6 +1333,60 @@ def _partial_extraction() -> None:
     )
     if not isinstance(full, CorpusCoverage) or not full.complete:
         raise AssertionError("полный корпус без частичных документов перестал быть полным")
+
+
+def _ocr_provenance() -> None:
+    """O25-остаток/O38a: исход пробы и постраничные счётчики — не свободные числа.
+
+    Проверяются три вещи, каждая из которых была бы тихой потерей: необъявленный исход
+    пробы не принимается (иначе «не проверено» не отличить от «проверено»); счётчики
+    страниц неотрицательны и не больше ``page_count`` (ложная провенанс-запись); агрегат
+    берёт **худший** исход, а не первый/большинство — иначе провал пробы тонул бы в
+    документах с ``ok``. ``None`` в агрегате — «нечего публиковать», а не ``ok``.
+    """
+    from core.domain.models import CorpusDoc
+    from core.domain.ocr_probe import worst_ocr_probe
+
+    def make(**overrides: object) -> CorpusDoc:
+        base: dict[str, object] = {
+            "doc_id": "d",
+            "product_id": "p",
+            "url": "https://a.test/d",
+            "page_count": 3,
+        }
+        base.update(overrides)
+        return CorpusDoc(**base)  # type: ignore[arg-type]
+
+    try:
+        make(ocr_probe="probed")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("CorpusDoc: необъявленный ocr_probe принят")
+
+    try:
+        make(pages_ocr=-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("CorpusDoc: отрицательный pages_ocr принят")
+
+    try:
+        make(pages_failed=4)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("CorpusDoc: pages_failed больше page_count принят")
+
+    # Законное состояние: счётчики без частичности (упавшая страница при полном статусе).
+    doc = make(pages_ocr=2, pages_failed=1, ocr_probe="ok")
+    if doc.partial or doc.pages_ocr != 2 or doc.pages_failed != 1:
+        raise AssertionError("CorpusDoc: счётчики OCR не пережили конструктор")
+
+    if worst_ocr_probe(["ok", "unavailable", "unknown"]) != "unavailable":
+        raise AssertionError("агрегат OCR не назвал худший исход")
+    if worst_ocr_probe([None, None]) is not None:
+        raise AssertionError("агрегат OCR выдал исход там, где проба не применима")
 
 
 def _corpus_chunk_span() -> None:

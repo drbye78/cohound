@@ -85,10 +85,12 @@ import importlib.metadata
 import importlib.resources
 import importlib.util
 import logging
+import math
 import os
 import re
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -1066,6 +1068,110 @@ def _converted_page_count(result: object) -> int | None:
         return None
 
 
+def _ocr_pages_with_cells(result: object) -> int | None:
+    """Сколько страниц дали **хотя бы одну** OCR-ячейку (O38a).
+
+    Единственный постраничный сигнал распознавания, переживающий дефолтные опции docling:
+    ``result.confidence.pages[page_no].ocr_score`` заполняется средним по ячейкам с
+    ``from_ocr`` (``docling/models/base_ocr_model.py``) — и только если такие ячейки на
+    странице были. Признак ``TextCell.from_ocr`` (происхождение самого текста страницы)
+    без ``generate_parsed_pages=True`` недоступен: пайплайн обнуляет
+    ``page.parsed_page``, поэтому «текст получен OCR-ом» сегодня не наблюдается вовсе.
+
+    ``None`` — сигнала нет (другая версия docling без ``confidence``, не-словарь): «не
+    измерено» честнее нуля. ``0`` — измерение: распознавание применялось, и ни одна
+    страница не дала ячеек (документ прочитан из текстового слоя).
+
+    **``.get``, а не индексация:** ``ConfidenceReport.pages`` — ``defaultdict``, и
+    индексация создала бы запись, то есть «измерила» бы несуществующую страницу.
+    """
+    confidence = getattr(result, "confidence", None)
+    pages = getattr(confidence, "pages", None)
+    if not isinstance(pages, Mapping):
+        return None
+    count = 0
+    for scores in pages.values():
+        score = getattr(scores, "ocr_score", None)
+        if score is None:
+            continue
+        try:
+            numeric = float(score)
+        except (TypeError, ValueError):  # pragma: no cover — нечисло от чужой версии
+            continue
+        if not math.isnan(numeric):
+            count += 1
+    return count
+
+
+def _failed_pages(result: object) -> int | None:
+    """Сколько **страниц** попало в ``result.errors`` docling с непустым ``page_no``.
+
+    Считаются страницы, а не ошибки: на одной странице их может быть несколько, и «три
+    ошибки» не значит «три страницы». Ошибка уровня документа (``page_no is None``) сюда
+    не входит — она не про страницу. ``None`` — поля ``errors`` нет вовсе (другая версия
+    docling): «не измерено», а не ноль.
+    """
+    errors = getattr(result, "errors", None)
+    if errors is None:
+        return None
+    failed: set[int] = set()
+    for error in errors:
+        page_no = getattr(error, "page_no", None)
+        if isinstance(page_no, int) and not isinstance(page_no, bool):
+            failed.add(page_no)
+    return len(failed)
+
+
+def _ocr_page_outcomes(
+    result: object,
+    page_count: int | None,
+    *,
+    office: bool,
+    level: DocumentLevel,
+) -> tuple[int | None, int | None]:
+    """``(pages_ocr, pages_failed)`` одного результата — одна точка обоих исходов.
+
+    ``office`` (DOCX/PPTX/XLSX) ⇒ ``(None, None)``: у офисного бэкенда нет понятия страницы
+    документа (``page_count`` у него ``0``, см. :func:`_page_count`), поэтому и «страниц с
+    ошибкой» у него не бывает — публиковать ``0`` значило бы объявить измерение, которого
+    формат не позволяет.
+
+    ``level`` без распознавания (``layout``/``layout_tables``/``text``) ⇒ ``pages_ocr=None``:
+    «не применимо», а не ``0`` — ноль означал бы «применили и не дали ни одной страницы».
+
+    Противоречие с размером документа (страниц с исходом больше, чем страниц в документе)
+    публикуется как «не измерено» с записью в журнал, а не выбрасывается исключением:
+    инвариант ``ExtractedDoc`` в этом случае убил бы **весь** документ (``_convert``
+    ловит любое исключение и отдаёт ``error``), а терять прочитанный текст из-за
+    провенанса нельзя — это тот же класс отказа, что D4 (``parser_failed`` на целом
+    документе).
+    """
+    if office:
+        return None, None
+    pages_ocr = (
+        _ocr_pages_with_cells(result) if level is DocumentLevel.FULL else None
+    )
+    pages_failed = _failed_pages(result)
+    if page_count is not None:
+        if pages_ocr is not None and pages_ocr > page_count:
+            _log.warning(
+                "docling: страниц с OCR-ячейками %d больше, чем страниц в документе "
+                "(%d) — pages_ocr не публикуется",
+                pages_ocr,
+                page_count,
+            )
+            pages_ocr = None
+        if pages_failed is not None and pages_failed > page_count:
+            _log.warning(
+                "docling: страниц с ошибкой %d больше, чем страниц в документе (%d) — "
+                "pages_failed не публикуется",
+                pages_failed,
+                page_count,
+            )
+            pages_failed = None
+    return pages_ocr, pages_failed
+
+
 class DoclingDocumentExtractor:
     """Документ (PDF/DOCX/PPTX/XLSX) → markdown через docling. Реализация ``ExtractorPort``.
 
@@ -1599,12 +1705,20 @@ class DoclingDocumentExtractor:
                 # и входить в корпус как доказательство он не вправе (I19).
                 return self._error(EMPTY_TEXT_REASON, stamp, ocr_probe=probe)
             pages = _page_count(result)
+            # O38a: исходы OCR по страницам — из того же результата, что дал текст.
+            # Уровень без распознавания (``layout``/``layout_tables``/``text``) и офисный
+            # документ дают ``pages_ocr=None``: «не применимо», а не ноль.
+            pages_ocr, pages_failed = _ocr_page_outcomes(
+                result, pages, office=office, level=self._level
+            )
             doc = ExtractedDoc(
                 text=text,
                 content_hash=_sha256(text),
                 extractor_version=stamp,
                 page_count=pages,
                 ocr_probe=probe,
+                pages_ocr=pages_ocr,
+                pages_failed=pages_failed,
             )
             if limit_reason is not None:
                 # Лимит объявлен и документ длиннее его: текст читаемой части в корпус,
@@ -1740,6 +1854,11 @@ class DoclingDocumentExtractor:
             )
         total = _page_count(result)
         converted = _converted_page_count(result)
+        # O38a: исходы OCR по страницам — тот же прибор, что и у полного успеха: частичный
+        # документ тоже обязан называть, сколько страниц дало распознавание и сколько упало.
+        pages_ocr, pages_failed = _ocr_page_outcomes(
+            result, total, office=office, level=self._level
+        )
         pages_note = ""
         if converted is not None and total is not None:
             pages_note = f", получено страниц {converted} из {total}"
@@ -1776,6 +1895,8 @@ class DoclingDocumentExtractor:
             partial_reason=reason,
             pages_converted=converted,
             ocr_probe=ocr_probe,
+            pages_ocr=pages_ocr,
+            pages_failed=pages_failed,
         )
 
     def _error(

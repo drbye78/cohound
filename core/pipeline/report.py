@@ -124,6 +124,7 @@ from core.pipeline.heading_anomalies import (
     write_heading_anomalies_artifact,
 )
 from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
+from core.pipeline.ocr_provenance import write_ocr_provenance_artifact
 from core.pipeline.onboarding import load_effective_seeds as _load_effective_seeds
 from core.pipeline.page_provenance import write_page_provenance_artifact
 from core.pipeline.partial_docs import (
@@ -364,6 +365,11 @@ class Artifacts:
     #: больше одной (O36, план 26): именно их цитаты страницу назвать не могут.
     #: ``None`` — документов корпуса нет (пустой файл не артефакт).
     page_provenance: Path | None = None
+    #: ``outputs/ocr_provenance.csv`` — исходы распознавания по продуктам и итог прогона
+    #: (O38a/O25-остаток, план 26): документы с ``pages_ocr > 0``, суммы страниц, ошибки и
+    #: распределение по ``ocr_probe``. ``None`` — документов корпуса нет (пустой файл не
+    #: артефакт); «документы есть, исходов нет» — это строка ``ocr_probe_unmeasured``.
+    ocr_provenance: Path | None = None
     #: Блок ``partial_docs`` манифеста (те же числа, свёрнутые до продукта) — чтобы CLI
     #: мог назвать факт строкой, даже когда CSV не создан.
     partial_docs_summary: dict[str, Any] | None = None
@@ -1009,6 +1015,7 @@ def build_manifest(
     manual_artifacts: Mapping[str, Any] | None = None,
     manual_artifacts_digest: str | None = None,
     partial_docs: Mapping[str, Any] | None = None,
+    ocr_probe: str | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
@@ -1621,6 +1628,10 @@ def build_manifest(
         # по продуктам). В ``EXECUTION_CONTRACT_FIELDS`` не входит: это факт о том, что
         # прибор прочитал, а не смена условий измерения.
         partial_docs=dict(partial_docs or {}),
+        # O25-остаток (план 26, схема 3.22.0): **худший** исход проверки OCR-движка по
+        # корпусу прогона. В ``EXECUTION_CONTRACT_FIELDS`` не входит: это наблюдение
+        # прибора, а не смена условий измерения (``extractor_stack`` уже там).
+        ocr_probe=ocr_probe,
         snapshot_date=snapshot_date,
         # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
         # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
@@ -3729,6 +3740,17 @@ def write_reports(
         )
     except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
         page_provenance_path = None
+    # O38a/O25-остаток (план 26): исходы распознавания — видимым артефактом. Пока они не
+    # публикуются, «страница прошла OCR» и «документ прочитан из текстового слоя» в отчёте
+    # неотличимы, а провал пробы (``ocr_probe=unavailable``) живёт только строкой журнала
+    # фазы. Сбой выгрузки отчёт не роняет (как и ``page_provenance``): факт остаётся в БД,
+    # теряется лишь удобная таблица.
+    try:
+        ocr_provenance_path = write_ocr_provenance_artifact(
+            store, run_id, outputs_dir / "ocr_provenance.csv"
+        )
+    except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
+        ocr_provenance_path = None
     # O28: аномалии ``heading_path`` (3 668 симв. на страницу-виновника) были видны
     # только отдельным харнессом — в отчёте прогона их не называл никто. Чтение чанков
     # идёт через ``cb_``→``pb_``-резолв внутри писателя; неразрешённая сборка даёт
@@ -3837,6 +3859,7 @@ def write_reports(
         partial_docs=partial_docs_path,
         partial_docs_summary=partial_summary,
         page_provenance=page_provenance_path,
+        ocr_provenance=ocr_provenance_path,
         support_quality=support_path,
         support_quality_summary=support_payload,
         corpus_freshness=corpus_freshness_path,

@@ -78,8 +78,8 @@ from core.pipeline.corpus_index import _chunk_id, _CorpusStageTimings
 from core.pipeline.corpus_ingest import (
     MEMBER_CONTENT_TYPES,
     ProductIngest,
+    _extraction_fields,
     _log_ocr_probe,
-    _partial_fields,
     _state_url_key,
     artifact_is_terminal,
     conversion_failure_kind,
@@ -500,7 +500,7 @@ def ingest_member_doc(
         page_map=getattr(extracted, "page_map", None),
         # Член — тот же путь извлечения, что и страница: признак частичности обязан
         # пережить его так же (иначе «прочитан 1 член из 47» молчит внутри архива).
-        **_partial_fields(extracted),
+        **_extraction_fields(extracted),
     )
     ingest.docs.append(doc)
     persist_docs(store, [doc], errors, versions_by_doc={document_id: member_dv_id})

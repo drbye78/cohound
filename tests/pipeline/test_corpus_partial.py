@@ -292,7 +292,7 @@ def test_pdfium_pages_without_text_layer_reach_corpus_doc() -> None:
     Новое число (страницы без текстового слоя) публикуется через уже существующее
     ``pages_converted``; схема БД не меняется — проверяется перенос, а не колонка.
     """
-    from core.pipeline.corpus_ingest import _partial_fields
+    from core.pipeline.corpus_ingest import _extraction_fields
 
     extracted = ExtractedDoc(
         text="первая\n\nтретья",
@@ -311,7 +311,7 @@ def test_pdfium_pages_without_text_layer_reach_corpus_doc() -> None:
         doc_id="p1:deadbeef",
         product_id="p1",
         url=URL,
-        **_partial_fields(extracted),
+        **_extraction_fields(extracted),
     )
 
     assert (doc.page_count, doc.pages_converted) == (3, 2)

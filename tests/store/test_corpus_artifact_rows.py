@@ -67,8 +67,13 @@ def test_schema_pins_the_table_shape() -> None:
 
     3.21.0 — O36 фазы 1b плана ``26``: таблица не менялась, версия сдвинута вместе с
     ``corpus_docs.page_map`` (карта страниц документа); файлы ≤ 3.20.0 отвергаются гейтом.
+
+    3.22.0 — O25-остаток + O38a плана ``26``: таблица не менялась, версия сдвинута вместе с
+    провенансом распознавания (``corpus_docs.ocr_probe``/``pages_ocr``/``pages_failed`` и
+    агрегат ``runs.ocr_probe``/``index_manifest.ocr_probe``); файлы ≤ 3.21.0 отвергаются
+    гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.21.0"
+    assert SCHEMA_VERSION == "3.22.0"
 
     conn = connect(":memory:")
     try:

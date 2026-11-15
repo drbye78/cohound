@@ -13,11 +13,24 @@ from dataclasses import dataclass, field
 
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
+from core.domain.ocr_probe import (
+    OCR_PROBE_OK,
+    OCR_PROBE_UNAVAILABLE,
+    OCR_PROBE_UNKNOWN,
+    OCR_PROBE_UNSUPPORTED,
+    OCR_PROBE_VALUES,
+    check_ocr_probe,
+)
 from core.domain.page_map import check_page_map
 
 # Переиспользуем доменные оси (D2/D4): краулер видит ``fetch``/``extract``/``strategy``
 # как value-объекты, не как строки. Реэкспорт — чтобы адаптеры/edge импортировали их из порт-слоя.
 __all__ = [
+    "OCR_PROBE_OK",
+    "OCR_PROBE_UNAVAILABLE",
+    "OCR_PROBE_UNKNOWN",
+    "OCR_PROBE_UNSUPPORTED",
+    "OCR_PROBE_VALUES",
     "Chunk",
     "CrawlStrategy",
     "ExtractedDoc",
@@ -155,23 +168,6 @@ class RawPage:
     source_path: str | None = None
 
 
-#: Значения провенанса OCR-пробы (:attr:`ExtractedDoc.ocr_probe`). Канонические строки
-#: живут рядом с полем, которое их несёт: адаптеры и кэш импортируют их отсюда, чтобы
-#: «ok»/«unsupported» не разъехались по слоям как литералы.
-#:
-#: * ``ok`` — движок OCR реально получен (не ``None``);
-#: * ``unavailable`` — docling отверг всех кандидатов: OCR фактически нет;
-#: * ``unsupported`` — внутренний API docling не позволил проверить (переименование);
-#: * ``unknown`` — проверки не было или её результат не сохранён (старый конверт кэша).
-#:   «Не проверено» ≠ «проверено и работает».
-OCR_PROBE_OK = "ok"
-OCR_PROBE_UNAVAILABLE = "unavailable"
-OCR_PROBE_UNSUPPORTED = "unsupported"
-OCR_PROBE_UNKNOWN = "unknown"
-OCR_PROBE_VALUES: frozenset[str] = frozenset(
-    {OCR_PROBE_OK, OCR_PROBE_UNAVAILABLE, OCR_PROBE_UNSUPPORTED, OCR_PROBE_UNKNOWN}
-)
-
 #: Причина отказа :class:`ExtractedDoc`: документ **добыт**, но текста в нём нет.
 #:
 #: Объявлена рядом с носителем, потому что структурированного признака «пустой артефакт»
@@ -228,10 +224,11 @@ class ExtractedDoc:
     #: прочиталось 662 из 665». ``None`` — движок числа не сообщает; выдумывать нельзя
     #: (A3), а ``page_count - 1`` не является измерением.
     pages_converted: int | None = None
-    #: Исход проверки OCR-движка (значения — :data:`OCR_PROBE_VALUES`). ``None`` — проверка
-    #: к документу **не применима** (не PDF либо уровень без OCR); ``"unknown"`` — её не
-    #: было или результат не сохранён (старый конверт ``extract_cache``). Отдельное поле, а
-    #: не молчание: «не проверено» не должно читаться как «проверено и работает» —
+    #: Исход проверки OCR-движка (значения — :data:`OCR_PROBE_VALUES`, канон —
+    #: :mod:`core.domain.ocr_probe`: то же значение проверяет ``CorpusDoc``). ``None`` —
+    #: проверка к документу **не применима** (не PDF либо уровень без OCR); ``"unknown"``
+    #: — её не было или результат не сохранён (старый конверт ``extract_cache``). Отдельное
+    #: поле, а не молчание: «не проверено» не должно читаться как «проверено и работает» —
     #: иначе переименование приватного API docling снова пройдёт незамеченным.
     #: Стоит в конце: позиционные конструкторы не должны поехать от появления провенанса.
     ocr_probe: str | None = None
@@ -265,6 +262,31 @@ class ExtractedDoc:
     #: Иначе один и тот же текст давал бы разные хеши у разных механизмов (и один документ
     #: — разные ключи ``extract_cache``).
     page_map: tuple[tuple[int, int, int], ...] | None = None
+    #: Сколько страниц дали **хотя бы одну OCR-ячейку** (O38a, план ``26``): страница, для
+    #: которой движок заполнил ``ocr_score``. ``None`` — **не применимо или не измерено**:
+    #: не PDF, уровень без OCR (``layout``/``layout_tables``/``text``), читатель, который
+    #: об OCR ничего не сообщает (``text_layer``, HTML, Office, EPUB).
+    #:
+    #: ``0`` — не заглушка, а факт: OCR **применялся** (уровень ``full``) и не дал ни одной
+    #: страницы — документ целиком прочитан из текстового слоя. Смешивать эти два случая
+    #: нельзя: «неприменимо» и «применили и не понадобилось» — разные наблюдения.
+    #:
+    #: Чего здесь **нет** и почему: «текст страницы получен OCR-ом» (``TextCell.from_ocr``)
+    #: docling отдаёт только при ``generate_parsed_pages=True``, а пайплайн обнуляет
+    #: ``page.parsed_page`` ⇒ посимвольное происхождение текста страницы сегодня
+    #: недоступно; это отдельная ось с ценой по RSS и отдельным замером (A3). «OCR смотрел
+    #: и текста не дал» библиотека не сообщает вовсе (только warning в лог) — публиковать
+    #: это как ``0`` было бы выдумкой.
+    pages_ocr: int | None = None
+    #: Сколько **страниц** попало в ``result.errors`` docling с непустым ``page_no``
+    #: (ошибка уровня документа, ``page_no=None``, сюда не входит). ``None`` — не
+    #: применимо либо не измерено (не docling-путь).
+    #:
+    #: Считаются **страницы**, а не ошибки: на одной странице их может быть несколько, и
+    #: «три ошибки» не значит «три страницы». ``partial`` для этого факта **не** требуется:
+    #: страница может упасть, а документ остаться полным по статусу — это независимое
+    #: наблюдение, а не производная от частичности.
+    pages_failed: int | None = None
 
     def __post_init__(self) -> None:
         """Держит инвариант частичности и проверяет провенанс OCR.
@@ -280,13 +302,27 @@ class ExtractedDoc:
         """
         # Счётчики страниц — факты, а не оценки: противоречивая пара (прочитано больше,
         # чем заявлено документом, либо отрицательное) — ложная провенанс-запись.
-        if self.ocr_probe is not None and self.ocr_probe not in OCR_PROBE_VALUES:
-            # Неизвестная строка — это не «другой механизм», а испорченный провенанс:
-            # читатель не сможет отличить «проверено» от «не проверено».
-            raise ValueError(
-                "ExtractedDoc: ocr_probe вне OCR_PROBE_VALUES — исход проверки OCR "
-                f"должен быть одним из {sorted(OCR_PROBE_VALUES)}"
-            )
+        check_ocr_probe(self.ocr_probe)
+        # Исходы OCR по страницам (O38a): неотрицательны и не больше числа страниц
+        # документа. ``partial`` для них **не** требуется — упавшая страница при полном
+        # статусе документа такое же наблюдение, как и любое другое, и связывать его с
+        # частичностью значило бы выдумать причину.
+        for name, value in (
+            ("pages_ocr", self.pages_ocr),
+            ("pages_failed", self.pages_failed),
+        ):
+            if value is None:
+                continue
+            if value < 0:
+                raise ValueError(
+                    f"ExtractedDoc: {name} отрицателен — число страниц не может быть "
+                    "меньше нуля"
+                )
+            if self.page_count is not None and value > self.page_count:
+                raise ValueError(
+                    f"ExtractedDoc: {name} больше page_count — страниц с этим исходом "
+                    "не может быть больше, чем страниц в документе"
+                )
         if self.page_map is not None:
             # Карта страниц — либо точная, либо отсутствует: см. докстринг поля.
             # Инвариант живёт в домене (``core.domain.page_map``): у карты два носителя,

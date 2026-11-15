@@ -73,6 +73,7 @@ from core.domain.enums import (
     Status,
     TerminationReason,
 )
+from core.domain.ocr_probe import check_ocr_probe
 from core.domain.page_map import check_page_map
 from core.util.document_formats import normalize_attachment_formats
 from core.util.ids import doc_version_of
@@ -1830,6 +1831,14 @@ class RunManifest(BaseModel):
     embed_device: str | None = None
     chunker_version: str | None = None
     extractor_version: str | None = None
+    #: Худший исход проверки OCR-движка по корпусу прогона (O25-остаток, план ``26``):
+    #: ``unavailable`` > ``unsupported`` > ``unknown`` > ``ok``
+    #: (:func:`~core.domain.ocr_probe.worst_ocr_probe`). Именно **худший**, а не
+    #: большинство: деградация распознавания не должна теряться за сотней документов с
+    #: ``ok``. ``None`` — ни один документ исхода не сообщил (не PDF-корпус либо проба не
+    #: проводилась вовсе). В ``run_id``/``execution_contract_digest`` поле **не** входит:
+    #: это наблюдение прогона, а не объявленное условие измерения.
+    ocr_probe: str | None = None
     lexical_engine_version: str | None = None
     vector_store: str | None = None
     retrieval_profile: str | None = None
@@ -2036,6 +2045,9 @@ class CorpusDoc(BaseModel):
     текст как условие проверяет ``ExtractedDoc`` (у строки ``corpus_docs`` текста нет:
     он живёт в чанках). Карту страниц (:attr:`page_map`) проверяет отдельный валидатор —
     против ``extracted_chars``, потому что ``len(text)`` здесь недоступна.
+    Исходы OCR (:attr:`ocr_probe`/:attr:`pages_ocr`/:attr:`pages_failed`) проверяются там
+    же, но **независимо** от частичности: упавшая страница и неприменимая проба — факты,
+    которые не обязаны совпадать с «документ прочитан не целиком».
     """
 
     model_config = _BASE
@@ -2081,6 +2093,23 @@ class CorpusDoc(BaseModel):
     #: момент извлечения. Когда она не записана (``None``), проверяется только структура и
     #: порядок: «не измерено» не даёт права отказать карте, но и не подтверждает её.
     page_map: tuple[tuple[int, int, int], ...] | None = None
+    #: Исход проверки OCR-движка для **этого** документа (O25-остаток, план ``26``):
+    #: значения — :data:`~core.domain.ocr_probe.OCR_PROBE_VALUES`, ``None`` — проба к
+    #: документу не применима (не PDF, уровень без OCR, переиспользование без экстракции).
+    #: Публикуется в манифесте прогона **худшим** исходом (см.
+    #: :func:`~core.domain.ocr_probe.worst_ocr_probe`): «не проверено» не должно тонуть в
+    #: большинстве проверенных ``ok``.
+    ocr_probe: str | None = None
+    #: Сколько страниц дало хотя бы одну OCR-ячейку (O38a, план ``26``). ``None`` — не
+    #: применимо/не измерено; ``0`` — распознавание применялось и ни одна страница не дала
+    #: текста. Контракт полей — :attr:`core.ports.types.ExtractedDoc.pages_ocr`; здесь он
+    #: **не** повторяется, но инварианты (неотрицательность, ``<= page_count``) держатся
+    #: и на границе корпуса: строка БД — тоже носитель факта.
+    pages_ocr: int | None = None
+    #: Сколько **страниц** попало в ошибки конвертации с номером страницы (O38a, план
+    #: ``26``); ``None`` — не применимо/не измерено. ``partial`` для этих счётчиков не
+    #: требуется: упавшая страница при полном статусе документа — независимый факт.
+    pages_failed: int | None = None
 
     @model_validator(mode="after")
     def _check_partial(self) -> CorpusDoc:
@@ -2114,6 +2143,23 @@ class CorpusDoc(BaseModel):
                 )
         if self.extracted_chars is not None and self.extracted_chars < 0:
             raise ValueError("corpus_docs: extracted_chars не может быть отрицательным")
+        # O25-остаток/O38a: исход пробы и постраничные счётчики OCR. Тот же инвариант, что
+        # у ``ExtractedDoc``: строка БД — носитель факта, и «страниц с OCR больше, чем
+        # страниц в документе» — ложная провенанс-запись независимо от того, кто её собрал.
+        check_ocr_probe(self.ocr_probe, label="corpus_docs")
+        for name, value in (
+            ("pages_ocr", self.pages_ocr),
+            ("pages_failed", self.pages_failed),
+        ):
+            if value is None:
+                continue
+            if value < 0:
+                raise ValueError(f"corpus_docs: {name} не может быть отрицательным")
+            if self.page_count is not None and value > self.page_count:
+                raise ValueError(
+                    f"corpus_docs: {name} больше page_count — страниц с этим исходом не "
+                    "может быть больше, чем страниц в документе"
+                )
         return self
 
     @model_validator(mode="after")
@@ -2300,6 +2346,13 @@ class IndexManifestEntry(BaseModel):
     chunker_version: str | None = None
     #: Композитная версия экстрактора, использованного при сборке (build-id witness, §13).
     extractor_version: str | None = None
+    #: Худший исход проверки OCR-движка по документам **этой** продукт-партиции (O25-остаток,
+    #: план ``26``): :func:`~core.domain.ocr_probe.worst_ocr_probe` — ``unavailable`` >
+    #: ``unsupported`` > ``unknown`` > ``ok``. ``None`` — ни один документ партиции исхода не
+    #: сообщил (нечего публиковать). В ``index_build_id``/``partition_build_id`` поле **не**
+    #: входит: это провенанс наблюдения, а не условие измерения — иначе сборка менялась бы
+    #: от того, был ли в ней скан.
+    ocr_probe: str | None = None
     embed_model_id: str | None = None
     embed_dim: int | None = None
     lexical_engine_version: str | None = None

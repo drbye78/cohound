@@ -348,6 +348,7 @@ from core.pipeline.liveness import Heartbeat
 from core.pipeline.manual_artifacts import (
     ManualArtifacts,
 )
+from core.pipeline.ocr_provenance import ocr_probe_by_product
 from core.pipeline.refresh_modes import dispatch_refresh
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
 from core.pipeline.runner import PhaseResult, PhaseStatus, sorted_error_lines
@@ -5480,6 +5481,17 @@ def _build_corpus(
     # ``snapshot_date``/``retrieval_*`` не входят.
     index_build_id = derive_composition_id(package, members, digests)
 
+    # O25-остаток (план 26, схема 3.22.0): худший исход проверки OCR по продукту — в
+    # строку ``index_manifest``. Источник — **персистентный** корпус, а не память прогона:
+    # ``ingest.docs`` освобождается на границе продукта, а строка реестра строится после
+    # неё. Сбой чтения не роняет фазу: провенанс вторичен к измерению (``None`` = «нечего
+    # публиковать», а не «всё проверено»).
+    try:
+        ocr_probes = ocr_probe_by_product(store, run_id)
+    except Exception as exc:  # noqa: BLE001 — провенанс не роняет фазу
+        errors.append(f"ocr_probe: {type(exc).__name__}: {exc}")
+        ocr_probes = {}
+
     entries: list[IndexManifestEntry] = []
     #: Записи, чьи партиции физически зафиксированы: только они идут в реестр прогона.
     manifest_entries: list[IndexManifestEntry] = []
@@ -5503,6 +5515,9 @@ def _build_corpus(
             snapshot_date=snapshot,
             chunker_version=resolved_chunker_version or None,
             extractor_version=extractor_token or None,
+            # O25-остаток (3.22.0): худший исход OCR-пробы по документам партиции.
+            # В ``index_build_id``/``partition_build_id`` не входит: наблюдение, а не условие.
+            ocr_probe=ocr_probes.get(product_id),
             embed_model_id=embed_model_id or None,
             embed_dim=getattr(embedder, "dim", None),
             lexical_engine_version=lexical_engine_version or None,

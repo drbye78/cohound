@@ -59,6 +59,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
+from core.domain.ocr_probe import OCR_PROBE_VALUES
 from core.domain.page_map import page_map_from_json, page_map_to_json
 from core.ports.store import CorpusArtifactRow, PlanInputsConflict, RunIndexRef
 from core.ports.types import Chunk
@@ -333,6 +334,17 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(name, default)
     return getattr(obj, name, default)
+
+
+def _declared_ocr_probe(value: Any) -> str | None:
+    """Исход OCR-пробы из строки БД; необъявленное значение читается как «не записано».
+
+    Колонка аддитивная (схема 3.22.0): у read-only файла прошлой версии её нет, а
+    испорченное значение не должно ронять чтение корпуса — отчёт обязан строиться и на
+    повреждённой БД (как у ``page_map``). ``None`` здесь значит «не записано», а не
+    «проверено и работает».
+    """
+    return value if isinstance(value, str) and value in OCR_PROBE_VALUES else None
 
 
 class SqliteStore:
@@ -1228,7 +1240,10 @@ class SqliteStore:
         ``hound diff`` не мог назвать ось расхождения и печатал «предел диагностики»),
         а также ``crawl_policy_digest`` и блок провенанса политики краула (план 19 §P4),
         а также ``corpus_snapshot_json`` — снимок корпуса прогона (план 20 §F1: провенанс,
-        а не идентичность; ``COALESCE`` — манифест без снимка не стирает durable-факт).
+        а не идентичность; ``COALESCE`` — манифест без снимка не стирает durable-факт),
+        а также ``ocr_probe`` — **худший** исход проверки OCR-движка по корпусу прогона
+        (O25-остаток, схема 3.22.0: ``unavailable`` > ``unsupported`` > ``unknown`` > ``ok``;
+        ``NULL`` — ни один документ исхода не сообщил).
         ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
@@ -1253,6 +1268,7 @@ class SqliteStore:
                 " execution_contract_digest = ?,"
                 " manual_artifacts_digest = ?, manual_artifacts_json = ?,"
                 " partial_docs_json = ?,"
+                " ocr_probe = ?,"
                 " publishability_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?,"
                 " run_scope = ?, product_plan_json = ?, embed_device = ?,"
@@ -1299,6 +1315,10 @@ class SqliteStore:
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
+                    # O25-остаток (3.22.0): худший исход проверки OCR по корпусу прогона.
+                    # Публикуется, потому что деградация распознавания иначе видна только
+                    # в журнале фазы: читатель артефакта прогона её не видел вовсе.
+                    manifest.ocr_probe,
                     json.dumps(
                         dict(manifest.publishability or {}),
                         ensure_ascii=False,
@@ -1496,6 +1516,15 @@ class SqliteStore:
         Это не то же, что монотонность ``reuse_kind`` (там понижается одно значение из
         набора, здесь запрещена потеря единственного измерения): правила разные и оба
         остаются видимыми.
+
+        **То же правило — у провенанса OCR (``ocr_probe``/``pages_ocr``/``pages_failed``,
+        схема 3.22.0).** Писатель, который извлечения не делал (переиспользование ``304``,
+        набор чанков, ``frozen``), приходит с ``None`` во всех трёх полях: измерений этого
+        цикла у него нет. Записать ``NULL`` поверх уже измеренного исхода значило бы
+        стереть наблюдение «проба не смогла» и объявить документ непроверенным — ровно та
+        тихая потеря, ради видимости которой поле и заведено. ``COALESCE`` сохраняет
+        измерение и при этом **не** мешает пере-извлечению уточнить его: новый непустой
+        исход перекрывает прежний (``unavailable`` → ``ok`` после починки движка).
         """
         http_status = doc.http_status
         reuse_kind = doc.reuse_kind
@@ -1506,8 +1535,9 @@ class SqliteStore:
                 " (doc_id, product_id, url, fetched_at, content_hash, raw_path,"
                 "  extractor_version, render_mode, lang, origin,"
                 "  partial, partial_reason, page_count, pages_converted, extracted_chars,"
-                "  http_status, reuse_kind, page_map)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  http_status, reuse_kind, page_map,"
+                "  ocr_probe, pages_ocr, pages_failed)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(doc_id) DO UPDATE SET"
                 "  product_id = excluded.product_id,"
                 "  url = excluded.url,"
@@ -1534,7 +1564,13 @@ class SqliteStore:
                 # Карта страниц только дописывается: писатель без карты (HTML/docling/
                 # шов/переиспользование) не вправе стереть измеренную карту того же
                 # текста (см. докстринг).
-                "  page_map = COALESCE(excluded.page_map, corpus_docs.page_map)",
+                "  page_map = COALESCE(excluded.page_map, corpus_docs.page_map),"
+                # Провенанс OCR (3.22.0) — то же правило и по той же причине: у писателя
+                # без извлечения измерений этого цикла нет, и его ``NULL`` не должен
+                # стирать уже измеренный исход (см. докстринг).
+                "  ocr_probe = COALESCE(excluded.ocr_probe, corpus_docs.ocr_probe),"
+                "  pages_ocr = COALESCE(excluded.pages_ocr, corpus_docs.pages_ocr),"
+                "  pages_failed = COALESCE(excluded.pages_failed, corpus_docs.pages_failed)",
                 (
                     doc.doc_id,
                     doc.product_id,
@@ -1556,6 +1592,9 @@ class SqliteStore:
                     None if http_status is None else int(http_status),
                     _as_text(reuse_kind),
                     page_map_json,
+                    doc.ocr_probe,
+                    doc.pages_ocr,
+                    doc.pages_failed,
                 ),
             )
             if doc_version_id:
@@ -1684,10 +1723,10 @@ class SqliteStore:
                 "INSERT OR REPLACE INTO index_manifest"
                 " (index_build_id, partition_build_id, product_id, package_id,"
                 "  partition_key, snapshot_date,"
-                "  chunker_version, extractor_version, embed_model_id, embed_dim,"
+                "  chunker_version, extractor_version, ocr_probe, embed_model_id, embed_dim,"
                 "  lexical_engine_version, vector_store, content_digest, store_path,"
                 "  created_at, stats_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.index_build_id,
                     entry.partition_build_id,
@@ -1697,6 +1736,7 @@ class SqliteStore:
                     entry.snapshot_date,
                     entry.chunker_version,
                     entry.extractor_version,
+                    entry.ocr_probe,
                     entry.embed_model_id,
                     entry.embed_dim,
                     entry.lexical_engine_version,
@@ -2745,6 +2785,12 @@ class SqliteStore:
                 # значение читается как ``None`` («карты нет»), а не роняет отчёт:
                 # ``report`` обязан строиться и на повреждённой БД.
                 page_map=page_map_from_json(_row_optional(doc, "page_map")),
+                # O25-остаток/O38a (3.22.0): провенанс распознавания. Колонки аддитивные
+                # ⇒ ``_row_optional``: на read-only файле прошлой версии их нет, и
+                # отсутствие значит «не записано», а не «OCR не применялся».
+                ocr_probe=_declared_ocr_probe(_row_optional(doc, "ocr_probe")),
+                pages_ocr=_row_optional(doc, "pages_ocr"),
+                pages_failed=_row_optional(doc, "pages_failed"),
             )
 
     # -- спуск в контейнеры (B3) ------------------------------------------- #
@@ -3000,6 +3046,10 @@ class SqliteStore:
         partial_docs_block = (
             partial_docs_raw if isinstance(partial_docs_raw, dict) else {}
         )
+        # O25-остаток (3.22.0): худший исход проверки OCR по корпусу прогона. Колонка
+        # аддитивная ⇒ ``_row_optional``: у строки прошлой схемы её нет, и отсутствие
+        # значит «не записано», а не «OCR проверен и работает».
+        ocr_probe = _declared_ocr_probe(_row_optional(row, "ocr_probe"))
         # 16 §3.1: провенанс среза (``run_scope``/``product_plan``) и наблюдаемая ось
         # устройства эмбеддера. Колонки аддитивные ⇒ читаются через ``_row_optional``
         # (read-only БД прошлой версии их не имеет); NULL/не-JSON → ``None``, а не пустой
@@ -3133,6 +3183,8 @@ class SqliteStore:
             # I2/I2c: частичное извлечение — наблюдение прогона (документы/страницы/
             # символы по продуктам); NULL-блок читается пустым.
             partial_docs=partial_docs_block,
+            # O25-остаток (3.22.0): худший исход OCR-пробы по корпусу — наблюдение прогона.
+            ocr_probe=ocr_probe,
             # §6/A1: профиль публикуемости из записи воспроизведения; пусто — legacy.
             publishability=publishability_block,
             llm_scenarios=scenarios,
@@ -3188,6 +3240,9 @@ class SqliteStore:
                 snapshot_date=row["snapshot_date"],
                 chunker_version=row["chunker_version"],
                 extractor_version=row["extractor_version"],
+                # O25-остаток (3.22.0): колонка аддитивная ⇒ ``_row_optional``: у строки
+                # прошлой схемы её нет, и отсутствие значит «не записано».
+                ocr_probe=_declared_ocr_probe(_row_optional(row, "ocr_probe")),
                 embed_model_id=row["embed_model_id"],
                 embed_dim=row["embed_dim"],
                 lexical_engine_version=row["lexical_engine_version"],

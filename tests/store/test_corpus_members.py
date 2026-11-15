@@ -91,8 +91,13 @@ def test_schema_version_is_additive_bump() -> None:
     3.21.0 — O36 фазы 1b плана ``26``: ``corpus_docs.page_map`` — карта страниц документа
     (JSON-список ``[page_no, start, end]``). Номер страницы чанка колонкой не стал: он
     функция от карты и ``char_start``; файлы ≤ 3.20.0 отвергаются гейтом версии.
+
+    3.22.0 — O25-остаток + O38a плана ``26``: провенанс распознавания
+    (``corpus_docs.ocr_probe``/``pages_ocr``/``pages_failed``, ``runs.ocr_probe``,
+    ``index_manifest.ocr_probe``); таблица ``corpus_members`` не менялась, файлы ≤ 3.21.0
+    отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.21.0"
+    assert SCHEMA_VERSION == "3.22.0"
     conn = connect(":memory:")
     try:
         tables = {

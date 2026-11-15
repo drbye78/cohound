@@ -167,6 +167,16 @@ from core.domain.models import (
     canonical_rate_limit,
     derived_evidence_id,
 )
+from core.domain.ocr_probe import (
+    OCR_PROBE_OK,
+    OCR_PROBE_SEVERITY,
+    OCR_PROBE_UNAVAILABLE,
+    OCR_PROBE_UNKNOWN,
+    OCR_PROBE_UNSUPPORTED,
+    OCR_PROBE_VALUES,
+    check_ocr_probe,
+    worst_ocr_probe,
+)
 from core.domain.page_map import (
     PageMap,
     check_page_map,
@@ -349,6 +359,15 @@ __all__ = [  # noqa: RUF022
     "page_map_from_json",
     "page_map_to_json",
     "page_number_for",
+    # исход OCR-пробы (O25/O38, план 26): тристейт, общий для документа и агрегатов
+    "OCR_PROBE_OK",
+    "OCR_PROBE_SEVERITY",
+    "OCR_PROBE_UNAVAILABLE",
+    "OCR_PROBE_UNKNOWN",
+    "OCR_PROBE_UNSUPPORTED",
+    "OCR_PROBE_VALUES",
+    "check_ocr_probe",
+    "worst_ocr_probe",
     # r2
     "apply_r2",
     # invariants (T2.2)

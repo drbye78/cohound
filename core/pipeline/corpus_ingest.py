@@ -1409,12 +1409,17 @@ def _log_ocr_probe(extracted: Any, subject: str) -> None:
     )
 
 
-def _partial_fields(extracted: Any) -> dict[str, Any]:
-    """Поля частичности ``ExtractedDoc`` → ``CorpusDoc`` (общая точка обоих путей).
+def _extraction_fields(extracted: Any) -> dict[str, Any]:
+    """Поля извлечения ``ExtractedDoc`` → ``CorpusDoc`` (общая точка обоих путей).
 
     Один маппинг на страницу и на члена контейнера: иначе «пул vs inline» или «страница
     vs член архива» могли бы разойтись в признаке, а это признак, ради которого всё и
     делается. ``None``/нечисло остаются ``None`` — «не измерено» не превращается в ноль.
+
+    Кроме частичности, здесь едут **исходы OCR** (O25-остаток/O38a): проба движка
+    (``ocr_probe``) и постраничные счётчики (``pages_ocr``/``pages_failed``). Они не
+    производные от ``partial``: страница может упасть при полном статусе документа, а
+    проба — быть неприменимой к документу, который прочитан целиком.
     """
     partial = bool(getattr(extracted, "partial", False))
     reason = str(getattr(extracted, "partial_reason", None) or "").strip() or None
@@ -1435,11 +1440,19 @@ def _partial_fields(extracted: Any) -> dict[str, Any]:
             else None
         ),
         "extracted_chars": len(text) if isinstance(text, str) else None,
+        "ocr_probe": getattr(extracted, "ocr_probe", None),
+        "pages_ocr": _count_or_none(getattr(extracted, "pages_ocr", None)),
+        "pages_failed": _count_or_none(getattr(extracted, "pages_failed", None)),
     }
 
 
-def _reused_partial_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
-    """Поля частичности **из durable-записи** версии: ``(поля CorpusDoc, признак известен)``.
+def _count_or_none(value: Any) -> int | None:
+    """Измеренное число либо ``None`` (``bool`` числом не считается, «не измерено» ≠ 0)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _reused_extraction_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
+    """Поля извлечения **из durable-записи** версии: ``(поля CorpusDoc, признак известен)``.
 
     Переиспользование версии (``304``: экстракции не было) не вправе ответить на вопрос
     «прочитан документ целиком?» из самого факта переиспользования. До v5 ответа не было
@@ -1447,6 +1460,10 @@ def _reused_partial_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
     текст молча объявлялся полным, а ``CorpusCoverage`` объявляло покрытие полным на
     нём (I2/I2c). Теперь признак лежит в ``document_version`` рядом с версией, к которой
     он относится, и переиспользование его **восстанавливает**.
+
+    Исходы OCR (O25-остаток/O38a) здесь всегда ``None``: в ``state.db`` (``STATE "12"``)
+    для них колонок нет, а выдумывать их из факта переиспользования нельзя. Записанное
+    ранее измерение этим не стирается: upsert корпуса пишет ``COALESCE``.
 
     :returns: ``(поля, известен)``. ``известен=False`` — строка записана версией, которая
         признак не сохраняла (``extract_partial IS NULL``). Тогда поля не утверждают
@@ -1463,6 +1480,9 @@ def _reused_partial_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
                 "page_count": None,
                 "pages_converted": None,
                 "extracted_chars": None,
+                "ocr_probe": None,
+                "pages_ocr": None,
+                "pages_failed": None,
             },
             False,
         )
@@ -1491,6 +1511,10 @@ def _reused_partial_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
                 else None
             ),
             "extracted_chars": None,
+            # Измерений этого цикла нет: экстракции не было (см. докстринг).
+            "ocr_probe": None,
+            "pages_ocr": None,
+            "pages_failed": None,
         },
         True,
     )
@@ -1841,10 +1865,10 @@ def finish_one(
     #   было, и усечённый текст объявлялся полным; теперь ``partial_known`` различает
     #   «полное» и «не измерено», и второе не выдаётся за первое.
     if reuse is None:
-        partial_fields = _partial_fields(extracted)
+        partial_fields = _extraction_fields(extracted)
         partial_known = True
     else:
-        partial_fields, partial_known = _reused_partial_fields(reuse.doc_version)
+        partial_fields, partial_known = _reused_extraction_fields(reuse.doc_version)
         if not partial_known:
             # «Не измерено» называется явно: иначе этот документ в отчёте неотличим от
             # прочитанного целиком, а ``CorpusCoverage`` считает полноту по признаку.
@@ -3911,7 +3935,7 @@ def rebuild_from_stored_bytes(
             raw_path=raw_path,
             extractor_token=token,
             level_text=str(level_text or ""),
-            partial_fields=_partial_fields(extracted),
+            partial_fields=_extraction_fields(extracted),
             chunks=sorted(
                 chunks or [], key=lambda chunk: getattr(chunk, "chunk_no", 0)
             ),
@@ -4326,7 +4350,7 @@ def offline_reuse_product(
         extractor_token = str(reuse.doc_version.extractor_version or "")
         level_text = str(reuse.doc_version.level or "")
         dv_id = doc_version_id(product_id, doc_hash, extractor_token, level_text)
-        partial_fields, partial_known = _reused_partial_fields(reuse.doc_version)
+        partial_fields, partial_known = _reused_extraction_fields(reuse.doc_version)
         if not partial_known:
             # v5: признак частичности в версии не записан — «не измерено», и это
             # называется отдельно (строка продукта), а не выдаётся за «прочитано всё».

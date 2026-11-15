@@ -257,10 +257,12 @@ mismatch forces `complete=False`; an unknown digest (either side) does not — a
 is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
 term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
 `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.21.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
+`SCHEMA_VERSION` 3.22.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
 `corpus_docs.page_map` at 3.21.0 — the page map, from which a chunk's page number is a
 **function**, not a column: a copy would have to be maintained on every chunk-write path and
-one missed path would give a silently wrong page); STATE `12` (`capture.policy_digest`
+one missed path would give a silently wrong page; `corpus_docs.ocr_probe`/`pages_ocr`/
+`pages_failed`, `runs.ocr_probe`, `index_manifest.ocr_probe` at 3.22.0 — recognition
+provenance, §10); STATE `12` (`capture.policy_digest`
 changed meaning ⇒ old files are rejected by the version gate).
 
 ## 6. Crawl scope: declared hosts
@@ -555,6 +557,21 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   is plan `26` O26. A failing page does not kill the document (`partial=True`); control
   characters and `\r\n` are normalized, without which the
   paragraph chunker matches nothing and the document becomes one chunk.
+- **Recognition provenance is a tri-state, never a zero placeholder.** `ExtractedDoc.pages_ocr`/
+  `pages_failed` (`None` = not applicable or not measured — never `0` as a stand-in) and the
+  document-level `ocr_probe` (`ok|unsupported|unavailable|unknown`, canon in
+  `core/domain/ocr_probe.py`) are persisted as `corpus_docs.ocr_probe`/`pages_ocr`/`pages_failed`
+  under the same **COALESCE** rule as `page_map` (a writer without extraction must not erase a
+  measured outcome), aggregated into `runs.ocr_probe`/`index_manifest.ocr_probe` as the **worst**
+  outcome (`unavailable > unsupported > unknown > ok` — degradation must not drown in a majority
+  of `ok`) and published as `outputs/ocr_provenance.csv`. `pages_ocr` counts pages whose
+  `confidence.pages[p].ocr_score` is a non-NaN number, read with `.get()` because
+  `ConfidenceReport.pages` is a `defaultdict` (indexing would invent a page); `pages_failed`
+  counts `ErrorItem`s carrying a `page_no` (document-level errors carry none). Two facts are
+  deliberately **not** measured: "the page's text came from OCR" (`TextCell.from_ocr` needs
+  `generate_parsed_pages=True`, which changes provenance and RSS — a separate axis and
+  measurement, A3) and "OCR looked and produced no text" (the library does not report it; only a
+  log warning).
 - **Page provenance is stored once, derived everywhere else.** The `text_layer` reader fills
   `ExtractedDoc.page_map` (`(page_no 1-based, char_start, char_end)`, half-open, sorted,
   non-overlapping; `"\n\n"` between pages is a **gap**, not part of a segment; offsets are in
