@@ -18,14 +18,19 @@ from pydantic import ValidationError
 from core.config.deploy import (
     DEFAULT_LLM_MODEL_ID,
     DEFAULT_LLM_SLOT,
+    LEXICAL_PROFILES,
+    RETRIEVAL_PROFILES,
     SPLIT_HARDENED_WARNING,
     CrawlBrowserConfig,
     CrawlConfig,
     CrawlShardConfig,
     DeployConfig,
     EmbedConfig,
+    ExtractDeployConfig,
+    LexicalDeployConfig,
     LLMDeployConfig,
     LLMSlotConfig,
+    RetrievalDeployConfig,
     SearchDeployConfig,
     is_split,
     load_deploy_config,
@@ -1168,3 +1173,166 @@ def test_shard_map_is_absent_from_digest_until_declared() -> None:
         {"node": "node-a", "hosts": ["third.test"]},
         {"node": "node-b", "hosts": ["docs.test", "other.test"]},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Объявленные условия измерения: ``retrieval`` / ``lexical`` / ``extract``
+# ---------------------------------------------------------------------------
+
+
+def test_declared_conditions_defaults() -> None:
+    """Отсутствие секций — объявленные дефолты (а не «ось не названа»).
+
+    ``retrieval.profile`` обязан быть назван **всегда** (D2 плана 26): незаданный флаг
+    раньше давал ``null`` в контракте при исполненном ``R0``. ``lexical.profile`` —
+    ``stemmed`` (прежняя выдача байт-в-байт). Бюджет кэша экстракции по умолчанию не
+    ограничен (сегодняшнее поведение).
+    """
+    config = DeployConfig()
+    assert config.retrieval.profile == "R0"
+    assert config.lexical.profile == "stemmed"
+    assert config.extract.cache_max_bytes is None
+
+
+def test_declared_conditions_parse_from_yaml(tmp_path: Path) -> None:
+    """Все три секции читаются из ``deploy.yaml``."""
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "retrieval": {"profile": "R2"},
+                "lexical": {"profile": "ngram"},
+                "extract": {"cache_max_bytes": 1024},
+            }
+        ),
+    )
+    config = load_deploy_config(path)
+    assert config.retrieval.profile == "R2"
+    assert config.lexical.profile == "ngram"
+    assert config.extract.cache_max_bytes == 1024
+
+
+def test_crawl_pdf_limits_are_declarable_on_the_node(tmp_path: Path) -> None:
+    """D9: ``crawl.pdf_max_*`` объявляется в ``deploy.yaml`` и по умолчанию отсутствует.
+
+    Проверяется именно **достижимость** оси из объявленного конфига: резолвер
+    (``resolve_crawl_limits``) читает app-слой через ``getattr``, и поле, которого нет в
+    схеме, давало бы «цепочку app < run < ...» с недостижимым первым слоем. Дефолт —
+    ``None``: потолок, которого никто не выбирал, был бы ограничением, а не измерением
+    (A3; замер O31 — любой кандидат режет материал).
+    """
+    assert DeployConfig().crawl.pdf_max_pages is None
+    assert DeployConfig().crawl.pdf_max_extracted_chars is None
+
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {"pdf_max_pages": 250, "pdf_max_extracted_chars": 1_000_000},
+            }
+        ),
+    )
+    config = load_deploy_config(path)
+    assert config.crawl.pdf_max_pages == 250
+    assert config.crawl.pdf_max_extracted_chars == 1_000_000
+
+    for bad in (0, -1):
+        bad_path = tmp_path / f"bad{bad}.yaml"
+        bad_path.write_text(
+            _dump({"profile": "local", "crawl": {"pdf_max_pages": bad}}), encoding="utf-8"
+        )
+        with pytest.raises(ValidationError):
+            load_deploy_config(bad_path)
+
+
+def test_unknown_retrieval_profile_rejected(tmp_path: Path) -> None:
+    """Неизвестный профиль ретривала — отказ загрузки с перечислением допустимых."""
+    path = _write(
+        tmp_path,
+        _dump({"profile": "local", "retrieval": {"profile": "R3"}}),
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        load_deploy_config(path)
+    message = str(excinfo.value)
+    assert "R3" in message
+    assert "R0" in message and "R1" in message and "R2" in message
+
+
+def test_retrieval_profile_case_is_normalized() -> None:
+    """``r0``/``r2`` — то же условие измерения, что ``R0``/``R2``: регистр не значим."""
+    assert RetrievalDeployConfig(profile=" r2 ").profile == "R2"
+
+
+def test_unknown_lexical_profile_rejected(tmp_path: Path) -> None:
+    """Неизвестный профиль лексики — отказ с перечислением допустимых."""
+    path = _write(
+        tmp_path,
+        _dump({"profile": "local", "lexical": {"profile": "fuzzy"}}),
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        load_deploy_config(path)
+    message = str(excinfo.value)
+    assert "fuzzy" in message
+    assert "stemmed" in message and "identifier" in message and "ngram" in message
+
+
+def test_lexical_raw_alias_normalized_to_identifier() -> None:
+    """``raw`` — псевдоним ``identifier``: в объявленном значении одно имя.
+
+    Иначе одно поведение имело бы два имени в контракте, и два прогона с одинаковым
+    анализатором получали бы разные ``run_id``.
+    """
+    assert LexicalDeployConfig(profile="RAW").profile == "identifier"
+    assert LexicalDeployConfig(profile="identifier").profile == "identifier"
+    assert LexicalDeployConfig(profile="  Stemmed ").profile == "stemmed"
+
+
+def test_extract_cache_budget_positive_only() -> None:
+    """Бюджет кэша: ``null`` — без вытеснения; положительное — LRU; ``0``/минус — отказ.
+
+    ``0`` — не «без кэша», а «вытеснять всё, включая только что записанное»: кэш, который
+    никогда не попадает. Отказ называет альтернативу (``null``), чтобы сообщение было
+    действием, а не только запретом.
+    """
+    assert ExtractDeployConfig().cache_max_bytes is None
+    assert ExtractDeployConfig(cache_max_bytes=1).cache_max_bytes == 1
+    for bad in (0, -1):
+        with pytest.raises(ValidationError) as excinfo:
+            ExtractDeployConfig(cache_max_bytes=bad)
+        assert "cache_max_bytes" in str(excinfo.value)
+        assert "null" in str(excinfo.value)
+
+
+def test_retrieval_profiles_mirror_the_engine_enum() -> None:
+    """Зеркало допустимых профилей не отстаёт от ``RetrievalProfile`` (01 §1: без импорта).
+
+    ``config`` не имеет права зависеть от ``pipeline`` (матрица слоёв гейтится
+    ``tests/selfcheck.py::_import_graph``), поэтому набор объявлен зеркалом. Дрейф
+    зеркала — отказ здесь, а не молчаливая потеря профиля в конфиге.
+    """
+    from core.pipeline.retrieve import RetrievalProfile
+
+    assert set(RETRIEVAL_PROFILES) == {profile.value for profile in RetrievalProfile}
+
+
+def test_lexical_profiles_mirror_the_adapter() -> None:
+    """Зеркало профилей лексики не отстаёт от адаптера (та же причина, что выше)."""
+    from core.adapters import lexical_tantivy
+
+    assert set(LEXICAL_PROFILES) == lexical_tantivy._PROFILES
+
+
+def test_extract_budget_is_not_a_contract_condition() -> None:
+    """Бюджет кэша экстракции — **не** условие измерения (D8): в контракт не входит.
+
+    Вытеснение меняет только цену повторного извлечения; состав корпуса и вердикты от
+    него не зависят. Пин держит решение: следующий читатель не должен «дополнить»
+    ``EXECUTION_CONTRACT_FIELDS`` этим полем — иначе переезд на диск другого размера
+    объявлял бы ``execution_change`` там, где измерение не менялось.
+    """
+    from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
+
+    assert not any("cache" in field for field in EXECUTION_CONTRACT_FIELDS)
+    assert "extract" not in {field.split("_")[0] for field in EXECUTION_CONTRACT_FIELDS}

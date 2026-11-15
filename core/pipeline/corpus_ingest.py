@@ -105,6 +105,7 @@ from core.pipeline.extraction_runtime import (
     _ExtractRequest,
     _hash_file,
     _page_with_source_path,
+    extract_with_pdf_limits,
 )
 from core.pipeline.fetch_plan import _host_matches
 from core.pipeline.incremental import (
@@ -160,6 +161,7 @@ from core.util.document_probe import CLASS_DOCUMENT
 from core.util.fetch_retry import FETCH_RETRY_TIMES as FETCH_RETRY_TIMES
 from core.util.fetch_retry import FetchAttemptStats, fetch_with_paced_retries
 from core.util.hashing import content_hash, short_hash
+from core.util.pdf_limits import PdfLimits
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
 
@@ -1285,6 +1287,7 @@ def ingest_one(
     extract_cache: ExtractionCache | None,
     reuse_kind: ReuseKind,
     origin: str = ORIGIN_CRAWL,
+    limits: CrawlLimits | None = None,
 ) -> str | None:
     """Inline-экстракция → доводка одного URL (путь без пула, ``None``/``1``).
 
@@ -1313,9 +1316,14 @@ def ingest_one(
         # staging-артефакта (``page.content`` пуст) ключ не вырождается в хеш пустоты.
         cache_key = raw_path.stem
         probe_page = _page_with_source_path(page, raw_path)
+        # D9 (план 26): лимиты PDF объявленного корня. При активном лимите кэш не
+        # спрашивается — запись, снятая прогоном без лимита, отдала бы полный текст под
+        # объявленной осью (цена: такие документы пере-извлекаются каждый прогон).
+        pdf_limits = None if limits is None else limits.pdf_limits()
+        limits_active = pdf_limits is not None and pdf_limits.active
         extracted = (
             None
-            if extract_cache is None
+            if extract_cache is None or limits_active
             else extract_cache.get(
                 cache_key,
                 _cache_extractor_version(extractor_obj, probe_page, fetch_plan.extract),
@@ -1323,7 +1331,9 @@ def ingest_one(
             )
         )
         if extracted is None:
-            extracted = extractor_obj.extract(probe_page, fetch_plan.extract)
+            extracted = extract_with_pdf_limits(
+                extractor_obj, probe_page, fetch_plan.extract, pdf_limits
+            )
             if extract_cache is not None:
                 extract_cache.put(
                     extracted, level=level_text, content_hash=cache_key
@@ -2157,6 +2167,8 @@ def feed_manual_artifact(
         # §11.2 там, где оно исполняется (``evaluate``), а не писатель строки.
         reuse_kind=ReuseKind.REUSED,
         origin=ORIGIN_MANUAL,
+        # D9: лимиты PDF объявленного корня — ручная подача не выключает условие измерения.
+        limits=limits,
     )
     return doc_id, raw_path
 
@@ -3819,7 +3831,12 @@ def rebuild_from_stored_bytes(
     )
     extracted = None
     cache_hit = False
-    if extract_cache is not None:
+    # D9 (план 26): лимиты PDF объявленного корня. При активном лимите кэш не
+    # спрашивается: запись, снятая прогоном без лимита, отдала бы полный текст под
+    # объявленной осью. Цена названа прямо — такие документы пере-извлекаются.
+    pdf_limits = limits.pdf_limits()
+    limits_active = pdf_limits is not None and pdf_limits.active
+    if extract_cache is not None and not limits_active:
         version_token = _cache_extractor_version(extractor_obj, page, route)
         extracted = extract_cache.get(raw_key, version_token, level_text)
         if extracted is not None:
@@ -3827,7 +3844,9 @@ def rebuild_from_stored_bytes(
     extracted_now = False
     if extracted is None:
         try:
-            extracted = extractor_obj.extract(page, route)
+            extracted = extract_with_pdf_limits(
+                extractor_obj, page, route, pdf_limits
+            )
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             errors.append(
                 f"{product_id}/{url}: {label}: extract: {type(exc).__name__}: {exc}"
@@ -5394,6 +5413,7 @@ def make_extract_request(
     level: DocumentLevel,
     pdf_pipeline: PdfPipeline,
     worker_rss_dir: str | None,
+    pdf_limits: PdfLimits | None = None,
 ) -> _ExtractRequest:
     """Строит picklable payload экстракции (примитивы + ``raw_path``; без байтов)."""
     return _ExtractRequest(
@@ -5416,6 +5436,8 @@ def make_extract_request(
         ),
         # F0: сток пика памяти воркера (``None`` — пик не собирается).
         rss_dir=worker_rss_dir,
+        # D9: лимиты PDF задания (``None`` — ось не объявлена).
+        pdf_limits=pdf_limits,
     )
 
 

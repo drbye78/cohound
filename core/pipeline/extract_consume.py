@@ -106,6 +106,7 @@ from core.pipeline.extraction_runtime import (
     _ExtractPoolKey,
     _ExtractPools,
     _ExtractRequest,
+    extract_with_pdf_limits,
 )
 from core.pipeline.incremental import doc_version_id
 from core.ports.chunker import ChunkerPort
@@ -259,6 +260,7 @@ def member_extract_request(
     rss_dir: str | None = None,
     cache_root: str | None = None,
     cache_max_bytes: int | None = None,
+    limits: CrawlLimits | None = None,
 ) -> _ExtractRequest:
     """B3/P4: payload экстракции члена — только примитивы, байты не передаются (I19).
 
@@ -290,6 +292,8 @@ def member_extract_request(
         cache_max_bytes=cache_max_bytes,
         cache_key=task.content_hash,
         rss_dir=rss_dir,
+        # D9: лимиты PDF того же корня, что и член (``None`` — ось не объявлена).
+        pdf_limits=None if limits is None else limits.pdf_limits(),
     )
 
 
@@ -354,6 +358,7 @@ def ingest_member_doc(
     timings: _CorpusStageTimings | None = None,
     reuse_kind: ReuseKind,
     persist_docs: Callable[..., None],
+    limits: CrawlLimits | None = None,
 ) -> MemberOutcome:
     """Член контейнера → документ корпуса (``CorpusDoc`` + чанки) или видимый пропуск.
 
@@ -409,12 +414,18 @@ def ingest_member_doc(
     #: потоке, которым байты писались в temp-файл (I19). Номер ``member-N.bin`` в ключ не
     #: входит: иначе все члены архива делили бы одну запись.
     cache_key = task.content_hash or None
+    # D9 (план 26): лимиты PDF — того же корня, что и сам контейнер (``limits`` пришёл от
+    # вызывающего). Inline-путь применяет их сам; для пула они уже в payload задания.
+    member_pdf_limits = None if limits is None else limits.pdf_limits()
     if extracted is _INLINE:
         # Inline-путь (нет пула): извлечение здесь, на главном потоке. Кэш спрашивается и
         # здесь: проход без сети (``frozen``) исполняет членов inline, и повторные байты
         # не должны конвертироваться второй раз только из-за отсутствия пула.
         cached = None
-        if extract_cache is not None and cache_key:
+        limits_active = member_pdf_limits is not None and member_pdf_limits.active
+        # При объявленном лимите кэш не спрашивается: запись, снятая без лимита, отдала бы
+        # полный текст под объявленной осью (та же причина, что у страниц).
+        if extract_cache is not None and cache_key and not limits_active:
             # Версия движка — фактического для этого маршрута: иначе проба не совпадёт с
             # записью и кэш останется write-only (та же причина, что у страниц).
             cached = extract_cache.get(
@@ -426,7 +437,9 @@ def ingest_member_doc(
             extracted = cached
         else:
             try:
-                extracted = extractor.extract(page, route)
+                extracted = extract_with_pdf_limits(
+                    extractor, page, route, member_pdf_limits
+                )
             except Exception as exc:  # noqa: BLE001 — отказ члена изолируется (контракт фазы)
                 return MemberOutcome(
                     skip_reason=SKIP_EXTRACT_FAILED,
@@ -806,6 +819,8 @@ def _row_request(item: ExtractQueueItem, scope: ConsumerScope) -> _ExtractReques
             scope.extract_cache.max_bytes if scope.extract_cache is not None else None
         ),
         rss_dir=scope.worker_rss_dir,
+        # D9: лимиты PDF — из разрешённых осей этого URL (app < run < product < site).
+        pdf_limits=scope.limits_for(item.url).pdf_limits(),
     )
 
 
@@ -1095,7 +1110,7 @@ def _descend_container(
     # ``persist_docs`` приходит операцией фазы (тесты подменяют его атрибутом модуля
     # ``corpus``): связываем один раз, чтобы две точки вызова не повторяли kwarg.
     ingest_member = partial(
-        operations.ingest_member_doc, persist_docs=operations.persist_docs
+        operations.ingest_member_doc, persist_docs=operations.persist_docs, limits=limits
     )
     pool_key: _ExtractPoolKey | None = (
         (level, pdf_pipeline, window) if window is not None else None
@@ -1168,6 +1183,7 @@ def _descend_container(
                     rss_dir=scope.worker_rss_dir,
                     cache_root=member_cache_root,
                     cache_max_bytes=member_cache_max_bytes,
+                    limits=limits,
                 ),
             )
 
@@ -1367,7 +1383,7 @@ def descend_frozen_container(
     docs_before = len(product.ingest.docs)
     chunks_before = len(product.ingest.chunks)
     members_before = len(scope.corpus_member_rows)
-    ingest_member = partial(ingest_member_doc, persist_docs=persist_docs)
+    ingest_member = partial(ingest_member_doc, persist_docs=persist_docs, limits=limits)
     walker = ArchiveDescentWalker(
         product_id=product_id,
         root_url=archive_url,
@@ -1560,7 +1576,14 @@ def _start_row(
     # C1/L4: проба ``extract_cache`` — **в родителе**, до submit. Хит идёт путём «готовый
     # текст», не занимая слот воркера и не оплачивая инициализатор. Ключ родителя и
     # воркера — один и тот же хеш ретенированных байтов (``raw_path.stem``).
-    if scope.extract_cache is not None:
+    #
+    # D9: при объявленном лимите PDF проба **не делается** — запись, снятая прогоном без
+    # лимита, отдала бы полный текст под объявленной осью (та же причина, что у воркера в
+    # ``_run_extract``); цена — пере-извлечение документов этого корня.
+    row_pdf_limits = limits.pdf_limits()
+    if scope.extract_cache is not None and not (
+        row_pdf_limits is not None and row_pdf_limits.active
+    ):
         cached = scope.extract_cache.get(
             _extract_cache_key(raw_path),
             _cache_extractor_version(
@@ -1701,6 +1724,8 @@ def _finish_inline(
         job.extractor,
         job.level,
         reuse_kind=job.reuse_kind,
+        # D9: лимиты PDF этого URL — те же разрешённые оси, что у пула.
+        limits=scope.limits_for(job.item.url),
     )
 
 

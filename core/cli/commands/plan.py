@@ -79,6 +79,7 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     identity_flag_values,
     resolve_declared_axes,
+    resolve_retrieval_profile,
 )
 from core.cli.wiring import llm_env_notices, serp_env_notices
 from core.config.deploy import load_deploy_config, profile_notices, shard_notices
@@ -125,8 +126,9 @@ def _declared_payload(
     ``retrieval_profile``/``cutoff_K`` — из :data:`core.cli.execution_axes.CONTRACT_FLAGS`
     (имена — как у полей ``EXECUTION_CONTRACT_FIELDS``). Печатаются отдельно от дайджеста,
     потому что иначе «какой профиль/вырез поехал в ``run_id``» читается только разбором
-    хеша. ``None`` — флаг не объявлен: план не подставляет дефолт Ш6, иначе показывал бы
-    значение, которого в измерении нет.
+    хеша. Профиль здесь **всегда назван**: незаданный флаг резолвится в объявленный
+    дефолт развёртывания (``deploy.retrieval.profile``), а не уходит ``null`` — иначе
+    план показывал бы идентичность, которой прогон не исполняет (D2 плана 26).
 
     ``retrieval_params`` — исполненные параметры целиком (план 26 O2): ``rrf_k``,
     множитель пула, число запросов и кросс-запросное слияние входят в ``run_id``, и
@@ -280,6 +282,13 @@ def run(args: argparse.Namespace) -> int:
     # ``run_id``. Читаются из единого инвентаря (``CONTRACT_FLAGS``), а не перечисляются
     # здесь: перечисление и было дефектом (``plan`` печатал чужой ``run_id``).
     contract_flags = contract_flag_values(args)
+    # I16/D2: незаданный флаг — не «профиль не объявлен», а объявленный дефолт
+    # развёртывания (``deploy.retrieval.profile``, дефолт ``R0``). Резолв тот же, что у
+    # прогона (:func:`core.cli.execution_axes.resolve_retrieval_profile`), иначе план
+    # печатал бы ``run_id`` с ``null``, а прогон исполнял бы дефолт Ш6.
+    contract_flags["retrieval_profile"] = resolve_retrieval_profile(
+        contract_flags.get("retrieval_profile"), deploy_config
+    )
     # 09 §6.2: остальной материал ``run_id`` — seed-набор (``--urls``), цикл
     # (``--cycle-id``/``--update``), объём (``--only-failed``/``--only-product``) и политика
     # наблюдения (``--refresh``). Тот же инвентарь, те же чистые резолверы, что у ``run``:
@@ -397,8 +406,8 @@ def run(args: argparse.Namespace) -> int:
             frozen_source=getattr(args, "frozen_source", None),
             refresh_policy=refresh_policy,
             # I16/I20: те же аргументы, что передаёт ``run`` (``run.py``), из того же
-            # инвентаря флагов. ``None`` — флаг не объявлен: контракт пишет ``null``,
-            # а не дефолт Ш6 (``run_id`` описывает объявленное).
+            # инвентаря флагов. Профиль уже резолвлен выше (флаг > deploy > ``R0``),
+            # поэтому в контракт не может уйти ``null`` при исполненном дефолте.
             **contract_flags,
             # План 26 O2: исполненные параметры (rrf_k/пул/запросы/слияние) — условие
             # измерения. Без них ``retrieval_params_json`` всегда был ``null``, и смена

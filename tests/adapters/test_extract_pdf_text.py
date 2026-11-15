@@ -606,3 +606,128 @@ def test_available_does_not_import_pypdfium2() -> None:
 
     assert seen["pdfium_loaded"] is False, "импорт адаптера подтянул pypdfium2"
     assert seen["available"] is seen["has_pdfium"]
+
+
+# ---------------------------------------------------------------------------
+# D9 (план 26): лимиты PDF — объявленная ось, по умолчанию отсутствующая
+# ---------------------------------------------------------------------------
+
+
+def test_pdf_limits_absent_keep_text_byte_identical(tmp_path: Path) -> None:
+    """Без объявленных лимитов текст и хеш **байт-в-байт** прежние (главное правило).
+
+    Ось обязана быть видимой только при объявлении: прогон без ``pdf_max_pages``/
+    ``pdf_max_extracted_chars`` не имеет права получить другой текст, другой
+    ``content_hash`` (то есть другой ключ ``extract_cache``) или ``partial``.
+    """
+    from core.util.pdf_limits import use_pdf_limits
+
+    path = _write(tmp_path, "three.pdf", ["first", "second", "third"])
+    adapter = PdfiumDocumentExtractor()
+
+    plain = adapter.extract_path(path, filename_hint="three.pdf")
+    with use_pdf_limits(None):
+        contextless = adapter.extract_path(path, filename_hint="three.pdf")
+
+    assert plain.error is None
+    assert plain.partial is False
+    assert plain.partial_reason is None
+    assert plain.page_count == 3
+    assert plain.text == contextless.text
+    assert plain.content_hash == contextless.content_hash
+
+
+def test_pdf_page_limit_reads_first_pages_and_names_the_reason(
+    tmp_path: Path,
+) -> None:
+    """``pdf_max_pages`` < N: прочитаны первые N, ``partial=True``, причина с числами.
+
+    Числа обязаны быть в **записи**, а не только в журнале: ``pages_converted``/``page_count``
+    уходят в ``document_version``, ``partial_reason`` — в ``extract_partial_reason`` и
+    ``outputs/partial_docs.csv``. Иначе «почему в корпусе нет конца документа» пришлось бы
+    выяснять из лога, которого у читателя корпуса нет.
+    """
+    from core.util.pdf_limits import (
+        PDF_LIMITS_EXHAUSTED_REASON,
+        pdf_limits,
+        use_pdf_limits,
+    )
+
+    path = _write(tmp_path, "five.pdf", ["one", "two", "three", "four", "five"])
+    adapter = PdfiumDocumentExtractor()
+
+    with use_pdf_limits(pdf_limits(max_pages=2)):
+        doc = adapter.extract_path(path, filename_hint="five.pdf")
+
+    assert doc.error is None
+    assert doc.partial is True
+    # Размер документа остаётся размером документа, а не прочитанной части.
+    assert doc.page_count == 5
+    assert doc.pages_converted == 2
+    # Текст — только первых двух страниц: третьей в корпусе нет.
+    assert "one" in doc.text and "two" in doc.text
+    assert "three" not in doc.text and "five" not in doc.text
+    assert PDF_LIMITS_EXHAUSTED_REASON in (doc.partial_reason or "")
+    assert "прочитано страниц 2 из 5" in (doc.partial_reason or "")
+    assert "pdf_max_pages=2" in (doc.partial_reason or "")
+    # Хеш описывает **обрезанный** текст (тот, что попадёт в корпус и в цитату, I22).
+    assert doc.content_hash == hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+
+
+def test_pdf_page_limit_above_document_size_changes_nothing(tmp_path: Path) -> None:
+    """Лимит больше документа — не исчерпан: ``partial`` и причины нет."""
+    from core.util.pdf_limits import pdf_limits, use_pdf_limits
+
+    path = _write(tmp_path, "two.pdf", ["alpha", "beta"])
+    adapter = PdfiumDocumentExtractor()
+    with use_pdf_limits(pdf_limits(max_pages=10)):
+        doc = adapter.extract_path(path, filename_hint="two.pdf")
+    assert doc.partial is False
+    assert doc.partial_reason is None
+    assert doc.page_count == 2
+
+
+def test_pdf_char_limit_truncates_and_reports_dropped(tmp_path: Path) -> None:
+    """``pdf_max_extracted_chars`` обрезает текст, и число отброшенного видно в причине."""
+    from core.util.pdf_limits import (
+        PDF_LIMITS_EXHAUSTED_REASON,
+        pdf_limits,
+        use_pdf_limits,
+    )
+
+    path = _write(tmp_path, "long.pdf", ["abcdefghij" * 5, "klmnopqrst" * 5])
+    adapter = PdfiumDocumentExtractor()
+    full = adapter.extract_path(path, filename_hint="long.pdf")
+    limit = 25
+
+    with use_pdf_limits(pdf_limits(max_extracted_chars=limit)):
+        doc = adapter.extract_path(path, filename_hint="long.pdf")
+
+    assert doc.error is None
+    assert doc.partial is True
+    assert len(doc.text) == limit
+    assert doc.text == full.text[:limit]
+    assert doc.content_hash == hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+    assert PDF_LIMITS_EXHAUSTED_REASON in (doc.partial_reason or "")
+    assert f"отброшено символов {len(full.text) - limit} из {len(full.text)}" in (
+        doc.partial_reason or ""
+    )
+    # Страницы лимитом не тронуты: обрез идёт по тексту, не по страницам.
+    assert doc.page_count == full.page_count
+
+
+def test_pdf_limits_do_not_leak_to_the_next_document(tmp_path: Path) -> None:
+    """Контекст лимита восстанавливается: следующий документ читается целиком."""
+    from core.util.pdf_limits import pdf_limits, use_pdf_limits
+
+    first = _write(tmp_path, "a.pdf", ["a1", "a2", "a3"])
+    second = _write(tmp_path, "b.pdf", ["b1", "b2", "b3"])
+    adapter = PdfiumDocumentExtractor()
+
+    with use_pdf_limits(pdf_limits(max_pages=1)):
+        limited = adapter.extract_path(first, filename_hint="a.pdf")
+    after = adapter.extract_path(second, filename_hint="b.pdf")
+
+    assert limited.partial is True and limited.page_count == 3
+    assert after.partial is False
+    assert "b3" in after.text

@@ -63,6 +63,7 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     identity_flag_values,
     resolve_declared_axes,
+    resolve_retrieval_profile,
 )
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
 from core.cli.parser import build_parser
@@ -345,9 +346,11 @@ def test_identity_flag_values_cover_inventory() -> None:
 @pytest.mark.parametrize(
     "flags, expected_profile, expected_cutoff",
     [
-        ([], None, None),
+        # D2 плана 26: незаданный флаг — не ``null``, а объявленный дефолт деплоймента
+        # (``deploy.retrieval.profile``, здесь — дефолт секции ``R0``).
+        ([], "R0", None),
         (["--retrieval-profile", "R1"], "R1", None),
-        (["--cutoff-k", "7"], None, 7),
+        (["--cutoff-k", "7"], "R0", 7),
         (["--retrieval-profile", "R2", "--cutoff-k", "3"], "R2", 3),
     ],
 )
@@ -362,8 +365,9 @@ def test_plan_run_id_matches_run_with_retrieval_flags(
     """Главное требование: ``plan`` с флагами печатает ``run_id`` прогона с теми же флагами.
 
     ``plan`` обязан назвать и сами значения (``retrieval_profile``/``cutoff_K``), а не
-    только хеш: «чем измеряем» должно читаться без разбора дайджеста. ``None`` — флаг не
-    объявлен, и план не подставляет дефолт Ш6.
+    только хеш: «чем измеряем» должно читаться без разбора дайджеста. Профиль назван
+    **всегда**: без флага действует объявленный дефолт развёртывания (``R0``), а не
+    ``null`` — иначе контракт описывал бы не тот прибор, которым исполнена оценка (D2).
     """
     package = valid_package(tmp_path)
     common = _common(package)
@@ -492,7 +496,8 @@ def test_plan_prints_executed_retrieval_params(
     assert main(["plan", *common]) == EXIT_OK
     payload = _payload(capsys)
     assert payload["retrieval_params"] == {
-        "profile": None,
+        # Профиль назван объявленным дефолтом (D2), K остаётся ``None``: флага не было.
+        "profile": "R0",
         "cutoff_K": None,
         "rrf_k": 60,
         "pool_multiplier": 1,
@@ -519,20 +524,22 @@ def test_plan_prints_executed_retrieval_params(
 def test_plan_absent_flags_do_not_change_contract(
     tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Без флагов контракт несёт **``null``** в профиле и K — и исполненные параметры.
+    """Без флагов контракт стабилен и несёт **объявленный дефолт** профиля (D2).
 
-    Ожидание строится независимо: та же чистая функция контракта вызывается с явными
-    ``retrieval_profile=None``/``cutoff_K=None``. ``None`` в профиле/K означает «флаг не
-    объявлен» (дефолт Ш6 в контракт не едет), но ``retrieval_params_json`` с планa 26 O2
-    объявляет **исполненные** ``rrf_k``/пул/запросы/слияние: они меняют доказательства,
-    поэтому входят в ``run_id`` даже без флагов.
+    Ожидание строится независимо: та же чистая функция контракта вызывается с профилем,
+    который резолвит тот же резолвер (``--retrieval-profile`` > ``deploy.retrieval.profile``
+    > ``R0``). ``cutoff_K`` остаётся ``None`` — флага не было, и подставлять дефолт в
+    контракт по-прежнему нельзя. Профиль же **обязан** быть назван: до D2 в контракт
+    уходил ``null``, а исполнение брало ``R0``, то есть два одинаковых измерения получали
+    разные ``run_id``. ``retrieval_params_json`` (план 26 O2) объявляет исполненные
+    ``rrf_k``/пул/запросы/слияние — они меняют доказательства и входят в ``run_id``.
     """
     package = valid_package(tmp_path)
     common = _common(package)
     for _ in range(2):
         assert main(["plan", *common]) == EXIT_OK
         payload = _payload(capsys)
-        assert payload["retrieval_profile"] is None
+        assert payload["retrieval_profile"] == "R0"
         assert payload["cutoff_K"] is None
 
     inputs = load_inputs(package / "run.yaml", package)
@@ -541,6 +548,7 @@ def test_plan_absent_flags_do_not_change_contract(
         package, inputs.run.products, profiles=profiles
     )
     args = build_parser().parse_args(["plan", *common])
+    expected_profile = resolve_retrieval_profile(None, DeployConfig(profile="local"))
     expected = build_execution_contract(
         inputs,
         cohort_digest=cohort_digest(
@@ -553,10 +561,10 @@ def test_plan_absent_flags_do_not_change_contract(
             args=args, inputs=inputs, deploy=DeployConfig(profile="local")
         ),
         status_dict_version=declared_status_dict_version(),
-        retrieval_profile=None,
+        retrieval_profile=expected_profile,
         cutoff_K=None,
         retrieval_params_json=retrieval_params_json(
-            profile=None,
+            profile=expected_profile,
             cutoff_k=None,
         ),
         crawl_policy_digest=_crawl_policy_resolution(

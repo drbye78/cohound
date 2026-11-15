@@ -102,3 +102,43 @@ def test_parse_site_key_normalizes_path() -> None:
     assert parse_site_key("Docs.Test/docs/") == ("docs.test", "/docs")
     assert parse_site_key("docs.test") == ("docs.test", "")
     assert parse_site_key("docs.test/") == ("docs.test", "")
+
+# ---------------------------------------------------------------------------
+# D9 (план 26): ``product_axes`` — оси лимитов PDF на продукт
+# ---------------------------------------------------------------------------
+
+
+def test_loads_product_axes_section(tmp_path: Path) -> None:
+    """Секция ``product_axes`` читается тем же файлом: лимиты — данные пакета.
+
+    Политика (``defaults``/``products``/``sites``) отвечает на «когда обновлять», оси —
+    на «что измеряется»; они не смешиваются в одной записи, но живут в одном артефакте,
+    чтобы не заводить вторую поверхность «продукт → оси».
+    """
+    config = load_crawl_policy(
+        _write(
+            tmp_path,
+            "products:\n"
+            "  p1: {mode: auto}\n"
+            "product_axes:\n"
+            "  p1: {pdf_max_pages: 250, pdf_max_extracted_chars: 1000000}\n",
+        )
+    )
+    axes = config.axes_for("p1")
+    assert axes is not None
+    assert axes.pdf_max_pages == 250
+    assert axes.pdf_max_extracted_chars == 1_000_000
+    # Продукт без осей — не «оси по умолчанию», а их отсутствие (A3).
+    assert config.axes_for("p2") is None
+
+
+def test_product_axes_reject_unknown_and_non_positive(tmp_path: Path) -> None:
+    """Строгая схема: неизвестная ось и ``0`` отвергаются, а не игнорируются молча."""
+    with pytest.raises(ValueError):
+        load_crawl_policy(
+            _write(tmp_path, "product_axes:\n  p1: {pdf_max_page: 10}\n")
+        )
+    with pytest.raises(ValueError):
+        load_crawl_policy(
+            _write(tmp_path, "product_axes:\n  p1: {pdf_max_pages: 0}\n")
+        )

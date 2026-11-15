@@ -683,6 +683,17 @@ class CrawlRunConfig(BaseModel):
     #: отвергался бы (``extra="forbid"``), а прогон оставался бы без объявленной оси:
     #: медленный источник нельзя ни ускорить, ни объяснить.
     document_timeout_s: float | None = Field(default=None, gt=0)
+    #: D9 (план 26): run-слой потолка **страниц** PDF-документа
+    #: (``run.yaml:crawl.pdf_max_pages``). ``None`` = не задано на этом слое: резолв берёт
+    #: продуктовый/корневой/app-слой, а при отсутствии везде — лимита нет (сегодняшнее
+    #: поведение байт-в-байт). Лимит меняет состав **текста** документа, то есть состав
+    #: корпуса: объявление — ``execution_change`` (§13), и в ``crawl_config_digest`` ключ
+    #: входит только при заданной оси.
+    pdf_max_pages: int | None = Field(default=None, gt=0)
+    #: D9 (план 26): run-слой потолка **извлечённых символов** PDF-документа
+    #: (``run.yaml:crawl.pdf_max_extracted_chars``). ``None`` = не задано на этом слое
+    #: (та же цепочка, что у ``pdf_max_pages``).
+    pdf_max_extracted_chars: int | None = Field(default=None, gt=0)
 
     @field_validator("exclude_paths", "exclude_documents")
     @classmethod

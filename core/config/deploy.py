@@ -13,6 +13,13 @@ OI-совместимым API корпоративного облака — эт
 (``cli`` для Z0, ``edge`` для Z1); конвейер о зонах не знает (07 §4). Версии edge и
 ``edge_schema_version`` для манифеста R7 — **не** задача этого модуля.
 
+Три секции описывают **условия измерения, которые объявлены на уровне развёртывания**,
+а не зашиты в код исполнения: ``retrieval.profile`` (профиль ретривала, I16),
+``lexical.profile`` (профиль анализатора лексического индекса) и ``extract.cache_max_bytes``
+(операционный бюджет кэша экстракции). Первые две входят в контракт прогона
+(``EXECUTION_CONTRACT_FIELDS``), третья — **нет** и входить не должна: бюджет кэша меняет
+только цену повторного извлечения, а не состав корпуса и не вердикты.
+
 Безопасность: загрузчик не логирует содержимое и не печатает секреты; ``client_key`` —
 это **путь** к файлу ключа, а не сам ключ. Доверие к TLS — через корпоративный CA;
 никакого certificate pinning (07 §8.1) — это осознанно отсутствует в модели.
@@ -60,7 +67,9 @@ __all__ = [
     "DEFAULT_LLM_SLOT",
     "ENV_NODE",
     "ENV_SERP",
+    "LEXICAL_PROFILES",
     "LLM_SLOTS",
+    "RETRIEVAL_PROFILES",
     "SPLIT_HARDENED_WARNING",
     "AuditConfig",
     "AuthConfig",
@@ -70,10 +79,13 @@ __all__ = [
     "DeployConfig",
     "EdgeConfig",
     "EmbedConfig",
+    "ExtractDeployConfig",
     "HostShard",
     "LLMDeployConfig",
     "LLMSlotConfig",
+    "LexicalDeployConfig",
     "OIDCConfig",
+    "RetrievalDeployConfig",
     "SearchDeployConfig",
     "SerpDeployConfig",
     "TLSConfig",
@@ -100,6 +112,17 @@ AUDIT_SINKS: tuple[str, ...] = ("file", "syslog")
 #: Режимы подключения браузерного краулера (07): внешний браузер по CDP либо
 #: персистентный профиль, которым владеет Playwright.
 CRAWL_BROWSER_MODES: tuple[str, ...] = ("cdp", "persistent")
+#: Профили ретривала (I16) — **зеркало** ``core.pipeline.retrieve.RetrievalProfile``.
+#: Зеркало, а не импорт: слой ``config`` не имеет права зависеть от ``pipeline``
+#: (матрица 01 §1 гейтится ``tests/selfcheck.py::_import_graph``), а профиль ретривала
+#: объявлен рядом с ретривалом. Расхождение ловит тест
+#: ``tests/config/test_deploy.py::test_retrieval_profiles_mirror_the_engine_enum``.
+RETRIEVAL_PROFILES: tuple[str, ...] = ("R0", "R1", "R2")
+#: Профили анализатора лексического индекса — **зеркало** ``_PROFILES`` из
+#: ``core.adapters.lexical_tantivy`` (та же причина: ``config`` не зависит от ``adapters``).
+#: ``raw`` — псевдоним ``identifier``; в объявленном значении он нормализуется к
+#: ``identifier``, чтобы одно поведение не имело двух имён в контракте.
+LEXICAL_PROFILES: tuple[str, ...] = ("stemmed", "identifier", "raw", "ngram")
 
 #: Именованные слоты моделей LLM (commodity/execution-слой §7.4). Активный slot
 #: выбирается в рантайме (``--llm-slot`` / ``COHOUND_LLM_SLOT``), см. :func:`resolve_llm_slot`.
@@ -572,6 +595,21 @@ class CrawlConfig(BaseModel):
     # ``run_id`` байт-в-байт. Именно поэтому поле ``None``, а не ``1800.0``: дефолт app-слоя
     # не должен делать ось «явной» и менять дайджест старых прогонов (§13).
     document_timeout_s: float | None = Field(default=None, gt=0)
+    # D9 (план 26): лимиты **PDF-документа** на уровне узла (``crawl.pdf_max_pages`` /
+    # ``crawl.pdf_max_extracted_chars``). ``None`` — лимита нет, и это **измеренное**
+    # состояние корпуса, а не «безопасный потолок»: замер O31 (09.11.2026, 1 721 PDF /
+    # 53 689 страниц) показывает, что любой кандидат потолка режет материал (1 000
+    # страниц — 9.2 % страниц, 250 — 20.0 %, 1 M символов — 29.1 %). Поэтому дефолт здесь
+    # именно ``None``: ось объявляет оператор, и объявленное значение входит в
+    # ``crawl_config_digest``/``run_id`` (``execution_change`` §13).
+    #
+    # Цепочка резолва — app < run < **product** < site
+    # (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits`): продукт (данные пакета,
+    # ``crawl_policy.yaml: product_axes``) специфичнее узла, корень — специфичнее продукта.
+    # App-слой не «ещё один потолок»: без него объявленная на узле ось была бы недостижима
+    # вовсе (``getattr(app, ...)`` возвращал бы ``None`` на любом конфиге).
+    pdf_max_pages: int | None = Field(default=None, gt=0)
+    pdf_max_extracted_chars: int | None = Field(default=None, gt=0)
 
     @field_validator("exclude_paths", "exclude_documents")
     @classmethod
@@ -841,6 +879,129 @@ class LLMDeployConfig(BaseModel):
         return slot
 
 
+class RetrievalDeployConfig(BaseModel):
+    """Секция ``retrieval`` deploy-конфига: **объявленный дефолт** профиля ретривала.
+
+    Закрывает D2 плана 26. Профиль ретривала — условие измерения (I16): он входит в
+    ``EXECUTION_CONTRACT_FIELDS`` (``retrieval_profile``), значит в ``run_id``. До этой
+    секции дефолт жил **в коде исполнения** (``evaluate.DEFAULT_RETRIEVAL_PROFILE``), а в
+    контракт уходил ``None``: два одинаковых измерения («флаг не задан») описывались
+    по-разному — ``null`` в ``run_id`` и ``R0`` в исполнении, — то есть ``run_id``
+    утверждал одно, а вердикты получены другим прибором.
+
+    Приоритет (объявленный, а не выведенный): ``--retrieval-profile`` >
+    ``deploy.retrieval.profile`` > ``R0`` (дефолт поля). Резолв — один
+    (:func:`core.cli.execution_axes.resolve_retrieval_profile`), поэтому контракт и
+    исполнение не могут разойтись.
+
+    Почему дефолт объявлен здесь, а не зашит в код: профиль симметричен для всех
+    продуктов цикла (I16) и относится к условиям измерения конкретного развёртывания, а
+    не к пакету. Смена значения — объявленная ось: новый ``run_id``
+    (``execution_change``), а не тихая правка поведения.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: ``R0`` | ``R1`` | ``R2``. Дефолт — ``R0``: лексическое плечо, единственное, что
+    #: работает без объявленной модели эмбеддера (``embed_spec: null``).
+    profile: str = "R0"
+
+    @field_validator("profile")
+    @classmethod
+    def _check_profile(cls, value: str) -> str:
+        """Строка приводится к канону (``r0`` → ``R0``); неизвестное значение — отказ.
+
+        Регистр не различаем намеренно: ``R0``/``r0`` — одно и то же условие измерения,
+        и отвергать вторую запись значило бы наказывать за оформление. Отказ перечисляет
+        допустимые значения: опечатка не должна доехать до исполнения как «другой
+        профиль».
+        """
+        profile = str(value).strip().upper()
+        if profile not in RETRIEVAL_PROFILES:
+            raise ValueError(
+                f"retrieval.profile: недопустимый профиль «{value}»; ожидается один из "
+                f"{list(RETRIEVAL_PROFILES)} (I16: профиль ретривала — условие измерения)"
+            )
+        return profile
+
+
+class LexicalDeployConfig(BaseModel):
+    """Секция ``lexical`` deploy-конфига: **объявленный** профиль лексического анализа.
+
+    Профиль анализатора — условие измерения, а не настройка удобства: ``stemmed``
+    (lowercase + два стеммера + стоп-слова) и ``identifier`` (whitespace без lowercase и
+    стемминга) дают разную выдачу. Замер O16 (15.11.2026, 253 306 чанков): ``stemmed``
+    P@10 0.96 / hit 1.00, ``identifier`` 1.00 / 1.00 — различие видно в ранге первого
+    попадания и в том, находит ли запрос ``min_wal_size``/``pg_upgrade``. Значит профиль
+    обязан быть назван в ``lexical_spec`` (``EXECUTION_CONTRACT_FIELDS``), а не браться
+    дефолтом адаптера в момент сборки индекса.
+
+    Дефолт — ``stemmed``: выигрыш ``identifier`` на пилоте не доказан (O16), а цена
+    ошибки — слепой recall (нет ни стемминга, ни lowercase). Смена профиля для
+    профиля-кейса — объявленная ось (новый ``run_id``), не правка кода.
+
+    ``raw`` — псевдоним ``identifier`` (см. ``adapters.lexical_tantivy``): нормализуется
+    к ``identifier``, чтобы в контракте одно поведение не имело двух имён.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: ``stemmed`` | ``identifier`` (``raw`` → ``identifier``) | ``ngram``.
+    profile: str = "stemmed"
+
+    @field_validator("profile")
+    @classmethod
+    def _check_profile(cls, value: str) -> str:
+        """Приводит имя к канону; ``raw`` → ``identifier``; неизвестное — отказ."""
+        profile = str(value).strip().lower()
+        if profile not in LEXICAL_PROFILES:
+            raise ValueError(
+                f"lexical.profile: недопустимый профиль «{value}»; ожидается один из "
+                f"{list(LEXICAL_PROFILES)} (``raw`` — псевдоним ``identifier``)"
+            )
+        return "identifier" if profile == "raw" else profile
+
+
+class ExtractDeployConfig(BaseModel):
+    """Секция ``extract`` deploy-конфига: операционный бюджет кэша экстракции (D8).
+
+    Решение владельца 15.11.2026: размер кэша экстракции — параметр конфигурации
+    развёртывания; по умолчанию **не ограничен**; если задан — вытеснение (LRU по
+    ``mtime``, ``ExtractionCache._evict_if_needed``) и повторное извлечение вытесненного
+    происходят автоматически, без человека. Ключ кэша контент-адресный, поэтому
+    вытеснение — обычный промах кэша, а не потеря доказательств.
+
+    **Почему это НЕ входит в ``EXECUTION_CONTRACT_FIELDS``.** Бюджет кэша — свойство
+    хоста, а не условие измерения: он меняет только то, что придётся пере-извлечь, но не
+    состав корпуса и не вердикты (текст документа — функция байтов и объявленного стека
+    извлечения, а не наличия записи в кэше). Внеси его в контракт — и переезд на диск
+    другого размера давал бы новый ``run_id`` при том же измерении. Это записано здесь
+    намеренно: следующий читатель не должен «дополнить» контракт этим полем.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Бюджет суммы ``*.json`` под ``paths.extract_cache``. ``None`` — без вытеснения
+    #: (сегодняшнее поведение). ``0`` отвергается: это не «без кэша», а «вытеснять всё,
+    #: включая только что записанное» — кэш, который никогда не попадает.
+    cache_max_bytes: int | None = None
+
+    @field_validator("cache_max_bytes")
+    @classmethod
+    def _check_budget(cls, value: int | None) -> int | None:
+        """Бюджет либо не объявлен, либо положителен; ``0``/отрицательное — отказ."""
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError(
+                "extract.cache_max_bytes: "
+                f"{value} — недопустимый бюджет. ``null`` означает «без вытеснения»; "
+                "заданное число обязано быть положительным (ноль вытеснял бы всё, "
+                "включая только что записанную запись, то есть кэш не попадал бы никогда)"
+            )
+        return value
+
+
 class DeployConfig(BaseModel):
     """Профиль развёртывания и настройки зон (03 D.5).
 
@@ -862,6 +1023,16 @@ class DeployConfig(BaseModel):
     #: объявлен здесь, а не выведен из окружения (torch выбирать устройство не должен).
     embed: EmbedConfig = Field(default_factory=EmbedConfig)
     llm: LLMDeployConfig = Field(default_factory=LLMDeployConfig)
+    #: Объявленный дефолт профиля ретривала (I16/D2). Отсутствие секции = ``R0``; значение
+    #: уходит **и** в контракт (``retrieval_profile``), **и** в исполнение — один резолв,
+    #: поэтому «дефолт в коде» больше не расходится с ``run_id``.
+    retrieval: RetrievalDeployConfig = Field(default_factory=RetrievalDeployConfig)
+    #: Объявленный профиль лексического анализатора (``lexical_spec``). Отсутствие
+    #: секции = ``stemmed`` — прежняя выдача байт-в-байт.
+    lexical: LexicalDeployConfig = Field(default_factory=LexicalDeployConfig)
+    #: Операционный бюджет кэша экстракции (D8). В контракт **не** входит: свойство хоста,
+    #: а не условие измерения (см. :class:`ExtractDeployConfig`).
+    extract: ExtractDeployConfig = Field(default_factory=ExtractDeployConfig)
 
     @field_validator("profile")
     @classmethod

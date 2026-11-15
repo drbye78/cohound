@@ -1470,6 +1470,103 @@ def test_embed_spec_changes_the_contract_digest(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# D2 плана 26: профиль ретривала — объявленный дефолт деплоймента
+# ---------------------------------------------------------------------------
+
+
+def _write_deploy(
+    tmp_path: Path, *, retrieval: str | None = None, lexical: str | None = None
+) -> None:
+    """Пишет ``config/deploy.yaml`` в CWD (фикстура ``home`` уже перевела CWD в ``tmp_path``)."""
+    data: dict[str, Any] = {"profile": "local"}
+    if retrieval is not None:
+        data["retrieval"] = {"profile": retrieval}
+    if lexical is not None:
+        data["lexical"] = {"profile": lexical}
+    path = tmp_path / "config" / "deploy.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+
+def test_retrieval_profile_never_leaves_the_contract_empty(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Незаданный флаг — не ``null`` в контракте, а объявленный дефолт (``R0``).
+
+    Это и есть закрытие D2: раньше в контракт уходило ``None``, а фаза оценки молча
+    подставляла ``R0``, то есть ``run_id`` описывал не тот прибор, которым получены
+    вердикты. План обязан печатать **то же** значение, которое исполнится.
+    """
+    package = valid_package(tmp_path)
+    assert main(["plan", *_common(package)]) == EXIT_OK
+    payload = _payload(capsys)
+    assert payload["retrieval_profile"] == "R0"
+    # Исполненные параметры строятся из того же профиля — не из ``None``.
+    assert payload["retrieval_params"]["profile"] == "R0"
+
+
+def test_retrieval_profile_default_comes_from_deploy(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``deploy.retrieval.profile`` — источник дефолта (``app < run``)."""
+    package = valid_package(tmp_path)
+    _write_deploy(tmp_path, retrieval="R2")
+    assert main(["plan", *_common(package)]) == EXIT_OK
+    payload = _payload(capsys)
+    assert payload["retrieval_profile"] == "R2"
+    assert payload["retrieval_params"]["profile"] == "R2"
+
+
+def test_retrieval_profile_flag_beats_deploy(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--retrieval-profile`` сильнее объявленного дефолта (тот же приоритет, что у осей)."""
+    package = valid_package(tmp_path)
+    _write_deploy(tmp_path, retrieval="R2")
+    assert main(["plan", *_common(package), "--retrieval-profile", "R1"]) == EXIT_OK
+    assert _payload(capsys)["retrieval_profile"] == "R1"
+
+
+def test_deploy_retrieval_profile_changes_the_contract_digest(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Другой профиль ретривала — другое условие измерения, значит другой ``run_id``.
+
+    Без этого дефолт деплоймента менял бы исполнение под прежней идентичностью — тот же
+    класс дефекта, что смена ``embed_spec`` (см. ``test_embed_spec_changes_the_contract_digest``).
+    """
+    package = valid_package(tmp_path)
+    _write_deploy(tmp_path, retrieval="R0")
+    assert main(["plan", *_common(package)]) == EXIT_OK
+    first = _payload(capsys)
+
+    _write_deploy(tmp_path, retrieval="R2")
+    assert main(["plan", *_common(package)]) == EXIT_OK
+    second = _payload(capsys)
+
+    assert first["retrieval_profile"] != second["retrieval_profile"]
+    assert first["execution_contract_digest"] != second["execution_contract_digest"]
+    assert first["run_id"] != second["run_id"]
+
+
+def test_deploy_lexical_profile_changes_the_contract_digest(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Профиль лексического анализатора — тоже условие измерения (``lexical_spec``)."""
+    package = valid_package(tmp_path)
+    _write_deploy(tmp_path, lexical="stemmed")
+    assert main(["plan", *_common(package)]) == EXIT_OK
+    first = _payload(capsys)
+
+    _write_deploy(tmp_path, lexical="identifier")
+    assert main(["plan", *_common(package)]) == EXIT_OK
+    second = _payload(capsys)
+
+    assert first["execution_contract_digest"] != second["execution_contract_digest"]
+    assert first["run_id"] != second["run_id"]
+
+
 def test_local_embedder_receives_declared_precision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1028,6 +1028,11 @@ def test_extract_request_carries_no_bytes(tmp_path: Path) -> None:
         "level",
         # P7: механизм извлечения PDF (аддитивное поле payload; примитив StrEnum).
         "pdf_pipeline",
+        # D9 (план 26): объявленные лимиты PDF-документа — frozen dataclass из двух
+        # чисел (`PdfLimits`), то есть примитивы: объект неизменяемый и picklable.
+        # Свойство задания, а не экстрактора: экстрактор общий на ключ
+        # `(уровень, механизм)`, поэтому лимит едет с заданием и ставится контекстом.
+        "pdf_limits",
         # Ф1.2: корень и бюджет межпрогонного кэша экстракции — примитивы, не объект
         # кэша: воркер строит свой экземпляр (иначе счётчики были бы копией родителя).
         "cache_root",
@@ -2004,3 +2009,212 @@ def _page_bytes(page: Any) -> bytes:
         return page.content
     path = getattr(page, "source_path", None)
     return pathlib.Path(path).read_bytes() if path else b""
+
+
+# ---------------------------------------------------------------------------
+# D9 (план 26): лимиты PDF едут заданием, а не конструктором экстрактора
+# ---------------------------------------------------------------------------
+
+
+def test_run_extract_passes_pdf_limits_into_the_extraction_context(
+    tmp_path: Path,
+) -> None:
+    """``_ExtractRequest.pdf_limits`` доходит до читателя через контекст вызова.
+
+    Носитель — ``ContextVar``, а не поле экстрактора: экземпляр общий на ключ
+    ``(уровень, механизм PDF)``, а лимит объявлен per-URL — два корня с разными лимитами
+    разделили бы один экстрактор. Тест фиксирует именно это: читатель видит лимит
+    **задания**, а после вызова контекст пуст.
+    """
+    from core.pipeline.extraction_runtime import _run_extract
+    from core.util.pdf_limits import PdfLimits, current_pdf_limits
+
+    raw = tmp_path / "page.bin"
+    raw.write_bytes(b"pdf-bytes")
+    seen: dict[str, PdfLimits | None] = {}
+
+    class _Recording:
+        version = "rec-1"
+
+        def extract(
+            self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+        ) -> ExtractedDoc:
+            seen["limits"] = current_pdf_limits()
+            return ExtractedDoc(
+                text="x" * 10,
+                content_hash=content_hash(b"pdf-bytes"),
+                extractor_version=self.version,
+                page_count=3,
+            )
+
+    request = _ExtractRequest(
+        raw_path=str(raw),
+        url="https://x.test/a.pdf",
+        fetched_at="2026-01-01T00:00:00+00:00",
+        fetch_mode=FetchMode.HTTP,
+        lang=None,
+        status_code=200,
+        content_type="application/pdf",
+        engine="http",
+        route=ExtractionRoute.DOCUMENT,
+        pdf_limits=PdfLimits(max_pages=1, max_extracted_chars=5),
+    )
+    doc = _run_extract(_Recording(), request)
+
+    assert seen["limits"] == PdfLimits(max_pages=1, max_extracted_chars=5)
+    assert current_pdf_limits() is None
+    assert doc.text == "x" * 10
+
+
+def test_run_extract_ignores_cache_when_pdf_limits_are_declared(
+    tmp_path: Path,
+) -> None:
+    """Активный лимит делает хит кэша непригодным: полный текст под объявленной осью — ложь.
+
+    Запись кэша снималась прогоном **без** лимита; вернуть её значит отдать документ
+    длиннее объявленного предела. Поэтому проба пропускается, и экстрактор вызывается
+    заново (цена — пере-извлечение, названа в докстринге ``_run_extract``).
+    """
+    from core.pipeline.extraction_runtime import _run_extract
+    from core.util.pdf_limits import PdfLimits
+
+    # Имя retained-файла — content-addressed (``{sha256}.bin``), как его кладёт retention:
+    # ключ кэша выводится из ``stem`` и обязан совпасть с хешем байтов (I19).
+    raw = tmp_path / f"{content_hash(b'pdf-bytes')}.bin"
+    raw.write_bytes(b"pdf-bytes")
+    cache = ExtractionCache(tmp_path / "cache")
+    cache.put(
+        ExtractedDoc(
+            text="cached-full-text",
+            content_hash=content_hash(b"pdf-bytes"),
+            extractor_version="rec-1",
+            page_count=3,
+        ),
+        level="full",
+        content_hash=_extract_cache_key(raw),
+    )
+
+    class _Recording:
+        version = "rec-1"
+        calls = 0
+
+        def extract(
+            self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+        ) -> ExtractedDoc:
+            _Recording.calls += 1
+            return ExtractedDoc(
+                text="fresh",
+                content_hash=content_hash(b"pdf-bytes"),
+                extractor_version=self.version,
+                page_count=3,
+            )
+
+    def _request(limits: PdfLimits | None) -> _ExtractRequest:
+        return _ExtractRequest(
+            raw_path=str(raw),
+            url="https://x.test/a.pdf",
+            fetched_at="2026-01-01T00:00:00+00:00",
+            fetch_mode=FetchMode.HTTP,
+            lang=None,
+            status_code=200,
+            content_type="application/pdf",
+            engine="http",
+            route=ExtractionRoute.DOCUMENT,
+            cache_root=str(cache.root),
+            pdf_limits=limits,
+        )
+
+    # Без лимита хит кэша обслуживает задание: экстрактор не зовётся.
+    assert _run_extract(_Recording(), _request(None)).text == "cached-full-text"
+    assert _Recording.calls == 0
+
+    # С объявленным лимитом — кэш не спрашивается, извлечение исполняется.
+    assert (
+        _run_extract(_Recording(), _request(PdfLimits(max_pages=1))).text == "fresh"
+    )
+    assert _Recording.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# D9 (план 26): продуктовый слой лимитов PDF исполняется на документах продукта
+# ---------------------------------------------------------------------------
+
+
+def test_product_axes_limit_pdf_pages_for_that_product_only(tmp_path: Path) -> None:
+    """D9: лимит PDF, объявленный продукту, исполняется **только** на его документах.
+
+    Проверяется производственный путь, а не собранный руками ``limits_for``: фаза
+    ``build_corpus`` → продуктовый потребитель очереди (``ProductContext.consume_scope``
+    с резолвером **этого** продукта) → ``extract_consume._row_request``
+    (``pdf_limits = scope.limits_for(url).pdf_limits()``) → контекст извлечения → pdfium.
+    Если продуктовая привязка пропадёт, документ ``p1`` прочитается целиком (как ``p2``),
+    и признак частичности не появится: ровно та регрессия, где ось «объявлена и не
+    подействовала».
+
+    Один прогон, два продукта — иначе глобальная (не продуктовая) проводка тоже прошла бы.
+    """
+    from core.adapters.extract_pdf_text import PdfiumDocumentExtractor
+    from core.cli.wiring import _LocalExtractor
+    from core.config.crawl_policy import ProductCrawlAxes
+    from core.domain.enums import DocumentLevel, PdfPipeline
+    from core.store.state_store import SqliteStateStore
+    from tests.adapters.test_extract_pdf_text import _make_pdf
+
+    p1_url = "https://docs.test/p1.pdf"
+    p2_url = "https://docs.test/p2.pdf"
+    pages = {
+        p1_url: _make_pdf(["one", "two", "three"]),
+        p2_url: _make_pdf(["alpha", "beta", "gamma"]),
+    }
+
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    with SqliteStateStore(":memory:") as state:
+        try:
+            build_corpus(
+                dataclasses.replace(_plan(), products=["p1", "p2"]),
+                _Crawler(pages),
+                # Композит производственной сборки: PDF обслуживает объявленный механизм
+                # ``text_layer`` (pdfium), HTML — заглушка теста (здесь он не нужен).
+                _LocalExtractor(
+                    html=_Extractor(),
+                    documents=None,
+                    pdf=PdfiumDocumentExtractor(),
+                    pdf_required=True,
+                ),
+                _Chunker(),
+                store,
+                urls={"p1": [p1_url], "p2": [p2_url]},
+                raw_root=tmp_path,
+                crawl_defaults=CrawlRunConfig(
+                    document_level=DocumentLevel.TEXT,
+                    pdf_pipeline=PdfPipeline.TEXT_LAYER,
+                ),
+                run_id=RUN_ID,
+                state=state,
+                product_axes={"p1": ProductCrawlAxes(pdf_max_pages=1)},
+            )
+            assert {doc.product_id for doc in _docs(store)} == {"p1", "p2"}
+
+            # p1: объявлен ``pdf_max_pages=1`` — прочитана первая страница, признак
+            # частичности и причина с числами лежат в записи версии документа (её и
+            # публикуют ``extract_partial_reason``/``partial_docs.csv``).
+            p1_versions = state.iter_document_versions("p1")
+            assert len(p1_versions) == 1
+            p1_version = p1_versions[0]
+            assert p1_version.extract_partial is True
+            reason = p1_version.extract_partial_reason or ""
+            assert "pdf_limits_exhausted" in reason
+            assert "pdf_max_pages=1" in reason
+            assert p1_version.extract_pages_converted == 1
+            assert p1_version.extract_page_count == 3
+
+            # p2: осей не объявлял — тот же PDF-механизм, но документ прочитан целиком.
+            p2_versions = state.iter_document_versions("p2")
+            assert len(p2_versions) == 1
+            p2_version = p2_versions[0]
+            assert p2_version.extract_partial is False
+            assert p2_version.extract_partial_reason is None
+            assert p2_version.extract_page_count == 3
+        finally:
+            store.close()

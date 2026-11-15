@@ -64,6 +64,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from core.config.crawl_policy import ProductCrawlAxes
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain.enums import (
@@ -91,6 +92,7 @@ from core.util.document_formats import (
     is_terminal_artifact_url,
     normalize_attachment_formats,
 )
+from core.util.pdf_limits import PdfLimits, pdf_limits
 from core.util.rate_limit import normalize_host
 from core.util.security import validate_url
 
@@ -328,6 +330,27 @@ class CrawlLimits:
     #: входит в ``as_dict()`` **всегда**: механизм определяет текст документа, то есть
     #: состав корпуса (``execution_change``, §13), а не расписание.
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
+    #: D9 (план 26): потолок **страниц** PDF-документа (ось ``crawl.pdf_max_pages``).
+    #: ``None`` — лимита нет, то есть сегодняшнее поведение **байт-в-байт**: замер O31
+    #: (09.11.2026, 1 721 PDF / 53 689 страниц) даёт p50 24 / p95 40 / p99 212.2 / max 2 763
+    #: страницы, и любой кандидат потолка режет материал (250 страниц — 13 документов /
+    #: 20.0 % страниц, 1 000 — 2 / 9.2 %). Поэтому ``None`` — измеренное состояние корпуса,
+    #: а не «безопасный потолок» (A3): лимит объявляет оператор.
+    #:
+    #: Заданное значение читает **первые N страниц**; документ помечается ``partial`` с
+    #: причиной ``pdf_limits_exhausted`` и числами («прочитано страниц N из M»). Резолвится
+    #: цепочкой app < run < **product** < site (продуктовый слой — ``crawl_policy.yaml:
+    #: product_axes``, §3): лимит объявляется на продукт или на корень.
+    pdf_max_pages: int | None = None
+    pdf_max_pages_explicit: bool = False
+    #: D9 (план 26): потолок **извлечённых символов** PDF-документа (ось
+    #: ``crawl.pdf_max_extracted_chars``). ``None`` — лимита нет (замер O31: символы p50
+    #: 26 864 / p99 231 158.6 / max 7 726 772; 1 M символов отрезал бы 9 документов /
+    #: 29.1 % символов корпуса). Заданное значение обрезает текст **после** чтения, документ
+    #: становится ``partial`` с причиной ``pdf_limits_exhausted`` и числом отброшенного.
+    #: Цепочка та же, что у ``pdf_max_pages``.
+    pdf_max_extracted_chars: int | None = None
+    pdf_max_extracted_chars_explicit: bool = False
     #: P9: **устройство** моделей извлечения PDF (ось ``crawl.pdf_device``). Дефолт
     #: ``cpu`` — поведение прогонов, ось не объявивших, остаётся прежним (модели на CPU).
     #: ``auto`` не существует намеренно (R5): объявленная ось обязана действовать, а
@@ -358,6 +381,16 @@ class CrawlLimits:
     #: ``deploy.yaml:crawl.robots``); ``None`` на всех слоях = автодетект — robots включён
     #: ровно при обходе ссылок (``max_depth > 0``) или наличии per-site ``sitemap``.
     robots: bool = False
+
+    def pdf_limits(self) -> PdfLimits | None:
+        """Лимиты PDF в форме, которую принимает извлечение (D9, план 26).
+
+        ``None`` — ни одна ось не объявлена: извлечение идёт прежним путём байт-в-байт.
+        Метод, а не поле: две оси разрешаются независимо (продукт может объявить только
+        страницы), а форма извлечения — один объект на задание, и собирать его в каждом
+        вызывающем значило бы держать вторую копию правила «обе ``None`` ⇒ ``None``».
+        """
+        return pdf_limits(self.pdf_max_pages, self.pdf_max_extracted_chars)
 
     def as_dict(self) -> dict[str, object]:
         """Канонический словарь для провенанса/манифеста (сортированно-стабильно).
@@ -472,6 +505,15 @@ class CrawlLimits:
             ]
         if self.revalidate_max_documents is not None:
             payload["revalidate_max_documents"] = self.revalidate_max_documents
+        # D9 (план 26): лимиты PDF — **только при объявлении**. Оба меняют состав
+        # **текста документа**, то есть состав корпуса: это условие измерения
+        # (``execution_change`` §13), а не расписание. Ключ появляется лишь при заданной
+        # оси — иначе ``crawl_config_digest``/``run_id`` прогонов без лимитов сдвинулись бы
+        # без изменения измерения (та же дисциплина, что у ``revalidate_max_documents``).
+        if self.pdf_max_pages is not None:
+            payload["pdf_max_pages"] = self.pdf_max_pages
+        if self.pdf_max_extracted_chars is not None:
+            payload["pdf_max_extracted_chars"] = self.pdf_max_extracted_chars
         if self.max_response_bytes_explicit:
             payload["max_response_bytes"] = self.max_response_bytes
         # P6: новые оси — только когда заданы (дефолт не меняет дайджест старых прогонов).
@@ -652,6 +694,27 @@ def _pick[T](app: T | None, run: T | None, site: T | None) -> T | None:
     return app
 
 
+def _pick4[T](
+    app: T | None, run: T | None, product: T | None, site: T | None
+) -> T | None:
+    """Высший не-``None`` приоритет четырёх слоёв: site > product > run > app.
+
+    Четырёхслойная цепочка существует ровно у осей лимитов PDF (D9/план 26): они
+    объявляются и на **продукт** (``crawl_policy.yaml: product_axes``), и на корень
+    (``domain_profiles.yaml``), и корень специфичнее продукта — тот же порядок
+    «самое специфичное побеждает», что у ``crawl_policy`` (``path`` > ``root`` > ``host``
+    > ``product``). Остальные оси остаются на :func:`_pick`: продуктового слоя у них нет,
+    и подставлять ``None`` четвёртым слагаемым значило бы обещать слой, которого нет.
+    """
+    if site is not None:
+        return site
+    if product is not None:
+        return product
+    if run is not None:
+        return run
+    return app
+
+
 def _declared_host_shards(
     app: object,
 ) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
@@ -700,6 +763,7 @@ def resolve_crawl_limits(
     app: CrawlConfig,
     run: CrawlRunConfig | None = None,
     profiles: Mapping[str, DomainProfile] | None = None,
+    product: ProductCrawlAxes | None = None,
     derive_extract_workers: bool = False,
     mem_budget_mb: int | None = None,
 ) -> CrawlLimits:
@@ -708,6 +772,14 @@ def resolve_crawl_limits(
     Per-site слой выбирается лучшим ``host[+path]``-профилем домена
     (:func:`core.pipeline.fetch_plan.select_domain_profile`) — тем же матчингом, что и
     ``FetchPlan``. Для каждого вида проксимального слоя побеждает высший не-``None``.
+
+    **D9 (план 26): продуктовый слой.** Оси лимитов PDF (``pdf_max_pages``/
+    ``pdf_max_extracted_chars``) объявляются ещё и **на продукт** — данными пакета
+    (``crawl_policy.yaml: product_axes``), а не кодом. Их цепочка — app < run < **product**
+    < site: корень специфичнее продукта, ровно как ``path`` > ``root`` > ``host`` >
+    ``product`` в :mod:`core.pipeline.crawl_policy`. Параметр ``product`` необязателен:
+    прогон, продукт которого осей не объявлял (и любой вызов без этой поверхности),
+    получает прежнее поведение — лимита нет.
 
     **F0: окно экстракции из бюджета памяти.** Если ``extract_workers`` не задан ни на
     одном слое (app/run/site), ``derive_extract_workers=True`` и бюджет объявлен
@@ -772,6 +844,16 @@ def resolve_crawl_limits(
         profile.archive_max_total_uncompressed_bytes if profile is not None else None
     )
     site_archive_descent = profile.archive_descent if profile is not None else None
+    # D9: per-site слой лимитов PDF (самый специфичный — корень host+path).
+    site_pdf_max_pages = profile.pdf_max_pages if profile is not None else None
+    site_pdf_max_extracted_chars = (
+        profile.pdf_max_extracted_chars if profile is not None else None
+    )
+    # Продуктовый слой (``crawl_policy.yaml: product_axes``) — между run и site.
+    product_pdf_max_pages = product.pdf_max_pages if product is not None else None
+    product_pdf_max_extracted_chars = (
+        product.pdf_max_extracted_chars if product is not None else None
+    )
 
     run_max_workers = run.max_workers if run is not None else None
     # F1 (план 17): app < run, без per-site слоя — число полос есть свойство узла.
@@ -972,6 +1054,25 @@ def resolve_crawl_limits(
         run_document_timeout,
         site_document_timeout,
     )
+    # D9 (план 26): лимиты PDF. Четырёхслойная цепочка app < run < product < site: корень
+    # специфичнее продукта (тот же порядок, что ``path`` > ``root`` > ``host`` > ``product``
+    # в ``crawl_policy``). ``None`` на всех слоях = лимита нет (поведение байт-в-байт).
+    run_pdf_max_pages = getattr(run, "pdf_max_pages", None) if run is not None else None
+    run_pdf_max_extracted_chars = (
+        getattr(run, "pdf_max_extracted_chars", None) if run is not None else None
+    )
+    pdf_max_pages = _pick4(
+        getattr(app, "pdf_max_pages", None),
+        run_pdf_max_pages,
+        product_pdf_max_pages,
+        site_pdf_max_pages,
+    )
+    pdf_max_extracted_chars = _pick4(
+        getattr(app, "pdf_max_extracted_chars", None),
+        run_pdf_max_extracted_chars,
+        product_pdf_max_extracted_chars,
+        site_pdf_max_extracted_chars,
+    )
     # P6: контейнеры. ``None`` на site/run — «наследовать»; app-дефолт всегда есть.
     app_max_artifact_bytes = getattr(app, "max_artifact_bytes", None)
     max_artifact_bytes = _pick(
@@ -1150,6 +1251,18 @@ def resolve_crawl_limits(
         pdf_pipeline=PdfPipeline(
             PdfPipeline.STRUCTURED if pdf_pipeline is None else pdf_pipeline
         ),
+        # D9: лимиты PDF. ``None`` — ось не объявлена ни на одном слое; ``*_explicit``
+        # совпадает с «значение задано» по построению (дефолта у оси нет, как у
+        # ``document_timeout_s``), и держится отдельным полем ради единой дисциплины
+        # ``as_dict``: ключ появляется **только** при объявленной оси.
+        pdf_max_pages=None if pdf_max_pages is None else int(pdf_max_pages),
+        pdf_max_pages_explicit=pdf_max_pages is not None,
+        pdf_max_extracted_chars=(
+            None
+            if pdf_max_extracted_chars is None
+            else int(pdf_max_extracted_chars)
+        ),
+        pdf_max_extracted_chars_explicit=pdf_max_extracted_chars is not None,
         pdf_device=resolved_pdf_device,
         document_timeout_s=(
             DEFAULT_DOCUMENT_TIMEOUT_S

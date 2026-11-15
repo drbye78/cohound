@@ -1344,6 +1344,43 @@ def test_cmd_run_injected_profile_reaches_cells(tmp_path: Path) -> None:
     assert {cell.retrieval_profile for cell in cells} == {"R2"}
 
 
+def test_cmd_run_declared_retrieval_profile_reaches_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2 плана 26: профиль из ``deploy.retrieval.profile`` доезжает до ячеек.
+
+    Проверяется **прод-путь** (реальный ``_resolve_phases``, без тест-шва
+    ``phases_factory``): незаданный ``--retrieval-profile`` больше не означает ``None`` —
+    контракт, манифест и ячейки несут одно объявленное значение. До правки контракт
+    писал ``null``, а фаза оценки исполняла ``R0``, то есть ``run_id`` описывал не тот
+    прибор, которым получены вердикты.
+    """
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    run_id = "declared-profile"
+    # Деплой-конфиг читается из CWD (``load_deploy_config(None)``): изолируем его.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "deploy.yaml").write_text(
+        "profile: local\nretrieval:\n  profile: R2\n", encoding="utf-8"
+    )
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
+    assert main([*argv, "--until", "plan"]) == EXIT_OK
+    _finalize_gates(db, run_id)
+
+    assert main(argv, ports=_retrieval_ports()) == EXIT_OK
+
+    with build_store(db) as store:
+        cells = list(store.iter_cells(run_id))
+        manifest = store.read_manifest(run_id)
+    assert cells, "прогон обязан дойти до оценки"
+    # Исполнение: ячейки несут объявленный профиль (не дефолт Ш6).
+    assert {cell.retrieval_profile for cell in cells} == {"R2"}
+    # Провенанс манифеста — то же значение, что исполнено.
+    assert manifest.retrieval_profile == "R2"
+
+
 def test_cmd_run_explicit_cutoff_wins_over_measured(tmp_path: Path) -> None:
     """Явный ``--cutoff-k`` приоритетнее фиксации: K оператора не затирается молча.
 

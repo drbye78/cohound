@@ -114,6 +114,7 @@ from core.config.deploy import (
     CrawlConfig,
     DeployConfig,
     EmbedConfig,
+    LexicalDeployConfig,
     LLMDeployConfig,
     LLMSlotConfig,
     is_split,
@@ -482,8 +483,15 @@ def seed_lexical_index(
     package: str | None,
     store: StorePort | None,
     build_id: str | None = None,
+    profile: str = "stemmed",
 ) -> LexicalIndexPort | None:
     """Собирает лексический индекс (BM25, R0/R2) из персистентных чанков сборки.
+
+    :param profile: объявленный профиль анализатора (``deploy.lexical.profile``) — то же
+        значение, что ушло в ``lexical_spec``/``run_id``. До правки индекс строился с
+        дефолтом адаптера, поэтому объявленный профиль (и его смена) не доезжал до
+        исполнения: контракт называл одно, индекс исполнял другое. Профиль —
+        **объявленная ось**, а не настройка адаптера.
 
     Лексическое плечо симметрично dense: ``TantivyLexicalIndex`` сам по себе непригоден
     (пустой индекс отвергает поиск), поэтому порт строится/засевается только при наличии
@@ -527,6 +535,9 @@ def seed_lexical_index(
     index = TantivyLexicalIndex(
         hydrate=store.get_chunks,
         view=view,
+        # Профиль — объявленный вход (``lexical_spec``), а не дефолт адаптера: смена
+        # профиля меняет выдачу, значит обязана доехать до сборки индекса.
+        profile=profile,
     )
 
     def _records() -> Iterable[LexicalChunk]:
@@ -2827,6 +2838,7 @@ def _build_local_ports(
     embed_model_id: str | None = None,
     embed_revision: str | None = None,
     embed_notices: list[str] | None = None,
+    lexical_profile: str = "stemmed",
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -2888,6 +2900,12 @@ def _build_local_ports(
     экстрактор портов и Ш5 исполняются на том же устройстве, что объявлено. ``cuda``
     проверяется здесь же (:func:`require_pdf_device`): недоступное устройство — отказ
     до прогона, а не тихий CPU.
+
+    **Профиль лексического индекса.** ``lexical_profile`` — объявленная ось
+    ``deploy.lexical.profile``: тот же профиль, что назван в ``lexical_spec``
+    (``run_id``), поэтому индекс засевается **тем** анализатором, который объявлен.
+    Дефолт ``stemmed`` здесь — только для прямых вызовов без конфига (тесты/DI); живой
+    путь передаёт значение из deploy-конфига.
     """
     html = HtmlExtractor()
     require_pdf_device(pdf_device)
@@ -2963,6 +2981,9 @@ def _build_local_ports(
             package=package,
             store=store,
             build_id=index_build_id,
+            # Объявленный профиль (``deploy.lexical.profile``) — то же значение, что в
+            # ``lexical_spec``; дефолт адаптера здесь не годится (см. докстринг выше).
+            profile=lexical_profile,
         )
     )
 
@@ -3515,6 +3536,13 @@ def build_adapters(
             embed_model_id=embed_spec.model_id,
             embed_revision=embed_spec.revision,
             embed_notices=embed_notices,
+            # Ось ``lexical.profile`` — та же, что в ``lexical_spec`` (``run_id``): индекс
+            # засевается объявленным анализатором, а не дефолтом адаптера.
+            lexical_profile=(
+                deploy.lexical.profile
+                if deploy is not None
+                else LexicalDeployConfig().profile
+            ),
         )
         # Выбор эмбеддера под объявленное устройство виден в журнале wiring (тот же
         # ``wiring.jsonl``, что и выбор движка краула): исключение Lite под ``cuda`` —

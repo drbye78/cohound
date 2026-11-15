@@ -173,6 +173,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from core.config.crawl_policy import ProductCrawlAxes
 from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.deploy import CrawlConfig, resolve_host_shard
 from core.config.domain_profiles import DomainProfile
@@ -1716,6 +1717,7 @@ def _build_corpus(
     frozen_source: str | None = None,
     seeds_digest: str | None = None,
     crawl_policy: CrawlPolicyResolution | None = None,
+    product_axes: Mapping[str, ProductCrawlAxes] | None = None,
     only_failed_repairs: Mapping[str, list[str]] | None = None,
     container_for: Callable[[str | Path], ContainerPort | None] | None = None,
     pools: _ExtractPools,
@@ -1933,6 +1935,16 @@ def _build_corpus(
         же generalized-проходом, что ``offline`` («продукт → корень»). Каждый пропуск
         делает покрытие неполным и назван токеном ``crawl_policy_skipped``.
         ``None`` — политики нет: каждый корень ``fetch``+``network`` (поведение прежнее).
+    :param product_axes: D9 (план 26) — продуктовый слой **лимитов** PDF
+        (``crawl_policy.yaml: product_axes``: ``product_id → ProductCrawlAxes``), то есть
+        тот же материал, что входит в ``crawl_config_digest`` (``execution_change``, §13).
+        Оси разрешаются **на продукт**: ``limits_for`` у продуктового потребителя очереди,
+        у проходов без сети и у ручной подачи закрывает ``product_id`` этого продукта,
+        поэтому лимит объявленный продукту X исполняется на документах X, а документы
+        продукта без оси извлекаются полностью. ``None``/пусто — прежнее поведение
+        байт-в-байт: слой ``product`` не добавляет ни одного значения в ``CrawlLimits``.
+        Почему аргумент, а не чтение файла здесь: тот же конфиг уже загружен
+        (``normalize.load_inputs``), и вторая загрузка дала бы вторую формулу входа.
     :param only_failed_repairs: ``product_id → [url, ...]`` — work-set **ремонта**
         (``--only-failed``, межпрогонный носитель ``url_state``; резолвится composition
         root'ом: ``core.cli.context._only_failed_work_set``). Для названного продукта
@@ -2503,16 +2515,33 @@ def _build_corpus(
         run_default_strategy=crawl_strategy_default,
         run_default_rate_limit=crawl_rate_default,
     )
-    #: Резолв осей краула ``app < run < site``: одна проводимость бюджета на фазу
-    #: (F0: ``derive_extract_workers``/``mem_budget_mb`` едут тем же путём).
-    _limits_for_url = partial(
-        resolve_crawl_limits,
-        app=crawl_app or CrawlConfig(),
-        run=crawl_defaults,
-        profiles=domain_profiles or {},
-        derive_extract_workers=derive_extract_workers,
-        mem_budget_mb=mem_budget_mb,
-    )
+    #: Резолв осей краула ``app < run < product < site``: одна проводимость бюджета на
+    #: фазу (F0: ``derive_extract_workers``/``mem_budget_mb`` едут тем же путём).
+    #:
+    #: D9 (план 26): продуктовый слой лимитов PDF (``crawl_policy.yaml: product_axes``)
+    #: объявлен **на продукт**, а контракт ``limits_for`` — ``Callable[[str], CrawlLimits]``
+    #: без продукта. Поэтому здесь фабрика: продукт закрывается в одной точке, а
+    #: вызывающие без продуктового контекста берут ``_limits_for(None)`` — прежнее
+    #: поведение **байт-в-байт** (слой ``None`` не добавляет ни одного значения).
+    _product_axes: Mapping[str, ProductCrawlAxes] = dict(product_axes or {})
+
+    def _limits_for(product_id: str | None) -> Callable[[str], CrawlLimits]:
+        """Резолвер осей для URL **этого** продукта (``None`` — продуктового слоя нет)."""
+        return partial(
+            resolve_crawl_limits,
+            app=crawl_app or CrawlConfig(),
+            run=crawl_defaults,
+            profiles=domain_profiles or {},
+            product=(
+                _product_axes.get(str(product_id))
+                if product_id is not None
+                else None
+            ),
+            derive_extract_workers=derive_extract_workers,
+            mem_budget_mb=mem_budget_mb,
+        )
+
+    _limits_for_url = _limits_for(None)
     _validators = partial(
         corpus_ingest.validators,
         state=state,
@@ -2849,7 +2878,9 @@ def _build_corpus(
         corpus_ingest.feed_manual_artifact,
         ingest_one=_ingest_one,
         retain=_retain,
-        limits_for=_limits_for_url,
+        # D9: ``limits_for`` не связан здесь — он **продуктовый**, а подача вызывается
+        # только в хвосте конкретного продукта (``_close_product``): связать его тут
+        # значило бы приписать ручной PDF лимит чужого продукта.
         resolve_target=_crawl_target,
         url_map=url_map,
         domain_profiles=domain_profiles,
@@ -3012,10 +3043,18 @@ def _build_corpus(
         work_item=_work_item,
         resolve_target=_resolve_target,
         fresh_sitemap_seeds=_fresh_sitemap_seeds,
+        # D9: продуктовый слой лимитов PDF здесь намеренно **не** связан. Дренаж корня
+        # читает только краульные оси (``max_*``/``robots``/``document_level``/
+        # ``pdf_pipeline``) — осей с продуктовым слоем среди них нет, поэтому
+        # ``product=None`` даёт прежние ``CrawlLimits`` байт-в-байт. Лимит PDF
+        # применяется там, где документ извлекается: у продуктового потребителя очереди
+        # (:func:`_limits_for` на границе продукта) и у проходов без сети.
         limits_for=_limits_for_url,
     )
     #: F5: фазовый носитель потребителя очереди. Пул/кэш/экстрактор — те же объекты, что
     #: у фазы: второй экземпляр конвертера означал бы второй ``extractor_version``.
+    #: D9: ``limits_for`` базового носителя — фазовый (без продукта); на границе продукта
+    #: он заменяется продуктовым (``ProductContext.consume_scope``).
     _consume_scope = extract_consume.ConsumerScope(
         errors=errors,
         store=store,
@@ -3846,8 +3885,13 @@ def _build_corpus(
             consume=_consume_product,
             #: Тот же фазовый носитель потребителя, но с бакетами **этого** продукта:
             #: конверсия идёт в хвосте продукта и мерит его ожидание экстракции.
+            #: D9 (план 26): и с **продуктовым** резолвером осей — очередь конвертирует
+            #: документы этого продукта (``_row_request`` берёт оттуда ``pdf_limits``),
+            #: поэтому лимит PDF, объявленный продукту, исполняется на его документах.
             consume_scope=replace(
-                _consume_scope, timings=product_timings[str(product_id)]
+                _consume_scope,
+                timings=product_timings[str(product_id)],
+                limits_for=_limits_for(str(product_id)),
             ),
             incremental_items=incremental_items,
             all_revalidation_groups=all_revalidation_groups,
@@ -3949,7 +3993,9 @@ def _build_corpus(
                     fetch_plan_for=lambda url: _crawl_target(
                         ctx.product_id, url
                     ).plan,
-                    limits_for=_limits_for_url,
+                    # D9: проход без сети пере-собирает документы **этого** продукта —
+                    # лимит PDF берётся из его осей, а не из фазового резолвера.
+                    limits_for=_limits_for(ctx.product_id),
                     extractor_factory=extractor_factory,
                     label=pass_label,
                 )
@@ -4019,7 +4065,9 @@ def _build_corpus(
                     chunker=chunker,
                     extract_cache=extract_cache,
                     fetch_plan_for=_frozen_fetch_plan,
-                    limits_for=_limits_for_url,
+                    # D9: ``frozen`` пере-извлекает байты этого продукта объявленным
+                    # уровнем **и** объявленным лимитом PDF — тот же продуктовый слой.
+                    limits_for=_limits_for(ctx.product_id),
                     # Тот же per-level резолвер, что у живого пути и ручных артефактов:
                     # `frozen` обязан извлекать объявленным уровнем, иначе он штампует
                     # условие, которого измерение не объявляло (см. corpus_ingest).
@@ -4243,7 +4291,15 @@ def _build_corpus(
         manual_resolved: list[str] = []
         for entry in manual_entries:
             doc_id, raw_path = _feed_manual_artifact(
-                product_id, entry, ingest, seen_docs, seen_chunk_ids
+                product_id,
+                entry,
+                ingest,
+                seen_docs,
+                seen_chunk_ids,
+                # D9: лимиты PDF — **этого** продукта. Ручная подача идёт через тот же
+                # ``ingest_one``, что и краул, и передаёт ему ``limits``: объявленная ось
+                # не выключается тем, что байты принёс оператор.
+                limits_for=_limits_for(product_id),
             )
             if doc_id is not None:
                 manual_resolved.append(entry.url)
@@ -4313,7 +4369,9 @@ def _build_corpus(
                     fetch_plan_for=lambda url: _crawl_target(
                         product_id, url
                     ).plan,
-                    limits_for=_limits_for_url,
+                    # D9: переиспользование запрещённых корней пере-собирает документы
+                    # **этого** продукта — лимит PDF из его осей.
+                    limits_for=_limits_for(product_id),
                     extractor_factory=extractor_factory,
                     label="crawl_policy",
                     skip_urls=present_urls,

@@ -1107,3 +1107,106 @@ def test_duplicate_form_survives_with_limits_clone() -> None:
     assert clone.duplicate_form_examples == ["https://h/page/"]
     # Клон тоже схлопывает: форма уже известна в скопированном множестве.
     assert clone.discover("https://h/page/", 1) is False
+
+
+# --------------------------------------------------------------------------- #
+# D9 (план 26): лимиты PDF — ось «не ограничивать, а измерять»
+# --------------------------------------------------------------------------- #
+
+
+def test_pdf_limits_are_absent_by_default() -> None:
+    """Ни одна ось не объявлена ⇒ лимита нет, и ключей нет в ``as_dict``.
+
+    Умолчание ``None`` — измеренное состояние корпуса (замер O31: p99 212 страниц /
+    231 158 символов, любой потолок режет материал), а не «безопасное» значение.
+    """
+    limits = resolve_crawl_limits(URL, app=APP)
+    assert limits.pdf_max_pages is None
+    assert limits.pdf_max_extracted_chars is None
+    assert limits.pdf_max_pages_explicit is False
+    assert limits.pdf_max_extracted_chars_explicit is False
+    # Фабрика формы извлечения: «обе оси None» — это именно отсутствие лимита.
+    assert limits.pdf_limits() is None
+
+
+def test_pdf_limits_chain_app_run_site() -> None:
+    """Цепочка app < run < site для обеих осей: побеждает высший не-``None``.
+
+    app-слой — **настоящий** ``CrawlConfig`` (``deploy.yaml:crawl.pdf_max_*``), а не
+    подкласс-заглушка: ось обязана быть достижима из объявленного конфига, иначе
+    «цепочка app < run < ...» называла бы слой, которого нельзя объявить.
+    """
+    app = CrawlConfig(pdf_max_pages=100, pdf_max_extracted_chars=10_000)
+    run = CrawlRunConfig(pdf_max_pages=50)
+    site = DomainProfile(pdf_max_pages=5)
+
+    from_run = resolve_crawl_limits(URL, app=app, run=run)
+    assert from_run.pdf_max_pages == 50
+    # Ось символов объявлена только на app-слое — она оттуда и приходит.
+    assert from_run.pdf_max_extracted_chars == 10_000
+
+    from_site = resolve_crawl_limits(
+        URL, app=app, run=run, profiles={"example.com": site}
+    )
+    assert from_site.pdf_max_pages == 5
+    assert from_site.pdf_max_extracted_chars == 10_000
+
+
+def test_pdf_limits_product_layer_between_run_and_site() -> None:
+    """Продуктовый слой: ``site > product > run > app`` (корень специфичнее продукта)."""
+    from core.config.crawl_policy import ProductCrawlAxes
+
+    app = CrawlConfig()
+    run = CrawlRunConfig(pdf_max_pages=50)
+    product = ProductCrawlAxes(pdf_max_pages=20, pdf_max_extracted_chars=2_000)
+
+    only_product = resolve_crawl_limits(URL, app=app, product=product)
+    assert only_product.pdf_max_pages == 20
+    assert only_product.pdf_max_extracted_chars == 2_000
+
+    # Продукт побеждает run, корень побеждает продукт.
+    with_run = resolve_crawl_limits(URL, app=app, run=run, product=product)
+    assert with_run.pdf_max_pages == 20
+    site = DomainProfile(pdf_max_pages=7)
+    with_site = resolve_crawl_limits(
+        URL, app=app, run=run, product=product, profiles={"example.com": site}
+    )
+    assert with_site.pdf_max_pages == 7
+    # Символов корень не объявлял — действует продуктовый слой.
+    assert with_site.pdf_max_extracted_chars == 2_000
+
+
+def test_pdf_limits_enter_digest_only_when_declared() -> None:
+    """Ключи ``as_dict`` появляются **только** при объявленной оси (обратная совместимость).
+
+    Лимит меняет состав текста документа, то есть состав корпуса, — это условие измерения
+    (``execution_change``), но у прогона без оси ``crawl_config_digest`` обязан остаться
+    прежним, иначе смена кода сдвинула бы ``run_id`` без изменения измерения.
+    """
+    plain = resolve_crawl_limits(URL, app=APP).as_dict()
+    assert "pdf_max_pages" not in plain
+    assert "pdf_max_extracted_chars" not in plain
+
+    pages_only = resolve_crawl_limits(
+        URL, app=APP, run=CrawlRunConfig(pdf_max_pages=25)
+    ).as_dict()
+    assert pages_only["pdf_max_pages"] == 25
+    assert "pdf_max_extracted_chars" not in pages_only
+
+    chars_only = resolve_crawl_limits(
+        URL, app=APP, run=CrawlRunConfig(pdf_max_extracted_chars=5_000)
+    ).as_dict()
+    assert chars_only["pdf_max_extracted_chars"] == 5_000
+    assert "pdf_max_pages" not in chars_only
+
+
+def test_pdf_limits_reject_non_positive_values() -> None:
+    """``0`` — не «без лимита»: это ошибка объявления (``None`` уже значит «нет»)."""
+    from core.config.crawl_policy import ProductCrawlAxes
+
+    with pytest.raises(ValidationError):
+        DomainProfile(pdf_max_pages=0)
+    with pytest.raises(ValidationError):
+        CrawlRunConfig(pdf_max_pages=0)
+    with pytest.raises(ValidationError):
+        ProductCrawlAxes(pdf_max_extracted_chars=0)

@@ -708,6 +708,7 @@ def crawl_control_digest(
     app: Any,
     profiles: Mapping[str, Any] | None,
     overrides: Mapping[str, Any] | None = None,
+    product_axes: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Стабильный дайджест **разрешённой** конфигурации контроля краула (N6/§13).
 
@@ -729,15 +730,24 @@ def crawl_control_digest(
         иначе ``run.yaml`` без секции ``crawl`` объявил бы ``strategy=auto``, которого в нём
         нет, и ``--pdf-pipeline structured`` (эффективно no-op) дал бы другой ``run_id``.
         ``None`` — оператор ось не задавал (поведение байт-в-байт).
+    :param product_axes: D9 (план 26) — продуктовый слой лимитов PDF
+        (``crawl_policy.yaml: product_axes``: ``product_id → ProductCrawlAxes``). ``None`` —
+        ни один продукт осей не объявлял (дайджест прежний). Слой входит в материал
+        **своими ключами** ``product:{pid}``: лимит меняет состав текста документа, то есть
+        корпус, и обязан менять ``run_id`` (``execution_change``, §13).
     """
     from core.config.deploy import CrawlConfig
 
     app_config = app if isinstance(app, CrawlConfig) else CrawlConfig()
     operator = {key: _axis_value(value) for key, value in (overrides or {}).items()}
 
-    def _resolved(url: str, sites: Mapping[str, Any]) -> dict[str, Any]:
+    def _resolved(
+        url: str, sites: Mapping[str, Any], axes: Any = None
+    ) -> dict[str, Any]:
         payload = dict(
-            resolve_crawl_limits(url, app=app_config, run=run_crawl, profiles=sites).as_dict()
+            resolve_crawl_limits(
+                url, app=app_config, run=run_crawl, profiles=sites, product=axes
+            ).as_dict()
         )
         payload.update(operator)
         return payload
@@ -747,6 +757,12 @@ def crawl_control_digest(
     for key in sorted(site_profiles):
         url = str(key) if "://" in str(key) else f"https://{key}"
         payload[str(key)] = _resolved(url, site_profiles)
+    # D9 (план 26): продуктовый слой лимитов PDF (``crawl_policy.yaml: product_axes``).
+    # У каждого продукта своя поверхность, поэтому ключ свой — ``product:{pid}``: без него
+    # объявленный лимит не менял бы ``crawl_config_digest``, то есть не менял бы ``run_id``,
+    # и два разных состава корпуса жили бы под одной идентичностью (§13).
+    for product_id, axes in sorted(dict(product_axes or {}).items()):
+        payload[f"product:{product_id}"] = _resolved("", {}, axes)
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return short_hash(material, 24)
 
@@ -1348,6 +1364,12 @@ def build_manifest(
         run_crawl=crawl_cfg,
         app=crawl_app,
         profiles=domain_profiles,
+        # D9 (план 26): тот же продуктовый слой, что у контракта. Legacy-путь
+        # (``axes is None``) обязан считать **ту же** величину: манифест, назвавший
+        # другой ``crawl_config_digest``, разошёлся бы с ``run_id`` на одном материале.
+        product_axes=getattr(
+            getattr(inputs, "crawl_policy", None), "product_axes", None
+        ),
     )
 
     extra: dict[str, Any] = {}

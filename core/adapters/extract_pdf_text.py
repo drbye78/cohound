@@ -71,6 +71,12 @@ from pathlib import Path
 
 from core.ports.types import ExtractedDoc
 from core.util.document_formats import FAMILY_TEXT, PDF_SUFFIX
+from core.util.pdf_limits import (
+    char_limit_note,
+    current_pdf_limits,
+    page_limit_note,
+    truncate_text,
+)
 from core.util.sanitize import finalize_extracted_text
 
 __all__ = [
@@ -289,8 +295,19 @@ class PdfiumDocumentExtractor:
         текстового и docling-путей. Порядок важен: ``content_hash`` обязан считаться по
         тому тексту, который увидит чанкер и цитата (I22), иначе один и тот же документ
         давал бы разные хеши на разных механизмах.
+
+        **D9: лимиты документа (план 26).** ``current_pdf_limits()`` — лимиты задания
+        извлечения (``None`` — ось не объявлена, поведение байт-в-байт). Ось страниц
+        читает **первые N**: страницы за пределом не открываются вовсе, поэтому лимит
+        экономит и время. Ось символов обрезает **готовый** текст (после очистки), поэтому
+        ``content_hash`` считается уже по обрезанному тексту — он описывает то, что
+        попало в корпус. Оба исхода дают ``partial=True`` и причину с числами.
         """
         import pypdfium2 as pdfium  # локально: см. докстринг модуля
+
+        limits = current_pdf_limits()
+        page_limit = None if limits is None else limits.max_pages
+        char_limit = None if limits is None else limits.max_extracted_chars
 
         pdf = pdfium.PdfDocument(path)
         pages: list[str] = []
@@ -304,7 +321,14 @@ class PdfiumDocumentExtractor:
         pages_without_text_layer: list[int] = []
         try:
             page_count = len(pdf)
-            for index in range(page_count):
+            # D9: лимит страниц — читаются **первые N**. Страницы за пределом не
+            # открываются: лимит обязан экономить работу, а не только объём текста.
+            read_pages = (
+                page_count
+                if page_limit is None or int(page_limit) >= page_count
+                else int(page_limit)
+            )
+            for index in range(read_pages):
                 try:
                     page = pdf[index]
                     try:
@@ -327,6 +351,7 @@ class PdfiumDocumentExtractor:
                     pages_without_text_layer.append(index + 1)
         finally:
             pdf.close()
+        page_limit_hit = read_pages < page_count
         text = finalize_extracted_text(
             _PAGE_SEPARATOR.join(strip_control_characters(chunk).strip() for chunk in pages)
         ).strip()
@@ -350,12 +375,18 @@ class PdfiumDocumentExtractor:
                 error="no_text_layer",
                 family=FAMILY_TEXT,
             )
-        if failed or pages_without_text_layer:
+        # D9: ось символов обрезает **готовый** текст (после очистки и склейки страниц),
+        # поэтому ``content_hash`` ниже считается уже по обрезанному тексту: хеш обязан
+        # описывать то, что увидит чанкер и цитата (I22). Отброшенное число едет в причину.
+        total_chars = len(text)
+        text, dropped_chars = truncate_text(text, char_limit)
+        if failed or pages_without_text_layer or page_limit_hit or dropped_chars:
             # Частичный результат — документ, а не отказ (симметрия с docling
             # ``PARTIAL_SUCCESS``): текст прочитанных страниц обязан попасть в корпус, но
             # частичность видна, чтобы «прочитано 3 из 665» не выдавалось за полный документ.
-            # Две причины называются раздельно, потому что это разные факты: страница не
-            # прочиталась (отказ pdfium) и страница прочитана без текстового слоя (скан).
+            # Причины называются раздельно, потому что это разные факты: страница не
+            # прочиталась (отказ pdfium), страница прочитана без текстового слоя (скан),
+            # документ обрезан объявленным лимитом оператора (D9).
             reasons: list[str] = []
             if failed:
                 reasons.append(
@@ -367,6 +398,10 @@ class PdfiumDocumentExtractor:
                     f"pages_without_text_layer: {len(pages_without_text_layer)} из "
                     f"{page_count} ({_page_list(pages_without_text_layer)})"
                 )
+            if page_limit_hit and page_limit is not None:
+                reasons.append(page_limit_note(read_pages, page_count, int(page_limit)))
+            if dropped_chars and char_limit is not None:
+                reasons.append(char_limit_note(dropped_chars, total_chars, int(char_limit)))
             return ExtractedDoc(
                 text=text,
                 content_hash=_sha256(text),
@@ -380,9 +415,11 @@ class PdfiumDocumentExtractor:
                 # Число прочитанных страниц — измеренная величина (документ минус отказы
                 # минус листы без слоя), а не оценка: без неё «частично» не отличить от
                 # «почти всё». Пустая страница здесь именно вычитается — она не дала
-                # текста, и считать её прочитанной значило бы завысить объём.
+                # текста, и считать её прочитанной значило бы завысить объём. При
+                # объявленном лимите страниц вычитается из **прочитанных**, а не из
+                # размера документа: страницы за лимитом работой не были.
                 pages_converted=(
-                    page_count - len(failed) - len(pages_without_text_layer)
+                    read_pages - len(failed) - len(pages_without_text_layer)
                 ),
             )
         return ExtractedDoc(

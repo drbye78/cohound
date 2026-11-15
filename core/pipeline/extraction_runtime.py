@@ -42,6 +42,7 @@ from core.pipeline.extract_cache import ExtractionCache
 from core.ports.extractor import ExtractorPort
 from core.ports.types import ExtractedDoc, ExtractionRoute, FetchMode, RawPage
 from core.util import memory as _memory
+from core.util.pdf_limits import PdfLimits, use_pdf_limits
 
 #: P0: размер порции потокового хеширования retained-байтов (resume).
 _RESUME_READ_CHUNK = 1024 * 1024
@@ -109,6 +110,13 @@ class _ExtractRequest:
     #: причине, что и уровень: воркер обязан обслужить задание **своим** механизмом, а не
     #: тем, что случайно построил инициализатор другого пула.
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
+    #: D9 (план 26): объявленные лимиты PDF-документа (``None`` — ось не объявлена,
+    #: поведение байт-в-байт). Едет в payload примитивами (frozen dataclass из чисел):
+    #: лимит — условие **измерения**, а не свойство экстрактора, поэтому он обязан
+    #: описывать именно это задание. Воркер ставит его контекстом на время вызова
+    #: (:func:`core.util.pdf_limits.use_pdf_limits`), потому что экземпляр экстрактора
+    #: общий на ключ ``(уровень, механизм)``.
+    pdf_limits: PdfLimits | None = None
     #: Ф1.2: корень и бюджет межпрогонного кэша экстракции. Едут **примитивами** — сам
     #: объект кэша не пиклится (payload остаётся picklable by construction); воркер
     #: строит экземпляр из этих полей. ``None`` → кэш в воркере выключен.
@@ -344,6 +352,27 @@ def _cache_extractor_version(
     return str(getattr(extractor, "version", "") or "")
 
 
+def extract_with_pdf_limits(
+    extractor: ExtractorPort,
+    page: RawPage,
+    route: ExtractionRoute,
+    limits: PdfLimits | None,
+) -> ExtractedDoc:
+    """Извлечение с объявленными лимитами PDF — тот же путь, что у воркера пула (D9).
+
+    Inline-пути (член контейнера без пула, пере-извлечение из сохранённых байтов) зовут
+    эту функцию вместо ``extractor.extract``: лимит обязан действовать одинаково на обоих
+    путях, иначе «один и тот же PDF, разные лимиты» зависело бы от того, поднялся ли пул.
+
+    ``limits is None`` или неактивные лимиты — прямой вызов без контекста: прогон без осей
+    обязан остаться байт-в-байт прежним.
+    """
+    if limits is None or not limits.active:
+        return extractor.extract(page, route)
+    with use_pdf_limits(limits):
+        return extractor.extract(page, route)
+
+
 def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> ExtractedDoc:
     """Перечитывает retained-байты (I19) и вызывает ``extractor.extract`` на том же ``RawPage``.
 
@@ -387,7 +416,14 @@ def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> Extracte
         if request.cache_root
         else None
     )
-    if cache is not None:
+    # D9 (план 26): объявленный лимит PDF делает хит кэша **непригодным**: запись,
+    # снятая прогоном без лимита, отдала бы полный текст под объявленной осью, и корпус
+    # молча оказался бы длиннее лимита. Поэтому при активном лимите кэш не спрашивается
+    # (цена названа прямо: такие документы пере-извлекаются каждый прогон), а запись
+    # остаётся — ``put`` частичное не сохраняет, поэтому обрезанный текст под полным
+    # ключом не появится.
+    limits_active = request.pdf_limits is not None and request.pdf_limits.active
+    if cache is not None and not limits_active:
         # Ключ — версия того движка, который обслужит **эту** страницу (штамп адаптера),
         # иначе проба не совпадёт с записью и кэш останется write-only.
         cached = cache.get(
@@ -395,7 +431,12 @@ def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> Extracte
         )
         if cached is not None:
             return cached
-    extracted = extractor.extract(page, request.route)
+    # Лимит — свойство **задания**, а не экстрактора: экземпляр общий на ключ
+    # ``(уровень, механизм)``, а лимит объявлен per-URL, поэтому он передаётся контекстом
+    # вызова. Восстановление контекста в ``finally`` — часть контракта: исключение
+    # читателя не должно оставить лимит следующему документу этого воркера.
+    with use_pdf_limits(request.pdf_limits):
+        extracted = extractor.extract(page, request.route)
     if cache is not None:
         cache.put(extracted, level=level_text, content_hash=key)
     return extracted

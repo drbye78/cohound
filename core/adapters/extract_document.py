@@ -89,6 +89,7 @@ import os
 import re
 import shutil
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -101,6 +102,13 @@ from core.ports.types import (
     ExtractedDoc,
 )
 from core.util.document_formats import DOCUMENT_SUFFIXES, PDF_SUFFIX
+from core.util.pdf_limits import (
+    char_limit_note,
+    current_pdf_limits,
+    merge_partial_reason,
+    page_limit_note,
+    truncate_text,
+)
 from core.util.sanitize import finalize_extracted_text
 
 #: docling-символы как модульные атрибуты (публичная поверхность адаптера).
@@ -434,14 +442,23 @@ class _DoclingResult(Protocol):
 
 
 class _DoclingConverter(Protocol):
-    """Поверхность ``DocumentConverter``: один метод ``convert(path)``.
+    """Поверхность ``DocumentConverter``: один метод ``convert(path[, page_range])``.
 
     Остальное (``status``, ``input.page_count``, ``pages``) читается через ``getattr``
     в :func:`_document_text`/:func:`_page_count` — там ``object`` и ``getattr`` уместны,
     потому что поле может отсутствовать у другой версии docling.
+
+    ``page_range`` объявлен, потому что D9 (лимит страниц) исполняется **до** конвертации:
+    диапазон отдаёт сам docling, и страницы за пределом не читаются вовсе. Настоящий
+    ``DocumentConverter`` принимает ``page_range`` как кортеж ``(1, N)`` (по умолчанию —
+    ``(1, sys.maxsize)``); адаптер передаёт аргумент **только** при объявленном лимите,
+    поэтому прогон без оси идёт прежним путём. ``None`` в подписи означает «аргумент не
+    передавался» — это не значение, которое уходит в docling.
     """
 
-    def convert(self, path: str) -> _DoclingResult: ...
+    def convert(
+        self, path: str, *, page_range: tuple[int, int] | None = None
+    ) -> _DoclingResult: ...
 
 
 class _DoclingDocument(Protocol):
@@ -1539,9 +1556,26 @@ class DoclingDocumentExtractor:
         # приписывать ему исход пробы от прошлого PDF (``ok``/``unsupported``) значило бы
         # выдать чужое наблюдение за его собственное. ``None`` = «не применимо».
         probe = None if office else self._ocr_probe
+        # D9 (план 26): лимиты задания извлечения (``None`` — ось не объявлена, поведение
+        # прежнее). Ось страниц отдаётся docling **до** конвертации (``page_range``): так
+        # лимит экономит время, а не только объём. Офисному документу она не применяется —
+        # «страница» у DOCX/XLSX/PPTX не страница файла, которой можно управлять заранее.
+        limits = current_pdf_limits()
+        page_limit = None if office or limits is None else limits.max_pages
+        char_limit = None if limits is None else limits.max_extracted_chars
+        page_range = (
+            None if page_limit is None else (1, int(page_limit))
+        )
         try:
-            result = converter.convert(path)
+            result = (
+                converter.convert(path, page_range=page_range)
+                if page_range is not None
+                else converter.convert(path)
+            )
             status = getattr(result.status, "name", str(result.status))
+            # Причина частичности по лимиту — общая для всех исходов ниже: страницы за
+            # пределом не читались, и это факт оператора, а не отказ движка.
+            limit_reason = self._page_limit_reason(result, page_limit)
             if status == PARTIAL_SUCCESS_STATUS:
                 doc = self._partial(
                     result, status, version=stamp, office=office, ocr_probe=probe
@@ -1552,7 +1586,9 @@ class DoclingDocumentExtractor:
                     # прочитан не целиком» обязан быть виден хотя бы в журнале, а не
                     # растворяться в числе документов.
                     _log.warning("частичное извлечение %s: %s", path, doc.partial_reason)
-                return doc
+                return self._with_char_limit(
+                    self._with_page_limit(doc, limit_reason), char_limit
+                )
             if status != "SUCCESS":
                 return self._error(
                     f"docling: статус конвертации {status}", stamp, ocr_probe=probe
@@ -1563,15 +1599,88 @@ class DoclingDocumentExtractor:
                 # и входить в корпус как доказательство он не вправе (I19).
                 return self._error(EMPTY_TEXT_REASON, stamp, ocr_probe=probe)
             pages = _page_count(result)
-            return ExtractedDoc(
+            doc = ExtractedDoc(
                 text=text,
                 content_hash=_sha256(text),
                 extractor_version=stamp,
                 page_count=pages,
                 ocr_probe=probe,
             )
+            if limit_reason is not None:
+                # Лимит объявлен и документ длиннее его: текст читаемой части в корпус,
+                # признак частичности и числа — в провенанс (``pages_converted`` = сколько
+                # страниц реально попало в результат).
+                doc = replace(
+                    doc,
+                    partial=True,
+                    partial_reason=limit_reason,
+                    pages_converted=_converted_page_count(result),
+                )
+            return self._with_char_limit(doc, char_limit)
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
             return self._error(f"docling: {exc}", stamp, ocr_probe=probe)
+
+    def _page_limit_reason(
+        self, result: _DoclingResult, page_limit: int | None
+    ) -> str | None:
+        """Причина частичности по оси страниц (``None`` — лимит не сработал).
+
+        Сравниваются **две разные величины**: ``input.page_count`` — размер документа
+        (docling заполняет его из PDF независимо от ``page_range``) и ``len(result.pages)``
+        — сколько страниц реально конвертировано. Их расхождение и есть исчерпание лимита,
+        поэтому причина строится по факту результата, а не по объявленному числу: документ
+        короче лимита не получает ни ``partial``, ни причины.
+
+        ``None`` при неизвестных величинах — честное «не измерено»: docling без
+        пагинации (Office) или без счётчика не даёт права объявить усечение (A3).
+        """
+        if page_limit is None:
+            return None
+        total = _page_count(result)
+        converted = _converted_page_count(result)
+        if total is None or converted is None or total <= int(page_limit):
+            return None
+        return page_limit_note(converted, total, int(page_limit))
+
+    def _with_page_limit(self, doc: ExtractedDoc, reason: str | None) -> ExtractedDoc:
+        """Добавляет причину лимита страниц к документу, не теряя причину docling.
+
+        Отказ (``error``) не трогается: «документ не прочитан» и «прочитан частично по
+        решению оператора» — разные факты, и второй не должен маскировать первый.
+        """
+        if reason is None or doc.error is not None:
+            return doc
+        return replace(
+            doc,
+            partial=True,
+            partial_reason=merge_partial_reason(doc.partial_reason, reason),
+        )
+
+    def _with_char_limit(
+        self, doc: ExtractedDoc, char_limit: int | None
+    ) -> ExtractedDoc:
+        """Обрезает текст до ``char_limit``; ``content_hash`` пересчитывается по обрезанному.
+
+        Хеш обязан описывать текст, который увидит чанкер и цитата (I22): оставить хеш
+        полного текста значило бы объявить документ, которого в корпусе нет. Отказ
+        (``error``) и пустой текст не трогаются — обрезать там нечего.
+        """
+        if char_limit is None or doc.error is not None or not doc.text:
+            return doc
+        total = len(doc.text)
+        text, dropped = truncate_text(doc.text, char_limit)
+        if not dropped:
+            return doc
+        return replace(
+            doc,
+            text=text,
+            content_hash=_sha256(text),
+            partial=True,
+            partial_reason=merge_partial_reason(
+                doc.partial_reason,
+                char_limit_note(dropped, total, int(char_limit)),
+            ),
+        )
 
     def _partial(
         self,

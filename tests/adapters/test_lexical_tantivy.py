@@ -589,9 +589,20 @@ def test_identifier_requires_its_own_build() -> None:
 
 @requires_tantivy
 def test_raw_profile_alias_uses_identifier_field() -> None:
-    records = [LexicalChunk("id1", PRODUCT_A, "see API-2024_X endpoint")]
+    """``raw`` — псевдоним ``identifier``, а не дефолт: регистр и пунктуация значимы.
+
+    Прежняя проверка была тождеством (один документ находился всегда): ветки анализатора
+    сравнивали профиль с ``"identifier"``, а проверка принимала ``"raw"``, поэтому
+    псевдоним молча получал **стеммированный** анализатор. Здесь два документа, которые
+    различает ровно identifier-анализ.
+    """
+    records = [
+        LexicalChunk("id1", PRODUCT_A, "see API-2024_X endpoint"),
+        LexicalChunk("id2", PRODUCT_A, "see api-2024_x endpoint"),
+    ]
     with _index(records, profile="raw") as index:
         hits = index.search("API-2024_X", [PRODUCT_A], top_k=5)
+        assert index.profile == "identifier"
     assert [c.chunk_id for c in hits] == ["id1"]
 
 
@@ -849,7 +860,7 @@ def test_ngram_missing_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 # ---------------------------------------------------------------------------
-# CJK-сегментация (schema ``single-body-stem-ru-en-zh-2``)
+# CJK-сегментация (schema ``single-body-stem-ru-en-zh-3``)
 # ---------------------------------------------------------------------------
 
 #: Документы точного кейса из плана 18: CJK-фраза без пробелов + английский контроль.
@@ -924,8 +935,36 @@ def test_lexical_schema_declares_the_cjk_version_boundary() -> None:
     ``lexical_engine_version``, поэтому пин держит обе адресные строки.
     """
     spec = lexical_tantivy.lexical_schema_spec()
-    assert spec["version"] == "single-body-stem-ru-en-zh-2"
+    assert spec["version"] == "single-body-stem-ru-en-zh-3"
     assert spec["stemmed_analyzer"][0] == "pre:segment:cjk-bigrams(han,kana,hangul)"
+
+
+def test_lexical_schema_names_the_declared_profile() -> None:
+    """Профиль анализатора назван в схеме: он и есть выбор того, как строится выдача.
+
+    До правки ``lexical_spec`` профиля не называл, а индекс строился с дефолтом
+    адаптера — то есть ``run_id`` не описывал анализатор, которым получены вердикты.
+    """
+    assert lexical_tantivy.lexical_schema_spec()["profile"] == "stemmed"
+    assert lexical_tantivy.lexical_schema_spec("identifier")["profile"] == "identifier"
+    assert lexical_tantivy.lexical_schema_spec("ngram")["profile"] == "ngram"
+    # ``raw`` — псевдоним: в контракте одно поведение, одно имя.
+    assert lexical_tantivy.lexical_schema_spec("raw")["profile"] == "identifier"
+    assert lexical_tantivy.lexical_schema_spec("  IDENTIFIER ")["profile"] == "identifier"
+
+
+def test_lexical_schema_profile_changes_the_spec() -> None:
+    """Смена профиля меняет материал схемы (а значит и ``execution_contract_digest``)."""
+    stemmed = lexical_tantivy.lexical_schema_spec("stemmed")
+    identifier = lexical_tantivy.lexical_schema_spec("identifier")
+    assert stemmed != identifier
+    assert stemmed["version"] == identifier["version"]  # версия схемы та же
+
+
+def test_lexical_schema_unknown_profile_rejected() -> None:
+    """Профиль вне набора — отказ, а не «какой-нибудь другой» в контракте."""
+    with pytest.raises(ValueError):
+        lexical_tantivy.lexical_schema_spec("fuzzy")
 
 
 # ---------------------------------------------------------------------------

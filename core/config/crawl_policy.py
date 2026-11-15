@@ -15,6 +15,16 @@
 Схема строгая (``extra="forbid"``): неизвестные поля отвергаются. Загрузчик только
 читает файл; разрешение приоритетов и матчинг — :mod:`core.pipeline.crawl_policy`.
 Нейтрален к предметной категории (§1.3).
+
+**Вторая секция того же файла — оси лимитов (D9, план 26).** ``product_axes`` объявляет
+лимиты **PDF** на продукт (``pdf_max_pages``/``pdf_max_extracted_chars``; ``None`` =
+лимита нет). Это не «ещё один режим политики»: ``defaults``/``products``/``sites``
+описывают **когда** обновлять корпус (решение по часам, вход ``crawl_policy_digest``), а
+лимит — **что** измеряется (состав текста документа, вход ``crawl_config_digest`` и
+``run_id``). Общего слоя ``defaults`` у осей нет намеренно: потолок, которого никто не
+выбирал, — это ограничение, а не измерение (A3). Секция читается тем же загрузчиком и
+резолвится :func:`core.pipeline.crawl_frontier.resolve_crawl_limits` (цепочка
+app < run < product < site).
 """
 
 from __future__ import annotations
@@ -38,6 +48,7 @@ __all__ = [
     "CRAWL_POLICY_FILENAME",
     "CrawlPolicyConfig",
     "CrawlPolicyEntry",
+    "ProductCrawlAxes",
     "load_crawl_policy",
     "parse_site_key",
 ]
@@ -74,14 +85,53 @@ class CrawlPolicyEntry(BaseModel):
         return self
 
 
+class ProductCrawlAxes(BaseModel):
+    """Оси **лимитов**, объявленные на продукт (``crawl_policy.yaml: product_axes``, D9).
+
+    Оба поля — ``None`` = «на этом слое не задано» (наследуется run/app, затем корень).
+    Схема строгая (``extra="forbid"``): неизвестная ось отвергается, а не игнорируется
+    молча — «объявил и не подействовало» было бы ложным провенансом.
+
+    Пределы положительны и не имеют дефолта: ``0`` не значит «без лимита» (это ``None``),
+    и принимать его значило бы получить пустой корпус при объявленной оси.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Потолок страниц PDF-документа: читаются первые N. ``None`` — лимита нет.
+    pdf_max_pages: int | None = Field(default=None, gt=0)
+    #: Потолок извлечённых символов PDF-документа: текст обрезается до N.
+    #: ``None`` — лимита нет.
+    pdf_max_extracted_chars: int | None = Field(default=None, gt=0)
+
+
 class CrawlPolicyConfig(BaseModel):
-    """Корень ``crawl_policy.yaml``: ``defaults`` → ``products`` → ``sites``."""
+    """Корень ``crawl_policy.yaml``: ``defaults`` → ``products`` → ``sites`` (+ ``product_axes``)."""
 
     model_config = ConfigDict(extra="forbid")
 
     defaults: CrawlPolicyEntry | None = None
     products: dict[str, CrawlPolicyEntry] = Field(default_factory=dict)
     sites: dict[str, dict[str, CrawlPolicyEntry]] = Field(default_factory=dict)
+    #: D9 (план 26): оси **лимитов** на продукт — отдельная секция того же пакетного
+    #: артефакта. Почему здесь, а не в общем механизме политики: ``defaults``/
+    #: ``products``/``sites`` описывают **когда** обновлять корпус (решение по часам) и
+    #: входят в ``crawl_policy_digest`` — поверхность решений. Лимит PDF описывает **что**
+    #: измеряется (состав текста документа), входит в ``crawl_config_digest`` и обязан
+    #: менять ``run_id`` как условие измерения (§13). Смешать их в одной записи значило бы
+    #: получить ось, которая одновременно решает «когда» и «что»; поэтому — отдельная
+    #: секция с собственным именем, но в том же файле: новый файл конфигурации завёл бы
+    #: вторую поверхность «продукт → оси» вместо уже объявленной.
+    product_axes: dict[str, ProductCrawlAxes] = Field(default_factory=dict)
+
+    def axes_for(self, product_id: str) -> ProductCrawlAxes | None:
+        """Продуктовый слой лимитов; ``None`` — продукт осей не объявлял.
+
+        Слоя ``defaults`` у осей намеренно нет: лимит — решение о конкретном продукте
+        (A3, «не ограничивать, а измерять»), а дефолт «обрезать всем» был бы потолком,
+        который никто не выбирал.
+        """
+        return self.product_axes.get(str(product_id))
 
     @field_validator("sites")
     @classmethod

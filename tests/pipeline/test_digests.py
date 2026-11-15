@@ -307,6 +307,44 @@ def test_embed_spec_is_a_contract_condition() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Профиль лексического анализатора — условие измерения (``lexical_spec``)
+# ---------------------------------------------------------------------------
+
+
+def test_lexical_spec_names_the_profile() -> None:
+    """``lexical_spec`` называет профиль анализатора, а не только версию схемы.
+
+    Профиль и есть выбор анализатора единственного поля: без него ``run_id`` не описывал
+    бы, каким анализом получена лексическая выдача (``stemmed`` против ``identifier`` —
+    разный ранг первого попадания, замер O16).
+    """
+    from core.adapters.lexical_tantivy import lexical_schema_spec
+
+    spec = lexical_schema_spec()
+    assert spec["profile"] == "stemmed"
+    assert lexical_schema_spec("identifier")["profile"] == "identifier"
+    # ``raw`` — псевдоним: каноническое имя одно.
+    assert lexical_schema_spec("raw")["profile"] == "identifier"
+
+
+def test_lexical_profile_is_a_contract_condition() -> None:
+    """Смена профиля лексики меняет ``execution_contract_digest`` (значит ``run_id``)."""
+    from core.adapters.lexical_tantivy import lexical_schema_spec
+
+    assert "lexical_spec" in EXECUTION_CONTRACT_FIELDS
+    stemmed = _contract_values()
+    stemmed["lexical_spec"] = lexical_schema_spec("stemmed")
+    identifier = _contract_values()
+    identifier["lexical_spec"] = lexical_schema_spec("identifier")
+    assert execution_contract_digest(stemmed) != execution_contract_digest(identifier)
+
+    # Отсутствие оси отличимо от объявленной: ``null`` — тоже значение контракта.
+    absent = _contract_values()
+    absent["lexical_spec"] = None
+    assert execution_contract_digest(absent) != execution_contract_digest(stemmed)
+
+
+# ---------------------------------------------------------------------------
 # O2 плана 26: retrieval_params_json = исполненные параметры
 # ---------------------------------------------------------------------------
 def test_retrieval_params_serializer_declares_exactly_executed_values() -> None:
@@ -349,3 +387,75 @@ def test_null_retrieval_params_is_not_the_defaults() -> None:
         profile=None, cutoff_k=None
     )
     assert execution_contract_digest(old) != execution_contract_digest(explicit)
+
+
+# ---------------------------------------------------------------------------
+# D9 (план 26): лимиты PDF — условие измерения, а не расписание
+# ---------------------------------------------------------------------------
+
+
+def test_pdf_limits_absent_do_not_change_crawl_config_digest() -> None:
+    """Прогон без объявленных осей даёт **прежний** ``crawl_config_digest``.
+
+    Это главная гарантия обратной совместимости: появление осей в коде не должно менять
+    ``run_id`` у прогона, который их не объявлял (§13). Сравнение — с вызовом, где оси
+    переданы как ``None`` явно: оба пути обязаны дать одну величину.
+    """
+    from core.config.deploy import CrawlConfig
+    from core.domain.models import CrawlRunConfig
+    from core.pipeline.report import crawl_control_digest
+
+    implicit = crawl_control_digest(
+        run_crawl=CrawlRunConfig(), app=CrawlConfig(), profiles=None
+    )
+    explicit = crawl_control_digest(
+        run_crawl=CrawlRunConfig(pdf_max_pages=None, pdf_max_extracted_chars=None),
+        app=CrawlConfig(),
+        profiles=None,
+    )
+    assert implicit == explicit
+
+
+def test_pdf_limits_declared_change_crawl_config_digest() -> None:
+    """Объявленная ось меняет дайджест: состав текста документа — это состав корпуса."""
+    from core.config.deploy import CrawlConfig
+    from core.domain.models import CrawlRunConfig
+    from core.pipeline.report import crawl_control_digest
+
+    plain = crawl_control_digest(
+        run_crawl=CrawlRunConfig(), app=CrawlConfig(), profiles=None
+    )
+    pages = crawl_control_digest(
+        run_crawl=CrawlRunConfig(pdf_max_pages=250), app=CrawlConfig(), profiles=None
+    )
+    chars = crawl_control_digest(
+        run_crawl=CrawlRunConfig(pdf_max_extracted_chars=1_000_000),
+        app=CrawlConfig(),
+        profiles=None,
+    )
+    assert len({plain, pages, chars}) == 3
+
+
+def test_pdf_limits_product_layer_changes_crawl_config_digest() -> None:
+    """Продуктовый слой (``product_axes``) — тоже условие измерения, а не провенанс."""
+    from core.config.crawl_policy import ProductCrawlAxes
+    from core.config.deploy import CrawlConfig
+    from core.domain.models import CrawlRunConfig
+    from core.pipeline.report import crawl_control_digest
+
+    base = crawl_control_digest(
+        run_crawl=CrawlRunConfig(), app=CrawlConfig(), profiles=None
+    )
+    with_product = crawl_control_digest(
+        run_crawl=CrawlRunConfig(),
+        app=CrawlConfig(),
+        profiles=None,
+        product_axes={"p1": ProductCrawlAxes(pdf_max_pages=250)},
+    )
+    other_limit = crawl_control_digest(
+        run_crawl=CrawlRunConfig(),
+        app=CrawlConfig(),
+        profiles=None,
+        product_axes={"p1": ProductCrawlAxes(pdf_max_pages=500)},
+    )
+    assert len({base, with_product, other_limit}) == 3

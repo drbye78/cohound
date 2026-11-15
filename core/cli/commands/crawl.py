@@ -81,6 +81,7 @@ from core.cli.errors import (
 from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
+    resolve_retrieval_profile,
 )
 from core.cli.wiring import (
     LOCAL_PROFILE,
@@ -469,15 +470,23 @@ def _execute_crawl_locked(
     except ValueError as exc:
         raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
     status_dict_version = declared_status_dict_version()
+    # I16/D2: ``crawl run`` не принимает ``--retrieval-profile``, поэтому профиль — это
+    # объявленный дефолт развёртывания (``deploy.retrieval.profile``). Резолв тот же, что
+    # у ``plan``/``run``: иначе при тех же входах ``crawl run`` адресовал бы другой
+    # ``run_id`` (``null`` вместо названного профиля).
+    resolved_profile = resolve_retrieval_profile(None, deploy_config)
     contract_d = build_execution_contract(
         inputs,
         cohort_digest=cohort_d,
         seeds_digest=seeds_d,
         declared=declared,
-        # План 26 O2: ``crawl`` не объявляет профиль/K ретривала, но поле контракта
+        retrieval_profile=resolved_profile,
+        # План 26 O2: ``crawl`` не объявляет профиль/K ретривала флагами, но поле контракта
         # обязано быть тем же, что у ``plan``/``run`` при тех же входах, — иначе
         # ``crawl run`` адресовал бы другой ``run_id``, чем ``run``.
-        retrieval_params_json=retrieval_params_json(profile=None, cutoff_k=None),
+        retrieval_params_json=retrieval_params_json(
+            profile=resolved_profile, cutoff_k=None
+        ),
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,
         frozen_source=getattr(args, "frozen_source", None),

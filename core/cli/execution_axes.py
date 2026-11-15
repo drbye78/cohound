@@ -170,6 +170,7 @@ __all__ = [
     "extractor_stack_version",
     "identity_flag_values",
     "resolve_declared_axes",
+    "resolve_retrieval_profile",
 ]
 
 #: Путь словаря статусов относительно корня репозитория (источник ``status_dict_version``).
@@ -621,6 +622,38 @@ def contract_flag_values(args: argparse.Namespace) -> dict[str, Any]:
         # ``is not None`` вместо приведения молча выбросила бы флаг из контракта.
         values[cast(str, spec.contract_arg)] = getattr(args, spec.dest, None)
     return values
+
+
+def resolve_retrieval_profile(
+    cli_value: RetrievalProfile | str | None,
+    deploy: DeployConfig | None = None,
+) -> str:
+    """Резолвит профиль ретривала: ``--retrieval-profile`` > ``deploy.retrieval.profile`` > ``R0``.
+
+    **Один резолв на контракт и на исполнение** (закрывает D2 плана 26). До правки
+    незаданный флаг давал ``None`` в контракте (``run_id`` описывал «профиль не
+    объявлен»), а фаза оценки молча подставляла ``evaluate.DEFAULT_RETRIEVAL_PROFILE``:
+    два одинаковых измерения получали разный ``run_id`` при одном и том же приборе.
+    Теперь значение резолвится **до** контракта и едет в него же и в фазы, поэтому
+    «объявлено» и «исполнено» — одно значение, а не два независимых дефолта.
+
+    Приоритет — тот же, что у прочих осей (``app < run``): флаг оператора сильнее
+    объявленного дефолта развёртывания. Проверка именно ``is None``, а не ``or``:
+    ``StrEnum`` — строка, и «ложность» значения здесь не имеет смысла (``R0`` не пуст,
+    но полагаться на это — значит завести второе правило для того же поля).
+
+    :param cli_value: значение ``--retrieval-profile`` (``None`` — флаг не задан).
+    :param deploy: resolved ``DeployConfig``; ``None`` — дефолт секции (``R0``), то есть
+        «развёртывание не объявляло» не превращается в «профиль не назван».
+    :returns: каноническое значение профиля (``"R0"``/``"R1"``/``"R2"``) — **никогда**
+        ``None``: контрактное поле ``retrieval_profile`` обязано называть прибор.
+    """
+    if cli_value is not None:
+        return RetrievalProfile(str(cli_value).strip().upper()).value
+    config = deploy if deploy is not None else DeployConfig(profile="local")
+    # ``retrieval.profile`` уже провалидирован загрузчиком конфига; приведение через
+    # ``RetrievalProfile`` держит каноническую форму (``r0`` → ``R0``) в одном месте.
+    return RetrievalProfile(config.retrieval.profile).value
 
 
 @dataclass(frozen=True)
@@ -1085,6 +1118,16 @@ def resolve_declared_axes(
             run_crawl=_run_layer_overrides(run_crawl, axis_overrides),
             app=config.crawl,
             profiles=getattr(inputs, "domain_profiles", None),
+            # D9 (план 26): продуктовый слой лимитов PDF (``crawl_policy.yaml:
+            # product_axes``). Передаётся **тот же** загруженный конфиг пакета, который
+            # получит Ш5 (``normalize.load_inputs`` → ``RunInputs.crawl_policy`` →
+            # ``phases.build_corpus``): объявленная ось обязана попасть и в ``run_id``,
+            # и в исполнение, иначе «объявил и не подействовало» — ложный провенанс.
+            # Пустая секция/``None`` оставляют дайджест байт-в-байт прежним (``report``
+            # канонизирует ``product_axes or {}``).
+            product_axes=getattr(
+                getattr(inputs, "crawl_policy", None), "product_axes", None
+            ),
         ),
         serp_rounds=serp_rounds,
         serp_source=serp_source,
@@ -1107,7 +1150,11 @@ def resolve_declared_axes(
         passports_digest=passports_digest(
             passport_content_digests(cohort_products, passports_dir)
         ),
-        lexical_spec=lexical_schema_spec(),
+        # C8: схема лексического индекса **с объявленным профилем анализатора**
+        # (``deploy.lexical.profile``): профиль выбирает анализатор единственного поля,
+        # то есть выдачу, поэтому он назван в контракте, а не берётся дефолтом адаптера
+        # в момент сборки индекса (``wiring.seed_lexical_index`` получает то же значение).
+        lexical_spec=lexical_schema_spec(config.lexical.profile),
         llm_scenarios=_resolve_llm_scenarios(args=args, inputs=inputs, deploy=config),
         # P9: устройство — объявленная ось (``app < run`` той же формулой, что у
         # исполнения); входит в стек, значит и в ``run_id``. Значение резолвится, а не

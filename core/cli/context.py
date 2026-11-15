@@ -2678,6 +2678,10 @@ def _resolve_phases(
         их сочетание явным ``ValueError``. ``False`` — прежнее поведение байт-в-байт.
     """
     passports_dir = _resolve_passports_dir(args, paths)
+    # Импорт локальный: ``execution_axes`` сам импортирует из этого модуля (парсеры и
+    # хелперы осей), поэтому на уровне модуля получился бы цикл. Функция — чистая.
+    from core.cli.execution_axes import resolve_retrieval_profile
+
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
     # 09 §8.1–§8.5: тот же корень, что у ``IndexBuilderPort`` (composition root), —
     # переиспользование партиций и запись ``_compositions/*.json``.
@@ -2764,7 +2768,13 @@ def _resolve_phases(
         "out_dir": getattr(args, "runs_dir", None) or "runs",
         "raw_root": raw_root,
         "index_root": index_root,
-        "retrieval_profile": getattr(args, "retrieval_profile", None),
+        # I16/D2: профиль ретривала резолвится **один раз** тем же резолвером, что и
+        # контракт (``--retrieval-profile`` > ``deploy.retrieval.profile`` > ``R0``).
+        # До правки сюда приходил ``None`` при незаданном флаге, и фаза оценки молча
+        # подставляла свой дефолт — то есть исполнение не совпадало с ``run_id``.
+        "retrieval_profile": resolve_retrieval_profile(
+            getattr(args, "retrieval_profile", None), deploy_config
+        ),
         "cutoff_k": getattr(args, "cutoff_k", None),
         # D2: доменные профили (из domain_profiles.yaml) + явное переопределение
         # оси fetch (--render-modes); резолв FetchPlan — в pipeline Ш5.
@@ -2879,11 +2889,23 @@ def _resolve_phases(
         # resolved-раскладки нет определённой области, а CWD-дефолт делает его общим
         # для всех вызовов процесса — ровно та же причина, по которой ``_resolve_ports``
         # отдаёт ``cache=None``. Иначе тесты и параллельные прогоны делят состояние.
-        # Бюджет не задаётся: вытеснение по размеру — операционное решение, дефолт —
-        # без вытеснения. Ключ — хеш ретенированных байтов (I19), поэтому кэш не может
-        # подсунуть неверифицированный контент.
+        # Бюджет — объявленный параметр развёртывания (``deploy.extract.cache_max_bytes``,
+        # D8): ``None`` — без вытеснения (прежнее поведение), число — LRU по ``mtime``
+        # внутри :class:`ExtractionCache`. В ``run_id`` бюджет **не** входит: вытеснение
+        # меняет только цену повторного извлечения, а не состав корпуса и не вердикты.
+        # Ключ — хеш ретенированных байтов (I19), поэтому кэш не может подсунуть
+        # неверифицированный контент, а вытесненный артефакт — обычный промах кэша.
         "extract_cache": (
-            ExtractionCache(str(paths.extract_cache)) if paths is not None else None
+            ExtractionCache(
+                str(paths.extract_cache),
+                max_bytes=(
+                    deploy_config.extract.cache_max_bytes
+                    if deploy_config is not None
+                    else None
+                ),
+            )
+            if paths is not None
+            else None
         ),
         # Ф3: межпрогонный кэш вердиктов оценщика. Каталог — resolved ``paths.eval_cache``
         # (``COHOUND_EVAL_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``); ``paths is None``

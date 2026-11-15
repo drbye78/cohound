@@ -66,6 +66,7 @@ from core.cli.errors import (
 from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
+    resolve_retrieval_profile,
 )
 from core.cli.wiring import (
     LOCAL_PROFILE,
@@ -348,6 +349,7 @@ def _rebind_retrieval_after_corpus(
     package: str,
     run_id: str,
     profile: str,
+    lexical_profile: str = "stemmed",
 ) -> PhaseFn:
     """Оборачивает фазу ``corpus``: привязывает ретривал к **её** композиции (09 §8.1/§8.4).
 
@@ -365,6 +367,11 @@ def _rebind_retrieval_after_corpus(
     ``tantivy``/``numpy`` или пустая композиция), но не молчаливое: причина попадает в
     ``errors``/``log_entries`` фазы. ``split`` не собирает локальные порты ретривала —
     composition id всё равно персистится, перепривязки нет.
+
+    ``profile`` — профиль **развёртывания** (``local``/``split``), ``lexical_profile`` —
+    объявленный профиль анализатора лексического индекса (``deploy.lexical.profile``).
+    Второй обязан совпадать с тем, что назван в ``lexical_spec``/``run_id``: пересборка
+    индекса другим анализатором дала бы выдачу, которой контракт не описывает.
     """
 
     def wrapped(ctx: RunContext) -> PhaseResult:
@@ -410,6 +417,9 @@ def _rebind_retrieval_after_corpus(
                 package=package,
                 store=store,
                 build_id=composition_id,
+                # Объявленный профиль (тот же, что в ``lexical_spec``): пересборка другим
+                # анализатором дала бы выдачу, которой контракт не описывает.
+                profile=lexical_profile,
             )
             vector = build_vector_index(
                 index_root=index_root,
@@ -866,18 +876,26 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         for item in policy_resolution.unmatched_requested
     )
     status_dict_version = declared_status_dict_version()
+    # I16/D2: профиль ретривала резолвится **до** контракта — один резолв на контракт и
+    # на исполнение (``--retrieval-profile`` > ``deploy.retrieval.profile`` > ``R0``).
+    # Незаданный флаг больше не означает «профиль не назван»: контракт и фаза оценки
+    # получают одно и то же значение, поэтому ``run_id`` не может описывать ``null`` при
+    # исполненном дефолте.
+    resolved_profile = resolve_retrieval_profile(
+        getattr(args, "retrieval_profile", None), deploy_config
+    )
     contract_d = build_execution_contract(
         inputs,
         cohort_digest=cohort_d,
         seeds_digest=seeds_d,
         declared=declared,
-        retrieval_profile=getattr(args, "retrieval_profile", None),
+        retrieval_profile=resolved_profile,
         cutoff_K=getattr(args, "cutoff_k", None),
         # План 26 O2: параметры, которые **реально исполнены** (rrf_k/пул/запросы/
         # слияние), а не только объявленные профиль/K. Это условие измерения: смена
         # любого меняет доказательства, поэтому поле входит в ``run_id``.
         retrieval_params_json=retrieval_params_json(
-            profile=getattr(args, "retrieval_profile", None),
+            profile=resolved_profile,
             cutoff_k=getattr(args, "cutoff_k", None),
         ),
         status_dict_version=status_dict_version,
@@ -903,6 +921,9 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
     # контракт с ``None`` при манифесте/ячейках с измеренным ``R2`` — ложную границу §13.
     # Явный CLI-профиль/``--cutoff-k`` приоритетнее фиксации; явный **противоречащий**
     # профиль отвергается (A3: изменить измеренное можно только пере-измерением).
+    # Дефолт из ``deploy.retrieval.profile`` «явным» **не** считается: это объявленное
+    # предположение, а фиксация — измерение (A3: измерение заменяет дефолт), поэтому
+    # противоречия с дефолтом не бывает — усыновление просто побеждает его.
     explicit_profile = getattr(args, "retrieval_profile", None)
     explicit_cutoff = getattr(args, "cutoff_k", None)
     if db_path.exists():
@@ -1455,6 +1476,7 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                     package=resolve_package_id(inputs),
                     run_id=run_id,
                     profile=args.profile,
+                    lexical_profile=deploy_config.lexical.profile,
                 )
             # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
             # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал

@@ -1078,7 +1078,13 @@ def build_phases(
         манифеста композиции (09 §8.1–§8.5). ``None`` — легаси-путь без чтения/записи
         индекса (композиция не пишется, переиспользования нет).
     :param snapshot_date: окно снимка (Ш5); ``None`` → ``plan``/когорта.
-    :param retrieval_profile: зафиксированный профиль R0/R1/R2 (I16); ``None`` → дефолт Ш6.
+    :param retrieval_profile: зафиксированный профиль R0/R1/R2 (I16). **Composition root
+        передаёт резолвленное значение** (``--retrieval-profile`` > ``deploy.retrieval.profile``
+        > ``R0``, :func:`core.cli.execution_axes.resolve_retrieval_profile`) — то же, что
+        ушло в контракт (``retrieval_profile`` → ``run_id``). ``None`` здесь — только
+        модульный вызов без оси (тесты/DI): тогда действует дефолт Ш6
+        (``evaluate.DEFAULT_RETRIEVAL_PROFILE``), и это «не объявлено», а не второй
+        дефолт прод-пути.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K`` (I20); ``None`` → дефолт Ш6.
     :param domain_profiles: типизированные доменные профили (D.2) для резолва ``FetchPlan``
         в фазе корпуса (Ш5).
@@ -1424,6 +1430,13 @@ def build_phases(
             # План 19 §P2: гейт сети — вход Ш5, а не решение CLI: резолв уже вошёл в
             # ``run_id``, и фаза обязана исполнить **тот же** объект.
             crawl_policy=crawl_policy,
+            # D9 (план 26): продуктовый слой лимитов PDF — **тот же** загруженный конфиг
+            # пакета, что вошёл в ``crawl_config_digest`` (``resolve_declared_axes``).
+            # Вторая загрузка файла дала бы вторую формулу входа; ``None`` — пакет секцию
+            # не объявлял, поведение байт-в-байт.
+            product_axes=getattr(
+                getattr(inputs, "crawl_policy", None), "product_axes", None
+            ),
             # ``--only-failed`` (межпрогонный ремонт): разрешённое множество провалов по
             # продукту — depth-0 известные URL, авторские корни не обходятся. ``None`` ⇒
             # прежнее поведение байт-в-байт.
@@ -1478,6 +1491,9 @@ def build_phases(
         # Разрешённые профиль/K фиксируются в holder для провенанса манифеста Ш9 (R7/§13):
         # ячейка несёт те же значения, что и манифест (иначе манифест — не самостоятельная
         # запись воспроизведения). Дефолты — те же, что применяет evaluate_phase.
+        # Прод-путь сюда не доходит: composition root передаёт профиль **резолвленным**
+        # (``deploy.retrieval.profile`` при незаданном флаге), поэтому ``DEFAULT_*`` ниже —
+        # страховка модульного вызова, а не источник истины.
         holder["retrieval_profile"] = (
             retrieval_profile.value
             if isinstance(retrieval_profile, RetrievalProfile)
