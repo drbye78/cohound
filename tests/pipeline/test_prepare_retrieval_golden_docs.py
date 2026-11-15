@@ -161,3 +161,172 @@ def test_resolved_accept_still_requires_doc_id(
         == 2
     )
     assert "без doc_id" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# annotate: подсказка разметчику (что утверждается и откуда фактически взята цитата)
+# ---------------------------------------------------------------------------
+CELLS_FIELDS = [
+    "product_id",
+    "excel_number",
+    "section",
+    "excel_title",
+    "raw_value",
+    "normalized_status",
+    "param_id",
+    "source_url",
+    "source_comment",
+    "hyperlink_target",
+]
+
+
+def _cells_csv(tmp_path: Path) -> Path:
+    import csv
+
+    path = tmp_path / "cells.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CELLS_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(
+            {
+                "product_id": PRODUCT,
+                "excel_number": "5",
+                "section": "Общие",
+                "excel_title": "Техническая поддержка 24×7",
+                "raw_value": "ДА",
+                "normalized_status": "✅",
+                "param_id": "param.a",
+                "source_url": "https://docs.test/tune",
+                "source_comment": "",
+                "hyperlink_target": "https://docs.test/tune",
+            }
+        )
+        writer.writerow(
+            {
+                "product_id": PRODUCT,
+                "excel_number": "6",
+                "section": "Общие",
+                "excel_title": "Документация\nна русском",
+                "raw_value": "ЧАСТИЧНО",
+                "normalized_status": "⚠️",
+                "param_id": "param.b",
+                "source_url": "https://docs.test/tune",
+                "source_comment": "",
+                "hyperlink_target": "https://docs.test/tune",
+            }
+        )
+    return path
+
+
+def test_annotate_joins_every_param_of_the_row(tmp_path: Path) -> None:
+    """Подсказка собирается по **всем** `param_ids`: страница цитируется несколькими ячейками."""
+    import csv
+
+    out = tmp_path / "annotated.csv"
+    assert (
+        PREP.main(  # type: ignore[attr-defined]
+            [
+                "annotate",
+                "--candidate",
+                str(_write(tmp_path, [_row(param_ids="param.a;param.b")])),
+                "--cells",
+                str(_cells_csv(tmp_path)),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    rows = list(csv.DictReader(out.open(encoding="utf-8")))
+    assert len(rows) == 1
+    # Порядок — порядок `param_ids`, значения — из исходной таблицы.
+    assert rows[0]["titles"] == "Техническая поддержка 24×7 | Документация на русском"
+    assert rows[0]["claims"] == "ДА | ЧАСТИЧНО"
+    # `decision` annotate не трогает: решение человека не подставляется.
+    assert rows[0]["decision"] == ""
+
+
+def test_annotate_leaves_unknown_param_empty_and_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ячейки нет в исходной таблице — колонки пусты, и это названо, а не выдумано."""
+    import csv
+
+    out = tmp_path / "annotated.csv"
+    assert (
+        PREP.main(  # type: ignore[attr-defined]
+            [
+                "annotate",
+                "--candidate",
+                str(_write(tmp_path, [_row(param_ids="param.a;param.нет")])),
+                "--cells",
+                str(_cells_csv(tmp_path)),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    rows = list(csv.DictReader(out.open(encoding="utf-8")))
+    assert rows[0]["titles"] == "Техническая поддержка 24×7"
+    assert "param.нет" in capsys.readouterr().err
+
+
+def test_annotate_resolves_citation_through_chunk_hash(tmp_path: Path) -> None:
+    """Адрес цитаты — через `corpus_chunks.content_hash` (хеш **чанка**, не документа).
+
+    Проверяется именно выбор таблицы: `cell_evidence.content_hash` не совпадает с
+    `corpus_docs.content_hash`, поэтому join по документам даёт ноль — и лист молча
+    показывал бы «цитаты нет» там, где она есть.
+    """
+    import csv
+
+    db = tmp_path / "cohound.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "CREATE TABLE corpus_docs (product_id TEXT, url TEXT, doc_id TEXT, content_hash TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE corpus_chunks (content_hash TEXT, doc_id TEXT, url TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE cell_evidence (product_id TEXT, param_id TEXT,"
+            " content_hash TEXT, citation_quote TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO corpus_docs VALUES (?, ?, ?, ?)",
+            (PRODUCT, "https://docs.test/tune", f"{PRODUCT}:aaa", "DOC-HASH"),
+        )
+        # Хеш чанка — другой, и адрес цитаты — другой документ.
+        conn.execute(
+            "INSERT INTO corpus_chunks VALUES (?, ?, ?)",
+            ("CHUNK-HASH", f"{PRODUCT}:aaa", "https://docs.test/other"),
+        )
+        conn.execute(
+            "INSERT INTO cell_evidence VALUES (?, ?, ?, ?)",
+            (PRODUCT, "param.a", "CHUNK-HASH", "текст цитаты"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = tmp_path / "annotated.csv"
+    assert (
+        PREP.main(  # type: ignore[attr-defined]
+            [
+                "annotate",
+                "--candidate",
+                str(_write(tmp_path, [_row(param_ids="param.a")])),
+                "--cells",
+                str(_cells_csv(tmp_path)),
+                "--run-db",
+                str(db),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    rows = list(csv.DictReader(out.open(encoding="utf-8")))
+    assert rows[0]["cited_from"] == "https://docs.test/other"

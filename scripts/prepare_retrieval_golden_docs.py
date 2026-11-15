@@ -72,6 +72,10 @@ CANDIDATE_FIELDS = [
     "live_url",
 ]
 
+#: Колонки-подсказки для разметчика (`annotate`): что именно утверждает ячейка.
+#: Не вход `compile` — это чтение для человека, а не решение; `compile` их игнорирует.
+ANNOTATION_FIELDS = ["titles", "claims", "cited_from"]
+
 #: Значения ``decision``, которые пишет человек. Пусто = ещё не рассмотрено.
 DECISIONS = {"accept", "reject"}
 
@@ -701,6 +705,157 @@ def _batch_live(row: dict[str, str]) -> str:
     return label
 
 
+def _batch_cited(row: dict[str, str]) -> str:
+    """Откуда фактически взята цитата: ``= объявлено``, иначе адрес(а) или «—».
+
+    ``= объявлено`` печатается вместо повторения адреса: совпадение — это факт, и он
+    должен читаться мгновенно. Несколько адресов — через ``<br>``, иначе markdown-строка
+    распухает и таблица перестаёт читаться.
+    """
+    cited = (row.get("cited_from") or "").strip()
+    if not cited:
+        return "—"
+    if cited == (row.get("corpus_url") or "").strip():
+        return "= объявлено"
+    return "<br>".join(part.strip() for part in cited.split(" ; ") if part.strip()).replace(
+        "|", "\\|"
+    )
+
+
+def _batch_claim(row: dict[str, str]) -> str:
+    """Утверждение ячейки для таблицы: «параметр: значение», иначе «—».
+
+    Печатается только когда аннотация есть (`annotate`); вертикальная черта внутри
+    текста заменяется, иначе она разрежет markdown-таблицу.
+    """
+    titles = (row.get("titles") or "").strip()
+    claims = (row.get("claims") or "").strip()
+    if not titles and not claims:
+        return "—"
+    text = f"{titles}: {claims}" if titles and claims else (titles or claims)
+    return text.replace("|", "\\|")
+
+
+def cmd_annotate(args: argparse.Namespace) -> int:
+    """Дописывает в лист утверждение ячейки: ``titles`` и ``claims``.
+
+    Зачем. В листе на разметку были только адреса: разметчик видел URL и документ
+    корпуса, но не видел, **что** утверждается цитатой, — а решение ``accept`` означает
+    именно «утверждение этой ячейки взято с этого документа». Без текста утверждения
+    сверять нечего, и разметка превращается в сверку похожести адресов.
+
+    Откуда берётся. ``golden_00_cells.csv`` — исходная comparative table: ``excel_title``
+    («что за параметр») и ``raw_value`` («что записано в ячейке»). Присоединение — по
+    ``(product_id, param_id)``, по **всем** ``param_ids`` строки (страница цитируется
+    несколькими ячейками, и решение принимается по всем сразу).
+
+    Чего не делает. Не решает и не додумывает: ячейка, которой нет в исходной таблице,
+    остаётся с пустыми колонками. Многострочный текст сводится к одной строке и
+    обрезается по ``MAX_ANNOTATION_CHARS`` — колонка читается глазами в таблице, а полный
+    текст лежит в исходном CSV.
+    """
+    rows = read_candidate(Path(args.candidate))
+    cells = _read_cells(Path(args.cells))
+    cited = _read_citations(Path(args.run_db)) if args.run_db else {}
+    missing: list[str] = []
+    for row in rows:
+        titles: list[str] = []
+        claims: list[str] = []
+        for param_id in (row.get("param_ids") or "").split(";"):
+            param_id = param_id.strip()
+            if not param_id:
+                continue
+            cell = cells.get((row["product_id"], param_id))
+            if cell is None:
+                # Имя, а не только счётчик: «1 пара не нашлась» не говорит, какую править.
+                missing.append(f"{row['product_id']}/{param_id}")
+                continue
+            titles.append(_one_line(cell.get("excel_title") or ""))
+            claims.append(_one_line(cell.get("raw_value") or ""))
+        row["titles"] = " | ".join(t for t in titles if t)
+        row["claims"] = " | ".join(c for c in claims if c)
+        urls: list[str] = []
+        for param_id in (row.get("param_ids") or "").split(";"):
+            for url in cited.get((row["product_id"], param_id.strip()), []):
+                if url not in urls:
+                    urls.append(url)
+        row["cited_from"] = " ; ".join(urls)
+    fields = list(CANDIDATE_FIELDS) + ANNOTATION_FIELDS
+    out = Path(args.out)
+    with out.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fields})
+    print(f"written: {out} ({len(rows)} строк, колонки {', '.join(ANNOTATION_FIELDS)})")
+    if args.run_db:
+        with_citation = sum(1 for row in rows if row.get("cited_from"))
+        print(f"цитата есть у {with_citation} из {len(rows)} строк (адрес — в cited_from)")
+    if missing:
+        print(
+            f"ВНИМАНИЕ: {len(missing)} пар (product, param_id) нет в исходной таблице — "
+            "колонки-подсказки у них пусты: " + ", ".join(missing),
+            file=sys.stderr,
+        )
+    return 0
+
+
+#: Потолок длины подсказки в листе: колонка читается глазами, полный текст — в исходном CSV.
+MAX_ANNOTATION_CHARS = 160
+
+
+def _one_line(text: str) -> str:
+    """Многострочный текст ячейки → одна строка, обрезанная по ``MAX_ANNOTATION_CHARS``."""
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) <= MAX_ANNOTATION_CHARS:
+        return collapsed
+    return collapsed[: MAX_ANNOTATION_CHARS - 1] + "…"
+
+
+def _read_citations(run_db: Path) -> dict[tuple[str, str], list[str]]:
+    """``(product_id, param_id)`` → адреса документов, из которых **фактически** взята цитата.
+
+    Зачем это в листе. Эталон объявляет один документ на ячейку — `source_url` из
+    comparative table. Оценщик же берёт цитату из любого документа корпуса, и адрес
+    цитаты виден в `cell_evidence` → `corpus_chunks` (там `content_hash` **чанка**;
+    `corpus_docs.content_hash` не подходит — это хеш документа, и join по нему даёт ноль).
+
+    Расхождение — не дефект: ячейка таблицы и документ корпуса адресуют одно и то же
+    утверждение по-разному, и разметчику нужно видеть оба, иначе `accept` превращается в
+    сверку похожести адресов. Само решение всё равно за человеком.
+    """
+    conn = sqlite3.connect(f"file:{run_db}?mode=ro", uri=True)
+    try:
+        by_chunk = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT content_hash, url FROM corpus_chunks WHERE url IS NOT NULL"
+            )
+        }
+        out: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for product_id, param_id, chunk_hash in conn.execute(
+            "SELECT product_id, param_id, content_hash FROM cell_evidence"
+            " WHERE citation_quote IS NOT NULL AND citation_quote != ''"
+        ):
+            url = by_chunk.get(chunk_hash)
+            if url is None:
+                continue
+            key = (product_id, param_id)
+            if url not in out[key]:
+                out[key].append(url)
+        return out
+    finally:
+        conn.close()
+
+
+def _read_cells(path: Path) -> dict[tuple[str, str], dict[str, str]]:
+    """Исходная comparative table: ``(product_id, param_id)`` → строка ячейки."""
+    with path.open(encoding="utf-8", newline="") as handle:
+        return {
+            (row["product_id"], row["param_id"]): row for row in csv.DictReader(handle)
+        }
+
+
 def cmd_batches(args: argparse.Namespace) -> int:
     rows = read_candidate(Path(args.candidate))
     by_product: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -713,14 +868,25 @@ def cmd_batches(args: argparse.Namespace) -> int:
             print(f"### {product_id} — пачка {start // BATCH_SIZE + 1} "
                   f"({len(batch)} строк)")
             print()
-            print("| URL из ячейки | адрес | документ в корпусе | ячеек | статус |")
-            print("|---|---|---|---|---|")
+            annotated = any(row.get("claims") or row.get("titles") for row in batch)
+            cited = any((row.get("cited_from") or "").strip() for row in batch)
+            header = ["URL из ячейки", "адрес", "документ в корпусе"]
+            if annotated:
+                header.append("что утверждается")
+            if cited:
+                header.append("цитата фактически из")
+            header += ["ячеек", "статус"]
+            print("| " + " | ".join(header) + " |")
+            print("|" + "---|" * len(header))
             for row in batch:
                 doc = row.get("corpus_url") or "—"
-                print(
-                    f"| {row['source_url']} | {_batch_live(row)} | {doc} | "
-                    f"{row['cells']} | {_batch_status(row)} |"
-                )
+                cells = [row["source_url"], _batch_live(row), doc]
+                if annotated:
+                    cells.append(_batch_claim(row))
+                if cited:
+                    cells.append(_batch_cited(row))
+                cells += [row["cells"], _batch_status(row)]
+                print("| " + " | ".join(cells) + " |")
             print()
     return 0
 
@@ -743,6 +909,20 @@ def build_parser() -> argparse.ArgumentParser:
         "без него колонки live_* пусты",
     )
     build.set_defaults(func=cmd_build)
+
+    annotate = sub.add_parser(
+        "annotate", help="дописать в лист утверждение ячейки (titles/claims)"
+    )
+    annotate.add_argument("--candidate", required=True)
+    annotate.add_argument("--cells", required=True)
+    annotate.add_argument("--out", required=True)
+    annotate.add_argument(
+        "--run-db",
+        default=None,
+        help="БД прогона: добавит cited_from — адрес документа, из которого фактически "
+        "взята цитата (без него колонка пуста)",
+    )
+    annotate.set_defaults(func=cmd_annotate)
 
     compile_ = sub.add_parser("compile", help="кандидатный CSV → JSON-эталон")
     compile_.add_argument("--candidate", required=True)
