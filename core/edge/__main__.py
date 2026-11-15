@@ -49,7 +49,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from core.adapters.chunker_family import FamilyChunker
+from core.adapters.chunker_family import FamilyChunker, declared_token_limiter
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import ScrapyCrawler
@@ -272,7 +272,7 @@ def _build_gateway(
     crawlers = _build_crawlers(config)
     dispatcher = _EngineCrawler(crawlers)
     extractor: ExtractorPort = _EdgeExtractor()
-    chunker: ChunkerPort = FamilyChunker()
+    chunker: ChunkerPort = FamilyChunker(token_limiter=declared_token_limiter())
     # Извлечение по артефакту (B1/B3): staging живёт рядом с остальным состоянием edge,
     # TTL и окно извлечения объявлены в конфиге. Сервис не создаёт каталогов и потоков при
     # конструировании — только при первом приёме чанка.

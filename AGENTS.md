@@ -418,6 +418,14 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
 - **Anything that changes the corpus or the verdicts must be a declared input.** Precedents
   that were once silently outside the contract: `--max-depth`/`--max-documents`,
   `chunk_size`, `prompt_template`, `evaluation_policy`, `render_modes`, `passports`.
+- **The token limiter is a declared condition, not a tuning knob.** `TOKEN_LIMIT` in
+  `core/adapters/chunker_family.py:77` is `(limit, "model_id@revision")` or `None`; at `None`
+  it is not applied and neither `chunker_version` nor `chunking_spec` changes (so switching it
+  on/off cannot fake an `execution_change`). Declared-but-no-counter is `ValueError`, a counter
+  without a declaration is a visible `token_limit_undeclared` warning, and every application is
+  logged. Turning it on is an `execution_change` with a full re-embed; the cost is published
+  (`docs/reports/measurements/2026-11-15-chunk-token-limit.md`: 253 306 → 262 876 chunks,
+  >512-token share 5.457 % → 1.626 %, 426.9 s per corpus).
 - **Crawl axes:** `crawl_strategy`, `crawl.rate_limit` and `crawl_config_digest` are contract
   fields; `max_depth`/`max_documents`/`exclude_*`/`robots`/`document_level`/`pdf_pipeline`/
   `pdf_max_pages`/`pdf_max_extracted_chars`

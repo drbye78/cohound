@@ -1,0 +1,142 @@
+{
+  "token_limit": 512,
+  "token_limit_policy": "token-limit-1",
+  "tokenizer": "BAAI/bge-m3",
+  "declared_in_code": false,
+  "tiny_tokens": 64,
+  "families": {
+    "markdown": {
+      "before": {
+        "chunks": 250478,
+        "chars": 229648008,
+        "tokens_total": 64490079,
+        "tokens_per_char": 0.2808,
+        "p50": 273.0,
+        "p90": 453.29999999998836,
+        "p95": 514.0,
+        "p99": 679.0,
+        "max": 1119,
+        "over_limit": 12698,
+        "over_limit_share": 0.050695071024201725,
+        "over_limit_token_share": 0.12007936910730098,
+        "tiny": 43329,
+        "tiny_share": 0.1729852521977978,
+        "tiny_token_share": 0.019908193940962608,
+        "limit": 512
+      },
+      "after": {
+        "chunks": 259500,
+        "chars": 229648008,
+        "tokens_total": 64490745,
+        "tokens_per_char": 0.2808,
+        "p50": 266.0,
+        "p90": 445.0,
+        "p95": 491.0,
+        "p99": 523.0,
+        "max": 574,
+        "over_limit": 3696,
+        "over_limit_share": 0.014242774566473989,
+        "over_limit_token_share": 0.03073544893922376,
+        "tiny": 43329,
+        "tiny_share": 0.16697109826589596,
+        "tiny_token_share": 0.019907988347785406,
+        "limit": 512
+      }
+    },
+    "text": {
+      "before": {
+        "chunks": 2828,
+        "chars": 3677958,
+        "tokens_total": 1143771,
+        "tokens_per_char": 0.311,
+        "p50": 399.0,
+        "p90": 572.0,
+        "p95": 577.0,
+        "p99": 584.0,
+        "max": 656,
+        "over_limit": 1126,
+        "over_limit_share": 0.39816124469589814,
+        "over_limit_token_share": 0.5544824969333897,
+        "tiny": 97,
+        "tiny_share": 0.0342998585572843,
+        "tiny_token_share": 0.002952514095916053,
+        "limit": 512
+      },
+      "after": {
+        "chunks": 3376,
+        "chars": 3677958,
+        "tokens_total": 1143819,
+        "tokens_per_char": 0.311,
+        "p50": 353.5,
+        "p90": 556.0,
+        "p95": 559.0,
+        "p99": 562.0,
+        "max": 575,
+        "over_limit": 578,
+        "over_limit_share": 0.1712085308056872,
+        "over_limit_token_share": 0.2804272354279829,
+        "tiny": 98,
+        "tiny_share": 0.029028436018957347,
+        "tiny_token_share": 0.0030074688390383446,
+        "limit": 512
+      }
+    }
+  },
+  "total": {
+    "before": {
+      "chunks": 253306,
+      "chars": 233325966,
+      "tokens_total": 65633850,
+      "tokens_per_char": 0.2813,
+      "p50": 275.0,
+      "p90": 457.0,
+      "p95": 521.0,
+      "p99": 679.0,
+      "max": 1119,
+      "over_limit": 13824,
+      "over_limit_share": 0.05457430933337544,
+      "over_limit_token_share": 0.12764951317041434,
+      "tiny": 43426,
+      "tiny_share": 0.17143691819380513,
+      "tiny_token_share": 0.01961271508527993,
+      "limit": 512
+    },
+    "after": {
+      "chunks": 262876,
+      "chars": 233325966,
+      "tokens_total": 65634564,
+      "tokens_per_char": 0.2813,
+      "p50": 267.0,
+      "p90": 448.0,
+      "p95": 496.0,
+      "p99": 530.0,
+      "max": 575,
+      "over_limit": 4274,
+      "over_limit_share": 0.016258616229705262,
+      "over_limit_token_share": 0.03508684844771727,
+      "tiny": 43427,
+      "tiny_share": 0.16519956177056863,
+      "tiny_token_share": 0.019613461590146312,
+      "limit": 512
+    }
+  },
+  "policy": {
+    "chunks_in": 253306,
+    "chunks_out": 262876,
+    "split_chunks": 9567,
+    "absorbed_tails": 4274,
+    "unsplittable": 0,
+    "over_limit": 4274,
+    "max_tokens_after": 575
+  },
+  "invariants": {
+    "p1_violations": 0,
+    "span_violations": 0
+  },
+  "cost": {
+    "seconds": 426.9,
+    "seconds_per_chunk_ms": 1.685,
+    "tokenizer_calls": 516182,
+    "documents": 19324
+  }
+}

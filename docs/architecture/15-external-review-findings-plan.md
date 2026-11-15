@@ -103,7 +103,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 3. **Геометрия чанка вне контракта (C3; закрыто `chunking_spec`).** В `EXECUTION_CONTRACT_FIELDS`
    (22 поля тогда, 32 сейчас) из
    «чанкового» только `chunker_version`, а это метка-строка `"md-heading-2+text-para-1"`
-   (`chunker_family.py:15`), не вывод из `chunk_size`/`min_chunk_size`/`overlap`. Правка
+   (`chunker_family.py:165`), не вывод из `chunk_size`/`min_chunk_size`/`overlap`. Правка
    `chunk_size = 1500` на другое число даёт другой корпус чанков при том же `run_id` — ровно
    тот класс, за который проект ругает себя в `embed_model_id`.
 4. **Ложное обоснование конечности спуска (F1; закрыто итеративным обходом).** `AGENTS.md:537-541`,
@@ -202,7 +202,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 |---|---|---|---|---|---|---|
 | C1 | ничья в RRF без `chunk_id` | ПОДТВЕРЖДЕНО для мёртвого модуля; **живой путь корректен** | мёртвый: `util/fusion.py:102` (+ `_fuse_template` не выносит `chunk_id`); живой: `retrieve.py:305`,`:415` | живой покрыт (`test_retrieve.py:194-224`, `tests/selfcheck.py:393`) | Г | P5 |
 | C2 | `core/util/fusion.py` — мёртвый дубль, докстринг и `06` врут о подключении | ПОДТВЕРЖДЕНО (покрытие 52 %) | импортов в `core/` нет; `06-implementation-strategy.md:47` — «✅ удалён (`aa4185b`): мёртвый дубль» | единственный тест — `tests/selfcheck.py:336` | Г | P5 |
-| C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:15` | нет | М | **P2** |
+| C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:165` | нет | М | **P2** |
 | C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:248` (`_pieces`), `:290` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
 | C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | **ЗАКРЫТО `text-para-4`**: кусок — точный срез, `citation_quote` — подстрока документа | `chunker_text.py:248` (`TextChunker.chunk`), `:268` (`char_start`/`char_end`); P1/P4 = 0 на 194 документах (`2026-11-04-text-chunker-exact-slices.md`) | `test_chunker_text.py` (P1/P4), `test_corpus_chunk_offsets.py` | Г | — |
 | C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:89`,`:176`, `chunker_text.py:98` | нет | М | P4 |
@@ -371,8 +371,8 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ `core/pipeline/prompt.py:299-317` — в блок чанка печатаются путь заголовков, документ и
   контекст продолжения (C7 закрыт в L1b-2a плана 18).
 - ✅ Вопрос «эмбеддить `context_prefix + text` или нет» решён явно: состав входа —
-  `EMBED_INPUT_FIELDS = ("text",)` (`core/adapters/chunker_family.py:44`), и он **объявлен**
-  в `chunking_spec.embed_input` (`:66`), а не подразумевается. Докстринг
+  `EMBED_INPUT_FIELDS = ("text",)` (`core/adapters/chunker_family.py:101`), и он **объявлен**
+  в `chunking_spec.embed_input` (`:130`), а не подразумевается. Докстринг
   `core/adapters/chunker_text.py:17-22` говорит правду: кусок — точный срез,
   `context_prefix` в эмбеддинг не входит.
 - В `EXECUTION_CONTRACT_FIELDS` добавить **геометрию и состав входа эмбеддера**

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from core.adapters import index_format
-from core.adapters.chunker_family import FamilyChunker
+from core.adapters.chunker_family import FamilyChunker, declared_token_limiter
 from core.adapters.container_any import container_for
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
@@ -2993,7 +2993,7 @@ def _build_local_ports(
         # спецификаций + дайджест спецификаций (провенанс манифеста, §13).
         registry_fetchers=registry_fetchers,
         registry_spec_digest=registry_spec_digest,
-        chunker=FamilyChunker(),
+        chunker=FamilyChunker(token_limiter=declared_token_limiter()),
         extractor=extractor,
         embedder=resolved_embedder,
         index_builder=index_builder,
