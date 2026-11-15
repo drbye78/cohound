@@ -167,6 +167,13 @@ from core.domain.models import (
     canonical_rate_limit,
     derived_evidence_id,
 )
+from core.domain.page_map import (
+    PageMap,
+    check_page_map,
+    page_map_from_json,
+    page_map_to_json,
+    page_number_for,
+)
 from core.domain.r2 import apply_r2
 from core.domain.scoring import (
     DEFAULT_COVERAGE_FLOOR,
@@ -336,6 +343,12 @@ __all__ = [  # noqa: RUF022
     "absence_evidence_id",
     "canonical_rate_limit",
     "derived_evidence_id",
+    # карта страниц (O36, план 26): носитель номера страницы чанка
+    "PageMap",
+    "check_page_map",
+    "page_map_from_json",
+    "page_map_to_json",
+    "page_number_for",
     # r2
     "apply_r2",
     # invariants (T2.2)

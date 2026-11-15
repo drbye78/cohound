@@ -1867,6 +1867,11 @@ def finish_one(
             None if reuse_kind is ReuseKind.REUSED else page.status_code
         ),
         reuse_kind=reuse_kind,
+        # O36 (план 26): карта страниц — из того же ``ExtractedDoc``, что дал текст.
+        # ``getattr``, а не прямое поле: при переиспользовании (``reuse``) экстракции не
+        # было, и карты в этом цикле нет — ``None`` честнее догадки (в БД уже записанная
+        # карта этим не стирается: upsert пишет ``COALESCE``).
+        page_map=getattr(extracted, "page_map", None),
         **partial_fields,
     )
     ingest.docs.append(doc)
@@ -3598,6 +3603,9 @@ class RebuiltDoc:
     :param extractor_token: ``extractor_version`` фактического движка (штамп адаптера).
     :param level_text: объявленный уровень извлечения (условие измерения).
     :param partial_fields: поля частичности извлечения (измерены сейчас, не из записи).
+    :param page_map: карта страниц из **текущей** экстракции (O36, план 26); ``None`` —
+        читатель карту не дал либо ``ExtractedDoc`` взят из ``extract_cache`` без неё.
+        Номер страницы чанка по ней выводит ``core.domain.page_map.page_number_for``.
     :param chunks: чанки текущего чанкера в порядке ``chunk_no``.
     :param from_cache: ``ExtractedDoc`` взят из ``extract_cache`` (экстрактор не звался).
     :param extracted: экстрактор вызывался (даже если затем отказал).
@@ -3622,6 +3630,10 @@ class RebuiltDoc:
     content_changed: bool = False
     extractor_changed: bool = False
     seconds: float = 0.0
+    #: Карта страниц **текущей** экстракции (O36, план 26); ``None`` — читатель её не дал
+    #: либо ``ExtractedDoc`` пришёл из ``extract_cache`` без карты. Поле в конце: позиционные
+    #: конструкторы не должны поехать от появления провенанса.
+    page_map: tuple[tuple[int, int, int], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -3925,6 +3937,10 @@ def rebuild_from_stored_bytes(
                 and not _same_extractor(prior_doc, token)
             ),
             seconds=time.perf_counter() - started,
+            # O36: карта страниц — из той же экстракции, что дала текст (пересборка из
+            # retained-байтов действительно прогоняет экстрактор). ``getattr`` — на случай
+            # заглушки без поля: «карты нет» не должно ломать пересборку.
+            page_map=getattr(extracted, "page_map", None),
         ),
         cache_hit=cache_hit,
         extracted=extracted_now,
@@ -3981,6 +3997,9 @@ def _persist_rebuilt_doc(
         lang=None,
         http_status=None,
         reuse_kind=ReuseKind.REUSED,
+        # O36: карта страниц пересборки — экстрактор в этом проходе действительно работал
+        # (по retained-байтам), поэтому карта принадлежит тому же тексту, что и ``doc_hash``.
+        page_map=rebuilt.page_map,
         **rebuilt.partial_fields,
     )
     ingest.docs.append(doc)
@@ -4328,6 +4347,10 @@ def offline_reuse_product(
             lang=None,
             http_status=None,
             reuse_kind=ReuseKind.REUSED,
+            # O36: переиспользование из набора чанков — ``ExtractedDoc`` в этом цикле нет,
+            # значит и карты страниц нет. ``None`` не стирает уже записанную карту того же
+            # текста: upsert пишет ``COALESCE`` (``SqliteStore.upsert_corpus_doc``).
+            page_map=None,
             **partial_fields,
         )
         ingest.docs.append(doc)

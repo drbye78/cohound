@@ -861,6 +861,12 @@ def _db_smoke() -> None:
     # переноса ячеек нет (09 §10), и колонка, всегда равная нулю, — ложь о механизме.
     _assert({"run_scope", "product_plan_json", "embed_device"} <= runs_cols)
     _assert({"http_status", "reuse_kind"} <= docs_cols)
+    # O36 (schema 3.21.0): карта страниц документа — носитель номера страницы чанка.
+    # Номер страницы чанка колонкой НЕ становится: это функция от карты и ``char_start``
+    # (``core.domain.page_map``), и копию пришлось бы поддерживать на каждом пути записи.
+    _assert("page_map" in docs_cols)
+    chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
+    _assert("page_number" not in chunk_map_cols)
     product_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_product)")}
     _assert({"run_id", "product_id", "mode", "status", "scope", "phase",
              "coverage_complete", "docs_total", "docs_reused", "docs_new",

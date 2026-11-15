@@ -59,6 +59,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
+from core.domain.page_map import page_map_from_json, page_map_to_json
 from core.ports.store import CorpusArtifactRow, PlanInputsConflict, RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite import SchemaVersionMismatch, connect, connect_read_only
@@ -1484,17 +1485,29 @@ class SqliteStore:
         Место правила — здесь: хранилище единственное знает прежнюю строку, писатель
         конвейера (``corpus.py``) — нет, и спрашивать её на каждый документ значило бы
         превратить запись корпуса в N+1 запросов.
+
+        **Правило записи для ``page_map`` — ``COALESCE``, а не последний писатель.**
+        ``doc_id`` = ``product_id:content_hash``, то есть один и тот же текст может прийти
+        от читателя **без** карты (HTML, docling, шов ``split``, переиспользование из
+        набора чанков). Записать ``NULL`` поверх уже сохранённой карты значило бы стереть
+        факт, который был измерен, и навсегда потерять номер страницы у документа, чей
+        текст не изменился ни на байт. Поэтому ``page_map = COALESCE(excluded.page_map,
+        corpus_docs.page_map)``: карта только **дописывается**, никогда не снимается.
+        Это не то же, что монотонность ``reuse_kind`` (там понижается одно значение из
+        набора, здесь запрещена потеря единственного измерения): правила разные и оба
+        остаются видимыми.
         """
         http_status = doc.http_status
         reuse_kind = doc.reuse_kind
+        page_map_json = page_map_to_json(doc.page_map)
         with self.conn:
             self.conn.execute(
                 "INSERT INTO corpus_docs"
                 " (doc_id, product_id, url, fetched_at, content_hash, raw_path,"
                 "  extractor_version, render_mode, lang, origin,"
                 "  partial, partial_reason, page_count, pages_converted, extracted_chars,"
-                "  http_status, reuse_kind)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  http_status, reuse_kind, page_map)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(doc_id) DO UPDATE SET"
                 "  product_id = excluded.product_id,"
                 "  url = excluded.url,"
@@ -1517,7 +1530,11 @@ class SqliteStore:
                 # понижением не считаются (у них свой смысл, см. докстринг).
                 "  reuse_kind = CASE WHEN corpus_docs.reuse_kind IN ('live', 'revalidated')"
                 "    AND excluded.reuse_kind = 'reused'"
-                "   THEN corpus_docs.reuse_kind ELSE excluded.reuse_kind END",
+                "   THEN corpus_docs.reuse_kind ELSE excluded.reuse_kind END,"
+                # Карта страниц только дописывается: писатель без карты (HTML/docling/
+                # шов/переиспользование) не вправе стереть измеренную карту того же
+                # текста (см. докстринг).
+                "  page_map = COALESCE(excluded.page_map, corpus_docs.page_map)",
                 (
                     doc.doc_id,
                     doc.product_id,
@@ -1538,6 +1555,7 @@ class SqliteStore:
                     doc.extracted_chars,
                     None if http_status is None else int(http_status),
                     _as_text(reuse_kind),
+                    page_map_json,
                 ),
             )
             if doc_version_id:
@@ -2723,6 +2741,10 @@ class SqliteStore:
                 # имеет, и отсутствие колонки значит «не записано», а не сбой чтения.
                 http_status=_row_optional(doc, "http_status"),
                 reuse_kind=_row_optional(doc, "reuse_kind"),
+                # O36 (план 26): карта страниц — тот же JSON, каким записана. Порченое
+                # значение читается как ``None`` («карты нет»), а не роняет отчёт:
+                # ``report`` обязан строиться и на повреждённой БД.
+                page_map=page_map_from_json(_row_optional(doc, "page_map")),
             )
 
     # -- спуск в контейнеры (B3) ------------------------------------------- #

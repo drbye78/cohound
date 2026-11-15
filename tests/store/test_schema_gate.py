@@ -56,22 +56,23 @@ def test_older_schema_is_rejected_with_message(tmp_path: Path) -> None:
 
 
 def test_previous_schema_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
-    """F3 плана 20: файл 3.19.0 отвергается гейтом 3.20.0, не изменяя байты.
+    """Предыдущая схема отвергается гейтом, не изменяя байты файла.
 
-    ``corpus_coverage.roots_json``/``cells.absence_as_of`` объявлены только в
-    ``CREATE TABLE``; шимов ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем — и
-    проверка фиксирует это наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий
-    догон объявил бы чужую схему текущей).
+    ``corpus_coverage.roots_json``/``cells.absence_as_of`` (3.20.0) и
+    ``corpus_docs.page_map`` (3.21.0) объявлены только в ``CREATE TABLE``; шимов
+    ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем — и проверка фиксирует это
+    наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий догон объявил бы чужую
+    схему текущей).
     """
-    db = _legacy_db(tmp_path / "cohound.db", "3.19.0")
+    db = _legacy_db(tmp_path / "cohound.db", "3.20.0")
     before = db.read_bytes()
 
     with pytest.raises(SchemaVersionMismatch) as excinfo:
         connect(db)
 
     message = str(excinfo.value)
-    assert "3.19.0" in message
     assert "3.20.0" in message
+    assert SCHEMA_VERSION in message
     assert db.read_bytes() == before
 
 
@@ -290,8 +291,14 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     (снятия объявленных корней; ``complete`` решается по ним) и ``cells.absence_as_of``
     (дата слабой опоры ``❌``). Обе — аддитивные колонки в ``CREATE TABLE``, шимов нет:
     прогоны ≤ 3.19.0 отвергаются гейтом версии.
+
+    3.21.0 (O36 фазы 1b плана ``26``) — ``corpus_docs.page_map``: карта страниц документа
+    (JSON-список ``[page_no, start, end]``). Номер страницы чанка колонкой **не** стал: он
+    функция от карты и ``char_start`` (``core.domain.page_map.page_number_for``), а копию
+    пришлось бы поддерживать на каждом пути записи чанка. Шимов нет: прогоны ≤ 3.20.0
+    отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.20.0"
+    assert SCHEMA_VERSION == "3.21.0"
 
     conn = connect(":memory:")
     try:
@@ -307,9 +314,12 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
 
         docs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_docs)")}
         assert {"http_status", "reuse_kind"} <= docs_cols
+        # 3.21.0 (O36): карта страниц — колонка; номера страницы у чанка нет намеренно.
+        assert "page_map" in docs_cols
 
         chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
         assert {"char_start", "char_end"} <= chunk_cols
+        assert "page_number" not in chunk_cols
 
         # 3.20.0 (F3 плана 20): носитель полноты — снятия корней — и дата слабой опоры ❌.
         coverage_cols = {

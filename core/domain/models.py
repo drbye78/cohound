@@ -73,6 +73,7 @@ from core.domain.enums import (
     Status,
     TerminationReason,
 )
+from core.domain.page_map import check_page_map
 from core.util.document_formats import normalize_attachment_formats
 from core.util.ids import doc_version_of
 
@@ -2033,7 +2034,8 @@ class CorpusDoc(BaseModel):
     запрещает ``partial_reason``/``pages_converted`` без самого ``partial`` (ложная
     провенанс-запись); счётчики страниц не могут противоречить друг другу. Пустой
     текст как условие проверяет ``ExtractedDoc`` (у строки ``corpus_docs`` текста нет:
-    он живёт в чанках).
+    он живёт в чанках). Карту страниц (:attr:`page_map`) проверяет отдельный валидатор —
+    против ``extracted_chars``, потому что ``len(text)`` здесь недоступна.
     """
 
     model_config = _BASE
@@ -2067,6 +2069,18 @@ class CorpusDoc(BaseModel):
     #: (legacy-строки) ⇒ ``❌`` не публикуется: наследовать ``url_state.reuse_kind``
     #: нельзя, там последняя классификация, в том числе из прошлого цикла.
     reuse_kind: ReuseKind | None = None
+    #: Карта страниц документа (O36, план 26) — та же, что дал читатель. Контракт
+    #: координат (полуоткрытые отрезки, пространство чанкера без BOM, ``None`` = «читатель
+    #: карту не дал») — в :attr:`core.ports.types.ExtractedDoc.page_map`, здесь он **не**
+    #: повторяется. Номер страницы чанка по этой карте выводит
+    #: :func:`core.domain.page_map.page_number_for`; отдельной колонки у чанка нет
+    #: намеренно (см. докстринг :mod:`core.domain.page_map`).
+    #:
+    #: Верхняя граница проверяется по ``extracted_chars``, а не по ``len(text)``: текста в
+    #: строке корпуса нет (он живёт в чанках), а ``extracted_chars`` — ровно его длина на
+    #: момент извлечения. Когда она не записана (``None``), проверяется только структура и
+    #: порядок: «не измерено» не даёт права отказать карте, но и не подтверждает её.
+    page_map: tuple[tuple[int, int, int], ...] | None = None
 
     @model_validator(mode="after")
     def _check_partial(self) -> CorpusDoc:
@@ -2100,6 +2114,21 @@ class CorpusDoc(BaseModel):
                 )
         if self.extracted_chars is not None and self.extracted_chars < 0:
             raise ValueError("corpus_docs: extracted_chars не может быть отрицательным")
+        return self
+
+    @model_validator(mode="after")
+    def _check_page_map_bounds(self) -> CorpusDoc:
+        """Держит инвариант карты страниц на границе корпуса (O36, план 26).
+
+        Один валидатор на два носителя (:func:`core.domain.page_map.check_page_map`):
+        ``ExtractedDoc`` проверяет карту против ``len(text)``, строка ``corpus_docs`` —
+        против ``extracted_chars``, потому что текста в ней нет. Правило то же: либо карта
+        точна (отсортирована, не пересекается, ``page_no >= 1``, ``0 <= start <= end`` и
+        не выходит за текст), либо ``None`` — «читатель её не дал». Ложная карта хуже
+        отсутствующей: по ней чанк получил бы номер страницы, которого не было.
+        """
+        if self.page_map is not None:
+            check_page_map(self.page_map, self.extracted_chars, label="corpus_docs")
         return self
 
 

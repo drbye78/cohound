@@ -125,6 +125,7 @@ from core.pipeline.heading_anomalies import (
 )
 from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
 from core.pipeline.onboarding import load_effective_seeds as _load_effective_seeds
+from core.pipeline.page_provenance import write_page_provenance_artifact
 from core.pipeline.partial_docs import (
     partial_docs_summary,
     write_partial_docs_artifact,
@@ -358,6 +359,11 @@ class Artifacts:
     #: (I2/I2c): продукт, документ, причина, страницы прочитано/заявлено, символы.
     #: ``None`` — частичных документов нет (пустой список не артефакт).
     partial_docs: Path | None = None
+    #: ``outputs/page_provenance.csv`` — карта страниц по продуктам (сколько документов с
+    #: картой и сколько страниц отображено) плюс документы без карты, у которых страниц
+    #: больше одной (O36, план 26): именно их цитаты страницу назвать не могут.
+    #: ``None`` — документов корпуса нет (пустой файл не артефакт).
+    page_provenance: Path | None = None
     #: Блок ``partial_docs`` манифеста (те же числа, свёрнутые до продукта) — чтобы CLI
     #: мог назвать факт строкой, даже когда CSV не создан.
     partial_docs_summary: dict[str, Any] | None = None
@@ -3713,6 +3719,16 @@ def write_reports(
     partial_summary = partial_docs_summary(
         store, run_id, products=planned_products
     )
+    # O36 (план 26): карта страниц — видимым артефактом. Пока её наличие не публикуется,
+    # отсутствие карты невидимо, а вместе с ним невидимо и то, что цитата из документа на
+    # 300 страниц не может назвать страницу вообще. Сбой выгрузки отчёт не роняет (как и
+    # ``partial_docs``): факт остаётся в БД, теряется лишь удобная таблица.
+    try:
+        page_provenance_path = write_page_provenance_artifact(
+            store, run_id, outputs_dir / "page_provenance.csv"
+        )
+    except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
+        page_provenance_path = None
     # O28: аномалии ``heading_path`` (3 668 симв. на страницу-виновника) были видны
     # только отдельным харнессом — в отчёте прогона их не называл никто. Чтение чанков
     # идёт через ``cb_``→``pb_``-резолв внутри писателя; неразрешённая сборка даёт
@@ -3820,6 +3836,7 @@ def write_reports(
         cell_diagnostics=cell_diagnostics,
         partial_docs=partial_docs_path,
         partial_docs_summary=partial_summary,
+        page_provenance=page_provenance_path,
         support_quality=support_path,
         support_quality_summary=support_payload,
         corpus_freshness=corpus_freshness_path,

@@ -87,8 +87,12 @@ def test_schema_version_is_additive_bump() -> None:
     3.20.0 — F3 плана ``20``: ``corpus_coverage.roots_json`` (снятия объявленных корней —
     по ним решается ``complete``) и ``cells.absence_as_of`` (дата слабой опоры ``❌``);
     аддитивные колонки объявлены в ``CREATE TABLE``, файлы ≤ 3.19.0 отвергаются гейтом.
+
+    3.21.0 — O36 фазы 1b плана ``26``: ``corpus_docs.page_map`` — карта страниц документа
+    (JSON-список ``[page_no, start, end]``). Номер страницы чанка колонкой не стал: он
+    функция от карты и ``char_start``; файлы ≤ 3.20.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.20.0"
+    assert SCHEMA_VERSION == "3.21.0"
     conn = connect(":memory:")
     try:
         tables = {

@@ -64,8 +64,11 @@ def test_schema_pins_the_table_shape() -> None:
     сдвинута вместе с ``corpus_coverage.roots_json``/``cells.absence_as_of``. Шимов
     ``ALTER TABLE`` нет, поэтому файлы ≤ 3.19.0 отвергаются гейтом версии
     (:class:`SchemaVersionMismatch`), а не досоздаются при открытии.
+
+    3.21.0 — O36 фазы 1b плана ``26``: таблица не менялась, версия сдвинута вместе с
+    ``corpus_docs.page_map`` (карта страниц документа); файлы ≤ 3.20.0 отвергаются гейтом.
     """
-    assert SCHEMA_VERSION == "3.20.0"
+    assert SCHEMA_VERSION == "3.21.0"
 
     conn = connect(":memory:")
     try:

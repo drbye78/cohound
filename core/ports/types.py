@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
+from core.domain.page_map import check_page_map
 
 # Переиспользуем доменные оси (D2/D4): краулер видит ``fetch``/``extract``/``strategy``
 # как value-объекты, не как строки. Реэкспорт — чтобы адаптеры/edge импортировали их из порт-слоя.
@@ -181,53 +182,6 @@ OCR_PROBE_VALUES: frozenset[str] = frozenset(
 EMPTY_TEXT_REASON = "текст пуст"
 
 
-def _check_page_map(
-    page_map: tuple[tuple[int, int, int], ...], text_length: int
-) -> None:
-    """Проверяет инвариант карты страниц (см. :attr:`ExtractedDoc.page_map`).
-
-    Карта — провенанс, а не оценка: сегменты обязаны идти по возрастанию номера страницы,
-    не пересекаться, лежать внутри ``text`` и не быть вывернутыми (``end < start``).
-    Нарушение — не «странная карта», а ложная запись: по ней чанк получил бы **номер
-    страницы**, которого не было, и отличить это от настоящего номера было бы нечем.
-    """
-    previous_page = 0
-    previous_end = 0
-    for entry in page_map:
-        if not isinstance(entry, tuple) or len(entry) != 3:
-            raise ValueError(
-                "ExtractedDoc: элемент page_map не является тройкой "
-                f"(page_no, char_start, char_end): {entry!r}"
-            )
-        page_no, start, end = entry
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in entry):
-            raise ValueError(
-                "ExtractedDoc: page_map содержит не целое число — смещения и номер "
-                f"страницы обязаны быть int: {entry!r}"
-            )
-        if page_no < 1:
-            raise ValueError(
-                "ExtractedDoc: page_map с номером страницы < 1 — нумерация страниц "
-                f"1-based: {entry!r}"
-            )
-        if start < 0 or end < start:
-            raise ValueError(
-                "ExtractedDoc: page_map с отрицательным или вывернутым интервалом — "
-                f"нужен 0 <= char_start <= char_end: {entry!r}"
-            )
-        if end > text_length:
-            raise ValueError(
-                "ExtractedDoc: page_map выходит за текст — char_end "
-                f"{end} > len(text) {text_length}: {entry!r}"
-            )
-        if page_no <= previous_page or start < previous_end:
-            raise ValueError(
-                "ExtractedDoc: page_map не отсортирована или сегменты пересекаются — "
-                f"страница {page_no} начинается в {start} после {previous_end}"
-            )
-        previous_page, previous_end = page_no, end
-
-
 @dataclass(frozen=True)
 class ExtractedDoc:
     """Нормализованный документ после экстракции (§3.5).
@@ -298,6 +252,11 @@ class ExtractedDoc:
     #: Пустая страница — это ``start == end``: страница прочитана, текста в ней нет; это
     #: факт, а не разрыв.
     #:
+    #: Само правило вывода — одна функция, :func:`core.domain.page_map.page_number_for`
+    #: (включая случай пустого сегмента и отсутствующей карты): номер страницы — функция
+    #: от карты и ``char_start``, а не колонка, которую обязан поддерживать каждый путь
+    #: записи чанка.
+    #:
     #: ``None`` — читатель карту **не дал** (сегодня так делают все, кроме ``text_layer``):
     #: это не «страниц нет» и не «одна страница». Выдуманный номер хуже отсутствующего (A3),
     #: поэтому ``None`` честнее догадки.
@@ -330,7 +289,9 @@ class ExtractedDoc:
             )
         if self.page_map is not None:
             # Карта страниц — либо точная, либо отсутствует: см. докстринг поля.
-            _check_page_map(self.page_map, len(self.text))
+            # Инвариант живёт в домене (``core.domain.page_map``): у карты два носителя,
+            # и две копии валидатора разошлись бы молча.
+            check_page_map(self.page_map, len(self.text))
         if self.pages_converted is not None:
             if self.pages_converted < 0:
                 raise ValueError(
