@@ -1,0 +1,1675 @@
+{
+  "run_id": "ru-pg-dbms-145ad66ca3f9",
+  "case_id": "ru-pg-dbms",
+  "conditions": {
+    "schema_version_of_file": "3.20.0",
+    "index_build_id": "cb_5c090025af68b95615c87869",
+    "cutoff_k": 10,
+    "lexical_profile": "stemmed",
+    "profiles": [
+      "R0"
+    ],
+    "cells_in_golden": 132,
+    "cells_without_golden": 773
+  },
+  "reports": [
+    {
+      "profile": "R0",
+      "cells": 132,
+      "counts": {
+        "absence_cell": 2,
+        "consistent_positive": 32,
+        "evaluator_missed": 1,
+        "lucky": 79,
+        "no_verdict": 4,
+        "search_missed": 14
+      },
+      "lucky_citation": {
+        "other": 79
+      },
+      "per_cell": [
+        {
+          "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "product_id": "digital_q_database",
+          "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "digital_q_database:61ab9b2ffeb9e2aa4dd6a8fb4c2e21163d3d19474238b05a39fd411a75dff8f9"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "product_id": "digital_q_database",
+          "param_id": "xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "digital_q_database:17c2f2cd922055ac0a907fcbdb2551c9f57c384f7dcc40d268afdccdcfbd3b95"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "product_id": "jatoba",
+          "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "jatoba:df385d29bd6b49d6066e5ec6c69fe661be757c885ecd84fc06f1e57a8e20e681"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+          "product_id": "jatoba",
+          "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "jatoba:1f5edb38dd5826be72bc669e38771e68c118f26acd50bc6a075c0eb2462ca359"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+          "product_id": "jatoba",
+          "param_id": "xlsx_018_nalichie_publichnogo_roadmap",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "jatoba:1f5edb38dd5826be72bc669e38771e68c118f26acd50bc6a075c0eb2462ca359"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+          "product_id": "jatoba",
+          "param_id": "xlsx_019_podderzhka_dbaas_cloud",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "product_id": "jatoba",
+          "param_id": "xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "jatoba:0aa36a5d1ab6a377b63be72de5fa6ed4fd79b72c14f4e6c8c956c8103416dbc2"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "product_id": "pangolin",
+          "param_id": "xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "pangolin:2a270c9a5e2b939500410e09886a2132668756c6f8011a685fe1109e2e6ce6ca",
+            "pangolin:f9f595127022f4fbdc32de095e1a3fcb61437340e643713f0ff100b485a03f25"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "product_id": "pangolin",
+          "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "pangolin:050dbb634c2d68a1f4be7c704943959989f4e769585cad119522bac2f2230326",
+            "pangolin:361ba020a6d6f6c8077772ff4c0434c018c0dc722541a6863883cc430fc8f532",
+            "pangolin:779848cdc7f323c274d7b98cf053ef087d41a52471cc5dbabcda173901a22f8e",
+            "pangolin:fd6959a281a85ab72ba802251601c2ee76ff377a505aba96da50497c564d475b"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:03ce1541ac8e69c0b7ff168dcf225bd6d159775d10ae7186bb7b285af3bf0cbd"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:215d3337d69a8ecae2c18f2dbaf1a4bc70c0528950e1a4e81d193e51e6a8a1af"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:215d3337d69a8ecae2c18f2dbaf1a4bc70c0528950e1a4e81d193e51e6a8a1af"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:695346a873d8860bdbc4e5580781d1cb2737764066cab3a0289e7e030d88c8ee"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:3461dfa387a74eccdddc165324acba6578f052a71393cf3292f2d48f704b6b25"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_013_dokumentaciya_na_russkom",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:05759050ed9da4e7d5060081274aff521e54d29c39c9d825f9a86cd447c4ca2e"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_020_nalichie_sertifikata_fstek",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:911f8003a60272d27924c7257a447c2fc1408a493cac98aff569cc07ec75a48f"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "status": "❓",
+          "found": true,
+          "class": "evaluator_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:00a46fa03c283cfab04fcca604bf4007fb754e87b12f116252f9a87d6782cb41",
+            "postgrespro:7bcaa4ce27fef2b043cd7010bd3aa77fb7446f08cabbb27456c9bbda4b08a043",
+            "postgrespro:81b5ff5e788ad4b3e85ce7aa5f49ba2e51c3cb80b0b7b147e0a74c84c2d7fc2e",
+            "postgrespro:ee1ab0b661417ed8b7657890dc08b4c8ad58cc5d29c208b36174d51417ca1afc"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:9e7354b26cba8d618c468c5a6d5719bc9841a8ac0c3f3192b158c2b19af19c2d",
+            "postgrespro:cb293771de24f7e5dc48d97c25a84b0fd1ab5c9ac78815b28016cf461e4a7c80"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:14a929c63f5a1ebaae9844abf9e2c5acc477647e5f3ca0430f79cab7e4d76732",
+            "postgrespro:88e868d75f8b5697fa479ab1a787fe36062f7fdb9271918cc97bda79b0471c82",
+            "postgrespro:f87c63b41ee39f450857210eaf249aedd8a1423358d315ea3629d08dda8a1f3b"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:74ab1a8964f7dcc2e8bd0c6ec64e43dfbcf70ca96935ebe6413b1847985a28eb",
+            "postgrespro:ee41ec19dd7fa38db1edb26e2f5481f80833876130e8ef8503602f06f81a4b89"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:0986cc2ec9e5900b9eb94b5c47de0976e42b3aa8299fbcbddb1b2de618872eb5",
+            "postgrespro:612454f6bb566e95268c662bcd501b1cdcc5a68c11548fa70356dd11e1859f8f",
+            "postgrespro:731ecc3d6729d63e494e315544d50b57c6c39cfb31636cac5f2bd9b112ad0155",
+            "postgrespro:79c5ccfe86584b53007163cdd95a1fa071c84ac39d90eba39c076aef8c1638a6"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:1faef06bbca29e4a0b9e808decde1953f000ed59130acd642e5f8d708373eeee"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:6aa4f228ece73a41e422ace89d0a81e7937fe021efc8bd71914ef7bd8e7c60cf",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:6552bf8db438b0142ce4d39d5d46334838ad01e0ea1a8f2d4f1c18ce21e8b3ef",
+            "postgrespro:fec8b7198d4ba5e268c8ace8c21c7074f315b29d56218772ceebd29573ab6a09"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:b2c8501fc9aeb1e56e015e36fb26b2ca3ad4406118ea3e865f5bf867e6cb3a36",
+            "postgrespro:ee1ab0b661417ed8b7657890dc08b4c8ad58cc5d29c208b36174d51417ca1afc"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:00a46fa03c283cfab04fcca604bf4007fb754e87b12f116252f9a87d6782cb41",
+            "postgrespro:7bcaa4ce27fef2b043cd7010bd3aa77fb7446f08cabbb27456c9bbda4b08a043",
+            "postgrespro:81b5ff5e788ad4b3e85ce7aa5f49ba2e51c3cb80b0b7b147e0a74c84c2d7fc2e",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:00a46fa03c283cfab04fcca604bf4007fb754e87b12f116252f9a87d6782cb41",
+            "postgrespro:7bcaa4ce27fef2b043cd7010bd3aa77fb7446f08cabbb27456c9bbda4b08a043",
+            "postgrespro:81b5ff5e788ad4b3e85ce7aa5f49ba2e51c3cb80b0b7b147e0a74c84c2d7fc2e",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:cb293771de24f7e5dc48d97c25a84b0fd1ab5c9ac78815b28016cf461e4a7c80",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:14a929c63f5a1ebaae9844abf9e2c5acc477647e5f3ca0430f79cab7e4d76732",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:32da1dfa209fd90d9df323758e38d259e73df06c49869f98aabdbb5199a96823"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:6aa4f228ece73a41e422ace89d0a81e7937fe021efc8bd71914ef7bd8e7c60cf",
+            "postgrespro:7bfaa325260bb3d9e54d74f29c9ebce93f49f61b6f155a2adae23e107a477e81"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:047561db7cf6997fdd8d999d69a4634d22b115eb3b07f8fab1dd078127f7f0ae",
+            "postgrespro:1493f970011c435e73bed6f779832bdd9a0970c37101f1b30fb815cad2aa05ff"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:03ce1541ac8e69c0b7ff168dcf225bd6d159775d10ae7186bb7b285af3bf0cbd"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:5bfe56bcc3df2cb360a347ca084b371cee89e3a1c0d7f79447614900bbd834d4"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:3f3fb9b11bdaf2ef7c50956010acbcae33d50bf75259fefb35c5a98f5b45cc91"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:370e9802c8b67abb35153387ecc19cebc085c192839967bebc320760671d6640",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83",
+            "postgrespro:f7fcc0a56e6062e6978039cae867a1329295a9f4195209f596c306386808b5f6"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:13a4cb19a16507fd2de7b980722943c9f6f4562905b46e1dfcdfccd9a08c9814",
+            "postgrespro:15bd53e036879f402592ac66287a1078c76154491d99f6159749b08ab7787c77",
+            "postgrespro:269233e797099b4b67e881f833be4eaf8d4c4a5d7bc5501a7e09f0ad668605c2",
+            "postgrespro:40cfe9046cf91a62c14a3b9c78db1e4990d5de43056c2b72682929aa08690bb5",
+            "postgrespro:751974cc94d9c776dc379706049c5ab4d50a83caac6265d8d640fe7aac16a478",
+            "postgrespro:ba2d19099abba9c1a9696cd857d29f61799d7ae35b05604b90ae5ba98f1c15ca",
+            "postgrespro:c8db9eb14ab9d1ac086ceb18649b0e1187e8338697bf1c575f6aff5caac52fa3",
+            "postgrespro:f278bf34c5ccdaf1fe90be4e98c41c9a9b26927ec1c215c0d1219d69cca0819f"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "status": "❌",
+          "found": false,
+          "class": "absence_cell",
+          "cited_doc_ids": [
+            "postgrespro:8f1fef3df55709bc62b7c74b6247727301d8ab9ee0a568d636440c3b3b71eea5",
+            "postgrespro:a37e7293a6063bf777f3e0a5506a8f8e81b8e4927e3e59abf10590a359e4443f"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:911f8003a60272d27924c7257a447c2fc1408a493cac98aff569cc07ec75a48f",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:3f3fb9b11bdaf2ef7c50956010acbcae33d50bf75259fefb35c5a98f5b45cc91"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:48cec999403753a0ac2ef9558b4947282dd50b62a4787fb33a5fd5c4c5cf3f91"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:53a0ac46da550a5401324f188dcc79945ad81783f66a0fa40635df6bedd6af18",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:269233e797099b4b67e881f833be4eaf8d4c4a5d7bc5501a7e09f0ad668605c2",
+            "postgrespro:40cfe9046cf91a62c14a3b9c78db1e4990d5de43056c2b72682929aa08690bb5",
+            "postgrespro:ba2d19099abba9c1a9696cd857d29f61799d7ae35b05604b90ae5ba98f1c15ca"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:911f8003a60272d27924c7257a447c2fc1408a493cac98aff569cc07ec75a48f"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_078_nalichie_in_memory_tehnologii",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:03ce1541ac8e69c0b7ff168dcf225bd6d159775d10ae7186bb7b285af3bf0cbd"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:715f01e9c5625e359c15adc753b4f443f651fb8aaecdf6293560c7c8fd6f14f0"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:3bebab87da0cc87d82470fa4381cc2468e46537904620da5c2f9f863cffc5628"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_083_split_merge_sekcii",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_086_zamorozka_planov_zaprosov",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:752a07b0074bbbf2bf5e2247ef172b9b56e48f4fbf9f4e62eff26c49e2f60794",
+            "postgrespro:fddcd105b7b37f6178ea54837ecaa445cafcee0fdf9c78de35dbc582c47e0c32"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:6aa4f228ece73a41e422ace89d0a81e7937fe021efc8bd71914ef7bd8e7c60cf",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:68cb813f9417324ba3a38be743e749ede209fe85a1385d23612e48402bbcfafd"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:f16ebcf190e61eea076b0808ad538591601e8c9b8d8d4a894592890cef80ac59"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:117602ad8fb0b5177f577ea1b0c120d233e4c28e2112dc37a6d0b8ea7dbd1f61",
+            "postgrespro:3d71f542ecd7cce5c3ff60a2e01dc09b1f470cf5fa01d13a1fcc19d7e8b66324"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:23f47f9b567081c723863162a3f43ed4d9c08df070abdf72b9ccd410f94b20dd"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:56dc1f939507428aa9dc0f717a9523a95a82251c76752ef253e6904df8c40401",
+            "postgrespro:a6572c3362a15dc0e2e10088051e7d0cf5bf5e77bbb48f546bc7ce9f74b05182"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:e242b094d42e94880fa9f9032d52f6b7f8948e5d2e4d4db362305cc7a0d138ac"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:adf6e1a942fe13ea21a9fc2d5d8ae66aad8e0c8ef75336d2def81d424ce43a5c"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_097_rum_indeks",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_097_rum_indeks",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:eac9696b8d6360bb598e0c105464e663295d0c8b8e32541ff810de49b06e0f43"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:49945f61cd48bfad585e200820789b3ca2f1243022bb1c3410d4b803c3727525",
+            "postgrespro:a1c9ac69f95e806009aff4f4ce2cb027fc790b7aa46dea9eb5b88699911ea446"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:6552bf8db438b0142ce4d39d5d46334838ad01e0ea1a8f2d4f1c18ce21e8b3ef",
+            "postgrespro:e1b499d25d5574bbffcaa5c0e8ae3805fa778c3d52ccb13f67c280ab89f77048"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:9292ca50ee9807b237f7ffa0e6fae36af98f7442df6acc386b281134ac487cd1",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [
+            "postgrespro:2de59a04b175ceebb54555a542f218c2ed4e2467ee383b78bf516bdbefd25022",
+            "postgrespro:8736caa22f59e326b0327f010a9ef8b54acb6d9a1cbd152660a11ba3b7bf0d3f",
+            "postgrespro:8f7e2c1699c012cbf9217d35db6195f747b44c3883acb617ba40885e5548a868"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:4b4a572a55079c04050f614114672a2dd1aedd48ed2c0d9c419c77ab68d2738e",
+            "postgrespro:6334b40b9dc4734a267db3c6e7a0740b0fc908100533639e4926e9e2dcf07fdc",
+            "postgrespro:63d3532548736c3ede81ecd2ece7525e42f057df932ec2d40ad74d750b5a0119",
+            "postgrespro:851b1b65eef88cc7444af8dcdc5fb2ca362da900a688d01aa8ec877d8593503b",
+            "postgrespro:8cea5a030e8e29e2f7d0fbcc6c4e83c63c11e3ae87e8aef8ac45fceec9ba5fd8",
+            "postgrespro:a47664064d1aa54073e1329c6a82d415a36d735a6372284cd2c7af2fd6a6582c",
+            "postgrespro:c2ee825fa10f58dedd15c0de236f801da5fa9e9616a8e8ced0966e1e3c515eac",
+            "postgrespro:efce11c9f404db0051e5b43843cc64384afc199a8b79eea635be437ed06ffd49"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83",
+            "postgrespro:f87c63b41ee39f450857210eaf249aedd8a1423358d315ea3629d08dda8a1f3b"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:00237f35ab79b8d85efd14f0d3b9cab04d0d501a93849065b3cf80e913a38aed"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:2e4804928b0a86bac60e232ae13e1fccc189e054fbef58766f9f8352b8cb2ddb",
+            "postgrespro:4021d9ab2b87fc7d2e0d7ce547893902c46171ae583db15c440a1e12509620e6",
+            "postgrespro:867fba28fc1ba7a77dd06564f9b1c9e859c66c524530c4a39e44e0cd6af95af3",
+            "postgrespro:cdf72310eab4c9486e95fe89d1f9fa3d5f10a507349cc122355ed1c3b7e6eeba"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_119_pluggable_toast",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_119_pluggable_toast",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:1faef06bbca29e4a0b9e808decde1953f000ed59130acd642e5f8d708373eeee",
+            "postgrespro:31a27ce7726d6f20b6f1813075ea87a53964bed05759ceeef75ea3b315e12d1d",
+            "postgrespro:93bbf73931e2d2841096b10fdd8d5313fb0c493bf1b105bc7dc35ad5509f4225"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:099a8d203738fda26948d957b52636d304fb75c54d77da3ba5009d528043cfe5",
+            "postgrespro:1261a1fdd58071ec9fa903c9040fc2add854bb198a3686f458340241fdc321be",
+            "postgrespro:5167a792531b1363f20619efbed044f3d3f282f08f72b47505d0f20606f79285",
+            "postgrespro:6d63720b04c69ffa96a11370fd22a2cd6534dad2afee7d91524ce0ec3a6aa52e",
+            "postgrespro:7970a7d10091480b1ea25e7afe2c15da618c3bcdee96cd80169fbc7e1ae055fa",
+            "postgrespro:79e0d92e7f75c337e3a0ec4bcba46179b1a26d340bcbbfc4aa00a214bcd7e462",
+            "postgrespro:9cd4a649d00f4b2da6c147b816830b1eb65079d664e6822e09f460d462b6dddb",
+            "postgrespro:a781d9b545f2dd908020acbe69f0079a8cf6afe24aae6def03ff3875b95296b5",
+            "postgrespro:e9178af00df6ab1e0f23476b0f441687b0b6b05e775d78c41da96145da576af0"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83",
+            "postgrespro:eac9696b8d6360bb598e0c105464e663295d0c8b8e32541ff810de49b06e0f43"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:cafd493d8d4bff903d61ab3fd1ede5ae6a32211a02d6f1b993efc6c055fc91b5"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:753ed1229511a6dd4c4fb1f00e37b1416525e47ff7ca6c7825bd7bcc39a68244"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:7bfaa325260bb3d9e54d74f29c9ebce93f49f61b6f155a2adae23e107a477e81"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:71a7b2546cd5171b6dba9fa8c71e9a2a4815abe8399a29c07108c998cac2aad6",
+            "postgrespro:d30f1e13430acc98529d78ea762a04bd896bfd04a663f9acb5d40e1e1326f485"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:99f857d5ea53a5434be11e70e105b7e7cb7fde653053210305c4e730a81d4d5c"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:0caa17c7049e72b7077c0acd28e6feffc3c26b60f088d16bbc4d087249ad8f7e",
+            "postgrespro:21e955dbdd54888d035848fda98a3838dbf1b9d24b9c2ffc4e6c36d68e074c20",
+            "postgrespro:76c3e4bb238075d363e6e386cdca41a162c7c3251d8c60a0a0f21fe6877f9ce0"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_139_parametry_v_skriptah_psql",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:9bbffc5a6819af49a63ec21afcbd39c27beba00fe1c04ab81b9c83f4296f82b7"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_140_podderzhka_associativnyh_tablic",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:1faef06bbca29e4a0b9e808decde1953f000ed59130acd642e5f8d708373eeee"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "status": "❌",
+          "found": false,
+          "class": "absence_cell",
+          "cited_doc_ids": [
+            "postgrespro:00a46fa03c283cfab04fcca604bf4007fb754e87b12f116252f9a87d6782cb41",
+            "postgrespro:1faef06bbca29e4a0b9e808decde1953f000ed59130acd642e5f8d708373eeee",
+            "postgrespro:7bcaa4ce27fef2b043cd7010bd3aa77fb7446f08cabbb27456c9bbda4b08a043",
+            "postgrespro:81b5ff5e788ad4b3e85ce7aa5f49ba2e51c3cb80b0b7b147e0a74c84c2d7fc2e"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:00a46fa03c283cfab04fcca604bf4007fb754e87b12f116252f9a87d6782cb41",
+            "postgrespro:7bcaa4ce27fef2b043cd7010bd3aa77fb7446f08cabbb27456c9bbda4b08a043",
+            "postgrespro:d5f7449b9c06c3b007ea2b73cd631b6383c6c760d2a37fa811bc2bc1eebcfb2a"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:d5f7449b9c06c3b007ea2b73cd631b6383c6c760d2a37fa811bc2bc1eebcfb2a"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:f3141255b74d3f464bfb10b202cd2fafb081ae72fc342743ec0bc534813a4ca9"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_150_upravlenie_rasshireniyami_bd",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:bdee8c3c66a452125de2a87cd77ebdb35fbee383cfcd6363c7d4c039896f13fb",
+            "postgrespro:ddb3fbdd82cf422290b4a298ad4252196e86e06b6591adf3ce8387bc533f536d"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_151_upravlenie_polzovatelyami_bd",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:3461dfa387a74eccdddc165324acba6578f052a71393cf3292f2d48f704b6b25",
+            "postgrespro:53b2e034c550152604e6412128b21dbb3ff77338c01bd894f9a4025b4d0a4683"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:ac952dff48bf9f50015c873d2f9b9869667bb372b2872ac86ea34877c2da6cad"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_154_sozdanie_udalenie_bd",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:911f8003a60272d27924c7257a447c2fc1408a493cac98aff569cc07ec75a48f",
+            "postgrespro:ea1f32205d40a5b76140642884fc011daefd7d12c39ec88e6a273c9cbc450e83"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:2b816de58729a064793783277bf7001841bf3b9a873a4d395d9ed33eab0ba7c6"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:7bfaa325260bb3d9e54d74f29c9ebce93f49f61b6f155a2adae23e107a477e81"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:4cb4cf262470a28c8b0d138526185ed1e8261e2c4f342dc3de1c51e86b480801",
+            "postgrespro:8d49798a2e52dba4688aad164d4b579191ffe79e0c21b31ef3d6ff7c79a287ca"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168",
+            "postgrespro:ac952dff48bf9f50015c873d2f9b9869667bb372b2872ac86ea34877c2da6cad"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:05ec547fff4194bb892b21b9cb18675c0bd588004290c248d473aa8e62961e05"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:7bfaa325260bb3d9e54d74f29c9ebce93f49f61b6f155a2adae23e107a477e81",
+            "postgrespro:94fe116eed409a907f1c1c40e6e32b7921eb085b89a053888d0b2421b91fa596"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_171_dostup_k_konsoli_psql",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:2e4804928b0a86bac60e232ae13e1fccc189e054fbef58766f9f8352b8cb2ddb",
+            "postgrespro:4021d9ab2b87fc7d2e0d7ce547893902c46171ae583db15c440a1e12509620e6",
+            "postgrespro:867fba28fc1ba7a77dd06564f9b1c9e859c66c524530c4a39e44e0cd6af95af3",
+            "postgrespro:cdf72310eab4c9486e95fe89d1f9fa3d5f10a507349cc122355ed1c3b7e6eeba"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:2b816de58729a064793783277bf7001841bf3b9a873a4d395d9ed33eab0ba7c6",
+            "postgrespro:69b8c0a70e6eb7b5c54719616caf5236c43f8337105c40409587857b0e532168"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "postgrespro:0986cc2ec9e5900b9eb94b5c47de0976e42b3aa8299fbcbddb1b2de618872eb5",
+            "postgrespro:612454f6bb566e95268c662bcd501b1cdcc5a68c11548fa70356dd11e1859f8f",
+            "postgrespro:731ecc3d6729d63e494e315544d50b57c6c39cfb31636cac5f2bd9b112ad0155",
+            "postgrespro:79c5ccfe86584b53007163cdd95a1fa071c84ac39d90eba39c076aef8c1638a6"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "postgrespro:efadfebfb0f87d80b46af17cda9b55a3d37b2b263628ecd612e51f933c83626c"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "status": null,
+          "found": false,
+          "class": "no_verdict",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "status": null,
+          "found": false,
+          "class": "no_verdict",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "product_id": "postgrespro",
+          "param_id": "xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "status": null,
+          "found": false,
+          "class": "no_verdict",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "product_id": "tantor",
+          "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "status": null,
+          "found": true,
+          "class": "no_verdict",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+          "product_id": "tantor",
+          "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+          "status": "✅",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "tantor:b36f99389af06cd6e40a19aaa20225d0e105450465e07e0e7609f20ab988a256"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "product_id": "tantor",
+          "param_id": "xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "tantor:8641744e5b8e0419462cdb6dbee22b1e74294eab6956ef40d5c6e8d9edb9c1ec"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "product_id": "tantor",
+          "param_id": "xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "tantor:f3ea582bf56c42a4020dfb24df4da6a0fb1e895e555a4f3ffa5582bc6975d32a"
+          ],
+          "citation_hits_golden": false
+        },
+        {
+          "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+          "product_id": "tantor",
+          "param_id": "xlsx_018_nalichie_publichnogo_roadmap",
+          "status": "❓",
+          "found": false,
+          "class": "search_missed",
+          "cited_doc_ids": [],
+          "citation_hits_golden": null
+        },
+        {
+          "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+          "product_id": "tantor",
+          "param_id": "xlsx_019_podderzhka_dbaas_cloud",
+          "status": "✅",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "tantor:9b35bbbb19070a284b08818ea485288c191fc19e2da37e4d50ce496c8b578995"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+          "product_id": "tantor",
+          "param_id": "xlsx_020_nalichie_sertifikata_fstek",
+          "status": "⚠️",
+          "found": true,
+          "class": "consistent_positive",
+          "cited_doc_ids": [
+            "tantor:215824f185ed37217071a8908d99430766b2b6fc5992ea57b11e0776c788a9e4"
+          ],
+          "citation_hits_golden": true
+        },
+        {
+          "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "product_id": "tantor",
+          "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "status": "⚠️",
+          "found": false,
+          "class": "lucky",
+          "cited_doc_ids": [
+            "tantor:b37d9ca375389bd050dea9f2d9cd62693c226944b268e6e0d35311e9ce706521"
+          ],
+          "citation_hits_golden": false
+        }
+      ]
+    }
+  ]
+}
