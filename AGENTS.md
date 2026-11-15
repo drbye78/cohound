@@ -257,8 +257,11 @@ mismatch forces `complete=False`; an unknown digest (either side) does not — a
 is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
 term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
 `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.20.0 (`corpus_coverage.roots_json`, `cells.absence_as_of`); STATE `12`
-(`capture.policy_digest` changed meaning ⇒ old files are rejected by the version gate).
+`SCHEMA_VERSION` 3.21.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
+`corpus_docs.page_map` at 3.21.0 — the page map, from which a chunk's page number is a
+**function**, not a column: a copy would have to be maintained on every chunk-write path and
+one missed path would give a silently wrong page); STATE `12` (`capture.policy_digest`
+changed meaning ⇒ old files are rejected by the version gate).
 
 ## 6. Crawl scope: declared hosts
 
@@ -552,6 +555,22 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   is plan `26` O26. A failing page does not kill the document (`partial=True`); control
   characters and `\r\n` are normalized, without which the
   paragraph chunker matches nothing and the document becomes one chunk.
+- **Page provenance is stored once, derived everywhere else.** The `text_layer` reader fills
+  `ExtractedDoc.page_map` (`(page_no 1-based, char_start, char_end)`, half-open, sorted,
+  non-overlapping; `"\n\n"` between pages is a **gap**, not part of a segment; offsets are in
+  the chunker's space, i.e. without a leading BOM, so the reader shifts by −1 on a BOM
+  document). It is persisted as `corpus_docs.page_map` (JSON, `NULL` = the reader gave none —
+  never `''`) with a **COALESCE** upsert: a writer without a map (HTML, docling, seam, reuse)
+  must not erase a measured map of the same text. A chunk's page number is **not** a column
+  but `page_number_for(char_start, page_map)` (`core/domain/page_map.py`): a copy would have to
+  be maintained on every chunk-write path and one missed path gives a silently wrong page.
+  Stamp `pdfium-text-4` is an `execution_change` on purpose: a warmed `extract_cache` entry
+  without the map would hand back a document that lost provenance. Measured 15.11.2026 on the
+  whole PDF corpus (307 documents / 21 636 pages): 0 defects, `text` and `content_hash`
+  identical to the previous reader, cost +2.8…+6.1 % extraction time
+  (`docs/reports/measurements/2026-11-15-pdf-page-map-corpus.md`, instrument
+  `scripts/check_pdf_page_map.py`). Under `deploy_profile: split` the map is `None` — the seam
+  (`SEAM "1"`) does not carry it yet; docling (`structured`) does not fill it either.
 - **There is no hybrid PDF pipeline, and that is a measurement decision, not an unfinished
   job**: pdfium lost 6.7 % of docling identifiers on a real book, and the only table detector
   with recall 1.0 flags 90 % of pages (`docs/reports/measurements/2026-10-28-hybrid-quality-gate.md`).

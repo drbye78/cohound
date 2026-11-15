@@ -134,7 +134,7 @@ run.yaml:crawl.<ось> → CrawlRunConfig → app CrawlConfig → resolve_crawl
    `ExtractorPort` (`core/ports/extractor.py:24-31`). Новая реализация отдаёт свою
    строку (`pdfium-text-1`), кэш экстракции разделяется сам, без правок в `corpus.py`.
 2. **Порт узкий.** `ExtractedDoc` — это `text`, `content_hash`, `extractor_version`,
-   `page_count`, `error`, `family` (`core/ports/types.py:145-164`). Реализовать его
+   `page_count`, `error`, `family` (`core/ports/types.py:146-165`). Реализовать его
    без docling — сотня строк.
 3. **Семейство формата уже в порте.** `family="text"` → `TextChunker` (абзацы),
    `None` → `MarkdownChunker`. Это выбор, который надо сделать **явно**: если

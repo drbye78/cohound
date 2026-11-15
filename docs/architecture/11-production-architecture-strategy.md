@@ -249,10 +249,10 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:392-393,562,1168`), подключены в
->   `core/pipeline/extract_consume.py:1270-1271`; видимая строка пропуска по бюджету —
+>   `core/pipeline/extract_consume.py:1273-1274`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:873-889` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:127`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
->   `core/store/sqlite.py:621-640`.
+>   `core/store/sqlite.py:636-655`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
@@ -295,14 +295,15 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   **Реализовано (2026-10-24):** синки `persist_observation`/`persist_member` в
   `ArchiveDescentWalker`, единая точка строки — `_emit_member`/`_emit_skipped_member`;
   `SKIP_BUDGET`/`SKIP_STREAM_TOO_LARGE` теперь дают строку члена (видимый пропуск); синки
-  подключаются в `core/pipeline/extract_consume.py:1208-1209`
+  подключаются в `core/pipeline/extract_consume.py:1211-1212`
   (`persist_observation_sync`/`persist_member_sync`, отказ стора → `errors`), финальная пачка
   осталась reconciliation-pass'ом. **Дополнено 09.11.2026:** строка появилась и у отказов
   **плана** — но только по бюджетным причинам (`member_too_large`/`member_limit_exceeded`/
   `total_uncompressed_exceeded`, `PLAN_SKIP_ROW_REASONS`): они известны до обхода, поэтому идут
   пачкой фазы, а не построчным синком (`durable=False`). Каталоги, шифрование и чужой формат
   остаются агрегатом прогноза: это не члены-файлы, а структура/свойство контейнера; отвергнутый
-  путь ждёт колонку `raw_member_path` (схема 3.21.0, план 23). Число опубликованных план-строк
+  путь ждёт колонку `raw_member_path` (свой бамп схемы — 3.21.0 занят `corpus_docs.page_map`,
+  O36; план 23). Число опубликованных план-строк
   публикуется как `outcome.members_skipped_rows`.
 - **Дефект схемы — исправлен (2026-10-24, `SCHEMA_VERSION = 3.13.0`):** PK `corpus_members` =
   `(archive_content_hash, member_path, product_id)` (`core/store/sqlite.py`). `run_id` в ключе

@@ -17,7 +17,7 @@
 
 ## 1. Как задан темп сейчас
 
-- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:480`).
+- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:481`).
   Резолвится цепочкой `defaults < run < profile < product < site`
   (`core/pipeline/crawl_sources.py:145-151`), едет в `FetchPlan` **на каждый URL**.
 - Примитив — не token bucket, а **резерв слота по origin**: `target = max(now, last[origin])
@@ -149,7 +149,7 @@
 
 - `Retry-After` разобран (`core/util/retry.py`), но его читают **только** поисковые
   адаптеры. На корпусном пути он **недоступен по носителю**: `RawPage` заголовков не несёт —
-  только `etag`/`last_modified`/`not_modified` (`core/ports/types.py:91-142`), поэтому повтор
+  только `etag`/`last_modified`/`not_modified` (`core/ports/types.py:92-143`), поэтому повтор
   ждёт слот объявленного лимитера (`core/util/fetch_retry.py:113` — `limiter.wait_reserved`),
   а не указание хоста. Шов отдаёт `retry_after` только как back-pressure **подачи** работы
   (`core/adapters/remote_crawl_executor.py:186`, ответ `crawl/submit`), а не как ответ

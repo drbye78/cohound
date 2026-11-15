@@ -33,9 +33,9 @@
 ## 1. Границы подсистемы и контракт с соседями
 
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:1259`),
-сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2762`), retention сырых байтов
+сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2767`), retention сырых байтов
 (`retain`, `core/pipeline/corpus_ingest.py:1158`), durable per-URL состоянием (`crawl_session_items`,
-`core/store/sqlite.py:464`), расширением ссылок из **сырых байтов** (`extract_links`,
+`core/store/sqlite.py:479`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.
 
@@ -45,7 +45,7 @@
 **Единица работы** — один URL объявленного корня. **Результат** — файл в `corpus_raw` плюс элемент
 сеанса `FETCHED` с `raw_path`/`content_hash`; это durable-факт **до** конверсии, и порядок в коде
 такой: байты пишутся, затем `retain` ставит `FETCHED` (`core/pipeline/corpus_ingest.py:1188`), а
-вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:3086`).
+вызывающий получает `(page, raw_path, …)` уже фактом (`core/pipeline/corpus_ingest.py:3091`).
 
 **Соседи приходят двумя путями.** Конверсия — **потребитель** durable-факта (§4); SERP — наоборот,
 **производитель**: его находки входят в frontier путём sitemap-`<loc>` — блэклист, `max_documents`,
@@ -62,7 +62,7 @@ level, pdf_pipeline)` плюс провенанс получения. Потре
 состояние меняет только потребитель, upsert запрещён.
 
 **Носитель состояния зависит от топологии:** run-DB — SQLite с одним писателем (читатель открывает
-файл `mode=ro`, `core/store/sqlite.py:823`); двух писателей в один файл не бывает, значит «кластер
+файл `mode=ro`, `core/store/sqlite.py:838`); двух писателей в один файл не бывает, значит «кластер
 краула» не может разделять одну run-DB (§2).
 
 **RAM-сцепка снята (F5).** Окно `extract_pending` с барьером, флаг `counters.defer_extract` с
@@ -133,9 +133,9 @@ host'ами — линейно.
 `FETCH_RETRY_TIMES` (2) раз, и **каждая попытка берёт свой слот** лимитера со своей меткой
 (`core/util/fetch_retry.py:55`, одно правило на `local` и `split`; классификатор —
 `core/ports/crawl_errors.py`). Контракт «никакой мутации состояния сеанса здесь нет» уже записан у
-`local_fetch` (`core/pipeline/corpus_ingest.py:2762`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2641`). Потоки не получают ни `Frontier`, ни
-стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:823`), поэтому
+`local_fetch` (`core/pipeline/corpus_ingest.py:2767`), а pre-fetch — чистая фаза
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2646`). Потоки не получают ни `Frontier`, ни
+стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:838`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 
 **Ключ — host, и он один: и для вежливости, и для эксклюзивности.** Лимитер нормализует ключ до
@@ -188,7 +188,7 @@ claim (`expect=PENDING, claimed_by=<worker>`), без второго метод�
 
 **Очередь принадлежит производителю, доставка — потребителю.** Это главное следствие требования
 «краул эффективен безотносительно конверсии», и оно снимает вопрос «где очередь при `cluster`».
-`extract_queue` живёт в плоскости **краула** (его run-DB, один писатель, `core/store/sqlite.py:823`),
+`extract_queue` живёт в плоскости **краула** (его run-DB, один писатель, `core/store/sqlite.py:838`),
 а транспорт выбирается топологией:
 
 * `local` — потребитель в том же процессе: очередь читает пул извлечения, `claimed` → `done`;
@@ -1006,7 +1006,7 @@ oversized/invalid content не попадает дальше.
 (`core/ports/crawler.py:50`). **Сделано:** retry вынесен из адаптеров в один цикл
 (`core/util/fetch_retry.py:55`, одна константа на `local` и `split`), классификация
 транзиентности — порт (`core/ports/crawl_errors.py:219`), ручной redirect-scope —
-`core/pipeline/corpus_ingest.py:2989` (включается `core/pipeline/corpus_drain.py:722`), process
+`core/pipeline/corpus_ingest.py:2994` (включается `core/pipeline/corpus_drain.py:722`), process
 isolation браузера (`core/edge/scheduler.py:181`), единая robots-семантика. **Остаток:**
 `FetchAttemptResult` и resolved-IP validation/pinning (грепп `pinning` по `core/` даёт только
 certificate pinning, которого нет: `core/config/deploy.py:18`, `core/edge/auth.py:315`;

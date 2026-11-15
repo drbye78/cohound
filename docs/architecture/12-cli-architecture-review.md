@@ -202,7 +202,7 @@ evaluate, review, g3, compute, g4, report`.
 То есть `35e4373` закрыл **один** путь: отсутствующий файл БД → `EXIT_NOT_FOUND`
 (`build_store(read_only=True)` → `StoreNotInitialized`). Второй путь — файл есть, а прогона в
 нём нет — по-прежнему `EXIT_USAGE`: `read_manifest` бросает `ValueError("прогон не найден…")`
-(`core/store/sqlite_store.py:2897`, def `core/store/sqlite_store.py:2875`), а `ValueError`
+(`core/store/sqlite_store.py:2919`, def `core/store/sqlite_store.py:2897`), а `ValueError`
 перехватывается общим обработчиком и отдаётся кодом 2 (`core/cli/main.py:266`), поэтому CLI печатает
 `E: прогон не найден: 'ghost'` кодом **2**. Для скрипта это одно и то же событие с двумя
 кодами — в зависимости от того, кто создал файл.
@@ -439,7 +439,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 
 ### Команды «только для чтения» создают БД
 
-✅ сделано (`core/store/sqlite.py:787-833` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
+✅ сделано (`core/store/sqlite.py:802-848` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
 Перемер на тех же трёх командах и несуществующем пути: `review --db /tmp/…/x.db`,
 `sensitivity --db …`, `golden --golden … --db …` → **`exit 4`**, каталог не создаётся
 (`ls: cannot access …`: файла нет). Сообщение называет причину: «read-only команда файл не
@@ -475,7 +475,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:1060`, `core/store/sqlite_store.py:1977`,
+✅ сделано (`core/cli/commands/crawl.py:1060`, `core/store/sqlite_store.py:1995`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
 текстовом выводе (`core/cli/commands/crawl.py:1074-1075`), и в JSON
 (`core/cli/commands/crawl.py:1067`). Докстринг `iter_crawl_sessions` прямо
@@ -588,7 +588,7 @@ JSON-артефакт** (БД не меняет:
 
 **Ссылочный счёт (сверено 07.11.2026).** Этот документ цитируется как обоснование из **12**
 файлов кода и тестов (в `README.md` до этой сверки стояло «9»): `core/pipeline/golden_status.py:34`,
-`core/store/sqlite.py:777`, `core/store/sqlite_store.py:1966`, `core/cli/commands/status.py:3`,
+`core/store/sqlite.py:792`, `core/store/sqlite_store.py:1984`, `core/cli/commands/status.py:3`,
 `core/cli/commands/runs.py:4`, `core/cli/run_overview.py:4`, `core/cli/wiring.py:654`,
 `tests/cli/test_gate.py:347`, `tests/cli/test_runs_status.py:3`,
 `tests/store/test_read_only_connect.py:6`, `tests/cli/test_read_only_commands.py:3`,

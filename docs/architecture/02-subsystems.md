@@ -125,10 +125,10 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
-(`_profile_material_for_run`, `core/cli/context.py:1567`), иначе проверялось бы не то, что
+(`_profile_material_for_run`, `core/cli/context.py:1570`), иначе проверялось бы не то, что
 аттестовано. Проверка подключена: `make_profile_gate`
 (`core/pipeline/profile_attestation.py:313`) → `_profile_gate_resolver`
-(`core/cli/context.py:1656`).
+(`core/cli/context.py:1659`).
 
 **Статус подписи — операционный факт, не дефект дизайна.** Измерено 2026-11-08: **0 строк**
 `profile_attestation` в `state.db` стенда (`~/.cohound/stands/ru-pg-dbms`) — механизмом не
@@ -252,7 +252,7 @@ products × doc_domains
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
 | `max_workers` | **сетевой** fetch-пул (`httpx`) | в `_open` — открытии полосы корня (`core/pipeline/corpus_driver.py:351-372`); ширину даёт `lane_width` (`core/pipeline/corpus_drain.py:1111-1126`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5168-5195`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5191-5218`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул (`recycle_tasks` в `new_extract_pool`) | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
@@ -359,7 +359,7 @@ index`. Это делает DMZ-шов физической границей **I
 `failed` и не `partial`; статус ставит recovery-on-open по свидетельству живости
 (`owner`/`heartbeat_at`), а `hound crawl cancel` демотирует `running` в `interrupted`
 (`cancelled_by_operator`). `interrupted` обязан оставаться в `_TERMINAL_SESSION_STATUSES`
-(`core/cli/context.py:2335`), иначе `--follow` ждёт вечно.
+(`core/cli/context.py:2338`), иначе `--follow` ждёт вечно.
 `completed` — при отсутствии failed/cancelled, иначе `partial`. При наличии `store` и `run_id` Ш5 перед фетчем читает
 durable-элементы сеанса и **не фетчит повторно** URL, у которого уже есть retained-байты:
 `RawPage` реконструируется из `corpus_raw` (I19: raw — источник), затем идёт ре-экстракция;
@@ -398,13 +398,13 @@ retained-байтами не фетчится заново
 `failed`/`source_unavailable` → сеанс `partial` (не «тихо пусто»).
 
 **Когда именно идёт развёртка.** Каталог разворачивается **на постановке seed'ов, до
-краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2265-2304`) вызывается в
+краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2270-2309`) вызывается в
 цикле продукта (`core/pipeline/corpus.py:3470`), и каждая запись становится **отдельным
 seed-корнем глубины 0** — это и есть «один уровень развёртки». Под `split` сетевую часть
 (опрос каталога) исполняет DMZ через `RemoteFeedPoller`, логика развёртки остаётся в ядре.
 Волн «top-level URL → опрос каталогов → записи» нет: `split` подаёт исполнителю **волны
 фронтьера** размером `executor_wave_items` (`submit_collect`,
-`core/pipeline/corpus_ingest.py:2081-2133`),
+`core/pipeline/corpus_ingest.py:2086-2138`),
 и `idempotency_key` выводится из набора работ **этой** волны, а не из вида источника.
 
 #### Контейнеры: спуск
@@ -430,7 +430,7 @@ seed-корнем глубины 0** — это и есть «один уров�
   а не отсутствие данных.
 - **Члены извлекаются через фазовый пул экстракции**, с окном упреждения
   `K = extract_window` и **строгой FIFO-доводкой** (`_resolve_member`,
-  `core/pipeline/extract_consume.py:1113-1131`;
+  `core/pipeline/extract_consume.py:1116-1134`;
   `ArchiveDescentWalker(defer_member=…, window=…)`, `core/pipeline/archive_descent.py:340-400`).
   Это не оптимизация порядка, а условие
   корректности: `_content_digest` сборки склеивает чанки **в порядке вставки**, а
@@ -596,7 +596,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1287-1318`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1288-1319`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
@@ -666,7 +666,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 из 70 без доказательства о предмете.
 **Следствие-аномалия теперь публикуется** (V1 закрыт 08.11.2026): записи замера идут в
 операторский `nda_questions.csv` строками `anomaly_kind=unrelated_support`
-(`core/pipeline/report.py:2087`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
+(`core/pipeline/report.py:2093`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
 не меняется. Маркерная проверка класса утверждения (отрицание/условность в цитате против
 заявленного ✅) остаётся **названным ограничением**, а не работой: она требует замера шума
 на корпусе, иначе превращается в порог из головы (A3).
@@ -687,7 +687,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:654-691`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:655-692`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
   сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1415-1420`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
@@ -828,7 +828,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3434-3503`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3440-3509`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
@@ -949,22 +949,22 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3434-3503` → `{out_dir}/{run_id}/outputs/`,
+`write_reports` `core/pipeline/report.py:3440-3509` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:427`); версионирование
 `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:128`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
 `core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
 `core/util/hashing.py:44-55`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
-(`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1848-1859`,
+(`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1851-1862`,
 потребитель — `HttpCrawler` и поисковые адаптеры); политика ретраев и backoff —
 ✅ сделано (общая политика HTTP-адаптеров `core/util/retry.py:1-27`,
 `request_with_retry` `core/util/retry.py:129`, потребители — `core/adapters/search_glm.py:486` и
 `core/adapters/search_yandex.py:724`; у **краулера** свой цикл повторов —
 `core/util/fetch_retry.py`, один на `local` и `split`);
 гранулярность транзакций SQLite при массовой записи — ✅ сделано
-(`core/store/sqlite.py:89` `PRAGMA journal_mode = WAL` +
-`core/store/sqlite_store.py:94` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch`
-`core/store/sqlite_store.py:646` — одна транзакция на пачку).
+(`core/store/sqlite.py:96` `PRAGMA journal_mode = WAL` +
+`core/store/sqlite_store.py:95` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch`
+`core/store/sqlite_store.py:647` — одна транзакция на пачку).
 
 **Что остаётся открытым, хотя в §H не значится:** шаг (3) эшелона — проверка следствия
 статуса из цитаты (§C.2, V1) и append-only раунды K2 (§G.2). Оба названы в тексте и оба
