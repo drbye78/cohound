@@ -1,8 +1,14 @@
-"""Retrieval-golden: метрики качества ретривала (hit@K, MRR, recall@K).
+"""Retrieval-golden: метрики качества ретривала (hit@K, MRR, recall@K, nDCG@K).
 
 Соответствует §11.2/§11.3 регламента (R9/R10, retrieval-golden) и I20
 (cut-off метрики = pipeline ``retrieval_cutoff_K``). Используется для выбора
 профиля R0/R1/R2 и как регрессионная сеть при смене эмбеддинга/чанкера.
+
+**nDCG — отдельная функция, не поле отчёта.** :func:`ndcg_at_k` считает метрику по
+бинарной релевантности и живёт рядом с остальными; в :class:`RetrievalReport` она не
+агрегируется, потому что публикуемая поверхность метрик — явный словарь
+:meth:`core.pipeline.experiments.RetrievalExperimentReport.to_manifest_json`, и добавлять
+туда поле значило бы менять опубликованный формат отчёта, а не только считать метрику.
 
 **Неразрешённые id эталона (O4).** Голден привязан к конкретным ``chunk_id``. Когда
 сборка пересобрана, а эталон — нет, ни один ожидаемый id не резолвится, и ``recall@K``
@@ -18,6 +24,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 
@@ -133,3 +140,42 @@ def evaluate_retrieval(
         unresolved_expected_examples=tuple(unresolved[:UNRESOLVED_EXAMPLE_LIMIT]),
         observed_ids=frozenset(observed),
     )
+
+
+def ndcg_at_k(expected_ids: Collection[str], ranked: Sequence[str], k: int) -> float:
+    """nDCG@K по **бинарной** релевантности: ``DCG/IDCG`` на срезе ``ranked[:k]``.
+
+    ``DCG = Σ rel_i / log2(i+1)`` по местам 1..k (``rel_i = 1``, если id ожидаемый, иначе
+    0); ``IDCG`` — тот же DCG идеального порядка, то есть ``min(len(expected), k)``
+    релевантных на первых местах. Метрика учитывает **позиции** всех найденных ожидаемых
+    id, а не только первого (в отличие от MRR) и не только их число (в отличие от
+    recall@K), поэтому чувствительна к тому, насколько высоко стоит каждый из них.
+
+    Знаменатель — идеальный порядок для этого же K, а не для всего эталона: при
+    ``k < len(expected_ids)`` nDCG=1.0 достижим (все K первых мест релевантны), иначе
+    метрика была бы недостижима по построению.
+
+    :param expected_ids: ожидаемые релевантные идентификаторы (порядок не важен).
+    :param ranked: выдача ранжировщика, лучший первым.
+    :param k: cut-off (I20); ``<= 0`` — отказ, а не пустая метрика.
+    :returns: значение в ``[0, 1]``; ``0.0`` при пустом ``expected_ids`` и при
+        ``IDCG == 0`` (недостижимо при ``k > 0`` и непустом эталоне — оставлено как
+        честная защита от деления на ноль, а не как «ноль качества»).
+    """
+    if k <= 0:
+        raise ValueError("k должен быть > 0")
+    expected = set(expected_ids)
+    if not expected:
+        return 0.0
+    top = list(ranked)[:k]
+    dcg = sum(
+        1.0 / math.log2(position + 1)
+        for position, chunk_id in enumerate(top, 1)
+        if chunk_id in expected
+    )
+    ideal_hits = min(len(expected), k)
+    idcg = sum(1.0 / math.log2(position + 1) for position in range(1, ideal_hits + 1))
+    if idcg == 0:
+        return 0.0
+    return dcg / idcg
+

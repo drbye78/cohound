@@ -41,6 +41,7 @@ from core.ports.vector_index import (
 )
 
 __all__ = [
+    "CROSS_QUERY_FUSION_POLICIES",
     "DEFAULT_CROSS_QUERY_FUSION",
     "DEFAULT_POOL_MULTIPLIER",
     "DEFAULT_RRF_K",
@@ -137,15 +138,28 @@ DEFAULT_RRF_K = 60
 #: фазы оценки, и оно входит в ``retrieval_params_json`` → ``run_id``.
 MAX_QUERIES = 3
 
-#: Множитель пула dense-плеча. Сегодня пул равен ``cutoff_K`` (множителя нет), поэтому
-#: исполняемое значение — ``1``. Это **объявление исполняемого**, а не ось настройки:
-#: настраиваемость пула — план 26 O12 (нужен замер на эталоне).
+#: Множитель пула плеч R2: плечи ищут ``cutoff_k * pool_multiplier`` кандидатов,
+#: а срез остаётся ``cutoff_k`` (I20: cut-off тот же). Дефолт ``1`` — прежнее поведение
+#: (пул равен K); смена значения — ``execution_change`` и решение по замеру на эталоне,
+#: а не побочный эффект правки. Значение исполняется (:func:`retrieve`), а не только
+#: объявляется.
 DEFAULT_POOL_MULTIPLIER = 1
 
-#: Слияние результатов нескольких запросов ячейки. Сегодня — union с победителем по
-#: ``max`` скора (``evaluate.retrieve_for_cell``). Как и пул, это объявление
-#: исполняемого: альтернативы (RRF/Borda) — план 26 O13, после замера.
+#: Слияние результатов нескольких запросов ячейки (исполняется
+#: :func:`core.pipeline.evaluate.retrieve_for_cell`):
+#:
+#: - ``max`` — union с победителем по большему сырому score (прежнее поведение);
+#: - ``rrf`` — ранговое слияние **по запросам**: ``Σ_q 1/(rrf_k + rank_q)``;
+#: - ``per_query`` — union по ``max`` без кросс-запросной обрезки до ``cutoff_k``
+#:   (срез делает вызывающий): «сколько бы нашли, если бы не резали».
+#:
+#: Дефолт — прежнее поведение; смена — ``execution_change`` после замера (O13).
 DEFAULT_CROSS_QUERY_FUSION = "max"
+
+#: Допустимые политики кросс-запросного слияния — единственный список для проверки
+#: аргумента и текста отказа.
+CROSS_QUERY_FUSION_POLICIES: tuple[str, ...] = ("max", "rrf", "per_query")
+
 
 
 def retrieval_params(
@@ -331,6 +345,7 @@ def retrieve(
     vector_index: VectorIndexPort | None = None,
     dense_hits: Sequence[RetrievedChunk] | None = None,
     rrf_k: int = DEFAULT_RRF_K,
+    pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
     lang: str | None = None,
 ) -> RetrievalResult:
     """Единая точка гибридного ретривала по зафиксированному профилю (I16/I17/I20).
@@ -348,19 +363,32 @@ def retrieve(
         Батч-путь не меняет семантику: те же ``cutoff_k`` и те же партиции ``product_ids``,
         просто чтение партиции и BLAS делятся между запросами одного продукта.
     :param rrf_k: RRF-константа (часть ``retrieval_params_json``, S1).
+    :param pool_multiplier: множитель пула плеч R2: искать ``cutoff_k * pool_multiplier``
+        кандидатов на плечо, срезать по-прежнему до ``cutoff_k`` (I20). Пул расширяет
+        только то, что видит слияние: чанк, который оба плеча ставят на 11–20 место,
+        при ``pool_multiplier > 1`` попадает в RRF и может подняться в срез. Готовое
+        dense-плечо (``dense_hits``) не перезапрашивается и не обрезается здесь — его
+        окно задаёт вызывающий (``precompute_dense_hits`` с тем же множителем).
     :param lang: язык запроса (плечо BM25).
 
     :raises RetrievalBuildMismatch: плечи R2 привязаны к разным **известным** сборкам
         индекса, либо один ``chunk_id`` пришёл из двух источников с разными
         ``content_hash``/``product_id``. Наследник ``ValueError``.
     :raises ValueError: неизвестный профиль; отсутствует нужный порт; для R1/R2 нет ни
-        вектора, ни готового dense-плеча.
+        вектора, ни готового dense-плеча; ``pool_multiplier <= 0``.
 
     Пустая сборка (``build_id == ""``) у любого плеча отказом не является: неизвестная
     сборка не удостоверяется, сравнивать нечего (A3 — отсутствие факта не факт отсутствия).
     """
     resolved = _as_profile(profile)
     products = list(product_ids)
+    if pool_multiplier <= 0:
+        # Пул — исполняемое условие: ``0`` дал бы пустое плечо, ``-1`` — отрицательный
+        # ``top_k``. Отказ с числом, а не тихая подстановка K (A3).
+        raise ValueError(
+            f"pool_multiplier обязан быть ≥ 1, получено {pool_multiplier!r} "
+            "(пул плеч R2 = cutoff_k * pool_multiplier)"
+        )
 
     if resolved in (RetrievalProfile.R0, RetrievalProfile.R2) and lexical_index is None:
         raise ValueError(f"профиль {resolved.value} требует lexical_index")
@@ -400,12 +428,18 @@ def retrieve(
                 "плечи R2 привязаны к разным сборкам индекса: "
                 f"лексический {lexical_build!r}, dense {dense_build!r}"
             )
-        lexical_hits = lexical.search(query_text, products, top_k=cutoff_k, lang=lang)
+        # Пул плеч: RRF видит ``cutoff_k * pool_multiplier`` кандидатов с каждого плеча,
+        # а срез остаётся ``cutoff_k`` (I20 — cut-off тот же). При множителе 1 поведение
+        # прежнее байт-в-байт.
+        pool = cutoff_k * pool_multiplier
+        lexical_hits = lexical.search(query_text, products, top_k=pool, lang=lang)
+        # Готовое dense-плечо (батч) не перезапрашивается и не обрезается: его окно
+        # задаёт вызывающий, иначе «батч = поштучно» перестало бы быть проверяемым.
         dense_leg = (
             list(dense_hits)
             if dense_hits is not None
             else vectors.search(
-                VectorQuery(product_ids=products, top_k=cutoff_k, vector=list(query_vector or []))
+                VectorQuery(product_ids=products, top_k=pool, vector=list(query_vector or []))
             )
         )
         chunks = rrf_fuse_chunks(lexical_hits, dense_leg, rrf_k=rrf_k, top_k=cutoff_k)

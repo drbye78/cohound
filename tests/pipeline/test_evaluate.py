@@ -975,6 +975,139 @@ def test_retrieve_for_cell_requires_vector_for_dense_profiles() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Кросс-запросное слияние ячейки (``cross_query_fusion``)
+# ---------------------------------------------------------------------------
+
+
+def test_retrieve_for_cell_max_fusion_is_previous_behaviour() -> None:
+    """``max`` — прежнее поведение: победитель по большему сырому score, срез до K."""
+    param = _param(_data())
+    queries = render_queries(param)
+    mapping = {
+        queries[0]: [_rc("c1", "p1", 0.9), _rc("c2", "p1", 0.5)],
+        queries[1]: [_rc("c2", "p1", 0.8), _rc("c3", "p1", 0.4)],
+        queries[2]: [_rc("c1", "p1", 0.7)],
+    }
+    result = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=3,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion="max",
+    )
+    assert [c.chunk_id for c in result.chunks] == ["c1", "c2", "c3"]
+    assert [c.score for c in result.chunks] == [0.9, 0.8, 0.4]
+    assert result.cutoff_K == 3
+
+
+def test_retrieve_for_cell_rrf_fusion_uses_query_ranks() -> None:
+    """``rrf`` — ``Σ_q 1/(rrf_k + rank_q)`` по запросам, где чанк встретился."""
+    param = _param(_data())
+    queries = render_queries(param)
+    mapping = {
+        queries[0]: [_rc("c1", "p1", 0.9), _rc("c2", "p1", 0.5), _rc("c3", "p1", 0.4)],
+        queries[1]: [_rc("c2", "p1", 0.8), _rc("c1", "p1", 0.6)],
+        queries[2]: [_rc("c1", "p1", 0.7)],
+    }
+    result = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=3,
+        lexical_index=_FakeLexical(mapping),
+        rrf_k=60,
+        cross_query_fusion="rrf",
+    )
+    expected = {
+        "c1": 1 / 61 + 1 / 62 + 1 / 61,  # q0 rank1, q1 rank2, q2 rank1
+        "c2": 1 / 62 + 1 / 61,  # q0 rank2, q1 rank1
+        "c3": 1 / 63,  # q0 rank3
+    }
+    assert [c.chunk_id for c in result.chunks] == ["c1", "c2", "c3"]
+    for chunk in result.chunks:
+        assert chunk.score == pytest.approx(expected[chunk.chunk_id])
+    # score в этом режиме — ранговый балл, а не сырой BM25 (0.9/0.8/0.4 из выдачи).
+    assert result.chunks[0].score < 0.9
+    assert result.cutoff_K == 3
+
+
+def test_retrieve_for_cell_per_query_fusion_does_not_truncate() -> None:
+    """``per_query`` не режет до ``cutoff_k``: срез делает вызывающий."""
+    param = _param(_data())
+    queries = render_queries(param)
+    mapping = {
+        queries[0]: [_rc("c1", "p1", 0.9), _rc("c2", "p1", 0.5)],
+        queries[1]: [_rc("c3", "p1", 0.8), _rc("c4", "p1", 0.4)],
+    }
+    wide = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=2,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion="per_query",
+    )
+    assert [c.chunk_id for c in wide.chunks] == ["c1", "c3", "c2", "c4"]
+    # ``cutoff_K`` описывает K **запросов**, а не длину списка.
+    assert wide.cutoff_K == 2 and len(wide.chunks) == 4
+
+    narrow = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=2,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion="max",
+    )
+    assert [c.chunk_id for c in narrow.chunks] == ["c1", "c3"]
+
+
+def test_retrieve_for_cell_rejects_unknown_fusion_policy() -> None:
+    """Опечатка в политике — отказ со списком допустимых, а не тихий ``max``."""
+    param = _param(_data())
+    with pytest.raises(ValueError, match="max, rrf, per_query") as excinfo:
+        retrieve_for_cell(
+            param,
+            product_id="p1",
+            profile="R0",
+            cutoff_k=3,
+            lexical_index=_FakeLexical({}),
+            cross_query_fusion="borda",
+        )
+    assert "borda" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("policy", ["max", "rrf", "per_query"])
+def test_retrieve_for_cell_fusion_is_deterministic_on_equal_scores(policy: str) -> None:
+    """Равные баллы разрешаются по ``chunk_id`` во всех политиках (R7)."""
+    param = _param(_data())
+    queries = render_queries(param)
+    mapping = {
+        queries[0]: [_rc("b", "p1", 0.9)],
+        queries[1]: [_rc("a", "p1", 0.9)],
+    }
+    first = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=3,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion=policy,
+    )
+    second = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=3,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion=policy,
+    )
+    assert [c.chunk_id for c in first.chunks] == [c.chunk_id for c in second.chunks] == ["a", "b"]
+    assert [c.score for c in first.chunks] == [c.score for c in second.chunks]
+
+
+# ---------------------------------------------------------------------------
 # Батч с изоляцией сбоев
 # ---------------------------------------------------------------------------
 

@@ -125,6 +125,9 @@ from core.pipeline.prompt import (
     render_queries,
 )
 from core.pipeline.retrieve import (
+    CROSS_QUERY_FUSION_POLICIES,
+    DEFAULT_CROSS_QUERY_FUSION,
+    DEFAULT_POOL_MULTIPLIER,
     DEFAULT_RRF_K,
     MAX_QUERIES,
     EmbedderBuildMismatch,
@@ -1175,6 +1178,7 @@ def precompute_dense_hits(
     vector_index: VectorIndexPort | None,
     query_vectors: Mapping[str, Sequence[float]] | None,
     max_queries: int = MAX_QUERIES,
+    pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
 ) -> dict[str, list[RetrievedChunk]] | None:
     """Dense-плечо для **всех** запросов пакета в продукте — одним батч-вызовом порта.
 
@@ -1189,12 +1193,22 @@ def precompute_dense_hits(
     :param vector_index: ``None`` — батчить нечего, возвращается ``None`` (прежний путь).
     :param query_vectors: векторы запросов; запрос без вектора остаётся поштучному пути
         (``None`` вместо подставленного нуля: выдуманный вектор — не измерение).
+    :param pool_multiplier: множитель пула плеч R2 (тот же, что у :func:`retrieve`):
+        окно батча — ``cutoff_k * pool_multiplier``. Вызывающий обязан передать то же
+        значение, что и в :func:`retrieve_for_cell`, иначе батч отдал бы меньше готовых
+        хитов, чем поштучный путь, и R2 мерил бы не объявленное условие.
     :returns: карта ``query → hits``; ``None`` — батч неприменим.
     """
     if vector_index is None or query_vectors is None:
         return None
     if _as_profile(profile) is RetrievalProfile.R0:
         return None
+    if pool_multiplier <= 0:
+        raise ValueError(
+            f"pool_multiplier обязан быть ≥ 1, получено {pool_multiplier!r} "
+            "(окно батча = cutoff_k * pool_multiplier)"
+        )
+    window = cutoff_k * pool_multiplier
     queries: list[str] = []
     requests: list[VectorQuery] = []
     for text in unique_queries(params, max_queries=max_queries):
@@ -1206,7 +1220,7 @@ def precompute_dense_hits(
         # ``VectorQuery`` без ``text``. Иначе батч спрашивал бы порт о другом запросе,
         # и «батч = поштучно» перестало бы быть проверяемым свойством.
         requests.append(
-            VectorQuery(product_ids=list(product_ids), top_k=cutoff_k, vector=list(vector))
+            VectorQuery(product_ids=list(product_ids), top_k=window, vector=list(vector))
         )
     if not requests:
         return None
@@ -1214,6 +1228,56 @@ def precompute_dense_hits(
     # Контракт ``batched_search``: ``hits[i]`` — выдача ``queries[i]``. ``strict=True`` —
     # чтобы реализация, вернувшая не то число выдач, падала видимо, а не теряла запросы.
     return {text: list(batch) for text, batch in zip(queries, hits, strict=True)}
+
+
+def _fuse_query_results(
+    results: Sequence[RetrievalResult],
+    *,
+    cutoff_k: int,
+    rrf_k: int,
+    policy: str,
+) -> list[RetrievedChunk]:
+    """Слияние результатов ≤``MAX_QUERIES`` запросов одной ячейки по объявленной политике.
+
+    Все три политики детерминированы: порядок — ``(-score, chunk_id)`` (R7).
+
+    - ``max`` — union с победителем по **большему сырому** score; срез до ``cutoff_k``.
+      Прежнее поведение (байт-в-байт), дефолт.
+    - ``rrf`` — ранговое слияние по запросам: каждый запрос даёт свой top-K (``retrieve``
+      уже срезал до ``cutoff_k``), вклад чанка — ``Σ_q 1/(rrf_k + rank_q)`` по запросам,
+      где он встретился; срез до ``cutoff_k``. Сырой BM25 не участвует: он зависит от
+      длины запроса и IDF, из-за чего длинный запрос систематически вытеснял короткий на
+      границе K (O13). Поэтому ``score`` результата здесь — **ранговый балл**, а не BM25;
+      значение уезжает в провенанс и в лог, и читать его надо именно так.
+    - ``per_query`` — union по ``max`` score **без** кросс-запросной обрезки: срез делает
+      вызывающий. Это «сколько бы мы нашли, если бы не резали» — политика измерима, а не
+      декларативна. ``RetrievalResult.cutoff_K`` тогда описывает K **запросов**, а не
+      длину списка.
+    """
+    if policy == "rrf":
+        scores: dict[str, float] = {}
+        provenance: dict[str, RetrievedChunk] = {}
+        for result in results:
+            for rank, chunk in enumerate(result.chunks, 1):
+                scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + 1.0 / (rrf_k + rank)
+                # Провенанс — из первого запроса, где чанк встретился (детерминизм).
+                provenance.setdefault(chunk.chunk_id, chunk)
+        ordered = [
+            replace(provenance[cid], score=scores[cid])
+            for cid in sorted(scores, key=lambda cid: (-scores[cid], cid))
+        ]
+        return ordered[:cutoff_k]
+
+    # ``max`` и ``per_query``: победитель — больший сырой score (при равенстве — первый
+    # встреченный, порядок запросов фиксирован ``run_queries_for_cell``).
+    best: dict[str, RetrievedChunk] = {}
+    for result in results:
+        for chunk in result.chunks:
+            current = best.get(chunk.chunk_id)
+            if current is None or chunk.score > current.score:
+                best[chunk.chunk_id] = chunk
+    ordered = sorted(best.values(), key=lambda c: (-c.score, c.chunk_id))
+    return ordered if policy == "per_query" else ordered[:cutoff_k]
 
 
 def retrieve_for_cell(
@@ -1229,6 +1293,8 @@ def retrieve_for_cell(
     query_vectors: Mapping[str, Sequence[float]] | None = None,
     dense_by_query: Mapping[str, Sequence[RetrievedChunk]] | None = None,
     rrf_k: int = DEFAULT_RRF_K,
+    pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
+    cross_query_fusion: str = DEFAULT_CROSS_QUERY_FUSION,
     lang: str | None = None,
     max_queries: int = MAX_QUERIES,
 ) -> RetrievalResult:
@@ -1236,8 +1302,9 @@ def retrieve_for_cell(
 
     Каждый запрос идёт по **одному** профилю и ``cutoff_k`` (I16), в партиции
     ``product_ids`` (по умолчанию ``[product_id]``; сателлиты добавляет вызывающий, I17).
-    Результаты объединяются и дедуплицируются по ``chunk_id``: побеждает лучший скор
-    (tie-break по ``chunk_id``, R7), затем список обрезается до ``cutoff_k`` (I20).
+    Результаты объединяются по ``chunk_id`` политикой ``cross_query_fusion``
+    (:func:`_fuse_query_results`), затем — в зависимости от политики — срезаются до
+    ``cutoff_k`` (I20).
 
     ``build_id`` берётся из первого непустого результата — это сборка, к которой
     привязан срез ретривала (S5/R15). Для R1/R2 нужен dense-вектор: он берётся из
@@ -1247,13 +1314,29 @@ def retrieve_for_cell(
     :param dense_by_query: готовые dense-результаты по тексту запроса
         (:func:`precompute_dense_hits`). ``None`` — прежний путь: поиск идёт поштучно.
         Готовый результат используется только для своего запроса, поэтому склейка
-        запросов ячейки (union/dedup/срез) остаётся здесь же и не меняется.
+        запросов ячейки (union/dedup/срез) остаётся здесь же и не меняется. Окно батча
+        задаёт вызывающий: он обязан передать в :func:`precompute_dense_hits` тот же
+        ``pool_multiplier``, иначе готовое плечо короче поштучного.
+    :param pool_multiplier: множитель пула плеч R2 (см. :func:`retrieve`): плечи ищут
+        ``cutoff_k * pool_multiplier``, срез — ``cutoff_k``.
+    :param cross_query_fusion: политика слияния запросов ячейки — ``max`` (дефолт,
+        прежнее поведение) | ``rrf`` | ``per_query`` (см. :func:`_fuse_query_results`).
+
+    :raises ValueError: неизвестный профиль; неизвестная политика слияния;
+        ``pool_multiplier <= 0``; нет нужного порта/вектора (из :func:`retrieve`).
     """
+    if cross_query_fusion not in CROSS_QUERY_FUSION_POLICIES:
+        # Отказ со списком допустимых: опечатка в политике иначе молча дала бы ``max``,
+        # и замер описал бы не то слияние, что объявлено.
+        raise ValueError(
+            f"неизвестная политика слияния запросов: {cross_query_fusion!r} "
+            f"(допустимо: {', '.join(CROSS_QUERY_FUSION_POLICIES)})"
+        )
     resolved_profile = _as_profile(profile)
     products = list(product_ids) if product_ids is not None else [product_id]
     queries = run_queries_for_cell(param, max_queries=max_queries)
 
-    best: dict[str, RetrievedChunk] = {}
+    results: list[RetrievalResult] = []
     build_id = ""
     for query in queries:
         vector = None
@@ -1273,16 +1356,16 @@ def retrieve_for_cell(
             vector_index=vector_index,
             dense_hits=dense_hits,
             rrf_k=rrf_k,
+            pool_multiplier=pool_multiplier,
             lang=lang,
         )
         if not build_id and result.build_id:
             build_id = result.build_id
-        for chunk in result.chunks:
-            current = best.get(chunk.chunk_id)
-            if current is None or chunk.score > current.score:
-                best[chunk.chunk_id] = chunk
+        results.append(result)
 
-    ordered = sorted(best.values(), key=lambda c: (-c.score, c.chunk_id))[:cutoff_k]
+    ordered = _fuse_query_results(
+        results, cutoff_k=cutoff_k, rrf_k=rrf_k, policy=cross_query_fusion
+    )
     return RetrievalResult(
         chunks=ordered,
         profile=resolved_profile.value,
