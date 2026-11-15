@@ -379,8 +379,8 @@ retained-байтами не фетчится заново
 
 **Источники-каталоги (`feed`/`channel`) — развёртка в записи.** Помимо обычных страниц, Ш5
 поддерживает **директорные** источники (`kind ∈ DIRECTORY_KINDS = {feed, channel}`,
-`core/pipeline/corpus_ingest.py:180`; `sitemap` в этот набор **не** входит — это per-site
-опция профиля домена, `_SITEMAP_KIND`, `core/pipeline/corpus_ingest.py:180`): такой URL не
+`core/pipeline/corpus_ingest.py:186`; `sitemap` в этот набор **не** входит — это per-site
+опция профиля домена, `_SITEMAP_KIND`, `core/pipeline/corpus_ingest.py:192`): такой URL не
 индексируется напрямую, а разворачивается в список
 ссылок-записей. Развёртка делегируется порту `ports/poller.py::PollPort`
 (`poll(url, *, kind, params, plan) → list[FeedEntry]`, `validate_params`): в профиле `local` —

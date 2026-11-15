@@ -261,7 +261,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 а неизвестный ключ внутри `embed:` по-прежнему отвергается `ValidationError` (это и
 проверяет тест). Внешний backend (`backend`/`base_url`/`model_version`) не объявлен —
 секция несёт две объявленные оси: `device` и `precision` (`EmbedConfig`,
-`core/config/deploy.py:645`). HTTP-адаптер ложится на `EmbedderPort` без изменения контракта:
+`core/config/deploy.py:684`). HTTP-адаптер ложится на `EmbedderPort` без изменения контракта:
 шесть `remote_*` адаптеров шва уже сделаны по этой форме, седьмой — по той же.
 
 Что уже есть и чего нет:
@@ -284,7 +284,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 - `deploy.llm.*` — готовая форма для `deploy.embed.*`: `base_url`, `model_id`,
   `model_version`, `timeout_s`; секрет из env, не из YAML.
   ✅ форма на месте (`core/config/deploy.py:677`, `LLMSlotConfig`), частично переиспользована:
-  секция `embed` в `DeployConfig` есть (`core/config/deploy.py:789`) и с O6 несёт
+  секция `embed` в `DeployConfig` есть (`core/config/deploy.py:1009`) и с O6 несёт
   `device`/`precision`/`model_id`/`revision` (`EmbedConfig`); `backend`/`base_url`/
   `model_version` отвергаются `extra="forbid"`.
 
@@ -293,8 +293,8 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 ⬜ не сделано (сверено 2026-11-07; **условие** — появится инстанс, см. §6 п. 5) — оформлена
 только спецификация в этом документе.
 Уточнение против записи 28.10: поле `embed` в `DeployConfig` **появилось**
-(`core/config/deploy.py:789`) и объявляет **две** оси — `device` и `precision` (`EmbedConfig`,
-`core/config/deploy.py:645`; обе входят в контракт, `EmbedDevice`/`EmbedPrecision` —
+(`core/config/deploy.py:1009`) и объявляет **две** оси — `device` и `precision` (`EmbedConfig`,
+`core/config/deploy.py:684`; обе входят в контракт, `EmbedDevice`/`EmbedPrecision` —
 `core/domain/enums.py:575` и `:585`);
 `backend`/`base_url`/`model_version` по-прежнему отвергаются (`extra="forbid"`), а
 `RemoteEmbedder` не существует и маршрута `embed` в контурах шва нет (`contracts/seam/`:
@@ -349,7 +349,7 @@ embed:
    прогона и не должна происходить оттого, что «на хосте появился torch».
 
 **Статус правил 1–6 (сверено 2026-11-07):** ❔ не проверено — проверить нечем: секция `embed`
-существует (`core/config/deploy.py:789`), но несёт только `device`/`precision`, а правила 1–3
+существует (`core/config/deploy.py:1009`), но несёт только `device`/`precision`, а правила 1–3
 и 5 адресуют `backend`/`base_url`/`model_version`, которых в схеме нет. Правило 4
 (`COHOUND_EMBED_API_KEY`) не объявлено ни в `.env.example`, ни в `03`. Правило 6 (дефолт
 `local`) держится **побочно** — дефолт и есть единственная реализация. Действует уже сейчас
@@ -398,7 +398,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:304-358`).
+(`core/cli/wiring.py:305-359`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
@@ -600,8 +600,8 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 
 5. ➖ **условие, а не работа** — `deploy.embed` + `RemoteEmbedder` за существующим портом, с
    пином `model_version` в `embed_model_id` (оговорка 1). Спецификация — §5.0. **Сделано:**
-   секция `embed` существует (`core/config/deploy.py:789`) и объявляет две оси — `device`
-   (`EmbedConfig`, `:645`) и `precision` (`:674`). **Не сделано:** `backend`/`base_url`/
+   секция `embed` существует (`core/config/deploy.py:1009`) и объявляет две оси — `device`
+   (`EmbedConfig`, `:684`) и `precision` (`:731`). **Не сделано:** `backend`/`base_url`/
    `model_version` (отвергаются `extra="forbid"`), `RemoteEmbedder` не существует.
    Это единственный пункт §6, который требует **решения о появлении инстанса**, а не работы
    по коду; оговорки 1/3/4 §5 — то же условие, а не четыре отдельные задачи.

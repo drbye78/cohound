@@ -34,7 +34,7 @@
 
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:1259`),
 сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2762`), retention сырых байтов
-(`retain`, `core/pipeline/corpus_ingest.py:1113`), durable per-URL состоянием (`crawl_session_items`,
+(`retain`, `core/pipeline/corpus_ingest.py:1158`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:464`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.
@@ -289,7 +289,7 @@ PDF, `docs/reports/measurements/2026-10-29-corpus-retention-footprint.md:37`). �
 
 ### 4.4 Что это меняет для памяти
 
-`ProductIngest` (`core/pipeline/corpus_ingest.py:577`) переезжает к потребителю: пик памяти становится
+`ProductIngest` (`core/pipeline/corpus_ingest.py:605`) переезжает к потребителю: пик памяти становится
 свойством конверсии, а не краула. Краул держит только in-flight страницы полос (ограничены пулом) и
 пишет байты на диск — это и есть «эффективен безотносительно конверсии».
 
@@ -379,7 +379,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:626`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:627`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:167`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,
@@ -1019,7 +1019,7 @@ IP-pinning отсутствует). **Gate:** одинаковый fake-server �
 `queue_depth|dlq|lease_age` по `core/` — 0); команд `inspect`, `pause`, `reconcile`, `replay`,
 `explain-entry` нет. Подкоманды `hound crawl` на 08.11.2026 —
 `run|status|list|resume|restart|cancel` + `policy set|list|clear`
-(`core/cli/commands/crawl.py:1859`); `hound extract consume` (`core/cli/commands/extract.py:319`)
+(`core/cli/commands/crawl.py:1971`); `hound extract consume` (`core/cli/commands/extract.py:319`)
 это не `inspect`/`replay`. Наблюдаемость живого краула есть в другом объёме: `crawl_progress`/
 `crawl_product`, `--per-url`, `owner`/`heartbeat_at`/`stale_reason`. Документы уже описывают шов
 и профили, но deployment drill (две edge-реплики, отдельный PDF-пул, два профиля, proxy/DLP

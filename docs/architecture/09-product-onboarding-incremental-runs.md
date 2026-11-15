@@ -171,7 +171,7 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:527`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:528`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277`, `core/pipeline/onboarding.py:310`), вызов — `preflight` из `core/cli/commands/run.py:917`, `core/cli/commands/run.py:1052` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
@@ -1530,7 +1530,7 @@ PK. Запись в конце фазы (`core/pipeline/corpus.py:5566-5585`) о
 стадиям, а не по продуктам-целиком: события `product_end` / `product_index_end` несут
 `fetch_wait_s`, `extract_wait_s`, `chunk_s`, `embed_s`, `build_s`, `overhead_s`
 (`_CorpusStageTimings`, `core/pipeline/corpus_index.py:259`; агрегат —
-`core/pipeline/corpus.py:1221`), и то же попадает в `metrics.json` как
+`core/pipeline/corpus.py:1222`), и то же попадает в `metrics.json` как
 `resources.stage_timings` (`ResourcesObservation.stage_timings`,
 `build_resources_block`). Это **наблюдаемость, а не контракт**: значения не входят ни в
 `execution_contract_digest`, ни в `pb`, ни в `content_digest` (доказано пинами в
@@ -2944,7 +2944,7 @@ class CompositionView:
 
 - записи идут **генератором** из `store.iter_chunks(partition_build_id, product_id=…)`
   прямо в `index.index(records, …)` — ни список записей, ни их текст не живут в памяти
-  (`core/cli/wiring.py:479-553`, докстринг `seed_lexical_index`);
+  (`core/cli/wiring.py:480-565`, докстринг `seed_lexical_index`);
 - при поиске текст догружается **из store пачкой** — `StorePort.get_chunks(chunk_ids)`
   (`core/store/sqlite_store.py`, `SqliteStore.get_chunks`, шаг `_CHUNK_ID_BATCH = 500`),
   передаётся адаптеру как провайдер гидртации, поэтому адаптер не знает ни SQL, ни
@@ -4243,7 +4243,7 @@ class ProductStatePort(Protocol):
 | `iter_chunks` | `iter_doc_chunks` | `iter_chunks` в коде занято run-DB-методом (чанки сборки); durable-чанки версии — это `iter_doc_chunks` |
 | `set_onboarding_state`, `set_last_corpus_run_id`, `set_last_evaluated`, `set_last_completed` | нет сеттеров вовсе | Рубежи двигает **один** владелец — `state_sync.record_run_outcome` (O10), и он пишет их вместе со снимком в одной транзакции. Отдельные сеттеры позволили бы сдвинуть рубеж без снимка — то есть объявить baseline, которого не было |
 | `get_attestation` | нет | Таблица `attestation` без писателя по решению (§4.2): действующая аттестация охвата живёт в `packages/{case}/scope_attestation.yaml` + `cell_evidence.scope_acceptance` (§11.5), а durable-аттестация профиля — в `profile_attestation` (§6.9). Третий носитель аттестации не заводится |
-| `iter_chunks_by_composition` | не нужен | Композиция читается по членам: `iter_chunks(partition_build_id, product_id=…)` в цикле по `view.members` — так делает `seed_lexical_index` (`core/cli/wiring.py:479-553`) |
+| `iter_chunks_by_composition` | не нужен | Композиция читается по членам: `iter_chunks(partition_build_id, product_id=…)` в цикле по `view.members` — так делает `seed_lexical_index` (`core/cli/wiring.py:480-565`) |
 
 Методы пер-ячеечного измерения **есть в порте** (`core/ports/state.py`): пишет Ш6
 (`record_cell_measurements`, пачка на продукт), читает перенос (`get_cell_measurement`,
@@ -4400,14 +4400,14 @@ state/state.db                                 # durable-состояние па
 5. `load_effective_seeds` (`core/pipeline/onboarding.py:146`) — ✅ **реализовано**:
    приоритет `--urls > seeds.yaml > corpus_urls.yaml` (`urls_override` заменяет набор
    целиком, `:167-198`; `seeds.yaml` — `:201-206`; legacy `corpus_urls.yaml` — `:203`).
-   Вызывается из `run`/`plan`/`crawl` (`core/cli/commands/run.py:688`,
+   Вызывается из `run`/`plan`/`crawl` (`core/cli/commands/run.py:773`,
    `core/cli/commands/plan.py:305`, `core/cli/commands/crawl.py:418`). Прежняя редакция
    называла это design-only и указывала `core/cli/context.py` — неверно по обоим пунктам.
 6. `NpyVectorIndex` (`core/adapters/vector_npy.py:213`) — ✅ **реализовано**:
    `CompositionViewPort` принимается как `view`, `build_id` композиции сверяется с
    `view.composition_id` и расхождение отвергается (`core/adapters/vector_npy.py:219-226`), каждая партиция читается
    по своей карте.
-7. `seed_lexical_index` (`core/cli/wiring.py:479-553`) — ✅ **реализовано**: итерация по
+7. `seed_lexical_index` (`core/cli/wiring.py:480-565`) — ✅ **реализовано**: итерация по
    `view.members` через `store.iter_chunks(partition_build_id, product_id=…)`, потоково
    (генератор, без списка записей), с гидртацией текста из store через `get_chunks`.
 8. `--only-failed` — ✅ **сделано 30.10.2026, межпрогонный.** Резолвер

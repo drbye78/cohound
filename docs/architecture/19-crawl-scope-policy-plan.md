@@ -56,7 +56,7 @@ per-host статуса и без различения дискавери и о�
 
 | механизм | где | чего не хватает |
 |---|---|---|
-| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:927`, `core/pipeline/run_identity.py:213`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:436`) |
+| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:927`, `core/pipeline/run_identity.py:213`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:437`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`core/store/state_sqlite.py:137`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3784` | переиспользует **чанки**; при смене версии чанкера/пустом наборе/I19-расхождении и **наличных байтах** документ пересобирается текущим конвейером (`rebuild_from_stored_bytes`), байтов нет — `no_bytes`; не пишет `url_state`/`document_version` как «последнюю версию» — эту дисциплину наследует и `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
@@ -64,7 +64,7 @@ per-host статуса и без различения дискавери и о�
 | `product → host+path` слои | `core/config/crawl_sources.py:51`, `core/config/crawl_sources.py:77`, `core/config/crawl_sources.py:89` | digest информационный (`core/pipeline/crawl_session.py:133`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`core/cli/package/commands.py:2994`) | — образец для CLI политики |
 | видимые отказы корня/продукта | `out_of_scope_subdomains` (`core/pipeline/crawl_frontier.py:1236`), `product_skipped` (`core/pipeline/corpus.py:5245`), `incomplete_reasons` (`core/pipeline/corpus_coverage.py:541`) | нет токена «запрещено политикой» |
-| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`core/pipeline/corpus.py:2710`, `core/pipeline/corpus.py:2717`; `core/pipeline/corpus_coverage.py:405`) | переиспользуется политическими пропусками |
+| готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`core/pipeline/corpus.py:2739`, `core/pipeline/corpus.py:2746`; `core/pipeline/corpus_coverage.py:405`) | переиспользуется политическими пропусками |
 
 **Ни один носитель не даёт «продукт × хост × путь» без ложной идентичности:**
 `crawl_sources.yaml` знает продукт, но не входит в `run_id`; `domain_profiles.yaml` входит в
@@ -177,7 +177,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:462`): иначе
    `run` и `crawl run` адресуют разные сеансы при одном объявленном входе.
 5. **Неизвестное значение политики — `EXIT_USAGE`, не `auto`.** Тихий fallback — это сеть по опечатке (AGENTS §2);
-   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:436`).
+   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:437`).
 6. Время снятия (`captured_at`) — **провенанс**, не идентичность (как `extractor_version`).
 7. Честная граница: резолв ветки «discovery vs update» читает `url_state`, поэтому **те же
    объявленные входы при сдвинутом `state.db` дают другой корпус** — так уже живёт `auto`
@@ -231,7 +231,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `core/pipeline/corpus.py:5349` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
-  (`core/cli/execution_axes.py:207`), паритет `plan`/`run`/`crawl run` по построению; значение
+  (`core/cli/execution_axes.py:208`), паритет `plan`/`run`/`crawl run` по построению; значение
   входит в `crawl_policy_digest` через оси исполнения (7-кортеж решения), отдельного поля нет.
 - ✅ Наблюдаемость: `crawl_network_denied`, `crawl_on_request_not_requested`,
   `crawl_policy_skipped`, `policy_scope` (+ `policy_skips` в `product_end`) и строки в
@@ -415,7 +415,7 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
    но другой гранулярности: `crawl_policy.mode=scheduled` + `interval_hours` решает «идти в
    сеть или переиспользовать» на scope (продукт/хост/корень/путь), а
    `due_at`/`overdue_by_seconds`/`missed_captures` публикует `hound crawl policy list --json`
-   (`core/cli/commands/crawl.py:1250-1304`).
+   (`core/cli/commands/crawl.py:1263`).
 5. **Не обещаем** экономию запросов там, где режим `auto`: цель — управляемость и
    измеримость, а не оптимизация обхода.
 

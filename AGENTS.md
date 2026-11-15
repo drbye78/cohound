@@ -279,7 +279,7 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
 - The root host is always in scope. A subdomain is in scope **only if declared** (product
   seed root, or a `domain_profiles.yaml` key). `www.` is equivalent to the bare host on both
   sides.
-- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1288`). This is
+- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1491`). This is
   **different** semantics from `fetch_plan._host_matches`: there a subdomain **inherits
   profile axes** (`fetch`/`extract`/limits), which is correct and needed. Inheriting axes ≠
   the right to spend another seed root's budget.
@@ -408,7 +408,8 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   that were once silently outside the contract: `--max-depth`/`--max-documents`,
   `chunk_size`, `prompt_template`, `evaluation_policy`, `render_modes`, `passports`.
 - **Crawl axes:** `crawl_strategy`, `crawl.rate_limit` and `crawl_config_digest` are contract
-  fields; `max_depth`/`max_documents`/`exclude_*`/`robots`/`document_level`/`pdf_pipeline`
+  fields; `max_depth`/`max_documents`/`exclude_*`/`robots`/`document_level`/`pdf_pipeline`/
+  `pdf_max_pages`/`pdf_max_extracted_chars`
   enter through `crawl_config_digest` (`CrawlLimits.as_dict()`), and so does the **resolved**
   `rate_limit` (site > run, same formula as execution, key only when declared) — a per-site
   value overrides the run-level axis, so leaving it out let a host be re-paced without a new
@@ -416,6 +417,13 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   (`core/cli/execution_axes.py:193`) so `plan` and `run` pick it up together — flag parity is
   tested. Changing an axis gives a **new `run_id`** (`execution_change`), not an edit of the
   current run; otherwise two different corpora become one measurement.
+- **Declared defaults live in `deploy.yaml`, not in code.** `retrieval.profile` (I16) and
+  `lexical.profile` are measurement conditions: they are resolved **before** the contract and
+  the same value feeds the phases (`--retrieval-profile` > `deploy.retrieval.profile` > `R0`;
+  `lexical.profile` → `lexical_spec` → `run_id` **and** the index seed), so "declared" and
+  "executed" cannot diverge. `extract.cache_max_bytes` is the opposite case on purpose: an
+  operational budget, deliberately **not** in `EXECUTION_CONTRACT_FIELDS` — it changes the
+  price of re-extraction, not the corpus or the verdicts.
 - **Crawl policy is identity, its execution is provenance.** `crawl_policy_digest`
   (plan 19 §6.1) is in `EXECUTION_CONTRACT_FIELDS`; `refresh_policy` is a separate `run_id`
   term and `frozen_source` enters canonicalised. Only those three describe the measurement

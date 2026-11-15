@@ -46,7 +46,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:213-222`).
 - Блокирующий отказ делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2543-2634`, `core/pipeline/corpus_coverage.py:216-218`, условие 2) —
+  (`core/domain/models.py:2612`, `core/pipeline/corpus_coverage.py:216-218`, условие 2) —
   **пока URL не закрыт объявленным артефактом**: материал, предъявленный артефактом
   (`corpus_docs.origin=manual`), перестаёт делать сеанс неполным (`resolved_manually`,
   `core/pipeline/corpus_coverage.py:261-270`, сверено 07.11.2026).
@@ -80,14 +80,14 @@
 развалится.
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
-намерению: `retain` (`core/pipeline/corpus_ingest.py:1113`) — единственный writer сырых
+намерению: `retain` (`core/pipeline/corpus_ingest.py:1158`) — единственный writer сырых
 байтов, с единственным вызовом (`core/pipeline/corpus.py:2553`, `_commit_local`), в который
 сходятся оба
 транспорта (локальный и executor).
 
 ```
 RawPage (core/ports/types.py:91-121)
-  → retain (core/pipeline/corpus_ingest.py:1113)   # сам хеширует байты, кладёт в corpus_raw
+  → retain (core/pipeline/corpus_ingest.py:1158)   # сам хеширует байты, кладёт в corpus_raw
     → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1422,
       `persist_docs`)
 ```
@@ -285,17 +285,17 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 
 **На 25.10 его не было.** Провалы фетчей попадали в отчёт только агрегатами
 (`core/domain/models.py:1541` — `CrawlSessionProvenance.failed: int`;
-`core/pipeline/report.py:1258-1312` — движки в шапке; `core/pipeline/report.py:2341-2372` —
+`core/pipeline/report.py:1258-1312` — движки в шапке; `core/pipeline/report.py:2430-2435` —
 `blocked = {error_kind: count}` и `unreadable_origins` от `derive_corpus_coverage`). Ни URL,
 ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 Сделано — §8 п. 1: файл пишется (`core/pipeline/artifacts_gap.py:314`).
 
-Ближайший образец формы — `core/pipeline/report.py:1970` `render_nda_questions`: единый
+Ближайший образец формы — `core/pipeline/report.py:1992` `render_nda_questions`: единый
 CSV, строка =
 аномалия, `anomaly_kind` из набора `i3_protocol`/`crawl_truncation`/`corpus_incomplete`/
-`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2028-2102`,
+`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2058-2124`,
 сверено 08.11.2026 — видов **шесть**). Тот же приём,
 другая таблица.
 
@@ -468,7 +468,7 @@ gaps:
 
 **Цепочка.** `_build_corpus` подаёт объявленные файлы после дренажа продукта (отказы краула
 уже в элементах сеанса) и до Pass B (документы входят в ту же сборку): файл → `RawPage`
-(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1113`)
+(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1158`)
 → экстракция → чанкер → индекс. Второго
 пути байтов в evidence нет (I19): retained-файл называет хеш самих байтов, а хеш от
 декларации не принимается.

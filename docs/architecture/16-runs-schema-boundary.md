@@ -296,7 +296,7 @@ CREATE INDEX IF NOT EXISTS idx_corpus_doc_version_doc
 
 **Почему таблица, а не колонка `corpus_docs.doc_version_id`.** `doc_id` дедуплицируется по
 `content_hash`, который **не включает уровень извлечения**, а `document_level` объявлен
-per-site (`core/pipeline/crawl_frontier.py:748-751`) — два уровня одного текста в одном прогоне
+per-site (`core/pipeline/crawl_frontier.py:826`) — два уровня одного текста в одном прогоне
 законны. Колонка держит одну версию на строку, то есть теряет вторую молча. Воспроизведение
 и цена — §10 п. 8.
 
@@ -368,10 +368,10 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (§3), поэтому `hound diff` против прогона прошлой схемы невозможен не из-за поля, а из-за
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
-`RunManifest` (`core/domain/models.py:1667`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2738-2740`) сопоставляет имя
+`RunManifest` (`core/domain/models.py:1736`) получает поле `embed_device`, и этого
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2760`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
-(`core/pipeline/report.py:2721-2726`)
+(`core/pipeline/report.py:2743`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
@@ -930,7 +930,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 
    Причина не в реализации, а в схеме: `doc_id = product:content_hash` **не различает
    уровень извлечения**, а `dv` различает — и `document_level` объявлен **per-site**
-   (`core/pipeline/crawl_frontier.py:748-751`), то есть два уровня в одном прогоне законны.
+   (`core/pipeline/crawl_frontier.py:826`), то есть два уровня в одном прогоне законны.
    Вторая версия терялась бы молча, и evidence, цитирующий её, получал бы «наблюдение не
    записано» — ложное утверждение о прогоне. Носитель — производная таблица
    `corpus_doc_version(doc_version_id PK, product_id, doc_id)`: одна версия → один документ,

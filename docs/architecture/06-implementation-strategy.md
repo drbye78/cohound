@@ -559,7 +559,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
 ✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2257` вызывает `_run_serp_contour`
-(def — `core/pipeline/corpus.py:1343`; поиск → допуск → расширение seed-набора **до** дренажа,
+(def — `core/pipeline/corpus.py:1344`; поиск → допуск → расширение seed-набора **до** дренажа,
 одна сборка), `core/pipeline/search_log.py` (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1553`)
 **не вызывается ни из одного прод-пути**: ссылки только в `core/pipeline/__init__.py` и
@@ -945,7 +945,7 @@ uv sync --frozen --extra dev
 6. **Публикация отчётов** (T10.3) — ✅ артефакты пишутся в `runs/{run_id}/outputs/`; `battle_card`
    эмитится и при низком Coverage — с баннером `ANALYTICAL_ONLY` (06.11: coverage 0.2666,
    12 артефактов), а блокируется только при `denominator == 0`
-   (`core/pipeline/report.py:1906` — `_coverage_absent`).
+   (`core/pipeline/report.py:576` — `_coverage_absent`).
    Адресация в отдельный `reports/` — не введена (не требуется).
 7. **Детерминизм инференса** (T9.2) — ✅ `core/adapters/llm_local.py` (seed/greedy; constrained
    decoding — забота [OI]-серверa).

@@ -341,7 +341,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   означает «оценщик не поднимается», а не «endpoint берётся из env». Место исполнения
 >   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:172`, стенд RnD).
 > - **SERP-контур:** ✅ реализован, но **не** через `run_serp_loop`. Производитель запросов —
->   `_run_serp_contour` (`core/pipeline/corpus.py:1343-1452`), вызов внутри фазы корпуса **до**
+>   `_run_serp_contour` (`core/pipeline/corpus.py:1344-1453`), вызов внутри фазы корпуса **до**
 >   дренажа (`core/pipeline/corpus.py:2257`); `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1553` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:148`), значение из
@@ -410,7 +410,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 - Документный `pb` (§2.1) + одна запись чанков (§3.1) — **⬜ нет** (см. статус выше).
 - `memmap`-запись партиции — **⬜ нет**; `embed_batch` — ✅ батч 64, осью не объявлен.
 - Ретривал: текст чанка не удерживается адаптером, гидртация пачкой на поисковое окно —
-  **✅** (`core/adapters/lexical_tantivy.py:122-135`); зеркало `_records_by_id` снято.
+  **✅** (`core/adapters/lexical_tantivy.py:127-140`); зеркало `_records_by_id` снято.
 - Удаление `IndexBuild.docs` — **✅**.
 
 **Exit.** Property-тест «ни один объект не переживает свою стадию»; пик стадии не зависит от

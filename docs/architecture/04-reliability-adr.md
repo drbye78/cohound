@@ -347,7 +347,7 @@ tests/
 | ANN-альтернатива | ➖ снято решением | решение — `14` §4: Qdrant отклонён (поиск продукт-скупед, I17, ANN по миллионам векторов не выполняется никогда), порт `VectorIndex` готов, ANN-адаптера нет; возврат — по условию строки выше, не по «на вырост» |
 | эмбеддинги на CPU | ✅ сделано | батчевый путь `core/adapters/embed_local.py:193` (нарезка входа `batch_size`); цена — 2.8–5.7 чанк/с продакшн-путь, fp16 — 15.40 чанк/с (06.11.2026, `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`) |
 | массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:89`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:94`, `save_cells_batch` — `core/store/sqlite_store.py:646`) |
-| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1385`, безлимит запрещён — `core/pipeline/corpus.py:1410`), кэш — `core/util/cache.py:133` |
+| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1386`, безлимит запрещён — `core/pipeline/corpus.py:1410`), кэш — `core/util/cache.py:133` |
 
 ### D.1. Память и OOM
 
@@ -356,7 +356,7 @@ tests/
 растёт храповиком до OOM-kill. Ниже — рычаги as-built и их замеры. Провенанс цифр —
 докстринг `core/util/memory.py` и комментарии `packages/ru-pg-dbms/run.yaml` (§`crawl`).
 
-**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`core/adapters/extract_document.py:932`,
+**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`core/adapters/extract_document.py:949`,
 `_PDF_QUEUE_MAX_SIZE_BY_LEVEL`: `layout`/`layout_tables`/`full` → 1, `text` → `None` — у
 `NativePdfPipeline` этого механизма нет.) Причина — не «PDF целиком», а **число страниц в
 полёте**. Замер при дефолтном `queue_max_size=100` (пики воркера): `text` 1191 MiB,
