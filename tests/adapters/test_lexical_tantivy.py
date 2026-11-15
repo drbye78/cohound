@@ -968,6 +968,87 @@ def test_lexical_schema_unknown_profile_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Воспроизводимость балла (O41): writer объявлен, а не выбран хостом
+# ---------------------------------------------------------------------------
+
+
+def test_writer_threads_are_declared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``index()`` объявляет число потоков writer'а: раскладка по сегментам — часть результата.
+
+    ``num_threads=0`` («взять с хоста») делал раскладку функцией расписания, а балл BM25
+    агрегируется по сегментам — два прогона с одним ``run_id`` отдавали оценщику разные
+    ``chunk_id``. Замер: ``2026-11-16-bm25-score-nondeterminism.md``.
+    """
+    seen: list[int | None] = []
+
+    class _Writer:
+        def delete_all_documents(self) -> None: ...
+        def add_document(self, document: object) -> None: ...
+        def commit(self) -> None: ...
+
+    class _Index:
+        def writer(self, num_threads: int | None = None) -> _Writer:
+            seen.append(num_threads)
+            return _Writer()
+
+        def reload(self) -> None: ...
+
+        def searcher(self) -> object:
+            return object()
+
+    monkeypatch.setattr(
+        TantivyLexicalIndex,
+        "_open_index",
+        lambda self, tantivy, schema: _Index(),
+    )
+    monkeypatch.setattr(
+        TantivyLexicalIndex, "_build_schema", lambda self, tantivy: object()
+    )
+    index = TantivyLexicalIndex(profile="stemmed", hydrate=lambda ids: {})
+    class _Document:
+        def __init__(self, **fields: object) -> None:
+            self.fields = fields
+
+    monkeypatch.setattr(
+        lexical_tantivy, "_require_tantivy", lambda: type("T", (), {"Document": _Document})
+    )
+    written = index.index([{"chunk_id": "c1", "product_id": "p1", "text": "т"}])
+    assert written == 1
+    assert seen == [lexical_tantivy.WRITER_THREADS]
+    assert lexical_tantivy.WRITER_THREADS == 1
+
+
+@requires_tantivy
+def test_two_builds_give_the_same_scores() -> None:
+    """Две независимые сборки одного корпуса дают побайтово одинаковый балл.
+
+    Это приёмка O41 на уровне адаптера: до объявления ``WRITER_THREADS`` число сегментов
+    зависело от расписания, и балл расходился на 1–4 ULP (max ``|Δ| = 7.6e-06``). Корпус
+    здесь маленький — он проверяет **механизм** (объявленный writer), а цена на большом
+    корпусе измерена прибором ``scripts/check_bm25_determinism.py``.
+    """
+    records = [
+        {
+            "chunk_id": f"c{i}",
+            "product_id": PRODUCT_A,
+            "text": f"экспорт данных раздел {i % 7}",
+            "heading_path": "Раздел",
+            "content_hash": f"h{i}",
+            "build_id": "build-1",
+        }
+        for i in range(200)
+    ]
+    with _index(records) as first:
+        left = [(c.chunk_id, repr(c.score)) for c in first.search("экспорт", [PRODUCT_A], 20)]
+    with _index(records) as second:
+        right = [
+            (c.chunk_id, repr(c.score)) for c in second.search("экспорт", [PRODUCT_A], 20)
+        ]
+    assert left == right
+    assert left
+
+
+# ---------------------------------------------------------------------------
 # Нейтральность (§1.3)
 # ---------------------------------------------------------------------------
 
