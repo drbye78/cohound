@@ -32,7 +32,8 @@ PDF-ветвь называется ``docling-doc-4``).
 
 * ``full`` (**дефолт**) — сегодняшнее эффективное поведение: layout Heron + таблицы
   TableFormer ``ACCURATE`` + ``do_cell_matching=True`` + OCR **с объявленным алфавитом**
-  (:data:`DOCLING_OCR_LANG`: RapidOCR, ``onnxruntime``, rec-модель из колеса ``rapidocr``),
+  (:data:`DOCLING_OCR_LANG`: RapidOCR, ``onnxruntime``, rec-модель в каталоге пакета
+  ``rapidocr`` — её **нет** в колесе, доставляется ``scripts/fetch_ocr_models.py``),
   ``images_scale=1.0``; энричменты выключены. Это дефолты ``DocumentConverter()``, кроме
   замеренной ручки памяти ``queue_max_size=1`` (см. :meth:`DoclingDocumentExtractor._pdf_options`:
   −44% peak RSS при байт-в-байт идентичном markdown) и алфавита OCR (авто-OCR docling
@@ -53,7 +54,7 @@ docling гонял RapidOCR. Теперь параметр удалён, а по
 авто-OCR (``OcrAutoOptions`` ставит ``lang=['ch']``: кириллица приходит латинской
 транслитерацией при ``error=None`` — замер 14.11.2026). Для ``full`` адаптер строит
 ``RapidOcrOptions`` с объявленным алфавитом (:data:`DOCLING_OCR_LANG`) и файлом
-rec-модели из колеса ``rapidocr``; нет модели — :class:`OcrEngineUnavailableError`
+rec-модели в каталоге пакета ``rapidocr``; нет модели — :class:`OcrEngineUnavailableError`
 (видимая ошибка, тихого отката на ``ch`` нет). Затем ``_build_converter`` **проверяет**
 постройку того же движка, что сделает пайплайн, и без движка отказывает (фаза фиксирует
 ``parser_failed``). Уровни ``layout``/``layout_tables``/``text`` OCR выключают явно и
@@ -232,8 +233,13 @@ DOCLING_TEXT_FINALIZE = "finalize-1"
 #: (A3). Поэтому алфавит и rec-модель названы константами, а не аргументом по месту.
 DOCLING_OCR_LANG = "cyrillic"
 
-#: Имя файла rec-модели **внутри установленного колеса** ``rapidocr``
-#: (``rapidocr/models/``, версия 3.9.2). Путь резолвится от пакета
+#: Имя файла rec-модели **в каталоге пакета** ``rapidocr`` (``rapidocr/models/``,
+#: версия 3.9.2). В колесе этого файла нет: ``RECORD`` 3.9.2 перечисляет три модели
+#: (``PP-OCRv6_det_small``, ``PP-OCRv6_rec_small``, ``ch_ppocr_mobile_v2.0_cls_mobile``),
+#: кириллической среди них нет — она появляется только после скачивания
+#: (``scripts/fetch_ocr_models.py``, пин адреса и SHA-256). Проверено 15.11.2026:
+#: на чистой установке 15 тестов падают, на хосте, где файл когда-то скачали, — нет.
+#: Путь резолвится от пакета
 #: (:func:`_rapidocr_rec_model_path`), а не хардкодится: ``.venv`` — свойство хоста, а не
 #: измерения. Модель названа явно, потому что ``lang=['cyrillic']`` без пути опирается на
 #: разрешение имени внутри rapidocr и на PP-OCR-версию по умолчанию: замер 14.11.2026 —
@@ -318,7 +324,11 @@ def docling_engine_build() -> str:
 
 
 def _rapidocr_rec_model_path() -> Path | None:
-    """Файл rec-модели кириллицы в установленном колесе ``rapidocr`` (``None`` — нет).
+    """Файл rec-модели кириллицы в каталоге пакета ``rapidocr`` (``None`` — нет).
+
+    В колесе этого файла нет (см. :data:`DOCLING_OCR_REC_MODEL`): он доставляется
+    прибором ``scripts/fetch_ocr_models.py``, который сверяет SHA-256. ``None`` поэтому
+    означает не «битую установку», а «модель не доставлена» — и это видимая ошибка.
 
     Путь резолвится **от пакета** (``importlib.resources.files``), а не от ``.venv``:
     раскладка виртуального окружения — свойство хоста, а не измерения, и хардкод
@@ -910,7 +920,7 @@ _log = logging.getLogger(__name__)
 class OcrEngineUnavailableError(RuntimeError):
     """``document_level=full`` требует рабочий OCR, но его нечем исполнить.
 
-    Два входа: объявленная rec-модель отсутствует в колесе ``rapidocr`` (отказ в
+    Два входа: объявленная rec-модель не доставлена в каталог пакета ``rapidocr`` (отказ в
     :meth:`DoclingDocumentExtractor._ocr_options`) либо объявленный движок не строится
     (отказ в :meth:`DoclingDocumentExtractor._require_working_ocr`). Молчаливое
     извлечение без OCR, помеченное как ``full``, — ложь о качестве текста: с авто-OCR
@@ -1514,8 +1524,9 @@ class DoclingDocumentExtractor:
         Почему путь к модели явный (:data:`DOCLING_OCR_REC_MODEL`). ``lang=['cyrillic']``
         без пути опирается на разрешение имени внутри rapidocr и на поколение PP-OCR по
         умолчанию; замер 14.11.2026 — такое разрешение падает, а torch-бэкенд тянет
-        ``.pth`` с modelscope и падает по таймауту. ``onnxruntime`` + файл из колеса
-        работают офлайн (extra ``extract-pdf``).
+        ``.pth`` с modelscope и падает по таймауту. ``onnxruntime`` + локальный файл
+        работают офлайн — но файл нужно **доставить**: в колесе ``rapidocr`` его нет
+        (см. :data:`DOCLING_OCR_REC_MODEL`), это делает ``scripts/fetch_ocr_models.py``.
 
         Модели нет — :class:`OcrEngineUnavailableError` с именем ожидаемого файла.
         Тихого отката на ``ch`` нет: он вернул бы транслитерацию под объявленным
@@ -1535,7 +1546,8 @@ class DoclingDocumentExtractor:
                 f"{DOCLING_OCR_REC_MODEL!r} (алфавит {DOCLING_OCR_LANG!r}) не найдена в "
                 "пакете rapidocr — объявленный алфавит исполнить нечем; тихий откат на "
                 "алфавит по умолчанию ('ch') запрещён: кириллица пришла бы латинской "
-                "транслитерацией (замер 14.11.2026)"
+                "транслитерацией (замер 14.11.2026). Доставить: "
+                "`.venv/bin/python scripts/fetch_ocr_models.py`"
             )
         return RapidOcrOptions(
             backend="onnxruntime",

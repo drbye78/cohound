@@ -333,3 +333,57 @@ def test_selfcheck_skipped_by_default(tmp_path: Path) -> None:
     check = _check(report, "selfcheck_run")
     assert check.status == doctor.OK
     assert "пропущен" in check.detail
+
+
+# ---------------------------------------------------------------------------
+# deps:extract-pdf: объявленный алфавит OCR исполним файлом, а не extra
+# ---------------------------------------------------------------------------
+
+
+def test_cyrillic_ocr_model_is_checked_where_it_is_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Модель OCR проверяется в группе `deps:extract-pdf`, и отсутствие — `fail`.
+
+    Почему `fail`, а не `warn`: установленные `rapidocr`/`torch`/`onnxruntime` не делают
+    объявленный алфавит исполнимым — его исполняет **файл**, которого в колесе `rapidocr`
+    нет (проверено по `RECORD` 3.9.2, 15.11.2026). Пока файла нет, `document_level=full`
+    отказывает `OcrEngineUnavailableError`, а у пакета `ru-pg-dbms` `full` объявлен
+    продукту `gaz-is.ru`. `warn` читался бы как «необязательно».
+    """
+    group = _dependency_group("deps:extract-pdf", False, ("rapidocr",))
+    names = [check.name for check in group.checks]
+    assert "ocr:cyrillic" in names
+
+    import core.adapters.extract_document as extract
+
+    monkeypatch.setattr(extract, "_rapidocr_rec_model_path", lambda: None)
+    group = _dependency_group("deps:extract-pdf", False, ("rapidocr",))
+    check = next(item for item in group.checks if item.name == "ocr:cyrillic")
+    assert check.status == doctor.FAIL
+    assert extract.DOCLING_OCR_REC_MODEL in check.detail
+    assert extract.DOCLING_OCR_LANG in check.detail
+    # Причина отказа обязана нести путь к лечению, иначе диагностика называет беду без выхода.
+    assert check.hint and "fetch_ocr_models.py" in check.hint
+
+
+def test_cyrillic_ocr_check_is_skipped_without_rapidocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без `rapidocr` проверка модели — `warn`, а не `fail`: extra не установлен.
+
+    Иначе диагностика на окружении без `extract-pdf` давала бы `fail` за то, чего это
+    окружение и не обещало: ось `text_layer` работает без OCR вовсе.
+    """
+    real_find_spec = doctor.importlib.util.find_spec
+
+    def _find_spec(name: str, *args: object) -> object:
+        if name == "rapidocr":
+            return None
+        return real_find_spec(name, *args)
+
+    monkeypatch.setattr(doctor.importlib.util, "find_spec", _find_spec)
+    group = _dependency_group("deps:extract-pdf", False, ("rapidocr",))
+    check = next(item for item in group.checks if item.name == "ocr:cyrillic")
+    assert check.status == doctor.WARN
+    assert "не установлен" in check.detail

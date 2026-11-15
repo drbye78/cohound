@@ -610,9 +610,14 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   measurement, not a ceiling set on faith. **The OCR alphabet is part of the same key**: at
   `full` docling's auto-OCR picks `lang=['ch']` and Cyrillic arrives as Latin
   transliteration (measured 14.11.2026: 176 chars, 0 Cyrillic) while the page is reported as
-  read (`error=None`). `docling-doc-4` declares `cyrillic` + the rec model shipped in the
-  `rapidocr` wheel and executes it on `onnxruntime`; a missing model is a visible
-  `OcrEngineUnavailableError`, never a silent fallback to `ch`. Text that is nothing but
+  read (`error=None`). `docling-doc-4` declares `cyrillic` + the rec model executed on
+  `onnxruntime`; a missing model is a visible `OcrEngineUnavailableError`, never a silent
+  fallback to `ch`. **That model is not in the `rapidocr` wheel** — measured 15.11.2026:
+  `RECORD` 3.9.2 lists three models and the Cyrillic one is not among them, so it is
+  downloaded into the package's `models/` dir by `scripts/fetch_ocr_models.py` (pinned URL
+  + SHA-256, `hound doctor` group `deps:extract-pdf`, check `ocr:cyrillic`). Without it a
+  clean install fails **15** tests that pass on a host where the file was once fetched —
+  the exact shape of "green locally, red in CI" (CI runs the fetch as its own step). Text that is nothing but
   `<!-- image -->` markers is `EMPTY_TEXT_REASON` (`FailureKind.EMPTY_DOCUMENT`), not a
   document.
 - **Containers** (`zip`/`7z`/`rar`) are opened by `archive_descent.py`. There is **no depth

@@ -842,6 +842,15 @@ golden-full, adversarial как приёмочный прогон) — **хар�
 `run_manifest.yaml` (§13, R7). Офлайн-бандл docling-весов (V4). Браузерные бинари — зеркало
 (`PLAYWRIGHT_DOWNLOAD_HOST`). `HF_HUB_OFFLINE=1` в контуре.
 
+> **Веса OCR — отдельно от extras (15.11.2026).** Кириллическая rec-модель **не входит** в
+> колесо `rapidocr` (замер: `RECORD` 3.9.2 перечисляет три модели, кириллической нет), поэтому
+> `--extra extract-pdf` даёт движок, но не веса: файл доставляет
+> `scripts/fetch_ocr_models.py` с пином адреса и SHA-256, а `hound doctor` (группа
+> `deps:extract-pdf`, проверка `ocr:cyrillic`) называет это до прогона. Разница измерена:
+> без файла падают **15** тестов на чистой установке при зелёном прогоне на хосте, где файл
+> когда-то скачали (`docs/reports/measurements/2026-11-15-ocr-model-not-in-wheel.md`).
+> V4 это **не закрывает**: доставка идёт по сети, лицензии весов не объявлены.
+
 > **Про `uv sync --frozen`.** `uv.lock` синхронен с `pyproject.toml` (`uv lock --check` проходит),
 > поэтому `uv sync --frozen --extra …` — воспроизводимый путь. Рабочая установка для прогона кейса
 > (фазы `corpus`/`evaluate`): `uv pip install -e '.[dev,retrieval,crawl,extract]'` плюс
@@ -1020,7 +1029,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
   materialize core/` даёт только локальную переменную `core/pipeline/report.py:2340-2346`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
-  не входит в `extractor_version`, `core/adapters/extract_document.py:339-375`), E1 follow-up
+  не входит в `extractor_version`, `core/adapters/extract_document.py:349-385`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`
   (`core/cli/context.py:1815` против `core/edge/server.py:1105`) **сводится в один замер** с
   паритетом `pb` `local`/`split` (§2): одна процедура — «один вход, два профиля, сравнить
@@ -1038,7 +1047,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   ➖ **снято как пункт, но не как факт:** под `split` процессной экстракции нет — это устройство
   зонной модели (воркеры на edge, свой бюджет: `core/cli/wiring.py:2491`), а не недоделка.
   Так же снят прежний остаток «`use_ocr=False` — мёртвый код»: решением P5 `full` несёт OCR,
-  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:1471-1480`),
+  `layout`/`layout_tables` — явный `do_ocr=False` (`core/adapters/extract_document.py:1481-1490`),
   и документированное прежде «сканы дают пустой текст» было неверным.
 
 ---

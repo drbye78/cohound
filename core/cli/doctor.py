@@ -370,7 +370,45 @@ def _dependency_group(group_name: str, required: bool, modules: tuple[str, ...])
 
     for module in modules:
         builder.add(module, _check(module))
+    if group_name == "deps:extract-pdf":
+        # Модули установлены — но объявленный алфавит OCR исполняется **файлом**, которого
+        # в колесе `rapidocr` нет (проверено по RECORD 3.9.2, 15.11.2026: три модели, все
+        # без кириллицы). Пока файла нет, `document_level=full` отказывает
+        # `OcrEngineUnavailableError` — и это не «нет опциональной библиотеки», а
+        # неисполнимая объявленная ось (у пакета `ru-pg-dbms` `full` объявлен продукту
+        # `gaz-is.ru`). Поэтому при установленном `rapidocr` отсутствие модели — `fail`.
+        builder.add(
+            "ocr:cyrillic",
+            _cyrillic_model_check,
+            hint="скачать: .venv/bin/python scripts/fetch_ocr_models.py",
+        )
     return builder.group
+
+
+def _cyrillic_model_check() -> tuple[str, str]:
+    """Наличие объявленной rec-модели кириллицы и её хеш.
+
+    Путь резолвит адаптер (:func:`core.adapters.extract_document._rapidocr_rec_model_path`),
+    а не этот модуль: иначе диагностика и исполнение разошлись бы ровно в том месте, где
+    расхождение невидимо.
+    """
+    if importlib.util.find_spec("rapidocr") is None:
+        return WARN, "rapidocr не установлен — модель не проверяется (extra extract-pdf)"
+    from core.adapters.extract_document import (  # noqa: PLC0415 — ленивый импорт
+        DOCLING_OCR_LANG,
+        DOCLING_OCR_REC_MODEL,
+        _rapidocr_rec_model_path,
+    )
+
+    path = _rapidocr_rec_model_path()
+    if path is None:
+        return (
+            FAIL,
+            f"нет rec-модели {DOCLING_OCR_REC_MODEL!r}: объявленный алфавит OCR "
+            f"{DOCLING_OCR_LANG!r} неисполним, document_level=full откажет",
+        )
+    size = path.stat().st_size
+    return OK, f"{DOCLING_OCR_REC_MODEL} ({size} байт), алфавит {DOCLING_OCR_LANG!r}"
 
 
 # ---------------------------------------------------------------------------

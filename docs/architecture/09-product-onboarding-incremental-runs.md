@@ -2838,7 +2838,7 @@ products:
 
 **`extractor_version` — не константа: в неё входит устройство (P9).** Строка имеет вид
 `docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`
-(`core/adapters/extract_document.py:339-375`), где
+(`core/adapters/extract_document.py:349-385`), где
 `<device>` — объявленная ось `crawl.pdf_device` (`cpu|cuda`, `core/domain/enums.py:531`,
 резолв — `resolve_pdf_device` в `core/pipeline/crawl_frontier.py`). Поэтому `pb` различает
 `cpu` и `cuda` **явно**, а не через «повезло/не повезло с железом»; сама ось входит в

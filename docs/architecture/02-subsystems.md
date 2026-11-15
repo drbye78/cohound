@@ -305,7 +305,7 @@ products × doc_domains
   `crawl_config_digest` всегда (как `max_depth`), а не только когда задан явно;
 - `document_level` тоже входит в дайджест **безусловно** (дефолт `full` присутствует
   всегда), а дополнительно кодируется в наблюдаемой версии экстрактора
-  (`core/adapters/extract_document.py:339-376` — `docling-doc-4:{level}/…`): он меняет
+  (`core/adapters/extract_document.py:349-386` — `docling-doc-4:{level}/…`): он меняет
   извлечённый текст (замер: `layout_tables → text` дал 154 678 → 138 598 символов) и влечёт
   новую `partition_build_id`. Класс от этого не меняется — идентичность прогона разошлась
   уже на дайджесте; новая сборка лишь следствие.

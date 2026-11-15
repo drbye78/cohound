@@ -238,7 +238,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > ✅ **закрыто по Exit** (5 из 6 пунктов; открыт один — изоляция памяти).
 > M0.5 в `06` §4 — механика ✅ (26.10) и приёмка ⬜; F1 закрыт по своему Exit, приёмка отчёта
 > человеком в Exit не входила.
-> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:339`
+> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:349`
 >   (`docling_extractor_version`), вид значения в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
 >   контракте — `trafilatura-html-7+text-plain-2+epub-3+pdfium-text-4:5.14.0+docling-office-1+docling-doc-4/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
