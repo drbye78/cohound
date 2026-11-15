@@ -44,6 +44,11 @@
 ``core/`` — категориально-нейтральный движок под гейтами mypy/нейтральности; класть
 туда неподключённый формат рано. Когда формат будет принят, загрузчик переедет в
 ``core`` вместе с правкой контракта оценки.
+
+Исключение — **правило «тот же документ»**: канонизация URL и индексы документов
+корпуса живут в :mod:`core.pipeline.doc_refs` (``DocIndex``). Измерение документного
+recall@K обязано резолвить URL тем же правилом, что и эталон; две копии канонизации
+разъехались бы молча и дали бы два разных ответа на один вопрос.
 """
 
 from __future__ import annotations
@@ -57,7 +62,20 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import urlsplit
+
+# Корень репозитория на sys.path: скрипт запускается как `python scripts/…py`, и тогда
+# sys.path[0] — каталог scripts, а не корень (плоская раскладка пакета `core`).
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from core.pipeline.doc_refs import (  # noqa: E402 — после правки sys.path
+    DocIndex,
+    canonical_url,
+    host_key,
+    root_matches,
+)
 
 GOLDEN_FORMAT = "cohound-retrieval-golden-docs/1"
 BATCH_SIZE = 50
@@ -97,58 +115,6 @@ DECISIONS = {"accept", "reject"}
 
 
 # ---------------------------------------------------------------------------
-# Нормализация URL
-# ---------------------------------------------------------------------------
-def canonical_url(url: str, *, drop_query: bool = False) -> str:
-    """Каноническая форма URL для сопоставления с корпусом.
-
-    Снимает только то, что не меняет документ по HTTP-семантике: регистр схемы и
-    хоста, порт по умолчанию, фрагмент (якорь внутри страницы), повторные и хвостовой
-    ``/``, percent-кодирование пути. ``http`` и ``https`` считаются одной формой:
-    корпус пишет ``https``, comparative table иногда ``http``.
-
-    ``drop_query`` — отдельный, более грубый уровень: query-строка может быть как
-    подсказкой подсветки (``?h=...``), так и языковой редакцией (``?lang=ru``).
-    Поэтому такой матч помечается ``canonical_query`` и уходит человеку на проверку.
-    """
-    parts = urlsplit(url.strip())
-    host = (parts.hostname or "").lower()
-    port = parts.port
-    netloc = host if port in (None, 80, 443) else f"{host}:{port}"
-    path = unquote(parts.path) or "/"
-    while "//" in path:
-        path = path.replace("//", "/")
-    if len(path) > 1 and path.endswith("/"):
-        path = path[:-1]
-    query = "" if drop_query else parts.query
-    return urlunsplit(("https", netloc, path, query, ""))
-
-
-def host_key(url: str) -> str:
-    """Хост без ``www.`` — так ``www.`` и голый хост считаются одной формой."""
-    host = (urlsplit(url.strip()).hostname or "").lower()
-    return host[4:] if host.startswith("www.") else host
-
-
-def root_matches(url: str, root: str) -> bool:
-    """Лежит ли URL под объявленным корнем (хост + префикс пути по сегменту).
-
-    Семантика та же, что у краула (AGENTS §6): поддомен не наследует право обхода,
-    поэтому хост сравнивается точно (с эквивалентностью ``www.``), а префикс пути —
-    только на границе сегмента.
-    """
-    if host_key(url) != host_key(root):
-        return False
-    root_path = urlsplit(root.strip()).path or "/"
-    if not root_path.endswith("/"):
-        root_path += "/"
-    path = urlsplit(url.strip()).path or "/"
-    if not path.endswith("/"):
-        path += "/"
-    return path == root_path or path.startswith(root_path)
-
-
-# ---------------------------------------------------------------------------
 # Чтение входов
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -184,44 +150,43 @@ def read_cells(path: Path) -> list[CellRow]:
 
 
 class CorpusIndex:
-    """Документы прогона, прочитанные точечно (``corpus_docs`` — тысячи строк)."""
+    """Документы прогона, прочитанные точечно (``corpus_docs`` — тысячи строк).
+
+    Разрешение «URL → документ» — правило :class:`~core.pipeline.doc_refs.DocIndex`;
+    здесь остаётся то, что делает именно подготовка эталона: покрытие, журнал краула и
+    политика. Публичные имена индексов документов сохранены прежними (``exact``,
+    ``canonical``, ``canonical_noquery``, ``doc_url``, ``doc_product``), чтобы остальной
+    скрипт не знал, где живёт правило.
+    """
 
     def __init__(self, db_path: Path) -> None:
         self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         self._conn.row_factory = sqlite3.Row
-        self.exact: dict[tuple[str, str], list[str]] = defaultdict(list)
-        self.canonical: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
-        self.canonical_noquery: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(
-            list
-        )
+        self.docs = DocIndex(self._conn)
         self._session_index: dict[tuple[str, str], sqlite3.Row] | None = None
-        for row in self._conn.execute(
-            "SELECT product_id, url, doc_id FROM corpus_docs"
-        ):
-            product_id = row["product_id"]
-            url = row["url"]
-            doc_id = row["doc_id"]
-            self.exact[(product_id, url.strip())].append(doc_id)
-            self.canonical[(product_id, canonical_url(url))].append((url, doc_id))
-            self.canonical_noquery[(product_id, canonical_url(url, drop_query=True))].append(
-                (url, doc_id)
-            )
 
     def close(self) -> None:
         self._conn.close()
 
+    # --- документы и их URL (правило — в core) -------------------------------
+    @property
+    def exact(self) -> dict[tuple[str, str], list[str]]:
+        return self.docs.exact
+
+    @property
+    def canonical(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
+        return self.docs.canonical
+
+    @property
+    def canonical_noquery(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
+        return self.docs.canonical_noquery
+
     # --- проверки для валидатора -------------------------------------------
     def doc_url(self, doc_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT url FROM corpus_docs WHERE doc_id = ?", (doc_id,)
-        ).fetchone()
-        return None if row is None else str(row["url"])
+        return self.docs.doc_url(doc_id)
 
     def doc_product(self, doc_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT product_id FROM corpus_docs WHERE doc_id = ?", (doc_id,)
-        ).fetchone()
-        return None if row is None else str(row["product_id"])
+        return self.docs.doc_product(doc_id)
 
     def declared_roots(self) -> dict[str, list[tuple[str, bool]]]:
         """Объявленные корни продукта и полнота их обхода (из покрытия прогона)."""
