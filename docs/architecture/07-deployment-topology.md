@@ -435,7 +435,7 @@ LLM-endpoint корп. облака — только в Z0.
    `_cache_extractor_version` возвращает `.version` = `remote-extractor-1`
    (`core/pipeline/extraction_runtime.py:331-334`, `core/adapters/remote_extractor.py:220`), а
    запись кладёт `ExtractedDoc.extractor_version` — штамп docling, названный **edge**
-   (`core/pipeline/extract_cache.py:375-380`). Ключи не совпадают никогда ⇒ под `split` кэш не
+   (`core/pipeline/extract_cache.py:442`). Ключи не совпадают никогда ⇒ под `split` кэш не
    даёт попаданий, и каждый цикл пере-извлекает весь корпус. Это не регресс, а названная
    асимметрия (она же в docstring помощника), но цена реальная: под `local` тот же корпус
    попадает в кэш. Починка — резолв идентичности через `capabilities.extract` один раз на

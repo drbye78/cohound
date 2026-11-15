@@ -139,7 +139,7 @@ shortcodes. Это не «никогда»: нет грамматики — не
   (`core/adapters/extract_document.py:207`), а `strip_control_chars` по-прежнему удаляет
   `\r`, а не нормализует. Нормализация `\r\n|\r` → `\n` стоит на границе чанкера
   (`md_ast.normalize_text`, `core/adapters/md_ast.py:147`) и в читателях текста/PDF
-  (`core/adapters/extract_text.py:63`, `core/adapters/extract_pdf_text.py:135`); факт
+  (`core/adapters/extract_text.py:63`, `core/adapters/extract_pdf_text.py:157`); факт
   нормализации виден флагом `normalized` в `MdDocument`.
 - ✅ BOM **сохраняется** (`'\ufeff# h'`): первый заголовок документа с BOM не распознаётся.
   Снимается он тоже не в финализации, а в `md_ast.normalize_text`

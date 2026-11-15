@@ -112,7 +112,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
 | `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — a published number lives there with its date and instrument) and incident traces. Per §1.2: the artifact outranks the document, and a number cited in `docs/architecture/` **without** an entry here is a hypothesis, not a proof. Measured 2026-11-15: **34** lines across `docs/architecture/*.md` cite a "замер DD.MM" with no report reference — reading one of them means re-measuring or treating it as dated hearsay. |
-| `scripts/measure_*.py`, `scripts/conformance_*.py` | **Named instruments** of measurements and censuses (A3): a claim is out of scope only after a census with one of these, and a re-measurement cites the script + date. |
+| `scripts/measure_*.py`, `scripts/conformance_*.py`, `scripts/check_pdf_page_map.py` | **Named instruments** of measurements and censuses (A3): a claim is out of scope only after a census with one of these, and a re-measurement cites the script + date. `check_pdf_page_map.py` — инвариант карты страниц PDF (`page_map`: покрытие, разрывы, обратная сборка) на реальном корпусе, а не на фикстурах; exit 1 при дефекте. |
 | `.env.example` | Environment variables and external keys (LLM, scout, search adapters), no secrets. |
 
 ### 3.1 Artifacts are data, not repository files
