@@ -138,16 +138,17 @@ def probe(url: str) -> Probe:
     """Одна проба: ручные хопы, ``Range``, без тела. Никогда не бросает."""
     origin = url.strip()
     current = _ascii_url(origin)
-    if urllib.parse.urlsplit(current).scheme not in {"http", "https"}:
-        # Схема — часть входа, а не гарантия: лист эталона мог принести `file:` или
-        # `ftp:`. Отказываем до запроса и называем причину, а не пробуем открыть.
-        return Probe(-1, origin, "unreachable", 0, "схема не http(s)")
     opener = _opener()
     hops = 0
     try:
         while True:
-            # noqa: S310 — адрес берётся из листа эталона, но схема проверена выше:
-            # до запроса допускаются только ``http``/``https``.
+            # Схема проверяется на **каждом** хопе, а не только на входе: `Location`
+            # приходит с чужого хоста, и редирект на `file:`/`ftp:` — не повод открыть
+            # его. До запроса допускаются только `http`/`https`; иначе — отказ с
+            # причиной, а не попытка открыть что попало.
+            if urllib.parse.urlsplit(current).scheme not in {"http", "https"}:
+                return Probe(-1, origin, "unreachable", hops, "схема не http(s)")
+            # noqa: S310 — схема проверена строкой выше.
             request = urllib.request.Request(  # noqa: S310
                 current,
                 headers={"Range": RANGE_HEADER, "User-Agent": USER_AGENT},
