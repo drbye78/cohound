@@ -34,6 +34,7 @@ from core.pipeline.page_publication import human_line as evidence_pages_human_li
 from core.pipeline.partial_docs import human_line as partial_docs_human_line
 from core.pipeline.report import manifest_payload, write_reports
 from core.pipeline.support_quality import support_quality_line
+from core.pipeline.table_provenance import human_line as tables_human_line
 
 
 def run(args: argparse.Namespace) -> int:
@@ -137,6 +138,12 @@ def run(args: argparse.Namespace) -> int:
     )
     if evidence_pages_line:
         notes.append(evidence_pages_line)
+    # O39 фаза 1: таблицы — строкой, а не только файлом. Строка называет оба факта сразу:
+    # сколько таблиц прочитано и на скольких документах вопрос «есть ли таблицы» не
+    # задавался вовсе (``text_layer``, HTML, EPUB, офисный путь, ``split``).
+    tables_line = tables_human_line(getattr(artifacts, "tables_summary", None))
+    if tables_line:
+        notes.append(tables_line)
     # A3: качество поддержки карты — строкой, как и частичность. Три замера
     # (поддержка не о предмете, концентрация) не меняют вердиктов, но именно они
     # объясняют, почему карта «зелёная» при почти пустом доказательстве.

@@ -142,6 +142,10 @@ from core.pipeline.support_quality import (
     support_quality,
     write_support_quality_artifact,
 )
+from core.pipeline.table_provenance import (
+    tables_summary,
+    write_tables_artifact,
+)
 from core.util.hashing import short_hash
 
 #: Строковые значения блокирующих классов — для разбора legacy-аудита в ячейке,
@@ -385,6 +389,14 @@ class Artifacts:
     #: распределение по ``ocr_probe``. ``None`` — документов корпуса нет (пустой файл не
     #: артефакт); «документы есть, исходов нет» — это строка ``ocr_probe_unmeasured``.
     ocr_provenance: Path | None = None
+    #: ``outputs/tables.csv`` — таблицы документа **объектами** (O39 фаза 1, план 26): строка
+    #: на таблицу (продукт, документ, ``table_id``, страница, строки, столбцы, шапка).
+    #: ``None`` — ни одной таблицы (пустой файл не артефакт): «таблиц нет» и «таблицы не
+    #: искали» различимы в сводке (``tables_summary``), а не в пустом CSV.
+    tables: Path | None = None
+    #: Блок ``tables`` манифеста — те же числа свёрнутыми, чтобы CLI назвал факт строкой,
+    #: даже когда CSV не создан. ``None`` — документов корпуса нет вовсе (не ноль).
+    tables_summary: dict[str, Any] | None = None
     #: Блок ``partial_docs`` манифеста (те же числа, свёрнутые до продукта) — чтобы CLI
     #: мог назвать факт строкой, даже когда CSV не создан.
     partial_docs_summary: dict[str, Any] | None = None
@@ -1061,6 +1073,7 @@ def build_manifest(
     partial_docs: Mapping[str, Any] | None = None,
     ocr_probe: str | None = None,
     page_provenance: Mapping[str, Any] | None = None,
+    tables: Mapping[str, Any] | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
@@ -1684,6 +1697,11 @@ def build_manifest(
         page_provenance=(
             None if page_provenance is None else dict(page_provenance)
         ),
+        # O39 фаза 1 (план 26, схема 3.24.0): таблицы — наблюдение прогона (сколько таблиц,
+        # в скольких документах и сколько документов читатель таблиц **не даёт**). В
+        # ``EXECUTION_CONTRACT_FIELDS`` не входит: нарезка чанков от этого не зависит.
+        # ``None`` — документов корпуса нет вовсе (не ноль).
+        tables=None if tables is None else dict(tables),
         snapshot_date=snapshot_date,
         # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
         # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
@@ -3855,6 +3873,17 @@ def write_reports(
         )
     except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
         ocr_provenance_path = None
+    # O39 фаза 1 (план 26): таблицы — видимым артефактом. Пока их нет в отчёте, «в корпусе
+    # есть таблицы» и «таблиц никто не искал» неотличимы: шапка таблицы уезжает в
+    # ``context_prefix`` чанка, и другого носителя факта нет. Сбой выгрузки отчёт не роняет
+    # (как у ``ocr_provenance``): факт остаётся в БД, теряется лишь удобная таблица.
+    try:
+        tables_path = write_tables_artifact(
+            store, run_id, outputs_dir / "tables.csv"
+        )
+    except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
+        tables_path = None
+    tables_block = tables_summary(store, run_id, products=planned_products)
     # O28: аномалии ``heading_path`` (3 668 симв. на страницу-виновника) были видны
     # только отдельным харнессом — в отчёте прогона их не называл никто. Чтение чанков
     # идёт через ``cb_``→``pb_``-резолв внутри писателя; неразрешённая сборка даёт
@@ -3966,6 +3995,8 @@ def write_reports(
         evidence_pages=evidence_pages_path,
         evidence_pages_summary=evidence_page_summary,
         ocr_provenance=ocr_provenance_path,
+        tables=tables_path,
+        tables_summary=tables_block,
         support_quality=support_path,
         support_quality_summary=support_payload,
         corpus_freshness=corpus_freshness_path,

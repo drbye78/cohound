@@ -875,6 +875,12 @@ def _db_smoke() -> None:
     # назвали страницу и почему нет у остальных). Колонки номера страницы у чанка нет и
     # не будет: номер — функция от ``corpus_docs.page_map`` и ``char_start``.
     _assert("page_provenance_json" in runs_cols)
+    # O39 фаза 1 (schema 3.24.0): таблица — объект. ``corpus_docs.tables`` несёт сами таблицы
+    # (``NULL`` — читатель их не даёт, ``[]`` — искал и не нашёл), ``runs.tables_json`` —
+    # сводку (сколько таблиц, в скольких документах и где вопрос не задавался). Без колонок
+    # «в корпусе есть таблицы» и «таблиц никто не искал» неотличимы в артефакте прогона.
+    _assert("tables" in docs_cols)
+    _assert("tables_json" in runs_cols)
     manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
     _assert("ocr_probe" in manifest_cols)
     chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}

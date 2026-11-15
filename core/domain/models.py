@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from core.domain.doc_tables import TableList
 from core.domain.enums import (
     ABSENT_DENIAL_STRENGTHS,
     BLOCKING_FAILURE_KINDS,
@@ -1892,6 +1893,14 @@ class RunManifest(BaseModel):
     #: ``EXECUTION_CONTRACT_FIELDS`` не входит — это факт о прочитанном, а не условие
     #: измерения. ``None`` — цитат нет вовсе (не ноль).
     page_provenance: dict[str, Any] | None = None
+    #: Таблицы документа — **числом** (O39 фаза 1 плана ``26``): ``{"documents_with_tables":
+    #: n, "tables": m, "documents_unmeasured": k, "by_product": {id: {...}}}``, где
+    #: ``documents_unmeasured`` — документы, у которых читатель таблиц **не даёт**
+    #: (``tables is None``: ``text_layer``, HTML, EPUB, офисный путь, ``split``). Два числа
+    #: не заменяют друг друга: «таблиц нет» и «таблицы не искали» — разные факты.
+    #: Наблюдение (как ``partial_docs``/``ocr_probe``): в ``run_id`` и
+    #: ``EXECUTION_CONTRACT_FIELDS`` не входит. ``None`` — документов корпуса нет вовсе.
+    tables: dict[str, Any] | None = None
     #: §13 (Backlog B): ось стратегии краула (``run.yaml:crawl.strategy``) и каноническая
     #: форма диапазона задержек (``run.yaml:crawl.rate_limit``, :func:`canonical_rate_limit`).
     #: Это **операционные** дефолты commodity-слоя (A2): их смена — граница класса
@@ -2122,6 +2131,13 @@ class CorpusDoc(BaseModel):
     #: ``26``); ``None`` — не применимо/не измерено. ``partial`` для этих счётчиков не
     #: требуется: упавшая страница при полном статусе документа — независимый факт.
     pages_failed: int | None = None
+    #: Таблицы документа как объекты (O39 фаза 1 плана ``26``) — те же, что дал читатель.
+    #: Контракт различия ``None``/``()`` — в :attr:`core.ports.types.ExtractedDoc.tables`
+    #: (``None`` — читатель таблиц не даёт, ``()`` — искал и не нашёл); здесь он **не**
+    #: повторяется. В ``content_hash``/``run_id`` таблицы не входят: наблюдение, а не
+    #: условие измерения (как ``page_map``/``ocr_probe``), и нарезка чанков от них не
+    #: зависит. Форма JSON-колонки — :func:`core.domain.doc_tables.tables_to_json`.
+    tables: TableList | None = None
 
     @model_validator(mode="after")
     def _check_partial(self) -> CorpusDoc:

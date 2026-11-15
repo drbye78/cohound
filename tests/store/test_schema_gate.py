@@ -311,8 +311,15 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     Колонки ``page_number`` у чанка по-прежнему нет и не будет: номер страницы — функция от
     ``corpus_docs.page_map`` и ``char_start``. Шимов нет: прогоны ≤ 3.22.0 отвергаются
     гейтом версии.
+
+    3.24.0 (O39 фаза 1 плана ``26``) — таблица становится **объектом**:
+    ``corpus_docs.tables`` (JSON-список ``{table_id, page_no, caption, header, rows}``,
+    ``NULL`` — читатель таблиц не даёт, ``[]`` — искал и не нашёл) и ``runs.tables_json``
+    (сводка прогона: таблицы, документы с таблицами и документы без распознавания таблиц).
+    Наблюдение, а не условие измерения: в ``EXECUTION_CONTRACT_FIELDS`` его нет, и нарезка
+    чанков от колонки не зависит. Шимов нет: прогоны ≤ 3.23.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.23.0"
+    assert SCHEMA_VERSION == "3.24.0"
 
     conn = connect(":memory:")
     try:
@@ -335,6 +342,9 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
         assert "ocr_probe" in runs_cols
         # 3.23.0 (O36 фаза 3): страница цитаты — наблюдение прогона, не потолок.
         assert "page_provenance_json" in runs_cols
+        # 3.24.0 (O39 фаза 1): таблица — объект у документа и сводка у прогона.
+        assert "tables" in docs_cols
+        assert "tables_json" in runs_cols
         manifest_cols = {
             r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")
         }

@@ -102,6 +102,7 @@ from core.ports.types import (
     OCR_PROBE_UNAVAILABLE,
     OCR_PROBE_UNSUPPORTED,
     ExtractedDoc,
+    ExtractedTable,
 )
 from core.util.document_formats import DOCUMENT_SUFFIXES, PDF_SUFFIX
 from core.util.pdf_limits import (
@@ -580,6 +581,149 @@ def _has_no_text(text: str) -> bool:
 
 #: Имя ``GroupLabel``, которым офисный бэкенд помечает группу листа книги (XLSX).
 _SHEET_GROUP_LABEL = "sheet"
+
+
+def _as_count(value: object) -> int:
+    """Неотрицательное целое из поля docling; всё иное — ``0``.
+
+    Счётчики ``num_rows``/``num_cols`` и смещения ячеек приходят из модели чужой
+    библиотеки: ``None``, ``bool`` и отрицательное число означают «поля нет» и «значение
+    не имеет смысла», а не «ноль строк». Гадать здесь нечем — таблица с невалидной сеткой
+    просто не станет объектом (её структуре верить нельзя).
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _table_grid(table: object) -> tuple[list[list[str]], set[int]] | None:
+    """Сетка таблицы и номера строк, помеченных шапкой; ``None`` — сетки нет.
+
+    Дешёвый путь без pandas: ``TableData.table_cells`` уже несут координаты
+    (``start_row_offset_idx``/``start_col_offset_idx``) и текст, поэтому
+    ``export_to_dataframe`` (pandas в базовых зависимостях нет) не нужен.
+
+    Объединённые ячейки заполняются по **началу**: текст стоит там, где его отдал
+    читатель, остальные позиции объединения остаются пустыми строками — размножение
+    текста по объединению было бы догадкой о его содержимом.
+    """
+    data = getattr(table, "data", None)
+    num_rows = _as_count(getattr(data, "num_rows", 0))
+    num_cols = _as_count(getattr(data, "num_cols", 0))
+    if num_rows == 0 or num_cols == 0:
+        return None
+    grid = [["" for _ in range(num_cols)] for _ in range(num_rows)]
+    header_rows: set[int] = set()
+    for cell in getattr(data, "table_cells", None) or ():
+        row = _as_count(getattr(cell, "start_row_offset_idx", 0))
+        column = _as_count(getattr(cell, "start_col_offset_idx", 0))
+        if row >= num_rows or column >= num_cols:
+            # Ячейка вне объявленной сетки — порча модели, а не повод расширить таблицу:
+            # сетка объявлена читателем, и подгонять её под одну ячейку нельзя.
+            continue
+        grid[row][column] = str(getattr(cell, "text", "") or "")
+        if getattr(cell, "column_header", False):
+            header_rows.add(row)
+    return grid, header_rows
+
+
+def _table_caption(table: object, document: object) -> str | None:
+    """Подпись таблицы из ссылок ``captions``; ``None`` — подписи нет.
+
+    docling хранит подпись **ссылкой** (``RefItem.cref``) на элемент документа, поэтому
+    текст достаётся разрешением ссылки. Неразрешимая ссылка — не повод отказать таблице:
+    подпись необязательна, а структура таблицы от неё не зависит (``None`` — «подписи
+    нет», а не выдуманная строка). Пустая подпись тоже читается как отсутствие.
+    """
+    parts: list[str] = []
+    for ref in getattr(table, "captions", None) or ():
+        resolver = getattr(ref, "resolve", None)
+        if not callable(resolver):
+            continue
+        item: object | None
+        try:
+            item = resolver(document)
+        except Exception:  # noqa: BLE001 — битая ссылка не отменяет таблицу
+            item = None
+        if item is None:
+            continue
+        text = " ".join(str(getattr(item, "text", "") or "").split())
+        if text:
+            parts.append(text)
+    return "\n".join(parts) if parts else None
+
+
+def _table_from_item(
+    table: object, document: object, table_id: str
+) -> ExtractedTable | None:
+    """Одна ``TableItem`` → :class:`ExtractedTable`; ``None`` — сетки нет.
+
+    Шапка объявляется **только** при однозначном случае: ведущая строка помечена
+    ``column_header`` и в ней есть текст. Две и более ведущих строк-шапок не сводятся в
+    одну (склейка — догадка о том, как читатель хотел их прочитать), поэтому тогда шапки
+    нет, а все строки остаются в ``rows`` как есть. Пустой каркас (все ячейки пусты)
+    объектом **становится**: читатель видел таблицу, и это факт — чистка такого шума
+    решается отдельно (ср. O40), а не молчанием здесь.
+
+    Страница берётся из провенанса (``prov[0].page_no``, 1-based); ``prov`` пуст или
+    номер не положителен — ``None``: страница неизвестна, и ноль её не заменяет.
+    """
+    grid_and_headers = _table_grid(table)
+    if grid_and_headers is None:
+        return None
+    grid, header_rows = grid_and_headers
+    # Ведущая строка-шапка: сколько **подряд** идущих строк помечено ``column_header``.
+    leading = 0
+    while leading < len(grid) and leading in header_rows:
+        leading += 1
+    header: tuple[str, ...] = ()
+    rows = [tuple(row) for row in grid]
+    if leading == 1 and any(cell.strip() for cell in grid[0]):
+        header = rows[0]
+        rows = rows[1:]
+    page_no: int | None = None
+    prov = getattr(table, "prov", None) or ()
+    if prov:
+        value = getattr(prov[0], "page_no", None)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            page_no = value
+    return ExtractedTable(
+        table_id=table_id,
+        page_no=page_no,
+        caption=_table_caption(table, document),
+        header=header,
+        rows=tuple(rows),
+    )
+
+
+def _tables_from_document(
+    document: object, *, office: bool
+) -> tuple[ExtractedTable, ...] | None:
+    """Таблицы документа (O39 фаза 1 плана ``26``); ``None`` — этот путь их не даёт.
+
+    Различие ``None``/``()`` — часть контракта (:attr:`ExtractedDoc.tables`): ``()``
+    значит «читатель смотрел и не нашёл», и оно отличается от «не смотрел» ровно так же,
+    как ``ocr_probe=None`` от ``ok``.
+
+    Офисный путь объявленно **не измеряет** таблицы: ``prov`` у DOCX/XLSX/PPTX несёт
+    номер листа или слайда (проверено по коду бэкендов docling 15.11.2026:
+    ``page_no=slide_ind + 1``, ``doc.add_page(page_no=page_no)``), а это не страница
+    файла. Объект с такой «страницей» описывал бы не тот предмет, поэтому офисные
+    документы попадают в ``documents_unmeasured`` — названным числом, а не тишиной.
+    """
+    if office:
+        return None
+    tables = getattr(document, "tables", None)
+    if tables is None:
+        # Читатель без поля ``tables`` — это читатель, который таблиц не даёт (шов,
+        # другая версия библиотеки): ``None``, а не пустой кортеж.
+        return None
+    extracted: list[ExtractedTable] = []
+    for index, table in enumerate(tables):
+        item = _table_from_item(table, document, f"t{index}")
+        if item is not None:
+            extracted.append(item)
+    return tuple(extracted)
 
 
 def _sheet_sections(document: object) -> list[tuple[int, str]] | None:
@@ -1719,6 +1863,9 @@ class DoclingDocumentExtractor:
                 ocr_probe=probe,
                 pages_ocr=pages_ocr,
                 pages_failed=pages_failed,
+                # O39 фаза 1: таблицы как объекты — из того же ``DoclingDocument``, что дал
+                # текст. Нарезка от них не зависит: чанкер видит прежний markdown.
+                tables=_tables_from_document(result.document, office=office),
             )
             if limit_reason is not None:
                 # Лимит объявлен и документ длиннее его: текст читаемой части в корпус,
@@ -1897,6 +2044,9 @@ class DoclingDocumentExtractor:
             ocr_probe=ocr_probe,
             pages_ocr=pages_ocr,
             pages_failed=pages_failed,
+            # O39 фаза 1: таблицы — тот же прибор, что и у полного успеха. Частичный
+            # документ тоже обязан называть, какие таблицы в нём прочитаны.
+            tables=_tables_from_document(result.document, office=office),
         )
 
     def _error(

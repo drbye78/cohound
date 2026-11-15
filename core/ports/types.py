@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from core.domain.doc_tables import ExtractedTable, TableList
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
 from core.domain.ocr_probe import (
@@ -34,12 +35,14 @@ __all__ = [
     "Chunk",
     "CrawlStrategy",
     "ExtractedDoc",
+    "ExtractedTable",
     "ExtractionRoute",
     "FetchMode",
     "FetchPlan",
     "ProductRef",
     "RateLimitSpec",
     "RawPage",
+    "TableList",
 ]
 
 
@@ -287,6 +290,20 @@ class ExtractedDoc:
     #: страница может упасть, а документ остаться полным по статусу — это независимое
     #: наблюдение, а не производная от частичности.
     pages_failed: int | None = None
+    #: Таблицы документа как **объекты** (O39 фаза 1 плана ``26``): шапка, строки данных,
+    #: подпись и страница каждой таблицы. Носитель — :class:`core.domain.doc_tables.ExtractedTable`
+    #: (определён в домене, потому что у факта два носителя: здесь и в строке корпуса;
+    #: реэкспорт ради того, чтобы читатель видел тип рядом с документом).
+    #:
+    #: ``None`` и ``()`` — **разные факты**, и это главное в поле: ``None`` — читатель
+    #: таблиц **не даёт вовсе** (``text_layer``/pdfium таблиц не распознаёт, HTML, EPUB,
+    #: офисный путь docling, шов ``split``); ``()`` — читатель искал и не нашёл ни одной.
+    #: Свести их к одному значило бы публиковать «таблиц нет» там, где их никто не искал.
+    #:
+    #: В ``content_hash``/``run_id`` таблицы **не** входят: это наблюдение о прочитанном,
+    #: а не условие измерения, — ровно как ``page_map``/``ocr_probe``. Нарезка чанков от
+    #: этого поля не зависит: генерация чанков из таблицы — отдельная фаза (O39 фаза 2).
+    tables: TableList | None = None
 
     def __post_init__(self) -> None:
         """Держит инвариант частичности и проверяет провенанс OCR.

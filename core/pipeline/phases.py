@@ -113,6 +113,8 @@ from core.pipeline.report import (
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
+from core.pipeline.table_provenance import human_line as tables_human_line
+from core.pipeline.table_provenance import tables_summary
 from core.ports.extractor import ExtractorPort
 from core.ports.types import FetchMode
 from core.util.rate_limit import RateLimiter
@@ -1795,6 +1797,12 @@ def build_phases(
             page_provenance=evidence_pages_summary(
                 ctx.store, plan.run_id, products=plan.products
             ),
+            # O39 фаза 1 (план 26, схема 3.24.0): таблицы документа — числом. Источник —
+            # персистентный корпус (как у ``partial_docs``), поэтому resume публикует тот
+            # же факт; нули по продуктам плана видны (симметрия). Два числа не заменяют
+            # друг друга: ``tables``/``documents_with_tables`` — прочитанное,
+            # ``documents_unmeasured`` — документы, где читатель таблиц их не даёт.
+            tables=tables_summary(ctx.store, plan.run_id, products=plan.products),
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
@@ -1931,6 +1939,11 @@ def build_phases(
             pending.append(
                 f"отчёт: {evidence_pages_line} (список: outputs/evidence_pages.csv)"
             )
+        # O39 фаза 1: таблицы — той же advisory-строкой. Она называет оба факта сразу:
+        # сколько таблиц прочитано и на скольких документах вопрос не задавался вовсе.
+        tables_line = tables_human_line(getattr(artifacts, "tables_summary", None))
+        if tables_line:
+            pending.append(f"отчёт: {tables_line} (список: outputs/tables.csv)")
         # План 26 O28: длинный ``heading_path`` — дефект извлечения, который до этого
         # был виден только измерительным харнессом. Строка оператора называет число и
         # документ-виновника; «не посчитано» называется причиной, а не нулём.

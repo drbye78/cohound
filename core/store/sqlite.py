@@ -109,7 +109,17 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: ``partial_docs_json``/``ocr_probe``). Колонка нужна потому, что манифест и ``hound
 #: report`` собираются позже фазы расчёта и обязаны читаться без памяти прогона. Шимов нет:
 #: файлы ≤ 3.22.0 отвергаются гейтом версии.
-SCHEMA_VERSION = "3.23.0"
+#:
+#: 3.24.0 (O39 фаза 1 плана ``26``): таблица становится **объектом**, а не строкой в
+#: ``context_prefix``. ``corpus_docs.tables`` — JSON-список таблиц документа
+#: (``table_id``/``page_no``/``caption``/``header``/``rows``, контракт —
+#: :class:`core.domain.doc_tables.ExtractedTable`); ``runs.tables_json`` — сводка прогона
+#: (сколько таблиц, в скольких документах и сколько документов читатель таблиц **не даёт**).
+#: Наблюдение, а не условие измерения: в ``EXECUTION_CONTRACT_FIELDS`` его нет (как
+#: ``page_map``/``ocr_probe``), и нарезка чанков от этой колонки не зависит — генерация
+#: чанков из таблицы будет отдельной правкой. Шимов нет: файлы ≤ 3.23.0 отвергаются гейтом
+#: версии, прогон переносится пересозданием.
+SCHEMA_VERSION = "3.24.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -191,6 +201,13 @@ CREATE TABLE IF NOT EXISTS runs (
     -- Номер страницы не колонка у чанка: он функция от ``corpus_docs.page_map`` и
     -- ``char_start`` (``core.domain.page_map.page_number_for``).
     page_provenance_json  TEXT,
+    -- O39 фаза 1 (план 26, схема 3.24.0): таблицы документа — наблюдение, не потолок.
+    -- Внутри: ``{documents_with_tables, tables, documents_unmeasured, by_product{id:{...}}}``
+    -- (``core.pipeline.table_provenance``). NULL — документов корпуса нет вовсе (не ноль):
+    -- «таблиц нет» и «таблицы не искали» — разные факты, и второй виден числом
+    -- ``documents_unmeasured``. Сами таблицы — в ``corpus_docs.tables``: манифест несёт
+    -- сводку, а не копию содержимого.
+    tables_json           TEXT,
     publishability_json   TEXT,                        -- §6/A1: профиль публикуемости (класс + числа, из которых он выведен)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
@@ -265,7 +282,16 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
     -- — независимый факт. В ``content_hash``/``run_id`` не входят: наблюдение, не условие.
     ocr_probe        TEXT,
     pages_ocr        INTEGER,
-    pages_failed     INTEGER
+    pages_failed     INTEGER,
+    -- O39 фаза 1 (план 26, схема 3.24.0): таблицы документа как объекты — JSON-список
+    -- ``{table_id, page_no, caption, header, rows}`` (контракт —
+    -- ``core.domain.doc_tables.ExtractedTable``). NULL = читатель таблиц **не даёт** (pdfium
+    -- ``text_layer``, HTML, EPUB, офисный путь docling, шов ``split``), а **не** пустой
+    -- список: ``[]`` — отдельный факт «искал и не нашёл», и свести их значило бы публиковать
+    -- «таблиц нет» там, где их никто не искал. В ``content_hash``/``run_id`` не входит:
+    -- наблюдение о прочитанном, а не условие измерения (как ``page_map``/``ocr_probe``);
+    -- нарезка чанков от колонки не зависит.
+    tables           TEXT
 );
 
 -- 13-manual-artifacts §3.3: аудит предоставления. Строка на объявленную подачу, дошедшую

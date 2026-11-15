@@ -59,6 +59,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
+from core.domain.doc_tables import tables_from_json, tables_to_json
 from core.domain.ocr_probe import OCR_PROBE_VALUES
 from core.domain.page_map import page_map_from_json, page_map_to_json
 from core.ports.store import CorpusArtifactRow, PlanInputsConflict, RunIndexRef
@@ -1266,7 +1267,10 @@ class SqliteStore:
         (O25-остаток, схема 3.22.0: ``unavailable`` > ``unsupported`` > ``unknown`` > ``ok``;
         ``NULL`` — ни один документ исхода не сообщил), а также ``page_provenance_json`` —
         страница **цитаты** (O36 фаза 3, схема 3.23.0: сколько цитат называют страницу и
-        почему не называют остальные; ``NULL`` — цитат нет вовсе, а не «ноль»).
+        почему не называют остальные; ``NULL`` — цитат нет вовсе, а не «ноль»), а также
+        ``tables_json`` — таблицы документа числом (O39 фаза 1, схема 3.24.0: сколько
+        таблиц, в скольких документах и сколько документов читатель таблиц **не даёт**;
+        ``NULL`` — документов корпуса нет вовсе, а не ноль).
         ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
@@ -1293,6 +1297,7 @@ class SqliteStore:
                 " partial_docs_json = ?,"
                 " ocr_probe = ?,"
                 " page_provenance_json = ?,"
+                " tables_json = ?,"
                 " publishability_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?,"
                 " run_scope = ?, product_plan_json = ?, embed_device = ?,"
@@ -1351,6 +1356,17 @@ class SqliteStore:
                         if manifest.page_provenance is None
                         else json.dumps(
                             dict(manifest.page_provenance),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    ),
+                    # O39 фаза 1 (3.24.0): таблицы — наблюдение прогона. ``None`` пишется
+                    # как ``NULL`` («документов корпуса нет»), а не как ``{}``.
+                    (
+                        None
+                        if manifest.tables is None
+                        else json.dumps(
+                            dict(manifest.tables),
                             ensure_ascii=False,
                             sort_keys=True,
                         )
@@ -1561,10 +1577,18 @@ class SqliteStore:
         тихая потеря, ради видимости которой поле и заведено. ``COALESCE`` сохраняет
         измерение и при этом **не** мешает пере-извлечению уточнить его: новый непустой
         исход перекрывает прежний (``unavailable`` → ``ok`` после починки движка).
+
+        **То же правило — у таблиц (``tables``, схема 3.24.0, O39 фаза 1).** Писатель без
+        извлечения (переиспользование ``304``, набор чанков, ``frozen``) приходит с ``None``,
+        и его ``NULL`` не должен стирать уже прочитанные таблицы того же текста. Тонкость,
+        которой нет у ``page_map``: пустой список — **факт** («читатель искал и не нашёл»),
+        поэтому ``[]`` пишется как ``[]`` и перекрывает прежнее значение честно, а ``NULL``
+        («не даёт вовсе») только дописывается — разделение ``None``/``()`` держится и здесь.
         """
         http_status = doc.http_status
         reuse_kind = doc.reuse_kind
         page_map_json = page_map_to_json(doc.page_map)
+        tables_json = tables_to_json(doc.tables)
         with self.conn:
             self.conn.execute(
                 "INSERT INTO corpus_docs"
@@ -1572,8 +1596,8 @@ class SqliteStore:
                 "  extractor_version, render_mode, lang, origin,"
                 "  partial, partial_reason, page_count, pages_converted, extracted_chars,"
                 "  http_status, reuse_kind, page_map,"
-                "  ocr_probe, pages_ocr, pages_failed)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  ocr_probe, pages_ocr, pages_failed, tables)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(doc_id) DO UPDATE SET"
                 "  product_id = excluded.product_id,"
                 "  url = excluded.url,"
@@ -1606,7 +1630,10 @@ class SqliteStore:
                 # стирать уже измеренный исход (см. докстринг).
                 "  ocr_probe = COALESCE(excluded.ocr_probe, corpus_docs.ocr_probe),"
                 "  pages_ocr = COALESCE(excluded.pages_ocr, corpus_docs.pages_ocr),"
-                "  pages_failed = COALESCE(excluded.pages_failed, corpus_docs.pages_failed)",
+                "  pages_failed = COALESCE(excluded.pages_failed, corpus_docs.pages_failed),"
+                # Таблицы (3.24.0) — то же правило и по той же причине; ``[]`` (искал и не
+                # нашёл) остаётся фактом и перекрывает прежнее значение (см. докстринг).
+                "  tables = COALESCE(excluded.tables, corpus_docs.tables)",
                 (
                     doc.doc_id,
                     doc.product_id,
@@ -1631,6 +1658,7 @@ class SqliteStore:
                     doc.ocr_probe,
                     doc.pages_ocr,
                     doc.pages_failed,
+                    tables_json,
                 ),
             )
             if doc_version_id:
@@ -2827,6 +2855,11 @@ class SqliteStore:
                 ocr_probe=_declared_ocr_probe(_row_optional(doc, "ocr_probe")),
                 pages_ocr=_row_optional(doc, "pages_ocr"),
                 pages_failed=_row_optional(doc, "pages_failed"),
+                # O39 фаза 1 (3.24.0): таблицы — тот же JSON, каким записаны. Колонка
+                # аддитивная ⇒ ``_row_optional``: у строки прошлой схемы её нет, и это
+                # «читатель таблиц не даёт» (``None``), а не сбой чтения. Порченое
+                # значение читается так же: ``report`` обязан строиться и на битой БД.
+                tables=tables_from_json(_row_optional(doc, "tables")),
             )
 
     # -- спуск в контейнеры (B3) ------------------------------------------- #
@@ -3096,6 +3129,11 @@ class SqliteStore:
         page_provenance_block = (
             page_provenance_raw if isinstance(page_provenance_raw, dict) else None
         )
+        # O39 фаза 1 (3.24.0): сводка таблиц. Та же дисциплина: колонки у строки прошлой
+        # схемы нет ⇒ ``None`` («не записано»), а не пустая сводка с нулями — ноль значил
+        # бы «таблиц нет», чего никто не утверждал.
+        tables_raw = _parse_json_text(_row_optional(row, "tables_json"))
+        tables_block = tables_raw if isinstance(tables_raw, dict) else None
         # 16 §3.1: провенанс среза (``run_scope``/``product_plan``) и наблюдаемая ось
         # устройства эмбеддера. Колонки аддитивные ⇒ читаются через ``_row_optional``
         # (read-only БД прошлой версии их не имеет); NULL/не-JSON → ``None``, а не пустой
@@ -3234,6 +3272,9 @@ class SqliteStore:
             # O36 фаза 3 (3.23.0): страница цитаты — наблюдение прогона. ``None`` —
             # не записано либо цитат не было вовсе.
             page_provenance=page_provenance_block,
+            # O39 фаза 1 (3.24.0): таблицы числом — наблюдение прогона. ``None`` —
+            # не записано либо документов корпуса нет вовсе.
+            tables=tables_block,
             # §6/A1: профиль публикуемости из записи воспроизведения; пусто — legacy.
             publishability=publishability_block,
             llm_scenarios=scenarios,

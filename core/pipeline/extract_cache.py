@@ -90,6 +90,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from core.domain.doc_tables import tables_from_json, tables_to_json
 from core.ports.types import OCR_PROBE_UNKNOWN, OCR_PROBE_VALUES, ExtractedDoc
 
 __all__ = ["ENVELOPE_FORMAT", "EVICT_CHECK_BYTES_DIVISOR", "ExtractionCache"]
@@ -399,6 +400,21 @@ class ExtractionCache:
                     self._misses += 1
                     return None
 
+        # Таблицы (O39 фаза 1) — аддитивное поле: конверт без него читается как ``None``
+        # («читатель таблиц не даёт»), и это **не** «таблиц нет»: пустой список пишется
+        # как ``[]`` и читается пустым кортежем. Порча записи (не текст JSON, нарушенная
+        # ширина строки) — промах кэша, а не молчаливое ``None``: таблица, собранная из
+        # испорченного конверта, была бы догадкой, а пере-извлечение дешевле ошибки.
+        # Без поля **хит** терял бы таблицы у самых часто извлекаемых документов.
+        tables_field = envelope.get("tables")
+        tables = None
+        if tables_field is not None:
+            tables = tables_from_json(tables_field)
+            if tables is None:
+                self._corrupt += 1
+                self._misses += 1
+                return None
+
         self._hits += 1
         if partial:
             self._partial_hits += 1
@@ -416,6 +432,7 @@ class ExtractionCache:
             page_map=page_map,
             pages_ocr=pages_ocr,
             pages_failed=pages_failed,
+            tables=tables,
         )
 
     # ------------------------------------------------------------------ #
@@ -503,6 +520,11 @@ class ExtractionCache:
             # вообще применялось, — у самых часто извлекаемых документов.
             "pages_ocr": getattr(doc, "pages_ocr", None),
             "pages_failed": getattr(doc, "pages_failed", None),
+            # Таблицы (O39 фаза 1) — аддитивное поле, бамп ``ENVELOPE_FORMAT`` не нужен:
+            # конверт без него читается как ``None`` («не даёт вовсе»), а не как «таблиц
+            # нет». Форма — тот же JSON-текст, что у колонки ``corpus_docs.tables``: один
+            # кодек на два носителя, чтобы копии формата не разошлись молча.
+            "tables": tables_to_json(getattr(doc, "tables", None)),
         }
         # Детерминированные байты: одинаковый вход → одинаковый файл (полезно для diff/аудита).
         payload = json.dumps(

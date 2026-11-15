@@ -146,6 +146,7 @@ from core.ports.types import (
     FetchMode,
     FetchPlan,
     RawPage,
+    TableList,
 )
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
@@ -1896,6 +1897,11 @@ def finish_one(
         # было, и карты в этом цикле нет — ``None`` честнее догадки (в БД уже записанная
         # карта этим не стирается: upsert пишет ``COALESCE``).
         page_map=getattr(extracted, "page_map", None),
+        # O39 фаза 1 (план 26): таблицы — из того же ``ExtractedDoc``, что дал текст.
+        # ``getattr`` по той же причине: при переиспользовании экстракции не было, и
+        # ``None`` («читатель не даёт») не стирает уже прочитанные таблицы — upsert пишет
+        # ``COALESCE``.
+        tables=getattr(extracted, "tables", None),
         **partial_fields,
     )
     ingest.docs.append(doc)
@@ -3658,6 +3664,9 @@ class RebuiltDoc:
     #: либо ``ExtractedDoc`` пришёл из ``extract_cache`` без карты. Поле в конце: позиционные
     #: конструкторы не должны поехать от появления провенанса.
     page_map: tuple[tuple[int, int, int], ...] | None = None
+    #: Таблицы **текущей** экстракции (O39 фаза 1, план 26); ``None`` — читатель таблиц не
+    #: даёт, ``()`` — искал и не нашёл (различие — контракт ``ExtractedDoc.tables``).
+    tables: TableList | None = None
 
 
 @dataclass(frozen=True)
@@ -3965,6 +3974,9 @@ def rebuild_from_stored_bytes(
             # retained-байтов действительно прогоняет экстрактор). ``getattr`` — на случай
             # заглушки без поля: «карты нет» не должно ломать пересборку.
             page_map=getattr(extracted, "page_map", None),
+            # O39 фаза 1: таблицы — из той же экстракции, что дала текст. ``getattr`` — на
+            # случай заглушки без поля: «таблиц не даёт» не должно ломать пересборку.
+            tables=getattr(extracted, "tables", None),
         ),
         cache_hit=cache_hit,
         extracted=extracted_now,
@@ -4024,6 +4036,9 @@ def _persist_rebuilt_doc(
         # O36: карта страниц пересборки — экстрактор в этом проходе действительно работал
         # (по retained-байтам), поэтому карта принадлежит тому же тексту, что и ``doc_hash``.
         page_map=rebuilt.page_map,
+        # O39 фаза 1: таблицы пересборки — экстрактор в этом проходе работал, значит
+        # таблицы принадлежат тому же тексту, что и ``doc_hash``.
+        tables=rebuilt.tables,
         **rebuilt.partial_fields,
     )
     ingest.docs.append(doc)

@@ -12,6 +12,12 @@ from core.domain.anchors import (
     verify_evidence_hash,
 )
 from core.domain.dictionary import assert_dictionary_integrity, load_dictionary
+from core.domain.doc_tables import (
+    ExtractedTable,
+    TableList,
+    tables_from_json,
+    tables_to_json,
+)
 from core.domain.enums import (
     ABSENT_DENIAL_STRENGTHS,
     BLOCKING_FAILURE_KINDS,
@@ -359,6 +365,11 @@ __all__ = [  # noqa: RUF022
     "page_map_from_json",
     "page_map_to_json",
     "page_number_for",
+    # таблицы документа как объект (O39 фаза 1, план 26): носитель «таблица существует»
+    "ExtractedTable",
+    "TableList",
+    "tables_from_json",
+    "tables_to_json",
     # исход OCR-пробы (O25/O38, план 26): тристейт, общий для документа и агрегатов
     "OCR_PROBE_OK",
     "OCR_PROBE_SEVERITY",
