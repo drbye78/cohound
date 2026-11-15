@@ -177,6 +177,17 @@ class StorePort(Protocol):
         ``Cell.absence_evidence`` (см. :meth:`add_absence_evidence`).
         """
 
+    def iter_evidence(self, run_id: str) -> Iterator[CellEvidence]:
+        """Типизированный evidence **всего прогона** (без ``absence``-протокола).
+
+        Один запрос на прогон, а не запрос на ячейку: вопрос «сколько цитат называют
+        страницу» задаётся ко всем сразу, и построчный читатель дал бы N+1 на 900+ ячеек
+        (та же причина, по которой заведены ``iter_cell_quotes`` и
+        ``iter_cell_evidence_refs``). Порядок — порядок вставки (``rowid``). Записи
+        ``evidence_type='absence'`` не отдаются, как и у ``iter_cell_evidence``: у
+        протокола отсутствия нет ``source_id``.
+        """
+
     def add_evidence(self, ev: CellEvidence) -> None: ...
     def add_evidence_batch(self, evs: list[CellEvidence]) -> None: ...
 

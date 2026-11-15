@@ -303,8 +303,16 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     **документа**), ``runs`` и ``index_manifest`` — ``ocr_probe`` (**худший** исход по
     прогону и по продукт-партиции). Одна работа — один бамп, потому что носитель факта
     общий. Шимов нет: прогоны ≤ 3.21.0 отвергаются гейтом версии.
+
+    3.23.0 (O36 фаза 3 плана ``26``) — ``runs.page_provenance_json``: сколько **цитат**
+    назвали страницу и почему не назвали остальные (``mapped``/``no_page_map``/
+    ``no_char_span``/``no_chunk``/``no_doc``). Наблюдение прогона, а не условие измерения
+    (в ``EXECUTION_CONTRACT_FIELDS`` его нет, как ``partial_docs_json``/``ocr_probe``).
+    Колонки ``page_number`` у чанка по-прежнему нет и не будет: номер страницы — функция от
+    ``corpus_docs.page_map`` и ``char_start``. Шимов нет: прогоны ≤ 3.22.0 отвергаются
+    гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.22.0"
+    assert SCHEMA_VERSION == "3.23.0"
 
     conn = connect(":memory:")
     try:
@@ -325,6 +333,8 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
         # 3.22.0 (O25-остаток/O38a): провенанс распознавания — у документа и в агрегатах.
         assert {"ocr_probe", "pages_ocr", "pages_failed"} <= docs_cols
         assert "ocr_probe" in runs_cols
+        # 3.23.0 (O36 фаза 3): страница цитаты — наблюдение прогона, не потолок.
+        assert "page_provenance_json" in runs_cols
         manifest_cols = {
             r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")
         }

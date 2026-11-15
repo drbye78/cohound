@@ -72,8 +72,12 @@ def test_schema_pins_the_table_shape() -> None:
     провенансом распознавания (``corpus_docs.ocr_probe``/``pages_ocr``/``pages_failed`` и
     агрегат ``runs.ocr_probe``/``index_manifest.ocr_probe``); файлы ≤ 3.21.0 отвергаются
     гейтом версии.
+
+    3.23.0 — O36 фаза 3 плана ``26``: таблица не менялась, версия сдвинута вместе с
+    ``runs.page_provenance_json`` (страница **цитаты**: сколько цитат назвали страницу и
+    почему нет у остальных); файлы ≤ 3.22.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.22.0"
+    assert SCHEMA_VERSION == "3.23.0"
 
     conn = connect(":memory:")
     try:

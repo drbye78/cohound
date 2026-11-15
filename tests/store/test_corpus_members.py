@@ -96,8 +96,12 @@ def test_schema_version_is_additive_bump() -> None:
     (``corpus_docs.ocr_probe``/``pages_ocr``/``pages_failed``, ``runs.ocr_probe``,
     ``index_manifest.ocr_probe``); таблица ``corpus_members`` не менялась, файлы ≤ 3.21.0
     отвергаются гейтом версии.
+
+    3.23.0 — O36 фаза 3 плана ``26``: ``runs.page_provenance_json`` — страница **цитаты**
+    (сколько цитат назвали страницу и почему нет у остальных); таблица ``corpus_members``
+    не менялась, файлы ≤ 3.22.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.22.0"
+    assert SCHEMA_VERSION == "3.23.0"
     conn = connect(":memory:")
     try:
         tables = {

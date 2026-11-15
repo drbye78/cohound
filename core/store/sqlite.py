@@ -101,7 +101,15 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: DDL **никогда не было** (проверено 15.11.2026 — это ``corpus_docs.extractor_version``,
 #: строка 198 старого файла), поэтому ``ocr_probe`` лёг в блок провенанса ``runs`` рядом с
 #: ``partial_docs_json``. Шимов нет: файлы ≤ 3.21.0 отвергаются гейтом версии.
-SCHEMA_VERSION = "3.22.0"
+#:
+#: 3.23.0 (O36 фаза 3 плана ``26``): ``runs.page_provenance_json`` — сколько **цитат**
+#: назвали страницу и почему не назвали остальные (``mapped``/``no_page_map``/
+#: ``no_char_span``/``no_chunk``/``no_doc``, ``core.pipeline.page_publication``). Это
+#: наблюдение прогона, а не условие измерения: в ``EXECUTION_CONTRACT_FIELDS`` его нет (как
+#: ``partial_docs_json``/``ocr_probe``). Колонка нужна потому, что манифест и ``hound
+#: report`` собираются позже фазы расчёта и обязаны читаться без памяти прогона. Шимов нет:
+#: файлы ≤ 3.22.0 отвергаются гейтом версии.
+SCHEMA_VERSION = "3.23.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -176,6 +184,13 @@ CREATE TABLE IF NOT EXISTS runs (
     -- Колонки ``extractor_version`` у ``runs`` нет вовсе — план 26 §O25 указывал на неё
     -- по устаревшему адресу; версия экстрактора живёт в ``corpus_docs``/``index_manifest``.
     ocr_probe             TEXT,
+    -- O36 фаза 3 (план 26, схема 3.23.0): страница **цитаты** — наблюдение, не потолок.
+    -- Внутри: ``{evidence, with_page, by_status{mapped|no_page_map|no_char_span|no_chunk|
+    -- no_doc}, by_product{id:{evidence, with_page}}}``. NULL — цитат нет вовсе (не ноль):
+    -- «цитаты есть, ни одна страницу не назвала» — наоборот, факт и публикуется числом.
+    -- Номер страницы не колонка у чанка: он функция от ``corpus_docs.page_map`` и
+    -- ``char_start`` (``core.domain.page_map.page_number_for``).
+    page_provenance_json  TEXT,
     publishability_json   TEXT,                        -- §6/A1: профиль публикуемости (класс + числа, из которых он выведен)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)

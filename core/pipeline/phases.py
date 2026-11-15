@@ -90,6 +90,8 @@ from core.pipeline.manual_artifacts import (
 )
 from core.pipeline.normalize import load_scope_attestations
 from core.pipeline.ocr_provenance import run_ocr_probe
+from core.pipeline.page_publication import evidence_pages_summary
+from core.pipeline.page_publication import human_line as evidence_pages_human_line
 from core.pipeline.partial_docs import (
     human_line as partial_docs_human_line,
 )
@@ -1785,6 +1787,14 @@ def build_phases(
             # корпус (как у ``partial_docs``), поэтому resume публикует тот же факт. Именно
             # худший: провал пробы не должен тонуть в большинстве проверенных ``ok``.
             ocr_probe=run_ocr_probe(ctx.store, plan.run_id),
+            # O36 фаза 3 (план 26, схема 3.23.0): страница **цитаты** — сколько цитат
+            # называют страницу и почему не называют остальные. Источник — персистентные
+            # ``corpus_docs``/``corpus_chunks``/``cell_evidence`` (как у ``partial_docs``),
+            # поэтому resume публикует тот же факт; нули по продуктам плана видны
+            # (симметрия). Наблюдение: в ``run_id`` не входит.
+            page_provenance=evidence_pages_summary(
+                ctx.store, plan.run_id, products=plan.products
+            ),
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
@@ -1911,6 +1921,16 @@ def build_phases(
         partial_line = partial_docs_human_line(artifacts.partial_docs_summary)
         if partial_line:
             pending.append(f"отчёт: {partial_line} (список: outputs/partial_docs.csv)")
+        # O36 фаза 3: страница у цитаты — advisory-строкой в том же выводе, что и
+        # частичность. «120 из 500» без причины читается как дефект прибора, хотя за ним
+        # стоит документ без карты (pdfium вне ``text_layer``, HTML, Office, ``split``).
+        evidence_pages_line = evidence_pages_human_line(
+            getattr(artifacts, "evidence_pages_summary", None)
+        )
+        if evidence_pages_line:
+            pending.append(
+                f"отчёт: {evidence_pages_line} (список: outputs/evidence_pages.csv)"
+            )
         # План 26 O28: длинный ``heading_path`` — дефект извлечения, который до этого
         # был виден только измерительным харнессом. Строка оператора называет число и
         # документ-виновника; «не посчитано» называется причиной, а не нулём.

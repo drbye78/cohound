@@ -30,6 +30,7 @@ from core.pipeline.heading_anomalies import human_line as heading_anomalies_huma
 from core.pipeline.heading_anomalies import (
     not_computed_note as heading_not_computed_note,
 )
+from core.pipeline.page_publication import human_line as evidence_pages_human_line
 from core.pipeline.partial_docs import human_line as partial_docs_human_line
 from core.pipeline.report import manifest_payload, write_reports
 from core.pipeline.support_quality import support_quality_line
@@ -127,6 +128,15 @@ def run(args: argparse.Namespace) -> int:
     )
     if partial_line:
         notes.append(partial_line)
+    # O36 фаза 3: страница у цитаты — строкой, а не только файлом, который надо открыть.
+    # «120 из 500 цитат называют страницу» без причины читается как дефект прибора, хотя
+    # за ним стоит известное ограничение механизма (документ без карты: pdfium вне
+    # ``text_layer``, HTML, Office, ``split``). Причина обязана быть в выводе команды.
+    evidence_pages_line = evidence_pages_human_line(
+        getattr(artifacts, "evidence_pages_summary", None)
+    )
+    if evidence_pages_line:
+        notes.append(evidence_pages_line)
     # A3: качество поддержки карты — строкой, как и частичность. Три замера
     # (поддержка не о предмете, концентрация) не меняют вердиктов, но именно они
     # объясняют, почему карта «зелёная» при почти пустом доказательстве.

@@ -871,6 +871,10 @@ def _db_smoke() -> None:
     # Без колонок факт «OCR не смог» остаётся строкой журнала и в артефакт не попадает.
     _assert({"ocr_probe", "pages_ocr", "pages_failed"} <= docs_cols)
     _assert("ocr_probe" in runs_cols)
+    # O36 фаза 3 (schema 3.23.0): страница **цитаты** — наблюдение прогона (сколько цитат
+    # назвали страницу и почему нет у остальных). Колонки номера страницы у чанка нет и
+    # не будет: номер — функция от ``corpus_docs.page_map`` и ``char_start``.
+    _assert("page_provenance_json" in runs_cols)
     manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
     _assert("ocr_probe" in manifest_cols)
     chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}

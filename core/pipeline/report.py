@@ -127,6 +127,12 @@ from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
 from core.pipeline.ocr_provenance import write_ocr_provenance_artifact
 from core.pipeline.onboarding import load_effective_seeds as _load_effective_seeds
 from core.pipeline.page_provenance import write_page_provenance_artifact
+from core.pipeline.page_publication import (
+    collect_evidence_pages,
+    pages_by_chunk,
+    summary_with_products,
+    write_evidence_pages_artifact,
+)
 from core.pipeline.partial_docs import (
     partial_docs_summary,
     write_partial_docs_artifact,
@@ -365,6 +371,15 @@ class Artifacts:
     #: больше одной (O36, план 26): именно их цитаты страницу назвать не могут.
     #: ``None`` — документов корпуса нет (пустой файл не артефакт).
     page_provenance: Path | None = None
+    #: ``outputs/evidence_pages.csv`` — страница у **цитаты** (O36 фаза 3, план 26): строка
+    #: на evidence с ``page``/``page_end`` и машинной причиной отсутствия
+    #: (``no_page_map``/``no_char_span``/``no_chunk``/``no_doc``). Отличается от
+    #: ``page_provenance`` предметом: там «у кого карта есть», здесь «сколько цитат страницу
+    #: назвали». ``None`` — цитат нет (пустой файл не артефакт).
+    evidence_pages: Path | None = None
+    #: Блок ``page_provenance`` манифеста — те же числа свёрнутыми, чтобы CLI назвал факт
+    #: строкой, даже когда CSV не создан. ``None`` — цитат нет вовсе (не ноль).
+    evidence_pages_summary: dict[str, Any] | None = None
     #: ``outputs/ocr_provenance.csv`` — исходы распознавания по продуктам и итог прогона
     #: (O38a/O25-остаток, план 26): документы с ``pages_ocr > 0``, суммы страниц, ошибки и
     #: распределение по ``ocr_probe``. ``None`` — документов корпуса нет (пустой файл не
@@ -557,8 +572,16 @@ def _status_symbol(cell: Any) -> str:
     return "—"
 
 
-def _matrix_cell(cell: Any | None) -> str:
-    """Текст ячейки матрицы: символ + обоснование + citation + «+N источников»."""
+def _matrix_cell(
+    cell: Any | None, pages: Mapping[str, tuple[int, int]] | None = None
+) -> str:
+    """Текст ячейки матрицы: символ + обоснование + citation + «+N источников».
+
+    ``pages`` — карта ``chunk_id → (page, page_end)`` (O36 фаза 3): цитата называет
+    страницу прямо в ячейке. Диапазон, а не одно число: чанк может пересекать границу
+    страниц, и «стр. 12» при половине цитаты на 13 было бы ложью. **Неизвестная страница
+    не добавляет ничего** — «стр. ?» было бы выдумкой (A3), а не отсутствием.
+    """
     if cell is None:
         return "—"
     parts = [_status_symbol(cell)]
@@ -567,11 +590,32 @@ def _matrix_cell(cell: Any | None) -> str:
         parts.append(justification)
     source_id, quote = _primary_citation(cell)
     if source_id or quote:
-        parts.append(f"{source_id}: {quote}".strip(": "))
+        citation = f"{source_id}: {quote}".strip(": ")
+        parts.append(f"{citation}{_page_suffix(source_id, pages)}")
     count = len(getattr(cell, "evidence", None) or [])
     if count > 1:
         parts.append(f"+{count - 1} источников")
     return "\n".join(parts)
+
+
+def _page_suffix(
+    source_id: str, pages: Mapping[str, tuple[int, int]] | None
+) -> str:
+    """`` (стр. N)`` / `` (стр. N–M)`` для цитаты; пустая строка — страница неизвестна.
+
+    Один расчёт на файл и карту: ``pages`` строится из тех же строк, что пишутся в
+    ``outputs/evidence_pages.csv`` (:func:`core.pipeline.page_publication.pages_by_chunk`),
+    поэтому ячейка и строка файла не могут назвать разные страницы.
+    """
+    if not pages or not source_id:
+        return ""
+    span = pages.get(source_id)
+    if span is None:
+        return ""
+    page, page_end = span
+    if page_end is not None and page_end != page:
+        return f" (стр. {page}–{page_end})"
+    return f" (стр. {page})"
 
 
 def _per_product_coverage(cells: list[Any], catalog: Mapping[str, CatalogRow]) -> dict[str, float]:
@@ -1016,6 +1060,7 @@ def build_manifest(
     manual_artifacts_digest: str | None = None,
     partial_docs: Mapping[str, Any] | None = None,
     ocr_probe: str | None = None,
+    page_provenance: Mapping[str, Any] | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
@@ -1632,6 +1677,13 @@ def build_manifest(
         # корпусу прогона. В ``EXECUTION_CONTRACT_FIELDS`` не входит: это наблюдение
         # прибора, а не смена условий измерения (``extractor_stack`` уже там).
         ocr_probe=ocr_probe,
+        # O36 фаза 3 (план 26, схема 3.23.0): страница **цитаты** — наблюдение прогона
+        # (сколько цитат называют страницу и почему нет у остальных). В
+        # ``EXECUTION_CONTRACT_FIELDS`` не входит, как ``partial_docs``/``ocr_probe``:
+        # это факт о прочитанном, а не условие измерения. ``None`` — цитат нет вовсе.
+        page_provenance=(
+            None if page_provenance is None else dict(page_provenance)
+        ),
         snapshot_date=snapshot_date,
         # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
         # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
@@ -1843,8 +1895,13 @@ def _battle_card_sheets(
     fallback: bool,
     insufficient: bool,
     crawl_provenance: CrawlProvenance | None = None,
+    pages: Mapping[str, tuple[int, int]] | None = None,
 ) -> list[tuple[str, list[list[Any]]]]:
-    """Собирает листы battle card (шапка/матрица/сателлиты/модули/sensitivity)."""
+    """Собирает листы battle card (шапка/матрица/сателлиты/модули/sensitivity).
+
+    ``pages`` — карта ``chunk_id → (page, page_end)``: цитата матрицы называет страницу
+    (O36 фаза 3). Карта приходит из того же расчёта, что ``outputs/evidence_pages.csv``.
+    """
     by_key = {(str(c.product_id), str(c.param_id)): c for c in cells}
 
     header_rows: list[list[Any]] = [["field", "value"]]
@@ -1863,7 +1920,13 @@ def _battle_card_sheets(
     matrix_rows: list[list[Any]] = [["product", *params]]
     for product in products:
         matrix_rows.append(
-            [product, *[_matrix_cell(by_key.get((product, param))) for param in params]]
+            [
+                product,
+                *[
+                    _matrix_cell(by_key.get((product, param)), pages)
+                    for param in params
+                ],
+            ]
         )
 
     satellite_rows: list[list[Any]] = [
@@ -1953,6 +2016,7 @@ def render_battle_card(
     out_path: str | Path,
     *,
     crawl_provenance: CrawlProvenance | None = None,
+    pages: Mapping[str, tuple[int, int]] | None = None,
 ) -> Path:
     """Пишет ``battle_card`` (XLSX; CSV-fallback) с G4/I11-гейтом (§9, 02 §E.2).
 
@@ -1967,6 +2031,12 @@ def render_battle_card(
     :param crawl_provenance: опциональный провенанс краула (§4.4/Phase 2); в шапку
         добавляются ``crawl_engines`` и (при >1 движке) ``crawl_engines_heterogeneous`` —
         информационно, без влияния на Comparability/§6.
+    :param pages: карта ``chunk_id → (page, page_end)`` (O36 фаза 3): цитата в ячейке
+        матрицы называет страницу — ``(стр. N)`` либо ``(стр. N–M)``, если чанк пересекает
+        границу страниц. Пара, а не одно число: одно назвало бы страницу начала, когда
+        половина цитаты уже на следующей. Нет записи в карте — не добавляется ничего
+        (никаких «стр. ?»). Карта строится из тех же строк, что
+        ``outputs/evidence_pages.csv``.
     """
     if _coverage_absent(bundle):
         raise PublishBlockedError(
@@ -1989,6 +2059,7 @@ def render_battle_card(
         fallback=fallback,
         insufficient=insufficient,
         crawl_provenance=crawl_provenance,
+        pages=pages,
     )
 
     out = Path(out_path)
@@ -3612,6 +3683,14 @@ def write_reports(
 
     # G4-предупреждение (мягкий гейт); жёсткий I11 — отказ render_battle_card.
     assert_publishable(bundle)
+    # O36 фаза 3 (план 26): страница **цитаты** — один расчёт на файл и battle card.
+    # Считается до матрицы, потому что цитата в ячейке называет страницу тем же числом:
+    # второй расчёт разошёлся бы с ``outputs/evidence_pages.csv``. Сбой чтения не роняет
+    # отчёт (функция возвращает пустое): факт остаётся в БД, теряется лишь таблица.
+    evidence_page_rows, _page_summary = collect_evidence_pages(store, run_id)
+    # Аннотация явная: ниже сводка может стать ``None`` («цитат нет вовсе»), а тип из
+    # распаковки — всегда ``dict``.
+    evidence_page_summary: dict[str, Any] | None = _page_summary
     try:
         battle_card: Path | None = render_battle_card(
             bundle,
@@ -3619,6 +3698,7 @@ def write_reports(
             catalog,
             outputs_dir / "battle_card.xlsx",
             crawl_provenance=manifest.crawl_provenance,
+            pages=pages_by_chunk(evidence_page_rows),
         )
     except PublishBlockedError:
         battle_card = None
@@ -3730,6 +3810,18 @@ def write_reports(
     partial_summary = partial_docs_summary(
         store, run_id, products=planned_products
     )
+    # O36 фаза 3: нули продуктов плана — к уже посчитанной сводке (второй проход по БД
+    # не нужен и разошёлся бы с файлом). «У продукта цитат нет» — тоже факт.
+    # Условие — **строки**, а не «сводка не None»: без цитат ``collect_evidence_pages``
+    # отдаёт пустой словарь, и добавление нулей превратило бы «цитат нет вовсе» в
+    # ``{"by_product": {...}}`` без полей ``evidence``/``with_page`` — то есть в сводку,
+    # у которой нет числа (а ``None`` как раз и означает «нечего публиковать»).
+    if evidence_page_rows:
+        evidence_page_summary = summary_with_products(
+            _page_summary, planned_products
+        )
+    else:
+        evidence_page_summary = None
     # O36 (план 26): карта страниц — видимым артефактом. Пока её наличие не публикуется,
     # отсутствие карты невидимо, а вместе с ним невидимо и то, что цитата из документа на
     # 300 страниц не может назвать страницу вообще. Сбой выгрузки отчёт не роняет (как и
@@ -3740,6 +3832,18 @@ def write_reports(
         )
     except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
         page_provenance_path = None
+    # O36 фаза 3 (план 26): страница **цитаты** — видимым артефактом. Строки уже посчитаны
+    # для battle card (один расчёт): цитата в матрице и строка файла называют одну страницу.
+    # Сбой выгрузки отчёт не роняет (как у ``page_provenance``): факт остаётся в БД.
+    try:
+        evidence_pages_path = write_evidence_pages_artifact(
+            store,
+            run_id,
+            outputs_dir / "evidence_pages.csv",
+            rows=evidence_page_rows,
+        )
+    except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
+        evidence_pages_path = None
     # O38a/O25-остаток (план 26): исходы распознавания — видимым артефактом. Пока они не
     # публикуются, «страница прошла OCR» и «документ прочитан из текстового слоя» в отчёте
     # неотличимы, а провал пробы (``ocr_probe=unavailable``) живёт только строкой журнала
@@ -3859,6 +3963,8 @@ def write_reports(
         partial_docs=partial_docs_path,
         partial_docs_summary=partial_summary,
         page_provenance=page_provenance_path,
+        evidence_pages=evidence_pages_path,
+        evidence_pages_summary=evidence_page_summary,
         ocr_provenance=ocr_provenance_path,
         support_quality=support_path,
         support_quality_summary=support_payload,

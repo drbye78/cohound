@@ -772,6 +772,27 @@ class SqliteStore:
                 result.append(evidence)
         return result
 
+    def iter_evidence(self, run_id: str) -> Iterator[CellEvidence]:
+        """Типизированный evidence **всего прогона** (без ``absence``-протокола).
+
+        Один запрос на прогон, а не запрос на ячейку: вопрос «сколько цитат называют
+        страницу» задаётся ко всем сразу, и построчный читатель дал бы N+1 на 900+ ячеек
+        (та же причина, по которой заведены :meth:`iter_cell_quotes` и
+        :meth:`iter_cell_evidence_refs`).
+
+        Порядок — порядок вставки (``rowid``), то есть детерминированный. Записи
+        ``evidence_type='absence'`` не отдаются, как и у :meth:`iter_cell_evidence`: у
+        протокола отсутствия нет ``source_id``, и страницы у него нет по природе.
+        """
+        sql = (
+            f"SELECT {self._readable('cell_evidence', _EVIDENCE_COLUMNS)} FROM cell_evidence"  # noqa: S608 - проекция из _EVIDENCE_COLUMNS, аргумент — bind
+            " WHERE run_id = ? AND evidence_type IS NOT ? ORDER BY rowid"
+        )
+        for row in self.conn.execute(sql, (run_id, EvidenceType.ABSENCE.value)):
+            evidence = _row_to_typed_evidence(row)
+            if evidence is not None:
+                yield evidence
+
     def iter_registry_cells(self, run_id: str) -> Iterator[Cell]:
         """Итерирует ячейки реестрового источника прогона (документированная поверхность).
 
@@ -1243,7 +1264,9 @@ class SqliteStore:
         а не идентичность; ``COALESCE`` — манифест без снимка не стирает durable-факт),
         а также ``ocr_probe`` — **худший** исход проверки OCR-движка по корпусу прогона
         (O25-остаток, схема 3.22.0: ``unavailable`` > ``unsupported`` > ``unknown`` > ``ok``;
-        ``NULL`` — ни один документ исхода не сообщил).
+        ``NULL`` — ни один документ исхода не сообщил), а также ``page_provenance_json`` —
+        страница **цитаты** (O36 фаза 3, схема 3.23.0: сколько цитат называют страницу и
+        почему не называют остальные; ``NULL`` — цитат нет вовсе, а не «ноль»).
         ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
@@ -1269,6 +1292,7 @@ class SqliteStore:
                 " manual_artifacts_digest = ?, manual_artifacts_json = ?,"
                 " partial_docs_json = ?,"
                 " ocr_probe = ?,"
+                " page_provenance_json = ?,"
                 " publishability_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?,"
                 " run_scope = ?, product_plan_json = ?, embed_device = ?,"
@@ -1319,6 +1343,18 @@ class SqliteStore:
                     # Публикуется, потому что деградация распознавания иначе видна только
                     # в журнале фазы: читатель артефакта прогона её не видел вовсе.
                     manifest.ocr_probe,
+                    # O36 фаза 3 (3.23.0): страница цитаты — наблюдение прогона. ``None``
+                    # пишется как ``NULL``, а не ``{}``: «цитат нет вовсе» и «цитаты есть,
+                    # страницы не названы» — разные факты.
+                    (
+                        None
+                        if manifest.page_provenance is None
+                        else json.dumps(
+                            dict(manifest.page_provenance),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    ),
                     json.dumps(
                         dict(manifest.publishability or {}),
                         ensure_ascii=False,
@@ -3050,6 +3086,16 @@ class SqliteStore:
         # аддитивная ⇒ ``_row_optional``: у строки прошлой схемы её нет, и отсутствие
         # значит «не записано», а не «OCR проверен и работает».
         ocr_probe = _declared_ocr_probe(_row_optional(row, "ocr_probe"))
+        # O36 фаза 3 (3.23.0): блок «страница цитаты». Колонка аддитивная ⇒
+        # ``_row_optional``: у строки прошлой схемы её нет, и отсутствие значит «не
+        # записано», а не «все цитаты страницу назвали». ``None`` сохраняется как ``None``
+        # (не ``{}``): «цитат нет вовсе» — факт, отличный от пустой сводки.
+        page_provenance_raw = _parse_json_text(
+            _row_optional(row, "page_provenance_json")
+        )
+        page_provenance_block = (
+            page_provenance_raw if isinstance(page_provenance_raw, dict) else None
+        )
         # 16 §3.1: провенанс среза (``run_scope``/``product_plan``) и наблюдаемая ось
         # устройства эмбеддера. Колонки аддитивные ⇒ читаются через ``_row_optional``
         # (read-only БД прошлой версии их не имеет); NULL/не-JSON → ``None``, а не пустой
@@ -3185,6 +3231,9 @@ class SqliteStore:
             partial_docs=partial_docs_block,
             # O25-остаток (3.22.0): худший исход OCR-пробы по корпусу — наблюдение прогона.
             ocr_probe=ocr_probe,
+            # O36 фаза 3 (3.23.0): страница цитаты — наблюдение прогона. ``None`` —
+            # не записано либо цитат не было вовсе.
+            page_provenance=page_provenance_block,
             # §6/A1: профиль публикуемости из записи воспроизведения; пусто — legacy.
             publishability=publishability_block,
             llm_scenarios=scenarios,

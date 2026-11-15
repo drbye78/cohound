@@ -1880,6 +1880,18 @@ class RunManifest(BaseModel):
     #: Наблюдение (как ``crawl_provenance``): в границы версий §13 не входит — это факт
     #: о том, что прибор прочитал, а не смена условий измерения.
     partial_docs: dict[str, Any] = Field(default_factory=dict)
+    #: Страница **цитаты** — **числом**, а не прилагательным (O36 фаза 3 плана ``26``):
+    #: ``{"evidence": n, "with_page": m, "by_status": {"mapped"|"no_page_map"|
+    #: "no_char_span"|"no_chunk"|"no_doc": k}, "by_product": {id: {"evidence": n,
+    #: "with_page": m}}}``. Пока это не публикуется, «цитата называет страницу» и «цитата
+    #: называет только документ» неотличимы в артефакте прогона, а причина различия
+    #: (нет карты / нет смещений чанка / не корпусная цитата / битая ссылка) не называется
+    #: нигде. Номер страницы — **функция** от ``corpus_docs.page_map`` и ``char_start``
+    #: (:func:`core.domain.page_map.page_number_for`), а не колонка чанка.
+    #: Наблюдение (как ``partial_docs``/``ocr_probe``): в ``run_id`` и
+    #: ``EXECUTION_CONTRACT_FIELDS`` не входит — это факт о прочитанном, а не условие
+    #: измерения. ``None`` — цитат нет вовсе (не ноль).
+    page_provenance: dict[str, Any] | None = None
     #: §13 (Backlog B): ось стратегии краула (``run.yaml:crawl.strategy``) и каноническая
     #: форма диапазона задержек (``run.yaml:crawl.rate_limit``, :func:`canonical_rate_limit`).
     #: Это **операционные** дефолты commodity-слоя (A2): их смена — граница класса
