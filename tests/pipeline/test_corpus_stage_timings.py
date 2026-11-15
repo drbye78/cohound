@@ -94,6 +94,42 @@ PINNED_EXECUTION_CONTRACT_DIGEST = "3481c21f7da94478c397367d"
 CRAWL_BUCKETS = ("fetch_wait_s", "extract_wait_s", "chunk_s")
 INDEX_BUCKETS = ("embed_s", "build_s")
 
+#: Полуширина шага публикации: остаток и бакеты публикуются с тремя знаками.
+_PUBLISH_HALF_STEP = 5e-4
+
+
+def _rounding_bound(terms: int) -> float:
+    """Сколько **может** разойтись формула кода и её пересчёт по опубликованным числам.
+
+    Код считает остаток от **неокруглённых** величин
+    (``round(E − Σp, 3)``), тест — от **опубликованных**, то есть уже округлённых до
+    трёх знаков (``round(round(E,3) − Σround(p,3), 3)``). Это разные числа, и разойтись
+    они могут не «чуть-чуть», а на сумму погрешностей всех слагаемых:
+
+    * ``|E − round(E,3)| ≤ 5e-4``;
+    * ``|pᵢ − round(pᵢ,3)| ≤ 5e-4`` на каждый из ``terms`` бакетов;
+    * само вычитание тоже публикуется тремя знаками — ещё ``≤ 5e-4``.
+
+    Итого ``5e-4 · (terms + 2)``. Для окна краула (3 бакета) это **2.5 мс**, для полного
+    окна (5 бакетов) — **3.5 мс**.
+
+    Почему это не «ослабили допуск, чтобы позеленело». Допуск ``1e-3`` был **меньше**
+    этой границы, то есть тест мог падать на верном коде — и падал: полный прогон
+    15.11.2026 дал ``test_product_rows_carry_stage_buckets`` красным при зелёном CI в
+    изоляции. Контрпример, который ловится руками: ``E = 0.97369``, бакеты
+    ``0.468317 / 0.21746 / 0.287413`` (их сумма равна ``E``, остаток — ровно 0): код
+    публикует ``0.0``, пересчёт по округлённым — ``0.002``, расхождение вдвое больше
+    допуска при **верной** формуле.
+
+    **Чем граница не делает проверку пустой.** Из опубликованных чисел остаток точнее
+    шага публикации не восстановить — это предел данных, а не слабость теста. Поэтому
+    сама формула проверяется **точно** на объявленных числах
+    (:func:`test_overhead_is_the_formula_not_a_clamp`, включая отрицательный остаток), а
+    здесь остаётся согласованность живой строки с публикацией: она ловит не «на миллисекунду
+    мимо», а другой класс — потерянный или перепутанный бакет.
+    """
+    return _PUBLISH_HALF_STEP * (terms + 2)
+
 
 def _catalog() -> list[CatalogRow]:
     raw = json.loads((FIXTURES / "neutral_inputs.json").read_text(encoding="utf-8"))
@@ -286,15 +322,38 @@ def test_product_rows_carry_stage_buckets(tmp_path: Path) -> None:
     assert index["index_elapsed_s"] >= 0.0
     assert index["total_elapsed_s"] >= crawl["elapsed_seconds"]
 
-    # Остаток — формула, а не константа: считаем её независимо от кода фазы.
+    # Остаток — формула, а не константа: считаем её независимо от кода фазы. Допуск —
+    # граница двойного округления (см. `_rounding_bound`), а не «примерно столько же».
     pass_a = crawl["fetch_wait_s"] + crawl["extract_wait_s"] + crawl["chunk_s"]
     assert crawl["overhead_s"] == pytest.approx(
-        round(crawl["elapsed_seconds"] - pass_a, 3), abs=1e-3
+        round(crawl["elapsed_seconds"] - pass_a, 3), abs=_rounding_bound(len(CRAWL_BUCKETS))
     )
     full = pass_a + index["embed_s"] + index["build_s"]
     assert index["overhead_s"] == pytest.approx(
-        round(index["total_elapsed_s"] - full, 3), abs=1e-3
+        round(index["total_elapsed_s"] - full, 3),
+        abs=_rounding_bound(len(CRAWL_BUCKETS) + len(INDEX_BUCKETS)),
     )
+
+
+def test_overhead_is_the_formula_not_a_clamp() -> None:
+    """Остаток — арифметика на **объявленных** числах, и отрицательный публикуется как есть.
+
+    Живая строка округляет всё до трёх знаков, поэтому её остаток сверяется с пересчётом
+    лишь с точностью шага публикации (см. `_rounding_bound`). Здесь сверка точная: числа
+    заданы, и ``overhead_s`` обязан быть **их** разностью. Без этого теста зажим
+    ``max(0, …)`` в коде остался бы незамеченным — на фикстуре настоящий остаток (≈2 мс)
+    меньше границы двойного округления (2.5 мс), и живая проверка его не различила бы.
+    """
+    timings = _CorpusStageTimings(
+        fetch_wait_s=1.0, extract_wait_s=0.5, chunk_s=0.25, embed_s=0.5, build_s=0.25
+    )
+    # Окно краула 2.0 c, Σ трёх бакетов 1.75 → остаток 0.25.
+    assert timings.crawl_fields(2.0)["overhead_s"] == pytest.approx(0.25, abs=0)
+    # Полное окно 3.0 c, Σ пяти бакетов 2.5 → остаток 0.5.
+    assert timings.index_fields(3.0)["overhead_s"] == pytest.approx(0.5, abs=0)
+    # Окно **меньше** суммы бакетов: дефект инструментирования обязан быть виден, а не
+    # спрятан нулём. Это и есть смысл «не max(0, …)» из докстринга носителя.
+    assert timings.crawl_fields(1.0)["overhead_s"] == pytest.approx(-0.75, abs=0)
 
 
 def test_stage_aggregate_is_the_sum_of_products(tmp_path: Path) -> None:

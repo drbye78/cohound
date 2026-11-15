@@ -449,7 +449,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
 же полосе. Пинованные значения — `PINNED_PARTITION_BUILD_ID`
 (`tests/pipeline/test_corpus_stage_timings.py:83`, сверка
-`tests/pipeline/test_corpus_stage_timings.py:421`) — меняются неизбежно.
+`tests/pipeline/test_corpus_stage_timings.py:485`) — меняются неизбежно.
 
 Почему **не** в `embed_model_id`: он описывает **веса**, а не место счёта, и классифицируется
 как `content_change` (`core/pipeline/digests.py:84-95`). Положив устройство туда, мы
@@ -662,8 +662,8 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 - `tests/pipeline/test_corpus_stage_timings.py:83` `PINNED_PARTITION_BUILD_ID`,
   `tests/pipeline/test_corpus_stage_timings.py:86`
   `PINNED_EXECUTION_CONTRACT_DIGEST` (сверки
-  `tests/pipeline/test_corpus_stage_timings.py:421`,
-  `tests/pipeline/test_corpus_stage_timings.py:426`) — оба значения меняются.
+  `tests/pipeline/test_corpus_stage_timings.py:485`,
+  `tests/pipeline/test_corpus_stage_timings.py:490`) — оба значения меняются.
 - `tests/pipeline/test_corpus_phase_boundary.py:153-163`,
   `tests/pipeline/test_document_levels.py:574-585` — вызывают
   `_derive_partition_build_id(**явные kwargs)`; новый обязательный аргумент → `TypeError`.
