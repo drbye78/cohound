@@ -20,7 +20,11 @@
 ``doc_content_hash`` — хеш **извлечённого текста** (поле ``ExtractedDoc.content_hash``) — и
 аддитивные поля частичности ``partial``/``partial_reason``/``pages_converted`` (v5), а
 также ``ocr_probe`` — исход проверки OCR-движка (поле аддитивное: конверт без него
-читается как ``unknown`` — «не проверено», а не ``ok``; ``null`` — проверка не применима).
+читается как ``unknown`` — «не проверено», а не ``ok``; ``null`` — проверка не применима) —
+и ``page_map`` (карта страниц: список троек ``[page_no, char_start, char_end]``; поле
+аддитивное: конверт без него читается как ``None`` — «читатель карты не дал», а не
+«страниц нет»; без него хит молча терял бы провенанс страниц у самых часто извлекаемых
+документов).
 Два хеша различны по смыслу и оба обязательны: ключ адресует сырьё, ``doc_content_hash``
 восстанавливает ровно тот ``ExtractedDoc``, который вернул экстрактор (по нему pipeline
 делает дедуп и строит ``doc_id``). Несовпадение ``content_hash``/``extractor_version``/
@@ -110,6 +114,39 @@ def _valid_key(content_hash: Any) -> bool:
     if not isinstance(content_hash, str) or len(content_hash) < _MIN_KEY_LEN:
         return False
     return all(char in _HASH_CHARS for char in content_hash)
+
+
+def _page_map_from_envelope(
+    raw: object, text_length: int
+) -> tuple[bool, tuple[tuple[int, int, int], ...] | None]:
+    """Карта страниц из конверта: ``(форма_годна, карта)``.
+
+    ``None`` (или отсутствие ключа) — законное «читатель карты не дал»: ``(True, None)``,
+    и это **не** «страниц нет». Всё прочее обязано быть списком троек целых, идущих по
+    возрастанию номера страницы, не пересекающихся и лежащих внутри текста; иначе
+    ``(False, None)`` и запись считается порчей: номер страницы по такой карте был бы
+    догадкой, а не провенансом.
+    """
+    if raw is None:
+        return True, None
+    if not isinstance(raw, list):
+        return False, None
+    entries: list[tuple[int, int, int]] = []
+    previous_page = 0
+    previous_end = 0
+    for item in raw:
+        if not isinstance(item, list) or len(item) != 3:
+            return False, None
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in item):
+            return False, None
+        page_no, start, end = item
+        if page_no < 1 or start < 0 or end < start or end > text_length:
+            return False, None
+        if page_no <= previous_page or start < previous_end:
+            return False, None
+        previous_page, previous_end = page_no, end
+        entries.append((page_no, start, end))
+    return True, tuple(entries)
 
 
 class ExtractionCache:
@@ -308,6 +345,18 @@ class ExtractionCache:
             self._misses += 1
             return None
 
+        # Карта страниц — аддитивное поле: конверт без него читается как ``None``
+        # («читатель карты не дал»), и это **не** «страниц нет». Порченая форма (не
+        # список троек, номер < 1, вывернутый интервал, выход за текст, пересечение)
+        # — порча записи: по такой карте номер страницы был бы догадкой.
+        page_map_ok, page_map = _page_map_from_envelope(
+            envelope.get("page_map"), len(text)
+        )
+        if not page_map_ok:
+            self._corrupt += 1
+            self._misses += 1
+            return None
+
         self._hits += 1
         if partial:
             self._partial_hits += 1
@@ -322,6 +371,7 @@ class ExtractionCache:
             partial_reason=partial_reason if partial else None,
             pages_converted=pages_converted if partial else None,
             ocr_probe=ocr_probe,
+            page_map=page_map,
         )
 
     # ------------------------------------------------------------------ #
@@ -398,6 +448,11 @@ class ExtractionCache:
             # Аддитивное поле: конверты без него читаются как ``unknown``, поэтому бамп
             # ``ENVELOPE_FORMAT`` не нужен — старый конверт честно говорит «не проверено».
             "ocr_probe": getattr(doc, "ocr_probe", None),
+            # Карта страниц — тоже аддитивное поле (JSON-формы: список троек). Конверт без
+            # неё читается как ``None`` («читатель карту не дал»), а не как «страниц нет».
+            # Без этого поля **хит** отдавал бы документ без провенанса страниц — и именно
+            # тем документам, которые извлекались чаще всех.
+            "page_map": getattr(doc, "page_map", None),
         }
         # Детерминированные байты: одинаковый вход → одинаковый файл (полезно для diff/аудита).
         payload = json.dumps(

@@ -48,12 +48,22 @@ C1, включая ``\\f`` 0x0C) снимает единая граница оч
 :attr:`PdfiumDocumentExtractor.available` достаточно, а импорт на уровне модуля привязывал
 бы к бинарю pdfium любой процесс, который лишь импортировал composition root.
 
-Версия: ``pdfium-text-3:<версия pypdfium2>`` (:func:`pdfium_engine_build`). Ступени:
+**Провенанс страниц.** Читатель отдаёт ``page_map`` — постраничные интервалы в координатах
+итогового текста (контракт — :attr:`~core.ports.types.ExtractedDoc.page_map`). До этого
+границы страниц стирались на ``"\\n\\n".join(...)``, и по чанку нельзя было сказать, из какой
+страницы он взят. Карта **точная или отсутствует**: если постраничная очистка не
+воспроизводит текст документа (шаблон промпт-инъекции перешагнул границу страницы), карта
+— ``None``, потому что выдуманный номер хуже отсутствующего (A3).
+
+Версия: ``pdfium-text-4:<версия pypdfium2>`` (:func:`pdfium_engine_build`). Ступени:
 ``-1`` → ``-2`` (02.11.2026) — добавлена единая очистка текста до ``content_hash``, то есть
 изменился текст, а не только способ чтения; ``-2`` → ``-3`` (09.11.2026, план 26 O24) — в
 штамп добавлена **сборка движка**. До этого докстринг обещал защиту от «другой сборки
 pdfium», которой не было: апгрейд ``pypdfium2`` давал тот же ключ ``extract_cache``, и
-текст, прочитанный другим движком, переиспользовался молча. Штамп входит в ключ
+текст, прочитанный другим движком, переиспользовался молча; ``-3`` → ``-4`` (15.11.2026,
+план 26 O36) — читатель отдаёт **карту страниц**. Текст от этого не меняется ни на байт, но
+запись кэша прежнего читателя карты не несёт: без смены штампа прогрев молча отдавал бы
+документ без провенанса страниц. Штамп входит в ключ
 ``extract_cache`` (``(content_hash, extractor_version, level)``) и в ``extractor_stack``
 (слагаемое ``run_id``), поэтому текст, произведённый другой сборкой pdfium **или другой
 очисткой**, не переиспользуется молча.
@@ -91,7 +101,7 @@ __all__ = [
 
 #: Семейство механизма ``text_layer`` — **префикс** штампа, а не полная версия.
 #:
-#: Полная версия — :func:`pdfium_engine_build` (``pdfium-text-3:<версия дистрибутива>``):
+#: Полная версия — :func:`pdfium_engine_build` (``pdfium-text-4:<версия дистрибутива>``):
 #: одна и та же формула идёт в ``extractor_version`` (ключ ``extract_cache``/``pb``) и в
 #: ``extractor_stack`` (слагаемое ``run_id``), иначе две формулы разошлись бы молча (Д-8).
 #:
@@ -101,7 +111,13 @@ __all__ = [
 #: константа обещала защиту от «другой сборки pdfium», которой не было: апгрейд
 #: ``pypdfium2`` давал тот же ключ кэша, и текст, прочитанный другим движком, молча
 #: переиспользовался. Смена штампа — однократный промах кэша, а не ошибка.
-PDFIUM_ADAPTER_FAMILY = "pdfium-text-3"
+#: ``-4`` (15.11.2026, план 26 O36): читатель отдаёт **карту страниц**
+#: (``ExtractedDoc.page_map``). Текст не изменился ни на байт — меняется то, что запись
+#: кэша теперь **несёт провенанс**. Прогретая запись прежнего штампа карты не содержит, и
+#: хит молча отдал бы документ без номеров страниц именно тем документам, которые
+#: извлекались чаще всех. Поэтому это ``execution_change`` намеренно: новый ``run_id`` и
+#: новый ключ ``extract_cache``.
+PDFIUM_ADAPTER_FAMILY = "pdfium-text-4"
 
 #: Прежнее имя полной версии механизма — сохранено как **алиас семейства**.
 #:
@@ -165,7 +181,7 @@ def pdfium_library_version() -> str:
 
 
 def pdfium_engine_build() -> str:
-    """Сборка механизма: ``pdfium-text-3:<версия дистрибутива>`` (план 26, O24).
+    """Сборка механизма: ``pdfium-text-4:<версия дистрибутива>`` (план 26, O24).
 
     Одна формула на два носителя — ``extractor_version`` документа (ключ
     ``extract_cache``, слагаемое ``pb``) и ``extractor_stack`` (слагаемое ``run_id``):
@@ -310,7 +326,11 @@ class PdfiumDocumentExtractor:
         char_limit = None if limits is None else limits.max_extracted_chars
 
         pdf = pdfium.PdfDocument(path)
-        pages: list[str] = []
+        # Пары «номер страницы, сырой текст», а не список строк: pdfium может отказать
+        # на отдельной странице, и тогда список **короче** документа — индекс в нём
+        # перестаёт быть номером страницы (отказ на второй из трёх дал бы «2» третьей).
+        # Номер берётся в момент сбора, а не из позиции в списке.
+        pages: list[tuple[int, str]] = []
         failed: list[int] = []
         # Страница **прочитана**, но текстового слоя в ней нет (``get_text_range()``
         # вернул пустую строку). Это не отказ pdfium и не отсутствие страницы: лист
@@ -346,14 +366,22 @@ class PdfiumDocumentExtractor:
                     # без текстового слоя сюда не попадают — у них текст пустой, а не отказ.
                     failed.append(index + 1)
                     continue
-                pages.append(chunk)
+                pages.append((index + 1, chunk))
                 if not chunk.strip():
                     pages_without_text_layer.append(index + 1)
         finally:
             pdf.close()
         page_limit_hit = read_pages < page_count
+        # Сырые сегменты страниц: нормализация переводов строк и снятие краевых пробелов —
+        # ровно те же шаги, что были до появления карты страниц, поэтому склейка ниже
+        # остаётся **байт-в-байт** прежней (текст и ``content_hash`` не меняются).
+        raw_segments = [
+            (page_no, strip_control_characters(chunk).strip()) for page_no, chunk in pages
+        ]
+        # Склейка — источник истины для ``text``/``content_hash``: карта страниц ниже
+        # строится **из** неё, а не наоборот. Иначе провенанс мог бы переписать текст.
         text = finalize_extracted_text(
-            _PAGE_SEPARATOR.join(strip_control_characters(chunk).strip() for chunk in pages)
+            _PAGE_SEPARATOR.join(segment for _, segment in raw_segments)
         ).strip()
         if not text:
             if failed:
@@ -375,11 +403,20 @@ class PdfiumDocumentExtractor:
                 error="no_text_layer",
                 family=FAMILY_TEXT,
             )
+        # Карта страниц строится по **нетронутому** тексту: обрез D9 ниже сдвинул бы
+        # границы, а сравнение «сегменты == текст» перестало бы быть сравнением с текстом.
+        # Провенанс не влияет на текст: он вычисляется из него и молча деградирует в
+        # ``None``, если точной карты нет.
+        page_map = _build_page_map(raw_segments, text)
         # D9: ось символов обрезает **готовый** текст (после очистки и склейки страниц),
         # поэтому ``content_hash`` ниже считается уже по обрезанному тексту: хеш обязан
         # описывать то, что увидит чанкер и цитата (I22). Отброшенное число едет в причину.
         total_chars = len(text)
         text, dropped_chars = truncate_text(text, char_limit)
+        if page_map is not None and len(text) != total_chars:
+            # Обрез — после финализации, поэтому сегменты обрезаются по факту, а не по
+            # обещанию: иначе ``char_end`` уехал бы за конец опубликованного текста.
+            page_map = _clip_page_map(page_map, len(text))
         if failed or pages_without_text_layer or page_limit_hit or dropped_chars:
             # Частичный результат — документ, а не отказ (симметрия с docling
             # ``PARTIAL_SUCCESS``): текст прочитанных страниц обязан попасть в корпус, но
@@ -421,6 +458,7 @@ class PdfiumDocumentExtractor:
                 pages_converted=(
                     read_pages - len(failed) - len(pages_without_text_layer)
                 ),
+                page_map=page_map,
             )
         return ExtractedDoc(
             text=text,
@@ -428,6 +466,7 @@ class PdfiumDocumentExtractor:
             extractor_version=self.version,
             page_count=page_count,
             family=FAMILY_TEXT,
+            page_map=page_map,
         )
 
     def _error(self, message: str) -> ExtractedDoc:
@@ -456,3 +495,87 @@ def _page_list(failed: list[int], limit: int = 5) -> str:
     if len(failed) > limit:
         shown = f"{shown}, …"
     return shown
+
+
+def _build_page_map(
+    segments: list[tuple[int, str]], text: str
+) -> tuple[tuple[int, int, int], ...] | None:
+    """Карта страниц в координатах ``text`` — или ``None``, если точной карты не выходит.
+
+    ``segments`` — пары «номер страницы, сегмент» уже после нормализации переводов строк и
+    снятия краевых пробелов. Карта строится **постранично**: каждый сегмент финализируется
+    сам, сегменты склеиваются тем же :data:`_PAGE_SEPARATOR`, и результат сравнивается с
+    ``text`` — текстом, собранным склейкой **до** финализации.
+
+    **Почему сравнение, а не доверие.** :func:`~core.util.sanitize.finalize_extracted_text`
+    — не посимвольная замена: ``neutralize_prompt_injection_marks`` знает шаблоны с
+    ``DOTALL`` (``<tool_call>…</tool_call>``), которые могут **перешагнуть** границу
+    страницы. Тогда финализация по частям и финализация склейки дают разные строки, и
+    постраничные смещения перестают относиться к опубликованному тексту. Выдуманный номер
+    страницы хуже отсутствующего (A3), поэтому такой документ остаётся без карты — а текст
+    остаётся ровно тем, что даёт склейка (она источник истины в обоих случаях).
+
+    **Края.** ``text`` — результат ``.strip()`` склейки, а сегменты уже обрезаны по краям:
+    ``.strip()`` снимает только разделители пустых крайних страниц, и эта длина сдвигает
+    все смещения — она вычитается явно (``lead``), а не предполагается нулевой.
+
+    **Пустая страница** даёт ``start == end``: она прочитана, текста в ней нет. Разделитель
+    между страницами в карту не входит — это разрыв (см. контракт поля).
+    """
+    finalized = [
+        (page_no, finalize_extracted_text(segment)) for page_no, segment in segments
+    ]
+    joined = _PAGE_SEPARATOR.join(segment for _, segment in finalized)
+    if joined.strip() != text:
+        # Постраничная очистка не воспроизводит текстовый документ — карты нет.
+        return None
+    lead = len(joined) - len(joined.lstrip())
+    limit = len(text)
+    page_map: list[tuple[int, int, int]] = []
+    # Позиция сегмента в ``joined``; в координаты ``text`` её переводит вычитание ``lead``
+    # (``.strip()`` снял разделители пустых крайних страниц — это те же символы в начале).
+    cursor = 0
+    for page_no, segment in finalized:
+        start = max(0, cursor - lead)
+        end = start + len(segment)
+        # Обрезка по ``limit`` — только для крайних пустых страниц: их разделители ушли
+        # вместе с ``.strip()``, и позиция за концом текста не является позицией.
+        page_map.append((page_no, min(start, limit), min(end, limit)))
+        cursor += len(segment) + len(_PAGE_SEPARATOR)
+    return _drop_leading_bom(page_map, text)
+
+
+def _drop_leading_bom(
+    page_map: list[tuple[int, int, int]], text: str
+) -> tuple[tuple[int, int, int], ...]:
+    """Сдвигает смещения на −1, если текст начинается с BOM (контракт карты).
+
+    Чанкер снимает ведущий ``\\ufeff`` (:func:`core.adapters.chunker_text._normalize`), а
+    :func:`~core.util.sanitize.finalize_extracted_text` — нет. Без сдвига ``char_start``
+    чанка указывал бы на символ **перед** нужным, то есть номер страницы уезжал бы на
+    единицу на всём документе — молча.
+    """
+    if not text.startswith("\ufeff"):
+        return tuple(page_map)
+    return tuple(
+        (page_no, max(0, start - 1), max(0, end - 1))
+        for page_no, start, end in page_map
+    )
+
+
+def _clip_page_map(
+    page_map: tuple[tuple[int, int, int], ...], limit: int
+) -> tuple[tuple[int, int, int], ...]:
+    """Обрезает карту по опубликованному тексту (D9: ``pdf_max_extracted_chars``).
+
+    Сегмент, начинающийся **за** концом текста, в карту не входит: страница за объявленным
+    лимитом не публиковалась. Сегмент, начавшийся внутри, обрезается по ``limit`` —
+    ``char_end`` не имеет права выйти за текст, иначе номер страницы перестал бы быть
+    проверяемым.
+    """
+    clipped: list[tuple[int, int, int]] = []
+    for page_no, start, end in page_map:
+        if start > limit:
+            continue
+        clipped.append((page_no, start, min(end, limit)))
+    return tuple(clipped)

@@ -663,3 +663,64 @@ def test_partial_with_more_converted_pages_than_declared_is_a_miss(
 
     assert cache.get(RAW_A, "ext-1", "full") is None
     assert cache.stats()["corrupt"] == 1
+
+
+# ---------------------------------------------------------------------------
+# O36 (план 26): карта страниц переживает кэш
+# ---------------------------------------------------------------------------
+
+
+def test_round_trip_preserves_page_map(tmp_path: Path) -> None:
+    """Хит обязан вернуть ту же карту: иначе провенанс теряется у самых частых хитов.
+
+    JSON не знает кортежей, поэтому в конверте карта — список троек; восстанавливаться она
+    обязана в объявленную форму ``tuple[tuple[int, int, int], ...]``, а не в список.
+    """
+    cache = ExtractionCache(tmp_path / "cache")
+    doc = ExtractedDoc(
+        text="alpha one\n\nbeta two",
+        content_hash=content_hash("alpha one\n\nbeta two"),
+        extractor_version="ext-1",
+        page_count=2,
+        page_map=((1, 0, 9), (2, 11, 19)),
+    )
+
+    cache.put(doc, level="full", content_hash=RAW_A)
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.page_map == ((1, 0, 9), (2, 11, 19))
+    assert isinstance(restored.page_map, tuple)
+    assert all(isinstance(entry, tuple) for entry in restored.page_map)
+    assert restored == doc
+
+
+def test_legacy_envelope_without_page_map_reads_none(tmp_path: Path) -> None:
+    """Конверт без поля — «читатель карты не дал», а не «страниц нет»."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A))
+
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.page_map is None
+
+
+@pytest.mark.parametrize(
+    "page_map",
+    [
+        [[1, 0, 99]],  # char_end за текстом (text = "hello")
+        [[0, 0, 5]],  # номер страницы 1-based
+        [[1, 4, 2]],  # вывернутый интервал
+        [[1, 0, 2], [2, 1, 3]],  # пересечение
+        [[2, 0, 2], [1, 3, 5]],  # не по возрастанию номера
+        [[1, 0]],  # не тройка
+        "nope",  # не список
+    ],
+)
+def test_corrupt_page_map_is_a_miss(tmp_path: Path, page_map: object) -> None:
+    """Порченая карта не обслуживается: по ней номер страницы был бы догадкой."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A), page_map=page_map)
+
+    assert cache.get(RAW_A, "ext-1", "full") is None

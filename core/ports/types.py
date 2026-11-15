@@ -181,6 +181,53 @@ OCR_PROBE_VALUES: frozenset[str] = frozenset(
 EMPTY_TEXT_REASON = "текст пуст"
 
 
+def _check_page_map(
+    page_map: tuple[tuple[int, int, int], ...], text_length: int
+) -> None:
+    """Проверяет инвариант карты страниц (см. :attr:`ExtractedDoc.page_map`).
+
+    Карта — провенанс, а не оценка: сегменты обязаны идти по возрастанию номера страницы,
+    не пересекаться, лежать внутри ``text`` и не быть вывернутыми (``end < start``).
+    Нарушение — не «странная карта», а ложная запись: по ней чанк получил бы **номер
+    страницы**, которого не было, и отличить это от настоящего номера было бы нечем.
+    """
+    previous_page = 0
+    previous_end = 0
+    for entry in page_map:
+        if not isinstance(entry, tuple) or len(entry) != 3:
+            raise ValueError(
+                "ExtractedDoc: элемент page_map не является тройкой "
+                f"(page_no, char_start, char_end): {entry!r}"
+            )
+        page_no, start, end = entry
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in entry):
+            raise ValueError(
+                "ExtractedDoc: page_map содержит не целое число — смещения и номер "
+                f"страницы обязаны быть int: {entry!r}"
+            )
+        if page_no < 1:
+            raise ValueError(
+                "ExtractedDoc: page_map с номером страницы < 1 — нумерация страниц "
+                f"1-based: {entry!r}"
+            )
+        if start < 0 or end < start:
+            raise ValueError(
+                "ExtractedDoc: page_map с отрицательным или вывернутым интервалом — "
+                f"нужен 0 <= char_start <= char_end: {entry!r}"
+            )
+        if end > text_length:
+            raise ValueError(
+                "ExtractedDoc: page_map выходит за текст — char_end "
+                f"{end} > len(text) {text_length}: {entry!r}"
+            )
+        if page_no <= previous_page or start < previous_end:
+            raise ValueError(
+                "ExtractedDoc: page_map не отсортирована или сегменты пересекаются — "
+                f"страница {page_no} начинается в {start} после {previous_end}"
+            )
+        previous_page, previous_end = page_no, end
+
+
 @dataclass(frozen=True)
 class ExtractedDoc:
     """Нормализованный документ после экстракции (§3.5).
@@ -207,7 +254,8 @@ class ExtractedDoc:
     ``text`` и ``error is None`` — «частичный успех» без текста есть провал, а не успех;
     ``partial_reason`` без ``partial`` — ложная провенанс-запись. Счётчики страниц
     (``page_count``/``pages_converted``) не могут противоречить друг другу, а
-    ``pages_converted`` без ``partial`` — счётчик без факта.
+    ``pages_converted`` без ``partial`` — счётчик без факта. Карта страниц
+    (:attr:`page_map`) проверяется там же: она либо точна, либо ``None``.
     """
 
     text: str
@@ -233,12 +281,39 @@ class ExtractedDoc:
     #: иначе переименование приватного API docling снова пройдёт незамеченным.
     #: Стоит в конце: позиционные конструкторы не должны поехать от появления провенанса.
     ocr_probe: str | None = None
+    #: Карта страниц: ``(page_no, char_start, char_end)`` — номер страницы (**1-based**) и
+    #: **полуоткрытый** интервал ``[char_start, char_end)`` её собственного текста.
+    #:
+    #: **Пространство координат** — то же, в котором живут :attr:`Chunk.char_start`/
+    #: ``char_end``: :attr:`text` **без ведущего BOM**. Чанкер снимает ``\\ufeff``
+    #: (:func:`core.adapters.chunker_text._normalize`), а
+    #: :func:`~core.util.sanitize.finalize_extracted_text` его не снимает; поэтому читатель,
+    #: чей текст начинается с BOM, сдвигает все смещения на −1. Без сдвига ``page_number``
+    #: чанка уезжал бы на единицу — молча и на всём документе.
+    #:
+    #: **Разделитель страниц — разрыв карты, а не её часть.** Сегменты покрывают текст
+    #: страницы, а ``\\n\\n`` между страницами в карту не входит. Отсюда правило для
+    #: потребителя (вывод номера страницы по ``char_start``): смещение, попавшее в разрыв,
+    #: принадлежит **следующей** странице, а смещение за последним сегментом — **последней**.
+    #: Пустая страница — это ``start == end``: страница прочитана, текста в ней нет; это
+    #: факт, а не разрыв.
+    #:
+    #: ``None`` — читатель карту **не дал** (сегодня так делают все, кроме ``text_layer``):
+    #: это не «страниц нет» и не «одна страница». Выдуманный номер хуже отсутствующего (A3),
+    #: поэтому ``None`` честнее догадки.
+    #:
+    #: В ``content_hash`` карта **не входит**: хеш описывает текст, а карта — провенанс.
+    #: Иначе один и тот же текст давал бы разные хеши у разных механизмов (и один документ
+    #: — разные ключи ``extract_cache``).
+    page_map: tuple[tuple[int, int, int], ...] | None = None
 
     def __post_init__(self) -> None:
         """Держит инвариант частичности и проверяет провенанс OCR.
 
         Частичность не бывает пустой и не бывает без текста; ``ocr_probe`` принимает
-        только объявленные значения — иначе «не проверено» не отличить от «проверено».
+        только объявленные значения — иначе «не проверено» не отличить от «проверено»;
+        ``page_map`` либо точна (отсортирована, не пересекается, лежит в тексте), либо
+        ``None`` — «читатель её не дал».
 
         Проверка здесь, а не в адаптере, потому что ``ExtractedDoc`` пересекает шов и кэш:
         «частичный» документ без текста и «полный» документ с причиной частичности —
@@ -253,6 +328,9 @@ class ExtractedDoc:
                 "ExtractedDoc: ocr_probe вне OCR_PROBE_VALUES — исход проверки OCR "
                 f"должен быть одним из {sorted(OCR_PROBE_VALUES)}"
             )
+        if self.page_map is not None:
+            # Карта страниц — либо точная, либо отсутствует: см. докстринг поля.
+            _check_page_map(self.page_map, len(self.text))
         if self.pages_converted is not None:
             if self.pages_converted < 0:
                 raise ValueError(

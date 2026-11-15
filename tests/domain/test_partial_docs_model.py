@@ -98,3 +98,68 @@ def test_extracted_doc_rejects_contradictory_page_counters() -> None:
             partial_reason="pdfium: страниц не прочитано",
             pages_converted=6,
         )
+
+
+def test_extracted_doc_accepts_exact_page_map() -> None:
+    """Карта страниц — провенанс: срезы существуют, номера идут по возрастанию."""
+    doc = ExtractedDoc(
+        text="abc\n\ndef",
+        content_hash="h",
+        extractor_version="e",
+        page_map=((1, 0, 3), (2, 5, 8)),
+    )
+
+    assert doc.page_map == ((1, 0, 3), (2, 5, 8))
+    assert [doc.text[start:end] for _, start, end in doc.page_map] == ["abc", "def"]
+
+
+def test_extracted_doc_accepts_empty_range_for_page_without_text() -> None:
+    """Пустая страница — ``start == end``: страница прочитана, текста в ней нет."""
+    doc = ExtractedDoc(
+        text="abc",
+        content_hash="h",
+        extractor_version="e",
+        page_map=((1, 0, 0), (2, 0, 3)),
+    )
+
+    assert doc.page_map == ((1, 0, 0), (2, 0, 3))
+
+
+def test_extracted_doc_rejects_page_map_outside_text() -> None:
+    """``char_end`` за текстом — среза не существует, номер страницы не проверяем."""
+    with pytest.raises(ValueError, match="page_map"):
+        ExtractedDoc(
+            text="abc",
+            content_hash="h",
+            extractor_version="e",
+            page_map=((1, 0, 4),),
+        )
+
+
+def test_extracted_doc_rejects_overlapping_or_unordered_page_map() -> None:
+    """Пересечение и обратный порядок — два номера на один символ, то есть догадка."""
+    with pytest.raises(ValueError, match="page_map"):
+        ExtractedDoc(
+            text="abcd",
+            content_hash="h",
+            extractor_version="e",
+            page_map=((1, 0, 2), (2, 1, 3)),
+        )
+    with pytest.raises(ValueError, match="page_map"):
+        ExtractedDoc(
+            text="abcd",
+            content_hash="h",
+            extractor_version="e",
+            page_map=((2, 0, 2), (1, 3, 4)),
+        )
+
+
+def test_extracted_doc_rejects_zero_based_page_number() -> None:
+    """Нумерация страниц 1-based: ``0`` — не «первая», а ложная запись."""
+    with pytest.raises(ValueError, match="page_map"):
+        ExtractedDoc(
+            text="abc",
+            content_hash="h",
+            extractor_version="e",
+            page_map=((0, 0, 3),),
+        )

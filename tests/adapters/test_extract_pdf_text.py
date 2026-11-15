@@ -731,3 +731,161 @@ def test_pdf_limits_do_not_leak_to_the_next_document(tmp_path: Path) -> None:
     assert limited.partial is True and limited.page_count == 3
     assert after.partial is False
     assert "b3" in after.text
+
+
+# ---------------------------------------------------------------------------
+# O36 (план 26): карта страниц — провенанс, а не догадка
+# ---------------------------------------------------------------------------
+
+
+def test_page_map_tiles_document_text(tmp_path: Path) -> None:
+    """Карта покрывает текст страницами: точные срезы и точная обратная сборка.
+
+    Проверяется контракт поля ``ExtractedDoc.page_map``: 1-based номер, полуоткрытые
+    интервалы, отсортированы, не пересекаются, ``char_end <= len(text)``; каждый срез —
+    текст своей страницы, а сегменты через разделитель страниц дают ровно ``doc.text``
+    (разделитель — разрыв карты, поэтому сборка обязана сойтись **точно**).
+    """
+    path = _write(tmp_path, "three.pdf", ["alpha one", "beta two", "gamma three"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="three.pdf")
+
+    assert doc.page_map is not None
+    assert [entry[0] for entry in doc.page_map] == [1, 2, 3]
+    previous_end = 0
+    for _, start, end in doc.page_map:
+        assert 0 <= start <= end <= len(doc.text)
+        assert start >= previous_end, "сегменты пересекаются"
+        previous_end = end
+    assert [doc.text[start:end] for _, start, end in doc.page_map] == [
+        "alpha one",
+        "beta two",
+        "gamma three",
+    ]
+    assert "\n\n".join(doc.text[start:end] for _, start, end in doc.page_map) == doc.text
+
+
+def test_page_map_keeps_real_page_numbers_when_a_page_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отказ pdfium на второй странице не превращает третью во вторую.
+
+    Список прочитанного короче документа, поэтому номер страницы обязан браться в момент
+    чтения, а не из позиции в списке: иначе весь провенанс после отказа сдвинулся бы на
+    единицу — и это было бы неотличимо от настоящей нумерации.
+    """
+    monkeypatch.setitem(
+        sys.modules, "pypdfium2", _FailingPdfium(["первая", None, "третья"])
+    )
+    path = _write(tmp_path, "vendor.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="vendor.pdf")
+
+    assert doc.page_map is not None
+    assert [entry[0] for entry in doc.page_map] == [1, 3]
+    assert [doc.text[start:end] for _, start, end in doc.page_map] == ["первая", "третья"]
+
+
+def test_page_map_marks_empty_page_with_empty_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Страница без текстового слоя — ``start == end``, и соседей она не сдвигает."""
+    monkeypatch.setitem(sys.modules, "pypdfium2", _FakePdfium(["первая", "", "третья"]))
+    path = _write(tmp_path, "scan.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="scan.pdf")
+
+    assert doc.text == "первая\n\n\n\nтретья"
+    assert doc.page_map == ((1, 0, 6), (2, 8, 8), (3, 10, 16))
+
+
+def test_page_map_shifts_offsets_when_text_starts_with_bom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BOM: смещения карты — в координатах чанкера (без ведущего ``\\ufeff``).
+
+    ``finalize_extracted_text`` BOM не снимает, а ``chunker_text._normalize`` снимает —
+    поэтому без явного сдвига на −1 ``char_start`` каждого чанка указывал бы на символ
+    перед нужным, то есть номер страницы уезжал бы на единицу на всём документе.
+    """
+    monkeypatch.setitem(sys.modules, "pypdfium2", _FakePdfium(["\ufeffпервая", "вторая"]))
+    path = _write(tmp_path, "bom.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="bom.pdf")
+
+    assert doc.text == "\ufeffпервая\n\nвторая"
+    # Без сдвига было бы ((1, 0, 7), (2, 9, 15)).
+    assert doc.page_map == ((1, 0, 6), (2, 8, 14))
+    chunker_space = doc.text.removeprefix("\ufeff")
+    assert [chunker_space[start:end] for _, start, end in doc.page_map] == [
+        "первая",
+        "вторая",
+    ]
+
+
+def test_page_map_is_clipped_by_char_limit(tmp_path: Path) -> None:
+    """D9: обрез по символам — после финализации, поэтому карта обрезается по факту."""
+    from core.util.pdf_limits import pdf_limits, use_pdf_limits
+
+    path = _write(
+        tmp_path, "long.pdf", ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"]
+    )
+    adapter = PdfiumDocumentExtractor()
+    full = adapter.extract_path(path, filename_hint="long.pdf")
+    limit = 15
+
+    with use_pdf_limits(pdf_limits(max_extracted_chars=limit)):
+        doc = adapter.extract_path(path, filename_hint="long.pdf")
+
+    assert len(doc.text) == limit
+    assert doc.text == full.text[:limit]
+    assert doc.page_map is not None
+    for _, _, end in doc.page_map:
+        assert end <= len(doc.text), "char_end вышел за опубликованный текст"
+    # Первая страница целиком, вторая обрезана по лимиту, третья за лимитом — её нет.
+    assert doc.page_map == ((1, 0, 10), (2, 12, 15))
+
+
+def test_page_map_is_none_when_pagewise_cleanup_differs_from_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Шаблон инъекции перешагнул границу страницы — карты нет, текст остаётся прежним.
+
+    ``neutralize_prompt_injection_marks`` знает шаблоны с ``DOTALL``: они могут совпасть
+    только на **склейке**, а не внутри страницы. Тогда постраничные смещения перестают
+    относиться к опубликованному тексту, и честный исход — ``None``: выдуманный номер
+    страницы хуже отсутствующего (A3).
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "pypdfium2",
+        _FakePdfium(["до <tool_call>", "после</tool_call> хвост"]),
+    )
+    path = _write(tmp_path, "inject.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="inject.pdf")
+
+    assert doc.error is None
+    assert "[injection-scaffold-removed]" in doc.text
+    assert doc.page_map is None
+
+
+def test_page_map_does_not_change_text_or_hash(tmp_path: Path) -> None:
+    """Карта — провенанс: текст и ``content_hash`` байт-в-байт прежние (запинено).
+
+    Значения сняты с поведения **до** появления карты (``pdfium-text-3``): правка не имеет
+    права тронуть склейку, иначе изменился бы ``content_hash``, ключ ``extract_cache`` и
+    ``run_id`` — на ровном месте.
+    """
+    path = _write(tmp_path, "three.pdf", ["alpha one", "beta two", "gamma three"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="three.pdf")
+
+    expected = "alpha one\n\nbeta two\n\ngamma three"
+    assert doc.text == expected
+    assert doc.content_hash == (
+        "f0f089ac07dcd08cc483b5246dee0fd004dbce7c00146c8d9c77569b4857aaf9"
+    )
+    assert doc.content_hash == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    # Карта в хеш не входит: у документа без карты хеш того же текста совпадает.
+    assert doc.page_map is not None
