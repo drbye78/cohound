@@ -1,0 +1,90 @@
+{
+  "run_id": "ru-pg-dbms-145ad66ca3f9",
+  "case_id": "ru-pg-dbms",
+  "conditions": {
+    "schema_version_of_file": "3.20.0",
+    "index_build_id": "cb_5c090025af68b95615c87869",
+    "cutoff_k": 10,
+    "rrf_k": 60,
+    "lexical_profile": "stemmed",
+    "embed_spec": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+    "index_embed_model_id": "BAAI/bge-m3",
+    "dim": 1024,
+    "profiles": [
+      "R0",
+      "R1",
+      "R2"
+    ],
+    "bootstrap": 1000,
+    "seed": 0,
+    "cells_in_golden": 132,
+    "limit_cells": 0,
+    "chunks_in_index": 253306,
+    "docs_in_corpus": 19324,
+    "wiring_notices": [
+      "embed.precision=fp16: LiteEmbedder исключён — он NumPy/CPU by design и объявленную точность исполнить не может; выбран LocalEmbedder (BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181) с torch.autocast"
+    ]
+  },
+  "timings": {
+    "lexical_index_seconds": 19.41,
+    "R0_seconds": 0.93,
+    "R1_seconds": 22.51,
+    "R2_seconds": 10.27
+  },
+  "reports": [
+    {
+      "profile": "R0",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.25757575757575757,
+      "hit_ci": [
+        0.18181818181818182,
+        0.3333333333333333
+      ],
+      "recall_at_k": 0.25757575757575757,
+      "recall_ci": [
+        0.18181818181818182,
+        0.3333333333333333
+      ],
+      "mrr": 0.1237463924963925
+    },
+    {
+      "profile": "R1",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.15151515151515152,
+      "hit_ci": [
+        0.09848484848484848,
+        0.2196969696969697
+      ],
+      "recall_at_k": 0.15151515151515152,
+      "recall_ci": [
+        0.09848484848484848,
+        0.2196969696969697
+      ],
+      "mrr": 0.06128848003848004
+    },
+    {
+      "profile": "R2",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.21212121212121213,
+      "hit_ci": [
+        0.14393939393939395,
+        0.28049242424242404
+      ],
+      "recall_at_k": 0.21212121212121213,
+      "recall_ci": [
+        0.14393939393939395,
+        0.28049242424242404
+      ],
+      "mrr": 0.11483585858585858
+    }
+  ]
+}

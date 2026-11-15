@@ -1,0 +1,1329 @@
+{
+  "format": "cohound-retrieval-golden-docs/1",
+  "case_id": "ru-pg-dbms",
+  "source": "packages/ru-pg-dbms/sources/golden_00_cells.csv",
+  "corpus_run_id": "ru-pg-dbms-145ad66ca3f9",
+  "generated_at": "2026-11-15T21:44:11+00:00",
+  "entries": [
+    {
+      "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "product_id": "digital_q_database",
+      "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "source_url": "https://database.diasoft.ru/#solution",
+      "expected_doc_ids": [
+        "digital_q_database:17c2f2cd922055ac0a907fcbdb2551c9f57c384f7dcc40d268afdccdcfbd3b95"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+      "product_id": "digital_q_database",
+      "param_id": "xlsx_131_sovmestimost_s_oracle_pl_sql",
+      "source_url": "https://database.diasoft.ru/#solution",
+      "expected_doc_ids": [
+        "digital_q_database:17c2f2cd922055ac0a907fcbdb2551c9f57c384f7dcc40d268afdccdcfbd3b95"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "product_id": "jatoba",
+      "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "source_url": "https://jatoba.ru/Программа-ТП-2023.pdf",
+      "expected_doc_ids": [
+        "jatoba:df385d29bd6b49d6066e5ec6c69fe661be757c885ecd84fc06f1e57a8e20e681"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+      "product_id": "jatoba",
+      "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+      "source_url": "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba",
+      "expected_doc_ids": [
+        "jatoba:1f5edb38dd5826be72bc669e38771e68c118f26acd50bc6a075c0eb2462ca359"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+      "product_id": "jatoba",
+      "param_id": "xlsx_018_nalichie_publichnogo_roadmap",
+      "source_url": "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba",
+      "expected_doc_ids": [
+        "jatoba:1f5edb38dd5826be72bc669e38771e68c118f26acd50bc6a075c0eb2462ca359"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+      "product_id": "jatoba",
+      "param_id": "xlsx_019_podderzhka_dbaas_cloud",
+      "source_url": "https://jatoba.ru/jatoba_vkcloud.pdf",
+      "expected_doc_ids": [
+        "jatoba:dc69240000198fd28641723815af16c09f9a31f5e2d0a97261b33087188d6266"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+      "product_id": "jatoba",
+      "param_id": "xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+      "source_url": "https://jatoba.ru/#gallery-75",
+      "expected_doc_ids": [
+        "jatoba:fa670fb85a9470c4aca545aad7d643158cf2ce3a55f3e65795b6e4ded5f0401b"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+      "product_id": "pangolin",
+      "param_id": "xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+      "source_url": "https://pangolin.sbertech.ru/center/knowledge-base/",
+      "expected_doc_ids": [
+        "pangolin:b9433068768160c4354233431e48803b230d584b04ccb39430be038fa19a6a47"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+      "product_id": "pangolin",
+      "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+      "source_url": "https://pangolin.sbertech.ru/center/docs/7/administration-guide/pangolin-tuner",
+      "expected_doc_ids": [
+        "pangolin:050dbb634c2d68a1f4be7c704943959989f4e769585cad119522bac2f2230326"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "source_url": "https://postgrespro.ru/services/support",
+      "expected_doc_ids": [
+        "postgrespro:fc29e9ed428916ba0c6850860f8a09ca29c1916b16bcd275806a87df68a1c9b3"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+      "source_url": "https://postgrespro.ru/services/support",
+      "expected_doc_ids": [
+        "postgrespro:fc29e9ed428916ba0c6850860f8a09ca29c1916b16bcd275806a87df68a1c9b3"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+      "source_url": "https://postgrespro.ru/release-policy",
+      "expected_doc_ids": [
+        "postgrespro:215d3337d69a8ecae2c18f2dbaf1a4bc70c0528950e1a4e81d193e51e6a8a1af"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+      "source_url": "https://postgrespro.ru/education/courses",
+      "expected_doc_ids": [
+        "postgrespro:34600d88424a7cda2298cdeca1ff3e6add81d72fa5919a6a861df7737019c9db"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+      "source_url": "https://postgrespro.ru/education/cert",
+      "expected_doc_ids": [
+        "postgrespro:2a38f7f896c1db31d40a2af3332de6cfdc5aac7779d9bbef38bf62a3034d8dbb"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_013_dokumentaciya_na_russkom",
+      "source_url": "https://postgrespro.ru/docs",
+      "expected_doc_ids": [
+        "postgrespro:c8c3df5d3447164228a2230f7c2f1c2fff73b9c7a87f4ebdf3ac28429c238a4e"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_020_nalichie_sertifikata_fstek",
+      "source_url": "https://postgrespro.ru/products/postgrespro/enterprisecertified",
+      "expected_doc_ids": [
+        "postgrespro:ceeab80dfb95d6287439d4378a50fef780789a2adfe284bd0b2d1ce1a9f9260b"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+      "source_url": "https://postgrespro.ru/products/postgrespro/enterprisecertified",
+      "expected_doc_ids": [
+        "postgrespro:ceeab80dfb95d6287439d4378a50fef780789a2adfe284bd0b2d1ce1a9f9260b"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+      "source_url": "https://postgrespro.ru/docs/enterprise/17/restrict-dbms-admin-data-access",
+      "expected_doc_ids": [
+        "postgrespro:87ebca3b3d3af76acad94a7e5d865f50997601f24e24dcfc77bb6d293440ccd0"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/sql-createprofile",
+      "expected_doc_ids": [
+        "postgrespro:88e868d75f8b5697fa479ab1a787fe36062f7fdb9271918cc97bda79b0471c82"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/release-proee-18-1-1",
+      "expected_doc_ids": [
+        "postgrespro:f9c7b960e8aacf1529621c8a652661a17892f5c6ade4a17cbff2229e89aa42a4"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/app-ldap2pg",
+      "expected_doc_ids": [
+        "postgrespro:65d5c32de96ccf30c78ee9cfa962da312690d98999047d29a1439718f2b3cbe0"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/app-ldap2pg",
+      "expected_doc_ids": [
+        "postgrespro:65d5c32de96ccf30c78ee9cfa962da312690d98999047d29a1439718f2b3cbe0"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-usage",
+      "expected_doc_ids": [
+        "postgrespro:4e73331de792308a3c73cebb949f71e5fa9493374769a0e35442e1af62920693"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-usage",
+      "expected_doc_ids": [
+        "postgrespro:4e73331de792308a3c73cebb949f71e5fa9493374769a0e35442e1af62920693"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pg-proaudit",
+      "expected_doc_ids": [
+        "postgrespro:bb392b55aa6ed4dbf240d563b4fe7bc313d80c97ab3d8a9d3d26c6398d4f4af1"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+      "source_url": "https://postgrespro.ru/docs/enterprise/17/release-proee-17-7-1",
+      "expected_doc_ids": [
+        "postgrespro:09e34a12ee271ad56d8a0cdfa0cb2f4025fd0860f52a1e266d2d0eb81c03080f"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-anonymizer",
+      "expected_doc_ids": [
+        "postgrespro:44419c41d5bd17d60e74275b0021d0db8f2900ab97bb4a4ebcc35d8084c006a3"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-anonymizer",
+      "expected_doc_ids": [
+        "postgrespro:44419c41d5bd17d60e74275b0021d0db8f2900ab97bb4a4ebcc35d8084c006a3"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pg-integrity-check",
+      "expected_doc_ids": [
+        "postgrespro:67e59f210af528309f2feef6dcf2cd7ed89c329d984304d5ed0eba1ddc0f7499"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pg-integrity-check",
+      "expected_doc_ids": [
+        "postgrespro:67e59f210af528309f2feef6dcf2cd7ed89c329d984304d5ed0eba1ddc0f7499"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/proxima",
+      "expected_doc_ids": [
+        "postgrespro:bdc69e2a4750cc9bcecab7c8c1438c7a5041b361f7af49fc9a2710ab3bedd6ab"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/proxima",
+      "expected_doc_ids": [
+        "postgrespro:bdc69e2a4750cc9bcecab7c8c1438c7a5041b361f7af49fc9a2710ab3bedd6ab"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/proxima",
+      "expected_doc_ids": [
+        "postgrespro:bdc69e2a4750cc9bcecab7c8c1438c7a5041b361f7af49fc9a2710ab3bedd6ab"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/proxima#PROXIMA-KVIK",
+      "expected_doc_ids": [
+        "postgrespro:bdc69e2a4750cc9bcecab7c8c1438c7a5041b361f7af49fc9a2710ab3bedd6ab"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+      "source_url": "https://postgrespro.ru/docs/shardman/17/intro-whatis",
+      "expected_doc_ids": [
+        "postgrespro:9b97f86b740e766aa2c98f937ac661bfa3158370bb4d7eed37972f4a93678061"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+      "source_url": "https://postgrespro.ru/docs/enterprise/17/citus",
+      "expected_doc_ids": [
+        "postgrespro:ad861349b1cbf72b06ef5f074460d0a46fdca753ecfd87c9c0c24593fb95cac2"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-key-features",
+      "expected_doc_ids": [
+        "postgrespro:c5af7a38386ff6c0485a59e602d7589e76208d0f438db213ffb1629a17a4c116"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-restoring-a-cluster",
+      "expected_doc_ids": [
+        "postgrespro:c13f4accd409526849e7372391aedcf71490cbcf02accd5397ff4671a35afa38"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup",
+      "expected_doc_ids": [
+        "postgrespro:d0c96e6d10bf7769b9e9582bf42faa364dc9f750139ff526e5a2cceac5a6c267"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup#PBK-FUSE",
+      "expected_doc_ids": [
+        "postgrespro:d0c96e6d10bf7769b9e9582bf42faa364dc9f750139ff526e5a2cceac5a6c267"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgtransfer",
+      "expected_doc_ids": [
+        "postgrespro:c691382421304eb0aa423c5b99b3496cc9db10748701d3cf724af036f30c2b0f"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/pbk-key-features",
+      "expected_doc_ids": [
+        "postgrespro:c5af7a38386ff6c0485a59e602d7589e76208d0f438db213ffb1629a17a4c116"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/app-pgprobackup#PBK-COMPRESSION-OPTS",
+      "expected_doc_ids": [
+        "postgrespro:751974cc94d9c776dc379706049c5ab4d50a83caac6265d8d640fe7aac16a478"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup",
+      "expected_doc_ids": [
+        "postgrespro:d0c96e6d10bf7769b9e9582bf42faa364dc9f750139ff526e5a2cceac5a6c267"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup",
+      "expected_doc_ids": [
+        "postgrespro:d0c96e6d10bf7769b9e9582bf42faa364dc9f750139ff526e5a2cceac5a6c267"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+      "source_url": "https://postgrespro.ru/docs/pg_probackup3/3.2/app-pgprobackup",
+      "expected_doc_ids": [
+        "postgrespro:d0c96e6d10bf7769b9e9582bf42faa364dc9f750139ff526e5a2cceac5a6c267"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/warm-standby",
+      "expected_doc_ids": [
+        "postgrespro:f026725ae79c5935e560636bbda490b701dfde33577d561c61ff1f4257867b82"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_078_nalichie_in_memory_tehnologii",
+      "source_url": "https://postgrespro.ru/docs/enterprise/17/in-memory",
+      "expected_doc_ids": [
+        "postgrespro:41201120308ac3be7bf996843951d5e5908707699e1c7fd8102b27623abaaf40"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_079_64_bitnyi_schetchik_tranzakcii",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/routine-vacuuming",
+      "expected_doc_ids": [
+        "postgrespro:e97a89a41b12ebba09d4cc7e32d380ac47a9865a638da97c0b5ff96a4d401775"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+      "source_url": "https://postgrespro.ru/docs/axe/1/postgres-pro-axe-overview",
+      "expected_doc_ids": [
+        "postgrespro:a9c1a6b2d9383b721f62168f9a683ac5a2a724d42857c3a8d9b865af38932e2b"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/ddl-partitioning",
+      "expected_doc_ids": [
+        "postgrespro:b3f6104d202dbdd3a21fe4633e2d4a59c0b45429b13aef8c5b4c1dfbc7decf24"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_083_split_merge_sekcii",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/sql-altertable#SQL-ALTERTABLE-MERGE-PARTITIONS",
+      "expected_doc_ids": [
+        "postgrespro:8d35ff13949d563cbd992a6136d9d0de9ee7f173fc7ec147bd06a9927782df20"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_085_podderzhka_timeseries_tipov_dannyh",
+      "source_url": "https://postgrespro.ru/support/sw",
+      "expected_doc_ids": [
+        "postgrespro:8a1055e876e305db0bc5fea1e13483679a50f1db0f2d92e40382bd3d9fd70979"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_086_zamorozka_planov_zaprosov",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-multiplan",
+      "expected_doc_ids": [
+        "postgrespro:8bd1c067620b33df85af7d1b5ec2e4a09c2c0879f6ab97b7bbd86a1c670c298c"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-multiplan",
+      "expected_doc_ids": [
+        "postgrespro:8bd1c067620b33df85af7d1b5ec2e4a09c2c0879f6ab97b7bbd86a1c670c298c"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-multiplan",
+      "expected_doc_ids": [
+        "postgrespro:8bd1c067620b33df85af7d1b5ec2e4a09c2c0879f6ab97b7bbd86a1c670c298c"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-rp",
+      "expected_doc_ids": [
+        "postgrespro:143638209dbc605c2efe07e66e326fb7dd6a52922a51c6e1278fde1c4616ac51"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-result-cache",
+      "expected_doc_ids": [
+        "postgrespro:3d71f542ecd7cce5c3ff60a2e01dc09b1f470cf5fa01d13a1fcc19d7e8b66324"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/aqo",
+      "expected_doc_ids": [
+        "postgrespro:db5a72365323674f7bea44d41218484fb07f9aa110cd33b13513508375ba558a"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/aqe",
+      "expected_doc_ids": [
+        "postgrespro:086fa8188c782b6cd816bc8e8de6b589d9a9d4e327c26fa2759266f13ead845f"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-stats",
+      "expected_doc_ids": [
+        "postgrespro:a9409258957d76952ebd6c4982ed78acca741067a85241dd3c81f47310f5df9d"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-gbtree",
+      "expected_doc_ids": [
+        "postgrespro:adf6e1a942fe13ea21a9fc2d5d8ae66aad8e0c8ef75336d2def81d424ce43a5c"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_097_rum_indeks",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_097_rum_indeks",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/rum",
+      "expected_doc_ids": [
+        "postgrespro:24685f8b9e3e97be810f0849143bc27ec65bf5b251af9e0d833a993f7e3ec2af"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/intro-pgpro-vs-pg",
+      "expected_doc_ids": [
+        "postgrespro:f13f0d3e0b4f8eb043d8d28d53d853d255ee991f11cf2673a51a5dd6efc09cb5"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/runtime-config-resource",
+      "expected_doc_ids": [
+        "postgrespro:ff429e4c797faf89bdfca38d18e5ac54c67dad3fd222a89756253575a5148d47"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+      "source_url": "https://postgrespro.ru/docs/enterprise/17/citus",
+      "expected_doc_ids": [
+        "postgrespro:ad861349b1cbf72b06ef5f074460d0a46fdca753ecfd87c9c0c24593fb95cac2"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_108_vstroennyi_planirovshchik_zadanii",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-scheduler",
+      "expected_doc_ids": [
+        "postgrespro:4cd46ed21f500e4d6132c2d2f422a9d24a8f2f4d8335301804176b3762a40d45"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-stats",
+      "expected_doc_ids": [
+        "postgrespro:a9409258957d76952ebd6c4982ed78acca741067a85241dd3c81f47310f5df9d"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pg-query-state",
+      "expected_doc_ids": [
+        "postgrespro:b43515294e7fa4b9ecec7081333c3a2ecd81e0ba07755f884bbe1fc826510a0d"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_115_optimizirovannyi_agent_sbora_metrik",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/mamonsu",
+      "expected_doc_ids": [
+        "postgrespro:6334b40b9dc4734a267db3c6e7a0740b0fc908100533639e4926e9e2dcf07fdc"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-pwr",
+      "expected_doc_ids": [
+        "postgrespro:6bb0bf86c0fac7a02acfa2a0918c51a8b045fb1823c636e94b8442282e9475df"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pg-wait-sampling",
+      "expected_doc_ids": [
+        "postgrespro:51d75b9f78bc23f0eebc9d4e6326d3fb895b0e401a5c6091854783f0ba1a95f9"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/app-pgpro-tune",
+      "expected_doc_ids": [
+        "postgrespro:4be8b2193318d7107e5074a9c13dad0f38418804e467fd8e08b07cef4620885e"
+      ],
+      "match": "canonical_query"
+    },
+    {
+      "cell": "postgrespro/xlsx_119_pluggable_toast",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_119_pluggable_toast",
+      "source_url": "https://postgrespro.ru/docs/enterprise/16/storage-toast",
+      "expected_doc_ids": [
+        "postgrespro:04607d09c11fc0537caad482823fea616de0116ab3051887fc750eca02e03085"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-bfile",
+      "expected_doc_ids": [
+        "postgrespro:9c47b5444855a32b8ed8539c763a6ce79b52e7cb3330fbed51512903bf00ce6b"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/sql-createtable",
+      "expected_doc_ids": [
+        "postgrespro:249ac990d84e4b6fb76910df04c77aa9daba6579f19171a19a7739b8883ff81f"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-ilm",
+      "expected_doc_ids": [
+        "postgrespro:82819a48eee836d3238b794f474b2b376e4cbd982a024664b1cf90e0ae9373ab"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-ilm",
+      "expected_doc_ids": [
+        "postgrespro:82819a48eee836d3238b794f474b2b376e4cbd982a024664b1cf90e0ae9373ab"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/proxima",
+      "expected_doc_ids": [
+        "postgrespro:bdc69e2a4750cc9bcecab7c8c1438c7a5041b361f7af49fc9a2710ab3bedd6ab"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/functions-json",
+      "expected_doc_ids": [
+        "postgrespro:684785e413297afceb5e764a5f906fb601cd4564b0728e313e3d0f0cd5cf5792"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_130_podderzhka_sessionnyh_peremennyh",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pg-variables",
+      "expected_doc_ids": [
+        "postgrespro:ee6c1d6c91f1670b226e3b58bbd4a48442998a64ee5d8c15b2d19fac02c18056"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_131_sovmestimost_s_oracle_pl_sql",
+      "source_url": "https://postgrespro.ru/docs/ora2pgpro/24/index",
+      "expected_doc_ids": [
+        "postgrespro:0a1607ed64c9d6643fcaa0995fb87731e6a7ca4376ff7e91c3be00e071ce6cdf"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/binary-installation-on-linux",
+      "expected_doc_ids": [
+        "postgrespro:ef5b046f988bf9f3c20722f3b0043890656f038475925ac7e3925f29e85ee1d5"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-queue",
+      "expected_doc_ids": [
+        "postgrespro:98f0f1b2062c4f88f9e78c35f5d14f8e3e6c905801613c5ab52631fdf0eeee88"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+      "source_url": "https://postgrespro.ru/docs/ora2pgpro/24/index",
+      "expected_doc_ids": [
+        "postgrespro:0a1607ed64c9d6643fcaa0995fb87731e6a7ca4376ff7e91c3be00e071ce6cdf"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_139_parametry_v_skriptah_psql",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/intro-pgpro-vs-pg",
+      "expected_doc_ids": [
+        "postgrespro:f13f0d3e0b4f8eb043d8d28d53d853d255ee991f11cf2673a51a5dd6efc09cb5"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_140_podderzhka_associativnyh_tablic",
+      "source_url": "https://postgrespro.ru/docs/ora2pgpro/24/ora2pgpro-exporting-associative-arrays",
+      "expected_doc_ids": [
+        "postgrespro:ca7d61eb6de6e2c69bd9d4bd43c8162fa869035b1cbd8fbbc009aa8ca9d408f8"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-bfile",
+      "expected_doc_ids": [
+        "postgrespro:9c47b5444855a32b8ed8539c763a6ce79b52e7cb3330fbed51512903bf00ce6b"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+      "source_url": "https://postgrespro.ru/docs/enterprise/18/pgpro-sfile",
+      "expected_doc_ids": [
+        "postgrespro:c3adc48957222d6b92e79bc9ce2a70ad6c0f9f82e41e7834e9d2c441ca42a28e"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+      "source_url": "https://postgrespro.ru/products/progate",
+      "expected_doc_ids": [
+        "postgrespro:d5f7449b9c06c3b007ea2b73cd631b6383c6c760d2a37fa811bc2bc1eebcfb2a"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/index",
+      "expected_doc_ids": [
+        "postgrespro:4b06efe935c1337fa906fa2de2532237edac08aeccce6b969d16b985f23e3992"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_147_naliichie_centra_operativnogo_kontrolya",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-control-center",
+      "expected_doc_ids": [
+        "postgrespro:f3141255b74d3f464bfb10b202cd2fafb081ae72fc342743ec0bc534813a4ca9"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-task-console",
+      "expected_doc_ids": [
+        "postgrespro:6335907a57f363686c2b9d6ab218ad43ede5e27b2230c06c388de35fdd2a0680"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_150_upravlenie_rasshireniyami_bd",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-extensions",
+      "expected_doc_ids": [
+        "postgrespro:252714ca8406ecff276b21159ec3b9c8b92224e68cbecec78bd8f916a17e009b"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_151_upravlenie_polzovatelyami_bd",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-instance-roles",
+      "expected_doc_ids": [
+        "postgrespro:70ecf3d8747cf2c02def93b2a6f9afdc49f0c38daf841e849b05d6e44f3b08f9"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_152_upravlenie_nastroikami_autentifikacii",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-authentication",
+      "expected_doc_ids": [
+        "postgrespro:f899656b246ed898fa043e0d23e125d4922db33184bc355d279cbb8168028f09"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_153_sozdanie_udalenie_ekzemplyara",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-instances",
+      "expected_doc_ids": [
+        "postgrespro:489ceed54e27a76ee04152b81088122e3eb3d70ee207caa6f65eb4b3fe986cfa"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_154_sozdanie_udalenie_bd",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-databases",
+      "expected_doc_ids": [
+        "postgrespro:03e894191d74f7f744cc4b0fb5325c55943ebf61636a0d004ca6e0efe04b4f35"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-tablespaces",
+      "expected_doc_ids": [
+        "postgrespro:51bccb9c840ebce636f22fe01b2421250a26ca348cef18a6c478fb3ad2e46e3f"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-schemas",
+      "expected_doc_ids": [
+        "postgrespro:d60462c20264b24cefb559a4f5425618554d01fc0a5b2580217ebd0b55c764e5"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-activity",
+      "expected_doc_ids": [
+        "postgrespro:32ab584b06d8027016e43a7ce67484a9e2bb62229afcb1407fbbc2249d8aa2b4"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-clusters",
+      "expected_doc_ids": [
+        "postgrespro:a2487b378b9b03821800c4fab2ae25d22a04c3b9469909b7044f1cf638851c41"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-clusters",
+      "expected_doc_ids": [
+        "postgrespro:a2487b378b9b03821800c4fab2ae25d22a04c3b9469909b7044f1cf638851c41"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-tables",
+      "expected_doc_ids": [
+        "postgrespro:9fbc2a0cd289d66ba7cf1fd9b39b25c1b7b76a11fa97b3d14790d8c5686cb251"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-task-console",
+      "expected_doc_ids": [
+        "postgrespro:6335907a57f363686c2b9d6ab218ad43ede5e27b2230c06c388de35fdd2a0680"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-backup",
+      "expected_doc_ids": [
+        "postgrespro:06d5349878e2eacdee2d9c5371b47757d0c4f6e6453016210beb535d6f1bec34"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-profiler",
+      "expected_doc_ids": [
+        "postgrespro:05aeba5c9dce344aecdcab671bf0604ed5f9499035a8a3ee73bbc3f921745f47"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_164_sozdanie_polzovatelskih_grafikov",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-metrics",
+      "expected_doc_ids": [
+        "postgrespro:3aa8f39823dfed7dfe68d19ebfa71d019be103f55ec28402971192bfb84de164"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-instances",
+      "expected_doc_ids": [
+        "postgrespro:489ceed54e27a76ee04152b81088122e3eb3d70ee207caa6f65eb4b3fe986cfa"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-message-log",
+      "expected_doc_ids": [
+        "postgrespro:357f27088d2385bec402380af6b4ee7c56a51de0caad37ceb2b1dd13b8c2a8c1"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-sql-statistics",
+      "expected_doc_ids": [
+        "postgrespro:0862733beca39054c5d6269e49b7b54b02f322142f3a893580ce005d5bbc6cc1"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-activity",
+      "expected_doc_ids": [
+        "postgrespro:32ab584b06d8027016e43a7ce67484a9e2bb62229afcb1407fbbc2249d8aa2b4"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-metrics",
+      "expected_doc_ids": [
+        "postgrespro:3aa8f39823dfed7dfe68d19ebfa71d019be103f55ec28402971192bfb84de164"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-activity",
+      "expected_doc_ids": [
+        "postgrespro:32ab584b06d8027016e43a7ce67484a9e2bb62229afcb1407fbbc2249d8aa2b4"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_171_dostup_k_konsoli_psql",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-features",
+      "expected_doc_ids": [
+        "postgrespro:4cb4cf262470a28c8b0d138526185ed1e8261e2c4f342dc3de1c51e86b480801"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-configuration-presets",
+      "expected_doc_ids": [
+        "postgrespro:464f365a194d90d4ed6ea3627dc8ea5bab593cd6cdb1dceae8c82e20ffd120c4"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-user-management",
+      "expected_doc_ids": [
+        "postgrespro:f926561d3f5eb58619590c4738d1e110ca550638a8c79f79697399a4a3a77618"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-integration-with-openldap-and-active-directory",
+      "expected_doc_ids": [
+        "postgrespro:f18817e7198f4a009e34551ff2fbc11de4ef4800cb03e7a4eb423f0fe2b0feab"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-alerts",
+      "expected_doc_ids": [
+        "postgrespro:bb4475b71ad07012f29704693bc5dcbc834a062580822151607c83193b667d77"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-query-plan-visualization",
+      "expected_doc_ids": [
+        "postgrespro:efadfebfb0f87d80b46af17cda9b55a3d37b2b263628ecd612e51f933c83626c"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-user-management",
+      "expected_doc_ids": [
+        "postgrespro:f926561d3f5eb58619590c4738d1e110ca550638a8c79f79697399a4a3a77618"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-architecture",
+      "expected_doc_ids": [
+        "postgrespro:2b657335f311a37189ff9a4925dd15fab1d6e2eca2c49e816a9168b811becbdf"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+      "source_url": "https://postgrespro.ru/docs/ppem/2/ppem-architecture",
+      "expected_doc_ids": [
+        "postgrespro:2b657335f311a37189ff9a4925dd15fab1d6e2eca2c49e816a9168b811becbdf"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+      "product_id": "postgrespro",
+      "param_id": "xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+      "source_url": "https://postgrespro.ru/products/PPEM",
+      "expected_doc_ids": [
+        "postgrespro:2b816de58729a064793783277bf7001841bf3b9a873a4d395d9ed33eab0ba7c6"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "product_id": "tantor",
+      "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+      "source_url": "https://tantorlabs.ru/docs/support",
+      "expected_doc_ids": [
+        "tantor:b725bfa910f7d8220c5f8082a840c21b585b308b0eef4875664a8e0c6abe0858"
+      ],
+      "match": "canonical"
+    },
+    {
+      "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+      "product_id": "tantor",
+      "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+      "source_url": "https://tantorlabs.ru/edu/atc-dbms",
+      "expected_doc_ids": [
+        "tantor:60b74fc2f358fd1b4bbd80bcccc7c23ee3399f94d892bf1a7aeffca21d337a06"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+      "product_id": "tantor",
+      "param_id": "xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+      "source_url": "https://tantorlabs.ru/edu",
+      "expected_doc_ids": [
+        "tantor:b36f99389af06cd6e40a19aaa20225d0e105450465e07e0e7609f20ab988a256"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+      "product_id": "tantor",
+      "param_id": "xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+      "source_url": "https://tantorlabs.ru/products/xdata",
+      "expected_doc_ids": [
+        "tantor:9b35bbbb19070a284b08818ea485288c191fc19e2da37e4d50ce496c8b578995"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+      "product_id": "tantor",
+      "param_id": "xlsx_018_nalichie_publichnogo_roadmap",
+      "source_url": "https://tantorlabs.ru/products/dbms",
+      "expected_doc_ids": [
+        "tantor:43fe589e985df2c12de23d909e4f8e4ab13abd5e9ca8b0711be245ac8ed0533b"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+      "product_id": "tantor",
+      "param_id": "xlsx_019_podderzhka_dbaas_cloud",
+      "source_url": "https://tantorlabs.ru/products/xdata",
+      "expected_doc_ids": [
+        "tantor:9b35bbbb19070a284b08818ea485288c191fc19e2da37e4d50ce496c8b578995"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+      "product_id": "tantor",
+      "param_id": "xlsx_020_nalichie_sertifikata_fstek",
+      "source_url": "https://tantorlabs.ru/certified",
+      "expected_doc_ids": [
+        "tantor:215824f185ed37217071a8908d99430766b2b6fc5992ea57b11e0776c788a9e4"
+      ],
+      "match": "exact"
+    },
+    {
+      "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+      "product_id": "tantor",
+      "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+      "source_url": "https://tantorlabs.ru/pgconfigurator",
+      "expected_doc_ids": [
+        "tantor:0ebc8fb9f836afd108b15ee9b2a7ae38a6331111a79423016ed2f7813ae3c9f8"
+      ],
+      "match": "exact"
+    }
+  ]
+}
