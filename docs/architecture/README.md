@@ -12,10 +12,10 @@
 
 | Что | Значение | Где в коде |
 |---|---|---|
-| `SCHEMA_VERSION` (run-DB) | `"3.21.0"` | `core/store/sqlite.py:93` |
+| `SCHEMA_VERSION` (run-DB) | `"3.22.0"` | `core/store/sqlite.py:104` |
 | `STATE_SCHEMA_VERSION` (state.db) | `"12"` | `core/store/state_sqlite.py:84` |
 | `EDGE_JOBS_SCHEMA_VERSION` | `"1"` | `core/edge/scheduler.py:198` |
-| `METHODOLOGY_VERSION` | `"0.3.0"` | `core/domain/models.py:163` |
+| `METHODOLOGY_VERSION` | `"0.3.0"` | `core/domain/models.py:164` |
 | `SEAM_SCHEMA_VERSION` | `"1"` | `core/edge/seam_schema.py:68` |
 | `EXECUTION_CONTRACT_FIELDS` | 33 поля | `core/pipeline/digests.py:96` |
 | `PHASES` | 15 фаз | `core/pipeline/runner.py:133` |
@@ -239,7 +239,7 @@ bump'а и канонический перечень версий — `16` (ед
    `extractor_zone` объявлены, но не потребляются.
 7. **Зависимости (`05` V3, V4).** Выбор `bge-m3` не подтверждён сравнением с русскими
    файнтюнами; аудит лицензий не закрыт. `DOCLING_ARTIFACTS_PATH` **читается** (поправка V4 в
-   `05`; `core/adapters/extract_document.py:797-814`), поэтому air-gap держится на
+   `05`; `core/adapters/extract_document.py:799-816`), поэтому air-gap держится на
    artifacts-пути и `HF_HUB_OFFLINE=1` вместе, а не на одном env.
 8. **Наблюдаемость триггеров (`04` §D).** Триггеры §D **сняты замером или решением** (сверено
    08.11.2026): порог Qdrant заменён размером партиции (108 614 против 200 000, запас **1.84×**),

@@ -238,7 +238,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > ✅ **закрыто по Exit** (5 из 6 пунктов; открыт один — изоляция памяти).
 > M0.5 в `06` §4 — механика ✅ (26.10) и приёмка ⬜; F1 закрыт по своему Exit, приёмка отчёта
 > человеком в Exit не входила.
-> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:336`
+> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:338`
 >   (`docling_extractor_version`), вид значения в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
 >   контракте — `trafilatura-html-7+text-plain-2+epub-3+pdfium-text-4:5.14.0+docling-office-1+docling-doc-4/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
@@ -252,7 +252,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `core/pipeline/extract_consume.py:1273-1274`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:873-889` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:127`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
->   `core/store/sqlite.py:636-655`.
+>   `core/store/sqlite.py:670-689`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
@@ -277,14 +277,14 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 - Хвост фазы durable: провенанс спуска по контейнеру, а не в конце. **Дизайн согласован
   (совет 2026-10-24, три полосы независимо + синтез).** `archive_observations`/
   `corpus_members` копились в памяти (`core/pipeline/corpus.py:2817,3027`) и писались пачкой
-  (`core/pipeline/corpus.py:5576-5581`) ⇒ SIGKILL терял всё. Лечение — write-through:
+  (`core/pipeline/corpus.py:5591-5596`) ⇒ SIGKILL терял всё. Лечение — write-through:
   `ArchiveDescentWalker` получает два необязательных колбэка (`persist_observation`,
   `persist_member`), `None` — прежнее поведение байт-в-байт. Точки: наблюдение — `_record`
   (`core/pipeline/archive_descent.py:514`, вызовы `642`/`686`/`708`/`1059`), член — `_settle`
   (`core/pipeline/archive_descent.py:773`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
   `_record`/`_settle`. Финальную пачку сохранить как идемпотентный reconciliation-pass
   (дешёвый повторный upsert). Сбой записи изолируется в `errors` по образцу `persist_docs`
-  (`core/pipeline/corpus_ingest.py:1422`) — отказ store не должен убивать спуск.
+  (`core/pipeline/corpus_ingest.py:1427`) — отказ store не должен убивать спуск.
   Идемпотентность уже обеспечена: `observation_id` детерминирован (`run|product|root|hash|depth`),
   `corpus_members` — UPSERT. **Не делать в первом патче:** предварительное observation «контейнер
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
@@ -302,7 +302,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   `total_uncompressed_exceeded`, `PLAN_SKIP_ROW_REASONS`): они известны до обхода, поэтому идут
   пачкой фазы, а не построчным синком (`durable=False`). Каталоги, шифрование и чужой формат
   остаются агрегатом прогноза: это не члены-файлы, а структура/свойство контейнера; отвергнутый
-  путь ждёт колонку `raw_member_path` (свой бамп схемы — 3.21.0 занят `corpus_docs.page_map`,
+  путь ждёт колонку `raw_member_path` (свой бамп схемы — 3.21.0/3.22.0 заняты,
   O36; план 23). Число опубликованных план-строк
   публикуется как `outcome.members_skipped_rows`.
 - **Дефект схемы — исправлен (2026-10-24, `SCHEMA_VERSION = 3.13.0`):** PK `corpus_members` =
@@ -342,8 +342,8 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   означает «оценщик не поднимается», а не «endpoint берётся из env». Место исполнения
 >   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:172`, стенд RnD).
 > - **SERP-контур:** ✅ реализован, но **не** через `run_serp_loop`. Производитель запросов —
->   `_run_serp_contour` (`core/pipeline/corpus.py:1344-1453`), вызов внутри фазы корпуса **до**
->   дренажа (`core/pipeline/corpus.py:2257`); `run_serp_loop` сам остаётся невызываемым
+>   `_run_serp_contour` (`core/pipeline/corpus.py:1345-1454`), вызов внутри фазы корпуса **до**
+>   дренажа (`core/pipeline/corpus.py:2258`); `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1553` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:148`), значение из
 >   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1202`).
@@ -394,7 +394,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 
 > 🟡 **частично (сверено 08.11.2026).** Пакет стадий собран: 9 модулей `core/pipeline/corpus_*.py`
 > (30.10–01.11), `corpus.py` — 5870 строк фасада с публичной `build_corpus`
-> (`core/pipeline/corpus.py:5854`); `IndexBuild.docs` снят (докстринг
+> (`core/pipeline/corpus.py:5869`); `IndexBuild.docs` снят (докстринг
 > `core/pipeline/index_build.py:30-33` объясняет, почему документы не едут в результате);
 > эмбеддинг батчами по `EMBED_BATCH_CHUNKS = 64` (`core/pipeline/corpus_index.py:79`).
 > **Нет** `memmap`-записи партиции и документного `pb`: `product_content_token` по-прежнему

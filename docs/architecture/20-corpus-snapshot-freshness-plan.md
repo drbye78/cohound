@@ -375,7 +375,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 
 **Чего в носителях нет** (проверено разведкой, `файл:строка`):
 
-* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`core/domain/models.py:1595-1597`: «политика названа
+* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`core/domain/models.py:1596-1598`: «политика названа
   один раз на прогон»). Для I2d это дефект: сверять надо **снятие** с объявленным, а не прогон с
   прогоном, иначе `scheduled`-снятие другого прогона нечем проверить. В `state.db` колонка есть,
   но её **никто не сравнивает** (0 попаданий `policy_digest ==` в `core/`).
@@ -395,12 +395,12 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 `core/pipeline/corpus_coverage.py:181` + источник `core/pipeline/corpus_coverage.py:611`
 (`iter_crawl_session_items` — сеанс, не снятия);
 `core/domain/invariants.py:298` (`check_absence_coverage` + новый `check_absence_dated`);
-зеркало в `core/pipeline/report.py:2333` (`collect_crawl_truncation_anomalies`)/
-`core/pipeline/report.py:2220` (`collect_absence_undated_anomalies`);
+зеркало в `core/pipeline/report.py:2344` (`collect_crawl_truncation_anomalies`)/
+`core/pipeline/report.py:2231` (`collect_absence_undated_anomalies`);
 `docs/status-dictionary.yaml` (токен `absence_undated`;
 `reuse_unconfirmed` больше не объявлен в коде (словаря он не касался — жил константой
 `core/pipeline/evaluate.py`), но строки старых прогонов читаются как есть);
-`core/domain/models.py:163` (`METHODOLOGY_VERSION` 0.2.0 → 0.3.0); `spec` §2.3/§4.2/§13 и
+`core/domain/models.py:164` (`METHODOLOGY_VERSION` 0.2.0 → 0.3.0); `spec` §2.3/§4.2/§13 и
 **`AGENTS.md` §5** (`AGENTS.md:184-186` — таблица I1/I2/I2b/I2d) — иначе документ будет
 утверждать снятое правило.
 

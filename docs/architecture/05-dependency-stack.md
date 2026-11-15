@@ -211,8 +211,8 @@ pdfium) GPU **не ускоряет** — отсюда обе механизмы
 плечо (BM25, косинус или RRF). Прежняя редакция этого абзаца утверждала «порт `reranker` есть,
 по умолчанию выключен»; проверено 15.11.2026 — в `core/ports/` его нет (19 модулей + `__init__.py`, `__all__` без
 `rerank`), а пять попаданий на слово `rerank` в `core/` описывают **место под число**, не
-механизм: `SearchLogEntry.rerank_score` (`core/domain/models.py:1397`), колонка
-`rerank_score REAL` (`core/store/sqlite.py:414`), её сериализация (`core/store/sqlite_store.py:232,918`)
+механизм: `SearchLogEntry.rerank_score` (`core/domain/models.py:1398`), колонка
+`rerank_score REAL` (`core/store/sqlite.py:448`), её сериализация (`core/store/sqlite_store.py:232,918`)
 и докстринг `core/pipeline/search_log.py:267` о переносе именованных скоров. Поле всегда `None`:
 производителя нет. Это O23 плана 26 — **измерение, а не решение** (триггер возврата в
 `cohound-spec-v2.md:940`: измеренный прирост precision на retrieval-golden).
@@ -629,7 +629,7 @@ copyright, перечень изменений. Такой реестр нель
 ## 5. Версионные границы (связь с §13)
 
 Класс границы определяется **не типом зависимости**, а тем, входит ли величина в
-`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 0.3.0 — `core/domain/models.py:163`). Таблица — зеркало
+`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 0.3.0 — `core/domain/models.py:164`). Таблица — зеркало
 `03` §C.1/§C.2 и `core/pipeline/digests.py`:
 
 | Что меняется | Класс | Следствие |
@@ -667,7 +667,7 @@ copyright, перечень изменений. Такой реестр нель
 | V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Подтверждён кодом: `core/adapters/lexical_tantivy.py:951-953` (`stemmer("russian")` + `stopword("russian")`). Внешний `snowballstemmer` не нужен |
 | V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. Подтверждён установкой: `uv.lock` (08.11.2026) держит ровно эти версии. См. `pyproject.toml` |
 | V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10. ⬜ **ОТКРЫТО (08.11.2026)** — `bge-m3` зафиксирован кодом как дефолт (`core/adapters/embed_local.py:75`), но **сравнения с RU-файнтюнами не было**: ни одного замера по `USER-bge-m3`/`RoSBERTa` в `docs/reports/measurements/` нет |
-| V4 | docling offline-веса в контуре + лицензии весов | ⬜ **ОТКРЫТО (08.11.2026), но посылка прежней записи ложна:** `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 **читается** — `env_prefix="DOCLING_"` (`.venv/…/docling/datamodel/settings.py:62-71`), а `BasePipeline` берёт `settings.artifacts_path` как fallback (`…/docling/pipeline/base_pipeline.py:67-68`). Механика офлайн-бандла исполниме: env → `artifacts_path`; `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. coHound передаёт `artifacts_path` только в OCR-пробу (`core/adapters/extract_document.py:797-814`). Остаётся: лицензии весов и `repo_id`/`revision` в манифесте |
+| V4 | docling offline-веса в контуре + лицензии весов | ⬜ **ОТКРЫТО (08.11.2026), но посылка прежней записи ложна:** `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 **читается** — `env_prefix="DOCLING_"` (`.venv/…/docling/datamodel/settings.py:62-71`), а `BasePipeline` берёт `settings.artifacts_path` как fallback (`…/docling/pipeline/base_pipeline.py:67-68`). Механика офлайн-бандла исполниме: env → `artifacts_path`; `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. coHound передаёт `artifacts_path` только в OCR-пробу (`core/adapters/extract_document.py:799-816`). Остаётся: лицензии весов и `repo_id`/`revision` в манифесте |
 | V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | ✅ **закрыт smoke-тестом (2026-10-08):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14). Smoke `tests/smoke_scrapy_playwright.py` пройден на Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright **1.63.0** (chromium + firefox) → **оставляем с диапазоном `playwright>=1.63,<2`** (пина `==` нет); связка 1.63/2.19 подтверждена, фолбэк 1.57 не нужен. Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
 
 ---
@@ -702,7 +702,7 @@ air-gap) сетевого доступа к HF нет — либо загруз�
 `extractor_stack` (константы + версия docling, `core/pipeline/run_identity.py:92`), но **не**
 repo_id/revision/лицензию весов; env-переключатель `DOCLING_ARTIFACTS_PATH` есть, но остаётся
 передать `artifacts_path` в `PdfPipelineOptions` экстракции явно, чтобы путь был объявленным
-входом, а не env (`core/adapters/extract_document.py:797-814` — сегодня только OCR-проба).
+входом, а не env (`core/adapters/extract_document.py:799-816` — сегодня только OCR-проба).
 
 **Что делать (план, закрывает V4):**
 1. **Предзакачать** нужные веса (`docling-tools models download`) на машине с доступом к сети →

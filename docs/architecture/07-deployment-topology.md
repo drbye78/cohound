@@ -419,7 +419,7 @@ LLM-endpoint корп. облака — только в Z0.
    действует»). Поэтому `deploy_profile` и остаётся полем контракта.
 4. ⚠️ **Per-root слой осей `document_level`/`pdf_device` под `split` не виден** (расхождение,
    которого в прежней редакции этого блока не было). Под `local` оси разрешаются на каждом
-   корне цепочкой app < run < site (`core/pipeline/corpus.py:1431`,
+   корне цепочкой app < run < site (`core/pipeline/corpus.py:1432`,
    `profiles=domain_profiles`), поэтому `domain_profiles.yaml` переопределяет уровень для
    конкретного хоста. Под `split` порты собираются **до** per-root резолва:
    `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3322`) отдаёт
@@ -435,7 +435,7 @@ LLM-endpoint корп. облака — только в Z0.
    `_cache_extractor_version` возвращает `.version` = `remote-extractor-1`
    (`core/pipeline/extraction_runtime.py:331-334`, `core/adapters/remote_extractor.py:220`), а
    запись кладёт `ExtractedDoc.extractor_version` — штамп docling, названный **edge**
-   (`core/pipeline/extract_cache.py:442`). Ключи не совпадают никогда ⇒ под `split` кэш не
+   (`core/pipeline/extract_cache.py:486`). Ключи не совпадают никогда ⇒ под `split` кэш не
    даёт попаданий, и каждый цикл пере-извлекает весь корпус. Это не регресс, а названная
    асимметрия (она же в docstring помощника), но цена реальная: под `local` тот же корпус
    попадает в кэш. Починка — резолв идентичности через `capabilities.extract` один раз на

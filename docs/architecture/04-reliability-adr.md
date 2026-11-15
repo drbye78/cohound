@@ -346,8 +346,8 @@ tests/
 | объём индекса | ➖ снято замером | 133 119 чанков на **3** партиции (срез 07.11.2026 до перезапуска корпуса, `14` §1; воспроизводится только из `cohound.db.before-corpus-rerun`); закрытый цикл 08.11.2026 — **154 664** чанка / **8 115** док на 5 партиций, максимум партиции 108 614 против порога 3–5 млн (запас ≥ 27×). Мера (`.npy`-шарды) есть: `core/adapters/vector_npy.py:247` |
 | ANN-альтернатива | ➖ снято решением | решение — `14` §4: Qdrant отклонён (поиск продукт-скупед, I17, ANN по миллионам векторов не выполняется никогда), порт `VectorIndex` готов, ANN-адаптера нет; возврат — по условию строки выше, не по «на вырост» |
 | эмбеддинги на CPU | ✅ сделано | батчевый путь `core/adapters/embed_local.py:193` (нарезка входа `batch_size`); цена — 2.8–5.7 чанк/с продакшн-путь, fp16 — 15.40 чанк/с (06.11.2026, `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`) |
-| массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:96`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:95`, `save_cells_batch` — `core/store/sqlite_store.py:647`) |
-| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1386`, безлимит запрещён — `core/pipeline/corpus.py:1410`), кэш — `core/util/cache.py:133` |
+| массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:107`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:96`, `save_cells_batch` — `core/store/sqlite_store.py:647`) |
+| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1387`, безлимит запрещён — `core/pipeline/corpus.py:1411`), кэш — `core/util/cache.py:133` |
 
 ### D.1. Память и OOM
 
@@ -356,7 +356,7 @@ tests/
 растёт храповиком до OOM-kill. Ниже — рычаги as-built и их замеры. Провенанс цифр —
 докстринг `core/util/memory.py` и комментарии `packages/ru-pg-dbms/run.yaml` (§`crawl`).
 
-**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`core/adapters/extract_document.py:949`,
+**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`core/adapters/extract_document.py:951`,
 `_PDF_QUEUE_MAX_SIZE_BY_LEVEL`: `layout`/`layout_tables`/`full` → 1, `text` → `None` — у
 `NativePdfPipeline` этого механизма нет.) Причина — не «PDF целиком», а **число страниц в
 полёте**. Замер при дефолтном `queue_max_size=100` (пики воркера): `text` 1191 MiB,
@@ -395,8 +395,9 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 временный файл.
 
 **Арифметика, которую надо считать до прогона.** «Пол» docling-воркера ≈ **1.1 GB**
-(torch 231 + docling-импорты 172 + веса ~500 + страница в полёте); HTML-воркер платит
-≈38 MB за импорт адаптера (а не 403 MB, пока docling не импортирован).
+(torch 231 + docling-импорты 172 + веса ~500 + страница в полёте) — это **оценка состава**;
+измеренный пол после первого документа и `malloc_trim(0)` — **1.45 GB** (п. 7). HTML-воркер
+платит ≈38 MB за импорт адаптера (а не 403 MB, пока docling не импортирован).
 Отсюда `layout_tables` + 2 воркера ≈ 2 × 2126 + baseline родителя ≈ 4.8 GB из 6.9 GB —
 помещается, но запаса мало, поэтому 2, а не «сколько ядер». Для `full` (OCR) та же
 арифметика **не проверена** после замера `queue_max_size`, а до него OOM был именно на
@@ -429,6 +430,34 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 документов. Уже записанная ложь возвращается в работу видимо:
 `scripts/repair_abandoned_extract.py` (по умолчанию только чтение, `--apply` пишет
 `outputs/repair_abandoned_extract.json`); настоящие отказы экстрактора им не трогаются.
+
+**7. Пик — функция документа, а не уровня, и он растёт внутри воркера (замер 15.11.2026).**
+Прибор `scripts/measure_extract_peak.py`, разбор — `docs/reports/measurements/2026-11-15-extraction-peak-decomposition.md`.
+Каждый замер — отдельный процесс, пик — `ru_maxrss` ребёнка, шаги — в порядке боевого пути
+(`sha256` → экстрактор → `finalize`+`content_hash` → конверт → `pickle`).
+
+- **Стена числом.** `structured/layout_tables`: **1 985–2 030 MB** на 94-страничном документе
+  (CPU, 4 прогона, разброс 2 %), **2 469 MB** на том же документе под `cuda`, **1 865 MB** на
+  12-страничном, **3 679 MB** на 2 763-страничном (24.10). `text_layer`: **164 MB** на
+  2 763 стр. / 6.51 M символов.
+- **Уровень даёт дельту, документ — разброс.** `layout` → `layout_tables` на одном документе
+  **+259 MB**; 12 стр. против 94 стр. на одном уровне — **+120 MB**. До ~150 страниц пик почти
+  не зависит от страниц: его задаёт пол рабочего набора.
+- **Пол — 1.45 GB, а не 1.1 GB.** После первого документа и `malloc_trim(0)` процесс держит
+  **1 451–1 510 MB**; `converter_build` даёт 690 MB и полом не является — веса layout и
+  TableFormer грузятся лениво при первом `forward`.
+- **Копии текста в `structured` бесплатны** (58 800 симв. — 0.006 % пика), а в `text_layer`
+  они и есть цена: из 79 MB, которые берёт `extract` на 6.51 M символов, **67 MB** — список
+  страниц (54) и склейка (13).
+- **Пик воркера — максимум по документам, а не цена одного.** При
+  `extract_max_tasks_per_child: 25` (`packages/ru-pg-dbms/run.yaml:110`) и `malloc_trim` после
+  каждого документа: 94-страничный документ — **+309 MB** к пику за 4 документа (насыщение не
+  наступило), 12-страничный — **+93 MB** за 8 (насыщение на 5-м, база 1.53 GB). Без trim второй
+  документ стоил **+462 MB** против **+135 MB** с ним.
+- **Формула `1430 + 0.82 × N` пригодна только в хвосте.** Она сходится на 191–2 763 стр.
+  (−0.5…+8 %) и занижает на **0.43–0.52 GB** ниже ~150 стр. (12 стр.: 1 440 против 1 865).
+  Приёмка по ней на малых документах недопустима: она пустит воркера на 0.5 GB меньше, чем
+  нужно, — в опасную сторону.
 
 **Почему это не ось контракта (ADR 0022).** Все перечисленные рычаги не меняют ни одного
 значения **измерения** (текст, хеши, чанки, статусы, счётчики), поэтому они **вне**
@@ -470,8 +499,8 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 | 0020 | Coverage по **вселенной scope** (§6/B-3a: `scope_universe`, `universe`/`completed`/`defined`, UNDEFINED) + разделение `methodology_version`/`EXECUTION_FIELDS` (§13/B-7) | A2/A3, I5/I11/I13 | accepted · **v2.1**; модель отсутствия с тех пор сменилась — методология **0.3.0** (I2d, план 20), ADR на это не было, добавлен **0024** |
 | 0021 | Двухуровневая идентичность индексной сборки: `partition_build_id` (`pb_`) на партицию + `index_build_id` (`cb_`) как композиция `(product_id, partition_build_id, content_digest)`; `params`/`snapshot_date` вне `pb_` | I17, §13, R7: переиспользование партиции при смене фокуса/каталога без коллизии same-id/different-content (уточняет 0013) | accepted · **реализовано** |
 | 0022 | Память экстракции — **операционный рычаг, вне** `EXECUTION_CONTRACT_FIELDS`: `PDF_QUEUE_MAX_SIZE`, `malloc_trim(0)` после документа, ленивый импорт docling, рециклинг воркеров | A1/A2: не меняет наблюдаемых значений, значит не вправе ветвить `run_id` (§D.1) | accepted · **реализовано** |
-| 0023 | Гейты как **точки интеграции**: G1/G2 — внутренняя аттестация профиля, G3/G4 — приём внешнего вердикта; решение привязано к `subject_digest`; waiver видим | I6/I7, §13: устаревшее одобрение не действует, молчание внешней системы не выдаётся за отказ или одобрение (уточняет 0011) | accepted · **реализовано**: гейтовая половина (привязка к `subject_digest`, вердикт, waiver, request-файл) и производитель durable-аттестации — `hound package profile attest` пишет `profile_attestation` в `state.db` (`core/cli/package/commands.py:2994`, запись — `core/cli/package/commands.py:3083`; `core/cli/package/parser.py:1007`). **0 строк** в реальных `state.db` (07.11.2026) — операционный факт: механизмом не пользовались, а не дефект дизайна. Писатель покрыт тестами: `tests/pipeline/test_profile_attestation.py:322`, `tests/selfcheck.py:2093` |
-| 0024 | **Датированное отсутствие** (I2d, методология 0.3.0): `❌` — утверждение о **датированном событии**, а не о «сегодня». Носитель зависит от класса отрицания: `explicit`/`authoritative` — дата наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`), `bounded` — снятие `complete=1` **каждого** объявленного корня с датой и совпадающим `policy_digest`; `absence_as_of = min(дат)` публикуется в `cells.absence_as_of`. Носителя нет → `❓` + токен `absence_undated`, протокол отсутствия не публикуется | A3: «не смотрели» и «смотрели в марте» — разные факты; план 20 §F1/F3 | accepted · **реализовано** (`core/domain/models.py:163` `METHODOLOGY_VERSION = "0.3.0"`, SCHEMA `3.20.0`) |
+| 0023 | Гейты как **точки интеграции**: G1/G2 — внутренняя аттестация профиля, G3/G4 — приём внешнего вердикта; решение привязано к `subject_digest`; waiver видим | I6/I7, §13: устаревшее одобрение не действует, молчание внешней системы не выдаётся за отказ или одобрение (уточняет 0011) | accepted · **реализовано**: гейтовая половина (привязка к `subject_digest`, вердикт, waiver, request-файл) и производитель durable-аттестации — `hound package profile attest` пишет `profile_attestation` в `state.db` (`core/cli/package/commands.py:2994`, запись — `core/cli/package/commands.py:3083`; `core/cli/package/parser.py:1007`). **0 строк** в реальных `state.db` (07.11.2026) — операционный факт: механизмом не пользовались, а не дефект дизайна. Писатель покрыт тестами: `tests/pipeline/test_profile_attestation.py:322`, `tests/selfcheck.py:2155` |
+| 0024 | **Датированное отсутствие** (I2d, методология 0.3.0): `❌` — утверждение о **датированном событии**, а не о «сегодня». Носитель зависит от класса отрицания: `explicit`/`authoritative` — дата наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`), `bounded` — снятие `complete=1` **каждого** объявленного корня с датой и совпадающим `policy_digest`; `absence_as_of = min(дат)` публикуется в `cells.absence_as_of`. Носителя нет → `❓` + токен `absence_undated`, протокол отсутствия не публикуется | A3: «не смотрели» и «смотрели в марте» — разные факты; план 20 §F1/F3 | accepted · **реализовано** (`core/domain/models.py:164` `METHODOLOGY_VERSION = "0.3.0"`, SCHEMA `3.20.0`) |
 
 **«Принято» ≠ «реализовано» — аудит реестра (2026-11-08, HEAD `2af6d1e`).** Реестр сверен
 против кода **целиком**, а не точечно. Расхождений два, и оба — про **смену решения**, а не про
@@ -498,7 +527,7 @@ IDP/DLP/IDS (07 §8); 0021–0022 — операционный слой посл
 и **разделение классов версий** diff-причин: `methodology_change` (`METHODOLOGY_FIELDS` + major
 `methodology_version`) vs `execution_change` (`EXECUTION_FIELDS`) — §13/B-7. `ranking_epsilon`
 (порог неразличимости) и `settings_provenance` (`default|measured`, A3) добавлены в `RunConfig`/
-`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — **`3.21.0`** (на срезе v2.1 было `3.5.0`;
+`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — **`3.22.0`** (на срезе v2.1 было `3.5.0`;
 дальше без шимов: 3.10.0 — `corpus_members`/`archive_observations`, 3.11.0 — поля
 `gate_decisions` полосы гейтов, 3.12.0 — `crawl_sessions.owner`/`heartbeat_at` (свидетельство
 живости) и `interrupted` в `crawl_session_status`, 3.13.0 — PK `corpus_members` включает
@@ -507,7 +536,9 @@ IDP/DLP/IDS (07 §8); 0021–0022 — операционный слой посл
 `runs.corpus_snapshot_json`/`corpus_artifact` (план 20 F1/F2), 3.20.0 —
 `corpus_coverage.roots_json` + `cells.absence_as_of` (F3, методология 0.3.0), 3.21.0 —
 `corpus_docs.page_map` (O36 фазы 1b плана 26: карта страниц документа; номер страницы чанка —
-функция от неё, а не колонка); с 3.12.0 файл другой версии **отвергается**
+функция от неё, а не колонка), 3.22.0 — провенанс распознавания (`corpus_docs.ocr_probe`/
+`pages_ocr`/`pages_failed`, `runs.ocr_probe`, `index_manifest.ocr_probe`; O25-остаток + O38a
+плана 26); с 3.12.0 файл другой версии **отвергается**
 гейтом `11` §2.6, а не мигрируется молча), `STATE_SCHEMA_VERSION` схемы `state/{package}/state.db` —
 **`"12"`** (`"4"` добавила `profile_attestation`; действующая цепочка: 8/9 — `crawl_policy`/`corpus_capture`,
 10 — `container_state`, 11 — `capture`/наблюдения `url_state`, 12 — отпечаток пространства
@@ -575,10 +606,10 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 
 **Открытые вопросы (закрыть до/в ходе M0):**
 - формат импорт-графа CI (статический анализ импортов `core.*`) — ✅ сделано
-  (`tests/selfcheck.py:984` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:355`;
+  (`tests/selfcheck.py:992` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:355`;
   тот же шаг в CI — `scripts/ci.sh:50`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
-  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1346` и `core/domain/models.py:1509`; производитель
+  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1347` и `core/domain/models.py:1510`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);
 - версионирование prompt-шаблонов (по файлам? по hash?) — ✅ сделано **по файлам**:
   `core/pipeline/prompt.py:128` (`TEMPLATE_VERSION = "evaluator_v5"`), `templates/{version}.txt`,
@@ -590,9 +621,9 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   `core/store/backup.py:274` `restore_run`; снапшот через `sqlite3.Connection.backup`, не
   копирование файла);
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
-  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:292`; маркер
-  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:200`; профиль публикуемости
-  `outputs/publishability.yaml` — `core/pipeline/report.py:3688`);
+  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:293`; маркер
+  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:201`; профиль публикуемости
+  `outputs/publishability.yaml` — `core/pipeline/report.py:3699`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через
   `read_prior_llm_usage`/`merge_llm_usage`, а не «последняя инвокация»; запись —

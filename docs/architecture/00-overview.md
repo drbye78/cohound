@@ -219,7 +219,7 @@ text/markdown/EPUB как первый класс (`adapters/extract_text.py`, `
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
 бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
-`SCHEMA_VERSION` = **`3.21.0`** (версия SQLite-схемы прогона, **не** регламента), и файл с
+`SCHEMA_VERSION` = **`3.22.0`** (версия SQLite-схемы прогона, **не** регламента), и файл с
 другой версией **отвергается** с сообщением, а не читается молча (гейт `11` §2.6); durable
 per-product состояние `state/{package_id}/state.db` версионируется отдельно —
 `STATE_SCHEMA_VERSION` = **`"12"`** (`store/state_sqlite.py`, см. `09` §4); `runs.settings_provenance_json`
@@ -449,12 +449,12 @@ M0 должен давать **сквозной вертикальный сре�
 `core/edge/server.py`, `contracts/seam/openapi.json`; 0020 — знаменатель `scope_universe`
 (`core/pipeline/compute.py:184`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);
 0022 — `core/util/memory.py` (`malloc_trim`); 0023 — `core/pipeline/gate_subject.py` + `gates/*-request.json`;
-0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:93`) + `cells.absence_as_of` (`core/store/sqlite.py:345`).
+0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:104`) + `cells.absence_as_of` (`core/store/sqlite.py:379`).
 
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).
   ✅ закрыто — батч-запись: `save_cells_batch` / `add_evidence_batch` через `executemany`
-  (`core/store/sqlite_store.py:532`, `:779`).
+  (`core/store/sqlite_store.py:544`, `:779`).
 - Формат и версионирование `prompt_hash` при смене шаблона (итерация 2).
   ✅ закрыто — контракт `H(template_version, rule, absence_rule, sorted(chunk_ids))`
   (`core/pipeline/prompt.py:34`); машинный токен «тот же hash — другой текст» — `:79`.

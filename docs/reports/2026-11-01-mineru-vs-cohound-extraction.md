@@ -38,7 +38,7 @@
 |---|---|---|
 | Маршрут формата | `core/cli/wiring.py:2103` | суффикс → Content-Type (магия байтов решает только класс контейнера — `core/util/document_formats.py:457`); `pdf_required` даёт `WiringError`, а не тихий HTML-фолбэк |
 | PDF `text_layer` | `core/adapters/extract_pdf_text.py:288` | pypdfium2, постранично, плоский текст; отказ `error="no_text_layer"` ставится, только когда слоя нет у **всего** документа (`:403`). Отдельных пустых страниц — **182 из 15 929** (1.14 %, замер 25.10.2026); на 01.11.2026 такая страница исчезала без пометки — с 15.11.2026 она видна как пустой интервал `start == end` в `ExtractedDoc.page_map` (O36 фаза 1a), агрегат по документу остаётся за O26 |
-| PDF `structured` | `core/adapters/extract_document.py:1052` | docling; выход — **markdown-строка** (`_document_text`, `:468`); уровни меняют опции конвейера (`_pdf_options`) |
+| PDF `structured` | `core/adapters/extract_document.py:1054` | docling; выход — **markdown-строка** (`_document_text`, `:468`); уровни меняют опции конвейера (`_pdf_options`) |
 | Office | тот же адаптер | `document_level`/`document_timeout`/`queue_max_size` к Office **не применяются** — офисный конвертер собирается без PDF-опций (`:961`) |
 | HTML | `core/adapters/extract_html.py:147` | trafilatura → markdown; весь boilerplate-отсев внутри библиотеки |
 | Санитайз | `core/util/sanitize.py:145,290,423` | вход HTML: структурный пре-клин `strip_active_html` (`:290`) — удаляется только активное, `class`/`id`/`role` остаются для `trafilatura`; allow-list `sanitize_html` (`:145`) — только на шве валидации (`gateway_validate.py:300`). Выход: `strip_control_chars` → `neutralize_prompt_injection_marks` в одной границе `finalize_extracted_text` (`:423`), её же вызывает документный путь (§10) |
@@ -224,7 +224,7 @@ y-кластеризация и склейка строк внутри блок�
    границу, а не четвёртую дыру. Это меняет `text` → `content_hash` → доказательства, поэтому
    смена версий — `execution_change` и отдельный акт, а не побочная правка.
 2. **Per-level таймауты docling вне дайджеста.** `_LEVEL_DOCUMENT_TIMEOUT_S`
-   (`core/adapters/extract_document.py:919-925`) — константа кода: 900/1800/2700/None по уровням.
+   (`core/adapters/extract_document.py:921-927`) — константа кода: 900/1800/2700/None по уровням.
    В `as_dict()` попадает только **явно объявленная** ось `document_timeout_s`
    (`crawl_frontier.py:470`). Значит смена уровня-дефолта меняет, какие документы успевают
    дочитаться (и попадают в корпус), **не меняя `run_id`**. Это ровно тот класс, который §9
