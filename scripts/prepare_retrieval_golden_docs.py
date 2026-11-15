@@ -485,14 +485,28 @@ def cmd_compile(args: argparse.Namespace) -> int:
             continue
         if decision == "reject":
             continue
-        # accept: строка обязана быть машинно разрешённой и указывать документ
-        if row.get("status") != "resolved":
+        # accept: строка обязана указывать документ — либо машинно разрешённый, либо
+        # **вручную пришпиленный** человеком. Ручной пин нужен ровно там, где машина
+        # честно не выбрала: ``ambiguous`` — два документа одного раздела (языковые
+        # редакции ``?lang=en``/``?lang=ru-en``). Без него единственным записываемым
+        # решением остаётся ``reject``, то есть ячейка выпадает из эталона из-за
+        # ограничения прибора, а не из-за факта — а решение человека обязано быть
+        # записываемым. Подмена не проходит молча: валидатор всё равно сверяет, что
+        # ``doc_id`` резолвится в корпусе прогона, принадлежит продукту ячейки (I17) и
+        # его URL совпадает с ``source_url`` (для ``canonical_query`` — без query).
+        status = row.get("status")
+        doc_id = (row.get("doc_id") or "").strip()
+        if status != "resolved" and not (status == "ambiguous" and doc_id):
             problems.append(
-                f"строка {lineno}: decision=accept при status={row.get('status')!r} "
+                f"строка {lineno}: decision=accept при status={status!r} "
                 f"({row.get('source_url')})"
+                + (
+                    " — у ambiguous впишите doc_id выбранного документа в колонку doc_id"
+                    if status == "ambiguous"
+                    else ""
+                )
             )
             continue
-        doc_id = (row.get("doc_id") or "").strip()
         if not doc_id:
             problems.append(f"строка {lineno}: decision=accept без doc_id")
             continue
