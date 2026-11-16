@@ -695,3 +695,203 @@ def test_declared_power_mode_never_derives_from_observed_signs(
     # И дефолт — именно `unknown`, а не «выведенное» значение.
     args = MEASURE._parse_args(["--db", "x.db", "--golden", "g.json", "--product", "p"])
     assert MEASURE._declared_power_mode(args) == MEASURE.DEFAULT_POWER_MODE == "unknown"
+
+
+# --------------------------------------------------------------- парное сравнение
+
+
+def test_mcnemar_exact_p_matches_the_binomial_tail() -> None:
+    """5 против 0 при n=5: p = 2·(1/2)^5 = 0.0625 — ровно то, что даёт формула."""
+    assert MEASURE.mcnemar_exact_p(5, 0) == pytest.approx(0.0625)
+    assert MEASURE.mcnemar_exact_p(0, 5) == pytest.approx(0.0625)
+
+
+def test_mcnemar_exact_p_is_symmetric_and_one_on_no_discordance() -> None:
+    """Согласованные ячейки не различают варианты, поэтому p=1, а не «мало»."""
+    assert MEASURE.mcnemar_exact_p(0, 0) == 1.0
+    assert MEASURE.mcnemar_exact_p(3, 3) == 1.0
+    assert MEASURE.mcnemar_exact_p(7, 3) == pytest.approx(MEASURE.mcnemar_exact_p(3, 7))
+
+
+def test_paired_comparison_counts_only_shared_resolved_cells() -> None:
+    """Ячейка, разрешённая в одном варианте и нет в другом, в пары не входит.
+
+    Иначе «документа нет в корпусе» попало бы в знаменатель как провал поиска, и разница
+    вариантов мерила бы состав эталона.
+    """
+    base = [
+        {"cell": "p/a", "rank": 1, "unresolved": False},
+        {"cell": "p/b", "rank": None, "unresolved": False},
+        {"cell": "p/c", "rank": 3, "unresolved": False},
+        {"cell": "p/gone", "rank": None, "unresolved": True},
+    ]
+    variant = [
+        {"cell": "p/a", "rank": 1, "unresolved": False},
+        {"cell": "p/b", "rank": 2, "unresolved": False},
+        {"cell": "p/c", "rank": None, "unresolved": False},
+        {"cell": "p/gone", "rank": 4, "unresolved": False},
+    ]
+
+    paired = MEASURE.paired_comparison(base, variant, bootstrap=200)
+
+    assert paired["n_pairs"] == 3
+    assert paired["better"] == 1 and paired["worse"] == 1
+    assert paired["hit_baseline"] == pytest.approx(2 / 3)
+    assert paired["hit_variant"] == pytest.approx(2 / 3)
+    assert paired["delta"] == pytest.approx(0.0)
+    assert paired["mcnemar_p"] == 1.0
+
+
+def test_paired_comparison_without_shared_cells_is_none_not_zero() -> None:
+    """«Сравнивать нечего» — не «разницы нет»: нули читались бы как измеренный ноль."""
+    paired = MEASURE.paired_comparison(
+        [{"cell": "p/a", "rank": 1, "unresolved": False}],
+        [{"cell": "p/z", "rank": 1, "unresolved": False}],
+    )
+
+    assert paired["n_pairs"] == 0
+    assert paired["delta"] is None
+    assert paired["mcnemar_p"] is None
+    assert paired["delta_ci"] is None
+
+
+def test_paired_delta_ci_brackets_the_point_estimate() -> None:
+    base = [{"cell": f"p/{i}", "rank": None, "unresolved": False} for i in range(10)]
+    variant = [
+        {"cell": f"p/{i}", "rank": 1 if i < 4 else None, "unresolved": False}
+        for i in range(10)
+    ]
+
+    paired = MEASURE.paired_comparison(base, variant, bootstrap=500)
+
+    assert paired["delta"] == pytest.approx(0.4)
+    low, high = paired["delta_ci"]
+    assert low <= 0.4 <= high
+    assert paired["mcnemar_p"] == pytest.approx(2 / 16)
+
+
+def test_evaluate_passes_bootstrap_and_flags_unresolved_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Дефект 16.11: прибор звал ``evaluate_documents`` с ``bootstrap=1``.
+
+    Тогда ``hit_ci`` публикуется, но равен точечной оценке — поле есть, информации нет.
+    Тест держит два факта сразу: объявленное число ресемплов доходит до метрик, и признак
+    ``unresolved`` попадает в по-ячеечный набор (без него парное сравнение не может
+    исключить ячейки, которых нет в корпусе).
+    """
+    from types import SimpleNamespace
+
+    import core.pipeline.evaluate as evaluate_module
+    import core.pipeline.retrieval_docs as docs_module
+
+    seen: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        evaluate_module, "retrieve_for_cell", lambda param, **kwargs: SimpleNamespace(chunks=())
+    )
+
+    def fake_evaluate(results: Any, *, profile: str, k: int, bootstrap: int, seed: int) -> Any:
+        seen["bootstrap"] = bootstrap
+        seen["unresolved"] = [result.unresolved for result in results]
+        return SimpleNamespace()
+
+    monkeypatch.setattr(docs_module, "evaluate_documents", fake_evaluate)
+
+    entry = SimpleNamespace(
+        cell="p/a", product_id="product", param_id="a", expected_doc_ids=("d1",)
+    )
+    _, per_cell = MEASURE._evaluate(
+        entries=[entry],
+        params={"a": object()},
+        profile="R1",
+        cutoff_k=10,
+        index=None,
+        query_vectors={},
+        chunk_doc={},
+        doc_ids=set(),
+        bootstrap=7,
+    )
+
+    assert seen["bootstrap"] == 7
+    # Два разных носителя одного факта: ``unresolved`` в ``DocQueryResult`` идёт в
+    # знаменатель метрик, а копия в по-ячеечном наборе — в парное сравнение. Проверяются
+    # оба: тест, смотрящий только на первый, пропустил бы выключенный флаг во втором
+    # (проверено мутацией 16.11.2026).
+    assert seen["unresolved"] == [True]
+    assert per_cell == [{"cell": "p/a", "rank": None, "unresolved": True}]
+
+
+def test_bootstrap_default_is_not_the_degenerate_one() -> None:
+    args = MEASURE._parse_args(["--db", "x.db", "--golden", "g.json", "--product", "p"])
+
+    assert args.bootstrap == 1000
+
+
+def test_summary_prints_paired_delta_with_its_interval(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Разница агрегатов и разница по ячейкам — разные утверждения; печатаются рядом."""
+    payload = {
+        "run_id": "run",
+        "product": "postgrespro",
+        "profile": "R1",
+        "cutoff_k": 10,
+        "cells_in_scope": 115,
+        "golden_cells": 132,
+        "chunks_measured": 3000,
+        "chunks_total": 206931,
+        "smoke_only": True,
+        "peak_rss_bytes": 1024,
+        "peak_vram_bytes": None,
+        "load_average": [1.0, 1.0, 1.0],
+        "power_mode": "ac-barrel",
+        "variants": [
+            {
+                "variant": "text",
+                "source": "partition",
+                "seconds": 0.0,
+                "chunks_per_s": None,
+                "metrics": {
+                    "hit_at_k": 0.1087,
+                    "recall_at_k": 0.1087,
+                    "mrr": 0.0357,
+                    "ndcg_at_k": 0.0521,
+                },
+                "power": {"before": {}, "after": {}},
+            },
+            {
+                "variant": "heading",
+                "source": "recomputed",
+                "seconds": 367.6,
+                "chunks_per_s": 8.16,
+                "metrics": {
+                    "hit_at_k": 0.1957,
+                    "recall_at_k": 0.1957,
+                    "mrr": 0.0582,
+                    "ndcg_at_k": 0.0894,
+                },
+                "power": {"before": {}, "after": {}},
+                "paired_vs": "text",
+                "paired": {
+                    "n_pairs": 46,
+                    "hit_baseline": 0.1087,
+                    "hit_variant": 0.1957,
+                    "delta": 0.0870,
+                    "better": 5,
+                    "worse": 1,
+                    "mcnemar_p": 0.2188,
+                    "delta_ci": [0.0, 0.1957],
+                },
+            },
+        ],
+    }
+
+    MEASURE._print_summary(payload)
+
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if line.startswith("парно с text"))
+    assert "46 ячеек" in line
+    assert "Δ +0.087" in line
+    assert "выиграл 5 / проиграл 1" in line
+    assert "McNemar p=0.2188" in line

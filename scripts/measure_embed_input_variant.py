@@ -31,6 +31,15 @@
 документов, а не доказательства — это предмет O15/O18), поведение на других продуктах
 (``--product`` называет один; число принадлежит ему).
 
+**Срез корпуса — выборка, а не «дымовой тест».** Полный корпус для ответа об оси не
+обязателен: решает не число чанков, а число **разрешённых ячеек эталона** и ширина
+интервала. Поэтому прибор публикует по-ячеечные результаты и **парное** сравнение вариантов
+(точный критерий МакНемара на дискордантных ячейках + бутстрэп-интервал дельты): разница
+агрегатов на срезе смешивает эффект оси с составом выборки и утверждением об оси не является.
+Длительность прогона — цена этого хоста на этом корпусе, а не метрика продукта: следующий
+профиль даст другое число, и это не делает замер неверным (A3: измеряется стоимость, а не
+объявляется потолок).
+
 **Режим питания — объявленный вход, а не вывод из признаков.** Скорость на этом хосте
 зависит от питания (USB-C против комплектного БП), а программно отличить одно от другого
 нельзя: ``power.limit`` у мобильной карты отдаётся как ``[N/A]``, ``cpufreq`` в WSL2 не
@@ -60,6 +69,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import random
 import sqlite3
 import subprocess
 import sys
@@ -169,6 +180,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--cache-dir",
         default="",
         help="каталог embed_cache (пусто — COHOUND_HOME/embed_cache, если он есть)",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=1000,
+        help=(
+            "ресемплов для интервалов (hit_ci и парной дельты); 1 — вырожденный интервал, "
+            "равный точечной оценке"
+        ),
     )
     parser.add_argument(
         "--power-mode",
@@ -459,8 +479,16 @@ def _evaluate(
     query_vectors: dict[str, list[float]],
     chunk_doc: dict[str, str],
     doc_ids: set[str],
+    bootstrap: int = 1000,
 ) -> tuple[Any, list[dict[str, Any]]]:
-    """Метрики варианта: продакшен-ретривал + метрики документного эталона."""
+    """Метрики варианта: продакшен-ретривал + метрики документного эталона.
+
+    ``bootstrap`` уходит в :func:`evaluate_documents` и задаёт число ресемплов интервала
+    ``hit_ci``. Дефолт 1000, а не 1: при ``bootstrap == 1`` ресемплинг вырожден и интервал
+    **совпадает с точечной оценкой** — поле публикуется, но не несёт информации, а читатель
+    принимает точку за интервал (замер 16.11.2026: ``hit_ci`` = 0.1087/0.1087 на 46
+    ячейках). Цена 1000 ресемплов на сотне ячеек — микросекунды.
+    """
     from core.pipeline.evaluate import retrieve_for_cell
     from core.pipeline.retrieval_docs import (
         DocQueryResult,
@@ -508,8 +536,19 @@ def _evaluate(
                 unresolved=not any(doc in doc_ids for doc in entry.expected_doc_ids),
             )
         )
-        per_cell.append({"cell": entry.cell, "rank": rank})
-    report = evaluate_documents(results, profile=profile, k=cutoff_k, bootstrap=1, seed=0)
+        # ``unresolved`` публикуется по-ячеечно, а не только агрегатом: парное сравнение
+        # вариантов обязано исключить одни и те же ячейки с обеих сторон, иначе
+        # «документа нет в корпусе» попадёт в знаменатель как провал поиска.
+        per_cell.append(
+            {
+                "cell": entry.cell,
+                "rank": rank,
+                "unresolved": not any(doc in doc_ids for doc in entry.expected_doc_ids),
+            }
+        )
+    report = evaluate_documents(
+        results, profile=profile, k=cutoff_k, bootstrap=bootstrap, seed=0
+    )
     return report, per_cell
 
 
@@ -739,6 +778,85 @@ def _require_same_chunks(reports: Sequence[dict[str, Any]]) -> None:
         )
 
 
+def mcnemar_exact_p(better: int, worse: int) -> float:
+    """Точный двусторонний критерий МакНемара на **дискордантных** парах.
+
+    ``better`` — ячейки, где вариант попал, а базовый промахнулся; ``worse`` — наоборот.
+    Согласованные ячейки (оба попали / оба промахнулись) в критерий не входят: они не
+    различают варианты, и включение их раздуло бы «значимость» числом лёгких ячеек.
+
+    Зачем это здесь. Срез корпуса стоит дешевле полного, но метрика на срезе считается по
+    меньшему числу ячеек, и разница ``0.109 → 0.196`` может быть и эффектом, и шумом.
+    Критерий отвечает на «могут ли такие числа выйти из подбрасывания монеты», а не на
+    «достаточно ли велик эффект» — второе решает человек, а не прибор (A3).
+
+    ``better + worse == 0`` → ``1.0``: варианты неразличимы на этих данных, и это не ноль.
+    """
+    total = better + worse
+    if total <= 0:
+        return 1.0
+    tail = sum(math.comb(total, i) for i in range(0, min(better, worse) + 1))
+    return min(1.0, 2.0 * tail / (2**total))
+
+
+def paired_comparison(
+    baseline: Sequence[dict[str, Any]],
+    variant: Sequence[dict[str, Any]],
+    *,
+    bootstrap: int = 2000,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Парное сравнение варианта с базовым **по общим разрешённым ячейкам**.
+
+    Парность обязательна: варианты меряются на одном корпусе и одном эталоне, поэтому
+    «сколько ячеек выиграл» точнее разницы двух агрегатов — агрегаты смешивают различие
+    вариантов с составом выборки, а на срезе корпуса состав меняется от прогона к прогону.
+
+    Возвращает долю hit у обоих, ``delta``, дискордантные ``better``/``worse``, точный
+    ``mcnemar_p`` и бутстрэп-интервал дельты по ячейкам (перцентили 2.5/97.5).
+    ``n_pairs == 0`` → все числа ``None``: «сравнивать нечего» — не «разницы нет».
+    """
+    left = {item["cell"]: item for item in baseline if not item.get("unresolved")}
+    right = {item["cell"]: item for item in variant if not item.get("unresolved")}
+    cells = sorted(set(left) & set(right))
+    count = len(cells)
+    if count == 0:
+        return {
+            "n_pairs": 0,
+            "hit_baseline": None,
+            "hit_variant": None,
+            "delta": None,
+            "better": None,
+            "worse": None,
+            "mcnemar_p": None,
+            "delta_ci": None,
+        }
+    hits_left = [1 if left[cell].get("rank") is not None else 0 for cell in cells]
+    hits_right = [1 if right[cell].get("rank") is not None else 0 for cell in cells]
+    better = sum(1 for a, b in zip(hits_left, hits_right, strict=True) if b and not a)
+    worse = sum(1 for a, b in zip(hits_left, hits_right, strict=True) if a and not b)
+    # Криптостойкость здесь вредна: бутстрэп обязан воспроизводиться по seed (A3).
+    generator = random.Random(seed)  # noqa: S311
+    deltas: list[float] = []
+    for _ in range(max(1, bootstrap)):
+        sample = [generator.randrange(count) for _ in range(count)]
+        deltas.append(sum(hits_right[i] - hits_left[i] for i in sample) / count)
+    deltas.sort()
+    return {
+        "n_pairs": count,
+        "hit_baseline": sum(hits_left) / count,
+        "hit_variant": sum(hits_right) / count,
+        "delta": (sum(hits_right) - sum(hits_left)) / count,
+        "better": better,
+        "worse": worse,
+        "mcnemar_p": mcnemar_exact_p(better, worse),
+        "delta_ci": [
+            deltas[int(0.025 * (len(deltas) - 1))],
+            deltas[int(0.975 * (len(deltas) - 1))],
+        ],
+    }
+
+
 def _build_payload(
     reports: Sequence[dict[str, Any]],
     base: dict[str, Any],
@@ -932,6 +1050,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             query_vectors=query_vectors,
             chunk_doc=chunk_doc,
             doc_ids=doc_ids,
+            bootstrap=args.bootstrap,
         )
         power_after = _power_snapshot(with_gpu=with_gpu)
         reports.append(
@@ -958,6 +1077,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         del index
         if name == variants[0]:
             baseline_matrix = None
+
+    # Парное сравнение считается **после** цикла, а не внутри: ему нужны оба набора
+    # по-ячеечных результатов, а второй появляется только к концу. База — первый вариант
+    # (`--variants` объявляет его базовым), и это то же соглашение, что у CSV-диффа.
+    base_cells = cells_by_variant.get(variants[0], [])
+    for item in reports:
+        item["cells"] = cells_by_variant.get(item["variant"], [])
+        if item["variant"] == variants[0]:
+            continue
+        item["paired_vs"] = variants[0]
+        item["paired"] = paired_comparison(
+            base_cells, item["cells"], bootstrap=args.bootstrap, seed=0
+        )
 
     payload = _build_payload(
         reports,
@@ -1149,9 +1281,10 @@ def _print_summary(payload: dict[str, Any]) -> None:
     )
     if payload.get("smoke_only"):
         print(
-            "ДЫМОВОЙ ПРОГОН (срез корпуса): метрики НЕ сопоставимы с прогоном на полном "
-            "корпусе — в матрице меньше документов, и место в top-K делят другие соседи. "
-            "Числа ниже проверяют, что прибор работает, а не силу оси."
+            "СРЕЗ КОРПУСА: абсолютные hit@K не сопоставимы с прогоном на полном корпусе — "
+            "в матрице меньше документов, и место в top-K делят другие соседи. Сравнение "
+            "вариантов внутри среза — парное и публикуется с интервалом; разница агрегатов "
+            "без интервала на срезе утверждением об оси не является."
         )
     header = (
         f"{'вариант':<20}{'hit@K':>8}{'recall':>8}{'MRR':>8}{'nDCG':>8}"
@@ -1170,6 +1303,27 @@ def _print_summary(payload: dict[str, Any]) -> None:
             f"{report['source']!s:>12}"
         )
     peak_vram = payload["peak_vram_bytes"]
+    # Парное сравнение печатается **рядом** с метриками, а не в отдельном блоке: разница
+    # агрегатов и разница по ячейкам — разные утверждения, и первое без второго на срезе
+    # корпуса читается как эффект оси, хотя может быть составом выборки.
+    for report in payload["variants"]:
+        paired = report.get("paired")
+        if not paired:
+            continue
+        if not paired.get("n_pairs"):
+            print(
+                f"парно с {report['paired_vs']}: сравнивать нечего — нет общих "
+                "разрешённых ячеек"
+            )
+            continue
+        low, high = paired["delta_ci"]
+        print(
+            f"парно с {report['paired_vs']}: {paired['n_pairs']} ячеек, "
+            f"{paired['hit_baseline']:.3f} → {paired['hit_variant']:.3f} "
+            f"(Δ {paired['delta']:+.3f}, CI [{low:+.3f}; {high:+.3f}]), "
+            f"выиграл {paired['better']} / проиграл {paired['worse']}, "
+            f"McNemar p={paired['mcnemar_p']:.4f}"
+        )
     print(
         f"пик RSS {payload['peak_rss_bytes'] / 2**20:.0f} MiB · "
         f"пик VRAM {'не измерен' if peak_vram is None else f'{peak_vram / 2**20:.0f} MiB'}"
