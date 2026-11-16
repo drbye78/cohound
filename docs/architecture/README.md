@@ -12,10 +12,10 @@
 
 | Что | Значение | Где в коде |
 |---|---|---|
-| `SCHEMA_VERSION` (run-DB) | `"3.24.0"` | `core/store/sqlite.py:112` |
+| `SCHEMA_VERSION` (run-DB) | `"3.25.0"` | `core/store/sqlite.py:132` |
 | `STATE_SCHEMA_VERSION` (state.db) | `"12"` | `core/store/state_sqlite.py:84` |
 | `EDGE_JOBS_SCHEMA_VERSION` | `"1"` | `core/edge/scheduler.py:198` |
-| `METHODOLOGY_VERSION` | `"0.3.0"` | `core/domain/models.py:165` |
+| `METHODOLOGY_VERSION` | `"0.3.0"` | `core/domain/models.py:166` |
 | `SEAM_SCHEMA_VERSION` | `"1"` | `core/edge/seam_schema.py:68` |
 | `EXECUTION_CONTRACT_FIELDS` | 33 поля | `core/pipeline/digests.py:96` |
 | `PHASES` | 15 фаз | `core/pipeline/runner.py:133` |
