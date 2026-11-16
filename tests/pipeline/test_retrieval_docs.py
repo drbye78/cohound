@@ -184,6 +184,40 @@ def test_evaluate_all_hits() -> None:
     assert report.hit_at_k == 1.0
     assert report.recall_at_k == 1.0
     assert report.mrr == 1.0
+    assert report.ndcg_at_k == 1.0
+
+
+def test_evaluate_ndcg_perfect_order_is_one() -> None:
+    """Единственный ожидаемый документ на первом месте — идеальный порядок."""
+    result = _result("p1/a", retrieved=("p1:doc1", "p1:x"), rank=1)
+    report = evaluate_documents([result], profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.ndcg_at_k == pytest.approx(1.0)
+
+
+def test_evaluate_ndcg_expected_at_third_position_between_zero_and_one() -> None:
+    """nDCG учитывает позицию: тот же найденный документ на 3-м месте дешевле первого."""
+    result = _result("p1/a", retrieved=("p1:x", "p1:y", "p1:doc1"), rank=3)
+    report = evaluate_documents([result], profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.hit_at_k == 1.0  # найден — hit не различает позицию
+    assert 0.0 < report.ndcg_at_k < 1.0
+
+
+def test_evaluate_ndcg_not_found_is_zero() -> None:
+    result = _result("p1/a", retrieved=("p1:x", "p1:y"), rank=None)
+    report = evaluate_documents([result], profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.ndcg_at_k == 0.0
+
+
+def test_evaluate_ndcg_excludes_unresolved_cells() -> None:
+    """``unresolved`` не входит в среднее nDCG: документа нет в корпусе — не провал поиска."""
+    results = [
+        _result("p1/a"),  # идеальный порядок → 1.0
+        _result("p1/b", retrieved=("p1:x",), rank=None, unresolved=True),
+    ]
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.scored == 1
+    assert report.unresolved_cells == 1
+    assert report.ndcg_at_k == pytest.approx(1.0)
 
 
 def test_evaluate_no_hits() -> None:
@@ -248,6 +282,7 @@ def test_evaluate_all_unresolved_gives_honest_zero() -> None:
     assert report.hit_at_k == 0.0
     assert report.recall_at_k == 0.0
     assert report.mrr == 0.0
+    assert report.ndcg_at_k == 0.0
     assert report.hit_ci == (0.0, 0.0)
     assert report.recall_ci == (0.0, 0.0)
 

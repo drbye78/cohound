@@ -22,13 +22,21 @@
 **Что публикуется** (числа, не оценки):
 
 ``profiles``
-    По каждому профилю (``R0``/``R1``/``R2``): ``hit@K``, ``recall@K``, ``MRR``,
-    бутстрэп-интервалы (1000 ресемплов по ячейкам, ``seed=0``), число ячеек, число
-    разрешённых (``scored``) и неразрешённых (``unresolved``) и ``per_cell`` — по каждой
-    ячейке ожидаемые и найденные документы, ранг.
+    По каждой **комбинации сетки** (профиль × политика кросс-запросного слияния, для
+    ``R2`` ещё × множитель пула плеч): ``hit@K``, ``recall@K``, ``MRR``, ``nDCG@K``,
+    бутстрэп-интервалы ``hit``/``recall`` (1000 ресемплов по ячейкам, ``seed=0``), число
+    ячеек, число разрешённых (``scored``) и неразрешённых (``unresolved``) и ``per_cell`` —
+    по каждой ячейке ожидаемые и найденные документы, ранг, nDCG.
 ``conditions``
     Профиль/K/``rrf_k``, объявленные оси эмбеддера, сборка композиции, версия схемы файла,
-    профиль лексического анализатора, число чанков в индексе и документов в корпусе.
+    профиль лексического анализатора, число чанков в индексе и документов в корпусе,
+    состав сетки (``pool_multipliers``/``cross_query_fusions``/``grid``).
+
+**Сетка — один проход, один индекс.** Сборка индекса стоит ~30 с, поэтому комбинации
+сетки меряются в одном запуске: лексический и векторный индексы строятся один раз,
+запросные векторы считаются один раз, а dense-плечо кешируется по
+``(продукт, множитель пула)`` — окно батча равно ``cutoff_k * pool_multiplier``, поэтому
+готовые хиты другого пула несравнимы и кеш между пулами не переиспользуется.
 
 **Чего прибор НЕ измеряет:** κ оценщика (это Ш6 и ``evaluator-benchmark``), качество
 цитат (I22), стоимость эмбеддинга корпуса. Только ретривал.
@@ -46,7 +54,7 @@ import json
 import sqlite3
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -220,51 +228,181 @@ def _partition_embed_model(index_root: Path, package_id: str,
 
 
 # ---------------------------------------------------------------------------
-# Прогон одного профиля
+# Сетка измерения: профиль × слияние запросов × множитель пула
 # ---------------------------------------------------------------------------
+
+
+def _split_csv(raw: str) -> list[str]:
+    """Элементы списка через запятую, без пустых: пробелы вокруг — не значение."""
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _resolve_pool_multipliers(scalar: int, listed: str | None) -> tuple[int, ...]:
+    """Множители пула плеч R2: список перекрывает скаляр.
+
+    Пул — исполняемое условие (``retrieve`` отказывает при ``< 1``), поэтому опечатка
+    в списке — отказ с числом, а не тихое выбрасывание элемента: иначе замер описал бы
+    не объявленную сетку.
+
+    :raises SystemExit: пустой список, не число или значение ``< 1``.
+    """
+    if listed is None:
+        if scalar < 1:
+            raise SystemExit(
+                f"measure: --pool-multiplier обязан быть >= 1, получено {scalar}"
+            )
+        return (scalar,)
+    values: list[int] = []
+    for item in _split_csv(listed):
+        try:
+            value = int(item)
+        except ValueError as exc:
+            raise SystemExit(
+                f"measure: --pool-multipliers: {item!r} — не целое число"
+            ) from exc
+        if value < 1:
+            raise SystemExit(
+                f"measure: --pool-multipliers: {value} < 1 "
+                "(пул плеч R2 = cutoff_k * pool_multiplier)"
+            )
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise SystemExit("measure: --pool-multipliers пуст")
+    return tuple(values)
+
+
+def _resolve_cross_query_fusions(
+    scalar: str, listed: str | None
+) -> tuple[str, ...]:
+    """Политики кросс-запросного слияния: список перекрывает скаляр.
+
+    :raises SystemExit: неизвестная политика (со списком допустимых) или пустой список.
+    """
+    from core.pipeline.retrieve import CROSS_QUERY_FUSION_POLICIES
+
+    raw = [scalar] if listed is None else _split_csv(listed)
+    if not raw:
+        raise SystemExit("measure: --cross-query-fusions пуст")
+    policies: list[str] = []
+    for item in raw:
+        if item not in CROSS_QUERY_FUSION_POLICIES:
+            raise SystemExit(
+                f"measure: неизвестная политика слияния запросов {item!r} "
+                f"(допустимо: {', '.join(CROSS_QUERY_FUSION_POLICIES)})"
+            )
+        if item not in policies:
+            policies.append(item)
+    return tuple(policies)
+
+
+def _measurement_grid(
+    profiles: Sequence[str],
+    fusions: Sequence[str],
+    pool_multipliers: Sequence[int],
+) -> list[tuple[str, int, str]]:
+    """Комбинации сетки: ``(профиль, множитель пула, политика слияния)``.
+
+    Пул участвует только у ``R2``: у ``R0``/``R1`` его нет в исполнении, и лишние
+    комбинации мерили бы одно и то же под разными метками. У ``R0``/``R1`` множитель
+    остаётся ``1`` — как дефолт, а не как объявленное условие.
+    """
+    grid: list[tuple[str, int, str]] = []
+    for profile in profiles:
+        for fusion in fusions:
+            if profile == "R2":
+                grid.extend((profile, pool, fusion) for pool in pool_multipliers)
+            else:
+                grid.append((profile, 1, fusion))
+    return grid
+
+
+def _combination_label(profile: str, pool_multiplier: int, fusion: str) -> str:
+    """Метка строки отчёта: пул называется только там, где он исполняется (``R2``)."""
+    if profile == "R2":
+        return f"{profile}/pool={pool_multiplier}/fusion={fusion}"
+    return f"{profile}/fusion={fusion}"
+
+
+# ---------------------------------------------------------------------------
+# Прогон одной комбинации сетки
+# ---------------------------------------------------------------------------
+
+
+def _dense_by_product(
+    *,
+    by_product: Mapping[str, Sequence[Any]],
+    params: Mapping[str, Any],
+    profile: str,
+    cutoff_k: int,
+    pool_multiplier: int,
+    vector_index: Any,
+    query_vectors: Any,
+    cache: dict[tuple[str, int], Any] | None = None,
+) -> dict[str, Any]:
+    """Dense-плечо по продуктам; кеш ключуется ``(продукт, множитель пула)``.
+
+    Окно батча — ``cutoff_k * pool_multiplier``, поэтому готовые хиты **разного пула
+    несравнимы**: отдать их другой комбинации значило бы померить пул 1 под меткой
+    ``pool=8``. Множитель поэтому входит в ключ, а не только продукт.
+
+    :param cache: накопитель между комбинациями одной сетки; ``None`` — без кеша.
+    """
+    from core.pipeline.evaluate import precompute_dense_hits
+
+    store = cache if cache is not None else {}
+    dense: dict[str, Any] = {}
+    for product_id, product_entries in by_product.items():
+        key = (product_id, pool_multiplier)
+        if key not in store:
+            store[key] = precompute_dense_hits(
+                [params[entry.param_id] for entry in product_entries],
+                product_ids=[product_id],
+                profile=profile,
+                cutoff_k=cutoff_k,
+                vector_index=vector_index,
+                query_vectors=query_vectors,
+                pool_multiplier=pool_multiplier,
+            )
+        dense[product_id] = store[key]
+    return dense
 
 
 def _measure_profile(
     *,
     profile: str,
+    pool_multiplier: int,
+    cross_query_fusion: str,
     entries: Sequence[Any],
-    params: dict[str, Any],
+    params: Mapping[str, Any],
     cutoff_k: int,
     lexical_index: Any,
     vector_index: Any,
-    embedder: Any,
+    query_vectors: Any,
     chunk_doc: dict[str, str],
     doc_ids: set[str],
     bootstrap: int,
     seed: int,
+    dense_cache: dict[tuple[str, int], Any] | None = None,
 ) -> Any:
-    """Ячейки одного профиля: ретривал композером фазы → документы top-K → метрики."""
-    from core.pipeline.evaluate import (
-        precompute_dense_hits,
-        precompute_query_vectors,
-        retrieve_for_cell,
-    )
+    """Ячейки одной комбинации сетки: ретривал композером фазы → документы top-K → метрики."""
+    from core.pipeline.evaluate import retrieve_for_cell
     from core.pipeline.retrieval_docs import DocQueryResult, document_ids_for
 
     by_product: dict[str, list[Any]] = {}
     for entry in entries:
         by_product.setdefault(entry.product_id, []).append(entry)
 
-    query_vectors = precompute_query_vectors(
-        [params[entry.param_id] for entry in entries],
+    dense_by_product = _dense_by_product(
+        by_product=by_product,
+        params=params,
         profile=profile,
-        embedder=embedder,
+        cutoff_k=cutoff_k,
+        pool_multiplier=pool_multiplier,
+        vector_index=vector_index,
+        query_vectors=query_vectors,
+        cache=dense_cache,
     )
-    dense_by_product: dict[str, Any] = {}
-    for product_id, product_entries in by_product.items():
-        dense_by_product[product_id] = precompute_dense_hits(
-            [params[entry.param_id] for entry in product_entries],
-            product_ids=[product_id],
-            profile=profile,
-            cutoff_k=cutoff_k,
-            vector_index=vector_index,
-            query_vectors=query_vectors,
-        )
 
     results: list[DocQueryResult] = []
     for entry in entries:
@@ -281,10 +419,14 @@ def _measure_profile(
             cutoff_k=cutoff_k,
             lexical_index=lexical_index,
             vector_index=vector_index,
-            embedder=embedder,
             query_vectors=query_vectors,
             dense_by_query=dense_by_product.get(entry.product_id),
+            pool_multiplier=pool_multiplier,
+            cross_query_fusion=cross_query_fusion,
         )
+        # ``per_query`` намеренно отдаёт больше ``cutoff_k`` чанков («сколько бы нашли,
+        # если бы не резали»). Документные метрики смотрят **срез** ``cutoff_k``: иначе
+        # политика выигрывала бы длиной списка, а не порядком.
         retrieved = document_ids_for(
             [chunk.chunk_id for chunk in retrieval.chunks], chunk_doc, top_k=cutoff_k
         )
@@ -314,10 +456,21 @@ def _measure_profile(
                               bootstrap=bootstrap, seed=seed)
 
 
-def _report_payload(report: Any) -> dict[str, Any]:
-    """Отчёт профиля как JSON: числа + по-ячеечная расшифровка (читается глазами)."""
+def _report_payload(
+    report: Any,
+    *,
+    label: str,
+    pool_multiplier: int,
+    cross_query_fusion: str,
+) -> dict[str, Any]:
+    """Отчёт комбинации как JSON: числа + по-ячеечная расшифровка (читается глазами)."""
+    from core.util.retrieval_eval import ndcg_at_k
+
     return {
+        "label": label,
         "profile": report.profile,
+        "pool_multiplier": pool_multiplier,
+        "cross_query_fusion": cross_query_fusion,
         "k": report.k,
         "cells": report.cells,
         "scored": report.scored,
@@ -327,6 +480,7 @@ def _report_payload(report: Any) -> dict[str, Any]:
         "recall_at_k": report.recall_at_k,
         "recall_ci": list(report.recall_ci),
         "mrr": report.mrr,
+        "ndcg_at_k": report.ndcg_at_k,
         "per_cell": [
             {
                 "cell": cell.cell,
@@ -335,6 +489,11 @@ def _report_payload(report: Any) -> dict[str, Any]:
                 "expected_doc_ids": list(cell.expected_doc_ids),
                 "retrieved_doc_ids": list(cell.retrieved_doc_ids),
                 "rank": cell.rank,
+                # По-ячеечный nDCG публикуется и у ``unresolved``: это формула на
+                # наблюдённой выдаче, а в среднее такие ячейки не входят (``scored``).
+                "ndcg_at_k": ndcg_at_k(
+                    cell.expected_doc_ids, cell.retrieved_doc_ids, report.k
+                ),
                 "unresolved": cell.unresolved,
             }
             for cell in report.per_cell
@@ -351,6 +510,8 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 #: Колонки по-ячеечной таблицы: ранг — первичное доказательство, выдача воспроизводима.
+#: ``label`` называет комбинацию сетки (пул и слияние), ``ndcg_at_k`` — по-ячеечная
+#: метрика позиций; прежние колонки остаются на своих местах.
 CELLS_CSV_COLUMNS = (
     "profile",
     "cell",
@@ -360,11 +521,13 @@ CELLS_CSV_COLUMNS = (
     "retrieved_docs",
     "rank",
     "unresolved",
+    "label",
+    "ndcg_at_k",
 )
 
 
 def _write_cells_csv(path: Path, reports: Sequence[dict[str, Any]]) -> None:
-    """Пишет по-ячеечную таблицу (CSV): ранг на ячейку и профиль.
+    """Пишет по-ячеечную таблицу (CSV): ранг на ячейку и комбинацию сетки.
 
     Выдача документов top-K в файл **не** попадает: она воспроизводится командой, а
     сотни ``doc_id`` по 70 символов раздули бы артефакт в разы. Публикуется то, из чего
@@ -377,7 +540,9 @@ def _write_cells_csv(path: Path, reports: Sequence[dict[str, Any]]) -> None:
         writer = csv.writer(handle)
         writer.writerow(CELLS_CSV_COLUMNS)
         for report in reports:
+            label = report.get("label", report["profile"])
             for cell in report["per_cell"]:
+                ndcg = cell.get("ndcg_at_k")
                 writer.writerow(
                     [
                         report["profile"],
@@ -388,6 +553,8 @@ def _write_cells_csv(path: Path, reports: Sequence[dict[str, Any]]) -> None:
                         len(cell["retrieved_doc_ids"]),
                         "" if cell["rank"] is None else cell["rank"],
                         "1" if cell["unresolved"] else "0",
+                        label,
+                        "" if ndcg is None else f"{ndcg:.4f}",
                     ]
                 )
 
@@ -410,6 +577,29 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--run-id", default=None, help="run_id (если в файле их несколько)")
     parser.add_argument(
         "--profiles", default="R0,R1,R2", help="профили через запятую (дефолт R0,R1,R2)"
+    )
+    parser.add_argument(
+        "--pool-multiplier",
+        type=int,
+        default=None,
+        help="множитель пула плеч R2 (скаляр; дефолт — DEFAULT_POOL_MULTIPLIER кода)",
+    )
+    parser.add_argument(
+        "--pool-multipliers",
+        default=None,
+        help="множители пула R2 через запятую (например 1,2,4,8); перекрывает "
+        "--pool-multiplier. Применяется только к R2",
+    )
+    parser.add_argument(
+        "--cross-query-fusion",
+        default=None,
+        help="политика кросс-запросного слияния (скаляр; дефолт — DEFAULT_CROSS_QUERY_FUSION)",
+    )
+    parser.add_argument(
+        "--cross-query-fusions",
+        default=None,
+        help="политики слияния через запятую (например max,rrf,per_query); "
+        "перекрывает --cross-query-fusion",
     )
     parser.add_argument(
         "--cutoff-k",
@@ -509,6 +699,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("measure: --profiles пуст", file=sys.stderr)
             return 2
 
+        from core.pipeline.retrieve import (
+            DEFAULT_CROSS_QUERY_FUSION,
+            DEFAULT_POOL_MULTIPLIER,
+        )
+
+        pool_scalar = (
+            DEFAULT_POOL_MULTIPLIER if args.pool_multiplier is None else args.pool_multiplier
+        )
+        fusion_scalar = (
+            DEFAULT_CROSS_QUERY_FUSION
+            if args.cross_query_fusion is None
+            else args.cross_query_fusion
+        )
+        try:
+            pool_multipliers = _resolve_pool_multipliers(
+                pool_scalar, args.pool_multipliers
+            )
+            cross_query_fusions = _resolve_cross_query_fusions(
+                fusion_scalar, args.cross_query_fusions
+            )
+        except SystemExit as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        grid = _measurement_grid(profiles, cross_query_fusions, pool_multipliers)
+
+        missing_params = [entry.cell for entry in entries if entry.param_id not in params]
+        if missing_params:
+            print(
+                f"measure: {len(missing_params)} ячеек эталона ссылаются на param_id, "
+                f"которых нет в каталоге прогона (первые: {', '.join(missing_params[:5])}) — "
+                "запрос не рендерится",
+                file=sys.stderr,
+            )
+            return 2
+
         from core.config.deploy import load_deploy_config
 
         deploy = load_deploy_config(args.deploy)
@@ -579,25 +804,55 @@ def main(argv: Sequence[str] | None = None) -> int:
         chunk_doc = _chunk_doc_map(conn)
         doc_ids = _corpus_doc_ids(conn)
 
+        from core.pipeline.evaluate import precompute_query_vectors
+
+        query_vectors = None
+        if embedder is not None:
+            # Векторы запросов считаются один раз на всю сетку: они не зависят ни от
+            # политики слияния, ни от множителя пула — только от текста и модели.
+            query_vectors = precompute_query_vectors(
+                [params[entry.param_id] for entry in entries],
+                profile="R1",  # вектор нужен любому dense-профилю; R0 его не использует
+                embedder=embedder,
+            )
+
         reports: list[dict[str, Any]] = []
         timings: dict[str, float] = {"lexical_index_seconds": round(lexical_seconds, 2)}
-        for profile in profiles:
-            profile_started = time.perf_counter()
+        # Кеш dense-плеча — по ``(продукт, множитель пула)``: окно батча равно
+        # ``cutoff_k * pool_multiplier``, поэтому хиты одного пула нельзя отдать
+        # комбинации с другим (иначе ``pool=8`` померил бы пул 1). Пул в ключе делает
+        # переиспользование внутри сетки безопасным и при этом дешёвым.
+        dense_cache: dict[tuple[str, int], Any] = {}
+        for profile, pool_multiplier, cross_query_fusion in grid:
+            label = _combination_label(profile, pool_multiplier, cross_query_fusion)
+            combination_started = time.perf_counter()
             report = _measure_profile(
                 profile=profile,
+                pool_multiplier=pool_multiplier,
+                cross_query_fusion=cross_query_fusion,
                 entries=entries,
                 params=params,
                 cutoff_k=cutoff_k,
                 lexical_index=lexical_index,
                 vector_index=vector_index,
-                embedder=embedder,
+                query_vectors=query_vectors,
                 chunk_doc=chunk_doc,
                 doc_ids=doc_ids,
                 bootstrap=args.bootstrap,
                 seed=args.seed,
+                dense_cache=dense_cache,
             )
-            timings[f"{profile}_seconds"] = round(time.perf_counter() - profile_started, 2)
-            reports.append(_report_payload(report))
+            timings[f"{label}_seconds"] = round(
+                time.perf_counter() - combination_started, 2
+            )
+            reports.append(
+                _report_payload(
+                    report,
+                    label=label,
+                    pool_multiplier=pool_multiplier,
+                    cross_query_fusion=cross_query_fusion,
+                )
+            )
 
         payload: dict[str, Any] = {
             "run_id": meta.run_id,
@@ -612,6 +867,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "index_embed_model_id": index_embed_model,
                 "dim": dim,
                 "profiles": profiles,
+                "pool_multipliers": list(pool_multipliers),
+                "cross_query_fusions": list(cross_query_fusions),
+                "grid": [report["label"] for report in reports],
                 "bootstrap": args.bootstrap,
                 "seed": args.seed,
                 "cells_in_golden": len(entries),
@@ -646,26 +904,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print("")
         print(
-            f"{'профиль':<8} {'scored':>6} {'unres':>6} {'hit@K':>7} {'hit CI':>17} "
-            f"{'recall@K':>9} {'recall CI':>17} {'MRR':>7}"
+            f"{'комбинация':<28} {'scored':>6} {'unres':>6} {'hit@K':>7} {'hit CI':>17} "
+            f"{'recall@K':>9} {'recall CI':>17} {'MRR':>7} {'nDCG@K':>7}"
         )
         for report in reports:
             hit_low, hit_high = report["hit_ci"]
             rec_low, rec_high = report["recall_ci"]
             print(
-                f"{report['profile']:<8} {report['scored']:>6} "
+                f"{report['label']:<28} {report['scored']:>6} "
                 f"{report['unresolved_cells']:>6} {report['hit_at_k']:>7.3f} "
                 f"[{hit_low:.3f}; {hit_high:.3f}] "
                 f"{report['recall_at_k']:>9.3f} [{rec_low:.3f}; {rec_high:.3f}] "
-                f"{report['mrr']:>7.3f}"
+                f"{report['mrr']:>7.3f} {report['ndcg_at_k']:>7.3f}"
             )
         print("")
         costs: list[str] = []
         if lexical_index is not None:
             costs.append(f"лексический индекс {timings['lexical_index_seconds']:.1f} с")
-        costs.extend(
-            f"{profile} {timings[f'{profile}_seconds']:.1f} с" for profile in profiles
-        )
+        for report in reports:
+            label = report["label"]
+            costs.append(f"{label} {timings[f'{label}_seconds']:.1f} с")
         print("цена: " + ", ".join(costs))
         for notice in notices:
             print(f"замечание проводки: {notice}")

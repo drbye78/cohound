@@ -43,6 +43,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.util.retrieval_eval import ndcg_at_k
+
 __all__ = [
     "DOC_GOLDEN_FORMAT",
     "DocGoldenEntry",
@@ -239,6 +241,10 @@ class DocRetrievalReport:
     :param hit_at_k: доля ``scored``, где ``rank is not None``.
     :param recall_at_k: средний по ``scored`` ``|найдено ∩ expected| / |expected|``.
     :param mrr: средний по ``scored`` ``1/rank`` (не найден — 0).
+    :param ndcg_at_k: средний по ``scored`` nDCG@K по бинарной релевантности: учитывает
+        **позиции всех** найденных ожидаемых документов, а не только первого (как MRR)
+        и не только их число (как recall). Дефолт ``0.0`` — поле добавлено после первых
+        публикаций отчёта, и старые конструкторы обязаны продолжать работать.
     :param hit_ci: бутстрэп-интервал ``hit_at_k`` (перцентили 2.5/97.5).
     :param recall_ci: бутстрэп-интервал ``recall_at_k``.
     :param per_cell: результаты ячеек в порядке входа.
@@ -255,6 +261,7 @@ class DocRetrievalReport:
     hit_ci: tuple[float, float]
     recall_ci: tuple[float, float]
     per_cell: tuple[DocQueryResult, ...]
+    ndcg_at_k: float = 0.0
 
 
 def _percentile(values: Sequence[float], q: float) -> float:
@@ -293,6 +300,10 @@ def evaluate_documents(
     seed: int = 0,
 ) -> DocRetrievalReport:
     """Считает документные метрики top-K и бутстрэп-интервалы по ячейкам.
+
+    Метрики: ``hit_at_k``, ``recall_at_k``, ``mrr`` и ``ndcg_at_k`` (позиции **всех**
+    найденных ожидаемых документов ячейки). Бутстрэп-интервалы считаются только для
+    ``hit``/``recall``: для nDCG интервала нет — отдельный вопрос, а не забытое поле.
 
     ``unresolved`` ячейки исключаются из метрик и считаются отдельно: «документа нет
     в корпусе» — не провал поиска. Если ``scored == 0``, метрики ``0.0``, интервалы
@@ -334,10 +345,16 @@ def evaluate_documents(
     reciprocal_ranks = [
         1.0 / result.rank if result.rank is not None else 0.0 for result in scored_cells
     ]
+    # nDCG@K по документам: позиции **всех** найденных ожиданий, а не только первого.
+    ndcgs = [
+        ndcg_at_k(result.expected_doc_ids, result.retrieved_doc_ids, k)
+        for result in scored_cells
+    ]
 
     hit_at_k = sum(hits) / scored
     recall_at_k = sum(recalls) / scored
     mrr = sum(reciprocal_ranks) / scored
+    ndcg = sum(ndcgs) / scored
 
     if bootstrap == 1:
         hit_ci = (hit_at_k, hit_at_k)
@@ -365,4 +382,5 @@ def evaluate_documents(
         hit_ci=hit_ci,
         recall_ci=recall_ci,
         per_cell=ordered,
+        ndcg_at_k=ndcg,
     )
