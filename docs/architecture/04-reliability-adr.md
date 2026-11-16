@@ -182,16 +182,18 @@
 
 ### C.1. Проверки на PR
 
-**`scripts/ci.sh` выполняет пять шагов:** `ruff check core tests scripts` (линтер) →
+**`scripts/ci.sh` выполняет шесть шагов:** `ruff check core tests scripts` (линтер) →
 `scripts/mypy_gate.py` (type-checker: `core/domain` — гейт «ноль ошибок», остальной `core/` —
 зафиксированный baseline) → `scripts/check_doc_anchors.py --strict` (якоря `путь:строка` в
 `docs/`, `README.md`, `AGENTS.md` указывают на существующую непустую строку) →
-`python3 tests/selfcheck.py` → `python3 -m pytest -q --cov=core` с порогом покрытия ядра
-(`fail_under = 80` в `pyproject.toml`). Таблица ниже разделена по этому факту: «гейт» из
+`scripts/check_runbook.py --strict` (команды, флаги, `COHOUND_*`, пути и ссылки в
+пользовательском руководстве разрешаются в коде) → `python3 tests/selfcheck.py` →
+`python3 -m pytest -q --cov=core` с порогом покрытия ядра (`fail_under = 80` в
+`pyproject.toml`). Таблица ниже разделена по этому факту: «гейт» из
 второй половины в CI **не** выполняется, даже если он обязателен к исполнению — его запускают
 вручную или на релизном (full-CI) прогоне.
 
-**В CI (`scripts/ci.sh` = `ruff` + `mypy_gate.py` + `check_doc_anchors.py --strict` + `selfcheck.py` + `pytest --cov`):**
+**В CI (`scripts/ci.sh` = `ruff` + `mypy_gate.py` + `check_doc_anchors.py --strict` + `check_runbook.py --strict` + `selfcheck.py` + `pytest --cov`):**
 
 Провайдер — GitHub Actions, `.github/workflows/ci.yml`. Файл не добавляет ни одного гейта: он
 готовит окружение (`uv sync --frozen` с объявленным набором extras) и вызывает **тот же**
@@ -243,6 +245,7 @@
 | **Типы: домен** | `core/domain` — ноль ошибок mypy (инварианты и scoring типизированы верно) | `scripts/mypy_gate.py` |
 | **Типы: долг не растёт** | остальной `core/` — ровно baseline, новая ошибка блокирует сборку | `scripts/mypy_gate.py` + `docs/architecture/mypy-baseline.txt` |
 | **Якоря документации** | каждый `path:line` в `docs/`, `README.md`, `AGENTS.md` резолвится в существующую непустую строку трекнутого файла; смысл не проверяется — `--show` печатает строку для человека | `scripts/check_doc_anchors.py --strict` |
+| **Команды руководства** | каждая строка запуска и каждый флаг в `docs/user-guide/` и `README.md` разрешаются в живом argparse-дереве (флаги приборов — в их `add_argument`), `COHOUND_*` объявлены, пути и ссылки существуют; смысл не проверяется | `scripts/check_runbook.py --strict` |
 | **Импорт-граф** | матрица зависимостей слоёв (итерация 1 §1) | `tests/selfcheck.py::_import_graph` (`ast`) |
 | **Грепп-нейтральность** | предметных терминов в `core/domain`/`core/ports`/`core/pipeline` нет (три слоя — это и есть гейт) | `tests/selfcheck.py::_neutrality` |
 | **DDL/триггеры** | схема + триггеры I4/I6/I7/I13/I18 | selfcheck |
@@ -611,7 +614,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 **Открытые вопросы (закрыть до/в ходе M0):**
 - формат импорт-графа CI (статический анализ импортов `core.*`) — ✅ сделано
   (`tests/selfcheck.py:1002` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:355`;
-  тот же шаг в CI — `scripts/ci.sh:50`);
+  тот же шаг в CI — `scripts/ci.sh:59`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
   итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1348` и `core/domain/models.py:1511`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);

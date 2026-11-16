@@ -143,6 +143,11 @@ public source → corpus_raw → hash → extraction → index → retrieval →
 
 ## Быстрый старт
 
+Сквозной порядок — от чистой машины до первого отчёта и до первого собственного
+измерения — в [`docs/user-guide/runbook.md`](docs/user-guide/runbook.md). Ниже — короткая
+версия; при расхождении верен runbook, и это расхождение ловится гейтом
+`scripts/check_runbook.py` (команды, флаги, переменные и пути сверяются с кодом).
+
 ### Установка
 
 Требуется Python **3.14** и `uv`.
@@ -360,7 +365,9 @@ per-run БД и audit store, но не должна быть авторитет�
 Пакет категории живёт в `packages/{case_id}/`. Его назначение и жизненный цикл описаны
 в [`docs/user-guide/package-profile.md`](docs/user-guide/package-profile.md), а
 подробный состав файлов и полей — в
-[`docs/user-guide/package-files.md`](docs/user-guide/package-files.md).
+[`docs/user-guide/package-files.md`](docs/user-guide/package-files.md). Порядок работы с
+системой целиком (среда, конфигурация, прогон, диагностика, эксперименты) —
+[`docs/user-guide/runbook.md`](docs/user-guide/runbook.md).
 
 Ключевые каталоги:
 

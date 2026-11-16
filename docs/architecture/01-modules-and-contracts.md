@@ -909,7 +909,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 |---|---|---|
 | `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1178` (`_shims_removed`) |
 | `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:124` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1178` |
-| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ✅ **закрыто** (29.10) — построчная сверка 111 утверждений (97 `check` + 14 `expect_raises`) с pytest-пирамидой: **94** имеют двойника (указан `путь:строка`), **8** держали покрытие в одиночку и дописаны тестами, **9** — структурные гейты над деревом, которым pytest-двойник противопоказан: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation`, `_domain_all_complete`, `_ports_contracts`, `_ports_i18`, `_ports_type_reuse`, полнота CLI-поверхности. Дописанные: конструктор `CellEvidence` (I19/R1/I10 — прежний тест проверял `check_evidence` на `model_construct`, то есть в обход валидатора), `core/util/text_utils` (язык, ё→е, нарезка, RU-токены), `core/util/security` (SSRF/allowlist/traversal/slug), `core/adapters/lexical_bm25` (**единственный адаптер без тестов**), `DoclingDocumentExtractor.supports`, `MarkdownChunkerPort`↔`ChunkerPort`. Пиксель-в-пиксель дублировать оставшиеся 94 не нужно и вредно: гейт над деревом и юнит-тест отвечают на разные вопросы. На 08.11 в selfcheck **113** утверждений (99 + 14) — два добавлены после сверки. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py`; `tests/domain` — 13 файлов / 172 функции / 183 кейса, `tests/store` — 20 файлов / 286 функций / 315 кейсов |
+| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ✅ **закрыто** (29.10) — построчная сверка 111 утверждений (97 `check` + 14 `expect_raises`) с pytest-пирамидой: **94** имеют двойника (указан `путь:строка`), **8** держали покрытие в одиночку и дописаны тестами, **9** — структурные гейты над деревом, которым pytest-двойник противопоказан: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation`, `_domain_all_complete`, `_ports_contracts`, `_ports_i18`, `_ports_type_reuse`, полнота CLI-поверхности. Дописанные: конструктор `CellEvidence` (I19/R1/I10 — прежний тест проверял `check_evidence` на `model_construct`, то есть в обход валидатора), `core/util/text_utils` (язык, ё→е, нарезка, RU-токены), `core/util/security` (SSRF/allowlist/traversal/slug), `core/adapters/lexical_bm25` (**единственный адаптер без тестов**), `DoclingDocumentExtractor.supports`, `MarkdownChunkerPort`↔`ChunkerPort`. Пиксель-в-пиксель дублировать оставшиеся 94 не нужно и вредно: гейт над деревом и юнит-тест отвечают на разные вопросы. На 08.11 в selfcheck **113** утверждений (99 + 14) — два добавлены после сверки. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:59`), обёртка — `tests/test_selfcheck.py`; `tests/domain` — 13 файлов / 172 функции / 183 кейса, `tests/store` — 20 файлов / 286 функций / 315 кейсов |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
 импорты идут напрямую из `core.domain` и `core.store.sqlite`. Последовательность миграции и её
@@ -920,8 +920,9 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 (`core/ports/__init__.py`): `GateStore` читается из `core.ports.store`, `GateDecision` — из
 `core.domain`. Порядок CI, который держит этот класс ошибок: `scripts/ci.sh` — ruff (`scripts/ci.sh:24`) →
 mypy-гейт (`scripts/ci.sh:32`) → `check_doc_anchors.py --strict` (`scripts/ci.sh:46`) →
-`tests/selfcheck.py` (`scripts/ci.sh:50`) →
-pytest + `--cov` (`scripts/ci.sh:82-88`).
+`check_runbook.py --strict` (`scripts/ci.sh:55`) →
+`tests/selfcheck.py` (`scripts/ci.sh:59`) →
+pytest + `--cov` (`scripts/ci.sh:91-97`).
 
 ---
 
