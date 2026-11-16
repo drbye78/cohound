@@ -47,6 +47,8 @@ from core.adapters.token_limit import (
 )
 from core.ports.types import Chunk, ExtractedDoc
 from core.util.document_formats import FAMILY_TEXT
+from core.util.embed_input import EMBED_INPUT_FIELDS as _EMBED_INPUT_FIELDS
+from core.util.embed_input import embed_input_text
 
 __all__ = [
     "EMBED_INPUT_FIELDS",
@@ -55,6 +57,7 @@ __all__ = [
     "composite_chunker_version",
     "composite_chunking_spec",
     "declared_token_limiter",
+    "embed_input_text",
 ]
 
 _log = logging.getLogger(__name__)
@@ -93,12 +96,12 @@ def declared_token_limiter() -> TokenLimiter | None:
     return TokenLimiter(HfTokenCounter(model_id, revision or None), limit)
 
 
-#: Из каких полей чанка собирается текст, уходящий в эмбеддер. Часть **условия
-#: измерения**, а не деталь реализации: смена состава меняет индекс, не меняя версию
-#: правил нарезки, поэтому она обязана попадать в ``run_id`` через
-#: :func:`composite_chunking_spec`. Сегодня — только ``text`` (``context_prefix``
-#: генерируется и хранится, но в эмбеддинг не входит).
-EMBED_INPUT_FIELDS: tuple[str, ...] = ("text",)
+#: Из каких полей чанка собирается текст, уходящий в эмбеддер — реэкспорт из
+#: :mod:`core.util.embed_input`. Живёт там, а не здесь, потому что исполняет состав слой
+#: ``pipeline`` (``core.pipeline.corpus_index``), которому импорт адаптера запрещён
+#: матрицей зависимостей (§4.1). Здесь — только объявление в ``chunking_spec``.
+EMBED_INPUT_FIELDS: tuple[str, ...] = _EMBED_INPUT_FIELDS
+
 
 def composite_chunking_spec() -> dict[str, object]:
     """Геометрия нарезки и состав входа эмбеддера — объявленная часть контракта (C3).

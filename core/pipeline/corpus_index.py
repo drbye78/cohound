@@ -26,7 +26,8 @@ from core.pipeline.liveness import Heartbeat
 from core.ports.embedder import EmbedderPort
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.types import Chunk as PortChunk
-from core.util.hashing import short_hash
+from core.util.embed_input import embed_input_text
+from core.util.hashing import content_hash, short_hash
 from core.util.index_partition import build_root as _partition_root
 from core.util.index_partition import is_committed as _partition_is_committed
 from core.util.index_partition import read_manifest as _read_partition_manifest
@@ -656,7 +657,10 @@ def _embed_batched(
     сборке, а не заявляется.
 
     **Кэш векторов (опция).** При ``cache`` каждый чанк батча сначала спрашивается у кэша
-    по ключу ``(content_hash текста, embed_model_id, embed_device, embed_precision)``;
+    по ключу ``(SHA-256 входа эмбеддера, embed_model_id, embed_device, embed_precision)``;
+    вход — :func:`~core.util.embed_input.embed_input_text` от объявленных полей
+    (при составе ``("text",)`` он байт-в-байт равен ``text``, поэтому ключ совпадает с
+    ``content_hash`` и кэш прежних прогонов не инвалидируется);
     эмбеддер получает
     только промахи, свежие векторы сразу записываются в кэш, а хиты подставляются в **свои**
     позиции. Поэтому порядок входа = порядок выхода и при смешанном батче (инвариант
@@ -664,12 +668,15 @@ def _embed_batched(
     эмбеддера). ``cache=None`` — без кэша: один вызов ``embed`` на батч (по уникальным
     текстам), результат побайтово тот же.
 
-    **Дедуп по тексту.** Входной список группируется по ``CorpusChunk.content_hash``:
-    одинаковый текст, попавший в батч дважды (и в разные батчи — при ``cache=None``), уходит
-    в эмбеддер **один раз**, а полученный вектор раскладывается по всем его позициям. Порядок
-    векторов остаётся порядком чанков: слоты адресуются позицией, поэтому массив партиции
-    побайтово тот же, что у пути без дедупа. Чанк без ``content_hash`` дедупу не подлежит:
-    пустой ключ не различает тексты.
+    **Дедуп по входу эмбеддера.** Входной список группируется по строке, которую увидит
+    модель (:func:`~core.util.embed_input.embed_input_text`), а не по
+    ``CorpusChunk.content_hash``: одинаковый вход, попавший в батч дважды (и в разные батчи —
+    при ``cache=None``), уходит в эмбеддер **один раз**, а полученный вектор раскладывается по
+    всем его позициям. Порядок векторов остаётся порядком чанков: слоты адресуются позицией,
+    поэтому массив партиции побайтово тот же, что у пути без дедупа. Различие существенно при
+    объявленном составе шире ``("text",)``: два чанка с одинаковым текстом и разными
+    заголовками обязаны получить **разные** векторы, а группировка по ``content_hash`` отдала
+    бы второму вектор первого — тихо и без следа в провенансе.
 
     Кэш — оптимизация, а потому его сбой не должен стоить прогона: ``get``/``put`` устроены
     как промах/no-op на любой порче файла. Ошибка самого эмбеддера по-прежнему пробрасывается
@@ -713,27 +720,30 @@ def _embed_batched(
     for start in range(0, total, batch_size):
         batch = chunks[start : start + batch_size]
         slots: list[list[float] | None] = [None] * len(batch)
-        # Дедуп по тексту: один ``content_hash`` — одна работа эмбеддера. Порядок слотов
-        # держит позиция чанка, поэтому порядок векторов не меняется (A3), а массив
-        # партиции остаётся побайтово тем же, что у пути без дедупа.
+        # Дедуп по **входу эмбеддера**, а не по ``content_hash`` текста: вектор — функция
+        # строки, которую увидела модель, а строка собирается из объявленных полей
+        # (:func:`~core.util.embed_input.embed_input_text`). При составе
+        # ``("text",)`` ключи совпадают байт-в-байт с ``content_hash`` (оба — SHA-256 того
+        # же текста), поэтому кэш и дедуп прежних прогонов не инвалидируются. При другом
+        # составе они расходятся — и это именно то различение, которого не хватало: два
+        # чанка с одинаковым текстом и **разными** заголовками обязаны получить разные
+        # векторы, а группировка по ``content_hash`` отдала бы второму вектор первого.
         groups: dict[str, list[int]] = {}
-        unkeyed: list[int] = []
+        texts: dict[str, str] = {}
         for position, chunk in enumerate(batch):
-            key = chunk.content_hash or ""
-            if key:
-                groups.setdefault(key, []).append(position)
-            else:
-                # Пустой хеш не различает тексты: такой чанк дедупу не подлежит.
-                unkeyed.append(position)
-        # ``(ключ, позиции, текст)`` на каждый уникальный текст батча.
+            text = embed_input_text(chunk)
+            key = content_hash(text)
+            groups.setdefault(key, []).append(position)
+            texts.setdefault(key, text)
+        # ``(ключ, позиции, текст)`` на каждый уникальный вход батча.
         pending: list[tuple[str, list[int], str]] = []
-        #: Ключи, обслуженные в этом батче без кэша: ``(content_hash, позиция в батче)``.
+        #: Ключи, обслуженные в этом батче без кэша: ``(ключ, позиция в батче)``.
         #: Строка матрицы берётся после записи батча — так дедуп не держит вторую копию.
         fresh_rows: list[tuple[str, int]] = []
         cached_now = 0
         # Сколько позиций ушло бы в эмбеддер без дедупа: ровно это и есть измеряемая
         # экономия. Кэш-хиты сюда не входят — они и так не считаются.
-        would_embed = len(unkeyed)
+        would_embed = 0
         for key, positions in groups.items():
             reused = known.get(key) if cache is None else None
             if reused is not None:
@@ -757,26 +767,8 @@ def _embed_batched(
                     slots[position] = hit
                 cached_now += len(positions)
                 continue
-            pending.append((key, positions, batch[positions[0]].text))
+            pending.append((key, positions, texts[key]))
             would_embed += len(positions)
-        for position in unkeyed:
-            hit = (
-                cache.get(
-                    "",
-                    embed_model_id,
-                    embed_device=embed_device,
-                    embed_precision=embed_precision,
-                    dim=expected_dim,
-                )
-                if cache is not None
-                else None
-            )
-            if hit is not None:
-                slots[position] = hit
-                cached_now += 1
-                continue
-            pending.append(("", [position], batch[position].text))
-            would_embed += 1
         if pending:
             fresh = embedder.embed([text for _key, _positions, text in pending])
             if len(fresh) != len(pending):
@@ -788,27 +780,16 @@ def _embed_batched(
                 # Вектор — функция текста: один и тот же на все позиции группы.
                 for position in positions:
                     slots[position] = vector
-                if key:
-                    if cache is None:
-                        # Без кэша повтор того же текста в следующем батче берётся отсюда.
-                        # Запоминается **позиция**, а не вектор: строка матрицы появится
-                        # только после ``sink.add``, и ссылка на неё не держит копию.
-                        fresh_rows.append((key, positions[0]))
-                    else:
-                        # Пишем ровно то, что вернула модель: квантизация в fp16 — забота
-                        # кэша, и она тождественна той, что делает сборщик индекса.
-                        cache.put(
-                            key,
-                            embed_model_id,
-                            vector,
-                            embed_device=embed_device,
-                            embed_precision=embed_precision,
-                            dim=expected_dim,
-                        )
-                elif cache is not None:
-                    # Пустой ключ невалиден — ``put`` остаётся видимым no-op кэша.
+                if cache is None:
+                    # Без кэша повтор того же входа в следующем батче берётся отсюда.
+                    # Запоминается **позиция**, а не вектор: строка матрицы появится
+                    # только после ``sink.add``, и ссылка на неё не держит копию.
+                    fresh_rows.append((key, positions[0]))
+                else:
+                    # Пишем ровно то, что вернула модель: квантизация в fp16 — забота
+                    # кэша, и она тождественна той, что делает сборщик индекса.
                     cache.put(
-                        "",
+                        key,
                         embed_model_id,
                         vector,
                         embed_device=embed_device,

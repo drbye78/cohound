@@ -23,11 +23,13 @@ from core.adapters.chunker_family import (
     composite_chunker_version,
     composite_chunking_spec,
     declared_token_limiter,
+    embed_input_text,
 )
 from core.adapters.chunker_markdown import MarkdownChunker, MarkdownChunkerPort
 from core.adapters.chunker_text import TextChunker
 from core.adapters.token_limit import TokenLimiter
 from core.ports.types import Chunk, ExtractedDoc
+from core.util import embed_input
 
 _TEXT = "# not a heading\n\nПервый абзац достаточно длинный.\n\nВторой абзац тоже длинный."
 _MARKDOWN = "# Раздел\n\n## Подраздел\n\nТекст раздела достаточно длинный."
@@ -95,6 +97,62 @@ def test_chunking_spec_declares_text_geometry() -> None:
         "min_chunk_size": TextChunker().min_chunk_size,
     }
     assert spec["embed_input"] == ["text"]
+
+
+# --------------------------------------------------------------------------- #
+# Вход эмбеддера (O19): объявленный состав исполняется, дефолт — байт-в-байт text
+# --------------------------------------------------------------------------- #
+
+
+def test_embed_input_is_exactly_the_text_by_default() -> None:
+    """При составе ``("text",)`` вход эмбеддера **байт-в-байт** равен ``text``.
+
+    На этом свойстве держится неизменность ``embed_cache`` и дедупа: ключ кэша —
+    SHA-256 входа, а ``content_hash`` чанка — SHA-256 его текста. Разойдись они на один
+    байт — объявленная ось молча инвалидировала бы весь кэш при выключенном значении.
+    """
+    chunk = Chunk(
+        chunk_id="c1",
+        chunk_no=0,
+        text="текст куска",
+        heading_path="Раздел > Подраздел",
+        context_prefix="шапка",
+        content_hash="h",
+    )
+    assert embed_input_text(chunk) == chunk.text
+
+
+def test_embed_input_follows_the_declared_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Состав входа — функция :data:`EMBED_INPUT_FIELDS`, а не ``chunk.text``."""
+    # Состав живёт в ``core.util.embed_input`` (его исполняет слой ``pipeline``), а
+    # ``chunker_family`` его реэкспортирует только для объявления в ``chunking_spec``:
+    # подменять надо источник, иначе тест проверял бы копию.
+    monkeypatch.setattr(
+        embed_input, "EMBED_INPUT_FIELDS", ("heading_path", "context_prefix", "text")
+    )
+    chunk = Chunk(
+        chunk_id="c1",
+        chunk_no=0,
+        text="текст",
+        heading_path="Раздел",
+        context_prefix="шапка",
+        content_hash="h",
+    )
+    assert embed_input_text(chunk) == "Раздел\n\nшапка\n\nтекст"
+
+
+def test_embed_input_skips_empty_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пустое поле не оставляет разделителя: вектор зависит от содержания, не от формы."""
+    monkeypatch.setattr(embed_input, "EMBED_INPUT_FIELDS", ("heading_path", "text"))
+    chunk = Chunk(
+        chunk_id="c1",
+        chunk_no=0,
+        text="текст",
+        heading_path="   ",
+        context_prefix="",
+        content_hash="h",
+    )
+    assert embed_input_text(chunk) == "текст"
 
 
 # --------------------------------------------------------------------------- #

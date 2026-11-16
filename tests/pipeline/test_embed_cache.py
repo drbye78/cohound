@@ -520,7 +520,15 @@ def test_old_envelope_format_is_a_miss_and_is_overwritten(tmp_path: Path) -> Non
 
 
 def test_invalid_key_is_a_miss_not_a_crash(tmp_path: Path) -> None:
-    """Чанк без ``content_hash`` не может стать ключом — промах, без исключения."""
+    """Невалидный ключ — промах, без исключения (ключ кэша санитизируется, а не падает).
+
+    **Что изменилось с O19.** Раньше ключом был ``content_hash`` чанка, и чанк без него
+    давал пустой ключ — отсюда счётчик ``invalid_key`` на этом пути. Теперь ключ —
+    SHA-256 **входа эмбеддера** (:func:`~core.adapters.chunker_family.embed_input_text`),
+    то есть он непуст всегда: пустой ключ на этом пути стал невозможен по построению, и
+    проверка «промах, а не падение» переехала на сам кэш (ниже). Заодно чанк без
+    ``content_hash`` перестал быть особым случаем: он обслуживается кэшем как любой другой.
+    """
     cache = EmbedCache(tmp_path / "embed_cache")
     bare = CorpusChunk(
         chunk_id="c1", doc_id="d1", product_id="p1", text="без хеша"
@@ -530,7 +538,11 @@ def test_invalid_key_is_a_miss_not_a_crash(tmp_path: Path) -> None:
         embedder, [bare], cache=cache, embed_model_id=MODEL, embed_device=DEVICE, embed_precision=PRECISION
     )
     assert len(vectors) == 1 and len(embedder.calls) == 1
-    assert cache.stats()["invalid_key"] >= 1
+    # Ключ — хеш входа, а не пустая строка: запись легла в кэш и обслуживается повторно.
+    key = content_hash("без хеша")
+    hit = cache.get(key, MODEL, embed_device=DEVICE, embed_precision=PRECISION)
+    assert hit is not None
+    assert list(hit) == list(vectors[0])
     assert cache.get("", MODEL, embed_device=DEVICE, embed_precision=PRECISION) is None
     assert cache.get("../../etc/passwd", MODEL, embed_device=DEVICE, embed_precision=PRECISION) is None
     # Необъявленное устройство — тоже невалидный ключ (пустая метка не адресует запись).

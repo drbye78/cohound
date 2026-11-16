@@ -136,17 +136,60 @@ def test_duplicate_across_batches_without_cache_is_embedded_once() -> None:
     assert _fp16(vectors) == _fp16(baseline)
 
 
-def test_chunks_without_content_hash_are_not_deduplicated() -> None:
-    """Пустой хеш не различает тексты: два одинаковых текста без хеша считаются оба."""
+def test_chunks_without_content_hash_are_deduplicated_by_the_embed_input() -> None:
+    """Ключ дедупа — хеш **входа эмбеддера**, а не ``content_hash`` текста.
+
+    Раньше пустой ``content_hash`` отключал дедуп: ключ не различал тексты. Теперь ключ
+    считается по строке, которую увидит модель, поэтому различает он всегда — и два
+    одинаковых текста без ``content_hash`` дают **один** вектор (это верно: вектор —
+    функция текста). Разные тексты по-прежнему не склеиваются.
+    """
     chunks = [
         _chunk("same", chunk_id="c0", hashed=False),
         _chunk("same", chunk_id="c1", hashed=False),
+        _chunk("other", chunk_id="c2", hashed=False),
     ]
     embedder = FakeEmbedder(dim=4)
 
     vectors = _embed(chunks, embedder=embedder)
 
-    assert embedder.calls == [["same", "same"]]
+    assert embedder.calls == [["same", "other"]]
+    assert len(vectors) == 3
+
+
+def test_same_text_with_different_headings_is_not_deduplicated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ось ``EMBED_INPUT_FIELDS`` исполняется: заголовок входит в вход — вход различает.
+
+    Это защита от **тихой** ошибки: если группировать по ``content_hash`` (он у обоих
+    чанков одинаков), второй получил бы вектор первого, посчитанный без его заголовка.
+    Замеряемая цена такой ошибки — весь смысл O19.
+    """
+    monkeypatch.setattr(
+        "core.pipeline.corpus_index.embed_input_text",
+        lambda chunk: f"{chunk.heading_path}\n\n{chunk.text}",
+    )
+    chunks = [
+        _chunk("same", chunk_id="c0"),
+        _chunk("same", chunk_id="c1"),
+    ]
+    # Заголовки разные, текст один: ключи обязаны разойтись.
+    chunks[1] = CorpusChunk(
+        chunk_id="c1",
+        doc_id="doc-c1",
+        product_id="p1",
+        url=URL,
+        heading_path="h2",
+        chunk_no=0,
+        text="same",
+        content_hash=content_hash("same"),
+    )
+    embedder = FakeEmbedder(dim=4)
+
+    vectors = _embed(chunks, embedder=embedder)
+
+    assert embedder.calls == [["h1\n\nsame", "h2\n\nsame"]]
     assert len(vectors) == 2
 
 
