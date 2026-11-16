@@ -46,7 +46,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:213-222`).
 - Блокирующий отказ делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2722`, `core/pipeline/corpus_coverage.py:216-218`, условие 2) —
+  (`core/domain/models.py:2746`, `core/pipeline/corpus_coverage.py:216-218`, условие 2) —
   **пока URL не закрыт объявленным артефактом**: материал, предъявленный артефактом
   (`corpus_docs.origin=manual`), перестаёт делать сеанс неполным (`resolved_manually`,
   `core/pipeline/corpus_coverage.py:261-270`, сверено 07.11.2026).
@@ -80,14 +80,14 @@
 развалится.
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
-намерению: `retain` (`core/pipeline/corpus_ingest.py:1159`) — единственный writer сырых
+намерению: `retain` (`core/pipeline/corpus_ingest.py:1160`) — единственный writer сырых
 байтов, с единственным вызовом (`core/pipeline/corpus.py:2554`, `_commit_local`), в который
 сходятся оба
 транспорта (локальный и executor).
 
 ```
 RawPage (core/ports/types.py:95-125)
-  → retain (core/pipeline/corpus_ingest.py:1159)   # сам хеширует байты, кладёт в corpus_raw
+  → retain (core/pipeline/corpus_ingest.py:1160)   # сам хеширует байты, кладёт в corpus_raw
     → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1423,
       `persist_docs`)
 ```
@@ -468,7 +468,7 @@ gaps:
 
 **Цепочка.** `_build_corpus` подаёт объявленные файлы после дренажа продукта (отказы краула
 уже в элементах сеанса) и до Pass B (документы входят в ту же сборку): файл → `RawPage`
-(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1159`)
+(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1160`)
 → экстракция → чанкер → индекс. Второго
 пути байтов в evidence нет (I19): retained-файл называет хеш самих байтов, а хеш от
 декларации не принимается.
@@ -501,7 +501,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
    дренажа корня (пулы, окна, провенанс). Объявленный контейнер получает видимую запись
    `errors` и retained-байты; предоставлять нужно документы членов. Молчаливого «скормить
    архив экстрактору» нет.
-2. `RawPage` ручной подачи несёт `engine=ORIGIN_MANUAL` (`core/pipeline/corpus_ingest.py:2064`),
+2. `RawPage` ручной подачи несёт `engine=ORIGIN_MANUAL` (`core/pipeline/corpus_ingest.py:2070`),
    а `corpus_docs.origin` заведён **в дополнение** к движку: движок
    описывает транспорт, а происхождение байтов — отдельный факт, который нужен и без
    `RawPage` (после прогона). `render_mode` у ручной подачи — `NULL` (получения не было;

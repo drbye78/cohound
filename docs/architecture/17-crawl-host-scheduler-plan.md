@@ -34,7 +34,7 @@
 
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:1259`),
 сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2797`), retention сырых байтов
-(`retain`, `core/pipeline/corpus_ingest.py:1159`), durable per-URL состоянием (`crawl_session_items`,
+(`retain`, `core/pipeline/corpus_ingest.py:1160`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:554`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.

@@ -208,7 +208,7 @@ products × doc_domains
 `IndexBuilderPort`, за эмбеддинги — `EmbedderPort` (K3).
 
 **Эмбеддинг — внешними батчами, а не одним вызовом на продукт** (`_embed_batched`,
-`core/pipeline/corpus_index.py:538-575`): один батч — один вызов `embed` и одна точка
+`core/pipeline/corpus_index.py:539-575`): один батч — один вызов `embed` и одна точка
 наблюдения, размер — `EMBED_BATCH_CHUNKS = 64` (`core/pipeline/corpus_index.py:79`). Батч
 ограничивает **второй** материализуемый список (тексты чанков), а не накопитель векторов:
 партицию собирает `IndexBuilderPort.build(chunks, vectors, meta)` целиком, поэтому пик «все
@@ -477,7 +477,7 @@ seed-корнем глубины 0** — это и есть «один уров�
 - `partition_build_id` = `"pb_" + short_hash(_PARTITION_SCHEMA, package_id, product_id,
   chunker_version, embed_model_id, embed_device, embed_precision, extractor_version,
   lexical_engine_version, vector_store,
-  product_content_token)` (`_derive_partition_build_id`, `core/pipeline/corpus_index.py:86-151`;
+  product_content_token)` (`_derive_partition_build_id`, `core/pipeline/corpus_index.py:87-151`;
   `_PARTITION_SCHEMA = "partition-3"`, `core/pipeline/corpus_index.py:54`).
   `embed_device`/`embed_precision` — не деталь:
   векторы CPU и CUDA (и fp32/fp16) численно разные, поэтому без них партиция одной
@@ -687,7 +687,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:657-694`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:658-694`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
   сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1416-1421`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
@@ -964,7 +964,7 @@ request-файлы гейтов — `core/pipeline/gate_subject.py:427`); вер
 гранулярность транзакций SQLite при массовой записи — ✅ сделано
 (`core/store/sqlite.py:125` `PRAGMA journal_mode = WAL` +
 `core/store/sqlite_store.py:97` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch`
-`core/store/sqlite_store.py:664` — одна транзакция на пачку).
+`core/store/sqlite_store.py:665` — одна транзакция на пачку).
 
 **Что остаётся открытым, хотя в §H не значится:** шаг (3) эшелона — проверка следствия
 статуса из цитаты (§C.2, V1) и append-only раунды K2 (§G.2). Оба названы в тексте и оба

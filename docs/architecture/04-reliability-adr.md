@@ -356,7 +356,7 @@ tests/
 растёт храповиком до OOM-kill. Ниже — рычаги as-built и их замеры. Провенанс цифр —
 докстринг `core/util/memory.py` и комментарии `packages/ru-pg-dbms/run.yaml` (§`crawl`).
 
-**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`core/adapters/extract_document.py:1105`,
+**1. Очередь страниц PDF — `PDF_QUEUE_MAX_SIZE = 1`.** (`core/adapters/extract_document.py:1128`,
 `_PDF_QUEUE_MAX_SIZE_BY_LEVEL`: `layout`/`layout_tables`/`full` → 1, `text` → `None` — у
 `NativePdfPipeline` этого механизма нет.) Причина — не «PDF целиком», а **число страниц в
 полёте**. Замер при дефолтном `queue_max_size=100` (пики воркера): `text` 1191 MiB,
@@ -625,8 +625,8 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   `core/store/backup.py:274` `restore_run`; снапшот через `sqlite3.Connection.backup`, не
   копирование файла);
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
-  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:303`; маркер
-  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:211`; профиль публикуемости
+  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:304`; маркер
+  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:212`; профиль публикуемости
   `outputs/publishability.yaml` — `core/pipeline/report.py:3794`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через

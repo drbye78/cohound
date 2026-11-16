@@ -603,6 +603,6 @@ _partition_reuse_reason 2926-3005
 10. **CI** — 5557 passed, 6 skipped, coverage **89.90 %**; `mypy_gate.py` 121/121 (долг не
     вырос; 12 ключей сменили путь — записи переехали вслед за кодом); `selfcheck` 111/111;
     `ruff` чист; `check_doc_anchors.py` — **0 проблем / 15 предупреждений** (после
-    перенумерации 143 якорей и трёх ручных исправлений: `corpus_index.py:86`
+    перенумерации 143 якорей и трёх ручных исправлений: `core/pipeline/corpus_index.py:87`
     `_derive_partition_build_id`, `_PARTITION_SCHEMA` `partition-1 → partition-2`,
     `evaluate.py:2756` (`_persist`) и `:2988,3073-3074` для `max_retries`).

@@ -235,7 +235,7 @@ endpoint'а, а не узла. Глобальный ресурс имеет од
 | `convert:*` | **content_hash** | ключ результата `(content_hash, extractor_version, level)` (`extract_cache.py`); работа без состояния |
 | `chunk` | **content_hash** | чистая функция текста и `chunker_version` |
 | `embed` | **content_hash** | ключ `embed_cache` |
-| `index` | **product** | `partition_build_id` продуктовый (`corpus_index.py:86`) |
+| `index` | **product** | `partition_build_id` продуктовый (`core/pipeline/corpus_index.py:87`) |
 | `evaluate` | **product** | I17: ретривал продуктовый |
 
 То есть продукт — единица эксклюзивности ровно для двух стадий, и обе требуют продукт

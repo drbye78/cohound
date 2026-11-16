@@ -325,7 +325,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W2 — Домен — ✅ done
 
-✅ сделано (проверено) — `core/domain/models.py:82` (`_BASE = ConfigDict(extra="forbid", …)` — база всех моделей),
+✅ сделано (проверено) — `core/domain/models.py:83` (`_BASE = ConfigDict(extra="forbid", …)` — база всех моделей),
 `core/domain/scoring.py:389` (знаменатель `scope_universe`), property-тесты — `tests/domain/`.
 
 - Модели Pydantic с `extra="forbid"`, `StrEnum`-перечисления, чистые `check_*`-инварианты,
@@ -544,7 +544,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:2008` (`render_battle_card`), `:1827:1930`
+✅ сделано (проверено) — `core/pipeline/report.py:2021` (`render_battle_card`), `:1827:1930`
 (`render_nda_questions`), `:2414` (`render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, 26.10) и
 `runs/ru-pg-dbms-c2e7b860ac17/outputs/` (**12** файлов, 06.11, включая `battle_card.xlsx`,
@@ -615,7 +615,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W14 — Стадийная архитектура извлечения и пост-извлечения — ⚠️ частично
 
 ⚠️ частично: Д-2…Д-8, A1–A6, B1–B4, группа 0 закрыты; остаток — документный `pb`, `memmap`,
-B2, B6 (`24` F1.5, `07` §6). Документный `pb` ещё не введён: `core/pipeline/corpus_index.py:153`
+B2, B6 (`24` F1.5, `07` §6). Документный `pb` ещё не введён: `core/pipeline/corpus_index.py:154`
 (`_product_content_token`) считает токен по `(chunk_id, content_hash)`; `pooled` как размещение
 отсутствует (`grep -c pooled core/` → 0); `grep "F3\b" core/` **не пусто** (`core/ports/store.py:361`,
 `core/store/sqlite.py:79`) — прежнее «пусто» было ложным.

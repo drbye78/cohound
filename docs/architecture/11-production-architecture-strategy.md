@@ -398,7 +398,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > `core/pipeline/index_build.py:30-33` объясняет, почему документы не едут в результате);
 > эмбеддинг батчами по `EMBED_BATCH_CHUNKS = 64` (`core/pipeline/corpus_index.py:79`).
 > **Нет** `memmap`-записи партиции и документного `pb`: `product_content_token` по-прежнему
-> хеш пар `(chunk_id, content_hash)` (`core/pipeline/corpus_index.py:153`). Сделано из
+> хеш пар `(chunk_id, content_hash)` (`core/pipeline/corpus_index.py:154`). Сделано из
 > смежного: бюджетирование памяти и ширина пула (F0), write-through спуска (F1).
 
 **Зачем.** Это и есть архитектурная работа, описанная теперь в `24` §8 (F0–F8). Она не зависит от качества карты,

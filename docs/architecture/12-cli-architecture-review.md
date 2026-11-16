@@ -439,7 +439,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 
 ### Команды «только для чтения» создают БД
 
-✅ сделано (`core/store/sqlite.py:851-897` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
+✅ сделано (`core/store/sqlite.py:879-897` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
 Перемер на тех же трёх командах и несуществующем пути: `review --db /tmp/…/x.db`,
 `sensitivity --db …`, `golden --golden … --db …` → **`exit 4`**, каталог не создаётся
 (`ls: cannot access …`: файла нет). Сообщение называет причину: «read-only команда файл не
@@ -588,7 +588,7 @@ JSON-артефакт** (БД не меняет:
 
 **Ссылочный счёт (сверено 07.11.2026).** Этот документ цитируется как обоснование из **12**
 файлов кода и тестов (в `README.md` до этой сверки стояло «9»): `core/pipeline/golden_status.py:34`,
-`core/store/sqlite.py:867`, `core/store/sqlite_store.py:2088`, `core/cli/commands/status.py:3`,
+`core/store/sqlite.py:895`, `core/store/sqlite_store.py:2088`, `core/cli/commands/status.py:3`,
 `core/cli/commands/runs.py:4`, `core/cli/run_overview.py:4`, `core/cli/wiring.py:654`,
 `tests/cli/test_gate.py:347`, `tests/cli/test_runs_status.py:3`,
 `tests/store/test_read_only_connect.py:6`, `tests/cli/test_read_only_commands.py:3`,

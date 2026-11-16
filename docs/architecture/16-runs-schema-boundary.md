@@ -334,7 +334,7 @@ per-site (`core/pipeline/crawl_frontier.py:826`) — два уровня одн�
   конфига, отсутствие `model_id` — dense-ветвь не собирается (`embed_spec: null`, видимая
   заметка wiring), недоступность объявленной модели — `EXIT_USAGE`, а не другой адаптер.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
-  `core/domain/models.py:517`), дефолт `None` — по той же причине, что у `pdf_device`
+  `core/domain/models.py:518`), дефолт `None` — по той же причине, что у `pdf_device`
   (`core/domain/models.py:617-623`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
   что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:488-509`).
@@ -369,7 +369,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 одного места — `core/pipeline/run_identity.py:383`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:2808-2834`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:2821-2834`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. `execution_change: embed_device` diff называет и тогда, когда
 поле есть только с одной стороны.
 ⚠️ **Сверено 08.11.2026 — оговорка к «старые прогоны читаются»:** совместимость чтения
@@ -377,7 +377,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (§3), поэтому `hound diff` против прогона прошлой схемы невозможен не из-за поля, а из-за
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
-`RunManifest` (`core/domain/models.py:1739`) получает поле `embed_device`, и этого
+`RunManifest` (`core/domain/models.py:1740`) получает поле `embed_device`, и этого
 достаточно: `_contract_field_attr` (`core/pipeline/report.py:2866`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
 (`core/pipeline/report.py:2849`)
@@ -435,7 +435,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 
 ### 5.1. `embed_device` в материале и в манифесте (**✅ as-built**)
 
-Материал `_derive_partition_build_id` (`core/pipeline/corpus_index.py:86-151`) получает `embed_device`
+Материал `_derive_partition_build_id` (`core/pipeline/corpus_index.py:87-151`) получает `embed_device`
 рядом с `embed_model_id`; манифест партиции — ключ `embed_device` в том же явном словаре
 (`core/adapters/index_npy.py:323-353`, где `extra` сливается на
 `core/adapters/index_npy.py:353`; второго места нет);
@@ -513,7 +513,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 
 ## 6. `chunk_id` (run-level)
 
-`_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:181-199`, где
+`_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:182-199`, где
 `doc_hash` — `extracted.content_hash`, вызов — `core/pipeline/corpus_ingest.py:1575`) →
 **`f"{product_id}:{doc_version_id}:{chunk_no}"`**.
 Почему в этой границе: `chunk_id` — часть `LexicalChunk`/`RetrievedChunk` и адрес гидртации
@@ -671,7 +671,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
   (подмножество параметров проходит, но перечень вариантов надо расширить).
 - `tests/selfcheck.py:808-818` (список обязательных таблиц — `run_product` в него),
   `tests/selfcheck.py:820-846` (ассерты по колонкам `runs`/`corpus_docs`),
-  `tests/selfcheck.py:1756-1758` (round-trip
+  `tests/selfcheck.py:1764-1766` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml` — **✅ синхронизировано:** `pdf_device`
   (`docs/status-dictionary.yaml:443`), `embed_device`
@@ -894,13 +894,13 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 **Чего не было вовсе:**
 
 1. **`EmbedConfig`/`EmbedRunConfig` не существовали** — имена были только в этом документе
-   (§4.1). ✅ Созданы границей: `core/domain/models.py:517` (`EmbedRunConfig`).
+   (§4.1). ✅ Созданы границей: `core/domain/models.py:518` (`EmbedRunConfig`).
 2. **Порт эмбеддера без `device`** — и это правильно; устройство идёт явным параметром
    (§4.1). Иначе граница повторила бы дефект: спрашивать у адаптера, на чём он считает.
    ✅ Сверено 08.11.2026: порт по-прежнему без `device` (`core/ports/embedder.py:15-21`).
 3. **Грамматика `source_id`** — `chunk_id` с четырьмя сегментами несовместим с
    `parse_source_id` (§6.1); и фолбэк `resolve()` был мёртв (починен, §6.3).
-   ✅ Закрыто 29.10.2026: `core/pipeline/corpus_index.py:181-199` (форма `_chunk_id`),
+   ✅ Закрыто 29.10.2026: `core/pipeline/corpus_index.py:182-199` (форма `_chunk_id`),
    `core/store/sqlite_store.py:3458` (четыре шага `resolve`).
 4. **`persist_manifest` — явный список колонок** (§4.2): колонка, не вписанная туда, не
    пишется никогда (на 29.10 — хотя `ALTER TABLE` её создал; с 3.14.0 шимов нет, колонка

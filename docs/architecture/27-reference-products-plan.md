@@ -53,7 +53,7 @@ upstream-факте в **измерение** с датой, цитатой и �
 | деталь | состояние |
 |---|---|
 | `PackageManifest.baselines: list[str]` (`core/domain/models.py:239`) | ✅ список — под B уже годится |
-| `BaselineRow` (`models.py:375`), `load_baselines` (`core/config/run_config.py:287`) | ✅ ключ `(baseline_id, param_id)` — это и есть «матрица параметр × базлайн» |
+| `BaselineRow` (`core/domain/models.py:376`), `load_baselines` (`core/config/run_config.py:287`) | ✅ ключ `(baseline_id, param_id)` — это и есть «матрица параметр × базлайн» |
 | режимы `direct/conditional/blocked` + I8 (`invariants.py:527`) | ✅ |
 | порог `min_version` (`inheritance.py:127`) | ✅ (нераспознанная версия → пропуск) |
 | базис «объявлено/выпущено» (`inheritance.py:378`) | ✅ |

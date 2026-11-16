@@ -49,7 +49,7 @@
 разбирает импорты **статически** (`ast`, без исполнения), включая резолв relative-импортов
 (`tests/selfcheck.py:1046` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
 (`tests/selfcheck.py:1063` `_check_edge`), то есть проверка по принципу allow-list, отдельных
-«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1070`
+«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1078`
 `_neutrality` (§1.3), `tests/selfcheck.py:1178` `_shims_removed` (нет `core.schemas`/`core.db`),
 `tests/selfcheck.py:3299` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
 по **всему** слою, а не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет
