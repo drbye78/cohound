@@ -108,8 +108,12 @@ def test_schema_version_is_additive_bump() -> None:
     3.25.0 — O36 фаза 2 плана ``26``: структурные блоки документа
     (``corpus_docs.blocks``, ``runs.blocks_json``); таблица ``corpus_members`` не менялась,
     файлы ≤ 3.24.0 отвергаются гейтом версии.
+
+    3.26.0 — O39 фаза 2 плана ``26``: адрес куска в таблице
+    (``corpus_chunks.table_ref``); таблица ``corpus_members`` не менялась, файлы ≤ 3.25.0
+    отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.25.0"
+    assert SCHEMA_VERSION == "3.26.0"
     conn = connect(":memory:")
     try:
         tables = {

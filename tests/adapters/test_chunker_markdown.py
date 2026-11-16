@@ -289,7 +289,7 @@ def test_version_is_a_stack_of_grammar_engine_and_policy() -> None:
     """
     version = MarkdownChunker.version
     assert version.startswith("md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-")
-    assert "/policy-5" in version
+    assert "/policy-6" in version
     assert "mdit-unknown" not in version, "версия движка должна читаться из метаданных"
     assert MarkdownChunker().chunk_overlap == 0
 

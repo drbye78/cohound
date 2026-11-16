@@ -572,6 +572,9 @@ def ingest_member_doc(
                 # а не потеря: ``CorpusChunk`` принимает либо пару, либо ``None``/``None``.
                 char_start=getattr(chunk, "char_start", None),
                 char_end=getattr(chunk, "char_end", None),
+                # O39 ф2: адрес куска внутри таблицы — как его объявил чанкер. У члена
+                # контейнера он есть ровно тогда, когда у члена есть таблицы-объекты.
+                table_ref=getattr(chunk, "table_ref", None),
             )
         )
     return MemberOutcome(

@@ -219,10 +219,10 @@ text/markdown/EPUB как первый класс (`adapters/extract_text.py`, `
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
 бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
-`SCHEMA_VERSION` = **`3.22.0`** (версия SQLite-схемы прогона, **не** регламента), и файл с
+`SCHEMA_VERSION` = **`3.26.0`** (версия SQLite-схемы прогона, **не** регламента), и файл с
 другой версией **отвергается** с сообщением, а не читается молча (гейт `11` §2.6); durable
 per-product состояние `state/{package_id}/state.db` версионируется отдельно —
-`STATE_SCHEMA_VERSION` = **`"12"`** (`store/state_sqlite.py`, см. `09` §4); `runs.settings_provenance_json`
+`STATE_SCHEMA_VERSION` = **`"13"`** (`store/state_sqlite.py`, см. `09` §4); `runs.settings_provenance_json`
 хранит провенанс настроек (A3), `runs.crawl_provenance_json` — провенанс краула (сеансы/движки/дайджест
 источников, Phase 2), `runs.crawl_strategy`/`runs.crawl_rate_limit` — операционные оси краула
 (границы `execution_change`, §13), `runs.crawl_config_digest`/`runs.registry_spec_digest` —
@@ -449,7 +449,7 @@ M0 должен давать **сквозной вертикальный сре�
 `core/edge/server.py`, `contracts/seam/openapi.json`; 0020 — знаменатель `scope_universe`
 (`core/pipeline/compute.py:184`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);
 0022 — `core/util/memory.py` (`malloc_trim`); 0023 — `core/pipeline/gate_subject.py` + `gates/*-request.json`;
-0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:112`) + `cells.absence_as_of` (`core/store/sqlite.py:420`).
+0024 — `SCHEMA_VERSION` 3.20.0 (`core/store/sqlite.py:143`) + `cells.absence_as_of` (`core/store/sqlite.py:467`).
 
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).

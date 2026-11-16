@@ -43,6 +43,7 @@ from core.domain import (
     StaleReason,
     Status,
 )
+from core.domain.doc_tables import table_ref_from_json
 from core.ports.types import Chunk
 
 
@@ -520,6 +521,9 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
         content_hash=row["content_hash"] or "",
         char_start=row["char_start"],
         char_end=row["char_end"],
+        # Адрес куска в таблице: порча JSON читается как «неизвестно», а не как исключение
+        # — отчёт обязан строиться и на повреждённой БД.
+        table_ref=table_ref_from_json(row["table_ref"]),
     )
 
 

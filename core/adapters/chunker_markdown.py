@@ -86,6 +86,7 @@ from core.adapters.md_ast import (
     parse_markdown,
     safe_cut_offsets,
 )
+from core.domain.doc_tables import TableList, TableRef
 from core.ports.types import Chunk, ExtractedDoc
 from core.util.text_utils import SENTENCE_END_CHARS
 
@@ -164,6 +165,131 @@ class _Cut:
     sentence: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _TableBinding:
+    """Табличный блок текста и его объект: ``(отрезок, table_id, начала строк данных)``.
+
+    ``rows_verified`` — число строк данных в тексте совпало с числом строк объекта. Если не
+    совпало, адрес таблицы всё равно известен (блок и объект сопоставлены по порядку), а
+    диапазон строк — нет: ``TableRef`` тогда называет таблицу и молчит о строках. Догадка
+    о строках была бы хуже молчания, потому что её нельзя отличить от факта.
+    """
+
+    start: int
+    end: int
+    table_id: str
+    row_starts: tuple[int, ...]
+    rows_verified: bool
+
+
+def _table_data_rows(block: MdBlock, expected: int) -> list[MdBlock]:
+    """Строки **данных** табличного блока, сверенные с числом строк объекта.
+
+    Шапка — не строка данных: её имена это оглавление, а не наблюдение. Но **есть ли она
+    в тексте** — вопрос, на который отвечает не разметка, а сам объект: pipe-таблица всегда
+    печатает строку-шапку с разделителем, даже когда у таблицы шапки нет (тогда docling
+    выводит в неё первую строку данных). Поэтому правило такое:
+
+    * строк в тексте на одну больше, чем в объекте — первая шапка, остальные данные;
+    * строк столько же — шапки в тексте нет, все строки данные (шапка синтезирована из
+      первой строки);
+    * ни то, ни другое — сопоставление строк не выполняется (``[]``), и ``TableRef``
+      называет таблицу без диапазона: догадка о строках неотличима от факта.
+
+    Измерено 16.11.2026 на 181 таблице: у таблиц **без** шапки (75 из 181) число строк в
+    тексте равно числу строк объекта, у таблиц с шапкой — на одну больше. Без этой сверки
+    адрес строки уехал бы на единицу ровно у таблиц без шапки.
+    """
+    rows = [item for item in block.walk() if item.kind == "table_row"]
+    if block.info.get("dialect") in ("grid", "multiline", "simple"):
+        data = [row for row in rows if not row.info.get("header")]
+        return data if len(data) == expected else []
+    if len(rows) == expected + 1:
+        return rows[1:]
+    if len(rows) == expected:
+        return rows
+    return []
+
+
+def _table_bindings(
+    document: MdDocument, tables: TableList | None
+) -> tuple[_TableBinding, ...]:
+    """Сопоставляет табличные блоки текста с таблицами-объектами читателя.
+
+    **Правило сопоставления — порядок, и только он.** docling не сообщает смещений таблиц в
+    экспортированном markdown, поэтому единственная связь между объектом и блоком —
+    позиция. Это допустимо ровно потому, что она **проверяема**: измерено 16.11.2026 на 22
+    документах / 181 таблице — число блоков совпало с числом объектов во всех 22
+    (``objects_vs_blocks_differ = 0``). При несовпадении сопоставление не выполняется
+    вовсе: «сдвинулось на одну» и «другая таблица» неразличимы, и привязать чанк к чужой
+    таблице хуже, чем не привязать ни к какой.
+    """
+    if tables is None:
+        return ()
+    blocks = [
+        block
+        for top in document.blocks
+        for block in top.walk()
+        if block.kind == "table"
+    ]
+    if not blocks or len(blocks) != len(tables):
+        return ()
+    bindings: list[_TableBinding] = []
+    for block, table in zip(blocks, tables, strict=True):
+        rows = _table_data_rows(block, len(table.rows))
+        bindings.append(
+            _TableBinding(
+                start=block.span.start_char,
+                end=block.span.end_char,
+                table_id=table.table_id,
+                row_starts=tuple(row.span.start_char for row in rows),
+                rows_verified=len(rows) == len(table.rows),
+            )
+        )
+    return tuple(bindings)
+
+
+def _table_ref_for(
+    bindings: tuple[_TableBinding, ...], start: int, end: int
+) -> TableRef | None:
+    """Адрес куска ``[start, end)`` внутри таблицы либо ``None``.
+
+    **Пересечение, а не вложенность**, и это выбор по замеру, а не по удобству. Кусок
+    начинается с заголовка секции и кончается на границе строки таблицы (первая граница
+    реза — самая крупная в окне), поэтому «кусок целиком внутри таблицы» не выполнялось
+    бы почти никогда: на реальном документе (6 таблиц, ``chunk_size=1500``) вложенных
+    кусков было **0 из 7**. При этом адрес нужен именно такому куску: в нём лежит шапка
+    таблицы, без которой строка сравнения не читается.
+
+    Кусок, пересекающий **две** таблицы, адреса не получает: «t0 и t3» — не адрес, а
+    перечисление, и выбрать из него одну значило бы соврать.
+    """
+    touched = [
+        binding
+        for binding in bindings
+        if start < binding.end and end > binding.start
+    ]
+    if len(touched) != 1:
+        return None
+    binding = touched[0]
+    if not binding.rows_verified:
+        return TableRef(table_id=binding.table_id)
+    covered = [
+        index
+        for index, row_start in enumerate(binding.row_starts)
+        if start <= row_start < end
+    ]
+    if not covered:
+        # Кусок пересекает таблицу, но не начинается ни на одной её строке данных: так
+        # выглядит кусок из одной шапки. Таблица названа, строки — нет.
+        return TableRef(table_id=binding.table_id)
+    return TableRef(
+        table_id=binding.table_id,
+        row_start=covered[0] + 1,
+        row_end=covered[-1] + 1,
+    )
+
+
 def _sha256_16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
@@ -191,7 +317,14 @@ class MarkdownChunker:
     #: ``policy-5`` — вторая половина правил Pandoc (таблицы grid/multiline/simple и
     #: подпись, raw TeX, нативный ``Div``): набор блоков и границы чанков в профиле
     #: ``pandoc`` меняются ещё раз; ``gfm``/``commonmark`` по-прежнему не затронуты.
-    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-5"
+    #: ``policy-6`` (O39 фаза 2) набор чанков **не** меняет: ``text``, ``chunk_no`` и
+    #: ``content_hash`` те же (измерено 16.11.2026: ни одна строка таблицы не превышает
+    #: бюджета куска, разрезы уже стоят на границах строк). Меняется адрес: кусок
+    #: таблицы получает ``table_ref`` (какая таблица и какие её строки). Версия всё равно
+    #: растёт, потому что иначе переиспользованный chunk-set из ``state.db`` пришёл бы без
+    #: адреса — и «кусок не из таблицы» стало бы молчаливой ложью о куске, который из неё.
+    #: Это тот же класс, что ``pdfium-text-5``: текст байт-в-байт тот же, провенанс — нет.
+    version = f"md-ast-1:{COMMONMARK_SPEC_VERSION}+gfm+pandoc/{_engine_version()}/policy-6"
 
     #: Объявленный (и снятый) размер перекрытия: контракт продолжает его публиковать
     #: (:func:`core.adapters.chunker_family.composite_chunking_spec`), а значение 0 —
@@ -214,7 +347,9 @@ class MarkdownChunker:
 
     # -- public --------------------------------------------------------- #
 
-    def chunk_text(self, document_id: str, text: str) -> list[Chunk]:
+    def chunk_text(
+        self, document_id: str, text: str, tables: TableList | None = None
+    ) -> list[Chunk]:
         """Режет markdown на структурные куски; ``text`` куска — точный срез (P1).
 
         Инвариант проверяем: ``"".join(c.text for c in chunks)`` равно
@@ -227,6 +362,10 @@ class MarkdownChunker:
         """
         document = parse_markdown(text, self.profile)
         index = LineIndex(document.text)
+        # Таблицы-объекты читателя (если он их даёт): из них берётся адрес куска, а не
+        # текст. ``text`` куска остаётся точным срезом, поэтому цитата по-прежнему
+        # сверяется с ним (I22) и ``content_hash`` не зависит от привязки.
+        bindings = _table_bindings(document, tables)
         chunks: list[Chunk] = []
         for section in self._sections(document):
             for start, end, context in self._pieces(document, section, index):
@@ -244,6 +383,7 @@ class MarkdownChunker:
                         content_hash=_sha256_16(body),
                         char_start=start,
                         char_end=end,
+                        table_ref=_table_ref_for(bindings, start, end),
                     )
                 )
         return chunks
@@ -636,5 +776,10 @@ class MarkdownChunkerPort(MarkdownChunker):
     """
 
     def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:
-        """Порт-путь: ``ExtractedDoc`` + ``document_id`` → структурные чанки."""
-        return self.chunk_text(document_id, doc.text)
+        """Порт-путь: ``ExtractedDoc`` + ``document_id`` → структурные чанки.
+
+        ``doc.tables`` передаётся в нарезку: из него берётся **адрес** куска
+        (``table_ref``), а не текст. ``None`` (читатель таблиц не даёт) — законный вход:
+        чанки получаются без адреса, и это видно числом в отчёте.
+        """
+        return self.chunk_text(document_id, doc.text, doc.tables)

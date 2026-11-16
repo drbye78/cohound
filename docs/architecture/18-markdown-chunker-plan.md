@@ -39,7 +39,7 @@ indented code, HTML-блоки, сноски, fenced div, line blocks, grid/mult
   настоящий парсер нашёл 64 блока `code_block` — ошибка в шесть раз, молча.
 - **Таблицы теряют шапку**: 292 из 1450 таблиц когорты длиннее `chunk_size`; шапка
   остаётся в предыдущем чанке, строки без имён параметров нечитаемы как evidence.
-- **`context_prefix` — дубль `heading_path`** (`core/adapters/chunker_markdown.py:243`), а промпт печатает
+- **`context_prefix` — дубль `heading_path`** (`core/adapters/chunker_markdown.py:382`), а промпт печатает
   только один из двух (`core/pipeline/prompt.py:323`): ёмкость поля простаивает.
 - **Провенанс не доходит до оценщика**: `RetrievedChunk` не несёт `context_prefix`
   (`core/ports/vector_index.py:34`).
@@ -96,7 +96,7 @@ shortcodes. Это не «никогда»: нет грамматики — не
 а не формула. Профиль входит в **`chunking_spec`** (`markdown.profile`,
 `core/adapters/chunker_family.py:137`) — объявленный вход прогона, — но **не** в строку
 `chunker_version`: та называет стек грамматики, движка и политики
-(`core/adapters/chunker_markdown.py:194`), а профиль — свойство экземпляра (`:205`), и
+(`core/adapters/chunker_markdown.py:327`), а профиль — свойство экземпляра (`:205`), и
 версия от него не зависит. В рантайме профиль пока **всегда `gfm`**: `FamilyChunker`
 собирает порт без аргумента (`core/adapters/chunker_family.py:191`), `ExtractedDoc`
 профиля не несёт, и `pandoc` достижим только из тестов и скриптов. Это названный остаток
@@ -124,7 +124,7 @@ shortcodes. Это не «никогда»: нет грамматики — не
 | citation / footnote ref / bracketed span | инлайновый токен | нет | — | `citations`, `footnote_refs`, `spans` |
 
 **Перекрытия не будет.** `chunk_overlap` (был 200, снят: `chunk_overlap = 0`,
-`core/adapters/chunker_markdown.py:199`) несовместим с P1: он дублирует
+`core/adapters/chunker_markdown.py:332`) несовместим с P1: он дублирует
 абзацы и шапки таблиц, а докстринг уже фиксирует, что дубли удваивают evidence-шум. Снятие
 перекрытия — отдельный замер «до/после» в L0.
 
@@ -225,9 +225,9 @@ shortcodes. Это не «никогда»: нет грамматики — не
 **L1b-2a — провенанс до оценщика (без схемы)**
 
 - ✅ `chunker_version` как стек:
-  `md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-4.2.0/plugins-0.6.1/policy-5` — действующая
-  версия (`core/adapters/chunker_markdown.py:194`; на момент L1b-2a в стеке стоял
-  `policy-3`, дальше `policy-4`/`policy-5` из §L3). Версия
+  `md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-4.2.0/plugins-0.6.1/policy-6` — действующая
+  версия (`core/adapters/chunker_markdown.py:327`; на момент L1b-2a в стеке стоял
+  `policy-3`, дальше `policy-4`/`policy-5` из §L3, `policy-6` — O39 фаза 2). Версия
   движка берётся **из метаданных пакета**, а не из константы: обновление зависимости
   меняет правила разбора и обязано менять `run_id` (тот же класс, что `extractor_stack`).
 - ✅ `chunking_spec`: добавлен профиль грамматики (`markdown.profile`). Бюджет в токенах
@@ -634,4 +634,4 @@ shortcodes. Это не «никогда»: нет грамматики — не
 | 04.11.2026 | L3, первая половина: правила блоков Pandoc в `md_dialect` — семантика пустой строки (список/цитата не прерывают абзац), line block, fancy/example lists; `chunker_version` → **`policy-4`** | дифференциальный оракул `pandoc 2.17.1.1`: `list_without_blank_line` 40 → 0 (26 → 0 на срезе прохода), `blockquote_without_blank_line` 1 → 0, `example_list` 2 → 0, `fancy_list` 2 → 0; `conformance_md` без сдвига (0 на 635/653, 652/652 и 670/670); в профиле `pandoc` меняется набор блоков ⇒ `execution_change`, `commonmark`/`gfm` правила не исполняют; остаются таблицы, raw TeX, HTML-`Div` (`2026-11-04-pandoc-dialect-blocks.md`) |
 | 04.11.2026 | L3, вторая половина: grid/multiline/simple таблицы с подписью, raw TeX, нативный `Div` в `md_dialect`; `chunker_version` → **`policy-5`** | оракул: `unparsed_construct` 6 → **0**, `sequence_length` 11 → **0**, `type_mismatch`/`oracle_error` 0, код 0 (59 док. / 2 387 блоков; дерево 0 и до, и после); `conformance_md` без сдвига; чанк-сет снимка 1 929 док. — **0 различий** в `gfm` и `pandoc` (в пилоте 1 216 pipe-таблиц, 1 simple, 1 raw, grid/multiline/`Div` — 0), поэтому версия объявлена `execution_change` по **объявленному поведению**, а не по сдвигу на пилоте; оракул нашёл ложную simple-таблицу в SQL-блоке — guard; 12 новых тестов, каждая ветка проверена мутантом (`2026-11-04-pandoc-dialect-tables.md`) |
 | 04.11.2026 | §7: атомарность единицы запинена для 25 конструкций §5 (54 формы, 17 видов) двумя бюджетами; страж «ничего не проверялось»; зубы — 3 мутанта (1/10/28 красных) | первый и последний непробельные символы в одном чанке при бюджете больше конструкции; при малом — объявленный контекст; остаток назван: definition list, `:::`-div, math, footnote, raw HTML, инлайновые токены |
-| 09.11.2026 | план переведён в **справочник** (as-built); `CONTINUATION_UNCHECKED` остаётся кодом, профиль диалекта в рантайме всегда `gfm` — названный остаток проводки | открытых задач плана нет; границы грамматик и P1–P13 — единственный дом этих знаний; §4 утверждал «профиль входит в `chunker_version`» — ложно (версия — константа класса, `chunker_markdown.py:194`) |
+| 09.11.2026 | план переведён в **справочник** (as-built); `CONTINUATION_UNCHECKED` остаётся кодом, профиль диалекта в рантайме всегда `gfm` — названный остаток проводки | открытых задач плана нет; границы грамматик и P1–P13 — единственный дом этих знаний; §4 утверждал «профиль входит в `chunker_version`» — ложно (версия — константа класса, `chunker_markdown.py:327`) |

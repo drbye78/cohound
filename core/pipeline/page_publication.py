@@ -11,7 +11,7 @@
 
 * ``outputs/evidence_pages.csv`` — строка на evidence: продукт, параметр, вид источника и
   тип доказательства, документ, чанк, смещения, ``page``/``page_end``, ``page_status``,
-  ``block``/``block_status``;
+  ``block``/``block_status``, ``table``/``table_rows``/``table_status``;
 * блок ``page_provenance`` манифеста (:func:`evidence_pages_summary`) — те же числа,
   свёрнутые до прогона и продукта, чтобы факт был виден без разбора CSV;
 * строка для оператора (:func:`human_line`) — в ``notes`` CLI-отчёта;
@@ -56,7 +56,32 @@
 * ``no_char_span`` — чанк есть, но ``char_start is None``;
 * ``no_chunk``/``no_doc`` — как у страницы.
 
-Пустая ячейка ``page``/``page_end``/``block`` — «не известно», не ноль.
+**Таблица (O39 фаза 2) — третий адрес, и здесь он колонка, а не функция.** Страница и блок
+считаются из носителя документа (карты страниц / списка блоков) по ``char_start`` чанка. У
+таблицы такого источника нет: объект таблицы (``corpus_docs.tables``) смещений в тексте
+**не несёт** — docling их не сообщает, — поэтому «какой кусок покрывает эти строки таблицы»
+знает только нарезка, и она пишет ответ в ``corpus_chunks.table_ref``
+(:class:`core.domain.doc_tables.TableRef`). Считать адрес таблицы из смещений здесь было бы
+догадкой (A3), поэтому он **читается** из колонки чанка. Текст чанка от этой правки не
+менялся (измерено 16.11.2026: ``chunk_text`` с таблицами и без — байт в байт).
+
+``table_status`` — пять исходов, и каждый называет свой носитель отсутствия:
+
+* ``mapped`` — таблица названа и диапазон строк есть;
+* ``table_without_rows`` — таблица названа, диапазона нет: шапка ушла отдельным куском либо
+  число строк объекта и табличного блока не сошлось;
+* ``no_table_ref`` — адреса нет: читатель таблиц их не даёт (``text_layer``/pdfium, HTML,
+  EPUB, Office, ``split``) либо сопоставление не выполнялось. На уровне документа видно
+  первое различие (``runs.tables_json.documents_unmeasured`` — «читатель не даёт» против
+  «таблицы прочитаны»); отдельного счётчика «сопоставление не выполнялось» (``documents_unbound``,
+  назван в :class:`core.domain.doc_tables.TableRef`) у отчёта пока **нет производителя**, и
+  выдавать отсутствие счётчика за ноль нельзя (A3);
+* ``no_chunk``/``no_doc`` — как у страницы.
+
+``table_ref is None`` у чанка — **не** «кусок не из таблицы», а «адрес неизвестен».
+
+Пустая ячейка ``page``/``page_end``/``block``/``table``/``table_rows`` — «не известно», не
+ноль.
 
 Источник — **персистентные** данные (``corpus_docs``/``corpus_chunks``/``cell_evidence``), а
 не память прогона: на resume фазы корпуса короткозамкнуты, а отчёт обязан называть тот же
@@ -90,6 +115,12 @@ __all__ = [
     "PAGE_STATUS_NO_CHUNK",
     "PAGE_STATUS_NO_DOC",
     "PAGE_STATUS_NO_PAGE_MAP",
+    "TABLE_STATUSES",
+    "TABLE_STATUS_MAPPED",
+    "TABLE_STATUS_NO_CHUNK",
+    "TABLE_STATUS_NO_DOC",
+    "TABLE_STATUS_NO_TABLE_REF",
+    "TABLE_STATUS_WITHOUT_ROWS",
     "collect_evidence_pages",
     "evidence_pages_summary",
     "human_line",
@@ -113,6 +144,9 @@ EVIDENCE_CSV_COLUMNS: tuple[str, ...] = (
     "page_status",
     "block",
     "block_status",
+    "table",
+    "table_rows",
+    "table_status",
 )
 
 #: Страница известна.
@@ -154,6 +188,28 @@ PAGE_STATUSES: tuple[str, ...] = (
     PAGE_STATUS_NO_CHAR_SPAN,
     PAGE_STATUS_NO_CHUNK,
     PAGE_STATUS_NO_DOC,
+)
+
+#: Таблица названа и диапазон строк есть.
+TABLE_STATUS_MAPPED = "mapped"
+#: Таблица названа, диапазона строк нет (шапка ушла отдельным куском либо число строк
+#: объекта и табличного блока не сошлось).
+TABLE_STATUS_WITHOUT_ROWS = "table_without_rows"
+#: Адреса нет: читатель таблиц их не даёт либо сопоставление не выполнялось (второго
+#: счётчика у отчёта нет — ``documents_unbound`` назван в ``TableRef``, но не публикуется).
+TABLE_STATUS_NO_TABLE_REF = "no_table_ref"
+#: ``source_id`` не найден в ``corpus_chunks`` — это не корпусная цитата.
+TABLE_STATUS_NO_CHUNK = "no_chunk"
+#: Чанк есть, документа нет — битая ссылка.
+TABLE_STATUS_NO_DOC = "no_doc"
+
+#: Все исходы для таблицы — в порядке объявления (сводка печатает их всегда, включая нули).
+TABLE_STATUSES: tuple[str, ...] = (
+    TABLE_STATUS_MAPPED,
+    TABLE_STATUS_WITHOUT_ROWS,
+    TABLE_STATUS_NO_TABLE_REF,
+    TABLE_STATUS_NO_CHUNK,
+    TABLE_STATUS_NO_DOC,
 )
 
 
@@ -315,6 +371,34 @@ def _row(
             # Точный срез есть, но список блоков его не покрывает (порча либо блоки
             # другого текста): адрес не выдумывается (A3), и причина — «блоков нет».
             block_status = BLOCK_STATUS_NO_BLOCKS
+    # Таблица — третий адрес (O39 фаза 2). Порядок проверок тот же (чанк → документ →
+    # носитель → строки), но носитель здесь **колонка** ``corpus_chunks.table_ref``: объект
+    # таблицы смещений в тексте не несёт, и посчитать адрес из ``char_start`` было бы
+    # догадкой. ``table_ref is None`` — «неизвестно», а не «кусок не из таблицы».
+    table_ref = getattr(chunk, "table_ref", None) if chunk is not None else None
+    table: str | None = None
+    table_rows: str | None = None
+    if chunk is None:
+        table_status = TABLE_STATUS_NO_CHUNK
+    elif doc_id is None:
+        table_status = TABLE_STATUS_NO_DOC
+    elif table_ref is None:
+        table_status = TABLE_STATUS_NO_TABLE_REF
+    elif table_ref.row_start is None:
+        # Таблица названа, строк данных в куске нет: шапка ушла отдельным куском либо
+        # число строк объекта и табличного блока не сошлось — адрес строк не выдумывается.
+        table_status = TABLE_STATUS_WITHOUT_ROWS
+        table = table_ref.table_id
+    else:
+        table_status = TABLE_STATUS_MAPPED
+        table = table_ref.table_id
+        # Половины диапазона не бывает (инвариант :class:`TableRef`), поэтому ``None`` во
+        # второй границе здесь означал бы нарушенный контракт, а не «строк нет».
+        row_start = int(table_ref.row_start)
+        row_end = table_ref.row_end or row_start
+        # Пара печатается одним полем: «4-7», а равенство границ — одним числом. Это не
+        # диапазон страниц: строка таблицы не режется, поэтому пара всегда осмысленна.
+        table_rows = f"{row_start}-{row_end}" if row_start != row_end else str(row_start)
     return {
         "product_id": _text(getattr(evidence, "product_id", "")),
         "param_id": _text(getattr(evidence, "param_id", "")),
@@ -329,6 +413,9 @@ def _row(
         "page_status": status,
         "block": block,
         "block_status": block_status,
+        "table": table,
+        "table_rows": table_rows,
+        "table_status": table_status,
     }
 
 
@@ -389,24 +476,30 @@ def collect_evidence_pages(
 def _summary(
     rows: Sequence[dict[str, Any]], products: Iterable[str] = ()
 ) -> dict[str, Any]:
-    """Сводка по строкам: всего/со страницей/с блоком, по исходам и по продуктам.
+    """Сводка по строкам: всего/со страницей/с блоком/с таблицей, по исходам и продуктам.
 
     ``by_product`` содержит **нули** для всех продуктов плана (симметрия с
     ``partial_docs_summary``): «у этого продукта цитат нет» — тоже факт. Продукты, которых
     нет в плане, не выдумываются.
 
-    Блок (O36 фаза 2) считается **теми же строками**, что и страница: второй расчёт
-    разошёлся бы с файлом. ``with_block`` и ``by_block_status`` — не новая сущность, а
-    те же числа для второго адреса цитаты.
+    Блок (O36 фаза 2) и таблица (O39 фаза 2) считаются **теми же строками**, что и страница:
+    второй расчёт разошёлся бы с файлом. ``with_block``/``by_block_status`` и
+    ``with_table``/``with_table_rows``/``by_table_status`` — не новые сущности, а те же
+    числа для второго и третьего адреса цитаты. ``with_table`` — сколько цитат назвали
+    таблицу (диапазон строк при этом может отсутствовать), ``with_table_rows`` — сколько
+    назвали и таблицу, и строки.
     """
     by_status = {status: 0 for status in PAGE_STATUSES}
     by_block_status = {status: 0 for status in BLOCK_STATUSES}
+    by_table_status = {status: 0 for status in TABLE_STATUSES}
     by_product: dict[str, dict[str, int]] = {
-        str(product): {"evidence": 0, "with_page": 0, "with_block": 0}
+        str(product): {"evidence": 0, "with_page": 0, "with_block": 0, "with_table": 0}
         for product in products
     }
     with_page = 0
     with_block = 0
+    with_table = 0
+    with_table_rows = 0
     for row in rows:
         status = str(row.get("page_status") or "")
         if status in by_status:
@@ -414,9 +507,12 @@ def _summary(
         block_status = str(row.get("block_status") or "")
         if block_status in by_block_status:
             by_block_status[block_status] += 1
+        table_status = str(row.get("table_status") or "")
+        if table_status in by_table_status:
+            by_table_status[table_status] += 1
         bucket = by_product.setdefault(
             str(row.get("product_id") or ""),
-            {"evidence": 0, "with_page": 0, "with_block": 0},
+            {"evidence": 0, "with_page": 0, "with_block": 0, "with_table": 0},
         )
         bucket["evidence"] += 1
         if row.get("page") is not None:
@@ -425,12 +521,20 @@ def _summary(
         if row.get("block") is not None:
             with_block += 1
             bucket["with_block"] += 1
+        if row.get("table") is not None:
+            with_table += 1
+            bucket["with_table"] += 1
+        if row.get("table_rows") is not None:
+            with_table_rows += 1
     return {
         "evidence": len(rows),
         "with_page": with_page,
         "with_block": with_block,
+        "with_table": with_table,
+        "with_table_rows": with_table_rows,
         "by_status": by_status,
         "by_block_status": by_block_status,
+        "by_table_status": by_table_status,
         "by_product": dict(sorted(by_product.items())),
     }
 
@@ -450,7 +554,8 @@ def summary_with_products(
     }
     for product in products:
         by_product.setdefault(
-            str(product), {"evidence": 0, "with_page": 0, "with_block": 0}
+            str(product),
+            {"evidence": 0, "with_page": 0, "with_block": 0, "with_table": 0},
         )
     updated = dict(summary)
     updated["by_product"] = dict(sorted(by_product.items()))
@@ -467,6 +572,11 @@ def evidence_pages_summary(
 
     ``products`` — план прогона: его продукты попадают в ``by_product`` с нулями, чтобы
     отсутствие цитат у продукта было видно, а не выводилось из отсутствия ключа.
+
+    Сводка несёт **три адреса** цитаты: страницу (``by_status``), блок (``by_block_status``)
+    и таблицу (``by_table_status``) — у каждого свой носитель отсутствия, поэтому и свой
+    набор исходов. Таблица добавлена без изменения формы остальных полей: блок манифеста
+    читается тем же кодом, что и раньше.
     """
     rows, summary = collect_evidence_pages(store, run_id)
     if not rows:
@@ -539,6 +649,12 @@ def human_line(summary: Mapping[str, Any] | None) -> str | None:
     Второй адрес цитаты — **блок** (O36 фаза 2) — печатается тем же правилом: число и
     причины по классам. Причина у него своя (``no_blocks`` вместо ``no_page_map``), потому
     что носитель отсутствия другой: документ может нести карту страниц и не нести блоков.
+
+    Третий адрес — **таблица** (O39 фаза 2) — печатается только когда он непустой: у
+    большинства корпусов таблиц нет, и строка «таблицы: 0 цитат» была бы шумом, а не
+    фактом. Причина отсутствия таблицы названа в файле (``no_table_ref``), а не здесь: у
+    цитаты она почти всегда одна и та же («читатель таблиц их не даёт»), и перечисление её
+    в каждой строке оператора не добавляло бы сведения.
     """
     if not summary:
         return None
@@ -547,6 +663,8 @@ def human_line(summary: Mapping[str, Any] | None) -> str | None:
         return None
     with_page = int(summary.get("with_page") or 0)
     with_block = int(summary.get("with_block") or 0)
+    with_table = int(summary.get("with_table") or 0)
+    with_table_rows = int(summary.get("with_table_rows") or 0)
     # Сводка прежней схемы блока не несёт вовсе. Молчать о нём — единственный честный
     # вариант: «0 из N называют блок» было бы утверждением о корпусе, которого никто не
     # делал (A3). Живая сводка всегда несёт ``by_block_status``.
@@ -593,4 +711,11 @@ def human_line(summary: Mapping[str, Any] | None) -> str | None:
             f"блок: {with_block} из {evidence} называют блок"
             f"{block_tail}{block_broken_tail}"
         )
+    # Третий адрес — таблица. Печатается только когда он непустой: «таблицы: 0 цитат» у
+    # корпуса без таблиц было бы шумом, а не фактом (нули не печатаются — как у блока,
+    # который молчит целиком при пустой сводке). Хвост про строки — тоже только при
+    # ненулевом числе: «строки у 0» читалось бы как утверждение о таблицах.
+    if with_table:
+        rows_tail = f" (строки у {with_table_rows})" if with_table_rows else ""
+        parts.append(f"таблицы: {with_table} цитат{rows_tail}")
     return "; ".join(parts)

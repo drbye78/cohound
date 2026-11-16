@@ -67,10 +67,10 @@
    `observed_how`, `actor`, `superseded_by` — append-only, как `crawl_policy` (план 19).
 2. `url_state` получает наблюдение: `observed_at`, `observed_how`, `capture_id`,
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
-   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:944-961`).
+   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:945-962`).
 3. Ручные артефакты (`hound package state adopt`: `plan_adoption` — `core/pipeline/state_adopt.py:706`,
-   `apply_adoption` — `core/pipeline/state_adopt.py:1487`, запись снятия —
-   `core/pipeline/state_adopt.py:1626`) создают снятие с
+   `apply_adoption` — `core/pipeline/state_adopt.py:1491`, запись снятия —
+   `core/pipeline/state_adopt.py:1630`) создают снятие с
    `observed_how=adopted`, `complete=False` и `actor`. **`complete=False` — не осторожность, а
    факт**: предоставленный артефакт не является обходом и не может удостоверить исчерпание.
 4. Снимок пишется в манифест и `pb`: `corpus_snapshot_id`, `captures[]` (id, корень, даты,
@@ -226,7 +226,7 @@
   `capture` — ноль строк (13 снятий: 3 `adopted` 06.11 + 10 `live` 07.11). То есть это
   по-прежнему нулевая точка. Две оговорки к прибору, обе проверены по коду: (1) срок считается
   от `url_state.last_checked_at` (`core/store/state_store.py:161-187`), а он пишется при
-  **любом** исходе, включая отказ (`core/pipeline/corpus_ingest.py:1029`), поэтому счётчик
+  **любом** исходе, включая отказ (`core/pipeline/corpus_ingest.py:1030`), поэтому счётчик
   отвечает «когда в последний раз касались URL», а не «когда последний раз видели версию»;
   (2) `adopted` не трогает `last_checked_at`, поэтому срок наступает на 3 суток раньше даты
   наблюдения adopted-артефактов.
@@ -622,7 +622,7 @@ run-DB утверждала «партиция на диске», хотя `comm
 - *новый `ProductStatePort` в `core/adapters/`, чтобы DMZ писал `state.db`* — три замка:
   (1) `07` §4.4: ядро инициирует, edge отвечает; обратного инициирования нет, а вливание
   строк в `state.db` ядра — именно оно; (2) `state.db` открывается без `busy_timeout`/WAL
-  (`core/store/state_sqlite.py:503`), сериализация — локом пакета, второй писатель из
+  (`core/store/state_sqlite.py:513`), сериализация — локом пакета, второй писатель из
   другого контейнера получит `database is locked` как норму; (3) без `document_version` +
   `chunk_store` следующий прогон не посчитает оценки на снятии (`offline_reuse_product`) —
   «снятие сделано» без корпуса не выполняет приёмку;

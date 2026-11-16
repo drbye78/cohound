@@ -294,6 +294,10 @@ class ChunkRow:
     #: чанкер не делал.
     char_start: int | None = None
     char_end: int | None = None
+    #: Адрес куска внутри таблицы (``corpus_chunks.table_ref``, O39 ф2). Хранится как
+    #: JSON-текст: durable-субстрат не разбирает доменные объекты, а ``None`` — «адрес
+    #: неизвестен», и это не то же самое, что «кусок не из таблицы».
+    table_ref: str | None = None
 
 
 @dataclass(frozen=True)

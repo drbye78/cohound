@@ -149,7 +149,7 @@
 
 - `Retry-After` разобран (`core/util/retry.py`), но его читают **только** поисковые
   адаптеры. На корпусном пути он **недоступен по носителю**: `RawPage` заголовков не несёт —
-  только `etag`/`last_modified`/`not_modified` (`core/ports/types.py:108-159`), поэтому повтор
+  только `etag`/`last_modified`/`not_modified` (`core/ports/types.py:162-164`), поэтому повтор
   ждёт слот объявленного лимитера (`core/util/fetch_retry.py:113` — `limiter.wait_reserved`),
   а не указание хоста. Шов отдаёт `retry_after` только как back-pressure **подачи** работы
   (`core/adapters/remote_crawl_executor.py:186`, ответ `crawl/submit`), а не как ответ

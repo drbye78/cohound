@@ -35,6 +35,9 @@ from core.domain.doc_blocks import (
 from core.domain.doc_tables import (
     ExtractedTable,
     TableList,
+    TableRef,
+    table_ref_from_json,
+    table_ref_to_json,
     tables_from_json,
     tables_to_json,
 )
@@ -407,6 +410,9 @@ __all__ = [  # noqa: RUF022
     # таблицы документа как объект (O39 фаза 1, план 26): носитель «таблица существует»
     "ExtractedTable",
     "TableList",
+    "TableRef",
+    "table_ref_from_json",
+    "table_ref_to_json",
     "tables_from_json",
     "tables_to_json",
     # исход OCR-пробы (O25/O38, план 26): тристейт, общий для документа и агрегатов

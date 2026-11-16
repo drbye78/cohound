@@ -821,6 +821,7 @@ def _db_smoke() -> None:
     # content_digest у продукт-партиции манифеста.
     chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
     _assert("extractor_version" in chunk_cols)
+    chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
     manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
     _assert("extractor_version" in manifest_cols and "content_digest" in manifest_cols)
 
@@ -889,10 +890,16 @@ def _db_smoke() -> None:
     # ``char_start`` (``core.domain.doc_blocks.block_id_for``), как номер страницы от карты.
     _assert("blocks" in docs_cols)
     _assert("blocks_json" in runs_cols)
+    # O39 фаза 2 (schema 3.26.0): адрес куска **внутри таблицы** — ``corpus_chunks.table_ref``
+    # (``{table_id, row_start, row_end}``). Колонкой, в отличие от номера страницы и адреса
+    # блока: таблица-объект смещений в тексте не несёт, поэтому адрес знает только нарезка —
+    # в момент нарезки. ``NULL`` — «адрес неизвестен» (читатель таблиц их не даёт либо
+    # сопоставление блоков с объектами не сошлось), и это НЕ «кусок не из таблицы».
+    chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
+    _assert("table_ref" in chunk_map_cols)
+    _assert("page_number" not in chunk_map_cols)
     manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
     _assert("ocr_probe" in manifest_cols)
-    chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
-    _assert("page_number" not in chunk_map_cols)
     product_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_product)")}
     _assert({"run_id", "product_id", "mode", "status", "scope", "phase",
              "coverage_complete", "docs_total", "docs_reused", "docs_new",

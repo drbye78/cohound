@@ -133,6 +133,10 @@ class LimitReport:
     over_limit: int = 0
     #: Наибольшее число токенов среди выходных кусков.
     max_tokens_after: int = 0
+    #: Сколько раз адрес куска в таблице (``table_ref``) **потерян** оттого, что кусок
+    #: разрезан: диапазон строк описывал целый кусок, а не его часть, и переносить его на
+    #: половину значило бы соврать о строках. ``0`` — ни одна таблица не разрезана.
+    table_ref_dropped: int = 0
 
 
 class HfTokenCounter:
@@ -288,6 +292,7 @@ class TokenLimiter:
         unsplittable = 0
         over_limit = 0
         max_tokens_after = 0
+        table_ref_dropped = 0
         no = 0
 
         for chunk in chunks:
@@ -315,6 +320,13 @@ class TokenLimiter:
                     for start, end in spans
                 ]
 
+            # Адрес куска в таблице переносится только на **неразрезанный** кусок: у
+            # разрезанного диапазон строк относится ко всему куску, и приписать его
+            # половине значило бы назвать строки, которых в ней нет. Потеря видна числом
+            # в отчёте, а не молчанием.
+            keep_ref = chunk.table_ref if len(pieces) == 1 else None
+            if chunk.table_ref is not None and keep_ref is None:
+                table_ref_dropped += 1
             for piece_text, char_start, char_end in pieces:
                 out.append(
                     Chunk(
@@ -329,6 +341,7 @@ class TokenLimiter:
                         content_hash=_sha256_16(piece_text),
                         char_start=char_start,
                         char_end=char_end,
+                        table_ref=keep_ref,
                     )
                 )
                 no += 1
@@ -343,6 +356,7 @@ class TokenLimiter:
             unsplittable=unsplittable,
             over_limit=over_limit,
             max_tokens_after=max_tokens_after,
+            table_ref_dropped=table_ref_dropped,
         )
         return out, report
 

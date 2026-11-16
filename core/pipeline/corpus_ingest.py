@@ -67,6 +67,7 @@ from core.domain import (
     RefreshPolicy,
     ReuseKind,
 )
+from core.domain.doc_tables import TableRef
 from core.pipeline.artifact_probe import probe_artifact
 from core.pipeline.corpus_index import _chunk_id, _CorpusStageTimings
 from core.pipeline.corpus_persist import (
@@ -1463,7 +1464,7 @@ def _reused_extraction_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
     нём (I2/I2c). Теперь признак лежит в ``document_version`` рядом с версией, к которой
     он относится, и переиспользование его **восстанавливает**.
 
-    Исходы OCR (O25-остаток/O38a) здесь всегда ``None``: в ``state.db`` (``STATE "12"``)
+    Исходы OCR (O25-остаток/O38a) здесь всегда ``None``: в ``state.db`` (``STATE "13"``)
     для них колонок нет, а выдумывать их из факта переиспользования нельзя. Записанное
     ранее измерение этим не стирается: upsert корпуса пишет ``COALESCE``.
 
@@ -1569,7 +1570,9 @@ def _accept_chunk_candidates(
     product_id: str,
     document_id: str,
     dv_id: str,
-    candidates: Iterable[tuple[int, str, str, str, str, int | None, int | None]],
+    candidates: Iterable[
+        tuple[int, str, str, str, str, int | None, int | None, TableRef | None]
+    ],
     *,
     ingest: ProductIngest,
     seen_chunk_ids: set[str],
@@ -1577,17 +1580,19 @@ def _accept_chunk_candidates(
     url: str,
     lang: str | None,
     embed_model_id: str,
-) -> list[tuple[int, str, str, str, int | None, int | None]]:
+) -> list[tuple[int, str, str, str, int | None, int | None, TableRef | None]]:
     """Допускает чанк-кандидаты в корпус — **единственная** точка I19-гейта чанка.
 
     Кандидат приходит ``(chunk_no, text, heading_path, context_prefix, provided_hash,
-    char_start, char_end)``: так выглядит и результат чанкера, и переиспользованный
-    chunk-set. Один гейт на оба пути — иначе «нарезка» и «переиспользование» разошлись бы
-    в проверках, а переиспользование как раз и есть место, где текст не пере-наблюдается.
+    char_start, char_end, table_ref)``: так выглядит и результат чанкера, и
+    переиспользованный chunk-set. Один гейт на оба пути — иначе «нарезка» и
+    «переиспользование» разошлись бы в проверках, а переиспользование как раз и есть
+    место, где текст не пере-наблюдается.
 
-    Смещения проходят насквозь: гейт их не считает и не выводит из текста — он лишь
-    обязан не терять провенанс, объявленный чанкером (``None``/``None`` у абзацного
-    чанкера — законное значение, а не «нули»).
+    Смещения и адрес таблицы проходят насквозь: гейт их не считает и не выводит из текста
+    — он лишь обязан не терять провенанс, объявленный чанкером (``None``/``None`` у
+    абзацного чанкера — законное значение, а не «нули»; ``table_ref=None`` — «адрес
+    неизвестен», а не «кусок не из таблицы»).
 
     Отклонение видно (``errors``) и не тихо: чанк без ``content_hash``, чанк с пустым
     текстом и дублирующийся ``chunk_id`` не попадают в корпус, но и не исчезают молча.
@@ -1595,7 +1600,7 @@ def _accept_chunk_candidates(
     :returns: принятые ``(chunk_no, text, heading_path, context_prefix, char_start,
         char_end)`` — вход durable-записи ``chunk_meta``/``chunk_store`` (09 §4.2/§9).
     """
-    accepted: list[tuple[int, str, str, str, int | None, int | None]] = []
+    accepted: list[tuple[int, str, str, str, int | None, int | None, TableRef | None]] = []
     for (
         chunk_no,
         text,
@@ -1604,6 +1609,7 @@ def _accept_chunk_candidates(
         provided_hash,
         char_start,
         char_end,
+        table_ref,
     ) in candidates:
         # I19: у каждого индексируемого чанка обязан быть непустой hash.
         if not provided_hash:
@@ -1634,6 +1640,9 @@ def _accept_chunk_candidates(
                 # переиспользованного chunk-set), а не вычисленное здесь значение.
                 char_start=char_start,
                 char_end=char_end,
+                # O39 ф2: адрес куска внутри таблицы — провенанс из чанкера (или из
+                # переиспользованного chunk-set), а не выведенный здесь.
+                table_ref=table_ref,
                 # Авторитетный хеш — от чистого текста (I19/§10).
                 content_hash=content_hash(text),
                 # build_id проставляется в Pass B после фиксации id сборки.
@@ -1643,7 +1652,7 @@ def _accept_chunk_candidates(
             )
         )
         accepted.append(
-            (chunk_no, text, heading_path, context_prefix, char_start, char_end)
+            (chunk_no, text, heading_path, context_prefix, char_start, char_end, table_ref)
         )
     return accepted
 
@@ -1922,11 +1931,14 @@ def finish_one(
     )
 
     #: ``(chunk_no, text, heading_path, context_prefix, provided_hash, char_start,
-    #: char_end)`` — общая форма для чанкера и переиспользованного набора (I19-проверки
-    #: ниже одинаковы). Смещения входят в кандидат, потому что это провенанс куска:
-    #: без них штатный путь ингеста писал бы ``NULL`` в ``corpus_chunks.char_start``
-    #: (``ingest_member_doc`` — не единственный производитель чанка).
-    candidates: list[tuple[int, str, str, str, str, int | None, int | None]] = []
+    #: char_end, table_ref)`` — общая форма для чанкера и переиспользованного набора
+    #: (I19-проверки ниже одинаковы). Смещения и адрес таблицы входят в кандидат, потому
+    #: что это провенанс куска: без них штатный путь ингеста писал бы ``NULL`` в
+    #: ``corpus_chunks.char_start``/``table_ref`` (``ingest_member_doc`` — не единственный
+    #: производитель чанка).
+    candidates: list[
+        tuple[int, str, str, str, str, int | None, int | None, TableRef | None]
+    ] = []
     if active_reuse is not None:
         candidates = [
             (
@@ -1937,6 +1949,7 @@ def finish_one(
                 chunk.content_hash,
                 chunk.char_start,
                 chunk.char_end,
+                chunk.table_ref,
             )
             for chunk in active_reuse.chunks
         ]
@@ -1966,13 +1979,18 @@ def finish_one(
                 # чанкера означает «кусок не срез», а не «начало в нуле».
                 getattr(chunk, "char_start", None),
                 getattr(chunk, "char_end", None),
+                # O39 ф2: адрес куска внутри таблицы. ``None`` — «адрес неизвестен»
+                # (читатель таблиц их не даёт либо сопоставление не сошлось).
+                getattr(chunk, "table_ref", None),
             )
             for chunk in sorted(
                 chunks or [], key=lambda c: getattr(c, "chunk_no", 0)
             )
         ]
 
-    accepted: list[tuple[int, str, str, str, int | None, int | None]] = (
+    accepted: list[
+        tuple[int, str, str, str, int | None, int | None, TableRef | None]
+    ] = (
         _accept_chunk_candidates(
             product_id,
             document_id,
@@ -4074,6 +4092,7 @@ def _persist_rebuilt_doc(
                 str(getattr(chunk, "content_hash", "") or "").strip(),
                 getattr(chunk, "char_start", None),
                 getattr(chunk, "char_end", None),
+                getattr(chunk, "table_ref", None),
             )
             for chunk in rebuilt.chunks
         ],
@@ -4429,6 +4448,7 @@ def offline_reuse_product(
                     chunk.content_hash,
                     chunk.char_start,
                     chunk.char_end,
+                    chunk.table_ref,
                 )
                 for chunk in reuse.chunks
             ],

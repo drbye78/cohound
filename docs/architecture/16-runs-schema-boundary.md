@@ -8,11 +8,11 @@
 >
 > | величина | значение | носитель |
 > |---|---|---|
-> | `METHODOLOGY_VERSION` | **`0.3.0`** | `core/domain/models.py:165` |
-> | `SCHEMA_VERSION` (`runs/{run_id}/cohound.db`) | **`3.24.0`** | `core/store/sqlite.py:112` |
-> | `STATE_SCHEMA_VERSION` (`state/{package_id}/state.db`) | **`"12"`** | `core/store/state_sqlite.py:84` |
+> | `METHODOLOGY_VERSION` | **`0.3.0`** | `core/domain/models.py:166` |
+> | `SCHEMA_VERSION` (`runs/{run_id}/cohound.db`) | **`3.26.0`** | `core/store/sqlite.py:143` |
+> | `STATE_SCHEMA_VERSION` (`state/{package_id}/state.db`) | **`"13"`** | `core/store/state_sqlite.py:90` |
 > | `SEAM_SCHEMA_VERSION` (контракт `/v1/*`) | **`"1"`** | `core/edge/seam_schema.py:68` |
-> | `EDGE_JOBS_SCHEMA_VERSION` (`edge_jobs.db`) | **`"1"`** | `core/edge/scheduler.py:197` |
+> | `EDGE_JOBS_SCHEMA_VERSION` (`edge_jobs.db`) | **`"1"`** | `core/edge/scheduler.py:198` |
 > | `EXECUTION_CONTRACT_FIELDS` | **33** поля | `core/pipeline/digests.py:96` |
 >
 > **Решение владельца 29.10.2026:** всё, что меняет материал `run_id` или состав прогонной
@@ -33,7 +33,7 @@
 > - **✅ «`SEAM_SCHEMA_VERSION` остался `"1"`»** — не снято: `"1"` действует
 >   (`core/edge/seam_schema.py:68`).
 > - **✅ «`EDGE_JOBS_SCHEMA_VERSION` остался `"1"`»** — не снято: `"1"` действует
->   (`core/edge/scheduler.py:197`).
+>   (`core/edge/scheduler.py:198`).
 >
 > **История версий — канонический перечень здесь**, и только здесь (`03` §4.4 даёт ссылку,
 > а не копию).
@@ -141,14 +141,14 @@ absence/evidence-модель, а значит по `AGENTS.md` §9 (класс�
 > **➖ снято 01.11.2026.** Решение ниже отменено владельцем вместе с волной S плана 17:
 > `_ensure_columns` и `_migrate_scope_acceptance` **удалены** из `core/store/sqlite.py`
 > (след — докстринг `SCHEMA_VERSION`, `core/store/sqlite.py:28-34`), версия стала **гейтом**:
-> `_reject_foreign_schema` (`core/store/sqlite.py:841-858`) читает `schema_meta.schema_version`
+> `_reject_foreign_schema` (`core/store/sqlite.py:860-877`) читает `schema_meta.schema_version`
 > **до** DDL и поднимает `SchemaVersionMismatch` (`core/util/schema_gate.py:40`); вызовы —
-> писательский `connect` (`core/store/sqlite.py:942`) и read-only `connect_read_only`
-> (`core/store/sqlite.py:919`), оба до `executescript`. Содержимое файла при отказе не
+> писательский `connect` (`core/store/sqlite.py:961`) и read-only `connect_read_only`
+> (`core/store/sqlite.py:938`), оба до `executescript`. Содержимое файла при отказе не
 > меняется — это проверено тестом (`tests/store/test_schema_gate.py:58`
 > `test_previous_schema_is_rejected_and_file_is_unchanged`).
 > Тот же класс и тот же формат сообщения — на **все три** БД
-> (`core/util/schema_gate.py:40-60`); в `core/store/state_sqlite.py:506` и
+> (`core/util/schema_gate.py:40-60`); в `core/store/state_sqlite.py:516` и
 > `core/edge/scheduler.py:642` версия тоже читается **до** DDL, а аддитивных
 > `ALTER TABLE ... ADD COLUMN` при открытии нет ни в одной из трёх. Путь отвергнутого файла —
 > обязательная часть сообщения (`schema_mismatch_message`,
@@ -157,13 +157,13 @@ absence/evidence-модель, а значит по `AGENTS.md` §9 (класс�
 > неотличимой от текущей, то есть объявляла файл новым, не будучи им.
 
 **Решение 29.10.2026: `SCHEMA_VERSION` остаётся `3.13.0`** (константа жила тогда на 15-й
-строке того же файла; сегодня — `core/store/sqlite.py:112`, значение `3.24.0`). Все
+строке того же файла; сегодня — `core/store/sqlite.py:143`, значение `3.26.0`). Все
 изменения
 ниже — аддитивные: колонки добавлял идемпотентный `_ensure_columns`
 (удалён в 3.14.0: шимов `ALTER TABLE` больше нет, `core/store/sqlite.py`), таблицу —
 `CREATE TABLE IF NOT EXISTS` в `DDL`. Гейт
-`_reject_foreign_schema` (`core/store/sqlite.py:841-858`, вызовы `core/store/sqlite.py:919` и
-`core/store/sqlite.py:942`) существует ради
+`_reject_foreign_schema` (`core/store/sqlite.py:860-877`, вызовы `core/store/sqlite.py:938` и
+`core/store/sqlite.py:961`) существует ради
 **несовместимого** чтения, а не ради счётчика ревизий: поднимать версию на аддитивном
 изменении значило бы запретить чтение уже завершённых прогонов без причины.
 
@@ -177,8 +177,8 @@ absence/evidence-модель, а значит по `AGENTS.md` §9 (класс�
 ### 3.1. `runs` — новые колонки
 
 > ⚠️ Ниже — **историческая** форма записи (как это вводилось 29.10.2026 через
-> `ALTER TABLE`). С 01.11.2026 шимов нет: `embed_device` (`core/store/sqlite.py:165`),
-> `run_scope`/`product_plan_json` (`core/store/sqlite.py:185-186`) объявлены прямо в `DDL`,
+> `ALTER TABLE`). С 01.11.2026 шимов нет: `embed_device` (`core/store/sqlite.py:176`),
+> `run_scope`/`product_plan_json` (`core/store/sqlite.py:196-197`) объявлены прямо в `DDL`,
 > а `ALTER TABLE` при открытии не выполняется ни один.
 
 ```sql
@@ -241,13 +241,13 @@ ALTER TABLE corpus_docs ADD COLUMN reuse_kind TEXT;      -- live|revalidated|reu
 ```
 
 Зачем: `url_state.reuse_kind` уже различает «сервер ответил 304» и «взяли retained-байты»
-(`core/store/state_sqlite.py:150`), но в прогонную БД это не доезжает, и 304-документ
+(`core/store/state_sqlite.py:156`), но в прогонную БД это не доезжает, и 304-документ
 выглядит как живой 200 (`09` §11.2). Без этих колонок правило «`❌` нельзя публиковать на
 неподтверждённом наблюдении» неисполнимо, сколько бы его ни уточнять текстом.
 
 **Правило записи — монотонное, и это не деталь.** Значение берётся из пути страницы
 **этого** прогона: живой fetch — `live`/`revalidated`, чтение retained-байтов
-(`resume_retained`, `core/pipeline/corpus_ingest.py:393-495`) — `reused`. Resume перечитывает и те документы, которые
+(`resume_retained`, `core/pipeline/corpus_ingest.py:394-496`) — `reused`. Resume перечитывает и те документы, которые
 в этом же `run_id` уже были получены от сервера (до перезапуска хоста), поэтому строка
 этого прогона, несущая `live`/`revalidated`, **не понижается** до `reused`: иначе resume
 стирал бы состоявшееся наблюдение. Наследовать `url_state.reuse_kind` **нельзя** — там
@@ -261,11 +261,11 @@ retained-байтов).
 (что именно произошло с URL в этом прогоне), а не условием статуса.
 
 **Оба значения уже в руках у единственного писателя** — новой проводки не нужно:
-`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1794`, рядом живут `reuse`
-(`core/pipeline/corpus_ingest.py:1921` — `reused = active_reuse is not None`) и `page.status_code`
-(он же уже уходит в `url_state` как `last_http_status`, `core/pipeline/corpus_ingest.py:1944`;
-второй путь — `core/pipeline/corpus_ingest.py:1751`). Точка записи одна — `persist_docs`
-(`core/pipeline/corpus_ingest.py:1428`, докстринг сам это фиксирует).
+`CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1803`, рядом живут `reuse`
+(`core/pipeline/corpus_ingest.py:1930` — `reused = active_reuse is not None`) и `page.status_code`
+(он же уже уходит в `url_state` как `last_http_status`, `core/pipeline/corpus_ingest.py:1957`;
+второй путь — `core/pipeline/corpus_ingest.py:1760`). Точка записи одна — `persist_docs`
+(`core/pipeline/corpus_ingest.py:1429`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
 `upsert_corpus_doc`. Прецедент в коде — `origin`
@@ -275,9 +275,9 @@ retained-байтов).
 обязаны читаться — `hound diff` строит дельту документов по `corpus_docs`
 (`core/cli/commands/diff.py:106`), а правило `❌`-допустимости (I2c) обязано спрашивать
 происхождение наблюдения там же. Решение границы: **поля
-`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2789`, явные
+`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2790`, явные
 kwargs) + `_has_column`-терпимость к необязательным колонкам
-(`core/store/sqlite_rows.py:77`). ✅ As-built — так и сделано.
+(`core/store/sqlite_rows.py:78`). ✅ As-built — так и сделано.
 
 ### 3.4. `corpus_doc_version` — отображение версии документа в строку корпуса (**as-built**)
 
@@ -389,8 +389,8 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (на 08.11.2026 список — **40** колонок, `core/store/sqlite_store.py:1263-1288`: счётчик
 растёт с каждой осью, механика та же). Колонка, не вписанная туда, останется `NULL` навсегда: штатного `ALTER TABLE` больше нет
 (схема версионируется, старая БД отвергается), поэтому расхождение списка с `DDL` — дефект,
-а не «домигрируется». Чтение — `read_manifest` (`core/store/sqlite_store.py:3012-3270`), где необязательные поля идут
-через `_has_column` (`core/store/sqlite_rows.py:77`).
+а не «домигрируется». Чтение — `read_manifest` (`core/store/sqlite_store.py:3013-3271`), где необязательные поля идут
+через `_has_column` (`core/store/sqlite_rows.py:78`).
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено» (**✅ as-built**)
 
@@ -514,7 +514,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 ## 6. `chunk_id` (run-level)
 
 `_chunk_id` = `f"{product_id}:{doc_hash}:{chunk_no}"` (`core/pipeline/corpus_index.py:182-199`, где
-`doc_hash` — `extracted.content_hash`, вызов — `core/pipeline/corpus_ingest.py:1575`) →
+`doc_hash` — `extracted.content_hash`, вызов — `core/pipeline/corpus_ingest.py:1578`) →
 **`f"{product_id}:{doc_version_id}:{chunk_no}"`**.
 Почему в этой границе: `chunk_id` — часть `LexicalChunk`/`RetrievedChunk` и адрес гидртации
 из store, поэтому смена формата и так требует пересборки партиций; делать её отдельным
@@ -569,7 +569,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 > `chunk_id` записан не канонической формой. В БД прошлой версии таблицы нет: шаг не
 > исполняется, фолбэк остаётся прежним, а не падает.
 
-`StorePort.resolve` (`core/store/sqlite_store.py:3458`) сначала делает прямой lookup по
+`StorePort.resolve` (`core/store/sqlite_store.py:3511`) сначала делает прямой lookup по
 `corpus_chunks.chunk_id`, а при промахе разбирает `source_id` через `parse_source_id` и ищет
 `WHERE product_id = ? AND doc_id = ? AND chunk_no = ?`. **Этот второй путь не может
 сработать**: `parse_source_id` возвращает `doc_id` = второй сегмент = `doc_hash`
@@ -671,7 +671,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
   (подмножество параметров проходит, но перечень вариантов надо расширить).
 - `tests/selfcheck.py:808-818` (список обязательных таблиц — `run_product` в него),
   `tests/selfcheck.py:820-846` (ассерты по колонкам `runs`/`corpus_docs`),
-  `tests/selfcheck.py:1764-1766` (round-trip
+  `tests/selfcheck.py:1776-1778` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml` — **✅ синхронизировано:** `pdf_device`
   (`docs/status-dictionary.yaml:443`), `embed_device`
@@ -704,8 +704,8 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    (`2026-10-29-crawl-url-duplication.md`, `2026-10-29-psq-docs-tree-scope.md`).
 2. Один коммит, по файлам:
    - **схема**: `core/store/sqlite.py` (DDL `run_product` —
-     `core/store/sqlite.py:655-674`; `_ensure_columns` тогда существовал, **снесён
-     01.11.2026** вместе с шимами, `core/store/sqlite.py:800-808`);
+     `core/store/sqlite.py:674-693`; `_ensure_columns` тогда существовал, **снесён
+     01.11.2026** вместе с шимами, `core/store/sqlite.py:819-827`);
    - **писатель `run_product`**: `core/store/sqlite_store.py` (`save_run_product` /
      `iter_run_products` по образцу `save_corpus_coverage`), вызов на границе продукта в
      `core/pipeline/corpus.py`;
@@ -730,14 +730,14 @@ O6) рядом с `embed_precision`, той же природой, что `extra
      заряжается в `consumed` и **не ставится в очередь**, а очередь строится только
      через `add_revalidate_seed` (`core/pipeline/crawl_frontier.py:1595`), чей work-set
      гейтится режимом продукта (`plan_incremental_items` под сетью отдаёт `[]` для
-     `new`/`full` — `core/pipeline/corpus_ingest.py:3255-3260`). Правило: **заряженный URL обязан быть и
+     `new`/`full` — `core/pipeline/corpus_ingest.py:3273-3278`). Правило: **заряженный URL обязан быть и
      дренируемым** — каждый элемент, засчитанный в `consumed`, ставится depth-0 листом
      (`add_revalidate_seed`, вне бюджета discovery) **независимо от режима**; гейт
      `mode == INCREMENTAL` для этого набора неверен, его настоящее предусловие — «есть
      durable-элементы для дренажа». ✅ **As-built** (`core/pipeline/corpus_drain.py:1581-1597`:
      `charged_urls` → `add_revalidate_seed`, комментарий называет дефект 3 и `09` §6.3).
      Плюс приписывание владельцу — тем же предикатом, что
-     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5065-5099`, вызов —
+     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5085-5119`, вызов —
      `core/pipeline/corpus.py:2620-2621`: побеждает самый специфичный
      `root_path_prefix`), а не «кто первый» (дефект 1); продукт-wide множество
      `resume_counted` (`core/pipeline/corpus.py:3560`) остаётся — меняется правило
@@ -777,9 +777,9 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    нигде, кроме материала `run_id` (`core/pipeline/plan.py:94`;
    прямо зафиксировано в `core/pipeline/state_adopt.py:33`,
    `core/pipeline/state_adopt.py:120` — **текст там с 08.11.2026 сам устарел**:
-   `runs.run_scope` объявлен (`core/store/sqlite.py:185`) и пишется `persist_manifest`
+   `runs.run_scope` объявлен (`core/store/sqlite.py:196`) и пишется `persist_manifest`
    (`core/store/sqlite_store.py:1287`); правка в `core/` — вне этой полосы), а `ProductPlanSet`
-   существует (`core/domain/models.py:2991`) и **до границы** не персистился ни разу —
+   существует (`core/domain/models.py:3002`) и **до границы** не персистился ни разу —
    единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей. ✅ После границы оба
@@ -835,7 +835,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 - **п. 5** — `METHODOLOGY_VERSION` = `0.2.0`. Под ним ещё **не измерено ни одного прогона**
   (прерванный шёл под `0.1.0`), поэтому волна 2 (перенос ячеек) входит в ту же `0.2.0`:
   номер описывает условия измерения, а измерений под ним нет. ➖ **Снято 05.11.2026**
-  (F3 планов 19/20): действует `0.3.0` (`core/domain/models.py:165`) — датированное
+  (F3 планов 19/20): действует `0.3.0` (`core/domain/models.py:166`) — датированное
   отсутствие I2d.
 - **п. 7** — `14` оговорка 5 и п. 7 §6 обновлены; `09` §4.3/§6.5/§11.2/§13.6/§14.1
   переведены в ✅.
@@ -885,7 +885,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
 `core/pipeline/report.py:2786` (первая редакция ссылалась на строку 1970 того же файла);
 `reuse_kind` в `url_state` —
-`core/store/state_sqlite.py:150` (первая редакция ссылалась на строку 93 — там комментарий);
+`core/store/state_sqlite.py:156` (первая редакция ссылалась на строку 93 — там комментарий);
 `_PARTITION_SCHEMA` —
 `core/pipeline/corpus_index.py:54`; `composition.py` исключён из состава (§8);
 «`embed_device` в `extra` **и** в корне» — одно место, а не два (§5.1); «геттер в
@@ -901,7 +901,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 3. **Грамматика `source_id`** — `chunk_id` с четырьмя сегментами несовместим с
    `parse_source_id` (§6.1); и фолбэк `resolve()` был мёртв (починен, §6.3).
    ✅ Закрыто 29.10.2026: `core/pipeline/corpus_index.py:182-199` (форма `_chunk_id`),
-   `core/store/sqlite_store.py:3458` (четыре шага `resolve`).
+   `core/store/sqlite_store.py:3511` (четыре шага `resolve`).
 4. **`persist_manifest` — явный список колонок** (§4.2): колонка, не вписанная туда, не
    пишется никогда (на 29.10 — хотя `ALTER TABLE` её создал; с 3.14.0 шимов нет, колонка
    просто обязана быть в `DDL`). ✅ Сверено 08.11.2026: список по-прежнему явный,
@@ -909,7 +909,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 5. **`run_scope`/`product_plan` — не переезд, а новый писатель** (§8 п. 3).
    ✅ Закрыто 29.10.2026: `persist_manifest` пишет оба
    (`core/store/sqlite_store.py:1287`), колонки объявлены в `DDL`
-   (`core/store/sqlite.py:185`).
+   (`core/store/sqlite.py:196`).
 6. **Пять из девяти тестовых файлов не существовали** (§7); плюс список тестов, которые
    сейчас пинуют старое поведение и обязаны быть поправлены (§7.1).
    ✅ Закрыто 29.10.2026: пять названных имён так и не появились (это и было утверждением —
@@ -997,7 +997,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
     комментарий называет `16` §2).
 15. **`run_lineage.status` объявляет два статуса, которых никто не пишет** (перенесено из
     `09` §4.4 при его чистке 08.11.2026). DDL называет `running|complete|partial|failed|aborted`
-    (`core/store/state_sqlite.py:275`), а `_LINEAGE_STATUS` (`core/pipeline/state_sync.py:67-72`)
+    (`core/store/state_sqlite.py:285`), а `_LINEAGE_STATUS` (`core/pipeline/state_sync.py:67-72`)
     отображает только исходы прогона: `ok→complete`, `blocked→partial`, `failed→failed`,
     `skipped→partial`. `running` при старте и `aborted` при recovery следующего прогона
     **не пишутся** ни одной фазой: упавший посреди работы прогон в `state.db` просто

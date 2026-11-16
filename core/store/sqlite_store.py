@@ -60,7 +60,7 @@ from core.domain import (
     TerminationReason,
 )
 from core.domain.doc_blocks import blocks_from_json, blocks_to_json
-from core.domain.doc_tables import tables_from_json, tables_to_json
+from core.domain.doc_tables import table_ref_to_json, tables_from_json, tables_to_json
 from core.domain.ocr_probe import OCR_PROBE_VALUES
 from core.domain.page_map import page_map_from_json, page_map_to_json
 from core.ports.store import CorpusArtifactRow, PlanInputsConflict, RunIndexRef
@@ -1780,8 +1780,8 @@ class SqliteStore:
             "INSERT OR REPLACE INTO corpus_chunks"
             " (chunk_id, doc_id, product_id, url, heading_path, lang, chunk_no, text,"
             "  context_prefix, content_hash, extractor_version, build_id, embed_model_id,"
-            "  embedded_at, char_start, char_end)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "  embedded_at, char_start, char_end, table_ref)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         rows = [
             (
@@ -1801,6 +1801,7 @@ class SqliteStore:
                 c.embedded_at,
                 c.char_start,
                 c.char_end,
+                table_ref_to_json(c.table_ref),
             )
             for c in chunks
         ]
@@ -3393,6 +3394,7 @@ class SqliteStore:
         "content_hash",
         "char_start",
         "char_end",
+        "table_ref",
     )
 
     @staticmethod

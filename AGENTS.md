@@ -301,7 +301,7 @@ mismatch forces `complete=False`; an unknown digest (either side) does not — a
 is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
 term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
 `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.25.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
+`SCHEMA_VERSION` 3.26.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
 `corpus_docs.page_map` at 3.21.0 — the page map, from which a chunk's page number is a
 **function**, not a column: a copy would have to be maintained on every chunk-write path and
 one missed path would give a silently wrong page; `corpus_docs.ocr_probe`/`pages_ocr`/
@@ -317,9 +317,22 @@ string in `context_prefix`; chunking does not depend on it; `corpus_docs.blocks`
 blocks, `()` = looked and found none), and a chunk's `block_id` is likewise a **function**
 (`block_id_for`, same rule as the page number), not a column; `structured`/docling gives `None`
 because its only exact per-page export is quadratic — measured 0.56 s for the whole document
-vs 63.2 s for 200 page exports), STATE `12`
-(`capture.policy_digest`
-changed meaning ⇒ old files are rejected by the version gate).
+vs 63.2 s for 200 page exports); `corpus_chunks.table_ref` at 3.26.0 — the **address of a
+chunk inside a table** (`{table_id, row_start, row_end}`, contract
+`core/domain/doc_tables.py:TableRef`; `NULL` = address unknown, which is **not** "the chunk is
+not from a table"). A column here, unlike the page number and the block id, because a
+table-object carries no offsets into the text (docling does not report them), so only the
+chunker knows the address — at slicing time. `text`/`content_hash` do not change (measured
+16.11.2026: `chunk_text` with and without tables gives byte-identical texts), but
+`chunker_version` → `policy-6` because a reused chunk-set from `state.db` would otherwise come
+back without the address — the same class as `pdfium-text-5`; `chunker_version` is a contract
+field (`digests.py:116`), so this is an `execution_change` with an unchanged corpus text. Why
+phase 2 is an address and not a re-slicing, with numbers: plan `26` §O39 and
+`docs/reports/measurements/2026-11-16-tables.md` (24 documents / 181 tables: no table row is
+longer than the chunk budget, so the cut already falls between rows). STATE `13` —
+`chunk_meta.table_ref`: the durable chunk-set carries the address too, and a file of an older
+STATE is rejected by the version gate (the same rule that made `capture.policy_digest` STATE
+`12`).
 
 ## 6. Crawl scope: declared hosts
 

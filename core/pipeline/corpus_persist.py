@@ -46,6 +46,7 @@ from core.domain import (
 # ``_FIELD_SEP`` — объявленный разделитель склейки идентификаторов (L3, ``corpus_index``):
 # тот же символ обязан использоваться и здесь, иначе дайджест набора ``chunk_id`` разошёлся
 # бы с тем, что считает сборка индекса.
+from core.domain.doc_tables import TableRef, table_ref_from_json, table_ref_to_json
 from core.pipeline.corpus_index import _FIELD_SEP
 from core.pipeline.extraction_runtime import _as_text
 from core.pipeline.fetch_plan import select_domain_profile
@@ -127,6 +128,10 @@ class ReusedChunk:
     #: нулевой длины в начале», то есть выдуманный факт.
     char_start: int | None = None
     char_end: int | None = None
+    #: Адрес куска внутри таблицы (O39 ф2). Переиспользование обязано вернуть его ровно
+    #: тем, чем он был записан: ``None`` здесь — «адрес неизвестен», и если бы путь reuse
+    #: его терял, кусок таблицы молча стал бы «не из таблицы».
+    table_ref: TableRef | None = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +221,7 @@ def load_reused_chunks(
                 # Смещения — из durable-записи как есть; ``None`` остаётся ``None``.
                 char_start=row.char_start,
                 char_end=row.char_end,
+                table_ref=table_ref_from_json(row.table_ref),
             )
         )
     return tuple(reused)
@@ -369,7 +375,9 @@ def write_document_state(
     extractor_token: str,
     level_text: str,
     raw_path: Path,
-    chunks: Sequence[tuple[int, str, str, str, int | None, int | None]],
+    chunks: Sequence[
+        tuple[int, str, str, str, int | None, int | None, TableRef | None]
+    ],
     partial_fields: Mapping[str, Any],
     partial_known: bool,
     state: ProductStatePort | None,
@@ -447,6 +455,7 @@ def write_document_state(
             context_prefix,
             char_start,
             char_end,
+            table_ref,
         ) in chunks:
             row = ChunkRow(
                 chunk_id=chunk_row_id(dv_id, chunker_version, chunk_no),
@@ -460,6 +469,7 @@ def write_document_state(
                 lang=page.lang,
                 char_start=char_start,
                 char_end=char_end,
+                table_ref=table_ref_to_json(table_ref),
             )
             rows.append((row, text))
         digest = short_hash(

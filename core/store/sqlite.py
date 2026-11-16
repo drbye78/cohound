@@ -129,7 +129,18 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: был бы поддерживать каждый путь записи чанка. Наблюдение, а не условие измерения: в
 #: ``EXECUTION_CONTRACT_FIELDS`` его нет, и нарезка чанков от колонки не зависит. Шимов
 #: нет: файлы ≤ 3.24.0 отвергаются гейтом версии, прогон переносится пересозданием.
-SCHEMA_VERSION = "3.25.0"
+#: 3.26.0 (O39 фаза 2 плана ``26``): ``corpus_chunks.table_ref`` — **адрес куска внутри
+#: таблицы** (``{table_id, row_start, row_end}``, контракт —
+#: :class:`core.domain.doc_tables.TableRef`): какая таблица документа и какие её строки
+#: данных попали в кусок. ``NULL`` — адрес неизвестен (читатель таблиц их не даёт либо
+#: число таблиц-объектов не совпало с числом табличных блоков текста), и это **не** «кусок
+#: не из таблицы»: различие видно числом в отчёте. ``text``/``content_hash`` от привязки не
+#: меняются — кусок остаётся точным срезом, поэтому цитата по-прежнему сверяется с ним
+#: (I22). Наблюдение, а не условие измерения: в ``EXECUTION_CONTRACT_FIELDS`` его нет.
+#: ``chunker_version`` при этом растёт (``policy-6``), потому что иначе переиспользованный
+#: chunk-set из ``state.db`` пришёл бы без адреса — тот же класс, что ``pdfium-text-5``.
+#: Шимов нет: файлы ≤ 3.25.0 отвергаются гейтом версии, прогон переносится пересозданием.
+SCHEMA_VERSION = "3.26.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -204,12 +215,19 @@ CREATE TABLE IF NOT EXISTS runs (
     -- Колонки ``extractor_version`` у ``runs`` нет вовсе — план 26 §O25 указывал на неё
     -- по устаревшему адресу; версия экстрактора живёт в ``corpus_docs``/``index_manifest``.
     ocr_probe             TEXT,
-    -- O36 фаза 3 (план 26, схема 3.23.0): страница **цитаты** — наблюдение, не потолок.
-    -- Внутри: ``{evidence, with_page, by_status{mapped|no_page_map|no_char_span|no_chunk|
-    -- no_doc}, by_product{id:{evidence, with_page}}}``. NULL — цитат нет вовсе (не ноль):
-    -- «цитаты есть, ни одна страницу не назвала» — наоборот, факт и публикуется числом.
-    -- Номер страницы не колонка у чанка: он функция от ``corpus_docs.page_map`` и
-    -- ``char_start`` (``core.domain.page_map.page_number_for``).
+    -- O36 фаза 3 + O36 ф2 + O39 ф2 (план 26, схемы 3.23.0/3.25.0/3.26.0): **адреса
+    -- цитаты** — наблюдение, не потолок. Внутри: ``{evidence, with_page, with_block,
+    -- with_table, with_table_rows, by_status{mapped|no_page_map|no_char_span|no_chunk|
+    -- no_doc}, by_block_status{mapped|no_blocks|no_char_span|no_chunk|no_doc},
+    -- by_table_status{mapped|table_without_rows|no_table_ref|no_chunk|no_doc},
+    -- by_product{id:{evidence, with_page, with_block, with_table}}}``
+    -- (``core.pipeline.page_publication``). NULL — цитат нет вовсе (не ноль): «цитаты есть,
+    -- ни одна адрес не назвала» — наоборот, факт и публикуется числом.
+    -- Номер страницы и адрес блока не колонки у чанка: это функции от
+    -- ``corpus_docs.page_map``/``corpus_docs.blocks`` и ``char_start``
+    -- (``core.domain.page_map.page_number_for``, ``core.domain.doc_blocks.block_id_for``).
+    -- Адрес таблицы — колонка (``corpus_chunks.table_ref``): таблица-объект смещений в
+    -- тексте не несёт, поэтому его знает только нарезка.
     page_provenance_json  TEXT,
     -- O39 фаза 1 (план 26, схема 3.24.0): таблицы документа — наблюдение, не потолок.
     -- Внутри: ``{documents_with_tables, tables, documents_unmeasured, by_product{id:{...}}}``
@@ -391,7 +409,8 @@ CREATE TABLE IF NOT EXISTS corpus_chunks (
     embed_model_id  TEXT,
     embedded_at     TEXT,
     char_start      INTEGER,                           -- L1b-2b: начало куска в тексте документа
-    char_end        INTEGER                            -- конец (исключающий); NULL+NULL — не срез
+    char_end        INTEGER,                           -- конец (исключающий); NULL+NULL — не срез
+    table_ref       TEXT                               -- O39 ф2: JSON-адрес куска в таблице
 );
 
 -- K1: пакетная сборка (index_build_id, иммутабельна) × продукт-партиция (I17).

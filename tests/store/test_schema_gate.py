@@ -334,8 +334,18 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     колонка: копию пришлось бы поддерживать на каждом пути записи чанка. Наблюдение, а не
     условие измерения: в ``EXECUTION_CONTRACT_FIELDS`` его нет, и нарезка чанков от колонки
     не зависит. Шимов нет: прогоны ≤ 3.24.0 отвергаются гейтом версии.
+
+    3.26.0 (O39 фаза 2 плана ``26``) — **адрес куска внутри таблицы**:
+    ``corpus_chunks.table_ref`` (JSON ``{table_id, row_start, row_end}``, контракт —
+    ``core.domain.doc_tables.TableRef``; ``NULL`` — адрес неизвестен, и это не «кусок не из
+    таблицы»). Здесь колонка заведена **намеренно**, в отличие от номера страницы и адреса
+    блока: те выводимы из ``char_start`` по хранимому списку отрезков, а таблица-объект
+    смещений в тексте не несёт (docling их не сообщает), поэтому адрес знает только
+    чанкер — в момент нарезки. ``text``/``content_hash`` не меняются: кусок остаётся точным
+    срезом, и цитата по-прежнему сверяется с ним (I22). Шимов нет: прогоны ≤ 3.25.0
+    отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.25.0"
+    assert SCHEMA_VERSION == "3.26.0"
 
     conn = connect(":memory:")
     try:
@@ -371,6 +381,9 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
 
         chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
         assert {"char_start", "char_end"} <= chunk_cols
+        # 3.26.0 (O39 фаза 2): адрес куска в таблице — колонка, потому что он не выводим
+        # из смещений (таблица-объект смещений не несёт).
+        assert "table_ref" in chunk_cols
         # Номер страницы и адрес блока у чанка — **функции** от документа и ``char_start``,
         # а не колонки: копию обязан был бы поддерживать каждый путь записи чанка.
         assert "page_number" not in chunk_cols

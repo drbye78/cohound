@@ -181,7 +181,7 @@ top-10 из 600** у близких соседей. Замер при едино
 600 запросов (30 %). Рычаг реализован, но не подключён: батч-чтение уже есть в порту
 (`StorePort.get_chunks(ids)`, `core/ports/store.py:705` — заведено ровно под гидратацию
 ретривала, A1/Д-3) и в хранилище (`SqliteStore.get_chunks`,
-`core/store/sqlite_store.py:3375`; `IN (...)` пачками по `_CHUNK_ID_BATCH = 500`, `:3206`).
+`core/store/sqlite_store.py:3376`; `IN (...)` пачками по `_CHUNK_ID_BATCH = 500`, `:3206`).
 `_resolve_top` по-прежнему зовёт `self._lookup(chunk_id)` на каждого кандидата
 (`core/adapters/vector_npy.py:374` и `:383`; тип резолвера — `:73`), а композиционный корень
 передаёт поштучный `store.get_chunk` (`core/cli/commands/run.py:416`,
@@ -544,7 +544,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 3. `vector_digest` в `_partition_reuse_reason` — «чужие векторы» становятся видимым отказом
    от переиспользования, а не тихой подменой прибора.
 
-`corpus_chunks.embedded_at`: чанк собирался с `embedded_at=None` (`core/pipeline/corpus_ingest.py:1564`,
+`corpus_chunks.embedded_at`: чанк собирался с `embedded_at=None` (`core/pipeline/corpus_ingest.py:1565`,
 `core/pipeline/extract_consume.py:552`) и в Pass B не переписывался — колонка без писателя, и
 «не эмбеддилось» по ней не читалось. С 07.11.2026 её заполняет `_embed_and_build`
 (`core/pipeline/corpus_index.py:816`): одно ISO-8601 (UTC) время эмбеддинга на продукт-цикл,

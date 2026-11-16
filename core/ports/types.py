@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.domain.doc_blocks import BlockList, check_blocks
-from core.domain.doc_tables import ExtractedTable, TableList
+from core.domain.doc_tables import ExtractedTable, TableList, TableRef
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
 from core.domain.ocr_probe import (
@@ -44,6 +44,7 @@ __all__ = [
     "RateLimitSpec",
     "RawPage",
     "TableList",
+    "TableRef",
 ]
 
 
@@ -432,6 +433,20 @@ class Chunk:
     content_hash: str
     char_start: int | None = None
     char_end: int | None = None
+    #: Адрес куска **внутри таблицы** (O39 фаза 2 плана ``26``): какая таблица документа и
+    #: какие её строки данных попали в кусок. ``None`` — адрес неизвестен: читатель таблиц
+    #: их не даёт (``text_layer``/pdfium, HTML, EPUB, офис, шов) либо число таблиц-объектов
+    #: не совпало с числом табличных блоков текста, и сопоставление по порядку было бы
+    #: догадкой. Это **не** «кусок не из таблицы»: различие видно числом в отчёте.
+    #:
+    #: ``text`` от привязки не меняется — кусок остаётся точным срезом документа, поэтому
+    #: цитата по-прежнему сверяется с ним (I22), и ``content_hash`` тоже не меняется.
+    #: ``run_id`` меняется, но не из-за адреса: ``chunker_version`` → ``policy-6`` входит
+    #: в контракт исполнения (``core/pipeline/digests.py``), иначе переиспользованный
+    #: chunk-set вернулся бы без адреса.
+    #: Строка и столбец: ``TableRef`` несёт строки, потому что нарезка режет таблицу только
+    #: по их границам (измерено 16.11.2026: разрезов внутри строки — ноль).
+    table_ref: TableRef | None = None
 
 
 @dataclass(frozen=True)

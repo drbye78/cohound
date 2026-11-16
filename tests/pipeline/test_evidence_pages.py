@@ -15,6 +15,11 @@
 * **один расчёт**: сводка манифеста, файл и цитата матрицы считаются из одного набора
   строк, поэтому разойтись не могут.
 
+Третий адрес (O39 фаза 2) — таблица — проверяется отдельно: ``table``/``table_rows`` и
+пять исходов ``table_status``. Его носитель другой: страница и блок считаются из карты
+документа, а адрес в таблице — **колонка** ``corpus_chunks.table_ref`` (объект таблицы
+смещений в тексте не несёт), и ``table_ref is None`` значит «неизвестно», а не «не таблица».
+
 Тесты нейтральны (§1.3): документы и адреса вымышленные, карта страниц собрана руками —
 реальный PDF здесь не нужен, предмет — арифметика смещений и форма артефакта.
 """
@@ -37,6 +42,7 @@ from core.domain import (
     RankingPolicy,
     RunConfig,
     RunMode,
+    TableRef,
 )
 from core.domain.enums import CellState, EvidenceType, SourceKind, Status
 from core.domain.models import Cell, CellEvidence, CorpusChunk, LLMEvidence, RunManifest
@@ -53,6 +59,12 @@ from core.pipeline.page_publication import (
     PAGE_STATUS_NO_CHUNK,
     PAGE_STATUS_NO_DOC,
     PAGE_STATUS_NO_PAGE_MAP,
+    TABLE_STATUS_MAPPED,
+    TABLE_STATUS_NO_CHUNK,
+    TABLE_STATUS_NO_DOC,
+    TABLE_STATUS_NO_TABLE_REF,
+    TABLE_STATUS_WITHOUT_ROWS,
+    TABLE_STATUSES,
     collect_evidence_pages,
     evidence_pages_summary,
     human_line,
@@ -114,8 +126,14 @@ def _chunk(
     *,
     text: str | None = None,
     chunk_no: int = 0,
+    table_ref: TableRef | None = None,
 ) -> CorpusChunk:
-    """Строка ``corpus_chunks``; ``span=None`` — кусок не является точным срезом."""
+    """Строка ``corpus_chunks``; ``span=None`` — кусок не является точным срезом.
+
+    ``table_ref`` — адрес куска внутри таблицы (O39 фаза 2): он **не** зависит от смещений,
+    потому что приходит из колонки, а не считается из ``char_start``. ``None`` — «адрес
+    неизвестен», а не «кусок не из таблицы».
+    """
     if span is None:
         return CorpusChunk(
             chunk_id=chunk_id,
@@ -123,6 +141,7 @@ def _chunk(
             product_id=PRODUCT,
             chunk_no=chunk_no,
             text=text or "абзац без смещений",
+            table_ref=table_ref,
         )
     start, end = span
     return CorpusChunk(
@@ -133,6 +152,7 @@ def _chunk(
         text=DOC_TEXT[start:end] if text is None else text,
         char_start=start,
         char_end=end,
+        table_ref=table_ref,
     )
 
 
@@ -161,7 +181,12 @@ def _evidence(
 
 @pytest.fixture()
 def store() -> Iterator[SqliteStore]:
-    """Корпус из двух документов: с картой страниц и без неё, плюс пять видов цитат."""
+    """Корпус из двух документов: с картой страниц и без неё, плюс пять видов цитат.
+
+    Адреса в таблицах (O39 фаза 2) расставлены так, чтобы все пять исходов
+    ``table_status`` встретились по одному разу: диапазон строк, шапка без строк,
+    отсутствие адреса, не корпусная цитата и битая ссылка.
+    """
     with SqliteStore(":memory:") as instance:
         instance.create_run(
             RUN_ID,
@@ -204,9 +229,31 @@ def store() -> Iterator[SqliteStore]:
         )
         instance.add_chunks_batch(
             [
-                _chunk(f"{PRODUCT}:dv_a:0", f"{PRODUCT}:hash", _FIRST_PAGE, chunk_no=0),
-                _chunk(f"{PRODUCT}:dv_a:1", f"{PRODUCT}:hash", _CROSSING, chunk_no=1),
-                _chunk(f"{PRODUCT}:dv_a:2", f"{PRODUCT}:hash", None, chunk_no=2),
+                # Адрес в таблице (O39 фаза 2) — колонка, а не функция от смещений: у
+                # куска ``param.a`` одна строка данных (2), у ``param.b`` — диапазон 4–7.
+                _chunk(
+                    f"{PRODUCT}:dv_a:0",
+                    f"{PRODUCT}:hash",
+                    _FIRST_PAGE,
+                    chunk_no=0,
+                    table_ref=TableRef("t0", 2, 2),
+                ),
+                _chunk(
+                    f"{PRODUCT}:dv_a:1",
+                    f"{PRODUCT}:hash",
+                    _CROSSING,
+                    chunk_no=1,
+                    table_ref=TableRef("t0", 4, 7),
+                ),
+                # Таблица названа, строк данных нет: шапка ушла отдельным куском.
+                _chunk(
+                    f"{PRODUCT}:dv_a:2",
+                    f"{PRODUCT}:hash",
+                    None,
+                    chunk_no=2,
+                    text="| столбец | столбец |",
+                    table_ref=TableRef("t1"),
+                ),
                 _chunk(f"{PRODUCT}:dv_b:0", f"{PRODUCT}:hash2", (0, 5), text="кусок"),
                 # Чанк с адресом версии, которой нет в ``corpus_doc_version``: документ по
                 # адресу не разрешается — битая ссылка, а не «карты нет».
@@ -361,16 +408,19 @@ def test_summary_counts_pages_and_reasons(store: SqliteStore) -> None:
         PAGE_STATUS_NO_DOC: 1,
     }
     # Продукт плана без цитат — нулями: «у него цитат нет» тоже факт (симметрия). Блок —
-    # второй адрес цитаты, поэтому в корзине продукта он идёт рядом со страницей.
+    # второй адрес цитаты, таблица — третий, поэтому в корзине продукта они идут рядом со
+    # страницей.
     assert summary["by_product"][OTHER_PRODUCT] == {
         "evidence": 0,
         "with_page": 0,
         "with_block": 0,
+        "with_table": 0,
     }
     assert summary["by_product"][PRODUCT] == {
         "evidence": 6,
         "with_page": 2,
         "with_block": 2,
+        "with_table": 3,
     }
 
 
@@ -631,7 +681,14 @@ def test_report_command_prints_evidence_pages_line(
             doc_version_id="dv_a",
         )
         persisted.add_chunks_batch(
-            [_chunk(f"{PRODUCT}:dv_a:0", f"{PRODUCT}:hash", _FIRST_PAGE)]
+            [
+                _chunk(
+                    f"{PRODUCT}:dv_a:0",
+                    f"{PRODUCT}:hash",
+                    _FIRST_PAGE,
+                    table_ref=TableRef("t0", 1, 2),
+                )
+            ]
         )
         persisted.add_evidence(_evidence("e1", "param.a", f"{PRODUCT}:dv_a:0"))
 
@@ -652,6 +709,9 @@ def test_report_command_prints_evidence_pages_line(
     # O36 фаза 2: блок — второй адрес цитаты, и он тоже называется строкой, а не только
     # колонкой файла, который надо открыть.
     assert "блок: все 1 называют блок" in payload
+    # O39 фаза 2: третий адрес — таблица. Строка доходит до CLI через ту же сводку, поэтому
+    # «сколько цитат называют таблицу» видно без разбора CSV.
+    assert "таблицы: 1 цитат (строки у 1)" in payload
     # Сводка блоков — **отдельной** строкой: у неё другой предмет (сколько структуры в
     # корпусе и на каких документах вопрос не задавался), и заменять ею адрес цитаты
     # значило бы смешать два факта.
@@ -792,3 +852,170 @@ def test_human_line_is_silent_about_blocks_when_the_summary_has_none() -> None:
         }
     )
     assert line == "цитаты: все 4 называют страницу"
+
+
+# ---------------------------------------------------------------------------
+# (ж) таблица у цитаты: третий адрес, его собственные исходы и публикация
+# ---------------------------------------------------------------------------
+
+
+def test_table_of_a_quote_is_known(store: SqliteStore) -> None:
+    """Кусок с адресом в таблице называет её и её строку — из **колонки**, не из смещений.
+
+    Страница и блок считаются из носителя документа по ``char_start``; таблица так не
+    считается: объект таблицы смещений в тексте не несёт, поэтому адрес читается из
+    ``corpus_chunks.table_ref``. Тест защищает ровно это: адрес берётся из строки чанка.
+    """
+    rows, _summary_block = collect_evidence_pages(store, RUN_ID)
+    by_param = {item["param_id"]: item for item in rows}
+    assert by_param["param.a"]["table"] == "t0"
+    assert by_param["param.a"]["table_status"] == TABLE_STATUS_MAPPED
+    # Одна строка данных печатается одним числом, а не диапазоном из двух одинаковых.
+    assert by_param["param.a"]["table_rows"] == "2"
+
+
+def test_table_rows_of_a_range_are_printed_as_a_pair(store: SqliteStore) -> None:
+    """Кусок, покрывающий строки 4–7, печатает пару «4-7» (не «4» и не «47»).
+
+    Нарезка режет таблицу по границам строк, поэтому пара всегда осмысленна: это не
+    диапазон страниц, где одна страница — обычный случай.
+    """
+    rows, _summary_block = collect_evidence_pages(store, RUN_ID)
+    by_param = {item["param_id"]: item for item in rows}
+    assert by_param["param.b"]["table"] == "t0"
+    assert by_param["param.b"]["table_rows"] == "4-7"
+    assert by_param["param.b"]["table_status"] == TABLE_STATUS_MAPPED
+
+
+def test_table_without_rows_names_the_table_only(store: SqliteStore) -> None:
+    """Таблица названа, строк нет — ``table_without_rows``, а не «таблицы нет».
+
+    Так выглядит шапка, ушедшая отдельным куском (либо несведение числа строк объекта и
+    блока): таблица известна, адрес строк — нет. Свести это к ``no_table_ref`` значило бы
+    потерять факт «кусок из таблицы t1».
+    """
+    rows, _summary_block = collect_evidence_pages(store, RUN_ID)
+    by_param = {item["param_id"]: item for item in rows}
+    assert by_param["param.c"]["table"] == "t1"
+    assert by_param["param.c"]["table_rows"] is None
+    assert by_param["param.c"]["table_status"] == TABLE_STATUS_WITHOUT_ROWS
+
+
+def test_absence_of_a_table_names_its_own_reason(store: SqliteStore) -> None:
+    """Три исхода отсутствия различимы и не подменяют друг друга.
+
+    ``no_table_ref`` — читатель таблиц их не даёт либо сопоставление не выполнялось;
+    ``no_chunk`` — не корпусная цитата; ``no_doc`` — битая ссылка. «Неизвестно» не
+    превращается в «не таблица»: ячейки пустые, а не нулевые.
+    """
+    rows, _summary_block = collect_evidence_pages(store, RUN_ID)
+    by_param = {item["param_id"]: item for item in rows}
+    assert by_param["param.d"]["table_status"] == TABLE_STATUS_NO_TABLE_REF
+    assert by_param["param.e"]["table_status"] == TABLE_STATUS_NO_CHUNK
+    assert by_param["param.f"]["table_status"] == TABLE_STATUS_NO_DOC
+    for param_id in ("param.d", "param.e", "param.f"):
+        assert by_param[param_id]["table"] is None
+        assert by_param[param_id]["table_rows"] is None
+
+
+def test_artifact_carries_table_columns(store: SqliteStore, tmp_path: Path) -> None:
+    """CSV несёт ``table``/``table_rows``/``table_status`` — в конце объявленного порядка.
+
+    Порядок колонок стабилен: файл читают глазами и скриптом. Новые колонки дописаны в
+    конец, поэтому читатель прежних колонок не сдвигается.
+    """
+    target = tmp_path / "outputs" / "evidence_pages.csv"
+    assert write_evidence_pages_artifact(store, RUN_ID, target) == target
+    with target.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert tuple(reader.fieldnames or ()) == EVIDENCE_CSV_COLUMNS
+        assert EVIDENCE_CSV_COLUMNS[-3:] == ("table", "table_rows", "table_status")
+        rows = {row["param_id"]: row for row in reader}
+    assert rows["param.a"]["table"] == "t0"
+    assert rows["param.a"]["table_rows"] == "2"
+    assert rows["param.a"]["table_status"] == TABLE_STATUS_MAPPED
+    assert rows["param.b"]["table_rows"] == "4-7"
+    # Пустая ячейка — «не известно», не ноль: адрес не выдумывается (A3).
+    assert rows["param.d"]["table"] == ""
+    assert rows["param.d"]["table_rows"] == ""
+    assert rows["param.d"]["table_status"] == TABLE_STATUS_NO_TABLE_REF
+
+
+def test_summary_counts_tables_from_the_same_rows_as_the_file(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """``with_table``/``by_table_status`` считаются по строкам файла, а не вторым расчётом.
+
+    Проверка сравнивает сводку с самим CSV: разойтись они не могут, потому что считаются из
+    одного набора строк. ``with_table_rows`` — строго меньшее число: цитата может назвать
+    таблицу и не назвать строки.
+    """
+    target = tmp_path / "outputs" / "evidence_pages.csv"
+    assert write_evidence_pages_artifact(store, RUN_ID, target) == target
+    with target.open(encoding="utf-8", newline="") as handle:
+        file_rows = list(csv.DictReader(handle))
+    summary = evidence_pages_summary(store, RUN_ID, products=[PRODUCT, OTHER_PRODUCT])
+    assert summary is not None
+    assert summary["with_table"] == sum(1 for row in file_rows if row["table"])
+    assert summary["with_table_rows"] == sum(1 for row in file_rows if row["table_rows"])
+    assert summary["with_table"] == 3
+    assert summary["with_table_rows"] == 2
+    assert summary["by_table_status"] == {
+        TABLE_STATUS_MAPPED: 2,
+        TABLE_STATUS_WITHOUT_ROWS: 1,
+        TABLE_STATUS_NO_TABLE_REF: 1,
+        TABLE_STATUS_NO_CHUNK: 1,
+        TABLE_STATUS_NO_DOC: 1,
+    }
+    # Все исходы присутствуют, включая нули: «такого класса не было» — тоже факт.
+    assert list(summary["by_table_status"]) == list(TABLE_STATUSES)
+
+
+def test_human_line_names_tables_only_when_nonzero() -> None:
+    """Часть про таблицы появляется только при ненулевом числе и не печатает нули.
+
+    У большинства корпусов таблиц нет; строка «таблицы: 0 цитат» была бы шумом. Хвост про
+    строки тоже печатается только при ненулевом числе — «строки у 0» читалось бы как
+    утверждение о таблицах, которого никто не делал.
+    """
+    with_rows = human_line(
+        {
+            "evidence": 4,
+            "with_page": 4,
+            "with_block": 4,
+            "with_table": 2,
+            "with_table_rows": 1,
+            "by_status": {PAGE_STATUS_MAPPED: 4},
+            "by_block_status": {BLOCK_STATUS_MAPPED: 4},
+            "by_table_status": {TABLE_STATUS_MAPPED: 1, TABLE_STATUS_WITHOUT_ROWS: 1},
+        }
+    )
+    assert with_rows is not None
+    assert "таблицы: 2 цитат (строки у 1)" in with_rows
+
+    without_rows = human_line(
+        {
+            "evidence": 2,
+            "with_page": 2,
+            "with_table": 2,
+            "with_table_rows": 0,
+            "by_status": {PAGE_STATUS_MAPPED: 2},
+            "by_table_status": {TABLE_STATUS_WITHOUT_ROWS: 2},
+        }
+    )
+    assert without_rows is not None
+    assert "таблицы: 2 цитат" in without_rows
+    assert "строки у 0" not in without_rows
+
+    # Сводка без адреса таблицы (у цитат его нет) о таблицах молчит целиком.
+    silent = human_line(
+        {
+            "evidence": 2,
+            "with_page": 2,
+            "with_table": 0,
+            "by_status": {PAGE_STATUS_MAPPED: 2},
+            "by_table_status": {TABLE_STATUS_NO_TABLE_REF: 2},
+        }
+    )
+    assert silent == "цитаты: все 2 называют страницу"
+

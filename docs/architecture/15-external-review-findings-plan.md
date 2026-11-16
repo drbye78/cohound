@@ -55,9 +55,9 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | Утверждение ревью | Что на самом деле |
 |---|---|
 | SSRF через редирект — «единственный дефект уровня до продакшена»; байты внутреннего эндпоинта попадают в retention и к LLM | Факт есть (`crawl_http.py:244`, `:322`; `crawl_scrapy.py:1136` — единственная валидация), тяжесть завышена: в корпусном пути при `max_depth > 0` редирект-эскейп **отвергается** (`core/pipeline/corpus.py:2986-2999`, `redirect_out_of_scope`, покрыто тестом). Настоящая дыра другая: запрос всё равно выпускается (слепой SSRF), байты ложатся в `cache/http` **до** проверки scope (`crawl_http.py:454`), гейт выключен при `max_depth=0` (`core/pipeline/corpus.py:3344`), и вне краул-очереди гейта нет вовсе (robots.txt, реестры, discovery-проба, SERP-фетч, edge `/v1/fetch`) |
-| Пейсинг размывается числом процессов | В `local` фетч идёт пулом **потоков** в одном процессе — лимитер один, разбавления нет (`core/pipeline/corpus.py:1565`, `core/pipeline/corpus_ingest.py:2818`). Разбавление `процессы × 1/delay` — только в DMZ-планировщике для `scrapy`/`browser` (`core/edge/scheduler.py:485-487`), и оно задокументировано |
+| Пейсинг размывается числом процессов | В `local` фетч идёт пулом **потоков** в одном процессе — лимитер один, разбавления нет (`core/pipeline/corpus.py:1565`, `core/pipeline/corpus_ingest.py:2836`). Разбавление `процессы × 1/delay` — только в DMZ-планировщике для `scrapy`/`browser` (`core/edge/scheduler.py:485-487`), и оно задокументировано |
 | Многораундовая SERP-петля мертва; `SearchPhase.SERP` не излучается; спека это признаёт | Мертвы только `run_serp_round`/`run_serp_loop`. `invalidate_affected` **вызывается** (`core/pipeline/corpus.py:1061` из `core/pipeline/corpus.py:3344`), `SearchPhase.SERP` **излучается** (`core/pipeline/corpus.py:850`, `core/pipeline/serp_loop.py:966`). Устарела спека (§546-548), а не код |
-| `context_prefix`/`heading_path` лежат в четырёх таблицах | Их две: `corpus_chunks` (`core/store/sqlite.py:179-194`) и `chunk_meta` (`core/store/state_sqlite.py:166-180`) |
+| `context_prefix`/`heading_path` лежат в четырёх таблицах | Их две: `corpus_chunks` (`core/store/sqlite.py:190-205`) и `chunk_meta` (`core/store/state_sqlite.py:172-186`) |
 | Правка `chunk_size` молча усечёт чанки по токенам | Усечения у дефолтных моделей нет (`embed_model2vec.py:71` `DEFAULT_MAX_LENGTH: None`; у `LocalEmbedder` параметра длины нет вовсе). Дефект — только в воспроизводимости: геометрия не входит в контракт |
 | Конечность спуска архивами обеспечена циклом + бюджетом | Обоснование ложно: бюджет ограничивает **байты**, цепочка из N крошечных **различных** архивов не упирается ни в цикл, ни в бюджет. Замер: цепочка 1200 zip → глубина **990**, конец виден как `archive_unreadable: container_reader_unavailable` (обманчивая причина: `RecursionError` погашен в `_reader`, `archive_descent.py:353-356`). Проба полосы на другой форме цепочки дала `RecursionError` **наружу** из `plan_members` (`container_policy.py:195`), 0 наблюдений. Причина одна, симптом зависит от формы цепочки — это и есть мера хрупкости |
 
@@ -106,7 +106,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
    (`chunker_family.py:165`), не вывод из `chunk_size`/`min_chunk_size`/`overlap`. Правка
    `chunk_size = 1500` на другое число даёт другой корпус чанков при том же `run_id` — ровно
    тот класс, за который проект ругает себя в `embed_model_id`.
-4. **Ложное обоснование конечности спуска (F1; закрыто итеративным обходом).** `AGENTS.md:706-710`,
+4. **Ложное обоснование конечности спуска (F1; закрыто итеративным обходом).** `AGENTS.md:716-720`,
    `archive_descent.py:12-22`, `:693` утверждали, что конечность дают цикл по хешу **и**
    бюджет. Цепочка различных маленьких архивов опровергла это замером (см. §1.1). Цена —
    не «тихая потеря»: в зависимости от формы цепочки это либо видимая (но ложно
@@ -174,11 +174,11 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | F1 | «потолка глубины нет, конечность — цикл+бюджет» — обоснование ложно; цепочка различных архивов упирается в рекурсию | ПОДТВЕРЖДЕНО (замером) | `archive_descent.py:813-818` (`_walk` рекурсивен, вне `try`), `:314-317` (RecursionError гасится в «не распознан»), `container_policy.py:195` | нет: максимум 3 уровня (`tests/pipeline/test_corpus_descent.py:374`) | М/Б | **P4** |
 | F2 | тест зависит от числа CPU хоста | ПОДТВЕРЖДЕНО (замер: `cpu_count=2` → `assert 2 == 3`) | `tests/pipeline/test_corpus_extract_pool.py:1958` — ныне `monkeypatch` `cpu_parallelism_cap` (на момент аудита вызова не было); режет `resources.py:441` | тест сам дефект | Г | **P4** |
 | F3 | 6 тестов проверяют **реальное** отсутствие `py7zr`/`rarfile`; с extra `extract-archives` они падают | ПОДТВЕРЖДЕНО (замер: 6 failed / 19 passed при подмене бэкенда) | `test_container_7z.py:36-38` (`_no_backend`), тесты `:46`,`:55`,`:68`, `test_container_rar.py:55,63,74` | — | Г | **P4** |
-| F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3344`), синхронно в фазе | только корректность (`tests/selfcheck.py:4068-4075`) | Д/Г | P4 |
+| F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3344`), синхронно в фазе | только корректность (`tests/selfcheck.py:4075-4082`) | Д/Г | P4 |
 | F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:693-694`, `:621`; сравнить `container_policy.py:311` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
 | F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `core/adapters/extract_document.py:1080` (`FULL: None`), `core/cli/wiring.py:2421` (`initargs` воркера — без `document_timeout`), `core/edge/__main__.py:139` — `DoclingDocumentExtractor()` без `document_timeout`; guard только родительский (`core/pipeline/corpus.py:3031`: `extract_timeout=_extract_timeout`); `core/cli/wiring.py:2476` recycle | частично, только родительская сторона (`tests/pipeline/test_corpus_extract_pool.py:865-932`) | Д/М | P4 |
-| F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:87`,`:220`,`:478-479`, `core/pipeline/corpus_ingest.py:2074-2080` (`probe_artifact`) | нет: все тесты кладут маркер в голову | М | P4 |
+| F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:87`,`:220`,`:478-479`, `core/pipeline/corpus_ingest.py:2092-2098` (`probe_artifact`) | нет: все тесты кладут маркер в голову | М | P4 |
 
 **Статус на 2026-10-28.** ✅ F1–F8 (пакет P4 закрыт по всем строкам).
 
@@ -203,9 +203,9 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | C1 | ничья в RRF без `chunk_id` | ПОДТВЕРЖДЕНО для мёртвого модуля; **живой путь корректен** | мёртвый: `util/fusion.py` — **удалён `aa4185b`**, поэтому адрес строки не проверяется и не должен (запись описывает состояние до удаления; `_fuse_template` не выносил `chunk_id`); живой: `retrieve.py:312`,`:415` | живой покрыт (`test_retrieve.py:194-224`, `tests/selfcheck.py:393`) | Г | P5 |
 | C2 | `core/util/fusion.py` — мёртвый дубль, докстринг и `06` врут о подключении | ПОДТВЕРЖДЕНО (покрытие 52 %) | импортов в `core/` нет; `06-implementation-strategy.md:47` — «✅ удалён (`aa4185b`): мёртвый дубль» | единственный тест — `tests/selfcheck.py:336` | Г | P5 |
 | C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:165` | нет | М | **P2** |
-| C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:248` (`_pieces`), `:290` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
+| C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:388` (`_pieces`), `:290` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
 | C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | **ЗАКРЫТО `text-para-4`**: кусок — точный срез, `citation_quote` — подстрока документа | `chunker_text.py:248` (`TextChunker.chunk`), `:268` (`char_start`/`char_end`); P1/P4 = 0 на 194 документах (`2026-11-04-text-chunker-exact-slices.md`) | `test_chunker_text.py` (P1/P4), `test_corpus_chunk_offsets.py` | Г | — |
-| C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:89`,`:176`, `chunker_text.py:98` | нет | М | P4 |
+| C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:90`,`:176`, `chunker_text.py:98` | нет | М | P4 |
 | C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | **ЗАКРЫТО** (L1b-2a плана 18): шапка фрагмента + `RetrievedChunk.context_prefix` | `prompt.py:299-317`, `core/ports/vector_index.py:34`, `retrieve.py:324` | `test_prompt.py` пинит **наличие** `heading:`/`context:`, `test_vector_npy.py`/`test_lexical_tantivy.py` — доезд контекста | М | **P2** |
 | C8 | лексический индекс: 4 поля с одним текстом, пересборка каждый прогон в temp, запрашивается только `stemmed` | ПОДТВЕРЖДЕНО → **закрыто** (`1e7fad9`: одно поле + `lexical_spec` в контракте) | `lexical_tantivy.py`, `core/pipeline/digests.py` (`lexical_spec`) | `test_lexical_tantivy.py`, `test_digests.py` | Д | P5 |
 | C9 | `index_npy` склеивает поля тем же разделителем, что и группы (латентно) | ПОДТВЕРЖДЕНО формально; сейчас не эксплуатируемо | `index_npy.py:123-132` vs `_GROUP_SEP` `:77` | нет | Г | P5 |
@@ -218,13 +218,13 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   там ничья разрешается по `chunk_id`; `06-implementation-strategy.md:47` говорит правду («удалён»).
 - ✅ C3 — геометрия чанка в контракте: `chunking_spec` — `core/pipeline/digests.py:178`
   (28 полей, `_prompt_template_identity`-подобный композит из чанкеров).
-- ✅ C4 — граница реза по переводу строки, не по середине слова: `core/adapters/chunker_markdown.py:485`
+- ✅ C4 — граница реза по переводу строки, не по середине слова: `core/adapters/chunker_markdown.py:723`
   (`_hard_cut`), `core/adapters/md_ast.py:841` (`safe_cut_offsets`).
 - ➖ C5 → ✅ **закрыто `text-para-4`**: кусок plain text — точный срез нормализованного
   входа (`P1`/`P4` = 0 на 194 документах), поэтому `citation_quote` — подстрока документа;
   нормализация пробелов в `core/pipeline/validate.py:326` остаётся, но больше не несёт
   компенсирующей роли. Правило не менялось.
-- ✅ C6 — `MIN_CHUNK_SIZE = 20` в обоих чанкерах: `core/adapters/chunker_markdown.py:89`,
+- ✅ C6 — `MIN_CHUNK_SIZE = 20` в обоих чанкерах: `core/adapters/chunker_markdown.py:90`,
   `core/adapters/chunker_text.py:98`; конструктор требует `min_chunk_size < chunk_size` (`:234`).
   В `md-heading-5` порог больше **не выбрасывает** текст: он приклеивает хвост разреза к
   предыдущему куску, а объявленная единица документа остаётся чанком (P1 плана 18).
@@ -244,7 +244,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | S2 | `run_serp_round`/`run_serp_loop` без производителя; спека устарела | ЧАСТИЧНО | мертвы только эти две; `invalidate_affected` вызывается (`core/pipeline/corpus.py:1061`), `SearchPhase.SERP` излучается (`core/pipeline/corpus.py:850`) | — | Г | P0 |
 | S3 | набор запросов фиксирован между раундами: `rounds>1` жжёт бюджет | ПОДТВЕРЖДЕНО → **закрыто** (`no_query_variation`: раунды 2..n не исполняются, причина в наблюдении — «измерять и называть», не потолок) | `core/pipeline/serp_loop.py:126-131`, `:1313` | `test_serp_discover.py::test_rounds_above_one_without_query_variation_are_not_executed` | Д | P5 |
 | S4 | контур последовательный, poll 30 с, async-режим: ~10 ч/продукт/раунд | ПОДТВЕРЖДЕНО → **измеряемо** (`SearchTiming`: `wait_seconds`/`request_seconds`/`polls`/`measured`, инъектируемые часы и `sleep`); параллелизм не вводился — «медленно» стало числом, а не диагнозом | `search_yandex.py:108-128`, `:418` | тайминги инъекцией `sleep` | Д | P5 |
-| S5 | адаптер поиска собирается без кэша | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`) | `core/cli/wiring.py:722-753`; краулеры кэш получают (`:1600-1619`) | только соответствие порту (`tests/selfcheck.py:4067`) | М | **P1** |
+| S5 | адаптер поиска собирается без кэша | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`) | `core/cli/wiring.py:722-753`; краулеры кэш получают (`:1600-1619`) | только соответствие порту (`tests/selfcheck.py:350`) | М | **P1** |
 | S6 | GLM без ретраев 429/5xx, бюджет при этом списывается | ПОДТВЕРЖДЕНО → **закрыто** (общая политика `core/util/retry.py` применена в GLM; списание при неуспехе сделано **видимым**: `budget.charged`, `yield.errors`, текст отказа в `query_outcomes[].error`) | `search_glm.py:44-66`, `:363,376` | `test_search_glm.py::test_post_retries_429_then_succeeds`, `::test_retry_exhaustion_raises_search_error` | Д | P5 |
 | S7 | `queries_log` пишется после `if not results: continue` → знаменатель приёмки завышен | ПОДТВЕРЖДЕНО → **закрыто** (запись до `continue`; добавлен per-query исход `results`/`no_results`/`error`/`budget_exhausted` и блок `yield` с явным знаменателем) | `core/pipeline/serp_loop.py:1363-1370`, `:731-770`, `:810-817` | `test_serp_discover.py` (исходы запросов, accepted per query) | Г | P5 |
 | S8 | ошибка адаптера неотличима от «не нашлось» в наблюдении | ПОДТВЕРЖДЕНО → **закрыто** (`errors` отделены от `no_results` в наблюдении контура; сбой — отдельная строка знаменателя, а не «ничего не нашлось») | `core/pipeline/serp_loop.py:1100-1114`, `:737-760` | `test_serp_discover.py` (`yield.errors` отдельно от `no_results`), `test_search_log.py` | Г | P5 |
@@ -330,7 +330,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - `docs/architecture/06-implementation-strategy.md:47` — `fusion.py` не «обёрнут в
   ретривал», а **удалён** (`aa4185b`); строка C1 выше ссылается на файл, которого нет,
   и читается как историческая.
-- `AGENTS.md:706-710`, `core/pipeline/archive_descent.py:12-22`,`:693` — конечность спуска:
+- `AGENTS.md:716-720`, `core/pipeline/archive_descent.py:12-22`,`:693` — конечность спуска:
   цикл и бюджет **не** дают её для цепочки различных архивов; фактический предел —
   рекурсия интерпретатора. Формулировку заменить на измеренную (до P4).
 - `core/util/document_probe.py:4-10`,`:155-157` — «по шапке/не разбирая содержимое» неверно:

@@ -81,7 +81,13 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: ``actor``, ``superseded_by``). ``last_checked_at`` роли наблюдения не несёт: он
 #: пишется при любом исходе, включая отказ. Шимов нет; файл версии ≤ 10 отвергается
 #: ``SchemaVersionMismatch``.
-STATE_SCHEMA_VERSION = "12"
+#: 12 — ``chunk_meta.table_ref`` (O39 фаза 2 плана ``26``): адрес куска внутри таблицы
+#: (JSON ``{table_id,row_start,row_end}``). Без него chunk-set, переиспользованный из
+#: ``state.db``, терял адрес и кусок таблицы молча становился «не из таблицы» — ровно та
+#: же потеря провенанса, ради видимости которой заводились ``char_start``/``char_end``
+#: (версия 7). Колонка объявлена в ``CREATE TABLE``; ``ALTER TABLE`` при открытии нет,
+#: поэтому файл версии ≤ 11 отвергается ``SchemaVersionMismatch`` и пересоздаётся.
+STATE_SCHEMA_VERSION = "13"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -205,7 +211,11 @@ CREATE TABLE IF NOT EXISTS chunk_meta (
     -- L1b-2b: смещения куска в тексте документа. NULL — кусок не является точным
     -- срезом (абзацный чанкер); 0 — настоящая позиция, поэтому NULL и 0 не смешиваются.
     char_start       INTEGER,
-    char_end         INTEGER
+    char_end         INTEGER,
+    -- O39 ф2: адрес куска внутри таблицы (JSON ``{table_id,row_start,row_end}``).
+    -- NULL — «адрес неизвестен»: читатель таблиц их не даёт либо сопоставление блоков с
+    -- объектами не сошлось. Это НЕ «кусок не из таблицы»; различие видно числом в отчёте.
+    table_ref        TEXT
 );
 
 -- 6. Снимок продукта за прогон (только после eval/coverage).

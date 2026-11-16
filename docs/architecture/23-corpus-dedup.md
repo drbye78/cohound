@@ -182,7 +182,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 ### S3. Точная идентичность текста
 
 * **Вход:** финализированный текст (`finalize_extracted_text` → `content_hash` текста).
-* **Решение:** `doc_id = {product_id}:{text_hash}` (`core/pipeline/corpus_ingest.py:1708`); при совпадении
+* **Решение:** `doc_id = {product_id}:{text_hash}` (`core/pipeline/corpus_ingest.py:1801`); при совпадении
   второй адрес становится алиасом первого, победитель — `min(url)`.
 * **Экономия:** ноль (извлечение уже оплачено) — но это и есть цена: **дедуп стоит после
   конвертации**. S2 снимает повторные байты до неё.
@@ -190,7 +190,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 * **Публикует:** `IndexBuild.duplicates` (`core/pipeline/index_build.py:103`) → note фазы (`core/pipeline/phases.py:373`) →
   `results[].notes`. Перенести в ledger как отдельную строку (сейчас это нота в логе, а не
   счётчик в артефакте).
-* **Хук:** `core/pipeline/corpus_ingest.py:1720` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:471`,
+* **Хук:** `core/pipeline/corpus_ingest.py:1729` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:481`,
   пост-проход `canonicalize_doc_urls` (`core/pipeline/corpus.py:628`) — он группирует по
   `crawl_session_items.doc_hash` и ставит победителем `min(urls)` (`core/pipeline/corpus.py:724`).
 * **Дефект детерминизма (найден при разведке).** `canonicalize_doc_urls` покрывает только
@@ -347,7 +347,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 ### 5.1 Распутать два `content_hash`
 
 Сегодня одна и та же колонка означает разное: `extract_queue.content_hash` — хеш **байтов**
-(`core/store/sqlite.py:606`), `corpus_docs.content_hash` — хеш **текста** (`core/store/sqlite.py:570`, `02-subsystems`
+(`core/store/sqlite.py:625`), `corpus_docs.content_hash` — хеш **текста** (`core/store/sqlite.py:283`, `02-subsystems`
 говорит об этом же). В новых таблицах имена обязаны быть однозначными
 (`member_content_hash`, `text_hash`), а в `corpus_docs` — комментарий и selfcheck-инвариант:
 `corpus_docs.content_hash == sha256(конкатенация corpus_chunks.text)` для документов без
@@ -483,7 +483,7 @@ measured_seconds_per_page`, где `measured_seconds_per_page` — из `stage_t
 **Чего в наблюдаемости сегодня нет** (и что P0 обязан закрыть, иначе ledger будет единственным
 местом, где эти факты существуют):
 
-* `corpus_members.skip_reason` имеет читателя стора (`core/store/sqlite_store.py:2886`) и **ни одного
+* `corpus_members.skip_reason` имеет читателя стора (`core/store/sqlite_store.py:2887`) и **ни одного
   экспортёра** — в `metrics.json`, `run_product.csv` и отчёте его нет;
 * отказы уровня плана (`core/util/container_policy.py:91`: `is_directory`, `path_rejected`, `encrypted`,
   `not_ingestible_format`, `member_too_large`, `member_limit_exceeded`,
@@ -588,8 +588,8 @@ S7 в `retrieval_params_json` (новый `run_id`, `execution_change`). Вор�
 | 1 | `extract_cache` не адресует членов: ключ — stem ретейленного файла, а у члена это **архив** | `core/pipeline/extraction_runtime.py:276`; замер 89/1 397 | недельный тираж конвертирует всё заново (≈5 ч) | **✅ P0-A 07.11.2026** |
 | 2 | `open_member` открывает `ZipFile` на каждого члена — O(n²) чтений каталога | `core/adapters/container_zip.py:190`; один хендл на архив | 30 мс/архив, рост с числом членов | **✅ P0-A 07.11.2026** |
 | 3 | повтор текста внутри одного батча эмбеддинга считается дважды | `core/pipeline/corpus_index.py:603` | 12.8 % лишних векторов | **✅ P0-B 07.11.2026** |
-| 4 | `corpus_chunks.embedded_at` всегда `NULL` | `core/store/sqlite.py:364` (колонка есть, писателя нет) | провенанс вектора не публикуется | **✅ P0-B 07.11.2026** |
-| 5 | `corpus_members.skip_reason` не экспортируется ни в один артефакт | `core/store/sqlite_store.py:2886` (только чтение) | «почему члена нет» из БД не отвечается | **✅ 09.11.2026**: `outputs/corpus_members.csv` + сводка `corpus_members` в `--json` (`core/pipeline/corpus_members.py`; только строки с `skip_reason`, схема БД не тронута) |
+| 4 | `corpus_chunks.embedded_at` всегда `NULL` | `core/store/sqlite.py:382` (колонка есть, писателя нет) | провенанс вектора не публикуется | **✅ P0-B 07.11.2026** |
+| 5 | `corpus_members.skip_reason` не экспортируется ни в один артефакт | `core/store/sqlite_store.py:2887` (только чтение) | «почему члена нет» из БД не отвечается | **✅ 09.11.2026**: `outputs/corpus_members.csv` + сводка `corpus_members` в `--json` (`core/pipeline/corpus_members.py`; только строки с `skip_reason`, схема БД не тронута) |
 | 6 | отказы уровня плана не порождают строку члена вовсе | `core/util/container_policy.py:91` | отказ виден только в памяти фазы | **✅ 09.11.2026**: бюджетные причины (`PLAN_SKIP_ROW_REASONS`) дают строку — пачкой фазы; каталог/шифрование/чужой формат остаются агрегатом прогноза (не члены-файлы), `path_rejected` — после колонки `raw_member_path` |
 | 7 | `corpus_docs.url` документа-члена = последний писатель ⇒ зависит от порядка спуска | `core/store/sqlite_store.py:1558`; канонизация членов — `core/pipeline/corpus.py:628` | адрес члена — функция расписания | **✅ P0-A 07.11.2026** |
 | 8 | EPUB не финализировал текст перед хешем | `core/adapters/extract_epub.py:61` vs `core/util/sanitize.py:423` | нарушен контракт «каждый читатель зовёт границу очистки»: тела глав чистил `HtmlExtractor`, а шапки глав и заметки — нет. **Не** про равенство хешей EPUB и HTML: книга склеена читателем, хеши не совпадут и после фикса | **✅ 09.11.2026**, `epub-3` (`execution_change`) |
@@ -630,5 +630,5 @@ P0b, `ocr_probe` из O25 плана `26`, `page_map`/`page_number` из O36). �
 бампа. **Сделано 15.11.2026 (схема 3.22.0, O25-остаток + O38a):** колонки
 `corpus_docs.ocr_probe`/`pages_ocr`/`pages_failed`, `runs.ocr_probe`, `index_manifest.ocr_probe`
 и агрегат `outputs/ocr_provenance.csv` (худший исход по продукту и по прогону). Следующий
-свободный номер для P0b — **3.25.0**: 3.21.0–3.24.0 заняты (O36 фазы 1b/3, O25-остаток + O38a,
-O39 фаза 1).
+свободный номер для P0b — **3.27.0**: 3.21.0–3.26.0 заняты (O36 фазы 1b/3, O25-остаток + O38a,
+O39 фазы 1/2).

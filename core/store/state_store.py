@@ -424,6 +424,7 @@ _CHUNK_COLUMNS = (
     "lang",
     "char_start",
     "char_end",
+    "table_ref",
 )
 
 #: Колонки ``cell_measurement`` в порядке записи (кроме составного ключа
@@ -1307,6 +1308,7 @@ class SqliteStateStore:
             lang=row["lang"],
             char_start=row["char_start"],
             char_end=row["char_end"],
+            table_ref=row["table_ref"],
         )
 
     def iter_doc_chunks(self, doc_version_id: str) -> list[ChunkRow]:

@@ -249,10 +249,10 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:392-393,562,1168`), подключены в
->   `core/pipeline/extract_consume.py:1276-1277`; видимая строка пропуска по бюджету —
+>   `core/pipeline/extract_consume.py:1279-1280`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:873-889` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:127`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
->   `core/store/sqlite.py:711-730`.
+>   `core/store/sqlite.py:730-749`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
@@ -284,7 +284,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   (`core/pipeline/archive_descent.py:773`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
   `_record`/`_settle`. Финальную пачку сохранить как идемпотентный reconciliation-pass
   (дешёвый повторный upsert). Сбой записи изолируется в `errors` по образцу `persist_docs`
-  (`core/pipeline/corpus_ingest.py:1428`) — отказ store не должен убивать спуск.
+  (`core/pipeline/corpus_ingest.py:1429`) — отказ store не должен убивать спуск.
   Идемпотентность уже обеспечена: `observation_id` детерминирован (`run|product|root|hash|depth`),
   `corpus_members` — UPSERT. **Не делать в первом патче:** предварительное observation «контейнер
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
@@ -295,7 +295,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   **Реализовано (2026-10-24):** синки `persist_observation`/`persist_member` в
   `ArchiveDescentWalker`, единая точка строки — `_emit_member`/`_emit_skipped_member`;
   `SKIP_BUDGET`/`SKIP_STREAM_TOO_LARGE` теперь дают строку члена (видимый пропуск); синки
-  подключаются в `core/pipeline/extract_consume.py:1214-1215`
+  подключаются в `core/pipeline/extract_consume.py:1217-1218`
   (`persist_observation_sync`/`persist_member_sync`, отказ стора → `errors`), финальная пачка
   осталась reconciliation-pass'ом. **Дополнено 09.11.2026:** строка появилась и у отказов
   **плана** — но только по бюджетным причинам (`member_too_large`/`member_limit_exceeded`/

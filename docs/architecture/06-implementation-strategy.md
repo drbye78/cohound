@@ -335,18 +335,18 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W3 — Store — ✅ done
 
-✅ сделано (проверено) — `core/store/sqlite.py:112` (`SCHEMA_VERSION = "3.24.0"`; **24** `CREATE TABLE`,
+✅ сделано (проверено) — `core/store/sqlite.py:143` (`SCHEMA_VERSION = "3.26.0"`; **24** `CREATE TABLE`,
 включая `schema_meta`, + `sqlite_sequence` = 25 таблиц в БД),
-`core/store/state_sqlite.py:84` (`STATE_SCHEMA_VERSION = "12"`),
-`core/store/state_store.py:1615` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
+`core/store/state_sqlite.py:90` (`STATE_SCHEMA_VERSION = "13"`),
+`core/store/state_store.py:1617` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.22.0"`;
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.26.0"`;
   гейт версии схемы — файл другой версии отвергается, `11` §2.6; свидетельство живости сеанса
   краула — F1.
 - `core/pipeline/liveness.py` — `owner`/`heartbeat_at`, recovery-on-open (`running` → `interrupted`),
   `Heartbeat` (F1/Д-6).
 - `core/store/state_sqlite.py` — durable per-product состояние (`state/{package_id}/state.db`,
-  `STATE_SCHEMA_VERSION = "12"`): lineage, `previous_run_id`, `profile_attestation`, политика
+  `STATE_SCHEMA_VERSION = "13"`): lineage, `previous_run_id`, `profile_attestation`, политика
   краула/снятия (планы 19/20). Источник
   `--since-run`/класса изменения (09 §4.1).
 - `core/store/sqlite_store.py` — реализация `StorePort`/`GateStore`; батчевые транзакции, WAL.
@@ -359,7 +359,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
 `core/cli/context.py:1697` (`make_profile_gate` подключён в CLI).
 ✅ механизм durable-аттестации профиля есть, **подписей 0**: `save_profile_attestation` вызывается
-из CLI (`core/cli/package/commands.py:3083` → `core/store/state_store.py:1615`), команда —
+из CLI (`core/cli/package/commands.py:3083` → `core/store/state_store.py:1617`), команда —
 `hound package profile attest` (`core/cli/package/commands.py:2994`); строк в `profile_attestation`
 в `state.db` — **0**.
 
@@ -579,7 +579,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173`/`:274`/`:465` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3224`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3239`),
 но приёмочный контур не пройден: golden-full дал 6.8 % на наборе из 236 строк
 (`2026-10-27-golden-reference-set-unusable.md`), на переразмеченных 905 строках прогнан только
 срез 50 ячеек (07.11, κ 0.024/0.056); §11.5-baseline и кейсы 2–5 не делались.
@@ -713,7 +713,7 @@ P5), но строка помечена здесь как неактуальна
 - **Параллельная экстракция (P4, as-built).** Ось `crawl.extract_workers` (app < run < site,
   `CrawlLimits.extract_workers`, манифест-поле `crawl_extract_workers`) —
   пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:133`), фабрика
-  `new_extract_pool` в `core/pipeline/corpus_ingest.py:5230`, воркер
+  `new_extract_pool` в `core/pipeline/corpus_ingest.py:5250`, воркер
   от composition root. `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
   воркер через `core/cli/wiring.py`), `split` — потоки поверх `RemoteExtractor`; шов
   (`/v1/*`, `SEAM_SCHEMA_VERSION`) **не** менялся. Воркер читает retained-`raw_path` (I19;
@@ -974,7 +974,7 @@ uv sync --frozen --extra dev
    (принятие риска) — `core/pipeline/evaluate.py:2844` (`evaluate_cell`), `:551` (`_carry_one`),
    `:1881` (`_resolve_denial`). Прежнее `scope_attested_by` живёт
    **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:327`)
-   и как миграция колонки (`core/store/sqlite.py:447`); в сигнатуре оценщика алиаса нет —
+   и как миграция колонки (`core/store/sqlite.py:466`); в сигнатуре оценщика алиаса нет —
    прежняя редакция выдавала желаемое за сделанное.
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой
@@ -1036,7 +1036,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   `index_build_id` и `registry_spec_digest`», — а не две.
   ➖ **A1 follow-up закрыт 07.11.2026:** мультиплексирование root/product — F4a/F4b
   (`core/pipeline/corpus_driver.py`); нит `limiter.wait` внутри/вне `try` снят `9a8440a` — оба
-  пути (пуловой и inline) зовут один помощник `core/pipeline/corpus_ingest.py:2738`
+  пути (пуловой и inline) зовут один помощник `core/pipeline/corpus_ingest.py:2756`
   (`_fetch_with_paced_retries`).
   ➖ **E2 follow-up закрыт 31.10.2026:** вестигиальное `Ports.registry`/`DEFAULT_REGISTRY_ID` и
   параметры `registry`/`registry_id` у `build_adapters` сняты (читателей не было — Ш3 берёт только

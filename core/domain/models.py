@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.domain.doc_blocks import BlockList, check_blocks
-from core.domain.doc_tables import TableList
+from core.domain.doc_tables import TableList, TableRef
 from core.domain.enums import (
     ABSENT_DENIAL_STRENGTHS,
     BLOCKING_FAILURE_KINDS,
@@ -1882,14 +1882,19 @@ class RunManifest(BaseModel):
     #: Наблюдение (как ``crawl_provenance``): в границы версий §13 не входит — это факт
     #: о том, что прибор прочитал, а не смена условий измерения.
     partial_docs: dict[str, Any] = Field(default_factory=dict)
-    #: Страница **цитаты** — **числом**, а не прилагательным (O36 фаза 3 плана ``26``):
-    #: ``{"evidence": n, "with_page": m, "by_status": {"mapped"|"no_page_map"|
-    #: "no_char_span"|"no_chunk"|"no_doc": k}, "by_product": {id: {"evidence": n,
-    #: "with_page": m}}}``. Пока это не публикуется, «цитата называет страницу» и «цитата
+    #: Адреса **цитаты** — **числом**, а не прилагательным (O36 фаза 3, O36 ф2 и O39 ф2
+    #: плана ``26``): ``{"evidence": n, "with_page": m, "with_block": b, "with_table": t,
+    #: "with_table_rows": r, "by_status": {"mapped"|"no_page_map"|"no_char_span"|
+    #: "no_chunk"|"no_doc": k}, "by_block_status": {"mapped"|"no_blocks"|...: k},
+    #: "by_table_status": {"mapped"|"table_without_rows"|"no_table_ref"|...: k},
+    #: "by_product": {id: {"evidence": n, "with_page": m, "with_block": b,
+    #: "with_table": t}}}``. Пока это не публикуется, «цитата называет страницу» и «цитата
     #: называет только документ» неотличимы в артефакте прогона, а причина различия
     #: (нет карты / нет смещений чанка / не корпусная цитата / битая ссылка) не называется
-    #: нигде. Номер страницы — **функция** от ``corpus_docs.page_map`` и ``char_start``
-    #: (:func:`core.domain.page_map.page_number_for`), а не колонка чанка.
+    #: нигде. Номер страницы и адрес блока — **функции** от ``corpus_docs.page_map``/
+    #: ``corpus_docs.blocks`` и ``char_start`` (:func:`core.domain.page_map.page_number_for`,
+    #: :func:`core.domain.doc_blocks.block_id_for`), а не колонки чанка; адрес таблицы —
+    #: колонка ``corpus_chunks.table_ref``, потому что таблица-объект смещений не несёт.
     #: Наблюдение (как ``partial_docs``/``ocr_probe``): в ``run_id`` и
     #: ``EXECUTION_CONTRACT_FIELDS`` не входит — это факт о прочитанном, а не условие
     #: измерения. ``None`` — цитат нет вовсе (не ноль).
@@ -2346,6 +2351,12 @@ class CorpusChunk(BaseModel):
     char_start: int | None = None
     #: Конец куска (исключающий): ``doc_text[char_start:char_end] == text``.
     char_end: int | None = None
+    #: Адрес куска **внутри таблицы** (O39 фаза 2 плана ``26``) — какая таблица документа и
+    #: какие её строки данных попали в кусок; ``None`` — адрес неизвестен (читатель таблиц
+    #: их не даёт либо сопоставление блоков с объектами не сошлось). Это не «кусок не из
+    #: таблицы». ``text``/``content_hash`` от адреса не зависят: кусок остаётся точным
+    #: срезом, и цитата по-прежнему сверяется с ним (I22).
+    table_ref: TableRef | None = None
 
     @model_validator(mode="after")
     def _check_char_span(self) -> CorpusChunk:

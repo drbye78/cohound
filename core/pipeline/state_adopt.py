@@ -1084,6 +1084,10 @@ def _plan_product(
                         lang=_as_text(_get(chunk, "lang")),
                         char_start=char_start,
                         char_end=char_end,
+                        # O39 ф2: адрес куска в таблице — как он записан в источнике.
+                        # ``_get`` терпит прогон старой схемы (колонки нет ⇒ None), и
+                        # ``None`` здесь означает «адрес неизвестен», а не «не таблица».
+                        table_ref=_as_text(_get(chunk, "table_ref")),
                     ),
                     text,
                 )
