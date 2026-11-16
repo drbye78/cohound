@@ -53,6 +53,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from core.adapters import index_format
 from core.adapters.index_format import read_partition
 from core.ports.types import Chunk
 from core.ports.vector_index import (
@@ -60,6 +61,7 @@ from core.ports.vector_index import (
     RetrievedChunk,
     VectorQuery,
 )
+from core.util.index_partition import VECTORS_FILE
 
 __all__ = [
     "DEFAULT_PARTITION_CACHE_BYTES",
@@ -128,6 +130,16 @@ class PartitionCache:
     иначе она вытеснила бы всё и вернулась бы на следующем запросе, забрав с собой
     остальное (трешинг вместо кэша).
 
+    **Отказ по размеру виден, а не молчит.** Партиция, которая не влезает, кэшируется
+    нулём байт: каждый запрос к ней читает файл и конвертирует ``fp16 → fp32`` заново.
+    Партиция ``postgrespro`` — 206 931 × 1024, то есть 808 MiB в fp32, — в дефолтные
+    256 MiB не влезает. Поэтому отказы считаются и запоминаются вместе с размером: у
+    оператора есть число, по которому подбирается бюджет, а не догадка.
+
+    Цену это даёт, только если поиск ходит в партицию поштучно: при батче на 132 ячейки
+    (замер O43, 16.11.2026) сетка ``R0,R1`` стоила 4.0 с при 256 MiB и 6.8 с при 1 GiB —
+    различие в пределах шума, потому что партиция читается пять раз, а не 396.
+
     :param budget_bytes: бюджет в байтах; ``0`` — кэш выключен (прежнее поведение по
         стоимости: конверсия на каждый запрос).
     :raises ValueError: если ``budget_bytes`` отрицателен.
@@ -140,6 +152,10 @@ class PartitionCache:
         self.hits = 0
         self.misses = 0
         self.evictions = 0
+        #: Сколько раз запись отвергнута по размеру (``nbytes > budget_bytes``).
+        self.too_large = 0
+        #: Отвергнутые записи и их размер — по ним видно, какой бюджет нужен.
+        self.too_large_sizes: dict[PartitionKey, int] = {}
         self._items: OrderedDict[PartitionKey, _Partition] = OrderedDict()
         self._bytes = 0
 
@@ -162,8 +178,17 @@ class PartitionCache:
         return item
 
     def put(self, key: PartitionKey, partition: _Partition) -> None:
-        """Кладёт партицию, вытесняя старейшие записи до бюджета."""
-        if self.budget_bytes == 0 or partition.nbytes > self.budget_bytes:
+        """Кладёт партицию, вытесняя старейшие записи до бюджета.
+
+        Отказ по размеру считается (:attr:`too_large`/``too_large_sizes``): кэш, который
+        для самой большой партиции является no-op, обязан быть виден, иначе его отсутствие
+        спишут на медленный профиль.
+        """
+        if self.budget_bytes == 0:
+            return
+        if partition.nbytes > self.budget_bytes:
+            self.too_large += 1
+            self.too_large_sizes[key] = partition.nbytes
             return
         previous = self._items.pop(key, None)
         if previous is not None:
@@ -236,6 +261,76 @@ class NpyVectorIndex:
         self._view = view
         self._lookup = _normalize_lookup(chunk_lookup)
         self.partition_cache = PartitionCache(cache_budget_bytes)
+        self.cache_notices: tuple[str, ...] = self._cache_notices()
+
+    def _cache_notices(self) -> tuple[str, ...]:
+        """Партиции, которые в бюджет кэша не влезают, — числом, а не догадкой.
+
+        Бюджет 256 MiB выбирался под партицию 11 400 × 1024 (46.7 MB fp32). На текущем
+        корпусе ``postgrespro`` — 206 931 × 1024, то есть **808 MiB** fp32: такая партиция
+        не кэшируется ни на байт, и каждый поиск по ней читает файл и конвертирует
+        ``fp16 → fp32`` заново. Заметка нужна до прогона: иначе оператор узнает о no-op
+        кэше после того, как час уже потрачен.
+
+        Замер O43 (16.11.2026) показал, что сама по себе эта заметка цену **не**
+        объясняет: дорогая сетка была следствием ключа кэша dense-плеча без профиля (см.
+        :func:`scripts.measure_retrieval_docs._dense_by_product`), а при батче цена от
+        бюджета не зависит. Заметка остаётся, потому что цена пере-чтения — свойство
+        корпуса и хоста, и на партиции, где чтение дороже, она первая, что нужно увидеть.
+
+        Считается по манифесту (``stats.chunks`` × ``stats.dim`` × 4 — размер в том виде,
+        в котором матрица живёт в кэше), с откатом на размер файла (fp16 на диске × 2) для
+        сборок без ``stats``, а не по факту первого поиска.
+        """
+        if self.partition_cache.budget_bytes == 0:
+            return (
+                "partition_cache_disabled: бюджет 0 — каждый поиск читает и "
+                "конвертирует матрицу заново",
+            )
+        notices: list[str] = []
+        budget_mb = self.partition_cache.budget_bytes / (1024 * 1024)
+        products = (
+            list(self._view.product_ids())
+            if self._view is not None
+            else index_format.list_partitions(self.index_root, self.package, self.build_id)
+        )
+        for product_id in products:
+            build_id = (
+                self._view.build_id_for(product_id)
+                if self._view is not None
+                else self.build_id
+            )
+            try:
+                stats = index_format.read_manifest(
+                    self.index_root, self.package, build_id, product_id
+                ).get("stats") or {}
+            except (OSError, ValueError, KeyError):
+                continue
+            chunks, dim = stats.get("chunks"), stats.get("dim")
+            if isinstance(chunks, int) and isinstance(dim, int):
+                needed_mb = chunks * dim * 4 / (1024 * 1024)
+            else:
+                # Сборки без ``stats`` (до появления поля) — размер по файлу: на диске
+                # fp16, в кэше fp32, то есть ровно вдвое больше. Заголовок ``npy``
+                # добавляет сотню байт — в сторону заметки, не в сторону молчания.
+                vectors = (
+                    index_format.partition_dir(
+                        self.index_root, self.package, build_id, product_id
+                    )
+                    / VECTORS_FILE
+                )
+                try:
+                    needed_mb = vectors.stat().st_size * 2 / (1024 * 1024)
+                except OSError:
+                    continue
+            if needed_mb > budget_mb:
+                notices.append(
+                    f"partition_cache_too_small: партиция {product_id!r} требует "
+                    f"{needed_mb:.0f} MiB в fp32, бюджет {budget_mb:.0f} MiB — кэш для неё "
+                    "не работает, каждый поиск перечитывает и конвертирует матрицу "
+                    "(цена: см. отчёт O43)"
+                )
+        return tuple(notices)
 
     @property
     def available(self) -> bool:

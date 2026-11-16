@@ -1046,7 +1046,7 @@ def test_dense_hits_cache_is_keyed_by_query_depth() -> None:
     texts = unique_queries([param])
     query_vectors = {text: [0.0, 0.0] for text in texts}
     index = _SpyVectorIndex()
-    cache: dict[tuple[str, int, int | None], object] = {}
+    cache: dict[tuple[str, str, int, int | None], object] = {}
 
     def dense(query_depth: int | None) -> object:
         return HARNESS._dense_by_product(
@@ -1068,3 +1068,156 @@ def test_dense_hits_cache_is_keyed_by_query_depth() -> None:
     assert index.windows == [10] * len(texts) + [40] * len(texts)
     dense(40)
     assert index.windows == [10] * len(texts) + [40] * len(texts)
+
+
+# ------------------------------------------------- цена комбинации (O43)
+#
+# Дефект O43: в смешанной сетке та же комбинация стоила в 22 раза дороже, чем
+# изолированно, и это списывалось на «профиль медленнее». Носители причины — кэш партиций
+# (партиция 847 MB fp32 не влезает в бюджет 256 MB) и страничные отказы. Поэтому цена
+# публикуется счётчиками, а не только секундами, и только по флагу: без него отчёт обязан
+# остаться прежним до байта (на нём стоят числа O14/O15).
+
+
+def test_partition_cache_mb_is_undeclared_by_default() -> None:
+    """Без флага бюджет не переопределяется: цена остаётся ценой дефолта кода."""
+    args = HARNESS._parse_args(
+        ["--db", "x.db", "--golden", "g.json", "--index-root", "idx"]
+    )
+    assert args.partition_cache_mb is None
+
+
+def test_partition_cache_mb_is_declared_explicitly() -> None:
+    args = HARNESS._parse_args(
+        [
+            "--db", "x.db", "--golden", "g.json", "--index-root", "idx",
+            "--partition-cache-mb", "0",
+        ]
+    )
+    assert args.partition_cache_mb == 0
+
+
+def test_cost_block_is_absent_without_the_flag() -> None:
+    """Флаг не задан ⇒ в отчёте нет ``cost`` (байтовая совместимость с O14/O15)."""
+    from core.pipeline.retrieval_docs import DocQueryResult, evaluate_documents
+
+    results = [
+        DocQueryResult(
+            cell=f"{PRODUCT}/a",
+            product_id=PRODUCT,
+            param_id="a",
+            expected_doc_ids=("d1",),
+            retrieved_doc_ids=("d1",),
+            rank=1,
+            unresolved=False,
+        )
+    ]
+    report = evaluate_documents(results, profile="R1", k=5, bootstrap=1, seed=0)
+    payload = HARNESS._report_payload(
+        report, label="R1/fusion=max", pool_multiplier=1, cross_query_fusion="max"
+    )
+    assert "cost" not in payload
+
+
+def test_cost_delta_publishes_faults_and_cache() -> None:
+    """Дельты, а не абсолюты: вопрос цены — «что стоила эта комбинация»."""
+    cost = HARNESS._cost_delta(
+        memory_before={"rss_kb": 1000, "minor_faults": 10, "major_faults": 1},
+        memory_after={"rss_kb": 2500, "minor_faults": 40, "major_faults": 5},
+        cache_before={"budget_bytes": 256, "hits": 1, "misses": 2, "evictions": 0,
+                      "bytes_used": 0, "too_large": 0},
+        cache_after={"budget_bytes": 256, "hits": 3, "misses": 9, "evictions": 4,
+                     "bytes_used": 128, "too_large": 5},
+    )
+    assert cost["minor_faults"] == 30
+    assert cost["major_faults"] == 4
+    assert cost["rss_kb_after"] == 2500
+    assert cost["partition_cache"] == {
+        "budget_bytes": 256,
+        "hits": 2,
+        "misses": 7,
+        "evictions": 4,
+        "bytes_used": 128,
+        "too_large": 5,
+    }
+
+
+def test_cost_delta_without_cache_has_no_cache_block() -> None:
+    """Лексический профиль кэша партиций не имеет — пустого блока не появляется."""
+    cost = HARNESS._cost_delta(
+        memory_before={"rss_kb": 1, "minor_faults": 0, "major_faults": 0},
+        memory_after={"rss_kb": 2, "minor_faults": 5, "major_faults": 0},
+        cache_before=None,
+        cache_after=None,
+    )
+    assert "partition_cache" not in cost
+
+
+def test_partition_cache_state_reads_the_public_counters() -> None:
+    """Счётчики берутся с адаптера, а не пересчитываются прибором."""
+
+    class _Cache:
+        budget_bytes = 256
+        hits = 5
+        misses = 7
+        evictions = 2
+        bytes_used = 1024
+        too_large = 1
+
+    class _Index:
+        partition_cache = _Cache()
+
+    state = HARNESS._partition_cache_state(_Index())
+    assert state == {
+        "budget_bytes": 256,
+        "hits": 5,
+        "misses": 7,
+        "evictions": 2,
+        "bytes_used": 1024,
+        "too_large": 1,
+    }
+    assert HARNESS._partition_cache_state(object()) is None
+
+
+def test_dense_hits_cache_is_keyed_by_profile() -> None:
+    """Дефект O43: «плеча нет» у R0 не должно отдаваться dense-профилю.
+
+    ``precompute_dense_hits`` возвращает ``None`` для ``R0`` — это законный ответ «батч
+    неприменим», а не готовые хиты. При ключе без профиля он ложился под тот же ключ, что
+    у ``R1``, и dense-профиль после ``R0`` в сетке шёл поштучным путём: 396 отдельных
+    ``search`` вместо 5 батчей. Метрики совпадали, цена росла в 146 раз (864.2 с против
+    5.9 с) — то есть замер описывал порядок профилей, а не профиль.
+    """
+    from types import SimpleNamespace
+
+    from core.domain.models import CatalogRow
+    from core.pipeline.evaluate import unique_queries
+
+    param = CatalogRow.model_validate(PARAM)
+    params = {"param_one": param}
+    by_product = {PRODUCT: [SimpleNamespace(product_id=PRODUCT, param_id="param_one")]}
+    texts = unique_queries([param])
+    query_vectors = {text: [0.0, 0.0] for text in texts}
+    index = _SpyVectorIndex()
+    cache: dict[tuple[str, str, int, int | None], object] = {}
+
+    def dense(profile: str) -> object:
+        return HARNESS._dense_by_product(
+            by_product=by_product,
+            params=params,
+            profile=profile,
+            cutoff_k=10,
+            pool_multiplier=1,
+            vector_index=index,
+            query_vectors=query_vectors,
+            cache=cache,
+            query_depth=None,
+        )
+
+    assert dense("R0")[PRODUCT] is None
+    assert index.windows == []  # R0 батч не спрашивает вовсе
+    assert dense("R1")[PRODUCT] is not None
+    assert index.windows == [10] * len(texts)
+    # Повтор R1 берёт готовое, а не спрашивает порт заново.
+    dense("R1")
+    assert index.windows == [10] * len(texts)

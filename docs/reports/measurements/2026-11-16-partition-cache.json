@@ -1,0 +1,440 @@
+{
+ "instrument": "scripts/measure_retrieval_docs.py",
+ "date": "2026-11-16",
+ "plan_item": "O43",
+ "conditions": {
+  "run_id": "ru-pg-dbms-145ad66ca3f9",
+  "index_build_id": "cb_5c090025af68b95615c87869",
+  "golden": "packages/ru-pg-dbms/sources/retrieval_golden_docs.json",
+  "cells": 132,
+  "cutoff_k": 10,
+  "bootstrap": 1000,
+  "seed": 0,
+  "embedder": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+  "partition_postgrespro_fp32_mib": 808.3,
+  "default_cache_budget_mib": 256
+ },
+ "root_cause": {
+  "where": "scripts/measure_retrieval_docs.py:_dense_by_product",
+  "what": "кэш dense-плеча ключевался (продукт, множитель пула, глубина) без профиля; precompute_dense_hits возвращает None для R0 (плеча нет), и это None отдавалось dense-профилю, идущему после R0 в сетке",
+  "effect": "поштучный путь вместо батча: 396 обращений к партиции вместо 5",
+  "fix": "профиль добавлен в ключ кэша"
+ },
+ "runs": [
+  {
+   "phase": "before",
+   "profiles": "R1",
+   "cache_budget_mib": 256,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 702123,
+   "major_faults": 27,
+   "rss_kb_after": 2482384,
+   "cache_hits": 0,
+   "cache_misses": 5,
+   "cache_evictions": 0,
+   "cache_too_large": 1
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 256,
+   "label": "R0/fusion=max",
+   "hit_at_k": 0.25757575757575757,
+   "mrr": 0.12058982683982684,
+   "ndcg_at_k": 0.15309391471417175,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "minor_faults": 1762,
+   "major_faults": 15,
+   "rss_kb_after": 2167228,
+   "cache_hits": 0,
+   "cache_misses": 0,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 256,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 88659737,
+   "major_faults": 793,
+   "rss_kb_after": 1753536,
+   "cache_hits": 47,
+   "cache_misses": 349,
+   "cache_evictions": 0,
+   "cache_too_large": 345
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 1024,
+   "label": "R0/fusion=max",
+   "hit_at_k": 0.25757575757575757,
+   "mrr": 0.12058982683982684,
+   "ndcg_at_k": 0.15309391471417175,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "minor_faults": 1778,
+   "major_faults": 21,
+   "rss_kb_after": 2153832,
+   "cache_hits": 0,
+   "cache_misses": 0,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 1024,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 486392,
+   "major_faults": 4445,
+   "rss_kb_after": 2568048,
+   "cache_hits": 391,
+   "cache_misses": 5,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 0,
+   "label": "R0/fusion=max",
+   "hit_at_k": 0.25757575757575757,
+   "mrr": 0.12058982683982684,
+   "ndcg_at_k": 0.15309391471417175,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "minor_faults": 1758,
+   "major_faults": 15,
+   "rss_kb_after": 2163380,
+   "cache_hits": 0,
+   "cache_misses": 0,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 0,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 77164110,
+   "major_faults": 1077,
+   "rss_kb_after": 1689272,
+   "cache_hits": 0,
+   "cache_misses": 396,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 256,
+   "label": "R0/fusion=max",
+   "hit_at_k": 0.25757575757575757,
+   "mrr": 0.12058982683982684,
+   "ndcg_at_k": 0.15309391471417175,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "minor_faults": 1760,
+   "major_faults": 23,
+   "rss_kb_after": 2164608,
+   "cache_hits": 0,
+   "cache_misses": 0,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 256,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 450062,
+   "major_faults": 4,
+   "rss_kb_after": 2537300,
+   "cache_hits": 0,
+   "cache_misses": 5,
+   "cache_evictions": 0,
+   "cache_too_large": 1
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 1024,
+   "label": "R0/fusion=max",
+   "hit_at_k": 0.25757575757575757,
+   "mrr": 0.12058982683982684,
+   "ndcg_at_k": 0.15309391471417175,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "minor_faults": 1783,
+   "major_faults": 19,
+   "rss_kb_after": 2094672,
+   "cache_hits": 0,
+   "cache_misses": 0,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 1024,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 574916,
+   "major_faults": 1214,
+   "rss_kb_after": 2935916,
+   "cache_hits": 0,
+   "cache_misses": 5,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 0,
+   "label": "R0/fusion=max",
+   "hit_at_k": 0.25757575757575757,
+   "mrr": 0.12058982683982684,
+   "ndcg_at_k": 0.15309391471417175,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "minor_faults": 1790,
+   "major_faults": 19,
+   "rss_kb_after": 2084256,
+   "cache_hits": 0,
+   "cache_misses": 0,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 0,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 670515,
+   "major_faults": 935,
+   "rss_kb_after": 1887824,
+   "cache_hits": 0,
+   "cache_misses": 5,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1,R2",
+   "cache_budget_mib": 256,
+   "label": "R0/fusion=max",
+   "hit_at_k": 0.25757575757575757,
+   "mrr": 0.12058982683982684,
+   "ndcg_at_k": 0.15309391471417175,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "minor_faults": 1837,
+   "major_faults": 4195,
+   "rss_kb_after": 1917952,
+   "cache_hits": 0,
+   "cache_misses": 0,
+   "cache_evictions": 0,
+   "cache_too_large": 0
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1,R2",
+   "cache_budget_mib": 256,
+   "label": "R1/fusion=max",
+   "hit_at_k": 0.15151515151515152,
+   "mrr": 0.06128848003848004,
+   "ndcg_at_k": 0.08270665172663463,
+   "hit_ci": [
+    0.09848484848484848,
+    0.2196969696969697
+   ],
+   "minor_faults": 417865,
+   "major_faults": 1891,
+   "rss_kb_after": 2283176,
+   "cache_hits": 0,
+   "cache_misses": 5,
+   "cache_evictions": 0,
+   "cache_too_large": 1
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1,R2",
+   "cache_budget_mib": 256,
+   "label": "R2/pool=1/fusion=max",
+   "hit_at_k": 0.21212121212121213,
+   "mrr": 0.11483585858585858,
+   "ndcg_at_k": 0.13834253795990434,
+   "hit_ci": [
+    0.14393939393939395,
+    0.28049242424242404
+   ],
+   "minor_faults": 350557,
+   "major_faults": 479,
+   "rss_kb_after": 2138020,
+   "cache_hits": 4,
+   "cache_misses": 1,
+   "cache_evictions": 0,
+   "cache_too_large": 1
+  }
+ ],
+ "prices": [
+  {
+   "phase": "before",
+   "profiles": "R1",
+   "cache_budget_mib": 256,
+   "wall_s": 23.9,
+   "maxrss_mib": 4097,
+   "seconds": {
+    "R1/fusion=max": 5.9
+   }
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 256,
+   "wall_s": 919.3,
+   "maxrss_mib": 4235,
+   "seconds": {
+    "R0/fusion=max": 1.0,
+    "R1/fusion=max": 864.2
+   }
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 1024,
+   "wall_s": 79.7,
+   "maxrss_mib": 3651,
+   "seconds": {
+    "R0/fusion=max": 0.9,
+    "R1/fusion=max": 17.7
+   }
+  },
+  {
+   "phase": "before",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 0,
+   "wall_s": 785.9,
+   "maxrss_mib": 3968,
+   "seconds": {
+    "R0/fusion=max": 0.9,
+    "R1/fusion=max": 728.6
+   }
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 256,
+   "wall_s": 54.6,
+   "maxrss_mib": 4213,
+   "seconds": {
+    "R0/fusion=max": 0.8,
+    "R1/fusion=max": 4.0
+   }
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 1024,
+   "wall_s": 62.7,
+   "maxrss_mib": 3890,
+   "seconds": {
+    "R0/fusion=max": 2.6,
+    "R1/fusion=max": 6.8
+   }
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1",
+   "cache_budget_mib": 0,
+   "wall_s": 68.9,
+   "maxrss_mib": 3768,
+   "seconds": {
+    "R0/fusion=max": 2.1,
+    "R1/fusion=max": 6.7
+   }
+  },
+  {
+   "phase": "after",
+   "profiles": "R0,R1,R2",
+   "cache_budget_mib": 256,
+   "wall_s": 67.3,
+   "maxrss_mib": 4115,
+   "seconds": {
+    "R0/fusion=max": 1.5,
+    "R1/fusion=max": 4.8,
+    "R2/pool=1/fusion=max": 5.0
+   }
+  }
+ ],
+ "notes": [
+  "wall_s включает построение лексического индекса (~29.6-30.1 с), кроме прогона R1 изолированно: dense-only профилю лексический индекс не нужен",
+  "секунды комбинаций — из строки `цена:` прибора; дельты счётчиков кэша и страничных отказов — из поля cost",
+  "maxrss_mib — пик RSS процесса прибора целиком, поэтому он не аддитивен по комбинациям"
+ ]
+}

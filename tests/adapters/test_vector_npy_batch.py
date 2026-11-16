@@ -516,3 +516,70 @@ def test_default_cache_budget_is_a_number_not_a_hope() -> None:
     # 11 400 × 1024 × 4 = 46.7 MB — партиция наблюдаемого масштаба; в бюджет входит ≥ 5.
     partition_bytes = 11_400 * 1024 * 4
     assert DEFAULT_PARTITION_CACHE_BYTES // partition_bytes >= 5
+
+
+def test_partition_cache_counts_oversized_refusals() -> None:
+    """Отказ по размеру считается: кэш, который для партиции no-op, обязан быть виден.
+
+    Дефект O43: партиция ``postgrespro`` — 206 931 × 1024 = 808 MiB fp32 при бюджете
+    256 MiB, то есть не кэшировалась **никогда**, и каждый поиск перечитывал и
+    конвертировал матрицу. Молчащий отказ превращал это в «профиль медленнее».
+    """
+    import numpy as np
+
+    cache = PartitionCache(budget_bytes=64)
+    cache.put(("root", PACKAGE, BUILD, "big"), _partition_stub(np, bytes_=1024))
+    cache.put(("root", PACKAGE, BUILD, "big"), _partition_stub(np, bytes_=1024))
+    assert cache.too_large == 2
+    assert cache.too_large_sizes == {("root", PACKAGE, BUILD, "big"): 1024}
+    # Влезающая запись отказов не добавляет и в размерах не появляется.
+    cache.put(("root", PACKAGE, BUILD, "small"), _partition_stub(np, bytes_=32))
+    assert cache.too_large == 2 and len(cache) == 1
+
+
+def test_partition_cache_off_does_not_count_refusals() -> None:
+    """Бюджет ``0`` — объявленное «кэша нет», а не отказ по размеру: это разные факты."""
+    import numpy as np
+
+    cache = PartitionCache(budget_bytes=0)
+    cache.put(("root", PACKAGE, BUILD, "p"), _partition_stub(np, bytes_=1024))
+    assert cache.too_large == 0 and cache.too_large_sizes == {}
+
+
+def test_index_publishes_a_notice_when_the_partition_does_not_fit(tmp_path: Path) -> None:
+    """Партиция больше бюджета — видимая заметка до прогона, а не после потраченного часа.
+
+    Заметка считается по манифесту (``stats.chunks × stats.dim × 4``), то есть до первого
+    поиска: цена no-op кэша должна быть известна на входе (дефект O43).
+    """
+    import numpy as np
+
+    vectors = np.zeros((4, DIM), dtype=np.float16)
+    _write(tmp_path, vectors, ["a", "b", "c", "d"])
+    lookup = lambda cid: None  # noqa: E731 — порт требует вызываемый объект
+
+    # 4 × 8 × 4 = 128 байт fp32 — влезает в бюджет 1 MiB: заметки нет.
+    roomy = NpyVectorIndex(
+        tmp_path, PACKAGE, BUILD, DIM, lookup, cache_budget_bytes=1024 * 1024
+    )
+    assert roomy.cache_notices == ()
+
+    # Бюджет 64 байта — партиция не влезает: заметка называет продукт и требуемый объём.
+    tight = NpyVectorIndex(tmp_path, PACKAGE, BUILD, DIM, lookup, cache_budget_bytes=64)
+    assert len(tight.cache_notices) == 1
+    notice = tight.cache_notices[0]
+    assert "partition_cache_too_small" in notice
+    assert PRODUCT in notice and "0 MiB" in notice
+
+
+def test_index_notice_names_a_disabled_cache(tmp_path: Path) -> None:
+    """``0`` — объявленное «кэша нет», и это тоже видно: не путать с «не влезло»."""
+    import numpy as np
+
+    _write(tmp_path, np.zeros((4, DIM), dtype=np.float16), ["a", "b", "c", "d"])
+    off = NpyVectorIndex(
+        tmp_path, PACKAGE, BUILD, DIM, lambda cid: None, cache_budget_bytes=0
+    )
+    assert len(off.cache_notices) == 1
+    assert "partition_cache_disabled" in off.cache_notices[0]
+    assert "too_small" not in off.cache_notices[0]

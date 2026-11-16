@@ -430,6 +430,7 @@ def build_vector_index(
     package: str | None,
     chunk_lookup: ChunkLookup | None,
     build_id: str | None = None,
+    partition_cache_mb: int | None = None,
 ) -> VectorIndexPort | None:
     """Собирает ``NpyVectorIndex`` (dense-плечо R1/R2), либо ``None`` — явное отсутствие.
 
@@ -452,7 +453,19 @@ def build_vector_index(
     dim = _build_dim(index_root, package, view)
     if dim is None:
         return None
-    return NpyVectorIndex(index_root, package, resolved, dim, chunk_lookup, view=view)
+    return NpyVectorIndex(
+        index_root,
+        package,
+        resolved,
+        dim,
+        chunk_lookup,
+        view=view,
+        **(
+            {"cache_budget_bytes": partition_cache_mb * 1024 * 1024}
+            if partition_cache_mb is not None
+            else {}
+        ),
+    )
 
 
 def _lexical_engine_version() -> str:
@@ -2839,6 +2852,8 @@ def _build_local_ports(
     embed_revision: str | None = None,
     embed_notices: list[str] | None = None,
     lexical_profile: str = "stemmed",
+    partition_cache_mb: int | None = None,
+    retrieval_notices: list[str] | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -2971,8 +2986,14 @@ def _build_local_ports(
             package=package,
             chunk_lookup=chunk_lookup,
             build_id=index_build_id,
+            partition_cache_mb=partition_cache_mb,
         )
     )
+    if retrieval_notices is not None:
+        # Кэш, который для самой большой партиции является no-op, виден до прогона:
+        # иначе его отсутствие спишут на медленный профиль (дефект O43).
+        for notice in getattr(resolved_vector_index, "cache_notices", ()):
+            retrieval_notices.append(notice)
     resolved_lexical_index = (
         lexical_index
         if lexical_index is not None
@@ -3510,6 +3531,7 @@ def build_adapters(
         )
         require_embed_device(embed_device)
         embed_notices: list[str] = []
+        retrieval_notices: list[str] = []
         ports = _build_local_ports(
             evaluator=evaluator,
             registry_fetchers=local_registry_fetchers or None,
@@ -3536,6 +3558,10 @@ def build_adapters(
             embed_model_id=embed_spec.model_id,
             embed_revision=embed_spec.revision,
             embed_notices=embed_notices,
+            partition_cache_mb=(
+                deploy.retrieval.partition_cache_mb if deploy is not None else None
+            ),
+            retrieval_notices=retrieval_notices,
             # Ось ``lexical.profile`` — та же, что в ``lexical_spec`` (``run_id``): индекс
             # засевается объявленным анализатором, а не дефолтом адаптера.
             lexical_profile=(
@@ -3550,6 +3576,8 @@ def build_adapters(
         if engine_log is not None:
             for notice in embed_notices:
                 engine_log.warn(notice, event="embed_device_note")
+            for notice in retrieval_notices:
+                engine_log.warn(notice, event="partition_cache_note")
         return ports
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)

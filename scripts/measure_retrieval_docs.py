@@ -418,15 +418,23 @@ def _dense_by_product(
     pool_multiplier: int,
     vector_index: Any,
     query_vectors: Any,
-    cache: dict[tuple[str, int, int | None], Any] | None = None,
+    cache: dict[tuple[str, str, int, int | None], Any] | None = None,
     query_depth: int | None = None,
 ) -> dict[str, Any]:
-    """Dense-плечо по продуктам; кеш ключуется ``(продукт, множитель пула, глубина)``.
+    """Dense-плечо по продуктам; кеш ключуется ``(продукт, профиль, множитель, глубина)``.
 
     Окно батча — ``max(cutoff_k * pool_multiplier, query_depth)``, поэтому готовые хиты
     **разного окна несравнимы**: отдать их другой комбинации значило бы померить пул 1
     под меткой ``pool=8`` или глубину K под меткой ``depth=40``. Множитель и глубина
     поэтому входят в ключ, а не только продукт.
+
+    **Профиль в ключе — не украшение, а исправление дефекта O43.** У ``R0``
+    ``precompute_dense_hits`` возвращает ``None`` (батч неприменим: плеча нет), и при
+    ключе без профиля это ``None`` ложилось под тот же ключ, что у ``R1``/``R2``. Тогда
+    dense-профиль, идущий в сетке **после** ``R0``, получал готовое «плеча нет» и шёл
+    поштучным путём — 396 отдельных ``search`` вместо 5 батчей (измерено: 396 обращений к
+    партиции против 5). Метрики от этого не менялись (поштучный путь даёт ту же выдачу —
+    это проверяемое свойство), а **цена** менялась в 146 раз: 864.2 с против 5.9 с.
 
     :param cache: накопитель между комбинациями одной сетки; ``None`` — без кеша.
     """
@@ -435,7 +443,7 @@ def _dense_by_product(
     store = cache if cache is not None else {}
     dense: dict[str, Any] = {}
     for product_id, product_entries in by_product.items():
-        key = (product_id, pool_multiplier, query_depth)
+        key = (product_id, profile, pool_multiplier, query_depth)
         if key not in store:
             store[key] = precompute_dense_hits(
                 [params[entry.param_id] for entry in product_entries],
@@ -463,7 +471,7 @@ def _retrieve_cells(
     vector_index: Any,
     query_vectors: Any,
     chunk_doc: dict[str, str],
-    dense_cache: dict[tuple[str, int, int | None], Any] | None = None,
+    dense_cache: dict[tuple[str, str, int, int | None], Any] | None = None,
     query_depth: int | None = None,
 ) -> tuple[dict[str, tuple[str, ...]], int]:
     """Ретривал **один раз** на ячейку: ``cell → doc_id top-K`` и чанки без документа.
@@ -595,7 +603,7 @@ def _measure_combination(
     doc_ids: set[str],
     bootstrap: int,
     seed: int,
-    dense_cache: dict[tuple[str, int, int | None], Any] | None = None,
+    dense_cache: dict[tuple[str, str, int, int | None], Any] | None = None,
     answer_sets: Any = None,
     query_depth: int | None = None,
 ) -> dict[str, Any]:
@@ -677,6 +685,79 @@ def _measure_combination(
     return out
 
 
+def _memory_state() -> dict[str, int]:
+    """Текущая память процесса и счётчики страничных отказов.
+
+    Замеры стоимости комбинации на этом корпусе упёрлись в память, а не в CPU: партиция
+    ``postgrespro`` — 423 MB fp16 на диске, 847 MB в fp32 (в этом виде она и лежит в кэше),
+    поэтому «сколько стоит комбинация» зависит от того, влезает ли партиция в бюджет кэша
+    и не вытеснил ли её предыдущий профиль. Без этих счётчиков такая разница списывается
+    на «профиль медленнее», то есть на свойство, которого нет (дефект O43).
+
+    ``minor_faults``/``major_faults`` — монотонные счётчики ядра: осмысленны только их
+    **дельты** между комбинациями. ``VmRSS`` — текущий, а не пик: пик по определению
+    монотонен и не показал бы, что память вернулась.
+    """
+    import resource
+
+    rss_kb = 0
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    rss_kb = int(line.split()[1])
+                    break
+    except OSError:
+        rss_kb = 0
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return {
+        "rss_kb": rss_kb,
+        "minor_faults": usage.ru_minflt,
+        "major_faults": usage.ru_majflt,
+    }
+
+
+def _partition_cache_state(vector_index: Any) -> dict[str, int] | None:
+    """Счётчики кэша партиций; ``None`` — у индекса кэша нет (лексический прогон)."""
+    cache = getattr(vector_index, "partition_cache", None)
+    if cache is None:
+        return None
+    return {
+        "budget_bytes": int(cache.budget_bytes),
+        "hits": int(cache.hits),
+        "misses": int(cache.misses),
+        "evictions": int(cache.evictions),
+        "bytes_used": int(cache.bytes_used),
+        "too_large": int(cache.too_large),
+    }
+
+
+def _cost_delta(
+    *,
+    memory_before: Mapping[str, int],
+    memory_after: Mapping[str, int],
+    cache_before: Mapping[str, int] | None,
+    cache_after: Mapping[str, int] | None,
+) -> dict[str, Any]:
+    """Дельты памяти и кэша за одну комбинацию: «что стоило», а не «сколько всего»."""
+    cost: dict[str, Any] = {
+        "rss_kb_after": memory_after["rss_kb"],
+        "minor_faults": memory_after["minor_faults"] - memory_before["minor_faults"],
+        "major_faults": memory_after["major_faults"] - memory_before["major_faults"],
+    }
+    if cache_before is not None and cache_after is not None:
+        cost["partition_cache"] = {
+            "budget_bytes": cache_after["budget_bytes"],
+            "hits": cache_after["hits"] - cache_before["hits"],
+            "misses": cache_after["misses"] - cache_before["misses"],
+            "evictions": cache_after["evictions"] - cache_before["evictions"],
+            "bytes_used": cache_after["bytes_used"],
+            # Отказы по размеру — причина, по которой кэш может быть no-op целиком.
+            "too_large": cache_after["too_large"] - cache_before["too_large"],
+        }
+    return cost
+
+
 def _report_payload(
     report: Any,
     *,
@@ -689,6 +770,7 @@ def _report_payload(
     answer_by_cell: Mapping[str, Sequence[str]] | None = None,
     sensitivity_by_cell: Mapping[str, Sequence[str]] | None = None,
     query_depth: int | None = None,
+    cost: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Отчёт комбинации как JSON: числа + по-ячеечная расшифровка (читается глазами).
 
@@ -777,6 +859,11 @@ def _report_payload(
         )
         for cell in report.per_cell
     ]
+    if cost is not None:
+        # Цена публикуется только по флагу — тем же правилом, что ``query_depth`` и
+        # ``answer_sets``: без флага отчёт обязан остаться прежним до байта, иначе
+        # числа O14/O15 перестают быть сравнимыми с прежними публикациями.
+        payload["cost"] = dict(cost)
     return payload
 
 
@@ -961,6 +1048,17 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--bootstrap", type=int, default=1000, help="ресемплов бутстрэпа")
     parser.add_argument("--seed", type=int, default=0, help="seed бутстрэпа (объявленный)")
+    parser.add_argument(
+        "--partition-cache-mb",
+        type=int,
+        default=None,
+        metavar="MB",
+        help=(
+            "бюджет кэша партиций dense-индекса в МиБ (по умолчанию — значение кода, "
+            "256); 0 — кэш выключен. Включает публикацию счётчиков кэша и памяти по "
+            "комбинациям: цена комбинации зависит от того, влезает ли партиция в бюджет"
+        ),
+    )
     parser.add_argument(
         "--limit-cells",
         type=int,
@@ -1175,6 +1273,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dim,
                 lookup,
                 view=view,
+                **(
+                    {"cache_budget_bytes": args.partition_cache_mb * 1024 * 1024}
+                    if args.partition_cache_mb is not None
+                    else {}
+                ),
             )
 
         chunk_doc = _chunk_doc_map(conn)
@@ -1198,7 +1301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # ``cutoff_k * pool_multiplier``, поэтому хиты одного пула нельзя отдать
         # комбинации с другим (иначе ``pool=8`` померил бы пул 1). Пул в ключе делает
         # переиспользование внутри сетки безопасным и при этом дешёвым.
-        dense_cache: dict[tuple[str, int, int | None], Any] = {}
+        dense_cache: dict[tuple[str, str, int, int | None], Any] = {}
         for profile, pool_multiplier, cross_query_fusion, query_depth in grid:
             label = _combination_label(
                 profile,
@@ -1208,6 +1311,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cutoff_k=cutoff_k,
             )
             combination_started = time.perf_counter()
+            memory_before = _memory_state()
+            cache_before = _partition_cache_state(vector_index)
             measured = _measure_combination(
                 profile=profile,
                 pool_multiplier=pool_multiplier,
@@ -1229,6 +1334,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             timings[f"{label}_seconds"] = round(
                 time.perf_counter() - combination_started, 2
             )
+            memory_after = _memory_state()
+            cost = (
+                _cost_delta(
+                    memory_before=memory_before,
+                    memory_after=memory_after,
+                    cache_before=cache_before,
+                    cache_after=_partition_cache_state(vector_index),
+                )
+                if args.partition_cache_mb is not None
+                else None
+            )
             reports.append(
                 _report_payload(
                     measured["address"],
@@ -1241,6 +1357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     answer_by_cell=measured["answer_expected"],
                     sensitivity_by_cell=measured["sensitivity_expected"],
                     query_depth=query_depth,
+                    cost=cost,
                 )
             )
 
@@ -1271,6 +1388,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "timings": timings,
             "reports": reports,
         }
+        if args.partition_cache_mb is not None:
+            # Бюджет кэша — условие цены, а не украшение: с ним партиция либо влезает,
+            # либо нет, и «сколько стоит комбинация» — свойство этого выбора.
+            payload["conditions"]["partition_cache_mb"] = args.partition_cache_mb
         if args.query_depths is not None:
             # Глубина — условие числа: без неё строка ``per_query`` описывала бы замер,
             # которого не было (при глубине K политика тождественна ``max``). Ключ

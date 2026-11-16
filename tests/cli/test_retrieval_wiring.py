@@ -18,7 +18,12 @@ from core.adapters import index_format
 from core.adapters.index_npy import numpy_available
 from core.adapters.lexical_tantivy import tantivy_available
 from core.adapters.vector_npy import NpyVectorIndex
-from core.cli.wiring import build_adapters, build_vector_index, seed_lexical_index
+from core.cli.wiring import (
+    _build_local_ports,
+    build_adapters,
+    build_vector_index,
+    seed_lexical_index,
+)
 from core.domain import CorpusChunk, CorpusDoc
 from core.pipeline.composition import CompositionView, write_composition
 from core.pipeline.experiments import run_retrieval_experiment
@@ -476,3 +481,57 @@ def test_build_adapters_publishes_actual_lexical_engine(
     without_tantivy = build_adapters(profile="local", index_root=tmp_path, package=PKG)
     assert without_tantivy.index_builder is not None
     assert without_tantivy.index_builder.lexical_engine_version == ""
+
+
+@requires_numpy
+def test_build_vector_index_declares_the_partition_cache_budget(tmp_path: Path) -> None:
+    """Бюджет кэша партиций — объявленный параметр развёртывания, а не константа кода.
+
+    Дефект O43: при бюджете 256 MiB партиция `postgrespro` (808 MiB fp32) не кэшировалась
+    никогда, и dense-плечо в сетке стоило 864.2 с вместо 17.7 с. Бюджет объявляется в
+    `deploy.retrieval.partition_cache_mb`; `None` — значение кода.
+    """
+    _write_build(tmp_path)
+    with _store_with_chunks() as store:
+        default = build_vector_index(
+            index_root=tmp_path, package=PKG, chunk_lookup=store.get_chunk
+        )
+        declared = build_vector_index(
+            index_root=tmp_path,
+            package=PKG,
+            chunk_lookup=store.get_chunk,
+            partition_cache_mb=1024,
+        )
+        off = build_vector_index(
+            index_root=tmp_path,
+            package=PKG,
+            chunk_lookup=store.get_chunk,
+            partition_cache_mb=0,
+        )
+    assert default is not None and declared is not None and off is not None
+    assert default.partition_cache.budget_bytes == 256 * 1024 * 1024
+    assert declared.partition_cache.budget_bytes == 1024 * 1024 * 1024
+    assert off.partition_cache.budget_bytes == 0
+
+
+@requires_numpy
+def test_cache_notice_reaches_the_run_when_the_partition_does_not_fit(tmp_path: Path) -> None:
+    """Отказ кэша по размеру виден в журнале прогона, а не только в секундах.
+
+    Заметки собирает `_build_local_ports`: адаптер знает размер партиции, а прогон —
+    куда это написать. Без этого «медленный профиль» и «no-op кэш» неразличимы.
+    """
+    _write_build(tmp_path)
+    notices: list[str] = []
+    with _store_with_chunks() as store:
+        _build_local_ports(
+            evaluator=None,
+            index_root=tmp_path,
+            package=PKG,
+            store=store,
+            chunk_lookup=store.get_chunk,
+            partition_cache_mb=0,
+            retrieval_notices=notices,
+        )
+    assert len(notices) == 1
+    assert "partition_cache" in notices[0]

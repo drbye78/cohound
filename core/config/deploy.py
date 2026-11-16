@@ -906,6 +906,39 @@ class RetrievalDeployConfig(BaseModel):
     #: работает без объявленной модели эмбеддера (``embed_spec: null``).
     profile: str = "R0"
 
+    #: Бюджет кэша партиций dense-индекса, МиБ. ``None`` — значение кода
+    #: (:data:`core.adapters.vector_npy.DEFAULT_PARTITION_CACHE_BYTES`, 256).
+    #:
+    #: **Операционный бюджет, а не условие измерения** — поэтому его нет в
+    #: ``EXECUTION_CONTRACT_FIELDS``, как и ``extract.cache_max_bytes``: он меняет цену
+    #: поиска, а не состав корпуса и не вердикты.
+    #:
+    #: Почему параметр вообще объявлен, хотя замер 16.11.2026 (O43) показал, что дефолта
+    #: хватает: он нужен там, где пере-чтение партиции действительно дорого. Тогда
+    #: «сколько памяти отдать кэшу» — решение оператора с числом, а не константа в коде.
+    #: На стенде ``postgrespro`` (206 931 × 1024 = **808 MiB** в fp32, то есть больше
+    #: дефолтных 256 MiB) кэш для этой партиции не работает, но цена от этого не зависит:
+    #: после устранения O43 сетка ``R0,R1`` стоит 4.0 с при 256 MiB, 6.8 с при 1024 MiB и
+    #: 6.7 с при кэше 0. Отказ кэша по размеру виден как ``partition_cache_too_small``.
+    partition_cache_mb: int | None = None
+
+    @field_validator("partition_cache_mb")
+    @classmethod
+    def _check_partition_cache_mb(cls, value: int | None) -> int | None:
+        """Отрицательный бюджет — отказ: ``0`` законно (кэш выключен), ``-1`` бессмысленно.
+
+        ``0`` не превращается в ``None``: «кэш выключен» и «взять дефолт» — разные
+        измерения цены, и тихое схлопывание одного в другое сделало бы замер
+        невоспроизводимым.
+        """
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError(
+                f"retrieval.partition_cache_mb: бюджет обязан быть ≥ 0, получено {value!r}"
+            )
+        return value
+
     @field_validator("profile")
     @classmethod
     def _check_profile(cls, value: str) -> str:
