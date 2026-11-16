@@ -640,6 +640,11 @@ Three facts that are cheap to state and expensive to rediscover:
   docling's peak would deny. Its honest limits: tables are not rebuilt, scans are not read —
   **182 of 15 929 pages (1.14 %) carry no text layer** (measured 25.10.2026,
   `2026-10-25-pdf-backend-alternatives.md`; another 473 pages carry 1–39 characters).
+  Reading order — the one limit that was named but never measured — **measured 16.11.2026**:
+  0 two-column **prose** pages in 19 331 (149 PDFs); the 13 pages with a real gutter are
+  version-comparison **tables** (fill 0.034–0.60 vs 0.89–0.97 for prose), which are read by rows
+  and are not a defect (`2026-11-16-reading-order.md`). So "reading order is not guaranteed"
+  stays a named limit about *other* corpora, not a defect of this one.
   `error="no_text_layer"` is raised only when the **whole document** has no text: an individual
   empty page currently vanishes without a mark and does not set `partial` — the visibility fix
   is plan `26` O26. A failing page does not kill the document (`partial=True`); control
