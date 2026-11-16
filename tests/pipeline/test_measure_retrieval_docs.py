@@ -394,3 +394,510 @@ def test_dense_hits_cache_is_keyed_by_pool_multiplier() -> None:
     dense(8)
     # Повтор того же пула — из кеша, порт не спрашивается.
     assert index.windows == [10] * len(texts) + [80] * len(texts)
+
+
+# ---------------------------------------------------------------------------
+# Часть 3: answer-семейство (O42) — один ретривал, две семьи метрик
+# ---------------------------------------------------------------------------
+class _Entry:
+    """Запись эталона: только то, что читает прибор.
+
+    ``doc_id`` получает префикс продукта (``p1:d1``): файл ответов требует его
+    инвариантом I17, и тест не должен обходить собственное правило загрузчика.
+    """
+
+    def __init__(self, cell: str, expected: tuple[str, ...]) -> None:
+        product_id, param_id = cell.split("/", 1)
+        self.cell = cell
+        self.product_id = product_id
+        self.param_id = param_id
+        self.expected_doc_ids = tuple(
+            doc if ":" in doc else f"{product_id}:{doc}" for doc in expected
+        )
+
+
+class _Param:
+    """Параметр каталога: прибору нужен только ``param_id`` (запрос подменён)."""
+
+    def __init__(self, param_id: str) -> None:
+        self.param_id = param_id
+
+
+class _Chunk:
+    def __init__(self, chunk_id: str) -> None:
+        self.chunk_id = chunk_id
+
+
+class _Retrieval:
+    def __init__(self, chunk_ids: tuple[str, ...]) -> None:
+        self.chunks = [_Chunk(chunk_id) for chunk_id in chunk_ids]
+
+
+def _fake_retrieval(
+    monkeypatch: pytest.MonkeyPatch, hits: dict[str, tuple[str, ...]]
+) -> list[str]:
+    """Подменяет ретривал фазы: возвращает список спрошенных ячеек (для счёта вызовов)."""
+    import core.pipeline.evaluate as evaluate_module
+
+    asked: list[str] = []
+
+    def retrieve(param: object, **kwargs: object) -> _Retrieval:
+        cell = f"{kwargs['product_id']}/{param.param_id}"  # type: ignore[attr-defined]
+        asked.append(cell)
+        return _Retrieval(hits.get(cell, ()))
+
+    monkeypatch.setattr(evaluate_module, "retrieve_for_cell", retrieve)
+    return asked
+
+
+def _answer_sets(tmp_path: Path, payload: dict[str, object]) -> Path:
+    path = tmp_path / "answers.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _answer_payload(
+    cells: list[tuple[str, list[str], list[list[str]]]],
+    *,
+    run_id: str = "run-a",
+    case_id: str = PRODUCT,
+) -> dict[str, object]:
+    """Файл ответов: ``(cell, cited, [(doc_id, how)])`` → ``cohound-...-answers/1``."""
+    return {
+        "format": "cohound-retrieval-golden-answers/1",
+        "case_id": case_id,
+        "run_id": run_id,
+        "cutoff_k": 10,
+        "judge": None,
+        "policy": {
+            "term_min_length": 4,
+            "term_min_distinct": 2,
+            "retrieved_depth": 0,
+            "max_candidates_per_cell": 20,
+            "include_partial": False,
+        },
+        "status": "candidate",
+        "entries": [
+            {
+                "cell": cell,
+                "product_id": cell.split("/", 1)[0],
+                "param_id": cell.split("/", 1)[1],
+                "cited_doc_ids": [
+                    doc if ":" in doc else f"{cell.split('/', 1)[0]}:{doc}"
+                    for doc in cited
+                ],
+                "answer_docs": [
+                    {
+                        "doc_id": (
+                            doc_id
+                            if ":" in doc_id
+                            else f"{cell.split('/', 1)[0]}:{doc_id}"
+                        ),
+                        "how": how,
+                        "quote": "",
+                    }
+                    for doc_id, how in docs
+                ],
+            }
+            for cell, cited, docs in cells
+        ],
+    }
+
+
+def test_one_retrieval_pass_serves_both_families(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ретривал выполняется **один раз** на ячейку: второй проход удвоил бы и время, и шум."""
+    entries = [
+        _Entry(f"{PRODUCT}/a", ("d1",)),
+        _Entry(f"{PRODUCT}/b", ("d2",)),
+        _Entry(f"{PRODUCT}/c", ("d3",)),
+    ]
+    hits = {
+        f"{PRODUCT}/a": ("c1",),
+        f"{PRODUCT}/b": ("c2",),
+        f"{PRODUCT}/c": ("c3",),
+    }
+    asked = _fake_retrieval(monkeypatch, hits)
+    sets_path = _answer_sets(
+        tmp_path,
+        _answer_payload(
+            [
+                (f"{PRODUCT}/a", ["d1"], [("d1", ["cited"]), ("d9", ["term"])]),
+                (f"{PRODUCT}/b", ["d2"], [("d2", ["cited"]), ("d8", ["term"])]),
+                (f"{PRODUCT}/c", ["d3"], [("d3", ["cited"]), ("d7", ["term"])]),
+            ]
+        ),
+    )
+    from core.pipeline.retrieval_answers import load_answer_sets
+
+    params = {name: _Param(name) for name in ("a", "b", "c")}
+    measured = HARNESS._measure_combination(
+        profile="R0",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+        entries=entries,
+        params=params,
+        cutoff_k=10,
+        lexical_index=None,
+        vector_index=None,
+        query_vectors=None,
+        chunk_doc={"c1": "p1:d1", "c2": "p1:d2", "c3": "p1:d3"},
+        doc_ids={"p1:d1", "p1:d2", "p1:d3"},
+        bootstrap=1,
+        seed=0,
+        answer_sets=load_answer_sets(sets_path),
+    )
+    # Ровно один запрос на ячейку — не два (по одному на семейство).
+    assert asked == [f"{PRODUCT}/a", f"{PRODUCT}/b", f"{PRODUCT}/c"]
+    assert measured["address"].hit_at_k == 1.0
+    assert measured["answer"].hit_at_k == 1.0
+    assert measured["sensitivity"] is not None
+
+
+def test_hit_gap_separates_question_misses_from_search_misses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``hit_gap`` = answer − address: промах адреса, который не был промахом вопроса.
+
+    Числа на синтетике: адрес нашёлся у 1 ячейки из 2 (0.5), отвечающий — у 2 из 2 (1.0),
+    значит разрыв 0.5. Без этого числа «адрес нашёлся в 50 %» читалось бы как «поиск
+    работает наполовину», хотя вопрос закрыт полностью.
+    """
+    entries = [_Entry(f"{PRODUCT}/a", ("d1",)), _Entry(f"{PRODUCT}/b", ("d2",))]
+    # Выдача: в первой ячейке адрес, во второй — другой документ того же продукта.
+    asked = _fake_retrieval(
+        monkeypatch,
+        {f"{PRODUCT}/a": ("c1",), f"{PRODUCT}/b": ("c9",)},
+    )
+    sets_path = _answer_sets(
+        tmp_path,
+        _answer_payload(
+            [
+                (f"{PRODUCT}/a", ["d1"], [("d1", ["cited"])]),
+                (f"{PRODUCT}/b", ["d2"], [("d2", ["cited"]), ("d9", ["term"])]),
+            ]
+        ),
+    )
+    from core.pipeline.retrieval_answers import load_answer_sets
+
+    measured = HARNESS._measure_combination(
+        profile="R0",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+        entries=entries,
+        params={name: _Param(name) for name in ("a", "b")},
+        cutoff_k=10,
+        lexical_index=None,
+        vector_index=None,
+        query_vectors=None,
+        chunk_doc={"c1": "p1:d1", "c9": "p1:d9"},
+        doc_ids={"p1:d1", "p1:d2", "p1:d9"},
+        bootstrap=1,
+        seed=0,
+        answer_sets=load_answer_sets(sets_path),
+    )
+    assert asked == [f"{PRODUCT}/a", f"{PRODUCT}/b"]
+    payload = HARNESS._report_payload(
+        measured["address"],
+        label="R0/fusion=max",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+        chunks_without_doc=measured["chunks_without_doc"],
+        answer=measured["answer"],
+        sensitivity=measured["sensitivity"],
+        answer_by_cell=measured["answer_expected"],
+        sensitivity_by_cell=measured["sensitivity_expected"],
+    )
+    assert payload["address_hit_at_k"] == 0.5
+    assert payload["answer_hit_at_k"] == 1.0
+    assert payload["hit_gap"] == pytest.approx(0.5)
+    # Алиасы равны адресным: прежние потребители видят прежние числа.
+    assert payload["hit_at_k"] == payload["address_hit_at_k"]
+    assert payload["recall_at_k"] == payload["address_recall_at_k"]
+    assert payload["mrr"] == payload["address_mrr"]
+    assert payload["ndcg_at_k"] == payload["address_ndcg_at_k"]
+
+
+def test_sensitivity_cell_with_only_retrieved_answers_is_a_zero_not_a_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ячейка, чьи ответы целиком из выдачи, даёт 0.0 и остаётся в знаменателе.
+
+    Иначе чувствительность считалась бы только по «удобным» ячейкам и была бы
+    оптимистичной ровно там, где вопрос «а если убрать подсказку системы» и задан.
+    """
+    entries = [_Entry(f"{PRODUCT}/a", ("d1",)), _Entry(f"{PRODUCT}/b", ("d2",))]
+    _fake_retrieval(
+        monkeypatch,
+        {f"{PRODUCT}/a": ("c1",), f"{PRODUCT}/b": ("c2",)},
+    )
+    sets_path = _answer_sets(
+        tmp_path,
+        _answer_payload(
+            [
+                (f"{PRODUCT}/a", ["d1"], [("d1", ["cited"])]),
+                # Только retrieved: после вычитания набор пуст.
+                (f"{PRODUCT}/b", ["d2"], [("d2", ["cited"]), ("d9", ["retrieved"])]),
+            ]
+        ),
+    )
+    from core.pipeline.retrieval_answers import load_answer_sets
+
+    measured = HARNESS._measure_combination(
+        profile="R0",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+        entries=entries,
+        params={name: _Param(name) for name in ("a", "b")},
+        cutoff_k=10,
+        lexical_index=None,
+        vector_index=None,
+        query_vectors=None,
+        chunk_doc={"c1": "p1:d1", "c2": "p1:d2"},
+        doc_ids={"p1:d1", "p1:d2"},
+        bootstrap=1,
+        seed=0,
+        answer_sets=load_answer_sets(sets_path),
+    )
+    sensitivity = measured["sensitivity"]
+    # Остаток ячейки b — только cited d2 (retrieved d9 вычтен), он найден ⇒ 1.0.
+    assert sensitivity.hit_at_k == 1.0
+    assert sensitivity.scored == 2
+
+    # Теперь ячейка, у которой после вычитания не осталось **ничего**.
+    entries = [_Entry(f"{PRODUCT}/c", ("d3",))]
+    _fake_retrieval(monkeypatch, {f"{PRODUCT}/c": ("c3",)})
+    sets_path = _answer_sets(
+        tmp_path,
+        _answer_payload([(f"{PRODUCT}/c", ["d3"], [("d3", ["retrieved"])])]),
+    )
+    empty = HARNESS._measure_combination(
+        profile="R0",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+        entries=entries,
+        params={"c": _Param("c")},
+        cutoff_k=10,
+        lexical_index=None,
+        vector_index=None,
+        query_vectors=None,
+        chunk_doc={"c3": "p1:d3"},
+        doc_ids={"p1:d3"},
+        bootstrap=1,
+        seed=0,
+        answer_sets=load_answer_sets(sets_path),
+    )
+    assert empty["sensitivity"].scored == 1
+    assert empty["sensitivity"].hit_at_k == 0.0
+
+
+def test_report_without_answer_sets_keeps_the_previous_field_set() -> None:
+    """Без файла ответов отчёт — прежний до поля: ни ``address_*``, ни ``hit_gap``.
+
+    Заморожённое ожидание, а не «сравнение с собой»: поля O14/O15 публиковались в этом
+    составе, и любое новое поле в этом режиме сделало бы два отчёта несравнимыми.
+    """
+    from core.pipeline.retrieval_docs import DocQueryResult, evaluate_documents
+
+    results = [
+        DocQueryResult(
+            cell=f"{PRODUCT}/a",
+            product_id=PRODUCT,
+            param_id="a",
+            expected_doc_ids=("d1",),
+            retrieved_doc_ids=("d9", "d1"),
+            rank=2,
+            unresolved=False,
+        )
+    ]
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    payload = HARNESS._report_payload(
+        report,
+        label="R0/fusion=max",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+    )
+    assert payload == {
+        "label": "R0/fusion=max",
+        "profile": "R0",
+        "pool_multiplier": 1,
+        "cross_query_fusion": "max",
+        "k": 5,
+        "cells": 1,
+        "scored": 1,
+        "unresolved_cells": 0,
+        "hit_at_k": 1.0,
+        "hit_ci": [1.0, 1.0],
+        "recall_at_k": 1.0,
+        "recall_ci": [1.0, 1.0],
+        "mrr": 0.5,
+        "ndcg_at_k": report.ndcg_at_k,
+        "per_cell": [
+            {
+                "cell": f"{PRODUCT}/a",
+                "product_id": PRODUCT,
+                "param_id": "a",
+                "expected_doc_ids": ["d1"],
+                "retrieved_doc_ids": ["d9", "d1"],
+                "rank": 2,
+                "ndcg_at_k": report.ndcg_at_k,
+                "unresolved": False,
+            }
+        ],
+    }
+
+
+def test_answer_sets_missing_golden_cell_is_a_refusal(tmp_path: Path) -> None:
+    """«Эталон 2, ответы 1» — отказ с числом и первыми пятью адресами."""
+    entries = [_Entry(f"{PRODUCT}/a", ("d1",)), _Entry(f"{PRODUCT}/b", ("d2",))]
+    path = _answer_sets(
+        tmp_path,
+        _answer_payload([(f"{PRODUCT}/a", ["d1"], [("d1", ["cited"])])]),
+    )
+    with pytest.raises(SystemExit) as exc:
+        HARNESS._answer_sets_for(
+            str(path), entries=entries, run_id="run-a", case_id=PRODUCT
+        )
+    message = str(exc.value)
+    assert "1 ячеек эталона отсутствуют" in message
+    assert f"{PRODUCT}/b" in message
+
+
+def test_answer_sets_extra_cell_is_a_refusal(tmp_path: Path) -> None:
+    entries = [_Entry(f"{PRODUCT}/a", ("d1",))]
+    path = _answer_sets(
+        tmp_path,
+        _answer_payload(
+            [
+                (f"{PRODUCT}/a", ["d1"], [("d1", ["cited"])]),
+                (f"{PRODUCT}/ghost", ["d2"], [("d2", ["cited"])]),
+            ]
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        HARNESS._answer_sets_for(
+            str(path), entries=entries, run_id="run-a", case_id=PRODUCT
+        )
+    message = str(exc.value)
+    assert "1 ячеек файла ответов отсутствуют в эталоне" in message
+    assert f"{PRODUCT}/ghost" in message
+
+
+def test_answer_sets_of_another_run_is_a_refusal(tmp_path: Path) -> None:
+    """``doc_id`` разных корпусов несравнимы: чужой набор не переносится."""
+    entries = [_Entry(f"{PRODUCT}/a", ("d1",))]
+    path = _answer_sets(
+        tmp_path,
+        _answer_payload(
+            [(f"{PRODUCT}/a", ["d1"], [("d1", ["cited"])])], run_id="run-b"
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        HARNESS._answer_sets_for(
+            str(path), entries=entries, run_id="run-a", case_id=PRODUCT
+        )
+    assert "run-b" in str(exc.value)
+
+
+def test_answer_sets_of_another_package_is_a_refusal(tmp_path: Path) -> None:
+    entries = [_Entry(f"{PRODUCT}/a", ("d1",))]
+    path = _answer_sets(
+        tmp_path,
+        _answer_payload(
+            [(f"{PRODUCT}/a", ["d1"], [("d1", ["cited"])])], case_id="other"
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        HARNESS._answer_sets_for(
+            str(path), entries=entries, run_id="run-a", case_id=PRODUCT
+        )
+    assert "other" in str(exc.value)
+
+
+def test_cells_csv_gains_answer_columns_only_with_answers(tmp_path: Path) -> None:
+    """``answer_rank`` и ``answers`` появляются только с файлом ответов.
+
+    Без него CSV остаётся прежним до байта — это проверяет тест выше; здесь — что
+    с файлом колонки добавляются **в конец**, а прежние остаются на своих местах.
+    """
+    reports = [
+        {
+            "profile": "R0",
+            "label": "R0/fusion=max",
+            "per_cell": [
+                {
+                    "cell": f"{PRODUCT}/param_one",
+                    "product_id": PRODUCT,
+                    "param_id": "param_one",
+                    "expected_doc_ids": ["d1"],
+                    "retrieved_doc_ids": ["d9", "d1"],
+                    "rank": 2,
+                    "ndcg_at_k": 0.6309297535714574,
+                    "unresolved": False,
+                    "answer_rank": 2,
+                    "answer_docs": 3,
+                }
+            ],
+        }
+    ]
+    out = tmp_path / "cells.csv"
+    HARNESS._write_cells_csv(out, reports, with_answers=True)
+    lines = out.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0].endswith("ndcg_at_k,answer_rank,answers")
+    assert lines[1] == (
+        f"R0,{PRODUCT}/param_one,{PRODUCT},param_one,d1,2,2,0,R0/fusion=max,0.6309,2,3"
+    )
+
+
+def test_doc_results_keeps_cell_when_some_members_are_in_corpus() -> None:
+    """Набор из 3, 2 выпали из корпуса — ячейка считается, знаменатель recall = 1."""
+    entries = [_Entry(f"{PRODUCT}/a", ("d1", "gone1", "gone2"))]
+    results = HARNESS._doc_results(
+        entries,
+        {f"{PRODUCT}/a": ("p1:d1",)},
+        {f"{PRODUCT}/a": ("p1:d1", "p1:gone1", "p1:gone2")},
+        {"p1:d1"},
+    )
+    assert len(results) == 1
+    result = results[0]
+    assert result.unresolved is False
+    assert result.resolved_doc_ids == ("p1:d1",)
+    from core.pipeline.retrieval_docs import evaluate_documents
+
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.scored == 1
+    assert report.recall_at_k == 1.0
+    assert report.unresolved_docs == 2
+
+
+def test_doc_results_marks_cell_unresolved_when_no_member_is_in_corpus() -> None:
+    entries = [_Entry(f"{PRODUCT}/a", ("gone1", "gone2"))]
+    results = HARNESS._doc_results(
+        entries,
+        {f"{PRODUCT}/a": ("p1:d1",)},
+        {f"{PRODUCT}/a": ("p1:gone1", "p1:gone2")},
+        {"p1:d1"},
+    )
+    assert results[0].unresolved is True
+    assert results[0].resolved_doc_ids == ()
+
+
+def test_chunks_without_doc_is_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Чанк без записи в ``chunk_id → doc_id`` не теряется молча: он посчитан."""
+    entries = [_Entry(f"{PRODUCT}/a", ("d1",))]
+    _fake_retrieval(monkeypatch, {f"{PRODUCT}/a": ("c1", "c_missing", "c2")})
+    retrieved, chunks_without_doc = HARNESS._retrieve_cells(
+        profile="R0",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+        entries=entries,
+        params={"a": _Param("a")},
+        cutoff_k=10,
+        lexical_index=None,
+        vector_index=None,
+        query_vectors=None,
+        chunk_doc={"c1": "p1:d1", "c2": "p1:d2"},
+    )
+    assert retrieved[f"{PRODUCT}/a"] == ("p1:d1", "p1:d2")
+    assert chunks_without_doc == 1

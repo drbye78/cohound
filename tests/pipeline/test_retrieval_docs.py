@@ -18,6 +18,7 @@ from core.pipeline.retrieval_docs import (
     DocQueryResult,
     document_ids_for,
     evaluate_documents,
+    first_hit_rank,
     load_doc_golden,
 )
 
@@ -334,3 +335,139 @@ def test_evaluate_per_cell_preserves_input_order() -> None:
     results = [_result("p1/z"), _result("p1/a"), _result("p1/m")]
     report = evaluate_documents(results, profile="R0", k=5, bootstrap=50, seed=1)
     assert [cell.cell for cell in report.per_cell] == ["p1/z", "p1/a", "p1/m"]
+
+
+# ---------------------------------------------------------------------------
+# Правило знаменателя при наборе > 1 (answer-семейство)
+# ---------------------------------------------------------------------------
+
+
+def _answer_result(
+    cell: str,
+    *,
+    expected: tuple[str, ...],
+    resolved: tuple[str, ...],
+    retrieved: tuple[str, ...],
+) -> DocQueryResult:
+    """Ячейка answer-семейства: ``unresolved`` — только при полном выпадении набора."""
+    product_id, param_id = cell.split("/", 1)
+    return DocQueryResult(
+        cell=cell,
+        product_id=product_id,
+        param_id=param_id,
+        expected_doc_ids=expected,
+        retrieved_doc_ids=retrieved,
+        rank=None,
+        unresolved=not resolved,
+        resolved_doc_ids=resolved,
+    )
+
+
+def test_recall_denominator_counts_only_documents_present_in_corpus() -> None:
+    """Набор из 3, два документа исчезли из корпуса: recall — по одному присутствующему.
+
+    Без правила знаменателя (деление на ``len(expected)``) ячейка навсегда упиралась бы в
+    ``1/3``, и отсутствие документа в корпусе читалось бы как провал поиска.
+    """
+    results = [
+        _answer_result(
+            "p1/a",
+            expected=("p1:doc1", "p1:gone1", "p1:gone2"),
+            resolved=("p1:doc1",),
+            retrieved=("p1:doc1", "p1:x"),
+        )
+    ]
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.scored == 1
+    assert report.unresolved_cells == 0
+    assert report.recall_at_k == 1.0  # 1 из 1 присутствующего, а не 1 из 3
+    assert report.hit_at_k == 1.0
+    assert report.unresolved_docs == 2
+
+
+def test_cell_is_unresolved_only_when_no_member_is_in_corpus() -> None:
+    results = [
+        _answer_result(
+            "p1/a",
+            expected=("p1:gone1", "p1:gone2"),
+            resolved=(),
+            retrieved=("p1:x",),
+        ),
+        _answer_result("p1/b", expected=("p1:doc1",), resolved=("p1:doc1",), retrieved=("p1:doc1",)),
+    ]
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.unresolved_cells == 1
+    assert report.scored == 1
+    assert report.unresolved_docs == 2
+
+
+def test_format_v1_recall_is_unchanged() -> None:
+    """Формат 1: набор — один документ, ``resolved_doc_ids`` не объявлен.
+
+    Разрешённая ячейка даёт ``1/1``, неразрешённая исключается — ровно как до правки;
+    знаменатель «по разрешённым» не должен превращать исключённую ячейку в честный ноль.
+    """
+    results = [
+        _result("p1/a"),  # ожидание есть в корпусе, найдено
+        _result("p1/b", retrieved=("p1:x",), rank=None, unresolved=True),
+    ]
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.scored == 1
+    assert report.recall_at_k == 1.0
+    assert report.unresolved_docs == 0  # поле не объявлено — не выдумывается
+
+
+def test_empty_denominator_is_zero_not_skipped() -> None:
+    """Ячейка, чьи ответы целиком выпали, даёт 0.0 и остаётся в знаменателе.
+
+    ``unresolved=False`` здесь намеренно: так прибор считает чувствительность (остаток
+    после вычитания ``retrieved`` пуст — это ответ «ноль», а не «ячейку не спрашивали»).
+    """
+    result = DocQueryResult(
+        cell="p1/a",
+        product_id="p1",
+        param_id="a",
+        expected_doc_ids=("p1:gone",),
+        retrieved_doc_ids=(),
+        rank=None,
+        unresolved=False,
+        resolved_doc_ids=(),
+    )
+    report = evaluate_documents([result], profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.scored == 1
+    assert report.hit_at_k == 0.0
+    assert report.recall_at_k == 0.0
+    assert report.unresolved_docs == 1
+
+
+# ---------------------------------------------------------------------------
+# Ранг — вывод, а не вход
+# ---------------------------------------------------------------------------
+
+
+def test_first_hit_rank_is_the_first_expected_position() -> None:
+    assert first_hit_rank(("p1:a", "p1:b"), ("p1:x", "p1:b", "p1:a")) == 2
+    assert first_hit_rank(("p1:a",), ("p1:x",)) is None
+    assert first_hit_rank(("p1:a",), ("p1:a",)) == 1
+
+
+def test_inconsistent_rank_does_not_fake_a_hit() -> None:
+    """``rank=1`` при пустой выдаче не делает ``hit=1``: ранг пересчитывается из выдачи.
+
+    Иначе ``hit``/``MRR`` (от ``rank``) разошлись бы с ``recall``/``nDCG`` (от выдачи) в
+    одном отчёте, и заметить это было бы нечем.
+    """
+    result = _result("p1/a", retrieved=(), rank=1)
+    report = evaluate_documents([result], profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.hit_at_k == 0.0
+    assert report.mrr == 0.0
+    assert report.recall_at_k == 0.0
+    assert report.ndcg_at_k == 0.0
+
+
+def test_missing_rank_is_recovered_from_retrieval() -> None:
+    """Обратный случай: ``rank=None`` при найденном документе — ``hit`` всё равно 1."""
+    result = _result("p1/a", retrieved=("p1:x", "p1:doc1"), rank=None)
+    report = evaluate_documents([result], profile="R0", k=5, bootstrap=1, seed=0)
+    assert report.hit_at_k == 1.0
+    assert report.mrr == 0.5

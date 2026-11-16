@@ -14,12 +14,32 @@
 отдельно (``DocRetrievalReport.unresolved_cells``) — та же дисциплина, что
 ``unresolved_expected_ids`` в :mod:`core.pipeline.experiments`.
 
+**Правило знаменателя при наборе больше одного.** Как только ожиданий у ячейки
+несколько (answer-семейство, :mod:`core.pipeline.retrieval_answers`), «документа нет в
+корпусе» перестаёт быть свойством ячейки целиком. Правило: ячейка ``unresolved`` **только
+если ни один член набора не найден** в корпусе; знаменатель ``recall`` — члены,
+**присутствующие** в корпусе (``DocQueryResult.resolved_doc_ids``), а число выпавших
+публикуется как ``unresolved_docs``. Без этого набор из трёх, где два документа исчезли,
+навсегда упирался бы в ``1/3``, и отсутствие документа читалось бы как провал поиска.
+Пустой знаменатель — ``0.0`` (ячейка с ответами целиком из выпавших документов даёт
+честный ноль), а не исключение из среднего: иначе число становилось бы оптимистичным
+ровно там, где вопрос и задан. Формат 1 не меняется: там набор — один документ, ячейка
+либо разрешена целиком (``1/1``), либо исключена.
+
+**Ранг — вывод, а не вход.** ``hit``/``MRR`` считаются из пересчитанного ранга
+(:func:`first_hit_rank`), а не из ``DocQueryResult.rank``: рассогласованный ранг
+(``rank=1`` при пустой выдаче) развёл бы ``hit``/``MRR`` с ``recall``/``nDCG`` в одном
+отчёте, и заметить это было бы нечем. Поле ``rank`` остаётся ради прежних конструкторов
+и того, что показывает отчёт.
+
 **Почему публикуются и ``hit_at_k``, и ``recall_at_k``.** При одном ожидании на
 ячейку они совпадают: «попал ли документ в top-K» = «какая доля ожиданий найдена».
 Оба всё равно публикуются: при нескольких ожиданиях они расходятся (документ нашёлся —
 ``hit`` = 1, а найдена лишь половина ожиданий — ``recall`` = 0.5), и читатель не должен
 догадываться, какой из двух смыслов зашит в единственное число. Кроме того, ``recall``
-остаётся сравнимой с чанковым отчётом.
+остаётся сравнимой с чанковым отчётом. ``recall`` при этом **растёт с размером набора**
+(больше членов — труднее найти все), поэтому он публикуется рядом с ``docs_per_cell``, а
+не как одно число.
 
 **Что такое интервал.** ``hit_ci``/``recall_ci`` — бутстрэп по **ячейкам**: ячейки
 ресемплируются с возвращением объявленное число раз с объявленным ``seed``,
@@ -52,6 +72,7 @@ __all__ = [
     "DocRetrievalReport",
     "document_ids_for",
     "evaluate_documents",
+    "first_hit_rank",
     "load_doc_golden",
 ]
 
@@ -213,11 +234,23 @@ class DocQueryResult:
     :param cell: ``"{product_id}/{param_id}"``.
     :param product_id: продукт ячейки.
     :param param_id: параметр ячейки.
-    :param expected_doc_ids: ожидаемые ``doc_id`` ячейки.
+    :param expected_doc_ids: ожидаемые ``doc_id`` ячейки (адрес — у адресного семейства,
+        весь набор отвечающих — у answer-семейства).
     :param retrieved_doc_ids: документы top-K в порядке выдачи.
     :param rank: 1-based ранг первого найденного ожидаемого документа; ``None`` — не найден.
+        **Не вход метрик**: :func:`evaluate_documents` пересчитывает ранг из
+        ``(retrieved_doc_ids, expected_doc_ids)``, потому что рассогласованный ранг дал бы
+        ``hit``/``MRR`` расходящимися с ``recall``/``nDCG`` в одном отчёте — молча. Поле
+        остаётся ради прежних конструкторов и как то, что показывает отчёт.
     :param unresolved: ни один ``expected_doc_id`` не существует в корпусе — ячейка
-        исключается из метрик и считается отдельно.
+        исключается из метрик и считается отдельно. Правило знаменателя: при наборе
+        больше одного документа частичное выпадение из корпуса — **не** ``unresolved``,
+        а меньшее число в знаменателе ``recall`` (см. ``resolved_doc_ids``).
+    :param resolved_doc_ids: члены набора, которые **есть** в корпусе (знаменатель
+        ``recall``). ``None`` — не объявлено, знаменатель равен ``expected_doc_ids``
+        (поведение формата 1: там набор — один документ, и ячейка либо разрешена
+        целиком, либо исключена). Пустой кортеж — законное «ни одного не осталось»
+        (ячейка всё равно считается, если вызывающий объявил её scorable).
     """
 
     cell: str
@@ -227,6 +260,14 @@ class DocQueryResult:
     retrieved_doc_ids: tuple[str, ...]
     rank: int | None
     unresolved: bool
+    resolved_doc_ids: tuple[str, ...] | None = None
+
+    @property
+    def recall_denominator_ids(self) -> tuple[str, ...]:
+        """Члены набора, по которым считается ``recall`` (разрешённые в корпусе)."""
+        if self.resolved_doc_ids is None:
+            return self.expected_doc_ids
+        return self.resolved_doc_ids
 
 
 @dataclass(frozen=True)
@@ -238,8 +279,11 @@ class DocRetrievalReport:
     :param cells: сколько записей эталона пришло.
     :param scored: разрешённых ячеек (не ``unresolved``) — по ним считаются метрики.
     :param unresolved_cells: ячеек, чьих ожидаемых документов нет в корпусе.
-    :param hit_at_k: доля ``scored``, где ``rank is not None``.
-    :param recall_at_k: средний по ``scored`` ``|найдено ∩ expected| / |expected|``.
+    :param hit_at_k: доля ``scored``, где ранг первого ожидаемого не ``None``.
+    :param recall_at_k: средний по ``scored`` ``|найдено ∩ разрешённые| / |разрешённые|``.
+        Знаменатель — члены набора, **присутствующие в корпусе** (``resolved_doc_ids``):
+        документ, исчезнувший из корпуса, — отсутствие предмета измерения, а не провал
+        поиска, и вечное ``1/3`` на наборе из трёх читалось бы как провал.
     :param mrr: средний по ``scored`` ``1/rank`` (не найден — 0).
     :param ndcg_at_k: средний по ``scored`` nDCG@K по бинарной релевантности: учитывает
         **позиции всех** найденных ожидаемых документов, а не только первого (как MRR)
@@ -248,6 +292,9 @@ class DocRetrievalReport:
     :param hit_ci: бутстрэп-интервал ``hit_at_k`` (перцентили 2.5/97.5).
     :param recall_ci: бутстрэп-интервал ``recall_at_k``.
     :param per_cell: результаты ячеек в порядке входа.
+    :param unresolved_docs: сколько членов наборов **не разрешилось** в корпусе (сумма по
+        ячейкам). ``0`` у формата 1 (там набор — один документ, и ячейка либо разрешена
+        целиком, либо исключена). Дефолт — поле добавлено после первых публикаций.
     """
 
     profile: str
@@ -262,6 +309,7 @@ class DocRetrievalReport:
     recall_ci: tuple[float, float]
     per_cell: tuple[DocQueryResult, ...]
     ndcg_at_k: float = 0.0
+    unresolved_docs: int = 0
 
 
 def _percentile(values: Sequence[float], q: float) -> float:
@@ -277,14 +325,52 @@ def _percentile(values: Sequence[float], q: float) -> float:
     return float(ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo))
 
 
+def first_hit_rank(
+    expected_doc_ids: Sequence[str], retrieved_doc_ids: Sequence[str]
+) -> int | None:
+    """1-based ранг первого ожидаемого документа в выдаче; ``None`` — не найден.
+
+    Единственное место, где ранг вычисляется: и метрики (:func:`evaluate_documents`), и
+    отчёт прибора берут его отсюда. Рассогласованный ``DocQueryResult.rank`` (например,
+    ``1`` при пустой выдаче) не может развести ``hit``/``MRR`` с ``recall``/``nDCG`` —
+    все четыре считаются из одних и тех же двух списков.
+    """
+    expected = set(expected_doc_ids)
+    for position, doc_id in enumerate(retrieved_doc_ids, start=1):
+        if doc_id in expected:
+            return position
+    return None
+
+
 def _cell_hit(result: DocQueryResult) -> float:
-    """1.0, если ожидаемый документ ячейки попал в top-K, иначе 0.0."""
-    return 1.0 if result.rank is not None else 0.0
+    """1.0, если ожидаемый документ ячейки попал в top-K, иначе 0.0.
+
+    Ранг пересчитывается из выдачи, а не берётся из ``result.rank``: поле результата —
+    то, что показывает отчёт, а не вход метрики.
+    """
+    return (
+        1.0
+        if first_hit_rank(result.expected_doc_ids, result.retrieved_doc_ids) is not None
+        else 0.0
+    )
+
+
+def _cell_reciprocal_rank(result: DocQueryResult) -> float:
+    """``1/rank`` по пересчитанному рангу (не найден — 0.0)."""
+    rank = first_hit_rank(result.expected_doc_ids, result.retrieved_doc_ids)
+    return 0.0 if rank is None else 1.0 / rank
 
 
 def _cell_recall(result: DocQueryResult) -> float:
-    """Доля найденных ожиданий ячейки; пустой список ожиданий даёт 0.0."""
-    expected = set(result.expected_doc_ids)
+    """Доля найденных **разрешённых** ожиданий; пустой знаменатель даёт 0.0.
+
+    Знаменатель — ``resolved_doc_ids`` (члены набора, присутствующие в корпусе), а не
+    весь набор: исчезнувший из корпуса документ не является провалом поиска, и деление
+    на него превращало бы «2 из 3 исчезли» в вечный потолок ``1/3``. Пустой знаменатель
+    — ``0.0`` (честный ноль ячейки, чьи ответы целиком выпали), а не исключение из
+    среднего: иначе число становилось бы оптимистичным ровно там, где вопрос и задан.
+    """
+    expected = set(result.recall_denominator_ids)
     if not expected:
         return 0.0
     retrieved = set(result.retrieved_doc_ids)
@@ -338,13 +424,18 @@ def evaluate_documents(
             hit_ci=(0.0, 0.0),
             recall_ci=(0.0, 0.0),
             per_cell=ordered,
+            unresolved_docs=sum(
+                len(result.expected_doc_ids) - len(result.resolved_doc_ids)
+                for result in ordered
+                if result.resolved_doc_ids is not None
+            ),
         )
 
     hits = [_cell_hit(result) for result in scored_cells]
     recalls = [_cell_recall(result) for result in scored_cells]
-    reciprocal_ranks = [
-        1.0 / result.rank if result.rank is not None else 0.0 for result in scored_cells
-    ]
+    # MRR — из **пересчитанного** ранга: рассогласованный ``result.rank`` не должен
+    # разводить ``hit``/``MRR`` с ``recall``/``nDCG`` в одном отчёте.
+    reciprocal_ranks = [_cell_reciprocal_rank(result) for result in scored_cells]
     # nDCG@K по документам: позиции **всех** найденных ожиданий, а не только первого.
     ndcgs = [
         ndcg_at_k(result.expected_doc_ids, result.retrieved_doc_ids, k)
@@ -355,6 +446,11 @@ def evaluate_documents(
     recall_at_k = sum(recalls) / scored
     mrr = sum(reciprocal_ranks) / scored
     ndcg = sum(ndcgs) / scored
+    unresolved_docs = sum(
+        len(result.expected_doc_ids) - len(result.resolved_doc_ids)
+        for result in ordered
+        if result.resolved_doc_ids is not None
+    )
 
     if bootstrap == 1:
         hit_ci = (hit_at_k, hit_at_k)
@@ -383,4 +479,5 @@ def evaluate_documents(
         recall_ci=recall_ci,
         per_cell=ordered,
         ndcg_at_k=ndcg,
+        unresolved_docs=unresolved_docs,
     )

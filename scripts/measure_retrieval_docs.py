@@ -41,6 +41,23 @@
 **Чего прибор НЕ измеряет:** κ оценщика (это Ш6 и ``evaluator-benchmark``), качество
 цитат (I22), стоимость эмбеддинга корпуса. Только ретривал.
 
+**Два семейства (O42), один ретривал.** С ``--answer-sets``
+(``cohound-retrieval-golden-answers/1``, :mod:`core.pipeline.retrieval_answers`) прибор
+отвечает на второй вопрос той же выдачей: «нашёлся ли хоть один документ, который решает
+параметр» (``answer_*``) — рядом с прежним «нашёлся ли названный адрес» (``address_*``;
+``hit_at_k`` и т.д. остаются алиасами адресных). Разность публикуется как ``hit_gap``:
+столько промахов адреса не были промахами вопроса. Ретривал при этом выполняется **один
+раз** — второй проход удвоил бы и время, и шум.
+
+**Две границы, которые публикуются, а не замалчиваются.**
+
+* ``document_ids_for`` режет по **чанкам** до дедупа, поэтому ``len(retrieved_doc_ids)``
+  обычно много меньше ``K``: doc-level ``hit@10`` строже, чем «десять документов», а
+  doc-level MRR несравним с chunk-level MRR из ``hound experiment retrieval``.
+* ``recall@K`` растёт с размером набора (``answers`` в CSV, ``docs_per_cell`` в условиях):
+  больше отвечающих документов — труднее найти все, поэтому recall публикуется рядом с
+  размером набора, а не как одно число.
+
 **K** берётся из ``runs.retrieval_cutoff_K`` (I20: cut-off эталона = K пайплайна), а не из
 флага по умолчанию: иначе число описывало бы не тот прибор, которым получены вердикты.
 
@@ -368,7 +385,7 @@ def _dense_by_product(
     return dense
 
 
-def _measure_profile(
+def _retrieve_cells(
     *,
     profile: str,
     pool_multiplier: int,
@@ -380,14 +397,23 @@ def _measure_profile(
     vector_index: Any,
     query_vectors: Any,
     chunk_doc: dict[str, str],
-    doc_ids: set[str],
-    bootstrap: int,
-    seed: int,
     dense_cache: dict[tuple[str, int], Any] | None = None,
-) -> Any:
-    """Ячейки одной комбинации сетки: ретривал композером фазы → документы top-K → метрики."""
+) -> tuple[dict[str, tuple[str, ...]], int]:
+    """Ретривал **один раз** на ячейку: ``cell → doc_id top-K`` и чанки без документа.
+
+    Разделение ретривала и метрик — не косметика. С появлением второго семейства
+    (набор отвечающих документов) метрики считаются по двум наборам ожиданий на **одной**
+    выдаче; второй проход удвоил бы и время, и шум (две выдачи одного запроса при
+    плавающих баллах не гарантированно совпадают).
+
+    Второй элемент результата — сколько чанков среза ``cutoff_k`` поиск вернул **без
+    записи** в ``chunk_id → doc_id``: ``document_ids_for`` такие чанки пропускает молча,
+    и без счётчика просевший recall выглядел бы свойством поиска, а не корпуса.
+
+    :raises SystemExit: ``param_id`` ячейки отсутствует в каталоге (запрос не рендерится).
+    """
     from core.pipeline.evaluate import retrieve_for_cell
-    from core.pipeline.retrieval_docs import DocQueryResult, document_ids_for
+    from core.pipeline.retrieval_docs import document_ids_for
 
     by_product: dict[str, list[Any]] = {}
     for entry in entries:
@@ -404,7 +430,8 @@ def _measure_profile(
         cache=dense_cache,
     )
 
-    results: list[DocQueryResult] = []
+    retrieved_by_cell: dict[str, tuple[str, ...]] = {}
+    chunks_without_doc = 0
     for entry in entries:
         param = params.get(entry.param_id)
         if param is None:
@@ -427,33 +454,152 @@ def _measure_profile(
         # ``per_query`` намеренно отдаёт больше ``cutoff_k`` чанков («сколько бы нашли,
         # если бы не резали»). Документные метрики смотрят **срез** ``cutoff_k``: иначе
         # политика выигрывала бы длиной списка, а не порядком.
-        retrieved = document_ids_for(
-            [chunk.chunk_id for chunk in retrieval.chunks], chunk_doc, top_k=cutoff_k
+        chunk_ids = [chunk.chunk_id for chunk in retrieval.chunks]
+        chunks_without_doc += sum(
+            1 for chunk_id in chunk_ids[:cutoff_k] if chunk_id not in chunk_doc
         )
-        rank = next(
-            (
-                position
-                for position, doc_id in enumerate(retrieved, start=1)
-                if doc_id in entry.expected_doc_ids
-            ),
-            None,
+        retrieved_by_cell[entry.cell] = document_ids_for(
+            chunk_ids, chunk_doc, top_k=cutoff_k
         )
+    return retrieved_by_cell, chunks_without_doc
+
+
+def _doc_results(
+    entries: Sequence[Any],
+    retrieved_by_cell: Mapping[str, tuple[str, ...]],
+    expected_by_cell: Mapping[str, Sequence[str]],
+    doc_ids: set[str],
+    *,
+    force_scored: bool = False,
+) -> list[Any]:
+    """Ячейки с ожиданиями ``expected_by_cell`` поверх **той же** выдачи.
+
+    Правило ``unresolved`` (пункт 3 разбора): ячейка неразрешена, только если **ни один**
+    член набора не найден в корпусе; знаменатель ``recall`` — найденные члены
+    (``resolved_doc_ids``). Формат 1 не меняется: там набор — один документ, и правило
+    сводится к прежнему «либо 1/1, либо ячейка исключена».
+
+    :param force_scored: держать ячейку в знаменателе даже при пустом остатке — так
+        считается чувствительность (ячейка, чьи ответы целиком пришли из выдачи, даёт
+        честный ноль, а не выпадает из среднего).
+    """
+    from core.pipeline.retrieval_docs import DocQueryResult, first_hit_rank
+
+    results: list[DocQueryResult] = []
+    for entry in entries:
+        expected = tuple(expected_by_cell.get(entry.cell, ()))
+        retrieved = retrieved_by_cell.get(entry.cell, ())
+        resolved = tuple(doc_id for doc_id in expected if doc_id in doc_ids)
         results.append(
             DocQueryResult(
                 cell=entry.cell,
                 product_id=entry.product_id,
                 param_id=entry.param_id,
-                expected_doc_ids=tuple(entry.expected_doc_ids),
+                expected_doc_ids=expected,
                 retrieved_doc_ids=retrieved,
-                rank=rank,
-                unresolved=not any(doc in doc_ids for doc in entry.expected_doc_ids),
+                # Ранг — производная от выдачи: метрики пересчитывают его сами
+                # (``first_hit_rank``), поэтому здесь он только для отчёта.
+                rank=first_hit_rank(expected, retrieved),
+                unresolved=False if force_scored else not resolved,
+                resolved_doc_ids=resolved,
             )
         )
+    return results
 
+
+def _measure_combination(
+    *,
+    profile: str,
+    pool_multiplier: int,
+    cross_query_fusion: str,
+    entries: Sequence[Any],
+    params: Mapping[str, Any],
+    cutoff_k: int,
+    lexical_index: Any,
+    vector_index: Any,
+    query_vectors: Any,
+    chunk_doc: dict[str, str],
+    doc_ids: set[str],
+    bootstrap: int,
+    seed: int,
+    dense_cache: dict[tuple[str, int], Any] | None = None,
+    answer_sets: Any = None,
+) -> dict[str, Any]:
+    """Одна комбинация сетки: **один** ретривал, затем метрики по обоим семействам.
+
+    Адресное семейство — прежнее поведение без изменений. Answer-семейство считается по
+    **своему** правилу разрешённости (ячейка неразрешена, только если ни один член набора
+    не найден в корпусе): его знаменатель — вопрос «нашёлся ли хоть один отвечающий
+    документ», и урезать его адресной разрешённостью значило бы выкинуть ровно те ячейки,
+    где адрес исчез из корпуса, а ответ остался. Отсюда два знаменателя; оба публикуются
+    (``scored`` и ``answer_scored``), а ``hit_gap`` — их разность, как и объявлено.
+
+    Чувствительность — тот же answer-``hit`` на наборе без документов, чьё происхождение
+    содержит ``retrieved``; ячейки с пустым остатком остаются в знаменателе с нулём.
+    """
+    from core.pipeline.retrieval_answers import (
+        answer_doc_ids,
+        answer_doc_ids_without_retrieved,
+    )
     from core.pipeline.retrieval_docs import evaluate_documents
 
-    return evaluate_documents(results, profile=profile, k=cutoff_k,
-                              bootstrap=bootstrap, seed=seed)
+    retrieved, chunks_without_doc = _retrieve_cells(
+        profile=profile,
+        pool_multiplier=pool_multiplier,
+        cross_query_fusion=cross_query_fusion,
+        entries=entries,
+        params=params,
+        cutoff_k=cutoff_k,
+        lexical_index=lexical_index,
+        vector_index=vector_index,
+        query_vectors=query_vectors,
+        chunk_doc=chunk_doc,
+        dense_cache=dense_cache,
+    )
+    address_results = _doc_results(
+        entries,
+        retrieved,
+        {entry.cell: tuple(entry.expected_doc_ids) for entry in entries},
+        doc_ids,
+    )
+    address = evaluate_documents(
+        address_results, profile=profile, k=cutoff_k, bootstrap=bootstrap, seed=seed
+    )
+    out: dict[str, Any] = {
+        "retrieved": retrieved,
+        "chunks_without_doc": chunks_without_doc,
+        "address": address,
+        "answer": None,
+        "sensitivity": None,
+        "answer_expected": None,
+        "sensitivity_expected": None,
+    }
+    if answer_sets is None:
+        return out
+
+    by_cell = answer_sets.by_cell()
+    answer_expected = {entry.cell: answer_doc_ids(by_cell[entry.cell]) for entry in entries}
+    sensitivity_expected = {
+        entry.cell: answer_doc_ids_without_retrieved(by_cell[entry.cell])
+        for entry in entries
+    }
+    out["answer_expected"] = answer_expected
+    out["sensitivity_expected"] = sensitivity_expected
+    out["answer"] = evaluate_documents(
+        _doc_results(entries, retrieved, answer_expected, doc_ids),
+        profile=profile,
+        k=cutoff_k,
+        bootstrap=bootstrap,
+        seed=seed,
+    )
+    out["sensitivity"] = evaluate_documents(
+        _doc_results(entries, retrieved, sensitivity_expected, doc_ids, force_scored=True),
+        profile=profile,
+        k=cutoff_k,
+        bootstrap=bootstrap,
+        seed=seed,
+    )
+    return out
 
 
 def _report_payload(
@@ -462,11 +608,31 @@ def _report_payload(
     label: str,
     pool_multiplier: int,
     cross_query_fusion: str,
+    chunks_without_doc: int = 0,
+    answer: Any = None,
+    sensitivity: Any = None,
+    answer_by_cell: Mapping[str, Sequence[str]] | None = None,
+    sensitivity_by_cell: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
-    """Отчёт комбинации как JSON: числа + по-ячеечная расшифровка (читается глазами)."""
-    from core.util.retrieval_eval import ndcg_at_k
+    """Отчёт комбинации как JSON: числа + по-ячеечная расшифровка (читается глазами).
 
-    return {
+    **Два семейства, одно поле-источник.** ``address_*`` — прежний вопрос «нашёлся ли
+    названный адрес»; ``hit_at_k``/``recall_at_k``/``mrr``/``ndcg_at_k`` остаются
+    **алиасами** адресных, потому что на них стоят публикации O14/O15 и прежние
+    потребители. ``answer_*`` — «нашёлся ли хоть один документ, который решает параметр».
+    ``hit_gap = answer_hit_at_k − address_hit_at_k`` — главное число §O42: сколько из
+    промахов адреса были промахами вопроса, а не поиска.
+
+    Без файла ответов (:data:`answer` ``is None``) отчёт остаётся **прежним до байта**:
+    тот же набор полей и те же значения, что публиковались до появления второго
+    семейства. Это не осторожность ради осторожности — на этом отчёте стоят числа
+    O14/O15, и «почти то же» здесь означает, что два отчёта несравнимы без ручной
+    сверки. Поэтому новые поля (``address_*``, ``unresolved_docs``,
+    ``chunks_without_doc``) появляются **только вместе с** ``--answer-sets``.
+    """
+    from core.pipeline.retrieval_docs import first_hit_rank
+
+    payload: dict[str, Any] = {
         "label": label,
         "profile": report.profile,
         "pool_multiplier": pool_multiplier,
@@ -481,24 +647,102 @@ def _report_payload(
         "recall_ci": list(report.recall_ci),
         "mrr": report.mrr,
         "ndcg_at_k": report.ndcg_at_k,
-        "per_cell": [
-            {
-                "cell": cell.cell,
-                "product_id": cell.product_id,
-                "param_id": cell.param_id,
-                "expected_doc_ids": list(cell.expected_doc_ids),
-                "retrieved_doc_ids": list(cell.retrieved_doc_ids),
-                "rank": cell.rank,
-                # По-ячеечный nDCG публикуется и у ``unresolved``: это формула на
-                # наблюдённой выдаче, а в среднее такие ячейки не входят (``scored``).
-                "ndcg_at_k": ndcg_at_k(
-                    cell.expected_doc_ids, cell.retrieved_doc_ids, report.k
-                ),
-                "unresolved": cell.unresolved,
-            }
-            for cell in report.per_cell
-        ],
     }
+    if answer is not None:
+        # Адресное семейство дублируется под явным именем: ``hit_at_k`` и т.д. остаются
+        # алиасами (на них стоят публикации O14/O15), а ``address_*`` называет смысл.
+        payload.update(
+            {
+                "unresolved_docs": report.unresolved_docs,
+                "chunks_without_doc": chunks_without_doc,
+                "address_hit_at_k": report.hit_at_k,
+                "address_recall_at_k": report.recall_at_k,
+                "address_mrr": report.mrr,
+                "address_ndcg_at_k": report.ndcg_at_k,
+                "answer_scored": answer.scored,
+                "answer_unresolved_cells": answer.unresolved_cells,
+                "answer_unresolved_docs": answer.unresolved_docs,
+                "answer_hit_at_k": answer.hit_at_k,
+                "answer_hit_ci": list(answer.hit_ci),
+                "answer_recall_at_k": answer.recall_at_k,
+                "answer_recall_ci": list(answer.recall_ci),
+                "answer_mrr": answer.mrr,
+                "answer_ndcg_at_k": answer.ndcg_at_k,
+                "hit_gap": answer.hit_at_k - report.hit_at_k,
+                # Разность двух средних осмысленна как «разложение промахов», только если
+                # знаменатели совпали. Ответ публикуется флагом, а не подразумевается:
+                # иначе читатель не отличит разложение от сравнения разных выборок.
+                "hit_gap_comparable": answer.scored == report.scored,
+            }
+        )
+        if sensitivity is not None:
+            payload.update(
+                {
+                    "answer_hit_at_k_wo_retrieved": sensitivity.hit_at_k,
+                    "answer_hit_ci_wo_retrieved": list(sensitivity.hit_ci),
+                    "answer_wo_retrieved_cells": sensitivity.scored,
+                    "answer_wo_retrieved_unresolved_docs": sensitivity.unresolved_docs,
+                }
+            )
+    payload["per_cell"] = [
+        _cell_payload(
+            cell,
+            k=report.k,
+            answer_by_cell=answer_by_cell,
+            sensitivity_by_cell=sensitivity_by_cell,
+            rank=first_hit_rank(cell.expected_doc_ids, cell.retrieved_doc_ids),
+        )
+        for cell in report.per_cell
+    ]
+    return payload
+
+
+def _cell_payload(
+    cell: Any,
+    *,
+    k: int,
+    rank: int | None,
+    answer_by_cell: Mapping[str, Sequence[str]] | None = None,
+    sensitivity_by_cell: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
+    """Одна ячейка отчёта. ``rank``/``answer_rank`` — из выдачи, а не из поля результата.
+
+    Ранг пересчитывается (:func:`first_hit_rank`), потому что поле ``DocQueryResult.rank``
+    — то, что показывает отчёт, а не вход метрики: рассогласованный ранг развёл бы
+    ``hit``/``MRR`` с ``recall``/``nDCG`` молча. ``answer_rank`` — ранг первого
+    **отвечающего** документа; он не заменяет ``rank``, потому что это два разных
+    вопроса к одной выдаче, и подмена сделала бы прежние числа O14 невоспроизводимыми.
+    """
+    from core.pipeline.retrieval_docs import first_hit_rank
+    from core.util.retrieval_eval import ndcg_at_k
+
+    payload: dict[str, Any] = {
+        "cell": cell.cell,
+        "product_id": cell.product_id,
+        "param_id": cell.param_id,
+        "expected_doc_ids": list(cell.expected_doc_ids),
+        "retrieved_doc_ids": list(cell.retrieved_doc_ids),
+        "rank": rank,
+        # По-ячеечный nDCG публикуется и у ``unresolved``: это формула на
+        # наблюдённой выдаче, а в среднее такие ячейки не входят (``scored``).
+        "ndcg_at_k": ndcg_at_k(cell.expected_doc_ids, cell.retrieved_doc_ids, k),
+        "unresolved": cell.unresolved,
+    }
+    if answer_by_cell is not None:
+        answer_ids = tuple(answer_by_cell.get(cell.cell, ()))
+        payload.update(
+            {
+                "resolved_docs": (
+                    None if cell.resolved_doc_ids is None else len(cell.resolved_doc_ids)
+                ),
+                "answer_doc_ids": list(answer_ids),
+                "answer_docs": len(answer_ids),
+                "answer_rank": first_hit_rank(answer_ids, cell.retrieved_doc_ids),
+            }
+        )
+    if sensitivity_by_cell is not None:
+        payload["sensitivity_doc_ids"] = list(sensitivity_by_cell.get(cell.cell, ()))
+    return payload
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -525,38 +769,51 @@ CELLS_CSV_COLUMNS = (
     "ndcg_at_k",
 )
 
+#: Колонки, которые добавляет answer-семейство: ``answer_rank`` — ранг первого
+#: отвечающего документа, ``answers`` — сколько документов решает параметр. Без
+#: ``--answer-sets`` этих колонок нет: прежний CSV остаётся прежним до байта.
+CELLS_CSV_ANSWER_COLUMNS = ("answer_rank", "answers")
 
-def _write_cells_csv(path: Path, reports: Sequence[dict[str, Any]]) -> None:
+
+def _write_cells_csv(
+    path: Path, reports: Sequence[dict[str, Any]], *, with_answers: bool = False
+) -> None:
     """Пишет по-ячеечную таблицу (CSV): ранг на ячейку и комбинацию сетки.
 
     Выдача документов top-K в файл **не** попадает: она воспроизводится командой, а
     сотни ``doc_id`` по 70 символов раздули бы артефакт в разы. Публикуется то, из чего
     считается метрика: ожидания, ранг, признак неразрешённости и размер выдачи.
+
+    :param with_answers: добавить ``answer_rank``/``answers`` (только с ``--answer-sets``).
     """
     import csv
 
+    columns = CELLS_CSV_COLUMNS + (CELLS_CSV_ANSWER_COLUMNS if with_answers else ())
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(CELLS_CSV_COLUMNS)
+        writer.writerow(columns)
         for report in reports:
             label = report.get("label", report["profile"])
             for cell in report["per_cell"]:
                 ndcg = cell.get("ndcg_at_k")
-                writer.writerow(
-                    [
-                        report["profile"],
-                        cell["cell"],
-                        cell["product_id"],
-                        cell["param_id"],
-                        " ".join(cell["expected_doc_ids"]),
-                        len(cell["retrieved_doc_ids"]),
-                        "" if cell["rank"] is None else cell["rank"],
-                        "1" if cell["unresolved"] else "0",
-                        label,
-                        "" if ndcg is None else f"{ndcg:.4f}",
-                    ]
-                )
+                row = [
+                    report["profile"],
+                    cell["cell"],
+                    cell["product_id"],
+                    cell["param_id"],
+                    " ".join(cell["expected_doc_ids"]),
+                    len(cell["retrieved_doc_ids"]),
+                    "" if cell["rank"] is None else cell["rank"],
+                    "1" if cell["unresolved"] else "0",
+                    label,
+                    "" if ndcg is None else f"{ndcg:.4f}",
+                ]
+                if with_answers:
+                    answer_rank = cell.get("answer_rank")
+                    row.append("" if answer_rank is None else answer_rank)
+                    row.append(cell.get("answer_docs", 0))
+                writer.writerow(row)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -632,6 +889,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--out-csv",
         metavar="PATH",
         help="по-ячеечная таблица: профиль, ячейка, ожидаемые документы, ранг",
+    )
+    parser.add_argument(
+        "--answer-sets",
+        metavar="PATH",
+        default=None,
+        help=(
+            "эталон отвечающих документов (cohound-retrieval-golden-answers/1): "
+            "включает answer-семейство метрик и hit_gap"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -734,6 +1000,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
 
+        # Файл ответов сверяется с эталоном **до** сборки индекса: расхождение составов —
+        # отказ, и платить за лексический индекс, чтобы затем отказать, незачем.
+        answer_sets = None
+        if args.answer_sets:
+            try:
+                answer_sets = _answer_sets_for(
+                    args.answer_sets,
+                    entries=entries,
+                    run_id=meta.run_id,
+                    case_id=case_id,
+                )
+            except SystemExit as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+
         from core.config.deploy import load_deploy_config
 
         deploy = load_deploy_config(args.deploy)
@@ -826,7 +1107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for profile, pool_multiplier, cross_query_fusion in grid:
             label = _combination_label(profile, pool_multiplier, cross_query_fusion)
             combination_started = time.perf_counter()
-            report = _measure_profile(
+            measured = _measure_combination(
                 profile=profile,
                 pool_multiplier=pool_multiplier,
                 cross_query_fusion=cross_query_fusion,
@@ -841,16 +1122,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bootstrap=args.bootstrap,
                 seed=args.seed,
                 dense_cache=dense_cache,
+                answer_sets=answer_sets,
             )
             timings[f"{label}_seconds"] = round(
                 time.perf_counter() - combination_started, 2
             )
             reports.append(
                 _report_payload(
-                    report,
+                    measured["address"],
                     label=label,
                     pool_multiplier=pool_multiplier,
                     cross_query_fusion=cross_query_fusion,
+                    chunks_without_doc=measured["chunks_without_doc"],
+                    answer=measured["answer"],
+                    sensitivity=measured["sensitivity"],
+                    answer_by_cell=measured["answer_expected"],
+                    sensitivity_by_cell=measured["sensitivity_expected"],
                 )
             )
 
@@ -881,6 +1168,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             "timings": timings,
             "reports": reports,
         }
+        if answer_sets is not None:
+            # Условия answer-семейства: без них ``hit_gap`` не воспроизводится — набор
+            # ответов, его политика и статус разметки суть входы числа, а не украшение.
+            from core.pipeline.retrieval_answers import answers_summary
+
+            payload["conditions"]["answer_sets"] = {
+                "path": str(args.answer_sets),
+                "status": answer_sets.status,
+                "reviewed_by": answer_sets.reviewed_by,
+                "judge": (
+                    None
+                    if answer_sets.judge is None
+                    else {
+                        "model_id": answer_sets.judge.model_id,
+                        "revision": answer_sets.judge.revision,
+                        "prompt_hash": answer_sets.judge.prompt_hash,
+                    }
+                ),
+                "policy": answer_sets.policy.as_dict(),
+                "summary": answers_summary(answer_sets.entries),
+            }
         if args.out_json:
             _write_json(Path(args.out_json).expanduser(), payload)
         if args.out_summary:
@@ -895,7 +1203,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ]
             _write_json(Path(args.out_summary).expanduser(), summary)
         if args.out_csv:
-            _write_cells_csv(Path(args.out_csv).expanduser(), reports)
+            _write_cells_csv(
+                Path(args.out_csv).expanduser(),
+                reports,
+                with_answers=answer_sets is not None,
+            )
 
         print(
             f"прогон {meta.run_id} (схема файла {meta.schema_version}), сборка "
@@ -925,6 +1237,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             label = report["label"]
             costs.append(f"{label} {timings[f'{label}_seconds']:.1f} с")
         print("цена: " + ", ".join(costs))
+        if answer_sets is not None:
+            _print_answer_table(reports)
+            from core.pipeline.retrieval_answers import answers_summary
+
+            summary = answers_summary(answer_sets.entries)
+            print(
+                f"набор ответов: {summary['cells']} ячеек, документов "
+                f"{summary['documents']} (различных {summary['distinct_documents']}), "
+                f"статус {answer_sets.status}"
+            )
+            sources = summary["cells_sources"]
+            print(
+                "ячеек по источникам: "
+                + ", ".join(f"{name} {count}" for name, count in sources.items())
+            )
+            for report in reports:
+                if "unresolved_docs" in report:
+                    print(
+                        f"{report['label']}: членов набора не разрешилось в корпусе "
+                        f"{report['answer_unresolved_docs']}, чанков без документа в "
+                        f"выдаче {report['chunks_without_doc']}"
+                    )
         for notice in notices:
             print(f"замечание проводки: {notice}")
     finally:
@@ -938,6 +1272,96 @@ def _rrf_k() -> int:
     from core.pipeline.retrieve import DEFAULT_RRF_K
 
     return DEFAULT_RRF_K
+
+
+def _answer_sets_for(
+    path: str,
+    *,
+    entries: Sequence[Any],
+    run_id: str,
+    case_id: str,
+) -> Any:
+    """Загружает файл ответов и сверяет его с эталоном **в обе стороны**.
+
+    Расхождение составов — отказ, а не предупреждение: «эталон покрывает 132 ячейки,
+    ответы 90» не должно пройти молча, иначе ``hit_gap`` считался бы по разным выборкам
+    и читался как свойство поиска. Причина отказа печатается с числом и первыми пятью
+    адресами — чтобы её можно было починить, не открывая файл.
+
+    :raises SystemExit: файл не читается, чужой ``run_id``/``case_id`` или составы
+        ячеек не совпадают.
+    """
+    from core.pipeline.retrieval_answers import load_answer_sets
+
+    try:
+        sets = load_answer_sets(path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"answer-sets: {path}: {exc}") from exc
+    if sets.run_id != run_id:
+        raise SystemExit(
+            f"answer-sets: набор собран на прогоне {sets.run_id!r}, а измеряется "
+            f"{run_id!r}: doc_id разных корпусов несравнимы"
+        )
+    if sets.case_id != case_id:
+        raise SystemExit(
+            f"answer-sets: набор собран для пакета {sets.case_id!r}, а эталон — "
+            f"{case_id!r}"
+        )
+    golden_cells = {entry.cell for entry in entries}
+    answer_cells = set(sets.by_cell())
+    missing = sorted(golden_cells - answer_cells)
+    extra = sorted(answer_cells - golden_cells)
+    if missing:
+        raise SystemExit(
+            f"answer-sets: {len(missing)} ячеек эталона отсутствуют в файле ответов "
+            f"(первые: {', '.join(missing[:5])}) — answer-семейство считалось бы по "
+            "другой выборке"
+        )
+    if extra:
+        raise SystemExit(
+            f"answer-sets: {len(extra)} ячеек файла ответов отсутствуют в эталоне "
+            f"(первые: {', '.join(extra[:5])}) — набор описывает ячейки, которых нет "
+            "в измерении"
+        )
+    return sets
+
+
+def _print_answer_table(reports: Sequence[dict[str, Any]]) -> None:
+    """Строки answer-семейства: главное число §O42 (``hit_gap``) и чувствительность.
+
+    Печатается отдельно от адресной таблицы, потому что это ответ на другой вопрос:
+    «нашёлся ли хоть один документ, решающий параметр», а не «нашёлся ли названный адрес».
+    """
+    print("")
+    print(
+        f"{'комбинация':<28} {'answer_hit':>10} {'answer CI':>17} {'answer_rec':>10} "
+        f"{'answer_MRR':>10} {'answer_nDCG':>11} {'hit_gap':>8} "
+        f"{'wo_retrieved':>12} {'wo_ret CI':>17}"
+    )
+    for report in reports:
+        if "answer_hit_at_k" not in report:
+            continue
+        low, high = report["answer_hit_ci"]
+        wo_low, wo_high = report.get("answer_hit_ci_wo_retrieved", (0.0, 0.0))
+        print(
+            f"{report['label']:<28} {report['answer_hit_at_k']:>10.3f} "
+            f"[{low:.3f}; {high:.3f}] {report['answer_recall_at_k']:>10.3f} "
+            f"{report['answer_mrr']:>10.3f} {report['answer_ndcg_at_k']:>11.3f} "
+            f"{report['hit_gap']:>+8.3f} "
+            f"{report.get('answer_hit_at_k_wo_retrieved', 0.0):>12.3f} "
+            f"[{wo_low:.3f}; {wo_high:.3f}]"
+        )
+    print(
+        "hit_gap = answer_hit@K − address_hit@K: сколько промахов адреса были промахами "
+        "вопроса, а не поиска"
+    )
+    for report in reports:
+        if "hit_gap_comparable" in report and not report["hit_gap_comparable"]:
+            print(
+                f"ВНИМАНИЕ  {report['label']}: знаменатели разные (адрес {report['scored']}, "
+                f"ответ {report['answer_scored']}) — hit_gap сравнивает две выборки; "
+                "разложение промахов читается по ячейкам, а не по разности средних"
+            )
 
 
 if __name__ == "__main__":
