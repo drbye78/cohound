@@ -1063,6 +1063,73 @@ def test_retrieve_for_cell_per_query_fusion_does_not_truncate() -> None:
     assert [c.chunk_id for c in narrow.chunks] == ["c1", "c3"]
 
 
+def test_per_query_is_indistinguishable_from_max_at_depth_equal_to_cutoff() -> None:
+    """Дефект измеримости: при глубине K политики неразличимы — один список.
+
+    Каждый запрос отдаёт не больше K чанков, поэтому union ``per_query`` и обрезанный
+    ``max`` — один и тот же список (не «похожий»: тот же). Пока глубина равна K,
+    сравнивать политики нельзя, и любой замер, где они «совпали», мерил одно и то же.
+    """
+    param = _param(_data())
+    queries = render_queries(param)
+    mapping = {queries[0]: [_rc(f"c{i}", "p1", 1.0 - i / 10) for i in range(1, 5)]}
+    per_query = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=2,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion="per_query",
+    )
+    max_fusion = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=2,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion="max",
+    )
+    assert [c.chunk_id for c in per_query.chunks] == [c.chunk_id for c in max_fusion.chunks]
+    assert [c.chunk_id for c in max_fusion.chunks] == ["c1", "c2"]
+
+
+def test_query_depth_makes_per_query_differ_from_max() -> None:
+    """Та же ячейка при глубине ``2K``: политики расходятся — дефект снят.
+
+    Глубина расширяет окно **запроса**, поэтому ``per_query`` получает материал, которого
+    при глубине K не видит ни одна политика, а ``max`` по-прежнему режет union до K (I20).
+    """
+    param = _param(_data())
+    queries = render_queries(param)
+    mapping = {queries[0]: [_rc(f"c{i}", "p1", 1.0 - i / 10) for i in range(1, 5)]}
+    per_query = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=2,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion="per_query",
+        query_depth=4,
+    )
+    max_fusion = retrieve_for_cell(
+        param,
+        product_id="p1",
+        profile="R0",
+        cutoff_k=2,
+        lexical_index=_FakeLexical(mapping),
+        cross_query_fusion="max",
+        query_depth=4,
+    )
+    assert [c.chunk_id for c in per_query.chunks] == ["c1", "c2", "c3", "c4"]
+    assert [c.chunk_id for c in max_fusion.chunks] == ["c1", "c2"]
+    # Префикс общий, различие — хвост: политика отличается длиной, а не порядком.
+    assert [c.chunk_id for c in per_query.chunks][:2] == [
+        c.chunk_id for c in max_fusion.chunks
+    ]
+    # Объявленный cut-off у обоих прежний (I20).
+    assert per_query.cutoff_K == max_fusion.cutoff_K == 2
+
+
 def test_retrieve_for_cell_rejects_unknown_fusion_policy() -> None:
     """Опечатка в политике — отказ со списком допустимых, а не тихий ``max``."""
     param = _param(_data())

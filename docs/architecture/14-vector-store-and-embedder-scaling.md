@@ -585,7 +585,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    (дефолт через цикл `search`, поэтому существующие реализации не сломаны).
    Проверено: `core/ports/vector_index.py:102` (`search_many` в порту), `:103-112`
    (`batched_search` с `getattr`-фолбэком), `core/adapters/vector_npy.py:272` (реализация),
-   вызывается из `core/pipeline/evaluate.py:1213`.
+   вызывается из `core/pipeline/evaluate.py:1227`.
 4. ✅ **Мемоизация векторов запроса** + пре-компьют `query_vectors` до `evaluate`
    (`precompute_query_vectors`, батчи по 32; это же закрывает оговорку 2 — оценщик
    больше не ходит за векторами вовсе).

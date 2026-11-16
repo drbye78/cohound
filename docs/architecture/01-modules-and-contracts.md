@@ -162,9 +162,9 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 остаётся `❓` (I12).
 
 **I2c — класс отрицания против наблюдённого охвата** (`check_absence_coverage`,
-`core/domain/invariants.py:298`; исполняется в Ш6: `core/pipeline/evaluate.py:2124-2208`
-`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2174`,
-применяется к ячейке на `core/pipeline/evaluate.py:3267`, токен причины
+`core/domain/invariants.py:298`; исполняется в Ш6: `core/pipeline/evaluate.py:2149-2233`
+`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2199`,
+применяется к ячейке на `core/pipeline/evaluate.py:3292`, токен причины
 `absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:234`). Условие `❌` зависит от **класса**, а не от
 одной полноты краула: `explicit` (цитата вендора) и `authoritative` (энумерация) неполнотой не
 отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` требует
@@ -175,7 +175,7 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 
 **I2d — у `❌` есть датированный носитель** (`check_absence_dated`,
 `core/domain/invariants.py:386`; исполняется в Ш6 `_enforce_dated_absence`,
-`core/pipeline/evaluate.py:2211-2321`, применяется к ячейке на `core/pipeline/evaluate.py:3285`).
+`core/pipeline/evaluate.py:2236-2346`, применяется к ячейке на `core/pipeline/evaluate.py:3310`).
 `❌` — утверждение не о сегодняшнем дне, а о **событии с датой**: носитель зависит от класса
 отрицания — `explicit`/`authoritative` требуют записи наблюдения (`observed_at`) **каждого**
 цитируемого документа, `bounded` — снятия **каждого** объявленного корня с `complete=1` и датой
@@ -801,7 +801,7 @@ class DiscoveryLLMPort(Protocol):
 | `xml_safe.py` | ленивый доступ к `defusedxml` (единственное место, знающее про extra) |
 | `text_utils.py` | многоязычные текстовые утилиты (RU/EN) |
 | `cjk_lexical.py` | сегментация CJK для лексического контура: биграммы внутри прогонов (без зависимостей) |
-| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:265` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
+| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:272` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
 | `agreement.py` | согласие аннотаторов: Cohen's κ (§11.5) |
 | `cache.py` | глобальный content-addressed кэш внешних вызовов (R7, ADR 0016) |
 | `retry.py` | bounded retry/backoff с уважением `Retry-After` (S6) — вынесен из поискового адаптера: политика повторов общая, а провайдер — commodity |
@@ -938,10 +938,10 @@ pytest + `--cov` (`scripts/ci.sh:82-88`).
 | `09` онбординг/инкремент | §3.10 (`ProductStatePort`), §3.9 (контейнеры), §4 (`run_isolated`, resume/N4) |
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
-`core/pipeline/retrieve.py:265` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
+`core/pipeline/retrieve.py:272` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
 `core/domain/models.py:1511`; структура `ProtocolExhaustion` — `core/domain/models.py:1348`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2826` (`max_retries`), цикл
-`core/pipeline/evaluate.py:3138`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2851` (`max_retries`), цикл
+`core/pipeline/evaluate.py:3163`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
-строит вызывающий (`core/pipeline/evaluate.py:3018`).
+строит вызывающий (`core/pipeline/evaluate.py:3043`).

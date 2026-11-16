@@ -23,20 +23,31 @@
 
 ``profiles``
     По каждой **комбинации сетки** (профиль × политика кросс-запросного слияния, для
-    ``R2`` ещё × множитель пула плеч): ``hit@K``, ``recall@K``, ``MRR``, ``nDCG@K``,
-    бутстрэп-интервалы ``hit``/``recall`` (1000 ресемплов по ячейкам, ``seed=0``), число
-    ячеек, число разрешённых (``scored``) и неразрешённых (``unresolved``) и ``per_cell`` —
-    по каждой ячейке ожидаемые и найденные документы, ранг, nDCG.
+    ``R2`` ещё × множитель пула плеч, для всех — × глубина поиска одного запроса):
+    ``hit@K``, ``recall@K``, ``MRR``, ``nDCG@K``, бутстрэп-интервалы ``hit``/``recall``
+    (1000 ресемплов по ячейкам, ``seed=0``), число ячеек, число разрешённых (``scored``)
+    и неразрешённых (``unresolved``) и ``per_cell`` — по каждой ячейке ожидаемые и
+    найденные документы, ранг, nDCG.
 ``conditions``
     Профиль/K/``rrf_k``, объявленные оси эмбеддера, сборка композиции, версия схемы файла,
     профиль лексического анализатора, число чанков в индексе и документов в корпусе,
-    состав сетки (``pool_multipliers``/``cross_query_fusions``/``grid``).
+    состав сетки (``pool_multipliers``/``cross_query_fusions``/``grid``; ``query_depths`` —
+    только когда глубину объявили флагом).
+
+**Глубина запроса — третье измерение, а не настройка.** Политика кросс-запросного
+слияния различает запросы только тем, что каждый из них вернул. При глубине, равной
+``cutoff_k``, каждый запрос отдаёт не больше K чанков, и ``per_query`` (union без
+обрезки) тождественно равен ``max`` (union, обрезанный до K) — он сравнивал бы две
+записи одного списка. Поэтому глубина объявляется флагом ``--query-depths`` и входит
+в метку (``R0/depth=20/fusion=per_query``) и в ``conditions``; при глубине, равной
+``cutoff_k``, метка остаётся прежней, и отчёт без флага — прежний до байта.
 
 **Сетка — один проход, один индекс.** Сборка индекса стоит ~30 с, поэтому комбинации
 сетки меряются в одном запуске: лексический и векторный индексы строятся один раз,
 запросные векторы считаются один раз, а dense-плечо кешируется по
-``(продукт, множитель пула)`` — окно батча равно ``cutoff_k * pool_multiplier``, поэтому
-готовые хиты другого пула несравнимы и кеш между пулами не переиспользуется.
+``(продукт, множитель пула, глубина)`` — окно батча равно
+``max(cutoff_k * pool_multiplier, query_depth)``, поэтому готовые хиты другого окна
+несравнимы и кеш между комбинациями не переиспользуется.
 
 **Чего прибор НЕ измеряет:** κ оценщика (это Ш6 и ``evaluator-benchmark``), качество
 цитат (I22), стоимость эмбеддинга корпуса. Только ретривал.
@@ -313,32 +324,84 @@ def _resolve_cross_query_fusions(
     return tuple(policies)
 
 
+def _resolve_query_depths(listed: str | None, cutoff_k: int) -> tuple[int | None, ...]:
+    """Глубины поиска одного запроса: ``None`` — не объявлена (равна ``cutoff_k``).
+
+    Без флага возвращается ``(None,)`` — одна комбинация, прежнее поведение: метки и
+    отчёт остаются прежними до байта. Глубина — **третье измерение сетки**, а не
+    настройка прибора: при глубине, равной K, каждый запрос отдаёт не больше K чанков,
+    и кросс-запросные политики видят один материал (``per_query`` тождественно равен
+    ``max``), поэтому без объявленной глубины сравнивать политики бессмысленно.
+
+    :raises SystemExit: не целое число, значение ``<= 0`` или пустой список.
+    """
+    if listed is None:
+        return (None,)
+    values: list[int | None] = []
+    for item in _split_csv(listed):
+        try:
+            value = int(item)
+        except ValueError as exc:
+            raise SystemExit(
+                f"measure: --query-depths: {item!r} — не целое число"
+            ) from exc
+        if value <= 0:
+            raise SystemExit(
+                f"measure: --query-depths: {value} <= 0 "
+                "(глубина запроса; срез результата по-прежнему K)"
+            )
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise SystemExit("measure: --query-depths пуст")
+    return tuple(values)
+
+
 def _measurement_grid(
     profiles: Sequence[str],
     fusions: Sequence[str],
     pool_multipliers: Sequence[int],
-) -> list[tuple[str, int, str]]:
-    """Комбинации сетки: ``(профиль, множитель пула, политика слияния)``.
+    query_depths: Sequence[int | None] = (None,),
+) -> list[tuple[str, int, str, int | None]]:
+    """Комбинации сетки: ``(профиль, множитель пула, политика слияния, глубина)``.
 
     Пул участвует только у ``R2``: у ``R0``/``R1`` его нет в исполнении, и лишние
     комбинации мерили бы одно и то же под разными метками. У ``R0``/``R1`` множитель
-    остаётся ``1`` — как дефолт, а не как объявленное условие.
+    остаётся ``1`` — как дефолт, а не как объявленное условие. Глубина — общая для всех
+    профилей ось (её исполняет :func:`core.pipeline.retrieve.retrieve`), ``None`` —
+    прежняя сетка без третьего измерения.
     """
-    grid: list[tuple[str, int, str]] = []
+    grid: list[tuple[str, int, str, int | None]] = []
     for profile in profiles:
         for fusion in fusions:
-            if profile == "R2":
-                grid.extend((profile, pool, fusion) for pool in pool_multipliers)
-            else:
-                grid.append((profile, 1, fusion))
+            for depth in query_depths:
+                if profile == "R2":
+                    grid.extend(
+                        (profile, pool, fusion, depth) for pool in pool_multipliers
+                    )
+                else:
+                    grid.append((profile, 1, fusion, depth))
     return grid
 
 
-def _combination_label(profile: str, pool_multiplier: int, fusion: str) -> str:
-    """Метка строки отчёта: пул называется только там, где он исполняется (``R2``)."""
-    if profile == "R2":
-        return f"{profile}/pool={pool_multiplier}/fusion={fusion}"
-    return f"{profile}/fusion={fusion}"
+def _combination_label(
+    profile: str,
+    pool_multiplier: int,
+    fusion: str,
+    query_depth: int | None = None,
+    *,
+    cutoff_k: int | None = None,
+) -> str:
+    """Метка строки отчёта: пул — только у ``R2``, глубина — только объявленная.
+
+    Глубина входит в метку, когда она **отличается от среза K**: при глубине, равной
+    ``cutoff_k``, исполнение прежнее, и метка остаётся прежней (``R0/fusion=max``) —
+    иначе поехали бы метки уже опубликованных чисел O14/O15.
+    """
+    label = f"{profile}/pool={pool_multiplier}" if profile == "R2" else profile
+    if query_depth is not None and query_depth != cutoff_k:
+        label = f"{label}/depth={query_depth}"
+    return f"{label}/fusion={fusion}"
 
 
 # ---------------------------------------------------------------------------
@@ -355,13 +418,15 @@ def _dense_by_product(
     pool_multiplier: int,
     vector_index: Any,
     query_vectors: Any,
-    cache: dict[tuple[str, int], Any] | None = None,
+    cache: dict[tuple[str, int, int | None], Any] | None = None,
+    query_depth: int | None = None,
 ) -> dict[str, Any]:
-    """Dense-плечо по продуктам; кеш ключуется ``(продукт, множитель пула)``.
+    """Dense-плечо по продуктам; кеш ключуется ``(продукт, множитель пула, глубина)``.
 
-    Окно батча — ``cutoff_k * pool_multiplier``, поэтому готовые хиты **разного пула
-    несравнимы**: отдать их другой комбинации значило бы померить пул 1 под меткой
-    ``pool=8``. Множитель поэтому входит в ключ, а не только продукт.
+    Окно батча — ``max(cutoff_k * pool_multiplier, query_depth)``, поэтому готовые хиты
+    **разного окна несравнимы**: отдать их другой комбинации значило бы померить пул 1
+    под меткой ``pool=8`` или глубину K под меткой ``depth=40``. Множитель и глубина
+    поэтому входят в ключ, а не только продукт.
 
     :param cache: накопитель между комбинациями одной сетки; ``None`` — без кеша.
     """
@@ -370,7 +435,7 @@ def _dense_by_product(
     store = cache if cache is not None else {}
     dense: dict[str, Any] = {}
     for product_id, product_entries in by_product.items():
-        key = (product_id, pool_multiplier)
+        key = (product_id, pool_multiplier, query_depth)
         if key not in store:
             store[key] = precompute_dense_hits(
                 [params[entry.param_id] for entry in product_entries],
@@ -380,6 +445,7 @@ def _dense_by_product(
                 vector_index=vector_index,
                 query_vectors=query_vectors,
                 pool_multiplier=pool_multiplier,
+                query_depth=query_depth,
             )
         dense[product_id] = store[key]
     return dense
@@ -397,7 +463,8 @@ def _retrieve_cells(
     vector_index: Any,
     query_vectors: Any,
     chunk_doc: dict[str, str],
-    dense_cache: dict[tuple[str, int], Any] | None = None,
+    dense_cache: dict[tuple[str, int, int | None], Any] | None = None,
+    query_depth: int | None = None,
 ) -> tuple[dict[str, tuple[str, ...]], int]:
     """Ретривал **один раз** на ячейку: ``cell → doc_id top-K`` и чанки без документа.
 
@@ -428,6 +495,7 @@ def _retrieve_cells(
         vector_index=vector_index,
         query_vectors=query_vectors,
         cache=dense_cache,
+        query_depth=query_depth,
     )
 
     retrieved_by_cell: dict[str, tuple[str, ...]] = {}
@@ -450,10 +518,15 @@ def _retrieve_cells(
             dense_by_query=dense_by_product.get(entry.product_id),
             pool_multiplier=pool_multiplier,
             cross_query_fusion=cross_query_fusion,
+            query_depth=query_depth,
         )
         # ``per_query`` намеренно отдаёт больше ``cutoff_k`` чанков («сколько бы нашли,
         # если бы не резали»). Документные метрики смотрят **срез** ``cutoff_k``: иначе
-        # политика выигрывала бы длиной списка, а не порядком.
+        # политика выигрывала бы длиной списка, а не порядком. Заметим, что при срезе
+        # именно по чанкам ``per_query`` и ``max`` дают один и тот же префикс из K
+        # чанков: политика отличается длиной хвоста, а не первыми K. Поэтому
+        # различаются они только в том, что видит слияние (``query_depth``), и в
+        # отчёте это видно как разная глубина, а не как разный hit@K.
         chunk_ids = [chunk.chunk_id for chunk in retrieval.chunks]
         chunks_without_doc += sum(
             1 for chunk_id in chunk_ids[:cutoff_k] if chunk_id not in chunk_doc
@@ -522,8 +595,9 @@ def _measure_combination(
     doc_ids: set[str],
     bootstrap: int,
     seed: int,
-    dense_cache: dict[tuple[str, int], Any] | None = None,
+    dense_cache: dict[tuple[str, int, int | None], Any] | None = None,
     answer_sets: Any = None,
+    query_depth: int | None = None,
 ) -> dict[str, Any]:
     """Одна комбинация сетки: **один** ретривал, затем метрики по обоим семействам.
 
@@ -555,6 +629,7 @@ def _measure_combination(
         query_vectors=query_vectors,
         chunk_doc=chunk_doc,
         dense_cache=dense_cache,
+        query_depth=query_depth,
     )
     address_results = _doc_results(
         entries,
@@ -613,6 +688,7 @@ def _report_payload(
     sensitivity: Any = None,
     answer_by_cell: Mapping[str, Sequence[str]] | None = None,
     sensitivity_by_cell: Mapping[str, Sequence[str]] | None = None,
+    query_depth: int | None = None,
 ) -> dict[str, Any]:
     """Отчёт комбинации как JSON: числа + по-ячеечная расшифровка (читается глазами).
 
@@ -629,6 +705,10 @@ def _report_payload(
     O14/O15, и «почти то же» здесь означает, что два отчёта несравнимы без ручной
     сверки. Поэтому новые поля (``address_*``, ``unresolved_docs``,
     ``chunks_without_doc``) появляются **только вместе с** ``--answer-sets``.
+
+    ``query_depth`` — то же правило: поле появляется только когда глубину объявили
+    (``--query-depths``). Без флага отчёт прежний до байта, иначе числа O14/O15 и
+    отчёт о глубине стали бы несравнимы без ручной сверки.
     """
     from core.pipeline.retrieval_docs import first_hit_rank
 
@@ -637,6 +717,9 @@ def _report_payload(
         "profile": report.profile,
         "pool_multiplier": pool_multiplier,
         "cross_query_fusion": cross_query_fusion,
+        # Глубина — условие числа, а не украшение: без неё ``per_query`` и ``max``
+        # неразличимы, и строка отчёта описывала бы не тот замер.
+        **({"query_depth": query_depth} if query_depth is not None else {}),
         "k": report.k,
         "cells": report.cells,
         "scored": report.scored,
@@ -859,6 +942,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "перекрывает --cross-query-fusion",
     )
     parser.add_argument(
+        "--query-depths",
+        default=None,
+        help=(
+            "глубины поиска одного запроса через запятую (например 10,20,40); "
+            "дефолт — глубина равна cutoff_k (прежнее поведение). Глубина — третье "
+            "измерение сетки: без неё per_query тождественно равен max"
+        ),
+    )
+    parser.add_argument(
         "--cutoff-k",
         type=int,
         default=0,
@@ -985,10 +1077,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             cross_query_fusions = _resolve_cross_query_fusions(
                 fusion_scalar, args.cross_query_fusions
             )
+            query_depths = _resolve_query_depths(args.query_depths, cutoff_k)
         except SystemExit as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        grid = _measurement_grid(profiles, cross_query_fusions, pool_multipliers)
+        grid = _measurement_grid(
+            profiles, cross_query_fusions, pool_multipliers, query_depths
+        )
 
         missing_params = [entry.cell for entry in entries if entry.param_id not in params]
         if missing_params:
@@ -1103,9 +1198,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         # ``cutoff_k * pool_multiplier``, поэтому хиты одного пула нельзя отдать
         # комбинации с другим (иначе ``pool=8`` померил бы пул 1). Пул в ключе делает
         # переиспользование внутри сетки безопасным и при этом дешёвым.
-        dense_cache: dict[tuple[str, int], Any] = {}
-        for profile, pool_multiplier, cross_query_fusion in grid:
-            label = _combination_label(profile, pool_multiplier, cross_query_fusion)
+        dense_cache: dict[tuple[str, int, int | None], Any] = {}
+        for profile, pool_multiplier, cross_query_fusion, query_depth in grid:
+            label = _combination_label(
+                profile,
+                pool_multiplier,
+                cross_query_fusion,
+                query_depth,
+                cutoff_k=cutoff_k,
+            )
             combination_started = time.perf_counter()
             measured = _measure_combination(
                 profile=profile,
@@ -1123,6 +1224,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=args.seed,
                 dense_cache=dense_cache,
                 answer_sets=answer_sets,
+                query_depth=query_depth,
             )
             timings[f"{label}_seconds"] = round(
                 time.perf_counter() - combination_started, 2
@@ -1138,6 +1240,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sensitivity=measured["sensitivity"],
                     answer_by_cell=measured["answer_expected"],
                     sensitivity_by_cell=measured["sensitivity_expected"],
+                    query_depth=query_depth,
                 )
             )
 
@@ -1168,6 +1271,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "timings": timings,
             "reports": reports,
         }
+        if args.query_depths is not None:
+            # Глубина — условие числа: без неё строка ``per_query`` описывала бы замер,
+            # которого не было (при глубине K политика тождественна ``max``). Ключ
+            # появляется только по флагу — иначе отчёт без флагов перестал бы быть
+            # байт-в-байт прежним (тот же приём, что у ``answer_sets`` ниже).
+            payload["conditions"]["query_depths"] = list(query_depths)
         if answer_sets is not None:
             # Условия answer-семейства: без них ``hit_gap`` не воспроизводится — набор
             # ответов, его политика и статус разметки суть входы числа, а не украшение.

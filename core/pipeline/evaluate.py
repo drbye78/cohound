@@ -1179,6 +1179,7 @@ def precompute_dense_hits(
     query_vectors: Mapping[str, Sequence[float]] | None,
     max_queries: int = MAX_QUERIES,
     pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
+    query_depth: int | None = None,
 ) -> dict[str, list[RetrievedChunk]] | None:
     """Dense-плечо для **всех** запросов пакета в продукте — одним батч-вызовом порта.
 
@@ -1197,6 +1198,11 @@ def precompute_dense_hits(
         окно батча — ``cutoff_k * pool_multiplier``. Вызывающий обязан передать то же
         значение, что и в :func:`retrieve_for_cell`, иначе батч отдал бы меньше готовых
         хитов, чем поштучный путь, и R2 мерил бы не объявленное условие.
+    :param query_depth: глубина поиска одного запроса (тот же аргумент, что у
+        :func:`retrieve`). Окно батча — ``max(cutoff_k * pool_multiplier, query_depth)``:
+        иначе готовое плечо оказалось бы короче поштучного, и «батч = поштучно»
+        перестало бы быть проверяемым свойством, а число — верным. ``None`` — прежнее
+        окно ``cutoff_k * pool_multiplier``.
     :returns: карта ``query → hits``; ``None`` — батч неприменим.
     """
     if vector_index is None or query_vectors is None:
@@ -1208,7 +1214,15 @@ def precompute_dense_hits(
             f"pool_multiplier обязан быть ≥ 1, получено {pool_multiplier!r} "
             "(окно батча = cutoff_k * pool_multiplier)"
         )
+    if query_depth is not None and query_depth <= 0:
+        # Та же проверка, что в ``retrieve``: окно батча не бывает «нулевой глубиной».
+        raise ValueError(
+            f"query_depth обязан быть ≥ 1, получено {query_depth!r} "
+            "(глубина поиска одного запроса; None — равна cutoff_k)"
+        )
     window = cutoff_k * pool_multiplier
+    if query_depth is not None:
+        window = max(window, query_depth)
     queries: list[str] = []
     requests: list[VectorQuery] = []
     for text in unique_queries(params, max_queries=max_queries):
@@ -1250,9 +1264,11 @@ def _fuse_query_results(
       границе K (O13). Поэтому ``score`` результата здесь — **ранговый балл**, а не BM25;
       значение уезжает в провенанс и в лог, и читать его надо именно так.
     - ``per_query`` — union по ``max`` score **без** кросс-запросной обрезки: срез делает
-      вызывающий. Это «сколько бы мы нашли, если бы не резали» — политика измерима, а не
-      декларативна. ``RetrievalResult.cutoff_K`` тогда описывает K **запросов**, а не
-      длину списка.
+      вызывающий. Это «сколько бы мы нашли, если бы не резали». **Измерима она только
+      при глубине запроса больше ``cutoff_k``**: при глубине, равной K, каждый запрос
+      отдаёт не больше K чанков, и первые K элементов union у ``per_query`` и ``max``
+      совпадают тождественно — политика сравнивала бы две записи одного списка.
+      ``RetrievalResult.cutoff_K`` тогда описывает K **запросов**, а не длину списка.
     """
     if policy == "rrf":
         scores: dict[str, float] = {}
@@ -1297,6 +1313,7 @@ def retrieve_for_cell(
     cross_query_fusion: str = DEFAULT_CROSS_QUERY_FUSION,
     lang: str | None = None,
     max_queries: int = MAX_QUERIES,
+    query_depth: int | None = None,
 ) -> RetrievalResult:
     """Конкретный путь I16/I17/I20: ``render_queries`` → ``retrieve`` по каждому запросу.
 
@@ -1321,9 +1338,16 @@ def retrieve_for_cell(
         ``cutoff_k * pool_multiplier``, срез — ``cutoff_k``.
     :param cross_query_fusion: политика слияния запросов ячейки — ``max`` (дефолт,
         прежнее поведение) | ``rrf`` | ``per_query`` (см. :func:`_fuse_query_results`).
+    :param query_depth: глубина поиска **каждого** запроса (см. :func:`retrieve`).
+        ``None`` — равна ``cutoff_k`` (прежнее поведение байт-в-байт). При глубине
+        больше ``cutoff_k`` каждый запрос отдаёт больше K чанков, и ``per_query``
+        получает материал, которого при глубине K не видит ни одна политика. Срез
+        результата по-прежнему ``cutoff_k`` (I20) — но только у ``max``/``rrf``:
+        ``per_query`` срезается вызывающим по объявленному правилу.
 
     :raises ValueError: неизвестный профиль; неизвестная политика слияния;
-        ``pool_multiplier <= 0``; нет нужного порта/вектора (из :func:`retrieve`).
+        ``pool_multiplier <= 0``; ``query_depth <= 0``; нет нужного порта/вектора
+        (из :func:`retrieve`).
     """
     if cross_query_fusion not in CROSS_QUERY_FUSION_POLICIES:
         # Отказ со списком допустимых: опечатка в политике иначе молча дала бы ``max``,
@@ -1358,6 +1382,7 @@ def retrieve_for_cell(
             rrf_k=rrf_k,
             pool_multiplier=pool_multiplier,
             lang=lang,
+            query_depth=query_depth,
         )
         if not build_id and result.build_id:
             build_id = result.build_id

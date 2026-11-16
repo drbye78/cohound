@@ -894,7 +894,7 @@ host'ах, поэтому бюджет, собранный на одном зе�
 - `partial`, truncation, blocked и failed видны в session provenance.
   → ✅ `core/pipeline/crawl_session.py:113-116`, `core/pipeline/metrics.py:490`.
 - Ни один failed fetch не создаёт absence автоматически.
-  → ✅ `core/pipeline/evaluate.py:2124` (`_enforce_absence_coverage`); `failed` → `status=null` (I4).
+  → ✅ `core/pipeline/evaluate.py:2149` (`_enforce_absence_coverage`); `failed` → `status=null` (I4).
 - Cached/raw reuse отличим от live fetch.
   → ✅ **локально** (09.11.2026): `RawPage.from_cache` выставляется всеми пятью
   `_page_from_cache` (`core/adapters/crawl_http.py:957`, `crawl_scrapy.py:1202`,

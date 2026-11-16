@@ -36,7 +36,7 @@
 `cells.failure_kind` пишется **двумя** путями и не пишется третьим:
 
 - сбой ретривала — `_record_cell_failure(store, failed, SEARCH_FAILED)`
-  (`core/pipeline/evaluate.py:4278`);
+  (`core/pipeline/evaluate.py:4303`);
 - отсутствие источников — тот же вызов (`:4024`);
 - **сбой оценщика — не пишется вовсе.** `_unresolved_outcome` (`:3318-3357`) знает класс
   (`kind`) и возвращает его в `EvaluationOutcome.failure_kind`, но `_persist` в нём

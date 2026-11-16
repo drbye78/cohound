@@ -439,3 +439,118 @@ def test_ready_dense_hits_are_not_requeried_or_truncated() -> None:
     assert vec.calls == []  # готовое плечо не перезапрашивается
     assert [c.chunk_id for c in result.chunks] == ["X", "A"]
     assert result.chunks[0].score == pytest.approx(1 / (60 + 2) + 1 / (60 + 15))
+
+
+# -- глубина поиска одного запроса (``query_depth``) ------------------------ #
+#
+# Зачем аргумент: политики кросс-запросного слияния различают запросы только тем, что
+# каждый из них вернул. При глубине, равной ``cutoff_k``, каждый запрос отдаёт не больше
+# K чанков, и ``per_query`` (union без обрезки) не может отличаться от ``max`` (union,
+# обрезанный до K) — сравнивались бы две записи одного списка.
+
+
+def test_query_depth_none_is_previous_behaviour() -> None:
+    """``query_depth=None`` — те же чанки, те же score, то же окно портов."""
+    hits = [_chunk(f"c{i}") for i in range(1, 6)]
+    default = _r2_call(
+        _FakeLexical(list(hits), build_id=_BOTH_ARMS_BUILD),
+        _FakeVector(list(hits), build_id=_BOTH_ARMS_BUILD),
+        cutoff_k=3,
+    )
+    lex = _FakeLexical(list(hits), build_id=_BOTH_ARMS_BUILD)
+    vec = _FakeVector(list(hits), build_id=_BOTH_ARMS_BUILD)
+    explicit = retrieve(
+        query_text="q",
+        query_vector=[1.0, 0.0, 0.0],
+        product_ids=["p1"],
+        profile="R2",
+        cutoff_k=3,
+        lexical_index=lex,
+        vector_index=vec,
+        query_depth=None,
+    )
+    assert [(c.chunk_id, c.score) for c in explicit.chunks] == [
+        (c.chunk_id, c.score) for c in default.chunks
+    ]
+    assert explicit.cutoff_K == default.cutoff_K == 3
+    assert lex.calls[0][2] == 3 and vec.calls[0].top_k == 3
+
+
+def test_query_depth_widens_the_window_but_cutoff_k_stays_the_cutoff() -> None:
+    """Глубина ``2K`` отдаёт до ``2K`` чанков до слияния; ``cutoff_K`` не меняется (I20)."""
+    hits = [_chunk(f"c{i}") for i in range(1, 7)]
+    lex = _FakeLexical(hits)
+    result = retrieve(
+        query_text="q",
+        query_vector=None,
+        product_ids=["p1"],
+        profile="R0",
+        cutoff_k=2,
+        lexical_index=lex,
+        query_depth=4,
+    )
+    assert lex.calls[0][2] == 4  # окно запроса — объявленная глубина
+    assert [c.chunk_id for c in result.chunks] == ["c1", "c2", "c3", "c4"]
+    assert result.cutoff_K == 2  # объявленный cut-off не поехал
+
+
+def test_query_depth_below_cutoff_k_does_not_shrink_the_window() -> None:
+    """Глубина ниже K выдачу не укорачивает: иначе cut-off стал бы недостижим молча."""
+    hits = [_chunk(f"c{i}") for i in range(1, 6)]
+    lex = _FakeLexical(hits)
+    result = retrieve(
+        query_text="q",
+        query_vector=None,
+        product_ids=["p1"],
+        profile="R0",
+        cutoff_k=4,
+        lexical_index=lex,
+        query_depth=2,
+    )
+    assert lex.calls[0][2] == 4
+    assert len(result.chunks) == 4
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_query_depth_must_be_positive(bad: int) -> None:
+    """``query_depth <= 0`` — отказ с числом, а не тихий возврат к K (A3)."""
+    with pytest.raises(ValueError, match="query_depth") as excinfo:
+        retrieve(
+            query_text="q",
+            query_vector=None,
+            product_ids=["p1"],
+            profile="R0",
+            cutoff_k=5,
+            lexical_index=_FakeLexical([]),
+            query_depth=bad,
+        )
+    assert str(bad) in str(excinfo.value)
+
+
+def test_query_depth_widens_r2_pool_and_result() -> None:
+    """У R2 окно — максимум из пула и глубины: иначе глубина не дошла бы до слияния."""
+    hits = [_chunk(f"c{i}") for i in range(1, 9)]
+    lex = _FakeLexical(list(hits), build_id=_BOTH_ARMS_BUILD)
+    vec = _FakeVector(list(hits), build_id=_BOTH_ARMS_BUILD)
+    result = _r2_call(lex, vec, cutoff_k=2, pool_multiplier=2)
+    assert lex.calls[0][2] == 4  # пул = 2 * 2
+    assert vec.calls[0].top_k == 4
+    assert len(result.chunks) == 2  # срез K
+
+    lex = _FakeLexical(list(hits), build_id=_BOTH_ARMS_BUILD)
+    vec = _FakeVector(list(hits), build_id=_BOTH_ARMS_BUILD)
+    deep = retrieve(
+        query_text="q",
+        query_vector=[1.0, 0.0, 0.0],
+        product_ids=["p1"],
+        profile="R2",
+        cutoff_k=2,
+        lexical_index=lex,
+        vector_index=vec,
+        pool_multiplier=2,
+        query_depth=6,
+    )
+    assert lex.calls[0][2] == 6  # max(2*2, 6)
+    assert vec.calls[0].top_k == 6
+    assert len(deep.chunks) == 6
+    assert deep.cutoff_K == 2

@@ -297,7 +297,11 @@ def test_grid_expands_lists_into_combinations() -> None:
 
 
 def test_scalar_arguments_keep_previous_behaviour() -> None:
-    """Скаляры (дефолты) дают ту же сетку, что до появления списков."""
+    """Скаляры (дефолты) дают ту же сетку, что до появления списков.
+
+    Четвёртый элемент кортежа — глубина запроса: ``None`` — не объявлена (равна
+    ``cutoff_k``), поэтому метки и исполнение прежние.
+    """
     assert HARNESS._resolve_pool_multipliers(1, None) == (1,)
     assert HARNESS._resolve_cross_query_fusions("max", None) == ("max",)
     grid = HARNESS._measurement_grid(
@@ -305,7 +309,11 @@ def test_scalar_arguments_keep_previous_behaviour() -> None:
         HARNESS._resolve_cross_query_fusions("max", None),
         HARNESS._resolve_pool_multipliers(1, None),
     )
-    assert grid == [("R0", 1, "max"), ("R1", 1, "max"), ("R2", 1, "max")]
+    assert grid == [
+        ("R0", 1, "max", None),
+        ("R1", 1, "max", None),
+        ("R2", 1, "max", None),
+    ]
     assert [HARNESS._combination_label(*item) for item in grid] == [
         "R0/fusion=max",
         "R1/fusion=max",
@@ -901,3 +909,162 @@ def test_chunks_without_doc_is_counted(tmp_path: Path, monkeypatch: pytest.Monke
     )
     assert retrieved[f"{PRODUCT}/a"] == ("p1:d1", "p1:d2")
     assert chunks_without_doc == 1
+
+
+# ---------------------------------------------------------------------------
+# Глубина запроса (``--query-depths``): третье измерение сетки
+# ---------------------------------------------------------------------------
+
+
+def test_query_depths_default_is_undeclared() -> None:
+    """Без флага — одна комбинация с необъявленной глубиной (прежнее поведение)."""
+    assert HARNESS._resolve_query_depths(None, 10) == (None,)
+
+
+def test_query_depths_parse_in_order_and_drop_duplicates() -> None:
+    assert HARNESS._resolve_query_depths("10,20,40", 10) == (10, 20, 40)
+    assert HARNESS._resolve_query_depths("40,20,40", 10) == (40, 20)
+
+
+def test_query_depths_reject_non_positive_and_garbage() -> None:
+    """Опечатка в глубине — отказ с числом: иначе замер описал бы не объявленную сетку."""
+    with pytest.raises(SystemExit) as excinfo:
+        HARNESS._resolve_query_depths("0", 10)
+    assert "0" in str(excinfo.value)
+    with pytest.raises(SystemExit):
+        HARNESS._resolve_query_depths("-5", 10)
+    with pytest.raises(SystemExit):
+        HARNESS._resolve_query_depths("10,x", 10)
+    with pytest.raises(SystemExit):
+        HARNESS._resolve_query_depths(" ", 10)
+
+
+def test_grid_adds_depth_dimension() -> None:
+    """Глубина размножает сетку для всех профилей: её исполняет ``retrieve``."""
+    grid = HARNESS._measurement_grid(["R0", "R2"], ["max"], [1, 2], [None, 20])
+    assert len(grid) == 2 + 2 * 2
+    assert {item[3] for item in grid} == {None, 20}
+    labels = [HARNESS._combination_label(*item, cutoff_k=10) for item in grid]
+    assert labels == [
+        "R0/fusion=max",
+        "R0/depth=20/fusion=max",
+        "R2/pool=1/fusion=max",
+        "R2/pool=2/fusion=max",
+        "R2/pool=1/depth=20/fusion=max",
+        "R2/pool=2/depth=20/fusion=max",
+    ]
+
+
+def test_label_keeps_the_previous_form_when_depth_equals_cutoff() -> None:
+    """Глубина, равная срезу K, метку не меняет: опубликованные числа O14/O15 не поехали."""
+    assert HARNESS._combination_label("R0", 1, "max", 10, cutoff_k=10) == "R0/fusion=max"
+    assert HARNESS._combination_label("R2", 2, "rrf", 10, cutoff_k=10) == (
+        "R2/pool=2/fusion=rrf"
+    )
+    # Объявленная глубина, отличная от K, называется в метке.
+    assert HARNESS._combination_label("R0", 1, "per_query", 40, cutoff_k=10) == (
+        "R0/depth=40/fusion=per_query"
+    )
+
+
+def test_report_payload_without_query_depth_is_byte_identical() -> None:
+    """Полный JSON отчёта без объявленной глубины — прежний до байта.
+
+    Замороженная строка, а не «сравнение с собой»: на этом отчёте стоят числа O14/O15, и
+    любое новое поле в этом режиме сделало бы два отчёта несравнимыми без ручной сверки.
+    Тот же приём, что у ``--answer-sets``.
+    """
+    from core.pipeline.retrieval_docs import DocQueryResult, evaluate_documents
+
+    results = [
+        DocQueryResult(
+            cell=f"{PRODUCT}/a",
+            product_id=PRODUCT,
+            param_id="a",
+            expected_doc_ids=("d1",),
+            retrieved_doc_ids=("d9", "d1"),
+            rank=2,
+            unresolved=False,
+        )
+    ]
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    payload = HARNESS._report_payload(
+        report,
+        label="R0/fusion=max",
+        pool_multiplier=1,
+        cross_query_fusion="max",
+    )
+    assert json.dumps(payload, ensure_ascii=False, sort_keys=True) == (
+        '{"cells": 1, "cross_query_fusion": "max", "hit_at_k": 1.0, "hit_ci": [1.0, 1.0],'
+        ' "k": 5, "label": "R0/fusion=max", "mrr": 0.5,'
+        ' "ndcg_at_k": 0.6309297535714575, "per_cell": [{"cell": "p1/a",'
+        ' "expected_doc_ids": ["d1"], "ndcg_at_k": 0.6309297535714575, "param_id": "a",'
+        ' "product_id": "p1", "rank": 2, "retrieved_doc_ids": ["d9", "d1"],'
+        ' "unresolved": false}], "pool_multiplier": 1, "profile": "R0",'
+        ' "recall_at_k": 1.0, "recall_ci": [1.0, 1.0], "scored": 1,'
+        ' "unresolved_cells": 0}'
+    )
+
+
+def test_report_payload_names_the_declared_depth() -> None:
+    """Объявленная глубина — в строке отчёта: иначе число невоспроизводимо."""
+    from core.pipeline.retrieval_docs import DocQueryResult, evaluate_documents
+
+    results = [
+        DocQueryResult(
+            cell=f"{PRODUCT}/a",
+            product_id=PRODUCT,
+            param_id="a",
+            expected_doc_ids=("d1",),
+            retrieved_doc_ids=("d1",),
+            rank=1,
+            unresolved=False,
+        )
+    ]
+    report = evaluate_documents(results, profile="R0", k=5, bootstrap=1, seed=0)
+    payload = HARNESS._report_payload(
+        report,
+        label="R0/depth=20/fusion=per_query",
+        pool_multiplier=1,
+        cross_query_fusion="per_query",
+        query_depth=20,
+    )
+    assert payload["query_depth"] == 20
+    assert payload["label"] == "R0/depth=20/fusion=per_query"
+
+
+def test_dense_hits_cache_is_keyed_by_query_depth() -> None:
+    """Окно батча = ``max(cutoff_k * pool, depth)``; кеш одной глубины не отдаётся другой."""
+    from types import SimpleNamespace
+
+    from core.domain.models import CatalogRow
+    from core.pipeline.evaluate import unique_queries
+
+    param = CatalogRow.model_validate(PARAM)
+    params = {"param_one": param}
+    by_product = {PRODUCT: [SimpleNamespace(product_id=PRODUCT, param_id="param_one")]}
+    texts = unique_queries([param])
+    query_vectors = {text: [0.0, 0.0] for text in texts}
+    index = _SpyVectorIndex()
+    cache: dict[tuple[str, int, int | None], object] = {}
+
+    def dense(query_depth: int | None) -> object:
+        return HARNESS._dense_by_product(
+            by_product=by_product,
+            params=params,
+            profile="R2",
+            cutoff_k=10,
+            pool_multiplier=1,
+            vector_index=index,
+            query_vectors=query_vectors,
+            cache=cache,
+            query_depth=query_depth,
+        )
+
+    dense(None)
+    assert index.windows == [10] * len(texts)
+    dense(40)
+    # Глубина 40 спросила порт заново и с окном 40: кеш необъявленной глубины не отдан.
+    assert index.windows == [10] * len(texts) + [40] * len(texts)
+    dense(40)
+    assert index.windows == [10] * len(texts) + [40] * len(texts)

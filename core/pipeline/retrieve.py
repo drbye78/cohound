@@ -153,6 +153,13 @@ DEFAULT_POOL_MULTIPLIER = 1
 #: - ``per_query`` — union по ``max`` без кросс-запросной обрезки до ``cutoff_k``
 #:   (срез делает вызывающий): «сколько бы нашли, если бы не резали».
 #:
+#: **``per_query`` отличается от ``max`` только хвостом за K.** Первые ``cutoff_k``
+#: элементов у них тождественны: обе политики сортируют один и тот же union по
+#: ``(-score, chunk_id)``, и разница лишь в том, применён ли срез до K. Замер 16.11.2026
+#: (R0, 132 ячейки эталона O14, глубины 10/20/40): 0 из 132 ячеек различимы на срезе
+#: по чанкам — то есть как политика по метрике ``hit@K`` ``per_query`` не измеряется,
+#: а «сколько бы нашли» меряется только при срезе по документам (и это другой вопрос).
+#:
 #: Дефолт — прежнее поведение; смена — ``execution_change`` после замера (O13).
 DEFAULT_CROSS_QUERY_FUSION = "max"
 
@@ -347,6 +354,7 @@ def retrieve(
     rrf_k: int = DEFAULT_RRF_K,
     pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
     lang: str | None = None,
+    query_depth: int | None = None,
 ) -> RetrievalResult:
     """Единая точка гибридного ретривала по зафиксированному профилю (I16/I17/I20).
 
@@ -370,12 +378,22 @@ def retrieve(
         dense-плечо (``dense_hits``) не перезапрашивается и не обрезается здесь — его
         окно задаёт вызывающий (``precompute_dense_hits`` с тем же множителем).
     :param lang: язык запроса (плечо BM25).
+    :param query_depth: глубина поиска **одного** запроса: сколько кандидатов спрашивать
+        у плеч до кросс-запросного слияния. ``None`` — равна ``cutoff_k`` (прежнее
+        поведение байт-в-байт). Зачем это нужно: при глубине, равной ``cutoff_k``,
+        каждый запрос возвращает не больше K чанков, поэтому политики кросс-запросного
+        слияния (``max``/``per_query``) видят один и тот же материал, и ``per_query``
+        не может отличаться от ``max`` ни на каком корпусе — сравнивались бы две записи
+        одного. Глубина ниже ``cutoff_k`` выдачу не укорачивает: окно запроса не бывает
+        меньше среза K, иначе объявленный cut-off (I20) стал бы недостижим молча.
+        Глубина — knob замера, а не объявленная ось: в ``retrieval_params_json``
+        (``run_id``) она не входит, пока её не объявят (D4).
 
     :raises RetrievalBuildMismatch: плечи R2 привязаны к разным **известным** сборкам
         индекса, либо один ``chunk_id`` пришёл из двух источников с разными
         ``content_hash``/``product_id``. Наследник ``ValueError``.
     :raises ValueError: неизвестный профиль; отсутствует нужный порт; для R1/R2 нет ни
-        вектора, ни готового dense-плеча; ``pool_multiplier <= 0``.
+        вектора, ни готового dense-плеча; ``pool_multiplier <= 0``; ``query_depth <= 0``.
 
     Пустая сборка (``build_id == ""``) у любого плеча отказом не является: неизвестная
     сборка не удостоверяется, сравнивать нечего (A3 — отсутствие факта не факт отсутствия).
@@ -389,6 +407,17 @@ def retrieve(
             f"pool_multiplier обязан быть ≥ 1, получено {pool_multiplier!r} "
             "(пул плеч R2 = cutoff_k * pool_multiplier)"
         )
+    if query_depth is not None and query_depth <= 0:
+        # Глубина запроса — исполняемое условие замера: ``0``/``-1`` дали бы пустое плечо
+        # или отрицательный ``top_k``. Отказ с числом, а не тихий возврат к K (A3).
+        raise ValueError(
+            f"query_depth обязан быть ≥ 1, получено {query_depth!r} "
+            "(глубина поиска одного запроса; None — равна cutoff_k)"
+        )
+    # Окно одного запроса. ``None`` — прежнее поведение (окно = срез K). Глубина ниже
+    # среза не укорачивает выдачу: окно не бывает меньше K, иначе объявленный cut-off
+    # (I20) стал бы недостижим молча — то есть число описывало бы не тот cut-off.
+    window = cutoff_k if query_depth is None else max(cutoff_k, query_depth)
 
     if resolved in (RetrievalProfile.R0, RetrievalProfile.R2) and lexical_index is None:
         raise ValueError(f"профиль {resolved.value} требует lexical_index")
@@ -400,7 +429,7 @@ def retrieve(
 
     if resolved is RetrievalProfile.R0:
         lexical = _required_index(lexical_index, "lexical_index", resolved)
-        chunks = list(lexical.search(query_text, products, top_k=cutoff_k, lang=lang))
+        chunks = list(lexical.search(query_text, products, top_k=window, lang=lang))
         # Провенанс R0 — сборка (composition_id), а не ``engine_version``: движок
         # описывает реализацию BM25, а не данные. Источник тот же, что у dense-плеча:
         # атрибут ``build_id`` порта (``TantivyLexicalIndex`` заполняет его при засеве).
@@ -411,7 +440,7 @@ def retrieve(
             dense_hits
             if dense_hits is not None
             else vectors.search(
-                VectorQuery(product_ids=products, top_k=cutoff_k, vector=list(query_vector or []))
+                VectorQuery(product_ids=products, top_k=window, vector=list(query_vector or []))
             )
         )
         build_id = vectors.build_id
@@ -430,8 +459,10 @@ def retrieve(
             )
         # Пул плеч: RRF видит ``cutoff_k * pool_multiplier`` кандидатов с каждого плеча,
         # а срез остаётся ``cutoff_k`` (I20 — cut-off тот же). При множителе 1 поведение
-        # прежнее байт-в-байт.
-        pool = cutoff_k * pool_multiplier
+        # прежнее байт-в-байт. Глубина запроса расширяет пул, но не сужает его: окно —
+        # максимум из двух объявленных величин (пул задаёт RRF, глубина — кросс-запросное
+        # слияние, и второе без первого не видно).
+        pool = max(cutoff_k * pool_multiplier, window)
         lexical_hits = lexical.search(query_text, products, top_k=pool, lang=lang)
         # Готовое dense-плечо (батч) не перезапрашивается и не обрезается: его окно
         # задаёт вызывающий, иначе «батч = поштучно» перестало бы быть проверяемым.
@@ -442,12 +473,16 @@ def retrieve(
                 VectorQuery(product_ids=products, top_k=pool, vector=list(query_vector or []))
             )
         )
-        chunks = rrf_fuse_chunks(lexical_hits, dense_leg, rrf_k=rrf_k, top_k=cutoff_k)
+        chunks = rrf_fuse_chunks(lexical_hits, dense_leg, rrf_k=rrf_k, top_k=window)
         build_id = vectors.build_id
 
-    # Детерминированный порядок + обрезка до K (I20). tie-break по chunk_id (R7).
+    # Детерминированный порядок + обрезка до окна запроса (при ``query_depth=None`` —
+    # это ``cutoff_k``, прежнее поведение). ``cutoff_K`` результата остаётся объявленным
+    # срезом (I20): глубже K список бывает только тогда, когда глубину запроса объявили
+    # явно, и это же записано в докстринге ``per_query`` у
+    # :func:`core.pipeline.evaluate._fuse_query_results`. tie-break по chunk_id (R7).
     chunks.sort(key=lambda c: (-c.score, c.chunk_id))
-    chunks = chunks[:cutoff_k]
+    chunks = chunks[:window]
 
     return RetrievalResult(
         chunks=chunks,
