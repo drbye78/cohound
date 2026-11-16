@@ -204,6 +204,16 @@ def _subset(order: Sequence[str], limit: int) -> list[str]:
     return [order[int(index * step)] for index in range(limit)]
 
 
+def _is_smoke_only(order: Sequence[str], full_order: Sequence[str]) -> bool:
+    """Прогон дымовой: измерено меньше чанков, чем в корпусе.
+
+    Отдельной функцией, а не строкой в :func:`main`, — чтобы свойство отчёта
+    проверялось без БД, эмбеддера и GPU. Потерянный флаг публикует число среза как
+    число оси: в матрице меньше документов, и место в top-K делят другие соседи.
+    """
+    return len(order) < len(full_order)
+
+
 class _MatrixIndex:
     """``VectorIndexPort`` поверх матрицы в памяти: тот же контракт, что у партиции.
 
@@ -535,7 +545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     rows = [rows_by_id[chunk_id] for chunk_id in order]
     chunk_doc = {row.chunk_id: row.doc_id for row in rows}
     doc_ids = {row.doc_id for row in rows}
-    smoke_only = len(order) < len(full_order)
+    smoke_only = _is_smoke_only(order, full_order)
 
     from core.cli.wiring import _resolve_embedder
     from core.config.deploy import load_deploy_config
