@@ -45,7 +45,7 @@ class DocumentExtractorPort(Protocol):
     Аннотация была ложью об интерфейсе, а не «шумом типов».
 
     ``version`` — read-only: реализации выводят штамп из уровня/устройства/сборки
-    движка (``docling-doc-4:<level>/<device>/…``, ``pdfium-text-4:<версия>``), записывать его
+    движка (``docling-doc-4:<level>/<device>/…``, ``pdfium-text-5:<версия>``), записывать его
     потребителю нечего.
 
     ``version_for(filename)`` намеренно **не** входит в порт: офисный и PDF-пути

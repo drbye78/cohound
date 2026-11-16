@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from core.domain.doc_blocks import BlockList, check_blocks
 from core.domain.doc_tables import TableList
 from core.domain.enums import (
     ABSENT_DENIAL_STRENGTHS,
@@ -1901,6 +1902,14 @@ class RunManifest(BaseModel):
     #: Наблюдение (как ``partial_docs``/``ocr_probe``): в ``run_id`` и
     #: ``EXECUTION_CONTRACT_FIELDS`` не входит. ``None`` — документов корпуса нет вовсе.
     tables: dict[str, Any] | None = None
+    #: Структурные блоки документа — **числом** (O36 фаза 2 плана ``26``):
+    #: ``{"documents_with_blocks": n, "blocks": m, "documents_unmeasured": k,
+    #: "by_kind": {вид: блоков}, "by_text_source": {"read": x, "reconstructed": y},
+    #: "by_product": {id: {...}}}``, где ``documents_unmeasured`` — документы, у которых
+    #: читатель блоков **не даёт** (``blocks is None``: HTML, текст, EPUB, Office, docling,
+    #: шов ``split``). Наблюдение, а не условие измерения: в ``run_id`` и
+    #: ``EXECUTION_CONTRACT_FIELDS`` не входит. ``None`` — документов корпуса нет вовсе.
+    blocks: dict[str, Any] | None = None
     #: §13 (Backlog B): ось стратегии краула (``run.yaml:crawl.strategy``) и каноническая
     #: форма диапазона задержек (``run.yaml:crawl.rate_limit``, :func:`canonical_rate_limit`).
     #: Это **операционные** дефолты commodity-слоя (A2): их смена — граница класса
@@ -2138,6 +2147,16 @@ class CorpusDoc(BaseModel):
     #: условие измерения (как ``page_map``/``ocr_probe``), и нарезка чанков от них не
     #: зависит. Форма JSON-колонки — :func:`core.domain.doc_tables.tables_to_json`.
     tables: TableList | None = None
+    #: Структурные блоки документа (O36 фаза 2 плана ``26``) — те же, что дал читатель.
+    #: Контракт различия ``None``/``()`` и координат — в
+    #: :attr:`core.ports.types.ExtractedDoc.blocks` (``None`` — читатель блоков не даёт,
+    #: ``()`` — смотрел и не дал); здесь он **не** повторяется. Адрес блока у чанка
+    #: выводит :func:`core.domain.doc_blocks.block_id_for`; отдельной колонки у чанка нет
+    #: намеренно (см. :mod:`core.domain.page_map`). Верхняя граница отрезков проверяется
+    #: по ``extracted_chars`` — текста в строке корпуса нет. В ``content_hash``/``run_id``
+    #: блоки не входят: наблюдение о прочитанном, а не условие измерения. Форма
+    #: JSON-колонки — :func:`core.domain.doc_blocks.blocks_to_json`.
+    blocks: BlockList | None = None
 
     @model_validator(mode="after")
     def _check_partial(self) -> CorpusDoc:
@@ -2192,17 +2211,22 @@ class CorpusDoc(BaseModel):
 
     @model_validator(mode="after")
     def _check_page_map_bounds(self) -> CorpusDoc:
-        """Держит инвариант карты страниц на границе корпуса (O36, план 26).
+        """Держит инварианты карты страниц и блоков на границе корпуса (O36, план 26).
 
-        Один валидатор на два носителя (:func:`core.domain.page_map.check_page_map`):
-        ``ExtractedDoc`` проверяет карту против ``len(text)``, строка ``corpus_docs`` —
-        против ``extracted_chars``, потому что текста в ней нет. Правило то же: либо карта
-        точна (отсортирована, не пересекается, ``page_no >= 1``, ``0 <= start <= end`` и
-        не выходит за текст), либо ``None`` — «читатель её не дал». Ложная карта хуже
-        отсутствующей: по ней чанк получил бы номер страницы, которого не было.
+        Один валидатор на два носителя (:func:`core.domain.page_map.check_page_map`,
+        :func:`core.domain.doc_blocks.check_blocks`): ``ExtractedDoc`` проверяет карту и
+        блоки против ``len(text)``, строка ``corpus_docs`` — против ``extracted_chars``,
+        потому что текста в ней нет. Правило то же: либо карта точна (отсортирована, не
+        пересекается, ``page_no >= 1``, ``0 <= start <= end``, не выходит за текст), либо
+        ``None`` — «читатель её не дал». Ложная карта хуже отсутствующей: по ней чанк
+        получил бы номер страницы, которого не было (у блока — адрес фрагмента).
         """
         if self.page_map is not None:
             check_page_map(self.page_map, self.extracted_chars, label="corpus_docs")
+        if self.blocks is not None:
+            # Блоки — тот же принцип и тот же один валидатор на два носителя: строка
+            # корпуса проверяет отрезки против ``extracted_chars`` (текста в ней нет).
+            check_blocks(self.blocks, self.extracted_chars, label="corpus_docs")
         return self
 
 

@@ -24,6 +24,7 @@ from core.cli.context import (
 )
 from core.cli.errors import EXIT_OK
 from core.cli.wiring import build_store
+from core.pipeline.block_provenance import human_line as blocks_human_line
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.gates import gate_trail
 from core.pipeline.heading_anomalies import human_line as heading_anomalies_human_line
@@ -144,6 +145,14 @@ def run(args: argparse.Namespace) -> int:
     tables_line = tables_human_line(getattr(artifacts, "tables_summary", None))
     if tables_line:
         notes.append(tables_line)
+    # O36 фаза 2: структурные блоки — строкой, как таблицы. Отдельного файла нет: сами
+    # блоки живут у документа, а адрес блока у **цитаты** — в ``outputs/evidence_pages.csv``.
+    # Строка называет оба факта: сколько структуры прочитано и на скольких документах
+    # вопрос «есть ли блоки» не задавался вовсе (HTML, текст, EPUB, офисный путь,
+    # docling, ``split``).
+    blocks_line = blocks_human_line(getattr(artifacts, "blocks_summary", None))
+    if blocks_line:
+        notes.append(blocks_line)
     # A3: качество поддержки карты — строкой, как и частичность. Три замера
     # (поддержка не о предмете, концентрация) не меняют вердиктов, но именно они
     # объясняют, почему карта «зелёная» при почти пустом доказательстве.

@@ -889,3 +889,141 @@ def test_page_map_does_not_change_text_or_hash(tmp_path: Path) -> None:
     assert doc.content_hash == hashlib.sha256(expected.encode("utf-8")).hexdigest()
     # Карта в хеш не входит: у документа без карты хеш того же текста совпадает.
     assert doc.page_map is not None
+
+
+# ---------------------------------------------------------------------------
+# Блоки (O36 фаза 2): по блоку на страницу, текст прочитан, границы из карты
+# ---------------------------------------------------------------------------
+
+
+def test_blocks_are_one_page_each(tmp_path: Path) -> None:
+    """PDF на 3 страницы ⇒ 3 блока ``kind="page"``, ``text_source="read"``.
+
+    Механизм ``text_layer`` знает границы страниц и не знает абзацев: объявлять здесь
+    ``paragraph`` значило бы выдать эвристику чанкера за структуру файла. Текст прочитан
+    текстовым слоем как есть — ``reconstructed`` (собрано моделью) было бы ложью о
+    происхождении.
+    """
+    path = _write(tmp_path, "three.pdf", ["alpha one", "beta two", "gamma three"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="three.pdf")
+
+    assert doc.blocks is not None
+    assert [block.kind for block in doc.blocks] == ["page", "page", "page"]
+    assert [block.text_source for block in doc.blocks] == ["read", "read", "read"]
+    assert [block.block_id for block in doc.blocks] == ["b0", "b1", "b2"]
+    assert [block.order for block in doc.blocks] == [0, 1, 2]
+    assert [block.page_no for block in doc.blocks] == [1, 2, 3]
+    # Рамку pdfium для страницы не даёт: выдуманные координаты выглядели бы проверяемыми.
+    assert [block.bbox for block in doc.blocks] == [None, None, None]
+    assert [block.parent_id for block in doc.blocks] == [None, None, None]
+
+
+def test_block_spans_match_the_page_map(tmp_path: Path) -> None:
+    """Отрезки блоков — те же, что у карты страниц: срезы дают текст своих страниц.
+
+    Один провенанс, два носителя: блок и страница считаются из одного постраничного
+    разбиения, поэтому разойтись не могут.
+    """
+    path = _write(tmp_path, "three.pdf", ["alpha one", "beta two", "gamma three"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="three.pdf")
+
+    assert doc.page_map is not None and doc.blocks is not None
+    assert [(block.page_no, block.char_start, block.char_end) for block in doc.blocks] == [
+        tuple(entry) for entry in doc.page_map
+    ]
+    assert [doc.text[block.char_start : block.char_end] for block in doc.blocks] == [
+        "alpha one",
+        "beta two",
+        "gamma three",
+    ]
+
+
+def test_blocks_are_none_when_the_page_map_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Нет точной карты — нет и блоков: границы, которых читатель не знает, не выдумываются.
+
+    Шаблон инъекции перешагнул границу страницы: постраничные смещения перестают
+    относиться к опубликованному тексту, поэтому и карта, и блоки — ``None``.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "pypdfium2",
+        _FakePdfium(["до <tool_call>", "после</tool_call> хвост"]),
+    )
+    path = _write(tmp_path, "inject.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="inject.pdf")
+
+    assert doc.page_map is None
+    assert doc.blocks is None
+
+
+def test_blocks_keep_real_page_numbers_when_a_page_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """После отказа pdfium ``order`` и ``page_no`` расходятся — и это видно.
+
+    Порядок чтения — позиция блока (0, 1), номер страницы — настоящий (1, 3): сводить их в
+    одно поле значило бы объявить третью страницу второй.
+    """
+    monkeypatch.setitem(
+        sys.modules, "pypdfium2", _FailingPdfium(["первая", None, "третья"])
+    )
+    path = _write(tmp_path, "vendor.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="vendor.pdf")
+
+    assert doc.blocks is not None
+    assert [(block.order, block.page_no) for block in doc.blocks] == [(0, 1), (1, 3)]
+
+
+def test_blocks_are_clipped_by_the_char_limit(tmp_path: Path) -> None:
+    """D9: обрез по символам обрезает и блоки — адрес не вправе выйти за текст."""
+    from core.util.pdf_limits import pdf_limits, use_pdf_limits
+
+    path = _write(tmp_path, "long.pdf", ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"])
+    adapter = PdfiumDocumentExtractor()
+
+    with use_pdf_limits(pdf_limits(max_extracted_chars=15)):
+        doc = adapter.extract_path(path, filename_hint="long.pdf")
+
+    assert doc.blocks is not None
+    assert [(block.char_start, block.char_end) for block in doc.blocks] == [
+        (0, 10),
+        (12, 15),
+    ]
+    for block in doc.blocks:
+        assert block.char_end <= len(doc.text)
+
+
+def test_blocks_do_not_change_text_or_hash(tmp_path: Path) -> None:
+    """Блоки — провенанс: текст и ``content_hash`` байт-в-байт прежние (приёмка фазы 1).
+
+    Значения те же, что до появления карты и блоков (``pdfium-text-3``): правка не имеет
+    права тронуть склейку, иначе изменился бы ``content_hash``, ключ ``extract_cache`` и
+    ``run_id`` — на ровном месте.
+    """
+    path = _write(tmp_path, "three.pdf", ["alpha one", "beta two", "gamma three"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="three.pdf")
+
+    expected = "alpha one\n\nbeta two\n\ngamma three"
+    assert doc.text == expected
+    assert doc.content_hash == (
+        "f0f089ac07dcd08cc483b5246dee0fd004dbce7c00146c8d9c77569b4857aaf9"
+    )
+    assert doc.blocks is not None
+
+
+def test_stamp_is_the_blocks_step() -> None:
+    """Штамп читателя — ``pdfium-text-5``: прогретая запись прежнего шага блоков не несёт.
+
+    Основание то же, что у ``-4``: текст не меняется, но запись кэша обязана нести новый
+    провенанс. Без смены штампа хит молча отдавал бы документ без блоков — и именно тем
+    документам, которые извлекались чаще всех.
+    """
+    assert PDFIUM_ADAPTER_FAMILY == "pdfium-text-5"
+    assert PdfiumDocumentExtractor().version.startswith("pdfium-text-5:")

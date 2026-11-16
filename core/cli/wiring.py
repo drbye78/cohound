@@ -2221,7 +2221,7 @@ class _LocalExtractor:
         **P7: PDF — отдельный механизм.** Внутри документной ветви PDF-суффикс уходит в
         выбранный ``pdf_pipeline`` (:meth:`_document_backend`), остальное — в docling.
         Поэтому версия для ключа ``extract_cache`` — версия реально работающего
-        адаптера (``pdfium-text-4:<версия дистрибутива>``, ``docling-doc-4:<level>/…`` для PDF либо
+        адаптера (``pdfium-text-5:<версия дистрибутива>``, ``docling-doc-4:<level>/…`` для PDF либо
         ``docling-office-1:…`` для DOCX/PPTX/XLSX), а не композита.
 
         Порядок ветвей — контракт поведения (``.txt``/``.epub`` проверяются до фолбэка в

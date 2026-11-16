@@ -81,8 +81,12 @@ def test_schema_pins_the_table_shape() -> None:
     ``corpus_docs.tables`` (таблица как объект: ``table_id``/``page_no``/``caption``/
     ``header``/``rows``) и ``runs.tables_json`` (сводка: таблицы, документы с таблицами и
     документы без распознавания таблиц); файлы ≤ 3.23.0 отвергаются гейтом версии.
+
+    3.25.0 — O36 фаза 2 плана ``26``: таблица не менялась, версия сдвинута вместе со
+    структурными блоками документа (``corpus_docs.blocks``, ``runs.blocks_json``); файлы
+    ≤ 3.24.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.24.0"
+    assert SCHEMA_VERSION == "3.25.0"
 
     conn = connect(":memory:")
     try:

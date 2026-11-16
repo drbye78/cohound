@@ -51,6 +51,7 @@ from core.config.domain_profiles import DomainProfile
 from core.config.seeds import normalize_seed_url
 from core.domain import (
     ArchiveDescentStatus,
+    BlockList,
     CorpusChunk,
     CorpusDoc,
     CrawlItemStatus,
@@ -1902,6 +1903,11 @@ def finish_one(
         # ``None`` («читатель не даёт») не стирает уже прочитанные таблицы — upsert пишет
         # ``COALESCE``.
         tables=getattr(extracted, "tables", None),
+        # O36 фаза 2 (план 26): структурные блоки — из того же ``ExtractedDoc``, что дал
+        # текст. ``getattr`` по той же причине: при переиспользовании экстракции не было, и
+        # ``None`` («читатель блоков не даёт») не стирает уже прочитанные блоки — upsert
+        # пишет ``COALESCE``.
+        blocks=getattr(extracted, "blocks", None),
         **partial_fields,
     )
     ingest.docs.append(doc)
@@ -3667,6 +3673,11 @@ class RebuiltDoc:
     #: Таблицы **текущей** экстракции (O39 фаза 1, план 26); ``None`` — читатель таблиц не
     #: даёт, ``()`` — искал и не нашёл (различие — контракт ``ExtractedDoc.tables``).
     tables: TableList | None = None
+    #: Структурные блоки **текущей** экстракции (O36 фаза 2, план 26); ``None`` — читатель
+    #: блоков не даёт, ``()`` — смотрел и не дал (различие — контракт
+    #: ``ExtractedDoc.blocks``). Адрес блока у чанка по ним выводит
+    #: ``core.domain.doc_blocks.block_id_for``.
+    blocks: BlockList | None = None
 
 
 @dataclass(frozen=True)
@@ -3977,6 +3988,10 @@ def rebuild_from_stored_bytes(
             # O39 фаза 1: таблицы — из той же экстракции, что дала текст. ``getattr`` — на
             # случай заглушки без поля: «таблиц не даёт» не должно ломать пересборку.
             tables=getattr(extracted, "tables", None),
+            # O36 фаза 2: блоки — из той же экстракции, что дала текст (пересборка из
+            # retained-байтов действительно прогоняет экстрактор). ``getattr`` — по той же
+            # причине, что у таблиц.
+            blocks=getattr(extracted, "blocks", None),
         ),
         cache_hit=cache_hit,
         extracted=extracted_now,
@@ -4039,6 +4054,9 @@ def _persist_rebuilt_doc(
         # O39 фаза 1: таблицы пересборки — экстрактор в этом проходе работал, значит
         # таблицы принадлежат тому же тексту, что и ``doc_hash``.
         tables=rebuilt.tables,
+        # O36 фаза 2: блоки пересборки — тот же довод: экстрактор работал в этом проходе,
+        # значит отрезки блоков относятся к тому же тексту, что и ``doc_hash``.
+        blocks=rebuilt.blocks,
         **rebuilt.partial_fields,
     )
     ingest.docs.append(doc)
@@ -4390,6 +4408,10 @@ def offline_reuse_product(
             # значит и карты страниц нет. ``None`` не стирает уже записанную карту того же
             # текста: upsert пишет ``COALESCE`` (``SqliteStore.upsert_corpus_doc``).
             page_map=None,
+            # O36 фаза 2: переиспользование из набора чанков — ``ExtractedDoc`` в этом цикле
+            # нет, значит и блоков нет. ``None`` не стирает уже записанные блоки того же
+            # текста: upsert пишет ``COALESCE``.
+            blocks=None,
             **partial_fields,
         )
         ingest.docs.append(doc)

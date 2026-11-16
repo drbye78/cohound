@@ -881,6 +881,14 @@ def _db_smoke() -> None:
     # «в корпусе есть таблицы» и «таблиц никто не искал» неотличимы в артефакте прогона.
     _assert("tables" in docs_cols)
     _assert("tables_json" in runs_cols)
+    # O36 фаза 2 (schema 3.25.0): структурные блоки документа — наблюдение, не потолок.
+    # ``corpus_docs.blocks`` несёт сами блоки (``NULL`` — читатель их не даёт, ``[]`` —
+    # смотрел и не дал), ``runs.blocks_json`` — сводку (документы с блоками, распределение
+    # по виду и по происхождению текста ``read|reconstructed``, документы без разметки).
+    # Адрес блока у чанка колонкой НЕ становится: это функция от списка блоков и
+    # ``char_start`` (``core.domain.doc_blocks.block_id_for``), как номер страницы от карты.
+    _assert("blocks" in docs_cols)
+    _assert("blocks_json" in runs_cols)
     manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
     _assert("ocr_probe" in manifest_cols)
     chunk_map_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}

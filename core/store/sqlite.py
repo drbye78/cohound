@@ -119,7 +119,17 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: ``page_map``/``ocr_probe``), и нарезка чанков от этой колонки не зависит — генерация
 #: чанков из таблицы будет отдельной правкой. Шимов нет: файлы ≤ 3.23.0 отвергаются гейтом
 #: версии, прогон переносится пересозданием.
-SCHEMA_VERSION = "3.24.0"
+#:
+#: 3.25.0 (O36 фаза 2 плана ``26``): ``corpus_docs.blocks`` — структурные блоки документа
+#: (JSON-список ``{block_id, kind, char_start, char_end, order, text_source, page_no,
+#: bbox, parent_id}``, контракт — :class:`core.domain.doc_blocks.ExtractedBlock`), и
+#: ``runs.blocks_json`` — сводка прогона (сколько документов с блоками, распределение по
+#: ``kind`` и по ``text_source``). Адрес блока у **чанка** — функция от этого списка и
+#: ``char_start`` (:func:`core.domain.doc_blocks.block_id_for`), а не колонка: копию обязан
+#: был бы поддерживать каждый путь записи чанка. Наблюдение, а не условие измерения: в
+#: ``EXECUTION_CONTRACT_FIELDS`` его нет, и нарезка чанков от колонки не зависит. Шимов
+#: нет: файлы ≤ 3.24.0 отвергаются гейтом версии, прогон переносится пересозданием.
+SCHEMA_VERSION = "3.25.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -208,6 +218,15 @@ CREATE TABLE IF NOT EXISTS runs (
     -- ``documents_unmeasured``. Сами таблицы — в ``corpus_docs.tables``: манифест несёт
     -- сводку, а не копию содержимого.
     tables_json           TEXT,
+    -- O36 фаза 2 (план 26, схема 3.25.0): структурные блоки документа — наблюдение, не
+    -- потолок. Внутри: ``{documents_with_blocks, blocks, documents_unmeasured, by_kind,
+    -- by_text_source{read|reconstructed}, by_product{id:{...}}}``
+    -- (``core.pipeline.block_provenance``). NULL — документов корпуса нет вовсе (не ноль):
+    -- «блоков нет» и «блоки не искали» — разные факты, и второй виден числом
+    -- ``documents_unmeasured``. Сами блоки — в ``corpus_docs.blocks``: манифест несёт
+    -- сводку, а не копию содержимого. Адрес блока у чанка — функция от списка и
+    -- ``char_start`` (``core.domain.doc_blocks.block_id_for``), а не колонка.
+    blocks_json           TEXT,
     publishability_json   TEXT,                        -- §6/A1: профиль публикуемости (класс + числа, из которых он выведен)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
@@ -291,7 +310,16 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
     -- «таблиц нет» там, где их никто не искал. В ``content_hash``/``run_id`` не входит:
     -- наблюдение о прочитанном, а не условие измерения (как ``page_map``/``ocr_probe``);
     -- нарезка чанков от колонки не зависит.
-    tables           TEXT
+    tables           TEXT,
+    -- O36 фаза 2 (план 26, схема 3.25.0): структурные блоки документа — JSON-список
+    -- ``{block_id, kind, char_start, char_end, order, text_source, page_no, bbox,
+    -- parent_id}`` (контракт — ``core.domain.doc_blocks.ExtractedBlock``). NULL = читатель
+    -- блоков **не даёт** (HTML, текст/markdown, EPUB, Office, docling, шов ``split``), а
+    -- **не** пустой список: ``[]`` — отдельный факт «смотрел и не дал». В
+    -- ``content_hash``/``run_id`` не входит: наблюдение о прочитанном, а не условие
+    -- измерения (как ``page_map``/``tables``); нарезка чанков от колонки не зависит, адрес
+    -- блока у чанка — функция (``core.domain.doc_blocks.block_id_for``).
+    blocks           TEXT
 );
 
 -- 13-manual-artifacts §3.3: аудит предоставления. Строка на объявленную подачу, дошедшую

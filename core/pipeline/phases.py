@@ -59,6 +59,8 @@ from core.domain.models import (
     CrawlSessionProvenance,
     Satellite,
 )
+from core.pipeline.block_provenance import blocks_summary
+from core.pipeline.block_provenance import human_line as blocks_human_line
 from core.pipeline.compute import bundle_for_run
 from core.pipeline.corpus import build_corpus
 from core.pipeline.crawl_frontier import resolve_crawl_limits
@@ -1803,6 +1805,12 @@ def build_phases(
             # друг друга: ``tables``/``documents_with_tables`` — прочитанное,
             # ``documents_unmeasured`` — документы, где читатель таблиц их не даёт.
             tables=tables_summary(ctx.store, plan.run_id, products=plan.products),
+            # O36 фаза 2 (план 26, схема 3.25.0): структурные блоки документа — числом.
+            # Источник — персистентный корпус (как у ``tables``), поэтому resume публикует
+            # тот же факт; нули по продуктам плана видны (симметрия). Два числа не
+            # заменяют друг друга: ``blocks``/``documents_with_blocks`` — прочитанное,
+            # ``documents_unmeasured`` — документы, где читатель блоков их не даёт.
+            blocks=blocks_summary(ctx.store, plan.run_id, products=plan.products),
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
@@ -1944,6 +1952,15 @@ def build_phases(
         tables_line = tables_human_line(getattr(artifacts, "tables_summary", None))
         if tables_line:
             pending.append(f"отчёт: {tables_line} (список: outputs/tables.csv)")
+        # O36 фаза 2: структурные блоки — той же advisory-строкой. Отдельного файла нет,
+        # поэтому хвост называет носитель иначе: сами блоки — у документа, адрес блока у
+        # цитаты — в ``evidence_pages.csv``. Строка нужна затем, чтобы оператор увидел
+        # **два** факта: сколько структуры и на какой части корпуса вопрос не задавался.
+        blocks_line = blocks_human_line(getattr(artifacts, "blocks_summary", None))
+        if blocks_line:
+            pending.append(
+                f"отчёт: {blocks_line} (адрес блока цитаты: outputs/evidence_pages.csv)"
+            )
         # План 26 O28: длинный ``heading_path`` — дефект извлечения, который до этого
         # был виден только измерительным харнессом. Строка оператора называет число и
         # документ-виновника; «не посчитано» называется причиной, а не нулём.

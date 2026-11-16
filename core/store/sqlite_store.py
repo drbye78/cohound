@@ -59,6 +59,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
+from core.domain.doc_blocks import blocks_from_json, blocks_to_json
 from core.domain.doc_tables import tables_from_json, tables_to_json
 from core.domain.ocr_probe import OCR_PROBE_VALUES
 from core.domain.page_map import page_map_from_json, page_map_to_json
@@ -1270,7 +1271,10 @@ class SqliteStore:
         почему не называют остальные; ``NULL`` — цитат нет вовсе, а не «ноль»), а также
         ``tables_json`` — таблицы документа числом (O39 фаза 1, схема 3.24.0: сколько
         таблиц, в скольких документах и сколько документов читатель таблиц **не даёт**;
-        ``NULL`` — документов корпуса нет вовсе, а не ноль).
+        ``NULL`` — документов корпуса нет вовсе, а не ноль), а также ``blocks_json`` —
+        структурные блоки документа (O36 фаза 2, схема 3.25.0: документы с блоками,
+        распределение по виду и по происхождению текста и документы, где читатель блоков
+        их **не даёт**; ``NULL`` — документов корпуса нет вовсе, а не ноль).
         ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
@@ -1298,6 +1302,7 @@ class SqliteStore:
                 " ocr_probe = ?,"
                 " page_provenance_json = ?,"
                 " tables_json = ?,"
+                " blocks_json = ?,"
                 " publishability_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?,"
                 " run_scope = ?, product_plan_json = ?, embed_device = ?,"
@@ -1367,6 +1372,17 @@ class SqliteStore:
                         if manifest.tables is None
                         else json.dumps(
                             dict(manifest.tables),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    ),
+                    # O36 фаза 2 (3.25.0): структурные блоки — наблюдение прогона. ``None``
+                    # пишется как ``NULL`` («документов корпуса нет»), а не как ``{}``.
+                    (
+                        None
+                        if manifest.blocks is None
+                        else json.dumps(
+                            dict(manifest.blocks),
                             ensure_ascii=False,
                             sort_keys=True,
                         )
@@ -1578,6 +1594,12 @@ class SqliteStore:
         измерение и при этом **не** мешает пере-извлечению уточнить его: новый непустой
         исход перекрывает прежний (``unavailable`` → ``ok`` после починки движка).
 
+        **То же правило — у блоков (``blocks``, схема 3.25.0, O36 фаза 2).** Писатель без
+        извлечения (переиспользование ``304``, набор чанков, ``frozen``) приходит с ``None``,
+        и его ``NULL`` не должен стирать уже прочитанные блоки того же текста. Разделение
+        ``None``/``()`` держится и здесь: ``[]`` («смотрел и не дал») — факт и перекрывает
+        прежнее значение честно.
+
         **То же правило — у таблиц (``tables``, схема 3.24.0, O39 фаза 1).** Писатель без
         извлечения (переиспользование ``304``, набор чанков, ``frozen``) приходит с ``None``,
         и его ``NULL`` не должен стирать уже прочитанные таблицы того же текста. Тонкость,
@@ -1589,6 +1611,7 @@ class SqliteStore:
         reuse_kind = doc.reuse_kind
         page_map_json = page_map_to_json(doc.page_map)
         tables_json = tables_to_json(doc.tables)
+        blocks_json = blocks_to_json(doc.blocks)
         with self.conn:
             self.conn.execute(
                 "INSERT INTO corpus_docs"
@@ -1596,8 +1619,8 @@ class SqliteStore:
                 "  extractor_version, render_mode, lang, origin,"
                 "  partial, partial_reason, page_count, pages_converted, extracted_chars,"
                 "  http_status, reuse_kind, page_map,"
-                "  ocr_probe, pages_ocr, pages_failed, tables)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  ocr_probe, pages_ocr, pages_failed, tables, blocks)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(doc_id) DO UPDATE SET"
                 "  product_id = excluded.product_id,"
                 "  url = excluded.url,"
@@ -1633,7 +1656,10 @@ class SqliteStore:
                 "  pages_failed = COALESCE(excluded.pages_failed, corpus_docs.pages_failed),"
                 # Таблицы (3.24.0) — то же правило и по той же причине; ``[]`` (искал и не
                 # нашёл) остаётся фактом и перекрывает прежнее значение (см. докстринг).
-                "  tables = COALESCE(excluded.tables, corpus_docs.tables)",
+                "  tables = COALESCE(excluded.tables, corpus_docs.tables),"
+                # Блоки (3.25.0) — то же правило и по той же причине; ``[]`` (смотрел и не
+                # дал) остаётся фактом и перекрывает прежнее значение (см. докстринг).
+                "  blocks = COALESCE(excluded.blocks, corpus_docs.blocks)",
                 (
                     doc.doc_id,
                     doc.product_id,
@@ -1659,6 +1685,7 @@ class SqliteStore:
                     doc.pages_ocr,
                     doc.pages_failed,
                     tables_json,
+                    blocks_json,
                 ),
             )
             if doc_version_id:
@@ -2860,6 +2887,11 @@ class SqliteStore:
                 # «читатель таблиц не даёт» (``None``), а не сбой чтения. Порченое
                 # значение читается так же: ``report`` обязан строиться и на битой БД.
                 tables=tables_from_json(_row_optional(doc, "tables")),
+                # O36 фаза 2 (3.25.0): блоки — тот же JSON, каким записаны. Колонка
+                # аддитивная ⇒ ``_row_optional``: у строки прошлой схемы её нет, и это
+                # «читатель блоков не даёт» (``None``), а не сбой чтения. Порченое
+                # значение читается так же: ``report`` обязан строиться и на битой БД.
+                blocks=blocks_from_json(_row_optional(doc, "blocks")),
             )
 
     # -- спуск в контейнеры (B3) ------------------------------------------- #
@@ -3134,6 +3166,11 @@ class SqliteStore:
         # бы «таблиц нет», чего никто не утверждал.
         tables_raw = _parse_json_text(_row_optional(row, "tables_json"))
         tables_block = tables_raw if isinstance(tables_raw, dict) else None
+        # O36 фаза 2 (3.25.0): сводка блоков. Та же дисциплина: колонки у строки прошлой
+        # схемы нет ⇒ ``None`` («не записано»), а не пустая сводка с нулями — ноль значил
+        # бы «блоков нет», чего никто не утверждал.
+        blocks_raw = _parse_json_text(_row_optional(row, "blocks_json"))
+        blocks_block = blocks_raw if isinstance(blocks_raw, dict) else None
         # 16 §3.1: провенанс среза (``run_scope``/``product_plan``) и наблюдаемая ось
         # устройства эмбеддера. Колонки аддитивные ⇒ читаются через ``_row_optional``
         # (read-only БД прошлой версии их не имеет); NULL/не-JSON → ``None``, а не пустой
@@ -3275,6 +3312,7 @@ class SqliteStore:
             # O39 фаза 1 (3.24.0): таблицы числом — наблюдение прогона. ``None`` —
             # не записано либо документов корпуса нет вовсе.
             tables=tables_block,
+            blocks=blocks_block,
             # §6/A1: профиль публикуемости из записи воспроизведения; пусто — legacy.
             publishability=publishability_block,
             llm_scenarios=scenarios,

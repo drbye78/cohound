@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from core.domain.doc_blocks import BlockList, check_blocks
 from core.domain.doc_tables import ExtractedTable, TableList
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
@@ -208,7 +209,8 @@ class ExtractedDoc:
     ``partial_reason`` без ``partial`` — ложная провенанс-запись. Счётчики страниц
     (``page_count``/``pages_converted``) не могут противоречить друг другу, а
     ``pages_converted`` без ``partial`` — счётчик без факта. Карта страниц
-    (:attr:`page_map`) проверяется там же: она либо точна, либо ``None``.
+    (:attr:`page_map`) и блоки (:attr:`blocks`) проверяются там же: они либо точны, либо
+    ``None``.
     """
 
     text: str
@@ -304,6 +306,27 @@ class ExtractedDoc:
     #: а не условие измерения, — ровно как ``page_map``/``ocr_probe``. Нарезка чанков от
     #: этого поля не зависит: генерация чанков из таблицы — отдельная фаза (O39 фаза 2).
     tables: TableList | None = None
+    #: Структурные блоки документа (O36 фаза 2 плана ``26``): вид фрагмента, его отрезок,
+    #: страница, рамка, родитель, порядок чтения и **происхождение текста**
+    #: (``read`` — прочитан слоем/разметкой, ``reconstructed`` — собран моделью из
+    #: раскладки). Носитель — :class:`core.domain.doc_blocks.ExtractedBlock` (определён в
+    #: домене, потому что у факта два носителя: здесь и в строке корпуса).
+    #:
+    #: ``None`` и ``()`` — **разные факты**: ``None`` — читатель блоков **не даёт вовсе**
+    #: (HTML, текст/markdown, EPUB, Office, шов ``split``, docling — см. докстринг
+    #: ``core.adapters.extract_document``), ``()`` — смотрел и блоков не дал. Свести их к
+    #: одному значило бы публиковать «блоков нет» там, где их никто не искал (A3).
+    #:
+    #: Смещения — в пространстве **чанкера** (тот же контракт, что у :attr:`page_map`:
+    #: полуоткрытые отрезки, без ведущего BOM), поэтому читатель сдвигает их так же, как
+    #: карту страниц. Адрес блока у **чанка** — функция от этого списка и ``char_start``
+    #: (:func:`core.domain.doc_blocks.block_id_for`), а не колонка: копию пришлось бы
+    #: поддерживать на каждом пути записи чанка (см. :mod:`core.domain.page_map`).
+    #:
+    #: В ``content_hash``/``run_id`` блоки **не** входят: это наблюдение о прочитанном, а
+    #: не условие измерения (как ``page_map``/``tables``), и нарезка чанков от них не
+    #: зависит.
+    blocks: BlockList | None = None
 
     def __post_init__(self) -> None:
         """Держит инвариант частичности и проверяет провенанс OCR.
@@ -345,6 +368,10 @@ class ExtractedDoc:
             # Инвариант живёт в домене (``core.domain.page_map``): у карты два носителя,
             # и две копии валидатора разошлись бы молча.
             check_page_map(self.page_map, len(self.text))
+        if self.blocks is not None:
+            # Блоки — тот же принцип: либо точный список, либо ``None`` («читатель блоков
+            # не даёт»). Инвариант один на два носителя (``core.domain.doc_blocks``).
+            check_blocks(self.blocks, len(self.text))
         if self.pages_converted is not None:
             if self.pages_converted < 0:
                 raise ValueError(

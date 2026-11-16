@@ -10,7 +10,8 @@
 Что публикуется:
 
 * ``outputs/evidence_pages.csv`` — строка на evidence: продукт, параметр, вид источника и
-  тип доказательства, документ, чанк, смещения, ``page``/``page_end``, ``page_status``;
+  тип доказательства, документ, чанк, смещения, ``page``/``page_end``, ``page_status``,
+  ``block``/``block_status``;
 * блок ``page_provenance`` манифеста (:func:`evidence_pages_summary`) — те же числа,
   свёрнутые до прогона и продукта, чтобы факт был виден без разбора CSV;
 * строка для оператора (:func:`human_line`) — в ``notes`` CLI-отчёта;
@@ -26,6 +27,12 @@
 чанка. Здесь она считается из ``(page_map документа, char_start чанка)`` — из тех же двух
 чисел, что уже лежат в БД.
 
+**Блок (O36 фаза 2) — та же функция, а не колонка.** ``corpus_chunks.block_id`` не
+существует по той же причине: адрес считается из ``(blocks документа, char_start чанка)``
+(:func:`core.domain.doc_blocks.block_id_for`). Правило границы у него **то же**, что у
+страницы (разрыв уходит следующему блоку, вне списка — первый/последний), потому что это
+один и тот же вопрос «какому отрезку принадлежит смещение».
+
 ``page_status`` — машинный токен, ровно один из пяти, и каждый называет **свой** носитель
 отсутствия, а не «неизвестно вообще»:
 
@@ -38,7 +45,18 @@
   унаследованный evidence — это **не** корпусная цитата, и страницы у неё нет по природе;
 * ``no_doc`` — чанк есть, документа нет (битая ссылка): факт, а не тишина.
 
-Пустая ячейка ``page``/``page_end`` — «не известно», не ноль.
+``block_status`` — те же пять исходов для **блока**, и каждый тоже называет свой носитель
+отсутствия:
+
+* ``mapped`` — блок известен;
+* ``no_blocks`` — у документа блоков нет: читатель блоков их не даёт (HTML, текст, EPUB,
+  Office, docling, ``split``) либо смотрел и не дал (``()``) — в обоих случаях назвать
+  нечего, а различие двух фактов видно на уровне документа
+  (``runs.blocks_json.documents_unmeasured``);
+* ``no_char_span`` — чанк есть, но ``char_start is None``;
+* ``no_chunk``/``no_doc`` — как у страницы.
+
+Пустая ячейка ``page``/``page_end``/``block`` — «не известно», не ноль.
 
 Источник — **персистентные** данные (``corpus_docs``/``corpus_chunks``/``cell_evidence``), а
 не память прогона: на resume фазы корпуса короткозамкнуты, а отчёт обязан называть тот же
@@ -55,10 +73,17 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from core.domain.doc_blocks import BlockList, block_id_for, blocks_from_json
 from core.domain.page_map import PageMap, page_map_from_json, page_number_for
 from core.util.ids import DOC_VERSION_PREFIX, parse_source_id
 
 __all__ = [
+    "BLOCK_STATUSES",
+    "BLOCK_STATUS_MAPPED",
+    "BLOCK_STATUS_NO_BLOCKS",
+    "BLOCK_STATUS_NO_CHAR_SPAN",
+    "BLOCK_STATUS_NO_CHUNK",
+    "BLOCK_STATUS_NO_DOC",
     "EVIDENCE_CSV_COLUMNS",
     "PAGE_STATUS_MAPPED",
     "PAGE_STATUS_NO_CHAR_SPAN",
@@ -86,6 +111,8 @@ EVIDENCE_CSV_COLUMNS: tuple[str, ...] = (
     "page",
     "page_end",
     "page_status",
+    "block",
+    "block_status",
 )
 
 #: Страница известна.
@@ -98,6 +125,26 @@ PAGE_STATUS_NO_CHAR_SPAN = "no_char_span"
 PAGE_STATUS_NO_CHUNK = "no_chunk"
 #: Чанк есть, документа нет — битая ссылка.
 PAGE_STATUS_NO_DOC = "no_doc"
+
+#: Блок известен.
+BLOCK_STATUS_MAPPED = "mapped"
+#: У документа блоков нет: читатель их не даёт либо смотрел и не дал.
+BLOCK_STATUS_NO_BLOCKS = "no_blocks"
+#: Чанк есть, но смещений у него нет — кусок не является точным срезом текста.
+BLOCK_STATUS_NO_CHAR_SPAN = "no_char_span"
+#: ``source_id`` не найден в ``corpus_chunks`` — это не корпусная цитата.
+BLOCK_STATUS_NO_CHUNK = "no_chunk"
+#: Чанк есть, документа нет — битая ссылка.
+BLOCK_STATUS_NO_DOC = "no_doc"
+
+#: Все исходы для блока — в порядке объявления (сводка печатает их всегда, включая нули).
+BLOCK_STATUSES: tuple[str, ...] = (
+    BLOCK_STATUS_MAPPED,
+    BLOCK_STATUS_NO_BLOCKS,
+    BLOCK_STATUS_NO_CHAR_SPAN,
+    BLOCK_STATUS_NO_CHUNK,
+    BLOCK_STATUS_NO_DOC,
+)
 
 #: Все исходы — в порядке объявления: сводка печатает их всегда, включая нули (ноль здесь
 #: честен: «такого класса у этого прогона не было»).
@@ -189,6 +236,14 @@ def _page_map_of(doc: Any) -> PageMap | None:
     return raw if isinstance(raw, tuple) else page_map_from_json(raw)
 
 
+def _blocks_of(doc: Any) -> BlockList | None:
+    """Блоки документа (``None`` — читатель их не даёт, ``()`` — смотрел и не дал)."""
+    raw = getattr(doc, "blocks", None)
+    if raw is None:
+        return None
+    return raw if isinstance(raw, tuple) else blocks_from_json(raw)
+
+
 def _doc_id_of(source_id: str, versions: Mapping[tuple[str, str], str]) -> str | None:
     """``doc_id`` по адресу чанка; ``None`` — адрес не разбирается либо версия не отображена.
 
@@ -212,8 +267,16 @@ def _row(
     chunk: Any | None,
     doc_id: str | None,
     page_map: PageMap | None,
+    blocks: BlockList | None = None,
 ) -> dict[str, Any]:
-    """Строка артефакта по одному evidence — включая **причину** отсутствия страницы."""
+    """Строка артефакта по одному evidence — включая **причину** отсутствия страницы и блока.
+
+    Порядок проверок у блока тот же, что у страницы (чанк → документ → носитель → смещение):
+    причина обязана называть **свой** носитель отсутствия, иначе «нет блока» читается как
+    «неизвестно вообще». ``blocks = ()`` (читатель смотрел и не дал) даёт ``no_blocks``:
+    назвать нечего — тот же факт для цитаты, а различие двух состояний видно на уровне
+    документа (``runs.blocks_json``).
+    """
     char_start = getattr(chunk, "char_start", None) if chunk is not None else None
     char_end = getattr(chunk, "char_end", None) if chunk is not None else None
     page: int | None = None
@@ -234,6 +297,24 @@ def _row(
         # называется только тогда, когда кусок действительно пересекает границу страниц.
         if isinstance(char_end, int) and char_end > char_start:
             page_end = page_number_for(char_end - 1, page_map)
+    block: str | None = None
+    if chunk is None:
+        block_status = BLOCK_STATUS_NO_CHUNK
+    elif doc_id is None:
+        block_status = BLOCK_STATUS_NO_DOC
+    elif not blocks:
+        # ``None`` («читатель не даёт») и ``()`` («смотрел и не дал») для цитаты — один
+        # факт: назвать нечего. Различие состояний публикуется на уровне документа.
+        block_status = BLOCK_STATUS_NO_BLOCKS
+    elif char_start is None:
+        block_status = BLOCK_STATUS_NO_CHAR_SPAN
+    else:
+        block_status = BLOCK_STATUS_MAPPED
+        block = block_id_for(char_start, blocks)
+        if block is None:
+            # Точный срез есть, но список блоков его не покрывает (порча либо блоки
+            # другого текста): адрес не выдумывается (A3), и причина — «блоков нет».
+            block_status = BLOCK_STATUS_NO_BLOCKS
     return {
         "product_id": _text(getattr(evidence, "product_id", "")),
         "param_id": _text(getattr(evidence, "param_id", "")),
@@ -246,6 +327,8 @@ def _row(
         "page": page,
         "page_end": page_end,
         "page_status": status,
+        "block": block,
+        "block_status": block_status,
     }
 
 
@@ -296,6 +379,7 @@ def collect_evidence_pages(
                 chunk=chunk,
                 doc_id=doc_id if doc is not None else None,
                 page_map=_page_map_of(doc) if doc is not None else None,
+                blocks=_blocks_of(doc) if doc is not None else None,
             )
         )
     rows.sort(key=lambda row: (row["product_id"], row["param_id"], row["chunk_id"]))
@@ -305,32 +389,48 @@ def collect_evidence_pages(
 def _summary(
     rows: Sequence[dict[str, Any]], products: Iterable[str] = ()
 ) -> dict[str, Any]:
-    """Сводка по строкам: всего/со страницей, по исходам и по продуктам.
+    """Сводка по строкам: всего/со страницей/с блоком, по исходам и по продуктам.
 
     ``by_product`` содержит **нули** для всех продуктов плана (симметрия с
     ``partial_docs_summary``): «у этого продукта цитат нет» — тоже факт. Продукты, которых
     нет в плане, не выдумываются.
+
+    Блок (O36 фаза 2) считается **теми же строками**, что и страница: второй расчёт
+    разошёлся бы с файлом. ``with_block`` и ``by_block_status`` — не новая сущность, а
+    те же числа для второго адреса цитаты.
     """
     by_status = {status: 0 for status in PAGE_STATUSES}
+    by_block_status = {status: 0 for status in BLOCK_STATUSES}
     by_product: dict[str, dict[str, int]] = {
-        str(product): {"evidence": 0, "with_page": 0} for product in products
+        str(product): {"evidence": 0, "with_page": 0, "with_block": 0}
+        for product in products
     }
     with_page = 0
+    with_block = 0
     for row in rows:
         status = str(row.get("page_status") or "")
         if status in by_status:
             by_status[status] += 1
+        block_status = str(row.get("block_status") or "")
+        if block_status in by_block_status:
+            by_block_status[block_status] += 1
         bucket = by_product.setdefault(
-            str(row.get("product_id") or ""), {"evidence": 0, "with_page": 0}
+            str(row.get("product_id") or ""),
+            {"evidence": 0, "with_page": 0, "with_block": 0},
         )
         bucket["evidence"] += 1
         if row.get("page") is not None:
             with_page += 1
             bucket["with_page"] += 1
+        if row.get("block") is not None:
+            with_block += 1
+            bucket["with_block"] += 1
     return {
         "evidence": len(rows),
         "with_page": with_page,
+        "with_block": with_block,
         "by_status": by_status,
+        "by_block_status": by_block_status,
         "by_product": dict(sorted(by_product.items())),
     }
 
@@ -349,7 +449,9 @@ def summary_with_products(
         for product_id, bucket in (summary.get("by_product") or {}).items()
     }
     for product in products:
-        by_product.setdefault(str(product), {"evidence": 0, "with_page": 0})
+        by_product.setdefault(
+            str(product), {"evidence": 0, "with_page": 0, "with_block": 0}
+        )
     updated = dict(summary)
     updated["by_product"] = dict(sorted(by_product.items()))
     return updated
@@ -433,6 +535,10 @@ def human_line(summary: Mapping[str, Any] | None) -> str | None:
     читается как дефект прибора, хотя за ним стоит документ без карты (pdfium вне
     ``text_layer``/HTML/Office/``split``) — то есть известное ограничение механизма.
     Нулевые классы в строку не попадают: перечисление нулей врало бы о значимости.
+
+    Второй адрес цитаты — **блок** (O36 фаза 2) — печатается тем же правилом: число и
+    причины по классам. Причина у него своя (``no_blocks`` вместо ``no_page_map``), потому
+    что носитель отсутствия другой: документ может нести карту страниц и не нести блоков.
     """
     if not summary:
         return None
@@ -440,23 +546,51 @@ def human_line(summary: Mapping[str, Any] | None) -> str | None:
     if evidence <= 0:
         return None
     with_page = int(summary.get("with_page") or 0)
+    with_block = int(summary.get("with_block") or 0)
+    # Сводка прежней схемы блока не несёт вовсе. Молчать о нём — единственный честный
+    # вариант: «0 из N называют блок» было бы утверждением о корпусе, которого никто не
+    # делал (A3). Живая сводка всегда несёт ``by_block_status``.
+    has_block_fact = "by_block_status" in summary or "with_block" in summary
+    parts: list[str] = []
     if with_page >= evidence:
-        return f"цитаты: все {evidence} называют страницу"
-    by_status = summary.get("by_status") or {}
-    reasons: list[str] = []
-    for status, label in (
-        (PAGE_STATUS_NO_PAGE_MAP, "без карты документа"),
-        (PAGE_STATUS_NO_CHAR_SPAN, "без смещений чанка"),
-        (PAGE_STATUS_NO_CHUNK, "вне корпуса"),
-    ):
-        count = int(by_status.get(status) or 0)
-        if count:
-            reasons.append(f"{label} {count}")
-    tail = f"; {', '.join(reasons)}" if reasons else ""
-    # Битая ссылка — отдельный хвост: это не ограничение механизма, а дефект данных, и
-    # смешивать его с «карты нет» значило бы прятать поломку в списке причин.
-    broken = int(by_status.get(PAGE_STATUS_NO_DOC) or 0)
-    broken_tail = f", битая ссылка {broken}" if broken else ""
-    return (
-        f"цитаты: {with_page} из {evidence} называют страницу{tail}{broken_tail}"
-    )
+        parts.append(f"цитаты: все {evidence} называют страницу")
+    else:
+        by_status = summary.get("by_status") or {}
+        reasons: list[str] = []
+        for status, label in (
+            (PAGE_STATUS_NO_PAGE_MAP, "без карты документа"),
+            (PAGE_STATUS_NO_CHAR_SPAN, "без смещений чанка"),
+            (PAGE_STATUS_NO_CHUNK, "вне корпуса"),
+        ):
+            count = int(by_status.get(status) or 0)
+            if count:
+                reasons.append(f"{label} {count}")
+        tail = f"; {', '.join(reasons)}" if reasons else ""
+        # Битая ссылка — отдельный хвост: это не ограничение механизма, а дефект данных, и
+        # смешивать его с «карты нет» значило бы прятать поломку в списке причин.
+        broken = int(by_status.get(PAGE_STATUS_NO_DOC) or 0)
+        broken_tail = f", битая ссылка {broken}" if broken else ""
+        parts.append(
+            f"цитаты: {with_page} из {evidence} называют страницу{tail}{broken_tail}"
+        )
+    if has_block_fact and with_block >= evidence:
+        parts.append(f"блок: все {evidence} называют блок")
+    elif has_block_fact:
+        by_block_status = summary.get("by_block_status") or {}
+        block_reasons: list[str] = []
+        for status, label in (
+            (BLOCK_STATUS_NO_BLOCKS, "без разметки блоков"),
+            (BLOCK_STATUS_NO_CHAR_SPAN, "без смещений чанка"),
+            (BLOCK_STATUS_NO_CHUNK, "вне корпуса"),
+        ):
+            count = int(by_block_status.get(status) or 0)
+            if count:
+                block_reasons.append(f"{label} {count}")
+        block_tail = f"; {', '.join(block_reasons)}" if block_reasons else ""
+        block_broken = int(by_block_status.get(BLOCK_STATUS_NO_DOC) or 0)
+        block_broken_tail = f", битая ссылка {block_broken}" if block_broken else ""
+        parts.append(
+            f"блок: {with_block} из {evidence} называют блок"
+            f"{block_tail}{block_broken_tail}"
+        )
+    return "; ".join(parts)

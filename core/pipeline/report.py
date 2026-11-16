@@ -91,6 +91,7 @@ from core.domain.models import (
 )
 from core.domain.scoring import evidence_coverage
 from core.pipeline.artifacts_gap import write_artifacts_gap
+from core.pipeline.block_provenance import blocks_summary
 from core.pipeline.compute import (
     ScoreBundle,
     assert_publishable,
@@ -397,6 +398,12 @@ class Artifacts:
     #: Блок ``tables`` манифеста — те же числа свёрнутыми, чтобы CLI назвал факт строкой,
     #: даже когда CSV не создан. ``None`` — документов корпуса нет вовсе (не ноль).
     tables_summary: dict[str, Any] | None = None
+    #: Блок ``blocks`` манифеста (O36 фаза 2, план 26) — те же числа свёрнутыми, чтобы CLI
+    #: назвал оба факта строкой: сколько структуры прочитано и на какой части корпуса
+    #: вопрос не задавался. Своего CSV нет намеренно: сами блоки живут у документа
+    #: (``corpus_docs.blocks``), а адрес блока у **цитаты** — уже в ``evidence_pages.csv``
+    #: (``block``/``block_status``). ``None`` — документов корпуса нет вовсе (не ноль).
+    blocks_summary: dict[str, Any] | None = None
     #: Блок ``partial_docs`` манифеста (те же числа, свёрнутые до продукта) — чтобы CLI
     #: мог назвать факт строкой, даже когда CSV не создан.
     partial_docs_summary: dict[str, Any] | None = None
@@ -1074,6 +1081,7 @@ def build_manifest(
     ocr_probe: str | None = None,
     page_provenance: Mapping[str, Any] | None = None,
     tables: Mapping[str, Any] | None = None,
+    blocks: Mapping[str, Any] | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
@@ -1702,6 +1710,11 @@ def build_manifest(
         # ``EXECUTION_CONTRACT_FIELDS`` не входит: нарезка чанков от этого не зависит.
         # ``None`` — документов корпуса нет вовсе (не ноль).
         tables=None if tables is None else dict(tables),
+        # O36 фаза 2 (план 26, схема 3.25.0): структурные блоки — наблюдение прогона
+        # (документы с блоками, распределение по виду и по происхождению текста и
+        # документы, где читатель блоков их не даёт). В ``EXECUTION_CONTRACT_FIELDS`` не
+        # входит: нарезка чанков от этого не зависит. ``None`` — документов нет вовсе.
+        blocks=None if blocks is None else dict(blocks),
         snapshot_date=snapshot_date,
         # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
         # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
@@ -3884,6 +3897,11 @@ def write_reports(
     except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
         tables_path = None
     tables_block = tables_summary(store, run_id, products=planned_products)
+    # O36 фаза 2 (план 26): структурные блоки — числом в манифест и строкой оператору.
+    # Отдельного CSV нет: сами блоки — у документа, адрес блока у цитаты — в
+    # ``evidence_pages.csv``. Сводка отвечает на другой вопрос: на какой части корпуса
+    # структура вообще измерена (``documents_unmeasured``) — этого не видно ни в одном файле.
+    blocks_block = blocks_summary(store, run_id, products=planned_products)
     # O28: аномалии ``heading_path`` (3 668 симв. на страницу-виновника) были видны
     # только отдельным харнессом — в отчёте прогона их не называл никто. Чтение чанков
     # идёт через ``cb_``→``pb_``-резолв внутри писателя; неразрешённая сборка даёт
@@ -3997,6 +4015,7 @@ def write_reports(
         ocr_provenance=ocr_provenance_path,
         tables=tables_path,
         tables_summary=tables_block,
+        blocks_summary=blocks_block,
         support_quality=support_path,
         support_quality_summary=support_payload,
         corpus_freshness=corpus_freshness_path,

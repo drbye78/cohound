@@ -55,23 +55,28 @@ def test_older_schema_is_rejected_with_message(tmp_path: Path) -> None:
     assert "новом каталоге" in message or "удалите" in message
 
 
-def test_previous_schema_is_rejected_and_file_is_unchanged(tmp_path: Path) -> None:
-    """Предыдущая схема отвергается гейтом, не изменяя байты файла.
+@pytest.mark.parametrize("version", ["3.20.0", "3.24.0"])
+def test_previous_schema_is_rejected_and_file_is_unchanged(
+    tmp_path: Path, version: str
+) -> None:
+    """Предыдущие схемы отвергаются гейтом, не изменяя байты файла.
 
-    ``corpus_coverage.roots_json``/``cells.absence_as_of`` (3.20.0) и
-    ``corpus_docs.page_map`` (3.21.0) объявлены только в ``CREATE TABLE``; шимов
+    ``corpus_coverage.roots_json``/``cells.absence_as_of`` (3.20.0),
+    ``corpus_docs.page_map`` (3.21.0), ``corpus_docs.tables`` (3.24.0) и
+    ``corpus_docs.blocks`` (3.25.0) объявлены только в ``CREATE TABLE``; шимов
     ``ALTER TABLE`` нет. Поэтому «догнать» старый файл нечем — и проверка фиксирует это
     наблюдаемо: отказ видим, файл остаётся прежним (A3: тихий догон объявил бы чужую
-    схему текущей).
+    схему текущей). Ближайшая прошлая версия (3.24.0) в списке намеренно: именно её файлы
+    остаются на стендах после этой правки.
     """
-    db = _legacy_db(tmp_path / "cohound.db", "3.20.0")
+    db = _legacy_db(tmp_path / f"cohound-{version}.db", version)
     before = db.read_bytes()
 
     with pytest.raises(SchemaVersionMismatch) as excinfo:
         connect(db)
 
     message = str(excinfo.value)
-    assert "3.20.0" in message
+    assert version in message
     assert SCHEMA_VERSION in message
     assert db.read_bytes() == before
 
@@ -318,8 +323,19 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     (сводка прогона: таблицы, документы с таблицами и документы без распознавания таблиц).
     Наблюдение, а не условие измерения: в ``EXECUTION_CONTRACT_FIELDS`` его нет, и нарезка
     чанков от колонки не зависит. Шимов нет: прогоны ≤ 3.23.0 отвергаются гейтом версии.
+
+    3.25.0 (O36 фаза 2 плана ``26``) — **структурные блоки документа**:
+    ``corpus_docs.blocks`` (JSON-список ``{block_id, kind, char_start, char_end, order,
+    text_source, page_no, bbox, parent_id}``, контракт — ``core.domain.doc_blocks``;
+    ``NULL`` — читатель блоков не даёт, ``[]`` — смотрел и не дал) и ``runs.blocks_json``
+    (сводка прогона: документы с блоками, распределение по виду и по происхождению текста
+    ``read|reconstructed``, документы без разметки блоков). Адрес блока у **чанка** —
+    функция от списка и ``char_start`` (``core.domain.doc_blocks.block_id_for``), а не
+    колонка: копию пришлось бы поддерживать на каждом пути записи чанка. Наблюдение, а не
+    условие измерения: в ``EXECUTION_CONTRACT_FIELDS`` его нет, и нарезка чанков от колонки
+    не зависит. Шимов нет: прогоны ≤ 3.24.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.24.0"
+    assert SCHEMA_VERSION == "3.25.0"
 
     conn = connect(":memory:")
     try:
@@ -345,6 +361,9 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
         # 3.24.0 (O39 фаза 1): таблица — объект у документа и сводка у прогона.
         assert "tables" in docs_cols
         assert "tables_json" in runs_cols
+        # 3.25.0 (O36 фаза 2): структурные блоки — у документа и сводка у прогона.
+        assert "blocks" in docs_cols
+        assert "blocks_json" in runs_cols
         manifest_cols = {
             r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")
         }
@@ -352,7 +371,10 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
 
         chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
         assert {"char_start", "char_end"} <= chunk_cols
+        # Номер страницы и адрес блока у чанка — **функции** от документа и ``char_start``,
+        # а не колонки: копию обязан был бы поддерживать каждый путь записи чанка.
         assert "page_number" not in chunk_cols
+        assert "block_id" not in chunk_cols
 
         # 3.20.0 (F3 плана 20): носитель полноты — снятия корней — и дата слабой опоры ❌.
         coverage_cols = {

@@ -30,11 +30,23 @@ from typing import Any
 
 import pytest
 
-from core.domain import CorpusDoc, Focus, RankingPolicy, RunConfig, RunMode
+from core.domain import (
+    CorpusDoc,
+    ExtractedBlock,
+    Focus,
+    RankingPolicy,
+    RunConfig,
+    RunMode,
+)
 from core.domain.enums import CellState, EvidenceType, SourceKind, Status
 from core.domain.models import Cell, CellEvidence, CorpusChunk, LLMEvidence, RunManifest
 from core.pipeline.compute import compute
 from core.pipeline.page_publication import (
+    BLOCK_STATUS_MAPPED,
+    BLOCK_STATUS_NO_BLOCKS,
+    BLOCK_STATUS_NO_CHAR_SPAN,
+    BLOCK_STATUS_NO_CHUNK,
+    BLOCK_STATUS_NO_DOC,
     EVIDENCE_CSV_COLUMNS,
     PAGE_STATUS_MAPPED,
     PAGE_STATUS_NO_CHAR_SPAN,
@@ -72,6 +84,22 @@ for _number, _page in enumerate(_PAGES, start=1):
     _map.append((_number, _offset, _offset + len(_page)))
     _offset += len(_page) + 2  # разделитель ``"\n\n"`` — разрыв карты, не страница
 DOC_PAGE_MAP: tuple[tuple[int, int, int], ...] = tuple(_map)
+
+#: Блоки того же документа (O36 фаза 2): по блоку ``kind="page"`` на страницу — ровно то,
+#: что отдаёт механизм ``text_layer``. Отрезки совпадают с картой: один провенанс, два
+#: носителя. ``read`` — текст прочитан слоем, а не собран моделью.
+DOC_BLOCKS: tuple[ExtractedBlock, ...] = tuple(
+    ExtractedBlock(
+        block_id=f"b{index}",
+        kind="page",
+        char_start=start,
+        char_end=end,
+        order=index,
+        text_source="read",
+        page_no=page_no,
+    )
+    for index, (page_no, start, end) in enumerate(DOC_PAGE_MAP)
+)
 
 #: Смещения кусков, собранных **срезами** текста: ``CorpusChunk`` требует, чтобы длина
 #: ``text`` равнялась длине диапазона, иначе это ложная провенанс-запись.
@@ -159,6 +187,7 @@ def store() -> Iterator[SqliteStore]:
                 page_count=3,
                 extracted_chars=len(DOC_TEXT),
                 page_map=DOC_PAGE_MAP,
+                blocks=DOC_BLOCKS,
             ),
             doc_version_id="dv_a",
         )
@@ -331,9 +360,18 @@ def test_summary_counts_pages_and_reasons(store: SqliteStore) -> None:
         PAGE_STATUS_NO_CHUNK: 1,
         PAGE_STATUS_NO_DOC: 1,
     }
-    # Продукт плана без цитат — нулями: «у него цитат нет» тоже факт (симметрия).
-    assert summary["by_product"][OTHER_PRODUCT] == {"evidence": 0, "with_page": 0}
-    assert summary["by_product"][PRODUCT] == {"evidence": 6, "with_page": 2}
+    # Продукт плана без цитат — нулями: «у него цитат нет» тоже факт (симметрия). Блок —
+    # второй адрес цитаты, поэтому в корзине продукта он идёт рядом со страницей.
+    assert summary["by_product"][OTHER_PRODUCT] == {
+        "evidence": 0,
+        "with_page": 0,
+        "with_block": 0,
+    }
+    assert summary["by_product"][PRODUCT] == {
+        "evidence": 6,
+        "with_page": 2,
+        "with_block": 2,
+    }
 
 
 def test_summary_is_none_without_evidence() -> None:
@@ -504,14 +542,22 @@ def test_battle_card_quote_without_page_adds_nothing(tmp_path: Path) -> None:
 
 
 def test_human_line_names_all_pages_when_every_quote_has_one() -> None:
-    """Все цитаты назвали страницу — так и говорится, без перечисления причин."""
+    """Все цитаты назвали страницу — так и говорится, без перечисления причин.
+
+    Блок — второй адрес той же цитаты (O36 фаза 2), поэтому строка называет и его: у
+    документа может быть страница и не быть блоков, и тогда второй факт обязан быть виден.
+    """
     summary = {
         "evidence": 12,
         "with_page": 12,
+        "with_block": 12,
         "by_status": {PAGE_STATUS_MAPPED: 12},
-        "by_product": {PRODUCT: {"evidence": 12, "with_page": 12}},
+        "by_block_status": {BLOCK_STATUS_MAPPED: 12},
+        "by_product": {PRODUCT: {"evidence": 12, "with_page": 12, "with_block": 12}},
     }
-    assert human_line(summary) == "цитаты: все 12 называют страницу"
+    assert human_line(summary) == (
+        "цитаты: все 12 называют страницу; блок: все 12 называют блок"
+    )
 
 
 def test_human_line_names_reasons_and_skips_zero_classes() -> None:
@@ -524,16 +570,23 @@ def test_human_line_names_reasons_and_skips_zero_classes() -> None:
     summary = {
         "evidence": 8,
         "with_page": 5,
+        "with_block": 3,
         "by_status": {
             PAGE_STATUS_MAPPED: 5,
             PAGE_STATUS_NO_PAGE_MAP: 2,
             PAGE_STATUS_NO_DOC: 1,
         },
-        "by_product": {PRODUCT: {"evidence": 8, "with_page": 5}},
+        "by_block_status": {
+            BLOCK_STATUS_MAPPED: 3,
+            BLOCK_STATUS_NO_BLOCKS: 4,
+            BLOCK_STATUS_NO_DOC: 1,
+        },
+        "by_product": {PRODUCT: {"evidence": 8, "with_page": 5, "with_block": 3}},
     }
     line = human_line(summary)
     assert line == (
-        "цитаты: 5 из 8 называют страницу; без карты документа 2, битая ссылка 1"
+        "цитаты: 5 из 8 называют страницу; без карты документа 2, битая ссылка 1; "
+        "блок: 3 из 8 называют блок; без разметки блоков 4, битая ссылка 1"
     )
     assert "без смещений чанка" not in line
     assert "вне корпуса" not in line
@@ -573,6 +626,7 @@ def test_report_command_prints_evidence_pages_line(
                 page_count=3,
                 extracted_chars=len(DOC_TEXT),
                 page_map=DOC_PAGE_MAP,
+                blocks=DOC_BLOCKS,
             ),
             doc_version_id="dv_a",
         )
@@ -595,6 +649,13 @@ def test_report_command_prints_evidence_pages_line(
     assert report_command.run(args) == 0
     payload = capsys.readouterr().out
     assert "цитаты: все 1 называют страницу" in payload
+    # O36 фаза 2: блок — второй адрес цитаты, и он тоже называется строкой, а не только
+    # колонкой файла, который надо открыть.
+    assert "блок: все 1 называют блок" in payload
+    # Сводка блоков — **отдельной** строкой: у неё другой предмет (сколько структуры в
+    # корпусе и на каких документах вопрос не задавался), и заменять ею адрес цитаты
+    # значило бы смешать два факта.
+    assert "блоки: 3 в 1 документах (прочитано 3)" in payload
     assert (tmp_path / "out" / RUN_ID / "outputs" / "evidence_pages.csv").exists()
 
 
@@ -624,3 +685,110 @@ def test_report_without_evidence_publishes_no_summary(tmp_path: Path) -> None:
         )
     assert artifacts.evidence_pages_summary is None
     assert artifacts.evidence_pages is None
+
+
+# ---------------------------------------------------------------------------
+# (е) блок у цитаты: второй адрес и его собственная причина отсутствия
+# ---------------------------------------------------------------------------
+
+
+def test_block_of_a_quote_is_known(store: SqliteStore) -> None:
+    """Чанк внутри страницы 1 называет блок ``b0`` — тем же правилом, что страницу."""
+    rows, _summary_block = collect_evidence_pages(store, RUN_ID)
+    by_param = {item["param_id"]: item for item in rows}
+    assert by_param["param.a"]["block"] == "b0"
+    assert by_param["param.a"]["block_status"] == BLOCK_STATUS_MAPPED
+    # Страница и блок — из одного постраничного разбиения, поэтому согласованы.
+    assert by_param["param.a"]["page"] == 1
+
+
+def test_block_of_a_crossing_quote_is_the_starting_block(store: SqliteStore) -> None:
+    """Блок — один адрес (начало куска), в отличие от пары страниц.
+
+    У страницы пара нужна потому, что цитата может лежать на двух страницах; у блока
+    адрес — это фрагмент, в котором кусок **начинается**. Второй адрес здесь ничего не
+    добавляет: структура блока не режется границей страницы.
+    """
+    rows, _summary_block = collect_evidence_pages(store, RUN_ID)
+    by_param = {item["param_id"]: item for item in rows}
+    assert by_param["param.b"]["block"] == "b1"
+    assert by_param["param.b"]["block_status"] == BLOCK_STATUS_MAPPED
+    assert (by_param["param.b"]["page"], by_param["param.b"]["page_end"]) == (2, 3)
+
+
+def test_absence_of_a_block_names_its_own_reason(store: SqliteStore) -> None:
+    """Пять исходов блока различимы и не подменяют друг друга.
+
+    ``no_blocks`` — отдельный носитель отсутствия: документ может нести карту страниц и не
+    нести блоков (HTML, текст, Office, docling), и «нет блока» — не «неизвестно вообще».
+    """
+    rows, _summary_block = collect_evidence_pages(store, RUN_ID)
+    by_param = {item["param_id"]: item for item in rows}
+    assert by_param["param.c"]["block_status"] == BLOCK_STATUS_NO_CHAR_SPAN
+    assert by_param["param.d"]["block_status"] == BLOCK_STATUS_NO_BLOCKS
+    assert by_param["param.e"]["block_status"] == BLOCK_STATUS_NO_CHUNK
+    assert by_param["param.f"]["block_status"] == BLOCK_STATUS_NO_DOC
+    for param_id in ("param.c", "param.d", "param.e", "param.f"):
+        assert by_param[param_id]["block"] is None
+
+
+def test_summary_counts_blocks_and_reasons(store: SqliteStore) -> None:
+    """``with_block`` и ``by_block_status`` — те же строки, что и файл (один расчёт)."""
+    summary = evidence_pages_summary(store, RUN_ID, products=[PRODUCT])
+    assert summary is not None
+    assert summary["with_block"] == 2
+    assert summary["by_block_status"] == {
+        BLOCK_STATUS_MAPPED: 2,
+        BLOCK_STATUS_NO_BLOCKS: 1,
+        BLOCK_STATUS_NO_CHAR_SPAN: 1,
+        BLOCK_STATUS_NO_CHUNK: 1,
+        BLOCK_STATUS_NO_DOC: 1,
+    }
+
+
+def test_artifact_carries_block_columns(store: SqliteStore, tmp_path: Path) -> None:
+    """CSV несёт ``block``/``block_status``: адрес и причину отсутствия — по строке."""
+    target = tmp_path / "outputs" / "evidence_pages.csv"
+    assert write_evidence_pages_artifact(store, RUN_ID, target) == target
+    with target.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert tuple(reader.fieldnames or ()) == EVIDENCE_CSV_COLUMNS
+        rows = {row["param_id"]: row for row in reader}
+    assert rows["param.a"]["block"] == "b0"
+    assert rows["param.a"]["block_status"] == BLOCK_STATUS_MAPPED
+    # Пустая ячейка — «не известно», не ноль: адрес не выдумывается (A3).
+    assert rows["param.d"]["block"] == ""
+    assert rows["param.d"]["block_status"] == BLOCK_STATUS_NO_BLOCKS
+
+
+def test_human_line_names_blocks_too() -> None:
+    """Строка оператора называет и блок — тем же правилом, с собственной причиной."""
+    line = human_line(
+        {
+            "evidence": 4,
+            "with_page": 1,
+            "with_block": 1,
+            "by_status": {"mapped": 1, "no_page_map": 3},
+            "by_block_status": {"mapped": 1, "no_blocks": 3},
+        }
+    )
+    assert line is not None
+    assert "цитаты: 1 из 4 называют страницу" in line
+    assert "блок: 1 из 4 называют блок" in line
+    assert "без разметки блоков 3" in line
+
+
+def test_human_line_is_silent_about_blocks_when_the_summary_has_none() -> None:
+    """Сводка прежней схемы блока не несёт — о нём молчим, а не говорим «0 из N».
+
+    «Ни одна цитата не назвала блок» — утверждение о корпусе; если блоков не искали
+    (сводка старше 3.25.0), такого утверждения делать нельзя (A3).
+    """
+    line = human_line(
+        {
+            "evidence": 4,
+            "with_page": 4,
+            "by_status": {PAGE_STATUS_MAPPED: 4},
+        }
+    )
+    assert line == "цитаты: все 4 называют страницу"

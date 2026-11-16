@@ -18,7 +18,7 @@ import pytest
 
 from core.adapters import extract_document
 from core.adapters.extract_document import DoclingDocumentExtractor
-from core.domain import DocumentLevel
+from core.domain import DocumentLevel, ExtractedBlock
 from core.pipeline.extract_cache import (
     ENVELOPE_FORMAT,
     EVICT_CHECK_BYTES_DIVISOR,
@@ -822,3 +822,103 @@ def test_corrupt_page_map_is_a_miss(tmp_path: Path, page_map: object) -> None:
     _write_envelope(_entry(tmp_path / "cache", RAW_A), page_map=page_map)
 
     assert cache.get(RAW_A, "ext-1", "full") is None
+
+
+# ---------------------------------------------------------------------------
+# O36 фаза 2 (план 26): структурные блоки переживают кэш
+# ---------------------------------------------------------------------------
+
+
+def test_round_trip_preserves_blocks(tmp_path: Path) -> None:
+    """Хит обязан вернуть те же блоки: иначе адрес цитаты теряется у самых частых хитов.
+
+    Форма в конверте — тот же JSON, что у колонки ``corpus_docs.blocks``; обратно блоки
+    приходят объявленным кортежем ``ExtractedBlock``, а не списком словарей.
+    """
+    cache = ExtractionCache(tmp_path / "cache")
+    blocks = (
+        ExtractedBlock(
+            block_id="b0",
+            kind="page",
+            char_start=0,
+            char_end=9,
+            order=0,
+            text_source="read",
+            page_no=1,
+        ),
+        ExtractedBlock(
+            block_id="b1",
+            kind="page",
+            char_start=11,
+            char_end=19,
+            order=1,
+            text_source="read",
+            page_no=2,
+        ),
+    )
+    doc = ExtractedDoc(
+        text="alpha one\n\nbeta two",
+        content_hash=content_hash("alpha one\n\nbeta two"),
+        extractor_version="ext-1",
+        page_count=2,
+        blocks=blocks,
+    )
+
+    cache.put(doc, level="full", content_hash=RAW_A)
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.blocks == blocks
+    assert isinstance(restored.blocks, tuple)
+    assert restored == doc
+
+
+def test_legacy_envelope_without_blocks_reads_none(tmp_path: Path) -> None:
+    """Конверт без поля — «читатель блоков не даёт», а не «блоков нет»."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A))
+
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.blocks is None
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        "nope",  # не JSON
+        {"blocks": []},  # не список
+        [[0, 0, 5]],  # элемент — не объект
+        [{"block_id": "b0"}],  # нет обязательных полей
+        # Отрезок за текстом ("hello" — 5 символов): адрес блока был бы догадкой.
+        [
+            {
+                "block_id": "b0",
+                "kind": "page",
+                "char_start": 0,
+                "char_end": 99,
+                "order": 0,
+                "text_source": "read",
+            }
+        ],
+        # Неизвестное происхождение текста: ``read``/``reconstructed`` — закрытый список.
+        [
+            {
+                "block_id": "b0",
+                "kind": "page",
+                "char_start": 0,
+                "char_end": 5,
+                "order": 0,
+                "text_source": "guessed",
+            }
+        ],
+    ],
+)
+def test_corrupt_blocks_is_a_miss(tmp_path: Path, blocks: object) -> None:
+    """Порченые блоки не обслуживаются: пере-извлечение дешевле выдуманного адреса."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A), blocks=blocks)
+
+    assert cache.get(RAW_A, "ext-1", "full") is None
+    assert cache.stats()["corrupt"] == 1
