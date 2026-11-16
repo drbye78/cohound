@@ -1,0 +1,275 @@
+{
+ "instrument": "scripts/measure_page_ocr.py",
+ "runs": {
+  "o35_textpdf_layout_tables": {
+   "instrument": "scripts/measure_page_ocr.py",
+   "conditions": {
+    "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+    "level": "layout_tables",
+    "device": "cuda",
+    "pages": [
+     3,
+     10,
+     20
+    ]
+   },
+   "summary": {
+    "measured": 3,
+    "failed": 0,
+    "page_number_preserved": true,
+    "seconds": [
+     0.193,
+     0.15,
+     0.155
+    ],
+    "peak_rss_mb": [
+     2021.62890625,
+     2026.76953125,
+     2020.56640625
+    ]
+   },
+   "pages": [
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+     "page": 3,
+     "level": "layout_tables",
+     "device": "cuda",
+     "seconds": 0.193,
+     "warmup_seconds": 7.038,
+     "floor_rss_mb": 47.19921875,
+     "warm_floor_rss_mb": 1994.7265625,
+     "peak_rss_mb": 2021.62890625,
+     "chars": 17,
+     "tables": 0,
+     "prov_pages": [
+      3
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 12.234
+    },
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+     "page": 10,
+     "level": "layout_tables",
+     "device": "cuda",
+     "seconds": 0.15,
+     "warmup_seconds": 7.098,
+     "floor_rss_mb": 47.203125,
+     "warm_floor_rss_mb": 1994.70703125,
+     "peak_rss_mb": 2026.76953125,
+     "chars": 603,
+     "tables": 0,
+     "prov_pages": [
+      10
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 12.037
+    },
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+     "page": 20,
+     "level": "layout_tables",
+     "device": "cuda",
+     "seconds": 0.155,
+     "warmup_seconds": 6.96,
+     "floor_rss_mb": 47.1328125,
+     "warm_floor_rss_mb": 1994.64453125,
+     "peak_rss_mb": 2020.56640625,
+     "chars": 330,
+     "tables": 0,
+     "prov_pages": [
+      20
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 11.968
+    }
+   ]
+  },
+  "o35_textpdf_full": {
+   "instrument": "scripts/measure_page_ocr.py",
+   "conditions": {
+    "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+    "level": "full",
+    "device": "cuda",
+    "pages": [
+     3,
+     10,
+     20
+    ]
+   },
+   "summary": {
+    "measured": 3,
+    "failed": 0,
+    "page_number_preserved": true,
+    "seconds": [
+     1.433,
+     9.807,
+     8.881
+    ],
+    "peak_rss_mb": [
+     2821.1484375,
+     3095.8515625,
+     3286.9453125
+    ]
+   },
+   "pages": [
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+     "page": 3,
+     "level": "full",
+     "device": "cuda",
+     "seconds": 1.433,
+     "warmup_seconds": 7.117,
+     "floor_rss_mb": 47.08984375,
+     "warm_floor_rss_mb": 2355.8203125,
+     "peak_rss_mb": 2821.1484375,
+     "chars": 31,
+     "tables": 0,
+     "prov_pages": [
+      3
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 14.847
+    },
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+     "page": 10,
+     "level": "full",
+     "device": "cuda",
+     "seconds": 9.807,
+     "warmup_seconds": 7.581,
+     "floor_rss_mb": 47.29296875,
+     "warm_floor_rss_mb": 2350.2578125,
+     "peak_rss_mb": 3095.8515625,
+     "chars": 603,
+     "tables": 0,
+     "prov_pages": [
+      10
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 24.194
+    },
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/postgrespro/29ef4399d666c08529581d78e11d6c1aecb54a027256597b33737060aa153695.bin",
+     "page": 20,
+     "level": "full",
+     "device": "cuda",
+     "seconds": 8.881,
+     "warmup_seconds": 7.4,
+     "floor_rss_mb": 47.11328125,
+     "warm_floor_rss_mb": 2352.30078125,
+     "peak_rss_mb": 3286.9453125,
+     "chars": 330,
+     "tables": 0,
+     "prov_pages": [
+      20
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 22.983
+    }
+   ]
+  },
+  "o35_jatoba_full": {
+   "instrument": "scripts/measure_page_ocr.py",
+   "conditions": {
+    "pdf": "/home/roger/.cohound/data/corpus_raw/jatoba/98aa0699e7f7063cc7d028736e0ec9019ef45a918e12371c52133a731a71eb68.bin",
+    "level": "full",
+    "device": "cuda",
+    "pages": [
+     5,
+     40,
+     70
+    ]
+   },
+   "summary": {
+    "measured": 3,
+    "failed": 0,
+    "page_number_preserved": true,
+    "seconds": [
+     1.707,
+     5.192,
+     1.407
+    ],
+    "peak_rss_mb": [
+     2802.18359375,
+     2805.5390625,
+     2779.3515625
+    ]
+   },
+   "pages": [
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/jatoba/98aa0699e7f7063cc7d028736e0ec9019ef45a918e12371c52133a731a71eb68.bin",
+     "page": 5,
+     "level": "full",
+     "device": "cuda",
+     "seconds": 1.707,
+     "warmup_seconds": 8.121,
+     "floor_rss_mb": 47.1484375,
+     "warm_floor_rss_mb": 2300.796875,
+     "peak_rss_mb": 2802.18359375,
+     "chars": 2317,
+     "tables": 1,
+     "prov_pages": [
+      5
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 16.691
+    },
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/jatoba/98aa0699e7f7063cc7d028736e0ec9019ef45a918e12371c52133a731a71eb68.bin",
+     "page": 40,
+     "level": "full",
+     "device": "cuda",
+     "seconds": 5.192,
+     "warmup_seconds": 7.967,
+     "floor_rss_mb": 47.14453125,
+     "warm_floor_rss_mb": 2300.5859375,
+     "peak_rss_mb": 2805.5390625,
+     "chars": 519,
+     "tables": 0,
+     "prov_pages": [
+      40
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 19.575
+    },
+    {
+     "pdf": "/home/roger/.cohound/data/corpus_raw/jatoba/98aa0699e7f7063cc7d028736e0ec9019ef45a918e12371c52133a731a71eb68.bin",
+     "page": 70,
+     "level": "full",
+     "device": "cuda",
+     "seconds": 1.407,
+     "warmup_seconds": 7.686,
+     "floor_rss_mb": 47.1328125,
+     "warm_floor_rss_mb": 2289.375,
+     "peak_rss_mb": 2779.3515625,
+     "chars": 2095,
+     "tables": 1,
+     "prov_pages": [
+      70
+     ],
+     "page_number_preserved": true,
+     "pages_in_result": 1,
+     "error": null,
+     "wall_seconds": 15.163
+    }
+   ]
+  }
+ }
+}
