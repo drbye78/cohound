@@ -119,7 +119,7 @@ CLI эксперимента. Отказ — `EmbedderBuildMismatch` (`EXIT_USAG
 или `read_manifest` (`core/util/index_partition.py:97-103`), и это надо назвать в сигнатуре
 проверки, а не доставать из глобального состояния. (2) Все четыре вызова
 `precompute_query_vectors`/`precompute_dense_hits`/`retrieve_for_cell` завёрнуты в
-`except Exception` с деградацией к поштучному пути (`evaluate.py:4041,4209,5057,5081`), а
+`except Exception` с деградацией к поштучному пути (`evaluate.py:4066,4234,5082,5106`), а
 `EmbedderBuildMismatch` — наследник `ValueError`; брошенный **внутри** он молча станет
 строкой в `errors`. Проверка ставится до этих `try` (или `except EmbedderBuildMismatch:
 raise` первой ветвью). Гард действует только для `R1`/`R2`: на `R0` эмбеддер не нужен, и
@@ -150,12 +150,12 @@ max_queries, cross_query_fusion}`; `plan` печатает их.
 **Что здесь объявляется, а что настраивается (проверено 09.11.2026).** `pool_multiplier` и
 `cross_query_fusion` в коде **не существуют** как параметры: пул сегодня — это `cutoff_K` у
 обоих плеч (множитель фактически `1`), а кросс-запросное слияние — inline-цикл union+`max`
-(`evaluate.py:1205-1210`). Пункт объявляет **исполняемое** (`1` и `"max"` — значения, а не
+(`evaluate.py:1211-1216`). Пункт объявляет **исполняемое** (`1` и `"max"` — значения, а не
 умолчания), а настраиваемость — это O12/O13 и только после числа: флаг, введённый сейчас,
 был бы осью без эффекта. `rrf_k` = `DEFAULT_RRF_K = 60` (`retrieve.py:133`), `max_queries` =
 `MAX_QUERIES = 3` (`retrieve.py:138`), `cutoff_K` — объявленный вход (может быть `None`).
 **Ловушка (закрыта реализацией O2).** `retry` восстанавливает условие через `_cell_condition`
-(`evaluate.py:4677-4704`); пока тот читал из JSON только `cutoff_K`, положенный в поле `rrf_k`
+(`evaluate.py:4702-4729`); пока тот читал из JSON только `cutoff_K`, положенный в поле `rrf_k`
 не исполнялся бы повтором — ложный провенанс повтора (всегда 60). Теперь `rrf_k` читается из
 `retrieval_params_json` и уходит в `retrieve_for_cell`, а ячейка без поля получает
 `DEFAULT_RRF_K` — то, что исполнялось тогда.
@@ -1459,7 +1459,7 @@ forbidden_hits=['Catalog']`; пустой текст → `chars=0`; скан б�
 `write_reports` новый источник: `store.iter_chunks(build_id, product_id=None)`
 (`core/ports/store.py:722-742`) + резолв `cb_`→`pb_` через `iter_index_manifest` — без него
 агрегат молча даст ноль на реальном прогоне (та же ловушка id-пространств, что в
-`evaluate.py:4837-4883`). Порог и формула — из харнесса: `HEADING_CHAR_BUCKETS = (200, 500)`,
+`evaluate.py:4862-4908`). Порог и формула — из харнесса: `HEADING_CHAR_BUCKETS = (200, 500)`,
 `CONTEXT_SHARE_LIMIT = 0.25` (`scripts/measure_md_chunking.py:312-317`).
 
 **Сделано 09.11.2026.** `core/pipeline/heading_anomalies.py`: `heading_anomaly_summary`
