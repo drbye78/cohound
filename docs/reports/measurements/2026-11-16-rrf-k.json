@@ -1,0 +1,241 @@
+{
+ "instrument": "scripts/measure_retrieval_docs.py",
+ "date": "2026-11-16",
+ "plan_item": "D4 (остаток: RRF-константа плеч R2)",
+ "conditions": {
+  "schema_version_of_file": "3.20.0",
+  "index_build_id": "cb_5c090025af68b95615c87869",
+  "cutoff_k": 10,
+  "rrf_k": [
+   10,
+   20,
+   40,
+   60,
+   100,
+   200
+  ],
+  "lexical_profile": "stemmed",
+  "embed_spec": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+  "index_embed_model_id": "BAAI/bge-m3",
+  "dim": 1024,
+  "profiles": [
+   "R0",
+   "R2"
+  ],
+  "pool_multipliers": [
+   1
+  ],
+  "cross_query_fusions": [
+   "max"
+  ],
+  "grid": [
+   "R0/fusion=max",
+   "R2/pool=1/rrf=10/fusion=max",
+   "R2/pool=1/rrf=20/fusion=max",
+   "R2/pool=1/rrf=40/fusion=max",
+   "R2/pool=1/fusion=max",
+   "R2/pool=1/rrf=100/fusion=max",
+   "R2/pool=1/rrf=200/fusion=max"
+  ],
+  "bootstrap": 1000,
+  "seed": 0,
+  "cells_in_golden": 132,
+  "limit_cells": 0,
+  "chunks_in_index": 253306,
+  "docs_in_corpus": 19324,
+  "wiring_notices": [
+   "embed.precision=fp16: LiteEmbedder исключён — он NumPy/CPU by design и объявленную точность исполнить не может; выбран LocalEmbedder (BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181) с torch.autocast"
+  ]
+ },
+ "baseline": "rrf_k=60 (DEFAULT_RRF_K)",
+ "runs": [
+  {
+   "rrf_k": 10,
+   "hit_at_k": 0.21212121212121213,
+   "hit_ci": [
+    0.14393939393939395,
+    0.28049242424242404
+   ],
+   "mrr": 0.11231060606060606,
+   "ndcg_at_k": 0.1363002907066871,
+   "paired_vs_60": {
+    "delta_hit": 0.0,
+    "better": 0,
+    "worse": 0,
+    "mcnemar_p": 1.0,
+    "delta_hit_ci": [
+     0.0,
+     0.0
+    ],
+    "delta_mrr": -0.002525252525252525,
+    "delta_mrr_ci": [
+     -0.006944444444444444,
+     0.0
+    ],
+    "cells_mrr_better": 0,
+    "cells_mrr_worse": 2,
+    "same_top10_composition": 132,
+    "same_top10_order": 121
+   }
+  },
+  {
+   "rrf_k": 20,
+   "hit_at_k": 0.21212121212121213,
+   "hit_ci": [
+    0.14393939393939395,
+    0.28049242424242404
+   ],
+   "mrr": 0.11357323232323233,
+   "ndcg_at_k": 0.1373506458873933,
+   "paired_vs_60": {
+    "delta_hit": 0.0,
+    "better": 0,
+    "worse": 0,
+    "mcnemar_p": 1.0,
+    "delta_hit_ci": [
+     0.0,
+     0.0
+    ],
+    "delta_mrr": -0.0012626262626262627,
+    "delta_mrr_ci": [
+     -0.003787878787878788,
+     0.0
+    ],
+    "cells_mrr_better": 0,
+    "cells_mrr_worse": 1,
+    "same_top10_composition": 132,
+    "same_top10_order": 126
+   }
+  },
+  {
+   "rrf_k": 40,
+   "hit_at_k": 0.21212121212121213,
+   "hit_ci": [
+    0.14393939393939395,
+    0.28049242424242404
+   ],
+   "mrr": 0.11483585858585858,
+   "ndcg_at_k": 0.13834253795990434,
+   "paired_vs_60": {
+    "delta_hit": 0.0,
+    "better": 0,
+    "worse": 0,
+    "mcnemar_p": 1.0,
+    "delta_hit_ci": [
+     0.0,
+     0.0
+    ],
+    "delta_mrr": 0.0,
+    "delta_mrr_ci": [
+     0.0,
+     0.0
+    ],
+    "cells_mrr_better": 0,
+    "cells_mrr_worse": 0,
+    "same_top10_composition": 132,
+    "same_top10_order": 132
+   }
+  },
+  {
+   "rrf_k": 60,
+   "hit_at_k": 0.21212121212121213,
+   "hit_ci": [
+    0.14393939393939395,
+    0.28049242424242404
+   ],
+   "mrr": 0.11483585858585858,
+   "ndcg_at_k": 0.13834253795990434,
+   "paired_vs_60": {
+    "delta_hit": 0.0,
+    "better": 0,
+    "worse": 0,
+    "mcnemar_p": 1.0,
+    "delta_hit_ci": [
+     0.0,
+     0.0
+    ],
+    "delta_mrr": 0.0,
+    "delta_mrr_ci": [
+     0.0,
+     0.0
+    ],
+    "cells_mrr_better": 0,
+    "cells_mrr_worse": 0,
+    "same_top10_composition": 132,
+    "same_top10_order": 132
+   }
+  },
+  {
+   "rrf_k": 100,
+   "hit_at_k": 0.21212121212121213,
+   "hit_ci": [
+    0.14393939393939395,
+    0.28049242424242404
+   ],
+   "mrr": 0.11483585858585858,
+   "ndcg_at_k": 0.13834253795990434,
+   "paired_vs_60": {
+    "delta_hit": 0.0,
+    "better": 0,
+    "worse": 0,
+    "mcnemar_p": 1.0,
+    "delta_hit_ci": [
+     0.0,
+     0.0
+    ],
+    "delta_mrr": 0.0,
+    "delta_mrr_ci": [
+     0.0,
+     0.0
+    ],
+    "cells_mrr_better": 0,
+    "cells_mrr_worse": 0,
+    "same_top10_composition": 132,
+    "same_top10_order": 132
+   }
+  },
+  {
+   "rrf_k": 200,
+   "hit_at_k": 0.21212121212121213,
+   "hit_ci": [
+    0.14393939393939395,
+    0.28049242424242404
+   ],
+   "mrr": 0.11483585858585858,
+   "ndcg_at_k": 0.13834253795990434,
+   "paired_vs_60": {
+    "delta_hit": 0.0,
+    "better": 0,
+    "worse": 0,
+    "mcnemar_p": 1.0,
+    "delta_hit_ci": [
+     0.0,
+     0.0
+    ],
+    "delta_mrr": 0.0,
+    "delta_mrr_ci": [
+     0.0,
+     0.0
+    ],
+    "cells_mrr_better": 0,
+    "cells_mrr_worse": 0,
+    "same_top10_composition": 132,
+    "same_top10_order": 132
+   }
+  }
+ ],
+ "reference_r0": {
+  "hit_at_k": 0.25757575757575757,
+  "hit_ci": [
+   0.18181818181818182,
+   0.3333333333333333
+  ],
+  "mrr": 0.12058982683982684,
+  "ndcg_at_k": 0.15309391471417175
+ },
+ "notes": [
+  "hit@10 тождественен при всех константах: 0 из 132 ячеек различимы по rank",
+  "состав top-10 одинаков во всех 132 ячейках; порядок различается в 11 при rrf_k=10 против 60",
+  "цена: лексический индекс 29.1 с, R0 0.8 с, каждая R2-комбинация 0.7-4.8 с (первая холоднее)"
+ ]
+}

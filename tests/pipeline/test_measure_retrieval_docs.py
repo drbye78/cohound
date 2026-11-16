@@ -300,7 +300,8 @@ def test_scalar_arguments_keep_previous_behaviour() -> None:
     """Скаляры (дефолты) дают ту же сетку, что до появления списков.
 
     Четвёртый элемент кортежа — глубина запроса: ``None`` — не объявлена (равна
-    ``cutoff_k``), поэтому метки и исполнение прежние.
+    ``cutoff_k``); пятый — RRF-константа: ``60`` — исполненный дефолт. Поэтому метки и
+    исполнение прежние.
     """
     assert HARNESS._resolve_pool_multipliers(1, None) == (1,)
     assert HARNESS._resolve_cross_query_fusions("max", None) == ("max",)
@@ -310,9 +311,9 @@ def test_scalar_arguments_keep_previous_behaviour() -> None:
         HARNESS._resolve_pool_multipliers(1, None),
     )
     assert grid == [
-        ("R0", 1, "max", None),
-        ("R1", 1, "max", None),
-        ("R2", 1, "max", None),
+        ("R0", 1, "max", None, 60),
+        ("R1", 1, "max", None, 60),
+        ("R2", 1, "max", None, 60),
     ]
     assert [HARNESS._combination_label(*item) for item in grid] == [
         "R0/fusion=max",
@@ -1221,3 +1222,64 @@ def test_dense_hits_cache_is_keyed_by_profile() -> None:
     # Повтор R1 берёт готовое, а не спрашивает порт заново.
     dense("R1")
     assert index.windows == [10] * len(texts)
+
+
+# ------------------------------------------------- RRF-константа плеч R2 (D4)
+
+
+def test_rrf_ks_default_is_the_executed_constant() -> None:
+    """Без флага сетка не размножается: константа одна и она — исполненный дефолт."""
+    assert HARNESS._resolve_rrf_ks(None) == (60,)
+
+
+def test_rrf_ks_expand_only_r2() -> None:
+    """Константа — форма слияния R2: у R0/R1 её нет в исполнении, дублей быть не должно."""
+    grid = HARNESS._measurement_grid(["R0", "R2"], ["rrf"], [1, 2], (None,), (10, 60))
+    assert len(grid) == 1 + 2 * 2
+    assert {item[4] for item in grid if item[0] == "R0"} == {10}
+    assert {item[4] for item in grid if item[0] == "R2"} == {10, 60}
+    labels = [HARNESS._combination_label(*item) for item in grid]
+    # Дефолтная константа метку не меняет — иначе поехали бы числа O12/O13.
+    assert "R2/pool=1/rrf=10/fusion=rrf" in labels
+    assert "R2/pool=1/fusion=rrf" in labels
+    assert len(set(labels)) == len(labels)
+
+
+def test_rrf_ks_reject_zero_and_garbage() -> None:
+    """``0`` — другая формула (без сглаживания), а не «маленькая константа»."""
+    for bad in ("0", "-5", "x"):
+        with pytest.raises(SystemExit):
+            HARNESS._resolve_rrf_ks(bad)
+    # Пустой элемент не отказ: ``_split_csv`` выбрасывает пустые — так же ведёт себя
+    # резолвер пула, и расходиться с ним в двух соседних флагах незачем.
+    assert HARNESS._resolve_rrf_ks("10,,20") == (10, 20)
+
+
+def test_report_payload_has_no_rrf_field_unless_declared() -> None:
+    """Флаг не задан ⇒ поля нет: отчёт без флагов остаётся прежним до байта."""
+    from core.pipeline.retrieval_docs import DocQueryResult, evaluate_documents
+
+    results = [
+        DocQueryResult(
+            cell=f"{PRODUCT}/a",
+            product_id=PRODUCT,
+            param_id="a",
+            expected_doc_ids=("d1",),
+            retrieved_doc_ids=("d1",),
+            rank=1,
+            unresolved=False,
+        )
+    ]
+    report = evaluate_documents(results, profile="R2", k=5, bootstrap=1, seed=0)
+    payload = HARNESS._report_payload(
+        report, label="R2/pool=1/fusion=rrf", pool_multiplier=1, cross_query_fusion="rrf"
+    )
+    assert "rrf_k" not in payload
+    declared = HARNESS._report_payload(
+        report,
+        label="R2/pool=1/rrf=10/fusion=rrf",
+        pool_multiplier=1,
+        cross_query_fusion="rrf",
+        rrf_k=10,
+    )
+    assert declared["rrf_k"] == 10

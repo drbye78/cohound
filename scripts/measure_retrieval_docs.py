@@ -357,30 +357,68 @@ def _resolve_query_depths(listed: str | None, cutoff_k: int) -> tuple[int | None
     return tuple(values)
 
 
+def _resolve_rrf_ks(listed: str | None) -> tuple[int, ...]:
+    """Сетка RRF-константы через запятую; ``None`` — исполненный дефолт.
+
+    Константа входит в ``retrieval_params_json`` (S1), но объявлена **в коде**
+    (``DEFAULT_RRF_K = 60``), а не в пакете: это форма слияния, а не свойство категории.
+    Поэтому «какая константа лучше» — вопрос замера, а не настройки, и мерить его надо
+    сеткой, а не правкой константы между прогонами: правка между прогонами сравнивала бы
+    два прогона вместо двух комбинаций одной сетки.
+
+    ``0`` отвергается: ``1/(0 + rank)`` при ``rank = 1`` даёт ``1.0`` и делает слияние
+    суммой обратных рангов без сглаживания — это не «очень маленькая константа», а другая
+    формула, и пусть она называется своим именем, если понадобится.
+    """
+    if listed is None:
+        return (_rrf_k(),)
+    values: list[int] = []
+    for item in _split_csv(listed):
+        try:
+            value = int(item)
+        except ValueError as exc:
+            raise SystemExit(f"measure: --rrf-ks: {item!r} — не целое число") from exc
+        if value < 1:
+            raise SystemExit(
+                f"measure: --rrf-ks: {value} < 1 "
+                "(RRF-константа; 0 — это уже другая формула, без сглаживания)"
+            )
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise SystemExit("measure: --rrf-ks пуст")
+    return tuple(values)
+
+
 def _measurement_grid(
     profiles: Sequence[str],
     fusions: Sequence[str],
     pool_multipliers: Sequence[int],
     query_depths: Sequence[int | None] = (None,),
-) -> list[tuple[str, int, str, int | None]]:
-    """Комбинации сетки: ``(профиль, множитель пула, политика слияния, глубина)``.
+    rrf_ks: Sequence[int] | None = None,
+) -> list[tuple[str, int, str, int | None, int]]:
+    """Комбинации сетки: ``(профиль, пул, слияние, глубина, RRF-константа)``.
 
-    Пул участвует только у ``R2``: у ``R0``/``R1`` его нет в исполнении, и лишние
-    комбинации мерили бы одно и то же под разными метками. У ``R0``/``R1`` множитель
-    остаётся ``1`` — как дефолт, а не как объявленное условие. Глубина — общая для всех
-    профилей ось (её исполняет :func:`core.pipeline.retrieve.retrieve`), ``None`` —
-    прежняя сетка без третьего измерения.
+    Пул и константа участвуют только у ``R2``: у ``R0``/``R1`` их нет в исполнении, и
+    лишние комбинации мерили бы одно и то же под разными метками. У ``R0``/``R1``
+    множитель остаётся ``1``, а константа — исполненный дефолт: это не объявленные
+    условия, а значения, которые код и так подставит. Глубина — общая для всех профилей
+    ось (её исполняет :func:`core.pipeline.retrieve.retrieve`), ``None`` — сетка без
+    третьего измерения.
     """
-    grid: list[tuple[str, int, str, int | None]] = []
+    constants = tuple(rrf_ks) if rrf_ks is not None else (_rrf_k(),)
+    grid: list[tuple[str, int, str, int | None, int]] = []
     for profile in profiles:
         for fusion in fusions:
             for depth in query_depths:
                 if profile == "R2":
                     grid.extend(
-                        (profile, pool, fusion, depth) for pool in pool_multipliers
+                        (profile, pool, fusion, depth, constant)
+                        for pool in pool_multipliers
+                        for constant in constants
                     )
                 else:
-                    grid.append((profile, 1, fusion, depth))
+                    grid.append((profile, 1, fusion, depth, constants[0]))
     return grid
 
 
@@ -389,6 +427,7 @@ def _combination_label(
     pool_multiplier: int,
     fusion: str,
     query_depth: int | None = None,
+    rrf_k: int | None = None,
     *,
     cutoff_k: int | None = None,
 ) -> str:
@@ -399,6 +438,10 @@ def _combination_label(
     иначе поехали бы метки уже опубликованных чисел O14/O15.
     """
     label = f"{profile}/pool={pool_multiplier}" if profile == "R2" else profile
+    if profile == "R2" and rrf_k is not None and rrf_k != _rrf_k():
+        # Константа в метке — только когда она **не** исполненный дефолт: иначе метки
+        # опубликованных чисел O12/O13 поехали бы на пустом месте.
+        label = f"{label}/rrf={rrf_k}"
     if query_depth is not None and query_depth != cutoff_k:
         label = f"{label}/depth={query_depth}"
     return f"{label}/fusion={fusion}"
@@ -473,6 +516,7 @@ def _retrieve_cells(
     chunk_doc: dict[str, str],
     dense_cache: dict[tuple[str, str, int, int | None], Any] | None = None,
     query_depth: int | None = None,
+    rrf_k: int | None = None,
 ) -> tuple[dict[str, tuple[str, ...]], int]:
     """Ретривал **один раз** на ячейку: ``cell → doc_id top-K`` и чанки без документа.
 
@@ -527,6 +571,9 @@ def _retrieve_cells(
             pool_multiplier=pool_multiplier,
             cross_query_fusion=cross_query_fusion,
             query_depth=query_depth,
+            # ``None`` — исполненный дефолт: передавать его числом незачем, но и
+            # угадывать здесь нельзя — константа приходит из сетки (``--rrf-ks``).
+            **({"rrf_k": rrf_k} if rrf_k is not None else {}),
         )
         # ``per_query`` намеренно отдаёт больше ``cutoff_k`` чанков («сколько бы нашли,
         # если бы не резали»). Документные метрики смотрят **срез** ``cutoff_k``: иначе
@@ -606,6 +653,7 @@ def _measure_combination(
     dense_cache: dict[tuple[str, str, int, int | None], Any] | None = None,
     answer_sets: Any = None,
     query_depth: int | None = None,
+    rrf_k: int | None = None,
 ) -> dict[str, Any]:
     """Одна комбинация сетки: **один** ретривал, затем метрики по обоим семействам.
 
@@ -638,6 +686,7 @@ def _measure_combination(
         chunk_doc=chunk_doc,
         dense_cache=dense_cache,
         query_depth=query_depth,
+        rrf_k=rrf_k,
     )
     address_results = _doc_results(
         entries,
@@ -771,6 +820,7 @@ def _report_payload(
     sensitivity_by_cell: Mapping[str, Sequence[str]] | None = None,
     query_depth: int | None = None,
     cost: Mapping[str, Any] | None = None,
+    rrf_k: int | None = None,
 ) -> dict[str, Any]:
     """Отчёт комбинации как JSON: числа + по-ячеечная расшифровка (читается глазами).
 
@@ -859,6 +909,10 @@ def _report_payload(
         )
         for cell in report.per_cell
     ]
+    if rrf_k is not None:
+        # Только объявленная константа: без флага отчёт обязан остаться прежним до байта
+        # (на нём стоят числа O12/O13/O14), поэтому и здесь — по тому же правилу.
+        payload["rrf_k"] = rrf_k
     if cost is not None:
         # Цена публикуется только по флагу — тем же правилом, что ``query_depth`` и
         # ``answer_sets``: без флага отчёт обязан остаться прежним до байта, иначе
@@ -1016,6 +1070,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help="множители пула R2 через запятую (например 1,2,4,8); перекрывает "
         "--pool-multiplier. Применяется только к R2",
+    )
+    parser.add_argument(
+        "--rrf-ks",
+        default=None,
+        help="RRF-константы через запятую (например 10,60,120); применяется только к R2. "
+        "Без флага — исполненный дефолт кода (DEFAULT_RRF_K)",
     )
     parser.add_argument(
         "--cross-query-fusion",
@@ -1176,11 +1236,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fusion_scalar, args.cross_query_fusions
             )
             query_depths = _resolve_query_depths(args.query_depths, cutoff_k)
+            rrf_ks = _resolve_rrf_ks(args.rrf_ks)
         except SystemExit as exc:
             print(str(exc), file=sys.stderr)
             return 2
         grid = _measurement_grid(
-            profiles, cross_query_fusions, pool_multipliers, query_depths
+            profiles, cross_query_fusions, pool_multipliers, query_depths, rrf_ks
         )
 
         missing_params = [entry.cell for entry in entries if entry.param_id not in params]
@@ -1302,13 +1363,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         # комбинации с другим (иначе ``pool=8`` померил бы пул 1). Пул в ключе делает
         # переиспользование внутри сетки безопасным и при этом дешёвым.
         dense_cache: dict[tuple[str, str, int, int | None], Any] = {}
-        for profile, pool_multiplier, cross_query_fusion, query_depth in grid:
+        for profile, pool_multiplier, cross_query_fusion, query_depth, rrf_k in grid:
             label = _combination_label(
                 profile,
                 pool_multiplier,
                 cross_query_fusion,
                 query_depth,
                 cutoff_k=cutoff_k,
+                rrf_k=rrf_k,
             )
             combination_started = time.perf_counter()
             memory_before = _memory_state()
@@ -1330,6 +1392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dense_cache=dense_cache,
                 answer_sets=answer_sets,
                 query_depth=query_depth,
+                rrf_k=rrf_k if profile == "R2" else None,
             )
             timings[f"{label}_seconds"] = round(
                 time.perf_counter() - combination_started, 2
@@ -1358,6 +1421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sensitivity_by_cell=measured["sensitivity_expected"],
                     query_depth=query_depth,
                     cost=cost,
+                    rrf_k=rrf_k if profile == "R2" else None,
                 )
             )
 
@@ -1368,7 +1432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "schema_version_of_file": meta.schema_version,
                 "index_build_id": meta.build_id,
                 "cutoff_k": cutoff_k,
-                "rrf_k": _rrf_k(),
+                "rrf_k": list(rrf_ks) if args.rrf_ks is not None else _rrf_k(),
                 "lexical_profile": deploy.lexical.profile,
                 "embed_spec": getattr(embedder, "model_id", None),
                 "index_embed_model_id": index_embed_model,
