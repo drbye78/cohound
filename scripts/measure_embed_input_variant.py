@@ -31,12 +31,27 @@
 документов, а не доказательства — это предмет O15/O18), поведение на других продуктах
 (``--product`` называет один; число принадлежит ему).
 
+**Режим питания — объявленный вход, а не вывод из признаков.** Скорость на этом хосте
+зависит от питания (USB-C против комплектного БП), а программно отличить одно от другого
+нельзя: ``power.limit`` у мобильной карты отдаётся как ``[N/A]``, ``cpufreq`` в WSL2 не
+проброшен, ``BAT1 power_now`` = 0. Поэтому режим **объявляет оператор** (``--power-mode``) и
+он попадает в отчёт **как есть**: прибор не нормализует значение и не угадывает режим по
+признакам. Наблюдённое (``ac_online``, ``battery_status``, частота/потребление/температура
+карты, счётчик ``SW Power Capping`` в микросекундах) публикуется рядом как **контроль**, а
+не как источник режима: ``battery_status == "Discharging"`` не переписывает объявленное
+значение и не трогает числа — расхождение объявленного с наблюдённым читает человек.
+Счётчик троттлинга публикуется **парой «до/после»** и не сворачивается в разницу: разница
+теряет факт «до тоже был не ноль», то есть что карта была ограничена ещё до замера.
+``unknown`` (дефолт) печатается явно: отсутствие факта должно быть видно, а не выглядеть
+как «всё в порядке».
+
 Запуск::
 
     .venv/bin/python scripts/measure_embed_input_variant.py \
       --db ~/.cohound/stands/ru-pg-dbms/runs/ru-pg-dbms-145ad66ca3f9/cohound.db \
       --golden packages/ru-pg-dbms/sources/retrieval_golden_docs.json \
-      --product postgrespro --variants text,heading --out-json /tmp/opencode/o19.json
+      --product postgrespro --variants text,heading --power-mode ac-barrel \
+      --out-json /tmp/opencode/o19.json
 
 Нейтрален (§1.3): продукт и эталон — аргументы, а не константы.
 """
@@ -46,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -66,6 +82,24 @@ VARIANTS: dict[str, tuple[str, ...]] = {
     "heading": ("heading_path", "text"),
     "heading+context": ("heading_path", "context_prefix", "text"),
 }
+
+#: Режим питания по умолчанию: «оператор не объявил». Печатается явно — отсутствие факта
+#: не должно выглядеть как «всё в порядке» (см. docstring прибора).
+DEFAULT_POWER_MODE = "unknown"
+
+#: Прокси-признаки питания: то, что на этом хосте вообще наблюдаемо (WSL2, мобильная карта).
+#: Объявленный режим отсюда **не выводится** — это контроль, а не источник.
+AC_ONLINE_PATH = Path("/sys/class/power_supply/AC1/online")
+BATTERY_STATUS_PATH = Path("/sys/class/power_supply/BAT1/status")
+NVIDIA_SMI = "nvidia-smi"
+
+#: Поля снимка карты: ``None`` — не измерено (не «ноль»).
+GPU_FIELDS: tuple[str, ...] = (
+    "sm_clock_mhz",
+    "power_draw_w",
+    "temperature_c",
+    "sw_power_cap_us",
+)
 
 
 @dataclass(frozen=True)
@@ -135,6 +169,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--cache-dir",
         default="",
         help="каталог embed_cache (пусто — COHOUND_HOME/embed_cache, если он есть)",
+    )
+    parser.add_argument(
+        "--power-mode",
+        default=DEFAULT_POWER_MODE,
+        help=(
+            "объявленный оператором режим питания (ac-barrel/ac-usbc/battery/…): попадает "
+            "в отчёт как есть, прибор его не выводит из признаков"
+        ),
     )
     parser.add_argument("--out-json", metavar="PATH", help="машинный отчёт")
     parser.add_argument(
@@ -494,6 +536,163 @@ def _load_average() -> list[float] | None:
         return None
 
 
+def _read_text(path: Path) -> str | None:
+    """Содержимое sysfs-файла; ``None`` — файла нет или он не читается.
+
+    Не исключение и не ``0``: «счётчика нет» и «счётчик показал ноль» — разные факты, а
+    прибор обязан различать их так же, как ``None`` и ``0`` в остальных полях отчёта.
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _ac_online() -> bool | None:
+    """``AC1/online``: питание от сети. ``None`` — файла нет или значение не 0/1."""
+    raw = _read_text(AC_ONLINE_PATH)
+    if raw in {"0", "1"}:
+        return raw == "1"
+    return None
+
+
+def _battery_status() -> str | None:
+    """``BAT1/status`` как есть (``Charging``/``Discharging``/…); ``None`` — не читается."""
+    return _read_text(BATTERY_STATUS_PATH) or None
+
+
+def _nvidia_smi(args: Sequence[str], *, timeout_s: float = 5.0) -> str | None:
+    """Вывод ``nvidia-smi``; ``None`` — команды нет, карты нет, отказ или таймаут.
+
+    Отказ инструмента — это не факт о железе: ``None``, а не исключение и не ``0``. Таймаут
+    короткий намеренно: опрос карты не имеет права задерживать замер.
+    """
+    try:
+        completed = subprocess.run(
+            [NVIDIA_SMI, *args],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=timeout_s,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _as_int(raw: str) -> int | None:
+    """Целое из поля вывода; ``[N/A]``/пусто/мусор — ``None``, а не ``0``."""
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(raw: str) -> float | None:
+    """Дробное из поля вывода; ``[N/A]``/пусто/мусор — ``None``, а не ``0.0``."""
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gpu_fields_none() -> dict[str, Any]:
+    """Снимок карты «не измерено»: ключи обязаны быть в отчёте и тогда, когда их нет.
+
+    Поле, которое «иногда есть», иначе не отличить от «не измеряли» при разборе старых
+    артефактов.
+    """
+    return dict.fromkeys(GPU_FIELDS)
+
+
+def _parse_gpu_metrics(text: str) -> dict[str, Any]:
+    """Строка ``--query-gpu=clocks.sm,power.draw,temperature.gpu`` → поля снимка.
+
+    ``[N/A]`` у мобильной карты даёт ``None``, а не ``0``: «карта не отдаёт потребление» —
+    это не «потребление ноль».
+    """
+    metrics = _gpu_fields_none()
+    line = next((item for item in text.splitlines() if item.strip()), "")
+    parts = [part.strip() for part in line.split(",")]
+    if len(parts) != 3:
+        return metrics
+    metrics["sm_clock_mhz"] = _as_int(parts[0])
+    metrics["power_draw_w"] = _as_float(parts[1])
+    metrics["temperature_c"] = _as_int(parts[2])
+    return metrics
+
+
+def _parse_sw_power_cap_us(text: str) -> int | None:
+    """Счётчик ``SW Power Capping`` из ``nvidia-smi -q -d PERFORMANCE``, микросекунды.
+
+    Берётся именно **счётчик** (секция ``Clocks Event Reasons Counters``), а не флаг
+    ``SW Power Cap: Active``: флаг говорит «ограничена сейчас», счётчик — «за время замера
+    карта была ограничена по питанию столько-то микросекунд». Строки нет — ``None``;
+    ``0 us`` — измеренный ноль, и он остаётся нулём.
+    """
+    for line in text.splitlines():
+        label, sep, value = line.partition(":")
+        if not sep or not label.strip().lower().startswith("sw power cap"):
+            continue
+        value = value.strip()
+        if not value.endswith("us"):
+            continue  # «Active»/«Not Active» — флаг, а не счётчик
+        return _as_int(value[: -len("us")].strip())
+    return None
+
+
+def _power_snapshot(*, with_gpu: bool) -> dict[str, Any]:
+    """Прокси-признаки питания на момент вызова: **контроль**, а не источник режима.
+
+    Снимается в окне замера, а не «на момент старта»: карта и питание меняются по ходу
+    прогона, и признак, взятый один раз в начале, описывал бы другое окно. ``with_gpu``
+    включается только объявленным ``cuda`` — при ``cpu`` карта не опрашивается вовсе, и
+    поля остаются ``None`` (не измерено), а не нулями.
+
+    Режим питания из этих признаков **не выводится**: объявленное (``--power-mode``) и
+    наблюдённое живут раздельно, расхождение между ними — повод для человека.
+    """
+    snapshot: dict[str, Any] = {
+        "ac_online": _ac_online(),
+        "battery_status": _battery_status(),
+    }
+    if not with_gpu:
+        snapshot.update(_gpu_fields_none())
+        return snapshot
+    metrics = _nvidia_smi(
+        ["--query-gpu=clocks.sm,power.draw,temperature.gpu", "--format=csv,noheader,nounits"]
+    )
+    snapshot.update(_parse_gpu_metrics(metrics) if metrics is not None else _gpu_fields_none())
+    counters = _nvidia_smi(["-q", "-d", "PERFORMANCE"])
+    snapshot["sw_power_cap_us"] = (
+        _parse_sw_power_cap_us(counters) if counters is not None else None
+    )
+    return snapshot
+
+
+def _declared_power_mode(args: argparse.Namespace) -> str:
+    """Объявленный режим питания — **только** из аргумента оператора.
+
+    Отдельная функция ради проверяемости: режим нельзя вывести из наблюдённых признаков
+    (``_ac_online``/``_battery_status``/снимок карты), потому что USB-C и комплектный БП
+    на этом хосте неразличимы, а «угаданный» режим в отчёте — это ложь о условии замера.
+    Признаки публикуются рядом как контроль; расхождение читает человек.
+    """
+    return str(args.power_mode)
+
+
+def _power_window(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Окно варианта: снимки «до» и «после» рядом, **без производных**.
+
+    Разница ``after − before`` здесь намеренно не публикуется: она теряет факт «до тоже
+    был не ноль», то есть что карта была ограничена по питанию ещё до замера. Читатель
+    видит оба абсолютных значения и решает сам.
+    """
+    return {"before": dict(before), "after": dict(after)}
+
+
 def _peak_vram_bytes() -> int | None:
     """Пик VRAM в окне замера; ``None`` — счёт невозможен (нет cuda/torch)."""
     try:
@@ -674,6 +873,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     batch_size = args.batch_size or EMBED_BATCH_CHUNKS
 
+    # Карта опрашивается только при объявленном ``cuda``: при ``cpu`` признаки карты к
+    # числу не относятся, и ``None`` там честнее нулей. Объявленный режим питания
+    # (``args.power_mode``) сюда не входит — он публикуется как есть, без вывода.
+    with_gpu = str(deploy.embed.device) == "cuda"
+
     # Векторы запросов считаются **один раз** и не зависят от варианта: ось меняет вход
     # документов, а не запросов. Иначе разница включала бы разницу в запросе.
     from core.pipeline.evaluate import precompute_query_vectors
@@ -692,6 +896,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     reports: list[dict[str, Any]] = []
     cells_by_variant: dict[str, list[dict[str, Any]]] = {}
+    # Снимок «до» первого варианта; дальше «после» предыдущего = «до» следующего, поэтому
+    # окна стыкуются и ни одно не остаётся без границы.
+    power_before = _power_snapshot(with_gpu=with_gpu)
     for name in variants:
         fields = VARIANTS[name]
         if name == variants[0] and baseline_matrix is not None:
@@ -726,11 +933,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             chunk_doc=chunk_doc,
             doc_ids=doc_ids,
         )
+        power_after = _power_snapshot(with_gpu=with_gpu)
         reports.append(
             {
                 "variant": name,
                 "fields": list(fields),
                 **_condition_fields(stats),
+                "power": _power_window(power_before, power_after),
                 "metrics": {
                     "hit_at_k": report.hit_at_k,
                     "recall_at_k": report.recall_at_k,
@@ -742,6 +951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
             }
         )
+        power_before = power_after
         cells_by_variant[name] = per_cell
         # Индекс отпускается до следующего варианта: две float32-матрицы рядом — это
         # второй пик RSS (847 MB на корпусе 207k×1024) там, где нужен один.
@@ -771,6 +981,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "embed_device": str(deploy.embed.device),
             "embed_precision": str(deploy.embed.precision),
             "batch_size": batch_size,
+            # Объявленный режим питания — как есть, без разбора и нормализации: прибор не
+            # угадывает режим по признакам (см. docstring модуля).
+            "power_mode": _declared_power_mode(args),
             "notices": notices,
         },
         peak_rss_bytes=_peak_rss_bytes(),
@@ -861,6 +1074,71 @@ def _write_cells_csv(
             )
 
 
+def _measured(value: Any, unit: str = "", *, digits: int | None = None) -> str:
+    """Значение с единицей; ``None`` печатается как «не измерено», а не как ноль."""
+    if value is None:
+        return "не измерено"
+    text = f"{value:.{digits}f}" if digits is not None else str(value)
+    return f"{text}{unit}"
+
+
+def _tri_state(value: bool | None) -> str:
+    """Тройное состояние признака: ``None`` — не измерено, а не «нет»."""
+    if value is None:
+        return "не измерено"
+    return "да" if value else "нет"
+
+
+def _counter_pair(before: Any, after: Any) -> str:
+    """Счётчик троттлинга парой «до→после»: разница потеряла бы «до тоже был не ноль»."""
+    if before is None and after is None:
+        return "SW Power Capping не измерено"
+    left = "не измерено" if before is None else str(before)
+    right = "не измерено" if after is None else str(after)
+    return f"SW Power Capping {left}→{right} us"
+
+
+def _power_line(payload: dict[str, Any]) -> str:
+    """Режим питания и признаки одной строкой: объявленное и наблюдённое — раздельно.
+
+    Режим печатается **объявленный**, признаки — наблюдённые, и рядом, а не вместо: если
+    оператор объявил ``ac-barrel``, а батарея при этом ``Discharging``, строка покажет оба
+    факта. Строка ничего не решает — расхождение читает человек.
+    """
+    mode = str(payload.get("power_mode") or DEFAULT_POWER_MODE)
+    declared = "не объявлен" if mode == DEFAULT_POWER_MODE else mode
+    variants = payload.get("variants") or []
+    power = (variants[0].get("power") or {}) if variants else {}
+    before = power.get("before") or {}
+    after = power.get("after") or {}
+    parts = [
+        f"питание: режим {declared}",
+        f"AC online {_tri_state(before.get('ac_online'))}",
+        f"батарея {before.get('battery_status') or 'не измерено'}",
+        f"SM {_measured(before.get('sm_clock_mhz'), ' МГц')}",
+        f"потребление {_measured(before.get('power_draw_w'), ' Вт', digits=1)}",
+        f"температура {_measured(before.get('temperature_c'), ' °C')}",
+        _counter_pair(before.get("sw_power_cap_us"), after.get("sw_power_cap_us")),
+    ]
+    return " · ".join(parts)
+
+
+def _print_power_conditions(payload: dict[str, Any]) -> None:
+    """Режим питания и признаки; при ``unknown`` — предупреждение.
+
+    Молчать при необъявленном режиме нельзя: числа скорости тогда не привязаны к условию
+    питания, и сравнивать их между прогонами (USB-C против комплектного БП) не с чем.
+    Отсутствие факта печатается, а не выглядит как «всё в порядке».
+    """
+    print(_power_line(payload))
+    mode = str(payload.get("power_mode") or DEFAULT_POWER_MODE)
+    if mode == DEFAULT_POWER_MODE:
+        print(
+            "ВНИМАНИЕ: режим питания не объявлен (--power-mode unknown) — числа скорости "
+            "не привязаны к режиму питания и между прогонами не сравниваются."
+        )
+
+
 def _print_summary(payload: dict[str, Any]) -> None:
     """Сводка: метрики вариантов рядом, цена каждого — тоже рядом."""
     print(
@@ -901,6 +1179,9 @@ def _print_summary(payload: dict[str, Any]) -> None:
         # Нагрузка хоста — условие числа, а не украшение: на общем хосте цена оси и цена
         # конкуренции за него неотличимы, если напечатано только «чанк/с».
         print(f"нагрузка хоста (1/5/15 мин): {load[0]:.2f} / {load[1]:.2f} / {load[2]:.2f}")
+    # Режим питания и его прокси — одной строкой: скорость на этом хосте от него зависит,
+    # а отличить USB-C от комплектного БП программно нельзя (см. docstring модуля).
+    _print_power_conditions(payload)
 
 
 if __name__ == "__main__":

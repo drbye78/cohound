@@ -24,6 +24,11 @@
   Слитые в одно число, они утверждают, что база мерилась на 206 931 чанке там, где
   измерено 3 000 (замер 16.11.2026, ``--limit-chunks 3000``). Рядом — инвариант: у всех
   вариантов отчёта ``chunks`` совпадает, иначе их числа несравнимы и отчёт отказывает.
+* **Режим питания объявлен, а не выведен**: ``--power-mode`` попадает в отчёт как есть
+  (дефолт ``unknown`` печатается предупреждением), а ``ac_online``/``battery_status`` и
+  счётчик ``SW Power Capping`` публикуются рядом как контроль. Счётчик — **пара «до/после»**,
+  а не разница: разница теряет факт «до тоже был не ноль». Отсутствие файла/команды даёт
+  ``None``, никогда ``0``. Вывода режима из признаков нет и тестом не закрепляется.
 
 Синтетика: матрицы ``numpy``, строки ``_Row`` и ``tmp_path`` для CSV. Стенд
 ``~/.cohound``, ``torch``/``cuda`` и БД не трогаются.
@@ -443,3 +448,250 @@ def test_load_average_published_as_measurement_condition() -> None:
     )
     assert "load_average" in payload
     assert payload["load_average"] is None
+
+
+# ------------------------------------- условия питания: объявлено и наблюдено (O19)
+
+_REQUIRED_ARGS = ["--db", "x.db", "--golden", "g.json", "--product", "p"]
+
+
+def test_power_mode_defaults_to_unknown() -> None:
+    """Дефолт — «не объявлено», а не подставленный режим: прибор питание не угадывает."""
+    args = MEASURE._parse_args([*_REQUIRED_ARGS])
+
+    assert args.power_mode == "unknown"
+    assert args.power_mode == MEASURE.DEFAULT_POWER_MODE
+
+
+@pytest.mark.parametrize("declared", ["ac-barrel", "ac-usbc", "battery", "AC-USB-C"])
+def test_power_mode_reaches_the_report_verbatim(declared: str) -> None:
+    """Объявленное значение идёт в отчёт **как есть**: ни нормализации, ни разбора.
+
+    ``AC-USB-C`` не приводится к нижнему регистру, ``unknown`` не подменяется ничем:
+    прибор не имеет права «улучшить» то, что объявил оператор.
+    """
+    args = MEASURE._parse_args([*_REQUIRED_ARGS, "--power-mode", declared])
+
+    payload = MEASURE._build_payload(
+        [{"variant": "text", "chunks": 1, "power": {}}],
+        {"power_mode": args.power_mode},
+        peak_rss_bytes=None,
+        peak_vram_bytes=None,
+    )
+
+    assert payload["power_mode"] == declared
+
+
+def test_power_snapshot_reads_ac_and_battery_from_substituted_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Прокси читаются из файлов, а не из констант хоста: тест не зависит от стенда."""
+    ac = tmp_path / "online"
+    ac.write_text("1\n", encoding="utf-8")
+    battery = tmp_path / "status"
+    battery.write_text("Charging\n", encoding="utf-8")
+    monkeypatch.setattr(MEASURE, "AC_ONLINE_PATH", ac)
+    monkeypatch.setattr(MEASURE, "BATTERY_STATUS_PATH", battery)
+
+    snapshot = MEASURE._power_snapshot(with_gpu=False)
+
+    assert snapshot["ac_online"] is True
+    assert snapshot["battery_status"] == "Charging"
+    # При ``cpu`` карта не опрашивается: поля есть и они ``None``, а не нули.
+    assert all(snapshot[field] is None for field in MEASURE.GPU_FIELDS)
+
+
+def test_power_snapshot_offline_is_false_not_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``0`` — измеренный факт «питания от сети нет»; он не имеет права стать ``None``."""
+    ac = tmp_path / "online"
+    ac.write_text("0", encoding="utf-8")
+    monkeypatch.setattr(MEASURE, "AC_ONLINE_PATH", ac)
+    monkeypatch.setattr(MEASURE, "BATTERY_STATUS_PATH", tmp_path / "no-battery")
+
+    snapshot = MEASURE._power_snapshot(with_gpu=False)
+
+    assert snapshot["ac_online"] is False
+    assert snapshot["battery_status"] is None
+
+
+def test_power_snapshot_missing_files_are_none_not_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Нет файла — «не измерено». ``0``/``False`` утверждали бы факт, которого не видели."""
+    monkeypatch.setattr(MEASURE, "AC_ONLINE_PATH", tmp_path / "no-ac")
+    monkeypatch.setattr(MEASURE, "BATTERY_STATUS_PATH", tmp_path / "no-battery")
+
+    snapshot = MEASURE._power_snapshot(with_gpu=False)
+
+    assert snapshot["ac_online"] is None
+    assert snapshot["battery_status"] is None
+    assert all(snapshot[field] is None for field in MEASURE.GPU_FIELDS)
+
+
+def test_power_snapshot_without_nvidia_smi_is_none_not_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Отказ инструмента (нет команды, нет карты) — ``None``, а не падение и не ``0``."""
+    monkeypatch.setattr(MEASURE, "AC_ONLINE_PATH", tmp_path / "no-ac")
+    monkeypatch.setattr(MEASURE, "BATTERY_STATUS_PATH", tmp_path / "no-battery")
+    monkeypatch.setattr(MEASURE, "NVIDIA_SMI", "cohound-no-such-nvidia-smi")
+
+    snapshot = MEASURE._power_snapshot(with_gpu=True)
+
+    assert all(snapshot[field] is None for field in MEASURE.GPU_FIELDS)
+
+
+def test_parse_gpu_metrics_maps_unavailable_to_none() -> None:
+    """``[N/A]`` мобильной карты — это «не измерено», а не «ноль ватт»."""
+    measured = MEASURE._parse_gpu_metrics("1057, 15.11, 67.90\n")
+
+    assert measured["sm_clock_mhz"] == 1057
+    assert measured["power_draw_w"] == pytest.approx(15.11)
+    assert measured["temperature_c"] == 67
+    assert measured["sw_power_cap_us"] is None
+
+    unavailable = MEASURE._parse_gpu_metrics("[N/A], [N/A], [N/A]")
+
+    assert unavailable["sm_clock_mhz"] is None
+    assert unavailable["power_draw_w"] is None
+    assert unavailable["temperature_c"] is None
+
+
+def test_sw_power_cap_counter_is_read_from_counters_not_from_the_flag() -> None:
+    """Флаг ``Active`` — «ограничена сейчас»; счётчик — «сколько микросекунд за замер»."""
+    text = (
+        "    Clocks Event Reasons\n"
+        "        SW Power Cap                                   : Not Active\n"
+        "    Clocks Event Reasons Counters\n"
+        "        SW Power Capping                               : 19983 us\n"
+    )
+
+    assert MEASURE._parse_sw_power_cap_us(text) == 19983
+
+
+def test_sw_power_cap_zero_is_measured_zero_and_missing_line_is_none() -> None:
+    """``0 us`` — измеренный ноль; отсутствие строки — ``None``: их нельзя путать."""
+    assert MEASURE._parse_sw_power_cap_us("        SW Power Capping : 0 us") == 0
+    assert MEASURE._parse_sw_power_cap_us("    Performance State : P0") is None
+
+
+def test_throttle_counter_is_published_as_a_pair_not_a_difference() -> None:
+    """Разница ``after − before`` теряет «до тоже был не ноль»: карта уже была ограничена."""
+    before = {
+        "ac_online": True,
+        "battery_status": "Charging",
+        "sm_clock_mhz": 1057,
+        "power_draw_w": 15.11,
+        "temperature_c": 67,
+        "sw_power_cap_us": 20068,
+    }
+    after = {**before, "sw_power_cap_us": 20068}
+
+    window = MEASURE._power_window(before, after)
+
+    assert window["before"]["sw_power_cap_us"] == 20068
+    assert window["after"]["sw_power_cap_us"] == 20068
+    # Набор ключей **закрыт**: любая производная (как бы она ни называлась) — дефект,
+    # потому что теряет факт «до тоже был не ноль». Перечисление известных имён ловило
+    # бы только те, что придумал автор теста: мутация `delta_us` проходила мимо.
+    assert set(window) == {"before", "after"}
+    # Окно не делит словари со снимками: правка отчёта не правит замер.
+    assert window["before"] is not before
+    assert window["after"] is not after
+
+
+def test_summary_warns_when_power_mode_is_not_declared(capsys: pytest.CaptureFixture[str]) -> None:
+    """``unknown`` обязан быть виден: иначе число читается как «условия в порядке»."""
+    payload = {
+        "power_mode": "unknown",
+        "variants": [{"variant": "text", "power": {"before": {}, "after": {}}}],
+    }
+
+    MEASURE._print_power_conditions(payload)
+
+    out = capsys.readouterr().out
+    assert "не объявлен" in out
+    assert "ВНИМАНИЕ" in out
+    assert "не привязаны к режиму питания" in out
+
+
+def test_summary_prints_declared_mode_and_counter_pair_in_one_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Сводка: режим и признаки одной строкой, счётчик — парой, без предупреждения."""
+    payload = {
+        "power_mode": "ac-barrel",
+        "variants": [
+            {
+                "variant": "text",
+                "power": {
+                    "before": {
+                        "ac_online": True,
+                        "battery_status": "Charging",
+                        "sm_clock_mhz": 1057,
+                        "power_draw_w": 15.11,
+                        "temperature_c": 67,
+                        "sw_power_cap_us": 19983,
+                    },
+                    "after": {"sw_power_cap_us": 20068},
+                },
+            }
+        ],
+    }
+
+    MEASURE._print_power_conditions(payload)
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "ac-barrel" in lines[0]
+    assert "19983→20068" in lines[0]
+    assert "ВНИМАНИЕ" not in out
+
+
+def test_observed_battery_does_not_rewrite_the_declared_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Расхождение объявленного с наблюдённым читает человек, а не прибор.
+
+    ``Discharging`` при объявленном ``ac-barrel`` — повод разобраться, а не повод
+    переписать режим: объявленное остаётся объявленным, наблюдённое печатается рядом.
+    """
+    payload = {
+        "power_mode": "ac-barrel",
+        "variants": [
+            {"variant": "text", "power": {"before": {"battery_status": "Discharging"}, "after": {}}}
+        ],
+    }
+
+    MEASURE._print_power_conditions(payload)
+
+    out = capsys.readouterr().out
+    assert "ac-barrel" in out
+    assert "Discharging" in out
+
+
+def test_declared_power_mode_never_derives_from_observed_signs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Режим берётся из аргумента, даже когда признаки говорят противоположное.
+
+    USB-C и комплектный БП на этом хосте неразличимы, поэтому «угадать» режим нельзя:
+    угаданное значение в отчёте — ложь о условии замера. Признаки публикуются рядом как
+    контроль, и расхождение с объявленным читает человек.
+
+    Тест намеренно подставляет признаки «от батареи», а объявляет `ac-barrel`: если
+    когда-нибудь появится вывод режима из `_ac_online`/`_battery_status`, этот тест упадёт.
+    """
+    monkeypatch.setattr(MEASURE, "_ac_online", lambda: False)
+    monkeypatch.setattr(MEASURE, "_battery_status", lambda: "Discharging")
+    args = MEASURE._parse_args(["--db", "x.db", "--golden", "g.json", "--product", "p",
+                                "--power-mode", "ac-barrel"])
+
+    assert MEASURE._declared_power_mode(args) == "ac-barrel"
+
+    # И дефолт — именно `unknown`, а не «выведенное» значение.
+    args = MEASURE._parse_args(["--db", "x.db", "--golden", "g.json", "--product", "p"])
+    assert MEASURE._declared_power_mode(args) == MEASURE.DEFAULT_POWER_MODE == "unknown"
