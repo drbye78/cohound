@@ -337,7 +337,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   3 продукта (`docs/reports/measurements/2026-11-07-evaluator-benchmark-first-kappa.md`):
 >   κ **0.024** `off` [−0.045; 0.091] / **0.056** `low` [−0.015; 0.133] — на уровне случайного
 >   согласия. Выбор модели по κ **не сделан**: обе слоты `deploy.yaml` несут одну модель
->   (`config/deploy.yaml:184`, `config/deploy.yaml:207`) — модель объявлена, а не измерена (A3).
+>   (`config/deploy.yaml:152` — `embed.model_id`, `config/deploy.yaml:253` — `llm.cheap.model_id`) — модель объявлена, а не измерена (A3).
 > - **`base_url` в слот:** ✅ — `config/deploy.yaml:180` (`https://plusvibeapi.ru`); пустой слот
 >   означает «оценщик не поднимается», а не «endpoint берётся из env». Место исполнения
 >   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:172`, стенд RnD).

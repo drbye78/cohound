@@ -200,7 +200,7 @@ bump'а и канонический перечень версий — `16` (ед
 2. **Паритет `split`** — перечень расхождений живёт в **одном** месте, `07` §6, и больше нигде
    не пересказывается: (а) `pdf_pipeline` под `split` выбирает edge, а не ось прогона
    (`wiring.py:2484-2486`); (б) per-root слой `document_level`/`pdf_device` не доезжает —
-   `wiring.py:3322` (`profiles=None`) и `:3336-3338`; (в) крупный артефакт не пересекает
+   `wiring.py:3595` (`split_limits = resolve_crawl_limits(`) и `:3595-3599`; (в) крупный артефакт не пересекает
    `crawl/collect` (inline-base64, 8 MiB) — `extract/submit` стейджит, `crawl/collect` нет.
    Члены контейнеров через шов **идут** (`ae0f933`, `remote_extractor.py:214`), оси
    уровня/устройства на слое app+run — тоже (`wiring.py:3377`). Отдельно: паритет `pb`
