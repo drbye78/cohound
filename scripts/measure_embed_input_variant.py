@@ -1,0 +1,793 @@
+"""Замер оси ``EMBED_INPUT_FIELDS``: меняет ли заголовок в входе эмбеддера ранжирование.
+
+**Вопрос.** ``chunking_spec.embed_input`` объявлен контрактом (``run_id``), но его значение
+``("text",)`` — допущение, а не измерение (O19 плана 26). Включение заголовка стоит
+пере-эмбеддинга почти всего корпуса: непустой ``heading_path`` у **238 001** из **253 306**
+чанков (94.0 %, замер 16.11.2026 по ``corpus_chunks`` стенда). Платить это имеет смысл только
+если ранжирование меняется — и вот это «меняется ли» и мерит прибор.
+
+**Базовый вариант читается из сборки, а не пересчитывается.** Векторы, лежащие в партиции
+``index_store``, посчитаны **ровно** с составом ``("text",)`` — это и есть исполненное
+условие прогона. Пересчитывать их заново значило бы сравнивать не два состава входа, а два
+пути счёта (мой и продакшен-путь сборки), и разница вариантов включала бы разницу ядер. Поэтому
+вариант, чьи поля равны ``("text",)``, берётся из партиции, а сравниваются только варианты,
+которые в сборке не лежат. Побочная выгода — встроенный контроль: число базового варианта
+обязано совпасть с числом прибора O14 на том же профиле, иначе прибор мерит что-то не то.
+
+**Что именно измеряется.** Профиль ``R1`` (только dense). Это не упрощение, а изоляция:
+``R0`` — лексика, на неё ось не влияет вовсе (BM25 смотрит на текст чанка, а не на вектор);
+``R2`` смешивает лексику и dense, поэтому эффект оси в нём ограничен эффектом в ``R1`` и
+отдельного числа не даёт. Запросы рендерятся и эмбеддятся **продакшен-путём**
+(:func:`core.pipeline.evaluate.precompute_query_vectors`), ретривал — тоже
+(:func:`core.pipeline.evaluate.retrieve_for_cell`), метрики — функциями документного эталона
+(``core.pipeline.retrieval_docs``). Своего только одно: матрица документов вместо чтения
+партиции на каждый запрос.
+
+**Цена публикуется рядом с числом.** Сколько чанков попало в кэш, сколько пересчитано, сколько
+секунд, пик RSS/VRAM. Без этого «стало лучше на N пунктов» не отвечает на вопрос «стоит ли
+платить».
+
+**Что НЕ измеряется.** ``R2``/``R0`` (см. выше), качество вердиктов (ось меняет адреса
+документов, а не доказательства — это предмет O15/O18), поведение на других продуктах
+(``--product`` называет один; число принадлежит ему).
+
+Запуск::
+
+    .venv/bin/python scripts/measure_embed_input_variant.py \
+      --db ~/.cohound/stands/ru-pg-dbms/runs/ru-pg-dbms-145ad66ca3f9/cohound.db \
+      --golden packages/ru-pg-dbms/sources/retrieval_golden_docs.json \
+      --product postgrespro --variants text,heading --out-json /tmp/opencode/o19.json
+
+Нейтрален (§1.3): продукт и эталон — аргументы, а не константы.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+import time
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+# Корень репозитория на sys.path: скрипт запускается как `python scripts/…py`, и тогда
+# sys.path[0] — каталог scripts, а не корень (плоская раскладка пакета `core`).
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+#: Объявленные варианты состава входа. Имя — то, что попадает в отчёт; порядок полей —
+#: тот же, что у ``EMBED_INPUT_FIELDS`` (объявленный порядок, а не «как удобно склеить»).
+VARIANTS: dict[str, tuple[str, ...]] = {
+    "text": ("text",),
+    "heading": ("heading_path", "text"),
+    "heading+context": ("heading_path", "context_prefix", "text"),
+}
+
+
+@dataclass(frozen=True)
+class _Row:
+    """Чанк продукта из ``corpus_chunks``: минимум для входа эмбеддера и ранжирования."""
+
+    chunk_id: str
+    doc_id: str
+    product_id: str
+    text: str
+    heading_path: str
+    context_prefix: str
+    content_hash: str
+
+
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "замер оси EMBED_INPUT_FIELDS на документном эталоне: меняет ли заголовок "
+            "в входе эмбеддера ранжирование (O19 плана 26)"
+        )
+    )
+    parser.add_argument("--db", required=True, help="cohound.db прогона (только чтение)")
+    parser.add_argument("--golden", required=True, help="retrieval_golden_docs.json")
+    parser.add_argument(
+        "--product",
+        required=True,
+        help="product_id, на котором мерить (матрица держится в памяти — один продукт)",
+    )
+    parser.add_argument(
+        "--variants",
+        default="text,heading",
+        help=f"варианты через запятую из {', '.join(VARIANTS)}; первый — базовый",
+    )
+    parser.add_argument(
+        "--profile", default="R1", help="профиль ретривала; ось влияет только на R1"
+    )
+    parser.add_argument(
+        "--cutoff-k", type=int, default=0, help="K эталона; 0 — из runs.retrieval_cutoff_K"
+    )
+    parser.add_argument(
+        "--index-root",
+        default="",
+        help="корень index_store (пусто — $COHOUND_HOME/index_store)",
+    )
+    parser.add_argument(
+        "--recompute-baseline",
+        action="store_true",
+        help=(
+            "пересчитать и вариант с составом (text,), а не брать векторы сборки: нужно "
+            "только чтобы проверить сам прибор — числа перестают быть сравнимыми с O14"
+        ),
+    )
+    parser.add_argument(
+        "--limit-chunks",
+        type=int,
+        default=0,
+        help="N чанков равномерным шагом (0 — все); срез делает прогон дымовым",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=0, help="батч эмбеддинга (0 — дефолт исполнения)"
+    )
+    parser.add_argument(
+        "--deploy", default="config/deploy.yaml", help="deploy-конфиг (оси эмбеддера)"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default="",
+        help="каталог embed_cache (пусто — COHOUND_HOME/embed_cache, если он есть)",
+    )
+    parser.add_argument("--out-json", metavar="PATH", help="машинный отчёт")
+    parser.add_argument(
+        "--out-csv",
+        metavar="PATH",
+        help="по-ячеечно: ранг под каждым вариантом (дифф ранжирования читается глазами)",
+    )
+    return parser.parse_args(argv)
+
+
+def _resolve_variants(raw: str) -> list[str]:
+    """Имена вариантов из списка; неизвестное имя — отказ со списком допустимых."""
+    names = [item.strip() for item in raw.split(",") if item.strip()]
+    if not names:
+        raise SystemExit("measure: --variants пуст")
+    unknown = [name for name in names if name not in VARIANTS]
+    if unknown:
+        raise SystemExit(
+            f"measure: неизвестный вариант {', '.join(unknown)} "
+            f"(допустимо: {', '.join(VARIANTS)})"
+        )
+    if len(set(names)) != len(names):
+        raise SystemExit("measure: вариант указан дважды — сравнение было бы с самим собой")
+    return names
+
+
+def _load_rows(
+    conn: sqlite3.Connection, product: str
+) -> tuple[dict[str, _Row], list[str]]:
+    """Чанки продукта: карта ``chunk_id → строка`` и порядок ``chunk_id`` по возрастанию.
+
+    Порядок — ``chunk_id``, а не вставки: матрица и отчёт обязаны быть воспроизводимыми
+    по содержимому БД, а не по истории записи. Порядок партиции (если базовый вариант
+    читается из сборки) сверяется с этой картой отдельно.
+    """
+    rows: dict[str, _Row] = {}
+    for row in conn.execute(
+        "select chunk_id, doc_id, product_id, text, heading_path, context_prefix, "
+        "content_hash from corpus_chunks where product_id = ? order by chunk_id",
+        (product,),
+    ):
+        rows[str(row[0])] = _Row(
+            chunk_id=str(row[0]),
+            doc_id=str(row[1]),
+            product_id=str(row[2]),
+            text=str(row[3] or ""),
+            heading_path=str(row[4] or ""),
+            context_prefix=str(row[5] or ""),
+            content_hash=str(row[6] or ""),
+        )
+    if not rows:
+        raise SystemExit(f"measure: у продукта {product!r} нет чанков в корпусе")
+    return rows, sorted(rows)
+
+
+def _subset(order: Sequence[str], limit: int) -> list[str]:
+    """Срез равномерным шагом, а не первыми N — и это не педантизм.
+
+    Замер 16.11.2026: первые 2000 чанков ``postgrespro`` покрывают **168** документов из
+    **15 188** (1.1 %), потому что ``chunk_id`` упорядочен по документу, а корпус
+    начинается с одного раздела. Такой срез даёт ``hit@K = 1.000`` на всех вариантах: в
+    матрице просто нет чужих документов, которые могли бы отобрать место.
+    """
+    if limit <= 0 or limit >= len(order):
+        return list(order)
+    step = len(order) / limit
+    return [order[int(index * step)] for index in range(limit)]
+
+
+class _MatrixIndex:
+    """``VectorIndexPort`` поверх матрицы в памяти: тот же контракт, что у партиции.
+
+    Ранжирование повторяет правило адаптера (``core/adapters/vector_npy.py``): косинус по
+    нормализованным строкам, tie-break по ``chunk_id``, кандидаты — не ниже ``limit``-го
+    балла. Это не «похожий» порядок, а тот же: иначе сравнение вариантов мерило бы
+    разницу ядер, а не разницу входа.
+    """
+
+    def __init__(self, rows: Sequence[_Row], matrix: Any, *, build_id: str, dim: int):
+        import numpy as np
+
+        self.build_id = build_id
+        self.dim = dim
+        self._np = np
+        self._rows = list(rows)
+        self._chunk_ids = [row.chunk_id for row in rows]
+        # Приведение к float32 и нормализация — один раз на вариант, а не на запрос:
+        # косинус не зависит от длины вектора, и нормировать 207k строк на каждый запрос
+        # значило бы платить за это K раз.
+        dense = np.array(matrix, dtype=np.float32)
+        norms = np.linalg.norm(dense, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        # Деление **на месте**: ``dense / norms`` дало бы вторую матрицу на 207k×1024
+        # (847 MB) рядом с первой, и пик RSS вырос бы на её размер без пользы.
+        dense /= norms
+        self._matrix = dense
+
+    def shard_ids(self, product_id: str) -> list[str]:
+        return [product_id]
+
+    def search(self, q: Any) -> list[Any]:
+        return self.search_many([q])[0]
+
+    def search_many(self, queries: Sequence[Any]) -> list[list[Any]]:
+        np = self._np
+        out: list[list[Any]] = []
+        for query in queries:
+            vector = getattr(query, "vector", None)
+            if vector is None:
+                raise ValueError("запрос без вектора: эмбеддинг — дело вызывающего")
+            q = np.asarray(vector, dtype=np.float32)
+            norm = float(np.linalg.norm(q)) or 1.0
+            scores = self._matrix @ (q / norm)
+            out.append(self._top(scores, int(getattr(query, "top_k", 0))))
+        return out
+
+    def _top(self, scores: Any, limit: int) -> list[Any]:
+        """Top-``limit`` тем же ключом, что у адаптера: ``(-балл, chunk_id)``."""
+        from core.ports.vector_index import RetrievedChunk
+
+        np = self._np
+        total = int(scores.shape[0])
+        if limit >= total or not bool(np.all(np.isfinite(scores))):
+            candidates = list(range(total))
+        else:
+            threshold = np.partition(scores, total - limit)[total - limit]
+            candidates = np.flatnonzero(scores >= threshold).tolist()
+        candidates.sort(key=lambda row: (-float(scores[row]), self._chunk_ids[row]))
+        hits: list[Any] = []
+        for row in candidates[:limit]:
+            chunk = self._rows[row]
+            hits.append(
+                RetrievedChunk(
+                    chunk_id=chunk.chunk_id,
+                    product_id=chunk.product_id,
+                    text=chunk.text,
+                    content_hash=chunk.content_hash,
+                    heading_path=chunk.heading_path,
+                    build_id=self.build_id,
+                    score=float(scores[row]),
+                    context_prefix=chunk.context_prefix,
+                )
+            )
+        return hits
+
+
+def _variant_matrix(
+    rows: Sequence[_Row],
+    fields: tuple[str, ...],
+    *,
+    embedder: Any,
+    cache: Any,
+    embed_model_id: str,
+    embed_device: str,
+    embed_precision: str,
+    batch_size: int,
+) -> tuple[Any, dict[str, Any]]:
+    """Матрица варианта через **продакшен-путь** эмбеддинга (дедуп + кэш + батчи).
+
+    Состав входа подменяется на уровне объявления (:data:`core.util.embed_input.
+    EMBED_INPUT_FIELDS`), а не передачей аргумента: исполнение читает ровно это
+    объявление, поэтому замер идёт через тот же код, что и прогон. Иначе прибор мерил бы
+    свою копию логики склейки, а не ось.
+    """
+    from core.pipeline.corpus_index import _embed_batched
+    from core.util import embed_input
+
+    declared = embed_input.EMBED_INPUT_FIELDS
+    embed_input.EMBED_INPUT_FIELDS = fields
+    try:
+        # Строки передаются как есть, а не пересобираются в ``CorpusChunk``: контракт
+        # ``embed_input_text`` — ``getattr`` по объявленному имени поля, и :class:`_Row`
+        # несёт ровно эти поля. Пydantic-валидация 207k моделей стоила бы памяти и
+        # времени, ничего не проверяя: тексты уже лежат в БД, а инварианты ``CorpusChunk``
+        # проверены на записи.
+        chunks = rows
+        started = time.perf_counter()
+        matrix = _embed_batched(
+            embedder,
+            chunks,
+            batch_size=batch_size,
+            cache=cache,
+            embed_model_id=embed_model_id,
+            embed_device=embed_device,
+            embed_precision=embed_precision,
+        )
+        seconds = time.perf_counter() - started
+    finally:
+        # Объявление возвращается в исходное состояние даже при падении: прибор не имеет
+        # права оставить процесс в состоянии, где ось включена.
+        embed_input.EMBED_INPUT_FIELDS = declared
+    stats = {
+        "source": "recomputed",
+        "chunks": len(chunks),
+        "seconds": round(seconds, 3),
+        "chunks_per_s": round(len(chunks) / seconds, 2) if seconds > 0 else None,
+        "cache": cache.stats() if cache is not None else None,
+    }
+    return matrix, stats
+
+
+def _partition_matrix(
+    index_root: Path, package_id: str, build_id: str, product: str
+) -> tuple[Any, list[str], dict[str, Any]]:
+    """Векторы продукта **из сборки** — исполненное условие ``("text",)``.
+
+    Это не оптимизация: партиция посчитана продакшен-путём, и брать её значит сравнивать
+    два состава входа, а не два пути счёта. Побочно — встроенный контроль: число базового
+    варианта обязано совпасть с числом прибора O14 на том же профиле.
+    """
+    from core.adapters.index_format import read_partition
+    from core.pipeline.composition import read_composition
+
+    view = read_composition(index_root, package_id, build_id)
+    if view is None:
+        raise SystemExit(
+            f"measure: композиция {build_id!r} не найдена под {index_root}: "
+            "сборка индекса не разрешается"
+        )
+    partition_build_id = view.build_id_for(product)
+    data = read_partition(index_root, package_id, partition_build_id, product)
+    return (
+        data.vectors,
+        list(data.chunk_ids),
+        {
+            "source": "partition",
+            "partition_build_id": partition_build_id,
+            "composition_id": view.composition_id,
+            "chunks": len(data.chunk_ids),
+            "seconds": 0.0,
+            "chunks_per_s": None,
+            "cache": None,
+        },
+    )
+
+
+def _evaluate(
+    *,
+    entries: Sequence[Any],
+    params: dict[str, Any],
+    profile: str,
+    cutoff_k: int,
+    index: Any,
+    query_vectors: dict[str, list[float]],
+    chunk_doc: dict[str, str],
+    doc_ids: set[str],
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Метрики варианта: продакшен-ретривал + метрики документного эталона."""
+    from core.pipeline.evaluate import retrieve_for_cell
+    from core.pipeline.retrieval_docs import (
+        DocQueryResult,
+        document_ids_for,
+        evaluate_documents,
+    )
+
+    results: list[DocQueryResult] = []
+    per_cell: list[dict[str, Any]] = []
+    for entry in entries:
+        param = params.get(entry.param_id)
+        if param is None:
+            raise SystemExit(
+                f"measure: ячейка {entry.cell}: param_id {entry.param_id!r} отсутствует "
+                "в каталоге прогона — запрос не рендерится"
+            )
+        retrieval = retrieve_for_cell(
+            param,
+            product_id=entry.product_id,
+            profile=profile,
+            cutoff_k=cutoff_k,
+            lexical_index=None,
+            vector_index=index,
+            query_vectors=query_vectors,
+        )
+        retrieved = document_ids_for(
+            [chunk.chunk_id for chunk in retrieval.chunks], chunk_doc, top_k=cutoff_k
+        )
+        rank = next(
+            (
+                position
+                for position, doc_id in enumerate(retrieved, start=1)
+                if doc_id in entry.expected_doc_ids
+            ),
+            None,
+        )
+        results.append(
+            DocQueryResult(
+                cell=entry.cell,
+                product_id=entry.product_id,
+                param_id=entry.param_id,
+                expected_doc_ids=tuple(entry.expected_doc_ids),
+                retrieved_doc_ids=retrieved,
+                rank=rank,
+                unresolved=not any(doc in doc_ids for doc in entry.expected_doc_ids),
+            )
+        )
+        per_cell.append({"cell": entry.cell, "rank": rank})
+    report = evaluate_documents(results, profile=profile, k=cutoff_k, bootstrap=1, seed=0)
+    return report, per_cell
+
+
+def _peak_rss_bytes() -> int:
+    """Пик RSS процесса: ``ru_maxrss`` в KiB на Linux, байты в отчёте."""
+    import resource
+
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+
+
+def _peak_vram_bytes() -> int | None:
+    """Пик VRAM в окне замера; ``None`` — счёт невозможен (нет cuda/torch)."""
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 — счёт невозможен, а не «ноль»
+        return None
+    if not torch.cuda.is_available():
+        return None
+    return int(torch.cuda.max_memory_allocated())
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parse_args(argv)
+    db_path = Path(args.db).expanduser()
+    if not db_path.is_file():
+        print(f"measure: БД не найдена: {db_path}", file=sys.stderr)
+        return 2
+    variants = _resolve_variants(args.variants)
+    index_root = _resolve_index_root(args.index_root)
+
+    from core.pipeline.retrieval_docs import load_doc_golden
+
+    case_id, golden_run_id, entries = load_doc_golden(args.golden)
+    selected = [entry for entry in entries if entry.product_id == args.product]
+    if not selected:
+        print(
+            f"measure: в эталоне {args.golden} нет ячеек продукта {args.product!r} "
+            f"(есть: {', '.join(sorted({e.product_id for e in entries}))})",
+            file=sys.stderr,
+        )
+        return 2
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        run_row = conn.execute(
+            "select run_id, package_id, index_build_id, retrieval_cutoff_K from runs limit 1"
+        ).fetchone()
+        if run_row is None:
+            print("measure: в БД нет записи прогона", file=sys.stderr)
+            return 2
+        run_id = str(run_row["run_id"])
+        if golden_run_id and golden_run_id != run_id:
+            print(
+                f"measure: эталон скомпилирован на прогоне {golden_run_id!r}, а БД — "
+                f"{run_id!r}: doc_id разных корпусов несравнимы",
+                file=sys.stderr,
+            )
+            return 2
+        package_id = str(run_row["package_id"] or case_id)
+        build_id = str(run_row["index_build_id"] or "")
+        cutoff_k = args.cutoff_k or int(run_row["retrieval_cutoff_K"] or 0) or 10
+        rows_by_id, full_order = _load_rows(conn, args.product)
+        params = _load_params(db_path)
+    finally:
+        conn.close()
+
+    # Порядок строк задаётся **один раз** и общий для всех вариантов: матрица и строки
+    # обязаны соответствовать друг другу, иначе вектор попадёт чужому чанку.
+    baseline_fields = VARIANTS[variants[0]]
+    order = _subset(full_order, args.limit_chunks)
+    baseline_stats: dict[str, Any] | None = None
+    baseline_matrix = None
+    use_partition = (
+        not args.recompute_baseline
+        and baseline_fields == ("text",)
+        and build_id
+        and index_root is not None
+    )
+    if use_partition:
+        baseline_matrix, partition_ids, baseline_stats = _partition_matrix(
+            index_root, package_id, build_id, args.product
+        )
+        if len(partition_ids) != len(full_order) or set(partition_ids) != set(full_order):
+            print(
+                "measure: состав партиции и корпуса не совпадает "
+                f"({len(partition_ids)} чанков в сборке, {len(full_order)} в corpus_chunks) — "
+                "базовый вариант нельзя взять из сборки: это были бы разные корпуса",
+                file=sys.stderr,
+            )
+            return 2
+        # Срез идёт по позициям партиции: её порядок и есть порядок матрицы.
+        if len(order) != len(partition_ids):
+            keep = set(order)
+            positions = [index for index, cid in enumerate(partition_ids) if cid in keep]
+            order = [partition_ids[index] for index in positions]
+            baseline_matrix = baseline_matrix[positions]
+        else:
+            order = partition_ids
+
+    rows = [rows_by_id[chunk_id] for chunk_id in order]
+    chunk_doc = {row.chunk_id: row.doc_id for row in rows}
+    doc_ids = {row.doc_id for row in rows}
+    smoke_only = len(order) < len(full_order)
+
+    from core.cli.wiring import _resolve_embedder
+    from core.config.deploy import load_deploy_config
+
+    deploy = load_deploy_config(args.deploy)
+    notices: list[str] = []
+    embedder = _resolve_embedder(
+        deploy.embed.device,
+        precision=deploy.embed.precision,
+        model_id=deploy.embed.model_id,
+        revision=deploy.embed.revision,
+        notices=notices,
+    )
+    if embedder is None:
+        print(
+            "measure: embed.model_id не объявлен в "
+            f"{args.deploy} — вектор нечем считать, а ось — про вектор",
+            file=sys.stderr,
+        )
+        return 2
+    embed_model_id = str(getattr(embedder, "model_id", "")) or str(deploy.embed.model_id)
+
+    cache = _open_cache(args.cache_dir)
+    from core.pipeline.corpus_index import EMBED_BATCH_CHUNKS
+
+    batch_size = args.batch_size or EMBED_BATCH_CHUNKS
+
+    # Векторы запросов считаются **один раз** и не зависят от варианта: ось меняет вход
+    # документов, а не запросов. Иначе разница включала бы разницу в запросе.
+    from core.pipeline.evaluate import precompute_query_vectors
+
+    query_vectors = precompute_query_vectors(
+        [params[entry.param_id] for entry in selected],
+        profile=args.profile,
+        embedder=embedder,
+    )
+    if not query_vectors:
+        print(
+            f"measure: профиль {args.profile} не даёт векторов запросов — ось мерить не на чем",
+            file=sys.stderr,
+        )
+        return 2
+
+    reports: list[dict[str, Any]] = []
+    cells_by_variant: dict[str, list[dict[str, Any]]] = {}
+    for name in variants:
+        fields = VARIANTS[name]
+        if name == variants[0] and baseline_matrix is not None:
+            matrix, stats = baseline_matrix, baseline_stats or {}
+        else:
+            matrix, stats = _variant_matrix(
+                rows,
+                fields,
+                embedder=embedder,
+                cache=cache,
+                embed_model_id=embed_model_id,
+                embed_device=str(deploy.embed.device),
+                embed_precision=str(deploy.embed.precision),
+                batch_size=batch_size,
+            )
+        index = _MatrixIndex(
+            rows,
+            matrix,
+            build_id=f"variant:{name}",
+            dim=int(getattr(embedder, "dim", 0) or matrix.shape[1]),
+        )
+        # fp16-матрица больше не нужна: индекс держит float32-копию. Без этого на корпусе
+        # 207k чанков рядом лежали бы 424 MB + 847 MB, хотя работать нужно со второй.
+        del matrix
+        report, per_cell = _evaluate(
+            entries=selected,
+            params=params,
+            profile=args.profile,
+            cutoff_k=cutoff_k,
+            index=index,
+            query_vectors=query_vectors,
+            chunk_doc=chunk_doc,
+            doc_ids=doc_ids,
+        )
+        reports.append(
+            {
+                "variant": name,
+                "fields": list(fields),
+                "source": stats.get("source"),
+                "partition_build_id": stats.get("partition_build_id"),
+                "chunks": stats.get("chunks"),
+                "seconds": stats.get("seconds"),
+                "chunks_per_s": stats.get("chunks_per_s"),
+                "cache": stats.get("cache"),
+                "metrics": {
+                    "hit_at_k": report.hit_at_k,
+                    "recall_at_k": report.recall_at_k,
+                    "mrr": report.mrr,
+                    "ndcg_at_k": getattr(report, "ndcg_at_k", None),
+                    "hit_ci": list(report.hit_ci),
+                    "scored": report.scored,
+                    "unresolved_cells": report.unresolved_cells,
+                },
+            }
+        )
+        cells_by_variant[name] = per_cell
+        # Индекс отпускается до следующего варианта: две float32-матрицы рядом — это
+        # второй пик RSS (847 MB на корпусе 207k×1024) там, где нужен один.
+        del index
+        if name == variants[0]:
+            baseline_matrix = None
+
+    payload = {
+        "instrument": "measure_embed_input_variant",
+        "measured_at": time.strftime("%Y-%m-%d"),
+        "smoke_only": smoke_only,
+        "run_id": run_id,
+        "case_id": case_id,
+        "package_id": package_id,
+        "index_build_id": build_id,
+        "product": args.product,
+        "profile": args.profile,
+        "cutoff_k": cutoff_k,
+        "golden": str(args.golden),
+        "golden_cells": len(entries),
+        "cells_in_scope": len(selected),
+        "chunks_total": len(full_order),
+        "chunks_measured": len(order),
+        "embed_model_id": embed_model_id,
+        "embed_device": str(deploy.embed.device),
+        "embed_precision": str(deploy.embed.precision),
+        "batch_size": batch_size,
+        "notices": notices,
+        "peak_rss_bytes": _peak_rss_bytes(),
+        "peak_vram_bytes": _peak_vram_bytes(),
+        "variants": reports,
+    }
+    if args.out_json:
+        path = Path(args.out_json)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    if args.out_csv:
+        _write_cells_csv(Path(args.out_csv), variants, cells_by_variant)
+
+    _print_summary(payload)
+    return 0
+
+
+def _resolve_index_root(raw: str) -> Path | None:
+    """Корень ``index_store``: аргумент, иначе ``$COHOUND_HOME/index_store``."""
+    import os
+
+    if raw:
+        return Path(raw).expanduser()
+    home = os.environ.get("COHOUND_HOME")
+    if not home:
+        return None
+    candidate = Path(home) / "index_store"
+    return candidate if candidate.is_dir() else None
+
+
+def _open_cache(raw: str) -> Any:
+    """Кэш векторов, если каталог назван или существует по раскладке хоста.
+
+    Кэш здесь — не удобство: он делает вариант ``text`` почти бесплатным (прогон уже
+    эмбеддил эти чанки) и публикует, сколько векторов варианта пришли готовыми. Без
+    каталога прибор работает без кэша и честно это печатает.
+    """
+    from core.pipeline.embed_cache import EmbedCache
+
+    if raw:
+        return EmbedCache(Path(raw).expanduser())
+    import os
+
+    home = os.environ.get("COHOUND_HOME")
+    if not home:
+        return None
+    candidate = Path(home) / "embed_cache"
+    return EmbedCache(candidate) if candidate.is_dir() else None
+
+
+def _load_params(db_path: Path) -> dict[str, Any]:
+    """Каталог прогона из ``plan_inputs.json`` рядом с БД (снимок, не пакет)."""
+    from core.domain.models import CatalogRow
+
+    snapshot = db_path.parent / "plan_inputs.json"
+    if not snapshot.is_file():
+        raise SystemExit(
+            f"measure: нет снимка входов {snapshot} — запросы обязаны быть теми же, "
+            "что рендерила фаза"
+        )
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    params = payload.get("params")
+    if not isinstance(params, list) or not params:
+        raise SystemExit(f"measure: {snapshot}: params пуст или не список")
+    return {str(item["param_id"]): CatalogRow.model_validate(item) for item in params}
+
+
+def _write_cells_csv(
+    path: Path, variants: Sequence[str], cells: dict[str, list[dict[str, Any]]]
+) -> None:
+    """По-ячеечно: ранг под каждым вариантом — дифф ранжирования читается глазами."""
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    order = [item["cell"] for item in cells[variants[0]]]
+    ranks = {name: {item["cell"]: item["rank"] for item in cells[name]} for name in variants}
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["cell", *variants, "delta"])
+        for cell in order:
+            values = [ranks[name].get(cell) for name in variants]
+            base, other = values[0], values[1] if len(values) > 1 else None
+            delta = "" if base is None or other is None else base - other
+            writer.writerow(
+                [cell, *["" if value is None else value for value in values], delta]
+            )
+
+
+def _print_summary(payload: dict[str, Any]) -> None:
+    """Сводка: метрики вариантов рядом, цена каждого — тоже рядом."""
+    print(
+        f"run {payload['run_id']} · продукт {payload['product']} · профиль "
+        f"{payload['profile']} · K={payload['cutoff_k']} · ячеек "
+        f"{payload['cells_in_scope']}/{payload['golden_cells']} · чанков "
+        f"{payload['chunks_measured']}/{payload['chunks_total']}"
+    )
+    if payload.get("smoke_only"):
+        print(
+            "ДЫМОВОЙ ПРОГОН (срез корпуса): метрики НЕ сопоставимы с прогоном на полном "
+            "корпусе — в матрице меньше документов, и место в top-K делят другие соседи. "
+            "Числа ниже проверяют, что прибор работает, а не силу оси."
+        )
+    header = (
+        f"{'вариант':<20}{'hit@K':>8}{'recall':>8}{'MRR':>8}{'nDCG':>8}"
+        f"{'сек':>9}{'чанк/с':>9}{'источник':>12}"
+    )
+    print(header)
+    for report in payload["variants"]:
+        metrics = report["metrics"]
+        ndcg = metrics["ndcg_at_k"]
+        print(
+            f"{report['variant']:<20}{metrics['hit_at_k']:>8.3f}"
+            f"{metrics['recall_at_k']:>8.3f}{metrics['mrr']:>8.3f}"
+            f"{(0.0 if ndcg is None else ndcg):>8.3f}"
+            f"{(report['seconds'] or 0.0):>9.1f}"
+            f"{(report['chunks_per_s'] or 0.0):>9.2f}"
+            f"{report['source']!s:>12}"
+        )
+    peak_vram = payload["peak_vram_bytes"]
+    print(
+        f"пик RSS {payload['peak_rss_bytes'] / 2**20:.0f} MiB · "
+        f"пик VRAM {'не измерен' if peak_vram is None else f'{peak_vram / 2**20:.0f} MiB'}"
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
