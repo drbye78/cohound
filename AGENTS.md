@@ -41,6 +41,36 @@ target — which is exactly why a construct is declared out of scope only after 
 named instrument (`scripts/measure_md_chunking.py --census`; границы грамматик —
 `18-markdown-chunker-plan.md`), never because one regex found nothing.
 
+**A sample is a measurement; "the full corpus" is not the default.** The owner's rule
+(16.11.2026): a measurement does not have to run over the whole corpus, or a large part of it,
+to be evidence — a **statistically significant sample** is enough, and a run's wall-clock
+duration is illustrative of *this host on this corpus*, not a property of the product or of a
+future profile. What replaces the full-corpus reflex is not a smaller number but a **stated
+uncertainty**: publish the interval (bootstrap CI) and the **paired** comparison (per-cell
+discordance, exact McNemar), because a difference of two aggregates on a slice mixes the effect
+of the axis with the composition of the sample. Measured 16.11.2026: the O19 instrument
+published `hit_ci` while calling `bootstrap=1` — the interval was the point estimate, so the
+field carried no information and "run everything" looked like the only way to be sure.
+
+Consequence for review: "we did not measure the whole corpus" is not by itself a defect;
+"we published a point without an interval, or compared two aggregates as if they were paired"
+is. The reverse also holds: a sample does not excuse a claim about the **population** — the
+slice bounds the claim, and a construct's absence in a slice is still a statement about that
+slice (§1.1 above).
+
+**Speed has measurement conditions too, and they are declared, not inferred.** On this host
+(and on any laptop) the numbers move with the **power supply**: measured 16.11.2026 on the
+reranker grid, `bge L=512 B=8` went 23.92 → 34.02 pairs/s (+42 %) after switching from USB-C to
+the supplied AC adapter, while three repeats in one mode varied by 2.16 %. The mode cannot be
+detected in software (`power.limit` = `[N/A]`, `cpufreq` not exposed in WSL2, `BAT1 power_now`
+= 0), so instruments take it as an **operator-declared** argument (`--power-mode`, default
+`unknown` with a visible warning) and publish the observed counters (`ac_online`,
+`battery_status`, SM clock, watts, °C, `SW Power Capping`) **beside** it as control, never as
+the source. Two things not to do: do not present a difference measured across two modes as the
+price of one condition (the split "power vs host contention" is **not** measured — publish
+`+14…+42 %, split not performed`), and do not read the **idle** clock as a mode indicator
+(1057 MHz is idle; under load on AC the card runs 1747–1777 MHz).
+
 **Refactoring is open.** Until the owner revisits it, architecture may be reworked wherever
 that is reasonable, and backward compatibility is not required: the DB schema gate rejects
 foreign versions visibly (`SchemaVersionMismatch`), packages/formats may be re-shaped. What is
@@ -101,7 +131,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `core/pipeline/` | Scenarios Ш1–Ш9 (numbered as in the spec): orchestrator + 15 phases, gates, crawl, corpus, retrieve/evaluate, review/compute/report, incremental, experiments, package authoring. |
 | `core/store/` | SQLite DDL + triggers, `StorePort` implementations, row converters, run backup. |
 | `core/adapters/` | Concrete engines behind ports: extractors (html/text/epub/docling/pdfium), container readers, lexical+vector indexes, embedders, LLMs, search, crawlers, remote-* (seam). |
-| `core/util/` | Text, security/SSRF, sanitize, fusion, retrieval eval, agreement (κ), feed, format probing, container policy, memory, robots/sitemap/rate limit, cache, ids/hashing/logging. |
+| `core/util/` | Text, security/SSRF, sanitize, retrieval eval, agreement (κ), feed, format probing, container policy, memory, robots/sitemap/rate limit, cache, ids/hashing/logging, `embed_input` (состав входа эмбеддера — объявление, а не аргумент, O19). |
 | `core/config/` | `run.yaml`/package loading, `deploy.yaml` (zone profile), path layout, domain profiles, crawl sources, passports. |
 | `core/cli/` | Composition root Z0: thin entry, parser, DI context, errors, output, adapter wiring, `doctor`, `commands/*`, `package/*`. |
 | `core/edge/` | Composition root Z1/DMZ: seam server, auth, audit, seam schema, crawl scheduler, poller, crawler factory, runtime config, launcher. |
@@ -111,7 +141,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `passports/{product_id}/` | Product passports. |
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
-| `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — a published number lives there with its date and instrument) and incident traces. Per §1.2: the artifact outranks the document, and a number cited in `docs/architecture/` **without** an entry here is a hypothesis, not a proof. Measured 2026-11-15: **34** lines across `docs/architecture/*.md` cite a "замер DD.MM" with no report reference — reading one of them means re-measuring or treating it as dated hearsay. |
+| `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — a published number lives there with its date and instrument) and incident traces. Per §1.2: the artifact outranks the document, and a number cited in `docs/architecture/` **without** an entry here is a hypothesis, not a proof. Re-measured 2026-11-16 with `rg -n 'замер\w*\s+(от\s+)?[0-9]{2}\.[0-9]{2}' docs/architecture/*.md \| grep -v reports/ \| wc -l` → **40** lines (the 15.11 count was 34): reading one of them means re-measuring or treating it as dated hearsay. |
 | `scripts/measure_*.py`, `scripts/conformance_*.py`, `scripts/check_pdf_page_map.py` | **Named instruments** of measurements and censuses (A3): a claim is out of scope only after a census with one of these, and a re-measurement cites the script + date. `check_pdf_page_map.py` — инвариант карты страниц PDF (`page_map`: покрытие, разрывы, обратная сборка) на реальном корпусе, а не на фикстурах; exit 1 при дефекте. |
 | `scripts/prepare_*.py` | **Артефакты для человека**, а не замеры: `prepare_retrieval_golden_docs.py` (документный эталон O14), `prepare_answer_sets.py` (набор отвечающих документов O42), `prepare_evidence_claims.py` (доказательная сила цитаты O18), `prepare_importance_pairs.py` (парные сравнения O20). Каждый пишет XLSX-лист на разметку и собирает результат обратно (`compile`/`validate`), отказывая на неразмеченном или чужом значении. Разметку не выдумывают: `candidate` в имени файла и `status: candidate` в наборе — это состояние «человек ещё не подтвердил». |
 | `.env.example` | Environment variables and external keys (LLM, scout, search adapters), no secrets. |
@@ -130,6 +160,18 @@ packages. Verify with `./hound.py doctor`, group `layout` (it prints the effecti
 its source**). Tool artifacts (mypy/ruff/coverage/hypothesis/pycache/pytest) are addressed by
 env vars in `~/.cohound/env.sh`. Tests do not depend on host state (`COHOUND_NO_DOTENV=1` in
 `tests/conftest.py`); live-run checks read `COHOUND_LIVE_RUNS_DIR` and skip without it.
+
+**Trap (re-measured 16.11.2026, and the earlier wording here was wrong).** Sourcing `.env`
+(`set -a; . ./.env`) does **not** by itself change `run_id` — measured on `ru-pg-dbms`:
+`plan` gives `ru-pg-dbms-3b82d5c0a132` with and without it, because `COHOUND_LLM_SLOT` is
+empty and `COHOUND_SERP` is absent. What it does change is **which tree is measured**: the
+file pins `COHOUND_HOME` + `COHOUND_PATHS_FILE`, and the `paths.yaml` it names carries
+**absolute** `packages`/`passports` — the main checkout's. A run started from a worktree then
+silently measures the main repo's package while the operator believes it measures the
+worktree's. Read `doctor` group `layout` (`источник: file|home|env|cli`) before trusting a
+number, and pass `PYTHONPATH` to the worktree instead of sourcing `.env`. The same shape
+applies to the stand: pointing at it needs **both** `COHOUND_HOME` and `COHOUND_PATHS_FILE`,
+otherwise one of them keeps the canonical layout.
 
 ### 3.2 Trusted zones
 
@@ -346,6 +388,30 @@ map, the corpus comes from what is already stored (`chunks`/`bytes`), coverage i
 and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` and never
 "no seeds".
 
+### 6.2 Crawl width, retries and what `fetch_ms` measures
+
+Three facts that are cheap to state and expensive to rediscover:
+
+- **Width belongs to the node, not to the package.** `crawl.max_workers` and
+  `crawl.host_concurrency` are declared in `config/deploy.yaml` (`CrawlLimits.max_workers`,
+  `core/config/deploy.py:490`) and a package does **not** declare them — they are a property of
+  the machine (memory, network), not of the category. `lanes_limit = 1` when
+  `host_concurrency is None`. Measured 07.11.2026 on this host: 1207 documents in 209 s =
+  **5.78 req/s**, p50/p95 151/113 ms. That number is a **price of this host**, not a ceiling:
+  re-measure before quoting it.
+- **Retries are not in the engine.** One cycle serves both `local` and `split`
+  (`core/util/fetch_retry.py`, `FETCH_RETRY_TIMES = 2` at `:55`, its own slot per attempt,
+  transient = 5xx/408/429/network), and Scrapy is configured with `RETRY_ENABLED=False`
+  (`core/adapters/crawl_scrapy.py:168`) on purpose — otherwise two retry layers would double
+  the load on a paced host and hide which one acted. Do not "fix" missing retries by enabling
+  the engine's.
+- **`fetch_ms` is not the host's response time.** It is measured around the fetch call
+  (`core/pipeline/crawl_pacing.py:259`), so it includes everything the adapter did before the
+  response arrived: measured 16.11.2026, Scrapy reported **1312 ms** on a page whose own
+  response was ~100 ms. For "how fast is the host" read the pacing/pacing-vs-minimum numbers in
+  `crawl status --per-host`, not `fetch_ms`. `COHOUND_SCOUT_CRAWLER=scrapy` is for
+  browser-profile hosts only — there the fetch is serialised by design.
+
 ## 7. Gates G1–G4
 
 - **What blocks a run.** `NON_BLOCKING_GATES = {G1, G2, G3}` (`core/pipeline/gates.py:79`,
@@ -426,7 +492,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   that were once silently outside the contract: `--max-depth`/`--max-documents`,
   `chunk_size`, `prompt_template`, `evaluation_policy`, `render_modes`, `passports`.
 - **The token limiter is a declared condition, not a tuning knob.** `TOKEN_LIMIT` in
-  `core/adapters/chunker_family.py:77` is `(limit, "model_id@revision")` or `None`; at `None`
+  `core/adapters/chunker_family.py:80` is `(limit, "model_id@revision")` or `None`; at `None`
   it is not applied and neither `chunker_version` nor `chunking_spec` changes (so switching it
   on/off cannot fake an `execution_change`). Declared-but-no-counter is `ValueError`, a counter
   without a declaration is a visible `token_limit_undeclared` warning, and every application is
@@ -440,7 +506,7 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   `rate_limit` (site > run, same formula as execution, key only when declared) — a per-site
   value overrides the run-level axis, so leaving it out let a host be re-paced without a new
   `run_id`. Add a new operator axis to the single inventory `CRAWL_AXIS_DESTS`
-  (`core/cli/execution_axes.py:193`) so `plan` and `run` pick it up together — flag parity is
+  (`core/cli/execution_axes.py:195`) so `plan` and `run` pick it up together — flag parity is
   tested. Changing an axis gives a **new `run_id`** (`execution_change`), not an edit of the
   current run; otherwise two different corpora become one measurement.
 - **Declared defaults live in `deploy.yaml`, not in code.** `retrieval.profile` (I16) and
