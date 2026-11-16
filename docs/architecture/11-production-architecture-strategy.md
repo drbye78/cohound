@@ -241,7 +241,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:349`
 >   (`docling_extractor_version`), вид значения в манифесте —
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0/md-plain-underscore/finalize-1`, стек в
->   контракте — `trafilatura-html-7+text-plain-2+epub-3+pdfium-text-4:5.14.0+docling-office-1+docling-doc-4/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
+>   контракте — `trafilatura-html-7+text-plain-2+epub-3+pdfium-text-5:5.14.0+docling-office-1+docling-doc-4/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
 >   (сегменты `<level>/<device>/<build>/<policy>/<finalize>`; `cpu`/`cuda` — ось
 >   `crawl.pdf_device`, P9).
 > - ✅ воркеры из бюджета + уровень из профиля: `core/pipeline/resources.py:525`

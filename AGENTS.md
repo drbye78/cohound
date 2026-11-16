@@ -257,7 +257,7 @@ mismatch forces `complete=False`; an unknown digest (either side) does not — a
 is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
 term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
 `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.24.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
+`SCHEMA_VERSION` 3.25.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
 `corpus_docs.page_map` at 3.21.0 — the page map, from which a chunk's page number is a
 **function**, not a column: a copy would have to be maintained on every chunk-write path and
 one missed path would give a silently wrong page; `corpus_docs.ocr_probe`/`pages_ocr`/
@@ -267,7 +267,13 @@ citations name a page and why the others cannot (`mapped`/`no_page_map`/`no_char
 `no_chunk`/`no_doc`), a run observation rather than a measurement condition; `corpus_docs.tables`
 + `runs.tables_json` at 3.24.0 — a table as an **object** (`table_id`/`page_no`/`caption`/
 `header`/`rows`; `NULL` = the reader gives no tables, `[]` = looked and found none), not a
-string in `context_prefix`; chunking does not depend on it); STATE `12`
+string in `context_prefix`; chunking does not depend on it; `corpus_docs.blocks` +
+`runs.blocks_json` at 3.25.0 — document **structure** (`kind`/`char_start`/`char_end`/`order`/
+`text_source` `read|reconstructed`/`page_no`/`bbox`/`parent_id`; `NULL` = the reader gives no
+blocks, `()` = looked and found none), and a chunk's `block_id` is likewise a **function**
+(`block_id_for`, same rule as the page number), not a column; `structured`/docling gives `None`
+because its only exact per-page export is quadratic — measured 0.56 s for the whole document
+vs 63.2 s for 200 page exports), STATE `12`
 (`capture.policy_digest`
 changed meaning ⇒ old files are rejected by the version gate).
 
@@ -595,9 +601,10 @@ and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` a
   must not erase a measured map of the same text. A chunk's page number is **not** a column
   but `page_number_for(char_start, page_map)` (`core/domain/page_map.py`): a copy would have to
   be maintained on every chunk-write path and one missed path gives a silently wrong page.
-  Stamp `pdfium-text-4` is an `execution_change` on purpose: a warmed `extract_cache` entry
-  without the map would hand back a document that lost provenance. Measured 15.11.2026 on the
-  whole PDF corpus (307 documents / 21 636 pages): 0 defects, `text` and `content_hash`
+  Stamp `pdfium-text-5` is an `execution_change` on purpose: a warmed `extract_cache` entry
+  without the map would hand back a document that lost provenance (and, since 3.25.0, without
+  the page blocks either — the text is byte-identical, identity is not). Measured 15.11.2026 on
+  the whole PDF corpus (307 documents / 21 636 pages): 0 defects, `text` and `content_hash`
   identical to the previous reader, cost +2.8…+6.1 % extraction time
   (`docs/reports/measurements/2026-11-15-pdf-page-map-corpus.md`, instrument
   `scripts/check_pdf_page_map.py`). Under `deploy_profile: split` the map is `None` — the seam
