@@ -1,0 +1,4952 @@
+{
+  "run_id": "ru-pg-dbms-145ad66ca3f9",
+  "case_id": "ru-pg-dbms",
+  "conditions": {
+    "schema_version_of_file": "3.20.0",
+    "index_build_id": "cb_5c090025af68b95615c87869",
+    "cutoff_k": 10,
+    "rrf_k": 60,
+    "lexical_profile": "stemmed",
+    "embed_spec": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+    "index_embed_model_id": "BAAI/bge-m3",
+    "dim": 1024,
+    "profiles": [
+      "R0",
+      "R1",
+      "R2"
+    ],
+    "pool_multipliers": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "cross_query_fusions": [
+      "max"
+    ],
+    "grid": [
+      "R0/fusion=max",
+      "R1/fusion=max",
+      "R2/pool=1/fusion=max",
+      "R2/pool=2/fusion=max",
+      "R2/pool=4/fusion=max",
+      "R2/pool=8/fusion=max"
+    ],
+    "bootstrap": 1000,
+    "seed": 0,
+    "cells_in_golden": 132,
+    "limit_cells": 0,
+    "chunks_in_index": 253306,
+    "docs_in_corpus": 19324,
+    "wiring_notices": [
+      "embed.precision=fp16: LiteEmbedder исключён — он NumPy/CPU by design и объявленную точность исполнить не может; выбран LocalEmbedder (BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181) с torch.autocast"
+    ]
+  },
+  "timings": {
+    "lexical_index_seconds": 29.67,
+    "R0/fusion=max_seconds": 0.77,
+    "R1/fusion=max_seconds": 745.93,
+    "R2/pool=1/fusion=max_seconds": 726.98,
+    "R2/pool=2/fusion=max_seconds": 7.37,
+    "R2/pool=4/fusion=max_seconds": 15.07,
+    "R2/pool=8/fusion=max_seconds": 9.65
+  },
+  "reports": [
+    {
+      "label": "R0/fusion=max",
+      "profile": "R0",
+      "pool_multiplier": 1,
+      "cross_query_fusion": "max",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.25757575757575757,
+      "hit_ci": [
+        0.18181818181818182,
+        0.3333333333333333
+      ],
+      "recall_at_k": 0.25757575757575757,
+      "recall_ci": [
+        0.18181818181818182,
+        0.3333333333333333
+      ],
+      "mrr": 0.12058982683982684,
+      "ndcg_at_k": 0.15309391471417175,
+      "per_cell": [
+        {
+          "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_097_rum_indeks",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_119_pluggable_toast",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        }
+      ]
+    },
+    {
+      "label": "R1/fusion=max",
+      "profile": "R1",
+      "pool_multiplier": 1,
+      "cross_query_fusion": "max",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.15151515151515152,
+      "hit_ci": [
+        0.09848484848484848,
+        0.2196969696969697
+      ],
+      "recall_at_k": 0.15151515151515152,
+      "recall_ci": [
+        0.09848484848484848,
+        0.2196969696969697
+      ],
+      "mrr": 0.06128848003848004,
+      "ndcg_at_k": 0.08270665172663463,
+      "per_cell": [
+        {
+          "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+          "rank": 9,
+          "ndcg_at_k": 0.3010299956639812,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "rank": 10,
+          "ndcg_at_k": 0.2890648263178879,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_097_rum_indeks",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "rank": 9,
+          "ndcg_at_k": 0.3010299956639812,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_119_pluggable_toast",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        }
+      ]
+    },
+    {
+      "label": "R2/pool=1/fusion=max",
+      "profile": "R2",
+      "pool_multiplier": 1,
+      "cross_query_fusion": "max",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.21212121212121213,
+      "hit_ci": [
+        0.14393939393939395,
+        0.28049242424242404
+      ],
+      "recall_at_k": 0.21212121212121213,
+      "recall_ci": [
+        0.14393939393939395,
+        0.28049242424242404
+      ],
+      "mrr": 0.11483585858585858,
+      "ndcg_at_k": 0.13834253795990434,
+      "per_cell": [
+        {
+          "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_097_rum_indeks",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_119_pluggable_toast",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        }
+      ]
+    },
+    {
+      "label": "R2/pool=2/fusion=max",
+      "profile": "R2",
+      "pool_multiplier": 2,
+      "cross_query_fusion": "max",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.24242424242424243,
+      "hit_ci": [
+        0.16666666666666666,
+        0.3181818181818182
+      ],
+      "recall_at_k": 0.24242424242424243,
+      "recall_ci": [
+        0.16666666666666666,
+        0.3181818181818182
+      ],
+      "mrr": 0.11984126984126985,
+      "ndcg_at_k": 0.14868518173523446,
+      "per_cell": [
+        {
+          "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_097_rum_indeks",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "rank": 10,
+          "ndcg_at_k": 0.2890648263178879,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_119_pluggable_toast",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        }
+      ]
+    },
+    {
+      "label": "R2/pool=4/fusion=max",
+      "profile": "R2",
+      "pool_multiplier": 4,
+      "cross_query_fusion": "max",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.23484848484848486,
+      "hit_ci": [
+        0.16666666666666666,
+        0.30303030303030304
+      ],
+      "recall_at_k": 0.23484848484848486,
+      "recall_ci": [
+        0.16666666666666666,
+        0.30303030303030304
+      ],
+      "mrr": 0.11904160654160655,
+      "ndcg_at_k": 0.14631183835460115,
+      "per_cell": [
+        {
+          "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_097_rum_indeks",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_119_pluggable_toast",
+          "rank": 9,
+          "ndcg_at_k": 0.3010299956639812,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        }
+      ]
+    },
+    {
+      "label": "R2/pool=8/fusion=max",
+      "profile": "R2",
+      "pool_multiplier": 8,
+      "cross_query_fusion": "max",
+      "k": 10,
+      "cells": 132,
+      "scored": 132,
+      "unresolved_cells": 0,
+      "hit_at_k": 0.23484848484848486,
+      "hit_ci": [
+        0.16666666666666666,
+        0.3106060606060606
+      ],
+      "recall_at_k": 0.23484848484848486,
+      "recall_ci": [
+        0.16666666666666666,
+        0.3106060606060606
+      ],
+      "mrr": 0.1193572631072631,
+      "ndcg_at_k": 0.14662049222067913,
+      "per_cell": [
+        {
+          "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": 8,
+          "ndcg_at_k": 0.31546487678572877,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_097_rum_indeks",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_119_pluggable_toast",
+          "rank": 9,
+          "ndcg_at_k": 0.3010299956639812,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+          "rank": 4,
+          "ndcg_at_k": 0.43067655807339306,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+          "rank": 7,
+          "ndcg_at_k": 0.3333333333333333,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+          "rank": 3,
+          "ndcg_at_k": 0.5,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+          "rank": 1,
+          "ndcg_at_k": 1.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+          "rank": 2,
+          "ndcg_at_k": 0.6309297535714575,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+          "rank": 5,
+          "ndcg_at_k": 0.38685280723454163,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+          "rank": 6,
+          "ndcg_at_k": 0.3562071871080222,
+          "unresolved": false
+        },
+        {
+          "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+          "rank": null,
+          "ndcg_at_k": 0.0,
+          "unresolved": false
+        }
+      ]
+    }
+  ]
+}
