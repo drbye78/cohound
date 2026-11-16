@@ -200,7 +200,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
-| C1 | ничья в RRF без `chunk_id` | ПОДТВЕРЖДЕНО для мёртвого модуля; **живой путь корректен** | мёртвый: `util/fusion.py:102` (+ `_fuse_template` не выносит `chunk_id`); живой: `retrieve.py:312`,`:415` | живой покрыт (`test_retrieve.py:194-224`, `tests/selfcheck.py:393`) | Г | P5 |
+| C1 | ничья в RRF без `chunk_id` | ПОДТВЕРЖДЕНО для мёртвого модуля; **живой путь корректен** | мёртвый: `util/fusion.py` — **удалён `aa4185b`**, поэтому адрес строки не проверяется и не должен (запись описывает состояние до удаления; `_fuse_template` не выносил `chunk_id`); живой: `retrieve.py:312`,`:415` | живой покрыт (`test_retrieve.py:194-224`, `tests/selfcheck.py:393`) | Г | P5 |
 | C2 | `core/util/fusion.py` — мёртвый дубль, докстринг и `06` врут о подключении | ПОДТВЕРЖДЕНО (покрытие 52 %) | импортов в `core/` нет; `06-implementation-strategy.md:47` — «✅ удалён (`aa4185b`): мёртвый дубль» | единственный тест — `tests/selfcheck.py:336` | Г | P5 |
 | C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:165` | нет | М | **P2** |
 | C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:248` (`_pieces`), `:290` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
