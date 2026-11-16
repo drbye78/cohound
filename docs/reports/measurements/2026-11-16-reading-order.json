@@ -1,0 +1,144 @@
+{
+ "instrument": "scripts/measure_reading_order.py",
+ "conditions": {
+  "mechanism": "text_layer",
+  "device": "cpu",
+  "max_pages": 0,
+  "documents": 149
+ },
+ "summary": {
+  "documents": 149,
+  "pages_examined": 19331,
+  "two_column_pages": 0,
+  "scored_pages": 0,
+  "interleaved_pages": 0,
+  "perfect_order_pages": 0,
+  "mean_lcs_ratio": null,
+  "reasons": {
+   "not_two_column": 17304,
+   "rotated_text": 53,
+   "table_like": 13,
+   "too_few_chars": 1961
+  },
+  "errors": 0
+ },
+ "pages": [
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/f1710cb8d3bd93dba4919a9d229afd31116dde0038beb04e52aacd7d729143ec.bin",
+   "page": 1947,
+   "reason": "table_like",
+   "column_lines": 88,
+   "fill_left": 0.153,
+   "fill_right": 0.36,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/f1710cb8d3bd93dba4919a9d229afd31116dde0038beb04e52aacd7d729143ec.bin",
+   "page": 1948,
+   "reason": "table_like",
+   "column_lines": 79,
+   "fill_left": 0.156,
+   "fill_right": 0.295,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/f1710cb8d3bd93dba4919a9d229afd31116dde0038beb04e52aacd7d729143ec.bin",
+   "page": 1951,
+   "reason": "table_like",
+   "column_lines": 86,
+   "fill_left": 0.155,
+   "fill_right": 0.264,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/f1710cb8d3bd93dba4919a9d229afd31116dde0038beb04e52aacd7d729143ec.bin",
+   "page": 1959,
+   "reason": "table_like",
+   "column_lines": 76,
+   "fill_left": 0.172,
+   "fill_right": 0.409,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/f1710cb8d3bd93dba4919a9d229afd31116dde0038beb04e52aacd7d729143ec.bin",
+   "page": 1960,
+   "reason": "table_like",
+   "column_lines": 82,
+   "fill_left": 0.156,
+   "fill_right": 0.289,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/f1710cb8d3bd93dba4919a9d229afd31116dde0038beb04e52aacd7d729143ec.bin",
+   "page": 1961,
+   "reason": "table_like",
+   "column_lines": 77,
+   "fill_left": 0.156,
+   "fill_right": 0.295,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/16d937c450f9376168d7fcc75329a7cbd0c57dd9558d4b26c68c2aa7775b0162.bin",
+   "page": 46,
+   "reason": "table_like",
+   "column_lines": 46,
+   "fill_left": 0.404,
+   "fill_right": 0.007,
+   "row_aligned": 0.609
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/a797741bda89686a386e5d0857456835c8f569441e802f691ca9e75d75b5f0f8.bin",
+   "page": 3,
+   "reason": "table_like",
+   "column_lines": 46,
+   "fill_left": 0.404,
+   "fill_right": 0.007,
+   "row_aligned": 0.609
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/95bcdb8f69826397f0efd1ccd1d61a5d37a6fcb76b3507a18b7cc0b67f95a9ae.bin",
+   "page": 54,
+   "reason": "table_like",
+   "column_lines": 46,
+   "fill_left": 0.404,
+   "fill_right": 0.007,
+   "row_aligned": 0.696
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/8aebb295ccc1fa91d8d5f6c095159b633c67b1a003af6de63e9d083200c54e51.bin",
+   "page": 59,
+   "reason": "table_like",
+   "column_lines": 48,
+   "fill_left": 0.404,
+   "fill_right": 0.007,
+   "row_aligned": 0.48
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/745d7c1dfcceda8651689cc5c2d8ff6ab5b5e6720bfd4260d96badfd13718095.bin",
+   "page": 245,
+   "reason": "table_like",
+   "column_lines": 94,
+   "fill_left": 0.034,
+   "fill_right": 0.6,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/745d7c1dfcceda8651689cc5c2d8ff6ab5b5e6720bfd4260d96badfd13718095.bin",
+   "page": 2152,
+   "reason": "table_like",
+   "column_lines": 80,
+   "fill_left": 0.156,
+   "fill_right": 0.238,
+   "row_aligned": 1.0
+  },
+  {
+   "path": "/home/roger/.cohound/data/corpus_raw/postgrespro/745d7c1dfcceda8651689cc5c2d8ff6ab5b5e6720bfd4260d96badfd13718095.bin",
+   "page": 2153,
+   "reason": "table_like",
+   "column_lines": 76,
+   "fill_left": 0.156,
+   "fill_right": 0.233,
+   "row_aligned": 1.0
+  }
+ ]
+}
