@@ -354,6 +354,10 @@ def _partition_matrix(
     Это не оптимизация: партиция посчитана продакшен-путём, и брать её значит сравнивать
     два состава входа, а не два пути счёта. Побочно — встроенный контроль: число базового
     варианта обязано совпасть с числом прибора O14 на том же профиле.
+
+    ``chunks`` здесь — размер партиции, то есть измеренное число только пока среза нет:
+    ``--limit-chunks`` режет матрицу ниже, и тогда ``chunks`` правит
+    :func:`_apply_partition_slice`, а размер партиции остаётся в ``partition_chunks``.
     """
     from core.adapters.index_format import read_partition
     from core.pipeline.composition import read_composition
@@ -374,11 +378,33 @@ def _partition_matrix(
             "partition_build_id": partition_build_id,
             "composition_id": view.composition_id,
             "chunks": len(data.chunk_ids),
+            "partition_chunks": len(data.chunk_ids),
             "seconds": 0.0,
             "chunks_per_s": None,
             "cache": None,
         },
     )
+
+
+def _apply_partition_slice(
+    order: Sequence[str],
+    partition_ids: Sequence[str],
+    matrix: Any,
+    stats: dict[str, Any],
+) -> tuple[list[str], Any]:
+    """Срез базовой матрицы по позициям партиции: порядок и строки режутся **вместе**.
+
+    Позиция ``i`` в ``partition_ids`` — строка ``i`` матрицы, поэтому фильтр применяется к
+    обоим спискам одним и тем же ``positions``: разойтись они не могут. Публикуется при
+    этом число **измеренных** чанков, а не размер партиции — иначе строка базового варианта
+    утверждает 206 931 чанк там, где измерено 3 000 (замер 16.11.2026, ``--limit-chunks
+    3000``), и читатель сравнивает дымовое число с O14 как число оси.
+    """
+    keep = set(order)
+    positions = [index for index, cid in enumerate(partition_ids) if cid in keep]
+    sliced_order = [partition_ids[index] for index in positions]
+    stats["chunks"] = len(sliced_order)
+    return sliced_order, matrix[positions]
 
 
 def _evaluate(
@@ -452,6 +478,22 @@ def _peak_rss_bytes() -> int:
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
 
 
+def _load_average() -> list[float] | None:
+    """Средняя нагрузка хоста (1/5/15 мин) на момент замера.
+
+    Нужна по той же причине, что в приборе реранкера: ``chunks_per_s`` на общем хосте без
+    неё невоспроизводимо. Замер 16.11.2026 шёл при занятом хосте (рядом работали pytest и
+    другой прибор), и без этого поля читатель не отличил бы цену оси от цены конкуренции.
+    ``None`` — счётчика нет (не Linux): отсутствие факта не факт отсутствия.
+    """
+    import os
+
+    try:
+        return [round(value, 2) for value in os.getloadavg()]
+    except OSError:
+        return None
+
+
 def _peak_vram_bytes() -> int | None:
     """Пик VRAM в окне замера; ``None`` — счёт невозможен (нет cuda/torch)."""
     try:
@@ -461,6 +503,66 @@ def _peak_vram_bytes() -> int | None:
     if not torch.cuda.is_available():
         return None
     return int(torch.cuda.max_memory_allocated())
+
+
+def _condition_fields(stats: dict[str, Any]) -> dict[str, Any]:
+    """Условия замера для строки варианта: измеренное число и размер партиции — раздельно.
+
+    ``chunks`` — сколько чанков реально попало в матрицу (после среза). ``partition_chunks``
+    — размер сборки, из которой взят базовый вариант; у пересчитанного варианта его нет
+    (``None``): он партицию не читал, и выдумывать ему это поле нельзя.
+    """
+    return {
+        "source": stats.get("source"),
+        "partition_build_id": stats.get("partition_build_id"),
+        "chunks": stats.get("chunks"),
+        "partition_chunks": stats.get("partition_chunks"),
+        "seconds": stats.get("seconds"),
+        "chunks_per_s": stats.get("chunks_per_s"),
+        "cache": stats.get("cache"),
+    }
+
+
+def _require_same_chunks(reports: Sequence[dict[str, Any]]) -> None:
+    """Инвариант сравнимости: у всех вариантов отчёта одно и то же число чанков.
+
+    Варианты, померившиеся на разных матрицах, дают числа, в разницу которых входит разница
+    корпусов, — публиковать их рядом как «эффект оси» нельзя. Сегодня срез режется в одном
+    месте (:func:`_apply_partition_slice`); проверка стоит здесь, чтобы второй путь среза не
+    прошёл молча.
+    """
+    measured = [(str(report.get("variant")), report.get("chunks")) for report in reports]
+    if len({chunks for _, chunks in measured}) > 1:
+        detail = ", ".join(f"{name}={chunks}" for name, chunks in measured)
+        raise SystemExit(
+            "measure: варианты померились на разном числе чанков — числа несравнимы "
+            f"({detail})"
+        )
+
+
+def _build_payload(
+    reports: Sequence[dict[str, Any]],
+    base: dict[str, Any],
+    *,
+    peak_rss_bytes: int | None,
+    peak_vram_bytes: int | None,
+    load_average: list[float] | None = None,
+) -> dict[str, Any]:
+    """Собирает отчёт и **на этом же пути** проверяет сравнимость вариантов.
+
+    Инвариант стоит здесь, а не в :func:`main`, по той же причине, по которой страница
+    чанка выводится функцией: путь публикации один, и проверка неотделима от него.
+    Вызов в ``main`` можно удалить (или обойти вторым путём сборки) — и тогда отчёт с
+    несравнимыми строками выйдет молча; здесь он выйти не может.
+    """
+    _require_same_chunks(reports)
+    return {
+        **base,
+        "peak_rss_bytes": peak_rss_bytes,
+        "peak_vram_bytes": peak_vram_bytes,
+        "load_average": load_average,
+        "variants": list(reports),
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -535,10 +637,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         # Срез идёт по позициям партиции: её порядок и есть порядок матрицы.
         if len(order) != len(partition_ids):
-            keep = set(order)
-            positions = [index for index, cid in enumerate(partition_ids) if cid in keep]
-            order = [partition_ids[index] for index in positions]
-            baseline_matrix = baseline_matrix[positions]
+            order, baseline_matrix = _apply_partition_slice(
+                order, partition_ids, baseline_matrix, baseline_stats
+            )
         else:
             order = partition_ids
 
@@ -629,12 +730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "variant": name,
                 "fields": list(fields),
-                "source": stats.get("source"),
-                "partition_build_id": stats.get("partition_build_id"),
-                "chunks": stats.get("chunks"),
-                "seconds": stats.get("seconds"),
-                "chunks_per_s": stats.get("chunks_per_s"),
-                "cache": stats.get("cache"),
+                **_condition_fields(stats),
                 "metrics": {
                     "hit_at_k": report.hit_at_k,
                     "recall_at_k": report.recall_at_k,
@@ -653,31 +749,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         if name == variants[0]:
             baseline_matrix = None
 
-    payload = {
-        "instrument": "measure_embed_input_variant",
-        "measured_at": time.strftime("%Y-%m-%d"),
-        "smoke_only": smoke_only,
-        "run_id": run_id,
-        "case_id": case_id,
-        "package_id": package_id,
-        "index_build_id": build_id,
-        "product": args.product,
-        "profile": args.profile,
-        "cutoff_k": cutoff_k,
-        "golden": str(args.golden),
-        "golden_cells": len(entries),
-        "cells_in_scope": len(selected),
-        "chunks_total": len(full_order),
-        "chunks_measured": len(order),
-        "embed_model_id": embed_model_id,
-        "embed_device": str(deploy.embed.device),
-        "embed_precision": str(deploy.embed.precision),
-        "batch_size": batch_size,
-        "notices": notices,
-        "peak_rss_bytes": _peak_rss_bytes(),
-        "peak_vram_bytes": _peak_vram_bytes(),
-        "variants": reports,
-    }
+    payload = _build_payload(
+        reports,
+        {
+            "instrument": "measure_embed_input_variant",
+            "measured_at": time.strftime("%Y-%m-%d"),
+            "smoke_only": smoke_only,
+            "run_id": run_id,
+            "case_id": case_id,
+            "package_id": package_id,
+            "index_build_id": build_id,
+            "product": args.product,
+            "profile": args.profile,
+            "cutoff_k": cutoff_k,
+            "golden": str(args.golden),
+            "golden_cells": len(entries),
+            "cells_in_scope": len(selected),
+            "chunks_total": len(full_order),
+            "chunks_measured": len(order),
+            "embed_model_id": embed_model_id,
+            "embed_device": str(deploy.embed.device),
+            "embed_precision": str(deploy.embed.precision),
+            "batch_size": batch_size,
+            "notices": notices,
+        },
+        peak_rss_bytes=_peak_rss_bytes(),
+        peak_vram_bytes=_peak_vram_bytes(),
+        load_average=_load_average(),
+    )
     if args.out_json:
         path = Path(args.out_json)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -797,6 +896,11 @@ def _print_summary(payload: dict[str, Any]) -> None:
         f"пик RSS {payload['peak_rss_bytes'] / 2**20:.0f} MiB · "
         f"пик VRAM {'не измерен' if peak_vram is None else f'{peak_vram / 2**20:.0f} MiB'}"
     )
+    load = payload.get("load_average")
+    if load:
+        # Нагрузка хоста — условие числа, а не украшение: на общем хосте цена оси и цена
+        # конкуренции за него неотличимы, если напечатано только «чанк/с».
+        print(f"нагрузка хоста (1/5/15 мин): {load[0]:.2f} / {load[1]:.2f} / {load[2]:.2f}")
 
 
 if __name__ == "__main__":

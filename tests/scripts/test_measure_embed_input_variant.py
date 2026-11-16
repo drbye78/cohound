@@ -19,6 +19,11 @@
   иначе дубль сравнивает вариант сам с собой и печатает нулевую разницу как результат;
 * **``_write_cells_csv``**: ``delta = базовый − второй`` и **пуст**, если один ранг
   ``None``; ``None``, записанный как ``0``, врёт в диффе ранжирования.
+* **Условия замера публикуются раздельно**: ``chunks`` — сколько чанков измерено (после
+  среза), ``partition_chunks`` — размер партиции (только у ``source == "partition"``).
+  Слитые в одно число, они утверждают, что база мерилась на 206 931 чанке там, где
+  измерено 3 000 (замер 16.11.2026, ``--limit-chunks 3000``). Рядом — инвариант: у всех
+  вариантов отчёта ``chunks`` совпадает, иначе их числа несравнимы и отчёт отказывает.
 
 Синтетика: матрицы ``numpy``, строки ``_Row`` и ``tmp_path`` для CSV. Стенд
 ``~/.cohound``, ``torch``/``cuda`` и БД не трогаются.
@@ -243,3 +248,198 @@ def test_write_cells_csv_delta_is_base_minus_other_and_blank_on_none(
     # Хотя бы один ранг ``None`` ⇒ delta пуст, а не ``-2``/``0``.
     assert rows[2] == ["p2", "", "2", ""]
     assert rows[3] == ["p3", "5", "", ""]
+
+
+# ------------------------------------- условия замера: срез и публикация (O19)
+
+
+def _partition_stats(size: int) -> dict[str, Any]:
+    """Статистика базового варианта ровно в той форме, что отдаёт ``_partition_matrix``."""
+    return {
+        "source": "partition",
+        "partition_build_id": "pb_test",
+        "composition_id": "cmp_test",
+        "chunks": size,
+        "partition_chunks": size,
+        "seconds": 0.0,
+        "chunks_per_s": None,
+        "cache": None,
+    }
+
+
+def test_partition_slice_publishes_measured_chunks_not_partition_size() -> None:
+    """Срез: ``chunks`` — 100 измеренных, ``partition_chunks`` — 1000 в сборке.
+
+    Слитые в одно поле, они публикуют дымовое число как число оси.
+    """
+    partition_ids = [f"chunk-{index:05d}" for index in range(1000)]
+    order = MEASURE._subset(partition_ids, 100)
+    matrix = np.arange(1000 * 2, dtype=np.float32).reshape(1000, 2)
+    stats = _partition_stats(1000)
+
+    sliced_order, sliced_matrix = MEASURE._apply_partition_slice(
+        order, partition_ids, matrix, stats
+    )
+
+    assert len(sliced_order) == 100
+    assert stats["chunks"] == 100
+    assert stats["partition_chunks"] == 1000
+    # Порядок и матрица режутся вместе: строка ``i`` матрицы принадлежит ``sliced_order[i]``.
+    positions = [partition_ids.index(chunk_id) for chunk_id in sliced_order]
+    assert sliced_matrix.shape[0] == len(sliced_order)
+    assert [int(row[0]) // 2 for row in sliced_matrix] == positions
+
+
+def test_no_slice_publishes_equal_chunk_counts() -> None:
+    """Без среза измерено всё: ``chunks == partition_chunks`` (их правит только срез)."""
+    published = MEASURE._condition_fields(_partition_stats(206_931))
+
+    assert published["chunks"] == published["partition_chunks"] == 206_931
+
+
+def test_conditions_separate_measured_chunks_from_partition_size() -> None:
+    """Публикация не склеивает два факта в одно поле (отчёт 16.11.2026: 206 931 / 3 000)."""
+    stats = _partition_stats(206_931)
+    stats["chunks"] = 3000
+
+    published = MEASURE._condition_fields(stats)
+
+    assert published["chunks"] == 3000
+    assert published["partition_chunks"] == 206_931
+
+
+def test_recomputed_variant_has_no_partition_chunks() -> None:
+    """Пересчитанный вариант партицию не читал: поля ``partition_chunks`` у него нет."""
+    published = MEASURE._condition_fields(
+        {"source": "recomputed", "chunks": 3000, "seconds": 438.008, "chunks_per_s": 6.85}
+    )
+
+    assert published["chunks"] == 3000
+    assert published["partition_chunks"] is None
+
+
+def test_require_same_chunks_rejects_variants_measured_on_different_corpora() -> None:
+    """База на 206 931 и вариант на 3 000: их числа несравнимы, отчёт обязан отказать."""
+    reports = [
+        {"variant": "text", "chunks": 206_931},
+        {"variant": "heading", "chunks": 3000},
+    ]
+
+    with pytest.raises(SystemExit) as excinfo:
+        MEASURE._require_same_chunks(reports)
+
+    message = str(excinfo.value.code)
+    assert "206931" in message
+    assert "3000" in message
+    assert "text" in message
+    assert "heading" in message
+
+
+def test_require_same_chunks_rejects_unknown_count() -> None:
+    """``None`` (неизвестно, сколько измерено) — не «совпадает»: сравнивать нечем."""
+    with pytest.raises(SystemExit):
+        MEASURE._require_same_chunks(
+            [{"variant": "text", "chunks": None}, {"variant": "heading", "chunks": 3000}]
+        )
+
+
+def test_require_same_chunks_accepts_equal_counts() -> None:
+    """Одинаковое число измеренных чанков — условие сравнимости выполнено."""
+    MEASURE._require_same_chunks(
+        [{"variant": "text", "chunks": 3000}, {"variant": "heading", "chunks": 3000}]
+    )
+
+
+def test_partition_matrix_publishes_partition_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_partition_matrix`` публикует размер партиции отдельным полем, а не только ``chunks``.
+
+    Проверяется сама функция, а не ``_condition_fields``: поле заполняется **здесь**, и
+    удаление строки из неё оставляло бы ``partition_chunks = None`` у базового варианта —
+    то есть размер сборки терялся бы молча, ровно тот дефект, ради которого поле заведено.
+    """
+    from types import SimpleNamespace
+
+    vectors = np.zeros((3, 4), dtype=np.float32)
+    data = SimpleNamespace(vectors=vectors, chunk_ids=["a", "b", "c"])
+    view = SimpleNamespace(
+        composition_id="comp-1", build_id_for=lambda product: f"pb_{product}"
+    )
+
+    calls: list[tuple[Any, ...]] = []
+
+    def fake_partition(index_root: Any, package: str, build_id: str, product: str, **_: Any) -> Any:
+        calls.append((package, build_id, product))
+        return data
+
+    monkeypatch.setattr("core.adapters.index_format.read_partition", fake_partition)
+    monkeypatch.setattr("core.pipeline.composition.read_composition", lambda *a, **k: view)
+
+    matrix, chunk_ids, stats = MEASURE._partition_matrix(Path("/nowhere"), "pkg", "comp-1", "prod")
+
+    assert calls == [("pkg", "pb_prod", "prod")]
+    assert chunk_ids == ["a", "b", "c"]
+    assert matrix is vectors
+    assert stats["chunks"] == 3
+    assert stats["partition_chunks"] == 3
+    assert stats["source"] == "partition"
+
+
+def test_build_payload_rejects_incomparable_variants() -> None:
+    """Путь сборки отчёта неотделим от проверки: несравнимые строки не выйдут наружу.
+
+    Проверка стоит в ``_build_payload``, а не в ``main``, именно ради этого теста: вызов
+    из ``main`` можно удалить, и отчёт вышел бы молча.
+    """
+    reports = [
+        {"variant": "text", "chunks": 206_931},
+        {"variant": "heading", "chunks": 3000},
+    ]
+
+    with pytest.raises(SystemExit):
+        MEASURE._build_payload(reports, {"run_id": "r"}, peak_rss_bytes=None, peak_vram_bytes=None)
+
+
+def test_build_payload_keeps_base_fields_and_variants() -> None:
+    """Сборка не теряет поля условий и кладёт ``variants`` последним (порядок — часть формата)."""
+    reports = [{"variant": "text", "chunks": 3000}, {"variant": "heading", "chunks": 3000}]
+
+    payload = MEASURE._build_payload(
+        reports, {"run_id": "r", "chunks_measured": 3000}, peak_rss_bytes=1, peak_vram_bytes=2
+    )
+
+    assert payload["run_id"] == "r"
+    assert payload["chunks_measured"] == 3000
+    assert payload["peak_rss_bytes"] == 1
+    assert payload["peak_vram_bytes"] == 2
+    assert payload["variants"] == reports
+    assert list(payload)[-1] == "variants"
+
+
+def test_load_average_published_as_measurement_condition() -> None:
+    """Нагрузка хоста — часть условий, а не украшение отчёта.
+
+    ``chunks_per_s`` на общем хосте без неё невоспроизводим: замер 16.11.2026 шёл при
+    занятом хосте (рядом работали pytest и другой прибор), и без поля «6.85 чанк/с»
+    читается как цена оси, а не как цена конкуренции за хост.
+    """
+    load = MEASURE._load_average()
+    assert load is None or (len(load) == 3 and all(isinstance(v, float) for v in load))
+
+    payload = MEASURE._build_payload(
+        [{"variant": "text", "chunks": 3000}],
+        {"run_id": "r"},
+        peak_rss_bytes=1,
+        peak_vram_bytes=None,
+        load_average=[7.4, 6.5, 4.7],
+    )
+    assert payload["load_average"] == [7.4, 6.5, 4.7]
+    # Ключ обязан быть в отчёте и когда счётчика нет: иначе поле «иногда есть» нельзя
+    # отличить от «не измеряли» при разборе старых артефактов.
+    payload = MEASURE._build_payload(
+        [{"variant": "text", "chunks": 3000}],
+        {"run_id": "r"},
+        peak_rss_bytes=1,
+        peak_vram_bytes=None,
+    )
+    assert "load_average" in payload
+    assert payload["load_average"] is None
