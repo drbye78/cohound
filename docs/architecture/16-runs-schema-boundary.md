@@ -378,7 +378,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
 `RunManifest` (`core/domain/models.py:1740`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2866`) сопоставляет имя
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2895`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
 (`core/pipeline/report.py:2849`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
@@ -779,7 +779,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    `core/pipeline/state_adopt.py:120` — **текст там с 08.11.2026 сам устарел**:
    `runs.run_scope` объявлен (`core/store/sqlite.py:196`) и пишется `persist_manifest`
    (`core/store/sqlite_store.py:1287`); правка в `core/` — вне этой полосы), а `ProductPlanSet`
-   существует (`core/domain/models.py:3002`) и **до границы** не персистился ни разу —
+   существует (`core/domain/models.py:3015`) и **до границы** не персистился ни разу —
    единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей. ✅ После границы оба

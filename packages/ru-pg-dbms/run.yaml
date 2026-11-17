@@ -59,6 +59,7 @@ package: ru-pg-dbms
 products:
 - pangolin
 - postgrespro
+- postgresql
 - tantor
 - jatoba
 - digital_q_database

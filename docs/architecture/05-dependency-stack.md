@@ -211,7 +211,7 @@ pdfium) GPU **не ускоряет** — отсюда обе механизмы
 плечо (BM25, косинус или RRF). Прежняя редакция этого абзаца утверждала «порт `reranker` есть,
 по умолчанию выключен»; проверено 15.11.2026 — в `core/ports/` его нет (19 модулей + `__init__.py`, `__all__` без
 `rerank`), а пять попаданий на слово `rerank` в `core/` описывают **место под число**, не
-механизм: `SearchLogEntry.rerank_score` (`core/domain/models.py:1399`), колонка
+механизм: `SearchLogEntry.rerank_score` (`core/domain/models.py:1425`), колонка
 `rerank_score REAL` (`core/store/sqlite.py:508`), её сериализация (`core/store/sqlite_store.py:233,918`)
 и докстринг `core/pipeline/search_log.py:267` о переносе именованных скоров. Поле всегда `None`:
 производителя нет. Это O23 плана 26 — **измерение, а не решение** (триггер возврата в

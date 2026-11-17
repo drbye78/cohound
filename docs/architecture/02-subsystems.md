@@ -359,7 +359,7 @@ index`. Это делает DMZ-шов физической границей **I
 `failed` и не `partial`; статус ставит recovery-on-open по свидетельству живости
 (`owner`/`heartbeat_at`), а `hound crawl cancel` демотирует `running` в `interrupted`
 (`cancelled_by_operator`). `interrupted` обязан оставаться в `_TERMINAL_SESSION_STATUSES`
-(`core/cli/context.py:2349`), иначе `--follow` ждёт вечно.
+(`core/cli/context.py:2354`), иначе `--follow` ждёт вечно.
 `completed` — при отсутствии failed/cancelled, иначе `partial`. При наличии `store` и `run_id` Ш5 перед фетчем читает
 durable-элементы сеанса и **не фетчит повторно** URL, у которого уже есть retained-байты:
 `RawPage` реконструируется из `corpus_raw` (I19: raw — источник), затем идёт ре-экстракция;
@@ -828,17 +828,19 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3540-3609`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3829`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
 `partial_docs.csv`, `support_quality.yaml` (замер `support_subject_overlap`),
 `corpus_freshness.yaml` + `cell_freshness.csv` (план 20 §7 F2), `artifacts_gap.yaml`
-(`13 §4`). Таблица выше называет публикационные (`PUBLISHED_ARTIFACTS`,
-`core/pipeline/gate_subject.py:59-64`) и манифест; полный набор имён, которые появляются в
-`{out_dir}/{run_id}/` после `write_reports`, — 16, включая `run_manifest.yaml` (корень
-прогона) и `artifacts_gap.yaml` (пишется помощником `write_artifacts_gap`,
-`core/pipeline/artifacts_gap.py:309-311`). Измерено по коду 2026-11-08.
+(`13 §4`), `baseline_delta.csv` + `baseline_delta.yaml` (Δ к объявленной точке отсчёта
+когорты — `cohort.yaml: comparison_base`; матрица переходов `base_status → product_status`,
+ординальности статусов не вводится). Таблица выше называет публикационные (`PUBLISHED_ARTIFACTS`,
+`core/pipeline/gate_subject.py:59-64`) и манифест. Полный перечень — поля датакласса
+`Artifacts` (`core/pipeline/report.py:307`), а не число: список рос на каждом O-пункте, и
+пересчитанное «сколько всего файлов» устаревало быстрее, чем его читали. Раньше здесь
+стояло «16» (измерено 2026-11-08) — к 17.11.2026 это число неверно.
 
 **Отчётный контур I3 (v2.1, §5).** `report.py` собирает `i3_anomalies` (`collect_i3_anomalies`):
 strict-`❓` без **полного** протокола исчерпания (`corpus`+`serp`+`registry`+`inheritance`). Это

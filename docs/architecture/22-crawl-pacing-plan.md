@@ -17,7 +17,7 @@
 
 ## 1. Как задан темп сейчас
 
-- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:484`).
+- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:498`).
   Резолвится цепочкой `defaults < run < profile < product < site`
   (`core/pipeline/crawl_sources.py:145-151`), едет в `FetchPlan` **на каждый URL**.
 - Примитив — не token bucket, а **резерв слота по origin**: `target = max(now, last[origin])

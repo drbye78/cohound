@@ -128,7 +128,7 @@ capability_alpha,Функция Alpha,core,capabilities,Кр,fact,"Засчит�
 
 ### `cohort.yaml`
 
-Когорта — канонический состав сравнения. В записях используются `product_id`, `role_overlap`, `selection_reason`, `anchor_relation`; у когорты — `case_id`, `frozen_at`, `entries`.
+Когорта — канонический состав сравнения. В записях используются `product_id`, `role_overlap`, `selection_reason`, `anchor_relation` и опциональный `comparison_base` (точка отсчёта, относительно которой отчёт публикует Δ — `outputs/baseline_delta.csv`/`.yaml`); у когорты — `case_id`, `frozen_at`, `entries`.
 
 ```yaml
 case_id: example_case

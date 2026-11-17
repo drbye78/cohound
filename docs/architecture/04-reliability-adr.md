@@ -491,7 +491,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 | 0009 | Кэш внешних вызовов для R7 | R7 | accepted |
 | 0010 | `failed` — состояние ячейки, не исключение | I4/I5 | accepted |
 | 0011 | Гейты G1–G4 — только человеческие решения | I6/I7 | **ЗАМЕНЕНО** решением владельца 26.10.2026: G1/G2/G3 **не блокируют** прогон — фаза идёт `skipped` и пишет waiver с `actor="policy"` (`core/pipeline/gates.py:79` `NON_BLOCKING_GATES`, `core/pipeline/runner.py:534`); блокируют только G4 и явный `rejected` — см. 0023 |
-| 0012 | Расщепление бывших `core/schemas.py`/`core/db.py` на слои | чистота слоёв | accepted · **реализовано** (M0/W1, шимы удалены; слой гейтится `tests/selfcheck.py:355` `_import_graph`) |
+| 0012 | Расщепление бывших `core/schemas.py`/`core/db.py` на слои | чистота слоёв | accepted · **реализовано** (M0/W1, шимы удалены; слой гейтится `tests/selfcheck.py:378` `_import_graph`) |
 | 0013 | Гранулярность индексной сборки и provenance ячеек | R7/R15, §13 | accepted · уточнён 0021 |
 | 0014 | SERP-петля vs иммутабельность: append-only раунды сборок | I19, §13, K2 | accepted · **частично**: код append-only раундов есть, живой SERP-раунд в прогоне кейса не выполнялся (`docs/architecture/06-implementation-strategy.md:190`, W11: код ✅, живой раунд ⏳) |
 | 0015 | Политика ранжирования/демотирования: requested vs computed | A3, K6 | accepted |
@@ -510,7 +510,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 долг: 0011 **заменён** решением владельца 26.10.2026 (G1/G2/G3 не блокируют, waiver
 `actor="policy"`), 0020 уточнён методологией **0.3.0** (I2d), на которую ADR не было —
 добавлен **0024**. 0012 реализован (якорь переставлен по содержанию:
-`tests/selfcheck.py:355`). 0014 и 0023 исполнены по коду, но у обоих открыта **операционная**
+`tests/selfcheck.py:378`). 0014 и 0023 исполнены по коду, но у обоих открыта **операционная**
 половина: живой SERP-раунд (`docs/architecture/06-implementation-strategy.md:190`) и подписанная аттестация
 профиля (0 строк в реальных `state.db`, 07.11.2026 — наблюдение о прогонах, не о дизайне).
 Остальные строки (0001–0010, 0013, 0015–0019, 0021–0022) совпадают с кодом.
@@ -613,7 +613,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 
 **Открытые вопросы (закрыть до/в ходе M0):**
 - формат импорт-графа CI (статический анализ импортов `core.*`) — ✅ сделано
-  (`tests/selfcheck.py:1009` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:355`;
+  (`tests/selfcheck.py:1032` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:378`;
   тот же шаг в CI — `scripts/ci.sh:59`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
   итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1348` и `core/domain/models.py:1511`; производитель
@@ -628,7 +628,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   `core/store/backup.py:274` `restore_run`; снапшот через `sqlite3.Connection.backup`, не
   копирование файла);
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
-  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:304`; маркер
+  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:310`; маркер
   `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:212`; профиль публикуемости
   `outputs/publishability.yaml` — `core/pipeline/report.py:3794`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано

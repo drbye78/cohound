@@ -1,7 +1,7 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
 > **Статус на 2026-11-08** (HEAD `f14f866`): сверены все якоря `путь:строка` по содержимому,
-> матрица §1 — построчно с `tests/selfcheck.py:1009` `_import_graph` (сходится), перечни
+> матрица §1 — построчно с `tests/selfcheck.py:1032` `_import_graph` (сходится), перечни
 > enum-значений и версии схем — с `core/`. §10 закрыт (5 из 5, сигнатуры перепроверены);
 > §9 закрыт — миграция `tests/selfcheck.py` сверена 29.10 (94 двойника / 8 дописанных тестов /
 > 9 структурных гейтов), на 08.11 в selfcheck **113** утверждений (99 `check` + 14
@@ -45,7 +45,7 @@
 (`core/edge/extract_service.py:59`, `core/edge/seam_schema.py:41`); дублировать словарь значило бы
 дать ему разойтись с доменом.
 
-**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:1009` `_import_graph`
+**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:1032` `_import_graph`
 разбирает импорты **статически** (`ast`, без исполнения), включая резолв relative-импортов
 (`tests/selfcheck.py:1053` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
 (`tests/selfcheck.py:1078` `_check_edge`), то есть проверка по принципу allow-list, отдельных
@@ -77,7 +77,7 @@
 | Отрицание и охват | `AbsenceRuleType` (`explicit`, `parameter_reference`, `distribution_absence`, `registry_absence`) · `SourceScope` (`exhaustive`, `partial`, `unknown`) · `DenialStrength` (`authoritative`, `explicit`, `bounded`, `unobserved`, `not_stated`, `instrument_failed`) · `DenialClaim` (`explicit`, `not_stated`) |
 | Сбои | `FailureKind` — **17**: 5 классов сбоя ячейки (`search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`) + 11 наблюдаемых исходов краула (`not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`) + `partial_extraction` (документ получен, прочитана часть страниц — блокирующий класс корпуса) |
 | Пропуск фазы | `SkipReason` — **7**: `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external`, `gate_not_blocking` (последний — не блокирующий гейт: фаза идёт дальше, в `gate_decisions` ложится waiver-строка `actor=policy`) |
-| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:2349`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `ExtractQueueState` (`pending`, `claimed`, `done`, `failed`, `skipped`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
+| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:2354`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `ExtractQueueState` (`pending`, `claimed`, `done`, `failed`, `skipped`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
 | Извлечение | `ExtractionRoute` (`auto`, `html`, `document`) · `DocumentLevel` (`off`, `text`, `layout`, `layout_tables`, `full`) · `PdfPipeline` (`structured`, `text_layer`) · `PdfDevice` (`cpu`, `cuda`) |
 | Контейнеры | `ArchiveDescent` (`plan`, `full` — ось `crawl.archive_descent`) · `ArchiveDescentStatus` (`planned`, `descended`, `unreadable`, `budget_exhausted`) · `ContainerEncryption` (`encrypted`, `not_encrypted`, `unknown` — три состояния, а не булево: «предикат молчит» неотличим от «не зашифрован») |
 | Гейты | `Gate` (G1–G4) · `GateSource` (`internal`, `external`) · `GateVerdict` (`approved`, `rejected`) · `GatePolicy` (`external`, `waived`) |
@@ -89,7 +89,7 @@
 **Почему `interrupted` терминален.** Протухший `running` при открытии сеанса становится
 `interrupted`: тело краула не финализировано, поэтому это не `failed` и не `cancelled`. Без него в
 множестве терминальных `--follow` ждал бы вечно сеанс, который уже никто не исполняет
-(`core/cli/context.py:2349`).
+(`core/cli/context.py:2354`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
 (`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1218,1220`, `gate_delegated_external`/

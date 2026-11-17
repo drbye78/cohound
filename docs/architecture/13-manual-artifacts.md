@@ -139,8 +139,8 @@ provide:
 (`core/pipeline/digests.py:179`).
 
 Материал — по образцу `seeds_digest` (`core/pipeline/digests.py:278-312`): отсортированные
-`(product_id, url, sha256)` (`manual_artifacts_digest` — `core/pipeline/digests.py:383`, материал
-`core/pipeline/digests.py:399`). **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
+`(product_id, url, sha256)` (`manual_artifacts_digest` — `core/pipeline/digests.py:401`, материал
+`core/pipeline/digests.py:407`). **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
 это провенанс записи, а не измерение (прецедент: `seeds_digest` исключает `source`/`added_*`;
 `scope_attested_by` не входит в контракт вовсе). Пустой набор даёт стабильный дайджест
 пустого множества, а не пустую строку — как у seeds.
@@ -264,7 +264,7 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 декларация не переписывается (`changed: 0`).
 
 **`run_id` двигает только материал.** `manual_artifacts_digest` считается по
-`(product_id, url, sha256)` (`core/pipeline/digests.py:383`), поэтому `provided_at` и
+`(product_id, url, sha256)` (`core/pipeline/digests.py:401`), поэтому `provided_at` и
 `provided_by` в идентичность не входят. Команда различает два исхода и говорит их разными
 словами: `digest_changed: true` → «следующий прогон получит новый `run_id`
 (`execution_change`)»; `changed > 0` при неизменном материале → «декларация переписана,
@@ -352,7 +352,7 @@ gaps:
 `run_lineage.previous_run_id` и `change_class` (`core/store/state_sqlite.py:276-280`; запись —
 `core/pipeline/state_adopt.py:1536,1807`). Прогон N+1, объявивший артефакты, попадает в эту
 цепочку автоматически, а `hound diff` называет смену `manual_artifacts_digest` осью
-расхождения (`core/pipeline/report.py:2803-2834`). Отдельная пометка на артефакте не нужна:
+расхождения (`core/pipeline/report.py:2832-2863`). Отдельная пометка на артефакте не нужна:
 состояния «артефакт перенесён из прогона X» нет — файл перечитывается каждый прогон, а
 перенос типизирован на уровне ячейки (`measurement_origin=carried` + `carried_from_run_id`);
 см. §8 п. 3.
@@ -421,7 +421,7 @@ gaps:
    `core/pipeline/corpus.py:4232`; `origin` — `core/store/sqlite.py:271`;
    `resolved_manually` — `core/domain/models.py:2716` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1737`; дайджест — `core/pipeline/digests.py:179`, материал
-   `core/pipeline/digests.py:399`).
+   `core/pipeline/digests.py:407`).
    As-built и расхождения — §10.
 3. ➖ **неактуально (сверено 08.11.2026)** — типизированной пометки «этот артефакт перенесён
    из прогона X» не будет: такого состояния нет. Объявленный файл перечитывается и
@@ -432,7 +432,7 @@ gaps:
    `carried_from_run_id` (`core/domain/models.py:1273-1279`, схема `cell-reuse-2`); документ —
    `corpus_docs.reuse_kind` (`live|revalidated|reused|stale`). Связь прогонов при этом видна:
    `run_lineage.previous_run_id` + `change_class`, а `hound diff` называет смену
-   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2803-2834`).
+   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2832-2863`).
 4. ➖ **переехало** — документный `pb` (`F3`) ведётся как гейт флота в
    `24-fleet-work-units.md` F1.5; здесь не ведётся. Цена «шаг 2 стоит часы на продукт»
    остаётся фактом §6 этого документа.
@@ -523,7 +523,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:133`); подача
   живёт внутри `corpus` (`core/pipeline/corpus.py:4232`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:179`,
-  материал `(product_id, url, sha256)` — `core/pipeline/digests.py:399`), считается даже
+  материал `(product_id, url, sha256)` — `core/pipeline/digests.py:407`), считается даже
   при пустом наборе.
 - ➖ **Типизированная пометка переноса** — не нужна: состояния «артефакт перенесён из
   прогона X» нет, перенос типизирован на уровне ячейки (`measurement_origin=carried` +

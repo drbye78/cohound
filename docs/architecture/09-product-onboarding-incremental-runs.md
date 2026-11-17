@@ -1796,7 +1796,12 @@ def derive_run_id(inputs: RunInputs, *, cycle_id: str, cohort_digest: str,
   наблюдения — это другое измерение, а не resume.
 - `cohort_digest` = `H(canonical JSON of sorted (product_id, anchor_relation, role_overlap);
   case_id; frozen_at; cohort_ref)`. `selection_reason` **не** входит: авторский текст не
-  меняет измерение.
+  меняет измерение. `comparison_base` (точка отсчёта Δ, `outputs/baseline_delta.*`)
+  **не входит вовсе**: это представление, а не условие замера, — прецедент тот же, что у
+  политики гейтов (§7: «process, not a measurement condition», поэтому её нет в
+  контракте). Иначе смена вида отчёта заставляла бы перезапускать прогон ради тех же
+  ячеек; два отчёта одного `run_id` не смешиваются, потому что `baseline_delta.yaml`
+  называет базовый продукт ключом `comparison_base`.
 - `seeds_digest` = `H(product_id, order, normalized_url, role, profile_key, enabled)`, где
   `order` — **авторская позиция корня внутри продукта** (`core/pipeline/digests.py`):
   порядок корней — часть идентичности, потому что краул порядко-чувствителен (корень,

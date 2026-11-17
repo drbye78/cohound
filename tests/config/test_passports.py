@@ -295,3 +295,29 @@ def test_loading_is_deterministic(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Объявленная точка отсчёта пакета (``passports/postgresql``)
+# ---------------------------------------------------------------------------
+
+REPO_PASSPORTS = Path(__file__).resolve().parents[2] / "passports"
+
+
+def test_comparison_base_passport_loads_from_repository() -> None:
+    """Паспорт предка пакета ``ru-pg-dbms`` читается загрузчиком и валиден по схеме.
+
+    Проверяется **объявленный** вход, а не фикстура: ``passports/postgresql`` — тот самый
+    файл, из которого ``plan`` берёт ``doc_domains`` и корпусный вход. Отдельно
+    фиксируется, что корень версионный (``/docs/18``), а не алиас ``/docs/current``:
+    алиас переезжает на новый мажор, и корпус дрейфовал бы без нового ``run_id``.
+    """
+    passport = load_passport("postgresql", REPO_PASSPORTS)
+    assert passport is not None
+    assert Passport.model_validate(passport.model_dump()) == passport
+    assert passport.product_id == "postgresql"
+    # Предок сам — нуль отсчёта, поэтому линия не объявлена. Поле читается через
+    # ``model_dump``, а не атрибутом: имя поля живёт в двух редакциях схемы
+    # (``upstream`` / ``upstreams``), и тест не должен закреплять одну из них.
+    declared = passport.model_dump().get("upstreams") or passport.model_dump().get("upstream")
+    assert not declared
+    assert passport.doc_domains[0] == "www.postgresql.org/docs/18"
+    assert passport_urls(passport) == ["https://www.postgresql.org/docs/18/"]

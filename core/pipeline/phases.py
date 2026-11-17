@@ -1923,6 +1923,7 @@ def build_phases(
             run_id=plan.run_id,
             exhaustions=exhaustions,
             store=ctx.store,
+            cohort=plan.cohort,
         )
         holder["artifacts"] = artifacts
         # §13/K2: устаревшие ячейки исключены из расчёта — «что требует пере-оценки» идёт

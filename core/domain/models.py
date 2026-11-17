@@ -317,6 +317,14 @@ class CohortEntry(BaseModel):
     role_overlap: float = Field(ge=0, le=1)
     selection_reason: str | None = None
     anchor_relation: AnchorRelation
+    #: Продукт, относительно которого отчёт публикует Δ (``outputs/baseline_delta.*``):
+    #: точка отсчёта линии, а не аналог. Это **представление**, а не условие замера —
+    #: поэтому в ``cohort_digest`` флаг **не входит**: включение перезапускало бы прогон
+    #: ради другого вида тех же ячеек (прецедент — политика гейтов, §7: процесс, не
+    #: условие замера, и в контракте её нет). Самоописательность держит артефакт:
+    #: ``baseline_delta.yaml`` называет базовый продукт ключом ``comparison_base``.
+    #: ``False`` — не объявлен; больше одного ``True`` — ошибка (:meth:`Cohort._check`).
+    comparison_base: bool = False
 
 
 class Cohort(BaseModel):
@@ -331,6 +339,12 @@ class Cohort(BaseModel):
         anchors = [e for e in self.entries if e.anchor_relation is AnchorRelation.ANCHOR]
         if len(anchors) != 1:
             raise ValueError(f"когорта обязана содержать ровно один якорь, найдено {len(anchors)}")
+        bases = [e.product_id for e in self.entries if e.comparison_base]
+        if len(bases) > 1:
+            raise ValueError(
+                "когорта может объявить не более одной точки отсчёта "
+                f"(comparison_base), найдено {len(bases)}: {', '.join(sorted(bases))}"
+            )
         pids = [e.product_id for e in self.entries]
         if len(pids) != len(set(pids)):
             raise ValueError("product_id в когорте должны быть уникальны")
