@@ -19,7 +19,9 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import json
 import sqlite3
 import sys
@@ -317,3 +319,224 @@ def test_main_returns_one_for_missing_db(tmp_path: Path, capsys: pytest.CaptureF
     )
     assert code == 1
     assert "БД не найдена" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Объявленный режим скоринга: --scoring доезжает до отчёта
+# ---------------------------------------------------------------------------
+
+
+class _Adapter:
+    """Фейк ``LocalReranker``: запоминает объявленные условия, считает по ``_identity``.
+
+    Подменяет адаптер целиком, потому что проверяется **провод**: какие условия прибор
+    объявил адаптеру и что он записал в отчёт. Сам режим скоринга проверен в
+    ``tests/adapters/test_rerank_local.py``.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.model_id = f"{kwargs['model_id']}@{kwargs['revision']}"
+        self.device = str(kwargs.get("device", "cpu"))
+        self.scoring = str(kwargs.get("scoring", "cross-encoder"))
+        self.batch_size = int(
+            kwargs.get("batch_size") or (4 if self.scoring == "decoder-yes-no" else 16)
+        )
+        self.decision_tokens = tuple(kwargs.get("decision_tokens") or ("yes", "no"))
+        self.decision_token_ids = (7, 8) if self.scoring == "decoder-yes-no" else None
+
+    def rerank(self, query: str, documents: list[str]) -> list[float]:
+        return _identity(query, documents)
+
+
+_PROMPT = "Q:{query}\nD:{document}\nA:"
+
+
+def _run_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *extra: str,
+) -> tuple[int, Path]:
+    """Прогон ``main`` с подменённым адаптером; возвращает код и путь отчёта."""
+    db, golden = _make_run(
+        tmp_path, docs=_DOCS, params=[_param("param_a", _TITLE)], expected=["p:good"]
+    )
+    monkeypatch.setattr(measure, "LocalReranker", _Adapter)
+    out = tmp_path / "report.json"
+    code = measure.main(
+        [
+            "--db",
+            str(db),
+            "--golden",
+            str(golden),
+            "--model",
+            "org/model@sha",
+            "--device",
+            "cpu",
+            "--top-n",
+            "2",
+            "--cutoff-k",
+            "1",
+            "--bootstrap",
+            "50",
+            "--out-json",
+            str(out),
+            *extra,
+        ]
+    )
+    return code, out
+
+
+def test_scoring_reaches_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Режим, промпт, его ``sha256``, пара токенов и батч — в отчёте, а не только в флагах."""
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text(_PROMPT + "\n", encoding="utf-8")
+
+    code, out = _run_main(
+        tmp_path,
+        monkeypatch,
+        "--scoring",
+        "decoder-yes-no",
+        "--prompt-file",
+        str(prompt_file),
+        "--decision-tokens",
+        "1,0",
+    )
+
+    assert code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["scoring"] == "decoder-yes-no"
+    # Шаблон записан дословно (снят только завершающий перевод строки файла).
+    assert payload["prompt_template"] == _PROMPT
+    assert payload["prompt_sha256"] == hashlib.sha256(_PROMPT.encode("utf-8")).hexdigest()
+    assert payload["prompt_source"] == str(prompt_file)
+    assert payload["decision_tokens"] == ["1", "0"]
+    assert payload["decision_token_ids"] == [7, 8]
+    # Батч — фактический: --batch-size не задан, значит дефолт режима (4 у декодера).
+    assert payload["batch_size"] == 4
+
+
+def test_cross_encoder_report_has_no_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """У кросс-энкодера промпта нет: поля пусты, а батч — прежние 16."""
+    code, out = _run_main(tmp_path, monkeypatch)
+
+    assert code == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["scoring"] == "cross-encoder"
+    assert payload["prompt_template"] is None
+    assert payload["prompt_sha256"] is None
+    assert payload["decision_token_ids"] is None
+    assert payload["batch_size"] == 16
+
+
+def test_decoder_without_prompt_file_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _ = _run_main(tmp_path, monkeypatch, "--scoring", "decoder-yes-no")
+    assert code == 1
+    assert "--prompt-file" in capsys.readouterr().err
+
+
+def test_prompt_file_with_cross_encoder_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Объявленное и неисполняемое условие — отказ, а не тихое игнорирование."""
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text(_PROMPT, encoding="utf-8")
+    code, _ = _run_main(tmp_path, monkeypatch, "--prompt-file", str(prompt_file))
+    assert code == 1
+    assert "промпта нет" in capsys.readouterr().err
+
+
+def test_unknown_scoring_is_refused(tmp_path: Path) -> None:
+    """Третьего режима нет: ``--scoring auto`` — отказ CLI, а не догадка."""
+    with pytest.raises(SystemExit) as excinfo:
+        measure.main(
+            [
+                "--db",
+                str(tmp_path / "cohound.db"),
+                "--golden",
+                str(tmp_path / "golden.json"),
+                "--model",
+                "org/model@sha",
+                "--scoring",
+                "auto",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_decision_tokens_must_be_a_pair() -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match="decision-tokens"):
+        measure._decision_tokens("yes")
+
+
+# ---------------------------------------------------------------------------
+# Прогресс по ячейке: результат переживает падение процесса
+# ---------------------------------------------------------------------------
+
+
+def test_run_reports_each_cell_to_the_callback(tmp_path: Path) -> None:
+    """Каждая ячейка уходит в колбэк сразу: файл прогресса — не отчёт «в конце»."""
+    db, golden = _make_run(
+        tmp_path, docs=_DOCS, params=[_param("param_a", _TITLE)], expected=["p:good"]
+    )
+    seen: list[dict[str, Any]] = []
+
+    payload = measure.run(
+        db,
+        golden,
+        reranker=_Reranker(_reordering),
+        top_n=2,
+        cutoff_k=1,
+        bootstrap=50,
+        on_cell=seen.append,
+    )
+
+    assert len(seen) == len(payload["per_cell"]) == 1
+    cell = seen[0]
+    assert cell["cell"] == payload["per_cell"][0]["cell"]
+    # В строке достаточно, чтобы пересчитать ячейку: ожидание и обе выдачи.
+    assert cell["expected_doc_ids"] == ["p:good"]
+    assert cell["retrieved_baseline"] == ["p:distractor"]
+    assert cell["retrieved_reranked"] == ["p:good"]
+    assert cell["rank_baseline"] is None
+    assert cell["rank_reranked"] == 1
+
+
+def test_progress_file_is_written_next_to_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``main`` ведёт ``*.progress.jsonl`` рядом с отчётом: заголовок + ячейка."""
+    code, out = _run_main(tmp_path, monkeypatch)
+    progress = out.with_name(out.stem + ".progress.jsonl")
+
+    assert code == 0
+    assert progress.is_file()
+    rows = [
+        json.loads(line)
+        for line in progress.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["kind"] == "header"
+    assert rows[0]["model"] == "org/model@sha"
+    assert rows[0]["scoring"] == "cross-encoder"
+    assert rows[0]["prompt_sha256"] is None
+    assert [row["cell"] for row in rows[1:]] == [
+        cell["cell"] for cell in json.loads(out.read_text(encoding="utf-8"))["per_cell"]
+    ]
+
+
+def test_progress_writer_flushes_each_line(tmp_path: Path) -> None:
+    """Строка видна в файле до закрытия — иначе смысл файла пропадает."""
+    path = tmp_path / "p.jsonl"
+    writer = measure._ProgressWriter(path, header={"kind": "header"})
+    writer({"cell": "p/a"})
+    text = path.read_text(encoding="utf-8")
+    assert len(text.splitlines()) == 2
+    writer.close()
+

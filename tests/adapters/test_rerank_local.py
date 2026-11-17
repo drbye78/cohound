@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -233,10 +233,110 @@ class _Model:
         return _Output([float(len(text)) for text in inputs["text_pair"].payload])
 
 
+# ---------------------------------------------------------------------------
+# Декодер: поддельные токенизатор и модель со «словарём» логитов
+# ---------------------------------------------------------------------------
+
+#: Пары «да»/«нет», которые поддельный токенизатор отдаёт одним токеном.
+_DECODER_SINGLE = {"yes": [7], "no": [8], "1": [16], "0": [15]}
+
+
+class _DecoderTokenizer:
+    """Поддельный токенизатор декодера: журнал ``encode``/``pad`` и однократные пары."""
+
+    def __init__(self, repo: str, init_kwargs: dict[str, Any]) -> None:
+        self.repo = repo
+        self.init_kwargs = init_kwargs
+        self.padding_side = init_kwargs.get("padding_side", "right")
+        self.single: dict[str, list[int]] = dict(_DECODER_SINGLE)
+        self.encode_calls: list[str] = []
+        self.pad_calls: list[dict[str, Any]] = []
+
+    @classmethod
+    def from_pretrained(cls, repo: str, **kwargs: Any) -> _DecoderTokenizer:
+        return cls(repo, kwargs)
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        self.encode_calls.append(text)
+        if text in self.single:
+            return list(self.single[text])
+        # Прочий текст — по токену на символ: длина документа в токенах = длине строки,
+        # поэтому бюджет усечения проверяется арифметикой, а не догадкой.
+        return [ord(char) % 50 + 10 for char in text]
+
+    def pad(
+        self, encoded: dict[str, list[list[int]]], padding: bool = True, return_tensors: str = "pt"
+    ) -> dict[str, _Tensor]:
+        rows = [list(row) for row in encoded["input_ids"]]
+        self.pad_calls.append(
+            {"rows": rows, "padding": padding, "return_tensors": return_tensors}
+        )
+        return {
+            "input_ids": _Tensor(rows),
+            "attention_mask": _Tensor([[1] * len(row) for row in rows]),
+        }
+
+
+class _CausalLogits:
+    """Логиты декодера: ``logits[i, -1, token_id]`` — как у настоящего тензора."""
+
+    def __init__(self, base: dict[int, float], true_ids: frozenset[int]) -> None:
+        self.base = base
+        self.true_ids = true_ids
+
+    def __getitem__(self, key: tuple[int, int, int]) -> float:
+        index, position, token_id = key
+        if position != -1:
+            raise AssertionError(f"логит читается не с последней позиции: {position}")
+        # Надбавка за номер строки — только у «да»: тогда разность логитов различает
+        # документы (``2 + i``) и видно, что порядок входа сохранён.
+        bonus = float(index) if token_id in self.true_ids else 0.0
+        return self.base.get(token_id, 0.0) + bonus
+
+
+class _CausalOutput:
+    def __init__(self, base: dict[int, float], true_ids: frozenset[int]) -> None:
+        self.logits = _CausalLogits(base, true_ids)
+
+
+class _CausalModel:
+    """Поддельный декодер: ``logit(«да») = 3 + i``, ``logit(«нет») = 1`` ⇒ балл ``2 + i``."""
+
+    #: Таблица логитов по идентификатору токена (переопределяется тестом при нужде).
+    table: ClassVar[dict[int, float]] = {7: 3.0, 8: 1.0, 16: -2.0, 15: -4.0}
+    #: Идентификаторы «да» — те, что получают надбавку за номер строки (7 = yes, 16 = 1).
+    true_ids: ClassVar[frozenset[int]] = frozenset({7, 16})
+
+    def __init__(self, repo: str, init_kwargs: dict[str, Any]) -> None:
+        self.repo = repo
+        self.init_kwargs = init_kwargs
+        self.device: str | None = None
+        self.eval_called = False
+        self.calls: list[dict[str, Any]] = []
+        _MODEL_INSTANCES.append(self)
+
+    @classmethod
+    def from_pretrained(cls, repo: str, **kwargs: Any) -> _CausalModel:
+        return cls(repo, kwargs)
+
+    def to(self, device: str) -> _CausalModel:
+        self.device = device
+        return self
+
+    def eval(self) -> _CausalModel:
+        self.eval_called = True
+        return self
+
+    def __call__(self, **inputs: Any) -> _CausalOutput:
+        self.calls.append(inputs)
+        return _CausalOutput(dict(type(self).table), type(self).true_ids)
+
+
 def _fake_transformers() -> types.ModuleType:
     fake = types.ModuleType("transformers")
     fake.AutoTokenizer = _Tokenizer  # type: ignore[attr-defined]
     fake.AutoModelForSequenceClassification = _Model  # type: ignore[attr-defined]
+    fake.AutoModelForCausalLM = _CausalModel  # type: ignore[attr-defined]
     return fake
 
 
@@ -264,9 +364,16 @@ def _fake_torch(
     return fake, autocast_calls
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, *, torch_fake: types.ModuleType) -> None:
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    torch_fake: types.ModuleType,
+    tokenizer_cls: type[Any] = _Tokenizer,
+) -> None:
     monkeypatch.setattr(module, "_transformers_available", lambda: True)
-    monkeypatch.setitem(sys.modules, "transformers", _fake_transformers())
+    fake = _fake_transformers()
+    fake.AutoTokenizer = tokenizer_cls  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", fake)
     monkeypatch.setitem(sys.modules, "torch", torch_fake)
 
 
@@ -359,3 +466,231 @@ def test_missing_snapshot_is_unavailable_not_network(
         rr.rerank("q", ["a"])
     assert "org/m@sha" in str(excinfo.value)
     assert "local_files_only=True" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Объявленный режим скоринга
+# ---------------------------------------------------------------------------
+
+#: Минимальный шаблон промпта: ровно по одному плейсхолдеру, суффикс различим, и вся
+#: арифметика усечения проверяема вручную (по токену на символ у поддельного токенизатора).
+_TEMPLATE = "Q:{query}\nD:{document}\nA:"
+
+
+def _decoder(**kwargs: Any) -> LocalReranker:
+    """Декодер с объявленным шаблоном; ``kwargs`` переопределяют поля."""
+    base: dict[str, Any] = {
+        "model_id": "org/dec",
+        "revision": "sha",
+        "scoring": module.SCORING_DECODER_YES_NO,
+        "prompt_template": _TEMPLATE,
+    }
+    base.update(kwargs)
+    return LocalReranker(**base)
+
+
+def test_unknown_scoring_is_refused() -> None:
+    """Режим объявляет вызывающий: автоопределение по конфигу — тот же тихий фолбэк."""
+    with pytest.raises(ValueError, match="scoring"):
+        LocalReranker(_fixed_fn(), model_id="org/m", revision="sha", scoring="auto")
+
+
+def test_decoder_requires_prompt_template() -> None:
+    with pytest.raises(ValueError, match="prompt_template"):
+        LocalReranker(
+            _fixed_fn(),
+            model_id="org/m",
+            revision="sha",
+            scoring=module.SCORING_DECODER_YES_NO,
+        )
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "без плейсхолдеров",
+        "query: {query}\n{query}\ndoc: {document}",
+        "query: {query}\ndoc: {document}\nещё: {document}",
+    ],
+)
+def test_prompt_template_placeholders_are_exactly_one(template: str) -> None:
+    with pytest.raises(ValueError, match="prompt_template"):
+        _decoder(prompt_template=template)
+
+
+def test_cross_encoder_refuses_a_prompt_template() -> None:
+    """У кросс-энкодера промпта нет: объявленный и неисполняемый шаблон — отказ."""
+    with pytest.raises(ValueError, match="prompt_template"):
+        LocalReranker(
+            _fixed_fn(), model_id="org/m", revision="sha", prompt_template=_TEMPLATE
+        )
+
+
+def test_decoder_batch_default_is_smaller_than_cross_encoder() -> None:
+    """Батч декодера меньше: логиты — ``batch × seq × vocab`` (см. докстринг константы)."""
+    assert module.DEFAULT_BATCH_SIZE_DECODER < module.DEFAULT_BATCH_SIZE
+    assert _decoder().batch_size == module.DEFAULT_BATCH_SIZE_DECODER
+    assert (
+        LocalReranker(_fixed_fn(), model_id="org/m", revision="sha").batch_size
+        == module.DEFAULT_BATCH_SIZE
+    )
+    assert _decoder(batch_size=2).batch_size == 2
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [("yes",), ("yes", "no", "maybe"), ("yes", ""), ("yes", "yes")],
+)
+def test_decision_tokens_must_be_two_distinct_strings(tokens: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="decision_tokens"):
+        _decoder(decision_tokens=tokens)
+
+
+def test_decoder_score_is_the_difference_of_two_logits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Главное свойство режима: балл = ``logit(«да») − logit(«нет»)``, порядок сохранён."""
+    _MODEL_INSTANCES.clear()
+    torch_fake, _ = _fake_torch()
+    _install(monkeypatch, torch_fake=torch_fake, tokenizer_cls=_DecoderTokenizer)
+
+    rr = _decoder(max_length=64)
+    scores = rr.rerank("запрос", ["a", "bb", "ccc"])
+
+    # Таблица поддельной модели: logit(yes)=3+i, logit(no)=1 ⇒ 2, 3, 4.
+    assert scores == [2.0, 3.0, 4.0]
+    model = _MODEL_INSTANCES[0]
+    assert model.repo == "org/dec"
+    assert model.init_kwargs == {"revision": "sha", "local_files_only": True}
+    assert model.device == "cpu" and model.eval_called is True
+    assert rr.decision_token_ids == (7, 8)
+
+
+def test_decoder_prompt_is_built_from_the_declared_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Промпт собран из шаблона, и суффикс шаблона стоит **последним** (иначе он срезан)."""
+    _MODEL_INSTANCES.clear()
+    torch_fake, _ = _fake_torch()
+    _install(monkeypatch, torch_fake=torch_fake, tokenizer_cls=_DecoderTokenizer)
+
+    rr = _decoder()
+    rr.rerank("мой запрос", ["док"])
+
+    tokenizer = rr._tokenizer
+    # Левое поле: логит берётся с позиции -1, а при правом padding там оказался бы pad.
+    assert tokenizer.init_kwargs == {
+        "revision": "sha",
+        "local_files_only": True,
+        "padding_side": "left",
+    }
+    assert tokenizer.padding_side == "left"
+    prefix_text, tail_text = _TEMPLATE.split("{document}")
+    assert tokenizer.encode_calls[0] == "yes"
+    assert tokenizer.encode_calls[1] == "no"
+    assert tokenizer.encode_calls[2] == prefix_text.replace("{query}", "мой запрос")
+    assert tokenizer.encode_calls[3] == tail_text
+    assert tokenizer.encode_calls[4] == "док"
+    rows = tokenizer.pad_calls[0]["rows"]
+    assert len(rows) == 1
+    prefix_len = len(tokenizer.encode(prefix_text.replace("{query}", "мой запрос")))
+    assert rows[0][:prefix_len] == tokenizer.encode(
+        prefix_text.replace("{query}", "мой запрос")
+    )
+    assert rows[0][-len(tokenizer.encode(tail_text)) :] == tokenizer.encode(tail_text)
+    assert tokenizer.pad_calls[0]["padding"] is True
+    assert tokenizer.pad_calls[0]["return_tensors"] == "pt"
+
+
+def test_decoder_truncates_the_document_and_keeps_the_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Усечение режет **документ**, а не суффикс: иначе промпт оборван и балл лжив."""
+    _MODEL_INSTANCES.clear()
+    torch_fake, _ = _fake_torch()
+    _install(monkeypatch, torch_fake=torch_fake, tokenizer_cls=_DecoderTokenizer)
+
+    rr = _decoder(max_length=10)
+    rr.rerank("q", ["x" * 40])
+
+    tokenizer = rr._tokenizer
+    prefix_len = len(tokenizer.encode(_TEMPLATE.split("{document}")[0].replace("{query}", "q")))
+    suffix_len = len(tokenizer.encode(_TEMPLATE.split("{document}")[1]))
+    row = tokenizer.pad_calls[0]["rows"][0]
+    # Префикс «Q:q\nD:» = 6 токенов, суффикс «\nA:» = 3, бюджет документа = 10-6-3 = 1.
+    assert (prefix_len, suffix_len) == (6, 3)
+    assert len(row) == 10
+    assert row[-suffix_len:] == tokenizer.encode(_TEMPLATE.split("{document}")[1])
+    assert row[:prefix_len] == tokenizer.encode(
+        _TEMPLATE.split("{document}")[0].replace("{query}", "q")
+    )
+
+
+def test_decoder_refuses_when_the_prompt_does_not_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Шаблон длиннее ``max_length`` — отказ с числами, а не молча обрезанный суффикс."""
+    _MODEL_INSTANCES.clear()
+    torch_fake, _ = _fake_torch()
+    _install(monkeypatch, torch_fake=torch_fake, tokenizer_cls=_DecoderTokenizer)
+
+    rr = _decoder(max_length=4)
+    with pytest.raises(ValueError, match="max_length"):
+        rr.rerank("q", ["doc"])
+
+
+def test_decoder_refuses_multi_token_decision_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пара распалась на несколько токенов — модель/токенизатор не те: отказ с числами."""
+    _MODEL_INSTANCES.clear()
+    torch_fake, _ = _fake_torch()
+    _install(monkeypatch, torch_fake=torch_fake, tokenizer_cls=_DecoderTokenizer)
+
+    class _SplitTokenizer(_DecoderTokenizer):
+        def __init__(self, repo: str, init_kwargs: dict[str, Any]) -> None:
+            super().__init__(repo, init_kwargs)
+            self.single = {"yes": [7, 7], "no": [8]}
+
+    fake = _fake_transformers()
+    fake.AutoTokenizer = _SplitTokenizer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+
+    rr = _decoder()
+    with pytest.raises(RerankerUnavailable) as excinfo:
+        rr.rerank("q", ["a"])
+    message = str(excinfo.value)
+    assert "'yes' → 2 токен(ов) [7, 7]" in message
+    assert "'no' → 1 токен(ов) [8]" in message
+
+
+def test_decoder_honours_declared_decision_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пара объявлена вызывающим (у mxbai-rerank-v2 карточка просит «0/1», не «yes/no»)."""
+    _MODEL_INSTANCES.clear()
+    torch_fake, _ = _fake_torch()
+    _install(monkeypatch, torch_fake=torch_fake, tokenizer_cls=_DecoderTokenizer)
+
+    rr = _decoder(decision_tokens=("1", "0"))
+    scores = rr.rerank("q", ["a"])
+
+    assert rr.decision_token_ids == (16, 15)
+    # logit(«1») = -2, logit(«0») = -4 ⇒ -2 - (-4) = 2.
+    assert scores == [2.0]
+
+
+def test_cross_encoder_path_is_unchanged_by_the_new_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Режим по умолчанию — прежний путь: ``AutoModelForSequenceClassification``."""
+    _MODEL_INSTANCES.clear()
+    torch_fake, _ = _fake_torch()
+    _install(monkeypatch, torch_fake=torch_fake)
+
+    rr = LocalReranker(model_id="org/m", revision="sha", max_length=128)
+    assert rr.scoring == module.SCORING_CROSS_ENCODER
+    assert rr.prompt_template is None
+    assert rr.rerank("q", ["ab"]) == [2.0]
+    assert isinstance(_MODEL_INSTANCES[0], _Model)
+

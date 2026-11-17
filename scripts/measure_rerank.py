@@ -36,9 +36,32 @@ O23 — «меняет ли порядок кросс-энкодер», и на 
 ``battery_status``, частота/потребление/температура карты, счётчик ``SW Power Capping``)
 публикуются рядом **контролем**, парой «до/после».
 
+**Результат пишется по ячейке, а не только в конце.** Длинный прогон (132 ячейки, ~10 пар/с
+у декодера) не имеет права терять всё при падении: рядом с отчётом прибор ведёт
+``*.progress.jsonl`` — строка на ячейку, сброшенная на диск сразу. В строке не только ранги,
+но и ``expected_doc_ids``/``retrieved_*``: из них восстанавливается ``DocQueryResult``, то есть
+прерванный прогон пересчитывается, а не перезапускается (замер 17.11.2026: первый прогон
+Qwen убит OOM на 4-й минуте, и без этого файла от него не осталось бы ничего).
+
+**Режим скоринга — объявленное условие, а не догадка по конфигу.** ``--scoring`` называет
+путь к баллу: ``cross-encoder`` (``AutoModelForSequenceClassification``, балл — сырой логит)
+или ``decoder-yes-no`` (``AutoModelForCausalLM``, балл — ``logit(«да») − logit(«нет»)`` на
+последней позиции промпта). Второй режим требует **объявленного промпта** (``--prompt-file``)
+и объявленной пары токенов решения (``--decision-tokens``): у Qwen3-Reranker карточка даёт
+``yes``/``no``, у mxbai-rerank-v2 — ``1``/``0``, потому что её промпт просит бинарную оценку
+«0/1». Дословные шаблоны обеих карточек записаны в докстринге
+``core/adapters/rerank_local.py``; в отчёт попадают сам шаблон, его ``sha256``, источник
+файла и пара токенов — другой промпт даёт другой балл, и без этого отчёт невоспроизводим.
+
+**Батч объявлен режимом.** ``--batch-size`` по умолчанию не задан: адаптер берёт дефолт
+режима (16 у кросс-энкодера, 4 у декодера — логиты декодера это ``batch × seq × vocab``,
+и на карте 4 GiB батч 16 уходит в пейджинг). В отчёт пишется **фактический** батч, а не
+запрошенный.
+
 **Чего прибор не мерит.** Dense-профили (``R1``/``R2``) — цена пере-эмбеддинга; влияние
-реранка на **вердикты** (это O15/O18: адрес документа — не доказательство); другие
-модели (``--model`` называет одну; сравнение моделей — отдельный прогон).
+реранка на **вердикты** (это O15/O18: адрес документа — не доказательство); третью модель
+за прогон (``--model`` называет одну; сравнение моделей — отдельный прогон, сводится
+таблицей отчёта).
 
 Запуск::
 
@@ -57,12 +80,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import sqlite3
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +114,13 @@ from measure_reranker_speed import (  # noqa: E402
 )
 
 from core.adapters.lexical_tantivy import LexicalChunk, TantivyLexicalIndex  # noqa: E402
-from core.adapters.rerank_local import LocalReranker, RerankerUnavailable  # noqa: E402
+from core.adapters.rerank_local import (  # noqa: E402
+    DEFAULT_DECISION_TOKENS,
+    SCORING_CROSS_ENCODER,
+    SCORING_DECODER_YES_NO,
+    LocalReranker,
+    RerankerUnavailable,
+)
 from core.domain.models import CatalogRow  # noqa: E402
 from core.pipeline.retrieval_docs import (  # noqa: E402
     DocQueryResult,
@@ -111,6 +141,29 @@ DEFAULT_CUTOFF_K = 10
 DEFAULT_MAX_LENGTH = 512
 #: Политика слияния баллов по запросам ячейки — та же, что у ретривала по умолчанию.
 RERANK_QUERY_FUSION = "max"
+
+
+def _decision_tokens(value: str) -> tuple[str, str]:
+    """``--decision-tokens "1,0"`` → пара строк; иначе ``argparse`` отвергает значение."""
+    parts = [item.strip() for item in value.split(",")]
+    if len(parts) != 2 or not all(parts):
+        raise argparse.ArgumentTypeError(
+            f"decision-tokens={value!r}: нужна пара «да,нет» (например yes,no или 1,0)"
+        )
+    return parts[0], parts[1]
+
+
+def _prompt_sha256(template: str | None) -> str | None:
+    """Отпечаток шаблона промпта: ``None``, если промпта нет (кросс-энкодер)."""
+    if template is None:
+        return None
+    return hashlib.sha256(template.encode("utf-8")).hexdigest()
+
+
+def _token_ids(reranker: Any) -> list[int] | None:
+    """Идентификаторы пары «да»/«нет»: ``None`` у кросс-энкодера (пары нет)."""
+    ids = getattr(reranker, "decision_token_ids", None)
+    return None if ids is None else [int(value) for value in ids]
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +334,7 @@ def _measure_cells(
     top_n: int,
     cutoff_k: int,
     profile: str,
+    on_cell: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[DocQueryResult], list[DocQueryResult], list[dict[str, Any]], dict[str, Any]]:
     """Две выдачи на ячейку: порядок плеча и порядок после реранка.
 
@@ -332,18 +386,32 @@ def _measure_cells(
         rerank_result = _doc_result(entry, reranked_ids, unresolved=unresolved)
         base_results.append(base_result)
         rerank_results.append(rerank_result)
-        per_cell.append(
-            {
-                "cell": entry.cell,
-                "product_id": entry.product_id,
-                "param_id": entry.param_id,
-                "candidates": len(candidates),
-                "queries": len(queries),
-                "rank_baseline": base_result.rank,
-                "rank_reranked": rerank_result.rank,
-                "unresolved": unresolved,
-            }
-        )
+        cell_row = {
+            "cell": entry.cell,
+            "product_id": entry.product_id,
+            "param_id": entry.param_id,
+            "candidates": len(candidates),
+            "queries": len(queries),
+            "rank_baseline": base_result.rank,
+            "rank_reranked": rerank_result.rank,
+            "unresolved": unresolved,
+        }
+        per_cell.append(cell_row)
+        if on_cell is not None:
+            # Каждая ячейка — сразу на диск: длинный прогон, чей результат живёт только
+            # в памяти, теряет всё при OOM (замер 17.11.2026: прогон убит на 4-й минуте).
+            # В строку прогресса идут ещё и ожидание с обеими выдачами: из них
+            # восстанавливается ``DocQueryResult``, поэтому прерванный прогон
+            # пересчитывается, а не перезапускается. В отчёт они не попадают — там
+            # ``per_cell`` остаётся сводкой, а полная выдача лежит в CSV.
+            on_cell(
+                {
+                    **cell_row,
+                    "expected_doc_ids": list(entry.expected_doc_ids),
+                    "retrieved_baseline": list(base_ids),
+                    "retrieved_reranked": list(reranked_ids),
+                }
+            )
     stats = {"pairs": pairs, "rerank_seconds": seconds}
     return base_results, rerank_results, per_cell, stats
 
@@ -384,8 +452,13 @@ def run(
     lexical_profile: str = LEXICAL_PROFILE,
     profile: str = RETRIEVAL_PROFILE,
     bootstrap: int = 1000,
+    on_cell: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Один корпус, один эталон, два порядка: базовый и после реранка."""
+    """Один корпус, один эталон, два порядка: базовый и после реранка.
+
+    :param on_cell: вызывается по завершении каждой ячейки — прибор пишет прогресс на
+        диск, а не держит результат только в памяти.
+    """
     if cutoff_k <= 0:
         raise ValueError(f"cutoff_k обязан быть положительным, получено {cutoff_k!r}")
     if top_n < cutoff_k:
@@ -446,6 +519,7 @@ def run(
                 top_n=top_n,
                 cutoff_k=cutoff_k,
                 profile=profile,
+                on_cell=on_cell,
             )
             del index
             base_results.extend(b_results)
@@ -537,6 +611,33 @@ def per_cell_as_rank(
     ]
 
 
+class _ProgressWriter:
+    """Пишет по строке на ячейку в ``.jsonl`` и сразу сбрасывает её на диск.
+
+    Смысл файла — пережить падение процесса, а буфер, сброшенный при закрытии, падения не
+    переживает. Формат — одна ячейка в строке, те же поля, что у ``per_cell`` в отчёте,
+    плюс ``expected_doc_ids``/``retrieved_*``: из них восстанавливается ``DocQueryResult``,
+    поэтому прерванный прогон пересчитывается, а не перезапускается.
+    """
+
+    def __init__(self, path: Path, *, header: dict[str, Any] | None = None) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = path.open("w", encoding="utf-8")
+        if header is not None:
+            self._write(header)
+
+    def _write(self, payload: dict[str, Any]) -> None:
+        self._handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self._handle.flush()
+
+    def __call__(self, cell: dict[str, Any]) -> None:
+        self._write(cell)
+
+    def close(self) -> None:
+        self._handle.close()
+
+
 # ---------------------------------------------------------------------------
 # Вывод
 # ---------------------------------------------------------------------------
@@ -607,8 +708,15 @@ def _print(payload: dict[str, Any]) -> None:
     print(
         f"{payload['profile']} · кандидатов {payload['top_n']} · K={payload['cutoff_k']} · "
         f"ячеек {payload['cells']} · модель {payload['model']} · "
-        f"{payload['device']}/{payload.get('precision', '?')}"
+        f"{payload['device']}/{payload.get('precision', '?')} · "
+        f"скоринг {payload.get('scoring', '?')} (батч {payload.get('batch_size', '?')})"
     )
+    if payload.get("prompt_sha256"):
+        print(
+            f"  промпт sha256 {payload['prompt_sha256'][:16]}… "
+            f"токены решения {payload.get('decision_tokens')} → "
+            f"{payload.get('decision_token_ids')}"
+        )
     for name in ("baseline", "reranked"):
         item = payload["metrics"][name]
         print(
@@ -670,6 +778,24 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--precision", default="fp32", choices=["fp32", "fp16"], help="точность счёта"
     )
     parser.add_argument(
+        "--scoring",
+        default=SCORING_CROSS_ENCODER,
+        choices=[SCORING_CROSS_ENCODER, SCORING_DECODER_YES_NO],
+        help="объявленный режим скоринга (не выводится из конфига модели)",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        default=None,
+        help="шаблон промпта декодера с {query} и {document} (обязателен для decoder-yes-no)",
+    )
+    parser.add_argument(
+        "--decision-tokens",
+        type=_decision_tokens,
+        default=DEFAULT_DECISION_TOKENS,
+        help="пара токенов решения «да,нет» для decoder-yes-no (дефолт yes,no)",
+    )
+    parser.add_argument(
         "--top-n",
         type=int,
         default=DEFAULT_TOP_N,
@@ -682,7 +808,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--lexical-profile", default=LEXICAL_PROFILE, help="профиль анализатора индекса"
     )
     parser.add_argument("--profile", default=RETRIEVAL_PROFILE, help="профиль ретривала")
-    parser.add_argument("--batch-size", type=int, default=16, help="батч реранкера")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="батч реранкера; по умолчанию — дефолт режима (16 кросс-энкодер, 4 декодер)",
+    )
     parser.add_argument(
         "--max-length",
         type=int,
@@ -696,6 +827,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="объявленный оператором режим питания; в отчёт попадает как есть",
     )
     parser.add_argument("--out-json", type=Path, default=None, help="машинный отчёт")
+    parser.add_argument(
+        "--progress-jsonl",
+        type=Path,
+        default=None,
+        help="прогресс по ячейке (по умолчанию — рядом с --out-json как *.progress.jsonl)",
+    )
     parser.add_argument("--out-csv", type=Path, default=None, help="по-ячеечно: ранг до/после")
     return parser.parse_args(argv)
 
@@ -722,8 +859,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    if args.batch_size <= 0 or args.max_length <= 0:
+    if (args.batch_size is not None and args.batch_size <= 0) or args.max_length <= 0:
         print("measure: --batch-size и --max-length обязаны быть положительными", file=sys.stderr)
+        return 1
+    prompt_template: str | None = None
+    prompt_source: str | None = None
+    if args.scoring == SCORING_DECODER_YES_NO:
+        if args.prompt_file is None:
+            print(
+                "measure: --scoring decoder-yes-no требует --prompt-file: декодер отвечает "
+                "на текст промпта, и промпт здесь условие замера, а не деталь вызова "
+                "(другой промпт — другой балл)",
+                file=sys.stderr,
+            )
+            return 1
+        prompt_path = Path(args.prompt_file).expanduser()
+        if not prompt_path.is_file():
+            print(f"measure: файл промпта не найден: {prompt_path}", file=sys.stderr)
+            return 1
+        # Ровно один завершающий перевод строки снимается: это соглашение файла, а не
+        # часть шаблона. Всё остальное уходит в промпт дословно и попадает в отчёт.
+        prompt_template = prompt_path.read_text(encoding="utf-8").removesuffix("\n")
+        prompt_source = str(prompt_path)
+    elif args.prompt_file is not None:
+        print(
+            f"measure: --prompt-file задан при --scoring {args.scoring}: у кросс-энкодера "
+            "промпта нет, и объявлять неисполняемое условие запрещено",
+            file=sys.stderr,
+        )
         return 1
 
     with_gpu = args.device == "cuda"
@@ -731,6 +894,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     monitor = RssMonitor()
     monitor.start()
     peak_vram: int | None = None
+    progress_path = args.progress_jsonl
+    if progress_path is None and args.out_json is not None:
+        progress_path = args.out_json.with_name(args.out_json.stem + ".progress.jsonl")
+    progress = (
+        None
+        if progress_path is None
+        else _ProgressWriter(
+            progress_path,
+            header={
+                "kind": "header",
+                "instrument": "scripts/measure_rerank.py",
+                "model": f"{model}@{revision}",
+                "scoring": args.scoring,
+                "top_n": args.top_n,
+                "cutoff_k": args.cutoff_k,
+                "prompt_sha256": _prompt_sha256(prompt_template),
+            },
+        )
+    )
     try:
         if with_gpu:
             import torch
@@ -750,8 +932,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             revision=revision,
             device=args.device,
             precision=args.precision,
+            scoring=args.scoring,
             batch_size=args.batch_size,
             max_length=args.max_length,
+            prompt_template=prompt_template,
+            decision_tokens=tuple(args.decision_tokens),
         )
         payload = run(
             db_path,
@@ -762,6 +947,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lexical_profile=args.lexical_profile,
             profile=args.profile,
             bootstrap=args.bootstrap,
+            on_cell=progress,
         )
         if with_gpu:
             peak_vram = int(torch.cuda.max_memory_allocated())
@@ -770,13 +956,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     finally:
         peak_rss = monitor.stop()
+        if progress is not None:
+            progress.close()
     power_after = _power_snapshot(with_gpu=with_gpu)
 
     payload.update(
         {
             "precision": args.precision,
-            "batch_size": args.batch_size,
+            "scoring": str(getattr(reranker, "scoring", args.scoring)),
+            # Фактический батч, а не запрошенный: ``None`` у --batch-size означает «дефолт
+            # режима», и отчёт обязан назвать то, чем действительно считалось.
+            "batch_size": int(getattr(reranker, "batch_size", args.batch_size or 0)),
             "max_length": args.max_length,
+            "prompt_source": prompt_source,
+            "prompt_template": prompt_template,
+            "prompt_sha256": _prompt_sha256(prompt_template),
+            "decision_tokens": list(getattr(reranker, "decision_tokens", ())),
+            "decision_token_ids": _token_ids(reranker),
             "peak_rss_bytes": peak_rss,
             # Окно RSS — весь замер (сборка индекса + реранк), а не только модель: индекс
             # 200k кусков держится в памяти движком, и «пик без индекса» описывал бы
@@ -788,6 +984,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
     )
     _print(payload)
+    if progress_path is not None:
+        print(f"прогресс: {progress_path}")
     if args.out_json is not None:
         args.out_json.parent.mkdir(parents=True, exist_ok=True)
         args.out_json.write_text(
