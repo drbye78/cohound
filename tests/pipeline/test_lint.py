@@ -473,6 +473,57 @@ def test_reference_product_outside_cohort_passes() -> None:
     assert check_reference_product_not_in_cohort(_clean()) == []
 
 
+def test_reference_product_as_comparison_base_passes() -> None:
+    """Точка отсчёта — не участник сравнения (§27.10, решение 18.11.2026).
+
+    ``postgresql`` у ``ru-pg-dbms`` объявлен и предком, и ``comparison_base: true``:
+    измеряется, чтобы дать Δ, а не чтобы занять место в матрице. Оба поля обязаны
+    разрешать одно и то же — иначе «разрешено в когорте, запрещено в ``run.products``»
+    дало бы то же падение через соседнее поле.
+    """
+    declared = _declared("baseline_a")
+    colliding = declared.model_copy(
+        update={
+            "products": [
+                declared.products[0].model_copy(update={"product_id": "p1"})
+            ]
+        }
+    )
+    base = _clean().cohort.entries[0].model_copy(
+        update={"product_id": "p1", "comparison_base": True}
+    )
+    inputs = replace(
+        _clean(),
+        reference_products=colliding,
+        cohort=_clean().cohort.model_copy(update={"entries": [base]}),
+        run=_clean().run.model_copy(update={"products": ["p1"]}),
+    )
+    assert check_reference_product_not_in_cohort(inputs) == []
+    assert "reference-product-in-cohort" not in " ".join(lint_run_inputs(inputs).blocking)
+
+
+def test_reference_product_in_cohort_without_base_flag_blocks() -> None:
+    """Тот же id, но без ``comparison_base`` — по-прежнему блокирует."""
+    declared = _declared("baseline_a")
+    colliding = declared.model_copy(
+        update={
+            "products": [
+                declared.products[0].model_copy(update={"product_id": "p1"})
+            ]
+        }
+    )
+    base = _clean().cohort.entries[0].model_copy(
+        update={"product_id": "p1", "comparison_base": False}
+    )
+    inputs = replace(
+        _clean(),
+        reference_products=colliding,
+        cohort=_clean().cohort.model_copy(update={"entries": [base]}),
+        run=_clean().run.model_copy(update={"products": ["p1"]}),
+    )
+    assert check_reference_product_not_in_cohort(inputs) != []
+
+
 def test_archetype_a_with_two_upstreams_blocks() -> None:
     package = _clean().package.model_copy(update={"archetype": Archetype.A})
     inputs = replace(

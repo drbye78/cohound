@@ -215,12 +215,26 @@ def check_reference_product_not_in_cohort(inputs: RunInputs) -> list[str]:
     (два смысла одного slug'а в одном пакете — источник молчаливых ошибок), поэтому
     пересечение обязано ловиться линтером, а не глазами: иначе «карта предка» и «карта
     продукта» смешались бы в отчёте, а карта когорты получила бы лишнего участника.
+
+    **Исключение — объявленная точка отсчёта** (``comparison_base: true``). Такая запись
+    когорты в сравнение не входит по смыслу флага: продукт измеряется, чтобы дать Δ,
+    а не чтобы получить место в матрице. Запрещать её — значит запретить профилю
+    измерять собственного предка: одна и та же линия законно объявляется и предком
+    (``sources/reference_products.yaml``), и точкой отсчёта (``cohort.yaml``) — две
+    декларации одного факта, каждая верная по отдельности. Поэтому id точки отсчёта
+    вычитается с обеих сторон — из когорты и из ``run.products``: иначе «разрешено
+    в когорте, запрещено в прогоне» дало бы то же падение через другое поле.
     """
     declared = getattr(inputs, "reference_products", None)
     if declared is None or not declared.products:
         return []
-    cohort_ids = {str(entry.product_id) for entry in inputs.cohort.entries}
-    run_ids = {str(pid) for pid in getattr(inputs.run, "products", ())}
+    base_ids = {
+        str(entry.product_id)
+        for entry in inputs.cohort.entries
+        if getattr(entry, "comparison_base", False)
+    }
+    cohort_ids = {str(entry.product_id) for entry in inputs.cohort.entries} - base_ids
+    run_ids = {str(pid) for pid in getattr(inputs.run, "products", ())} - base_ids
     collisions = sorted(
         {product.product_id for product in declared.products} & (cohort_ids | run_ids)
     )

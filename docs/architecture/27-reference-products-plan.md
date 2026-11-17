@@ -556,11 +556,28 @@ Reference-продукт **не попадает** в `cohort.yaml`, `run.yaml:p
 
 Линтер (блокирующий):
 * `product_id` из `reference_products.yaml` не может встречаться в `cohort.yaml` или
-  `run.yaml:products`;
+  `run.yaml:products` — **кроме записи с `comparison_base: true`** (см. ниже);
 * `baseline_id` из `baselines.csv` обязан быть объявлен в `reference_products.yaml`, если
   строки есть;
 * `baseline_id` из `passport.upstreams` обязан быть объявлен там же;
-* архетип A: ровно один `upstreams`; B: ≥1; C: `baselines.csv` пуст и `upstreams` пуст.
+* архетип A: `upstreams` **не больше одного** (второй — заявка формы B в A-пакете);
+  отсутствие предка у продукта не блокирует, а публикуется предупреждением
+  `upstreams-by-archetype` — «вендор не называет версию» честное состояние, и требовать
+  предка значило бы заставить автора его выдумать (A3, `core/pipeline/lint.py:307`);
+  блокирует лишь пакет A, где предка нет **ни у одного** продукта когорты.
+  B: ≥1 не требуется (регламент §1.5 — «если он существует»); C: `baselines.csv` пуст
+  и `upstreams` пуст.
+
+**Точка отсчёта — не участник сравнения** (решение владельца 18.11.2026). Запись когорты
+с `comparison_base: true` (pg-baseline, `CohortEntry.comparison_base`) вычитается из
+обеих сторон проверки namespace: продукт измеряется, чтобы дать Δ, а не чтобы занять
+место в матрице, и «не входит в сравнение» — ровно смысл флага. Без исключения две
+полосы, каждая верная по отдельности, взаимно уничтожались на реальном пакете: план 27
+объявил `postgresql` предком (`sources/reference_products.yaml: baseline_id: upstream-pg`),
+pg-baseline — точкой отсчёта когорты, и `plan` падал с `rc=2` до печати `run_id`
+(поймано 18.11.2026 при слиянии; фикстуры правила были зелены, потому что `plan` на
+реальном пакете тестом не покрыт — теперь покрыт,
+`tests/pipeline/test_lint.py::test_reference_product_as_comparison_base_passes`).
 
 Посмотреть на reference-продукт — `hound baseline report` (read-only, прогон не нужен):
 покрытие каталога по версиям, распределение `present/absent/unclear`, принято/на ревью,
