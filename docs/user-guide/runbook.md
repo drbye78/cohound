@@ -334,6 +334,14 @@ normalize → lint → plan → G1 → discovery → G2 → registry → inherit
 ./hound.py experiment retrieval --runs-dir runs --run-id {run_id} \
   --golden packages/{case_id}/sources/retrieval_golden_docs.json --cutoff-k 10
 
+# Чанковый эталон — вторичная проверка (адрес единицы доказательства, I19).
+# Он привязан к нарезке и пересобирается скриптом при каждой смене chunker_version;
+# руками не правится, validate отказывает на нерезолвимом chunk_id.
+python scripts/prepare_retrieval_golden_chunks.py build \
+  --db runs/{run_id}/cohound.db --out packages/{case_id}/sources/retrieval_golden_chunks.json
+python scripts/prepare_retrieval_golden_chunks.py validate \
+  --golden packages/{case_id}/sources/retrieval_golden_chunks.json --db runs/{run_id}/cohound.db
+
 # Сравнить модели оценщика (согласие, отказы, воспроизводимость)
 ./hound.py experiment evaluator-benchmark --runs-dir runs --run-id {run_id} \
   --golden packages/{case_id}/golden.csv --model {model_id}
