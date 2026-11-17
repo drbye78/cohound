@@ -50,6 +50,10 @@ repo/
                              # absent | present | declined (+ reason/declined_by) —
                              # объявленное «сверять не с чем» вместо удаления golden.csv;
                              # exempt_products — waiver по продукту (эталона для него нет)
+      provenance.yaml        # ОПЦ.: происхождение эталона — из каких файлов и когда собран
+                             # golden.csv; дата/источник печатаются рядом с `golden:` в plan
+                             # (`built:` = generated_at пакета, `snapshot:` = snapshot_date
+                             # источника — только если объявлен отдельно)
       seeds.yaml             # КАНОНИЧЕСКИЙ seed-набор (`schema: seeds/1`, §A.1.1);
                              # сейчас пакеты ещё на legacy corpus_urls.yaml
       corpus_urls.yaml       # legacy `{product_id: [url, …]}` (миграционный fallback)
@@ -845,6 +849,10 @@ RTX 3050 — 9.94×/11.73×/8.45× на 22/181/665 стр. против одно
 - `baselines.csv` → `list[BaselineRow]`.
 - `cohort.yaml` → `Cohort` (ровно один якорь — §1.6).
 - `golden.csv` → `list[GoldenRow]` (тир fast/full; страта ❌ обязательна для full).
+- `sources/provenance.yaml` → `GoldenProvenance` (`pipeline/golden_status.py`): происхождение
+  эталона — дата сборки пакета (`generated_at`), дата состояния источника (`snapshot_date`),
+  источники с `sha256` в объявленном порядке. Файла нет → `None` (нет даты, а не ошибка);
+  `plan` печатает `built:`/`snapshot:`/`source:`/`sha256:` рядом с `golden:`.
 - `domain_profiles.yaml` → `dict[str, DomainProfile]` — три независимые оси получения
   контента: `fetch: http|browser`, `extract: auto|html|document` и ось стратегии краула
   `strategy: auto|honest|hybrid` (+ опц. `wait_for` для браузерного рендера и per-host
@@ -1708,7 +1716,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   профиля пакета-якоря (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь —
   durable-аттестация профиля (`profile_attestation` в `state/{package_id}/state.db`) —
   объявлена, проверяется гейтом (`make_profile_gate`, `core/pipeline/profile_attestation.py:313`;
-  проводка — `_profile_gate_resolver`, `core/cli/context.py:1670`)
+  проводка — `_profile_gate_resolver`, `core/cli/context.py:1671`)
   и **имеет производителя — человека**: `hound package profile attest --gate G1|G2
   --actor …` (`--dry-run` ничего не пишет и говорит об этом). Прогон её **только читает** и
   никогда не пишет. Механизм рабочий, но замер 2026-10-30 — **ноль строк** во всех реальных

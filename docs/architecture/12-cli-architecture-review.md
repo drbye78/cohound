@@ -511,10 +511,10 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 ### Документация описывает не то, что делает код
 
 ✅ сделано (`35e4373`) — все три расхождения закрыты; сейчас
-`docs/architecture/03-data-config-cli.md:1451` (`resolve` — «резолв
-`source_id` → URL по БД прогона, без сети»), `docs/architecture/03-data-config-cli.md:1460`
+`docs/architecture/03-data-config-cli.md:1565` (`resolve` — «резолв
+`source_id` → URL по БД прогона, без сети»), `docs/architecture/03-data-config-cli.md:1575`
 (`review` — «**только печать**, ячейки не
-меняет») и `docs/architecture/03-data-config-cli.md:1473` (benchmark — «Пишет **только
+меняет») и `docs/architecture/03-data-config-cli.md:1588` (benchmark — «Пишет **только
 JSON-артефакт** (БД не меняет:
 `persist_manifest` есть лишь в ветке `retrieval`)»). Таблица ниже — запись дефекта в
 нумерации до правки.

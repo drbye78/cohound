@@ -742,7 +742,7 @@ class DiscoveryLLMPort(Protocol):
 * G1/G2 — **внутренняя аттестация** содержимого профиля пакета-якоря. Рабочий путь —
   per-run строка `gate_decisions` (аудит-след и override). Второй путь — durable
   `profile_attestation` в `state/{package}/state.db` (`core/pipeline/profile_attestation.py:313`,
-  `make_profile_gate` подключён в CLI, `core/cli/context.py:1670`): производитель у него есть —
+  `make_profile_gate` подключён в CLI, `core/cli/context.py:1671`): производитель у него есть —
   **человек** (`hound package profile attest`, `core/cli/package/commands.py:2997`), прогон строку
   только читает. Замер 30.10.2026: в реальных `state.db` — 0 строк, поэтому рабочим остаётся
   per-run путь; выдавать подпись за существующую нельзя, но и «производителя нет» уже неверно.

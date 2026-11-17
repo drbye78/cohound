@@ -46,6 +46,47 @@ golden-строки, и это решение с причиной и автор�
         declared_by: analyst
         declared_at: '2026-10-27'              # опционален
 
+**Второй объявленный файл —** ``packages/{case_id}/sources/provenance.yaml``
+(:func:`read_provenance`): **происхождение** самого ``golden.csv`` — из каких файлов и
+когда он собран. Это не дубль состояния: ``golden_status.yaml`` объявляет, **годится ли**
+набор (``state``), а ``provenance.yaml`` — **откуда** он взялся (``sources``, их
+``sha256``, дата сборки). Разные факты о разных вещах, поэтому и носителей два.
+
+**Почему дата не в** ``golden_status.yaml``. Дата — свойство **источника** (таблицы, из
+которой собран эталон), состояние — свойство **использования** набора. Сложив их в один
+файл, мы получили бы два места, куда пишется одна и та же дата, и они разъехались бы:
+набор переобъявляют ``declined``/``present``, не пересобирая таблицу, и наоборот. Поэтому
+дата живёт там, где объявлено происхождение, и **не дублируется** в объявлении состояния.
+
+``generated_at`` — когда **пакет** собран; ``snapshot_date`` — дата **состояния
+источника**. Это разные факты, и совпадение значений не делает их одним фактом: в
+``ru-pg-dbms`` обе даты равны 2026-10-28, но дата самой сравнительной таблицы этим не
+объявлена — в репозитории она не названа нигде. Поэтому ``plan``
+печатает ``built:`` из ``generated_at``, а ``snapshot:`` — только если ``snapshot_date``
+**отличается** от ``generated_at``. Совпадение означает «оператор объявил одну дату
+дважды», а не «источник снят в день сборки»; печатать его рядом значило бы выдать дату
+сборки за дату источника.
+
+Форма (:data:`PROVENANCE_FILE`)::
+
+    case_id: ru-pg-dbms
+    generated_at: '2026-10-28T00:00:00Z'   # когда собран пакет (в выводе — без времени)
+    generator: packages/{case_id}/sources/build_from_golden_00.py
+    snapshot_date: '2026-10-28'            # дата состояния ИСТОЧНИКА (ISO)
+    sources:                               # порядок значим: первый — из него собран эталон
+      - path: /путь/к/таблице.xlsx
+        role: что этот файл дал эталону
+        sha256: 64 hex
+        sheet: имя листа
+    superseded_sources: [...]              # читается, но в вывод не идёт
+
+Файла нет → ``None``: у пакета может не быть объявленного происхождения, и это не
+ошибка — просто нет даты (выводить из отсутствия что-либо запрещено). Файл есть —
+разбирается строго: неизвестный ключ, не-словарь, пустой ``sources``, не-ISO
+``snapshot_date``/``generated_at``, ``sha256`` не 64 hex — :class:`ValueError` с ведущим
+``provenance.yaml:`` (тихий пропуск опечатки в ``snapshot_date`` недопустим: тогда дата
+просто исчезла бы из вывода).
+
 **Разбор** (:func:`read_golden_status`):
 
 * файла нет (или он содержит только комментарии) → состояние **выводится** из наличия
@@ -86,14 +127,19 @@ __all__ = [
     "GOLDEN_STATUS_DIR",
     "GOLDEN_STATUS_FILE",
     "GOLDEN_STATUS_SCHEMA",
+    "PROVENANCE_FILE",
     "STATE_ABSENT",
     "STATE_DECLINED",
     "STATE_PRESENT",
     "GoldenProductExemption",
+    "GoldenProvenance",
     "GoldenState",
     "GoldenStatus",
+    "ProvenanceSource",
     "golden_status_path",
+    "provenance_path",
     "read_golden_status",
+    "read_provenance",
 ]
 
 #: Версия схемы файла (меняется только при несовместимой смене формы).
@@ -104,6 +150,10 @@ GOLDEN_STATUS_DIR = "sources"
 
 #: Имя файла объявления внутри :data:`GOLDEN_STATUS_DIR`.
 GOLDEN_STATUS_FILE = "golden_status.yaml"
+
+#: Имя файла происхождения эталона внутри :data:`GOLDEN_STATUS_DIR` — второй объявленный
+#: файл состояния эталона (дата и источник живут здесь, а не в объявлении состояния).
+PROVENANCE_FILE = "provenance.yaml"
 
 #: Имя эталонного набора в корне пакета (§4.2/§11.6).
 GOLDEN_FILE = "golden.csv"
@@ -138,6 +188,27 @@ _EXEMPT_KEYS: frozenset[str] = frozenset(
 
 #: Обязательные поля записи waiver'а: без них объявление снова было бы молчанием.
 _EXEMPT_REQUIRED: tuple[str, ...] = ("product_id", "reason", "declared_by")
+
+#: Единственные допустимые ключи ``provenance.yaml`` (та же ``extra="forbid"``-дисциплина).
+_PROVENANCE_KEYS: frozenset[str] = frozenset(
+    {
+        "case_id",
+        "generated_at",
+        "generator",
+        "snapshot_date",
+        "sources",
+        "superseded_sources",
+    }
+)
+
+#: Допустимые ключи одной записи источника (в ``sources`` и ``superseded_sources``).
+_PROVENANCE_SOURCE_KEYS: frozenset[str] = frozenset({"path", "role", "sha256", "sheet"})
+
+#: Длина ``sha256`` в hex-символах.
+_SHA256_HEX_LEN = 64
+
+#: Hex-алфавит отпечатка.
+_HEX_DIGITS: frozenset[str] = frozenset("0123456789abcdefABCDEF")
 
 
 @dataclass(frozen=True)
@@ -237,14 +308,89 @@ class GoldenStatus:
         }
 
 
+@dataclass(frozen=True)
+class ProvenanceSource:
+    """Один объявленный источник эталона (запись ``sources``/``superseded_sources``).
+
+    :param path: путь к файлу источника, как его объявил автор (файл может лежать вне
+        репозитория — путь не обязан существовать на этой машине).
+    :param role: что этот файл дал эталону (опционально).
+    :param sha256: отпечаток файла, 64 hex; обязателен в ``sources``, опционален в
+        ``superseded_sources``.
+    :param sheet: лист/страница источника (опционально).
+    """
+
+    path: str
+    role: str | None = None
+    sha256: str | None = None
+    sheet: str | None = None
+
+    @property
+    def name(self) -> str:
+        """Имя файла без каталогов — то, что печатается рядом с числом."""
+        return Path(self.path).name
+
+
+@dataclass(frozen=True)
+class GoldenProvenance:
+    """Происхождение эталона, как оно объявлено в ``sources/provenance.yaml``.
+
+    :param case_id: пакет, к которому относится объявление.
+    :param generated_at: дата сборки пакета, ISO ``YYYY-MM-DD`` (время отброшено: час
+        сборки — не факт об эталоне).
+    :param generator: чем собран эталон (путь к скрипту), опционально.
+    :param snapshot_date: объявленная дата **состояния источника**, ISO, опционально.
+        Может совпадать с ``generated_at`` — это «одна дата объявлена дважды», а не
+        утверждение, что источник снят в день сборки (см. :attr:`distinct_snapshot_date`).
+    :param sources: источники в объявленном порядке; **первый** — тот, из которого собран
+        эталон (порядок значим, поэтому не сортируется).
+    :param superseded_sources: прежние источники; читаются для полноты объявления, в вывод
+        не идут.
+    """
+
+    case_id: str
+    generated_at: str | None
+    generator: str | None
+    snapshot_date: str | None
+    sources: tuple[ProvenanceSource, ...]
+    superseded_sources: tuple[ProvenanceSource, ...] = ()
+
+    @property
+    def primary_source(self) -> ProvenanceSource | None:
+        """Источник, из которого собран эталон (первый объявленный)."""
+        return self.sources[0] if self.sources else None
+
+    @property
+    def distinct_snapshot_date(self) -> str | None:
+        """``snapshot_date``, если он **отличается** от даты сборки; иначе ``None``.
+
+        Совпадение означает «оператор объявил одну дату дважды»: печатать её как дату
+        источника значило бы выдать дату сборки за дату таблицы. Отсутствие отдельного
+        объявления — это «дата источника не объявлена», а не «равна дате сборки».
+        """
+        if self.snapshot_date is None or self.snapshot_date == self.generated_at:
+            return None
+        return self.snapshot_date
+
+
 def golden_status_path(package_dir: str | Path) -> Path:
     """Путь объявления: ``{package}/sources/golden_status.yaml``."""
     return Path(package_dir) / GOLDEN_STATUS_DIR / GOLDEN_STATUS_FILE
 
 
+def provenance_path(package_dir: str | Path) -> Path:
+    """Путь объявления происхождения: ``{package}/sources/provenance.yaml``."""
+    return Path(package_dir) / GOLDEN_STATUS_DIR / PROVENANCE_FILE
+
+
 def _error(path: Path, message: str) -> ValueError:
     """Ошибка пакета с ведущим кодом ``golden_status.yaml:`` (видна в CLI)."""
     return ValueError(f"{GOLDEN_STATUS_FILE}: {message} (файл: {path})")
+
+
+def _provenance_error(path: Path, message: str) -> ValueError:
+    """Ошибка пакета с ведущим кодом ``provenance.yaml:`` (видна в CLI)."""
+    return ValueError(f"{PROVENANCE_FILE}: {message} (файл: {path})")
 
 
 def _text(value: Any) -> str | None:
@@ -255,8 +401,16 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
-def _declined_at(value: Any, path: Path, *, key: str = "declined_at") -> str | None:
-    """Дата объявления в ISO-8601; ``date`` (YAML-скаляр) и ``str`` равнозначны."""
+def _iso_date(value: Any, *, key: str, allow_moment: bool = False) -> str | None:
+    """Дата ISO-8601 (``YYYY-MM-DD``) из ``date``/``datetime``/строки; пусто → ``None``.
+
+    ``allow_moment`` — принять и полный ISO-момент (``2026-10-28T00:00:00Z``), взяв из
+    него дату: так объявлен ``generated_at`` в ``provenance.yaml`` (время сборки — не факт
+    об эталоне, и в вывод оно не идёт).
+
+    :raises ValueError: значение не является датой ISO-8601. Сообщение называет ``key`` и
+        значение; префикс файла добавляет вызывающий.
+    """
     if value is None:
         return None
     if isinstance(value, _dt.datetime):
@@ -268,11 +422,24 @@ def _declined_at(value: Any, path: Path, *, key: str = "declined_at") -> str | N
         return None
     try:
         return _dt.date.fromisoformat(text).isoformat()
+    except ValueError:
+        pass
+    if allow_moment:
+        try:
+            return _dt.datetime.fromisoformat(
+                text.replace("Z", "+00:00")
+            ).date().isoformat()
+        except ValueError:
+            pass
+    raise ValueError(f"{key}={text!r} не является датой ISO-8601 (YYYY-MM-DD)")
+
+
+def _declined_at(value: Any, path: Path, *, key: str = "declined_at") -> str | None:
+    """Дата объявления в ISO-8601; ``date`` (YAML-скаляр) и ``str`` равнозначны."""
+    try:
+        return _iso_date(value, key=key)
     except ValueError as exc:
-        raise _error(
-            path,
-            f"{key}={text!r} не является датой ISO-8601 (YYYY-MM-DD)",
-        ) from exc
+        raise _error(path, str(exc)) from exc
 
 
 def _exempt_products(value: Any, path: Path) -> tuple[GoldenProductExemption, ...]:
@@ -476,4 +643,169 @@ def read_golden_status(package_dir: str | Path) -> GoldenStatus:
         declined_by=declined_by,
         declined_at=declined_at,
         exempt_products=exempt_products,
+    )
+
+
+def _provenance_date(
+    value: Any, path: Path, *, key: str, allow_moment: bool = False
+) -> str | None:
+    """Дата ``provenance.yaml`` в ISO-8601 с префиксом файла в ошибке."""
+    try:
+        return _iso_date(value, key=key, allow_moment=allow_moment)
+    except ValueError as exc:
+        raise _provenance_error(path, str(exc)) from exc
+
+
+def _is_sha256(text: str) -> bool:
+    """Отпечаток ли это ``sha256``: ровно 64 hex-символа."""
+    return len(text) == _SHA256_HEX_LEN and all(ch in _HEX_DIGITS for ch in text)
+
+
+def _provenance_sources(
+    value: Any, path: Path, *, key: str, require_sha256: bool
+) -> tuple[ProvenanceSource, ...]:
+    """Разбирает список источников ``sources``/``superseded_sources``.
+
+    Строгость та же, что у остального объявления: элемент не словарь, неизвестный ключ
+    записи, пустой ``path``, ``sha256`` не 64 hex — видимая ошибка пакета. ``sha256``
+    обязателен только в ``sources``: прежний источник (``superseded_sources``) объявляется
+    ради полноты истории, и отпечатка у него может не быть.
+
+    :raises ValueError: список не является списком; элемент не словарь; неизвестный ключ
+        записи; пустой ``path``; отсутствующий или битый ``sha256``.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise _provenance_error(
+            path,
+            f"{key} обязан быть списком записей, получено {type(value).__name__}",
+        )
+    entries: list[ProvenanceSource] = []
+    for index, raw in enumerate(value, start=1):
+        where = f"{key}[{index}]"
+        if not isinstance(raw, Mapping):
+            raise _provenance_error(
+                path,
+                f"{where} обязан быть словарём, получено {type(raw).__name__}",
+            )
+        unknown = sorted(
+            str(field) for field in raw if field not in _PROVENANCE_SOURCE_KEYS
+        )
+        if unknown:
+            raise _provenance_error(
+                path,
+                f"{where}: неизвестные ключи {unknown}; допустимы "
+                f"{sorted(_PROVENANCE_SOURCE_KEYS)}",
+            )
+        source_path = _text(raw.get("path"))
+        if source_path is None:
+            raise _provenance_error(
+                path,
+                f"{where} требует path: источник без пути не адресуем, а объявление "
+                "происхождения без адреса — молчание",
+            )
+        sha256 = _text(raw.get("sha256"))
+        if sha256 is None and require_sha256:
+            raise _provenance_error(
+                path,
+                f"{where} требует sha256: без отпечатка источник не тот же самый файл, "
+                "а лишь файл с тем же именем",
+            )
+        if sha256 is not None and not _is_sha256(sha256):
+            raise _provenance_error(
+                path,
+                f"{where}.sha256={sha256!r} не является отпечатком sha256 "
+                f"({_SHA256_HEX_LEN} hex-символов)",
+            )
+        entries.append(
+            ProvenanceSource(
+                path=source_path,
+                role=_text(raw.get("role")),
+                sha256=sha256,
+                sheet=_text(raw.get("sheet")),
+            )
+        )
+    return tuple(entries)
+
+
+def read_provenance(package_dir: str | Path) -> GoldenProvenance | None:
+    """Читает объявление происхождения эталона: ``{package}/sources/provenance.yaml``.
+
+    Файла нет → ``None``: у пакета может не быть объявленного происхождения, и это не
+    ошибка (выводить из отсутствия что-либо запрещено — просто нет даты). Присутствующий
+    файл разбирается строго: он объявляет происхождение, и объявление с опечаткой хуже
+    отсутствующего, потому что читается как факт.
+
+    Порядок ``sources`` сохраняется как объявлен: первый — источник, из которого собран
+    эталон.
+
+    :raises ValueError: файл не читается/не YAML-словарь; файл пуст; неизвестный ключ;
+        нет ``case_id``; пустой ``sources``; элемент списка источников не словарь, с
+        неизвестным ключом, без ``path`` или с битым ``sha256``; ``snapshot_date``/
+        ``generated_at`` не ISO-дата.
+    """
+    path = provenance_path(package_dir)
+    if not path.is_file():
+        return None
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as exc:  # noqa: BLE001 — понятная ошибка важнее типа
+        raise _provenance_error(path, f"не удалось прочитать: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise _provenance_error(path, f"некорректный YAML: {exc}") from exc
+
+    # Пустой файл не объявляет ничего, но, в отличие от ``golden_status.yaml``, здесь нет
+    # шаблонной роли «показать форму»: объявление происхождения без происхождения — это
+    # не «нет объявления», а незаполненное объявление.
+    if data is None:
+        raise _provenance_error(
+            path,
+            "файл пуст: объявление происхождения обязано назвать case_id и sources",
+        )
+    if not isinstance(data, dict):
+        raise _provenance_error(
+            path, f"ожидался YAML-словарь, получено {type(data).__name__}"
+        )
+
+    unknown = sorted(str(key) for key in data if key not in _PROVENANCE_KEYS)
+    if unknown:
+        raise _provenance_error(
+            path,
+            f"неизвестные ключи {unknown}; допустимы {sorted(_PROVENANCE_KEYS)}",
+        )
+
+    case_id = _text(data.get("case_id"))
+    if case_id is None:
+        raise _provenance_error(
+            path, "case_id обязателен: файл объявляет происхождение конкретного пакета"
+        )
+
+    sources = _provenance_sources(
+        data.get("sources"), path, key="sources", require_sha256=True
+    )
+    if not sources:
+        raise _provenance_error(
+            path,
+            "sources обязателен и непуст: файл объявляет происхождение эталона, "
+            "а пустое происхождение — не объявление",
+        )
+
+    return GoldenProvenance(
+        case_id=case_id,
+        generated_at=_provenance_date(
+            data.get("generated_at"), path, key="generated_at", allow_moment=True
+        ),
+        generator=_text(data.get("generator")),
+        snapshot_date=_provenance_date(
+            data.get("snapshot_date"), path, key="snapshot_date"
+        ),
+        sources=sources,
+        superseded_sources=_provenance_sources(
+            data.get("superseded_sources"),
+            path,
+            key="superseded_sources",
+            require_sha256=False,
+        ),
     )

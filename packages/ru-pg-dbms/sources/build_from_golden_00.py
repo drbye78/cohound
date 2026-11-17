@@ -73,7 +73,11 @@ def main() -> None:
     (PACKAGE/'baselines.csv').write_text('baseline_id,param_id,min_version,inheritance_mode,note\n',encoding='utf-8')
     (PACKAGE/'catalog.lock.csv').write_text('param_id,source_file,source_row,title,generated_at\n',encoding='utf-8')
     sha=hashlib.sha256(SOURCE.read_bytes()).hexdigest()
-    provenance={'case_id':'ru-pg-dbms','generated_at':'2026-10-28T00:00:00Z','generator':'packages/ru-pg-dbms/sources/build_from_golden_00.py','snapshot_date':'2026-10-28','sources':[{'path':str(SOURCE),'role':'сравнительная таблица и исходные статусы 181 параметра','sha256':sha,'sheet':SHEET}], 'superseded_sources':[{'path':'/mnt/c/Work/gtm/psq_params_091_demo.xlsx','role':'прежний технический каталог 119 параметров','sheet':'final'}, {'path':'/mnt/c/Work/gtm/golden_091.xlsx','role':'прежний неполный golden-набор','sheet':'data'}]}
+    # `generated_at` — когда собран пакет (этот скрипт), `snapshot_date` — дата состояния
+    # источника: таблица снята 01.10.2026 (та же дата в шапках паспортов продуктов,
+    # `comp_0.xlsx` «Лист1»). Держать здесь дату сборки в обоих полях нельзя: читатель
+    # принимал бы полуторамесячную оценку за текущую (`core/pipeline/golden_status.py`).
+    provenance={'case_id':'ru-pg-dbms','generated_at':'2026-10-28T00:00:00Z','generator':'packages/ru-pg-dbms/sources/build_from_golden_00.py','snapshot_date':'2026-10-01','sources':[{'path':str(SOURCE),'role':'сравнительная таблица и исходные статусы 181 параметра','sha256':sha,'sheet':SHEET}], 'superseded_sources':[{'path':'/mnt/c/Work/gtm/psq_params_091_demo.xlsx','role':'прежний технический каталог 119 параметров','sheet':'final'}, {'path':'/mnt/c/Work/gtm/golden_091.xlsx','role':'прежний неполный golden-набор','sheet':'data'}]}
     (PACKAGE/'sources/provenance.yaml').write_text(yaml.safe_dump(provenance,allow_unicode=True,sort_keys=False),encoding='utf-8')
 
 if __name__=='__main__': main()

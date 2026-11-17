@@ -429,7 +429,7 @@ def run(args: argparse.Namespace) -> int:
             run_scope=run_scope,
             refresh_policy=refresh_policy.value,
         )
-    payload = _plan_payload(result)
+    payload = _plan_payload(result, args.package)
     # План 19 §P1: план **печатает** резолв («что было бы запрещено/отложено»), но не
     # исполняет его. Несовпавшие строки видимы токеном ``crawl_policy_unmatched`` и в
     # дайджест не входят (no-op правка оператора не даёт ``execution_change``).

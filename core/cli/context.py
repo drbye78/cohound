@@ -98,6 +98,7 @@ from core.pipeline.gate_subject import (
     publication_subject,
     review_subject,
 )
+from core.pipeline.golden_status import read_provenance
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.phases import resolve_package_id
@@ -2965,7 +2966,9 @@ def _resolve_phases(
     return build_phases(**kwargs)
 
 
-def _plan_payload(result: RunPlan) -> dict[str, Any]:
+def _plan_payload(
+    result: RunPlan, package_dir: str | Path | None = None
+) -> dict[str, Any]:
     """Сериализует :class:`RunPlan` в JSON-совместимый словарь.
 
     Состояние эталона (``golden_state``/``golden_declared``/``golden_reason``/
@@ -2975,8 +2978,24 @@ def _plan_payload(result: RunPlan) -> dict[str, Any]:
     реально участвующие в сверке (0 при ``absent``/``declined``).
     ``golden_exempt_products`` — продукты, для которых эталон объявленно отсутствует
     (waiver): ``golden_count`` без него читался бы как «когорта покрыта целиком».
+
+    **Дата и источник эталона** (``package_dir`` — каталог пакета, чей
+    ``sources/provenance.yaml`` читается). Число строк без даты читается как «сегодняшний
+    эталон», поэтому рядом с ним едут два **разных** факта:
+
+    * ``golden_built`` — когда собран **пакет** (``generated_at``, без времени);
+    * ``golden_snapshot`` — дата состояния **источника** (``snapshot_date``), и только если
+      она объявлена **отдельно**: совпадение с ``generated_at`` означает «одна дата
+      объявлена дважды», а не «источник снят в день сборки»;
+    * ``golden_source``/``golden_source_sha256`` — первый объявленный источник и первые 12
+      hex его отпечатка.
+
+    ``package_dir is None`` (план собран в обход каталога пакета, напр. в тестах) —
+    происхождение не читалось: поля ``None``, а не выведенные из чего-либо.
     """
     status = result.golden_status
+    provenance = read_provenance(package_dir) if package_dir is not None else None
+    primary = provenance.primary_source if provenance is not None else None
     return {
         "run_id": result.run_id,
         "case_id": result.cohort.case_id,
@@ -3006,6 +3025,18 @@ def _plan_payload(result: RunPlan) -> dict[str, Any]:
             [entry.as_dict() for entry in status.exempt_products]
             if status is not None
             else []
+        ),
+        # Происхождение эталона (``sources/provenance.yaml``): дата сборки пакета, дата
+        # состояния источника (только если объявлена отдельно), первый источник и первые
+        # 12 hex его отпечатка. Поля присутствуют всегда — форма ``--json`` стабильна, а
+        # «факта нет» выражено ``None``, не пропуском ключа.
+        "golden_built": provenance.generated_at if provenance is not None else None,
+        "golden_snapshot": (
+            provenance.distinct_snapshot_date if provenance is not None else None
+        ),
+        "golden_source": primary.name if primary is not None else None,
+        "golden_source_sha256": (
+            primary.sha256[:12] if primary is not None and primary.sha256 else None
         ),
         "warnings": list(result.warnings),
     }
@@ -3077,6 +3108,23 @@ def _print_plan(payload: dict[str, Any]) -> None:
     weights = ", ".join(
         f"{module}={weight}" for module, weight in sorted(payload["renormalized_weights"].items())
     )
+    # Дата и источник эталона — в тех же скобках, что и состояние: «905 строк» без даты
+    # читается как «сегодняшний эталон». Печатается только объявленный факт: пустых
+    # ``unknown``/``—`` здесь нет — отсутствие факта не печатается вовсе, иначе строка
+    # утверждала бы, что дата известна. ``snapshot`` попадает сюда лишь когда он
+    # **отличается** от даты сборки (``distinct_snapshot_date``): совпадение — одна дата
+    # дважды, а не дата таблицы.
+    golden = f"golden: {payload['golden_count']} (state: {payload['golden_state']}"
+    for key, label in (
+        ("golden_built", "built"),
+        ("golden_snapshot", "snapshot"),
+        ("golden_source", "source"),
+        ("golden_source_sha256", "sha256"),
+    ):
+        value = payload.get(key)
+        if value:
+            golden += f", {label}: {value}"
+    golden += ")"
     lines = [
         f"run_id: {payload['run_id']}",
         f"case_id: {payload['case_id']}",
@@ -3086,7 +3134,7 @@ def _print_plan(payload: dict[str, Any]) -> None:
         f"params: {', '.join(payload['params'])}",
         f"roles: {', '.join(payload['roles'])}",
         f"weights: {weights or '—'}",
-        f"golden: {payload['golden_count']} (state: {payload['golden_state']})",
+        golden,
     ]
     # Причина непригодности эталона — рядом со счётчиком, а не только в ``--json``:
     # «0 строк» без причины читается как «эталон потеряли».
