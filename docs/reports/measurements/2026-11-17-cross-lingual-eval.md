@@ -47,7 +47,7 @@
 
 | условие | значение | откуда |
 |---|---|---|
-| читатель | `trafilatura-html-7` (`core/adapters/extract_html.py:344`) | тот же, что в пайплайне |
+| читатель | `trafilatura-html-7` на момент замера (`core/adapters/extract_html.py:363` — текущая `trafilatura-html-8`, снятие пролога XHTML) | тот же, что в пайплайне |
 | чанкер | `md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-4.2.0/plugins-0.6.1/policy-6`, `chunk_size=**1500**` | `MarkdownChunkerPort()`; ключа `chunk_size` в `config/deploy.yaml` **нет** — это дефолт кода (`core/adapters/chunker_markdown.py:336`) |
 | оценщик | `deepseek-v4.1-flash-1017:yellow`, `decoder=json_object`, endpoint `deploy.llm.cheap` | `--llm-model` > слот; `COHOUND_LLM_MODEL` не читается |
 | путь оценки | `core.pipeline.evaluate.evaluate_cell` (`core/pipeline/evaluate.py:3002`) | не своя копия промпта |

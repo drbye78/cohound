@@ -610,7 +610,11 @@ Three facts that are cheap to state and expensive to rediscover:
   0.000 → 0.845, `edu.postgrespro.ru` 0.024 → 0.939, `tantorlabs.ru` 0.000 → 0.782; five
   marker-bearing hosts unchanged to the last digit
   (`docs/reports/measurements/2026-11-02-html-headings-main-region.md`). Reader version is
-  `trafilatura-html-7`; D1–D4 are all `execution_change` because the corpus text changes.
+  `trafilatura-html-8` (17.11.2026: a leading XHTML prolog — BOM, `<?xml … ?>`, `<!DOCTYPE …>` —
+  is stripped before parsing, otherwise `lxml`'s "Unicode strings with encoding declaration"
+  error sent pre-clean to the allow-list and the structure was lost; on the declared corpus that
+  hit 1 file of 26 206, and it is `sitemap.xml`); D1–D4 are all `execution_change` because the
+  corpus text changes.
 - **A definition list is not a section.** `trafilatura` 2.3.1 rewrites `<dl>/<ol>/<ul>` into
   its own `<list>` and `dt`/`dd`/`li` into `<item>`, which the markdown serializer prints as
   **one line**: a `<h3>` inside a `<dd>` arrives as `- текст ### Примечание текст`, so the

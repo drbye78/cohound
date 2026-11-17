@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from core.util.sanitize import (
@@ -301,6 +303,113 @@ def test_strip_active_keeps_injection_text_but_finalize_still_neutralizes() -> N
     finalized = finalize_extracted_text(cleaned)
     assert "Игнорируй предыдущие инструкции" not in finalized
     assert "[injection-scaffold-removed]" in finalized
+
+
+# ---------------------------------------------------------------------------
+# strip_active_html — ведущий пролог XHTML (17.11.2026, trafilatura-html-8)
+#
+# ``lxml.html.document_fromstring`` отвергает **юникодную** строку с объявлением
+# кодировки, поэтому корректный XHTML уходил в деградацию к allow-list: структура
+# class/id/role терялась. Пролог (BOM, <?xml … ?>, <!DOCTYPE …>) снимается до разбора;
+# XHTML-DTD снимается заодно — иначе libxml2 подставляет ``xmlns`` и переключает
+# сериализатор, и второй проход возвращает уже другой текст (не идемпотентно).
+# ---------------------------------------------------------------------------
+
+_XHTML_BODY = (
+    '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Документ</title></head>'
+    '<body class="page" role="document"><div id="content" class="article-body" role="main">'
+    "<h1>Заголовок</h1><p>основной текст статьи.</p>"
+    "<script>var x = 1;</script></div></body></html>"
+)
+
+_XHTML_WITH_PROLOG = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"\n'
+    '  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">\n' + _XHTML_BODY
+)
+
+
+def test_strip_active_xhtml_with_declaration_matches_without() -> None:
+    """XHTML с объявлением и тот же XHTML без него дают **одинаковый** выход.
+
+    Это и есть предмет правки: разница в форме входа (объявлена кодировка или нет) не
+    имеет права менять политику пре-клина — до неё XHTML шёл через allow-list.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with_prolog = strip_active_html(_XHTML_WITH_PROLOG)
+    without_prolog = strip_active_html(_XHTML_BODY)
+
+    assert with_prolog == without_prolog
+    # Деградации нет: структура на месте, предупреждения нет.
+    assert 'class="article-body"' in with_prolog
+    assert 'role="main"' in with_prolog
+    assert [str(w.message) for w in caught] == []
+
+
+def test_strip_active_xhtml_with_bom_is_stable() -> None:
+    """BOM перед объявлением не мешает снятию пролога и не попадает в выход."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cleaned = strip_active_html("\ufeff" + _XHTML_WITH_PROLOG)
+
+    assert cleaned == strip_active_html(_XHTML_BODY)
+    assert "\ufeff" not in cleaned
+    assert [str(w.message) for w in caught] == []
+
+
+def test_strip_active_keeps_declaration_that_is_not_at_the_start() -> None:
+    """``<?xml … ?>`` внутри документа — это текст, а не пролог.
+
+    Пример кода/лог в ``<pre>`` разбирается как processing instruction и сериализуется
+    комментарием; главное — он **остаётся** в документе, а не снимается как пролог.
+    """
+    html = '<html><body><pre><?xml version="1.0"?>\ncode</pre></body></html>'
+    cleaned = strip_active_html(html)
+    assert "?xml version=" in cleaned
+    assert "code" in cleaned
+
+
+def test_strip_active_xhtml_is_idempotent() -> None:
+    """Идемпотентность сохранена и на XHTML (в т.ч. с XHTML-DTD)."""
+    once = strip_active_html(_XHTML_WITH_PROLOG)
+    assert strip_active_html(once) == once
+    assert strip_active_html(_XHTML_WITH_PROLOG) == once
+
+
+# Пин: выход **обычного** HTML (без пролога) до правки 17.11.2026. Литерал снят с
+# реализации ``git show HEAD:core/util/sanitize.py``, а не записан «по памяти»:
+# сравнение побайтовое, поэтому любое изменение сериализации падает.
+_PLAIN_HTML = (
+    "<!DOCTYPE html><html><head><title>Документ</title></head>"
+    '<body class="page"><div id="content" class="article"><h1>Заголовок</h1>'
+    '<p>Текст статьи с <b>акцентом</b> и <a href="https://example.test/x">ссылкой</a>.</p>'
+    "<script>alert(1)</script><noscript>nope</noscript>"
+    "</div></body></html>"
+)
+
+_PLAIN_HTML_PRE_FIX = (
+    '<html><head><title>Документ</title></head><body class="page"><div id="content" '
+    'class="article"><h1>Заголовок</h1><p>Текст статьи с <b>акцентом</b> и '
+    '<a href="https://example.test/x">ссылкой</a>.</p></div></body></html>'
+)
+
+
+def test_strip_active_plain_html_is_byte_identical_to_pre_fix() -> None:
+    """Обычный HTML (без пролога) — выход **побайтово** прежний."""
+    assert strip_active_html(_PLAIN_HTML) == _PLAIN_HTML_PRE_FIX
+
+
+def test_strip_active_degradation_stays_visible_on_unparseable_input() -> None:
+    """Действительно неразбираемый вход по-прежнему даёт ``RuntimeWarning``.
+
+    Снятие пролога лечит **корректный** XHTML; оно не «убирает предупреждение».
+    Документ, состоящий из одного объявления, после снятия пуст — ``lxml`` его не
+    разбирает, и деградация к allow-list обязана остаться видимой.
+    """
+    with pytest.warns(RuntimeWarning, match="не смог разобрать HTML"):
+        degraded = strip_active_html('<?xml version="1.0" encoding="utf-8"?>')
+    assert degraded == sanitize_html('<?xml version="1.0" encoding="utf-8"?>')
 
 
 # ---------------------------------------------------------------------------

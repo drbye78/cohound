@@ -63,9 +63,9 @@ def test_extractor_version_is_stable() -> None:
     # структуросохраняющий (``trafilatura-html-4``); D2 — страница без объявленного
     # основного блока получает ``<main>`` (``trafilatura-html-5``); 03.11.2026 D3 —
     # списки определений разворачиваются до ``trafilatura`` (``trafilatura-html-6``);
-    # 14.11.2026 D4 — псевдо-тег ``<name:…>`` экранируется (``trafilatura-html-7``).
+    # 14.11.2026 D4 — псевдо-тег ``<name:…>`` экранируется (появилось в ``trafilatura-html-7``).
     # Каждый раз меняется объявленный стек (``extractor_stack``), а не только реализация.
-    assert HtmlExtractor.version == "trafilatura-html-7"
+    assert HtmlExtractor.version == "trafilatura-html-8"
 
 
 def test_extract_passes_decoded_html_to_fn() -> None:

@@ -277,7 +277,8 @@ def _neutralize_definition_lists(html: str) -> str:
     неверным утверждением; понадобится — лечится отдельно и отдельным замером.
 
     Это ``execution_change``: текст корпуса меняется, версия читателя была поднята до
-    ``trafilatura-html-6`` (текущая — ``trafilatura-html-7``, см. :func:`_escape_pseudo_tags`).
+    ``trafilatura-html-6`` (текущая — ``trafilatura-html-8``, см. :func:`_escape_pseudo_tags`
+    и :func:`core.util.sanitize.strip_active_html`).
     """
     if not _DEFINITION_LIST_RE.search(html):
         return html
@@ -336,7 +337,8 @@ def _escape_pseudo_tags(html: str) -> str:
     что те делают round-trip через ``lxml`` и вернули бы псевдо-тег в строку.
 
     Это ``execution_change``: текст корпуса меняется, версия читателя —
-    ``trafilatura-html-7``.
+    ``trafilatura-html-7``; ``trafilatura-html-8`` (17.11.2026) — снятие ведущего пролога
+    XHTML в пре-клине (:func:`core.util.sanitize.strip_active_html`).
     """
     return _PSEUDO_TAG_RE.sub("&lt;", html)
 
@@ -349,9 +351,16 @@ class HtmlExtractor:
     отличается от chrome; удаляется только активное. Прежний allow-list
     (:func:`core.util.sanitize.sanitize_html`) снимал структуру и тянул cookie-баннер
     в текст (замер 02.11.2026: 400/400 страниц против 99/400 без чистки).
+
+    ``trafilatura-html-8`` (17.11.2026): ведущий пролог XHTML (BOM, ``<?xml … ?>``,
+    ``<!DOCTYPE …>``) снимается до разбора, поэтому на XHTML-страницах текст приходит
+    путём, **сохраняющим структуру**, а не через allow-list. Ключ ``extract_cache``
+    включает ``extractor_version``, поэтому прогрев инвалидируется целиком (цена —
+    ``docs/reports/measurements/2026-11-17-xhtml-preclean.md``). ``extractor_version`` —
+    провенанс (``content_change``), не вход ``run_id``.
     """
 
-    version = "trafilatura-html-7"
+    version = "trafilatura-html-8"
 
     #: B3: адаптер читает байты **локального** файла (``page.source_path``), поэтому годится
     #: для членов контейнеров (спуск). Шов ``split`` умеет то же с ``ae0f933``:

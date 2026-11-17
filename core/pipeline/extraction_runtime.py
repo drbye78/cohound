@@ -332,9 +332,9 @@ def _cache_extractor_version(
     """Версия движка для ключа ``extract_cache`` — **фактического** движка страницы.
 
     Кэш пишется с ``ExtractedDoc.extractor_version`` (его штампует сам адаптер: страница —
-    ``trafilatura-html-7``, PDF — ``docling-doc-4:full/cpu/docling-<build>/<policy>/<finalize>/ocr-cyrillic-v5``),
+    ``trafilatura-html-8``, PDF — ``docling-doc-4:full/cpu/docling-<build>/<policy>/<finalize>/ocr-cyrillic-v5``),
     поэтому проба обязана спрашивать ту же величину. Композитная ``.version`` для этого не
-    годится: она описывает набор движков композита (``trafilatura-html-7+…``) и не
+    годится: она описывает набор движков композита (``trafilatura-html-8+…``) и не
     совпадает со штампом **ни одного** документа — кэш от такого ключа не давал попаданий
     вовсе (write-only).
 
