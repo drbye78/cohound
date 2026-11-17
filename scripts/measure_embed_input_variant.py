@@ -88,10 +88,19 @@ if str(_ROOT) not in sys.path:
 
 #: Объявленные варианты состава входа. Имя — то, что попадает в отчёт; порядок полей —
 #: тот же, что у ``EMBED_INPUT_FIELDS`` (объявленный порядок, а не «как удобно склеить»).
+#:
+#: ``recomputed`` — **не ось состава**, а контроль воспроизводимости: тот же вход
+#: ``("text",)``, но посчитанный заново, тогда как базовый вариант берётся из сборки
+#: (``_partition_matrix``). В паре ``text,recomputed`` прибор отвечает не «что лучше», а
+#: «даёт ли пере-эмбеддинг те же числа»: смена версии чанкера (``policy-6``) не входит в
+#: ключ ``embed_cache`` (``core/pipeline/embed_cache.py``), поэтому новый прогон
+#: пересчитывает векторы там, где кэш пуст, и вопрос «изменится ли от этого ранжирование»
+#: имеет цену в ячейках, а не в рассуждении.
 VARIANTS: dict[str, tuple[str, ...]] = {
     "text": ("text",),
     "heading": ("heading_path", "text"),
     "heading+context": ("heading_path", "context_prefix", "text"),
+    "recomputed": ("text",),
 }
 
 #: Режим питания по умолчанию: «оператор не объявил». Печатается явно — отсутствие факта
@@ -406,6 +415,41 @@ def _variant_matrix(
         "cache": cache.stats() if cache is not None else None,
     }
     return matrix, stats
+
+
+def _vector_drift(base: Any, new: Any) -> dict[str, Any]:
+    """Насколько пересчитанные векторы разошлись с числами сборки — **числом**, не словом.
+
+    Вопрос пары ``text,recomputed`` не «что лучше», а «даёт ли пере-эмбеддинг те же
+    числа». Ранжирование может совпасть и при разошедшихся векторах (разница ниже
+    разрешения top-K), и это другой вывод, чем «векторы совпали»: первый говорит о
+    устойчивости ранжирования, второй — о воспроизводимости счёта. Публикуются оба
+    факта раздельно, потому что путать их значит выдавать одно за другое.
+
+    Сравнение поэлементное по ``float32`` (в такой матрице считает адаптер); «идентично»
+    — строгое равенство всех компонент, без допуска: допуск пришлось бы объявлять, а
+    объявленный порог «почти совпало» — это ровно то, чего A3 не разрешает.
+    """
+    import numpy as np
+
+    left = np.asarray(base, dtype=np.float32)
+    right = np.asarray(new, dtype=np.float32)
+    if left.shape != right.shape:
+        return {
+            "comparable": False,
+            "shape_base": list(left.shape),
+            "shape_new": list(right.shape),
+        }
+    diff = np.abs(left - right)
+    return {
+        "comparable": True,
+        "rows": int(left.shape[0]),
+        "components": int(left.size),
+        "differing_components": int(np.count_nonzero(diff)),
+        "max_abs": float(diff.max()) if diff.size else 0.0,
+        "mean_abs": float(diff.mean()) if diff.size else 0.0,
+        "identical": not bool(np.any(diff)),
+    }
 
 
 def _partition_matrix(
@@ -758,6 +802,10 @@ def _condition_fields(stats: dict[str, Any]) -> dict[str, Any]:
         "seconds": stats.get("seconds"),
         "chunks_per_s": stats.get("chunks_per_s"),
         "cache": stats.get("cache"),
+        # Расхождение векторов с числами сборки — только у варианта, который их
+        # пересчитал; у базового его нет (``None``), а не «ноль»: ноль означал бы
+        # измеренное совпадение, которого не было.
+        "vector_drift": stats.get("vector_drift"),
     }
 
 
@@ -1017,10 +1065,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Снимок «до» первого варианта; дальше «после» предыдущего = «до» следующего, поэтому
     # окна стыкуются и ни одно не остаётся без границы.
     power_before = _power_snapshot(with_gpu=with_gpu)
+    # Векторы базового варианта **до** нормировки: ``_MatrixIndex`` делит строки на их
+    # норму на месте, поэтому сравнение с пересчитанной матрицей после него мерило бы
+    # косинус, а не сами числа, и «идентично» означало бы «одинаково направлено».
+    baseline_raw: Any = None
     for name in variants:
         fields = VARIANTS[name]
         if name == variants[0] and baseline_matrix is not None:
             matrix, stats = baseline_matrix, baseline_stats or {}
+            baseline_raw = matrix.copy()
         else:
             matrix, stats = _variant_matrix(
                 rows,
@@ -1032,6 +1085,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 embed_precision=str(deploy.embed.precision),
                 batch_size=batch_size,
             )
+            if baseline_raw is not None:
+                stats["vector_drift"] = _vector_drift(baseline_raw, matrix)
         index = _MatrixIndex(
             rows,
             matrix,

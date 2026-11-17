@@ -1,0 +1,575 @@
+{
+ "instrument": "scripts/measure_embed_input_variant.py",
+ "measured_at": "2026-11-17",
+ "axis": "recomputed vs partition (тот же вход text, пересчёт)",
+ "run_id": "ru-pg-dbms-145ad66ca3f9",
+ "index_build_id": "cb_5c090025af68b95615c87869",
+ "profile": "R1",
+ "cutoff_k": 10,
+ "golden": "packages/ru-pg-dbms/sources/retrieval_golden_docs.json",
+ "golden_cells": 132,
+ "power_mode": "ac-barrel",
+ "products": {
+  "jatoba": {
+   "cells_in_scope": 5,
+   "chunks_measured": 539,
+   "embed_model_id": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+   "embed_device": "cuda",
+   "embed_precision": "fp16",
+   "batch_size": 64,
+   "peak_rss_bytes": 3698552832,
+   "peak_vram_bytes": 2292961280,
+   "variants": [
+    {
+     "variant": "text",
+     "fields": [
+      "text"
+     ],
+     "source": "partition",
+     "partition_build_id": "pb_239b80cac170a302f306634d",
+     "chunks": 539,
+     "partition_chunks": 539,
+     "seconds": 0.0,
+     "chunks_per_s": null,
+     "cache": null,
+     "vector_drift": null,
+     "power": {
+      "before": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1057,
+       "power_draw_w": 14.32,
+       "temperature_c": 57,
+       "sw_power_cap_us": 20045
+      },
+      "after": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1057,
+       "power_draw_w": 14.26,
+       "temperature_c": 57,
+       "sw_power_cap_us": 20045
+      }
+     },
+     "metrics": {
+      "hit_at_k": 0.8,
+      "recall_at_k": 0.8,
+      "mrr": 0.5333333333333333,
+      "ndcg_at_k": 0.6,
+      "hit_ci": [
+       0.4,
+       1.0
+      ],
+      "scored": 5,
+      "unresolved_cells": 0
+     },
+     "cells": [
+      {
+       "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+       "rank": 3,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+       "rank": 3,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+       "rank": 1,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+       "rank": 1,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+       "rank": null,
+       "unresolved": false
+      }
+     ]
+    },
+    {
+     "variant": "recomputed",
+     "fields": [
+      "text"
+     ],
+     "source": "recomputed",
+     "partition_build_id": null,
+     "chunks": 539,
+     "partition_chunks": null,
+     "seconds": 0.297,
+     "chunks_per_s": 1817.09,
+     "cache": {
+      "hits": 517,
+      "misses": 0,
+      "writes": 0,
+      "corrupt": 0,
+      "evicted": 0,
+      "invalid_key": 0,
+      "scans": 0
+     },
+     "vector_drift": {
+      "comparable": true,
+      "rows": 539,
+      "components": 551936,
+      "differing_components": 19295,
+      "max_abs": 0.0003662109375,
+      "mean_abs": 1.3098198223815416e-06,
+      "identical": false
+     },
+     "power": {
+      "before": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1057,
+       "power_draw_w": 14.26,
+       "temperature_c": 57,
+       "sw_power_cap_us": 20045
+      },
+      "after": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1057,
+       "power_draw_w": 14.25,
+       "temperature_c": 57,
+       "sw_power_cap_us": 20045
+      }
+     },
+     "metrics": {
+      "hit_at_k": 0.8,
+      "recall_at_k": 0.8,
+      "mrr": 0.5333333333333333,
+      "ndcg_at_k": 0.6,
+      "hit_ci": [
+       0.4,
+       1.0
+      ],
+      "scored": 5,
+      "unresolved_cells": 0
+     },
+     "cells": [
+      {
+       "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+       "rank": 3,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+       "rank": 3,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+       "rank": 1,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+       "rank": 1,
+       "unresolved": false
+      },
+      {
+       "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+       "rank": null,
+       "unresolved": false
+      }
+     ],
+     "paired_vs": "text",
+     "paired": {
+      "n_pairs": 5,
+      "hit_baseline": 0.8,
+      "hit_variant": 0.8,
+      "delta": 0.0,
+      "better": 0,
+      "worse": 0,
+      "mcnemar_p": 1.0,
+      "delta_ci": [
+       0.0,
+       0.0
+      ]
+     }
+    }
+   ]
+  },
+  "digital_q_database": {
+   "cells_in_scope": 2,
+   "chunks_measured": 10870,
+   "embed_model_id": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+   "embed_device": "cuda",
+   "embed_precision": "fp16",
+   "batch_size": 64,
+   "peak_rss_bytes": 3730345984,
+   "peak_vram_bytes": 3226098176,
+   "variants": [
+    {
+     "variant": "text",
+     "fields": [
+      "text"
+     ],
+     "source": "partition",
+     "partition_build_id": "pb_39c34456a6d1632e03710460",
+     "chunks": 10870,
+     "partition_chunks": 10870,
+     "seconds": 0.0,
+     "chunks_per_s": null,
+     "cache": null,
+     "vector_drift": null,
+     "power": {
+      "before": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1777,
+       "power_draw_w": 19.73,
+       "temperature_c": 58,
+       "sw_power_cap_us": 20038
+      },
+      "after": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1777,
+       "power_draw_w": 19.33,
+       "temperature_c": 58,
+       "sw_power_cap_us": 20038
+      }
+     },
+     "metrics": {
+      "hit_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "mrr": 0.0,
+      "ndcg_at_k": 0.0,
+      "hit_ci": [
+       0.0,
+       0.0
+      ],
+      "scored": 2,
+      "unresolved_cells": 0
+     },
+     "cells": [
+      {
+       "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+       "rank": null,
+       "unresolved": false
+      }
+     ]
+    },
+    {
+     "variant": "recomputed",
+     "fields": [
+      "text"
+     ],
+     "source": "recomputed",
+     "partition_build_id": null,
+     "chunks": 10870,
+     "partition_chunks": null,
+     "seconds": 1064.869,
+     "chunks_per_s": 10.21,
+     "cache": {
+      "hits": 418,
+      "misses": 9482,
+      "writes": 9482,
+      "corrupt": 0,
+      "evicted": 0,
+      "invalid_key": 0,
+      "scans": 0
+     },
+     "vector_drift": {
+      "comparable": true,
+      "rows": 10870,
+      "components": 11130880,
+      "differing_components": 5368,
+      "max_abs": 0.00079345703125,
+      "mean_abs": 3.198707432261472e-08,
+      "identical": false
+     },
+     "power": {
+      "before": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1777,
+       "power_draw_w": 19.33,
+       "temperature_c": 58,
+       "sw_power_cap_us": 20038
+      },
+      "after": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1747,
+       "power_draw_w": 33.37,
+       "temperature_c": 85,
+       "sw_power_cap_us": 20038
+      }
+     },
+     "metrics": {
+      "hit_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "mrr": 0.0,
+      "ndcg_at_k": 0.0,
+      "hit_ci": [
+       0.0,
+       0.0
+      ],
+      "scored": 2,
+      "unresolved_cells": 0
+     },
+     "cells": [
+      {
+       "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+       "rank": null,
+       "unresolved": false
+      }
+     ],
+     "paired_vs": "text",
+     "paired": {
+      "n_pairs": 2,
+      "hit_baseline": 0.0,
+      "hit_variant": 0.0,
+      "delta": 0.0,
+      "better": 0,
+      "worse": 0,
+      "mcnemar_p": 1.0,
+      "delta_ci": [
+       0.0,
+       0.0
+      ]
+     }
+    }
+   ]
+  },
+  "tantor": {
+   "cells_in_scope": 8,
+   "chunks_measured": 13951,
+   "embed_model_id": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+   "embed_device": "cuda",
+   "embed_precision": "fp16",
+   "batch_size": 64,
+   "peak_rss_bytes": 3735302144,
+   "peak_vram_bytes": 3316382720,
+   "variants": [
+    {
+     "variant": "text",
+     "fields": [
+      "text"
+     ],
+     "source": "partition",
+     "partition_build_id": "pb_f0ed68fdd3af3b0d966180e0",
+     "chunks": 13951,
+     "partition_chunks": 13951,
+     "seconds": 0.0,
+     "chunks_per_s": null,
+     "cache": null,
+     "vector_drift": null,
+     "power": {
+      "before": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1057,
+       "power_draw_w": 17.77,
+       "temperature_c": 78,
+       "sw_power_cap_us": 19813
+      },
+      "after": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1057,
+       "power_draw_w": 17.68,
+       "temperature_c": 78,
+       "sw_power_cap_us": 19813
+      }
+     },
+     "metrics": {
+      "hit_at_k": 0.125,
+      "recall_at_k": 0.125,
+      "mrr": 0.0625,
+      "ndcg_at_k": 0.07886621919643219,
+      "hit_ci": [
+       0.0,
+       0.375
+      ],
+      "scored": 8,
+      "unresolved_cells": 0
+     },
+     "cells": [
+      {
+       "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+       "rank": 2,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+       "rank": null,
+       "unresolved": false
+      }
+     ]
+    },
+    {
+     "variant": "recomputed",
+     "fields": [
+      "text"
+     ],
+     "source": "recomputed",
+     "partition_build_id": null,
+     "chunks": 13951,
+     "partition_chunks": null,
+     "seconds": 1215.626,
+     "chunks_per_s": 11.48,
+     "cache": {
+      "hits": 309,
+      "misses": 13583,
+      "writes": 13583,
+      "corrupt": 0,
+      "evicted": 0,
+      "invalid_key": 0,
+      "scans": 0
+     },
+     "vector_drift": {
+      "comparable": true,
+      "rows": 13951,
+      "components": 14285824,
+      "differing_components": 1526889,
+      "max_abs": 0.003448486328125,
+      "mean_abs": 4.526415523287142e-06,
+      "identical": false
+     },
+     "power": {
+      "before": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1057,
+       "power_draw_w": 17.68,
+       "temperature_c": 78,
+       "sw_power_cap_us": 19813
+      },
+      "after": {
+       "ac_online": true,
+       "battery_status": "Charging",
+       "sm_clock_mhz": 1747,
+       "power_draw_w": 26.29,
+       "temperature_c": 84,
+       "sw_power_cap_us": 19813
+      }
+     },
+     "metrics": {
+      "hit_at_k": 0.125,
+      "recall_at_k": 0.125,
+      "mrr": 0.0625,
+      "ndcg_at_k": 0.07886621919643219,
+      "hit_ci": [
+       0.0,
+       0.375
+      ],
+      "scored": 8,
+      "unresolved_cells": 0
+     },
+     "cells": [
+      {
+       "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+       "rank": null,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+       "rank": 2,
+       "unresolved": false
+      },
+      {
+       "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+       "rank": null,
+       "unresolved": false
+      }
+     ],
+     "paired_vs": "text",
+     "paired": {
+      "n_pairs": 8,
+      "hit_baseline": 0.125,
+      "hit_variant": 0.125,
+      "delta": 0.0,
+      "better": 0,
+      "worse": 0,
+      "mcnemar_p": 1.0,
+      "delta_ci": [
+       0.0,
+       0.0
+      ]
+     }
+    }
+   ]
+  }
+ },
+ "totals": {
+  "chunks_measured": 25360,
+  "cells": 15,
+  "components": 25968640,
+  "differing_components": 1551552,
+  "share_differing": 0.059747,
+  "discordant_pairs": 0,
+  "mcnemar_p": 1.0
+ }
+}

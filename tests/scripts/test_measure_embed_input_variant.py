@@ -895,3 +895,82 @@ def test_summary_prints_paired_delta_with_its_interval(
     assert "Δ +0.087" in line
     assert "выиграл 5 / проиграл 1" in line
     assert "McNemar p=0.2188" in line
+
+
+# ------------------------------------------------- _vector_drift / вариант recomputed
+#
+# ``recomputed`` — не ось состава входа, а контроль воспроизводимости: тот же вход
+# ``("text",)``, посчитанный заново против чисел сборки. Пара ``text,recomputed``
+# отвечает на вопрос «меняет ли пере-эмбеддинг ранжирование» (цена смены версии
+# чанкера, ``policy-6``), и путать её с осью нельзя: поля у вариантов совпадают.
+
+
+def test_recomputed_variant_declares_the_same_input_as_base() -> None:
+    """Контроль воспроизводимости объявляет **тот же** вход, что базовый вариант.
+
+    Если поля разойдутся, пара ``text,recomputed`` начнёт мерить ось состава, а её
+    числа прочитают как «цена пере-эмбеддинга» — подмена предмета замера.
+    """
+    assert MEASURE.VARIANTS["recomputed"] == MEASURE.VARIANTS["text"] == ("text",)
+
+
+def test_resolve_variants_accepts_the_determinism_pair() -> None:
+    """Пара ``text,recomputed`` разрешается: имена разные, вход один."""
+    assert MEASURE._resolve_variants("text,recomputed") == ["text", "recomputed"]
+
+
+def test_vector_drift_reports_identity_without_tolerance() -> None:
+    """Совпадение — строгое равенство всех компонент, без «почти»."""
+    import numpy as np
+
+    base = np.array([[0.5, -0.25], [0.125, 0.75]], dtype=np.float16)
+    drift = MEASURE._vector_drift(base, base.copy())
+
+    assert drift["identical"] is True
+    assert drift["differing_components"] == 0
+    assert drift["max_abs"] == 0.0
+    assert drift["rows"] == 2
+    assert drift["components"] == 4
+
+
+def test_vector_drift_counts_components_and_publishes_max() -> None:
+    """Расхождение публикуется числом компонент и максимальным отклонением.
+
+    Один шаг ``float16`` в компоненте — это не «идентично»: ранжирование может не
+    измениться, но воспроизводимость счёта уже другая, и отчёт обязан это различать.
+    """
+    import numpy as np
+
+    base = np.array([[0.5, 0.5]], dtype=np.float16)
+    other = np.array([[0.5, np.nextafter(np.float16(0.5), np.float16(1.0))]], dtype=np.float16)
+
+    drift = MEASURE._vector_drift(base, other)
+
+    assert drift["identical"] is False
+    assert drift["differing_components"] == 1
+    assert drift["max_abs"] > 0.0
+    assert drift["components"] == 2
+
+
+def test_vector_drift_refuses_to_compare_different_shapes() -> None:
+    """Разные формы — «сравнивать нечего», а не «совпало»."""
+    import numpy as np
+
+    drift = MEASURE._vector_drift(
+        np.zeros((2, 3), dtype=np.float16), np.zeros((3, 2), dtype=np.float16)
+    )
+
+    assert drift["comparable"] is False
+    assert drift["shape_base"] == [2, 3]
+    assert drift["shape_new"] == [3, 2]
+
+
+def test_conditions_publish_vector_drift_only_when_measured() -> None:
+    """У базового варианта поля нет (``None``): ноль означал бы неизмеренное совпадение."""
+    base = MEASURE._condition_fields({"source": "partition", "chunks": 539})
+    recomputed = MEASURE._condition_fields(
+        {"source": "recomputed", "chunks": 539, "vector_drift": {"identical": False}}
+    )
+
+    assert base["vector_drift"] is None
+    assert recomputed["vector_drift"] == {"identical": False}

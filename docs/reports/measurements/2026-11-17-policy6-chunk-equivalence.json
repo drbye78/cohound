@@ -1,0 +1,55 @@
+{
+ "instrument": "scripts/measure_chunker_equivalence.py",
+ "conditions": {
+  "db": "/home/roger/.cohound/stands/ru-pg-dbms/runs/ru-pg-dbms-145ad66ca3f9/cohound.db",
+  "chunk_size": 1500,
+  "profile": "gfm",
+  "documents_in_run": 19324,
+  "family_rule": "text-plain-* → text (если URL не markdown), иначе markdown; повторяет core/adapters/extract_text.py:family"
+ },
+ "summary": {
+  "documents": 19324,
+  "compared": 19324,
+  "skipped": 0,
+  "skipped_reasons": {},
+  "documents_without_chunks": 0,
+  "chunks_compared": 253306,
+  "chunks_old_total": 253306,
+  "documents_with_mismatch": 0,
+  "mismatches": {},
+  "families": {
+   "markdown": 19130,
+   "text": 194
+  },
+  "by_product": {
+   "digital_q_database": {
+    "documents": 1149,
+    "compared": 10870,
+    "mismatched": 0
+   },
+   "jatoba": {
+    "documents": 21,
+    "compared": 539,
+    "mismatched": 0
+   },
+   "pangolin": {
+    "documents": 1693,
+    "compared": 21015,
+    "mismatched": 0
+   },
+   "postgrespro": {
+    "documents": 15188,
+    "compared": 206931,
+    "mismatched": 0
+   },
+   "tantor": {
+    "documents": 1273,
+    "compared": 13951,
+    "mismatched": 0
+   }
+  },
+  "wall_seconds": 176.0
+ },
+ "documents": [],
+ "examples": []
+}

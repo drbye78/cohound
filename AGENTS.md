@@ -329,7 +329,13 @@ back without the address — the same class as `pdfium-text-5`; `chunker_version
 field (`digests.py:116`), so this is an `execution_change` with an unchanged corpus text. Why
 phase 2 is an address and not a re-slicing, with numbers: plan `26` §O39 and
 `docs/reports/measurements/2026-11-16-tables.md` (24 documents / 181 tables: no table row is
-longer than the chunk budget, so the cut already falls between rows). STATE `13` —
+longer than the chunk budget, so the cut already falls between rows). The address never reaches
+retrieval — index body is `chunk.text` alone, embed input is `("text",)`, `embed_cache` key
+carries no chunker version — and the price of `policy-6` was **measured** 17.11.2026 rather
+than argued: the whole corpus re-chunked to 253 306 of 253 306 identical chunks, and
+re-embedding changed the ranking on **0** of 15 golden cells (McNemar p=1.0)
+(`2026-11-17-policy6-retrieval.md`; `postgrespro`/`pangolin`, 117 of 132 cells, not re-embedded
+— ≈5 h GPU). STATE `13` —
 `chunk_meta.table_ref`: the durable chunk-set carries the address too, and a file of an older
 STATE is rejected by the version gate (the same rule that made `capture.policy_digest` STATE
 `12`).
