@@ -32,6 +32,7 @@ from core.ports.lexical_index import LexicalIndexPort
 from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse, TokenUsage
 from core.ports.poller import PollPort
 from core.ports.registry import RegistryFact, RegistryFetcherPort
+from core.ports.reranker import RerankerPort
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 from core.ports.state import (
     ChunkRow,
@@ -97,6 +98,7 @@ __all__ = [
     "RawPage",
     "RegistryFact",
     "RegistryFetcherPort",
+    "RerankerPort",
     "RetrievalResult",
     "RetrievedChunk",
     "RunIndexRef",

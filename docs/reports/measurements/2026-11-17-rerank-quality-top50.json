@@ -1,0 +1,1455 @@
+{
+ "instrument": "scripts/measure_rerank.py",
+ "run_id": "ru-pg-dbms-145ad66ca3f9",
+ "package_id": "ru-pg-dbms",
+ "build_id": "cb_5c090025af68b95615c87869",
+ "model": "BAAI/bge-reranker-v2-m3@953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+ "device": "cuda",
+ "profile": "R0",
+ "lexical_profile": "stemmed",
+ "top_n": 50,
+ "cutoff_k": 10,
+ "bootstrap": 1000,
+ "rerank_query_fusion": "max",
+ "cells": 132,
+ "products": [
+  "digital_q_database",
+  "jatoba",
+  "pangolin",
+  "postgrespro",
+  "tantor"
+ ],
+ "per_product": {
+  "digital_q_database": {
+   "cells": 2,
+   "chunks": 10870,
+   "pairs": 300,
+   "hit_at_k_baseline": 0.5,
+   "hit_at_k_reranked": 0.0
+  },
+  "jatoba": {
+   "cells": 5,
+   "chunks": 539,
+   "pairs": 636,
+   "hit_at_k_baseline": 0.6,
+   "hit_at_k_reranked": 0.4
+  },
+  "pangolin": {
+   "cells": 2,
+   "chunks": 21015,
+   "pairs": 300,
+   "hit_at_k_baseline": 0.5,
+   "hit_at_k_reranked": 0.0
+  },
+  "postgrespro": {
+   "cells": 115,
+   "chunks": 206931,
+   "pairs": 17250,
+   "hit_at_k_baseline": 0.20869565217391303,
+   "hit_at_k_reranked": 0.3130434782608696
+  },
+  "tantor": {
+   "cells": 8,
+   "chunks": 13951,
+   "pairs": 1200,
+   "hit_at_k_baseline": 0.625,
+   "hit_at_k_reranked": 0.5
+  }
+ },
+ "corpus": {
+  "chunks_indexed": 253306,
+  "index_seconds": 32.6
+ },
+ "metrics": {
+  "baseline": {
+   "hit_at_k": 0.25757575757575757,
+   "recall_at_k": 0.25757575757575757,
+   "mrr": 0.1261002886002886,
+   "ndcg_at_k": 0.1572757062620816,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "scored": 132,
+   "unresolved_cells": 0
+  },
+  "reranked": {
+   "hit_at_k": 0.3181818181818182,
+   "recall_at_k": 0.3181818181818182,
+   "mrr": 0.15411856661856663,
+   "ndcg_at_k": 0.1927114818309473,
+   "hit_ci": [
+    0.2422348484848485,
+    0.4015151515151515
+   ],
+   "scored": 132,
+   "unresolved_cells": 0
+  }
+ },
+ "paired": {
+  "n_pairs": 132,
+  "hit_baseline": 0.25757575757575757,
+  "hit_variant": 0.3181818181818182,
+  "delta": 0.06060606060606061,
+  "better": 15,
+  "worse": 7,
+  "mcnemar_p": 0.13380050659179688,
+  "delta_ci": [
+   -0.015151515151515152,
+   0.13636363636363635
+  ]
+ },
+ "cost": {
+  "pairs": 19686,
+  "rerank_seconds": 645.32,
+  "seconds_per_cell": 4.889,
+  "pairs_per_s": 30.51
+ },
+ "per_cell": [
+  {
+   "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "product_id": "digital_q_database",
+   "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+   "product_id": "digital_q_database",
+   "param_id": "xlsx_131_sovmestimost_s_oracle_pl_sql",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 4,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "product_id": "jatoba",
+   "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 2,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+   "product_id": "jatoba",
+   "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+   "candidates": 46,
+   "queries": 3,
+   "rank_baseline": 2,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+   "product_id": "jatoba",
+   "param_id": "xlsx_018_nalichie_publichnogo_roadmap",
+   "candidates": 16,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+   "product_id": "jatoba",
+   "param_id": "xlsx_019_podderzhka_dbaas_cloud",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+   "product_id": "jatoba",
+   "param_id": "xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+   "product_id": "pangolin",
+   "param_id": "xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+   "product_id": "pangolin",
+   "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 7,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 8,
+   "rank_reranked": 6,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 2,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_013_dokumentaciya_na_russkom",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 2,
+   "rank_reranked": 3,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_020_nalichie_sertifikata_fstek",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 8,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 7,
+   "rank_reranked": 4,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 4,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 3,
+   "rank_reranked": 3,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 7,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 4,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 5,
+   "rank_reranked": 3,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 6,
+   "rank_reranked": 9,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 4,
+   "rank_reranked": 7,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_078_nalichie_in_memory_tehnologii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_079_64_bitnyi_schetchik_tranzakcii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_083_split_merge_sekcii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_085_podderzhka_timeseries_tipov_dannyh",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_086_zamorozka_planov_zaprosov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 7,
+   "rank_reranked": 5,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 8,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 8,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 2,
+   "rank_reranked": 2,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_097_rum_indeks",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_097_rum_indeks",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 3,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 7,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 4,
+   "rank_reranked": 3,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 5,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_108_vstroennyi_planirovshchik_zadanii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 2,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_115_optimizirovannyi_agent_sbora_metrik",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 4,
+   "rank_reranked": 3,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 6,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 4,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_119_pluggable_toast",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_119_pluggable_toast",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 8,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 4,
+   "rank_reranked": 3,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 5,
+   "rank_reranked": 2,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_130_podderzhka_sessionnyh_peremennyh",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_131_sovmestimost_s_oracle_pl_sql",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_139_parametry_v_skriptah_psql",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_140_podderzhka_associativnyh_tablic",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 8,
+   "rank_reranked": 9,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 2,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_147_naliichie_centra_operativnogo_kontrolya",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_150_upravlenie_rasshireniyami_bd",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_151_upravlenie_polzovatelyami_bd",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_152_upravlenie_nastroikami_autentifikacii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_153_sozdanie_udalenie_ekzemplyara",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 2,
+   "rank_reranked": 2,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_154_sozdanie_udalenie_bd",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_164_sozdanie_polzovatelskih_grafikov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 2,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_171_dostup_k_konsoli_psql",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 10,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+   "product_id": "postgrespro",
+   "param_id": "xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "product_id": "tantor",
+   "param_id": "xlsx_005_tehnicheskaya_podderzhka_24_7",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 2,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+   "product_id": "tantor",
+   "param_id": "xlsx_011_nalichie_obucheniya_po_produktu",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+   "product_id": "tantor",
+   "param_id": "xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 5,
+   "rank_reranked": 7,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+   "product_id": "tantor",
+   "param_id": "xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+   "product_id": "tantor",
+   "param_id": "xlsx_018_nalichie_publichnogo_roadmap",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+   "product_id": "tantor",
+   "param_id": "xlsx_019_podderzhka_dbaas_cloud",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+   "product_id": "tantor",
+   "param_id": "xlsx_020_nalichie_sertifikata_fstek",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": 1,
+   "rank_reranked": 1,
+   "unresolved": false
+  },
+  {
+   "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+   "product_id": "tantor",
+   "param_id": "xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+   "candidates": 50,
+   "queries": 3,
+   "rank_baseline": null,
+   "rank_reranked": null,
+   "unresolved": false
+  }
+ ],
+ "precision": "fp16",
+ "batch_size": 16,
+ "max_length": 512,
+ "peak_rss_bytes": 3672559616,
+ "peak_rss_scope": "index+rerank",
+ "peak_vram_bytes": 3145124352,
+ "power_mode": "ac",
+ "power": {
+  "before": {
+   "ac_online": true,
+   "battery_status": "Charging",
+   "sm_clock_mhz": 1057,
+   "power_draw_w": 13.53,
+   "temperature_c": 55,
+   "sw_power_cap_us": 0
+  },
+  "after": {
+   "ac_online": true,
+   "battery_status": "Charging",
+   "sm_clock_mhz": 1747,
+   "power_draw_w": 37.62,
+   "temperature_c": 86,
+   "sw_power_cap_us": 19997
+  }
+ }
+}
