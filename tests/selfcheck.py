@@ -151,6 +151,29 @@ def main() -> int:
             entries=[CohortEntry(product_id="a", role_overlap=1.0, selection_reason="x", anchor_relation=AnchorRelation.ANALOG)],
         ),
     )
+    check(
+        "когорта: точка отсчёта Δ (comparison_base) — одна, и это не якорь",
+        lambda: Cohort(
+            case_id="pg",
+            frozen_at=dt.date(2026, 6, 1),
+            entries=[
+                CohortEntry(product_id="anchor", role_overlap=1.0, selection_reason="x", anchor_relation=AnchorRelation.ANCHOR),
+                CohortEntry(product_id="base", role_overlap=0.8, selection_reason="y", anchor_relation=AnchorRelation.ANALOG, comparison_base=True),
+            ],
+        ),
+    )
+    expect_raises(
+        "когорта с двумя точками отсчёта отклоняется",
+        ValueError,
+        lambda: Cohort(
+            case_id="pg",
+            frozen_at=dt.date(2026, 6, 1),
+            entries=[
+                CohortEntry(product_id="anchor", role_overlap=1.0, selection_reason="x", anchor_relation=AnchorRelation.ANCHOR, comparison_base=True),
+                CohortEntry(product_id="b2", role_overlap=0.8, selection_reason="y", anchor_relation=AnchorRelation.ANALOG, comparison_base=True),
+            ],
+        ),
+    )
 
     section("Выход LLM-оценщика §7")
     check(

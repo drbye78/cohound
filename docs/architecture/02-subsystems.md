@@ -125,10 +125,10 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
-(`_profile_material_for_run`, `core/cli/context.py:1582`), иначе проверялось бы не то, что
+(`_profile_material_for_run`, `core/cli/context.py:1587`), иначе проверялось бы не то, что
 аттестовано. Проверка подключена: `make_profile_gate`
 (`core/pipeline/profile_attestation.py:313`) → `_profile_gate_resolver`
-(`core/cli/context.py:1671`).
+(`core/cli/context.py:1676`).
 
 **Статус подписи — операционный факт, не дефект дизайна.** Измерено 2026-11-08: **0 строк**
 `profile_attestation` в `state.db` стенда (`~/.cohound/stands/ru-pg-dbms`) — механизмом не
@@ -359,7 +359,7 @@ index`. Это делает DMZ-шов физической границей **I
 `failed` и не `partial`; статус ставит recovery-on-open по свидетельству живости
 (`owner`/`heartbeat_at`), а `hound crawl cancel` демотирует `running` в `interrupted`
 (`cancelled_by_operator`). `interrupted` обязан оставаться в `_TERMINAL_SESSION_STATUSES`
-(`core/cli/context.py:2349`), иначе `--follow` ждёт вечно.
+(`core/cli/context.py:2354`), иначе `--follow` ждёт вечно.
 `completed` — при отсутствии failed/cancelled, иначе `partial`. При наличии `store` и `run_id` Ш5 перед фетчем читает
 durable-элементы сеанса и **не фетчит повторно** URL, у которого уже есть retained-байты:
 `RawPage` реконструируется из `corpus_raw` (I19: raw — источник), затем идёт ре-экстракция;
@@ -596,7 +596,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1290-1321`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1304-1335`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
@@ -666,7 +666,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 из 70 без доказательства о предмете.
 **Следствие-аномалия теперь публикуется** (V1 закрыт 08.11.2026): записи замера идут в
 операторский `nda_questions.csv` строками `anomaly_kind=unrelated_support`
-(`core/pipeline/report.py:2193`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
+(`core/pipeline/report.py:2222`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
 не меняется. Маркерная проверка класса утверждения (отрицание/условность в цитате против
 заявленного ✅) остаётся **названным ограничением**, а не работой: она требует замера шума
 на корпусе, иначе превращается в порог из головы (A3).
@@ -687,7 +687,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:658-694`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:918-957`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
   сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1416-1421`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
@@ -828,17 +828,19 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3540-3609`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3829`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
 `partial_docs.csv`, `support_quality.yaml` (замер `support_subject_overlap`),
 `corpus_freshness.yaml` + `cell_freshness.csv` (план 20 §7 F2), `artifacts_gap.yaml`
-(`13 §4`). Таблица выше называет публикационные (`PUBLISHED_ARTIFACTS`,
-`core/pipeline/gate_subject.py:59-64`) и манифест; полный набор имён, которые появляются в
-`{out_dir}/{run_id}/` после `write_reports`, — 16, включая `run_manifest.yaml` (корень
-прогона) и `artifacts_gap.yaml` (пишется помощником `write_artifacts_gap`,
-`core/pipeline/artifacts_gap.py:309-311`). Измерено по коду 2026-11-08.
+(`13 §4`), `baseline_delta.csv` + `baseline_delta.yaml` (Δ к объявленной точке отсчёта
+когорты — `cohort.yaml: comparison_base`; матрица переходов `base_status → product_status`,
+ординальности статусов не вводится). Таблица выше называет публикационные (`PUBLISHED_ARTIFACTS`,
+`core/pipeline/gate_subject.py:59-64`) и манифест. Полный перечень — поля датакласса
+`Artifacts` (`core/pipeline/report.py:307`), а не число: список рос на каждом O-пункте, и
+пересчитанное «сколько всего файлов» устаревало быстрее, чем его читали. Раньше здесь
+стояло «16» (измерено 2026-11-08) — к 17.11.2026 это число неверно.
 
 **Отчётный контур I3 (v2.1, §5).** `report.py` собирает `i3_anomalies` (`collect_i3_anomalies`):
 strict-`❓` без **полного** протокола исчерпания (`corpus`+`serp`+`registry`+`inheritance`). Это
@@ -949,13 +951,13 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3540-3609` → `{out_dir}/{run_id}/outputs/`,
+`write_reports` `core/pipeline/report.py:3829` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:427`); версионирование
 `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:128`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
 `core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
 `core/util/hashing.py:44-55`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
-(`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1862-1873`,
+(`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1867-1878`,
 потребитель — `HttpCrawler` и поисковые адаптеры); политика ретраев и backoff —
 ✅ сделано (общая политика HTTP-адаптеров `core/util/retry.py:1-27`,
 `request_with_retry` `core/util/retry.py:129`, потребители — `core/adapters/search_glm.py:486` и

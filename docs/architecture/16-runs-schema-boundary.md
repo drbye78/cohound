@@ -221,7 +221,7 @@ CREATE TABLE IF NOT EXISTS run_product (
 coverage)` (`core/pipeline/corpus_coverage.py:654`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: на момент
 границы переноса ячеек не было (`09` §10), а сегодня их считает отчёт из durable-ячеек
-(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3396`).
+(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3425`).
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — величины того же класса, что `product_end` пишет в `results[].notes` прогона
@@ -334,8 +334,8 @@ per-site (`core/pipeline/crawl_frontier.py:826`) — два уровня одн�
   конфига, отсутствие `model_id` — dense-ветвь не собирается (`embed_spec: null`, видимая
   заметка wiring), недоступность объявленной модели — `EXIT_USAGE`, а не другой адаптер.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
-  `core/domain/models.py:695`), дефолт `None` — по той же причине, что у `pdf_device`
-  (`core/domain/models.py:859`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
+  `core/domain/models.py:709`), дефолт `None` — по той же причине, что у `pdf_device`
+  (`core/domain/models.py:873`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
   что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:488-509`).
 - Резолвер: `resolve_embed_device(app, run)` (`core/pipeline/crawl_frontier.py:511-538`) —
@@ -365,11 +365,11 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (`core/cli/execution_axes.py:693-700`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
-(`core/pipeline/digests.py:617-639`) требует точного набора ключей, но вызывается ровно из
+(`core/pipeline/digests.py:626-648`) требует точного набора ключей, но вызывается ровно из
 одного места — `core/pipeline/run_identity.py:383`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:2821-2834`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:2850-2863`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. `execution_change: embed_device` diff называет и тогда, когда
 поле есть только с одной стороны.
 ⚠️ **Сверено 08.11.2026 — оговорка к «старые прогоны читаются»:** совместимость чтения
@@ -377,10 +377,10 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (§3), поэтому `hound diff` против прогона прошлой схемы невозможен не из-за поля, а из-за
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
-`RunManifest` (`core/domain/models.py:2010`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2866`) сопоставляет имя
+`RunManifest` (`core/domain/models.py:1931`) получает поле `embed_device`, и этого
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:2908`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
-(`core/pipeline/report.py:2849`)
+(`core/pipeline/report.py:2878`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
@@ -617,8 +617,8 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    `tests/cli/test_execution_axes.py:1286` (дефолт `cpu`),
    `tests/cli/test_execution_axes.py:1291` (run > deploy),
    `tests/cli/test_execution_axes.py:1305` (поле JSON-сериализуемо);
-   `tests/pipeline/test_report.py:2433`, `tests/pipeline/test_report.py:2465`
-   (манифест несёт значение как объявлено), `tests/pipeline/test_report.py:2492` (diff называет
+   `tests/pipeline/test_report.py:2437`, `tests/pipeline/test_report.py:2469`
+   (манифест несёт значение как объявлено), `tests/pipeline/test_report.py:2496` (diff называет
    `execution_change: embed_device`, а не «недоступно»). **Прямого теста «`cpu`→`cuda`
    меняет `execution_contract_digest`» нет** — разница держится тем, что поле входит в
    материал дайджеста (`core/pipeline/digests.py:96`), а пин
@@ -648,7 +648,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    снято F3 плана 20, допустимость `❌` теперь держит датированный носитель
    (`tests/pipeline/test_absence_dated.py`).
 8. `tests/pipeline/test_report.py` — `run_scope`/`product_plan` в манифесте и в `--json`
-   (payload команды `report` блок манифеста **несёт**: `core/cli/commands/report.py:175`,
+   (payload команды `report` блок манифеста **несёт**: `core/cli/commands/report.py:176`,
    `tests/cli/test_report_provenance_payload.py:96`); `run_product` заполняется по продуктам,
    `cells_carried` живёт в отчёте, а не в `run_product` (§3.2).
 9. `tests/pipeline/test_report.py` (диагностика) — diff против прогона без `embed_device`
@@ -669,9 +669,9 @@ O6) рядом с `embed_precision`, той же природой, что `extra
   `_derive_partition_build_id(**явные kwargs)`; новый обязательный аргумент → `TypeError`.
 - `tests/pipeline/test_corpus.py:934-948` — перечень вариантов чувствительности `pb`
   (подмножество параметров проходит, но перечень вариантов надо расширить).
-- `tests/selfcheck.py:808-818` (список обязательных таблиц — `run_product` в него),
-  `tests/selfcheck.py:820-846` (ассерты по колонкам `runs`/`corpus_docs`),
-  `tests/selfcheck.py:1776-1778` (round-trip
+- `tests/selfcheck.py:831-841` (список обязательных таблиц — `run_product` в него),
+  `tests/selfcheck.py:843-869` (ассерты по колонкам `runs`/`corpus_docs`),
+  `tests/selfcheck.py:1799-1801` (round-trip
   `source_id`).
 - `docs/status-dictionary.yaml` — **✅ синхронизировано:** `pdf_device`
   (`docs/status-dictionary.yaml:443`), `embed_device`
@@ -779,7 +779,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    `core/pipeline/state_adopt.py:120` — **текст там с 08.11.2026 сам устарел**:
    `runs.run_scope` объявлен (`core/store/sqlite.py:196`) и пишется `persist_manifest`
    (`core/store/sqlite_store.py:1287`); правка в `core/` — вне этой полосы), а `ProductPlanSet`
-   существует (`core/domain/models.py:3002`) и **до границы** не персистился ни разу —
+   существует (`core/domain/models.py:3029`) и **до границы** не персистился ни разу —
    единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей. ✅ После границы оба
@@ -883,7 +883,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2786` (первая редакция ссылалась на строку 1970 того же файла);
+`core/pipeline/report.py:2815` (первая редакция ссылалась на строку 1970 того же файла);
 `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:156` (первая редакция ссылалась на строку 93 — там комментарий);
 `_PARTITION_SCHEMA` —
@@ -894,7 +894,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 **Чего не было вовсе:**
 
 1. **`EmbedConfig`/`EmbedRunConfig` не существовали** — имена были только в этом документе
-   (§4.1). ✅ Созданы границей: `core/domain/models.py:518` (`EmbedRunConfig`).
+   (§4.1). ✅ Созданы границей: `core/domain/models.py:709` (`EmbedRunConfig`).
 2. **Порт эмбеддера без `device`** — и это правильно; устройство идёт явным параметром
    (§4.1). Иначе граница повторила бы дефект: спрашивать у адаптера, на чём он считает.
    ✅ Сверено 08.11.2026: порт по-прежнему без `device` (`core/ports/embedder.py:15-21`).

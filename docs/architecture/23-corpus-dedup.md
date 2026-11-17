@@ -284,7 +284,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
   назвать параметры.
 * **Контракт:** все параметры (τ, режим, роли) — в `retrieval_params_json`, которое **уже**
   входит в `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:115`) и в `cell_reuse_key`
-  (`core/pipeline/digests.py:864`) ⇒ новое поле контракта не нужно, перенос ячеек инвалидируется по
+  (`core/pipeline/digests.py:873`) ⇒ новое поле контракта не нужно, перенос ячеек инвалидируется по
   построению.
 * **Не делать:** порог «не более N на семью» без замера; удаление кандидатов из индекса.
 
@@ -429,7 +429,7 @@ CREATE TABLE dedup_ledger (
 |---|---|---|---|
 | S0 | нет (уже) | — | — |
 | S1, S2 | **нет** — чистая функция байт | провенанс + ledger | — |
-| S3 | да (уже) | `doc_id`, `corpus_doc_set_digest` (`core/pipeline/digests.py:571`) | уже действует |
+| S3 | да (уже) | `doc_id`, `corpus_doc_set_digest` (`core/pipeline/digests.py:670`) | уже действует |
 | S5 (роль) | да — ранжирование | `retrieval_params_json` | `execution_change` |
 | S7 (схлопывание) | да — набор доказательств | `retrieval_params_json` | `execution_change` |
 | S8 | нет — даты и reuse | `corpus_snapshot`, `reuse_kind` | провенанс |

@@ -54,12 +54,14 @@ def _entry(
     anchor_relation: AnchorRelation = AnchorRelation.ANCHOR,
     role_overlap: float = 1.0,
     selection_reason: str | None = "якорь",
+    comparison_base: bool = False,
 ) -> CohortEntry:
     return CohortEntry(
         product_id=product_id,
         role_overlap=role_overlap,
         selection_reason=selection_reason,
         anchor_relation=anchor_relation,
+        comparison_base=comparison_base,
     )
 
 
@@ -168,6 +170,50 @@ def test_cohort_digest_is_sensitive_to_case_id_and_cohort_ref() -> None:
     assert cohort_digest(cohort, case_id="case_y", cohort_ref="r1") != base
     assert cohort_digest(cohort, case_id="case_x", cohort_ref="r2") != base
     assert cohort_digest(cohort, case_id="case_x", cohort_ref=None) != base
+
+
+def test_cohort_digest_without_comparison_base_is_pinned() -> None:
+    """Пин: дайджест **тот же**, что до появления поля ``comparison_base``.
+
+    Литерал ниже посчитан реализацией до правки
+    (``git show HEAD:core/pipeline/digests.py``) на этой же фикстуре. Он держит главное
+    свойство: ``comparison_base`` — представление (относительно кого печатать Δ), а не
+    условие замера, поэтому материал не меняется ни при дефолте, ни при объявлении.
+    """
+    cohort = _cohort(
+        _entry("p1"),
+        _entry("p2", anchor_relation=AnchorRelation.ANALOG, role_overlap=0.5),
+    )
+    assert (
+        cohort_digest(cohort, case_id="case_x", cohort_ref="r1")
+        == "daf029ae9212643495f90a59"
+    )
+
+
+def test_cohort_digest_ignores_declared_comparison_base() -> None:
+    """Объявленная точка отсчёта материал **не меняет**: иначе смена вида отчёта
+    заставляла бы перезапускать прогон ради тех же ячеек (§7: политика гейтов — тоже
+    процесс, а не условие замера, и её в контракте нет).
+
+    Самоописательность сохраняется на артефакте: ``baseline_delta.yaml`` называет
+    ``base_product``, поэтому два вида отчёта одного ``run_id`` не смешиваются.
+    """
+    left = _cohort(
+        _entry("p1"),
+        _entry("p2", anchor_relation=AnchorRelation.ANALOG, role_overlap=0.5),
+    )
+    right = _cohort(
+        _entry("p1"),
+        _entry(
+            "p2",
+            anchor_relation=AnchorRelation.ANALOG,
+            role_overlap=0.5,
+            comparison_base=True,
+        ),
+    )
+    assert cohort_digest(left, case_id="case_x", cohort_ref="r1") == cohort_digest(
+        right, case_id="case_x", cohort_ref="r1"
+    )
 
 
 # ---------------------------------------------------------------------------

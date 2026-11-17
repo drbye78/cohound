@@ -117,6 +117,7 @@ def run(args: argparse.Namespace) -> int:
             out_dir=out_dir,
             run_id=run_id,
             store=store,
+            cohort=cohort,
         )
 
     # Сужение типа для mypy: ``run_id``/``bundle``/``manifest`` присваиваются безусловно

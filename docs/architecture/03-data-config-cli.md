@@ -348,7 +348,7 @@ class SqliteStore:
 | `package` | `run.yaml:package` | правка `run.yaml` |
 | `anchor` | `run.yaml:anchor` | правка `run.yaml` (смена якоря — новый прогон) |
 | `cycle_id` | `--cycle-id` > `run.yaml:cycle_id` > `snapshot_date` | `--cycle-id`, `--update` |
-| `cohort_digest` | состав + `cohort_ref` + `frozen_at` когорты (`digests.cohort_digest`) | правка `cohort.yaml`/`cohort_ref` |
+| `cohort_digest` | состав + `cohort_ref` + `frozen_at` когорты (`digests.cohort_digest`); `comparison_base` **не входит** (представление, не условие замера) | правка `cohort.yaml`/`cohort_ref` |
 | `seeds_digest` | эффективный seed-набор, включая **порядок** корней внутри продукта (`digests.seeds_digest`) | **`--urls FILE`** (полная замена набора), правка `seeds.yaml`/`corpus_urls.yaml`, перестановка корней |
 | `execution_contract_digest` | отпечаток осей контракта (`digests.execution_contract_digest`, §C.1 выше) | смена любой оси контракта: `--llm-model`, `--llm-slot`, `--retrieval-profile`, `--cutoff-k`, `--document-level`, `--frozen-source`, `--profile`, `run.yaml:crawl.*` |
 | `run_scope` | `full` \| `only_failed` \| `product:<id>` | **`--only-failed`**, **`--only-product ID`** |
@@ -1717,7 +1717,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   профиля пакета-якоря (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь —
   durable-аттестация профиля (`profile_attestation` в `state/{package_id}/state.db`) —
   объявлена, проверяется гейтом (`make_profile_gate`, `core/pipeline/profile_attestation.py:313`;
-  проводка — `_profile_gate_resolver`, `core/cli/context.py:1671`)
+  проводка — `_profile_gate_resolver`, `core/cli/context.py:1676`)
   и **имеет производителя — человека**: `hound package profile attest --gate G1|G2
   --actor …` (`--dry-run` ничего не пишет и говорит об этом). Прогон её **только читает** и
   никогда не пишет. Механизм рабочий, но замер 2026-10-30 — **ноль строк** во всех реальных
@@ -1774,10 +1774,10 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 
 | Шаг | Действие | Проверка | Статус |
 |---|---|---|---|
-| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1185` (`_shims_removed`) |
-| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:145`, `SCHEMA_VERSION` — `core/store/sqlite.py:143`; тот же гейт `tests/selfcheck.py:1185` |
-| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:1009` (`_import_graph`), вызов `tests/selfcheck.py:355` |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1435` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
+| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1216` (`_shims_removed`) |
+| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:145`, `SCHEMA_VERSION` — `core/store/sqlite.py:143`; тот же гейт `tests/selfcheck.py:1216` |
+| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:1040` (`_import_graph`), вызов `tests/selfcheck.py:378` |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1449` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется
@@ -1798,7 +1798,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | Развёртывание/DMZ (07) | A.1 (`edge/`, `config/deploy.yaml`), D.5, E.3 |
 
 **Открытые вопросы к итерации 4** (сверено 08.11.2026): формат импорт-графа CI — ✅ сделано
-(`tests/selfcheck.py:1009` `_import_graph`, вызов `tests/selfcheck.py:355`; AST по `core.*`);
+(`tests/selfcheck.py:1040` `_import_graph`, вызов `tests/selfcheck.py:378`; AST по `core.*`);
 структура логирования — ✅ сделано
 (`core/util/logging.py:1` — JSON-lines `runs/{run_id}/logs/{phase}.jsonl`, поля 04 §B.1;
 W12/T12.1, 2026-10-08); бэкап/

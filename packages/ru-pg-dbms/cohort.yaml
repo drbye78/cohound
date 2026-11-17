@@ -9,6 +9,19 @@ entries:
   role_overlap: 1.0
   selection_reason: Российский лидер PG-СУБД; максимальное перекрытие ролей с якорем.
 - anchor_relation: analog
+  comparison_base: true
+  product_id: postgresql
+  role_overlap: 0.8
+  selection_reason: >-
+    Предок линии, нуль отсчёта: Δ к нему показывает, что продукт добавляет к PostgreSQL.
+    `analog`, а не новый член `AnchorRelation`: якорь у когорты уже один, а объявленная
+    роль предка — не якорь, а база сравнения (`comparison_base`). Перекрытие ролей — из
+    четырёх ролей профиля (`backup_recovery`, `core_engine`, `management_platform`,
+    `migration`) предок закрывает `core_engine` полностью, `migration` и
+    `backup_recovery` частично (`pg_dump`/`pg_basebackup`/`pg_upgrade`), а
+    `management_platform` — не закрывает вовсе; по объявленным весам модулей пакета
+    (core 0.58, backup 0.19, management 0.23) это ≈0.8.
+- anchor_relation: analog
   product_id: tantor
   role_overlap: 0.9
   selection_reason: Российская СУБД на PostgreSQL; высокое перекрытие ролей.

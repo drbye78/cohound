@@ -133,9 +133,12 @@ entries:
     role_overlap: 0.8
     selection_reason: "Сопоставимый аналог"
     anchor_relation: analog
+    comparison_base: true   # опц.: точка отсчёта Δ (см. ниже)
 ```
 
 `case_id` связывает когорту с пакетом; `frozen_at` — дата фиксации; `entries` — уникальные продукты. У каждой записи `product_id` — slug паспорта, `role_overlap` — численная оценка перекрытия ролей, `selection_reason` — содержательное обоснование (null означает incomplete), `anchor_relation` — `anchor` или `analog`. Ровно одна запись должна быть anchor.
+
+`comparison_base: true` (по умолчанию `false`) объявляет продукт, относительно которого отчёт публикует Δ: `outputs/baseline_delta.csv` — строка на пару «продукт × параметр» со статусами предка и продукта, `outputs/baseline_delta.yaml` — матрица переходов `base_status → product_status` с числами. Больше одной такой записи — ошибка валидатора когорты. В `cohort_digest` флаг **не входит**: это представление, а не условие замера, поэтому смена точки отсчёта не требует нового `run_id`; какой продукт был базой, называет сам `baseline_delta.yaml` (ключ `comparison_base`).
 
 ## `run.yaml`
 

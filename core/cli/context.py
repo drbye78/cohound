@@ -640,6 +640,11 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # B3: члены контейнеров без документа (причина пропуска) — путь к таблице.
         # ``None`` — пропусков нет, файл не создавался; это отличается от «путь забыт».
         "corpus_members": _path(getattr(artifacts, "corpus_members", None)),
+        # Δ к объявленной точке отсчёта когорты (``comparison_base``) — таблица и матрица
+        # переходов. ``None`` — точки отсчёта не объявлено: артефактов нет, и это не
+        # ошибка (обычный пакет без предка), поэтому «путь забыт» отличим от «не объявлено».
+        "baseline_delta": _path(getattr(artifacts, "baseline_delta", None)),
+        "baseline_delta_yaml": _path(getattr(artifacts, "baseline_delta_yaml", None)),
         # План 26 O28: аномалии ``heading_path`` — путь к таблице. ``None`` — не
         # посчитано (причина в блоке ``heading_anomalies``), а не «аномалий нет».
         "heading_anomalies": _path(getattr(artifacts, "heading_anomalies", None)),

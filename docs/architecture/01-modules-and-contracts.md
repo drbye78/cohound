@@ -1,7 +1,7 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
 > **Статус на 2026-11-08** (HEAD `f14f866`): сверены все якоря `путь:строка` по содержимому,
-> матрица §1 — построчно с `tests/selfcheck.py:1009` `_import_graph` (сходится), перечни
+> матрица §1 — построчно с `tests/selfcheck.py:1040` `_import_graph` (сходится), перечни
 > enum-значений и версии схем — с `core/`. §10 закрыт (5 из 5, сигнатуры перепроверены);
 > §9 закрыт — миграция `tests/selfcheck.py` сверена 29.10 (94 двойника / 8 дописанных тестов /
 > 9 структурных гейтов), на 08.11 в selfcheck **113** утверждений (99 `check` + 14
@@ -45,13 +45,13 @@
 (`core/edge/extract_service.py:59`, `core/edge/seam_schema.py:41`); дублировать словарь значило бы
 дать ему разойтись с доменом.
 
-**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:1009` `_import_graph`
+**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:1040` `_import_graph`
 разбирает импорты **статически** (`ast`, без исполнения), включая резолв relative-импортов
-(`tests/selfcheck.py:1053` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
-(`tests/selfcheck.py:1078` `_check_edge`), то есть проверка по принципу allow-list, отдельных
-«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1085`
-`_neutrality` (§1.3), `tests/selfcheck.py:1185` `_shims_removed` (нет `core.schemas`/`core.db`),
-`tests/selfcheck.py:3306` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
+(`tests/selfcheck.py:1084` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
+(`tests/selfcheck.py:1101` `_check_edge`), то есть проверка по принципу allow-list, отдельных
+«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1108`
+`_neutrality` (§1.3), `tests/selfcheck.py:1216` `_shims_removed` (нет `core.schemas`/`core.db`),
+`tests/selfcheck.py:3341` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
 по **всему** слою, а не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет
 сформулирован по запрещённым слоям, а не по файлам).
 
@@ -77,7 +77,7 @@
 | Отрицание и охват | `AbsenceRuleType` (`explicit`, `parameter_reference`, `distribution_absence`, `registry_absence`) · `SourceScope` (`exhaustive`, `partial`, `unknown`) · `DenialStrength` (`authoritative`, `explicit`, `bounded`, `unobserved`, `not_stated`, `instrument_failed`) · `DenialClaim` (`explicit`, `not_stated`) |
 | Сбои | `FailureKind` — **17**: 5 классов сбоя ячейки (`search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`) + 11 наблюдаемых исходов краула (`not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`) + `partial_extraction` (документ получен, прочитана часть страниц — блокирующий класс корпуса) |
 | Пропуск фазы | `SkipReason` — **7**: `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external`, `gate_not_blocking` (последний — не блокирующий гейт: фаза идёт дальше, в `gate_decisions` ложится waiver-строка `actor=policy`) |
-| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:2349`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `ExtractQueueState` (`pending`, `claimed`, `done`, `failed`, `skipped`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
+| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:2354`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `ExtractQueueState` (`pending`, `claimed`, `done`, `failed`, `skipped`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
 | Извлечение | `ExtractionRoute` (`auto`, `html`, `document`) · `DocumentLevel` (`off`, `text`, `layout`, `layout_tables`, `full`) · `PdfPipeline` (`structured`, `text_layer`) · `PdfDevice` (`cpu`, `cuda`) |
 | Контейнеры | `ArchiveDescent` (`plan`, `full` — ось `crawl.archive_descent`) · `ArchiveDescentStatus` (`planned`, `descended`, `unreadable`, `budget_exhausted`) · `ContainerEncryption` (`encrypted`, `not_encrypted`, `unknown` — три состояния, а не булево: «предикат молчит» неотличим от «не зашифрован») |
 | Гейты | `Gate` (G1–G4) · `GateSource` (`internal`, `external`) · `GateVerdict` (`approved`, `rejected`) · `GatePolicy` (`external`, `waived`) |
@@ -89,7 +89,7 @@
 **Почему `interrupted` терминален.** Протухший `running` при открытии сеанса становится
 `interrupted`: тело краула не финализировано, поэтому это не `failed` и не `cancelled`. Без него в
 множестве терминальных `--follow` ждал бы вечно сеанс, который уже никто не исполняет
-(`core/cli/context.py:2349`).
+(`core/cli/context.py:2354`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
 (`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1218,1220`, `gate_delegated_external`/
@@ -742,7 +742,7 @@ class DiscoveryLLMPort(Protocol):
 * G1/G2 — **внутренняя аттестация** содержимого профиля пакета-якоря. Рабочий путь —
   per-run строка `gate_decisions` (аудит-след и override). Второй путь — durable
   `profile_attestation` в `state/{package}/state.db` (`core/pipeline/profile_attestation.py:313`,
-  `make_profile_gate` подключён в CLI, `core/cli/context.py:1671`): производитель у него есть —
+  `make_profile_gate` подключён в CLI, `core/cli/context.py:1676`): производитель у него есть —
   **человек** (`hound package profile attest`, `core/cli/package/commands.py:2997`), прогон строку
   только читает. Замер 30.10.2026: в реальных `state.db` — 0 строк, поэтому рабочим остаётся
   per-run путь; выдавать подпись за существующую нельзя, но и «производителя нет» уже неверно.
@@ -907,8 +907,8 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 | Было | Стало | Статус |
 |---|---|---|
-| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1185` (`_shims_removed`) |
-| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:124` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1185` |
+| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1216` (`_shims_removed`) |
+| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:124` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1208` |
 | `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ✅ **закрыто** (29.10) — построчная сверка 111 утверждений (97 `check` + 14 `expect_raises`) с pytest-пирамидой: **94** имеют двойника (указан `путь:строка`), **8** держали покрытие в одиночку и дописаны тестами, **9** — структурные гейты над деревом, которым pytest-двойник противопоказан: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation`, `_domain_all_complete`, `_ports_contracts`, `_ports_i18`, `_ports_type_reuse`, полнота CLI-поверхности. Дописанные: конструктор `CellEvidence` (I19/R1/I10 — прежний тест проверял `check_evidence` на `model_construct`, то есть в обход валидатора), `core/util/text_utils` (язык, ё→е, нарезка, RU-токены), `core/util/security` (SSRF/allowlist/traversal/slug), `core/adapters/lexical_bm25` (**единственный адаптер без тестов**), `DoclingDocumentExtractor.supports`, `MarkdownChunkerPort`↔`ChunkerPort`. Пиксель-в-пиксель дублировать оставшиеся 94 не нужно и вредно: гейт над деревом и юнит-тест отвечают на разные вопросы. На 08.11 в selfcheck **113** утверждений (99 + 14) — два добавлены после сверки. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:59`), обёртка — `tests/test_selfcheck.py`; `tests/domain` — 13 файлов / 172 функции / 183 кейса, `tests/store` — 20 файлов / 286 функций / 315 кейсов |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
@@ -940,7 +940,7 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:272` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1726`; структура `ProtocolExhaustion` — `core/domain/models.py:1348`;
+`core/domain/models.py:1772`; структура `ProtocolExhaustion` — `core/domain/models.py:1609`;
 политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2851` (`max_retries`), цикл
 `core/pipeline/evaluate.py:3163`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:

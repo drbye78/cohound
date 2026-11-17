@@ -500,7 +500,7 @@ Three facts that are cheap to state and expensive to rediscover:
 ## 9. Run identity, declared axes, versioning
 
 - `run_id` is a function of **declared inputs only**: 35 fields in
-  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:96`). Host-observed values
+  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:105`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
   `embed_spec` (`model_id@revision`) is the declared twin of `embed_model_id`, exactly as

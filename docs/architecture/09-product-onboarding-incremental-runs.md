@@ -179,7 +179,7 @@
 | §6.4 | ✅ сделано | `carry_forward_cell` (`core/pipeline/carry_forward.py`), вызов — `evaluate_batch._one` (между retrieval и оценщиком), запись — `_persist_carried` |
 | §6.5 | ✅ сделано | статус продукта **в прогоне** пишется в `run_product` (`RunProductStatus`); снимок `state.db.product_snapshot` остаётся durable-рубежом — это две разные величины, а не дубль |
 | §6.6, §6.7, §6.7.1, §6.8 | ✅ сделано | `archive_descent`/`artifact_probe` в корпусе (`ArchiveDescentWalker` — `core/pipeline/archive_descent.py:340`; зонд — `core/pipeline/artifact_probe.py:67`), семейство чанкеров — `chunker_family` |
-| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1671`), waiver-след (`core/pipeline/runner.py:477`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
+| §6.9 | ✅ сделано | `make_profile_gate` подключён (`_profile_gate_resolver`, `core/cli/context.py:1676`), waiver-след (`core/pipeline/runner.py:477`); durable-путь G1/G2 **имеет производителя-человека** — `hound package profile attest` (`core/cli/package/commands.py:2994`), но подписей 0 (§6.9) |
 | §7 | ✅ сделано | `seeds.yaml`/нормализация/приоритет источников (`load_effective_seeds`) + CLI-набор (`seeds add/disable/enable/export`); экспорт legacy — `render_corpus_urls`, round-trip проверяется тестом |
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/store/backup.py:687`; вызов — `core/cli/package/commands.py:2394`) |
 | §9 | ✅ сделано | строка «Cell/evidence» описывает as-built перенос (§10): `measurement_origin`/`carried_from_run_id`, копии evidence с per-run `evidence_id` |
@@ -493,7 +493,7 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
    > **Уточнение к прежней редакции: прогон от этого не отказывал и не отказывает.**
    > `classify_change` (`core/pipeline/run_identity.py:386`) при росте состава даёт
    > `cohort_expansion` + `golden_required=full` + новый `run_id`; отказ живёт только в
-   > `hound diff` (`core/pipeline/report.py:3146`). Настоящий дефект был в **провенансе**: по
+   > `hound diff` (`core/pipeline/report.py:3175`). Настоящий дефект был в **провенансе**: по
    > `run_id`/манифесту нельзя было отличить «когорту расширили, объявив ревизию» от
    > «в `cohort.yaml` дописали строку».
    >
@@ -1264,7 +1264,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > `run_scope`/`product_plan_json` (`core/store/sqlite.py:196-197`), `embed_device` (`core/store/sqlite.py:176`) и таблица `run_product`
 > (`core/store/sqlite.py:700`; писатель — корпус, `save_run_product` —
 > `core/pipeline/corpus.py:3891`, обёртка `core/pipeline/corpus_persist.py:699`;
-> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2300`).
+> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2418`).
 > `runs.cohort_digest` и `runs.seeds_digest` **есть** (колонки `core/store/sqlite.py:162-163`)
 > и заполняются из манифеста; они дублируют слагаемые `run_id` для диагностики diff, а
 > цепочка циклов живёт в `state.db.run_lineage` (§12.3). `RunManifest` несёт
@@ -1796,7 +1796,12 @@ def derive_run_id(inputs: RunInputs, *, cycle_id: str, cohort_digest: str,
   наблюдения — это другое измерение, а не resume.
 - `cohort_digest` = `H(canonical JSON of sorted (product_id, anchor_relation, role_overlap);
   case_id; frozen_at; cohort_ref)`. `selection_reason` **не** входит: авторский текст не
-  меняет измерение.
+  меняет измерение. `comparison_base` (точка отсчёта Δ, `outputs/baseline_delta.*`)
+  **не входит вовсе**: это представление, а не условие замера, — прецедент тот же, что у
+  политики гейтов (§7: «process, not a measurement condition», поэтому её нет в
+  контракте). Иначе смена вида отчёта заставляла бы перезапускать прогон ради тех же
+  ячеек; два отчёта одного `run_id` не смешиваются, потому что `baseline_delta.yaml`
+  называет базовый продукт ключом `comparison_base`.
 - `seeds_digest` = `H(product_id, order, normalized_url, role, profile_key, enabled)`, где
   `order` — **авторская позиция корня внутри продукта** (`core/pipeline/digests.py`):
   порядок корней — часть идентичности, потому что краул порядко-чувствителен (корень,
@@ -2607,7 +2612,7 @@ TextChunker.version`, `chunker_family.composite_chunker_version` — тот же
    `profile_digest` один раз, и прогоны с тем же содержимым профиля не требуют повторного
    решения (профиль квази-константен: 2–5 правок в год при еженедельных прогонах).
    Резолвер — `make_profile_gate` (`core/pipeline/profile_attestation.py`), подключён в CLI
-   (`_profile_gate_resolver`, `core/cli/context.py:1671`; вызов `make_profile_gate` — `core/cli/context.py:1698`). Аттестация применима **только** к
+   (`_profile_gate_resolver`, `core/cli/context.py:1676`; вызов `make_profile_gate` — `core/cli/context.py:1703`). Аттестация применима **только** к
    G1/G2; отозванная (`superseded_at`) действующей не считается. При расхождении дайджеста
    сообщение **называет** изменившийся компонент (`describe_subject_diff`), а не «гейт не
    пройден».
@@ -2966,7 +2971,7 @@ class CompositionView:
   `core/pipeline/embed_cache.py:187`); при хите вектор берётся из кэша, эмбеддится только
   новый текст. **Кэш реализован и подключён** (`core/pipeline/embed_cache.py`;
   инстанцируется в composition root — `EmbedCache(str(paths.embed_cache))`,
-  `core/cli/context.py:2922`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
+  `core/cli/context.py:2927`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
   параметр `embed_cache` у `_build_corpus`, `core/pipeline/corpus.py:1708`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
   до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и в
@@ -3179,7 +3184,7 @@ def cell_reuse_key(*, product_id, param_id,
 `prompt_template_digest` — отпечаток **текущего** шаблона/правила (`compiled.template_version`
 + текст rule), а не `prev.prompt_hash`: иначе смена шаблона не инвалидировала бы перенос.
 `model_config_digest` — текущая конфигурация модели, а не `prev.model_id`.
-`coverage_digest(coverage)` — свободная функция (`core/pipeline/digests.py:732`), текущий; предыдущее значение используется только как данные
+`coverage_digest(coverage)` — свободная функция (`core/pipeline/digests.py:741`), текущий; предыдущее значение используется только как данные
 `prev`-строки для сравнения.
 
 **`retrieved_doc_set_digest` — не `doc_set_digest` продукта (решение 29.10.2026: per-cell).**
@@ -3636,8 +3641,8 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 ### 11.5. `scope_acceptance` (as-built; `attestation` — design-only)
 
 > **Имя сменилось.** Прежнее `scope_attested_by`/`scope_attestations` заменено на
-> `scope_acceptance` и в домене (`EvidenceScope` — `core/domain/models.py:936`, `CellEvidence` — `core/domain/models.py:1093`), и в манифесте
-> (`RunManifest.scope_acceptance`, `core/domain/models.py:1921`), и в run DB
+> `scope_acceptance` и в домене (`EvidenceScope` — `core/domain/models.py:1127`, `CellEvidence` — `core/domain/models.py:1284`), и в манифесте
+> (`RunManifest.scope_acceptance`, `core/domain/models.py:1935`), и в run DB
 > (`cell_evidence.scope_acceptance`, `core/store/sqlite.py:466`; колонки `scope_attested_by`
 > в схеме 3.14.0 нет — старые run DB отвергаются гейтом версии, поэтому копирующей
 > миграции не существует). Причина в коде названа прямо: подпись — **принятие риска**
@@ -3717,7 +3722,7 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 ### 12.2. `cohort_digest` и `seeds_digest`
 
 - `cohort_digest` входит в `run_id`, `execution_contract_digest`, `state.db.run_lineage`
-  **и** в `runs`/`RunManifest` (`core/store/sqlite.py:162`, `core/domain/models.py:1696`) —
+  **и** в `runs`/`RunManifest` (`core/store/sqlite.py:162`, `core/domain/models.py:1931`) —
   последние два закрывают диагностику diff без открытия `state.db` (§12.3).
 - `seeds_digest` — тоже: смена seed-набора меняет корпус и coverage. Он **порядко-чувствителен**
   внутри продукта (§6.2): перестановка корней — другая идентичность, потому что другой
@@ -3726,8 +3731,8 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 
 > **Дефект провенанса (проверено 29.10.2026, ✅ исправлен границей A): колонка
 > `runs.cohort_ref` хранила другое поле.**
-> В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:706`) — имя файла
-> когорты из `run.yaml`, и `cohort_ref: str | None` (`core/domain/models.py:720`) — авторская ревизия, которая
+> В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:958`) — имя файла
+> когорты из `run.yaml`, и `cohort_ref: str | None` (`core/domain/models.py:734`) — авторская ревизия, которая
 > **входит в `cohort_digest`**. `core/store/sqlite_store.py:477-484` кладёт в колонку `cohort_ref` значение
 > `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:696`).
 > Следствие на живом прогоне `ru-pg-dbms-3d3dc7c3c969`: `runs.cohort_ref =
@@ -4014,7 +4019,7 @@ golden**.
   применяется (в `notes` — пояснение). `max_attempts` — потолок попыток по URL;
   исчерпание → терминальный `failed` (`attempts_exhausted`), не тихо.
   Межпрогонный вариант (по `url_state.consecutive_failures` предыдущего прогона) —
-  **реализован** (`_only_failed_work_set`, `core/cli/context.py:2188`): источник 1 —
+  **реализован** (`_only_failed_work_set`, `core/cli/context.py:2193`): источник 1 —
   `FAILED`-элементы текущего сеанса, источник 2 — `consecutive_failures` из `state.db`.
 - `run` без `--update` и с тем же `run_id` — resume: `Runner` пропускает `ok`-фазы;
   `corpus` переиспользует doc-версии и чанки завершённых продуктов (чанки пишутся на
@@ -4039,7 +4044,7 @@ golden**.
   `RunManifest`, и `report.py` его не выводил. Это было дефектом видимости, а не политики:
   `--only-product` меняет смысл среза, и он обязан быть виден в артефакте прогона.
   Теперь `run_scope` персистится (`runs.run_scope`, `RunManifest.run_scope`,
-  `core/pipeline/report.py:1489-1493`) и виден в `run_manifest.yaml` и `hound report --json`;
+  `core/pipeline/report.py:1518-1522`) и виден в `run_manifest.yaml` и `hound report --json`;
   политика **не изменилась** — scoped-прогон обрабатывает только выбранный продукт и не
   двигает `last_completed_run_id` (O10). Состав — `16-runs-schema-boundary.md` §3.1/§8.
 - Следующий полный прогон увидит `last_completed_run_id` от предыдущего полного прогона
@@ -4424,7 +4429,7 @@ state/state.db                                 # durable-состояние па
     **✅ сделано**: `eval_echo` расширен объявленным методологическим контекстом,
     `EVAL_CACHE_FORMAT` поднят до `2`, конверт формата 1 читается как промах (§10.5).
     Ключ **переноса ячеек** — отдельная величина и тоже существует:
-    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:646`,
+    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:873`,
     §10.1); прежняя редакция называла его несуществующим.
 11. `_chunk_id` (`core/pipeline/corpus_index.py:182`) — ✅ **сделано**: форма
     `f"{product_id}:{doc_version_id}:{chunk_no}"` (вызовы — `core/pipeline/corpus_ingest.py:1578`,
@@ -4491,7 +4496,7 @@ state/state.db                                 # durable-состояние па
 | T13 | `--only-failed` после T9 | повторяются только failed URL/продукты; успешные не фетчатся; провал **прошлого** прогона тоже виден | as-built с 30.10.2026: межпрогонный, источник 2 — `url_state.consecutive_failures > 0` (§2.4); ремонт идёт depth-0 известными URL, авторские корни не дренятся. Приёмка — `tests/pipeline/test_only_failed_work_set.py`, `tests/cli/test_only_failed_interrun.py` |
 | T14 | Пустые seed'ы, preflight обойдён (unit) | coverage `expected=0, complete=False, reason=no_seeds`; cells `failed`; нет «тихого ok» | as-built |
 | T15 | Продукт retired, затем re-add | режим `new`; полный краул; старые партиции сохранены, но не в композиции | as-built с 30.10.2026: retirement — авторское `state: retired` в `sources/seeds.yaml` (отдельной команды нет), прогон отражает его в durable `product_state` **до** выхода на блокировку (`_reconcile_declared_retirements`, `core/cli/commands/run.py`), а возврат активного seed'а выставляет `re_added_at` в той же сверке (`reconcile_seed_set`, `core/store/state_store.py`). Приёмка — `tests/cli/test_run_retirement.py` (3), `tests/pipeline/test_re_added_at.py` (10; 7 падают без писателя) |
-| T16 | Переименование `canonical_name` | режим `incremental`; краул не запускается; меняется только `product_state` | as-built: `canonical_name` **не входит** ни в `cohort_digest` (`core/pipeline/digests.py:258-284`), ни в `seeds_digest` (`core/pipeline/digests.py:287-321`), поэтому `run_id` не меняется и прогон резюмируется, а не краулит заново |
+| T16 | Переименование `canonical_name` | режим `incremental`; краул не запускается; меняется только `product_state` | as-built: `canonical_name` **не входит** ни в `cohort_digest` (`core/pipeline/digests.py:280-317`), ни в `seeds_digest` (`core/pipeline/digests.py:318-353`), поэтому `run_id` не меняется и прогон резюмируется, а не краулит заново |
 | T17 | Смена `cutoff_K` | `cell_reuse_key` не совпал; все ячейки переоценены (I20) | as-built на уровне ключа: `test_cell_reuse_key_changes_with_any_condition` (`cutoff_k`, `retrieval_profile`, `retrieval_params_json`) |
 | T17b | Изменён документ вне top-K ячейки | ячейка **перенесена**, LLM не вызван (per-cell) | as-built: `test_new_document_outside_top_k_does_not_block_carry` |
 | T18 | Смена `methodology_version` | carry-forward запрещён; eval cache miss; golden-full требуется | as-built в части переноса/кэша: версия входит в оба ключа (`test_cell_reuse_key_changes_with_any_condition`, `EVAL_CACHE_FORMAT = 2`); требование golden-full — процесс §13, тестом не покрыто |

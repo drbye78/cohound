@@ -488,10 +488,10 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `report` пишет артефакты с заглушками и говорит `ok: true`
 
-⬜ не сделано — поведение дословно прежнее (`core/cli/commands/report.py:156-163`): при
+⬜ не сделано — поведение дословно прежнее (`core/cli/commands/report.py:157-164`): при
 незаполненном манифесте в `notes` уходит та же строка «версии — заглушки», а `ok` остаётся
-`True` (`"ok": True, … "manifest_partial": partial`, `core/cli/commands/report.py:163`), и функция
-заканчивается безусловным `return EXIT_OK` (`core/cli/commands/report.py:256`). Признак частичности
+`True` (`"ok": True, … "manifest_partial": partial`, `core/cli/commands/report.py:164`), и функция
+заканчивается безусловным `return EXIT_OK` (`core/cli/commands/report.py:257`). Признак частичности
 есть, но он **не влияет на код выхода** и не отличает «готовый отчёт» от «отчёт с выдуманными версиями» для скрипта. Что
 осталось: `manifest_partial=True` должен менять `ok`/код выхода (или отказывать вовсе),
 иначе ложный провенанс остаётся успехом.

@@ -53,7 +53,7 @@ upstream-факте в **измерение** с датой, цитатой и �
 | деталь | состояние |
 |---|---|
 | `PackageManifest.baselines: list[str]` (`core/domain/models.py:239`) | ✅ список — под B уже годится |
-| `BaselineRow` (`core/domain/models.py:376`), `load_baselines` (`core/config/run_config.py:287`) | ✅ ключ `(baseline_id, param_id)` — это и есть «матрица параметр × базлайн» |
+| `BaselineRow` (`core/domain/models.py:396`), `load_baselines` (`core/config/run_config.py:287`) | ✅ ключ `(baseline_id, param_id)` — это и есть «матрица параметр × базлайн» |
 | режимы `direct/conditional/blocked` + I8 (`invariants.py:527`) | ✅ |
 | порог `min_version` (`inheritance.py:127`) | ✅ (нераспознанная версия → пропуск) |
 | базис «объявлено/выпущено» (`inheritance.py:378`) | ✅ |
@@ -379,7 +379,7 @@ baseline_id 'upstream-pg', но reference-продукт для него не о
 меняет набор унаследованных ячеек.
 
 Порядок `upstreams` входит в `passports_digest` автоматически (дайджест считается по
-байтам паспорта, `digests.py:420`) — отдельного поля не нужно, но **перестановка предков
+байтам паспорта, `digests.py:428`) — отдельного поля не нужно, но **перестановка предков
 даёт новый `run_id`**, и это правильно: она меняет, кто из них победит.
 
 Оба новых поля — `execution_change`. Разово и явно, не «под капотом».

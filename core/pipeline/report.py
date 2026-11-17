@@ -22,6 +22,11 @@
   продукту (медиана/p90/max); ``outputs/cell_freshness.csv`` — ``evidence_as_of`` ячеек.
 * ``outputs/corpus_members.csv`` — члены контейнеров, **не** попавшие в корпус, с причиной
   пропуска (B3): «почему этого файла из архива нет» отвечается строкой, а не догадкой.
+* ``outputs/baseline_delta.csv`` + ``outputs/baseline_delta.yaml`` — Δ к объявленной точке
+  отсчёта когорты (``cohort.yaml: comparison_base``): матрица переходов
+  ``base_status → product_status`` с числами и счётчиками наличия статуса с обеих сторон.
+  Это **описание**, а не счёт: Capability/Coverage/ранжирование не меняются, ординальность
+  статусов не вводится (её нет в словаре — «``❌`` хуже ``⚠️``» было бы выдумкой).
 
 Инварианты:
 
@@ -81,6 +86,7 @@ from core.domain.invariants import (
 )
 from core.domain.models import (
     CatalogRow,
+    Cohort,
     CorpusCoverage,
     CorpusSnapshot,
     CrawlProvenance,
@@ -447,6 +453,19 @@ class Artifacts:
     #: Тот же агрегат для ``--json``/``notes``: ``{written, reason, summary}``. Числа
     #: публикуются строкой оператора, даже когда CSV не записан.
     heading_anomalies_summary: dict[str, Any] | None = None
+    #: ``outputs/baseline_delta.csv`` — Δ к объявленной точке отсчёта когорты
+    #: (``cohort.yaml: comparison_base``): по строке на пару «продукт × параметр» с
+    #: ``base_status``/``product_status``/``evidence_kind_product``. ``None`` — точки
+    #: отсчёта не объявлено (обычный пакет без предка) либо каталог пуст: артефакта нет,
+    #: и это не ошибка.
+    baseline_delta: Path | None = None
+    #: ``outputs/baseline_delta.yaml`` — матрица переходов ``base_status → product_status``
+    #: с числами и счётчиками наличия статуса с обеих сторон. Ординальности статусов нет:
+    #: файл публикует переходы, интерпретация — читателя.
+    baseline_delta_yaml: Path | None = None
+    #: Тот же документ, что в ``baseline_delta.yaml``, — для ``--json`` payload: файл и
+    #: машинный вывод собираются одним расчётом и разойтись не могут.
+    baseline_delta_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +494,16 @@ def _write_csv(
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+    return path
+
+
+def _write_yaml(path: Path, document: Mapping[str, Any]) -> Path:
+    """Пишет YAML детерминированно (``sort_keys``, UTF-8, LF) — как ``run_manifest``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.safe_dump(
+        dict(document), sort_keys=True, allow_unicode=True, default_flow_style=False
+    )
+    path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -3639,6 +3668,164 @@ def _write_cell_diagnostics(
         rows,
     )
 
+# ---------------------------------------------------------------------------
+# Δ к объявленной точке отсчёта (comparison_base)
+# ---------------------------------------------------------------------------
+
+#: Колонки ``outputs/baseline_delta.csv`` (строка на пару «продукт × параметр»).
+BASELINE_DELTA_COLUMNS: tuple[str, ...] = (
+    "product_id",
+    "param_id",
+    "base_status",
+    "product_status",
+    "evidence_kind_product",
+)
+
+
+def _cell_status(cell: Any | None) -> str:
+    """Статус ячейки как в карте; пустая строка — статуса нет.
+
+    ``failed``/``preliminary``/``pending`` — состояния, а не статусы (I4/I13), поэтому в
+    Δ они дают пустую строку: «статуса нет» и «статус ``❓``» — разные факты, и
+    подменять один другим значило бы выдумать вердикт.
+    """
+    if cell is None:
+        return ""
+    status = getattr(cell, "status", None)
+    if status is None:
+        return ""
+    return status.value if isinstance(status, Status) else str(status)
+
+
+def _evidence_kind(cell: Any | None) -> str:
+    """Вид источника ячейки (``SourceKind``) строкой; пусто — не записан."""
+    if cell is None:
+        return ""
+    kind = getattr(cell, "source_kind", None)
+    if kind is None:
+        return ""
+    return kind.value if hasattr(kind, "value") else str(kind)
+
+
+@dataclass
+class BaselineDelta:
+    """Δ к точке отсчёта: строки CSV и документ YAML из **одного** расчёта."""
+
+    document: dict[str, Any]
+    rows: list[dict[str, str]]
+
+
+def collect_baseline_delta(
+    cells: Iterable[Any],
+    catalog: Mapping[str, CatalogRow] | Iterable[CatalogRow],
+    cohort: Cohort | None,
+) -> BaselineDelta | None:
+    """Считает Δ продуктов когорты к объявленной точке отсчёта (``comparison_base``).
+
+    Отвечает на вопрос профиля «что продукт добавляет к предку»: по каждому продукту
+    когорты, **кроме** самой точки отсчёта, публикуется матрица переходов
+    ``base_status → product_status`` с числами и счётчики наличия статуса с обеих сторон.
+
+    **Ординальности статусов здесь нет намеренно.** У ``✅``/``⚠️``/``❌``/``❓`` нет
+    объявленного порядка, и «``❌`` хуже ``⚠️``» — выдумка, а не измерение. Поэтому
+    публикуется матрица переходов, а интерпретация — читателя (``_status_symbol``
+    упорядочивает только вывод, не смысл).
+
+    ``None`` — сравнивать не с чем: когорты нет либо ни одна запись не объявила
+    ``comparison_base``. Это **не** ошибка (обычный случай пакета без предка): артефактов
+    просто нет. Больше одной точки отсчёта — :class:`ValueError`: валидатор когорты ловит
+    это раньше, но отчёт не должен молча взять первую.
+
+    :param cells: ячейки прогона (duck typing: ``product_id``/``param_id``/``status``/
+        ``source_kind``).
+    :param catalog: каталог — задаёт полный список параметров (переходы считаются по нему,
+        а не по объединению встреченных ячеек: «параметра нет ни у кого» — тоже факт).
+    :param cohort: объявленный состав когорты; ``None`` — объявления нет.
+    """
+    if cohort is None:
+        return None
+    bases = sorted(entry.product_id for entry in cohort.entries if entry.comparison_base)
+    if not bases:
+        return None
+    if len(bases) > 1:
+        raise ValueError(
+            "baseline_delta: объявлено больше одной точки отсчёта (comparison_base): "
+            + ", ".join(bases)
+        )
+    base_id = bases[0]
+    catalog_map = _catalog_map(catalog)
+    param_ids = sorted(catalog_map) if catalog_map else _param_ids(_cell_list(cells))
+    product_ids = sorted(
+        entry.product_id for entry in cohort.entries if entry.product_id != base_id
+    )
+    by_key = {
+        (str(cell.product_id), str(cell.param_id)): cell for cell in _cell_list(cells)
+    }
+
+    rows: list[dict[str, str]] = []
+    products: dict[str, Any] = {}
+    for product_id in product_ids:
+        transitions: dict[str, int] = {}
+        base_has = product_has = product_only = base_only = 0
+        for param_id in param_ids:
+            base_status = _cell_status(by_key.get((base_id, param_id)))
+            product_cell = by_key.get((product_id, param_id))
+            product_status = _cell_status(product_cell)
+            rows.append(
+                {
+                    "product_id": product_id,
+                    "param_id": param_id,
+                    "base_status": base_status,
+                    "product_status": product_status,
+                    "evidence_kind_product": _evidence_kind(product_cell),
+                }
+            )
+            if base_status:
+                base_has += 1
+            if product_status:
+                product_has += 1
+            if product_status and not base_status:
+                product_only += 1
+            if base_status and not product_status:
+                base_only += 1
+            key = f"{base_status}→{product_status}"
+            transitions[key] = transitions.get(key, 0) + 1
+        products[product_id] = {
+            "params_total": len(param_ids),
+            "base_has_status": base_has,
+            "product_has_status": product_has,
+            "product_has_base_missing": product_only,
+            "base_has_product_missing": base_only,
+            "transitions": dict(sorted(transitions.items())),
+        }
+
+    document = {
+        "comparison_base": base_id,
+        "params_total": len(param_ids),
+        "products": products,
+        # Ординальности нет: файл публикует переходы, а не «лучше/хуже».
+        "ordering": "none",
+    }
+    return BaselineDelta(document=document, rows=rows)
+
+
+def write_baseline_delta_artifacts(
+    delta: BaselineDelta, csv_path: str | Path, yaml_path: str | Path
+) -> tuple[Path | None, Path | None]:
+    """Пишет ``outputs/baseline_delta.csv`` и ``outputs/baseline_delta.yaml``.
+
+    Оба файла собираются из одного :class:`BaselineDelta`, поэтому не могут разойтись.
+    Пустой список строк (каталог пуст) → CSV не создаётся (``None``): пустая таблица
+    читалась бы как «переходов нет», хотя не было самого предмета. YAML пишется, если
+    есть документ: он называет объявленную точку отсчёта, и это факт даже без параметров.
+    """
+    csv_result: Path | None = None
+    if delta.rows:
+        csv_result = _write_csv(Path(csv_path), list(BASELINE_DELTA_COLUMNS), delta.rows)
+    yaml_result = _write_yaml(Path(yaml_path), delta.document)
+    return csv_result, yaml_result
+
+
 def write_reports(
     *,
     bundle: ScoreBundle,
@@ -3653,6 +3840,7 @@ def write_reports(
     coverage: Mapping[str, Any] | Iterable[Any] | None = None,
     store: Any | None = None,
     golden_status: GoldenStatus | None = None,
+    cohort: Cohort | None = None,
 ) -> Artifacts:
     """Пишет все артефакты прогона в ``{out_dir}/{run_id}/outputs/`` (Ш9, 03 §A.2).
 
@@ -3704,6 +3892,11 @@ def write_reports(
     таблицы ``run_product``) и собирает аномалии ``absence_undated`` (``❌`` снят
     инвариантом «у отрицания есть датированный носитель»). Оба — чтение уже записанного:
     отчёт не пересчитывает ни статус продукта, ни правило допуска ``❌``.
+
+    :param cohort: объявленный состав когорты (``cohort.yaml``). Нужен только для
+        ``outputs/baseline_delta.*``: продукт с ``comparison_base: true`` становится точкой
+        отсчёта, относительно которой публикуется Δ. ``None`` или отсутствие флага —
+        артефактов нет, и это не ошибка (обычный пакет без предка).
     """
     cell_list = _cell_list(cells)
     run_dir = Path(out_dir) / run_id
@@ -3947,6 +4140,23 @@ def write_reports(
         freshness.cell_rows, outputs_dir / "cell_freshness.csv"
     )
 
+    # Δ к объявленной точке отсчёта когорты (``comparison_base``): «что продукт добавляет
+    # к предку». Это **описание**, а не счёт: ScoreBundle/Capability/Coverage/ранжирование
+    # не трогаются, ординальности статусов не вводится (её нет в словаре). Один расчёт —
+    # два файла и payload, поэтому CSV/YAML/``--json`` не могут разойтись.
+    baseline_delta = collect_baseline_delta(cell_list, catalog, cohort)
+    if baseline_delta is None:
+        baseline_delta_path: Path | None = None
+        baseline_delta_yaml_path: Path | None = None
+        baseline_delta_summary: dict[str, Any] | None = None
+    else:
+        baseline_delta_path, baseline_delta_yaml_path = write_baseline_delta_artifacts(
+            baseline_delta,
+            outputs_dir / "baseline_delta.csv",
+            outputs_dir / "baseline_delta.yaml",
+        )
+        baseline_delta_summary = baseline_delta.document
+
     # B3: члены контейнеров, не вошедшие в корпус — с причиной пропуска. Таблица прогона
     # (``corpus_members``) отвечала на вопрос «почему этого файла из архива нет» только
     # тому, кто знал, где искать; ``outputs/`` не называл ни файла, ни сводки. Файл и
@@ -4021,6 +4231,9 @@ def write_reports(
         corpus_freshness=corpus_freshness_path,
         cell_freshness=cell_freshness_path,
         corpus_freshness_summary=freshness.document,
+        baseline_delta=baseline_delta_path,
+        baseline_delta_yaml=baseline_delta_yaml_path,
+        baseline_delta_summary=baseline_delta_summary,
         corpus_members=corpus_members_path,
         corpus_members_summary=corpus_members_payload,
         critical_unknown=critical_unknown_summary(cell_list, catalog),

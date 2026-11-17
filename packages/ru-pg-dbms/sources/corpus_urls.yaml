@@ -47,6 +47,15 @@ postgrespro:
 - https://postgrespro.ru/docs/
 - https://postgrespro.ru/products/postgrespro/enterprise/
 - https://postgrespro.ru/
+postgresql:
+# Предок и точка отсчёта когорты (`comparison_base: true` в cohort.yaml). Версия
+# объявлена в префиксе: `/docs/18/`, а не `/docs/current/` — `current` это алиас,
+# который переезжает на новый мажор при релизе, и корпус дрейфовал бы без нового
+# `run_id`. Замер 17.11.2026: sitemap отдаёт 1153 URL и для `/docs/18/`, и для
+# `/docs/current/` — сегодня совпадают, при выходе 19 разойдутся.
+# Источник — `doc_domains` паспорта `passports/postgresql/2026-11-17.yaml` (деривация
+# `core.config.passport_urls`): правка паспорта и этой строки обязана совпадать.
+- https://www.postgresql.org/docs/18/
 tantor:
 - https://tantorlabs.ru/
 - https://tantorlabs.ru/products/dbms/

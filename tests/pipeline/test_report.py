@@ -38,6 +38,7 @@ from core.config.domain_profiles import DomainProfile
 from core.domain import REQUIRED_EXHAUSTION_CONTOURS
 from core.domain.enums import (
     AbsenceRuleType,
+    AnchorRelation,
     CellState,
     ChangeClass,
     CrawlStrategy,
@@ -59,6 +60,8 @@ from core.domain.models import (
     CatalogRow,
     Cell,
     CellEvidence,
+    Cohort,
+    CohortEntry,
     CorpusCoverage,
     CrawlProvenance,
     CrawlRunConfig,
@@ -90,6 +93,7 @@ from core.pipeline.report import (
     _contract_field_diagnostics,
     build_manifest,
     collect_absence_undated_anomalies,
+    collect_baseline_delta,
     collect_corpus_coverage_anomalies,
     collect_i3_anomalies,
     collect_run_products,
@@ -2803,3 +2807,150 @@ def test_critical_unknown_in_csv_fallback(
     assert header["unknown_total"] == "5"
     assert header["critical_unknown"] == "1"
     assert header["unknown_by_importance_Вж"] == "3"
+
+
+# ---------------------------------------------------------------------------
+# Δ к объявленной точке отсчёта (comparison_base)
+# ---------------------------------------------------------------------------
+
+
+def _delta_catalog() -> dict[str, CatalogRow]:
+    """Каталог из трёх параметров — ровно столько, сколько нужно матрице переходов."""
+    catalog = _catalog()
+    return {
+        param_id: catalog[param_id]
+        for param_id in ("param.absent", "param.ok", "param.p2")
+    }
+
+
+def _delta_cohort(*, comparison_base: bool = True) -> Cohort:
+    """Когорта: PRODUCT_A — якорь и (опционально) точка отсчёта, PRODUCT_B — аналог."""
+    return Cohort(
+        case_id="case-1",
+        frozen_at=_dt.date(2026, 1, 1),
+        entries=[
+            CohortEntry(
+                product_id=PRODUCT_A,
+                role_overlap=1.0,
+                selection_reason="anchor",
+                anchor_relation=AnchorRelation.ANCHOR,
+                comparison_base=comparison_base,
+            ),
+            CohortEntry(
+                product_id=PRODUCT_B,
+                role_overlap=0.8,
+                selection_reason="analog",
+                anchor_relation=AnchorRelation.ANALOG,
+            ),
+        ],
+    )
+
+
+def _delta_cells() -> list[Cell]:
+    """Три параметра на два продукта; у ``param.p2`` у базлайна ячейки нет."""
+    return [
+        _cell(PRODUCT_A, "param.ok", Status.OK),
+        _cell(PRODUCT_A, "param.absent", Status.ABSENT),
+        _cell(PRODUCT_B, "param.ok", Status.OK),
+        _cell(PRODUCT_B, "param.absent", Status.UNKNOWN),
+        _cell(PRODUCT_B, "param.p2", Status.OK),
+    ]
+
+
+def test_baseline_delta_publishes_rows_and_transitions(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Δ к точке отсчёта: CSV построчно + матрица переходов с числами.
+
+    Порядка «лучше/хуже» нет: файл публикует переходы (``✅→✅``, ``❌→❓``, ``→✅``),
+    интерпретация — читателя.
+    """
+    _save(store, _delta_cells())
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_delta_catalog(), module_weights={})
+    cells = list(store.iter_cells(RUN_ID))
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=_delta_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+        store=store,
+        cohort=_delta_cohort(),
+    )
+
+    assert artifacts.baseline_delta is not None
+    assert artifacts.baseline_delta_yaml is not None
+    with artifacts.baseline_delta.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    # Строки — только по продукту, который не является точкой отсчёта.
+    assert [row["product_id"] for row in rows] == [PRODUCT_B] * 3
+    assert [row["param_id"] for row in rows] == ["param.absent", "param.ok", "param.p2"]
+    assert [row["base_status"] for row in rows] == ["❌", "✅", ""]
+    assert [row["product_status"] for row in rows] == ["❓", "✅", "✅"]
+    # Ячейки без статуса/вида источника дают пустую строку, а не выдуманное значение.
+    assert rows[0]["evidence_kind_product"] == ""
+
+    document = yaml.safe_load(artifacts.baseline_delta_yaml.read_text(encoding="utf-8"))
+    assert document["comparison_base"] == PRODUCT_A
+    assert document["params_total"] == 3
+    assert document["ordering"] == "none"
+    product = document["products"][PRODUCT_B]
+    assert product["transitions"] == {"→✅": 1, "✅→✅": 1, "❌→❓": 1}
+    assert product["base_has_status"] == 2
+    assert product["product_has_status"] == 3
+    assert product["product_has_base_missing"] == 1
+    assert product["base_has_product_missing"] == 0
+    # Тот же документ уходит в --json: файл и машинный вывод не могут разойтись.
+    assert artifacts.baseline_delta_summary == document
+
+
+def test_baseline_delta_absent_without_declared_base(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Точки отсчёта не объявлено → артефактов нет; это не ошибка."""
+    _save(store, _delta_cells())
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_delta_catalog(), module_weights={})
+    cells = list(store.iter_cells(RUN_ID))
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=_delta_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+        store=store,
+        cohort=_delta_cohort(comparison_base=False),
+    )
+    assert artifacts.baseline_delta is None
+    assert artifacts.baseline_delta_yaml is None
+    assert artifacts.baseline_delta_summary is None
+    assert not (tmp_path / RUN_ID / "outputs" / "baseline_delta.csv").exists()
+    assert not (tmp_path / RUN_ID / "outputs" / "baseline_delta.yaml").exists()
+
+
+def test_collect_baseline_delta_rejects_two_bases() -> None:
+    """Отчёт не берёт первую точку отсчёта молча (валидатор когорты ловит раньше)."""
+    entries = [
+        CohortEntry(
+            product_id=PRODUCT_A,
+            role_overlap=1.0,
+            selection_reason="anchor",
+            anchor_relation=AnchorRelation.ANCHOR,
+            comparison_base=True,
+        ),
+        CohortEntry(
+            product_id=PRODUCT_B,
+            role_overlap=0.8,
+            selection_reason="analog",
+            anchor_relation=AnchorRelation.ANALOG,
+            comparison_base=True,
+        ),
+    ]
+    # ``model_construct`` обходит валидатор — ровно тот случай, от которого отчёт обязан
+    # защититься сам: молча взять первую точку отсчёта значило бы выдумать объявление.
+    forged = Cohort.model_construct(
+        case_id="case-1", frozen_at=_dt.date(2026, 1, 1), entries=entries
+    )
+    with pytest.raises(ValueError, match="comparison_base"):
+        collect_baseline_delta(_delta_cells(), _delta_catalog(), forged)
