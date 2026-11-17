@@ -84,7 +84,7 @@ packages/example_case/
 
 ### `package.yaml`
 
-Манифест идентифицирует пакет, его методологический профиль и версии авторских данных. Ключевые поля: `case_id` (slug пакета), `package_version`, `archetype` (`A|B|C`), `modules`, `roles`, `baselines`, `baseline_participant`, `jurisdictions`, `registries`, `languages`.
+Манифест идентифицирует пакет, его методологический профиль и версии авторских данных. Ключевые поля: `case_id` (slug пакета), `package_version`, `archetype` (`A|B|C`), `modules`, `roles`, `baselines`, `baseline_participants`, `jurisdictions`, `registries`, `languages`.
 
 ```yaml
 case_id: example_case
@@ -101,7 +101,7 @@ roles:
     core_coverage_allowed: true
     multi_instance: false
 baselines: []
-baseline_participant: null
+baseline_participants: []
 jurisdictions: [XX]
 registries: []
 languages: [ru, en]

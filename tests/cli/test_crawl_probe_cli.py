@@ -29,7 +29,7 @@ MANIFEST = (
     "  weight: 100.0\n"
     "roles: []\n"
     "baselines: []\n"
-    "baseline_participant: null\n"
+    "baseline_participants: []\n"
 )
 
 HEADER = "# Обоснование (живые замеры) — шапка.\n# вторая строка шапки\n\n"

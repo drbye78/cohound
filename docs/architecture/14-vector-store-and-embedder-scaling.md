@@ -295,7 +295,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 Уточнение против записи 28.10: поле `embed` в `DeployConfig` **появилось**
 (`core/config/deploy.py:1009`) и объявляет **две** оси — `device` и `precision` (`EmbedConfig`,
 `core/config/deploy.py:684`; обе входят в контракт, `EmbedDevice`/`EmbedPrecision` —
-`core/domain/enums.py:575` и `:585`);
+`core/domain/enums.py:610` и `:634`);
 `backend`/`base_url`/`model_version` по-прежнему отвергаются (`extra="forbid"`), а
 `RemoteEmbedder` не существует и маршрута `embed` в контурах шва нет (`contracts/seam/`:
 `capabilities`, `crawl`, `envelope`, `extract`, `fetch`, `health`, `openapi`, `registry`,
@@ -474,7 +474,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 :func:`core.pipeline.crawl_frontier.resolve_embed_device`; передаётся в
 `SentenceTransformer(..., device=…)` **явным параметром** (`core/adapters/embed_local.py`),
 а не спрашивается у адаптера. Ось входит в `EXECUTION_CONTRACT_FIELDS` (28 → 29; текущий
-размер контракта — 33 поля после `frozen_source`, `embed_precision` и `embed_spec` (O6),
+размер контракта — 35 полей после `frozen_source`, `embed_precision`, `embed_spec` (O6) и двух baseline-дайджестов (план 27 §7.1),
 планы 19 §P3, `16` §4.1 и `26`), в материал
 `pb`, в манифест партиции и в ключ `embed_cache` — CPU- и CUDA-прогон больше не могут
 обменяться векторами. `vector_digest` пересчитывается с диска при проверке переиспользования

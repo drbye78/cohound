@@ -392,7 +392,7 @@ def test_extraction_refuses_unavailable_structured(
     golden = _golden(tmp_path, _cases(tmp_path))
     _install_fakes(
         monkeypatch,
-        structured=FakeExtractor("trafilatura-html-7", document_level=None),
+        structured=FakeExtractor("trafilatura-html-8", document_level=None),
         text_layer=FakeExtractor("pdfium-text-5"),
     )
     code = main(

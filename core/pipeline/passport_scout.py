@@ -367,7 +367,7 @@ def build_passport_draft(
         product_id=product_id,
         canonical_name=canonical_name,
         vendor=vendor,
-        upstream=upstream,
+        upstreams=[upstream] if upstream is not None else [],
         edition_assessed=_clean(hypothesis.edition_assessed),
         version=_clean(hypothesis.version),
         jurisdiction=jurisdiction,

@@ -138,8 +138,8 @@ provide:
 было 19 полей, сейчас — **32**, `core/pipeline/digests.py:96`): `manual_artifacts_digest`
 (`core/pipeline/digests.py:179`).
 
-Материал — по образцу `seeds_digest` (`core/pipeline/digests.py:278-312`): отсортированные
-`(product_id, url, sha256)` (`manual_artifacts_digest` — `core/pipeline/digests.py:383`, материал
+Материал — по образцу `seeds_digest` (`core/pipeline/digests.py:309-343`): отсортированные
+`(product_id, url, sha256)` (`manual_artifacts_digest` — `core/pipeline/digests.py:414`, материал
 `core/pipeline/digests.py:399`). **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
 это провенанс записи, а не измерение (прецедент: `seeds_digest` исключает `source`/`added_*`;
 `scope_attested_by` не входит в контракт вовсе). Пустой набор даёт стабильный дайджест
@@ -419,7 +419,7 @@ gaps:
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
    `core/pipeline/corpus.py:4232`; `origin` — `core/store/sqlite.py:271`;
-   `resolved_manually` — `core/domain/models.py:2716` + `core/pipeline/corpus_coverage.py:281`;
+   `resolved_manually` — `core/domain/models.py:2954` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1737`; дайджест — `core/pipeline/digests.py:179`, материал
    `core/pipeline/digests.py:399`).
    As-built и расхождения — §10.

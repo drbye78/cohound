@@ -160,8 +160,7 @@ def test_hypothesis_needs_human_is_propagated() -> None:
 
 def test_upstream_built_with_confirmed_citation() -> None:
     report = _report()
-    upstream = report.passport.upstream
-    assert upstream is not None
+    [upstream] = report.passport.upstreams
     assert upstream.baseline_id == "base-1"
     assert upstream.version == "1.0"
     assert upstream.evidence.url == URL
@@ -172,7 +171,7 @@ def test_upstream_with_fabricated_url_is_dropped() -> None:
     hyp = _hypothesis()
     hyp["upstream"] = {"url": "https://fab.test/base", "quote": "supports Feature X natively"}
     report = _report(discovery_llm=_llm(hyp))
-    assert report.passport.upstream is None
+    assert report.passport.upstreams == []
     assert any("upstream" in item for item in report.needs_human)
 
 
@@ -180,7 +179,7 @@ def test_upstream_with_unconfirmed_quote_is_dropped() -> None:
     hyp = _hypothesis()
     hyp["upstream"] = {"url": URL, "quote": "NOT IN TEXT AT ALL"}
     report = _report(discovery_llm=_llm(hyp))
-    assert report.passport.upstream is None
+    assert report.passport.upstreams == []
     assert any("цитата" in item for item in report.needs_human)
 
 
@@ -190,7 +189,7 @@ def test_partial_upstream_flags_needs_human() -> None:
     hyp["upstream_baseline_id"] = None
     hyp["upstream_version"] = None
     report = _report(discovery_llm=_llm(hyp))
-    assert report.passport.upstream is None
+    assert report.passport.upstreams == []
 
 
 # ---------------------------------------------------------------------------

@@ -284,6 +284,41 @@ class InheritanceMode(StrEnum):
     BLOCKED = "blocked"
 
 
+class FactStatus(StrEnum):
+    """Наблюдение о **документации** upstream-версии (план 27 §3.3), не статус ячейки.
+
+    Это не :class:`Status`: ``present`` — «параметр описан в документации версии V»,
+    ``absent`` — «в документации этой версии не описан», ``unclear`` — «прочитано, но
+    однозначного вывода нет». ``absent`` **не** даёт ``❌`` и оценку продукта не
+    подавляет (решение владельца 4, §3.3 плана): отсутствие в документации предка —
+    наблюдение, а не утверждение об отсутствии функции.
+
+    Операционное перечисление; источник истины — ``docs/status-dictionary.yaml``
+    (секция ``fact_status``).
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNCLEAR = "unclear"
+
+
+class FactReview(StrEnum):
+    """Подпись человека под фактом baseline (план 27 §3.3): наследует только ``accepted``.
+
+    ``pending`` — факт заведён прибором и человеком не подтверждён; ``accepted`` —
+    человек проверил цитату и хеш; ``rejected`` — проверка не прошла (причина в
+    ``note``). Наследование берёт **только** ``accepted``: остальные состояния —
+    отсутствие ускорения, а не наблюдение о продукте.
+
+    Операционное перечисление; источник истины — ``docs/status-dictionary.yaml``
+    (секция ``fact_review``).
+    """
+
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
 class ParamType(StrEnum):
     FACT = "fact"
     SHOWCASE = "showcase"

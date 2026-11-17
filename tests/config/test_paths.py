@@ -74,7 +74,7 @@ def test_defaults_field_names() -> None:
     assert set(HARNESS_FIELDS) == {
         "packages", "passports", "runs", "index_store",
         "corpus_raw", "cache", "extract_cache", "eval_cache", "embed_cache",
-        "reports", "state",
+        "reports", "state", "reference",
     }
     assert set(ENV_BY_FIELD) == set(HARNESS_FIELDS)
 

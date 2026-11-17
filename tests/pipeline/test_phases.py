@@ -35,6 +35,7 @@ from core.domain import (
     AbsenceRuleType,
     AnchorRelation,
     Archetype,
+    BaselineFact,
     BaselineRow,
     CatalogRow,
     Cell,
@@ -44,6 +45,8 @@ from core.domain import (
     CohortEntry,
     CrawlRunConfig,
     CrawlStrategy,
+    FactReview,
+    FactStatus,
     Importance,
     InheritanceMode,
     LLMCellOutput,
@@ -183,12 +186,34 @@ def _cohort() -> Cohort:
     )
 
 
+def _baseline_facts() -> list[BaselineFact]:
+    """Принятый факт ``present`` о документации предка (план 27 §3.3).
+
+    Без факта ``direct``-строка не выпускает ячейку: наследование переносит **факт**, а
+    не паспортную цитату.
+    """
+    return [
+        BaselineFact(
+            baseline_id="base_1",
+            param_id="param_a",
+            version="1",
+            status=FactStatus.PRESENT,
+            url="https://up.test/p1",
+            quote="upstream quote",
+            content_hash="a" * 64,
+            review=FactReview.ACCEPTED,
+            reviewed_by="tester",
+        )
+    ]
+
+
 def _inputs() -> RunInputs:
     return RunInputs(
         run=_run_config(),
         package=_package(),
         catalog=_catalog(),
         baselines=_baselines(),
+        baseline_facts=_baseline_facts(),
         cohort=_cohort(),
         golden=[],
         domain_profiles={},
@@ -220,11 +245,13 @@ def _passports() -> dict[str, Passport]:
             vendor="Vendor",
             jurisdiction="RU",
             snapshot_date=_dt.date(2026, 1, 1),
-            upstream=Upstream(
-                baseline_id="base_1",
-                version="1",
-                evidence=Citation(url="https://up.test/p1", quote="upstream quote"),
-            ),
+            upstreams=[
+                Upstream(
+                    baseline_id="base_1",
+                    version="1",
+                    evidence=Citation(url="https://up.test/p1", quote="upstream quote"),
+                )
+            ],
         )
     }
 

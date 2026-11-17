@@ -411,7 +411,7 @@ def _empty_artifacts(case_id: str, archetype: Archetype) -> PackageArtifacts:
         modules=[ModuleDef(module_id="core", weight=100.0)],
         roles=[],
         baselines=[],
-        baseline_participant=None,
+        baseline_participants=[],
     )
     frozen = _dt.date(1970, 1, 1)
     cohort = Cohort(
@@ -658,7 +658,7 @@ def set_archetype(
         )
     updates: dict[str, Any] = {"archetype": arch}
     if arch is Archetype.C:
-        updates["baseline_participant"] = None
+        updates["baseline_participants"] = []
     artifacts.manifest = _rebuild_manifest(artifacts.manifest, **updates)
     return _finalize(
         package_dir, artifacts, before, ["package"], op="set-archetype", actor=actor, dry_run=dry_run

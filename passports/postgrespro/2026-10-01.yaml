@@ -2,12 +2,13 @@
 product_id: postgrespro
 canonical_name: "Postgres Pro Enterprise / Certified"
 vendor: "Postgres Professional"
-upstream:
-  baseline_id: upstream-pg
-  version: "18"
-  evidence:
-    url: "https://postgrespro.ru/products/postgrespro"
-    quote: "Российская СУБД корпоративного уровня на базе PostgreSQL с расширенной функциональностью"
+upstreams:
+  -
+    baseline_id: upstream-pg
+    version: "18"
+    evidence:
+      url: "https://postgrespro.ru/products/postgrespro"
+      quote: "Российская СУБД корпоративного уровня на базе PostgreSQL с расширенной функциональностью"
 edition_assessed: "Enterprise / Certified"
 version: "Postgres Pro Enterprise 18.4.1 (2026); Standard 18.4.1 (18.06.2026)"
 jurisdiction: RU

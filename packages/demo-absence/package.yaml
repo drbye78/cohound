@@ -1,7 +1,7 @@
 # Демонстрационный стенд правила I2d (план 20 §11), не кейс: эталона нет,
 # наследования нет — все ячейки обязаны быть оценёнными (archetype B, baselines пуст).
 archetype: B
-baseline_participant: null
+baseline_participants: []
 baselines: []
 case_id: demo-absence
 jurisdictions:

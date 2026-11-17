@@ -86,14 +86,17 @@ class BaselineProposal:
     """Предложение базовой линии: кандидаты :class:`BaselineRow` (не запись).
 
     :param baseline_id: предложенный slug базовой линии (из имени upstream).
-    :param baseline_participant: предложенный ``product_id`` участника базовой линии.
+    :param upstream_product_id: предложенный ``product_id`` reference-продукта (предка),
+        которому соответствует линия. Имя не ``baseline_participant``: в манифесте
+        ``baseline_participants`` — это **линии, на которых стоит сам пакет** (план 27
+        §3.2), и одно имя не должно значить две вещи.
     :param rows: кандидаты строк наследования.
     :param notes: человекочитаемые заметки/пропуски.
     :param needs_human: всегда ``True`` в I1 (кандидаты, не auto-approve, A3).
     """
 
     baseline_id: str
-    baseline_participant: str
+    upstream_product_id: str
     rows: list[BaselineRow] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     needs_human: bool = True
@@ -102,7 +105,7 @@ class BaselineProposal:
         """JSON-совместимое представление (строки — через ``model_dump(mode="json")``)."""
         return {
             "baseline_id": self.baseline_id,
-            "baseline_participant": self.baseline_participant,
+            "upstream_product_id": self.upstream_product_id,
             "rows": [row.model_dump(mode="json") for row in self.rows],
             "notes": list(self.notes),
             "needs_human": self.needs_human,
@@ -247,7 +250,7 @@ def compose_baselines(
 ) -> BaselineProposal:
     """Собирает черновик наследования базовой линии. Ничего не пишет (A3).
 
-    ``baseline_id`` — slug имени upstream; ``baseline_participant`` — ``upstream_id``
+    ``baseline_id`` — slug имени upstream; ``upstream_product_id`` — ``upstream_id``
     (или slug имени). Для каждого ``param_id`` из ``scope`` формируется кандидат
     :class:`BaselineRow`; параметры без референса в профиле обрабатываются политикой
     ``unreferenced``:
@@ -269,7 +272,7 @@ def compose_baselines(
     if not upstream_name:
         return BaselineProposal(
             baseline_id="",
-            baseline_participant=str(upstream_id or ""),
+            upstream_product_id=str(upstream_id or ""),
             rows=[],
             notes=["в профиле нет upstream_name — базовая линия не определена"],
             needs_human=True,
@@ -321,7 +324,7 @@ def compose_baselines(
 
     return BaselineProposal(
         baseline_id=baseline_id,
-        baseline_participant=participant,
+        upstream_product_id=participant,
         rows=proposals,
         notes=notes,
         needs_human=True,

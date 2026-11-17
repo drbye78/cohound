@@ -49,12 +49,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from core.config.seeds import normalize_seed_url
-from core.domain.models import CatalogRow, Cohort, SeedsConfig
+from core.domain.models import (
+    BaselineFact,
+    BaselineRow,
+    CatalogRow,
+    Cohort,
+    SeedsConfig,
+)
 from core.util.hashing import short_hash
 from core.util.robots import url_canonical_form
 
@@ -62,6 +69,8 @@ from core.util.robots import url_canonical_form
 __all__ = [
     "CELL_REUSE_SCHEMA",
     "EXECUTION_CONTRACT_FIELDS",
+    "baseline_facts_digest",
+    "baselines_digest",
     "catalog_digest",
     "cell_reuse_key",
     "cohort_digest",
@@ -242,6 +251,19 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     # паспорта меняла корпус, не меняя идентичность. Материал — ``(product_id, sha256
     # набора файлов)``; путь и mtime не входят (переезд каталога не меняет измерение).
     "passports_digest",
+    # План 27 §7.1: **политика** наследования (``baselines.csv``). До этого поля правка
+    # ``min_version``/режима строки меняла вердикты под прежним ``run_id`` — тот же класс
+    # дефекта, что ``chunk_size`` до C3: объявленный вход, не входивший в идентичность.
+    # Материал — только ``(baseline_id, param_id, min_version, mode)``: ``note`` это
+    # авторский комментарий, а не условие измерения.
+    "baselines_digest",
+    # План 27 §7.1: **наблюдение** о документации предка (``sources/baseline_facts.csv``)
+    # — какие ячейки наследуются, решает именно оно. Не входят: ``observed_at``,
+    # ``corpus_build_id``, ``reviewed_by``, ``note``, ``url`` (провенанс записи;
+    # переезд документации при том же тексте вердикт не меняет — текст фиксирует
+    # ``content_hash``). ``review`` **входит**: снятие ``accepted`` меняет набор
+    # унаследованных ячеек, то есть вердикты.
+    "baseline_facts_digest",
 )
 
 #: Длина короткого дайджеста идентичности (§12.2/§6.2).
@@ -409,6 +431,65 @@ def manual_artifacts_digest(rows: Iterable[tuple[str, str, str]]) -> str:
     return short_hash(
         _canonical({"artifacts": [list(row) for row in material]}), _DIGEST_LEN
     )
+
+
+def baselines_digest(rows: Iterable[BaselineRow]) -> str:
+    """Дайджест **политики** наследования (``baselines.csv``, план 27 §7.1), 24 hex.
+
+    Материал: отсортированные ``(baseline_id, param_id, min_version or "", mode)``.
+    ``note`` **не** входит: это авторский комментарий к строке, а не условие измерения
+    (зеркало ``manual_artifacts_digest``, где исключены ``path``/``provided_by``).
+
+    Почему поле вообще в контракте: до него правка ``min_version`` или режима строки
+    меняла набор унаследованных ячеек, не меняя ``run_id`` — два разных набора
+    доказательств жили под одной идентичностью (тот же класс, что ``chunk_size`` до C3).
+
+    Пустой набор даёт стабильный дайджест пустого множества: «строк нет» — объявленное
+    условие (архетип C, или пилот, где механизм ещё не заполнен), а не отсутствие поля.
+    """
+    material = sorted(
+        (
+            str(row.baseline_id),
+            str(row.param_id),
+            str(row.min_version or ""),
+            row.inheritance_mode.value,
+        )
+        for row in rows
+    )
+    return short_hash(_canonical({"baselines": [list(r) for r in material]}), _DIGEST_LEN)
+
+
+def baseline_facts_digest(rows: Iterable[BaselineFact]) -> str:
+    """Дайджест **наблюдений** о документации предка (план 27 §7.1), 24 hex.
+
+    Материал: отсортированные
+    ``(baseline_id, param_id, version, status, review, sha256(quote))``.
+
+    Что входит и почему: ``version`` — один параметр в v11 и v18 это два разных факта;
+    ``status``/``review`` — именно они решают, наследуется ли ячейка; ``sha256(quote)``
+    привязывает запись к **тексту**, а не к записи целиком (сама цитата в материал
+    входит отпечатком: полная строка в контракте не нужна, а хеш стабилен).
+
+    Что **не** входит (провенанс записи, а не измерение): ``observed_at`` (дата
+    наблюдения — как даты корпуса, план 20 §F1), ``corpus_build_id``, ``reviewed_by``
+    (кто подписал — авторизация, не измерение), ``note``, ``url`` (переезд документации
+    при том же тексте вердикт не меняет; текст фиксирует ``content_hash``).
+
+    Пустой набор даёт стабильный дайджест пустого множества — «фактов ещё нет» отличимо
+    от «файл не читали».
+    """
+    material = sorted(
+        (
+            str(row.baseline_id),
+            str(row.param_id),
+            str(row.version),
+            row.status.value,
+            row.review.value,
+            hashlib.sha256((row.quote or "").encode("utf-8")).hexdigest(),
+        )
+        for row in rows
+    )
+    return short_hash(_canonical({"baseline_facts": [list(r) for r in material]}), _DIGEST_LEN)
 
 
 def render_modes_digest(modes: Mapping[str, str]) -> str:

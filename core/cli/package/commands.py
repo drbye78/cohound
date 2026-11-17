@@ -915,7 +915,7 @@ def cmd_package_compose_baselines(args: argparse.Namespace) -> int:
     payload = {"ok": True, **proposal.as_dict()}
     lines = [
         f"baseline_id: {payload['baseline_id'] or '—'}",
-        f"baseline_participant: {payload['baseline_participant'] or '—'}",
+        f"upstream_product_id: {payload['upstream_product_id'] or '—'}",
         f"rows: {len(payload['rows'])}",
         f"needs_human: {'yes' if payload['needs_human'] else 'no'}",
     ]

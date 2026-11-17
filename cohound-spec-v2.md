@@ -301,7 +301,7 @@ evidence_state:  verified | claimed
 
 ### 4.2. Пакет категории
 
-**package.yaml:** `archetype (A|B|C)` · модули с весами (сумма=100) · реестр ролей (definition, markers, query_patterns RU/EN, core_coverage_allowed, multi_instance) · реестр базлайнов · `baseline_participant` (null для C) · юрисдикции+реестры · языки.
+**package.yaml:** `archetype (A|B|C)` · модули с весами (сумма=100) · реестр ролей (definition, markers, query_patterns RU/EN, core_coverage_allowed, multi_instance) · реестр базлайнов · `baseline_participants` — **список** линий, на которых стоит пакет (`[]` для C; в B их несколько) · юрисдикции+реестры · языки.
 
 **cohort.yaml:** состав когорты и обоснование (§1.6): `product_id · role_overlap · selection_reason · anchor_relation · frozen_at`.
 
@@ -356,7 +356,7 @@ evidence_state:  verified | claimed
 product_id: pangolin
 canonical_name: "Platform V Pangolin"
 vendor: "СберТех"
-upstream: {baseline_id: upstream-pg, version: "16", evidence: {url, quote}} | null
+upstreams: [{baseline_id: upstream-pg, version: "16", evidence: {url, quote}}]  # порядок = приоритет
 edition_assessed: "Enterprise"
 version: "6.2"
 jurisdiction: RU

@@ -121,14 +121,14 @@ def main() -> int:
         ),
     )
     expect_raises(
-        "архетип C: baseline_participant обязан быть null",
+        "архетип C: baseline_participants обязан быть пустым",
         ValueError,
         lambda: PackageManifest(
             case_id="pg",
             archetype=Archetype.C,
             modules=[ModuleDef(module_id="core", weight=100)],
             roles=[],
-            baseline_participant="some-baseline",
+            baseline_participants=["some-baseline"],
         ),
     )
     check(
@@ -2272,6 +2272,10 @@ def _cli_plan_lint() -> None:
         for item in fixtures.iterdir():
             if item.is_file():
                 shutil.copy(item, pkg / item.name)
+        # Пакет — не только файлы верхнего уровня: `sources/reference_products.yaml`
+        # объявляет reference-продуктов, без которых непустой `baselines.csv` блокируется
+        # правилом `baseline-without-reference-product` (план 27 §10).
+        shutil.copytree(fixtures / "sources", pkg / "sources")
         (pkg / "scope_attestation.yaml").write_text(
             'procedure: "аттестация (selfcheck)"\n', encoding="utf-8"
         )
@@ -4082,6 +4086,9 @@ def _cli_surface() -> None:
         "resolve", "plan", "run", "discover", "review", "promote",
         "report", "golden", "sensitivity", "diff", "deploy-check", "doctor",
         "baseline-agreement",
+        # План 27: группа reference-продуктов профиля — обязательная поверхность CLI
+        # (декларация, факты, разведка, ревью, refresh, карта).
+        "baseline",
     }
     missing = required - commands
     if missing:

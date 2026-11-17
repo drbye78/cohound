@@ -18,6 +18,7 @@ import pytest
 from core.domain import (
     AbsenceRuleType,
     AnchorRelation,
+    BaselineFact,
     BaselineRow,
     CatalogRow,
     Cell,
@@ -31,6 +32,8 @@ from core.domain import (
     DenialStrength,
     EvidenceScope,
     EvidenceType,
+    FactReview,
+    FactStatus,
     Focus,
     InheritanceMode,
     LLMCellOutput,
@@ -561,17 +564,35 @@ def _passport() -> Passport:
         product_id="p1",
         canonical_name="Product p1",
         vendor="Vendor",
-        upstream=Upstream(
-            baseline_id="base_1",
-            version="16.0",
-            evidence=Citation(
-                url="https://upstream.test/doc#param_a",
-                quote="upstream documents the mechanism",
-            ),
-        ),
+        upstreams=[
+            Upstream(
+                baseline_id="base_1",
+                version="16.0",
+                evidence=Citation(
+                    url="https://upstream.test/doc#param_a",
+                    quote="upstream documents the mechanism",
+                ),
+            )
+        ],
         version="1.0",
         jurisdiction="RU",
         snapshot_date=_dt.date(2026, 1, 1),
+    )
+
+
+def _fact() -> BaselineFact:
+    """Принятый факт ``present`` о документации предка (план 27 §3.3): без него ``direct``
+    не выпускает ячейку, и Fork D нечего было бы накладывать на реестр."""
+    return BaselineFact(
+        baseline_id="base_1",
+        param_id="param_a",
+        version="16",
+        status=FactStatus.PRESENT,
+        url="https://upstream.test/doc",
+        quote="upstream documents the mechanism",
+        content_hash="a" * 64,
+        review=FactReview.ACCEPTED,
+        reviewed_by="tester",
     )
 
 
@@ -588,7 +609,7 @@ def test_inheritance_wave_keeps_registry_on_agreement(store: SqliteStore) -> Non
     store.save_cell(_registry_present("param_a"))
 
     result = inheritance_wave(
-        _plan(["param_a"]), [_baseline()], {"p1": _passport()}, store
+        _plan(["param_a"]), [_baseline()], {"p1": _passport()}, store, facts=[_fact()]
     )
 
     assert result.errors == []
@@ -602,7 +623,7 @@ def test_inheritance_wave_turns_registry_conflict_into_pending(store: SqliteStor
     store.save_cell(_registry_absence("param_a"))
 
     result = inheritance_wave(
-        _plan(["param_a"]), [_baseline()], {"p1": _passport()}, store
+        _plan(["param_a"]), [_baseline()], {"p1": _passport()}, store, facts=[_fact()]
     )
 
     assert result.errors == []

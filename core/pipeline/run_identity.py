@@ -162,6 +162,15 @@ class DeclaredAxesLike(Protocol):
     @property
     def passports_digest(self) -> str | None: ...
 
+    #: План 27 §7.1: политика наследования (``baselines.csv``) и наблюдения о документации
+    #: предка (``sources/baseline_facts.csv``). Оба — объявленные входы пакета, вычислимые
+    #: до сборки портов, и оба меняют набор унаследованных ячеек, то есть вердикты.
+    @property
+    def baselines_digest(self) -> str | None: ...
+
+    @property
+    def baseline_facts_digest(self) -> str | None: ...
+
     #: C8: объявленная схема лексического индекса (состав полей + цепочка анализатора).
     #: Меняет лексическую выдачу, значит вердикты; версия движка сюда не входит.
     @property
@@ -386,6 +395,11 @@ def build_execution_contract(
         # объявлено» остаётся отличимым от «объявлено пустое множество».
         "render_modes_digest": _declared(declared, "render_modes_digest"),
         "passports_digest": _declared(declared, "passports_digest"),
+        # План 27 §7.1: политика наследования и факты о документации предка. ``None`` —
+        # ось не передана (чистые вызовы): «не объявлено» отличимо от пустого набора,
+        # который даёт стабильный дайджест пустого множества.
+        "baselines_digest": _declared(declared, "baselines_digest"),
+        "baseline_facts_digest": _declared(declared, "baseline_facts_digest"),
         "lexical_spec": _declared(declared, "lexical_spec"),
         "extractor_stack": _declared(declared, "extractor_stack"),
         # 16-runs-schema-boundary §4.2: устройство эмбеддера. Объявленная ось

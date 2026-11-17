@@ -35,6 +35,30 @@ def _make(tmp_path: Path, case: str = "case_x", archetype: str = "B") -> Path:
     return tmp_path / case
 
 
+def _declare_reference(package: Path, *baseline_ids: str) -> Path:
+    """Объявляет reference-продуктов пакета (``sources/reference_products.yaml``).
+
+    План 27 §10: строка ``baselines.csv`` обязана иметь объявленного предка, иначе
+    правило ``baseline-without-reference-product`` блокирует мутацию.
+    """
+    path = package / "sources" / "reference_products.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    products = "".join(
+        f"  - baseline_id: {baseline_id}\n"
+        f"    product_id: ref_{baseline_id}\n"
+        f"    canonical_name: Reference {baseline_id}\n"
+        f"    current_version: '1'\n"
+        f"    versions:\n"
+        f"      - version: '1'\n"
+        f"        docs_roots: ['https://{baseline_id}.test/docs']\n"
+        for baseline_id in baseline_ids
+    )
+    path.write_text(
+        f"schema: reference_products/1\nproducts:\n{products}", encoding="utf-8"
+    )
+    return path
+
+
 def _snapshot(package: Path) -> dict[str, bytes]:
     return {
         path.name: path.read_bytes()
@@ -266,6 +290,7 @@ def test_apply_param_candidate(tmp_path: Path) -> None:
 
 def test_apply_baseline_candidate(tmp_path: Path) -> None:
     package = _make(tmp_path)
+    _declare_reference(package, "up")
     result = apply_candidate(
         package,
         Candidate(
@@ -412,6 +437,7 @@ def test_apply_candidates_fail_fast_keeps_applied(tmp_path: Path) -> None:
 
 def test_baseline_crud(tmp_path: Path) -> None:
     package = _make(tmp_path)
+    _declare_reference(package, "up")
     pa.add_baseline(package, "up", "param.alpha_capability", min_version="1.0", actor="t")
     pa.add_baseline(package, "up", "param.beta_capability", actor="t")
     assert len(pa.list_baselines(package)) == 2
@@ -429,6 +455,7 @@ def test_baseline_add_requires_existing_param(tmp_path: Path) -> None:
 
 def test_baseline_duplicate_refuses(tmp_path: Path) -> None:
     package = _make(tmp_path)
+    _declare_reference(package, "up")
     pa.add_baseline(package, "up", "param.alpha_capability")
     with pytest.raises(pa.PackageAdminError):
         pa.add_baseline(package, "up", "param.alpha_capability")

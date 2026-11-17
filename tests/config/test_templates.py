@@ -86,7 +86,7 @@ def test_template_passport_loads_and_validates() -> None:
     assert passport is not None
     assert isinstance(passport, Passport)
     assert passport.product_id == "example_product"
-    assert passport.upstream is None  # архетип B
+    assert passport.upstreams == []  # архетип B: предков не объявлено
     assert passport.doc_domains and all(".invalid" in d for d in passport.doc_domains)
     # Установленный сателлит несёт все обязательные поля + relationship_evidence.
     approved = [s for s in passport.satellites if s.state.value == "approved"]

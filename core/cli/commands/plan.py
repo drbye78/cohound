@@ -59,10 +59,12 @@ from core.cli.context import (
     _add_llm_slot_flag,
     _crawl_policy_resolution,
     _load_corpus_urls,
+    _load_passports_dir,
     _plan_payload,
     _previous_cycle_id,
     _print_json,
     _print_plan,
+    _resolve_passports_dir,
     add_freshness_warn_days_flag,
     observation_dates_by_product,
 )
@@ -257,6 +259,12 @@ def run(args: argparse.Namespace) -> int:
     функция входа (§13), иначе «план» описывал бы другой прогон.
     """
     inputs = load_inputs(args.run_yaml, args.package)
+    # План 27 §10: линтер сверяет предков паспорта с объявленными reference-продуктами.
+    # Паспорта приходят из раскладки, а не из пакета, поэтому composition root кладёт их
+    # в ``inputs`` до линта — иначе правило молчало бы «не проверял».
+    inputs.passports = _load_passports_dir(
+        _resolve_passports_dir(args, getattr(args, "paths", None))
+    )
     report = lint_run_inputs(inputs)
     if not report.ready:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)

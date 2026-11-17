@@ -38,7 +38,7 @@ def _base(**overrides: Any) -> dict[str, Any]:
         "product_id": "p1",
         "canonical_name": "Product One",
         "vendor": "Vendor One",
-        "upstream": None,
+        "upstreams": [],
         "edition_assessed": "Standard",
         "version": "1.0",
         "jurisdiction": "XX",
@@ -72,7 +72,7 @@ def test_load_fixture_passport() -> None:
     assert passport.product_id == "p1"
     assert passport.canonical_name == "Product One"
     assert passport.vendor == "Vendor One"
-    assert passport.upstream is None
+    assert passport.upstreams == []
     assert passport.jurisdiction == "XX"
     assert passport.doc_domains == ["example.com"]
     assert passport.satellites == []
@@ -153,13 +153,18 @@ def test_missing_dir_returns_empty_dict(tmp_path: Path) -> None:
 
 
 def test_upstream_and_satellites_parsed(tmp_path: Path) -> None:
-    """``upstream`` и оба состояния сателлита (approved / not_found) парсятся."""
+    """``upstreams`` (список предков) и оба состояния сателлита парсятся."""
     data = _base(
-        upstream={
-            "baseline_id": "baseline-x",
-            "version": "16",
-            "evidence": {"url": "https://upstream.example/spec", "quote": "feature present"},
-        },
+        upstreams=[
+            {
+                "baseline_id": "baseline-x",
+                "version": "16",
+                "evidence": {
+                    "url": "https://upstream.example/spec",
+                    "quote": "feature present",
+                },
+            }
+        ],
         satellites=[
             {
                 "role": "backup",
@@ -181,10 +186,11 @@ def test_upstream_and_satellites_parsed(tmp_path: Path) -> None:
     passport = load_passport("p1", tmp_path)
     assert passport is not None
 
-    assert passport.upstream is not None
-    assert passport.upstream.baseline_id == "baseline-x"
-    assert passport.upstream.version == "16"
-    assert passport.upstream.evidence.url == "https://upstream.example/spec"
+    assert len(passport.upstreams) == 1
+    [upstream] = passport.upstreams
+    assert upstream.baseline_id == "baseline-x"
+    assert upstream.version == "16"
+    assert upstream.evidence.url == "https://upstream.example/spec"
 
     assert len(passport.satellites) == 2
     approved, not_found = passport.satellites

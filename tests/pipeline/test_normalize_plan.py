@@ -28,6 +28,10 @@ _PACKAGE_FILES = (
     "cohort.yaml",
     "golden.csv",
     "domain_profiles.yaml",
+    # Каталог (симлинк на каталог тоже валиден): ``sources/reference_products.yaml``
+    # объявляет reference-продуктов — без них непустой ``baselines.csv`` блокируется
+    # правилом ``baseline-without-reference-product`` (план 27 §10).
+    "sources",
 )
 
 

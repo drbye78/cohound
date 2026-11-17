@@ -88,7 +88,11 @@ CHILD_B = "https://docs.test/b"
 PINNED_PARTITION_BUILD_ID = "pb_b633e90996b4f36fd2a6b6e9"
 PINNED_CONTENT_DIGEST = "f26d9da9face8cc0662b9b6d"
 PINNED_INDEX_BUILD_ID = "cb_197ae68483e35f9d8f3ce976"
-PINNED_EXECUTION_CONTRACT_DIGEST = "3481c21f7da94478c397367d"
+#: Пин пересчитан 17.11.2026: план 27 §7.1 добавил два объявленных поля контракта
+#: (``baselines_digest``/``baseline_facts_digest``), и дайджест от синтетического
+#: ``{name: "v-<name>"}`` сменился — это смена **набора условий**, а не сдвиг от таймингов.
+#: Проверка не ослаблена: ниже по-прежнему сверяется значение целиком.
+PINNED_EXECUTION_CONTRACT_DIGEST = "8174a402beb3ab0ce83fc9b5"
 
 #: Поля, которые обязана нести строка продукта (``product_end``) и её Pass B-продолжение.
 CRAWL_BUCKETS = ("fetch_wait_s", "extract_wait_s", "chunk_s")

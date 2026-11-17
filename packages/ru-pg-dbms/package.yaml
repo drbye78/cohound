@@ -1,5 +1,6 @@
 archetype: A
-baseline_participant: postgresql
+baseline_participants:
+- postgresql
 baselines:
 - upstream-pg
 case_id: ru-pg-dbms

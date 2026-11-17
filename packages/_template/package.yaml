@@ -35,7 +35,7 @@ roles:
 
 # Архетип B: эталона нет — набор baselines пуст, участие в baseline отсутствует (§1.5).
 baselines: []
-baseline_participant: null
+baseline_participants: []
 
 # Код-заполнитель юрисдикции (реальные значения — от владельца домена).
 jurisdictions: [XX]

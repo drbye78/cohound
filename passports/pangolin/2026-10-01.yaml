@@ -5,7 +5,7 @@
 product_id: pangolin
 canonical_name: "Platform V Pangolin DB"
 vendor: "СберТех"
-upstream: null
+upstreams: []
 edition_assessed: null
 version: "Pangolin 8.1 (31.05.2026, ядро 11.1.0, Patroni 4.1.0)"
 jurisdiction: RU

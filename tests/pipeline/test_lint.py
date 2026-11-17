@@ -8,12 +8,20 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from core.domain import Archetype, GoldenTier, ModuleDef, Status
+from core.domain import (
+    Archetype,
+    GoldenTier,
+    ModuleDef,
+    ReferenceProducts,
+    Status,
+)
 from core.pipeline.golden_status import GoldenStatus
 from core.pipeline.lint import (
     RULES,
@@ -21,10 +29,14 @@ from core.pipeline.lint import (
     check_absence_attestation,
     check_anchor_in_products,
     check_archetype_c_baselines,
+    check_baseline_reference_product,
     check_empty_concept_terms,
     check_golden_full_absent_stratum,
     check_golden_presence,
+    check_passport_upstreams,
     check_products_match_cohort,
+    check_reference_product_not_in_cohort,
+    check_reference_versions,
     check_showcase_metric,
     check_slug_lowercase,
     check_weights_sum_to_100,
@@ -79,8 +91,23 @@ def test_rules_registry_is_complete() -> None:
         "products-match-cohort",
         "empty-concept-terms",
         "golden-presence",
+        # План 27 §10: связь «строка baselines.csv → reference-продукт» и форма предков.
+        "baseline-without-reference-product",
+        "reference-product-in-cohort",
+        "baseline-version-numeric",
+        "passport-upstreams",
+        "upstream-presence",
     }
     assert expected <= codes
+    # Новые правила — блокирующие, кроме `upstream-presence` (видимое состояние, не блок).
+    blocking = {rule.code for rule in RULES if rule.severity == "blocking"}
+    assert {
+        "baseline-without-reference-product",
+        "reference-product-in-cohort",
+        "baseline-version-numeric",
+        "passport-upstreams",
+    } <= blocking
+    assert "upstream-presence" not in blocking
 
 
 def test_clean_fixture_passes() -> None:
@@ -121,7 +148,7 @@ def test_weights_sum_not_100_blocks() -> None:
 
 def test_archetype_c_with_baselines_blocks() -> None:
     package = _clean().package.model_copy(
-        update={"archetype": Archetype.C, "baseline_participant": None}
+        update={"archetype": Archetype.C, "baseline_participants": []}
     )
     inputs = replace(_clean(), package=package)
     messages = check_archetype_c_baselines(inputs)
@@ -131,7 +158,7 @@ def test_archetype_c_with_baselines_blocks() -> None:
 
 def test_archetype_c_without_baselines_passes() -> None:
     package = _clean().package.model_copy(
-        update={"archetype": Archetype.C, "baseline_participant": None, "baselines": []}
+        update={"archetype": Archetype.C, "baseline_participants": [], "baselines": []}
     )
     inputs = replace(_clean(), package=package, baselines=[])
     assert check_archetype_c_baselines(inputs) == []
@@ -345,3 +372,208 @@ def test_anchor_not_in_products_blocks() -> None:
     messages = check_anchor_in_products(inputs)
     assert messages and "p3" in messages[0]
     assert any("anchor" in msg for msg in lint_run_inputs(inputs).blocking)
+
+
+# ---------------------------------------------------------------------------
+# План 27 §10: связь baselines.csv ↔ reference-продукты и форма предков
+# ---------------------------------------------------------------------------
+
+
+def _passport(product_id: str, *, upstreams: list[tuple[str, str]]) -> Any:
+    """Паспорт с объявленными линиями ``[(baseline_id, version), …]`` (порядок = приоритет)."""
+    from core.domain import Citation, Passport, Upstream
+
+    return Passport(
+        product_id=product_id,
+        canonical_name=f"Product {product_id}",
+        vendor="Vendor",
+        jurisdiction="XX",
+        snapshot_date=_dt.date(2026, 1, 1),
+        upstreams=[
+            Upstream(
+                baseline_id=baseline_id,
+                version=version,
+                evidence=Citation(
+                    url=f"https://{baseline_id}.test/doc", quote="ancestor quote"
+                ),
+            )
+            for baseline_id, version in upstreams
+        ],
+    )
+
+
+def _declared(*baseline_ids: str) -> ReferenceProducts:
+    """Минимальная декларация reference-продуктов (schema ``reference_products/1``)."""
+    return ReferenceProducts.model_validate(
+        {
+            "schema": "reference_products/1",
+            "products": [
+                {
+                    "baseline_id": baseline_id,
+                    "product_id": f"ref_{baseline_id}",
+                    "canonical_name": f"Reference {baseline_id}",
+                    "current_version": "1",
+                    "versions": [
+                        {"version": "1", "docs_roots": [f"https://{baseline_id}.test/docs"]}
+                    ],
+                }
+                for baseline_id in baseline_ids
+            ],
+        }
+    )
+
+
+def test_baselines_without_reference_product_blocks() -> None:
+    # baselines.csv непуст, а декларации нет вовсе: строке некуда наследовать.
+    inputs = replace(_clean(), reference_products=None)
+    messages = check_baseline_reference_product(inputs)
+    assert messages and "baseline-without-reference-product" in messages[0]
+    assert "reference_products.yaml отсутствует" in messages[0]
+    assert any(
+        "baseline-without-reference-product" in msg
+        for msg in lint_run_inputs(inputs).blocking
+    )
+
+
+def test_baselines_with_undeclared_ancestor_blocks() -> None:
+    # Декларация есть, но объявляет другую линию: (baseline_b, param_b) остаётся сиротой.
+    inputs = replace(_clean(), reference_products=_declared("baseline_a"))
+    messages = check_baseline_reference_product(inputs)
+    assert messages and "baseline_b" in messages[0] and "param_b" in messages[0]
+    assert lint_run_inputs(inputs).ok is False
+
+
+def test_empty_baselines_need_no_reference_product() -> None:
+    # Архетип C и пилот без строк: правило не задевает пустой baselines.csv.
+    inputs = replace(_clean(), reference_products=None, baselines=[])
+    assert check_baseline_reference_product(inputs) == []
+
+
+def test_reference_product_in_cohort_blocks() -> None:
+    declared = _declared("baseline_a")
+    # product_id reference-продукта делит namespace с когортой — пересечение блокирует.
+    colliding = declared.model_copy(
+        update={
+            "products": [
+                declared.products[0].model_copy(update={"product_id": "p1"})
+            ]
+        }
+    )
+    inputs = replace(_clean(), reference_products=colliding)
+    messages = check_reference_product_not_in_cohort(inputs)
+    assert messages and "reference-product-in-cohort" in messages[0]
+    assert "'p1'" in messages[0]
+    assert any(
+        "reference-product-in-cohort" in msg for msg in lint_run_inputs(inputs).blocking
+    )
+
+
+def test_reference_product_outside_cohort_passes() -> None:
+    assert check_reference_product_not_in_cohort(_clean()) == []
+
+
+def test_archetype_a_with_two_upstreams_blocks() -> None:
+    package = _clean().package.model_copy(update={"archetype": Archetype.A})
+    inputs = replace(
+        _clean(),
+        package=package,
+        passports={
+            "p1": _passport("p1", upstreams=[("baseline_a", "1"), ("baseline_b", "1")]),
+            "p2": _passport("p2", upstreams=[("baseline_a", "1")]),
+        },
+    )
+    messages = check_passport_upstreams(inputs)
+    assert any("архетип A" in msg and "p1" in msg for msg in messages)
+    assert any("upstreams-by-archetype" in msg for msg in lint_run_inputs(inputs).blocking)
+
+
+def test_archetype_c_with_upstreams_blocks() -> None:
+    package = _clean().package.model_copy(
+        update={"archetype": Archetype.C, "baselines": [], "baseline_participants": []}
+    )
+    inputs = replace(
+        _clean(),
+        package=package,
+        baselines=[],
+        passports={"p1": _passport("p1", upstreams=[("baseline_a", "1")])},
+    )
+    messages = check_passport_upstreams(inputs)
+    assert any("архетип C" in msg and "p1" in msg for msg in messages)
+    assert any("upstreams-by-archetype" in msg for msg in lint_run_inputs(inputs).blocking)
+
+
+def test_undeclared_passport_upstream_blocks() -> None:
+    # Продукт объявляет линию, о которой профиль ничего не знает: наследовать не по чему.
+    inputs = replace(
+        _clean(),
+        passports={"p1": _passport("p1", upstreams=[("baseline_zzz", "1")])},
+    )
+    messages = check_passport_upstreams(inputs)
+    assert any("baseline_zzz" in msg for msg in messages)
+    assert any("passport-upstream-undeclared" in msg for msg in lint_run_inputs(inputs).blocking)
+
+
+def test_archetype_a_without_any_upstream_blocks() -> None:
+    # A-пакет описывает линию: без единого объявленного предка линия не существует.
+    package = _clean().package.model_copy(update={"archetype": Archetype.A})
+    inputs = replace(_clean(), package=package, passports={"p1": _passport("p1", upstreams=[])})
+    messages = check_passport_upstreams(inputs)
+    assert any("не объявляет ни одного предка" in msg for msg in messages)
+    assert lint_run_inputs(inputs).ok is False
+
+
+def test_archetype_a_product_without_upstream_warns_not_blocks() -> None:
+    # «Вендор не называет версию» — честное состояние: предупреждение, не блок (§3.2).
+    package = _clean().package.model_copy(update={"archetype": Archetype.A})
+    inputs = replace(
+        _clean(),
+        package=package,
+        passports={
+            "p1": _passport("p1", upstreams=[("baseline_a", "1")]),
+            "p2": _passport("p2", upstreams=[]),
+        },
+    )
+    report = lint_run_inputs(inputs)
+    assert report.ok is True
+    assert any("p2" in warning and "предок не объявлен" in warning for warning in report.warnings)
+
+
+def test_non_numeric_min_version_blocks() -> None:
+    baselines = [
+        row.model_copy(update={"min_version": "abc"}) if row.param_id == "param_a" else row
+        for row in _clean().baselines
+    ]
+    inputs = replace(_clean(), baselines=baselines)
+    messages = check_reference_versions(inputs)
+    assert any("baseline-version-numeric" in msg and "abc" in msg for msg in messages)
+    assert any(
+        "baseline-version-numeric" in msg for msg in lint_run_inputs(inputs).blocking
+    )
+
+
+def test_non_numeric_declared_version_blocks() -> None:
+    declared = _declared("baseline_a")
+    broken = declared.model_copy(
+        update={
+            "products": [
+                declared.products[0].model_copy(
+                    update={
+                        "current_version": "abc",
+                        "versions": [
+                            declared.products[0].versions[0].model_copy(
+                                update={"version": "abc"}
+                            )
+                        ],
+                    }
+                )
+            ]
+        }
+    )
+    inputs = replace(_clean(), reference_products=broken)
+    messages = check_reference_versions(inputs)
+    assert any("baseline_a" in msg and "abc" in msg for msg in messages)
+    assert lint_run_inputs(inputs).ok is False
+
+
+def test_numeric_versions_pass() -> None:
+    assert check_reference_versions(_clean()) == []

@@ -517,7 +517,7 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
 
 **`add-product` не пишет `state.db`.** Это операционное состояние прогона, а не авторский
 артефакт; продукт материализуется в state при первом `run`, который его увидел (§4.6).
-**Проекция `run.yaml`.** `patch_run_projection` (`core/pipeline/package_io.py:397`) патчит
+**Проекция `run.yaml`.** `patch_run_projection` (`core/pipeline/package_io.py:405`) патчит
 блок `products` и `anchor`; `cohort_ref` патчится отдельно —
 `_patch_run_cohort_ref` (`core/pipeline/package_admin.py:284`), потому что это не поле
 проекции из `products`, а ревизия состава. Патч построчный: значение заменяется на месте
@@ -3729,7 +3729,7 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 > В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:706`) — имя файла
 > когорты из `run.yaml`, и `cohort_ref: str | None` (`core/domain/models.py:720`) — авторская ревизия, которая
 > **входит в `cohort_digest`**. `core/store/sqlite_store.py:477-484` кладёт в колонку `cohort_ref` значение
-> `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:694`).
+> `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:696`).
 > Следствие на живом прогоне `ru-pg-dbms-3d3dc7c3c969`: `runs.cohort_ref =
 > 'cohort-ru-pg-dbms-2026-10-28-golden00'` (имя файла), а в дайджест ушло `None` — то есть
 > манифест показывает «ревизию», которая в `run_id` **не входила**. Правка меняет состав
@@ -3800,7 +3800,7 @@ diff — инкрементальность была полезна только
 **Реализовано (методология 2.3.0).**
 
 - `execution_contract_digest` — отпечаток **условий измерения**, без контента. Ровно
-  **33 поля** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
+  **35 полей** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
   механически (`len(EXECUTION_CONTRACT_FIELDS)`), а не по памяти:
 
   | Группа | Поля |
@@ -4028,7 +4028,7 @@ golden**.
 
 ### 13.6. `--only-product`
 
-- `scope=product_only` (`resolve_run_scope`, `core/pipeline/run_identity.py:183`); он входит в
+- `scope=product_only` (`resolve_run_scope`, `core/pipeline/run_identity.py:244`); он входит в
   `run_id` через `derive_run_id` — то есть scoped-прогон **отдельный** прогон, а не режим
   полного.
 - `last_completed_run_id` **не** обновляется (O10: рубеж двигает только `scope=full` при
@@ -4424,7 +4424,7 @@ state/state.db                                 # durable-состояние па
     **✅ сделано**: `eval_echo` расширен объявленным методологическим контекстом,
     `EVAL_CACHE_FORMAT` поднят до `2`, конверт формата 1 читается как промах (§10.5).
     Ключ **переноса ячеек** — отдельная величина и тоже существует:
-    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:565`,
+    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:646`,
     §10.1); прежняя редакция называла его несуществующим.
 11. `_chunk_id` (`core/pipeline/corpus_index.py:182`) — ✅ **сделано**: форма
     `f"{product_id}:{doc_version_id}:{chunk_no}"` (вызовы — `core/pipeline/corpus_ingest.py:1578`,
@@ -4821,7 +4821,7 @@ state_store.reconcile_seed_set(product_id, rows)               # seeds.yaml → 
 onboarding = preflight(args.package, products, state=state_store)   # режимы продуктов
 sync_product_state(state_store, ...)                           # рубежи last_*_run_id
 cycle_id = resolve_cycle_id(...)                               # без неявного today()
-contract_digest = build_execution_contract(...)                # 33 поля, §12.5
+contract_digest = build_execution_contract(...)                # 35 полей, §12.5
 run_id = derive_run_id(..., cycle_id, contract_digest, run_scope, refresh_policy)
 previous = previous_run_of(state_store, package_id, run_id=run_id, explicit=args.since_run)
 previous_run_id = previous.run_id if previous else None        # resume ⇒ None

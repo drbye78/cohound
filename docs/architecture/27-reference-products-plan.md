@@ -631,3 +631,53 @@ upstream, (б) переездом документации, (в) дефекто�
 3. **Порог согласия факт↔карта**, ниже которого дешёвый путь объявляется непригодным.
    Вводить порог я не хочу (A3: не ограничивать, а измерять) — предлагаю публиковать κ и
    решение оставлять читателю. Если порог нужен как гейт — это отдельное решение.
+
+---
+
+## 16. Статус реализации (17.11.2026)
+
+Этапы 1–10 и 12 сделаны; этап 11 (живой recon) не запускался — нужен стенд и разрешение
+владельца.
+
+| # | что | состояние | где |
+|---|---|---|---|
+| 1 | `baselines_digest` в контракте | ✅ | `digests.py:436`; полей контракта стало **35** (было 33: добавились `baselines_digest` и `baseline_facts_digest`) |
+| 2 | `Passport.upstreams`, `baseline_participants`, порядок = приоритет | ✅ | `models.py`; паспорта и `package.yaml` пилота переведены |
+| 3 | `reference_products.yaml` + модель + линтер | ✅ | `config/run_config.py:load_reference_products`; `lint.py` — 4 блокирующих правила + предупреждение `upstream-presence` |
+| 4 | `baseline_facts.csv` + `baseline_facts_digest` + словарь | ✅ | `FactStatus`/`FactReview` в `status-dictionary.yaml` и `domain/dictionary.py` |
+| 5 | Ш4 читает факты, обходит предков по порядку, причины в базисе | ✅ | `inheritance.py:decide_inheritance`; `not_inherited` + `ancestor_fallbacks` + `reason_counts`/`fallback_counts` |
+| 6 | `hound baseline list\|facts\|report` | ✅ | `cli/commands/baseline_products.py` |
+| 7 | reference-корпус + `hound baseline recon` | ✅ | `pipeline/reference_corpus.py`; `reference.db` + `manifest.json`, `build_id` от **содержимого** |
+| 8 | `hound baseline review` + `apply_log` | ✅ | `pipeline/reference_products.py:review_facts` |
+| 9 | карта + `hound baseline map` + согласие факт↔карта | ✅ | `pipeline/reference_map.py`; `score.json` = форма `ScoreBundle` + `subject: reference` |
+| 10 | `hound baseline refresh` (diff, `min_version` — предложение) | ✅ | `reference_products.py:refresh_diff`/`apply_refresh` |
+| 11 | разово для пилота: PostgreSQL 11…18, факты, разметка, карта | ⛔ **не начато** | нужен стенд `COHOUND_HOME` и разрешение владельца: живой краул + ~40 мин оценки на версию |
+| 12 | документация | ✅ | `03` §E.1 (строка `hound baseline`), `package-files.md` (`reference_products.yaml`, `baseline_facts.csv`), этот раздел |
+
+### 16.1. Что уточнено по ходу (и почему)
+
+* **Контракт — 35 полей, не 34.** План считал от 32; фактически было 33 (`embed_spec` уже
+  входил). Оба новых поля — `execution_change`: прежние `run_id` несравнимы.
+* **Продукт A-пакета без предка не блокируется** — публикуется предупреждением
+  `upstream-presence` (строка линта — `upstreams-by-archetype`). «Вендор не называет версию» — честное состояние; блок остаётся на
+  противоречие (два предка в A, предок в C, необъявленный `baseline_id`).
+* **Цитата наследования берётся из факта, а не из паспорта**: `source_id =
+  upstream://{baseline_id}#{param_id}@{version}`, `citation_quote`/`source_url`/`content_hash`
+  — из `BaselineFact`. Паспортная цитата как фолбэк снята: она описывала заявление вендора,
+  а не наблюдение.
+* **`BaselineFact` при `status=present` требует непустой `url`** (I15): производное
+  доказательство обязано резолвиться в адрес. Разведка, нашедшая цитату в чанке без URL,
+  публикует `unclear` с причиной `quote_found_without_url`, а не `present`.
+* **`build_id` reference-сборки — от содержимого** (`reference_content_digest` по
+  отсортированным хешам чанков), не от пути БД: иначе две одинаковые сборки стали бы разными.
+* **Движок лексики карты выбирает composition root** (порт `LexicalSearcherPort` в
+  `ports/lexical_index.py`): `pipeline` не импортирует `adapters` (матрица 01 §1).
+
+### 16.2. Что осталось открытым
+
+1. **Этап 11** — данные. Без него в пилоте нет ни одного факта (`baseline_facts.csv` пуст),
+   поэтому доля наследования не измерена; это цена, а не дефект: механизм работает на
+   синтетике (`tests/pipeline/test_reference_products.py`, `test_reference_corpus.py`,
+   `test_reference_map.py`).
+2. **Открытые вопросы §15** не закрыты: объём git-фактов при 200 профилях, карта по всем
+   версиям vs `current_version`, порог согласия факт↔карта (порог не вводится — A3).

@@ -176,6 +176,11 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         # отвечает), поэтому отдельная ось от ``serp_rounds``.
         "serp_mode",
         "manual_artifacts_digest",
+        # План 27 §7.1: политика наследования и наблюдения о документации предка —
+        # условия измерения (правка строки меняла набор унаследованных ячеек, не
+        # меняя ``run_id``).
+        "baselines_digest",
+        "baseline_facts_digest",
         # C3: геометрия нарезки отдельно от метки ``chunker_version`` — правка
         # ``chunk_size`` меняла корпус, не меняя ``run_id``.
         "chunking_spec",

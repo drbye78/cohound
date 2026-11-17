@@ -342,7 +342,7 @@ per-site (`core/pipeline/crawl_frontier.py:826`) — два уровня одн�
   копия `resolve_pdf_device` без site-слагаемого.
   Дефолт `cpu`, значения только `cpu|cuda`, `auto` **нет** (R5: объявленная ось обязана
   действовать). Enum `EmbedDevice` — в `core/domain/enums.py` рядом с `PdfDevice`
-  (`core/domain/enums.py:575`).
+  (`core/domain/enums.py:610`).
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
@@ -360,12 +360,12 @@ per-site (`core/pipeline/crawl_frontier.py:826`) — два уровня одн�
 `crawl_policy_digest` и др.); на 15.11.2026 — **33**: `embed_spec` (`model_id@revision`,
 O6) рядом с `embed_precision`, той же природой, что `extractor_stack` при
 `extractor_version`: объявленный вход — стек/веса, наблюдаемая строка `embed_model_id` —
-провенанс. Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:254`)
+провенанс. Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:315`)
 из `DeclaredExecutionAxes` — там же, где `extractor_stack`
-(`core/cli/execution_axes.py:687-694`).
+(`core/cli/execution_axes.py:693-700`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
-(`core/pipeline/digests.py:527-549`) требует точного набора ключей, но вызывается ровно из
+(`core/pipeline/digests.py:617-639`) требует точного набора ключей, но вызывается ровно из
 одного места — `core/pipeline/run_identity.py:383`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
@@ -625,7 +625,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    `PINNED_EXECUTION_CONTRACT_DIGEST` (`tests/pipeline/test_corpus_stage_timings.py:86`)
    фиксирует значение для `cpu`. Это названный пробел, а не «покрыто». ⬜ Остаток на
    08.11.2026: для точности такой тест **есть**
-   (`tests/cli/test_execution_axes.py:1343` — `test_embed_precision_changes_the_contract_digest`),
+   (`tests/cli/test_execution_axes.py:1353` — `test_embed_precision_changes_the_contract_digest`),
    для устройства — нет.
 3. `tests/config/test_deploy.py` — `deploy.embed.device` объявлен; неизвестный ключ в
    `embed:` отвергается (`extra="forbid"`, там уже есть параметризация
@@ -680,7 +680,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
   (`docs/status-dictionary.yaml:775`), `run_scope`
   (`docs/status-dictionary.yaml:804`), перечень статусов продукта прогона `run_product_status`
   (`docs/status-dictionary.yaml:818`). Проверка —
-  `core/domain/dictionary.py:80` `assert_dictionary_integrity`, `required`-список
+  `core/domain/dictionary.py:82` `assert_dictionary_integrity`, `required`-список
   (`core/domain/dictionary.py:121` `embed_device`,
   `core/domain/dictionary.py:130` `run_product_status`), `checks`-таблица
   (`core/domain/dictionary.py:187`, `core/domain/dictionary.py:219`);
@@ -1010,7 +1010,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 **Что осталось открытым на 08.11.2026 (не выдаётся за закрытое):**
 
 - **⬜ Прямого теста «`cpu` → `cuda` меняет `execution_contract_digest`» нет** (§7 п. 2).
-  Для `embed_precision` такой тест есть (`tests/cli/test_execution_axes.py:1343`), для
+  Для `embed_precision` такой тест есть (`tests/cli/test_execution_axes.py:1353`), для
   устройства — нет; разница держится материалом дайджеста и пином под `cpu`.
 - **⬜ Писателя `run_lineage.status='running'|'aborted'` нет** (§10 п. 15): прерванный прогон
   не оставляет строки в линии циклов, и `previous_run_of` шагает через него к предыдущему

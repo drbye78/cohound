@@ -1,0 +1,36 @@
+# Декларация reference-продуктов профиля (план 27 §3.1, формат reference_products/1).
+#
+# Это **декларация**, а не наблюдение: здесь сказано, какие линии профиль считает
+# предками и какие версии объявляет явно (решение владельца 2 — не «все подряд»).
+# Наблюдения о том, что в документации версии V параметр действительно описан, живут
+# отдельно — `sources/baseline_facts.csv`, с цитатой, хешем текста и датой.
+#
+# `current_version` — версия, по которой строятся карта и наследование. Остальные версии
+# объявлены, чтобы `hound baseline refresh` мог сравнивать мажоры и показывать регрессии.
+#
+# Корни документации — официальные (postgresql.org/docs/{v}/). Объявлены только мажоры,
+# которые профиль действительно собирается измерять; расширение списка — авторское
+# решение, а не автоматика.
+schema: reference_products/1
+products:
+  - baseline_id: upstream-pg
+    product_id: postgresql
+    canonical_name: PostgreSQL
+    versions:
+      - version: "11"
+        docs_roots: ["https://www.postgresql.org/docs/11/"]
+      - version: "12"
+        docs_roots: ["https://www.postgresql.org/docs/12/"]
+      - version: "13"
+        docs_roots: ["https://www.postgresql.org/docs/13/"]
+      - version: "14"
+        docs_roots: ["https://www.postgresql.org/docs/14/"]
+      - version: "15"
+        docs_roots: ["https://www.postgresql.org/docs/15/"]
+      - version: "16"
+        docs_roots: ["https://www.postgresql.org/docs/16/"]
+      - version: "17"
+        docs_roots: ["https://www.postgresql.org/docs/17/"]
+      - version: "18"
+        docs_roots: ["https://www.postgresql.org/docs/18/"]
+    current_version: "18"

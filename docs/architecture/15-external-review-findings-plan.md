@@ -174,7 +174,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | F1 | «потолка глубины нет, конечность — цикл+бюджет» — обоснование ложно; цепочка различных архивов упирается в рекурсию | ПОДТВЕРЖДЕНО (замером) | `archive_descent.py:813-818` (`_walk` рекурсивен, вне `try`), `:314-317` (RecursionError гасится в «не распознан»), `container_policy.py:195` | нет: максимум 3 уровня (`tests/pipeline/test_corpus_descent.py:374`) | М/Б | **P4** |
 | F2 | тест зависит от числа CPU хоста | ПОДТВЕРЖДЕНО (замер: `cpu_count=2` → `assert 2 == 3`) | `tests/pipeline/test_corpus_extract_pool.py:1958` — ныне `monkeypatch` `cpu_parallelism_cap` (на момент аудита вызова не было); режет `resources.py:441` | тест сам дефект | Г | **P4** |
 | F3 | 6 тестов проверяют **реальное** отсутствие `py7zr`/`rarfile`; с extra `extract-archives` они падают | ПОДТВЕРЖДЕНО (замер: 6 failed / 19 passed при подмене бэкенда) | `test_container_7z.py:36-38` (`_no_backend`), тесты `:46`,`:55`,`:68`, `test_container_rar.py:55,63,74` | — | Г | **P4** |
-| F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3344`), синхронно в фазе | только корректность (`tests/selfcheck.py:4075-4082`) | Д/Г | P4 |
+| F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3344`), синхронно в фазе | только корректность (`tests/selfcheck.py:4079-4086`) | Д/Г | P4 |
 | F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:693-694`, `:621`; сравнить `container_policy.py:311` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
 | F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `core/adapters/extract_document.py:1080` (`FULL: None`), `core/cli/wiring.py:2421` (`initargs` воркера — без `document_timeout`), `core/edge/__main__.py:139` — `DoclingDocumentExtractor()` без `document_timeout`; guard только родительский (`core/pipeline/corpus.py:3031`: `extract_timeout=_extract_timeout`); `core/cli/wiring.py:2476` recycle | частично, только родительская сторона (`tests/pipeline/test_corpus_extract_pool.py:865-932`) | Д/М | P4 |
@@ -616,7 +616,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 Пункты 1–5 описывают состояние на 27–28.10.2026; что изменилось — в статусе ниже.
 
 1. **Дыра идентичности ровно в том классе, который аудит назвал главным.** `prompt_template`
-   = `имя@hash(файла шаблона)` (`run_identity.py:188-204`), а `ABSENCE_GUIDANCE` — текст
+   = `имя@hash(файла шаблона)` (`core/pipeline/run_identity.py:284-320`), а `ABSENCE_GUIDANCE` — текст
    **измерения** — живёт в `prompt.py:97-118`, то есть в коде. Следствие: правка guidance
    меняет отрендеренный промпт у 119/119 ячеек и ломает ключ `eval_cache`, но **не меняет
    `run_id`**. Два текста одного измерения имеют разную силу идентичности. Это тот же класс,
@@ -641,9 +641,9 @@ absence-модель, scoring и определения Coverage/Comparability �
 **Статус на 2026-11-07.**
 
 - ✅ 1 — guidance вошёл в идентичность через композит: `prompt_template` =
-  `имя@hash(шаблон + ABSENCE_GUIDANCE + JSON-схема)` (`core/pipeline/run_identity.py:223-251`).
+  `имя@hash(шаблон + ABSENCE_GUIDANCE + JSON-схема)` (`core/pipeline/run_identity.py:284-320`).
 - ✅ 2 — условия генерации записываются: `seed`/`temperature`/`constrained_decoding`/
-  `endpoint_host`/`max_tokens` в строке сценария (`core/cli/execution_axes.py:894-901`),
+  `endpoint_host`/`max_tokens` в строке сценария (`core/cli/execution_axes.py:907-914`),
   фактические значения — из тех же констант, что уходят в адаптер.
 - ✅ 3 — `base_url` вошёл в идентичность как **хост**: `llm_scenarios.endpoint_host`
   (`core/cli/execution_axes.py:900`), а `llm_scenarios` — поле контракта

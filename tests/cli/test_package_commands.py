@@ -31,6 +31,31 @@ def _new(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> Path:
     return tmp_path / "demo_pkg"
 
 
+def _declare_reference_product(package: Path, *baseline_ids: str) -> Path:
+    """Объявляет reference-продукты пакета (``sources/reference_products.yaml``).
+
+    План 27 §10: строка ``baselines.csv`` обязана иметь объявленного предка — правило
+    ``baseline-without-reference-product`` блокирующее, поэтому авторский порядок теперь
+    такой: сначала декларация, затем строка наследования.
+    """
+    path = package / "sources" / "reference_products.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    products = "".join(
+        f"  - baseline_id: {baseline_id}\n"
+        f"    product_id: ref_{baseline_id}\n"
+        f"    canonical_name: Reference {baseline_id}\n"
+        f"    current_version: '1'\n"
+        f"    versions:\n"
+        f"      - version: '1'\n"
+        f"        docs_roots: ['https://{baseline_id}.test/docs']\n"
+        for baseline_id in baseline_ids
+    )
+    path.write_text(
+        f"schema: reference_products/1\nproducts:\n{products}", encoding="utf-8"
+    )
+    return path
+
+
 # ---------------------------------------------------------------------------
 # new / show / validate
 # ---------------------------------------------------------------------------
@@ -250,6 +275,7 @@ def _write(path: Path, text: str) -> Path:
 
 def test_cli_baseline_crud(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
+    _declare_reference_product(package, "up")
     code, _, _ = _run(
         capsys,
         ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",
@@ -489,7 +515,7 @@ def test_cli_package_list_includes_template(capsys, tmp_path: Path) -> None:
     (tmp_path / "_template" / "package.yaml").write_text(
         "case_id: template\npackage_version: '0.0.0'\narchetype: B\n"
         "modules:\n  - module_id: core\n    weight: 100\n"
-        "roles: []\nbaselines: []\nbaseline_participant: null\n",
+        "roles: []\nbaselines: []\nbaseline_participants: []\n",
         encoding="utf-8",
     )
     _, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--json"])
@@ -541,6 +567,7 @@ def test_cli_role_list_search(capsys, tmp_path: Path) -> None:
 
 def test_cli_baseline_list_search_and_filter(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
+    _declare_reference_product(package, "up", "down")
     _run(
         capsys,
         ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",
@@ -666,6 +693,7 @@ def test_cli_param_get_requires_a_source(capsys, tmp_path: Path) -> None:
 
 def test_cli_baseline_get_exact_and_ambiguous(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
+    _declare_reference_product(package, "up")
     _run(
         capsys,
         ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",

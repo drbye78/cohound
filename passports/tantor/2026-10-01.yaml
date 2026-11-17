@@ -2,12 +2,13 @@
 product_id: tantor
 canonical_name: "Tantor Postgres"
 vendor: "Tantor Labs (ГК Астра)"
-upstream:
-  baseline_id: upstream-pg
-  version: "18"
-  evidence:
-    url: "https://tantorlabs.ru"
-    quote: "Российская СУБД общего назначения на базе PostgreSQL с сертификатами ФСТЭК"
+upstreams:
+  -
+    baseline_id: upstream-pg
+    version: "18"
+    evidence:
+      url: "https://tantorlabs.ru"
+      quote: "Российская СУБД общего назначения на базе PostgreSQL с сертификатами ФСТЭК"
 edition_assessed: null
 version: "Tantor Postgres 18.3.0 (06.2026); Platform 7.0 (08.2026)"
 jurisdiction: RU

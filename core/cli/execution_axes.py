@@ -130,6 +130,7 @@ from core.config.deploy import (
     resolve_serp_rounds,
 )
 from core.config.passports import passport_content_digests
+from core.config.run_config import load_baseline_facts, load_baselines
 from core.domain.dictionary import load_dictionary
 from core.domain.enums import FrozenSource, PdfDevice, RefreshPolicy, SearchMode
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
@@ -139,7 +140,12 @@ from core.pipeline.crawl_frontier import (
     resolve_embed_spec,
     resolve_pdf_device,
 )
-from core.pipeline.digests import passports_digest, render_modes_digest
+from core.pipeline.digests import (
+    baseline_facts_digest,
+    baselines_digest,
+    passports_digest,
+    render_modes_digest,
+)
 from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.manual_artifacts import load_manual_artifacts
 from core.pipeline.normalize import RunInputs
@@ -771,6 +777,13 @@ class DeclaredExecutionAxes:
     #: конструкторы): «не объявлено» отличимо от «объявлено пустое множество».
     render_modes_digest: str | None = None
     passports_digest: str | None = None
+    #: План 27 §7.1: отпечатки **политики** наследования (``baselines.csv``) и
+    #: **наблюдений** о документации предка (``sources/baseline_facts.csv``). Оба читаются
+    #: из файлов пакета тем же загрузчиком, что и исполнение (``load_baselines`` /
+    #: ``load_baseline_facts``): второй формулы нет, иначе ``run_id`` описывал бы не тот
+    #: набор, по которому наследовали. ``None`` — резолвер не вызывался (DI/legacy).
+    baselines_digest: str | None = None
+    baseline_facts_digest: str | None = None
     #: C8: схема лексического индекса — читается из адаптера, а не из копии констант:
     #: разъехаться с фактической схемой она не может (тот же приём, что у
     #: ``chunking_spec``).
@@ -1022,6 +1035,40 @@ def _manual_artifacts_digest(args: argparse.Namespace) -> str:
         ) from exc
 
 
+def _baseline_digests(args: argparse.Namespace) -> tuple[str, str]:
+    """Отпечатки политики наследования и фактов о документации предка (план 27 §7.1).
+
+    Читаются **те же** файлы пакета теми же загрузчиками, что увидит исполнение
+    (``load_baselines`` / ``load_baseline_facts``): двух формул нет, иначе ``run_id``
+    описывал бы не тот набор строк, по которому наследовали.
+
+    ``baselines.csv`` — обязательный артефакт пакета, поэтому отсутствие файла — ошибка
+    (как у ``load_baselines`` в ``normalize``). ``sources/baseline_facts.csv`` опционален:
+    его нет — наследования по фактам не будет, и это объявленное пустое множество, а не
+    «неизвестно».
+
+    :raises core.cli.errors.CliError: файл объявлен, но не читается.
+    """
+    package_dir = getattr(args, "package", None)
+    base = Path(package_dir) if package_dir else Path(".")
+    try:
+        baselines = load_baselines(base / "baselines.csv")
+    except (ValueError, OSError) as exc:
+        raise CliError(
+            f"baselines: {exc}", code="baselines", exit_code=EXIT_USAGE
+        ) from exc
+    facts_path = base / "sources" / "baseline_facts.csv"
+    facts = []
+    if facts_path.is_file():
+        try:
+            facts = load_baseline_facts(facts_path)
+        except (ValueError, OSError) as exc:
+            raise CliError(
+                f"baseline_facts: {exc}", code="baseline_facts", exit_code=EXIT_USAGE
+            ) from exc
+    return baselines_digest(baselines), baseline_facts_digest(facts)
+
+
 def _serp_axis(
     *, args: argparse.Namespace, run: Any, deploy: DeployConfig
 ) -> tuple[int, str, str]:
@@ -1101,6 +1148,9 @@ def resolve_declared_axes(
     # частью идентичности — это отказ, а не ``None``.
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
     passports_dir = _resolve_passports_dir(args, getattr(args, "paths", None))
+    # План 27 §7.1: оба отпечатка читаются одним проходом по файлам пакета — второй
+    # вызов открыл бы те же файлы заново и мог бы разойтись с первым по времени чтения.
+    baselines_digest_value, baseline_facts_digest_value = _baseline_digests(args)
     cohort = getattr(inputs, "cohort", None)
     cohort_products = (
         [str(entry.product_id) for entry in cohort.entries]
@@ -1193,4 +1243,8 @@ def resolve_declared_axes(
         # 13-manual-artifacts §3.2: ручные артефакты объявлены файлом пакета, поэтому
         # отпечаток — функция входа (как seeds_digest), а не наблюдение прогона.
         manual_artifacts_digest=_manual_artifacts_digest(args),
+        # План 27 §7.1: политика наследования и факты о документации предка. Оба —
+        # объявленные входы пакета, читаемые тем же загрузчиком, что увидит Ш4.
+        baselines_digest=baselines_digest_value,
+        baseline_facts_digest=baseline_facts_digest_value,
     )

@@ -2,7 +2,7 @@
 product_id: p1
 canonical_name: "Product One"
 vendor: "Vendor One"
-upstream: null
+upstreams: []
 edition_assessed: "Standard"
 version: "1.0"
 jurisdiction: XX

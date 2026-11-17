@@ -194,7 +194,7 @@ PDF с механизмом `structured` (docling) требует ещё extra `
 `embed_cache/`, `state/`) по умолчанию живут вне репозитория — раскладка задаётся
 `COHOUND_HOME` + `COHOUND_PATHS_FILE`, пример в
 [`config/paths.example.yaml`](config/paths.example.yaml). **Ловушка:** `COHOUND_HOME` сдвигает
-все 11 полей раскладки, включая `packages` и `passports` — эти два должны быть
+все 12 полей раскладки, включая `packages` и `passports` — эти два должны быть
 **абсолютными**, иначе CLI не найдёт пакеты.
 
 ### Первый run

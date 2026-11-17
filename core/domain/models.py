@@ -39,6 +39,8 @@ from core.domain.enums import (
     EvidenceType,
     ExtractionRoute,
     ExtractQueueState,
+    FactReview,
+    FactStatus,
     FailureKind,
     Gate,
     GatePolicy,
@@ -238,7 +240,10 @@ class PackageManifest(BaseModel):
     modules: list[ModuleDef]
     roles: list[RoleDef]
     baselines: list[str] = Field(default_factory=list)  # baseline_id
-    baseline_participant: str | None = None
+    #: Базлайн-участники продукта (план 27 §3.2): в архетипе B их несколько — по одному
+    #: на линию наследования (форк + линия, на которой он стоит). Одно поле ``str | None``
+    #: этого не выражало. Архетип C базлайн-участников не имеет — список обязан быть пустым.
+    baseline_participants: list[str] = Field(default_factory=list)
     jurisdictions: list[str] = Field(default_factory=list)
     registries: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
@@ -254,9 +259,9 @@ class PackageManifest(BaseModel):
         rids = [r.role_id for r in self.roles]
         if len(rids) != len(set(rids)):
             raise ValueError("role_id должны быть уникальны")
-        # §1.5: архетип C — эталона нет; baseline_participant должен быть null.
-        if self.archetype is Archetype.C and self.baseline_participant is not None:
-            raise ValueError("архетип C: baseline_participant обязан быть null")
+        # §1.5/план 27 §3.2: архетип C — эталона нет; baseline_participants обязан быть пустым.
+        if self.archetype is Archetype.C and self.baseline_participants:
+            raise ValueError("архетип C: baseline_participants обязан быть пустым")
         return self
 
 
@@ -385,6 +390,137 @@ class BaselineRow(BaseModel):
     note: str | None = None
 
 
+class ReferenceProductVersion(BaseModel):
+    """Версия reference-продукта и корни её документации (план 27 §3.1).
+
+    ``version`` — **мажорная** версия, объявленная явно (решение владельца 2, §7.2):
+    список версий профиль объявляет сам, а не выводит «все подряд». ``docs_roots`` —
+    абсолютные URL корней документации этой версии.
+    """
+
+    model_config = _BASE
+
+    version: str
+    docs_roots: list[str]
+
+    @field_validator("version")
+    @classmethod
+    def _check_version(cls, value: str) -> str:
+        # §7.2: пустая версия — не «любая», а отсутствие объявления: факт ищется ровно
+        # на объявленной версии, поэтому пустая строка сделала бы поиск неопределённым.
+        if not value.strip():
+            raise ValueError("версия reference-продукта обязана быть непустой строкой")
+        return value
+
+
+class ReferenceProduct(BaseModel):
+    """Reference-продукт профиля (план 27 §3.1): декларация, а не наблюдение.
+
+    ``baseline_id`` связывает запись с ``baselines.csv`` и ``passport.upstreams``;
+    ``product_id`` — slug reference-продукта в **общем** с когортой namespace (два смысла
+    одного slug'а в одном пакете — источник молчаливых ошибок). ``current_version`` —
+    версия, по которой строятся карта и наследование.
+    """
+
+    model_config = _BASE
+
+    baseline_id: str
+    product_id: str
+    canonical_name: str
+    versions: list[ReferenceProductVersion]
+    current_version: str
+
+
+class ReferenceProducts(BaseModel):
+    """``sources/reference_products.yaml`` (schema ``reference_products/1``, план 27 §3.1).
+
+    Инварианты (проверяются здесь, а не линтером): уникальность ``baseline_id`` и
+    ``product_id``, непустой список версий, ``current_version`` ∈ объявленных версий.
+    Дубль ``baseline_id`` сделал бы связь «строка baselines.csv → продукт» неоднозначной,
+    а ``current_version`` вне объявленных версий — наследование по версии, которой нет в
+    декларации (молчаливое расхождение «что объявлено» и «по чему считается»).
+    """
+
+    model_config = _BASE
+
+    schema_: str = Field(alias="schema")
+    products: list[ReferenceProduct] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check(self) -> ReferenceProducts:
+        if self.schema_ != "reference_products/1":
+            raise ValueError(
+                f"reference_products: схема {self.schema_!r}, ожидалась 'reference_products/1'"
+            )
+        baseline_ids = [p.baseline_id for p in self.products]
+        if len(baseline_ids) != len(set(baseline_ids)):
+            raise ValueError("reference_products: baseline_id обязаны быть уникальны")
+        product_ids = [p.product_id for p in self.products]
+        if len(product_ids) != len(set(product_ids)):
+            raise ValueError("reference_products: product_id обязаны быть уникальны")
+        for product in self.products:
+            if not product.versions:
+                raise ValueError(
+                    f"reference_products: у {product.baseline_id!r} пустой список versions"
+                )
+            declared = {v.version for v in product.versions}
+            if product.current_version not in declared:
+                raise ValueError(
+                    f"reference_products: current_version {product.current_version!r} "
+                    f"у {product.baseline_id!r} вне объявленных версий {sorted(declared)}"
+                )
+        return self
+
+
+class BaselineFact(BaseModel):
+    """Строка ``sources/baseline_facts.csv`` (план 27 §3.3): наблюдение о документации.
+
+    Не путать с :class:`BaselineRow`: строка ``baselines.csv`` — **политика** (что
+    наследуем и в каком режиме, авторское решение), а факт — **наблюдение** (что у
+    upstream есть в версии V, замер с датой, цитатой и хешем). Наследует только
+    ``status=present`` **и** ``review=accepted``.
+
+    I22-дисциплина: ``present`` без дословной цитаты и хеша текста недопустим — иначе
+    «факт» нечем проверить, а наследование получило бы доказательство без источника.
+    """
+
+    model_config = _BASE
+
+    baseline_id: str
+    param_id: str
+    version: str
+    status: FactStatus
+    url: str | None = None
+    quote: str | None = None
+    content_hash: str | None = None
+    observed_at: str | None = None
+    corpus_build_id: str | None = None
+    review: FactReview = FactReview.PENDING
+    reviewed_by: str | None = None
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> BaselineFact:
+        # I22-дисциплина (план 27 §3.3): «есть в документации» — утверждение с
+        # доказательством. Цитата без хеша не привязана к тексту, хеш без цитаты
+        # нечитаем; поэтому ``present`` требует обоих.
+        if self.status is FactStatus.PRESENT:
+            if not (self.quote or "").strip():
+                raise ValueError("status=present: quote обязан быть непустым")
+            if not (self.content_hash or "").strip():
+                raise ValueError("status=present: content_hash обязан быть непустым")
+            # I15: derived-evidence обязан резолвиться в URL. Факт без адреса не
+            # наследуется (``check_derived_evidence`` откажет), и правильнее сказать это
+            # на входе, чем получить «факт есть, а ячейки нет» без объяснения.
+            if not (self.url or "").strip():
+                raise ValueError("status=present: url обязан быть непустым (I15)")
+        # Подпись человека: ``accepted``/``rejected`` без автора — не решение, а анонимное
+        # состояние; провенанс подписи потерян бы молча.
+        if self.review is not FactReview.PENDING and not (self.reviewed_by or "").strip():
+            raise ValueError(f"review={self.review.value}: reviewed_by обязан быть непустым")
+        return self
+
+
 class GoldenRow(BaseModel):
     """Строка golden.csv (§4.2)."""
 
@@ -453,14 +589,23 @@ class Satellite(BaseModel):
 
 
 class Passport(BaseModel):
-    """passports/{product_id}/{YYYY-MM-DD}.yaml (§4.3)."""
+    """passports/{product_id}/{YYYY-MM-DD}.yaml (§4.3).
+
+    ``upstreams`` — список предков (план 27 §3.2), а не одно поле: в архетипе B у продукта
+    несколько линий наследования (форк и линия, на которой он стоит). **Порядок списка —
+    объявленный приоритет предков**, не порядок вставки: для параметра перебираются
+    ``upstreams`` в объявленном порядке, и наследует первый, у которого есть строка
+    ``baselines.csv`` и принятый факт ``present`` на его версии (§3.2). Перестановка
+    предков меняет, кто победит, поэтому она входит в ``passports_digest`` и даёт новый
+    ``run_id``.
+    """
 
     model_config = _BASE
 
     product_id: str
     canonical_name: str
     vendor: str
-    upstream: Upstream | None = None
+    upstreams: list[Upstream] = Field(default_factory=list)
     edition_assessed: str | None = None
     version: str | None = None
     jurisdiction: str

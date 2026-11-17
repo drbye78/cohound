@@ -138,7 +138,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `core/edge/` | Composition root Z1/DMZ: seam server, auth, audit, seam schema, crawl scheduler, poller, crawler factory, runtime config, launcher. |
 | `scripts/ci.sh` | Single CI entry point (spec §11.6). `scripts/check_doc_anchors.py` gates `path:line` anchors in `docs/`, `README.md`, `AGENTS.md`; `--check-drift BASE` reports anchors whose target line **moved** since `BASE` (a non-empty line at the old address proves nothing — measured 16.11.2026: 55 anchors drifted silently past the non-emptiness check). `scripts/check_runbook.py` gates the user-facing guide the same way anchors gate prose: a command the reader copies must exist. |
 | `tests/selfcheck.py` | Autonomous foundation check (no pytest): dictionary, DDL, invariants, import graph §1, neutrality §1.3. |
-| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `scope_attestation.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`); optional `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
+| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `scope_attestation.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`; `reference_products.yaml` — which upstream lines the profile measures and at which versions; `baseline_facts.csv` — observations about the ancestor's documentation, each with a verbatim quote, text hash and date); optional `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
 | `passports/{product_id}/` | Product passports. |
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
@@ -155,7 +155,7 @@ layout is configured; on a configured host they live outside the repo under `COH
 Connection: `COHOUND_HOME` + `COHOUND_PATHS_FILE` in `./.env`; `paths.yaml` itself stays
 outside git (paths are host-specific).
 
-**Trap:** `COHOUND_HOME` shifts **all 11** `HARNESS_FIELDS`, including `packages` and
+**Trap:** `COHOUND_HOME` shifts **all 12** `HARNESS_FIELDS`, including `packages` and
 `passports` — those two must be **absolute** in `paths.yaml`, otherwise the CLI will not find
 packages. Verify with `./hound.py doctor`, group `layout` (it prints the effective path **and
 its source**). Tool artifacts (mypy/ruff/coverage/hypothesis/pycache/pytest) are addressed by
@@ -499,7 +499,7 @@ Three facts that are cheap to state and expensive to rediscover:
 
 ## 9. Run identity, declared axes, versioning
 
-- `run_id` is a function of **declared inputs only**: 33 fields in
+- `run_id` is a function of **declared inputs only**: 35 fields in
   `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:96`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
@@ -817,6 +817,20 @@ aggregate) and `crawl_product` (product boundaries — the aggregate cannot dist
 queued" from "lost"). "Why does this product have zero sources" is answered by
 `results[].notes` in `run --json`, along with `product_start`/`product_end`/`product_skipped`;
 for a live crawl use `./hound.py crawl status --per-url`.
+
+**Reference products (plan 27).** Inheritance from an upstream line is a **measurement**, not
+an assumption: `sources/reference_products.yaml` declares which lines the profile measures and
+at which versions, `sources/baseline_facts.csv` records observations about the ancestor's
+documentation (verbatim quote + text hash + date + `review`). `./hound.py baseline
+{list|facts|report|review|refresh|recon|map}` reads and writes them; none of it touches `runs/`.
+Only `status=present` **and** `review=accepted` is inherited — anything else means "no
+acceleration", and the parameter is evaluated normally (neither `❓` nor `❌` follows from it).
+A fact is looked up on the **major** version of the declared line (`18.4.1` → `18`), never
+"≤ V": otherwise an upstream regression is papered over. The reference corpus
+(`reference.db` + `manifest.json`) and the map (`maps/{map_id}/`) live under
+`COHOUND_HOME/reference/` and are addressed by **content** (`build_id`, `map_id`), not by path
+or date. `hound baseline recon` is deterministic (quote must be a substring of the chunk text);
+the map is the evaluator's verdict and therefore carries its own identity, including the model.
 
 Blocked bytes the crawler was not allowed to take (robots, auth) enter the corpus as a
 **declared** input, never by editing `corpus_raw`: `./hound.py artifacts list …` shows the

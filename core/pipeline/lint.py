@@ -65,7 +65,12 @@ __all__ = [  # noqa: RUF022
     "check_showcase_metric",
     "check_slug_lowercase",
     "check_anchor_in_products",
+    "check_baseline_reference_product",
+    "check_passport_upstreams",
+    "check_upstream_presence",
     "check_products_match_cohort",
+    "check_reference_product_not_in_cohort",
+    "check_reference_versions",
     "check_unfilled_authoring",
 ]
 
@@ -161,6 +166,193 @@ def check_archetype_c_baselines(inputs: RunInputs) -> list[str]:
         "§4.2/§1.5: архетип C не заполняет baselines "
         f"(найдено: {', '.join(found)})"
     ]
+
+
+def _declared_reference_ids(inputs: RunInputs) -> set[str] | None:
+    """``baseline_id`` объявленных reference-продуктов; ``None`` — декларации нет."""
+    declared = getattr(inputs, "reference_products", None)
+    if declared is None:
+        return None
+    return {product.baseline_id for product in declared.products}
+
+
+def check_baseline_reference_product(inputs: RunInputs) -> list[str]:
+    """План 27 §6.4/§10: строка ``baselines.csv`` обязана иметь reference-продукт.
+
+    ``direct``-наследование без reference-продукта — это ровно тот путь, которым 181 «✅»
+    превращаются в фикцию: цитата берётся не из документации предка, а из паспортной
+    визитки продукта («мы на базе X»), и обслуживает все параметры сразу. Поэтому связь
+    «строка базлайна → объявленный reference-продукт» проверяется **до** прогона, а не
+    выясняется из пустого ``inheritance.jsonl``.
+
+    Пустой ``baselines.csv`` правило не задевает (архетип C и пилот, где механизм ещё не
+    заполнен): блокируется только строка, которой некуда наследовать.
+    """
+    if not inputs.baselines:
+        return []
+    declared = _declared_reference_ids(inputs)
+    known = set() if declared is None else declared
+    orphans = [
+        (row.baseline_id, row.param_id)
+        for row in inputs.baselines
+        if row.baseline_id not in known
+    ]
+    if not orphans:
+        return []
+    first_bid, first_pid = sorted(orphans)[0]
+    suffix = "" if declared is not None else " (sources/reference_products.yaml отсутствует)"
+    return [
+        f"baseline-without-reference-product: строка ({first_bid}, {first_pid}) "
+        f"наследует от baseline_id {first_bid!r}, но reference-продукт для него не "
+        f"объявлен (§27.6.4){suffix}; всего строк без предка: {len(orphans)}"
+    ]
+
+
+def check_reference_product_not_in_cohort(inputs: RunInputs) -> list[str]:
+    """План 27 §10: reference-продукт не входит в сравнение когорты.
+
+    ``product_id`` reference-продукта делит namespace с продуктами когорты намеренно
+    (два смысла одного slug'а в одном пакете — источник молчаливых ошибок), поэтому
+    пересечение обязано ловиться линтером, а не глазами: иначе «карта предка» и «карта
+    продукта» смешались бы в отчёте, а карта когорты получила бы лишнего участника.
+    """
+    declared = getattr(inputs, "reference_products", None)
+    if declared is None or not declared.products:
+        return []
+    cohort_ids = {str(entry.product_id) for entry in inputs.cohort.entries}
+    run_ids = {str(pid) for pid in getattr(inputs.run, "products", ())}
+    collisions = sorted(
+        {product.product_id for product in declared.products} & (cohort_ids | run_ids)
+    )
+    if not collisions:
+        return []
+    return [
+        "reference-product-in-cohort: product_id "
+        + ", ".join(repr(pid) for pid in collisions)
+        + " объявлен как reference-продукт и одновременно участвует в когорте (§27.10)"
+    ]
+
+
+def check_reference_versions(inputs: RunInputs) -> list[str]:
+    """План 27 §7.2: версии — числовые, мажор приводится однозначно.
+
+    Факт ищется **ровно на объявленной мажорной версии**, поэтому нечисловая версия
+    (``"abc"``) сделала бы поиск неопределённым: «не нашли» стало бы неотличимо от
+    «сравнивать нечем». Это линт-ошибка, а не «пропустим».
+
+    Проверяются обе стороны: объявленные версии reference-продукта и ``min_version``
+    строк ``baselines.csv`` (это пол применимости, и он сравнивается численно).
+    """
+    from core.pipeline.inheritance import major_version
+
+    violations: list[str] = []
+    declared = getattr(inputs, "reference_products", None)
+    if declared is not None:
+        for product in declared.products:
+            for version in product.versions:
+                if major_version(version.version) is None:
+                    violations.append(
+                        f"baseline-version-numeric: {product.baseline_id}: версия "
+                        f"{version.version!r} не содержит числового мажора (§27.7.2)"
+                    )
+    for row in inputs.baselines:
+        if row.min_version and major_version(row.min_version) is None:
+            violations.append(
+                f"baseline-version-numeric: ({row.baseline_id}, {row.param_id}): "
+                f"min_version {row.min_version!r} не содержит числового мажора (§27.7.2)"
+            )
+    return sorted(violations)
+
+
+def check_passport_upstreams(inputs: RunInputs) -> list[str]:
+    """План 27 §3.2/§10: предки паспорта объявлены, их число согласовано с архетипом.
+
+    Проверяется только когорта: каталог паспортов содержит продукты всех пакетов, и
+    чужой паспорт не должен валить этот.
+
+    * ``baseline_id`` из ``passport.upstreams`` обязан быть объявлен в
+      ``reference_products.yaml`` — иначе продукт объявляет линию, о которой профиль
+      ничего не знает, и наследовать по ней нечему;
+    * архетип A — линия одна, поэтому **больше одного** предка у продукта быть не может
+      (это была бы заявка формы B в A-пакете), и линия обязана быть объявлена **хоть
+      кем-то**: A-пакет без единого предка не использует наследование вовсе;
+    * архетип C — предков нет (эталона нет, §1.5).
+
+    **Продукт без предка не блокирует** (отличие от буквы §3.2 плана, и оно осознанное):
+    «вендор не называет версию» — честное состояние (объявленный продукт может не
+    указывать предка: версия ядра ≠ версия линии, на которой он стоит), и требовать предка
+    значило бы заставить автора его выдумать.
+    Такие продукты публикуются **предупреждением**, а не блоком; блок — только
+    противоречие объявленному (два предка в A, предок в C, необъявленный baseline_id).
+
+    Паспорта приходят из раскладки, а не из пакета, поэтому проверка работает, когда
+    composition root их передал (``inputs.passports``); неизвестность не выдаётся за
+    «нарушений нет» — она просто не проверяется здесь.
+    """
+    passports = getattr(inputs, "passports", None) or {}
+    if not passports:
+        return []
+    cohort_ids = [str(entry.product_id) for entry in inputs.cohort.entries]
+    declared = _declared_reference_ids(inputs)
+    archetype = inputs.package.archetype
+    violations: list[str] = []
+    declared_lines = 0
+    for product_id in sorted(cohort_ids):
+        passport = passports.get(product_id)
+        if passport is None:
+            continue
+        upstreams = list(getattr(passport, "upstreams", ()) or ())
+        ids = [str(upstream.baseline_id) for upstream in upstreams]
+        if ids:
+            declared_lines += 1
+        undeclared = sorted({bid for bid in ids if bid not in (declared or set())})
+        if undeclared and declared is not None:
+            violations.append(
+                f"passport-upstream-undeclared: {product_id}: "
+                + ", ".join(repr(bid) for bid in undeclared)
+                + " не объявлен в sources/reference_products.yaml (§27.10)"
+            )
+        if archetype is Archetype.A and len(upstreams) > 1:
+            violations.append(
+                f"upstreams-by-archetype: {product_id}: архетип A — одна линия, "
+                f"объявлено предков: {len(upstreams)} (§27.3.2)"
+            )
+        if archetype is Archetype.C and upstreams:
+            violations.append(
+                f"upstreams-by-archetype: {product_id}: архетип C не объявляет upstream "
+                f"(объявлено {len(upstreams)}) (§1.5/§27.3.2)"
+            )
+    if archetype is Archetype.A and cohort_ids and declared_lines == 0:
+        violations.append(
+            "upstreams-by-archetype: архетип A не объявляет ни одного предка ни у одного "
+            "продукта когорты — пакет описывает линию, которой нет (§27.3.2)"
+        )
+    return violations
+
+
+def check_upstream_presence(inputs: RunInputs) -> list[str]:
+    """План 27 §3.2: продукт A-пакета без объявленного предка — видимое состояние.
+
+    Не блокирует: «вендор не называет версию» — честное состояние (продукт может не
+    указывать предка: версия ядра ≠ версия линии, на которой он стоит), и требовать предка
+    значило бы заставить автора его выдумать (A3, precision-first). Предупреждение нужно затем,
+    чтобы «наследование для продукта недоступно» было названо, а не выяснялось из
+    отсутствия ячеек.
+    """
+    passports = getattr(inputs, "passports", None) or {}
+    if not passports or inputs.package.archetype is not Archetype.A:
+        return []
+    messages: list[str] = []
+    for product_id in sorted(str(entry.product_id) for entry in inputs.cohort.entries):
+        passport = passports.get(product_id)
+        if passport is None:
+            continue
+        if not list(getattr(passport, "upstreams", ()) or ()):
+            messages.append(
+                f"upstreams-by-archetype: {product_id}: архетип A, но предок не объявлен "
+                "— наследование для продукта недоступно (§27.3.2)"
+            )
+    return messages
 
 
 def check_absence_attestation(inputs: RunInputs) -> list[str]:
@@ -414,6 +606,18 @@ def check_unfilled_authoring(inputs: RunInputs) -> list[str]:
 RULES: tuple[LintRule, ...] = (
     LintRule("weights-sum-100", "blocking", check_weights_sum_to_100),
     LintRule("archetype-c-baselines", "blocking", check_archetype_c_baselines),
+    # План 27 §10: связь «строка базлайна → объявленный reference-продукт», namespace
+    # когорты и версии. Все три блокируют: без них наследование опирается на паспортную
+    # визитку, а карта предка смешалась бы с картой продукта.
+    LintRule(
+        "baseline-without-reference-product", "blocking", check_baseline_reference_product
+    ),
+    LintRule(
+        "reference-product-in-cohort", "blocking", check_reference_product_not_in_cohort
+    ),
+    LintRule("baseline-version-numeric", "blocking", check_reference_versions),
+    LintRule("passport-upstreams", "blocking", check_passport_upstreams),
+    LintRule("upstream-presence", "warning", check_upstream_presence),
     LintRule("absence-attestation", "blocking", check_absence_attestation),
     LintRule("golden-full-absent-stratum", "blocking", check_golden_full_absent_stratum),
     LintRule("showcase-metric", "blocking", check_showcase_metric),

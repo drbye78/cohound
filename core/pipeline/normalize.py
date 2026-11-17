@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -35,19 +36,23 @@ from core.config.crawl_sources import CrawlSourcesConfig, load_crawl_sources
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
     cross_check_products,
+    load_baseline_facts,
     load_baselines,
     load_catalog,
     load_cohort,
     load_golden,
     load_package_manifest,
+    load_reference_products,
     load_run_config,
 )
 from core.domain.models import (
+    BaselineFact,
     BaselineRow,
     CatalogRow,
     Cohort,
     GoldenRow,
     PackageManifest,
+    ReferenceProducts,
     RunConfig,
     ScopeAttestation,
 )
@@ -100,6 +105,21 @@ class RunInputs:
     crawl_policy: CrawlPolicyConfig = field(default_factory=CrawlPolicyConfig)
     scope_attestation_procedure: str | None = None
     golden_status: GoldenStatus | None = None
+    #: План 27 §3.1: декларация reference-продуктов профиля
+    #: (``sources/reference_products.yaml``). ``None`` — файла нет: reference-продуктов
+    #: профиль не объявлял, и наследование по фактам невозможно (линтер это проверит,
+    #: если ``baselines.csv`` непуст).
+    reference_products: ReferenceProducts | None = None
+    #: План 27 §3.3: наблюдения о документации предка (``sources/baseline_facts.csv``).
+    #: Пусто — фактов ещё не разведали: наследования по фактам не будет, и это не
+    #: наблюдение о продукте (§1.1 плана).
+    baseline_facts: list[BaselineFact] = field(default_factory=list)
+    #: Паспорта продуктов (``product_id → Passport``) — заполняет composition root, когда
+    #: каталог паспортов известен из раскладки. Нужны линтеру для проверки, что предки
+    #: паспорта объявлены в ``reference_products.yaml`` и что их число соответствует
+    #: архетипу (план 27 §3.2/§10). ``None``/пусто — проверка не выполнена (неизвестность
+    #: не выдаётся за «нарушений нет»).
+    passports: dict[str, Any] = field(default_factory=dict)
 
 
 def load_scope_attestation(package_dir: str | Path) -> str | None:
@@ -261,6 +281,13 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
         load_crawl_policy(policy_path) if policy_path.exists() else CrawlPolicyConfig()
     )
 
+    reference_path = package_path / "sources" / "reference_products.yaml"
+    reference_products = (
+        load_reference_products(reference_path) if reference_path.exists() else None
+    )
+    facts_path = package_path / "sources" / "baseline_facts.csv"
+    baseline_facts = load_baseline_facts(facts_path) if facts_path.exists() else []
+
     return RunInputs(
         run=run,
         package=package,
@@ -273,6 +300,8 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
         crawl_policy=crawl_policy,
         scope_attestation_procedure=load_scope_attestation(package_path),
         golden_status=golden_status,
+        reference_products=reference_products,
+        baseline_facts=baseline_facts,
     )
 
 

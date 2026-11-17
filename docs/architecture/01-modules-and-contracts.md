@@ -231,7 +231,7 @@ min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` 
 ### 2.5. `domain/r2.py`, `domain/anchors.py`, `domain/dictionary.py`
 
 `r2.py` держит `apply_r2` (`core/domain/r2.py:11`), `dictionary.py` —
-`load_dictionary`/`assert_dictionary_integrity` (`core/domain/dictionary.py:71,80`).
+`load_dictionary`/`assert_dictionary_integrity` (`core/domain/dictionary.py:73,82`).
 `anchors.py` добавляет `resolve_source_url(source_id, resolver: SourceResolver)` — **детерминированный**
 резолв (I10/I15): `source_id` кодирует `product_id`+`doc_id`+`chunk_no` (+ привязку к `build_id`),
 резолв — по индексу, без сети. `SourceResolver` — reader-протокол, **объявленный внутри `domain/`**
@@ -940,7 +940,7 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:272` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1511`; структура `ProtocolExhaustion` — `core/domain/models.py:1348`;
+`core/domain/models.py:1726`; структура `ProtocolExhaustion` — `core/domain/models.py:1348`;
 политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2851` (`max_retries`), цикл
 `core/pipeline/evaluate.py:3163`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:

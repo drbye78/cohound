@@ -33,6 +33,8 @@ from core.domain.enums import (
     ExcludedCellClass,
     ExtractionRoute,
     ExtractQueueState,
+    FactReview,
+    FactStatus,
     FailureKind,
     FetchMode,
     Gate,
@@ -174,6 +176,13 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # P6c: полоса неопределённости вердиктов — ограничение ранжирования и провенанс.
         "ranking_restriction",
         "uncertainty_provenance",
+        # План 27 §3.3: наблюдение о документации reference-продукта и подпись человека
+        # под ним. Секции обязательны, потому что производитель у обоих есть: recon
+        # пишет ``fact_status``/``fact_review`` в ``baseline_facts.csv``, а Ш4 читает
+        # ``accepted`` как условие наследования — расхождение словаря и enum'а молча
+        # меняло бы набор унаследованных ячеек.
+        "fact_status",
+        "fact_review",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -276,6 +285,11 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # словарь и enum разъезжаются молча (как было бы с любой строкой «на глаз»).
         "ranking_restriction": {v.value for v in RankingRestriction},
         "uncertainty_provenance": {v.value for v in UncertaintyProvenance},
+        # План 27 §3.3: наблюдение о документации предка и подпись человека. Оба
+        # значения ходят в ``baseline_facts_digest`` (идентичность прогона) и решают,
+        # наследуется ли ячейка: расхождение словаря и enum'а молча меняло бы вердикты.
+        "fact_status": {v.value for v in FactStatus},
+        "fact_review": {v.value for v in FactReview},
     }
     for section, expected in checks.items():
         actual = set(data[section])

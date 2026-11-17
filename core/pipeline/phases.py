@@ -1280,8 +1280,13 @@ def build_phases(
     def inheritance_phase(ctx: RunContext) -> PhaseResult:
         """Ш4: волна наследования по ``baselines`` и паспортам (I8)."""
         baselines = list(getattr(inputs, "baselines", None) or [])
+        # План 27 §6.2: наблюдения о документации предка — объявленный вход пакета
+        # (``sources/baseline_facts.csv``). Пусто — наследования по фактам не будет, и
+        # базис назовёт причину ``baseline_fact_missing``; подставлять паспортную цитату
+        # вместо факта запрещено (§6.4): именно так 181 «✅» превращались в фикцию.
+        facts = list(getattr(inputs, "baseline_facts", None) or [])
         return _as_phase(
-            inheritance_wave(plan, baselines, passports or {}, ctx.store),
+            inheritance_wave(plan, baselines, passports or {}, ctx.store, facts),
             "inheritance",
         )
 

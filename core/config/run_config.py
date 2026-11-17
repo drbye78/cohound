@@ -35,6 +35,8 @@ from pydantic import ValidationError
 
 from core.domain.enums import (
     AbsenceRuleType,
+    FactReview,
+    FactStatus,
     GoldenTier,
     Importance,
     InheritanceMode,
@@ -43,21 +45,25 @@ from core.domain.enums import (
     Status,
 )
 from core.domain.models import (
+    BaselineFact,
     BaselineRow,
     CatalogRow,
     Cohort,
     GoldenRow,
     PackageManifest,
+    ReferenceProducts,
     RunConfig,
 )
 
 __all__ = [
     "cross_check_products",
+    "load_baseline_facts",
     "load_baselines",
     "load_catalog",
     "load_cohort",
     "load_golden",
     "load_package_manifest",
+    "load_reference_products",
     "load_run_config",
 ]
 
@@ -80,6 +86,9 @@ _CATALOG_COLUMNS = (
     "search_langs",
 )
 _BASELINE_COLUMNS = ("baseline_id", "param_id", "inheritance_mode")
+#: Колонки ``sources/baseline_facts.csv`` (план 27 §3.3). Обязательны только четыре
+#: идентифицирующие; остальные читаются как пустые, если колонки нет в файле.
+_BASELINE_FACT_COLUMNS = ("baseline_id", "param_id", "version", "status")
 _GOLDEN_COLUMNS = (
     "product_id",
     "param_id",
@@ -240,7 +249,7 @@ def load_package_manifest(path: str | Path) -> PackageManifest:
     """Загружает ``package.yaml`` (§4.2) в :class:`PackageManifest`.
 
     Валидаторы домена обеспечивают: сумма весов модулей = 100, уникальность
-    ``module_id``/``role_id``, ``baseline_participant is None`` для архетипа C.
+    ``module_id``/``role_id``, ``baseline_participants`` пуст для архетипа C.
     """
     data = _as_mapping(_read_yaml(path), "package.yaml")
     return PackageManifest.model_validate(data)
@@ -304,6 +313,56 @@ def load_baselines(path: str | Path) -> list[BaselineRow]:
             )
         except (ValidationError, ValueError) as exc:
             raise ValueError(f"baselines.csv строка {lineno}: {exc}") from exc
+    return rows
+
+
+def load_reference_products(path: str | Path) -> ReferenceProducts:
+    """Загружает ``sources/reference_products.yaml`` (план 27 §3.1) в доменную модель.
+
+    Декларация reference-продуктов профиля: какие baseline_id объявлены, какие у них
+    версии и корни документации. Отсутствие файла — не здесь: вызывающий решает, что
+    значит «не объявлено» (``None``), иначе пустая декларация и её отсутствие слились бы.
+
+    :raises ValueError: файл не читается или не соответствует схеме ``reference_products/1``.
+    """
+    data = _as_mapping(_read_yaml(path), "reference_products.yaml")
+    try:
+        return ReferenceProducts.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(f"reference_products.yaml: {exc}") from exc
+
+
+def load_baseline_facts(path: str | Path) -> list[BaselineFact]:
+    """Загружает ``sources/baseline_facts.csv`` (план 27 §3.3) в ``list[BaselineFact]``.
+
+    Наблюдение, а не политика: строка говорит, что у upstream **в версии V** параметр
+    описан (``present``) или не описан (``absent``/``unclear``), с дословной цитатой,
+    хешем текста и датой наблюдения. Пустые необязательные колонки читаются как ``None``;
+    ``review`` по умолчанию ``pending`` — прибор не подписывает за человека.
+
+    :raises ValueError: строка не валидна (в т.ч. ``present`` без цитаты/хеша).
+    """
+    rows: list[BaselineFact] = []
+    for lineno, row in _iter_csv(path, _BASELINE_FACT_COLUMNS, "baseline_facts.csv"):
+        try:
+            rows.append(
+                BaselineFact(
+                    baseline_id=_req(row, "baseline_id"),
+                    param_id=_req(row, "param_id"),
+                    version=_req(row, "version"),
+                    status=FactStatus(_req(row, "status")),
+                    url=_opt(row, "url"),
+                    quote=_opt(row, "quote"),
+                    content_hash=_opt(row, "content_hash"),
+                    observed_at=_opt(row, "observed_at"),
+                    corpus_build_id=_opt(row, "corpus_build_id"),
+                    review=FactReview(_opt(row, "review") or FactReview.PENDING.value),
+                    reviewed_by=_opt(row, "reviewed_by"),
+                    note=_opt(row, "note"),
+                )
+            )
+        except (ValidationError, ValueError) as exc:
+            raise ValueError(f"baseline_facts.csv строка {lineno}: {exc}") from exc
     return rows
 
 

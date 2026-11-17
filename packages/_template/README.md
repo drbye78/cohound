@@ -30,7 +30,7 @@ URL/имена в иллюстративных местах используют
 
 | Файл | Статус | Что заполнить |
 |---|---|---|
-| `package.yaml` | обязателен | `case_id`, `archetype` (здесь **B** — кросс-линейный, эталона нет), модули с весами (Σ = 100), роли с `definition`/`markers`/`query_patterns`, `jurisdictions`, `languages`. `baselines: []`, `baseline_participant: null`. |
+| `package.yaml` | обязателен | `case_id`, `archetype` (здесь **B** — кросс-линейный, эталона нет), модули с весами (Σ = 100), роли с `definition`/`markers`/`query_patterns`, `jurisdictions`, `languages`. `baselines: []`, `baseline_participants: []`. |
 | `catalog.csv` | обязателен | 11 колонок; здесь **5 строк-примеров**, показывающих формат (факт ×4 + showcase ×1) — `title`/`rule` иллюстративные, замените реальными. `param_id` — slug нижнего регистра, `concept_terms` — JSON `{"ru":[…],"en":[…]}` (кавычки в CSV удваиваются), `search_langs` — через `\|`. |
 | `baselines.csv` | обязателен | Архетип B: **только заголовок** (наследования базовой линии нет). |
 | `cohort.yaml` | обязателен | Ровно один `anchor` + аналоги; уникальные `product_id`. `selection_reason` — пустой до заполнения. |

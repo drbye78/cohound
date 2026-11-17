@@ -23,6 +23,10 @@ reports/*.csv
 # Индексные сборки (.npy-шарды) — иммутабельны, но велики
 index_store/
 
+# Reference-корпус и карты предка (план 27 §4): данные хоста, как runs/ и index_store/.
+# Переживают прогон, адресуются содержимым (`build_id`/`map_id`), в git не едут.
+reference/
+
 # Байты, скачанные вручную (`hound artifacts fetch`): декларация
 # `sources/manual_artifacts.yaml` версионируется, сами байты — данные хоста.
 packages/*/sources/manual/

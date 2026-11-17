@@ -13,6 +13,7 @@ from core.cli.commands import (
     artifacts,
     backup,
     baseline,
+    baseline_products,
     crawl,
     deploy,
     diff,
@@ -53,6 +54,11 @@ COMMANDS = (
     sensitivity,
     golden,
     baseline,
+    # ``baseline_products`` — группа ``hound baseline`` (reference-продукты профиля,
+    # план 27 §5): стоит рядом с ``baseline-agreement`` (согласие аннотаторов, §11.5),
+    # потому что оба — про эталон, но предметы разные: измерение предка против
+    # человеческой разметки.
+    baseline_products,
     report,
     # Бэкап/восстановление стоят сразу за отчётом: это операции над готовым прогоном
     # (``runs/{run_id}/``) и его durable-состоянием, а не часть измерения.

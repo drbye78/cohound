@@ -35,8 +35,9 @@ def _package(tmp_path: Path, name: str = "policy_pkg") -> Path:
     package.mkdir()
     for filename in ("package.yaml", "catalog.csv", "baselines.csv", "cohort.yaml"):
         shutil.copy(FIXTURES / filename, package / filename)
-    (package / "sources").mkdir()
-    shutil.copy(FIXTURES / "sources" / "seeds.yaml", package / "sources" / "seeds.yaml")
+    # Каталог целиком: `sources/reference_products.yaml` объявляет reference-продуктов,
+    # без которых непустой `baselines.csv` блокируется (план 27 §10).
+    shutil.copytree(FIXTURES / "sources", package / "sources")
     (package / "scope_attestation.yaml").write_text(
         "procedure: ручная аттестация полноты источника (тест)\n", encoding="utf-8"
     )

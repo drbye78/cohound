@@ -9,6 +9,8 @@
 | `package.yaml` | Обязательный манифест категории: модули, роли и методологические метаданные. |
 | `catalog.csv` | Обязательный каталог измеряемых параметров; один параметр на строку. |
 | `baselines.csv` | Обязательный заголовок и, когда применимо, правила наследования baseline. Может быть без строк данных. |
+| `sources/reference_products.yaml` | Необязательная **декларация reference-продуктов профиля**: какие линии профиль считает предками и какие версии объявлены (schema `reference_products/1`). Без неё строки `baselines.csv` и `passport.upstreams` не проходят линт. |
+| `sources/baseline_facts.csv` | Необязательные **наблюдения** о документации предка: «параметр P в версии V описан здесь», с дословной цитатой, хешем текста и датой. Наследует только `status=present` **и** `review=accepted`. |
 | `cohort.yaml` | Обязательный замороженный состав продуктов и единственный anchor. |
 | `run.yaml` | Обязательный мандат конкретного прогона; products проецируют когорту. |
 | `golden.csv` | Проверочные эталонные примеры; необязателен для обычного run, хотя присутствует в шаблоне. |
@@ -42,7 +44,7 @@ roles:
     core_coverage_allowed: true
     multi_instance: false
 baselines: []
-baseline_participant: null
+baseline_participants: []
 jurisdictions: [XX]
 registries: []
 languages: [ru, en]
@@ -53,7 +55,7 @@ languages: [ru, en]
 * `archetype` — `A`, `B` или `C`; ограничения baseline зависят от архетипа.
 * `modules[]`: `module_id` — стабильный lowercase slug, `weight` — вес модуля; сумма весов ровно 100.
 * `roles[]`: `role_id` — стабильный slug; `definition` — содержательное определение; `markers` — публичные ориентиры роли; `query_patterns` — поисковые шаблоны по языковым ключам; `core_coverage_allowed` и `multi_instance` — булевы правила роли. Пустые авторские поля — incomplete, а не повод сочинять значения.
-* `baselines` — объявленные baseline-идентификаторы; `baseline_participant` — участие пакета в baseline либо `null`. Архетип B обычно использует пустой список; архетип C не допускает непустой `baselines.csv`.
+* `baselines` — объявленные baseline-идентификаторы; `baseline_participants` — **список** линий, на которых стоит пакет (в архетипе B их несколько: форк и линия, на которой он стоит; `[]` — линий нет). Архетип C не допускает непустой `baselines.csv`.
 * `jurisdictions` — коды юрисдикций, относящиеся к профилю категории.
 * `registries` — идентификаторы файлов `registries/{id}.yaml`.
 * `languages` — языки пакета.
@@ -80,7 +82,42 @@ feature_alpha,Функция Alpha,core,capabilities,Кр,fact,"Засчитыв
 
 ## `baselines.csv`
 
-Фиксированный заголовок: `baseline_id,param_id,min_version,inheritance_mode,note`. Каждая строка связывает известный baseline с параметром. `min_version` задаёт нижнюю версию источника baseline, `inheritance_mode` — `direct`, `conditional` или `blocked`, `note` — пояснение применения. Для архетипа B допустим только заголовок без строк.
+Фиксированный заголовок: `baseline_id,param_id,min_version,inheritance_mode,note`. Каждая строка связывает известный baseline с параметром. `min_version` задаёт **пол** применимости строки (не диапазон поиска), `inheritance_mode` — `direct`, `conditional` или `blocked`, `note` — пояснение применения.
+
+Строка — это **политика**, а не наблюдение: она говорит, что наследовать и с какого пола. Само наблюдение («в документации версии V параметр описан») живёт в `sources/baseline_facts.csv` и несёт цитату, хеш текста и дату. Наследует **первый** предок из `passport.upstreams` (порядок = приоритет), у которого есть строка и принятый факт `present` на объявленной мажорной версии; проигравшие линии публикуются причинами в базисе наследования (`hound baseline report`).
+
+Для архетипа B допустим только заголовок без строк.
+
+## `sources/reference_products.yaml`
+
+```yaml
+schema: reference_products/1
+products:
+  - baseline_id: upstream_line
+    product_id: upstream_product
+    canonical_name: "Upstream Product"
+    versions:
+      - version: "18"
+        docs_roots: ["https://upstream.example/docs/18/"]
+    current_version: "18"
+```
+
+* `baseline_id` — стабильный идентификатор линии; на него ссылаются `baselines.csv` и `passport.upstreams`.
+* `product_id` — slug reference-продукта; **не может** совпадать с продуктом когорты (линт блокирует: reference-продукт не измеряется в прогоне).
+* `versions[].version` — объявленная версия; сравнивается **по мажору** (`18.4.1` → `18`), нечисловая версия — линт-ошибка.
+* `current_version` — версия, по которой строятся карта и наследование.
+
+Роль reference-продукта **вычисляется**, а не объявляется: если продукт когорты назвал линию предком в паспорте — это `ancestor`, иначе `parallel` (`hound baseline list`).
+
+## `sources/baseline_facts.csv`
+
+Фиксированный заголовок: `baseline_id,param_id,version,status,url,quote,content_hash,observed_at,corpus_build_id,review,reviewed_by,note`.
+
+* `status` — `present` (место найдено и процитировано), `absent` (проход по **полному** охвату не нашёл) или `unclear` (не нашли при неполном охвате — «не смотрели» не выдаётся за «нет»).
+* `review` — `pending` (прибор записал, человек не подписал), `accepted`, `rejected`. **Наследует только `accepted`**; подпись ставит человек: `hound baseline review --accept --actor …`.
+* `quote` — дословная подстрока текста чанка; выдуманная цитата отсекается при разведке, а не при наследовании.
+* `url` обязателен при `status=present`: производное доказательство обязано резолвиться в адрес.
+* `observed_at`/`corpus_build_id`/`reviewed_by`/`note` — провенанс записи, в `run_id` не входят. Входит `review`: снятие `accepted` меняет набор унаследованных ячеек.
 
 ## `cohort.yaml`
 

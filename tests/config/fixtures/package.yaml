@@ -16,7 +16,7 @@ roles:
     core_coverage_allowed: true
     multi_instance: false
 baselines: [baseline_a]
-baseline_participant: baseline_a
+baseline_participants: [baseline_a]
 jurisdictions: [RU]
 registries: []
 languages: [ru, en]

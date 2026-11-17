@@ -34,6 +34,7 @@ from core.cli.context import (
     _follow_session,
     _gate_runtime,
     _load_corpus_urls,
+    _load_passports_dir,
     _load_render_modes,
     _only_failed_work_set,
     _open_state_store,
@@ -46,6 +47,7 @@ from core.cli.context import (
     _print_run_report,
     _product_callback,
     _progress_callback,
+    _resolve_passports_dir,
     _resolve_phases,
     _resolve_plan,
     _resolve_ports,
@@ -709,6 +711,12 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
     (``reconcile_seed_set``) и резолвит режимы продуктов (``new``/``full``/``incremental``).
     """
     inputs = load_inputs(args.run_yaml, args.package)
+    # План 27 §10: линтер сверяет предков паспорта с объявленными reference-продуктами.
+    # Паспорта приходят из раскладки, а не из пакета, поэтому composition root кладёт их
+    # в ``inputs`` до линта — иначе правило молчало бы «не проверял».
+    inputs.passports = _load_passports_dir(
+        _resolve_passports_dir(args, getattr(args, "paths", None))
+    )
     report = lint_run_inputs(inputs)
     package_id = Path(args.package).name
     # Момент старта прогона — для lineage state-контура (09 §4.2 ``run_lineage``).

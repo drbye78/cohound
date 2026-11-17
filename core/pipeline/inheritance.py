@@ -41,15 +41,19 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from core.domain import (
+    BaselineFact,
     BaselineRow,
     CatalogRow,
     Cell,
     CellEvidence,
     CellState,
     EvidenceType,
+    FactReview,
+    FactStatus,
     InheritanceMode,
     LLMEvidence,
     Passport,
@@ -73,16 +77,31 @@ from core.pipeline.precedence import (
     resolve_precedence,
 )
 from core.pipeline.runner import PhaseResult
-from core.util.hashing import content_hash
 
 __all__ = [
+    "InheritanceDecision",
     "apply_precedence",
+    "decide_inheritance",
     "inheritance_basis",
     "inheritance_wave",
+    "major_version",
 ]
 
-#: Разделитель полей для детерминированного хэша цитаты (unit separator).
-_FIELD_SEP = "\x1f"
+# Машинные токены причин «не наследовали» (план 27 §6.2). Публикуются по продукту и
+# параметру в ``inheritance_basis``: «объявлено 181, выпущено 140» без причин читается
+# как дефект конвейера, а не как «41 факт ещё не разведан».
+REASON_NO_POLICY_ROW = "no_policy_row"
+REASON_MODE_BLOCKED = "mode_blocked"
+REASON_MODE_CONDITIONAL = "mode_conditional"
+REASON_BELOW_MIN_VERSION = "below_min_version"
+REASON_VERSION_UNPARSABLE = "version_unparsable"
+REASON_FACT_MISSING = "baseline_fact_missing"
+
+#: Причина «факт есть, но не принят» — ``baseline_fact_pending``/``..._rejected``.
+REASON_FACT_REVIEW = "baseline_fact_{review}"
+
+#: Причина «факт принят, но статус не ``present``» — ``baseline_fact_absent``/``..._unclear``.
+REASON_FACT_STATUS = "baseline_fact_{status}"
 
 
 def _passport_index(passports: Any) -> dict[str, Passport]:
@@ -116,6 +135,26 @@ def _baseline_index(baselines: Iterable[BaselineRow]) -> dict[tuple[str, str], B
     return index
 
 
+def _fact_index(
+    facts: Iterable[BaselineFact],
+) -> dict[tuple[str, str, str], BaselineFact]:
+    """Индексирует факты по ``(baseline_id, param_id, версия)`` (план 27 §6.2).
+
+    Ключ включает **версию**: один параметр в v11 и v18 — два разных факта, и lookup
+    обязан их различать (I15). При дублях остаётся первая по сортировке ключа; повторная
+    запись того же ключа — дефект файла, и он виден в ``hound baseline facts``, а не
+    разрешается молча последним вхождением.
+    """
+    ordered = sorted(
+        (fact for fact in facts if fact is not None),
+        key=lambda fact: (fact.baseline_id, fact.param_id, fact.version),
+    )
+    index: dict[tuple[str, str, str], BaselineFact] = {}
+    for fact in ordered:
+        index.setdefault((fact.baseline_id, fact.param_id, fact.version), fact)
+    return index
+
+
 def _numeric_version(value: str | None) -> tuple[int, ...] | None:
     """Числовые компоненты версии (``"16.2-beta1"`` → ``(16, 2, 1)``)."""
     if not value:
@@ -144,29 +183,56 @@ def _satisfies_min_version(version: str | None, min_version: str | None) -> bool
     return current >= minimum
 
 
-def _upstream_source_id(baseline: BaselineRow, param_id: str) -> str:
-    """Нейтральный ``source_id`` паспортной цитаты upstream (K5, §4.2 регламента)."""
-    return f"upstream://{baseline.baseline_id}#{param_id}"
+def major_version(value: str | None) -> str | None:
+    """Мажорная версия из строки (``"18.4.1"`` → ``"18"``), ``None`` — не разбирается.
+
+    План 27 §7.2: факт ищется **ровно на объявленной мажорной версии**, а не «где-нибудь
+    ≤ V»: если в v18 параметр исчез, а в v17 был, наследовать нельзя — это регрессия
+    upstream, и она обязана быть видна. Нераспознанная версия — линт-ошибка, а не
+    «пропустим»: ``None`` здесь означает «сравнивать нечем», и вызывающий публикует
+    причину, а не угадывает версию.
+    """
+    if not value:
+        return None
+    parts = re.findall(r"\d+", str(value))
+    if not parts:
+        return None
+    return str(int(parts[0]))
+
+
+def _upstream_source_id(baseline_id: str, param_id: str, version: str) -> str:
+    """Нейтральный ``source_id`` факта upstream (K5, §4.2 регламента; план 27 §6.3).
+
+    ``@version`` — не косметика: один параметр в v11 и v18 это **два разных факта**, и
+    адрес обязан их различать (I15: детерминированный lookup). Без версии две записи
+    доказательства схлопнулись бы в один ``source_id``.
+    """
+    return f"upstream://{baseline_id}#{param_id}@{version}"
 
 
 def _derived_evidence(
     run_id: str,
     product_id: str,
     param_id: str,
-    baseline: BaselineRow,
-    passport: Passport,
+    fact: BaselineFact,
 ) -> tuple[CellEvidence, UpstreamRef] | None:
-    """Строит derived-evidence наследования и upstream-ссылку для проверки (K5).
+    """Строит derived-evidence наследования из **факта** и upstream-ссылку (K5).
 
-    ``None`` — если у паспорта нет upstream-цитаты (нет резолва/hash): нарушение I1/I10/I15.
+    Цитата, URL и хеш берутся у факта, а не у паспорта (план 27 §6.3): паспортная цитата
+    у продукта одна на все параметры, поэтому 181 «✅» опирался на одну визитку «мы на
+    базе X». Факт — это измерение конкретного места в документации конкретной версии.
+
+    ``content_hash`` — хеш **текста чанка** (I19), записанный прибором, а не пересчитанный
+    от URL+цитаты: адрес переезжает, текст — нет.
+
+    ``None`` — если у факта нет цитаты или хеша (нарушение I1/I19): наследовать нечем.
     """
-    upstream = passport.upstream
-    if upstream is None or upstream.evidence is None:
+    if not (fact.quote or "").strip() or not (fact.content_hash or "").strip():
         return None
-    source_id = _upstream_source_id(baseline, param_id)
-    url = upstream.evidence.url
-    quote = upstream.evidence.quote
-    digest = content_hash(f"{url}{_FIELD_SEP}{quote}")
+    source_id = _upstream_source_id(fact.baseline_id, param_id, fact.version)
+    url = fact.url
+    quote = fact.quote or ""
+    digest = fact.content_hash
     evidence = CellEvidence(
         evidence_id=derived_evidence_id(
             run_id, product_id, param_id, source_id, SourceKind.INHERITANCE.value, 0
@@ -236,19 +302,19 @@ def _direct_cell(
     product_id: str,
     param: CatalogRow,
     baseline: BaselineRow,
-    passport: Passport,
+    fact: BaselineFact,
     errors: list[str],
 ) -> tuple[Cell | None, CellEvidence | None]:
-    """Строит унаследованную ✅-ячейку ``direct``; при нарушении K5 — ``(None, None)``.
+    """Строит унаследованную ✅-ячейку ``direct`` из факта; при нарушении K5 — ``(None, None)``.
 
     Возвращает ``(ячейка, derived-evidence)``. Ошибки инвариантов собираются в ``errors``.
     """
     param_id = str(param.param_id)
-    built = _derived_evidence(run_id, product_id, param_id, baseline, passport)
+    built = _derived_evidence(run_id, product_id, param_id, fact)
     if built is None:
         errors.append(
-            f"I8/I15: {product_id}/{param_id}: direct-наследование без upstream-цитаты "
-            f"(нет резолва/hash) — ячейка не выпущена"
+            f"I8/I15: {product_id}/{param_id}: direct-наследование без цитаты/хеша факта "
+            f"({fact.baseline_id}@{fact.version}) — ячейка не выпущена"
         )
         return None, None
     evidence, upstream_ref = built
@@ -304,6 +370,116 @@ def _conditional_cell(
     )
 
 
+@dataclass(frozen=True)
+class InheritanceDecision:
+    """Результат разрешения одного параметра по объявленному порядку предков (§6.2).
+
+    ``reasons`` — **все** рассмотренные предки с причиной отказа, а не только последний:
+    «почему не унаследовали» обязано называть каждую линию, иначе читатель решит, что
+    параметр просто забыли. ``None`` в ``cell`` — наследования нет, и параметр
+    оценивается обычным путём (Ш5/Ш6): это отсутствие ускорения, а не наблюдение (§1.1).
+    """
+
+    product_id: str
+    param_id: str
+    cell: Cell | None = None
+    evidence: CellEvidence | None = None
+    reasons: tuple[dict[str, str], ...] = ()
+
+
+def decide_inheritance(
+    *,
+    run_id: str,
+    product_id: str,
+    param: CatalogRow,
+    upstreams: Sequence[Any],
+    baselines: Mapping[tuple[str, str], BaselineRow],
+    facts: Mapping[tuple[str, str, str], BaselineFact],
+    errors: list[str] | None = None,
+) -> InheritanceDecision:
+    """Разрешает наследование параметра по предкам **в объявленном порядке** (план 27 §6.2).
+
+    Правило одно и детерминированное, без тай-брейка по часам или порядку вставки:
+    перебираем ``upstreams``; наследует **первый**, у которого есть строка
+    ``baselines.csv`` **и** принятый факт ``present`` на его версии. Проседание к
+    следующему предку разрешено и правильно: если ближний предок параметр не описывает, а
+    дальний описывает, возможность пришла из дальнего — продукт объявил обе линии.
+
+    Факт ищется **ровно на мажорной версии** предка (§7.2): «где-нибудь ≤ V» скрыло бы
+    регрессию upstream, при которой параметр исчез в новой версии.
+
+    :param upstreams: ``Passport.upstreams`` — порядок и есть приоритет.
+    :param baselines: индекс ``(baseline_id, param_id) → BaselineRow``.
+    :param facts: индекс ``(baseline_id, param_id, версия) → BaselineFact``.
+    :param errors: накопитель нарушений инвариантов (K5); ``None`` — молча.
+    """
+    param_id = str(param.param_id)
+    reasons: list[dict[str, str]] = []
+    sink: list[str] = errors if errors is not None else []
+
+    for upstream in upstreams:
+        baseline_id = str(upstream.baseline_id)
+        version = str(upstream.version)
+        line = {"baseline_id": baseline_id, "version": version}
+
+        policy = baselines.get((baseline_id, param_id))
+        if policy is None:
+            reasons.append({**line, "reason": REASON_NO_POLICY_ROW})
+            continue
+        if policy.inheritance_mode is InheritanceMode.BLOCKED:
+            reasons.append({**line, "reason": REASON_MODE_BLOCKED})
+            continue
+        if policy.inheritance_mode is InheritanceMode.CONDITIONAL:
+            # Кандидат на ревью: строка объявляет условное наследование, и решает человек.
+            reasons.append({**line, "reason": REASON_MODE_CONDITIONAL})
+            return InheritanceDecision(
+                product_id=product_id,
+                param_id=param_id,
+                cell=_conditional_cell(run_id, product_id, param_id),
+                reasons=tuple(reasons),
+            )
+        if not _satisfies_min_version(version, policy.min_version):
+            reasons.append({**line, "reason": REASON_BELOW_MIN_VERSION})
+            continue
+
+        major = major_version(version)
+        if major is None:
+            reasons.append({**line, "reason": REASON_VERSION_UNPARSABLE})
+            continue
+        fact = facts.get((baseline_id, param_id, major))
+        if fact is None:
+            reasons.append({**line, "reason": REASON_FACT_MISSING})
+            continue
+        if fact.review is not FactReview.ACCEPTED:
+            reasons.append(
+                {**line, "reason": REASON_FACT_REVIEW.format(review=fact.review.value)}
+            )
+            continue
+        if fact.status is not FactStatus.PRESENT:
+            reasons.append(
+                {**line, "reason": REASON_FACT_STATUS.format(status=fact.status.value)}
+            )
+            continue
+
+        cell, evidence = _direct_cell(run_id, product_id, param, policy, fact, sink)
+        if cell is None:
+            # Инвариант K5 не пропустил ячейку: причина уже в ``errors``, но линия
+            # обязана быть названа и в базисе — иначе «не наследовали» без причины.
+            reasons.append({**line, "reason": "derived_evidence_invalid"})
+            continue
+        return InheritanceDecision(
+            product_id=product_id,
+            param_id=param_id,
+            cell=cell,
+            evidence=evidence,
+            reasons=tuple(reasons),
+        )
+
+    return InheritanceDecision(
+        product_id=product_id, param_id=param_id, reasons=tuple(reasons)
+    )
+
+
 def _apply_higher_source(
     cell: Cell,
     protected: Mapping[tuple[str, str], Cell],
@@ -339,6 +515,8 @@ def _basis_summary(
     planned: Mapping[str, int],
     released: Mapping[str, Mapping[str, int]],
     unattributed: int,
+    reason_counts: Mapping[str, int] | None = None,
+    fallback_counts: Mapping[str, int] | None = None,
 ) -> str:
     """Одна строка «что объявлено / что выпущено» продукта — для ``log_entries``.
 
@@ -372,6 +550,16 @@ def _basis_summary(
     parts.append(f"blocked {planned.get('blocked', 0)} skipped")
     if unattributed:
         parts.append(f"unattributed {unattributed}")
+    if reason_counts:
+        # Причины «не наследовали» одной строкой: оператор видит, это «факт не разведан»
+        # или «порог версии/режим», не открывая артефакт.
+        details = ", ".join(f"{token}: {count}" for token, count in reason_counts.items())
+        parts.append(f"not_inherited {sum(reason_counts.values())} ({details})")
+    if fallback_counts:
+        details = ", ".join(
+            f"{token}: {count}" for token, count in fallback_counts.items()
+        )
+        parts.append(f"fallback {sum(fallback_counts.values())} ({details})")
     return f"{product_id}: " + "; ".join(parts)
 
 
@@ -382,6 +570,7 @@ def inheritance_basis(
     passports: Any = None,
     params: Iterable[Any] | None = None,
     cells: Iterable[Cell] = (),
+    decisions: Iterable[InheritanceDecision] = (),
 ) -> dict[str, Any]:
     """**Базис наследования**: объявленный режим против фактически выпущенного.
 
@@ -404,13 +593,18 @@ def inheritance_basis(
     :param baselines: строки ``baselines.csv``.
     :param products: ``product_id`` плана (итерируемое).
     :param passports: ``Passport``-набор (mapping либо итерируемое) — источник
-        ``upstream.baseline_id``.
+        ``upstreams[].baseline_id`` (план 27 §3.2: предков может быть несколько, и
+        «объявлено» считается по объединению их строк).
     :param params: объявленные параметры плана (``CatalogRow`` или ``param_id``);
         ``None`` — фильтра нет (считаются все строки базлайна).
     :param cells: ячейки результата волны.
+    :param decisions: решения волны (:class:`InheritanceDecision`) — источник причин
+        «не наследовали». Пусто — причины не публикуются (вызов без волны: базис
+        считает только объявленное/выпущенное).
     :returns: JSON-совместимый словарь по продуктам (``planned``/``released``/
-        ``cells_emitted``/``unattributed_cells``/``summary``), итоги и список строк
-        ``summary``. В БД и в файлы функция ничего не пишет.
+        ``cells_emitted``/``unattributed_cells``/``not_inherited``/``reason_counts``/
+        ``summary``), итоги и список строк ``summary``. В БД и в файлы функция ничего
+        не пишет.
     """
     passport_by_product = _passport_index(passports)
     wanted: set[str] | None = None
@@ -427,21 +621,42 @@ def inheritance_basis(
         mode.value: {key: 0 for key in _RELEASED_STATE_KEYS} for mode in InheritanceMode
     }
     summaries: list[str] = []
+    reasons_by_product: dict[str, list[dict[str, Any]]] = {}
+    for decision in decisions:
+        if not decision.reasons:
+            continue
+        # Публикуются причины **всех рассмотренных линий**, в том числе когда ячейка
+        # выпущена: проигравшие предки у решения уже перечислены, и это ровно ответ на
+        # вопрос «почему не от первого предка» (§3.2, §6.2). Отбросить их — значит
+        # показать наследование «от второго», не назвав, чем плох первый; читатель
+        # прочтёт это как произвол порядка, а не как измерение.
+        # ``inherited`` отличает «не наследовали вовсе» от «наследовали, но не сразу».
+        inherited = decision.cell is not None and decision.cell.state is CellState.EVALUATED
+        reasons_by_product.setdefault(str(decision.product_id), []).append(
+            {
+                "param_id": decision.param_id,
+                "inherited": inherited,
+                "reasons": [dict(item) for item in decision.reasons],
+            }
+        )
+
     for product_id in sorted(str(pid) for pid in products):
         passport = passport_by_product.get(product_id)
-        upstream = passport.upstream if passport is not None else None
-        baseline_id = upstream.baseline_id if upstream is not None else None
+        upstreams = list(passport.upstreams) if passport is not None else []
+        baseline_ids = [str(upstream.baseline_id) for upstream in upstreams]
 
-        # Объявлено: строки базлайна этой upstream-линии (режим — свойство строки).
+        # Объявлено: строки базлайна **всех** объявленных линий продукта (режим —
+        # свойство строки). При нескольких предках «объявлено» — объединение, иначе
+        # базис занижал бы план ровно на число дополнительных линий.
         planned = {mode.value: 0 for mode in InheritanceMode}
         mode_by_param: dict[str, InheritanceMode] = {}
         for row in baselines:
-            if row is None or row.baseline_id != baseline_id:
+            if row is None or row.baseline_id not in baseline_ids:
                 continue
             if wanted is not None and row.param_id not in wanted:
                 continue
             planned[row.inheritance_mode.value] += 1
-            mode_by_param[row.param_id] = row.inheritance_mode
+            mode_by_param.setdefault(row.param_id, row.inheritance_mode)
 
         # Выпущено: ровно то, что вернула волна (никакого второго чтения стора). Ячейка
         # другого источника — не работа Ш4, даже если у параметра есть строка базлайна
@@ -476,18 +691,51 @@ def inheritance_basis(
             for count in states.values()
         )
 
-        summary = _basis_summary(product_id, planned, released, unattributed)
+        # Причины «не наследовали» — по продукту и параметру (§6.2): «объявлено 181,
+        # выпущено 140» без них читается как дефект конвейера, а не как «41 факт ещё не
+        # разведан». Счётчик по токенам — для строки итога: адресный список остаётся в
+        # артефакте, а не в однострочном логе.
+        all_reasons = sorted(
+            reasons_by_product.get(product_id, []), key=lambda item: item["param_id"]
+        )
+        # Два разных факта, и оба нужны: «параметр не унаследован вовсе» (это цена
+        # неразведанного факта) и «унаследован, но не от первого предка» (это цена
+        # проседания по линиям). Слить их в один счётчик — значит потерять различие.
+        not_inherited = [item for item in all_reasons if not item["inherited"]]
+        ancestor_fallbacks = [item for item in all_reasons if item["inherited"]]
+        reason_counts: dict[str, int] = {}
+        for item in not_inherited:
+            for entry in item["reasons"]:
+                token = str(entry.get("reason", ""))
+                reason_counts[token] = reason_counts.get(token, 0) + 1
+        reason_counts = dict(sorted(reason_counts.items()))
+        fallback_counts: dict[str, int] = {}
+        for item in ancestor_fallbacks:
+            for entry in item["reasons"]:
+                token = str(entry.get("reason", ""))
+                fallback_counts[token] = fallback_counts.get(token, 0) + 1
+        fallback_counts = dict(sorted(fallback_counts.items()))
+
+        summary = _basis_summary(
+            product_id, planned, released, unattributed, reason_counts, fallback_counts
+        )
         for mode in InheritanceMode:
             planned_total[mode.value] += planned[mode.value]
             for key in _RELEASED_STATE_KEYS:
                 released_total[mode.value][key] += released[mode.value][key]
         report[product_id] = {
-            "baseline_id": baseline_id,
+            "baseline_ids": baseline_ids,
             "planned": planned,
             "released": released,
             "cells_emitted": wave_cells,
             "unattributed_cells": unattributed,
             "foreign_cells": foreign,
+            "not_inherited": not_inherited,
+            "reason_counts": reason_counts,
+            # Проседание к следующему предку: параметр унаследован, но не от первого
+            # объявленного. Причины называют, чем именно не подошла каждая линия выше.
+            "ancestor_fallbacks": ancestor_fallbacks,
+            "fallback_counts": fallback_counts,
             "summary": summary,
         }
         # Продукт без объявленных строк и без выпущенных ячеек не несёт факта:
@@ -508,13 +756,26 @@ def inheritance_wave(
     baselines: list[BaselineRow],
     passports: Any,
     store: Any = None,
+    facts: Sequence[BaselineFact] = (),
 ) -> PhaseResult:
     """Ш4: волна наследования. Возвращает ``PhaseResult`` (без LLM).
 
+    Наследование — **ускоритель, а не ворота** (план 27 §1.1): нет факта, факт
+    ``pending``/``rejected``/``absent`` — ячейка не наследуется, и параметр оценивается
+    обычным путём (Ш5/Ш6). Ни ``❓``, ни ``❌`` из этого не следует: отсутствие ускорения
+    — не наблюдение о продукте.
+
+    Предки перебираются **в объявленном порядке** (``Passport.upstreams``, §3.2):
+    наследует первый, у которого есть строка ``baselines.csv`` и принятый факт
+    ``present`` на его версии. Проседание к следующему предку разрешено и правильно.
+
     :param plan: ``RunPlan`` (продукты, параметры, ``run_id``).
-    :param baselines: строки ``baselines.csv``.
+    :param baselines: строки ``baselines.csv`` (политика наследования).
     :param passports: ``Passport``-набор — mapping ``product_id → Passport`` либо итерируемое.
     :param store: опциональный ``StorePort`` (пишет ячейки и derived-evidence).
+    :param facts: строки ``sources/baseline_facts.csv`` (наблюдения о документации
+        предка). Пусто — наследования по фактам не будет, и причины это назовут
+        (``baseline_fact_missing``), а не «наследовать нечему».
     :raises ValueError: если ``baselines`` не список (контракт входа).
     """
     if not isinstance(baselines, list):
@@ -527,6 +788,7 @@ def inheritance_wave(
     )
     passport_by_product = _passport_index(passports)
     baseline_by_key = _baseline_index(baselines)
+    fact_by_key = _fact_index(facts)
     # Ш3 уже отработал (PHASES: registry → inheritance): реестровые ячейки — высокий
     # источник, который Ш4 не должен молча затирать (Fork D, §2.2 п.7).
     protected = collect_protected_cells(store, run_id)
@@ -534,6 +796,7 @@ def inheritance_wave(
     cells: list[Cell] = []
     evidence_items: list[CellEvidence] = []
     errors: list[str] = []
+    decisions: list[InheritanceDecision] = []
 
     for product_id in products:
         passport = passport_by_product.get(product_id)
@@ -541,51 +804,43 @@ def inheritance_wave(
             # Паспорт — предусловие G2; без него upstream-совпадение недоказуемо.
             errors.append(f"нет паспорта для продукта {product_id!r} — Ш4 пропущен")
             continue
-        upstream = passport.upstream
-        if upstream is None:
-            # Нет upstream-линии → кросс-линейный параметр (архетип B): не здесь.
+        upstreams = list(passport.upstreams)
+        if not upstreams:
+            # Нет upstream-линий → кросс-линейный параметр (архетип B): не здесь.
             continue
 
         for row in params:
-            baseline = baseline_by_key.get((upstream.baseline_id, row.param_id))
-            if baseline is None:
-                # Нет строки baselines.csv → кросс-линейный параметр (только корпус).
-                continue
-
-            mode = baseline.inheritance_mode
-            if mode is InheritanceMode.BLOCKED:
-                # upstream-факт не используется: пропуск.
-                continue
-            if mode is InheritanceMode.CONDITIONAL:
-                cells.append(_conditional_cell(run_id, product_id, row.param_id))
-                continue
-
-            # mode == DIRECT: применяем порог min_version (upstream ≥ min_version).
-            if not _satisfies_min_version(upstream.version, baseline.min_version):
-                continue
-            cell, evidence = _direct_cell(
-                run_id, product_id, row, baseline, passport, errors
+            decision = decide_inheritance(
+                run_id=run_id,
+                product_id=product_id,
+                param=row,
+                upstreams=upstreams,
+                baselines=baseline_by_key,
+                facts=fact_by_key,
+                errors=errors,
             )
-            if cell is not None:
-                cell = _apply_higher_source(
-                    cell, protected, product_id, row.param_id
-                )
+            decisions.append(decision)
+            cell = decision.cell
+            if cell is not None and cell.state is CellState.EVALUATED:
+                cell = _apply_higher_source(cell, protected, product_id, row.param_id)
             if cell is not None:
                 cells.append(cell)
-            if evidence is not None:
-                evidence_items.append(evidence)
+            if decision.evidence is not None:
+                evidence_items.append(decision.evidence)
 
     cells.sort(key=lambda cell: (cell.product_id, cell.param_id))
     _persist(store, cells, evidence_items, errors)
     # Базис наследования — тот же результат волны, а не второе чтение стора: оператор
     # видит «direct N/M evaluated, conditional K/L pending» там же, где итог фазы
     # (``results[].notes`` в выводе прогона), и не догадывается, что под «✅» разные режимы.
+    # Причины «не наследовали» — из решений той же волны (§6.2).
     basis = inheritance_basis(
         baselines,
         products=products,
         passports=passport_by_product,
         params=params,
         cells=cells,
+        decisions=decisions,
     )
     log_entries = (
         ["inheritance_basis: " + " | ".join(basis["summary"])]

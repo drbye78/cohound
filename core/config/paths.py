@@ -81,6 +81,7 @@ ENV_EMBED_CACHE_DIR = "COHOUND_EMBED_CACHE_DIR"
 ENV_REPORTS_DIR = "COHOUND_REPORTS_DIR"
 #: Durable per-product состояние (``state/{package_id}/state.db``, 09 §4.1).
 ENV_STATE_DIR = "COHOUND_STATE_DIR"
+ENV_REFERENCE_DIR = "COHOUND_REFERENCE_DIR"
 
 #: Канонический путь ``paths.yaml`` относительно CWD (раскладка A.1).
 DEFAULT_PATHS_FILE: Path = Path("config/paths.yaml")
@@ -98,6 +99,7 @@ HARNESS_FIELDS: tuple[str, ...] = (
     "embed_cache",
     "reports",
     "state",
+    "reference",
 )
 
 #: Соответствие поля раскладки → env-переменная (``COHOUND_<FIELD>_DIR``).
@@ -113,6 +115,7 @@ ENV_BY_FIELD: dict[str, str] = {
     "embed_cache": ENV_EMBED_CACHE_DIR,
     "reports": ENV_REPORTS_DIR,
     "state": ENV_STATE_DIR,
+    "reference": ENV_REFERENCE_DIR,
 }
 
 #: Спец-ключ документа ``paths.yaml``: корень раскладки (не поле :class:`PathsConfig`).
@@ -159,6 +162,11 @@ class PathsConfig(BaseModel):
     #: ``state/{package_id}/state.db``. Вне ``packages/`` (авторские данные) и вне
     #: ``runs/{run_id}/`` (переживает прогоны).
     state: Path = Path("state")
+    #: Reference-корпус и карты предка (план 27 §4): ``reference/{package}/{product}/{version}/``
+    #: с ``reference.db``/``manifest.json``/``maps/``. Данные хоста, а не пакета: сборка
+    #: переживает прогон и переиспользуется между циклами, поэтому живёт рядом с
+    #: ``index_store``, а не в ``packages/``.
+    reference: Path = Path("reference")
 
 
 # ---------------------------------------------------------------------------

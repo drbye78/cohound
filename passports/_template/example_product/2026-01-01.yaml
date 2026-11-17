@@ -4,7 +4,7 @@ product_id: example_product
 canonical_name: "TODO: каноническое имя продукта"
 vendor: "TODO: вендор продукта"
 # Архетип B: эталона нет.
-upstream: null
+upstreams: []
 edition_assessed: "TODO: оцениваемая редакция продукта"
 version: "TODO: версия продукта на дату снимка"
 jurisdiction: XX

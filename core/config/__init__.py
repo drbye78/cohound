@@ -54,11 +54,13 @@ from core.config.paths import (
 )
 from core.config.run_config import (
     cross_check_products,
+    load_baseline_facts,
     load_baselines,
     load_catalog,
     load_cohort,
     load_golden,
     load_package_manifest,
+    load_reference_products,
     load_run_config,
 )
 from core.config.seeds import (
@@ -83,6 +85,9 @@ __all__ = [  # noqa: RUF022 — порядок смысловыми группа
     "load_catalog",
     # baselines.csv (§4.2)
     "load_baselines",
+    # sources/reference_products.yaml + sources/baseline_facts.csv (план 27 §3)
+    "load_reference_products",
+    "load_baseline_facts",
     # cohort.yaml (§1.6)
     "load_cohort",
     # golden.csv (§4.2/§11.6)

@@ -522,7 +522,7 @@ def _write_min_package(entry: Path, case_id: str, *, version: str = "1.0.0") -> 
         modules=[ModuleDef(module_id="core", weight=100.0)],
         roles=[],
         baselines=[],
-        baseline_participant=None,
+        baseline_participants=[],
     )
     save_artifact(entry, "package", manifest)
     return entry

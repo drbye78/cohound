@@ -66,7 +66,7 @@ def _isolated_operational_caches(tmp_path_factory: pytest.TempPathFactory) -> No
     ``state/e2e`` — артефакты тестов, внешне неотличимые от данных.
 
     ``packages``/``passports`` закреплены **абсолютными** путями репозитория: ``home``
-    сдвигает все 11 полей (:func:`core.config.paths.with_home`), и без закрепления тесты
+    сдвигает все 12 полей (:func:`core.config.paths.with_home`), и без закрепления тесты
     искали бы пакеты в ``<tmp>/packages``. Абсолютный per-field путь перебивает дом, а
     дом перебивает дефолт — поэтому явный ``monkeypatch.setenv("COHOUND_HOME", …)`` в
     тесте продолжает работать и сдвигает всё, кроме авторских каталогов.

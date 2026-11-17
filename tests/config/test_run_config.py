@@ -108,7 +108,7 @@ def test_load_package_manifest_happy() -> None:
     assert manifest.case_id == "case_x"
     assert manifest.archetype is Archetype.B
     assert round(sum(m.weight for m in manifest.modules), 6) == 100
-    assert manifest.baseline_participant == "baseline_a"
+    assert manifest.baseline_participants == ["baseline_a"]
     assert manifest.roles[0].role_id == "role_a"
 
 
@@ -251,10 +251,10 @@ def test_package_duplicate_module_id_rejected(tmp_path: Path) -> None:
         load_package_manifest(path)
 
 
-def test_package_archetype_c_with_baseline_participant_rejected(tmp_path: Path) -> None:
+def test_package_archetype_c_with_baseline_participants_rejected(tmp_path: Path) -> None:
     data = _load_yaml(FIXTURES / "package.yaml")
     data["archetype"] = "C"
-    data["baseline_participant"] = "baseline_a"
+    data["baseline_participants"] = ["baseline_a"]
     path = _write(tmp_path, "package.yaml", yaml.safe_dump(data, allow_unicode=True))
     with pytest.raises(ValidationError, match="архетип C"):
         load_package_manifest(path)

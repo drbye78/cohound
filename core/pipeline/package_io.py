@@ -54,6 +54,7 @@ from core.config.run_config import (
     load_cohort,
     load_golden,
     load_package_manifest,
+    load_reference_products,
     load_run_config,
 )
 from core.config.seeds import SEEDS_RELPATH, load_seeds, render_seeds
@@ -66,6 +67,7 @@ from core.domain.models import (
     GoldenRow,
     ModuleDef,
     PackageManifest,
+    ReferenceProducts,
     RunConfig,
     ScopeAttestation,
     SeedsConfig,
@@ -168,6 +170,12 @@ class PackageArtifacts:
     run: RunConfig | None = None
     #: Авторский seed-набор (``sources/seeds.yaml``, 09 §7); ``None`` — файла нет.
     seeds: SeedsConfig | None = None
+    #: План 27 §3.1: декларация reference-продуктов профиля
+    #: (``sources/reference_products.yaml``); ``None`` — файла нет. Читается здесь, а не
+    #: только в прогоне, потому что **линтер** обязан видеть её раньше: иначе
+    #: проспективный линт считал бы любую строку ``baselines.csv`` «без предка» и
+    #: блокировал бы авторскую правку, которая на самом деле корректна.
+    reference_products: ReferenceProducts | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +571,10 @@ def load_artifacts(package_dir: str | Path) -> PackageArtifacts:
     if baselines_file.is_file():
         artifacts.baselines = load_baselines(baselines_file)
 
+    reference_file = base / "sources" / "reference_products.yaml"
+    if reference_file.is_file():
+        artifacts.reference_products = load_reference_products(reference_file)
+
     cohort_file = base / "cohort.yaml"
     if cohort_file.is_file():
         artifacts.cohort = load_cohort(cohort_file)
@@ -857,7 +869,7 @@ def _synthesized_manifest(case_id: str) -> PackageManifest:
         modules=[ModuleDef(module_id="core", weight=100.0)],
         roles=[],
         baselines=[],
-        baseline_participant=None,
+        baseline_participants=[],
     )
 
 
@@ -913,6 +925,7 @@ def build_run_inputs(artifacts: PackageArtifacts) -> RunInputs:
         crawl_sources=artifacts.crawl_sources,
         scope_attestation_procedure=artifacts.scope_attestation,
         golden_status=status,
+        reference_products=artifacts.reference_products,
     )
 
 

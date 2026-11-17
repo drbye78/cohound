@@ -2,12 +2,13 @@
 product_id: jatoba
 canonical_name: "Jatoba (Ятоба)"
 vendor: "Газинформсервис"
-upstream:
-  baseline_id: upstream-pg
-  version: "18"
-  evidence:
-    url: "https://jatoba.ru"
-    quote: "Jatoba 18 Standard/Enterprise (18.02.2026, PostgreSQL 18)"
+upstreams:
+  -
+    baseline_id: upstream-pg
+    version: "18"
+    evidence:
+      url: "https://jatoba.ru"
+      quote: "Jatoba 18 Standard/Enterprise (18.02.2026, PostgreSQL 18)"
 edition_assessed: null
 version: "Jatoba 18 Standard/Enterprise (18.02.2026, PostgreSQL 18)"
 jurisdiction: RU

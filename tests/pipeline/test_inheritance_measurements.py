@@ -20,6 +20,7 @@ from pathlib import Path
 
 from core.domain import (
     AnchorRelation,
+    BaselineFact,
     BaselineRow,
     CatalogRow,
     Cell,
@@ -27,6 +28,8 @@ from core.domain import (
     Citation,
     Cohort,
     CohortEntry,
+    FactReview,
+    FactStatus,
     InheritanceMode,
     LLMEvidence,
     Passport,
@@ -110,14 +113,33 @@ def _passport(product_id: str = "p1", *, quote: str = VISITING_CARD) -> Passport
         product_id=product_id,
         canonical_name=f"Product {product_id}",
         vendor="Vendor",
-        upstream=Upstream(
-            baseline_id="base_1",
-            version="16.0",
-            evidence=Citation(url="https://upstream.test/doc#param_a", quote=quote),
-        ),
+        upstreams=[
+            Upstream(
+                baseline_id="base_1",
+                version="16.0",
+                evidence=Citation(url="https://upstream.test/doc#param_a", quote=quote),
+            )
+        ],
         version="1.0",
         jurisdiction="RU",
         snapshot_date=_dt.date(2026, 1, 1),
+    )
+
+
+def _fact(param_id: str = "param_a", *, quote: str = VISITING_CARD) -> BaselineFact:
+    """Принятый факт ``present``: цитата факта — тот носитель, который теперь несёт
+    унаследованная ячейка (план 27 §6.3), поэтому замер «о предмете ли доказательство»
+    проверяется на ней, а не на паспортной визитке."""
+    return BaselineFact(
+        baseline_id="base_1",
+        param_id=param_id,
+        version="16",
+        status=FactStatus.PRESENT,
+        url="https://upstream.test/doc",
+        quote=quote,
+        content_hash="a" * 64,
+        review=FactReview.ACCEPTED,
+        reviewed_by="tester",
     )
 
 
@@ -159,10 +181,13 @@ def test_inherited_cell_is_flagged_but_keeps_verdict() -> None:
         _plan(["param_a"]),
         [_baselines()["param_a"]],
         {"p1": _passport()},
+        facts=[_fact("param_a")],
     )
 
     [cell] = result.cells
-    # Наблюдение: цитата-визитка не упоминает предмет параметра (I8/K5 при этом выполнен).
+    # Наблюдение: цитата-визитка факта не упоминает предмет параметра (I8/K5 при этом
+    # выполнен — цитата и хеш пришли из факта, а не из паспорта).
+    assert cell.evidence[0].quote == VISITING_CARD
     assert cell.validation_notes and cell.validation_notes[0].startswith(
         SUPPORT_NOT_ABOUT_SUBJECT
     )
@@ -174,11 +199,12 @@ def test_inherited_cell_is_flagged_but_keeps_verdict() -> None:
 
 
 def test_inherited_cell_with_related_quote_stays_silent() -> None:
-    # Предмет param_a — «Param A»: цитата, упоминающая «param», замера не требует.
+    # Предмет param_a — «Param A»: цитата факта, упоминающая «param», замера не требует.
     result = inheritance_wave(
         _plan(["param_a"]),
         [_baselines()["param_a"]],
-        {"p1": _passport(quote="param is handled by the mechanism")},
+        {"p1": _passport()},
+        facts=[_fact("param_a", quote="param is handled by the mechanism")],
     )
 
     [cell] = result.cells
@@ -372,7 +398,7 @@ def test_inheritance_basis_separates_modes() -> None:
     )
 
     product = basis["products"]["p1"]
-    assert product["baseline_id"] == "base_1"
+    assert product["baseline_ids"] == ["base_1"]
     assert product["planned"] == {"direct": 2, "conditional": 1, "blocked": 1}
     assert product["released"]["direct"]["evaluated"] == 2
     assert product["released"]["conditional"]["pending"] == 1
@@ -444,6 +470,7 @@ def test_wave_publishes_basis_in_log_entries() -> None:
         _plan(["param_a", "param_b", "param_c"]),
         [_baselines()[key] for key in ("param_a", "param_b", "param_c")],
         {"p1": _passport()},
+        facts=[_fact("param_a")],
     )
 
     [note] = result.log_entries

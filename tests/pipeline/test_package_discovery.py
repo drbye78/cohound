@@ -107,7 +107,7 @@ def test_compose_uses_hints() -> None:
     assert row.param_id == "param.a"
     assert row.inheritance_mode is InheritanceMode.CONDITIONAL
     assert row.min_version == "2.0.0"
-    assert proposal.baseline_participant == "product_anchor"
+    assert proposal.upstream_product_id == "product_anchor"
 
 
 def test_compose_scope_all_vs_module() -> None:

@@ -22,6 +22,31 @@ def _make(tmp_path: Path, case: str = "case_x", archetype: str = "B") -> Path:
     return tmp_path / case
 
 
+def _declare_reference(package: Path, *baseline_ids: str) -> Path:
+    """Объявляет reference-продуктов пакета (``sources/reference_products.yaml``).
+
+    План 27 §10: строка ``baselines.csv`` обязана иметь объявленного предка, иначе
+    правило ``baseline-without-reference-product`` блокирует мутацию. Авторский порядок:
+    сначала декларация, затем строка наследования.
+    """
+    path = package / "sources" / "reference_products.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    products = "".join(
+        f"  - baseline_id: {baseline_id}\n"
+        f"    product_id: ref_{baseline_id}\n"
+        f"    canonical_name: Reference {baseline_id}\n"
+        f"    current_version: '1'\n"
+        f"    versions:\n"
+        f"      - version: '1'\n"
+        f"        docs_roots: ['https://{baseline_id}.test/docs']\n"
+        for baseline_id in baseline_ids
+    )
+    path.write_text(
+        f"schema: reference_products/1\nproducts:\n{products}", encoding="utf-8"
+    )
+    return path
+
+
 def _weights(package: Path) -> list[float]:
     artifacts = load_artifacts(package)
     assert artifacts.manifest is not None
@@ -387,6 +412,7 @@ def test_list_roles_filter(tmp_path: Path) -> None:
 
 def test_list_baselines_filter(tmp_path: Path) -> None:
     package = _make(tmp_path)
+    _declare_reference(package, "up", "down")
     pa.add_baseline(package, "up", "param.alpha_capability", note="основной upstream")
     pa.add_baseline(package, "down", "param.alpha_capability", inheritance_mode="conditional")
     assert {r.baseline_id for r in pa.list_baselines(package, baseline_id="up")} == {"up"}
@@ -429,6 +455,7 @@ def test_get_role_found_and_missing(tmp_path: Path) -> None:
 
 def test_get_baseline_exact_key(tmp_path: Path) -> None:
     package = _make(tmp_path)
+    _declare_reference(package, "up")
     pa.add_baseline(package, "up", "param.alpha_capability", note="x")
     row = pa.get_baseline(package, baseline_id="up", param_id="param.alpha_capability")
     assert row is not None and row.baseline_id == "up"
@@ -437,6 +464,7 @@ def test_get_baseline_exact_key(tmp_path: Path) -> None:
 
 def test_get_baseline_single_key_ambiguity(tmp_path: Path) -> None:
     package = _make(tmp_path)
+    _declare_reference(package, "up")
     pa.add_baseline(package, "up", "param.alpha_capability")
     # Один ключ, одно совпадение → найдено.
     assert pa.get_baseline(package, baseline_id="up") is not None
@@ -448,6 +476,7 @@ def test_get_baseline_single_key_ambiguity(tmp_path: Path) -> None:
 
 def test_find_baselines_by_param_and_query(tmp_path: Path) -> None:
     package = _make(tmp_path)
+    _declare_reference(package, "up", "down")
     pa.add_baseline(package, "up", "param.alpha_capability", note="основной")
     pa.add_baseline(package, "down", "param.beta_capability", note="запасной")
     assert {r.baseline_id for r in pa.find_baselines(package, param_id="param.alpha_capability")} == {"up"}

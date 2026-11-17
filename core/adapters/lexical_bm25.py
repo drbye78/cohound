@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from core.ports.lexical_index import LexicalDocLike
 from core.util.text_utils import tokenize_lexical
 
 
@@ -63,8 +65,22 @@ class Bm25Index:
 
     # -- build ---------------------------------------------------------- #
 
-    def index(self, docs: list[LexicalDoc]) -> None:
-        self._docs = list(docs)
+    def index(self, docs: Sequence[LexicalDocLike]) -> None:
+        """Строит индекс по документам, удовлетворяющим ``LexicalDocLike``.
+
+        Принимается **структурный минимум** (``chunk_id``/``product_id``/``text``), а не
+        только ``LexicalDoc``: так адаптер обслуживает и порт ``LexicalIndexPort``
+        (документы прогона), и ``LexicalSearcherPort`` (чужой корпус reference-карты), не
+        заставляя вызывающего собирать тип адаптера.
+        """
+        self._docs = [
+            doc
+            if isinstance(doc, LexicalDoc)
+            else LexicalDoc(
+                chunk_id=doc.chunk_id, product_id=doc.product_id, text=doc.text
+            )
+            for doc in docs
+        ]
         self._tokens = [tokenize_lexical(d.text) for d in self._docs]
         self._df = Counter()
         total_len = 0
@@ -75,6 +91,26 @@ class Bm25Index:
         n = len(self._docs)
         self._avgdl = total_len / max(1, n)
         self._built = True
+
+    # -- search_scores (LexicalSearcherPort.shape) ---------------------- #
+
+    def search_scores(
+        self,
+        query: str,
+        product_ids: Sequence[str] | None = None,
+        top_k: int = 8,
+    ) -> list[tuple[str, float]]:
+        """``(chunk_id, score)`` — тот же поиск, но без типа ``RetrievedChunk``.
+
+        Нужен потребителям, у которых нет провенанса сборки (reference-корпус карты):
+        ``RetrievedChunk`` требует ``build_id``/``content_hash``/``heading_path``, и
+        подставлять туда пустые строки значило бы объявить провенанс, которого нет.
+        """
+        allowed = list(product_ids) if product_ids is not None else None
+        return [
+            (hit.chunk_id, hit.score)
+            for hit in self.search(query, product_ids=allowed, top_k=top_k)
+        ]
 
     # -- search (LexicalIndexPort.shape) -------------------------------- #
 
