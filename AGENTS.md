@@ -144,7 +144,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
 | `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — a published number lives there with its date and instrument) and incident traces. Per §1.2: the artifact outranks the document, and a number cited in `docs/architecture/` **without** an entry here is a hypothesis, not a proof. Re-measured 2026-11-16 with `rg -n 'замер\w*\s+(от\s+)?[0-9]{2}\.[0-9]{2}' docs/architecture/*.md \| grep -v reports/ \| wc -l` → **40** lines (the 15.11 count was 34): reading one of them means re-measuring or treating it as dated hearsay. |
 | `scripts/measure_*.py`, `scripts/conformance_*.py`, `scripts/check_pdf_page_map.py` | **Named instruments** of measurements and censuses (A3): a claim is out of scope only after a census with one of these, and a re-measurement cites the script + date. `check_pdf_page_map.py` — инвариант карты страниц PDF (`page_map`: покрытие, разрывы, обратная сборка) на реальном корпусе, а не на фикстурах; exit 1 при дефекте. |
-| `scripts/prepare_*.py` | **Артефакты для человека**, а не замеры: `prepare_retrieval_golden_docs.py` (документный эталон O14), `prepare_answer_sets.py` (набор отвечающих документов O42), `prepare_evidence_claims.py` (доказательная сила цитаты O18), `prepare_importance_pairs.py` (парные сравнения O20). Каждый пишет XLSX-лист на разметку и собирает результат обратно (`compile`/`validate`), отказывая на неразмеченном или чужом значении. Разметку не выдумывают: `candidate` в имени файла и `status: candidate` в наборе — это состояние «человек ещё не подтвердил». |
+| `scripts/prepare_*.py` | **Артефакты для человека**, а не замеры: `prepare_retrieval_golden_docs.py` (документный эталон O14), `prepare_answer_sets.py` (набор отвечающих документов O42), `prepare_evidence_claims.py` (доказательная сила цитаты O18), `prepare_importance_pairs.py` (парные сравнения O20), `prepare_extraction_golden.py` (PDF-эталон извлечения O38б/D10 — 30–50 документов × пять направлений, двухколоночность определяет **прибор** `measure_reading_order.py`). Каждый пишет XLSX-лист на разметку и собирает результат обратно (`compile`/`validate`), отказывая на неразмеченном или чужом значении. Разметку не выдумывают: `candidate` в имени файла и `status: candidate` в наборе — это состояние «человек ещё не подтвердил». |
 | `.env.example` | Environment variables and external keys (LLM, scout, search adapters), no secrets. |
 
 ### 3.1 Artifacts are data, not repository files
@@ -779,6 +779,13 @@ entry point.
 # 5. Evaluator model selection is a measurement task (A3), not a predetermination.
 ./hound.py experiment evaluator-benchmark --runs-dir runs --run-id {run_id} \
   --golden packages/{case_id}/golden.csv --model {model_id}
+
+# 5b. Extraction mechanisms A/B on a **human-annotated** set (O38б/D10): the set is built by
+#     scripts/prepare_extraction_golden.py (candidates → XLSX → human → compile → validate);
+#     AI never fills the decisions. auto_switch is always false — the choice is a human's.
+./hound.py experiment extraction --runs-dir runs --run-id {run_id} \
+  --golden packages/{case_id}/sources/extraction_golden.json \
+  --mechanism-a structured --mechanism-b text_layer --level layout_tables --device cpu
 
 # 6. Finish an interrupted Ш6 on the SAME run_id: retry only cells without a verdict.
 #    --dry-run = selector only (no ports built). run_id does not change; per-attempt log

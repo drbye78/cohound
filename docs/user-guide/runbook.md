@@ -337,10 +337,23 @@ normalize → lint → plan → G1 → discovery → G2 → registry → inherit
 # Сравнить модели оценщика (согласие, отказы, воспроизводимость)
 ./hound.py experiment evaluator-benchmark --runs-dir runs --run-id {run_id} \
   --golden packages/{case_id}/golden.csv --model {model_id}
+
+# Сравнить механизмы извлечения PDF на размеченном наборе (structured ↔ text_layer)
+./hound.py experiment extraction --runs-dir runs --run-id {run_id} \
+  --golden packages/{case_id}/sources/extraction_golden.json \
+  --mechanism-a structured --mechanism-b text_layer --level layout_tables --device cpu
 ```
 
 Оба пишут результат в базу прогона: выбор перестаёт быть «мнением» и становится записью,
 на которую можно сослаться в следующем цикле.
+
+Третий (`extraction`) читает **набор извлечения**, а не каталог: набор собирает
+`scripts/prepare_extraction_golden.py` из корпуса прогона, **размечает человек** (решения
+`include`/пять направлений в XLSX пусты по построению — AI их не выдумывает), затем
+`compile` собирает JSON формата `cohound-extraction-golden/1`, а `validate` перечитывает его
+тем же загрузчиком, что и прогон. Команда **не** размечает и не выбирает механизм: она
+публикует, сколько кейсов проходит под каждым, и сколько — только под одним
+(`auto_switch` всегда `false`).
 
 ### 5.3 Приборы: отдельные скрипты
 
