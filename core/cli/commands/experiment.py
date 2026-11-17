@@ -46,6 +46,17 @@ R0/R1/R2 (:func:`core.pipeline.experiments.run_retrieval_experiment`).
 identity намеренно игнорирует env, и benchmark не должен воспроизводить это расхождение.
 Артефакт — ``runs/{run_id}/benchmark/evaluator-<timestamp>.json``; код возврата ``0`` даже
 при плохом счёте модели, ненулевой — только при отсутствии предпосылки.
+
+**``experiment extraction``** (O38б, D10) — третий вид: A/B **механизмов PDF-извлечения**
+(``structured`` ↔ ``text_layer``) на размеченном наборе извлечения
+(``cohound-extraction-golden/1``). Набор готовит ``scripts/prepare_extraction_golden.py``
+из корпуса прогона, размечает человек (D10) — команда ничего не размечает и не выдумывает.
+Механизмы собираются **той же** фабрикой, что и воркеры прогона
+(:func:`core.cli.wiring.build_worker_extractor`), сравнение — :func:`compare_extractors`
+(``auto_switch`` всегда ``False``: A/B — измерение, A3). Артефакт —
+``runs/{run_id}/extraction/extraction-<timestamp>.json``; код возврата ``0`` — измерение
+состоялось (даже если оба механизма плохи), ``EXIT_USAGE`` — нет набора / 0 кейсов /
+объявленный механизм не исполним (с числами, без тихого фолбэка).
 """
 
 from __future__ import annotations
@@ -54,6 +65,7 @@ import argparse
 import datetime as _dt
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -74,10 +86,17 @@ from core.cli.wiring import (
     build_adapters,
     build_evaluator_llm,
     build_store,
+    build_worker_extractor,
     resolve_experiment_target,
 )
 from core.config.deploy import LLM_SLOTS, load_deploy_config
-from core.domain.enums import ReasoningEffort, SkipReason
+from core.domain.enums import (
+    DocumentLevel,
+    PdfDevice,
+    PdfPipeline,
+    ReasoningEffort,
+    SkipReason,
+)
 from core.pipeline import (
     BENCHMARK_CONTRACT,
     DEFAULT_PROFILES,
@@ -90,10 +109,14 @@ from core.pipeline import (
     run_retrieval_experiment,
 )
 from core.pipeline.evaluate import DEFAULT_RETRIEVAL_CUTOFF_K
+from core.pipeline.extraction_eval import (
+    compare_extractors,
+    load_extraction_golden_document,
+)
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.retrieve import DEFAULT_RRF_K
 
-__all__ = ["configure", "run", "run_evaluator_benchmark"]
+__all__ = ["configure", "run", "run_evaluator_benchmark", "run_extraction"]
 
 #: Настройки-предпосылки: попадают в артефакт, но НЕ измерены этим прогоном.
 #: ``retrieval_cutoff_K`` задан оператором/зафиксирован ранее, ``rrf_k`` не варьируется
@@ -742,16 +765,287 @@ def run_evaluator_benchmark(args: argparse.Namespace) -> int:
     _emit_benchmark(args, payload)
     return EXIT_OK
 
+# ---------------------------------------------------------------------------
+# ``experiment extraction``: A/B механизмов PDF-экстракции (O38б, D10, A3)
+# ---------------------------------------------------------------------------
+
+#: Каталог артефакта рядом с БД прогона (как у benchmark).
+EXTRACTION_ARTIFACT_DIR = "extraction"
+
+#: Объявленные механизмы PDF (``PdfPipeline``): ``structured`` — модели разметки (docling),
+#: ``text_layer`` — текстовый слой файла (pdfium). Значения — данные, не решение.
+EXTRACTION_MECHANISMS: tuple[str, ...] = (PdfPipeline.STRUCTURED.value, PdfPipeline.TEXT_LAYER.value)
+
+
+def _resolve_extraction_golden(args: argparse.Namespace, case_id: str | None) -> Path:
+    """Путь к набору: ``--golden`` > ``--package``/sources > ``packages/{case_id}/sources``.
+
+    Третья форма — та же раскладка, что у пакета (§4.2): ``sources/`` лежит в каталоге
+    кейса, и имя набора там фиксировано. Раскладка резолвится объявленным путём
+    (:func:`core.config.paths.resolve_paths`), а не ``Path("packages")`` от CWD: на хосте с
+    ``COHOUND_HOME`` пакеты живут вне репозитория.
+    """
+    if getattr(args, "golden", None):
+        return Path(str(args.golden)).expanduser()
+    if getattr(args, "package", None):
+        return Path(str(args.package)).expanduser() / "sources" / "extraction_golden.json"
+    if not case_id:
+        raise CliError(
+            "набор не назван: передайте --golden либо --package (прогон не несёт case_id)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    from core.config.paths import resolve_paths  # noqa: PLC0415 — только для дефолта пути
+
+    # Composition root уже разрешил раскладку (``args.paths``): второй резолв читал бы env
+    # ещё раз и мог разойтись с тем, что видели остальные команды.
+    paths = getattr(args, "paths", None)
+    if paths is None:
+        try:
+            paths = resolve_paths()
+        except ValueError as exc:
+            raise CliError(
+                f"раскладка не прочитана ({_concise(exc)}): передайте --golden",
+                code="usage",
+                exit_code=EXIT_USAGE,
+            ) from exc
+    return paths.packages / case_id / "sources" / "extraction_golden.json"
+
+
+def _require_mechanism_available(
+    extractor: Any, mechanism: str, *, level: DocumentLevel, device: PdfDevice
+) -> None:
+    """Объявленный механизм обязан быть **исполним** — отказ, а не тихая подмена.
+
+    ``build_worker_extractor`` при ``structured`` без docling возвращает композит, у
+    которого документного читателя нет: PDF ушёл бы в HTML-читатель, и измерение назвало
+    бы механизм, которого не было (тот же класс, что тихий CPU-фолбэк при ``cuda``).
+    Композит объявляет это честно: ``document_level is None`` — документного адаптера нет.
+    """
+    if mechanism != PdfPipeline.STRUCTURED.value:
+        return
+    if getattr(extractor, "document_level", None) is not None:
+        return
+    raise CliError(
+        f"механизм structured не исполним: docling не установлен (level={level.value}, "
+        f"device={device.value}), PDF ушёл бы в HTML-читатель — измерение назвало бы не тот "
+        "движок. Объявите --mechanism-a text_layer либо установите extra 'extract-pdf'",
+        code="wiring",
+        exit_code=EXIT_USAGE,
+    )
+
+
+def _extraction_artifact_path(db_path: str | Path) -> Path:
+    """``runs/{run_id}/extraction/extraction-<timestamp>.json`` рядом с БД прогона."""
+    stamp = _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return Path(str(db_path)).parent / EXTRACTION_ARTIFACT_DIR / f"extraction-{stamp}.json"
+
+
+def _extraction_table(payload: dict[str, Any]) -> str:
+    """Markdown-таблица: кейс | исход A | исход B | символы A/B | страницы A/B | мс A/B."""
+    lines = [
+        "| case_id | A | B | chars A/B | pages A/B | ms A/B |",
+        "|---|---|---|---|---|---|",
+    ]
+    for row in payload["per_case"]:
+        arm_a = row["a"]
+        arm_b = row["b"]
+
+        def _fmt_pair(left: Any, right: Any, fmt: str = "{}") -> str:
+            text_left = "—" if left is None else fmt.format(left)
+            text_right = "—" if right is None else fmt.format(right)
+            return f"{text_left}/{text_right}"
+
+        lines.append(
+            "| {case} | {a} | {b} | {chars} | {pages} | {ms} |".format(
+                case=row["case_id"],
+                a=arm_a.get("outcome", "absent"),
+                b=arm_b.get("outcome", "absent"),
+                chars=_fmt_pair(arm_a.get("chars"), arm_b.get("chars")),
+                pages=_fmt_pair(arm_a.get("pages"), arm_b.get("pages")),
+                ms=_fmt_pair(arm_a.get("elapsed_ms"), arm_b.get("elapsed_ms"), "{:.0f}"),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _emit_extraction(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    """Печатает результат: ``--json`` — payload, иначе сводка + таблица."""
+    if args.json:
+        _print_json(payload)
+        return
+    summary = payload["summary"]
+    lines = [
+        f"run_id: {payload['run_id']}",
+        f"golden: {payload['golden']} (формат {payload['golden_format'] or 'не объявлен'}, "
+        f"status {payload['golden_status']})",
+        f"кейсов: {payload['total']}",
+        "A: {mechanism} level={level} device={device} version={extractor_version}".format(
+            **payload["mechanisms"]["a"]
+        ),
+        "B: {mechanism} level={level} device={device} version={extractor_version}".format(
+            **payload["mechanisms"]["b"]
+        ),
+        f"прошло под A: {summary['a_passed']}/{payload['total']}, "
+        f"под B: {summary['b_passed']}/{payload['total']}",
+        f"только A: {summary['a_only']}, только B: {summary['b_only']}, "
+        f"оба: {summary['both']}, ни один: {summary['neither']}",
+        f"recommendation: {payload['recommendation']['suggested']} "
+        f"(auto_switch={payload['recommendation']['auto_switch']})",
+        f"artifact: {payload['artifact']}",
+        "",
+        _extraction_table(payload),
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+
+
+def run_extraction(args: argparse.Namespace) -> int:
+    """``hound experiment extraction``: A/B механизмов PDF-извлечения на наборе (O38б).
+
+    Набор — файл формата ``cohound-extraction-golden/1`` (его готовит
+    ``scripts/prepare_extraction_golden.py``, размечает человек — D10). Байты кейсов
+    читаются по ``raw_path`` из набора: этот путь — тот же ``corpus_docs.raw_path`` прогона,
+    поэтому второго способа найти документ не заводится.
+
+    Механизмы собираются **той же** фабрикой, что и воркеры прогона
+    (:func:`core.cli.wiring.build_worker_extractor`), — иначе измерялся бы не тот экстрактор,
+    который исполняется в корпусе. Сравнение — :func:`core.pipeline.extraction_eval.compare_extractors`:
+    ``auto_switch`` всегда ``False`` (A3), выбор механизма фиксирует человек.
+
+    Код возврата: ``0`` — измерение состоялось, даже если оба механизма плохи; ``EXIT_USAGE``
+    — нет набора, в наборе 0 кейсов, объявленный механизм не исполним (с числами, без
+    тихого фолбэка) или A и B — один и тот же механизм.
+    """
+    db_path = _resolve_db_path(args)
+    run_id = args.run_id
+    case_id: str | None = None
+    with build_store(db_path, profile=args.profile) as store:
+        if run_id is None:
+            run_id = _infer_run_id(store)
+        manifest = store.read_manifest(run_id)  # валидация: прогон существует
+        # ``case_id`` — имя пакета в раскладке (§4.2); ``package_id`` у манифеста нет, а
+        # придумывать его из ничего нельзя: без ``case_id`` команда потребует --golden.
+        case_id = getattr(manifest, "case_id", None) or None
+
+    golden_path = _resolve_extraction_golden(args, case_id)
+    if not golden_path.is_file():
+        raise CliError(
+            f"набора нет: {golden_path} — соберите его "
+            "`scripts/prepare_extraction_golden.py candidates|compile` и разметьте (D10)",
+            code="golden",
+            exit_code=EXIT_USAGE,
+        )
+    try:
+        document = load_extraction_golden_document(golden_path)
+    except ValueError as exc:
+        raise CliError(_concise(exc), code="golden", exit_code=EXIT_USAGE) from exc
+    cases = list(document.cases)
+    if args.limit is not None:
+        cases = cases[: args.limit]
+    if not cases:
+        raise CliError(
+            f"в наборе 0 кейсов ({golden_path}) — измерять нечего: пустой набор не "
+            "превращается в измерение",
+            code="golden",
+            exit_code=EXIT_USAGE,
+        )
+
+    mechanism_a = PdfPipeline(str(args.mechanism_a))
+    mechanism_b = PdfPipeline(str(args.mechanism_b))
+    if mechanism_a is mechanism_b:
+        raise CliError(
+            f"A и B — один механизм ({mechanism_a.value}): сравнение механизма с самим "
+            "собой ничего не измеряет",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    level = DocumentLevel(str(args.level))
+    device = PdfDevice(str(args.device))
+
+    extractor_a = build_worker_extractor(
+        level=level, pdf_pipeline=mechanism_a, pdf_device=device
+    )
+    _require_mechanism_available(extractor_a, mechanism_a.value, level=level, device=device)
+    extractor_b = build_worker_extractor(
+        level=level, pdf_pipeline=mechanism_b, pdf_device=device
+    )
+    _require_mechanism_available(extractor_b, mechanism_b.value, level=level, device=device)
+
+    comparison = compare_extractors(cases, extractor_a, extractor_b, clock=time.perf_counter)
+    totals = comparison["totals"]
+    payload: dict[str, Any] = {
+        "ok": True,
+        "run_id": run_id,
+        "case_id": case_id,
+        "golden": str(golden_path),
+        "golden_format": document.format,
+        "golden_status": document.status,
+        "golden_reviewed_by": document.reviewed_by,
+        "total": len(cases),
+        "cases": [
+            {
+                "case_id": case.case_id,
+                "format": case.format,
+                "doc_id": case.doc_id,
+                "raw_path": case.raw_path,
+                "expect_error": case.expect_error,
+            }
+            for case in cases
+        ],
+        "mechanisms": {
+            "a": {
+                "mechanism": mechanism_a.value,
+                "level": level.value,
+                "device": device.value,
+                "extractor_version": comparison["a_version"],
+            },
+            "b": {
+                "mechanism": mechanism_b.value,
+                "level": level.value,
+                "device": device.value,
+                "extractor_version": comparison["b_version"],
+            },
+        },
+        "extractor_version": {
+            "a": comparison["a_version"],
+            "b": comparison["b_version"],
+        },
+        "per_case": comparison["cases"],
+        "summary": {
+            "a_passed": comparison["a_passed"],
+            "b_passed": comparison["b_passed"],
+            "a_pass_rate": comparison["a_pass_rate"],
+            "b_pass_rate": comparison["b_pass_rate"],
+            **totals,
+            "classification": comparison["summary"],
+        },
+        "recommendation": comparison["recommendation"],
+    }
+    artifact = (
+        Path(str(args.out_json)).expanduser()
+        if getattr(args, "out_json", None)
+        else _extraction_artifact_path(db_path)
+    )
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    payload["artifact"] = str(artifact)
+    artifact.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
+    _emit_extraction(args, payload)
+    return EXIT_OK
+
+
 def _no_subcommand(args: argparse.Namespace) -> int:  # noqa: ARG001 — сигнатура handler
     """``hound experiment`` без вида: печатает usage и возвращает :data:`EXIT_USAGE`."""
     sys.stderr.write(
-        "usage: hound experiment {retrieval|evaluator-benchmark} ...\n"
+        "usage: hound experiment {retrieval|evaluator-benchmark|extraction} ...\n"
     )
     return EXIT_USAGE
 
 
 def configure(sub: Any) -> None:
-    """Регистрирует подпакет ``experiment`` (вид ``retrieval``)."""
+    """Регистрирует подпакет ``experiment`` (виды ``retrieval``/``evaluator-benchmark``/``extraction``)."""
     p_exp = sub.add_parser(
         "experiment", help="эксперименты фиксации параметров измерением (A3)"
     )
@@ -892,6 +1186,81 @@ def configure(sub: Any) -> None:
     )
     _add_common(p_bench)
     p_bench.set_defaults(handler=run_evaluator_benchmark)
+
+    p_ext = exp_sub.add_parser(
+        "extraction",
+        help="A/B механизмов PDF-извлечения на наборе извлечения (O38б, D10)",
+    )
+    source_ext = p_ext.add_mutually_exclusive_group(required=True)
+    source_ext.add_argument("--db", default=None, help="путь к cohound.db прогона")
+    source_ext.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов (runs/{run_id}/cohound.db; требует --run-id)",
+    )
+    p_ext.add_argument(
+        "--run-id",
+        default=None,
+        help="run_id (обязателен с --runs-dir; с --db выводится, если прогон один)",
+    )
+    p_ext.add_argument(
+        "--golden",
+        default=None,
+        help="набор извлечения (JSON, формат cohound-extraction-golden/1); по умолчанию — "
+        "{package}/sources/extraction_golden.json",
+    )
+    p_ext.add_argument(
+        "--package",
+        default=None,
+        help="каталог пакета (опц.; из него берётся набор, если --golden не задан)",
+    )
+    p_ext.add_argument(
+        "--mechanism-a",
+        dest="mechanism_a",
+        choices=list(EXTRACTION_MECHANISMS),
+        default=PdfPipeline.STRUCTURED.value,
+        help=f"механизм A ({', '.join(EXTRACTION_MECHANISMS)}); дефолт "
+        f"{PdfPipeline.STRUCTURED.value}",
+    )
+    p_ext.add_argument(
+        "--mechanism-b",
+        dest="mechanism_b",
+        choices=list(EXTRACTION_MECHANISMS),
+        default=PdfPipeline.TEXT_LAYER.value,
+        help=f"механизм B ({', '.join(EXTRACTION_MECHANISMS)}); дефолт "
+        f"{PdfPipeline.TEXT_LAYER.value}",
+    )
+    p_ext.add_argument(
+        "--level",
+        choices=[level.value for level in DocumentLevel],
+        default=DocumentLevel.FULL.value,
+        help="уровень документной экстракции для structured "
+        f"({', '.join(level.value for level in DocumentLevel)}); дефолт "
+        f"{DocumentLevel.FULL.value}",
+    )
+    p_ext.add_argument(
+        "--device",
+        choices=[device.value for device in PdfDevice],
+        default=PdfDevice.CPU.value,
+        help="устройство моделей для structured (cpu|cuda; cuda без устройства — отказ, "
+        "не тихий CPU)",
+    )
+    p_ext.add_argument(
+        "--out-json",
+        dest="out_json",
+        default=None,
+        help="куда писать артефакт замера (по умолчанию "
+        "runs/{run_id}/extraction/extraction-<timestamp>.json)",
+    )
+    p_ext.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="smoke-подмножество: не более N кейсов (детерминированно по набору)",
+    )
+    _add_common(p_ext)
+    p_ext.set_defaults(handler=run_extraction)
 
     # ``hound experiment`` без вида — usage-ошибка, а не трейсбек отсутствующего handler.
     p_exp.set_defaults(handler=_no_subcommand)

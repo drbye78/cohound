@@ -17,6 +17,20 @@
 экстрактора и возвращает рекомендацию с флагом ``auto_switch: False``: выбор экстрактора
 фиксируется человеком/гейтом по измерению, а не предвидением; флаг документирует это в манифесте.
 
+**Набор как файл (O38б/D10 плана 26).** У набора есть два носителя: голый JSON-список кейсов
+(историческая форма, живёт в фикстурах) и конверт :data:`EXTRACTION_GOLDEN_FORMAT` — тот же
+список в ключе ``cases`` плюс **объявленное состояние набора** (``status``/``reviewed_by``/
+``run_id``) и машинные условия сборки (``policy``). Конверт нужен потому, что набор из корпуса
+готовит **AI**, а размечает **человек** (D10): «кандидат» и «подтверждённый набор» — разные
+состояния одного файла, и различать их по содержимому нельзя. Оба носителя читает один
+загрузчик (:func:`load_extraction_golden_document`); формат чужого конверта — ``ValueError``,
+а не тихое «кейсов нет».
+
+**Что измерено, а что объявлено.** ``pages`` в результате кейса — наблюдение читателя
+(``ExtractedDoc.pages_converted``), ``elapsed_ms`` — цена хоста и **только** при явно
+переданных часах: по умолчанию время не снимается, поэтому результат остаётся
+воспроизводимым (``to_manifest_json`` пригоден для хеширования, как и раньше).
+
 Модуль категорийно нейтрален (§1.3), детерминирован и не требует тяжёлых адаптеров
 (docling/trafilatura) — в тестах используется фейковый ``ExtractorPort``. Единственный I/O —
 загрузчик golden и чтение ``raw_path``.
@@ -27,27 +41,43 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from core.ports.extractor import ExtractorPort
 from core.ports.types import RawPage
 
 __all__ = [
+    "EXTRACTION_GOLDEN_FORMAT",
+    "EXTRACTION_GOLDEN_STATUSES",
     "FORMAT_CONTENT_TYPES",
     "SUPPORTED_GOLDEN_FORMATS",
     "ExtractionCaseResult",
     "ExtractionGoldenCase",
+    "ExtractionGoldenSet",
     "ExtractionReport",
+    "case_outcome",
     "compare_extractors",
     "extractor_version_changed",
     "load_extraction_golden",
+    "load_extraction_golden_document",
     "run_extraction_golden",
 ]
 
 
 #: Форматы extraction-golden (02 §B.1/01 §3.5): PDF + Office Open XML + HTML.
 SUPPORTED_GOLDEN_FORMATS: frozenset[str] = frozenset({"pdf", "docx", "pptx", "xlsx", "html"})
+
+#: Строка формата **конверта** набора (O38б/D10 плана 26): одна константа на оба писателя —
+#: :mod:`scripts.prepare_extraction_golden` пишет её, этот модуль проверяет. Голый JSON-список
+#: (историческая форма фикстур) остаётся читаемым: конверта в нём нет, и это названо.
+EXTRACTION_GOLDEN_FORMAT = "cohound-extraction-golden/1"
+
+#: Состояния набора: ``candidate`` — набор собран AI и **не подтверждён человеком** (D10),
+#: ``reviewed`` — подтверждён, и ``reviewed_by`` обязан быть непустым.
+EXTRACTION_GOLDEN_STATUSES: frozenset[str] = frozenset({"candidate", "reviewed"})
 
 #: Content-Type по формату: детерминированная метка формата на ``RawPage`` (01 §3.5).
 FORMAT_CONTENT_TYPES: dict[str, str] = {
@@ -84,6 +114,13 @@ class ExtractionGoldenCase:
     #: отказ — правильное поведение, и golden обязан его требовать, а не молча
     #: принимать пустой текст.
     expect_error: str | None = None
+    #: Документ корпуса, из которого взят кейс (``corpus_docs.doc_id``). Провенанс, не условие
+    #: прогона: ``raw_path`` — хост-специфичный адрес байтов, а ``doc_id`` называет документ в
+    #: корпусе прогона, поэтому по нему кейс находится и на другом хосте с тем же корпусом.
+    doc_id: str | None = None
+    #: Заметка разметчика (что именно проверяет кейс по пяти направлениям O38б). Свободный
+    #: текст: он не участвует в проверках и существует для следующего читателя набора.
+    notes: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,6 +138,14 @@ class ExtractionCaseResult:
     #: ``no_text_layer``, а получили текст» отличалось от «ожидали текст, а получили
     #: ``no_text_layer``» без чтения исходного golden.
     expected_error: str | None = None
+    #: Страницы, реально попавшие в текст (``ExtractedDoc.pages_converted``; ``None`` — читатель
+    #: числа не сообщает). Наблюдение читателя, а не длина текста: «7 страниц из 2763» и «7
+    #: страниц» — разные факты, и второй выдумывать нельзя (A3).
+    pages: int | None = None
+    #: Время извлечения кейса в миллисекундах. ``None`` — часы не переданы (детерминизм
+    #: по умолчанию): время — цена хоста, а не свойство набора, и в ``to_manifest_json``
+    #: оно не публикуется.
+    elapsed_ms: float | None = None
 
 
 @dataclass
@@ -147,11 +192,37 @@ class ExtractionReport:
                     "forbidden_hits": list(result.forbidden_hits),
                     "error": result.error,
                     "expected_error": result.expected_error,
+                    # ``elapsed_ms`` намеренно отсутствует: время кейса — цена хоста, а не
+                    # результат измерения, и строка обязана оставаться воспроизводимой.
+                    "pages": result.pages,
                 }
                 for result in self.results
             ],
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+@dataclass(frozen=True)
+class ExtractionGoldenSet:
+    """Набор extraction-golden как **файл**: кейсы + объявленное состояние набора (O38б/D10).
+
+    ``format`` — строка конверта (:data:`EXTRACTION_GOLDEN_FORMAT`); ``""`` означает
+    историческую форму — голый JSON-список без конверта, где ни статус, ни автор
+    подтверждения не объявлены, и читатель не вправе их додумать.
+
+    ``status``/``reviewed_by`` — состояние набора, а не его содержимое: набор из корпуса
+    готовит AI (``candidate``), подтверждает человек (``reviewed``), и «подтверждён» обязан
+    называть, кем. ``policy`` — машинные условия, с которыми набор собран (инструмент, seed,
+    объём выборки, прибор двухколоночности): они читаются отчётом, а не угадываются.
+    """
+
+    format: str
+    cases: list[ExtractionGoldenCase]
+    case_id: str | None = None
+    run_id: str | None = None
+    status: str = "candidate"
+    reviewed_by: str | None = None
+    policy: dict[str, Any] = field(default_factory=dict)
 
 
 def _decode_b64(value: str, where: str) -> bytes:
@@ -162,30 +233,136 @@ def _decode_b64(value: str, where: str) -> bytes:
         raise ValueError(f"{where}: некорректный base64 ({exc})") from exc
 
 
-def load_extraction_golden(path: str | Path) -> list[ExtractionGoldenCase]:
-    """Загружает extraction-golden из JSON-списка объектов с валидацией формы.
+def _parse_case(item: Any, where: str, base_dir: Path, seen_ids: set[str]) -> ExtractionGoldenCase:
+    """Один кейс из JSON-объекта: валидация формы и резолв ``raw_path``.
 
-    Ожидаемая форма::
+    Общая часть обоих носителей (голого списка и конверта): правила кейса не должны
+    разъехаться между ними.
+    """
+    if not isinstance(item, dict):
+        raise ValueError(f"{where}: ожидается объект, получено {type(item).__name__}")
 
-        [
-          {
-            "case_id": "case_a",
-            "format": "html",
-            "raw_b64": "<base64>",          # либо "raw_path": "files/page.pdf"
-            "expected_substrings": ["..."],
-            "forbidden_substrings": ["..."],
-            "min_chars": 10,
-            "expect_error": "no_text_layer"   # необязательный негативный кейс
-          }
-        ]
+    case_id = item.get("case_id")
+    if not isinstance(case_id, str) or not case_id.strip():
+        raise ValueError(f"{where}.case_id: ожидается непустая строка")
+    if case_id in seen_ids:
+        raise ValueError(f"{where}.case_id: дубликат {case_id!r}")
+    seen_ids.add(case_id)
+
+    fmt_raw = item.get("format")
+    if not isinstance(fmt_raw, str) or fmt_raw.strip().lower() not in SUPPORTED_GOLDEN_FORMATS:
+        raise ValueError(
+            f"{where}.format: ожидается один из {sorted(SUPPORTED_GOLDEN_FORMATS)}, "
+            f"получено {fmt_raw!r}"
+        )
+    fmt = fmt_raw.strip().lower()
+
+    raw_path = item.get("raw_path")
+    raw_b64 = item.get("raw_b64")
+    if raw_path is not None and not isinstance(raw_path, str):
+        raise ValueError(f"{where}.raw_path: ожидается строка")
+    if raw_b64 is not None and not isinstance(raw_b64, str):
+        raise ValueError(f"{where}.raw_b64: ожидается строка")
+    path_value = raw_path if isinstance(raw_path, str) and raw_path.strip() != "" else None
+    b64_value = raw_b64 if isinstance(raw_b64, str) and raw_b64.strip() != "" else None
+    if path_value is not None and b64_value is not None:
+        raise ValueError(f"{where}: заданы и raw_path, и raw_b64 — допустим ровно один")
+    if path_value is None and b64_value is None:
+        raise ValueError(f"{where}: не задан источник байтов (raw_path или raw_b64)")
+
+    resolved_path = str((base_dir / path_value).resolve()) if path_value is not None else None
+    if b64_value is not None:
+        _decode_b64(b64_value, f"{where}.raw_b64")
+
+    expected = item.get("expected_substrings", [])
+    forbidden = item.get("forbidden_substrings", [])
+    for name, value in (
+        ("expected_substrings", expected),
+        ("forbidden_substrings", forbidden),
+    ):
+        if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
+            raise ValueError(f"{where}.{name}: ожидается список строк")
+
+    min_chars = item.get("min_chars", 0)
+    if isinstance(min_chars, bool) or not isinstance(min_chars, int) or min_chars < 0:
+        raise ValueError(f"{where}.min_chars: ожидается целое >= 0")
+
+    expect_error = item.get("expect_error")
+    if expect_error is not None and (
+        not isinstance(expect_error, str) or not expect_error.strip()
+    ):
+        raise ValueError(f"{where}.expect_error: ожидается непустая строка")
+
+    doc_id = item.get("doc_id")
+    if doc_id is not None and (not isinstance(doc_id, str) or not doc_id.strip()):
+        raise ValueError(f"{where}.doc_id: ожидается непустая строка")
+
+    notes = item.get("notes", "")
+    if notes is not None and not isinstance(notes, str):
+        raise ValueError(f"{where}.notes: ожидается строка")
+
+    return ExtractionGoldenCase(
+        case_id=case_id,
+        format=fmt,
+        raw_path=resolved_path,
+        raw_b64=b64_value,
+        expected_substrings=list(expected),
+        forbidden_substrings=list(forbidden),
+        min_chars=min_chars,
+        expect_error=expect_error,
+        doc_id=doc_id,
+        notes=notes or "",
+    )
+
+
+def _cases_from_list(data: list[Any], base_dir: Path) -> list[ExtractionGoldenCase]:
+    """Кейсы из JSON-списка: общий путь для голого списка и ключа ``cases`` конверта."""
+    seen_ids: set[str] = set()
+    return [
+        _parse_case(item, f"extraction-golden[{index}]", base_dir, seen_ids)
+        for index, item in enumerate(data)
+    ]
+
+
+def load_extraction_golden_document(path: str | Path) -> ExtractionGoldenSet:
+    """Загружает набор extraction-golden **как файл**: конверт либо исторический список.
+
+    Ожидаемые формы::
+
+        # конверт (O38б/D10; пишется scripts/prepare_extraction_golden.py)
+        {
+          "format": "cohound-extraction-golden/1",
+          "case_id": "case_x", "run_id": "case_x-…",
+          "status": "candidate", "reviewed_by": null,
+          "policy": {...},
+          "cases": [ {...кейс...}, ... ]
+        }
+
+        # историческая форма (фикстуры): голый список кейсов
+        [ {...кейс...}, ... ]
+
+    Кейс::
+
+        {
+          "case_id": "case_a",
+          "format": "html",
+          "raw_b64": "<base64>",          # либо "raw_path": "files/page.pdf"
+          "expected_substrings": ["..."],
+          "forbidden_substrings": ["..."],
+          "min_chars": 10,
+          "expect_error": "no_text_layer",  # необязательный негативный кейс
+          "doc_id": "…",                    # необязательный провенанс
+          "notes": "…"                      # необязательная заметка разметчика
+        }
 
     Относительный ``raw_path`` резолвится относительно каталога самого golden-файла
     (не зависит от CWD). ``raw_b64`` валидируется по синтаксису base64 уже на загрузке.
 
-    :raises ValueError: не JSON-список, элемент не объект, ``case_id`` пуст/дублируется,
-        неизвестный формат, заданы оба/ни один источник байтов, битый base64,
-        списки подстрок не из строк, ``min_chars`` не целое >= 0, ``expect_error``
-        не непустая строка.
+    :raises ValueError: не JSON, конверт с чужим/пустым ``format``, ``cases`` не список,
+        ``status`` вне :data:`EXTRACTION_GOLDEN_STATUSES`, ``reviewed`` без ``reviewed_by``,
+        элемент не объект, ``case_id`` пуст/дублируется, неизвестный формат, заданы
+        оба/ни один источник байтов, битый base64, списки подстрок не из строк,
+        ``min_chars`` не целое >= 0, ``expect_error`` не непустая строка.
     """
     golden_path = Path(path)
     raw_text = golden_path.read_text(encoding="utf-8")
@@ -193,83 +370,66 @@ def load_extraction_golden(path: str | Path) -> list[ExtractionGoldenCase]:
         data = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"extraction-golden: некорректный JSON ({golden_path}): {exc}") from exc
-    if not isinstance(data, list):
-        raise ValueError(
-            f"extraction-golden: ожидается JSON-список, получено {type(data).__name__}"
-        )
 
     base_dir = golden_path.resolve().parent
-    cases: list[ExtractionGoldenCase] = []
-    seen_ids: set[str] = set()
-    for index, item in enumerate(data):
-        where = f"extraction-golden[{index}]"
-        if not isinstance(item, dict):
-            raise ValueError(f"{where}: ожидается объект, получено {type(item).__name__}")
-
-        case_id = item.get("case_id")
-        if not isinstance(case_id, str) or not case_id.strip():
-            raise ValueError(f"{where}.case_id: ожидается непустая строка")
-        if case_id in seen_ids:
-            raise ValueError(f"{where}.case_id: дубликат {case_id!r}")
-        seen_ids.add(case_id)
-
-        fmt_raw = item.get("format")
-        if not isinstance(fmt_raw, str) or fmt_raw.strip().lower() not in SUPPORTED_GOLDEN_FORMATS:
-            raise ValueError(
-                f"{where}.format: ожидается один из {sorted(SUPPORTED_GOLDEN_FORMATS)}, "
-                f"получено {fmt_raw!r}"
-            )
-        fmt = fmt_raw.strip().lower()
-
-        raw_path = item.get("raw_path")
-        raw_b64 = item.get("raw_b64")
-        if raw_path is not None and not isinstance(raw_path, str):
-            raise ValueError(f"{where}.raw_path: ожидается строка")
-        if raw_b64 is not None and not isinstance(raw_b64, str):
-            raise ValueError(f"{where}.raw_b64: ожидается строка")
-        path_value = raw_path if isinstance(raw_path, str) and raw_path.strip() != "" else None
-        b64_value = raw_b64 if isinstance(raw_b64, str) and raw_b64.strip() != "" else None
-        if path_value is not None and b64_value is not None:
-            raise ValueError(f"{where}: заданы и raw_path, и raw_b64 — допустим ровно один")
-        if path_value is None and b64_value is None:
-            raise ValueError(f"{where}: не задан источник байтов (raw_path или raw_b64)")
-
-        resolved_path = str((base_dir / path_value).resolve()) if path_value is not None else None
-        if b64_value is not None:
-            _decode_b64(b64_value, f"{where}.raw_b64")
-
-        expected = item.get("expected_substrings", [])
-        forbidden = item.get("forbidden_substrings", [])
-        for name, value in (
-            ("expected_substrings", expected),
-            ("forbidden_substrings", forbidden),
-        ):
-            if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
-                raise ValueError(f"{where}.{name}: ожидается список строк")
-
-        min_chars = item.get("min_chars", 0)
-        if isinstance(min_chars, bool) or not isinstance(min_chars, int) or min_chars < 0:
-            raise ValueError(f"{where}.min_chars: ожидается целое >= 0")
-
-        expect_error = item.get("expect_error")
-        if expect_error is not None and (
-            not isinstance(expect_error, str) or not expect_error.strip()
-        ):
-            raise ValueError(f"{where}.expect_error: ожидается непустая строка")
-
-        cases.append(
-            ExtractionGoldenCase(
-                case_id=case_id,
-                format=fmt,
-                raw_path=resolved_path,
-                raw_b64=b64_value,
-                expected_substrings=list(expected),
-                forbidden_substrings=list(forbidden),
-                min_chars=min_chars,
-                expect_error=expect_error,
-            )
+    if isinstance(data, list):
+        # Историческая форма: состояние набора не объявлено, и додумывать его нельзя.
+        return ExtractionGoldenSet(format="", cases=_cases_from_list(data, base_dir))
+    if not isinstance(data, dict):
+        raise ValueError(
+            "extraction-golden: ожидается конверт (объект) либо JSON-список кейсов, "
+            f"получено {type(data).__name__}"
         )
-    return cases
+
+    declared_format = data.get("format")
+    if declared_format != EXTRACTION_GOLDEN_FORMAT:
+        raise ValueError(
+            f"extraction-golden: чужой формат {declared_format!r} "
+            f"(ожидается {EXTRACTION_GOLDEN_FORMAT!r})"
+        )
+    cases_raw = data.get("cases")
+    if not isinstance(cases_raw, list):
+        raise ValueError("extraction-golden: конверт обязан нести список 'cases'")
+
+    status = data.get("status", "candidate")
+    if not isinstance(status, str) or status not in EXTRACTION_GOLDEN_STATUSES:
+        raise ValueError(
+            f"extraction-golden.status: ожидается один из {sorted(EXTRACTION_GOLDEN_STATUSES)}, "
+            f"получено {status!r}"
+        )
+    reviewed_by = data.get("reviewed_by")
+    if reviewed_by is not None and not isinstance(reviewed_by, str):
+        raise ValueError("extraction-golden.reviewed_by: ожидается строка")
+    if status == "reviewed" and not (reviewed_by or "").strip():
+        raise ValueError(
+            "extraction-golden: status=reviewed без reviewed_by — подтверждение набора "
+            "обязано называть, кем оно сделано"
+        )
+    policy = data.get("policy", {})
+    if not isinstance(policy, dict):
+        raise ValueError("extraction-golden.policy: ожидается объект")
+
+    return ExtractionGoldenSet(
+        format=EXTRACTION_GOLDEN_FORMAT,
+        cases=_cases_from_list(cases_raw, base_dir),
+        case_id=data.get("case_id") or None,
+        run_id=data.get("run_id") or None,
+        status=status,
+        reviewed_by=reviewed_by or None,
+        policy=dict(policy),
+    )
+
+
+def load_extraction_golden(path: str | Path) -> list[ExtractionGoldenCase]:
+    """Загружает **кейсы** набора (конверт либо исторический список).
+
+    Тонкая обёртка над :func:`load_extraction_golden_document` для прогона, которому
+    состояние набора не нужно: правила формы живут в одном месте, а не в двух.
+
+    :raises ValueError: см. :func:`load_extraction_golden_document`.
+    """
+    return load_extraction_golden_document(path).cases
+
 
 
 def _read_case_bytes(case: ExtractionGoldenCase) -> bytes:
@@ -298,23 +458,39 @@ def _build_page(case: ExtractionGoldenCase) -> RawPage:
     )
 
 
-def _result_error(case_id: str, *, version: str, error: str, chars: int = 0) -> ExtractionCaseResult:
+def _result_error(
+    case_id: str,
+    *,
+    version: str,
+    error: str,
+    chars: int = 0,
+    elapsed_ms: float | None = None,
+) -> ExtractionCaseResult:
     return ExtractionCaseResult(
         case_id=case_id,
         ok=False,
         extractor_version=version,
         chars=chars,
         error=error,
+        elapsed_ms=elapsed_ms,
     )
 
 
-def _run_case(case: ExtractionGoldenCase, extractor: ExtractorPort) -> ExtractionCaseResult:
+def _run_case(
+    case: ExtractionGoldenCase,
+    extractor: ExtractorPort,
+    *,
+    clock: Callable[[], float] | None = None,
+) -> ExtractionCaseResult:
     """Прогоняет один кейс с изоляцией ошибок: любой сбой → результат с ``error``, не исключение.
 
     Негативный кейс (``expect_error``) инвертирует проверку ошибки: успех — ровно
     ожидаемый ``error``; текст при этом не проверяется (его может не быть вовсе).
     Отсутствие ошибки или другая ошибка — провал кейса, и в результате видно
     ``expected_error`` рядом с фактическим ``error``.
+
+    ``clock`` (``() -> секунды``) снимает время **извлечения** (не чтения байтов). ``None`` —
+    время не измеряется: по умолчанию результат обязан оставаться воспроизводимым.
     """
     fallback_version = str(getattr(extractor, "version", "") or "")
 
@@ -325,20 +501,33 @@ def _run_case(case: ExtractionGoldenCase, extractor: ExtractorPort) -> Extractio
             case.case_id, version=fallback_version, error=f"raw: {type(exc).__name__}: {exc}"
         )
 
+    started = clock() if clock is not None else None
     try:
         extracted = extractor.extract(page)
     except Exception as exc:  # noqa: BLE001 — изоляция кейса: адаптер бросил
+        elapsed_ms = (clock() - started) * 1000.0 if (clock and started is not None) else None
         return _result_error(
-            case.case_id, version=fallback_version, error=f"extract: {type(exc).__name__}: {exc}"
+            case.case_id,
+            version=fallback_version,
+            error=f"extract: {type(exc).__name__}: {exc}",
+            elapsed_ms=elapsed_ms,
         )
+    elapsed_ms = (clock() - started) * 1000.0 if (clock and started is not None) else None
 
     if extracted is None:
         return _result_error(
-            case.case_id, version=fallback_version, error="extract: пустой ExtractedDoc"
+            case.case_id,
+            version=fallback_version,
+            error="extract: пустой ExtractedDoc",
+            elapsed_ms=elapsed_ms,
         )
 
     version = str(getattr(extracted, "extractor_version", "") or fallback_version)
     text = str(getattr(extracted, "text", "") or "")
+    # ``pages_converted`` — сколько страниц реально попало в текст; ``None`` у читателя,
+    # который числа не сообщает (выдуманный счётчик хуже отсутствующего, A3).
+    pages = getattr(extracted, "pages_converted", None)
+    pages_value = int(pages) if isinstance(pages, int) and not isinstance(pages, bool) else None
 
     error = getattr(extracted, "error", None)
     actual_error = str(error) if error else None
@@ -350,9 +539,17 @@ def _run_case(case: ExtractionGoldenCase, extractor: ExtractorPort) -> Extractio
             chars=len(text),
             error=actual_error,
             expected_error=case.expect_error,
+            pages=pages_value,
+            elapsed_ms=elapsed_ms,
         )
     if error:
-        return _result_error(case.case_id, version=version, error=str(error), chars=len(text))
+        return _result_error(
+            case.case_id,
+            version=version,
+            error=str(error),
+            chars=len(text),
+            elapsed_ms=elapsed_ms,
+        )
 
     missing = [needle for needle in case.expected_substrings if needle not in text]
     forbidden_hits = [needle for needle in case.forbidden_substrings if needle in text]
@@ -366,53 +563,111 @@ def _run_case(case: ExtractionGoldenCase, extractor: ExtractorPort) -> Extractio
         missing=missing,
         forbidden_hits=forbidden_hits,
         error=None,
+        pages=pages_value,
+        elapsed_ms=elapsed_ms,
     )
+
+
+def case_outcome(result: ExtractionCaseResult) -> str:
+    """Класс исхода кейса — одна метка для таблицы A/B, а не набор флагов.
+
+    ``ok`` — все ожидания выполнены; ``error`` — экстрактор отказал на обычном кейсе;
+    ``missing`` — ожидаемая подстрока не найдена; ``forbidden`` — найдена запрещённая;
+    ``min_chars`` — текста меньше объявленного минимума (все подстроки на месте);
+    ``unexpected_success`` — негативный кейс дал текст вместо ожидаемого отказа;
+    ``wrong_error`` — негативный кейс отказал, но другой ошибкой.
+
+    Порядок ветвей и есть приоритет: отказ важнее недостающей подстроки, иначе «не
+    прочитал документ» читалось бы как «прочитал без фразы».
+    """
+    if result.ok:
+        return "ok"
+    if result.expected_error is not None:
+        return "wrong_error" if result.error else "unexpected_success"
+    if result.error:
+        return "error"
+    if result.missing:
+        return "missing"
+    if result.forbidden_hits:
+        return "forbidden"
+    return "min_chars"
 
 
 def run_extraction_golden(
     cases: list[ExtractionGoldenCase],
     extractor: ExtractorPort,
+    *,
+    clock: Callable[[], float] | None = None,
 ) -> ExtractionReport:
     """Прогоняет extraction-golden по одному экстрактору (детерминирован, изоляция кейсов).
 
     Для каждого кейса строится ``RawPage`` (байты из ``raw_b64``/``raw_path``, формат — из
     ``format``), вызывается ``extractor.extract(page)`` и проверяются ``expected_substrings``/
     ``forbidden_substrings``/``min_chars``; у негативного кейса — ``expect_error``.
-    Ошибка одного кейса не прерывает прогон.
+    Ошибка одного кейса не прерывает прогон. ``clock`` — необязательный счётчик времени
+    (``None``: время не измеряется, результат воспроизводим).
     """
     return ExtractionReport(
         extractor_version=str(getattr(extractor, "version", "") or ""),
-        results=[_run_case(case, extractor) for case in cases],
+        results=[_run_case(case, extractor, clock=clock) for case in cases],
     )
+
+
+def _arm_payload(result: ExtractionCaseResult | None) -> dict[str, Any]:
+    """Плечо A/B одного кейса: исход, объём, страницы и расхождения — как есть."""
+    if result is None:
+        return {"outcome": "absent"}
+    return {
+        "outcome": case_outcome(result),
+        "ok": result.ok,
+        "chars": result.chars,
+        "pages": result.pages,
+        "missing": list(result.missing),
+        "forbidden_hits": list(result.forbidden_hits),
+        "error": result.error,
+        "expected_error": result.expected_error,
+        "elapsed_ms": result.elapsed_ms,
+    }
 
 
 def compare_extractors(
     cases: list[ExtractionGoldenCase],
     a: ExtractorPort,
     b: ExtractorPort,
+    *,
+    clock: Callable[[], float] | None = None,
 ) -> dict:
     """A/B-сравнение двух экстракторов на одном golden (T8.7, A3).
 
     Возвращает словарь с версиями/``pass_rate`` обоих, пер-кейс классификацией
-    (``both_pass`` / ``both_fail`` / ``disagree``), сводкой и **рекомендацией измерения**:
-    ``recommendation.auto_switch`` всегда ``False`` — A/B это измерение (A3), выбор
-    фиксируется человеком/гейтом, а не автопереключением реализации.
+    (``both_pass`` / ``both_fail`` / ``disagree``), **деталью по каждому плечу**
+    (``a``/``b``: исход, символы, страницы, расхождения), сводкой и **рекомендацией
+    измерения**: ``recommendation.auto_switch`` всегда ``False`` — A/B это измерение (A3),
+    выбор фиксируется человеком/гейтом, а не автопереключением реализации.
+
+    ``totals`` отделяет «сколько проходит только под одним механизмом» от согласия:
+    ``a_only``/``b_only``/``both``/``neither``. Это и есть предмет решения — механизм,
+    который проходит те же кейсы, что и другой, не измерен, а продублирован.
     """
-    report_a = run_extraction_golden(cases, a)
-    report_b = run_extraction_golden(cases, b)
+    report_a = run_extraction_golden(cases, a, clock=clock)
+    report_b = run_extraction_golden(cases, b, clock=clock)
     results_b = {result.case_id: result for result in report_b.results}
 
     cases_out: list[dict] = []
     summary = {"both_pass": 0, "both_fail": 0, "disagree": 0}
+    totals = {"both": 0, "a_only": 0, "b_only": 0, "neither": 0}
     for result_a in report_a.results:
         result_b = results_b.get(result_a.case_id)
         b_ok = bool(result_b.ok) if result_b is not None else False
         if result_a.ok and b_ok:
             classification = "both_pass"
+            totals["both"] += 1
         elif not result_a.ok and not b_ok:
             classification = "both_fail"
+            totals["neither"] += 1
         else:
             classification = "disagree"
+            totals["a_only" if result_a.ok else "b_only"] += 1
         summary[classification] += 1
         cases_out.append(
             {
@@ -420,6 +675,8 @@ def compare_extractors(
                 "a_ok": result_a.ok,
                 "b_ok": b_ok,
                 "classification": classification,
+                "a": _arm_payload(result_a),
+                "b": _arm_payload(result_b),
             }
         )
 
@@ -435,8 +692,12 @@ def compare_extractors(
         "b_version": report_b.extractor_version,
         "a_pass_rate": report_a.pass_rate,
         "b_pass_rate": report_b.pass_rate,
+        "a_passed": report_a.passed,
+        "b_passed": report_b.passed,
+        "total": report_a.total,
         "cases": cases_out,
         "summary": summary,
+        "totals": totals,
         "recommendation": {
             "suggested": suggested,
             "auto_switch": False,
@@ -447,6 +708,7 @@ def compare_extractors(
             ),
         },
     }
+
 
 
 def extractor_version_changed(
