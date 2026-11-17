@@ -79,6 +79,7 @@ if str(_ROOT) not in sys.path:
 from core.domain.models import CatalogRow  # noqa: E402 — после правки sys.path
 from core.pipeline.evaluate import run_queries_for_cell  # noqa: E402
 from core.pipeline.experiments import load_retrieval_golden  # noqa: E402
+from core.pipeline.quote_text import normalize  # noqa: E402 — одна нормализация на два прибора
 from core.pipeline.retrieval_docs import DocGoldenEntry, load_doc_golden  # noqa: E402
 
 #: Путь документного эталона кейса по умолчанию (вход пересборки).
@@ -331,52 +332,10 @@ def build_doc_text(rows: list[sqlite3.Row]) -> DocText:
 # ---------------------------------------------------------------------------
 # Нормализация и поиск цитаты
 # ---------------------------------------------------------------------------
-def normalize(text: str) -> tuple[str, list[int]]:
-    """Нормализует текст для поиска цитаты и возвращает карту «норм. индекс → исходный».
-
-    Две нормализации, обе замеренные, а не вкусовые:
-
-    * пробельные серии → один пробел: цитата склеивается из строки промпта, где переводы
-      строк и отступы не совпадают с текстом чанка;
-    * ``\\\\_`` → ``_``: документация пишет экранированный underscore, и буквальная
-      подстрока ``pg_basebackup`` такого чанка не видит (замер O16 15.11.2026: 810
-      «чистых» чанков против 930 экранированных).
-
-    Регистр и пунктуация **не** нормализуются: цитата — то, что оценщик прочитал в чанке,
-    и «нашлось после смены регистра» — другой факт, который не должен выглядеть как
-    попадание.
-    """
-    out: list[str] = []
-    index: list[int] = []
-    position = 0
-    length = len(text)
-    while position < length:
-        char = text[position]
-        if char == "\\" and position + 1 < length and text[position + 1] == "_":
-            out.append("_")
-            index.append(position)
-            position += 2
-            continue
-        if char.isspace():
-            end = position
-            while end < length and text[end].isspace():
-                end += 1
-            out.append(" ")
-            index.append(position)
-            position = end
-            continue
-        out.append(char)
-        index.append(position)
-        position += 1
-    start = 0
-    stop = len(out)
-    while start < stop and out[start] == " ":
-        start += 1
-    while stop > start and out[stop - 1] == " ":
-        stop -= 1
-    return "".join(out[start:stop]), index[start:stop]
-
-
+#: Нормализация — **не здесь**: она общая с документным прибором (правило A) и живёт в
+#: :mod:`core.pipeline.quote_text`. Две копии разошлись бы молча, и один прибор находил бы
+#: цитату там, где другой её не видит. Имя оставлено импортом выше: на него опираются
+#: `locate_quote` и замер O16.
 def locate_quote(doc: DocText, quote: str) -> list[tuple[int, int, list[str]]]:
     """Все вхождения цитаты в тексте документа: ``[(начало, конец, [chunk_id…])]``.
 
