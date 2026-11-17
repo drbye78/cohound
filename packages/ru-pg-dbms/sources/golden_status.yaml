@@ -1,3 +1,26 @@
 # Состояние эталонного набора (golden_status/1).
+#
+# `present`: файл `golden.csv` есть и используется — 905 строк (181 параметр × 5 продуктов
+# когорты), снимок сравнительной таблицы 2026-10-01, происхождение — `provenance.yaml`.
+#
+# Waiver по продукту объявлен 18.11.2026 (решение владельца): у `postgresql` нет ни одной
+# строки эталона, и это решение, а не потеря. Причина — роль продукта, а не недоделка:
+# он объявлен точкой отсчёта когорты (`cohort.yaml: comparison_base: true`) и предком
+# (`sources/reference_products.yaml: baseline_id: upstream-pg`), то есть измеряется ради
+# Δ к нему, а не ради места в матрице. Ответного ключа «что предок умеет» эталон когорты
+# и не должен нести: это предмет `baseline_facts.csv` (наблюдения о документации предка,
+# цитата + хеш + дата), у которого своя дисциплина — `hound baseline recon|review`.
+#
+# Waiver НЕ входит ни в `execution_contract_digest`, ни в `cohort_digest`: `golden.csv` —
+# проверочный инструмент (§11.3), его состояние не меняет `run_id`. Отказ виден в отчёте
+# аномалией `golden_exempt_product` и строкой `nda_questions.csv`.
 schema: golden_status/1
 state: present
+exempt_products:
+  - product_id: postgresql
+    reason: >-
+      Точка отсчёта когорты (comparison_base) и предок (upstream-pg): измеряется ради Δ
+      к нему, а не ради места в матрице. Наблюдения о его документации ведёт
+      sources/baseline_facts.csv (hound baseline recon/review), а не эталон когорты.
+    declared_by: roger
+    declared_at: '2026-11-18'
