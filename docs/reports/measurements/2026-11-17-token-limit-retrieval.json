@@ -1,0 +1,799 @@
+{
+ "instrument": "scripts/measure_token_limit_retrieval.py",
+ "token_limit": 512,
+ "tokenizer": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+ "profile": "R0",
+ "lexical_profile": "stemmed",
+ "cutoff_k": 10,
+ "bootstrap": 1000,
+ "build_id": "cb_5c090025af68b95615c87869",
+ "cells": 132,
+ "products": [
+  "digital_q_database",
+  "jatoba",
+  "pangolin",
+  "postgrespro",
+  "tantor"
+ ],
+ "per_product": {
+  "digital_q_database": {
+   "cells": 2,
+   "chunks_in": 10870,
+   "chunks_out": 11095,
+   "hit_at_k_baseline": 0.5,
+   "hit_at_k_limited": 0.5
+  },
+  "jatoba": {
+   "cells": 5,
+   "chunks_in": 539,
+   "chunks_out": 540,
+   "hit_at_k_baseline": 0.6,
+   "hit_at_k_limited": 0.6
+  },
+  "pangolin": {
+   "cells": 2,
+   "chunks_in": 21015,
+   "chunks_out": 22412,
+   "hit_at_k_baseline": 0.5,
+   "hit_at_k_limited": 0.5
+  },
+  "postgrespro": {
+   "cells": 115,
+   "chunks_in": 206931,
+   "chunks_out": 214570,
+   "hit_at_k_baseline": 0.20869565217391303,
+   "hit_at_k_limited": 0.20869565217391303
+  },
+  "tantor": {
+   "cells": 8,
+   "chunks_in": 13951,
+   "chunks_out": 14259,
+   "hit_at_k_baseline": 0.625,
+   "hit_at_k_limited": 0.625
+  }
+ },
+ "corpus": {
+  "chunks_in": 253306,
+  "chunks_out": 262876,
+  "split_chunks": 9567,
+  "absorbed_tails": 4274,
+  "over_limit": 4274,
+  "touched_parents": 9567
+ },
+ "cost": {
+  "token_seconds": 311.0,
+  "index_seconds": 72.5
+ },
+ "metrics": {
+  "baseline": {
+   "hit_at_k": 0.25757575757575757,
+   "recall_at_k": 0.25757575757575757,
+   "mrr": 0.1261002886002886,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "scored": 132,
+   "unresolved_cells": 0
+  },
+  "limited": {
+   "hit_at_k": 0.25757575757575757,
+   "recall_at_k": 0.25757575757575757,
+   "mrr": 0.12564935064935065,
+   "hit_ci": [
+    0.18181818181818182,
+    0.3333333333333333
+   ],
+   "scored": 132,
+   "unresolved_cells": 0
+  }
+ },
+ "paired": {
+  "n_pairs": 132,
+  "hit_baseline": 0.25757575757575757,
+  "hit_variant": 0.25757575757575757,
+  "delta": 0.0,
+  "better": 0,
+  "worse": 0,
+  "mcnemar_p": 1.0,
+  "delta_ci": [
+   0.0,
+   0.0
+  ]
+ },
+ "ranks": {
+  "cells": 132,
+  "rank_changed": 4,
+  "rank_changed_hit_preserved": 4,
+  "examples": [
+   {
+    "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+    "baseline": 7,
+    "limited": 8
+   },
+   {
+    "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+    "baseline": 4,
+    "limited": 3
+   },
+   {
+    "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+    "baseline": 4,
+    "limited": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+    "baseline": 5,
+    "limited": 8
+   }
+  ]
+ },
+ "touch": {
+  "cells": 132,
+  "cells_with_touched_expected_chunks": 28,
+  "expected_chunks": 5194,
+  "touched_chunks": 111,
+  "per_cell": [
+   {
+    "cell": "digital_q_database/xlsx_005_tehnicheskaya_podderzhka_24_7",
+    "expected_chunks": 6,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "digital_q_database/xlsx_131_sovmestimost_s_oracle_pl_sql",
+    "expected_chunks": 6,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "jatoba/xlsx_005_tehnicheskaya_podderzhka_24_7",
+    "expected_chunks": 12,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "jatoba/xlsx_011_nalichie_obucheniya_po_produktu",
+    "expected_chunks": 19,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "jatoba/xlsx_018_nalichie_publichnogo_roadmap",
+    "expected_chunks": 19,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "jatoba/xlsx_019_podderzhka_dbaas_cloud",
+    "expected_chunks": 22,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "jatoba/xlsx_075_integraciya_so_storonnimi_sistemami_rezervnogo_kopir",
+    "expected_chunks": 18,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "pangolin/xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "pangolin/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+    "expected_chunks": 45,
+    "touched_chunks": 8
+   },
+   {
+    "cell": "postgrespro/xlsx_005_tehnicheskaya_podderzhka_24_7",
+    "expected_chunks": 51,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_008_vneocherednoi_vypusk_relizov_s_obnovleniyami",
+    "expected_chunks": 51,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_009_ezhekvartalnyi_vypusk_obnovlenii_s_ispravleniyami_os",
+    "expected_chunks": 25,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_011_nalichie_obucheniya_po_produktu",
+    "expected_chunks": 5,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+    "expected_chunks": 5,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_013_dokumentaciya_na_russkom",
+    "expected_chunks": 3,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_020_nalichie_sertifikata_fstek",
+    "expected_chunks": 41,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_021_podderzhka_minimum_treh_mazhornyh_versii_v_sertifici",
+    "expected_chunks": 41,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_023_zashchita_dannyh_ot_privilegirovannyh_polzovatelei",
+    "expected_chunks": 15,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_024_upravlenie_parolnymi_politikami_profili_parolei_i_t",
+    "expected_chunks": 15,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_026_vozmozhnost_rotacii_parolei_tehnologicheskih_uchetny",
+    "expected_chunks": 11,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_027_sinhronizaciya_rolei_i_grupp_iz_ldap",
+    "expected_chunks": 149,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_028_autentifikaciya_polzovatelei_cherez_vneshnie_sluzhby",
+    "expected_chunks": 149,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_033_otchety_po_privilegiyam_polzovatelei_i_rolei",
+    "expected_chunks": 24,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_034_poisk_izbytochnyh_privilegii_polzovatelei",
+    "expected_chunks": 24,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_036_rasshirennyi_audit_deistvii_polzovatelei_i_sbor_soby",
+    "expected_chunks": 36,
+    "touched_chunks": 4
+   },
+   {
+    "cell": "postgrespro/xlsx_038_maskirovanie_parolei_i_parametrov_zaprosov_v_zhurnal",
+    "expected_chunks": 17,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_040_sokrytie_chuvstvitelnyh_dannyh_staticheskoe_maskirov",
+    "expected_chunks": 120,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_041_sokrytie_chuvstvitelnyh_dannyh_dinamicheskoe_maskiro",
+    "expected_chunks": 120,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_043_kontrol_celostnosti_ispolnyaemyh_i_konfiguracionnyh",
+    "expected_chunks": 7,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_044_kontrol_celostnosti_ispolnyaemyh_obektov_procedur_fu",
+    "expected_chunks": 7,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_052_balansirovka_rw_ro_nagruzki_soedinenii",
+    "expected_chunks": 137,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_053_pulling_i_proksirovanie_nagruzki_s_vozmozhnostyu_avt",
+    "expected_chunks": 137,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_054_avtomatizaciya_ispolzoaniya_pulinga_i_proksirovaniya",
+    "expected_chunks": 137,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_055_nalichie_in_memory_keshirovaniya_s_obnovleniem_kesha",
+    "expected_chunks": 137,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_056_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_057_gorizontalnaya_masshtabiruemost_s_pomoshchyu_shardir",
+    "expected_chunks": 520,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_061_inkrementalnoe_rezervnoe_kopirovanie",
+    "expected_chunks": 4,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_065_vozmozhnost_vosstanovleniya_na_moment_vremeni_point",
+    "expected_chunks": 27,
+    "touched_chunks": 4
+   },
+   {
+    "cell": "postgrespro/xlsx_066_vozmozhnost_validacii_arhiva_wal_dlya_garantii_pitr",
+    "expected_chunks": 75,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_067_bystroe_vosstanovlenie_chasti_dannyh_iz_rezervnoi_ko",
+    "expected_chunks": 75,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_068_bystroe_klonirovanie_otdelnyh_bd_tablic_s_indeksami",
+    "expected_chunks": 8,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_069_upravlenie_politikami_hraneniya_rezervnyh_kopii",
+    "expected_chunks": 4,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_070_szhatie_rezernvyh_kopii_s_podderzhkoi_algoritmov_szh",
+    "expected_chunks": 226,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_072_proverka_vozmozhnosti_vypolneniya_komandy_s_zadannym",
+    "expected_chunks": 75,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_073_probnoe_vosstanovlenie_rezevrnyh_kopii_bez_faktiches",
+    "expected_chunks": 75,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_074_podderzhka_hraneniya_rezervnyh_kopii_s3_hranilishcha",
+    "expected_chunks": 75,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_076_avtomaticheskoe_vosstanovlenie_povrezhdennyh_blokov",
+    "expected_chunks": 44,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_078_nalichie_in_memory_tehnologii",
+    "expected_chunks": 21,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_079_64_bitnyi_schetchik_tranzakcii",
+    "expected_chunks": 34,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_080_nalichie_analiticheskogo_dvizhka_dlya_raboty_s_razli",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_081_sekcionirovanie_bolshih_relyacionnyh_tablic",
+    "expected_chunks": 38,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_083_split_merge_sekcii",
+    "expected_chunks": 53,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_085_podderzhka_timeseries_tipov_dannyh",
+    "expected_chunks": 8,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_086_zamorozka_planov_zaprosov",
+    "expected_chunks": 87,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_087_upravlenie_mnozhestvennymi_planami_zaprosa_upravleni",
+    "expected_chunks": 87,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_088_vozmozhnost_avtomaticheskogo_dobavleniya_pereplaniro",
+    "expected_chunks": 87,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_090_upravlenie_prioritezaciei_resursov_cpu_ram_i_o",
+    "expected_chunks": 25,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_091_keshirovanie_rezultatov_zaprosov_dlya_povyshaya_proi",
+    "expected_chunks": 21,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_092_adaptivnaya_optimizaciya_zaprosov_v_avtomaticheskom",
+    "expected_chunks": 85,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_093_vozmozhnost_pereplanirovaniya_zaprosov_v_realnom_vre",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_094_sbor_statistiki_planirovaniya_i_vypolneniya_vseh_obr",
+    "expected_chunks": 88,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_095_globalnye_indeksy_i_globalnye_konstreinty_na_sekcion",
+    "expected_chunks": 14,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_097_rum_indeks",
+    "expected_chunks": 20,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_100_otlozhennaya_zapis_vremennyh_tablic_na_disk",
+    "expected_chunks": 21,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_101_nalichie_funkcionalnosti_kotoraya_pozvolyaet_ispolzo",
+    "expected_chunks": 43,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_104_kolonochnyi_metod_hraneniya_dannyh_storonnee_rasshir",
+    "expected_chunks": 520,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_108_vstroennyi_planirovshchik_zadanii",
+    "expected_chunks": 78,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_110_trassirovka_sessii_s_raznymi_urovnyami_detalizacii",
+    "expected_chunks": 88,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_112_otslezhivanie_progressa_ispolneniya_zaprosov",
+    "expected_chunks": 24,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_115_optimizirovannyi_agent_sbora_metrik",
+    "expected_chunks": 58,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_116_diagnosticheskie_otchety_analog_oracle_awr",
+    "expected_chunks": 128,
+    "touched_chunks": 7
+   },
+   {
+    "cell": "postgrespro/xlsx_117_detalnyi_monitoring_sobytii_ozhidaniya",
+    "expected_chunks": 22,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+    "expected_chunks": 41,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_119_pluggable_toast",
+    "expected_chunks": 17,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_122_vneshnee_hranenie_binarnyh_obektov_lob_obekty_hranya",
+    "expected_chunks": 9,
+    "touched_chunks": 2
+   },
+   {
+    "cell": "postgrespro/xlsx_123_avtoochistka_otnoshenii_v_parallelnom_rezhime",
+    "expected_chunks": 86,
+    "touched_chunks": 5
+   },
+   {
+    "cell": "postgrespro/xlsx_125_avtoperemeshchenie_davno_nezaprashivaemyh_obnovlenny",
+    "expected_chunks": 17,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_126_vozmozhnost_nastroiki_razdelnyh_pravil_dlya_avtopere",
+    "expected_chunks": 17,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_128_skvoznaya_autentifikaciya_mezhdu_pulerom_i_subd",
+    "expected_chunks": 137,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table",
+    "expected_chunks": 83,
+    "touched_chunks": 18
+   },
+   {
+    "cell": "postgrespro/xlsx_130_podderzhka_sessionnyh_peremennyh",
+    "expected_chunks": 34,
+    "touched_chunks": 4
+   },
+   {
+    "cell": "postgrespro/xlsx_131_sovmestimost_s_oracle_pl_sql",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_133_podderzhka_vektornyh_operacii_i_vektornyh_indeksov",
+    "expected_chunks": 35,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_134_podderzhka_ocheredei_s_podderzhkoi_tranzakcionnosti",
+    "expected_chunks": 23,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_138_instrumentarii_dlya_avtomaticheskoi_konvertaciya_pak",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_139_parametry_v_skriptah_psql",
+    "expected_chunks": 21,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_140_podderzhka_associativnyh_tablic",
+    "expected_chunks": 5,
+    "touched_chunks": 1
+   },
+   {
+    "cell": "postgrespro/xlsx_141_vozmozhnost_hraneniya_binarnyh_dannyh_vne_failov_dan",
+    "expected_chunks": 9,
+    "touched_chunks": 2
+   },
+   {
+    "cell": "postgrespro/xlsx_143_otsutstvie_ogranichenii_na_kolichestvo_i_razmer_blob",
+    "expected_chunks": 24,
+    "touched_chunks": 3
+   },
+   {
+    "cell": "postgrespro/xlsx_145_instrumentarii_dlya_migracii_i_replikacii_dannyh_cdc",
+    "expected_chunks": 16,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_146_gui_sredstva_upravleniya_i_monitoringa",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_147_naliichie_centra_operativnogo_kontrolya",
+    "expected_chunks": 4,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_148_nalichie_massovyh_operacii_nad_instansami_klasterami",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_150_upravlenie_rasshireniyami_bd",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_151_upravlenie_polzovatelyami_bd",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_152_upravlenie_nastroikami_autentifikacii",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_153_sozdanie_udalenie_ekzemplyara",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_154_sozdanie_udalenie_bd",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_155_sozdanie_udalenie_redaktirovanie_tablespace",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_156_sozdanie_udalenie_redaktirovanie_obektov_shemy_bd",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_157_monitoring_proizvoditelnosti_sql_zaprosov_v_realnom",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_158_upravlenie_otkazoustoichivymi_klasterami",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_159_otobrazhenie_statusa_i_sostoyaniya_replikacii",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_160_informaciya_o_fizicheskoi_strukture_hraneniya_obekto",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_161_vypolnenie_i_planirovanie_reglamentnyh_operacii_po_o",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_162_upravlenie_rezervnym_kopirovaniem_vosstanovleniem",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_163_instrumentarii_dlya_raboty_s_istoricheskoi_diagnosti",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_164_sozdanie_polzovatelskih_grafikov",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_165_vozmozhnost_avtomaticheskogo_obnaruzheniya_ekzemplya",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_166_vozmozhnost_raboty_s_zhurnalom_soobshchenii_ekzemply",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_167_otobrazhenie_informacii_po_sessiyam_i_sql_zaprosam",
+    "expected_chunks": 4,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_168_informaciya_o_plane_i_progresse_aktivnogo_zaprosa",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_169_otobrazhenie_informacii_o_blokirovkah",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_170_interfeis_dlya_otobrazheniya_profilya_ozhidanii_dlya",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_171_dostup_k_konsoli_psql",
+    "expected_chunks": 3,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_172_sozdanie_upravlenie_grupp_parametrov_presetov_konfig",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_173_rolevaya_model_polzovatelei_graficheskogo_interfeisa",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_174_integraciya_s_ldap_freeipa_ms_ad_ald_pro",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_175_vozmozhnost_otpravki_soobshchenii_uvedomlenii_otvets",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_177_vizualizacii_planov_zaprosov_s_podskazkami_i_rekomen",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_178_vozmozhnost_izolyacii_ekzemplyarov_i_razgranicheniya",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_179_nalichie_api_dlya_vypolneniya_operacii_dostupnyh_iz",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_180_vozmozhnost_integracii_s_promyshlennymi_sistmemami_m",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "postgrespro/xlsx_181_vozmozhnost_upravleniya_vanilnym_postgresql",
+    "expected_chunks": 22,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_005_tehnicheskaya_podderzhka_24_7",
+    "expected_chunks": 14,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_011_nalichie_obucheniya_po_produktu",
+    "expected_chunks": 2,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_012_nalichie_programmy_sertifikacii_specialistov",
+    "expected_chunks": 4,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_017_nalichie_sobstvennogo_ili_partnerskogo_pak",
+    "expected_chunks": 13,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_018_nalichie_publichnogo_roadmap",
+    "expected_chunks": 17,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_019_podderzhka_dbaas_cloud",
+    "expected_chunks": 13,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_020_nalichie_sertifikata_fstek",
+    "expected_chunks": 7,
+    "touched_chunks": 0
+   },
+   {
+    "cell": "tantor/xlsx_118_rekomendacii_po_optimalnoi_konfiguracii_v_zavisimost",
+    "expected_chunks": 1,
+    "touched_chunks": 0
+   }
+  ]
+ }
+}
