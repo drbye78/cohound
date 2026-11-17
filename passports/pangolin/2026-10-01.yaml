@@ -1,11 +1,20 @@
 # Паспорт продукта (§4.3). Источник: comp_0.xlsx «Лист1» (снимок 2026-10-01).
-# Precision-first: upstream null — в источнике нет достоверного мажора PostgreSQL
-# (стр.15 «Технологический стек» перечисляет PostgreSQL без версии; «ядро 11.1.0»
-# в стр.16 — версия ядра Pangolin, не PostgreSQL).
+# Предок объявлен 18.11.2026 по документации продукта, а не по comp_0.xlsx: в таблице
+# снимка мажора PostgreSQL не было (стр.15 «Технологический стек» перечисляет PostgreSQL
+# без версии; «ядро 11.1.0» в стр.16 — версия ядра Pangolin, не PostgreSQL), поэтому до
+# 18.11.2026 здесь стоял `upstreams: []` — precision-first. Артефакт перевесил документ:
+# база знаний продукта даёт соответствие версий таблицей, и редакция паспорта
+# (Pangolin 8.1) попадает в строку `8.x → PostgreSQL 18.x`. Цитата дословная.
 product_id: pangolin
 canonical_name: "Platform V Pangolin DB"
 vendor: "СберТех"
-upstreams: []
+upstreams:
+  -
+    baseline_id: upstream-pg
+    version: "18"
+    evidence:
+      url: "https://pangolin.sbertech.ru/center/knowledge-base/use-cases/update/pangolin-core-versions/"
+      quote: "| Pangolin 8.x | PostgreSQL 18.x |"
 edition_assessed: null
 version: "Pangolin 8.1 (31.05.2026, ядро 11.1.0, Patroni 4.1.0)"
 jurisdiction: RU

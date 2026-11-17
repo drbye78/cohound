@@ -1443,6 +1443,13 @@ def run_recon(args: argparse.Namespace) -> int:
         "params": len(catalog),
         "present": sum(1 for fact in facts if fact.status is FactStatus.PRESENT),
         "unclear": sum(1 for fact in facts if fact.status is FactStatus.UNCLEAR),
+        # Параметр без терминов не ищется вовсе, и это не «не нашли в корпусе»:
+        # назвать число дешевле, чем оставить оператора догадываться, почему ячейка
+        # пустая. Термины даёт title+concept_terms (rule исключён, см.
+        # ``parameter_terms``), поэтому пустой список — дефект каталога, а не корпуса.
+        "params_without_terms": sorted(
+            str(row.param_id) for row in catalog if not parameter_terms(row)
+        ),
         "facts_path": str(package / "sources" / "baseline_facts.csv"),
         "written": written,
         "dry_run": dry_run,
@@ -1465,6 +1472,15 @@ def run_recon(args: argparse.Namespace) -> int:
             f"индекс {index.engine_version} (top_k={RECON_TOP_K})",
             f"параметров: {payload['params']}; present {payload['present']}, "
             f"unclear {payload['unclear']}",
+        ]
+        without = payload["params_without_terms"]
+        if without:
+            lines.append(
+                f"без терминов (не искались, дефект каталога): {len(without)} — "
+                + ", ".join(without[:5])
+                + (" …" if len(without) > 5 else "")
+            )
+        lines += [
             (
                 "dry-run: ничего не записано"
                 if dry_run

@@ -141,6 +141,30 @@ def test_parameter_terms_skip_short_words_and_keep_order() -> None:
     assert terms == parameter_terms(_param())
 
 
+def test_parameter_terms_ignore_rule_text() -> None:
+    """Слова процедуры проверки — не термины поиска (замер 18.11.2026).
+
+    ``rule`` у каталога ``ru-pg-dbms`` — служебная формулировка («…явно указанного
+    значения в исходной comparative table…»), и слово ``table`` находилось в таблице
+    стандарта SQL: параметр «Разработчик» получал ``present`` с цитатой
+    ``| X040 |  | Basic table mapping |  |``. 16 из 49 ``present`` были такими.
+    """
+    param = _param().model_copy(update={"rule": "supports table mapping and provenance"})
+    terms = parameter_terms(param)
+    assert "table" not in terms
+    assert "mapping" not in terms
+    assert "provenance" not in terms
+    assert "jsonb" in terms
+
+
+def test_parameter_terms_empty_when_only_rule_matches() -> None:
+    """Нет терминов — пустой список, а не «поищем по процедуре»."""
+    param = _param().model_copy(
+        update={"title": "QL", "rule": "supports table mapping", "concept_terms": {}}
+    )
+    assert parameter_terms(param) == []
+
+
 # ---------------------------------------------------------------------------
 # Факты (§8.1 шаги 8–9, §8.3)
 # ---------------------------------------------------------------------------
