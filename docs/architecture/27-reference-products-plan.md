@@ -201,16 +201,29 @@ packages/{case_id}/sources/
 
 ```
 COHOUND_HOME/reference/{package_id}/{product_id}/{version}/
-  reference.db        # corpus_docs + corpus_chunks (та же схема, отдельная БД)
-  lexical/            # tantivy по чанкам
-  manifest.json       # build_id, extractor_version, chunker_version, content_digest, docs, chunks
-  maps/{map_id}/      # карта: cells.jsonl + score.json + manifest.json
+  current.json                    # указатель на «текущую» сборку (атомарная запись)
+  .lock                           # один писатель на (пакет, продукт, версия)
+  raw/{sha256}.bin                # retained-байты, общие для сборок версии (I19)
+  builds/{build_id}/
+    reference.db                  # corpus_docs + corpus_chunks (та же схема, отдельная БД)
+    manifest.json                 # build_id, версии, content_digest, объёмы, провенанс прохода
+    maps/{map_id}/                # карта: cells.jsonl + score.json + manifest.json
 ```
 
 Свойства:
 * **иммутабельно**, как `index_store/{package}/{build}/{product}`: новая сборка — новый
   `build_id`, правка на месте запрещена;
 * `build_id = ref_{product}_{version}_{hash(content_digest)[:8]}`;
+* раскладка **per-build** (17.11.2026): две сборки одной версии сосуществуют, а не
+  перезаписывают друг друга. Пока `reference.db` лежал прямо в каталоге версии,
+  «пересобрали» означало «стёрли прежнее» — вместе с доказательством того, что читалось
+  раньше. Байты при этом **общие** (`raw/`): retention content-addressed, поэтому
+  сосуществование сборок диска не удваивает;
+* выбор сборки — `current.json` > единственная > отказ (`resolve_build`), **никогда** по
+  `mtime`: порядок записи на диск не является ни объявленным входом, ни наблюдением;
+* `manifest.json` публикует и провенанс прохода (`complete`/`incomplete_reasons`/
+  `skipped`/`errors`/`roots`): `absent` в фактах допустим только при `complete=true`
+  (§8.3, I2/I2c). Провенанс в `build_id` **не** входит — он функция содержимого;
 * **не в `runs/`**: reference-корпус живёт дольше прогона (документация PostgreSQL 11 не
   меняется никогда) и переиспользуется между циклами;
 * карта — **отдельная сборка** внутри версии: смена модели/промпта меняет карту, но не
@@ -224,16 +237,21 @@ COHOUND_HOME/reference/{package_id}/{product_id}/{version}/
 здесь — измерение).
 
 ```bash
-# что объявлено и в каком состоянии (роль предка — вычисленная)
+# сборка reference-корпуса версии (корни — из декларации, не из --urls)
+hound baseline build --package {case_id} --baseline upstream-pg [--version 18] \
+  [--max-documents N] [--max-depth N] [--rate-limit 0.5] [--exclude-path GLOB] \
+  [--document-level full] [--pdf-pipeline structured] [--dry-run] [--json]
+
+# что объявлено и в каком состоянии: роль предка, состояние корпуса, следующая команда
 hound baseline list --package {case_id} [--json]
 
-# разведка: reference-корпус + факты по каталогу
+# разведка: факты по каталогу из выбранной сборки (лексический индекс, без LLM)
 hound baseline recon --package {case_id} --baseline upstream-pg \
-  [--version 18] [--param pg_json_type] [--map] [--dry-run] [--json]
+  [--version 18] [--build {build_id}] [--param pg_json_type] [--dry-run] [--json]
 
 # карта reference-продукта: Capability/Coverage по каталогу профиля
 hound baseline map --package {case_id} --baseline upstream-pg [--version 18] \
-  [--repeats N] [--dry-run] [--json]
+  [--build {build_id}] [--dry-run] [--json]
 
 # факты с фильтрами (read-only)
 hound baseline facts --package {case_id} [--baseline …] [--version …] [--param …] \
@@ -255,6 +273,23 @@ hound baseline report --package {case_id} [--baseline …] [--with-map] [--json]
 Правила: `--actor` обязателен для любой записи; `--dry-run` ничего не пишет и **говорит**,
 что записал бы; запись идёт через `.authoring/apply_log.jsonl` (существующий контур I1);
 ни одна подкоманда не пишет в `runs/` и не трогает прогон.
+
+**Порядок — цепочка, а не набор команд**: `build` → `recon` → `review` → `report` → `map`.
+Каждая команда, которой не хватает предыдущего шага, отказывает **и называет его**; `list`
+печатает для продукта ту же следующую команду. Оси сборки — объявленный вход: `--max-depth`
+по умолчанию не ограничена (граница — path-prefix объявленного корня), `--max-documents`
+без потолка, а объём и полнота прохода публикуются в манифесте сборки и в сводке `build`.
+
+Две вещи, которых в первой редакции этого раздела не было и без которых цепочка не
+работала:
+
+* **порядок работы — цепочка**, и каждая команда называет следующую:
+  `build` → `recon` → `review` → `report` → `map`. Корпус не появлялся ниоткуда: `recon`
+  умел только читать `reference.db` и отказывал, если файла нет, — производителя не было.
+  `build` берёт корни **из декларации** (`versions[].docs_roots`), а не из `--urls`:
+  декларация — единственный источник, иначе корпус описывал бы не объявленную версию;
+* **сборка выбирается явно** (`--build`) либо раскладкой (`current.json` > единственная >
+  отказ с перечнем). `--corpus-db` остаётся аварийным входом для чужого файла.
 
 ---
 
@@ -384,19 +419,27 @@ content-addressed идентичность сборки, как `partition_build
 ### 8.1. Шаги
 
 ```
-1. Декларация      reference_products.yaml + corpus_urls.yaml версии (автор)
+1. Декларация      reference_products.yaml (versions[].docs_roots) — автор
 2. Краул           те же краулер/SSRF/robots/scope, что у продукта, но корни — свои
 3. Экстракция      тот же extractor_factory(level, pdf_pipeline) — объявленный, не дефолт
 4. Чанкинг         тот же чанкер (chunker_version в manifest.json)
-5. Лексический     tantivy по чанкам (BM25); векторы НЕ нужны (§8.4)
-6. Кандидаты       для каждого param_id каталога: запрос из title + rule + concept_terms
-7. Отбор цитаты    (a) детерминированно: чанк, где встречаются все термины правила;
+5. Лексический     in-process BM25 по чанкам (LexicalSearcherPort); векторы НЕ нужны (§8.4)
+6. Кандидаты       для каждого param_id каталога: запрос из title + rule + concept_terms,
+                   top_k=RECON_TOP_K кандидатов от индекса
+7. Отбор цитаты    (a) детерминированно: первый кандидат, из которого select_quote берёт
+                   дословную цитату;
                    (b) опционально LLM — выбрать чанк и вернуть дословную цитату
 8. Проверка        quote ∈ chunk.text (как I22); иначе факт = unclear + причина
 9. Запись          baseline_facts.csv со status=pending, review=pending
 10. Карта          (--map) оценка по чанкам тем же evaluate → Capability/Coverage
 11. Человек        hound baseline review --accept|--reject
 ```
+
+Шаги 1–5 исполняет `hound baseline build`, шаги 5–9 — `hound baseline recon`; до 17.11.2026
+шагов 1–5 не было вовсе (корпус мог появиться только руками). Шаг 6–7 — **не** линейный
+проход по корпусу: замена измерена (`docs/reports/measurements/2026-11-17-recon-top-k.md`):
+исход совпадает уже при `K=2`, а главное — линейный проход на корпусе пилота цитировал
+**6** различных чанков на 181 факт (один чанк дал 152 цитаты), индекс — **165**.
 
 ### 8.2. Граница LLM — та же асимметрия, что у разведки
 
@@ -647,7 +690,7 @@ upstream, (б) переездом документации, (в) дефекто�
 | 4 | `baseline_facts.csv` + `baseline_facts_digest` + словарь | ✅ | `FactStatus`/`FactReview` в `status-dictionary.yaml` и `domain/dictionary.py` |
 | 5 | Ш4 читает факты, обходит предков по порядку, причины в базисе | ✅ | `inheritance.py:decide_inheritance`; `not_inherited` + `ancestor_fallbacks` + `reason_counts`/`fallback_counts` |
 | 6 | `hound baseline list\|facts\|report` | ✅ | `cli/commands/baseline_products.py` |
-| 7 | reference-корпус + `hound baseline recon` | ✅ | `pipeline/reference_corpus.py`; `reference.db` + `manifest.json`, `build_id` от **содержимого** |
+| 7 | reference-корпус + `hound baseline recon` | ✅ | `pipeline/reference_build.py` (производитель: §8.1 шаги 1–5) + `pipeline/reference_corpus.py` (раскладка/манифест/факты); `builds/{build_id}/reference.db` + `manifest.json`, `build_id` от **содержимого** |
 | 8 | `hound baseline review` + `apply_log` | ✅ | `pipeline/reference_products.py:review_facts` |
 | 9 | карта + `hound baseline map` + согласие факт↔карта | ✅ | `pipeline/reference_map.py`; `score.json` = форма `ScoreBundle` + `subject: reference` |
 | 10 | `hound baseline refresh` (diff, `min_version` — предложение) | ✅ | `reference_products.py:refresh_diff`/`apply_refresh` |
@@ -672,12 +715,58 @@ upstream, (б) переездом документации, (в) дефекто�
   отсортированным хешам чанков), не от пути БД: иначе две одинаковые сборки стали бы разными.
 * **Движок лексики карты выбирает composition root** (порт `LexicalSearcherPort` в
   `ports/lexical_index.py`): `pipeline` не импортирует `adapters` (матрица 01 §1).
+* **Производитель reference-корпуса — отдельный модуль, и писатель хранилища в нём
+  инъектируется** (17.11.2026). `recon` умел только читать `reference.db`; сборки не было
+  вовсе. `pipeline/reference_build.py` собирает её портами (`CrawlerPort`/`ExtractorPort`/
+  `ChunkerPort`) и `Frontier` — второй формулы scope нет. `SqliteStore` приходит фабрикой
+  из composition root, потому что `pipeline` не импортирует `core.store`; без фабрики
+  сборка отказывает видимо (`ReferenceBuildUnavailable`), а не собирает «в памяти».
+  Раскладка стала per-build (см. §4) — это `reference-corpus/2`: две сборки одной версии
+  сосуществуют, `current.json` выбирает текущую, `mtime` не выбирает никогда.
+* **CLI доведён до цепочки, а не до набора команд** (17.11.2026): `build` собирает корпус
+  (корни — только из декларации), `recon`/`map` берут `--build` и разрешают сборку
+  раскладкой, `list` показывает состояние корпуса (сборки, объёмы, охват) и **следующую**
+  команду, а каждая ошибка «нечего читать» называет команду, которая это создаёт.
+  `recon` перестал быть линейным проходом: кандидатов отбирает `Bm25Index`, и замена
+  измерена (`docs/reports/measurements/2026-11-17-recon-top-k.md`) — исход совпадает уже при
+  `K=2`, а цитаты перестали приходить из одного чанка (6 источников на 181 факт → 165).
+* **Полнота прохода — носитель I2/I2c, а не косметика манифеста**: `complete=false` с
+  машинными причинами (`truncated:max_documents`, `skipped:robots`, …) запрещает `absent`
+  в фактах. `complete` при этом **не** входит в `build_id`: он описывает проход, а не
+  содержимое, иначе один упавший запрос давал бы «другую сборку» той же документации.
+* **Глубина обхода по умолчанию не ограничена, и это исправленный дефект** (17.11.2026).
+  `CrawlLimits.max_depth=0` значит «только seeds оператора» — верно для краула когорты, но
+  для reference-корпуса это читало **одну** страницу руководства и объявляло
+  `complete=True`, то есть давало `recon` право публиковать `absent` по одной странице
+  (I2/I2c). Граница пространства здесь — объявленный корень (`docs_roots` = path-prefix),
+  а не выдуманный потолок (A3); `max_documents` остаётся `None` по той же причине — объём
+  публикуется в манифесте. Ссылки теперь извлекаются **всегда** (иначе frontier не увидел
+  бы, что упёрся в границу), поэтому явный `--max-depth 0` — законное объявление «только
+  корни» с видимой ценой: `truncated:max_depth` ⇒ `complete=false`.
+* **Архетип B не требует объявленной линии** — отличие от буквы §3.2 плана, и это
+  откат принятого ранее правила. Регламент §1.5: базлайн-участник в когорту включается
+  «если он существует», а кросс-линейные параметры B измеряются только корпусом, поэтому
+  «ни у одного продукта нет предка» — штатная форма B, а не противоречие методу. Цена
+  обратного правила измерена: канонический валидный пакет профиля
+  (`tests/config/fixtures/package.yaml` — B, `baselines: [baseline_a]`, продукты без
+  предков) перестал проходить линтер. В B проверяется **состояние продукта**
+  (`upstream-presence`, предупреждение), а не метод пакета.
 
 ### 16.2. Что осталось открытым
 
 1. **Этап 11** — данные. Без него в пилоте нет ни одного факта (`baseline_facts.csv` пуст),
-   поэтому доля наследования не измерена; это цена, а не дефект: механизм работает на
+   поэтому доля наследования не измерена; это цена, а не дефект: механизм проверен на
    синтетике (`tests/pipeline/test_reference_products.py`, `test_reference_corpus.py`,
-   `test_reference_map.py`).
+   `test_reference_map.py`, `test_reference_build.py`), но живой сборки reference-корпуса
+   не было ни одной — ни `build` на реальном краулере, ни `map`/`report --with-map` на
+   реальной сборке.
 2. **Открытые вопросы §15** не закрыты: объём git-фактов при 200 профилях, карта по всем
    версиям vs `current_version`, порог согласия факт↔карта (порог не вводится — A3).
+3. **Лексический индекс reference-корпуса не материализуется** (§4 предусматривал
+   `lexical/` рядом с `reference.db`): `recon` собирает `Bm25Index` в памяти на вызов
+   (замер: `index()` 29.0 с на 253 306 чанках, поиск 181 параметра 308.9 с). Для корпуса
+   версии (1–2 тыс. страниц) это секунды, поэтому материализация отложена до появления
+   профиля, где цена станет заметной (§12 — триггер тот же: измеренная доля `unclear`).
+4. **`map`/`report --with-map` не исполнялись на живой сборке** — проверены только
+   синтетикой CLI-тестов; порядок «сборка → карта → согласие» на реальном корпусе
+   остаётся непроверенным до этапа 11.

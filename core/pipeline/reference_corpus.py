@@ -7,10 +7,26 @@ Reference-корпус — это документация **одного refere
 
 ```
 COHOUND_HOME/reference/{package_id}/{product_id}/{version}/
-  reference.db        # corpus_docs + corpus_chunks (та же схема, отдельная БД)
-  manifest.json       # build_id, extractor_version, chunker_version, content_digest, docs, chunks
-  maps/{map_id}/      # карта: cells.jsonl + score.json + manifest.json (§9)
+  current.json             # указатель на «текущую» сборку (атомарная запись)
+  .lock                    # один писатель на (пакет, продукт, версия)
+  raw/{sha256}.bin         # retained-байты, общие для всех сборок (I19, иммутабельны)
+  builds/{build_id}/
+    reference.db           # corpus_docs + corpus_chunks (та же схема, отдельная БД)
+    manifest.json          # build_id, версии читателя/чанкера, content_digest, объёмы, провенанс
+    maps/{map_id}/         # карта: cells.jsonl + score.json + manifest.json (§9)
 ```
+
+Раскладка **per-build**, а не per-version: сборка — это содержимое, и две сборки одной
+версии обязаны сосуществовать, не перезаписывая друг друга. Пока ``reference.db`` лежал
+прямо в каталоге версии, «пересобрали» означало «стёрли прежнее», то есть терялось
+единственное доказательство того, что именно читалось в прошлый раз. Байты при этом
+**общие** для сборок: retention content-addressed (``raw/{sha256}.bin``), поэтому
+сосуществование сборок не удваивает диск — и иммутабельность байтов следует из имени
+файла, а не из обещания.
+
+``current.json`` — указатель, а не порядок каталога: выбор «текущей» сборки по mtime
+сделал бы измерение функцией порядка записи на диск (та же дисциплина, что у
+``report --with-map``). Нет указателя и нет единственной сборки — отказ, а не догадка.
 
 Свойства, которые здесь закреплены кодом:
 
@@ -34,11 +50,12 @@ COHOUND_HOME/reference/{package_id}/{product_id}/{version}/
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from core.domain.enums import FactReview, FactStatus
 from core.domain.models import BaselineFact, CatalogRow
@@ -46,16 +63,34 @@ from core.util.hashing import content_hash, short_hash
 
 __all__ = [
     "REFERENCE_SCHEMA",
+    "ChunkDigestSource",
+    "ReferenceBuildAmbiguous",
+    "ReferenceBuildMissing",
     "ReferenceCorpusLayout",
     "ReferenceManifest",
     "derive_facts",
+    "list_builds",
+    "read_current_build",
     "reference_build_id",
     "reference_content_digest",
+    "resolve_build",
     "select_quote",
+    "write_current_build",
 ]
 
 #: Версия формата ``manifest.json`` reference-корпуса.
-REFERENCE_SCHEMA = "reference-corpus/1"
+#:
+#: ``2`` — раскладка стала per-build (``builds/{build_id}/``) и манифест публикует
+#: провенанс прохода (``complete``/``incomplete_reasons``/``skipped``/``errors``).
+#: Манифест ``/1`` читается по-прежнему (``from_dict`` не требует новых полей), и это
+#: честно: поля не было — значит «полнота не заявлена» (``complete=False``), а не
+#: «полно». Раскладка ``/1`` (``reference.db`` прямо в каталоге версии) не
+#: поддерживается: сборок в ``builds/`` нет, и выбор сборки отказывает
+#: (:class:`ReferenceBuildMissing`), а не читает файл «как получится».
+REFERENCE_SCHEMA = "reference-corpus/2"
+
+#: Имя файла-указателя текущей сборки в каталоге версии.
+CURRENT_BUILD_FILE = "current.json"
 
 #: Минимальная длина термина запроса (короче — шум: «и», «в», «of»).
 MIN_TERM_LEN = 4
@@ -88,6 +123,12 @@ class ReferenceCorpusLayout:
     ``root`` — ``COHOUND_HOME/reference/{package_id}/{product_id}/{version}``. Путь
     передаётся вызывающим (composition root), а не выводится из окружения: раскладка
     хоста — не измерение, и модуль не должен её угадывать.
+
+    Внутри ``root`` живут **две разные вещи**: ``raw/`` — retained-байты, общие для всех
+    сборок версии (имя файла — хеш содержимого, поэтому общий каталог ничего не путает),
+    и ``builds/{build_id}/`` — сборки, каждая со своей БД и манифестом. Поэтому
+    ``db_path``/``manifest_path``/``maps_dir`` — **методы от ``build_id``**, а не
+    свойства: у версии больше нет одного «того самого» корпуса, есть сборки.
     """
 
     root: Path
@@ -96,24 +137,177 @@ class ReferenceCorpusLayout:
     version: str
 
     @property
-    def db_path(self) -> Path:
-        return self.root / "reference.db"
+    def builds_dir(self) -> Path:
+        """Каталог сборок версии (``builds/``)."""
+        return self.root / "builds"
+
+    def build_dir(self, build_id: str) -> Path:
+        """Каталог одной сборки: ``builds/{build_id}/``."""
+        return self.builds_dir / build_id
+
+    def db_path(self, build_id: str) -> Path:
+        """БД сборки: ``builds/{build_id}/reference.db``."""
+        return self.build_dir(build_id) / "reference.db"
+
+    def manifest_path(self, build_id: str) -> Path:
+        """Манифест сборки: ``builds/{build_id}/manifest.json``."""
+        return self.build_dir(build_id) / "manifest.json"
+
+    def maps_dir(self, build_id: str) -> Path:
+        """Каталог карт сборки: ``builds/{build_id}/maps/`` (§7.3: карта — своя сборка)."""
+        return self.build_dir(build_id) / "maps"
+
+    def map_dir(self, build_id: str, map_id: str) -> Path:
+        """Каталог одной карты внутри сборки."""
+        return self.maps_dir(build_id) / map_id
 
     @property
-    def manifest_path(self) -> Path:
-        return self.root / "manifest.json"
+    def raw_dir(self) -> Path:
+        """Retention байтов версии: ``raw/{sha256}.bin`` (общий для сборок, I19)."""
+        return self.root / "raw"
 
     @property
-    def maps_dir(self) -> Path:
-        return self.root / "maps"
+    def current_path(self) -> Path:
+        """Указатель на текущую сборку: ``current.json``."""
+        return self.root / CURRENT_BUILD_FILE
 
-    def map_dir(self, map_id: str) -> Path:
-        return self.maps_dir / map_id
+    @property
+    def lock_path(self) -> Path:
+        """Файл лока «один писатель на (пакет, продукт, версия)»: ``.lock``."""
+        return self.root / ".lock"
 
     def ensure(self) -> ReferenceCorpusLayout:
-        """Создаёт каталог сборки (идемпотентно)."""
+        """Создаёт каталог версии (идемпотентно)."""
         self.root.mkdir(parents=True, exist_ok=True)
         return self
+
+
+class ReferenceBuildMissing(LookupError):
+    """Сборку выбрать нельзя: её нет (явная/указанная/единственная).
+
+    Сообщение называет путь версии и то, что было объявлено: «сборок нет» и «вы назвали
+    сборку, которой нет» — разные факты, и оператору нужен именно второй.
+    """
+
+
+class ReferenceBuildAmbiguous(LookupError):
+    """Сборок несколько, а ``current.json`` не указывает ни на одну — выбор неоднозначен.
+
+    ``builds`` — перечень имеющихся сборок: отказ обязан быть действенным («укажите
+    ``--build``»), а не просто запретом.
+    """
+
+    def __init__(self, message: str, builds: Sequence[str]) -> None:
+        super().__init__(message)
+        self.builds: list[str] = list(builds)
+
+
+def list_builds(layout: ReferenceCorpusLayout) -> list[str]:
+    """Сборки версии, у которых есть манифест (отсортировано лексикографически).
+
+    Каталог без манифеста — **не** сборка: публикация пишет манифест в staging и
+    переименовывает каталог целиком, поэтому недописанная сборка не видна. Сортировка —
+    строковая, а не по времени: порядок каталога не должен нести смысл «новее»
+    (``resolve_build`` его не использует вовсе).
+    """
+    builds = layout.builds_dir
+    if not builds.is_dir():
+        return []
+    found: list[str] = []
+    for entry in builds.iterdir():
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if not (entry / "manifest.json").is_file():
+            continue
+        found.append(entry.name)
+    return sorted(found)
+
+
+def read_current_build(layout: ReferenceCorpusLayout) -> str | None:
+    """``build_id`` из ``current.json``; файла нет — ``None``.
+
+    Битый или чужой по форме файл — :class:`ReferenceBuildMissing`, а не ``None``:
+    молчаливое «указателя нет» при двух сборках превратилось бы в выбор по каталогу,
+    то есть в догадку о том, что именно измерено.
+    """
+    path = layout.current_path
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReferenceBuildMissing(
+            f"указатель текущей сборки не читается: {path} ({type(exc).__name__}: {exc})"
+        ) from exc
+    build_id = payload.get("build_id") if isinstance(payload, dict) else None
+    if not isinstance(build_id, str) or not build_id:
+        raise ReferenceBuildMissing(
+            f"указатель текущей сборки не содержит build_id: {path}"
+        )
+    return build_id
+
+
+def write_current_build(layout: ReferenceCorpusLayout, build_id: str) -> None:
+    """Пишет ``current.json`` **атомарно** (временный файл в том же каталоге + ``replace``).
+
+    Атомарность здесь не косметика: указатель читают другие команды (``recon``/``map``),
+    и половина JSON на диске выглядела бы как «указателя нет» — то есть как разрешение
+    выбрать сборку за читателя.
+    """
+    layout.root.mkdir(parents=True, exist_ok=True)
+    path = layout.current_path
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    text = json.dumps({"build_id": build_id}, ensure_ascii=False, sort_keys=True, indent=2)
+    tmp.write_text(text + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def resolve_build(layout: ReferenceCorpusLayout, *, explicit: str | None = None) -> str:
+    """Какую сборку читать: явная > ``current.json`` > единственная > отказ.
+
+    Порядок — это и есть правило, и оно **не** включает время: ``mtime`` каталога не
+    является ни объявленным входом, ни наблюдением о содержимом, поэтому выбор по нему
+    сделал бы ответ функцией порядка записи на диск (та же дисциплина, что у
+    ``report --with-map``, где карта выбирается по ``map_id``).
+
+    Отказы:
+
+    * :class:`ReferenceBuildMissing` — явная сборка не найдена (сообщение перечисляет
+      имеющиеся), ``current.json`` указывает на отсутствующую сборку, либо сборок нет;
+    * :class:`ReferenceBuildAmbiguous` — сборок несколько и указателя нет; ``builds``
+      перечисляет их, чтобы отказ можно было исправить одной командой.
+    """
+    builds = list_builds(layout)
+    if explicit is not None:
+        if explicit not in builds:
+            available = ", ".join(builds) if builds else "ни одной"
+            raise ReferenceBuildMissing(
+                f"сборка {explicit!r} не найдена в {layout.builds_dir} "
+                f"(есть: {available})"
+            )
+        return explicit
+    current = read_current_build(layout)
+    if current is not None:
+        if current not in builds:
+            available = ", ".join(builds) if builds else "ни одной"
+            raise ReferenceBuildMissing(
+                f"current.json указывает на отсутствующую сборку {current!r} "
+                f"({layout.current_path}; есть: {available})"
+            )
+        return current
+    if not builds:
+        # Подсказку «чем собрать» даёт CLI: слой pipeline не знает имён команд и флагов,
+        # а прежняя подсказка здесь называла `recon` — команду, которая корпус **читает**.
+        raise ReferenceBuildMissing(
+            f"сборок reference-корпуса нет: {layout.builds_dir}"
+        )
+    if len(builds) == 1:
+        return builds[0]
+    raise ReferenceBuildAmbiguous(
+        f"сборок несколько ({len(builds)}), а current.json отсутствует: "
+        f"{layout.root} — укажите сборку явно",
+        builds,
+    )
 
 
 @dataclass
@@ -123,6 +317,16 @@ class ReferenceManifest:
     Публикуются ровно те величины, которые нужны, чтобы понять **чем** прочитан текст:
     сборка, версии читателя и чанкера, отпечаток содержимого и объёмы. ``observed_at`` —
     провенанс (дата снятия), а не идентичность.
+
+    **Провенанс прохода — не идентичность.** ``complete``/``incomplete_reasons``/
+    ``skipped``/``errors``/``roots`` описывают, как прошёл обход, и в ``build_id`` не
+    входят (он — функция содержимого, §4): иначе одна и та же документация, собранная
+    дважды, давала бы две сборки из-за одного упавшего запроса. Но публиковать их
+    обязательно: ``absent`` в :func:`derive_facts` допустим **только** при
+    ``complete=True`` (I2/I2c-дисциплина), и читатель манифеста должен видеть, на каком
+    основании ему отказано.
+
+    ``complete=False`` по умолчанию у нового манифеста: «не заявлено» — не «полно».
     """
 
     schema: str
@@ -137,6 +341,14 @@ class ReferenceManifest:
     chunker_version: str | None = None
     observed_at: str | None = None
     roots: list[str] = field(default_factory=list)
+    #: Обход прошёл объявленное пространство до исчерпания (см. ``build_reference_corpus``).
+    complete: bool = False
+    #: Машинные причины неполноты (``truncated:…``/``skipped:…``), отсортированы.
+    incomplete_reasons: list[str] = field(default_factory=list)
+    #: Счётчики пропусков по машинным ключам (``SkipReason``): что именно не попало и почему.
+    skipped: dict[str, int] = field(default_factory=dict)
+    #: Ошибки прохода (отказ корня, сбой фетча/retention/экстракции) — с адресом.
+    errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +364,10 @@ class ReferenceManifest:
             "chunker_version": self.chunker_version,
             "observed_at": self.observed_at,
             "roots": list(self.roots),
+            "complete": self.complete,
+            "incomplete_reasons": list(self.incomplete_reasons),
+            "skipped": dict(sorted(self.skipped.items())),
+            "errors": list(self.errors),
         }
 
     @classmethod
@@ -169,6 +385,13 @@ class ReferenceManifest:
             chunker_version=data.get("chunker_version"),
             observed_at=data.get("observed_at"),
             roots=list(data.get("roots") or ()),
+            complete=bool(data.get("complete", False)),
+            incomplete_reasons=[str(item) for item in (data.get("incomplete_reasons") or ())],
+            skipped={
+                str(key): int(value)
+                for key, value in (data.get("skipped") or {}).items()
+            },
+            errors=[str(item) for item in (data.get("errors") or ())],
         )
 
 
@@ -251,7 +474,19 @@ def select_quote(text: str, terms: Sequence[str]) -> str | None:
     return None
 
 
-def reference_content_digest(chunks: Iterable[ChunkText]) -> str:
+class ChunkDigestSource(Protocol):
+    """Что нужно отпечатку содержимого от чанка: ``text`` и (опционально) его хеш.
+
+    Протокол, а не конкретный класс: отпечаток считается и по :class:`ChunkText`
+    (разведка), и по ``CorpusChunk``/``Chunk`` порта (сборка) — вторая копия формулы
+    «что такое содержимое сборки» разошлась бы с первой молча.
+    """
+
+    text: str
+    content_hash: str | None
+
+
+def reference_content_digest(chunks: Iterable[ChunkDigestSource]) -> str:
     """Отпечаток **содержимого** reference-корпуса (вход ``build_id``, §4).
 
     Материал — отсортированные хеши текстов чанков. Именно содержимое, а не путь и не

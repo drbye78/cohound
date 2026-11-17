@@ -624,7 +624,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 2. **Манифест не может подтвердить даже условия генерации.** В живом прогоне
    `llm_scenarios` = `(evaluator, deepseek-v4.1-flash:purple, api, decoder=json_object,
    seed=NULL, temperature=NULL, constrained_decoding=NULL)` — три последние колонки объявлены
-   в схеме (`core/domain/models.py:1174-1189`) и обещаны §7.1/`02:488` («фиксируется в `run_manifest.yaml`
+   в схеме (`core/domain/models.py:1553-1555`) и обещаны §7.1/`02:488` («фиксируется в `run_manifest.yaml`
    (R7)»), но `_resolve_llm_scenarios` (`core/cli/execution_axes.py:824-908`) их не пишет вообще.
    Проверено чтением БД. То есть V6/V4/V3 складываются в одно: **условия измерения не
    записаны**, а не «записаны неверно».

@@ -822,15 +822,26 @@ for a live crawl use `./hound.py crawl status --per-url`.
 an assumption: `sources/reference_products.yaml` declares which lines the profile measures and
 at which versions, `sources/baseline_facts.csv` records observations about the ancestor's
 documentation (verbatim quote + text hash + date + `review`). `./hound.py baseline
-{list|facts|report|review|refresh|recon|map}` reads and writes them; none of it touches `runs/`.
+{build|list|facts|report|review|refresh|recon|map}` reads and writes them; none of it touches
+`runs/`. The commands form a **chain** — `build → recon → review → report → map` — and a command
+whose predecessor is missing refuses and names it (`list` prints the same next command).
 Only `status=present` **and** `review=accepted` is inherited — anything else means "no
 acceleration", and the parameter is evaluated normally (neither `❓` nor `❌` follows from it).
 A fact is looked up on the **major** version of the declared line (`18.4.1` → `18`), never
-"≤ V": otherwise an upstream regression is papered over. The reference corpus
-(`reference.db` + `manifest.json`) and the map (`maps/{map_id}/`) live under
-`COHOUND_HOME/reference/` and are addressed by **content** (`build_id`, `map_id`), not by path
-or date. `hound baseline recon` is deterministic (quote must be a substring of the chunk text);
-the map is the evaluator's verdict and therefore carries its own identity, including the model.
+"≤ V": otherwise an upstream regression is papered over. The reference corpus lives under
+`COHOUND_HOME/reference/{package}/{product}/{version}/` and is **per-build**:
+`builds/{build_id}/{reference.db,manifest.json,maps/{map_id}/}`, shared content-addressed
+`raw/`, and a `current.json` pointer. Identity is **content** (`build_id`, `map_id`), never path
+or `mtime`; `current.json` only says which build the operator asked for last. `manifest.json`
+publishes the walk's provenance (`complete`, `incomplete_reasons`, `skipped`, `errors`), and
+`absent` in facts is allowed **only** at `complete=true` (I2/I2c) — an incomplete walk is
+`unclear`, never "not documented". `hound baseline build` resolves its axes as declared input:
+`--max-depth` is unbounded by default (the bound is the declared root's path prefix, not an
+invented ceiling), `--max-documents` has no cap; links are always extracted so that an explicit
+`--max-depth 0` is visibly `complete=false` rather than a one-page corpus claiming exhaustion.
+`hound baseline recon` is deterministic (quote must be a substring of the chunk text) and picks
+candidates through `LexicalSearcherPort` (in-process BM25), not a linear scan; the map is the
+evaluator's verdict and therefore carries its own identity, including the model.
 
 Blocked bytes the crawler was not allowed to take (robots, auth) enter the corpus as a
 **declared** input, never by editing `corpus_raw`: `./hound.py artifacts list …` shows the

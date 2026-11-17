@@ -13,14 +13,27 @@ import pytest
 
 from core.domain.enums import (
     AnchorRelation,
+    FactReview,
+    FactStatus,
+    InheritanceMode,
     OnboardingState,
     SeedRole,
     SeedSource,
     SeedState,
 )
-from core.domain.models import Cohort, CohortEntry, ProductSeeds, SeedEntry, SeedsConfig
+from core.domain.models import (
+    BaselineFact,
+    BaselineRow,
+    Cohort,
+    CohortEntry,
+    ProductSeeds,
+    SeedEntry,
+    SeedsConfig,
+)
 from core.pipeline.digests import (
     EXECUTION_CONTRACT_FIELDS,
+    baseline_facts_digest,
+    baselines_digest,
     cohort_digest,
     execution_contract_digest,
     seeds_digest,
@@ -219,6 +232,190 @@ def test_seeds_digest_empty_set_is_stable_not_empty_string() -> None:
 )
 def test_seeds_digest_is_sensitive_to_material(left: SeedsConfig, right: SeedsConfig) -> None:
     assert seeds_digest(left) != seeds_digest(right)
+
+
+# ---------------------------------------------------------------------------
+# baselines_digest — политика наследования (``baselines.csv``, план 27 §7.1)
+# ---------------------------------------------------------------------------
+
+
+def _baseline(
+    baseline_id: str = "upstream_a",
+    *,
+    param_id: str = "param_a",
+    min_version: str | None = "1",
+    mode: InheritanceMode = InheritanceMode.DIRECT,
+    note: str | None = None,
+) -> BaselineRow:
+    """Строка ``baselines.csv`` — **политика**: что наследуем, с какого пола и в каком режиме."""
+    return BaselineRow(
+        baseline_id=baseline_id,
+        param_id=param_id,
+        min_version=min_version,
+        inheritance_mode=mode,
+        note=note,
+    )
+
+
+def test_baselines_digest_is_stable_and_canonicalizes_row_order() -> None:
+    """Порядок строк в файле измерение не меняет: материал сортируется внутри."""
+    left = [
+        _baseline("upstream_a", param_id="param_a"),
+        _baseline("upstream_b", param_id="param_b", mode=InheritanceMode.CONDITIONAL),
+    ]
+    first = baselines_digest(left)
+    assert first == baselines_digest(list(reversed(left)))
+    assert first == baselines_digest(left)
+    assert len(first) == 24
+
+
+def test_baselines_digest_ignores_author_note() -> None:
+    """``note`` — авторский комментарий к строке, а не условие измерения.
+
+    Ровно это утверждает докстрока :func:`core.pipeline.digests.baselines_digest`: в
+    материал входят ``(baseline_id, param_id, min_version, mode)``. Если бы ``note``
+    входил, пояснение к строке давало бы ``execution_change`` — «поменял комментарий,
+    получил новый прогон».
+    """
+    assert baselines_digest([_baseline(note=None)]) == baselines_digest(
+        [_baseline(note="пояснение автора")]
+    )
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        # min_version — пол применимости строки: другой пол — другой набор ячеек.
+        (_baseline(min_version="1"), _baseline(min_version="2")),
+        # «пол не объявлен» отличимо от объявленного: пустая строка, а не то же значение.
+        (_baseline(min_version=None), _baseline(min_version="1")),
+        # Режим решает, наследуется ли ячейка вообще.
+        (_baseline(mode=InheritanceMode.DIRECT), _baseline(mode=InheritanceMode.BLOCKED)),
+        (_baseline(param_id="param_a"), _baseline(param_id="param_b")),
+        (_baseline(baseline_id="upstream_a"), _baseline(baseline_id="upstream_b")),
+    ],
+)
+def test_baselines_digest_is_sensitive_to_policy_material(
+    left: BaselineRow, right: BaselineRow
+) -> None:
+    """Каждое поле материала меняет дайджест: это условия измерения, а не провенанс."""
+    assert baselines_digest([left]) != baselines_digest([right])
+
+
+def test_baselines_digest_empty_set_is_stable_not_empty_string() -> None:
+    """«Строк нет» (архетип C, незаполненный пилот) — объявленное условие, не пустая строка."""
+    digest = baselines_digest([])
+    assert digest
+    assert len(digest) == 24
+    assert digest == baselines_digest(())
+
+
+# ---------------------------------------------------------------------------
+# baseline_facts_digest — наблюдения о документации предка (план 27 §3.3/§7.1)
+# ---------------------------------------------------------------------------
+
+
+def _fact(
+    baseline_id: str = "upstream_a",
+    *,
+    param_id: str = "param_a",
+    version: str = "1",
+    status: FactStatus = FactStatus.PRESENT,
+    review: FactReview = FactReview.PENDING,
+    quote: str = "параметр описан в документации версии",
+    url: str = "https://upstream.example.test/docs/1/",
+    reviewed_by: str | None = None,
+    observed_at: str | None = "2026-06-01",
+    corpus_build_id: str | None = "build_1",
+    note: str | None = None,
+) -> BaselineFact:
+    """Строка ``sources/baseline_facts.csv`` — **наблюдение** с цитатой, хешем и датой."""
+    return BaselineFact(
+        baseline_id=baseline_id,
+        param_id=param_id,
+        version=version,
+        status=status,
+        url=url,
+        quote=quote,
+        content_hash="a" * 64,
+        observed_at=observed_at,
+        corpus_build_id=corpus_build_id,
+        review=review,
+        reviewed_by=reviewed_by,
+        note=note,
+    )
+
+
+def test_baseline_facts_digest_is_stable_and_canonicalizes_row_order() -> None:
+    """Порядок строк в файле измерение не меняет: материал сортируется внутри."""
+    left = [_fact("upstream_a"), _fact("upstream_b", param_id="param_b", version="2")]
+    first = baseline_facts_digest(left)
+    assert first == baseline_facts_digest(list(reversed(left)))
+    assert first == baseline_facts_digest(left)
+    assert len(first) == 24
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        # status решает, «описан / не описан / неясно» — это и есть наблюдение.
+        (_fact(status=FactStatus.PRESENT), _fact(status=FactStatus.ABSENT)),
+        # review решает, наследуется ли ячейка; подписавший тот же, поэтому разница
+        # именно в решении, а не в провенансе подписи.
+        (
+            _fact(review=FactReview.ACCEPTED, reviewed_by="reviewer"),
+            _fact(review=FactReview.REJECTED, reviewed_by="reviewer"),
+        ),
+        # Цитата входит отпечатком: другой текст — другой факт.
+        (_fact(quote="цитата один"), _fact(quote="цитата два")),
+        # Один параметр в v1 и v2 — два разных факта.
+        (_fact(version="1"), _fact(version="2")),
+        (_fact(param_id="param_a"), _fact(param_id="param_b")),
+        (_fact(baseline_id="upstream_a"), _fact(baseline_id="upstream_b")),
+    ],
+)
+def test_baseline_facts_digest_is_sensitive_to_observation(
+    left: BaselineFact, right: BaselineFact
+) -> None:
+    """``version``/``status``/``review``/``quote`` входят в материал — они меняют вердикты."""
+    assert baseline_facts_digest([left]) != baseline_facts_digest([right])
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        # Кто подписал — авторизация, а не измерение.
+        (
+            _fact(review=FactReview.ACCEPTED, reviewed_by="reviewer"),
+            _fact(review=FactReview.ACCEPTED, reviewed_by="other_reviewer"),
+        ),
+        # Дата наблюдения — провенанс (как даты корпуса, план 20 §F1).
+        (_fact(observed_at="2026-06-01"), _fact(observed_at="2026-07-15")),
+        # Сборка корпуса, из которого взят факт, — провенанс записи.
+        (_fact(corpus_build_id="build_1"), _fact(corpus_build_id="build_2")),
+        # Комментарий автора.
+        (_fact(note=None), _fact(note="проверено вручную")),
+        # Переезд документации при том же тексте вердикт не меняет: текст фиксирует
+        # content_hash, а адрес — провенанс записи.
+        (
+            _fact(url="https://upstream.example.test/docs/1/"),
+            _fact(url="https://upstream.example.test/docs/moved/"),
+        ),
+    ],
+)
+def test_baseline_facts_digest_ignores_record_provenance(
+    left: BaselineFact, right: BaselineFact
+) -> None:
+    """Провенанс записи в материал не входит — иначе переезд давал бы ``execution_change``."""
+    assert baseline_facts_digest([left]) == baseline_facts_digest([right])
+
+
+def test_baseline_facts_digest_empty_set_is_stable() -> None:
+    """«Фактов ещё нет» отличимо от «файл не читали»: пустое множество стабильно."""
+    digest = baseline_facts_digest([])
+    assert digest
+    assert len(digest) == 24
+    assert digest == baseline_facts_digest(())
 
 
 # ---------------------------------------------------------------------------

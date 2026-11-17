@@ -30,15 +30,16 @@ URL/имена в иллюстративных местах используют
 
 | Файл | Статус | Что заполнить |
 |---|---|---|
-| `package.yaml` | обязателен | `case_id`, `archetype` (здесь **B** — кросс-линейный, эталона нет), модули с весами (Σ = 100), роли с `definition`/`markers`/`query_patterns`, `jurisdictions`, `languages`. `baselines: []`, `baseline_participants: []`. |
+| `package.yaml` | обязателен | `case_id`, `archetype` (здесь **B** — кросс-линейный), модули с весами (Σ = 100), роли с `definition`/`markers`/`query_patterns`, `jurisdictions`, `languages`. `baselines: []` — политика наследования по параметрам ещё не заполнена (линия-предок объявлена в `sources/reference_products.yaml`), `baseline_participants: []`. |
 | `catalog.csv` | обязателен | 11 колонок; здесь **5 строк-примеров**, показывающих формат (факт ×4 + showcase ×1) — `title`/`rule` иллюстративные, замените реальными. `param_id` — slug нижнего регистра, `concept_terms` — JSON `{"ru":[…],"en":[…]}` (кавычки в CSV удваиваются), `search_langs` — через `\|`. |
-| `baselines.csv` | обязателен | Архетип B: **только заголовок** (наследования базовой линии нет). |
+| `baselines.csv` | обязателен | Архетип B: **только заголовок** — политика наследования по параметрам (какой параметр, с какого `min_version`, в каком режиме) заполняется владельцем домена. Объявленная линия-предок строк не добавляет: наследует только то, что объявлено строкой. |
 | `cohort.yaml` | обязателен | Ровно один `anchor` + аналоги; уникальные `product_id`. `selection_reason` — пустой до заполнения. |
 | `golden.csv` | обязателен | Минимум по одной строке `tier=fast` и `tier=full`; в `full` обязана быть страта `❌` (иначе линтер блокирует, §11.6). |
 | `run.yaml` | обязателен для прогона | `products` — **ровно** множество `product_id` когорты (S11); `anchor ∈ products`; `focus` — модули и параметры. |
 | `scope_attestation.yaml` | опционален | Процедура аттестации полноты источника для `absence_rule ∈ {parameter_reference, distribution_absence}` (I2b). |
 | `domain_profiles.yaml` | опционален | Профили получения/извлечения per domain (`fetch`/`extract`/`strategy`/`wait_for`); корень — словарь словарей. |
 | `sources/manual_artifacts.yaml` | опционален | Ручные артефакты: файлы, которые не взял краулер (robots/CAPTCHA/платный барьер). Вход I19 (файл → `corpus_raw` → экстракция → индекс), `origin=manual` в `corpus_docs`, отказ краула остаётся в сессии, дайджест входит в `run_id` (13-manual-artifacts §3). Пустой `provide: []` — подач нет. |
+| `sources/reference_products.yaml` | опционален по формату, нужен архетипам A и B | **Декларация** линий-предков (не наблюдение): `baseline_id` (на него ссылаются `baselines.csv` и `passport.upstreams`), `product_id` reference-продукта (не может совпадать с продуктом когорты), объявленные мажорные версии с корнями документации и `current_version` — версия, по которой строятся карта и наследование. Шаблон объявляет одну линию-плейсхолдер `upstream-line` (адреса на TLD `.invalid`), на неё ссылается `passports/_template/example_product`. Наблюдения о документации предка живут отдельно — `sources/baseline_facts.csv`. |
 
 Реестровые спецификации — **package-scoped**: `packages/{case_id}/registries/{registry_id}.yaml`,
 перечисляются в `package.yaml: registries` (03 §D.4). Секреты в спецификации не хранятся
@@ -54,6 +55,9 @@ URL/имена в иллюстративных местах используют
 - showcase-параметр несёт публичную величину/метрику в `rule`;
 - `param_id` — slug нижнего регистра; `products` = когорта; `anchor ∈ products`;
 - `golden-full` содержит страту `❌`;
+- архетип B объявляет **хотя бы одну** линию-предка (пакет без линий утверждает
+  кросс-линейное сравнение, которого нет — блок `upstreams-by-archetype`); продукт без
+  предка — предупреждение `upstream-presence`, а не блок («вендор не называет версию»);
 - `concept_terms` заполнены у всех параметров (иначе warning `empty-concept-terms`);
 - присутствуют оба тира golden (`fast`/`full`) — иначе warning `golden-presence`;
 - заполнены авторские поля (`definition` роли, `selection_reason` когорты) — иначе incomplete.

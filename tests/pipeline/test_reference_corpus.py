@@ -58,14 +58,22 @@ def test_layout_puts_corpus_outside_runs(tmp_path: Path) -> None:
         product_id="postgresql",
         version="18",
     ).ensure()
-    assert layout.db_path.parent == layout.root
-    assert "runs" not in str(layout.db_path)
-    assert layout.map_dir("map_1").parent == layout.maps_dir
+    build_id = "ref_postgresql_18_deadbeef"
+    # Сборка — каталог внутри версии: две сборки одной версии сосуществуют.
+    assert layout.db_path(build_id) == layout.build_dir(build_id) / "reference.db"
+    assert layout.db_path(build_id).parent.parent == layout.builds_dir
+    assert layout.manifest_path(build_id) == layout.build_dir(build_id) / "manifest.json"
+    assert "runs" not in str(layout.db_path(build_id))
+    assert layout.map_dir(build_id, "map_1").parent == layout.maps_dir(build_id)
+    # Байты общие для сборок версии, а не для одной сборки.
+    assert layout.raw_dir == layout.root / "raw"
+    assert layout.current_path == layout.root / "current.json"
+    assert layout.lock_path == layout.root / ".lock"
 
 
 def test_manifest_round_trip(tmp_path: Path) -> None:
     manifest = ReferenceManifest(
-        schema="reference-corpus/1",
+        schema="reference-corpus/2",
         build_id="ref_postgresql_18_deadbeef",
         package_id="pkg",
         product_id="postgresql",
@@ -77,10 +85,35 @@ def test_manifest_round_trip(tmp_path: Path) -> None:
         chunker_version="policy-6",
         observed_at="2026-11-17T00:00:00+00:00",
         roots=["https://www.postgresql.org/docs/18/"],
+        complete=False,
+        incomplete_reasons=["truncated:max_documents"],
+        skipped={"duplicate_text": 2},
+        errors=["pkg: https://x/fail: fetch: Timeout: таймаут"],
     )
     path = write_manifest(tmp_path / "manifest.json", manifest)
     assert read_manifest(path) == manifest
     assert read_manifest(tmp_path / "missing.json") is None
+
+
+def test_manifest_old_schema_reads_with_incomplete_provenance() -> None:
+    """Манифест ``/1`` читается, но «полнота» не выдумывается: ``complete=False``.
+
+    Старый формат поля не нёс, значит факта о полноте нет; ``complete=True`` по умолчанию
+    разрешил бы ``absent`` без носителя (I2/I2c).
+    """
+    manifest = ReferenceManifest.from_dict(
+        {
+            "schema": "reference-corpus/1",
+            "build_id": "ref_x_1_aaaaaaaa",
+            "content_digest": "aaaaaaaa",
+            "docs": 1,
+            "chunks": 1,
+        }
+    )
+    assert manifest.complete is False
+    assert manifest.incomplete_reasons == []
+    assert manifest.skipped == {}
+    assert manifest.errors == []
 
 
 # ---------------------------------------------------------------------------

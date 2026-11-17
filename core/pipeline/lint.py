@@ -276,7 +276,16 @@ def check_passport_upstreams(inputs: RunInputs) -> list[str]:
     * архетип A — линия одна, поэтому **больше одного** предка у продукта быть не может
       (это была бы заявка формы B в A-пакете), и линия обязана быть объявлена **хоть
       кем-то**: A-пакет без единого предка не использует наследование вовсе;
-    * архетип C — предков нет (эталона нет, §1.5).
+    * архетип C — предков нет (эталона нет, §1.5);
+    * архетип B **не требует** ни одной объявленной линии, и это отличие от буквы
+      §27.3.2 плана — осознанное. Регламент §1.5 описывает B как «несколько
+      OSS-альтернатив + коммерческие на их основе», где базлайн-участник включается
+      **«если он существует»**: кросс-линейное сравнение без общего предка — штатная
+      форма B, а не противоречие. Блокировать её значило бы требовать от автора выдумать
+      линию (A3), и цена такого правила измерена: канонический валидный пакет профиля
+      (`tests/config/fixtures/package.yaml`: B, `baselines: [baseline_a]`, продукты без
+      предков) перестал проходить линтер. Поэтому в B проверяется **состояние продукта**
+      (предупреждение :func:`check_upstream_presence`), а не метод пакета.
 
     **Продукт без предка не блокирует** (отличие от буквы §3.2 плана, и оно осознанное):
     «вендор не называет версию» — честное состояние (объявленный продукт может не
@@ -287,20 +296,25 @@ def check_passport_upstreams(inputs: RunInputs) -> list[str]:
 
     Паспорта приходят из раскладки, а не из пакета, поэтому проверка работает, когда
     composition root их передал (``inputs.passports``); неизвестность не выдаётся за
-    «нарушений нет» — она просто не проверяется здесь.
+    «нарушений нет» — она просто не проверяется здесь. По той же причине пакетные
+    правила (A/B) судят только о **наблюдённых** паспортах когорты: каталог может быть
+    чужим и не содержать ни одного её продукта, и «предков нет» тогда — отсутствие
+    данных, а не утверждение о методе профиля.
     """
     passports = getattr(inputs, "passports", None) or {}
     if not passports:
         return []
     cohort_ids = [str(entry.product_id) for entry in inputs.cohort.entries]
+    # Правило судит только о **наблюдённых** паспортах когорты. Каталог паспортов приходит
+    # из раскладки и может быть чужим (другой пакет) или не содержать продуктов когорты;
+    # тогда «предков нет» — не наблюдение, а отсутствие данных, и блокировать им нельзя.
+    observed_ids = [pid for pid in sorted(cohort_ids) if passports.get(pid) is not None]
     declared = _declared_reference_ids(inputs)
     archetype = inputs.package.archetype
     violations: list[str] = []
     declared_lines = 0
-    for product_id in sorted(cohort_ids):
-        passport = passports.get(product_id)
-        if passport is None:
-            continue
+    for product_id in observed_ids:
+        passport = passports[product_id]
         upstreams = list(getattr(passport, "upstreams", ()) or ())
         ids = [str(upstream.baseline_id) for upstream in upstreams]
         if ids:
@@ -322,7 +336,7 @@ def check_passport_upstreams(inputs: RunInputs) -> list[str]:
                 f"upstreams-by-archetype: {product_id}: архетип C не объявляет upstream "
                 f"(объявлено {len(upstreams)}) (§1.5/§27.3.2)"
             )
-    if archetype is Archetype.A and cohort_ids and declared_lines == 0:
+    if archetype is Archetype.A and observed_ids and declared_lines == 0:
         violations.append(
             "upstreams-by-archetype: архетип A не объявляет ни одного предка ни у одного "
             "продукта когорты — пакет описывает линию, которой нет (§27.3.2)"
@@ -331,16 +345,23 @@ def check_passport_upstreams(inputs: RunInputs) -> list[str]:
 
 
 def check_upstream_presence(inputs: RunInputs) -> list[str]:
-    """План 27 §3.2: продукт A-пакета без объявленного предка — видимое состояние.
+    """План 27 §3.2: продукт пакета A/B без объявленного предка — видимое состояние.
 
     Не блокирует: «вендор не называет версию» — честное состояние (продукт может не
     указывать предка: версия ядра ≠ версия линии, на которой он стоит), и требовать предка
     значило бы заставить автора его выдумать (A3, precision-first). Предупреждение нужно затем,
     чтобы «наследование для продукта недоступно» было названо, а не выяснялось из
     отсутствия ячеек.
+
+    Архетип B проверяется по той же причине, но с другой стороны: в B предков может быть
+    несколько (форк и линия, на которой продукт стоит), и продукт без единого предка
+    лишён ускорения — однако его отсутствие всё равно остаётся фактом о вендоре, а не о
+    методе профиля. Заявку метода проверяет :func:`check_passport_upstreams` на уровне
+    пакета; здесь — состояние конкретного продукта.
     """
     passports = getattr(inputs, "passports", None) or {}
-    if not passports or inputs.package.archetype is not Archetype.A:
+    archetype = inputs.package.archetype
+    if not passports or archetype not in (Archetype.A, Archetype.B):
         return []
     messages: list[str] = []
     for product_id in sorted(str(entry.product_id) for entry in inputs.cohort.entries):
@@ -349,8 +370,8 @@ def check_upstream_presence(inputs: RunInputs) -> list[str]:
             continue
         if not list(getattr(passport, "upstreams", ()) or ()):
             messages.append(
-                f"upstreams-by-archetype: {product_id}: архетип A, но предок не объявлен "
-                "— наследование для продукта недоступно (§27.3.2)"
+                f"upstreams-by-archetype: {product_id}: архетип {archetype.value}, "
+                "но предок не объявлен — наследование для продукта недоступно (§27.3.2)"
             )
     return messages
 

@@ -201,6 +201,7 @@ from core.domain.models import (
     absence_evidence_id,
     canonical_rate_limit,
     derived_evidence_id,
+    parse_rate_limit,
 )
 from core.domain.ocr_probe import (
     OCR_PROBE_OK,
@@ -394,6 +395,7 @@ __all__ = [  # noqa: RUF022
     "absence_evidence_id",
     "canonical_rate_limit",
     "derived_evidence_id",
+    "parse_rate_limit",
     # карта страниц (O36, план 26): носитель номера страницы чанка
     "PageMap",
     "check_page_map",

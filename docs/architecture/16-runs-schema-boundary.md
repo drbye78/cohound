@@ -334,8 +334,8 @@ per-site (`core/pipeline/crawl_frontier.py:826`) — два уровня одн�
   конфига, отсутствие `model_id` — dense-ветвь не собирается (`embed_spec: null`, видимая
   заметка wiring), недоступность объявленной модели — `EXIT_USAGE`, а не другой адаптер.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
-  `core/domain/models.py:518`), дефолт `None` — по той же причине, что у `pdf_device`
-  (`core/domain/models.py:617-623`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
+  `core/domain/models.py:695`), дефолт `None` — по той же причине, что у `pdf_device`
+  (`core/domain/models.py:859`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
   что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:488-509`).
 - Резолвер: `resolve_embed_device(app, run)` (`core/pipeline/crawl_frontier.py:511-538`) —
@@ -377,7 +377,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (§3), поэтому `hound diff` против прогона прошлой схемы невозможен не из-за поля, а из-за
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
-`RunManifest` (`core/domain/models.py:1740`) получает поле `embed_device`, и этого
+`RunManifest` (`core/domain/models.py:2010`) получает поле `embed_device`, и этого
 достаточно: `_contract_field_attr` (`core/pipeline/report.py:2866`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
 (`core/pipeline/report.py:2849`)

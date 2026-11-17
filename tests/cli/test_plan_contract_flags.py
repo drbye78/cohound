@@ -728,3 +728,71 @@ def test_plan_writes_nothing_with_retrieval_flags(
 
     assert _snapshot(package, home, tmp_path / "runs") == before
     assert not (tmp_path / "runs").exists()
+
+
+# ---------------------------------------------------------------------------
+# 4. Дайджесты наследования: правка файла пакета меняет run_id
+# ---------------------------------------------------------------------------
+
+
+def test_baselines_and_facts_files_change_run_id(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``baselines.csv`` и ``sources/baseline_facts.csv`` — материал ``run_id``.
+
+    Оба читаются **теми же** загрузчиками, что увидит исполнение
+    (``resolve_declared_axes`` → ``load_baselines``/``load_baseline_facts``), поэтому
+    проверка идёт правкой файла на диске, а не вызовом дайджеста напрямую: «план
+    описывает прогон» проверяется там, где оператор действительно меняет вход.
+
+    * ``min_version`` — пол применимости строки: другой пол даёт другой набор
+      унаследованных ячеек, значит и другой ``run_id``;
+    * ``note`` — авторский комментарий, не условие измерения: ``run_id`` тот же (иначе
+      «поправил пояснение» выглядело бы как смена измерения);
+    * появление факта ``present`` и снятие подписи ``accepted`` меняют набор
+      унаследованных ячеек — это отдельное поле контракта (``baseline_facts_digest``).
+    """
+    package = valid_package(tmp_path)
+    common = _common(package)
+
+    assert main(["plan", *common]) == EXIT_OK
+    base = _payload(capsys)["run_id"]
+
+    baselines = package / "baselines.csv"
+    original = baselines.read_text(encoding="utf-8")
+    # Комментарий автора — не измерение: идентичность не меняется.
+    baselines.write_text(
+        original.replace(",примечание", ",другой комментарий"), encoding="utf-8"
+    )
+    assert main(["plan", *common]) == EXIT_OK
+    assert _payload(capsys)["run_id"] == base
+
+    # Пол применимости — условие измерения.
+    baselines.write_text(
+        original.replace("baseline_a,param_a,1.0,", "baseline_a,param_a,2.0,"),
+        encoding="utf-8",
+    )
+    assert main(["plan", *common]) == EXIT_OK
+    with_policy_change = _payload(capsys)["run_id"]
+    assert with_policy_change != base
+
+    # Наблюдение о документации предка — второй материал контракта.
+    facts = package / "sources" / "baseline_facts.csv"
+    facts.write_text(
+        "baseline_id,param_id,version,status,url,quote,content_hash,"
+        "observed_at,corpus_build_id,review,reviewed_by,note\n"
+        "baseline_a,param_a,1,present,https://upstream.example.test/docs/1/,"
+        f"цитата,{'a' * 64},2026-06-01,build_1,accepted,reviewer,\n",
+        encoding="utf-8",
+    )
+    assert main(["plan", *common]) == EXIT_OK
+    with_fact = _payload(capsys)["run_id"]
+    assert with_fact not in {base, with_policy_change}
+
+    # Снятие ``accepted`` меняет набор унаследованных ячеек → новая идентичность.
+    facts.write_text(
+        facts.read_text(encoding="utf-8").replace(",accepted,reviewer,", ",pending,,"),
+        encoding="utf-8",
+    )
+    assert main(["plan", *common]) == EXIT_OK
+    assert _payload(capsys)["run_id"] not in {base, with_policy_change, with_fact}

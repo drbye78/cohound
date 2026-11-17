@@ -212,26 +212,86 @@ def _package_with_manifest(tmp_path: Path) -> Path:
     return package
 
 
-def _reference_db(tmp_path: Path) -> Path:
-    """Reference-корпус на один документ: одна страница, один чанк."""
+BUILD_ID = "ref_postgresql_18_deadbeef"
+
+
+def _build_root(tmp_path: Path) -> Path:
+    """Корень версии reference-корпуса для пакета ``pkg`` (``pkg`` — имя каталога)."""
+    return tmp_path / "reference" / "pkg" / "postgresql" / "18"
+
+
+def _write_build(
+    tmp_path: Path,
+    *,
+    build_id: str = BUILD_ID,
+    root: Path | None = None,
+    docs: int = 1,
+    chunks: int = 1,
+    complete: bool = True,
+    current: bool = True,
+) -> str:
+    """Сборка reference-корпуса: каталог ``builds/{build_id}/`` с манифестом.
+
+    Манифест — то, чем сборка **существует** (``list_builds`` видит каталог только с
+    ``manifest.json``), поэтому фикстура пишет его всегда: без него «сборка есть» была бы
+    утверждением о каталоге, а не о проходе.
+    """
+    base = root if root is not None else _build_root(tmp_path)
+    build_dir = base / "builds" / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "reference-corpus/2",
+                "build_id": build_id,
+                "package_id": "pkg",
+                "product_id": "postgresql",
+                "version": "18",
+                "content_digest": build_id.rsplit("_", 1)[-1],
+                "docs": docs,
+                "chunks": chunks,
+                "extractor_version": "trafilatura-html-8",
+                "chunker_version": "md-heading-4",
+                "observed_at": "2026-11-17T00:00:00+00:00",
+                "roots": ["https://x/"],
+                "complete": complete,
+                "incomplete_reasons": [] if complete else ["truncated:max_documents"],
+                "skipped": {} if complete else {"fetch_error": 2},
+                "errors": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    if current:
+        (base / "current.json").write_text(
+            json.dumps({"build_id": build_id}), encoding="utf-8"
+        )
+    return build_id
+
+
+def _reference_db(tmp_path: Path, *, build_id: str = BUILD_ID, root: Path | None = None) -> str:
+    """Reference-корпус на один документ: одна страница, один чанк (сборка целиком)."""
     from core.store.sqlite import connect
 
-    db_path = tmp_path / "reference.db"
+    base = root if root is not None else _build_root(tmp_path)
+    build_dir = base / "builds" / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+    db_path = build_dir / "reference.db"
     conn = connect(db_path)
     conn.execute(
         "INSERT INTO corpus_docs (doc_id, product_id, url, content_hash, fetched_at, "
         "extractor_version) VALUES ('d1','postgresql','https://x','h','2026-11-17',"
-        "'trafilatura-html-7')"
+        "'trafilatura-html-8')"
     )
     conn.execute(
         "INSERT INTO corpus_chunks (chunk_id, doc_id, product_id, url, chunk_no, text, "
         "content_hash, build_id) VALUES ('c1','d1','postgresql','https://x',0,"
-        "'The database supports jsonb storage with expression indexing.','a',"
-        "'ref_postgresql_18_deadbeef')"
+        "'The database supports jsonb storage with expression indexing.','a',?)",
+        (build_id,),
     )
     conn.commit()
     conn.close()
-    return db_path
+    return _write_build(tmp_path, build_id=build_id, root=root)
 
 
 class _MapEvaluator:
@@ -264,12 +324,12 @@ class _MapEvaluator:
 def test_map_writes_artifacts_outside_runs(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     package = _package_with_manifest(tmp_path)
-    db_path = _reference_db(tmp_path)
+    build_id = _reference_db(tmp_path)
     parser = build_parser()
     args = parser.parse_args(
         [
             "baseline", "map", "--package", str(package), "--baseline", "upstream-pg",
-            "--corpus-db", str(db_path), "--json",
+            "--build", build_id, "--json",
         ]
     )
     args.evaluator = _MapEvaluator()
@@ -277,22 +337,26 @@ def test_map_writes_artifacts_outside_runs(tmp_path: Path, capsys, monkeypatch) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["counts"] == {"present": 1}
     assert payload["map_id"].startswith("map_")
+    assert payload["reference_build_id"] == build_id
     assert set(payload["paths"]) == {"cells", "manifest", "score"}
     for path in payload["paths"].values():
         assert Path(path).is_file()
         assert "/runs/" not in path
+        # Карта живёт внутри сборки: смена модели меняет карту, но не корпус (§7.3).
+        assert f"builds/{build_id}/maps/" in path
     assert not (tmp_path / "runs").exists()
 
 
 def test_map_dry_run_writes_nothing(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     package = _package_with_manifest(tmp_path)
-    db_path = _reference_db(tmp_path)
+    store = tmp_path / "refstore"
+    build_id = _reference_db(tmp_path, root=store / "pkg" / "postgresql" / "18")
     parser = build_parser()
     args = parser.parse_args(
         [
             "baseline", "map", "--package", str(package), "--baseline", "upstream-pg",
-            "--corpus-db", str(db_path), "--dry-run", "--json",
+            "--build", build_id, "--reference-dir", str(store), "--dry-run", "--json",
         ]
     )
     args.evaluator = _MapEvaluator()
@@ -300,6 +364,9 @@ def test_map_dry_run_writes_nothing(tmp_path: Path, capsys, monkeypatch) -> None
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
     assert payload["paths"] == {}
+    # Артефактов карты не появилось: ни cells.jsonl, ни score.json (§5).
+    maps_dir = store / "pkg" / "postgresql" / "18" / "builds" / build_id / "maps"
+    assert not maps_dir.exists() or not any(maps_dir.iterdir())
     assert not (tmp_path / "reference").exists()
 
 
@@ -307,12 +374,12 @@ def test_report_with_map_publishes_agreement(tmp_path: Path, capsys, monkeypatch
     """Согласие факт↔карта публикуется числами: κ, n и расхождения (§9.5)."""
     monkeypatch.chdir(tmp_path)
     package = _package_with_manifest(tmp_path)
-    db_path = _reference_db(tmp_path)
+    build_id = _reference_db(tmp_path)
     parser = build_parser()
     args = parser.parse_args(
         [
             "baseline", "map", "--package", str(package), "--baseline", "upstream-pg",
-            "--corpus-db", str(db_path), "--json",
+            "--build", build_id, "--json",
         ]
     )
     args.evaluator = _MapEvaluator()
@@ -347,7 +414,9 @@ def test_report_without_map_says_so(tmp_path: Path, capsys, monkeypatch) -> None
     assert args.handler(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["map"]["map_id"] is None
+    # Ошибка/состояние называет **следующую** команду цепочки: карта → сборка.
     assert "hound baseline map" in payload["map"]["note"]
+    assert "hound baseline build" in payload["map"]["note"]
 
 
 def test_report_with_map_refuses_to_guess_between_maps(
@@ -356,7 +425,8 @@ def test_report_with_map_refuses_to_guess_between_maps(
     """Две карты и нет ``--map`` — отказ, а не «последняя по времени» (A3)."""
     monkeypatch.chdir(tmp_path)
     package = _package_with_manifest(tmp_path)
-    maps_dir = tmp_path / "reference" / "pkg" / "postgresql" / "18" / "maps"
+    build_id = _write_build(tmp_path)
+    maps_dir = _build_root(tmp_path) / "builds" / build_id / "maps"
     for name in ("map_a", "map_b"):
         (maps_dir / name).mkdir(parents=True)
         (maps_dir / name / "manifest.json").write_text(
@@ -378,4 +448,506 @@ def test_report_with_map_refuses_to_guess_between_maps(
         ["baseline", "report", "--package", str(package), "--with-map", "--json"]
     )
     with pytest.raises(CliError, match="--map"):
+        args.handler(args)
+
+
+# ---------------------------------------------------------------------------
+# build: сборка reference-корпуса (шаг 1 §8.1)
+# ---------------------------------------------------------------------------
+
+#: Корень документации из ``REFERENCE_YAML`` — сборка берёт корни **только** оттуда.
+DOCS_ROOT = "https://www.postgresql.org/docs/18/"
+
+
+class _FakePage:
+    """Страница для фейкового краулера (минимум, который читает сборка)."""
+
+    def __init__(self, url: str, content: bytes, content_type: str = "text/html") -> None:
+        self.url = url
+        self.content = content
+        self.content_type = content_type
+        self.status_code = 200
+        self.fetched_at = "2026-11-17T00:00:00+00:00"
+        self.fetch_mode = None
+        self.lang = "en"
+        self.from_cache = False
+
+
+class _FakeCrawler:
+    """Краулер-двойник: отдаёт заранее объявленные страницы и помнит запросы."""
+
+    def __init__(self, pages: dict[str, _FakePage]) -> None:
+        self.pages = pages
+        self.fetched: list[str] = []
+
+    def fetch(self, url: str, plan):  # noqa: ANN001 — шов порта
+        self.fetched.append(url)
+        if url not in self.pages:
+            raise RuntimeError(f"нет страницы {url}")
+        return self.pages[url]
+
+
+class _FakeExtractor:
+    """Экстрактор-двойник: текст = тело ответа, хеш — от текста (дедуп как у настоящего)."""
+
+    version = "fake-extract-1"
+
+    def extract(self, page, plan):  # noqa: ANN001 — шов порта
+        from types import SimpleNamespace
+
+        from core.util.hashing import content_hash
+
+        text = page.content.decode("utf-8")
+        return SimpleNamespace(
+            text=text,
+            content_hash=content_hash(text),
+            error=None,
+            extractor_version=self.version,
+            partial=False,
+            partial_reason=None,
+            page_count=None,
+            pages_converted=None,
+            page_map=None,
+            ocr_probe=None,
+            pages_ocr=None,
+            pages_failed=None,
+            tables=None,
+            blocks=None,
+        )
+
+
+class _FakeChunker:
+    """Чанкер-двойник: один чанк на документ (нарезка здесь не предмет проверки)."""
+
+    version = "fake-chunk-1"
+
+    def chunk(self, extracted, doc_id: str):  # noqa: ANN001 — шов порта
+        from types import SimpleNamespace
+
+        return [
+            SimpleNamespace(
+                chunk_id=f"{doc_id}#0",
+                chunk_no=0,
+                text=extracted.text,
+                content_hash=extracted.content_hash,
+                heading_path=None,
+                context_prefix=None,
+                char_start=0,
+                char_end=len(extracted.text),
+                table_ref=None,
+            )
+        ]
+
+
+class _FakeRobots:
+    """Политика ``robots.txt``: ``allow=False`` запрещает всё (для проверки пропусков)."""
+
+    def __init__(self, allow: bool = True) -> None:
+        self.allow = allow
+
+    def allowed(self, url: str) -> bool:  # noqa: ARG002 — шов порта
+        return self.allow
+
+
+def _run_with(argv: list[str], capsys: pytest.CaptureFixture[str], **ports) -> dict:
+    """Прогон с инъекцией портов: composition root подменяется, путь команды — тот же."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    for name, value in ports.items():
+        setattr(args, name, value)
+    code = args.handler(args)
+    out = capsys.readouterr().out
+    assert code == 0, out
+    return json.loads(out)
+
+
+def _build_argv(package: Path, *extra: str) -> list[str]:
+    return [
+        "baseline", "build", "--package", str(package), "--baseline", "upstream-pg", *extra
+    ]
+
+
+def test_build_dry_run_prints_plan_and_touches_nothing(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``--dry-run`` печатает план и не идёт в сеть: краулер-ловушка не вызывается."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    crawler = _FakeCrawler({})
+    payload = _run_with(
+        _build_argv(package, "--dry-run", "--json"), capsys, crawler=crawler
+    )
+    assert payload["dry_run"] is True
+    # Корни — из декларации, а не из флагов/сети.
+    assert payload["roots"] == [DOCS_ROOT]
+    assert payload["limits"]["document_level"] == "full"
+    assert payload["limits"]["pdf_pipeline"] == "structured"
+    assert crawler.fetched == []
+    assert not (tmp_path / "reference").exists()
+
+
+def test_build_rate_limit_is_declared_in_canonical_form(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Темп объявляется **канонической строкой** — сравнение сборок не должно быть строковой лотереей."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    seconds = _run_with(
+        _build_argv(package, "--rate-limit", "0.5", "--dry-run", "--json"), capsys
+    )
+    assert seconds["limits"]["rate_limit"] == "uniform(min=0.5,max=0.5)"
+    declared = _run_with(
+        _build_argv(package, "--rate-limit", "uniform(min=0.5,max=1.0)", "--dry-run", "--json"),
+        capsys,
+    )
+    assert declared["limits"]["rate_limit"] == "uniform(min=0.5,max=1.0)"
+
+
+def test_build_rejects_zero_documents_and_accepts_zero_depth(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``max_documents=0`` — пустой корпус (ошибка конфигурации), ``max_depth=0`` — только корни.
+
+    Дефолт глубины — **без ограничения** (граница пространства — объявленный корень):
+    ``CrawlLimits``-овский ноль «только seeds» здесь читал бы одну страницу руководства
+    и объявлял охват полным. Явный ``0`` остаётся законным объявлением «только корни».
+    """
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(_build_argv(package, "--max-documents", "0"))
+    default_payload = _run_with(_build_argv(package, "--dry-run", "--json"), capsys)
+    assert default_payload["limits"]["max_depth"] is None
+    payload = _run_with(_build_argv(package, "--max-depth", "0", "--dry-run", "--json"), capsys)
+    assert payload["limits"]["max_depth"] == 0
+
+
+def test_build_creates_build_and_names_next_command(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    pages = {
+        DOCS_ROOT: _FakePage(
+            DOCS_ROOT,
+            b"<html><body><p>The database supports jsonb storage with expression "
+            b"indexing.</p></body></html>",
+        )
+    }
+    payload = _run_with(
+        _build_argv(package, "--json"),
+        capsys,
+        crawler=_FakeCrawler(pages),
+        extractor=_FakeExtractor(),
+        chunker=_FakeChunker(),
+        robots=_FakeRobots(),
+    )
+    assert payload["docs"] == 1
+    assert payload["chunks"] == 1
+    assert payload["complete"] is True
+    assert payload["build_id"].startswith("ref_postgresql_18_")
+    # Сборка стала текущей, и её манифест опубликован (§4: сборка адресуется содержимым).
+    assert payload["current"] == payload["build_id"]
+    assert Path(payload["manifest_path"]).is_file()
+    assert "hound baseline recon" in payload["next_command"]
+    assert payload["next_command"].endswith(payload["build_id"])
+
+
+def test_build_prints_summary_and_next_step(tmp_path: Path, capsys, monkeypatch) -> None:
+    """Человекочитаемая сводка: объёмы, охват и **следующая** команда."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    pages = {
+        DOCS_ROOT: _FakePage(
+            DOCS_ROOT, b"<html><body><p>The database supports jsonb storage.</p></body></html>"
+        )
+    }
+    parser = build_parser()
+    args = parser.parse_args(_build_argv(package))
+    args.crawler = _FakeCrawler(pages)
+    args.extractor = _FakeExtractor()
+    args.chunker = _FakeChunker()
+    args.robots = _FakeRobots()
+    assert args.handler(args) == 0
+    out = capsys.readouterr().out
+    assert "документов 1, чанков 1" in out
+    assert "охват полный" in out
+    assert "дальше: hound baseline recon" in out
+
+
+def test_build_reports_incomplete_coverage_with_reasons(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Запрет ``robots`` — неполный охват с причиной, а не молчаливый «полный»."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    payload = _run_with(
+        _build_argv(package, "--json"),
+        capsys,
+        crawler=_FakeCrawler({DOCS_ROOT: _FakePage(DOCS_ROOT, b"<html><body>x</body></html>")}),
+        extractor=_FakeExtractor(),
+        chunker=_FakeChunker(),
+        robots=_FakeRobots(allow=False),
+    )
+    assert payload["complete"] is False
+    assert payload["skipped"]["robots"] == 1
+    assert payload["docs"] == 0
+
+
+def test_build_then_recon_reads_the_built_corpus(tmp_path: Path, capsys, monkeypatch) -> None:
+    """Цепочка целиком: собранный корпус читается `recon` без указания сборки.
+
+    Это пин контракта между двумя командами: `build` пишет `corpus_chunks` с `build_id` и
+    `current.json`, `recon` находит сборку раскладкой и читает её — без ручной подстановки
+    путей и без «соберите корпус руками».
+    """
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    pages = {
+        DOCS_ROOT: _FakePage(
+            DOCS_ROOT,
+            b"<html><body><p>The database supports jsonb storage with expression "
+            b"indexing.</p></body></html>",
+        )
+    }
+    built = _run_with(
+        _build_argv(package, "--json"),
+        capsys,
+        crawler=_FakeCrawler(pages),
+        extractor=_FakeExtractor(),
+        chunker=_FakeChunker(),
+        robots=_FakeRobots(),
+    )
+    recon = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg", "--json"],
+        capsys,
+    )
+    assert recon["corpus_build_id"] == built["build_id"]
+    assert recon["chunks"] == 1
+    assert recon["present"] == 1
+    stored = load_package_facts(package)
+    assert stored[0].url == DOCS_ROOT
+
+
+# ---------------------------------------------------------------------------
+# recon: выбор сборки и лексический индекс (§8.1 шаги 5–6)
+# ---------------------------------------------------------------------------
+
+
+def _write_corpus(
+    tmp_path: Path,
+    build_id: str,
+    chunks: list[tuple[str, str, str]],
+    *,
+    current: bool = False,
+) -> str:
+    """Сборка с заданными чанками: ``(doc_id, url, text)`` в порядке объявления."""
+    from core.store.sqlite import connect
+
+    root = _build_root(tmp_path)
+    build_dir = root / "builds" / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+    conn = connect(build_dir / "reference.db")
+    for doc_id, url, text in chunks:
+        conn.execute(
+            "INSERT INTO corpus_docs (doc_id, product_id, url, content_hash, fetched_at, "
+            "extractor_version) VALUES (?, 'postgresql', ?, ?, '2026-11-17', "
+            "'trafilatura-html-8')",
+            (doc_id, url, f"hash-{doc_id}"),
+        )
+        conn.execute(
+            "INSERT INTO corpus_chunks (chunk_id, doc_id, product_id, url, chunk_no, text, "
+            "content_hash, build_id) VALUES (?, ?, 'postgresql', ?, 0, ?, ?, ?)",
+            (f"{doc_id}#0", doc_id, url, text, f"chunk-{doc_id}", build_id),
+        )
+    conn.commit()
+    conn.close()
+    return _write_build(
+        tmp_path,
+        build_id=build_id,
+        docs=len(chunks),
+        chunks=len(chunks),
+        current=current,
+    )
+
+
+def test_recon_uses_the_named_build(tmp_path: Path, capsys, monkeypatch) -> None:
+    """``--build`` берёт именно указанную сборку, а не «единственную/текущую»."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    first = _write_corpus(
+        tmp_path, "ref_a", [("d1", "https://x/a", "The database supports jsonb storage.")]
+    )
+    second = _write_corpus(
+        tmp_path, "ref_b", [("d2", "https://x/b", "The database supports jsonb indexing.")]
+    )
+    payload = _run_with(
+        [
+            "baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+            "--build", second, "--json",
+        ],
+        capsys,
+    )
+    assert payload["corpus_build_id"] == second != first
+    stored = load_package_facts(package)
+    assert stored[0].url == "https://x/b"
+
+
+def test_recon_refuses_two_corpus_addresses(tmp_path: Path, capsys, monkeypatch) -> None:
+    """``--build`` и ``--corpus-db`` — разные адреса: молчаливое предпочтение одного запрещено."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    _write_corpus(tmp_path, "ref_a", [("d1", "https://x/a", "jsonb storage")], current=True)
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+            "--build", "ref_a", "--corpus-db", str(tmp_path / "other.db"),
+        ]
+    )
+    with pytest.raises(CliError, match="выберите один"):
+        args.handler(args)
+
+
+def test_recon_refuses_to_guess_between_builds(tmp_path: Path, capsys, monkeypatch) -> None:
+    """Две сборки без ``current.json`` — отказ с перечнем, а не выбор по каталогу (A3)."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    _write_corpus(tmp_path, "ref_a", [("d1", "https://x/a", "jsonb storage")])
+    _write_corpus(tmp_path, "ref_b", [("d2", "https://x/b", "jsonb storage")])
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg"]
+    )
+    with pytest.raises(CliError, match="--build"):
+        args.handler(args)
+
+
+def test_recon_finds_quote_by_index_not_by_corpus_order(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Регрессия замены линейного прохода: побеждает релевантный чанк, не первый.
+
+    Первый по порядку корпуса чанк содержит только один термин правила (``indexing``) —
+    линейный проход брал цитату из него. Лексический индекс ставит первым чанк, где
+    терминов больше, и цитата берётся из него.
+    """
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    build_id = _write_corpus(
+        tmp_path,
+        "ref_x",
+        [
+            ("a1", "https://x/glossary", "Glossary note about indexing only."),
+            (
+                "b1",
+                "https://x/jsonb",
+                "The database supports jsonb storage with expression indexing.",
+            ),
+        ],
+        current=True,
+    )
+    payload = _run_with(
+        [
+            "baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+            "--json",
+        ],
+        capsys,
+    )
+    assert payload["present"] == 1
+    # Движок индекса виден: «чем искали» — часть наблюдения.
+    assert payload["engine"] == "bm25-py-2"
+    assert payload["top_k"] >= 1
+    stored = load_package_facts(package)
+    assert stored[0].url == "https://x/jsonb"
+    assert "jsonb storage" in stored[0].quote
+    assert payload["corpus_build_id"] == build_id
+
+
+# ---------------------------------------------------------------------------
+# list: дашборд состояния корпуса
+# ---------------------------------------------------------------------------
+
+
+def test_list_reports_corpus_state_and_next_command(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    _write_build(tmp_path, docs=812, chunks=41230, complete=False)
+    parser = build_parser()
+    args = parser.parse_args(["baseline", "list", "--package", str(package)])
+    assert args.handler(args) == 0
+    out = capsys.readouterr().out
+    assert "сборок 1" in out
+    assert "812 док / 41230 чанков" in out
+    assert "охват неполный" in out
+    assert "дальше (upstream-pg): hound baseline recon" in out
+
+
+def test_list_json_carries_corpus_state(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    build_id = _write_build(tmp_path, docs=812, chunks=41230, complete=False)
+    payload = _run(["baseline", "list", "--package", str(package), "--json"], capsys)
+    # Существующие поля не переименованы.
+    assert payload["declared"] is True
+    assert payload["products"]["upstream-pg"]["role"] == "parallel"
+    state = payload["corpus"]["upstream-pg"]
+    assert state["builds"] == 1
+    assert state["current"] == build_id
+    assert (state["docs"], state["chunks"]) == (812, 41230)
+    assert state["complete"] is False
+    assert state["incomplete_reasons"] == ["truncated:max_documents"]
+    assert payload["next"]["step"] == "recon"
+    assert "hound baseline recon" in payload["next_commands"]["upstream-pg"]["command"]
+
+
+def test_list_next_step_is_review_when_facts_are_pending(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path)
+    _write_build(tmp_path)
+    payload = _run(["baseline", "list", "--package", str(package), "--json"], capsys)
+    assert payload["next"]["step"] == "review"
+    assert "hound baseline review" in payload["next"]["command"]
+
+
+# ---------------------------------------------------------------------------
+# Ошибки называют следующую команду (§5: без шага ошибка бесполезна)
+# ---------------------------------------------------------------------------
+
+
+def test_recon_without_corpus_names_build_command(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg"]
+    )
+    with pytest.raises(CliError, match="hound baseline build"):
+        args.handler(args)
+
+
+def test_map_without_corpus_names_build_command(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package_with_manifest(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "map", "--package", str(package), "--baseline", "upstream-pg"]
+    )
+    args.evaluator = _MapEvaluator()
+    with pytest.raises(CliError, match="hound baseline build"):
+        args.handler(args)
+
+
+def test_group_help_names_the_chain() -> None:
+    """Порядок цепочки виден из отказа группы, а не только из документации."""
+    parser = build_parser()
+    args = parser.parse_args(["baseline"])
+    with pytest.raises(CliError, match="build → recon → review → report → map"):
         args.handler(args)

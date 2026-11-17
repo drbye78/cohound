@@ -3,8 +3,18 @@
 product_id: example_product
 canonical_name: "TODO: каноническое имя продукта"
 vendor: "TODO: вендор продукта"
-# Архетип B: эталона нет.
-upstreams: []
+# Архетип B — кросс-линейное сравнение: продукт стоит на объявленной линии-предке.
+# `baseline_id` обязан совпадать с объявленным в `sources/reference_products.yaml`
+# пакета (иначе линтер блокирует `passport-upstream-undeclared`), а порядок списка —
+# объявленный **приоритет** предков: наследует первый, у которого есть строка политики
+# и принятый факт `present` на объявленной версии.
+# ШАБЛОН: версия — плейсхолдер, адрес — TLD `.invalid` (RFC 2606), цитата — TODO.
+upstreams:
+  - baseline_id: upstream-line
+    version: "TODO: мажорная версия линии, на которой стоит продукт"
+    evidence:
+      url: "https://upstream.example.invalid/docs/2/"
+      quote: "TODO: цитата из документации линии, подтверждающая связь"
 edition_assessed: "TODO: оцениваемая редакция продукта"
 version: "TODO: версия продукта на дату снимка"
 jurisdiction: XX

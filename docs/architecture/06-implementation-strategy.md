@@ -969,7 +969,7 @@ uv sync --frozen --extra dev
    (тот же класс, что `reviewed_by`), иначе смена подписанта рвала бы межцикловый diff.
    Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
-   ✅ проверено на `2af6d1e`: правило — `core/pipeline/lint.py:417` (`absence-attestation`),
+   ✅ проверено на `2af6d1e`: правило — `core/pipeline/lint.py:646` (`absence-attestation`),
    канал в Ш6 — `core/pipeline/phases.py:1482`. Имя параметра сменилось: `scope_acceptance`
    (принятие риска) — `core/pipeline/evaluate.py:2844` (`evaluate_cell`), `:551` (`_carry_one`),
    `:1881` (`_resolve_denial`). Прежнее `scope_attested_by` живёт

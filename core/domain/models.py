@@ -7,6 +7,7 @@ T2.2 в ``domain/invariants.py``). Нейтральны (§1.3).
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -658,6 +659,37 @@ def canonical_rate_limit(spec: RateLimitSpec | None) -> str | None:
     if spec is None:
         return None
     return f"uniform(min={float(spec.min_s)!r},max={float(spec.max_s)!r})"
+
+
+_RATE_LIMIT_RE = re.compile(
+    r"^uniform\(min=(?P<min>[0-9eE+\-.]+),max=(?P<max>[0-9eE+\-.]+)\)$"
+)
+
+
+def parse_rate_limit(text: str | None) -> RateLimitSpec | None:
+    """Обратный разбор канонической формы :func:`canonical_rate_limit` (``None`` → ``None``).
+
+    Зачем парсер вообще нужен: часть конфигурации несёт темп **канонической строкой**
+    (``CrawlLimits.rate_limit`` — она входит в ``crawl_config_digest``), а исполнение
+    (`resolve_fetch_plan`/`RateLimiter`) принимает :class:`RateLimitSpec`. Пока форма
+    писалась в одном месте, а читалась только строковым сравнением, разбор был не нужен;
+    как только появился потребитель, парсер обязан жить **рядом с формой** — второй его
+    экземпляр в другом модуле разошёлся бы с ``repr(float)`` на первой же правке
+    (``1e-05`` против ``1e-5`` читаются по-разному, и «объявленный темп» перестал бы
+    совпадать с исполненным).
+
+    Неразбираемая строка — ``ValueError``, а не «темпа нет»: молчаливая подмена
+    объявленного условия исполнения запрещена (A3).
+    """
+    if text is None:
+        return None
+    match = _RATE_LIMIT_RE.match(text.strip())
+    if match is None:
+        raise ValueError(
+            f"rate_limit: ожидалась каноническая форма 'uniform(min=…,max=…)', "
+            f"получено {text!r}"
+        )
+    return RateLimitSpec(min_s=float(match.group("min")), max_s=float(match.group("max")))
 
 
 class EmbedRunConfig(BaseModel):

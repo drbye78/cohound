@@ -86,7 +86,12 @@ def test_template_passport_loads_and_validates() -> None:
     assert passport is not None
     assert isinstance(passport, Passport)
     assert passport.product_id == "example_product"
-    assert passport.upstreams == []  # архетип B: предков не объявлено
+    # Архетип B: предок объявлен — формат ``upstreams`` виден в шаблоне.
+    assert len(passport.upstreams) == 1
+    upstream = passport.upstreams[0]
+    assert upstream.baseline_id == "upstream-line"
+    assert ".invalid" in upstream.evidence.url
+    assert upstream.evidence.quote.strip()
     assert passport.doc_domains and all(".invalid" in d for d in passport.doc_domains)
     # Установленный сателлит несёт все обязательные поля + relationship_evidence.
     approved = [s for s in passport.satellites if s.state.value == "approved"]
@@ -94,6 +99,27 @@ def test_template_passport_loads_and_validates() -> None:
     sat = approved[0]
     assert sat.component and sat.origin and sat.relationship and sat.evidence_state
     assert sat.relationship_evidence is not None
+
+
+def test_template_passport_upstream_is_declared_by_package() -> None:
+    """Предок паспорта шаблона объявлен в ``sources/reference_products.yaml`` пакета.
+
+    Иначе шаблон демонстрировал бы формат, который сам же не проходит линт
+    (``passport-upstream-undeclared``): объявленная линия и ссылка на неё — одна пара.
+    """
+    from core.config.run_config import load_reference_products
+
+    declared = load_reference_products(
+        TEMPLATE_PACKAGE / "sources" / "reference_products.yaml"
+    )
+    passport = load_passport("example_product", TEMPLATE_PASSPORTS)
+    assert passport is not None
+    declared_ids = {product.baseline_id for product in declared.products}
+    assert {upstream.baseline_id for upstream in passport.upstreams} <= declared_ids
+    # Версии объявлены явно и их больше одной — виден механизм refresh (сравнение мажоров).
+    product = declared.products[0]
+    assert len(product.versions) >= 2
+    assert product.current_version in {v.version for v in product.versions}
 
 
 def test_template_registry_config_loads() -> None:

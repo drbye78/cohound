@@ -5,11 +5,25 @@
 разведка и отчёт). Ни одна подкоманда не пишет в ``runs/`` и не трогает прогон: факты и
 декларация живут в пакете, reference-корпус — в ``COHOUND_HOME/reference/…``.
 
+Порядок работы — цепочка, и каждая команда называет **следующую** (шаг, который не
+сделан, обязан быть виден из вывода, а не из документации):
+
+```
+hound baseline build    # корпус версии: краул → экстракция → чанки → сборка
+hound baseline recon    # факты по каталогу из сборки (детерминированно, без LLM)
+hound baseline review   # подпись человека под фактами (наследует только accepted)
+hound baseline report   # что унаследовано и кем (+ --with-map)
+hound baseline map      # карта reference-продукта: Capability/Coverage
+```
+
 Правила, общие для всех подкоманд (§5):
 
 * ``--actor`` обязателен для любой записи — подпись без автора недоказуема;
 * ``--dry-run`` ничего не пишет и **говорит**, что записал бы;
-* запись идёт через ``.authoring/apply_log.jsonl`` (существующий контур I1).
+* запись идёт через ``.authoring/apply_log.jsonl`` (существующий контур I1);
+* сборка выбирается **явно** (``--build``) либо разрешается раскладкой
+  (``current.json`` > единственная сборка > отказ с перечнем) — «последняя по mtime»
+  не выбирается никогда (A3).
 
 Нейтрален к предметной категории (§1.3): ни одного названия продукта или вендора.
 """
@@ -20,11 +34,20 @@ import argparse
 import datetime as _dt
 import json
 import sys
-from dataclasses import asdict
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from core.cli.context import _add_common, _print_json
+from core.cli.context import (
+    _add_common,
+    _document_level,
+    _non_negative_int,
+    _pdf_pipeline,
+    _positive_int,
+    _print_json,
+)
 from core.cli.errors import EXIT_OK, EXIT_USAGE, CliError
 from core.config.run_config import (
     load_baselines,
@@ -32,15 +55,20 @@ from core.config.run_config import (
     load_package_manifest,
 )
 from core.domain.enums import FactReview, FactStatus
+from core.domain.models import BaselineFact, CatalogRow
 from core.pipeline.reference_corpus import (
     ChunkText,
-    ReferenceManifest,
+    ReferenceCorpusLayout,
     derive_facts,
     iter_reference_chunks,
+    list_builds,
+    parameter_terms,
+    read_current_build,
     read_manifest,
     reference_build_id,
     reference_content_digest,
-    write_manifest,
+    resolve_build,
+    select_quote,
 )
 from core.pipeline.reference_map import (
     MapChunk,
@@ -60,6 +88,23 @@ from core.pipeline.reference_products import (
 )
 
 __all__ = ["configure", "run"]
+
+
+#: Сколько кандидатов лексический индекс отдаёт на **один** параметр разведки.
+#:
+#: Разведка ищет не «самый похожий» чанк, а **любой**, из которого берётся дословная
+#: цитата: кандидат, где терминов правила нет (стемминг лексики и разбор ``parameter_terms``
+#: режут текст по-разному), цитаты не даёт, и цикл идёт к следующему. Замер 17.11.2026
+#: (``scripts/measure_recon_top_k.py``, корпус пилота 253 306 чанков, 181 правило каталога,
+#: линейный проход нашёл цитату для всех 181): ``K=1`` → 178 цитат, ``K=2`` → **181**,
+#: дальше не меняется; на срезах 2 000 и 6 000 чанков — то же (`K=2` достаточно).
+#: Публикация: ``docs/reports/measurements/2026-11-17-recon-top-k.md``.
+#:
+#: Взято 20, а не 2: цена линейна по ``K`` (одно обращение к индексу на параметр), а запас
+#: нужен для корпусов, где разбор терминов и токенизация расходятся сильнее. **Граница
+#: замера:** мерился корпус пилота, а не reference-корпус версии; при промахах первым делом
+#: мерить ``K``, а не поднимать его на глаз.
+RECON_TOP_K = 20
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +140,146 @@ def _reference_dir(args: argparse.Namespace, product_id: str, version: str) -> P
     )
     package_id = _package_dir(args).name
     return base / package_id / product_id / version
+
+
+def _layout(
+    args: argparse.Namespace, product: Any, version: str
+) -> ReferenceCorpusLayout:
+    """Раскладка reference-корпуса продукта/версии (``reference-corpus/2``).
+
+    Путь разрешает composition root (``_reference_dir``), а имена каталогов внутри —
+    ``reference_corpus``: две копии правила «где лежит сборка» разошлись бы при первом же
+    изменении раскладки.
+    """
+    return ReferenceCorpusLayout(
+        root=_reference_dir(args, product.product_id, version),
+        package_id=_package_dir(args).name,
+        product_id=product.product_id,
+        version=version,
+    )
+
+
+def _build_hint(args: argparse.Namespace, product: Any, version: str) -> str:
+    """Команда, которая создаёт корпус: её печатает любая ошибка «нечего читать».
+
+    Ошибка без следующего шага заставляет читать документацию, чтобы узнать, чего не
+    хватает; поэтому подсказка собирается **здесь**, а не пишется в каждом сообщении.
+    """
+    return (
+        f"hound baseline build --package {_package_dir(args)} "
+        f"--baseline {product.baseline_id} --version {version}"
+    )
+
+
+def _resolve_build_id(
+    args: argparse.Namespace, layout: ReferenceCorpusLayout, product: Any, *, purpose: str
+) -> str:
+    """Выбор сборки: ``--build`` > ``current.json`` > единственная > отказ с перечнем.
+
+    Разрешение — дело раскладки (``resolve_build``), здесь только перевод отказа в
+    ``CliError`` с адресом: явный выбор не подменяется угадыванием, а неоднозначность не
+    решается ни временем файла, ни порядком каталогов (A3 — не выбирать измерение за
+    оператора).
+    """
+    from core.pipeline.reference_corpus import (
+        ReferenceBuildAmbiguous,
+        ReferenceBuildMissing,
+    )
+
+    explicit = getattr(args, "build", None)
+    try:
+        return resolve_build(layout, explicit=explicit)
+    except ReferenceBuildMissing as exc:
+        raise CliError(
+            f"{purpose}: reference-корпус не найден — {exc}. Соберите его: "
+            f"{_build_hint(args, product, layout.version)}",
+            code="baseline",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    except ReferenceBuildAmbiguous as exc:
+        raise CliError(
+            f"{purpose}: сборка не выбрана — {exc}. Укажите --build явно",
+            code="baseline",
+            exit_code=EXIT_USAGE,
+        ) from exc
+
+
+def _reason_counts(items: Any) -> dict[str, int]:
+    """Пропуски по причинам: ``{причина: сколько}`` (детерминированно, по убыванию).
+
+    Форма ``skipped`` принадлежит сборке (``ReferenceBuildResult``) и может быть как
+    отображением «причина → счётчик», так и списком записей с полем ``reason``. Печать
+    обязана показывать причины, а не длину списка, поэтому читаются обе формы.
+    """
+    if not items:
+        return {}
+    if isinstance(items, Mapping):
+        return {str(key): int(value) for key, value in sorted(items.items())}
+    counts: Counter[str] = Counter()
+    for item in items:
+        reason = getattr(item, "reason", None)
+        if reason is None and isinstance(item, Mapping):
+            reason = item.get("reason")
+        counts[str(reason or "unknown")] += 1
+    return dict(sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])))
+
+
+def _corpus_state(layout: ReferenceCorpusLayout) -> dict[str, Any]:
+    """Состояние корпуса версии для дашборда ``list``: сборки, текущая, объёмы, охват.
+
+    Охват берётся из манифеста **сборки** (``complete``/``incomplete_reasons``/
+    ``skipped``/``errors``): это наблюдение прохода, а не свойство продукта, и при
+    отсутствии сборки публикуется ``None`` — «неизвестно», а не «полный» (A3: отсутствие
+    факта не факт).
+    """
+    builds = list_builds(layout)
+    current = read_current_build(layout)
+    state: dict[str, Any] = {
+        "version": layout.version,
+        "builds": len(builds),
+        "build_ids": list(builds),
+        "current": current,
+        "docs": None,
+        "chunks": None,
+        "complete": None,
+        "incomplete_reasons": [],
+        "errors": None,
+        "skipped": {},
+        "roots": [],
+        "db_path": None,
+    }
+    if current is None:
+        return state
+    manifest = read_manifest(layout.manifest_path(current))
+    state["db_path"] = str(layout.db_path(current))
+    if manifest is None:
+        return state
+    state["docs"] = manifest.docs
+    state["chunks"] = manifest.chunks
+    state["complete"] = manifest.complete
+    state["incomplete_reasons"] = list(manifest.incomplete_reasons)
+    state["errors"] = list(manifest.errors)
+    state["skipped"] = _reason_counts(manifest.skipped)
+    state["roots"] = list(manifest.roots)
+    return state
+
+
+def _coverage_text(state: Mapping[str, Any]) -> str:
+    """Охват одной фразой: полный / неполный с причинами / неизвестно."""
+    complete = state.get("complete")
+    if complete is None:
+        return "охват неизвестен"
+    if complete:
+        return "охват полный"
+    reasons = list(state.get("incomplete_reasons") or ())
+    if not reasons:
+        errors = state.get("errors") or []
+        skipped = state.get("skipped") or {}
+        if errors:
+            reasons.append(f"ошибок {len(errors)}")
+        if skipped:
+            reasons.append("пропусков " + str(sum(int(v) for v in skipped.values())))
+    return "охват неполный" + (f" ({', '.join(reasons)})" if reasons else "")
 
 
 def _declaration(args: argparse.Namespace) -> Any:
@@ -140,8 +325,382 @@ def _passports(args: argparse.Namespace) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# build: reference-корпус версии (краул → экстракция → чанки)
+# ---------------------------------------------------------------------------
+
+
+def _roots_for_version(product: Any, version: str) -> list[str]:
+    """Корни документации версии — из **декларации**, а не из флагов и не из сети.
+
+    ``sources/reference_products.yaml`` — единственный источник корней (план 27 §3.1):
+    корпус описывает документацию объявленной версии объявленного продукта, и ``--urls``
+    здесь был бы вторым, независимым объявлением того же предмета. Версия вне декларации —
+    отказ с перечнем объявленных, а не «соберём что-нибудь».
+    """
+    for entry in product.versions:
+        if str(entry.version) == version:
+            roots = [str(root) for root in entry.docs_roots]
+            if not roots:
+                raise CliError(
+                    f"версия {version} объявлена без docs_roots: добавьте корни "
+                    "документации в sources/reference_products.yaml",
+                    code="baseline",
+                    exit_code=EXIT_USAGE,
+                )
+            return roots
+    raise CliError(
+        f"версия {version!r} не объявлена для {product.baseline_id!r} "
+        f"(объявлены: {', '.join(str(v.version) for v in product.versions) or '—'})",
+        code="baseline",
+        exit_code=EXIT_USAGE,
+    )
+
+
+def _rate_limit(raw: str) -> str:
+    """``argparse``-тип ``--rate-limit``: канонический темп ``uniform(min=…,max=…)``.
+
+    Сборка объявляет темп **канонической строкой** (``ReferenceBuildLimits.rate_limit`` —
+    та же форма, что у ``CrawlLimits``): две записи одного темпа сделали бы сравнение
+    сборок строковым лотерейным билетом. Для удобства принимается и одно число секунд
+    (``--rate-limit 0.5`` ⇒ ``uniform(min=0.5,max=0.5)``), но канонизирует его
+    :func:`~core.domain.models.canonical_rate_limit`, а не строка флага.
+
+    :raises argparse.ArgumentTypeError: ни число, ни каноническая форма.
+    """
+    from core.domain.models import RateLimitSpec, canonical_rate_limit, parse_rate_limit
+
+    text = (raw or "").strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        if seconds < 0:
+            raise argparse.ArgumentTypeError(
+                f"задержка обязана быть неотрицательной, получено {raw!r}"
+            )
+        return str(
+            canonical_rate_limit(RateLimitSpec(min_s=seconds, max_s=seconds))
+        )
+    try:
+        return str(canonical_rate_limit(parse_rate_limit(text)))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"ожидалось число секунд либо каноническая форма "
+            f"'uniform(min=0.5,max=0.5)', получено {raw!r}"
+        ) from exc
+
+
+def _build_limits(args: argparse.Namespace) -> Any:
+    """Лимиты сборки из флагов (``None`` — ось не объявлена, действует дефолт сборки)."""
+    from core.domain.enums import DocumentLevel, PdfPipeline
+    from core.pipeline.reference_build import ReferenceBuildLimits
+
+    depth = getattr(args, "max_depth", None)
+    return ReferenceBuildLimits(
+        max_documents=getattr(args, "max_documents", None),
+        # ``None`` — глубины нет: граница пространства — path-prefix объявленного корня
+        # (``docs_roots``), а не выдуманный потолок. Явный ``--max-depth 0`` остаётся
+        # объявлением «только корни» и даёт ``complete=False`` (усечение видно).
+        max_depth=int(depth) if depth is not None else None,
+        rate_limit=getattr(args, "rate_limit", None),
+        exclude_paths=tuple(getattr(args, "exclude_paths", None) or ()),
+        document_level=getattr(args, "document_level", None) or DocumentLevel.FULL,
+        pdf_pipeline=getattr(args, "pdf_pipeline", None) or PdfPipeline.STRUCTURED,
+    )
+
+
+def _package_domain_profiles(package: Path) -> Any:
+    """``domain_profiles.yaml`` пакета (если файл есть); иначе ``None`` — осей нет.
+
+    Доменный профиль — авторское объявление осей хоста (``fetch``/``extract``/лимиты), и
+    сборка reference-корпуса читает его **того же** пакета: иначе документация предка
+    читалась бы другим механизмом, чем документация продукта когорты.
+    """
+    path = package / "domain_profiles.yaml"
+    if not path.is_file():
+        return None
+    from core.config.domain_profiles import load_domain_profiles
+
+    try:
+        return load_domain_profiles(path)
+    except ValueError as exc:
+        raise CliError(
+            f"domain_profiles.yaml пакета не читается: {exc}",
+            code="baseline",
+            exit_code=EXIT_USAGE,
+        ) from exc
+
+
+def _build_ports(args: argparse.Namespace) -> tuple[Any, Any, Any, Any, Any]:
+    """Порты сборки: краулер, экстрактор, чанкер, robots и доменные профили.
+
+    Движки не угадываются здесь, а строятся теми же фабриками, что у прогона:
+    ``build_scout_crawler`` (краулер по ``deploy.yaml``/env), ``build_worker_extractor``
+    (объявленные ``document_level``/``pdf_pipeline``) и ``FamilyChunker`` с **объявленным**
+    ограничителем (``declared_token_limiter``). Инъекция (``args.crawler``/``extractor``/
+    ``chunker``/``robots``) — для тестов и будущего AB: она не меняет путь по умолчанию.
+    """
+    from core.adapters.chunker_family import FamilyChunker, declared_token_limiter
+    from core.cli.wiring import (
+        _robots_gate,
+        build_scout_crawler,
+        build_worker_extractor,
+    )
+    from core.config.deploy import load_deploy_config
+    from core.domain.enums import DocumentLevel, PdfPipeline
+
+    deploy = load_deploy_config(None)
+    package = _package_dir(args)
+    domain_profiles = _package_domain_profiles(package)
+    level = getattr(args, "document_level", None) or DocumentLevel.FULL
+    pipeline = getattr(args, "pdf_pipeline", None) or PdfPipeline.STRUCTURED
+
+    crawler = getattr(args, "crawler", None)
+    if crawler is None:
+        crawler = build_scout_crawler(
+            deploy=deploy,
+            cache=None,
+            domain_profiles=domain_profiles,
+            run_crawl=None,
+            cli_max_depth=getattr(args, "max_depth", None),
+        )
+    extractor = getattr(args, "extractor", None)
+    if extractor is None:
+        extractor = build_worker_extractor(level, pipeline)
+    chunker = getattr(args, "chunker", None)
+    if chunker is None:
+        chunker = FamilyChunker(token_limiter=declared_token_limiter())
+    robots = getattr(args, "robots", None)
+    if robots is None:
+        # Тот же гейт, что у прогона: ``robots.txt`` читается лениво и **тем же**
+        # краулером, поэтому инъекция краулера в тестах не ходит в сеть сама по себе.
+        robots = _robots_gate(crawler, user_agent=deploy.crawl.user_agent)
+    return crawler, extractor, chunker, robots, domain_profiles
+
+
+def run_build(args: argparse.Namespace) -> int:
+    """``hound baseline build``: собрать reference-корпус объявленной версии (шаг 1 §8.1).
+
+    Корни — из декларации (``reference_products.yaml:versions[].docs_roots``), механизм —
+    тот же, что у корпуса когорты: краулер → экстрактор → чанкер → ``content_hash``.
+    Сборка **иммутабельна** и адресуется содержимым (``build_id``), поэтому повторный
+    запуск на тех же байтах даёт ту же сборку, а изменившаяся документация — новую.
+
+    ``--dry-run`` печатает план (корни, лимиты, уровень, механизм) и **не** ходит в сеть:
+    проверка декларации не обязана стоить запросов.
+    """
+    package = _package_dir(args)
+    declaration = _declaration(args)
+    product = _resolve_baseline(args, declaration)
+    version = str(getattr(args, "version", None) or product.current_version)
+    roots = _roots_for_version(product, version)
+    layout = _layout(args, product, version)
+    limits = _build_limits(args)
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    if dry_run:
+        payload: dict[str, Any] = {
+            "package": str(package),
+            "baseline_id": product.baseline_id,
+            "product_id": product.product_id,
+            "version": version,
+            "roots": roots,
+            "limits": asdict(limits),
+            "reference_dir": str(layout.root),
+            "builds": list_builds(layout),
+            "current": read_current_build(layout),
+            "dry_run": True,
+            "next_command": _build_hint(args, product, version),
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            lines = [
+                f"build (dry-run): {product.baseline_id} → {product.product_id} @{version}",
+                f"  корни ({len(roots)}): " + ", ".join(roots),
+                f"  лимиты: max_documents={limits.max_documents}, "
+                f"max_depth={limits.max_depth if limits.max_depth is not None else 'без ограничения (граница — корень)'}, "
+                f"rate_limit={limits.rate_limit}, "
+                f"exclude_paths={list(limits.exclude_paths) or '—'}",
+                f"  уровень: {limits.document_level or 'full'}, "
+                f"механизм PDF: {limits.pdf_pipeline or 'structured'}",
+                f"  раскладка: {layout.root}",
+                "сеть не тронута, на диск ничего не записано",
+                f"дальше: {_build_hint(args, product, version)} (без --dry-run)",
+            ]
+            sys.stdout.write("\n".join(lines) + "\n")
+        return EXIT_OK
+
+    from core.pipeline.reference_build import (
+        ReferenceBuildBusy,
+        ReferenceBuildConflict,
+        ReferenceBuildError,
+        build_reference_corpus,
+    )
+    from core.store.sqlite_store import SqliteStore
+
+    crawler, extractor, chunker, robots, domain_profiles = _build_ports(args)
+    try:
+        result = build_reference_corpus(
+            layout=layout,
+            roots=roots,
+            crawler=crawler,
+            extractor=extractor,
+            chunker=chunker,
+            limits=limits,
+            domain_profiles=domain_profiles,
+            robots=robots,
+            store_factory=lambda path: SqliteStore(path),
+        )
+    except ReferenceBuildBusy as exc:
+        raise CliError(
+            f"версию уже собирает другой процесс: {exc}. Дождитесь его или снимите "
+            f"лок {layout.lock_path}",
+            code="baseline",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    except ReferenceBuildConflict as exc:
+        raise CliError(
+            f"сборка не подтвердила идентичность: {exc}. Удалите каталог сборки "
+            f"{layout.builds_dir} и повторите: {_build_hint(args, product, version)}",
+            code="baseline",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    except ReferenceBuildError as exc:
+        raise CliError(
+            f"сборка не удалась: {exc}", code="baseline", exit_code=EXIT_USAGE
+        ) from exc
+
+    skipped = _reason_counts(result.skipped)
+    next_command = (
+        f"hound baseline recon --package {package} --baseline {product.baseline_id} "
+        f"--version {version} --build {result.build_id}"
+    )
+    payload = {
+        "package": str(package),
+        "baseline_id": product.baseline_id,
+        "product_id": product.product_id,
+        "version": version,
+        "build_id": result.build_id,
+        "content_digest": result.content_digest,
+        "docs": result.docs,
+        "chunks": result.chunks,
+        "skipped": skipped,
+        "errors": result.errors,
+        "truncated": list(result.truncated),
+        "complete": bool(result.complete),
+        "roots": list(result.roots),
+        "reused": result.reused,
+        "db_path": str(result.db_path),
+        "manifest_path": str(layout.manifest_path(result.build_id)),
+        "current": read_current_build(layout),
+        "next_command": next_command,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        state = _corpus_state(layout)
+        lines = [
+            f"build {result.build_id} — {product.product_id} @{version}"
+            + (" (уже была: содержимое то же, ничего не перезаписано)" if result.reused else ""),
+            f"  документов {result.docs}, чанков {result.chunks}, "
+            f"корней {len(payload['roots'])}",
+            f"  {_coverage_text(state)}",
+        ]
+        if skipped:
+            lines.append(
+                "  пропуски: " + ", ".join(f"{name} {count}" for name, count in skipped.items())
+            )
+        if payload["errors"]:
+            lines.append(f"  ошибок: {len(payload['errors'])}")
+            for error in payload["errors"][:10]:
+                lines.append(f"    {error}")
+        lines.append(f"  сборка: {payload['db_path']}")
+        lines.append(f"текущая сборка версии: {payload['current']}")
+        lines.append(f"дальше: {next_command}")
+        sys.stdout.write("\n".join(lines) + "\n")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
+
+
+def _fact_counts(facts: Sequence[BaselineFact], baseline_id: str) -> dict[str, int]:
+    """Факты одной линии по статусам и подписям (для дашборда ``list``)."""
+    rows = [fact for fact in facts if fact.baseline_id == baseline_id]
+    return {
+        "total": len(rows),
+        "present": sum(1 for fact in rows if fact.status is FactStatus.PRESENT),
+        "absent": sum(1 for fact in rows if fact.status is FactStatus.ABSENT),
+        "unclear": sum(1 for fact in rows if fact.status is FactStatus.UNCLEAR),
+        "accepted": sum(1 for fact in rows if fact.review is FactReview.ACCEPTED),
+        "pending": sum(1 for fact in rows if fact.review is FactReview.PENDING),
+        "rejected": sum(1 for fact in rows if fact.review is FactReview.REJECTED),
+    }
+
+
+def _map_count(layout: ReferenceCorpusLayout, build_id: str | None) -> int:
+    """Сколько карт посчитано по сборке (0 — карт нет)."""
+    if build_id is None:
+        return 0
+    maps_dir = layout.maps_dir(build_id)
+    if not maps_dir.is_dir():
+        return 0
+    return sum(1 for path in maps_dir.iterdir() if path.is_dir())
+
+
+def _next_command(
+    args: argparse.Namespace,
+    package: Path,
+    product: Any,
+    version: str,
+    state: Mapping[str, Any],
+    counts: Mapping[str, int],
+    maps: int,
+) -> dict[str, str]:
+    """Следующий шаг цепочки для продукта: ``{"step": …, "command": …}``.
+
+    Один шаг, а не список: дашборд отвечает на вопрос «что делать сейчас», и цепочка
+    строится по **наблюдаемому** состоянию (сборка → факты → подпись → карта → отчёт),
+    а не по номеру этапа плана.
+    """
+    package_arg = str(package)
+    build_cmd = _build_hint(args, product, version)
+    if state["current"] is None:
+        return {"step": "build", "command": build_cmd}
+    recon_cmd = (
+        f"hound baseline recon --package {package_arg} --baseline {product.baseline_id} "
+        f"--version {version} --build {state['current']}"
+    )
+    if not counts["total"]:
+        return {"step": "recon", "command": recon_cmd}
+    if counts["pending"]:
+        return {
+            "step": "review",
+            "command": (
+                f"hound baseline review --package {package_arg} "
+                f"--baseline {product.baseline_id} --version {version} "
+                "--accept --actor {кто}"
+            ),
+        }
+    if not maps:
+        return {
+            "step": "map",
+            "command": (
+                f"hound baseline map --package {package_arg} "
+                f"--baseline {product.baseline_id} --version {version} "
+                f"--build {state['current']}"
+            ),
+        }
+    return {
+        "step": "report",
+        "command": (
+            f"hound baseline report --package {package_arg} --with-map --json"
+        ),
+    }
 
 
 def _list_payload(args: argparse.Namespace) -> dict[str, Any]:
@@ -160,6 +719,24 @@ def _list_payload(args: argparse.Namespace) -> dict[str, Any]:
     )
     facts = load_package_facts(package)
     baselines = load_baselines(package / "baselines.csv")
+    corpus: dict[str, Any] = {}
+    fact_summary: dict[str, Any] = {}
+    next_commands: dict[str, Any] = {}
+    for product in declaration.products if declaration is not None else ():
+        version = str(product.current_version)
+        layout = _layout(args, product, version)
+        state = _corpus_state(layout)
+        counts = _fact_counts(facts, product.baseline_id)
+        counts["baselines"] = sum(
+            1 for row in baselines if row.baseline_id == product.baseline_id
+        )
+        maps = _map_count(layout, state["current"])
+        corpus[product.baseline_id] = {**state, "maps": maps}
+        fact_summary[product.baseline_id] = counts
+        next_commands[product.baseline_id] = _next_command(
+            args, package, product, version, state, counts, maps
+        )
+    primary = _primary_next(next_commands)
     payload: dict[str, Any] = {
         "package": str(package),
         "declared": declaration is not None,
@@ -167,8 +744,40 @@ def _list_payload(args: argparse.Namespace) -> dict[str, Any]:
         "baselines_rows": len(baselines),
         "facts": len(facts),
         "cohort_products": cohort_products,
+        "corpus": corpus,
+        "fact_summary": fact_summary,
+        "next_commands": next_commands,
+        "next": primary,
     }
     return payload
+
+
+def _primary_next(next_commands: Mapping[str, Any]) -> dict[str, str] | None:
+    """Шаг «дальше» для текущего продукта: первый незавершённый в порядке ``baseline_id``.
+
+    Если незавершённых нет, печатается шаг первой линии (``report``) — дашборд не
+    оставляет читателя без следующего действия.
+    """
+    if not next_commands:
+        return None
+    ordered = sorted(next_commands.items())
+    for baseline_id, item in ordered:
+        if item["step"] != "report":
+            return {"baseline_id": baseline_id, **item}
+    baseline_id, item = ordered[0]
+    return {"baseline_id": baseline_id, **item}
+
+
+def _corpus_column(state: Mapping[str, Any]) -> str:
+    """Состояние корпуса одной фразой: сборки, текущая, объёмы, охват."""
+    if not state["builds"]:
+        return "сборок 0 (корпус не собран)"
+    docs = state["docs"] if state["docs"] is not None else "?"
+    chunks = state["chunks"] if state["chunks"] is not None else "?"
+    return (
+        f"сборок {state['builds']}, текущая {state['current'] or '—'}, "
+        f"{docs} док / {chunks} чанков, {_coverage_text(state)}"
+    )
 
 
 def _print_list(payload: dict[str, Any]) -> None:
@@ -179,22 +788,36 @@ def _print_list(payload: dict[str, Any]) -> None:
         )
     products_payload: dict[str, dict[str, Any]] = dict(payload["products"])
     for baseline_id, data in sorted(products_payload.items()):
-        role = data["role"]
         who = (
             "ancestor of: " + ", ".join(data["ancestors_of"])
             if data["ancestors_of"]
-            else "parallel (ни один продукт когорты не объявляет его предком)"
+            else "parallel (не предок когорты)"
         )
+        state = payload["corpus"].get(baseline_id, {})
+        counts = payload["fact_summary"].get(baseline_id, {})
         lines.append(
-            f"{baseline_id:<16} {data['product_id']:<16} current {data['current_version']:<6} "
-            f"versions [{', '.join(data['versions'])}]  {who}"
-            if role == "ancestor"
-            else f"{baseline_id:<16} {data['product_id']:<16} {who}"
+            f"{baseline_id:<14} {data['product_id']:<14} "
+            f"current {data['current_version']:<4} "
+            f"versions [{', '.join(data['versions'])}]  {who}  "
+            f"корпус: {_corpus_column(state)}  "
+            f"факты: {counts.get('total', 0)} (present {counts.get('present', 0)}, "
+            f"absent {counts.get('absent', 0)}, unclear {counts.get('unclear', 0)}; "
+            f"accepted {counts.get('accepted', 0)}, pending {counts.get('pending', 0)}, "
+            f"rejected {counts.get('rejected', 0)})  "
+            f"baselines.csv: {counts.get('baselines', 0)} строк"
         )
     lines.append(
-        f"baselines.csv: {payload['baselines_rows']} строк; "
-        f"baseline_facts.csv: {payload['facts']} фактов"
+        f"итого: baselines.csv {payload['baselines_rows']} строк; "
+        f"baseline_facts.csv {payload['facts']} фактов"
     )
+    primary = payload.get("next")
+    if primary is None:
+        lines.append(
+            "дальше: объявите reference-продукт в sources/reference_products.yaml "
+            "(schema reference_products/1), затем `hound baseline build …`"
+        )
+    else:
+        lines.append(f"дальше ({primary['baseline_id']}): {primary['command']}")
     sys.stdout.write("\n".join(lines) + "\n")
 
 
@@ -342,23 +965,45 @@ def run_report(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _map_dir(args: argparse.Namespace, product: Any, version: str) -> Path:
-    """Каталог ``maps/`` версии reference-корпуса (раскладка — та же, что у ``map``)."""
-    return _reference_dir(args, product.product_id, version) / "maps"
+def _map_dir(args: argparse.Namespace, product: Any, version: str) -> Path | None:
+    """Каталог ``maps/`` **выбранной сборки** версии (``None`` — сборки ещё нет).
+
+    Карта адресуется сборкой: смена модели/промпта меняет карту, но не корпус, и раскладка
+    держит карты внутри сборки (``builds/{build_id}/maps/``). Сборки нет — карты тоже:
+    это не ошибка отчёта, а состояние, о котором отчёт говорит подсказкой. Неоднозначность
+    сборок, наоборот, **не** глотается: отчёт обязан отказать так же, как ``recon``.
+    """
+    from core.pipeline.reference_corpus import ReferenceBuildMissing
+
+    layout = _layout(args, product, version)
+    try:
+        build_id = _resolve_build_id(args, layout, product, purpose="report --with-map")
+    except CliError as exc:
+        cause = exc.__cause__
+        if isinstance(cause, ReferenceBuildMissing):
+            return None
+        raise
+    return layout.maps_dir(build_id)
 
 
-def _pick_map(args: argparse.Namespace, maps_dir: Path) -> Path | None:
+def _pick_map(args: argparse.Namespace, maps_dir: Path | None) -> Path | None:
     """Выбирает карту: явный ``--map`` либо **единственную** имеющуюся.
 
     Несколько карт и нет ``--map`` — отказ с их списком, а не «последняя по mtime»:
     выбор измерения по времени файла выдал бы одну карту за другую (A3 — не угадывать).
     """
+    if maps_dir is None:
+        return None
     explicit = getattr(args, "map_id", None)
     if explicit:
         path = maps_dir / explicit
         if not path.is_dir():
             raise CliError(
-                f"карта не найдена: {path}", code="baseline", exit_code=EXIT_USAGE
+                f"карта не найдена: {path}. Посчитайте её: "
+                f"`hound baseline map --package {_package_dir(args)} --baseline "
+                f"{getattr(args, 'baseline', '…')}`",
+                code="baseline",
+                exit_code=EXIT_USAGE,
             )
         return path
     if not maps_dir.is_dir():
@@ -404,7 +1049,11 @@ def _map_section(
                     "baseline_id": product.baseline_id,
                     "version": version,
                     "map_id": None,
-                    "note": "карты нет: `hound baseline map --baseline …`",
+                    "note": (
+                        f"карты нет: `hound baseline map --package {package} "
+                        f"--baseline {product.baseline_id} --version {version}` "
+                        f"(сборка — `{_build_hint(args, product, version)}`)"
+                    ),
                 }
             )
             continue
@@ -595,12 +1244,85 @@ def run_refresh(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _ReconDoc:
+    """Чанк в форме ``LexicalDocLike``: индексу нужны идентичность, партиция и текст.
+
+    Адрес/хеш индексу не нужны, а факту — нужны, поэтому исходный чанк держится рядом:
+    ``select_quote``/``derive_facts`` читают его, индекс — только текст.
+    """
+
+    chunk_id: str
+    product_id: str
+    text: str
+    chunk: ChunkText
+
+
+def _recon_facts(
+    *,
+    baseline_id: str,
+    version: str,
+    params: Sequence[CatalogRow],
+    docs: Sequence[_ReconDoc],
+    index: Any,
+    corpus_build_id: str,
+    observed_at: str,
+) -> list[BaselineFact]:
+    """Факты по каталогу: кандидатов отбирает индекс, статус ставит ``derive_facts``.
+
+    Прежний линейный проход читал **все** чанки на каждый параметр (181 правило × корпус
+    версии) и брал первый подходящий в порядке ``doc_id, chunk_no`` — то есть порядок
+    документа, а не релевантность. Теперь кандидаты приходят из лексического индекса
+    (``Bm25Index`` за портом ``LexicalSearcherPort``) в порядке убывания счёта с
+    tie-break по ``chunk_id``, и цикл идёт по ним, пока ``select_quote`` не найдёт
+    дословную цитату.
+
+    **Статус факта остаётся за ``derive_facts``** (единственный источник семантики
+    ``present``/``unclear``/``absent``, I15/I22): здесь выбирается только **что читать**.
+    Пустой список кандидатов — тот же исход «не нашли», что у линейного прохода, с той же
+    причиной (``coverage_incomplete``), поэтому неполнота охвата не подменяется
+    релевантностью.
+    """
+    by_id = {doc.chunk_id: doc for doc in docs}
+    facts: list[BaselineFact] = []
+    for param in params:
+        terms = parameter_terms(param)
+        candidates = index.search_scores(" ".join(terms), top_k=RECON_TOP_K) if terms else []
+        fact: BaselineFact | None = None
+        for chunk_id, _score in candidates:
+            doc = by_id.get(chunk_id)
+            if doc is None or select_quote(doc.chunk.text, terms) is None:
+                continue
+            fact = derive_facts(
+                baseline_id=baseline_id,
+                version=version,
+                chunks=[doc.chunk],
+                params=[param],
+                corpus_build_id=corpus_build_id,
+                observed_at=observed_at,
+            )[0]
+            break
+        if fact is None:
+            fact = derive_facts(
+                baseline_id=baseline_id,
+                version=version,
+                chunks=[],
+                params=[param],
+                corpus_build_id=corpus_build_id,
+                observed_at=observed_at,
+            )[0]
+        facts.append(fact)
+    return facts
+
+
 def run_recon(args: argparse.Namespace) -> int:
     """``hound baseline recon``: факты по каталогу из reference-корпуса (шаг 7a плана).
 
-    Разведка **детерминированная**: кандидат — чанк, где встречается термин правила;
-    цитата обязана быть дословной подстрокой текста чанка. LLM здесь не участвует, и это
-    осознанно: факт — провенанс, а провенанс не должен зависеть от модели.
+    Разведка **детерминированная**: кандидат — чанк, найденный лексическим индексом по
+    терминам правила; цитата обязана быть дословной подстрокой текста чанка. LLM здесь не
+    участвует, и это осознанно: факт — провенанс, а провенанс не должен зависеть от
+    модели. Движок индекса выбирает composition root, и его версия печатается: «чем
+    искали» — часть наблюдения.
 
     ``absent`` не выводится: проход по объявленному корпусу не аттестует **полноту**
     охвата (I2/I2c), поэтому «не нашли» публикуется как ``unclear`` с причиной
@@ -610,16 +1332,40 @@ def run_recon(args: argparse.Namespace) -> int:
     declaration = _declaration(args)
     product = _resolve_baseline(args, declaration)
     version = str(getattr(args, "version", None) or product.current_version)
-    reference_dir = _reference_dir(args, product.product_id, version)
-    db_path = Path(getattr(args, "corpus_db", None) or reference_dir / "reference.db")
-    if not db_path.is_file():
+    layout = _layout(args, product, version)
+    explicit_db = getattr(args, "corpus_db", None)
+    if explicit_db and getattr(args, "build", None):
+        # Два адреса одной сборки: молча выиграть один значило бы измерить не то, что
+        # назвал оператор. Это отказ, а не приоритет.
         raise CliError(
-            f"reference-корпус не найден: {db_path}. Соберите его (crawl + extract + "
-            "chunk в reference.db) либо укажите --corpus-db",
+            "--corpus-db и --build называют разные адреса корпуса: выберите один "
+            "(--build — сборку раскладки, --corpus-db — чужой файл)",
             code="baseline",
             exit_code=EXIT_USAGE,
         )
-    manifest = read_manifest(reference_dir / "manifest.json")
+    if explicit_db:
+        # Явный путь — аварийный вход (чужая БД, разбор): сборка тогда адресуется
+        # содержимым, потому что манифеста у такого файла может не быть.
+        db_path = Path(explicit_db)
+        manifest = None
+        if not db_path.is_file():
+            raise CliError(
+                f"reference-корпус не найден: {db_path} (--corpus-db). Соберите его: "
+                f"{_build_hint(args, product, version)}",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
+    else:
+        build_id = _resolve_build_id(args, layout, product, purpose="recon")
+        db_path = layout.db_path(build_id)
+        manifest = read_manifest(layout.manifest_path(build_id))
+        if not db_path.is_file():
+            raise CliError(
+                f"сборка {build_id} объявлена, но файла корпуса нет: {db_path}. "
+                f"Пересоберите: {_build_hint(args, product, version)}",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
     catalog = _catalog(package)
     only = getattr(args, "param", None)
     if only:
@@ -631,7 +1377,10 @@ def run_recon(args: argparse.Namespace) -> int:
     chunks = list(iter_reference_chunks(db_path))
     if not chunks:
         raise CliError(
-            f"reference-корпус пуст: {db_path} (0 чанков)", code="baseline", exit_code=EXIT_USAGE
+            f"reference-корпус пуст: {db_path} (0 чанков). Пересоберите: "
+            f"{_build_hint(args, product, version)}",
+            code="baseline",
+            exit_code=EXIT_USAGE,
         )
     # Без манифеста сборка адресуется **содержимым**, а не путём: путь — раскладка хоста,
     # и хеш от него сделал бы две одинаковые сборки разными (§4).
@@ -642,12 +1391,28 @@ def run_recon(args: argparse.Namespace) -> int:
             product.product_id, version, reference_content_digest(chunks)
         )
     )
+    # Движок лексики — адаптер, и выбирает его composition root: `pipeline` не импортирует
+    # `adapters` (матрица 01 §1). Индекс строится один раз на прогон, а не на параметр.
+    from core.adapters.lexical_bm25 import Bm25Index
+
+    index = Bm25Index()
+    docs = [
+        _ReconDoc(
+            chunk_id=chunk.chunk_id,
+            product_id=product.product_id,
+            text=chunk.text,
+            chunk=chunk,
+        )
+        for chunk in chunks
+    ]
+    index.index(docs)
     observed_at = _dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat()
-    facts = derive_facts(
+    facts = _recon_facts(
         baseline_id=product.baseline_id,
         version=version,
-        chunks=chunks,
         params=catalog,
+        docs=docs,
+        index=index,
         corpus_build_id=build_id,
         observed_at=observed_at,
     )
@@ -664,28 +1429,15 @@ def run_recon(args: argparse.Namespace) -> int:
     written = False
     if not dry_run:
         write_facts(package, [*merged, *facts])
-        # Манифест сборки фиксирует, чем прочитан текст: без него «откуда цитата»
-        # отвечалось бы догадкой (версии читателя/чанкера — провенанс, не identity).
-        write_manifest(
-            reference_dir / "manifest.json",
-            ReferenceManifest(
-                schema="reference-corpus/1",
-                build_id=build_id,
-                package_id=package.name,
-                product_id=product.product_id,
-                version=version,
-                content_digest=build_id.rsplit("_", 1)[-1],
-                docs=len({chunk.doc_id for chunk in chunks}),
-                chunks=len(chunks),
-                observed_at=observed_at,
-            ),
-        )
         written = True
     payload = {
         "package": str(package),
         "baseline_id": product.baseline_id,
         "version": version,
         "corpus_build_id": build_id,
+        "build": build_id,
+        "engine": index.engine_version,
+        "top_k": RECON_TOP_K,
         "chunks": len(chunks),
         "docs": len({chunk.doc_id for chunk in chunks}),
         "params": len(catalog),
@@ -694,6 +1446,11 @@ def run_recon(args: argparse.Namespace) -> int:
         "facts_path": str(package / "sources" / "baseline_facts.csv"),
         "written": written,
         "dry_run": dry_run,
+        "next_command": (
+            f"hound baseline review --package {package} "
+            f"--baseline {product.baseline_id} --version {version} "
+            "--accept --actor {кто}"
+        ),
         "note": (
             "факты записаны с review=pending: наследует только accepted, подпись — "
             "`hound baseline review --accept --actor …`"
@@ -704,7 +1461,8 @@ def run_recon(args: argparse.Namespace) -> int:
     else:
         lines = [
             f"recon {product.baseline_id} @{version}: {payload['chunks']} чанков, "
-            f"{payload['docs']} документов, сборка {build_id}",
+            f"{payload['docs']} документов, сборка {build_id}, "
+            f"индекс {index.engine_version} (top_k={RECON_TOP_K})",
             f"параметров: {payload['params']}; present {payload['present']}, "
             f"unclear {payload['unclear']}",
             (
@@ -712,7 +1470,7 @@ def run_recon(args: argparse.Namespace) -> int:
                 if dry_run
                 else f"записано: {payload['facts_path']} (review=pending)"
             ),
-            payload["note"],
+            f"дальше: {payload['next_command']}",
         ]
         sys.stdout.write("\n".join(lines) + "\n")
     return EXIT_OK
@@ -764,9 +1522,10 @@ def _evaluator(args: argparse.Namespace) -> Any:
 def run_map(args: argparse.Namespace) -> int:
     """``hound baseline map``: Capability/Coverage reference-продукта по каталогу (§9).
 
-    Карта **не** входит в сравнение когорты: артефакт лежит в ``reference/…/maps/{map_id}/``
-    и имеет свою идентичность. Считается тем же расчётом, что бандл прогона, по ячейкам
-    оценщика на reference-корпусе — второй формулы оценки нет.
+    Карта **не** входит в сравнение когорты: артефакт лежит в
+    ``reference/…/builds/{build_id}/maps/{map_id}/`` и имеет свою идентичность. Считается
+    тем же расчётом, что бандл прогона, по ячейкам оценщика на reference-корпусе — второй
+    формулы оценки нет.
     """
     from core.pipeline.digests import baseline_facts_digest, catalog_digest
     from core.pipeline.reference_corpus import iter_reference_chunks
@@ -781,15 +1540,38 @@ def run_map(args: argparse.Namespace) -> int:
     declaration = _declaration(args)
     product = _resolve_baseline(args, declaration)
     version = str(getattr(args, "version", None) or product.current_version)
-    reference_dir = _reference_dir(args, product.product_id, version)
-    db_path = Path(getattr(args, "corpus_db", None) or reference_dir / "reference.db")
-    if not db_path.is_file():
+    corpus_layout = _layout(args, product, version)
+    explicit_db = getattr(args, "corpus_db", None)
+    if explicit_db and getattr(args, "build", None):
+        # Два адреса одной сборки: молча выиграть один значило бы измерить не то, что
+        # назвал оператор. Это отказ, а не приоритет.
         raise CliError(
-            f"reference-корпус не найден: {db_path}",
+            "--corpus-db и --build называют разные адреса корпуса: выберите один "
+            "(--build — сборку раскладки, --corpus-db — чужой файл)",
             code="baseline",
             exit_code=EXIT_USAGE,
         )
-    manifest = read_manifest(reference_dir / "manifest.json")
+    if explicit_db:
+        db_path = Path(explicit_db)
+        manifest = None
+        if not db_path.is_file():
+            raise CliError(
+                f"reference-корпус не найден: {db_path} (--corpus-db). Соберите его: "
+                f"{_build_hint(args, product, version)}",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
+    else:
+        build_id = _resolve_build_id(args, corpus_layout, product, purpose="map")
+        db_path = corpus_layout.db_path(build_id)
+        manifest = read_manifest(corpus_layout.manifest_path(build_id))
+        if not db_path.is_file():
+            raise CliError(
+                f"сборка {build_id} объявлена, но файла корпуса нет: {db_path}. "
+                f"Пересоберите: {_build_hint(args, product, version)}",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
     catalog = _catalog(package)
     facts = [fact for fact in load_package_facts(package) if fact.baseline_id == product.baseline_id]
     chunks = [
@@ -804,7 +1586,8 @@ def run_map(args: argparse.Namespace) -> int:
     ]
     if not chunks:
         raise CliError(
-            f"reference-корпус пуст: {db_path} (0 чанков)",
+            f"reference-корпус пуст: {db_path} (0 чанков). Пересоберите: "
+            f"{_build_hint(args, product, version)}",
             code="baseline",
             exit_code=EXIT_USAGE,
         )
@@ -841,9 +1624,11 @@ def run_map(args: argparse.Namespace) -> int:
         prompt_template=getattr(args, "prompt_template", None),
         evaluation_policy=None,
     )
-    layout = ReferenceMapLayout(root=reference_dir / "maps" / map_id, map_id=map_id)
+    map_layout = ReferenceMapLayout(
+        root=corpus_layout.map_dir(build_id, map_id), map_id=map_id
+    )
     result = build_reference_map(
-        layout=layout,
+        layout=map_layout,
         product_id=product.product_id,
         version=version,
         reference_build_id=build_id,
@@ -867,7 +1652,7 @@ def run_map(args: argparse.Namespace) -> int:
         paths = {
             name: str(path)
             for name, path in write_map(
-                layout, result, extra_score={"fact_map_agreement": agreement}
+                map_layout, result, extra_score={"fact_map_agreement": agreement}
             ).items()
         }
     payload = {
@@ -921,8 +1706,8 @@ def configure(sub: Any) -> None:
     """Регистрирует группу ``hound baseline`` (план 27 §5)."""
     parser = sub.add_parser(
         "baseline",
-        help="reference-продукты профиля: декларация, факты о документации предка, "
-        "разведка, ревью, refresh и отчёт (план 27)",
+        help="reference-продукты профиля: сборка корпуса, факты о документации предка, "
+        "разведка, ревью, refresh, карта и отчёт (план 27)",
     )
     inner = parser.add_subparsers(dest="baseline_command", metavar="ПОДКОМАНДА")
 
@@ -938,6 +1723,84 @@ def configure(sub: Any) -> None:
             "вычисляется по пустому набору)",
         )
         _add_common(target)
+
+    p_build = inner.add_parser(
+        "build",
+        help="собрать reference-корпус версии: краул → экстракция → чанки (шаг 1 §8.1)",
+    )
+    _package_arg(p_build)
+    p_build.add_argument("--baseline", required=True, help="baseline_id")
+    p_build.add_argument(
+        "--version",
+        default=None,
+        help="версия (по умолчанию — current_version); корни берутся из "
+        "sources/reference_products.yaml:versions[].docs_roots",
+    )
+    p_build.add_argument(
+        "--max-documents",
+        dest="max_documents",
+        type=_positive_int,
+        default=None,
+        help="потолок документов сборки (по умолчанию — без лимита)",
+    )
+    p_build.add_argument(
+        "--max-depth",
+        dest="max_depth",
+        type=_non_negative_int,
+        default=None,
+        help=(
+            "глубина обхода от корней; по умолчанию не ограничена — граница это "
+            "объявленный корень (path-prefix). 0 — только сами корни (охват "
+            "публикуется неполным)"
+        ),
+    )
+    p_build.add_argument(
+        "--rate-limit",
+        dest="rate_limit",
+        type=_rate_limit,
+        default=None,
+        metavar="SECONDS",
+        help="задержка между запросами: число секунд либо каноническая форма "
+        "uniform(min=…,max=…) (по умолчанию — политика deploy.yaml)",
+    )
+    p_build.add_argument(
+        "--exclude-path",
+        dest="exclude_paths",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help="glob блэклиста по пути URL (повторяемый)",
+    )
+    p_build.add_argument(
+        "--document-level",
+        dest="document_level",
+        type=_document_level,
+        default=None,
+        metavar="LEVEL",
+        help="уровень извлечения документов: off|text|layout|layout_tables|full "
+        "(по умолчанию full)",
+    )
+    p_build.add_argument(
+        "--pdf-pipeline",
+        dest="pdf_pipeline",
+        type=_pdf_pipeline,
+        default=None,
+        metavar="PIPELINE",
+        help="механизм извлечения PDF: structured|text_layer (по умолчанию structured)",
+    )
+    p_build.add_argument(
+        "--reference-dir",
+        dest="reference_dir",
+        default=None,
+        help="корень reference-корпуса (по умолчанию — раскладка хоста)",
+    )
+    p_build.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="напечатать план (корни, лимиты, уровень, механизм) и не ходить в сеть",
+    )
+    p_build.set_defaults(handler=run_build)
 
     p_list = inner.add_parser("list", help="что объявлено и в каком состоянии")
     _package_arg(p_list)
@@ -973,6 +1836,12 @@ def configure(sub: Any) -> None:
         help="добавить карту reference-продукта и согласие факт↔карта (§9.5)",
     )
     p_report.add_argument("--map", dest="map_id", default=None, help="map_id карты")
+    p_report.add_argument(
+        "--build",
+        dest="build",
+        default=None,
+        help="build_id сборки для --with-map (по умолчанию — текущая)",
+    )
     p_report.add_argument("--baseline", default=None, help="только эта линия")
     p_report.add_argument(
         "--version", default=None, help="версия reference-корпуса (по умолчанию current)"
@@ -1023,13 +1892,22 @@ def configure(sub: Any) -> None:
     )
     p_recon.add_argument("--param", default=None, help="только один param_id")
     p_recon.add_argument(
-        "--corpus-db", dest="corpus_db", default=None, help="путь к reference.db"
+        "--build",
+        dest="build",
+        default=None,
+        help="build_id сборки (по умолчанию — текущая из раскладки)",
+    )
+    p_recon.add_argument(
+        "--corpus-db",
+        dest="corpus_db",
+        default=None,
+        help="путь к БД корпуса (аварийный вход: сборка тогда адресуется содержимым)",
     )
     p_recon.add_argument(
         "--reference-dir",
         dest="reference_dir",
         default=None,
-        help="корень reference-корпуса (по умолчанию ./reference)",
+        help="корень reference-корпуса (по умолчанию — раскладка хоста)",
     )
     p_recon.add_argument(
         "--dry-run", dest="dry_run", action="store_true", help="ничего не писать"
@@ -1046,13 +1924,22 @@ def configure(sub: Any) -> None:
         "--version", default=None, help="версия (по умолчанию — current_version)"
     )
     p_map.add_argument(
-        "--corpus-db", dest="corpus_db", default=None, help="путь к reference.db"
+        "--build",
+        dest="build",
+        default=None,
+        help="build_id сборки (по умолчанию — текущая из раскладки)",
+    )
+    p_map.add_argument(
+        "--corpus-db",
+        dest="corpus_db",
+        default=None,
+        help="путь к БД корпуса (аварийный вход: сборка тогда адресуется содержимым)",
     )
     p_map.add_argument(
         "--reference-dir",
         dest="reference_dir",
         default=None,
-        help="корень reference-корпуса (по умолчанию ./reference)",
+        help="корень reference-корпуса (по умолчанию — раскладка хоста)",
     )
     p_map.add_argument(
         "--llm-model",
@@ -1088,7 +1975,8 @@ def run(args: argparse.Namespace) -> int:
     if handler is None or handler is run or not getattr(args, "baseline_command", None):
         raise CliError(
             "hound baseline: нужна подкоманда "
-            "(list|facts|report|review|refresh|recon|map)",
+            "(build|list|facts|report|review|refresh|recon|map); порядок работы — "
+            "build → recon → review → report → map",
             code="baseline",
             exit_code=EXIT_USAGE,
         )

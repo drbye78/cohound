@@ -39,6 +39,7 @@ from core.pipeline.lint import (
     check_reference_versions,
     check_showcase_metric,
     check_slug_lowercase,
+    check_upstream_presence,
     check_weights_sum_to_100,
     lint_run_inputs,
 )
@@ -520,6 +521,81 @@ def test_archetype_a_without_any_upstream_blocks() -> None:
     messages = check_passport_upstreams(inputs)
     assert any("не объявляет ни одного предка" in msg for msg in messages)
     assert lint_run_inputs(inputs).ok is False
+
+
+def test_archetype_b_without_any_upstream_does_not_block() -> None:
+    """B-пакет без единой объявленной линии — **не** блок: это штатная форма B.
+
+    Регламент §1.5: базлайн-участник в когорту включается «если он существует», а
+    кросс-линейные параметры измеряются только корпусом. Поэтому «ни у одного продукта
+    нет предка» в B — состояние профиля, а не противоречие его методу; блокировать его
+    значило бы заставить автора выдумать линию (A3).
+
+    Цена обратного правила измерена: канонический валидный пакет
+    (``tests/config/fixtures/package.yaml``) — архетип B с ``baselines: [baseline_a]`` и
+    продуктами без предков, и пакетный блок сделал его невалидным.
+    """
+    assert _clean().package.archetype is Archetype.B
+    inputs = replace(
+        _clean(),
+        passports={
+            "p1": _passport("p1", upstreams=[]),
+            "p2": _passport("p2", upstreams=[]),
+        },
+    )
+    assert check_passport_upstreams(inputs) == []
+    report = lint_run_inputs(inputs)
+    assert report.ok is True
+    # Наследование недоступно — это названо предупреждением, а не скрыто.
+    assert any("p1" in warning and "предок не объявлен" in warning for warning in report.warnings)
+
+
+def test_archetype_b_with_one_declared_line_passes_package_rule() -> None:
+    """Хотя бы одна объявленная линия снимает пакетный блок (метод профиля есть)."""
+    inputs = replace(
+        _clean(),
+        passports={
+            "p1": _passport("p1", upstreams=[("baseline_a", "1")]),
+            "p2": _passport("p2", upstreams=[]),
+        },
+    )
+    assert check_passport_upstreams(inputs) == []
+
+
+def test_archetype_b_product_without_upstream_warns_not_blocks() -> None:
+    """Продукт B-пакета без предка — предупреждение ``upstream-presence``, не блок.
+
+    Наследование для него недоступно, и это названо; блокировать нечего — «вендор не
+    называет версию» остаётся честным состоянием (A3, precision-first).
+    """
+    inputs = replace(
+        _clean(),
+        passports={
+            "p1": _passport("p1", upstreams=[("baseline_a", "1")]),
+            "p2": _passport("p2", upstreams=[]),
+        },
+    )
+    messages = check_upstream_presence(inputs)
+    assert any("p2" in msg and "архетип B" in msg for msg in messages)
+    assert not any("p1" in msg for msg in messages)
+    report = lint_run_inputs(inputs)
+    assert report.ok is True
+    assert any("p2" in warning and "предок не объявлен" in warning for warning in report.warnings)
+
+
+def test_archetype_c_product_without_upstream_is_silent() -> None:
+    """Архетип C предупреждения не получает: предка там нет по определению (§1.5)."""
+    package = _clean().package.model_copy(
+        update={"archetype": Archetype.C, "baselines": [], "baseline_participants": []}
+    )
+    inputs = replace(
+        _clean(),
+        package=package,
+        baselines=[],
+        passports={"p1": _passport("p1", upstreams=[])},
+    )
+    assert check_upstream_presence(inputs) == []
+    assert check_passport_upstreams(inputs) == []
 
 
 def test_archetype_a_product_without_upstream_warns_not_blocks() -> None:
