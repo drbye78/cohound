@@ -12,10 +12,12 @@ from pathlib import Path
 from core.domain.enums import FactReview, FactStatus, Importance, ParamType
 from core.domain.models import CatalogRow
 from core.pipeline.reference_corpus import (
+    MAX_QUOTE_CHARS,
     ChunkText,
     ReferenceCorpusLayout,
     ReferenceManifest,
     derive_facts,
+    parameter_phrases,
     parameter_terms,
     read_manifest,
     reference_build_id,
@@ -134,6 +136,21 @@ def test_quote_missing_term_returns_none() -> None:
     assert select_quote("", ["jsonb"]) is None
 
 
+def test_long_sentence_quote_stays_a_substring() -> None:
+    """Длинное предложение: обрезка не делает цитату не-подстрокой.
+
+    До 18.11.2026 обрезка добавляла «…», и ``select_quote`` отбрасывал собственный
+    результат проверкой подстрочности — термин был в тексте, а ответ был «не нашли».
+    Замер на PG 18: таких потерь 0 из 181, но класс дефекта — молчаливое «в корпусе
+    нет информации», поэтому проверка живёт здесь, а не в отчёте.
+    """
+    long_sentence = "x " * (MAX_QUOTE_CHARS // 2 + 40) + "jsonb storage here."
+    quote = select_quote(long_sentence, ["jsonb storage"])
+    assert quote is not None, "термин в тексте есть — «не нашли» было бы ложным ответом"
+    assert quote in long_sentence
+    assert len(quote) <= MAX_QUOTE_CHARS
+
+
 def test_parameter_terms_skip_short_words_and_keep_order() -> None:
     terms = parameter_terms(_param())
     assert "jsonb" in terms
@@ -163,6 +180,66 @@ def test_parameter_terms_empty_when_only_rule_matches() -> None:
         update={"title": "QL", "rule": "supports table mapping", "concept_terms": {}}
     )
     assert parameter_terms(param) == []
+
+
+# ---------------------------------------------------------------------------
+# Фразы зачёта (§8.1 шаг 7a): запрос — слова, зачёт — термин целиком
+# ---------------------------------------------------------------------------
+
+
+def test_parameter_phrases_keep_multiterm_whole() -> None:
+    """Многословный термин — **одна** фраза, а не три слова.
+
+    Замер 18.11.2026: разбиение на слова давало 165 ``present`` против 37 при зачёте по
+    фразе — ``point-in-time recovery`` совпадало по любому из трёх слов.
+    """
+    param = _param().model_copy(
+        update={"concept_terms": {"en": ["point-in-time recovery"]}}
+    )
+    assert parameter_phrases(param) == ["point-in-time recovery"]
+    # А запрос по-прежнему строится из слов: BM25 токенизирует всё равно.
+    spaced = _param().model_copy(
+        update={"title": "", "concept_terms": {"en": ["incremental backup"]}}
+    )
+    assert parameter_phrases(spaced) == ["incremental backup"]
+    assert parameter_terms(spaced) == ["incremental", "backup"]
+
+
+def test_parameter_phrases_fall_back_to_title() -> None:
+    """Авторских терминов нет — фразой становится заголовок (он называет параметр)."""
+    param = _param().model_copy(
+        update={"concept_terms": {}, "title": "Streaming replication"}
+    )
+    assert parameter_phrases(param) == ["Streaming replication"]
+
+
+def test_parameter_phrases_empty_without_terms_and_title() -> None:
+    """Ни терминов, ни заголовка — пустой список: засчитывать нечего."""
+    param = _param().model_copy(update={"concept_terms": {}, "title": ""})
+    assert parameter_phrases(param) == []
+
+
+def test_parameter_phrases_order_is_deterministic() -> None:
+    """Порядок — от ключей языков, а не от порядка вставки в словарь (R7)."""
+    first = _param().model_copy(
+        update={
+            "concept_terms": {
+                "ru": ["резервное копирование", "backup"],
+                "en": ["backup", "backup"],
+            }
+        }
+    )
+    second = _param().model_copy(
+        update={
+            "concept_terms": {
+                "en": ["backup", "backup"],
+                "ru": ["резервное копирование", "backup"],
+            }
+        }
+    )
+    # `en` < `ru`; внутри языка — авторский порядок; дубликаты (в т.ч. межъязыковые) убраны.
+    assert parameter_phrases(first) == ["backup", "резервное копирование"]
+    assert parameter_phrases(second) == parameter_phrases(first)
 
 
 # ---------------------------------------------------------------------------
@@ -254,3 +331,46 @@ def test_derive_facts_absent_only_with_complete_coverage() -> None:
     )
     assert facts[0].status is FactStatus.ABSENT
     assert facts[0].note == "no_place_found"
+
+
+def test_derive_facts_scores_phrase_not_single_word() -> None:
+    """Зачёт по фразе: слова по отдельности ``present`` не дают (замер 18.11.2026).
+
+    Слово в предложении — не утверждение о параметре: ``incremental`` и ``backup``
+    встречаются в документации предка по отдельности постоянно, а параметр называется
+    фразой ``incremental backup``.
+    """
+    param = CatalogRow(
+        param_id="p3",
+        title="Incremental backup",
+        module="m",
+        group="g",
+        importance=Importance.CRITICAL,
+        param_type=ParamType.FACT,
+        rule="incremental backup mode",
+        concept_terms={"en": ["incremental backup"]},
+    )
+
+    def _fact(text: str) -> FactStatus:
+        chunk = ChunkText(
+            chunk_id="c1",
+            doc_id="d1",
+            url="https://www.postgresql.org/docs/18/backup.html",
+            text=text,
+            content_hash="d" * 64,
+        )
+        return derive_facts(
+            baseline_id="upstream-pg",
+            version="18",
+            chunks=[chunk],
+            params=[param],
+            corpus_build_id="ref_postgresql_18_deadbeef",
+            observed_at="2026-11-17T00:00:00+00:00",
+        )[0].status
+
+    assert (
+        _fact("An incremental backup is not the same as a full backup.")
+        is FactStatus.PRESENT
+    )
+    # Слова есть, фразы нет — это не находка.
+    assert _fact("The backup was incremental.") is FactStatus.UNCLEAR

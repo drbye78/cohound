@@ -70,6 +70,8 @@ __all__ = [
     "ReferenceManifest",
     "derive_facts",
     "list_builds",
+    "parameter_phrases",
+    "parameter_terms",
     "read_current_build",
     "reference_build_id",
     "reference_content_digest",
@@ -475,6 +477,48 @@ def parameter_terms(param: CatalogRow) -> list[str]:
     return _terms(" ".join(parts))
 
 
+def parameter_phrases(param: CatalogRow) -> list[str]:
+    """Фразы параметра для **зачёта** цитаты: авторские термины целиком, без разбиения.
+
+    Запрос и зачёт — разные задачи, и это замер, а не вкус. Запрос (:func:`parameter_terms`)
+    строит BM25-запрос, поэтому его материал обязан быть словами: индекс всё равно
+    токенизирует. Зачёт же отвечает на вопрос «называет ли предложение **параметр**», и
+    слово — слишком слабый ответ: ``point-in-time recovery`` превращалось в три слова, и
+    любое из них давало повод совпасть случайно.
+
+    Замер 18.11.2026 на reference-корпусе PG 18 (9 763 чанка, ``top_k=20``, каталог
+    ``ru-pg-dbms`` с авторскими ``concept_terms``): кандидатов во всех вариантах даёт один
+    и тот же запрос :func:`parameter_terms`, различается только условие зачёта —
+    любое слово **165/181** ``present`` при 154 уникальных цитатах и **11** цитатах,
+    делившихся между параметрами; все слова термина 86/181, 85, 1; термин целиком
+    **37/181**, 37, **0**. Доля делящихся цитат — структурный дефект: цитата, обслуживающая
+    2–8 параметров, параметр не называет (на старом каталоге одна цитата
+    ``'Oracle Compatibility Mode #'`` приходилась на 8 параметров), а именно это и есть
+    ложный ``present``.
+
+    Материал — значения ``concept_terms`` всех языков, каждое значение **целиком** (strip,
+    пустые отброшены, дубликаты убраны). Порядок детерминирован: языки в отсортированном
+    порядке ключей (``en`` < ``ru``), внутри языка — авторский порядок, поэтому повторный
+    recon на тех же данных даёт тот же зачёт (R7). Авторских терминов нет — fallback на
+    ``title``: заголовок непуст у всех 181 параметра пакета (замер 18.11.2026), поэтому
+    fallback не оставляет параметр без зачёта.
+
+    ``rule`` в фразы не входит по той же причине, что и в :func:`parameter_terms` (там
+    описан замер 16 ложных ``present`` из 49): процедура проверки описывает каталог, а не
+    предка.
+    """
+    phrases: list[str] = []
+    for lang in sorted(param.concept_terms or {}):
+        for value in param.concept_terms[lang]:
+            phrase = str(value or "").strip()
+            if phrase and phrase not in phrases:
+                phrases.append(phrase)
+    if phrases:
+        return phrases
+    fallback = str(param.title or "").strip()
+    return [fallback] if fallback else []
+
+
 def _sentence_around(text: str, term: str) -> str:
     """Предложение, содержащее термин (цитата обязана быть дословной подстрокой)."""
     lowered = text.lower()
@@ -487,7 +531,12 @@ def _sentence_around(text: str, term: str) -> str:
     end = min(ends) + 1 if ends else len(text)
     quote = text[start:end].strip()
     if len(quote) > MAX_QUOTE_CHARS:
-        quote = quote[: MAX_QUOTE_CHARS - 1].rstrip() + "…"
+        # Режем ЖЁСТКО и без многоточия: «…» делает цитату не-подстрокой, а тогда
+        # `select_quote` ниже отбрасывает найденный термин и отвечает «не нашли» —
+        # ложный отрицательный результат из-за косметики. Замер 18.11.2026 на PG 18
+        # (9 763 чанка, 181 параметр): таких потерь 0, но цена дефекта — молчаливое
+        # «нет информации в корпусе», поэтому обрезка остаётся подстрокой.
+        quote = quote[:MAX_QUOTE_CHARS].rstrip()
     return quote
 
 
@@ -616,14 +665,19 @@ def derive_facts(
 
     ``review`` по умолчанию ``pending``: прибор не подписывает за человека, и наследует
     только ``accepted`` (§3.3).
+
+    Зачёт идёт по **фразе** (:func:`parameter_phrases`), а не по слову: слово давало
+    ложный ``present`` (165 против 37 на 181 параметре, 18.11.2026) и цитату, делившуюся
+    между 2–8 параметрами. Цитата обязана называть параметр, а не содержать одно из слов
+    его названия.
     """
     material: list[ChunkText] = list(chunks)
     facts: list[BaselineFact] = []
     for param in params:
-        terms = parameter_terms(param)
+        phrases = parameter_phrases(param)
         found: tuple[ChunkText, str] | None = None
         for chunk in material:
-            quote = select_quote(chunk.text, terms)
+            quote = select_quote(chunk.text, phrases)
             if quote is not None:
                 found = (chunk, quote)
                 break

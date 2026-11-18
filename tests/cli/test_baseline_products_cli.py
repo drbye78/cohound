@@ -866,6 +866,105 @@ def test_recon_finds_quote_by_index_not_by_corpus_order(
 
 
 # ---------------------------------------------------------------------------
+# recon: видимость делящихся цитат (§8.1 шаг 7a: зачёт по фразе)
+# ---------------------------------------------------------------------------
+
+
+def _package_with_shared_term(tmp_path: Path) -> Path:
+    """Пакет из двух параметров с **одним** авторским термином (``jsonb``)."""
+    package = _package(tmp_path, facts=False)
+    (package / "catalog.csv").write_text(
+        "param_id,title,module,group,importance,param_type,rule,absence_rule,"
+        "role_binding,concept_terms,search_langs\n"
+        'p1,JSONB indexing,m,g,Кр,fact,"supports jsonb storage",explicit,,ru=jsonb,ru|en\n'
+        'p2,JSONB operators,m,g,Кр,fact,"supports jsonb operators",explicit,,ru=jsonb,ru|en\n',
+        encoding="utf-8",
+    )
+    return package
+
+
+def test_recon_reports_shared_quotes_and_unique_ratio(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Одна цитата на два параметра видна числом, а не наследуется молча.
+
+    Замер 18.11.2026: зачёт по слову давал 45 ``present`` при 30 уникальных цитатах, и
+    одна цитата обслуживала 8 параметров. Доля уникальных делает этот класс дефекта
+    наблюдаемым.
+    """
+    monkeypatch.chdir(tmp_path)
+    package = _package_with_shared_term(tmp_path)
+    _write_corpus(
+        tmp_path,
+        "ref_x",
+        [("d1", "https://x/jsonb", "The database supports jsonb storage.")],
+        current=True,
+    )
+    payload = _run(
+        [
+            "baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+            "--json",
+        ],
+        capsys,
+    )
+    assert payload["present"] == 2
+    assert payload["quotes"] == 2
+    assert payload["unique_quotes"] == 1
+    assert payload["unique_quote_ratio"] == 0.5
+    assert len(payload["shared_quotes"]) == 1
+    shared = payload["shared_quotes"][0]
+    assert shared["params"] == ["p1", "p2"]
+    assert shared["quote"].startswith("The database supports jsonb storage")
+
+
+def test_recon_unique_ratio_is_none_without_present(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Ноль ``present`` — ``None``, а не ``0.0``: «нечего делить» ≠ «всё делится»."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    _write_corpus(
+        tmp_path,
+        "ref_x",
+        [("d1", "https://x/other", "Unrelated page about backups.")],
+        current=True,
+    )
+    payload = _run(
+        [
+            "baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+            "--json",
+        ],
+        capsys,
+    )
+    assert payload["present"] == 0
+    assert payload["quotes"] == 0
+    assert payload["unique_quotes"] == 0
+    assert payload["shared_quotes"] == []
+    assert payload["unique_quote_ratio"] is None
+
+
+def test_recon_prints_quote_sharing_line(tmp_path: Path, capsys, monkeypatch) -> None:
+    """Человекочитаемый вывод называет долю уникальных и общие цитаты."""
+    monkeypatch.chdir(tmp_path)
+    package = _package_with_shared_term(tmp_path)
+    _write_corpus(
+        tmp_path,
+        "ref_x",
+        [("d1", "https://x/jsonb", "The database supports jsonb storage.")],
+        current=True,
+    )
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg"]
+    )
+    assert args.handler(args) == 0
+    out = capsys.readouterr().out
+    assert "цитат: 2, уникальных 1 (доля 0.50)" in out
+    assert "общих цитат: 1" in out
+    assert "p1, p2: The database supports jsonb storage." in out
+
+
+# ---------------------------------------------------------------------------
 # list: дашборд состояния корпуса
 # ---------------------------------------------------------------------------
 

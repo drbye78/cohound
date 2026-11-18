@@ -62,6 +62,7 @@ from core.pipeline.reference_corpus import (
     derive_facts,
     iter_reference_chunks,
     list_builds,
+    parameter_phrases,
     parameter_terms,
     read_current_build,
     read_manifest,
@@ -1282,16 +1283,24 @@ def _recon_facts(
     Пустой список кандидатов — тот же исход «не нашли», что у линейного прохода, с той же
     причиной (``coverage_incomplete``), поэтому неполнота охвата не подменяется
     релевантностью.
+
+    **Запрос и зачёт — разные построители, и это не дублирование.** Кандидатов даёт
+    ``parameter_terms`` (recall: BM25 токенизирует всё равно, и слова дают больше
+    попаданий), а цитату засчитывает ``parameter_phrases`` (точность: термин целиком).
+    Слить их в один список значило бы либо потерять кандидатов, либо вернуть зачёт по
+    слову — замер 18.11.2026: 165 ``present`` по слову против 37 по фразе при одном и том
+    же наборе кандидатов.
     """
     by_id = {doc.chunk_id: doc for doc in docs}
     facts: list[BaselineFact] = []
     for param in params:
         terms = parameter_terms(param)
+        phrases = parameter_phrases(param)
         candidates = index.search_scores(" ".join(terms), top_k=RECON_TOP_K) if terms else []
         fact: BaselineFact | None = None
         for chunk_id, _score in candidates:
             doc = by_id.get(chunk_id)
-            if doc is None or select_quote(doc.chunk.text, terms) is None:
+            if doc is None or select_quote(doc.chunk.text, phrases) is None:
                 continue
             fact = derive_facts(
                 baseline_id=baseline_id,
@@ -1313,6 +1322,39 @@ def _recon_facts(
             )[0]
         facts.append(fact)
     return facts
+
+
+def _quote_stats(facts: Sequence[BaselineFact]) -> dict[str, Any]:
+    """Сколько ``present`` и сколько среди них **различных** цитат (видимость дефекта).
+
+    Зачёт по слову давал 45 ``present`` при 30 уникальных цитатах, и одна цитата
+    обслуживала 8 параметров (замер 18.11.2026): цитата, названная однажды, «подтверждала»
+    параметры, которые она не называет. Числа ``quotes``/``unique_quotes`` и список
+    ``shared_quotes`` делают этот класс дефекта **видимым** в выводе, вместо того чтобы он
+    тихо наследовался следующим замером. ``unique_quote_ratio`` — ``None`` при нуле
+    ``present``: «нечего делить» и «всё делится» — разные наблюдения, и один ноль их не
+    различает.
+    """
+    present = [fact for fact in facts if fact.status is FactStatus.PRESENT]
+    by_quote: dict[str, list[str]] = {}
+    for fact in present:
+        if fact.quote:
+            by_quote.setdefault(fact.quote, []).append(str(fact.param_id))
+    shared = [
+        {"quote": quote[:120], "params": sorted(param_ids)}
+        for quote, param_ids in by_quote.items()
+        if len(param_ids) >= 2
+    ]
+    # По убыванию числа параметров, затем по тексту: порядок не должен зависеть от
+    # порядка обхода фактов (R7 — повторный recon даёт тот же вывод).
+    shared.sort(key=lambda item: (-len(item["params"]), item["quote"]))
+    quotes = len(present)
+    return {
+        "quotes": quotes,
+        "unique_quotes": len(by_quote),
+        "shared_quotes": shared,
+        "unique_quote_ratio": (len(by_quote) / quotes) if quotes else None,
+    }
 
 
 def run_recon(args: argparse.Namespace) -> int:
@@ -1443,6 +1485,7 @@ def run_recon(args: argparse.Namespace) -> int:
         "params": len(catalog),
         "present": sum(1 for fact in facts if fact.status is FactStatus.PRESENT),
         "unclear": sum(1 for fact in facts if fact.status is FactStatus.UNCLEAR),
+        **_quote_stats(facts),
         # Параметр без терминов не ищется вовсе, и это не «не нашли в корпусе»:
         # назвать число дешевле, чем оставить оператора догадываться, почему ячейка
         # пустая. Термины даёт title+concept_terms (rule исключён, см.
@@ -1466,13 +1509,27 @@ def run_recon(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(payload)
     else:
+        ratio = payload["unique_quote_ratio"]
+        # «—» при нуле present: доли нет, потому что делить нечего (а не потому что 0.0).
+        ratio_text = "—" if ratio is None else f"{ratio:.2f}"
         lines = [
             f"recon {product.baseline_id} @{version}: {payload['chunks']} чанков, "
             f"{payload['docs']} документов, сборка {build_id}, "
             f"индекс {index.engine_version} (top_k={RECON_TOP_K})",
             f"параметров: {payload['params']}; present {payload['present']}, "
             f"unclear {payload['unclear']}",
+            f"цитат: {payload['quotes']}, уникальных {payload['unique_quotes']} "
+            f"(доля {ratio_text})",
         ]
+        shared = payload["shared_quotes"]
+        if shared:
+            shown = "; ".join(
+                f"{', '.join(item['params'])}: {item['quote']}" for item in shared[:3]
+            )
+            lines.append(
+                f"общих цитат: {len(shared)} — {shown}"
+                + (f" … и ещё {len(shared) - 3}" if len(shared) > 3 else "")
+            )
         without = payload["params_without_terms"]
         if without:
             lines.append(
