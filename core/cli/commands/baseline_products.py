@@ -12,6 +12,7 @@
 hound baseline build    # корпус версии: краул → экстракция → чанки → сборка
 hound baseline recon    # факты по каталогу из сборки (детерминированно, без LLM)
 hound baseline review   # подпись человека под фактами (наследует только accepted)
+hound baseline propose  # наблюдения → строки baselines.csv (на разметку человеком)
 hound baseline report   # что унаследовано и кем (+ --with-map)
 hound baseline map      # карта reference-продукта: Capability/Coverage
 ```
@@ -48,7 +49,7 @@ from core.cli.context import (
     _positive_int,
     _print_json,
 )
-from core.cli.errors import EXIT_ERROR, EXIT_OK, EXIT_USAGE, CliError
+from core.cli.errors import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, EXIT_USAGE, CliError
 from core.config.run_config import (
     load_baselines,
     load_catalog,
@@ -56,6 +57,7 @@ from core.config.run_config import (
 )
 from core.domain.enums import FactReview, FactStatus
 from core.domain.models import BaselineFact, CatalogRow
+from core.pipeline.package_admin import PackageAdminError
 from core.pipeline.reference_corpus import (
     ChunkText,
     ReferenceCorpusLayout,
@@ -78,6 +80,7 @@ from core.pipeline.reference_map import (
     reference_map_id,
 )
 from core.pipeline.reference_products import (
+    apply_refresh,
     baseline_roles,
     fact_rows,
     inheritance_report,
@@ -87,6 +90,12 @@ from core.pipeline.reference_products import (
     refresh_diff,
     review_facts,
     write_facts,
+)
+from core.pipeline.reference_propose import (
+    apply_candidates,
+    candidates_path,
+    propose_baselines,
+    write_candidates,
 )
 
 __all__ = ["configure", "run"]
@@ -687,6 +696,17 @@ def _next_command(
                 "--accept --actor {кто}"
             ),
         }
+    # Наблюдения собраны и подписаны, а политики нет: это и есть разрыв, который закрывает
+    # ``propose``. Без этого шага цепочка после ``review`` уходила в карту, и факты
+    # оставались наблюдением, которое никто не превращал в строки наследования.
+    if counts.get("accepted", 0) and not counts.get("baselines", 0):
+        return {
+            "step": "propose",
+            "command": (
+                f"hound baseline propose --package {package_arg} "
+                f"--baseline {product.baseline_id}"
+            ),
+        }
     if not maps:
         return {
             "step": "map",
@@ -966,7 +986,9 @@ def run_report(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _map_dir(args: argparse.Namespace, product: Any, version: str) -> Path | None:
+def _map_dir(
+    args: argparse.Namespace, product: Any, version: str, *, purpose: str = "report --with-map"
+) -> Path | None:
     """Каталог ``maps/`` **выбранной сборки** версии (``None`` — сборки ещё нет).
 
     Карта адресуется сборкой: смена модели/промпта меняет карту, но не корпус, и раскладка
@@ -978,7 +1000,7 @@ def _map_dir(args: argparse.Namespace, product: Any, version: str) -> Path | Non
 
     layout = _layout(args, product, version)
     try:
-        build_id = _resolve_build_id(args, layout, product, purpose="report --with-map")
+        build_id = _resolve_build_id(args, layout, product, purpose=purpose)
     except CliError as exc:
         cause = exc.__cause__
         if isinstance(cause, ReferenceBuildMissing):
@@ -1184,6 +1206,10 @@ def run_refresh(args: argparse.Namespace) -> int:
     ``removed`` не применяется никогда; ``min_version`` выводится **предложением** —
     ``baselines.csv`` эта команда не трогает вовсе (неверный пол молча пере- или
     недо-наследует, а решение о применимости строки — авторское).
+
+    ``--apply`` доводит до файла то, что раньше только печаталось: ``apply_refresh``
+    применяет ``added``/``changed`` к ``baseline_facts.csv`` (``removed`` — нет). Без
+    ``--apply`` поведение прежнее байт-в-байт: ничего не пишется.
     """
     package = _package_dir(args)
     declaration = _declaration(args)
@@ -1201,41 +1227,244 @@ def run_refresh(args: argparse.Namespace) -> int:
         if fact.baseline_id == product.baseline_id and fact.version == version
     ]
     diff = refresh_diff(previous, current)
-    payload = {
-        "package": str(package),
-        "baseline_id": product.baseline_id,
-        "version": version,
-        "previous_versions": sorted({fact.version for fact in previous}),
-        "diff": diff,
-        "proposed_min_version": [item["param_id"] for item in diff["added"]],
-        "applied": [],
-        "dry_run": True,
-        "note": (
-            "refresh не пишет факты и не меняет baselines.csv: новая версия разведуется "
-            "через `hound baseline recon --version …`, а min_version остаётся "
-            "предложением автору профиля (§27.13)"
-        ),
-    }
+    previous_versions = sorted({fact.version for fact in previous})
+    apply = bool(getattr(args, "apply", False))
+    if apply:
+        actor = (getattr(args, "actor", None) or "").strip()
+        if not actor:
+            raise CliError(
+                "--apply требует --actor: запись без автора недоказуема",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
+        payload = apply_refresh(
+            package,
+            baseline_id=product.baseline_id,
+            version=version,
+            actor=actor,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            current_facts=current,
+        )
+        payload["package"] = str(package)
+        payload["note"] = (
+            "removed не применяется: регрессия/переезд/дефект различает человек; "
+            "baselines.csv не тронут — строки политики предлагает `hound baseline propose`"
+        )
+    else:
+        payload = {
+            "package": str(package),
+            "baseline_id": product.baseline_id,
+            "version": version,
+            "previous_versions": previous_versions,
+            "diff": diff,
+            "proposed_min_version": [item["param_id"] for item in diff["added"]],
+            "applied": [],
+            "dry_run": True,
+            "note": (
+                "refresh не пишет факты и не меняет baselines.csv: новая версия разведуется "
+                "через `hound baseline recon --version …`, а min_version остаётся "
+                "предложением автору профиля (§27.13)"
+            ),
+        }
     if args.json:
         _print_json(payload)
     else:
         lines = [
             f"refresh {product.baseline_id} @{version} против "
-            f"[{', '.join(payload['previous_versions']) or '—'}]",
+            f"[{', '.join(previous_versions) or '—'}]",
         ]
         for kind in ("added", "removed", "changed", "unchanged", "unclear"):
-            items = diff[kind]
+            items = payload["diff"][kind]
             lines.append(f"  {kind}: {len(items)}")
             for item in items[:20]:
                 lines.append(f"    {item['param_id']}")
             if len(items) > 20:
                 lines.append(f"    … ещё {len(items) - 20}")
-        if payload["proposed_min_version"]:
+        if payload.get("proposed_min_version"):
             lines.append(
                 "предложение min_version="
                 f"{version} для: {', '.join(payload['proposed_min_version'][:20])}"
             )
         lines.append("removed не применяется: регрессия/переезд/дефект различает человек")
+        if apply:
+            applied = payload["applied"]
+            lines.append(
+                ("dry-run: " if payload["dry_run"] else "")
+                + f"применено фактов: {len(applied)}"
+                + (
+                    " — " + ", ".join(item["param_id"] for item in applied[:20])
+                    if applied
+                    else ""
+                )
+            )
+            if payload["dry_run"]:
+                lines.append("файл фактов не записан")
+        sys.stdout.write("\n".join(lines) + "\n")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# propose: наблюдения → строки политики наследования (шаг между review и report)
+# ---------------------------------------------------------------------------
+
+
+def _propose_map(
+    args: argparse.Namespace, product: Any, version: str
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Карта версии для предложения (``--with-map``): строки ``cells.jsonl`` и версия.
+
+    Карта нужна ровно для одного решения — «цитата найдена, но она не о предмете»
+    (``support_not_about_subject``). Её отсутствие не ошибка предложения: без карты режим
+    ``conditional`` не выводится, потому что условие не наблюдали. Сборка выбирается так
+    же, как у ``report --with-map`` (``current.json`` > единственная > отказ), поэтому
+    карта читается с той сборки, которую оператор и считал текущей.
+    """
+    if not getattr(args, "with_map", False):
+        return [], None
+    from core.pipeline.reference_map import read_map_cells
+
+    maps_dir = _map_dir(args, product, version, purpose="propose --with-map")
+    chosen = _pick_map(args, maps_dir)
+    if chosen is None:
+        return [], None
+    return read_map_cells(chosen / "cells.jsonl"), version
+
+
+def run_propose(args: argparse.Namespace) -> int:
+    """``hound baseline propose``: строки политики из подписанных наблюдений (§13).
+
+    Два режима и разная запись:
+
+    * без ``--apply`` — строит ``sources/baselines.candidate.csv`` (предложение на
+      разметку); строки политики **не** пишутся: ``decision`` заполняет человек;
+    * ``--apply --actor`` — читает размеченный файл и пишет ``baselines.csv`` только по
+      ``accept``. Незаполненная строка — отказ: разметку не выдумываем.
+
+    Строки ``baselines.csv`` входят в ``baselines_digest``, а тот — в
+    ``execution_contract_digest``: применение предложения меняет ``run_id``. Это печатается
+    сообщением, но не вычисляется здесь: идентичность считает ``plan``.
+    """
+    package = _package_dir(args)
+    declaration = _declaration(args)
+    product = _resolve_baseline(args, declaration)
+    dry_run = bool(getattr(args, "dry_run", False))
+    apply = bool(getattr(args, "apply", False))
+
+    if apply:
+        try:
+            result = apply_candidates(
+                package,
+                baseline_id=product.baseline_id,
+                actor=getattr(args, "actor", None) or "",
+                dry_run=dry_run,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc), code="baseline", exit_code=EXIT_USAGE) from exc
+        except PackageAdminError as exc:
+            raise CliError(
+                str(exc),
+                code=getattr(exc, "code", "baseline"),
+                exit_code=EXIT_USAGE if exc.kind == "usage" else EXIT_BLOCKED,
+            ) from exc
+        payload: dict[str, Any] = {
+            "package": str(package),
+            "baseline_id": product.baseline_id,
+            "apply": result,
+            "dry_run": dry_run,
+            "execution_change": True,
+            "note": (
+                "строки baselines.csv входят в baselines_digest ⇒ execution_change: "
+                "новый run_id (посчитает `hound plan`)"
+            ),
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            lines = [
+                f"propose --apply: {product.baseline_id}, файл {result['path']}",
+                f"  принято {result['counts']['accepted']}, пропущено "
+                f"{result['counts']['skipped']} (reject/skip/existing не пишутся)",
+            ]
+            for item in result["added"]:
+                lines.append(
+                    f"  + {item['param_id']} min_version={item['min_version']} "
+                    f"{item['inheritance_mode']} ({item['reason']})"
+                )
+            lines.append(
+                "dry-run: baselines.csv не записан"
+                if dry_run
+                else "execution_change: baselines_digest изменился ⇒ новый run_id"
+            )
+            sys.stdout.write("\n".join(lines) + "\n")
+        return EXIT_OK
+
+    versions = [str(entry.version) for entry in product.versions]
+    map_cells, map_version = _propose_map(
+        args, product, str(getattr(args, "version", None) or product.current_version)
+    )
+    proposal = propose_baselines(
+        baseline_id=product.baseline_id,
+        facts=load_package_facts(package),
+        versions=versions,
+        catalog=_catalog(package),
+        baselines=load_baselines(package / "baselines.csv"),
+        map_cells=map_cells,
+        map_version=map_version,
+    )
+    path: Path | None = None
+    if not dry_run:
+        path = write_candidates(package, product.baseline_id, proposal["rows"])
+    payload = {
+        "package": str(package),
+        **proposal,
+        "path": (
+            str(path)
+            if path is not None
+            else str(candidates_path(package, product.baseline_id))
+        ),
+        "written": path is not None,
+        "dry_run": dry_run,
+        "next_command": (
+            f"hound baseline propose --package {package} "
+            f"--baseline {product.baseline_id} --apply --actor {{кто}}"
+        ),
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        counts = proposal["counts"]
+        lines = [
+            f"propose {product.baseline_id}: каталог {counts['catalog']}, "
+            f"объявлено версий {len(versions)}"
+            + (
+                f", карта @{map_version} применена"
+                if proposal["map_applied"]
+                else ""
+            ),
+            f"  предлагается {counts['proposed']} "
+            f"(direct {counts['direct']}, conditional {counts['conditional']})",
+            f"  нужна подпись: {counts['needs_signature']}, "
+            f"уже в baselines.csv: {counts['existing']}, "
+            f"без доказательств: {counts['no_evidence']}",
+        ]
+        for param_id in proposal["proposed"][:20]:
+            lines.append(f"  → {param_id}")
+        if len(proposal["proposed"]) > 20:
+            lines.append(f"  … ещё {len(proposal['proposed']) - 20}")
+        if proposal["needs_signature"]:
+            lines.append(
+                "  без подписи (прибор не подписывает за человека): "
+                + ", ".join(proposal["needs_signature"][:10])
+                + (" …" if len(proposal["needs_signature"]) > 10 else "")
+            )
+        lines += [
+            (
+                "dry-run: файл предложения не записан"
+                if dry_run
+                else f"записано: {payload['path']} (decision пуста — заполняет человек)"
+            ),
+            f"дальше: {payload['next_command']}",
+        ]
         sys.stdout.write("\n".join(lines) + "\n")
     return EXIT_OK
 
@@ -1268,6 +1497,7 @@ def _recon_facts(
     index: Any,
     corpus_build_id: str,
     observed_at: str,
+    coverage_complete: bool = False,
 ) -> list[BaselineFact]:
     """Факты по каталогу: кандидатов отбирает индекс, статус ставит ``derive_facts``.
 
@@ -1283,6 +1513,12 @@ def _recon_facts(
     Пустой список кандидатов — тот же исход «не нашли», что у линейного прохода, с той же
     причиной (``coverage_incomplete``), поэтому неполнота охвата не подменяется
     релевантностью.
+
+    ``coverage_complete`` — **наблюдение сборки**, а не решение разведки: он приходит из
+    ``manifest.complete``. При полном охвате «не нашли» — это ``absent`` (утверждение о
+    документации версии), при неполном — ``unclear`` с причиной ``coverage_incomplete``.
+    Без этого параметра даже аттестованная сборка публиковала ``unclear``, и ``absent``
+    не появлялся никогда.
 
     **Запрос и зачёт — разные построители, и это не дублирование.** Кандидатов даёт
     ``parameter_terms`` (recall: BM25 токенизирует всё равно, и слова дают больше
@@ -1309,6 +1545,7 @@ def _recon_facts(
                 params=[param],
                 corpus_build_id=corpus_build_id,
                 observed_at=observed_at,
+                coverage_complete=coverage_complete,
             )[0]
             break
         if fact is None:
@@ -1319,6 +1556,7 @@ def _recon_facts(
                 params=[param],
                 corpus_build_id=corpus_build_id,
                 observed_at=observed_at,
+                coverage_complete=coverage_complete,
             )[0]
         facts.append(fact)
     return facts
@@ -1357,23 +1595,20 @@ def _quote_stats(facts: Sequence[BaselineFact]) -> dict[str, Any]:
     }
 
 
-def run_recon(args: argparse.Namespace) -> int:
-    """``hound baseline recon``: факты по каталогу из reference-корпуса (шаг 7a плана).
+def _recon_version(
+    args: argparse.Namespace,
+    product: Any,
+    *,
+    version: str,
+    catalog: Sequence[CatalogRow],
+) -> dict[str, Any]:
+    """Разведка **одной** версии: сборка → чанки → индекс → факты (без записи).
 
-    Разведка **детерминированная**: кандидат — чанк, найденный лексическим индексом по
-    терминам правила; цитата обязана быть дословной подстрокой текста чанка. LLM здесь не
-    участвует, и это осознанно: факт — провенанс, а провенанс не должен зависеть от
-    модели. Движок индекса выбирает composition root, и его версия печатается: «чем
-    искали» — часть наблюдения.
-
-    ``absent`` не выводится: проход по объявленному корпусу не аттестует **полноту**
-    охвата (I2/I2c), поэтому «не нашли» публикуется как ``unclear`` с причиной
-    ``coverage_incomplete``. Аттестация охвата — отдельное человеческое действие.
+    Отдельная функция, потому что ``--all-versions`` обходит все объявленные версии, а
+    запись у него одна: наблюдение версии возвращается вызывающему, и он решает, что и
+    когда писать. Отказ версии (нет сборки, пустой корпус) поднимается как ``CliError`` —
+    вызывающий либо пробрасывает его, либо публикует строкой «пропущено».
     """
-    package = _package_dir(args)
-    declaration = _declaration(args)
-    product = _resolve_baseline(args, declaration)
-    version = str(getattr(args, "version", None) or product.current_version)
     layout = _layout(args, product, version)
     explicit_db = getattr(args, "corpus_db", None)
     if explicit_db and getattr(args, "build", None):
@@ -1408,14 +1643,6 @@ def run_recon(args: argparse.Namespace) -> int:
                 code="baseline",
                 exit_code=EXIT_USAGE,
             )
-    catalog = _catalog(package)
-    only = getattr(args, "param", None)
-    if only:
-        catalog = [row for row in catalog if str(row.param_id) == only]
-        if not catalog:
-            raise CliError(
-                f"param {only!r} отсутствует в каталоге", code="baseline", exit_code=EXIT_USAGE
-            )
     chunks = list(iter_reference_chunks(db_path))
     if not chunks:
         raise CliError(
@@ -1448,7 +1675,10 @@ def run_recon(args: argparse.Namespace) -> int:
         for chunk in chunks
     ]
     index.index(docs)
-    observed_at = _dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat()
+    # Охват — **наблюдение сборки**: ``complete`` манифеста аттестует исчерпание
+    # объявленного пространства, и только тогда «не нашли» становится ``absent``.
+    # Манифеста нет (``--corpus-db``) — полнота неизвестна, значит ``unclear``.
+    coverage_complete = bool(manifest.complete) if manifest is not None else False
     facts = _recon_facts(
         baseline_id=product.baseline_id,
         version=version,
@@ -1456,35 +1686,138 @@ def run_recon(args: argparse.Namespace) -> int:
         docs=docs,
         index=index,
         corpus_build_id=build_id,
-        observed_at=observed_at,
+        observed_at=_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
+        coverage_complete=coverage_complete,
     )
+    return {
+        "version": version,
+        "build_id": build_id,
+        "chunks": len(chunks),
+        "docs": len({chunk.doc_id for chunk in chunks}),
+        "engine": index.engine_version,
+        "coverage_complete": coverage_complete,
+        "facts": facts,
+    }
+
+
+def _recon_version_line(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Сводка версии для вывода: сборка, объёмы, исходы (без самих фактов)."""
+    facts = list(item["facts"])
+    return {
+        "version": item["version"],
+        "build_id": item["build_id"],
+        "chunks": item["chunks"],
+        "docs": item["docs"],
+        "coverage_complete": item["coverage_complete"],
+        "present": sum(1 for fact in facts if fact.status is FactStatus.PRESENT),
+        "unclear": sum(1 for fact in facts if fact.status is FactStatus.UNCLEAR),
+        "absent": sum(1 for fact in facts if fact.status is FactStatus.ABSENT),
+    }
+
+
+def run_recon(args: argparse.Namespace) -> int:
+    """``hound baseline recon``: факты по каталогу из reference-корпуса (шаг 7a плана).
+
+    Разведка **детерминированная**: кандидат — чанк, найденный лексическим индексом по
+    терминам правила; цитата обязана быть дословной подстрокой текста чанка. LLM здесь не
+    участвует, и это осознанно: факт — провенанс, а провенанс не должен зависеть от
+    модели. Движок индекса выбирает composition root, и его версия печатается: «чем
+    искали» — часть наблюдения.
+
+    ``absent`` публикуется **только** при аттестованном охвате (``manifest.complete``):
+    проход по неполному корпусу не даёт утверждения об отсутствии (I2/I2c), поэтому «не
+    нашли» там — ``unclear`` с причиной ``coverage_incomplete``.
+
+    ``--all-versions`` обходит все **объявленные** версии линии: у каждой своя сборка
+    (``current.json`` > единственная > пропуск), а запись одна на конце — слияние сохраняет
+    прочие версии и параметры. Версия без сборки печатается строкой «сборки нет,
+    пропущено» и считается в итоге: одна из восьми может быть не собрана, и это не повод
+    отказывать всей разведке, но и не повод молчать.
+    """
+    package = _package_dir(args)
+    declaration = _declaration(args)
+    product = _resolve_baseline(args, declaration)
+    all_versions = bool(getattr(args, "all_versions", False))
+    if all_versions:
+        if getattr(args, "version", None):
+            raise CliError(
+                "--version и --all-versions взаимоисключающие: выберите одну версию либо "
+                "все объявленные",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
+        if getattr(args, "corpus_db", None) or getattr(args, "build", None):
+            raise CliError(
+                "--corpus-db/--build адресуют одну сборку и несовместимы с --all-versions: "
+                "у каждой версии своя сборка",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
+        versions = [str(entry.version) for entry in product.versions]
+        if not versions:
+            raise CliError(
+                f"{product.baseline_id}: в sources/reference_products.yaml не объявлено ни "
+                "одной версии — разведывать нечего",
+                code="baseline",
+                exit_code=EXIT_USAGE,
+            )
+    else:
+        versions = [str(getattr(args, "version", None) or product.current_version)]
+    catalog = _catalog(package)
+    only = getattr(args, "param", None)
+    if only:
+        catalog = [row for row in catalog if str(row.param_id) == only]
+        if not catalog:
+            raise CliError(
+                f"param {only!r} отсутствует в каталоге", code="baseline", exit_code=EXIT_USAGE
+            )
+
+    observed: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for version in versions:
+        try:
+            observed.append(
+                _recon_version(args, product, version=version, catalog=catalog)
+            )
+        except CliError as exc:
+            if not all_versions:
+                raise
+            # Версия не разведана — видимая строка, а не тихий пропуск: причина называется
+            # текстом отказа (нет сборки / неоднозначная сборка / пустой корпус).
+            skipped.append({"version": version, "reason": str(exc)})
+
+    facts = [fact for item in observed for fact in item["facts"]]
     dry_run = bool(getattr(args, "dry_run", False))
+    # Слияние по ключу ``(baseline, version, param)``: обновляются только перемеренные
+    # строки, всё остальное (другие версии, другие параметры) остаётся как было.
+    fresh_keys = {(fact.baseline_id, fact.version, fact.param_id) for fact in facts}
     merged = [
         fact
         for fact in load_package_facts(package)
-        if not (
-            fact.baseline_id == product.baseline_id
-            and fact.version == version
-            and any(item.param_id == fact.param_id for item in facts)
-        )
+        if (fact.baseline_id, fact.version, fact.param_id) not in fresh_keys
     ]
     written = False
-    if not dry_run:
+    if facts and not dry_run:
         write_facts(package, [*merged, *facts])
         written = True
-    payload = {
+    primary = observed[0] if observed else None
+    current_version = str(product.current_version)
+    payload: dict[str, Any] = {
         "package": str(package),
         "baseline_id": product.baseline_id,
-        "version": version,
-        "corpus_build_id": build_id,
-        "build": build_id,
-        "engine": index.engine_version,
+        "version": primary["version"] if (primary is not None and not all_versions) else None,
+        "corpus_build_id": (
+            primary["build_id"] if (primary is not None and not all_versions) else None
+        ),
+        "build": primary["build_id"] if (primary is not None and not all_versions) else None,
+        "engine": primary["engine"] if primary is not None else None,
         "top_k": RECON_TOP_K,
-        "chunks": len(chunks),
-        "docs": len({chunk.doc_id for chunk in chunks}),
+        "chunks": sum(item["chunks"] for item in observed),
+        "docs": sum(item["docs"] for item in observed),
         "params": len(catalog),
         "present": sum(1 for fact in facts if fact.status is FactStatus.PRESENT),
         "unclear": sum(1 for fact in facts if fact.status is FactStatus.UNCLEAR),
+        "absent": sum(1 for fact in facts if fact.status is FactStatus.ABSENT),
         **_quote_stats(facts),
         # Параметр без терминов не ищется вовсе, и это не «не нашли в корпусе»:
         # назвать число дешевле, чем оставить оператора догадываться, почему ячейка
@@ -1496,9 +1829,12 @@ def run_recon(args: argparse.Namespace) -> int:
         "facts_path": str(package / "sources" / "baseline_facts.csv"),
         "written": written,
         "dry_run": dry_run,
+        "all_versions": all_versions,
+        "versions": [_recon_version_line(item) for item in observed],
+        "skipped_versions": skipped,
         "next_command": (
             f"hound baseline review --package {package} "
-            f"--baseline {product.baseline_id} --version {version} "
+            f"--baseline {product.baseline_id} --version {current_version} "
             "--accept --actor {кто}"
         ),
         "note": (
@@ -1508,16 +1844,47 @@ def run_recon(args: argparse.Namespace) -> int:
     }
     if args.json:
         _print_json(payload)
+    elif all_versions:
+        lines = [
+            f"recon {product.baseline_id}: объявлено версий {len(versions)}, "
+            f"разведано {len(observed)}, пропущено {len(skipped)}; "
+            f"индекс {payload['engine'] or '—'} (top_k={RECON_TOP_K})",
+        ]
+        for item in payload["versions"]:
+            lines.append(
+                f"  @{item['version']}: сборка {item['build_id']}, {item['chunks']} чанков, "
+                f"{item['docs']} документов — present {item['present']}, "
+                f"unclear {item['unclear']}, absent {item['absent']}"
+                + ("" if item["coverage_complete"] else " (охват неполный)")
+            )
+        for item in skipped:
+            lines.append(f"  @{item['version']}: сборки нет, пропущено — {item['reason']}")
+        lines += [
+            f"итого: present {payload['present']}, unclear {payload['unclear']}, "
+            f"absent {payload['absent']}; цитат {payload['quotes']}, "
+            f"уникальных {payload['unique_quotes']}",
+            (
+                "dry-run: ничего не записано"
+                if dry_run
+                else (
+                    f"записано: {payload['facts_path']} (review=pending)"
+                    if written
+                    else "записывать нечего: ни одна версия не разведана"
+                )
+            ),
+            f"дальше: {payload['next_command']}",
+        ]
+        sys.stdout.write("\n".join(lines) + "\n")
     else:
         ratio = payload["unique_quote_ratio"]
         # «—» при нуле present: доли нет, потому что делить нечего (а не потому что 0.0).
         ratio_text = "—" if ratio is None else f"{ratio:.2f}"
         lines = [
-            f"recon {product.baseline_id} @{version}: {payload['chunks']} чанков, "
-            f"{payload['docs']} документов, сборка {build_id}, "
-            f"индекс {index.engine_version} (top_k={RECON_TOP_K})",
+            f"recon {product.baseline_id} @{payload['version']}: {payload['chunks']} чанков, "
+            f"{payload['docs']} документов, сборка {payload['build']}, "
+            f"индекс {payload['engine']} (top_k={RECON_TOP_K})",
             f"параметров: {payload['params']}; present {payload['present']}, "
-            f"unclear {payload['unclear']}",
+            f"unclear {payload['unclear']}, absent {payload['absent']}",
             f"цитат: {payload['quotes']}, уникальных {payload['unique_quotes']} "
             f"(доля {ratio_text})",
         ]
@@ -1989,6 +2356,18 @@ def configure(sub: Any) -> None:
     p_refresh.add_argument(
         "--version", default=None, help="версия (по умолчанию — current_version)"
     )
+    p_refresh.add_argument(
+        "--apply",
+        dest="apply",
+        action="store_true",
+        help="применить added/changed к sources/baseline_facts.csv (removed не пишется)",
+    )
+    p_refresh.add_argument(
+        "--actor", default=None, help="кто применяет (обязателен вместе с --apply)"
+    )
+    p_refresh.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", help="ничего не писать"
+    )
     p_refresh.set_defaults(handler=run_refresh)
 
     p_recon = inner.add_parser(
@@ -2021,7 +2400,51 @@ def configure(sub: Any) -> None:
     p_recon.add_argument(
         "--dry-run", dest="dry_run", action="store_true", help="ничего не писать"
     )
+    p_recon.add_argument(
+        "--all-versions",
+        dest="all_versions",
+        action="store_true",
+        help="обойти все объявленные версии линии (у каждой своя сборка; запись одна)",
+    )
     p_recon.set_defaults(handler=run_recon)
+
+    p_propose = inner.add_parser(
+        "propose",
+        help="предложить строки baselines.csv из подписанных фактов (на разметку человеком)",
+    )
+    _package_arg(p_propose)
+    p_propose.add_argument("--baseline", required=True, help="baseline_id")
+    p_propose.add_argument(
+        "--version",
+        default=None,
+        help="версия карты для --with-map (по умолчанию — current_version)",
+    )
+    p_propose.add_argument(
+        "--with-map",
+        dest="with_map",
+        action="store_true",
+        help="учесть карту версии: support_not_about_subject делает строку conditional",
+    )
+    p_propose.add_argument("--map", dest="map_id", default=None, help="map_id карты")
+    p_propose.add_argument(
+        "--build",
+        dest="build",
+        default=None,
+        help="build_id сборки для --with-map (по умолчанию — текущая)",
+    )
+    p_propose.add_argument(
+        "--apply",
+        dest="apply",
+        action="store_true",
+        help="записать baselines.csv по заполненному decision (только accept)",
+    )
+    p_propose.add_argument(
+        "--actor", default=None, help="кто применяет (обязателен вместе с --apply)"
+    )
+    p_propose.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", help="ничего не писать"
+    )
+    p_propose.set_defaults(handler=run_propose)
 
     p_map = inner.add_parser(
         "map",
@@ -2092,8 +2515,8 @@ def run(args: argparse.Namespace) -> int:
     if handler is None or handler is run or not getattr(args, "baseline_command", None):
         raise CliError(
             "hound baseline: нужна подкоманда "
-            "(build|list|facts|report|review|refresh|recon|map); порядок работы — "
-            "build → recon → review → report → map",
+            "(build|list|facts|report|review|refresh|recon|propose|map); порядок работы — "
+            "build → recon → review → propose → report → map",
             code="baseline",
             exit_code=EXIT_USAGE,
         )

@@ -121,8 +121,12 @@ _RUNS_DIR_COMMANDS: frozenset[str] = frozenset(
 )
 #: Команды, чей ``--passports-dir`` — операционный дефолт раскладки: без флага —
 #: resolved ``paths.passports``. ``discover`` сюда не входит: его ``--passports-dir`` —
-#: opt-in seed-источник запросов (I19), а не каталог-дефолт.
-_PASSPORTS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "passport-scout"})
+#: opt-in seed-источник запросов (I19), а не каталог-дефолт. ``baseline`` входит: роль
+#: предка **вычисляется** из паспортов (``baseline_roles``), и без каталога ``report``/
+#: ``list`` печатают «parallel» и «inherited cells: 0» — тихий ложный ноль.
+_PASSPORTS_DIR_COMMANDS: frozenset[str] = frozenset(
+    {"run", "passport-scout", "baseline"}
+)
 
 def main(
     argv: Sequence[str] | None = None,

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from core.cli.errors import CliError
+from core.cli.errors import EXIT_USAGE, CliError
 from core.cli.parser import build_parser
 from core.pipeline.reference_products import load_package_facts
 
@@ -1014,6 +1014,41 @@ def test_list_next_step_is_review_when_facts_are_pending(
     assert "hound baseline review" in payload["next"]["command"]
 
 
+def test_list_next_step_is_propose_when_facts_are_signed_but_policy_is_empty(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    # Разрыв, который закрывает ``propose``: факты собраны и подписаны, а строк политики
+    # нет. Без этого шага цепочка после ``review`` уходила прямо в карту, и наблюдение
+    # оставалось наблюдением — ровно то состояние, в котором жил ``ru-pg-dbms``.
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path)
+    _write_build(tmp_path)
+    (package / "baselines.csv").write_text(
+        "baseline_id,param_id,min_version,inheritance_mode,note\n", encoding="utf-8"
+    )
+    (package / "sources" / "baseline_facts.csv").write_text(
+        FACTS_CSV.replace("pending,,\n", "accepted,roger,\n"), encoding="utf-8"
+    )
+    payload = _run(["baseline", "list", "--package", str(package), "--json"], capsys)
+    assert payload["next"]["step"] == "propose"
+    assert "hound baseline propose" in payload["next"]["command"]
+
+
+def test_list_keeps_policy_step_out_of_the_chain_when_rows_exist(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    # Строка политики уже есть — предлагать нечего: шаг ``propose`` не появляется, даже
+    # когда подписанных фактов больше, чем строк.
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path)
+    _write_build(tmp_path)
+    (package / "sources" / "baseline_facts.csv").write_text(
+        FACTS_CSV.replace("pending,,\n", "accepted,roger,\n"), encoding="utf-8"
+    )
+    payload = _run(["baseline", "list", "--package", str(package), "--json"], capsys)
+    assert payload["next"]["step"] != "propose"
+
+
 # ---------------------------------------------------------------------------
 # Ошибки называют следующую команду (§5: без шага ошибка бесполезна)
 # ---------------------------------------------------------------------------
@@ -1048,7 +1083,7 @@ def test_group_help_names_the_chain() -> None:
     """Порядок цепочки виден из отказа группы, а не только из документации."""
     parser = build_parser()
     args = parser.parse_args(["baseline"])
-    with pytest.raises(CliError, match="build → recon → review → report → map"):
+    with pytest.raises(CliError, match="build → recon → review → propose → report"):
         args.handler(args)
 
 
@@ -1100,3 +1135,368 @@ def test_map_progress_goes_to_stderr_not_stdout(
     captured = capsys.readouterr()
     json.loads(captured.out)  # stdout — только результат
     assert "[map 1/" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# propose: наблюдения → строки политики (шаг между review и report)
+# ---------------------------------------------------------------------------
+
+MULTI_VERSION_YAML = """\
+schema: reference_products/1
+products:
+  - baseline_id: upstream-pg
+    product_id: postgresql
+    canonical_name: PostgreSQL
+    versions:
+      - version: "18"
+        docs_roots: ["https://www.postgresql.org/docs/18/"]
+      - version: "17"
+        docs_roots: ["https://www.postgresql.org/docs/17/"]
+      - version: "11"
+        docs_roots: ["https://www.postgresql.org/docs/11/"]
+    current_version: "18"
+"""
+
+ACCEPTED_FACTS_CSV = (
+    "baseline_id,param_id,version,status,url,quote,content_hash,observed_at,"
+    "corpus_build_id,review,reviewed_by,note\n"
+    "upstream-pg,p1,18,present,https://www.postgresql.org/docs/18/a.html,"
+    '"the database supports jsonb storage with expression indexing",'
+    f'{"a" * 64},2026-11-17T00:00:00+00:00,ref_postgresql_18_deadbeef,accepted,roger,\n'
+)
+
+
+def _package_accepted(tmp_path: Path) -> Path:
+    """Пакет без строк политики и с **подписанным** фактом: предложению есть что сказать.
+
+    ``package.yaml`` здесь обязателен: ``--apply`` пишет через ``package_admin.add_baseline``,
+    а тот отказывает каталогу без манифеста («это не пакет категории»).
+    """
+    package = _package_with_manifest(tmp_path)
+    (package / "baselines.csv").write_text(
+        "baseline_id,param_id,min_version,inheritance_mode,note\n", encoding="utf-8"
+    )
+    (package / "sources" / "baseline_facts.csv").write_text(
+        ACCEPTED_FACTS_CSV, encoding="utf-8"
+    )
+    return package
+
+
+def test_propose_writes_candidate_file_without_touching_baselines(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package_accepted(tmp_path)
+    baselines_before = (package / "baselines.csv").read_text(encoding="utf-8")
+    payload = _run(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg",
+         "--json"],
+        capsys,
+    )
+    assert payload["proposed"] == ["p1"]
+    assert payload["counts"]["direct"] == 1
+    assert payload["written"] is True
+    assert Path(payload["path"]).is_file()
+    assert "--apply" in payload["next_command"]
+    # Строки политики пишет только `--apply`: предложение — не решение.
+    assert (package / "baselines.csv").read_text(encoding="utf-8") == baselines_before
+
+
+def test_propose_dry_run_writes_no_file(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package_accepted(tmp_path)
+    payload = _run(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg",
+         "--dry-run", "--json"],
+        capsys,
+    )
+    assert payload["written"] is False
+    assert not Path(payload["path"]).exists()
+
+
+def test_propose_prints_summary_and_next_command(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package_accepted(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg"]
+    )
+    assert args.handler(args) == 0
+    out = capsys.readouterr().out
+    assert "предлагается 1 (direct 1, conditional 0)" in out
+    assert "дальше: hound baseline propose" in out
+
+
+def test_propose_apply_refuses_unfilled_decisions(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Разметку не выдумываем: пустая ``decision`` — отказ с перечнем и путём файла."""
+    monkeypatch.chdir(tmp_path)
+    package = _package_accepted(tmp_path)
+    _run(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg",
+         "--json"],
+        capsys,
+    )
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg",
+         "--apply", "--actor", "roger"]
+    )
+    with pytest.raises(CliError) as exc:
+        args.handler(args)
+    assert exc.value.exit_code == EXIT_USAGE
+    assert "p1" in str(exc.value)
+    assert "baselines.upstream-pg.candidate.csv" in str(exc.value)
+
+
+def test_propose_apply_writes_accepted_rows_and_reports_execution_change(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    from core.pipeline.reference_propose import (
+        candidates_path,
+        load_candidates,
+        write_candidates,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    package = _package_accepted(tmp_path)
+    _run(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg",
+         "--json"],
+        capsys,
+    )
+    rows = load_candidates(candidates_path(package, "upstream-pg"))
+    write_candidates(
+        package, "upstream-pg",
+        [{**row, "decision": "accept"} if row["param_id"] == "p1" else row
+         for row in rows],
+    )
+    payload = _run(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg",
+         "--apply", "--actor", "roger", "--json"],
+        capsys,
+    )
+    assert [item["param_id"] for item in payload["apply"]["added"]] == ["p1"]
+    assert payload["execution_change"] is True
+    assert "run_id" in payload["note"]
+    stored = (package / "baselines.csv").read_text(encoding="utf-8").splitlines()
+    assert stored[1:] == ["upstream-pg,p1,18,direct,"]
+
+
+def test_propose_apply_requires_actor(tmp_path: Path) -> None:
+    package = _package_accepted(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "propose", "--package", str(package), "--baseline", "upstream-pg",
+         "--apply"]
+    )
+    with pytest.raises(CliError, match="--actor"):
+        args.handler(args)
+
+
+# ---------------------------------------------------------------------------
+# recon --all-versions и охват сборки (I2/I2c)
+# ---------------------------------------------------------------------------
+
+
+def test_recon_all_versions_reports_missing_build_and_writes_once(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Версия без сборки — видимая строка, а не тихий пропуск; запись одна на все версии."""
+    from core.domain.enums import FactStatus
+
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    (package / "sources" / "reference_products.yaml").write_text(
+        MULTI_VERSION_YAML, encoding="utf-8"
+    )
+    _reference_db(tmp_path, build_id="ref_v18")
+    _reference_db(
+        tmp_path,
+        build_id="ref_v17",
+        root=tmp_path / "reference" / "pkg" / "postgresql" / "17",
+    )
+    payload = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--all-versions", "--json"],
+        capsys,
+    )
+    assert [item["version"] for item in payload["versions"]] == ["18", "17"]
+    assert [item["version"] for item in payload["skipped_versions"]] == ["11"]
+    assert "hound baseline build" in payload["skipped_versions"][0]["reason"]
+    stored = load_package_facts(package)
+    assert {(fact.version, fact.status) for fact in stored} == {
+        ("18", FactStatus.PRESENT),
+        ("17", FactStatus.PRESENT),
+    }
+
+
+def test_recon_all_versions_prints_skipped_line(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    (package / "sources" / "reference_products.yaml").write_text(
+        MULTI_VERSION_YAML, encoding="utf-8"
+    )
+    _reference_db(tmp_path, build_id="ref_v18")
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--all-versions"]
+    )
+    assert args.handler(args) == 0
+    out = capsys.readouterr().out
+    assert "@18: сборка ref_v18" in out
+    assert "@17: сборки нет, пропущено" in out
+    assert "@11: сборки нет, пропущено" in out
+    assert "пропущено 2" in out
+
+
+def test_recon_refuses_version_with_all_versions(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--all-versions", "--version", "18"]
+    )
+    with pytest.raises(CliError, match="взаимоисключающие"):
+        args.handler(args)
+
+
+def test_recon_publishes_absent_only_when_coverage_is_complete(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``complete=true`` + «не нашли» ⇒ ``absent``; ``complete=false`` ⇒ ``unclear``."""
+    from core.domain.enums import FactStatus
+
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    build_id = _write_corpus(
+        tmp_path,
+        "ref_x",
+        [("d1", "https://x/other", "Unrelated page about backups.")],
+        current=True,
+    )
+    payload = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--json"],
+        capsys,
+    )
+    assert payload["absent"] == 1
+    assert load_package_facts(package)[0].status is FactStatus.ABSENT
+
+    _write_build(tmp_path, build_id=build_id, complete=False, current=True)
+    payload = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--json"],
+        capsys,
+    )
+    assert payload["unclear"] == 1
+    assert payload["absent"] == 0
+    assert load_package_facts(package)[0].status is FactStatus.UNCLEAR
+
+
+# ---------------------------------------------------------------------------
+# refresh --apply
+# ---------------------------------------------------------------------------
+
+TWO_VERSION_FACTS = (
+    "baseline_id,param_id,version,status,url,quote,content_hash,observed_at,"
+    "corpus_build_id,review,reviewed_by,note\n"
+    "upstream-pg,p1,17,present,https://www.postgresql.org/docs/17/a.html,"
+    f'"old text about jsonb storage",{"a" * 64},2026-11-17T00:00:00+00:00,'
+    "ref_postgresql_17_deadbeef,pending,,\n"
+    "upstream-pg,p1,18,present,https://www.postgresql.org/docs/18/a.html,"
+    f'"new text about jsonb storage",{"b" * 64},2026-11-18T00:00:00+00:00,'
+    "ref_postgresql_18_deadbeef,pending,,\n"
+)
+
+
+def test_refresh_apply_writes_facts_and_never_touches_baselines(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    (package / "sources" / "baseline_facts.csv").write_text(
+        TWO_VERSION_FACTS, encoding="utf-8"
+    )
+    baselines_before = (package / "baselines.csv").read_text(encoding="utf-8")
+    payload = _run(
+        ["baseline", "refresh", "--package", str(package), "--baseline", "upstream-pg",
+         "--apply", "--actor", "roger", "--json"],
+        capsys,
+    )
+    assert [item["param_id"] for item in payload["applied"]] == ["p1"]
+    assert payload["dry_run"] is False
+    assert (package / "baselines.csv").read_text(encoding="utf-8") == baselines_before
+    log = (package / ".authoring" / "apply_log.jsonl").read_text(encoding="utf-8")
+    assert "baseline-refresh" in log
+
+
+def test_refresh_without_apply_still_writes_nothing(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    (package / "sources" / "baseline_facts.csv").write_text(
+        TWO_VERSION_FACTS, encoding="utf-8"
+    )
+    before = (package / "sources" / "baseline_facts.csv").read_text(encoding="utf-8")
+    payload = _run(
+        ["baseline", "refresh", "--package", str(package), "--baseline", "upstream-pg",
+         "--json"],
+        capsys,
+    )
+    assert payload["dry_run"] is True
+    assert payload["applied"] == []
+    assert (package / "sources" / "baseline_facts.csv").read_text(encoding="utf-8") == before
+    assert not (package / ".authoring" / "apply_log.jsonl").exists()
+
+
+def test_refresh_apply_requires_actor(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "refresh", "--package", str(package), "--baseline", "upstream-pg",
+         "--apply"]
+    )
+    with pytest.raises(CliError, match="--actor"):
+        args.handler(args)
+
+
+# ---------------------------------------------------------------------------
+# --passports-dir по умолчанию для всей группы (тихий ложный ноль роли)
+# ---------------------------------------------------------------------------
+
+#: Минимальный argv каждой подкоманды: проверяется только наличие ``passports_dir``.
+_BASELINE_ARGV: dict[str, list[str]] = {
+    "build": ["--baseline", "upstream-pg", "--dry-run"],
+    "list": [],
+    "facts": [],
+    "report": [],
+    "review": ["--baseline", "upstream-pg", "--actor", "roger", "--accept"],
+    "refresh": ["--baseline", "upstream-pg"],
+    "recon": ["--baseline", "upstream-pg"],
+    "propose": ["--baseline", "upstream-pg"],
+    "map": ["--baseline", "upstream-pg"],
+}
+
+
+def test_baseline_is_in_the_passports_dir_defaults() -> None:
+    """Без дефолта роль предка читалась бы по пустому набору паспортов (ложный «parallel»)."""
+    from core.cli.main import _PASSPORTS_DIR_COMMANDS
+
+    assert "baseline" in _PASSPORTS_DIR_COMMANDS
+
+
+def test_every_baseline_subcommand_accepts_passports_dir(tmp_path: Path) -> None:
+    """``main`` подставляет дефолт через ``getattr`` — у каждой подкоманды поле обязано быть."""
+    package = _package(tmp_path)
+    parser = build_parser()
+    for name, extra in _BASELINE_ARGV.items():
+        args = parser.parse_args(
+            ["baseline", name, "--package", str(package), *extra]
+        )
+        assert getattr(args, "passports_dir", "missing") is None, name
