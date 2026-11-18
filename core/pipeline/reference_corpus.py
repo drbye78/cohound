@@ -73,6 +73,7 @@ __all__ = [
     "read_current_build",
     "reference_build_id",
     "reference_content_digest",
+    "reference_layout",
     "resolve_build",
     "select_quote",
     "write_current_build",
@@ -180,6 +181,24 @@ class ReferenceCorpusLayout:
         """Создаёт каталог версии (идемпотентно)."""
         self.root.mkdir(parents=True, exist_ok=True)
         return self
+
+
+def reference_layout(
+    base: str | Path, *, package_id: str, product_id: str, version: str
+) -> ReferenceCorpusLayout:
+    """Раскладка версии из **корня раскладки хоста** (``paths.reference``).
+
+    Имена каталогов внутри корня — правило этого модуля, а не каждой команды: две копии
+    «где лежит сборка» разошлись бы при первом же изменении раскладки, и разведка искала
+    бы корпус не там, где его собрали. Сам корень задаёт composition root (``paths`` —
+    поле ``HARNESS_FIELDS``), а не модуль: раскладка хоста — не измерение.
+    """
+    return ReferenceCorpusLayout(
+        root=Path(base) / package_id / product_id / version,
+        package_id=package_id,
+        product_id=product_id,
+        version=version,
+    )
 
 
 class ReferenceBuildMissing(LookupError):
@@ -516,13 +535,20 @@ def reference_content_digest(chunks: Iterable[ChunkDigestSource]) -> str:
 
 @dataclass
 class ChunkText:
-    """Минимальный носитель чанка для отбора цитаты (не завязываемся на порт-тип)."""
+    """Минимальный носитель чанка для отбора цитаты (не завязываемся на порт-тип).
+
+    ``heading_path`` — раздел документа: нужен выдаче ``hound search --scope reference``
+    (по нему человек понимает, куда смотреть), для отбора цитаты не используется.
+    ``None`` — раздел не записан, а не «раздела нет»: колонка есть у всех сборок,
+    созданных хранилищем, но у чужого файла её может не быть.
+    """
 
     chunk_id: str
     doc_id: str
     url: str | None
     text: str
     content_hash: str | None = None
+    heading_path: str | None = None
 
 
 def iter_reference_chunks(db_path: str | Path, *, build_id: str | None = None) -> Iterator[ChunkText]:
@@ -531,6 +557,10 @@ def iter_reference_chunks(db_path: str | Path, *, build_id: str | None = None) -
     Один проход, а не запрос на документ: индекса по ``corpus_chunks.doc_id`` в схеме нет
     (замер 17.11.2026: ``WHERE doc_id=?`` на каждый документ — полный скан 253k строк), и
     разведка по 1–2 тыс. страниц не имеет права превратиться в квадратичную.
+
+    Раздел (``heading_path``) читается **тем же** проходом, а не отдельным запросом на
+    документ: выдача без раздела бесполезна человеку, но добирать его по ``doc_id``
+    значило бы вернуть ту самую квадратичность.
     """
     import sqlite3
 
@@ -540,20 +570,22 @@ def iter_reference_chunks(db_path: str | Path, *, build_id: str | None = None) -
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         sql = (
-            "SELECT chunk_id, doc_id, url, text, content_hash FROM corpus_chunks"
+            "SELECT chunk_id, doc_id, url, heading_path, text, content_hash "
+            "FROM corpus_chunks"
         )
         params: list[Any] = []
         if build_id is not None:
             sql += " WHERE build_id = ?"
             params.append(build_id)
         sql += " ORDER BY doc_id, chunk_no, chunk_id"
-        for chunk_id, doc_id, url, text, digest in conn.execute(sql, params):
+        for chunk_id, doc_id, url, heading, text, digest in conn.execute(sql, params):
             yield ChunkText(
                 chunk_id=str(chunk_id),
                 doc_id=str(doc_id),
                 url=str(url) if url else None,
                 text=str(text or ""),
                 content_hash=str(digest) if digest else None,
+                heading_path=str(heading) if heading else None,
             )
     finally:
         conn.close()

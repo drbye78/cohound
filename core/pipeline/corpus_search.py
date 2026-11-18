@@ -28,12 +28,22 @@ from core.ports.vector_index import RetrievedChunk
 
 __all__ = [
     "ANSWER_TEMPLATE",
+    "SIDE_COHORT",
+    "SIDE_REFERENCE",
     "Hit",
     "SearchAnswer",
     "build_answer_prompt",
     "merge_hits",
     "render_hits",
 ]
+
+#: Стороны выдачи: корпус когорты (tantivy) и reference-корпус предка (BM25).
+#:
+#: Счета двух движков **не сливаются**: это разные шкалы, и упорядочивание по ним
+#: описывало бы не релевантность, а разницу нормировок. Поэтому сторона — поле
+#: попадания, а слияние и сортировка идут только внутри своей стороны.
+SIDE_COHORT = "cohort"
+SIDE_REFERENCE = "reference"
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,10 @@ class Hit:
     ``queries`` — индексы запросов в порядке вызова. Поле нужно для ``--explain``:
     «нашлось по третьему термину» и «нашлось по всем трём» — разные факты о терминах
     каталога, и именно второй отличает настоящее совпадение понятия от случайного слова.
+
+    ``side`` — из какого корпуса фрагмент (:data:`SIDE_COHORT`/``SIDE_REFERENCE``).
+    Счёт имеет смысл только внутри стороны: лексическое плечо когорты считает tantivy,
+    reference-корпус — ``Bm25Index``, и сравнивать их числа между собой нельзя.
     """
 
     chunk_id: str
@@ -54,6 +68,7 @@ class Hit:
     build_id: str
     score: float
     queries: tuple[int, ...] = ()
+    side: str = SIDE_COHORT
 
     def with_score(self, score: float, query: int) -> Hit:
         """Тот же чанк с большим счётом и добавленным номером запроса."""
@@ -67,14 +82,21 @@ class Hit:
             build_id=self.build_id,
             score=max(self.score, score),
             queries=(*self.queries, query),
+            side=self.side,
         )
 
 
-def merge_hits(per_query: Sequence[Sequence[RetrievedChunk]]) -> list[Hit]:
+def merge_hits(
+    per_query: Sequence[Sequence[RetrievedChunk]], *, side: str = SIDE_COHORT
+) -> list[Hit]:
     """Сливает выдачу нескольких запросов по правилу ``max`` (то же, что в Ш6).
 
     Порядок — по убыванию счёта, tie-break по ``chunk_id``: выдача обязана быть
     воспроизводимой (A3), иначе два прогона одной команды дают разные списки.
+
+    ``side`` помечает попадания стороной и **не** меняет правило слияния: счета разных
+    движков сравнимы только внутри стороны, поэтому межстороннее упорядочивание здесь
+    не делается вовсе (его не существует и в выдаче).
     """
     merged: dict[str, Hit] = {}
     for index, chunks in enumerate(per_query):
@@ -90,6 +112,7 @@ def merge_hits(per_query: Sequence[Sequence[RetrievedChunk]]) -> list[Hit]:
                 build_id=chunk.build_id,
                 score=chunk.score,
                 queries=(index,),
+                side=side,
             )
             merged[chunk.chunk_id] = (
                 hit if existing is None else existing.with_score(chunk.score, index)

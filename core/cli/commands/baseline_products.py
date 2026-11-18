@@ -67,6 +67,7 @@ from core.pipeline.reference_corpus import (
     read_manifest,
     reference_build_id,
     reference_content_digest,
+    reference_layout,
     resolve_build,
     select_quote,
 )
@@ -125,21 +126,20 @@ def _package_dir(args: argparse.Namespace) -> Path:
     return path
 
 
-def _reference_dir(args: argparse.Namespace, product_id: str, version: str) -> Path:
-    """Каталог reference-корпуса: ``--reference-dir`` > раскладка (``args.paths``).
+def _reference_base(args: argparse.Namespace) -> Path:
+    """Корень reference-корпуса: ``--reference-dir`` > раскладка (``args.paths``).
 
     Раскладку разрешает composition root (03 §A.1): ``reference`` — обычное поле
     ``HARNESS_FIELDS``, поэтому ``COHOUND_HOME``/``COHOUND_REFERENCE_DIR``/``paths.yaml``
     действуют на него так же, как на ``runs``/``index_store``. Собственный дефолт от CWD
     здесь был бы вторым резолвом раскладки и разошёлся бы с остальными командами.
+    Имена каталогов внутри корня — правило ``reference_corpus.reference_layout``.
     """
     root = getattr(args, "reference_dir", None)
     paths = getattr(args, "paths", None)
-    base = Path(root) if root else (
+    return Path(root) if root else (
         Path(paths.reference) if paths is not None else Path("reference")
     )
-    package_id = _package_dir(args).name
-    return base / package_id / product_id / version
 
 
 def _layout(
@@ -147,12 +147,12 @@ def _layout(
 ) -> ReferenceCorpusLayout:
     """Раскладка reference-корпуса продукта/версии (``reference-corpus/2``).
 
-    Путь разрешает composition root (``_reference_dir``), а имена каталогов внутри —
-    ``reference_corpus``: две копии правила «где лежит сборка» разошлись бы при первом же
-    изменении раскладки.
+    Путь разрешает composition root (``_reference_base``), а имена каталогов внутри —
+    ``reference_corpus.reference_layout``: две копии правила «где лежит сборка» разошлись
+    бы при первом же изменении раскладки.
     """
-    return ReferenceCorpusLayout(
-        root=_reference_dir(args, product.product_id, version),
+    return reference_layout(
+        _reference_base(args),
         package_id=_package_dir(args).name,
         product_id=product.product_id,
         version=version,

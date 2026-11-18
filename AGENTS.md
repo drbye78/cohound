@@ -822,6 +822,15 @@ another `schema_version` is refused; reading only its corpus is explicit
 verdicts). Measured cost on 253 306 chunks: **29.6 s** R0 / **40.0 s** R2 per call, almost all
 of it the tantivy seed (the index is not persisted, C8) — the search itself is milliseconds.
 
+`--scope cohort|reference|both` (18.11.2026) adds the **ancestor's documentation** from the
+reference corpus (plan 27). It has no vectors (`index_manifest` empty, `embed_model_id`
+NULL), so the reference side is lexical only and `R1/R2` with it is `EXIT_USAGE` — a silent
+downgrade would make a lexical answer look hybrid. `--param` sets the task differently per
+side (`render_queries` for the cohort, `parameter_terms` for the reference — the same
+posture as `baseline recon`), and the header names the builder. The two engines' scores are
+never merged (tantivy vs in-memory BM25 are different scales); each hit carries `side`.
+Reference side costs seconds, not 29.6 s: 9 763 chunks vs 253 306.
+
 Crawl sessions: `./hound.py crawl run|status|list|resume|restart|cancel` (`resume` is
 idempotent: same `session_id`, already-`FETCHED` items are not re-fetched). Refresh policy
 per scope is set with `./hound.py crawl policy set|list|clear` and consumed per run via

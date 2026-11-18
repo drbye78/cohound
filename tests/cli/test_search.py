@@ -12,13 +12,16 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from core.adapters.lexical_bm25 import LexicalHit
 from core.cli.commands import search
 from core.cli.errors import CliError
 from core.cli.parser import build_parser
@@ -30,6 +33,18 @@ from core.util.schema_gate import SchemaVersionMismatch
 
 CATALOG = """param_id,title,module,group,importance,param_type,rule,absence_rule,role_binding,concept_terms,search_langs
 p_one,Подключаемый механизм хранения,core,g,Баз,fact,правило,distribution_absence,core_engine,"{""ru"": [""сменный механизм""], ""en"": [""pluggable storage""]}",ru|en
+"""
+
+#: Декларация reference-линии: одна линия, одна версия — минимум, который нужен команде.
+DECLARATION = """schema: reference_products/1
+products:
+  - baseline_id: upstream-pg
+    product_id: postgresql
+    canonical_name: PostgreSQL
+    versions:
+      - version: "18"
+        docs_roots: ["https://example.org/docs/18/"]
+    current_version: "18"
 """
 
 
@@ -318,3 +333,278 @@ def test_latest_run_without_any_run_is_not_found(tmp_path: Path) -> None:
     with pytest.raises(CliError) as excinfo:
         search._latest_run_id(tmp_path / "empty")
     assert excinfo.value.exit_code == 4
+
+
+# ---------------------------------------------------------------------------
+# Сторона reference-корпуса (план 27): ``--scope reference|both``
+# ---------------------------------------------------------------------------
+
+
+def _write_reference_db(path: Path, chunks: list[dict[str, Any]]) -> None:
+    """Минимальная БД чанков: ровно те колонки, которые читает ``iter_reference_chunks``.
+
+    Настоящая схема пинится в ``tests/store``; здесь нужен только носитель выдачи, и
+    ``chunk_no`` есть потому, что проход упорядочен ``doc_id, chunk_no, chunk_id``.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE corpus_chunks (chunk_id TEXT, doc_id TEXT, product_id TEXT, "
+            "url TEXT, heading_path TEXT, lang TEXT, chunk_no INTEGER, text TEXT, "
+            "context_prefix TEXT, content_hash TEXT, build_id TEXT)"
+        )
+        for number, chunk in enumerate(chunks):
+            conn.execute(
+                "INSERT INTO corpus_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chunk["chunk_id"],
+                    chunk["doc_id"],
+                    "postgresql",
+                    chunk.get("url"),
+                    chunk.get("heading_path"),
+                    "en",
+                    number,
+                    chunk["text"],
+                    "",
+                    chunk.get("content_hash", "h" * 64),
+                    chunk.get("build_id", "ref_a"),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _reference_tree(
+    tmp_path: Path,
+    *,
+    version: str = "18",
+    builds: tuple[str, ...] = ("ref_a",),
+    current: str | None = "ref_a",
+    complete: bool = True,
+    chunks: list[dict[str, Any]] | None = None,
+    package: str = "pkg",
+) -> Path:
+    """Раскладка ``reference-corpus/2``: ``builds/{build_id}/{reference.db,manifest.json}``."""
+    root = tmp_path / "reference"
+    version_dir = root / package / "postgresql" / version
+    for build in builds:
+        build_dir = version_dir / "builds" / build
+        build_dir.mkdir(parents=True)
+        _write_reference_db(
+            build_dir / "reference.db",
+            chunks
+            or [
+                {
+                    "chunk_id": "r1",
+                    "doc_id": "d1",
+                    "url": "https://docs.example/r1",
+                    "heading_path": "Раздел",
+                    "text": "pluggable toast storage",
+                }
+            ],
+        )
+        (build_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": "reference-corpus/2",
+                    "build_id": build,
+                    "package_id": package,
+                    "product_id": "postgresql",
+                    "version": version,
+                    "content_digest": "d",
+                    "docs": 1,
+                    "chunks": 1,
+                    "complete": complete,
+                }
+            ),
+            encoding="utf-8",
+        )
+    if current is not None:
+        (version_dir / "current.json").write_text(
+            json.dumps({"build_id": current}), encoding="utf-8"
+        )
+    return root
+
+
+def _reference_package(tmp_path: Path, *, declaration: str | None = DECLARATION) -> Path:
+    """Пакет с каталогом и (опционально) декларацией reference-линий."""
+    package = _package(tmp_path)
+    (package / "sources").mkdir()
+    if declaration is not None:
+        (package / "sources" / "reference_products.yaml").write_text(
+            declaration, encoding="utf-8"
+        )
+    return package
+
+
+def _paths(tmp_path: Path) -> Any:
+    """Раскладка хоста: ``reference`` — обычное поле ``HARNESS_FIELDS``."""
+    return SimpleNamespace(
+        packages=tmp_path / "packages",
+        passports=tmp_path / "passports",
+        runs=tmp_path / "runs",
+        index_store=tmp_path / "index_store",
+        reference=tmp_path / "reference",
+    )
+
+
+class FakeBm25:
+    """Reference-движок с управляемым счётом: нужен, чтобы проверить **порядок блоков**."""
+
+    engine_version = "fake-bm25"
+
+    def __init__(self) -> None:
+        self.docs: list[Any] = []
+
+    def index(self, docs: Any) -> None:
+        self.docs = list(docs)
+
+    def search(
+        self, query: str, product_ids: list[str] | None = None, top_k: int = 8,
+        lang: str | None = None,
+    ) -> list[LexicalHit]:
+        return [LexicalHit("r1", "postgresql", 99.0)][:top_k]
+
+
+def test_reference_scope_reads_reference_db_without_opening_the_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--scope reference`` не открывает run-DB: сторона предка живёт вне ``runs/``."""
+    package = _reference_package(tmp_path)
+    _reference_tree(tmp_path)
+    monkeypatch.setattr(search, "_resolve_paths", lambda args: _paths(tmp_path))
+
+    def _no_reader(*a: Any, **k: Any) -> Any:
+        raise AssertionError("--scope reference не открывает run-DB")
+
+    monkeypatch.setattr(search, "CorpusReader", _no_reader)
+
+    payload = search._collect(
+        _args("pluggable toast", "--scope", "reference", "--package", str(package))
+    )
+    assert payload["run_id"] is None
+    assert payload["reference"]["build_id"] == "ref_a"
+    assert payload["reference"]["product_id"] == "postgresql"
+    assert payload["reference"]["version"] == "18"
+    assert [hit["side"] for hit in payload["hits"]] == ["reference"]
+    assert payload["hits"][0]["chunk_id"] == "r1"
+    assert payload["hits"][0]["heading_path"] == "Раздел"
+    assert payload["hits"][0]["url"] == "https://docs.example/r1"
+
+
+def test_reference_scope_refuses_a_dense_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Векторов у reference-корпуса нет ⇒ отказ, а не тихое понижение до R0."""
+    package = _reference_package(tmp_path)
+    monkeypatch.setattr(search, "_resolve_paths", lambda args: _paths(tmp_path))
+    with pytest.raises(CliError) as excinfo:
+        search._collect(
+            _args(
+                "q", "--scope", "reference", "--package", str(package),
+                "--retrieval-profile", "R2",
+            )
+        )
+    assert excinfo.value.exit_code == 2
+    assert "векторов" in str(excinfo.value)
+
+
+def test_reference_param_uses_parameter_terms_not_render_queries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Постановка задачи у предка — термины recon, а не запросы Ш6."""
+    package = _reference_package(tmp_path)
+    _reference_tree(tmp_path)
+    monkeypatch.setattr(search, "_resolve_paths", lambda args: _paths(tmp_path))
+    seen: list[str] = []
+
+    def _terms(row: Any) -> list[str]:
+        seen.append(row.param_id)
+        return ["pluggable", "toast"]
+
+    def _no_render(row: Any) -> list[str]:
+        raise AssertionError("reference-сторона не использует render_queries")
+
+    monkeypatch.setattr(search, "parameter_terms", _terms)
+    monkeypatch.setattr(search, "render_queries", _no_render)
+
+    payload = search._collect(
+        _args("--param", "p_one", "--scope", "reference", "--package", str(package))
+    )
+    assert seen == ["p_one"]
+    assert payload["reference_queries"] == ["pluggable toast"]
+    assert payload["builders"] == {"cohort": None, "reference": "parameter_terms"}
+
+
+def test_both_scope_prints_two_blocks_without_resorting_between_sides(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Счета двух движков несравнимы: reference с 99.0 не поднимается над когортой."""
+    package = _reference_package(tmp_path)
+    _reference_tree(tmp_path)
+    corpus = FakeCorpus(ref=_ref(), parts=[PartitionRef("p1", "pb_1", None, None)])
+    _install(
+        monkeypatch, corpus, _ports(FakeLexical({"pluggable toast": [_chunk("c1", 0.5)]}))
+    )
+    monkeypatch.setattr(search, "_resolve_paths", lambda args: _paths(tmp_path))
+    monkeypatch.setattr(search, "Bm25Index", FakeBm25)
+
+    payload = search._collect(
+        _args(
+            "pluggable toast", "--scope", "both", "--package", str(package),
+            "--db", "/tmp/x.db",
+        )
+    )
+    assert [hit["side"] for hit in payload["hits"]] == ["cohort", "reference"]
+    assert [hit["score"] for hit in payload["hits"]] == [0.5, 99.0]
+    assert payload["reference"]["profile"] == "R0"
+
+    search._print_text(payload)
+    printed = capsys.readouterr().out
+    assert printed.index("КОРПУС КОГОРТЫ") < printed.index("REFERENCE-КОРПУС")
+    # Каждый блок нумеруется со своего начала: это два списка, а не один рейтинг.
+    assert printed.count(" 1. [") == 2
+
+
+def test_missing_reference_declaration_names_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package = _reference_package(tmp_path, declaration=None)
+    monkeypatch.setattr(search, "_resolve_paths", lambda args: _paths(tmp_path))
+    with pytest.raises(CliError) as excinfo:
+        search._collect(_args("q", "--scope", "reference", "--package", str(package)))
+    message = str(excinfo.value)
+    assert "reference_products.yaml" in message
+    assert "hound baseline list" in message
+    assert excinfo.value.exit_code == 2
+
+
+def test_several_reference_builds_without_current_refuse_and_list_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Выбор по mtime запрещён: без указателя и с двумя сборками — отказ с перечнем."""
+    package = _reference_package(tmp_path)
+    _reference_tree(tmp_path, builds=("ref_a", "ref_b"), current=None)
+    monkeypatch.setattr(search, "_resolve_paths", lambda args: _paths(tmp_path))
+    with pytest.raises(CliError) as excinfo:
+        search._collect(_args("q", "--scope", "reference", "--package", str(package)))
+    message = str(excinfo.value)
+    assert "ref_a" in message and "ref_b" in message
+    assert "--reference-build" in message
+    assert excinfo.value.exit_code == 2
+
+
+def test_incomplete_reference_build_is_visible_in_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``complete=false`` — предупреждение в выдаче, а не молчание; код возврата тот же."""
+    package = _reference_package(tmp_path)
+    _reference_tree(tmp_path, complete=False)
+    monkeypatch.setattr(search, "_resolve_paths", lambda args: _paths(tmp_path))
+    payload = search._collect(
+        _args("pluggable toast", "--scope", "reference", "--package", str(package))
+    )
+    assert payload["reference"]["complete"] is False
+    assert "неполная" in payload["reference"]["notice"]
+    assert "проходу" in payload["reference"]["notice"]
