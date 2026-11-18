@@ -517,7 +517,7 @@ def cmd_package_validate(args: argparse.Namespace) -> int:
         }
         _emit(args, payload, ["ok: no", "blocking: package.yaml отсутствует"])
         return EXIT_BLOCKED
-    result = _invoke(lambda: validate_package(args.package))
+    result = _invoke(lambda: _validate_package_cli(args.package, getattr(args, "passports_dir", None)))
     payload = _op_payload(result)
     # Готовность к прогону = нет блокирующих И нет незаполненных авторских полей (A3).
     ready = payload["ok"] and payload["complete"]
@@ -3200,3 +3200,13 @@ def cmd_package(args: argparse.Namespace) -> int:
     else:  # pragma: no cover — парсер всегда доступен в реальном CLI
         sys.stderr.write("hound package: укажите подкоманду\n")
     return EXIT_USAGE
+
+
+def _validate_package_cli(package_dir: str, passports_dir: str | None) -> OpResult:
+    """``validate`` пакета; ``--passports-dir`` включает паспортные правила.
+
+    Тонкая обёртка: вся семантика — в :func:`validate_package` (``passports_dir=None``
+    означает прежнее поведение байт-в-байт). Обёртка оставлена, чтобы точка вызова в CLI
+    оставалась одной строкой и якоря документации не двигались.
+    """
+    return validate_package(package_dir, passports_dir=passports_dir)

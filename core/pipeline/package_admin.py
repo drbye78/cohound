@@ -598,14 +598,27 @@ def show_package(package_dir: str | Path) -> dict[str, Any]:
     }
 
 
-def validate_package(package_dir: str | Path) -> OpResult:
+def validate_package(
+    package_dir: str | Path, *, passports_dir: str | Path | None = None
+) -> OpResult:
     """Линт пакета без записи; ``blocking``/``warnings`` в :class:`OpResult`.
 
     Ошибки разбора превращаются в блокирующее сообщение (а не исключение), чтобы
     команда ``validate`` всегда возвращала отчёт.
+
+    ``passports_dir`` — opt-in: без него паспорта не загружаются и правила
+    ``passport-upstreams``/``upstreams-by-archetype``/``upstream-presence`` не применяются
+    (поведение прежнее, байт-в-байт). С каталогом паспорта когорты попадают в
+    ``RunInputs``, и «паспорт объявляет необъявленную линию» блокируется здесь, а не
+    только в ``plan``/``run``. Импорт ленивый: ``reference_products`` зависит от
+    ``package_io``, и модульный импорт замкнул бы цикл.
     """
     try:
         artifacts = load_artifacts(package_dir)
+        if passports_dir is not None:
+            from core.pipeline.reference_products import load_package_passports
+
+            artifacts.passports = load_package_passports(passports_dir)
         report = prospective_lint(artifacts)
     except (ValueError, OSError) as exc:
         message = " ".join(str(exc).split())

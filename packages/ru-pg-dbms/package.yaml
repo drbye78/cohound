@@ -1,6 +1,6 @@
 archetype: A
 baseline_participants:
-- postgresql
+- upstream-pg
 baselines:
 - upstream-pg
 case_id: ru-pg-dbms
@@ -16,7 +16,7 @@ modules:
   weight: 19.0
 - module_id: management
   weight: 23.0
-package_version: 2.1.0
+package_version: 2.1.1
 registries: []
 roles:
 - core_coverage_allowed: true

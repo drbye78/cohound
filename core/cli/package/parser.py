@@ -160,6 +160,14 @@ def add_package_parser(subparsers: Any) -> None:
 
     p_validate = pkg.add_parser("validate", help="линт пакета без записи")
     _add_read_common(p_validate)
+    p_validate.add_argument(
+        "--passports-dir",
+        default=None,
+        help=(
+            "каталог паспортов продуктов: включает паспортные правила линтера "
+            "(passport-upstreams/upstream-presence); без флага паспорта не загружаются"
+        ),
+    )
     p_validate.set_defaults(handler=cmd_package_validate)
 
     # list (обзор пакетов) ------------------------------------------------- #

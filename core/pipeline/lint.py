@@ -6,6 +6,10 @@ pydantic-валидаторами домена (нужно сопоставле�
 - сумма весов модулей = 100 (defensive: домен уже проверяет при загрузке);
 - архетип C при непустом ``baselines`` (manifest и/или ``baselines.csv``) → **блок**
   (§1.5/§4.2);
+- реестр ``package.yaml: baselines``/``baseline_participants`` обязан ссылаться на
+  ``baseline_id``, объявленные в ``sources/reference_products.yaml`` → **блок**
+  (план 27 §3.1); объявленная линия без единой строки ``baselines.csv`` → warning:
+  механизм выключен, и это видно до прогона, а не по ``no_policy_row``;
 - ``absence_rule ∈ {parameter_reference, distribution_absence}`` без настроенной
   процедуры аттестации полноты источника ``scope_attested_by`` → **блок** (§4.2/I2b);
 - пустые ``concept_terms`` у параметра → warning (§4.2; S13);
@@ -66,6 +70,8 @@ __all__ = [  # noqa: RUF022
     "check_slug_lowercase",
     "check_anchor_in_products",
     "check_baseline_reference_product",
+    "check_manifest_baselines_declared",
+    "check_baseline_policy_present",
     "check_passport_upstreams",
     "check_upstream_presence",
     "check_products_match_cohort",
@@ -174,6 +180,80 @@ def _declared_reference_ids(inputs: RunInputs) -> set[str] | None:
     if declared is None:
         return None
     return {product.baseline_id for product in declared.products}
+
+
+def _declared_versions(inputs: RunInputs) -> dict[str, list[str]]:
+    """Объявленные версии reference-продуктов: ``baseline_id → [version, …]``.
+
+    Пустой словарь — декларации нет: сравнивать версии не с чем, и правило версии
+    не применяется (неизвестность не выдаётся за нарушение, A3).
+    """
+    declared = getattr(inputs, "reference_products", None)
+    if declared is None:
+        return {}
+    return {
+        product.baseline_id: [version.version for version in product.versions]
+        for product in declared.products
+    }
+
+
+def check_manifest_baselines_declared(inputs: RunInputs) -> list[str]:
+    """План 27 §3.1/§6.4: реестр манифеста обязан ссылаться на объявленные линии.
+
+    ``package.yaml: baselines`` и ``package.yaml: baseline_participants`` — списки
+    **``baseline_id``**, а не ``product_id``: оба поля ссылаются на линии, объявленные в
+    ``sources/reference_products.yaml``. До этого правила расхождение «реестр объявляет
+    линию, которой в декларации нет» проходило ``hound package validate`` с ``ok: yes``:
+    поля читал только запрет «C ⇒ пусто», и опечатка в имени линии не отличалась от
+    осознанного объявления.
+
+    Правило применяется только при наличии декларации: у пакета без
+    ``sources/reference_products.yaml`` сравнивать не с чем, и блокировать его значило бы
+    потребовать декларацию, которой профиль ещё не завёл (старые пакеты остаются
+    валидными).
+
+    Уровень — **blocking**: имя, которого нет среди ``baseline_id``, — либо опечатка,
+    либо ссылка на линию другого профиля; в обоих случаях наследование по нему не
+    заработает, а молчаливое «не заработало» неотличимо от «наследовать нечего».
+    """
+    declared = _declared_reference_ids(inputs)
+    if declared is None:
+        return []
+    registry = [*inputs.package.baselines, *inputs.package.baseline_participants]
+    undeclared = sorted({str(bid) for bid in registry if str(bid) not in declared})
+    if not undeclared:
+        return []
+    declared_list = ", ".join(sorted(declared)) if declared else "ни одной линии"
+    return [
+        "manifest-baseline-undeclared: package.yaml объявляет "
+        + ", ".join(repr(bid) for bid in undeclared)
+        + " в baselines/baseline_participants, но sources/reference_products.yaml "
+        f"объявляет: {declared_list} (§27.3.1)"
+    ]
+
+
+def check_baseline_policy_present(inputs: RunInputs) -> list[str]:
+    """План 27 §7.1: объявленная линия без строк ``baselines.csv`` — видимое состояние.
+
+    ``package.yaml: baselines`` объявляет **линии**, а ``baselines.csv`` — **политику
+    наследования по параметрам**. Линия в реестре без единой строки политики означает, что
+    механизм наследования для неё выключен: наследовать по ней нечему. Это не ошибка
+    (пакет может быть не заполнен), поэтому уровень — ``warning``, но состояние обязано
+    быть названо: иначе последствие видно только как ``no_policy_row`` в базисе прогона,
+    то есть уже после замера.
+
+    Формулировка сообщения намеренно прямая: «строк нет — механизм выключен», а не
+    «наследовать нечего» — второе читается как свойство предка, тогда как это состояние
+    пакета.
+    """
+    csv_ids = {str(row.baseline_id) for row in inputs.baselines}
+    empty = sorted({str(bid) for bid in inputs.package.baselines if str(bid) not in csv_ids})
+    return [
+        f"baseline-policy-empty: линия {bid!r} объявлена в package.yaml:baselines, но в "
+        "baselines.csv нет ни одной строки с этим baseline_id — строк наследования нет, "
+        "механизм выключен, а не «наследовать нечего»"
+        for bid in empty
+    ]
 
 
 def check_baseline_reference_product(inputs: RunInputs) -> list[str]:
@@ -287,6 +367,11 @@ def check_passport_upstreams(inputs: RunInputs) -> list[str]:
     * ``baseline_id`` из ``passport.upstreams`` обязан быть объявлен в
       ``reference_products.yaml`` — иначе продукт объявляет линию, о которой профиль
       ничего не знает, и наследовать по ней нечему;
+    * мажор версии предка обязан быть **объявлен** у той же линии: ``inheritance`` ищет
+      факт по буквальному мажору (``inheritance.py``), поэтому предок «18.4.1» при
+      объявленной «18» молча даёт ``baseline_fact_missing`` — «наследования нет» без
+      единого слова о том, что версия не объявлена. Правило применяется, только когда
+      декларация есть и версия разбирается: сравнивать не с чем — не отказ;
     * архетип A — линия одна, поэтому **больше одного** предка у продукта быть не может
       (это была бы заявка формы B в A-пакете), и линия обязана быть объявлена **хоть
       кем-то**: A-пакет без единого предка не использует наследование вовсе;
@@ -318,12 +403,15 @@ def check_passport_upstreams(inputs: RunInputs) -> list[str]:
     passports = getattr(inputs, "passports", None) or {}
     if not passports:
         return []
+    from core.pipeline.inheritance import major_version
+
     cohort_ids = [str(entry.product_id) for entry in inputs.cohort.entries]
     # Правило судит только о **наблюдённых** паспортах когорты. Каталог паспортов приходит
     # из раскладки и может быть чужим (другой пакет) или не содержать продуктов когорты;
     # тогда «предков нет» — не наблюдение, а отсутствие данных, и блокировать им нельзя.
     observed_ids = [pid for pid in sorted(cohort_ids) if passports.get(pid) is not None]
     declared = _declared_reference_ids(inputs)
+    declared_versions = _declared_versions(inputs)
     archetype = inputs.package.archetype
     violations: list[str] = []
     declared_lines = 0
@@ -339,6 +427,22 @@ def check_passport_upstreams(inputs: RunInputs) -> list[str]:
                 f"passport-upstream-undeclared: {product_id}: "
                 + ", ".join(repr(bid) for bid in undeclared)
                 + " не объявлен в sources/reference_products.yaml (§27.10)"
+            )
+        # Версия предка: мажор ищется ровно на объявленной версии линии (§27.7.2).
+        for upstream in upstreams:
+            versions = declared_versions.get(str(upstream.baseline_id))
+            if versions is None:
+                continue  # линия не объявлена — об этом уже сказано выше
+            major = major_version(str(upstream.version))
+            if major is None:
+                continue  # версия не разбирается — сравнивать нечем
+            if major in {m for m in map(major_version, versions) if m is not None}:
+                continue
+            violations.append(
+                f"upstream-version-undeclared: {product_id}: предок "
+                f"{upstream.baseline_id!r} объявлен на версии {upstream.version!r} "
+                f"(мажор {major}), а в sources/reference_products.yaml у этой линии "
+                "объявлены версии: " + ", ".join(versions) + " (§27.7.2)"
             )
         if archetype is Archetype.A and len(upstreams) > 1:
             violations.append(
@@ -651,6 +755,13 @@ RULES: tuple[LintRule, ...] = (
         "reference-product-in-cohort", "blocking", check_reference_product_not_in_cohort
     ),
     LintRule("baseline-version-numeric", "blocking", check_reference_versions),
+    # Реестр манифеста ссылается на объявленные линии (§27.3.1) — блокирует: имя, которого
+    # нет среди ``baseline_id``, не даст наследования и неотличимо от опечатки.
+    LintRule(
+        "manifest-baseline-undeclared", "blocking", check_manifest_baselines_declared
+    ),
+    # Объявленная линия без строк ``baselines.csv`` — механизм выключен (видимо, не блок).
+    LintRule("baseline-policy-empty", "warning", check_baseline_policy_present),
     LintRule("passport-upstreams", "blocking", check_passport_upstreams),
     LintRule("upstream-presence", "warning", check_upstream_presence),
     LintRule("absence-attestation", "blocking", check_absence_attestation),

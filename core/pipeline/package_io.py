@@ -67,6 +67,7 @@ from core.domain.models import (
     GoldenRow,
     ModuleDef,
     PackageManifest,
+    Passport,
     ReferenceProducts,
     RunConfig,
     ScopeAttestation,
@@ -176,6 +177,11 @@ class PackageArtifacts:
     #: проспективный линт считал бы любую строку ``baselines.csv`` «без предка» и
     #: блокировал бы авторскую правку, которая на самом деле корректна.
     reference_products: ReferenceProducts | None = None
+    #: Паспорта продуктов (``product_id → Passport``). Заполняет вызывающий, когда каталог
+    #: паспортов известен (``hound package validate --passports-dir``): паспортные правила
+    #: линтера (``passport-upstreams``/``upstream-presence``) работают только по
+    #: **наблюдённым** паспортам. Пусто — правила не применяются (прежнее поведение).
+    passports: dict[str, Passport] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +909,9 @@ def build_run_inputs(artifacts: PackageArtifacts) -> RunInputs:
     выполняется, поэтому набор не является входом. ``golden_status is None`` — артефакты
     собраны напрямую (не через :func:`load_artifacts`): поведение прежнее, строки
     передаются как есть.
+
+    Паспорта передаются, только если вызывающий их загрузил (``artifacts.passports``):
+    без них паспортные правила линтера не применяются, и это не «нарушений нет».
     """
     case_id = artifacts.manifest.case_id if artifacts.manifest is not None else "package"
     cohort = artifacts.cohort if artifacts.cohort is not None else _synthesized_cohort(case_id)
@@ -926,6 +935,7 @@ def build_run_inputs(artifacts: PackageArtifacts) -> RunInputs:
         scope_attestation_procedure=artifacts.scope_attestation,
         golden_status=status,
         reference_products=artifacts.reference_products,
+        passports=dict(artifacts.passports),
     )
 
 

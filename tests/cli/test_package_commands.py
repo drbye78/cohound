@@ -911,3 +911,75 @@ def test_cli_validate_existing_dir_without_manifest_is_blocked(capsys, tmp_path:
     assert payload["lint"]["blocking"] == ["package.yaml отсутствует"]
 
 
+
+
+def _filled_package(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> Path:
+    """Пакет из шаблона с заполненными авторскими полями (``validate`` → ``ok: yes``)."""
+    package = _new(capsys, tmp_path)
+    for role_id in ("role_primary", "role_secondary"):
+        code, _, _ = _run(
+            capsys,
+            ["package", "role", "update", "--package", str(package),
+             "--role-id", role_id, "--definition", f"роль {role_id}"],
+        )
+        assert code == EXIT_OK
+    entries = _write(
+        tmp_path / "entries.yaml",
+        "- product_id: product_anchor\n  role_overlap: 1.0\n  selection_reason: якорь\n  anchor_relation: anchor\n"
+        "- product_id: product_analog_a\n  role_overlap: 0.8\n  selection_reason: аналог A\n  anchor_relation: analog\n"
+        "- product_id: product_analog_b\n  role_overlap: 0.6\n  selection_reason: аналог B\n  anchor_relation: analog\n",
+    )
+    code, _, _ = _run(
+        capsys,
+        ["package", "cohort", "set", "--package", str(package), "--entries", str(entries),
+         "--actor", "t", "--json"],
+    )
+    assert code == EXIT_OK
+    return package
+
+
+def test_cli_validate_passports_dir_pins_passport_rules(capsys, tmp_path: Path) -> None:
+    """Паспортные правила в ``validate`` исполняются **только** с ``--passports-dir``.
+
+    Пин разделения, а не «починка ради зелени»: без флага паспорта не загружаются, и
+    паспорт, объявляющий необъявленную линию, не виден; с флагом — блокирует. Шаблон
+    объявляет ``upstream-line``, паспорт продукта когорты объявляет ``ghost-line``.
+    """
+    package = _filled_package(capsys, tmp_path)
+    passports = tmp_path / "passports"
+    (passports / "product_anchor").mkdir(parents=True)
+    (passports / "product_anchor" / "2026-01-01.yaml").write_text(
+        "product_id: product_anchor\n"
+        "canonical_name: Product Anchor\n"
+        "vendor: Vendor\n"
+        "upstreams:\n"
+        "  - baseline_id: ghost_line\n"
+        "    version: '1'\n"
+        "    evidence:\n"
+        "      url: 'https://ghost.test/doc'\n"
+        "      quote: 'мы на базе ghost'\n"
+        "jurisdiction: XX\n"
+        "doc_domains: ['ghost.test']\n"
+        "satellites: []\n"
+        "snapshot_date: 2026-01-01\n",
+        encoding="utf-8",
+    )
+
+    # Без флага — прежнее поведение: паспорта не загружены, правило не применяется.
+    code, out, _ = _run(capsys, ["package", "validate", "--package", str(package), "--json"])
+    assert code == EXIT_OK, out
+    assert json.loads(out)["ok"] is True
+
+    # С флагом — паспорт объявляет линию, которой нет в декларации профиля.
+    code, out, _ = _run(
+        capsys,
+        ["package", "validate", "--package", str(package),
+         "--passports-dir", str(passports), "--json"],
+    )
+    assert code == EXIT_BLOCKED, out
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert any(
+        "passport-upstream-undeclared" in message and "ghost_line" in message
+        for message in payload["lint"]["blocking"]
+    ), payload["lint"]["blocking"]

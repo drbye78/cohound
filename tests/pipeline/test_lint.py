@@ -29,10 +29,12 @@ from core.pipeline.lint import (
     check_absence_attestation,
     check_anchor_in_products,
     check_archetype_c_baselines,
+    check_baseline_policy_present,
     check_baseline_reference_product,
     check_empty_concept_terms,
     check_golden_full_absent_stratum,
     check_golden_presence,
+    check_manifest_baselines_declared,
     check_passport_upstreams,
     check_products_match_cohort,
     check_reference_product_not_in_cohort,
@@ -98,17 +100,23 @@ def test_rules_registry_is_complete() -> None:
         "baseline-version-numeric",
         "passport-upstreams",
         "upstream-presence",
+        # Реестр манифеста ↔ объявленные линии (§27.3.1) и пустая политика наследования.
+        "manifest-baseline-undeclared",
+        "baseline-policy-empty",
     }
     assert expected <= codes
-    # Новые правила — блокирующие, кроме `upstream-presence` (видимое состояние, не блок).
+    # Новые правила — блокирующие, кроме `upstream-presence` и `baseline-policy-empty`
+    # (видимое состояние, не блок).
     blocking = {rule.code for rule in RULES if rule.severity == "blocking"}
     assert {
         "baseline-without-reference-product",
         "reference-product-in-cohort",
         "baseline-version-numeric",
         "passport-upstreams",
+        "manifest-baseline-undeclared",
     } <= blocking
     assert "upstream-presence" not in blocking
+    assert "baseline-policy-empty" not in blocking
 
 
 def test_clean_fixture_passes() -> None:
@@ -704,3 +712,154 @@ def test_non_numeric_declared_version_blocks() -> None:
 
 def test_numeric_versions_pass() -> None:
     assert check_reference_versions(_clean()) == []
+
+
+# ---------------------------------------------------------------------------
+# manifest-baseline-undeclared: реестр манифеста ↔ объявленные линии
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_baseline_undeclared_blocks() -> None:
+    """``package.yaml:baselines`` ссылается на линию, которой нет в декларации."""
+    package = _clean().package.model_copy(
+        update={"baselines": ["baseline_a", "ghost_line"]}
+    )
+    inputs = replace(_clean(), package=package)
+    messages = check_manifest_baselines_declared(inputs)
+    assert messages and "manifest-baseline-undeclared" in messages[0]
+    assert "ghost_line" in messages[0]
+    # Сообщение называет файл и перечисляет объявленные линии.
+    assert "sources/reference_products.yaml" in messages[0]
+    assert "baseline_a" in messages[0] and "baseline_b" in messages[0]
+    assert any(
+        "manifest-baseline-undeclared" in msg for msg in lint_run_inputs(inputs).blocking
+    )
+
+
+def test_manifest_baseline_participant_undeclared_blocks() -> None:
+    """То же для ``baseline_participants``: это тоже ``baseline_id``, а не ``product_id``."""
+    package = _clean().package.model_copy(
+        update={"baseline_participants": ["ref_a"]}
+    )
+    inputs = replace(_clean(), package=package)
+    messages = check_manifest_baselines_declared(inputs)
+    assert messages and "ref_a" in messages[0]
+
+
+def test_manifest_baseline_undeclared_skipped_without_declaration() -> None:
+    """Без ``sources/reference_products.yaml`` правило не применяется (старые пакеты)."""
+    package = _clean().package.model_copy(update={"baselines": ["ghost_line"]})
+    inputs = replace(_clean(), package=package, reference_products=None)
+    assert check_manifest_baselines_declared(inputs) == []
+
+
+def test_manifest_baselines_declared_passes() -> None:
+    assert check_manifest_baselines_declared(_clean()) == []
+
+
+# ---------------------------------------------------------------------------
+# baseline-policy-empty: линия объявлена, политики нет
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_policy_empty_warns() -> None:
+    """Линия в реестре без строк ``baselines.csv`` — предупреждение, не блок."""
+    inputs = replace(_clean(), baselines=[])
+    messages = check_baseline_policy_present(inputs)
+    assert messages and "baseline-policy-empty" in messages[0]
+    assert "'baseline_a'" in messages[0]
+    report = lint_run_inputs(inputs)
+    assert report.ok is True
+    assert any("baseline-policy-empty" in warning for warning in report.warnings)
+    assert not any("baseline-policy-empty" in msg for msg in report.blocking)
+
+
+def test_baseline_policy_present_is_silent() -> None:
+    # В фикстуре у baseline_a есть строка — правило молчит.
+    assert check_baseline_policy_present(_clean()) == []
+
+
+def test_baseline_policy_empty_reports_each_line() -> None:
+    package = _clean().package.model_copy(
+        update={"baselines": ["baseline_a", "baseline_b"]}
+    )
+    inputs = replace(
+        _clean(),
+        package=package,
+        baselines=[row for row in _clean().baselines if row.baseline_id == "baseline_a"],
+    )
+    messages = check_baseline_policy_present(inputs)
+    assert len(messages) == 1 and "'baseline_b'" in messages[0]
+
+
+# ---------------------------------------------------------------------------
+# upstream-version-undeclared: мажор предка обязан быть объявлен
+# ---------------------------------------------------------------------------
+
+
+def test_upstream_version_undeclared_blocks() -> None:
+    """Предок «18.4.1» при объявленной «18» — блок с перечнем объявленных версий.
+
+    Иначе ``inheritance`` ищет факт по буквальному мажору и молча даёт
+    ``baseline_fact_missing``: «наследования нет» без слова о необъявленной версии.
+    """
+    declared = _declared("baseline_a")
+    product = declared.products[0].model_copy(
+        update={
+            "current_version": "18",
+            "versions": [
+                declared.products[0].versions[0].model_copy(update={"version": "18"})
+            ],
+        }
+    )
+    inputs = replace(
+        _clean(),
+        reference_products=declared.model_copy(update={"products": [product]}),
+        passports={"p1": _passport("p1", upstreams=[("baseline_a", "19.4.1")])},
+    )
+    messages = check_passport_upstreams(inputs)
+    assert any("upstream-version-undeclared" in msg for msg in messages)
+    assert any("19" in msg and "18" in msg for msg in messages)
+    assert any("upstream-version-undeclared" in msg for msg in lint_run_inputs(inputs).blocking)
+
+
+def test_upstream_version_declared_passes() -> None:
+    """«18.4.1» при объявленной «18» — мажор совпал, наследование по версии возможно."""
+    declared = _declared("baseline_a")
+    product = declared.products[0].model_copy(
+        update={
+            "current_version": "18",
+            "versions": [
+                declared.products[0].versions[0].model_copy(update={"version": "18"})
+            ],
+        }
+    )
+    inputs = replace(
+        _clean(),
+        reference_products=declared.model_copy(update={"products": [product]}),
+        passports={"p1": _passport("p1", upstreams=[("baseline_a", "18.4.1")])},
+    )
+    assert check_passport_upstreams(inputs) == []
+
+
+def test_upstream_version_not_applied_without_declaration() -> None:
+    """Декларации нет — сравнивать версии не с чем, правило молчит (о линии скажет другое)."""
+    inputs = replace(
+        _clean(),
+        reference_products=None,
+        passports={"p1": _passport("p1", upstreams=[("baseline_a", "99")])},
+    )
+    assert not any(
+        "upstream-version-undeclared" in msg for msg in check_passport_upstreams(inputs)
+    )
+
+
+def test_upstream_version_unparsable_not_applied() -> None:
+    """Неразбираемая версия предка — не отказ версии (это состояние паспорта, не декларации)."""
+    inputs = replace(
+        _clean(),
+        passports={"p1": _passport("p1", upstreams=[("baseline_a", "vNext")])},
+    )
+    assert not any(
+        "upstream-version-undeclared" in msg for msg in check_passport_upstreams(inputs)
+    )
