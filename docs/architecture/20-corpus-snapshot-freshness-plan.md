@@ -335,7 +335,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 Решение владельца **29.10.2026** «`❌` требует `live|revalidated` в этом цикле»
 (as-built: `_enforce_reuse_confirmed`, два уровня — evidence для `explicit`/`authoritative`
 и корпус для `bounded`; токен `reuse_unconfirmed`. **Удалено в 0.3.0:** правило заменено
-`_enforce_dated_absence` (`core/pipeline/evaluate.py:2236`) с токеном `absence_undated` —
+`_enforce_dated_absence` (`core/pipeline/evaluate.py:2406`) с токеном `absence_undated` —
 см. §11.9).
 
 Оно было верным для своего носителя: тогда корпус был «один прогон = один снимок», и `reused`
@@ -386,7 +386,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 * `CorpusCoverage` не знает о снятиях: ни `capture_id`, ни дат, ни `policy_digest`.
 * Читателя, который сравнил бы `capture.policy_digest` с объявленным, сегодня нет ни одного.
 
-Код, который **был тронут** (F3): `_enforce_dated_absence` (`core/pipeline/evaluate.py:2236`)
+Код, который **был тронут** (F3): `_enforce_dated_absence` (`core/pipeline/evaluate.py:2406`)
 заменил `_enforce_reuse_confirmed` (удалён вместе с `_CONFIRMED_REUSE_KINDS` и двумя уровнями
 `_evidence_level_reuse_violations`/`_corpus_level_reuse_violations`), вызовы — Ш6
 (`core/pipeline/evaluate.py:3310`) и **перенос ячейки из прошлого прогона**

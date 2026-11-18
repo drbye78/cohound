@@ -581,7 +581,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 | 5 | `_resolve_denial` берёт `quotes[0]` | **ПОДТВЕРЖДЕНО прогоном** | `core/pipeline/evaluate.py:1979-2018` (ныне `_designated_denial_quote`); проба: evidence = [«добавлена поддержка» (a), «не поддерживаются» (b)] → `❌`, `citation_quote` = **первая**, не отрицающая. Живой экспозиции нет: `❌` = 0 ячеек. v4 расширяет риск (`v4:35` делает ветку `explicit` нормальной) | M |
 | 6 | `assert last_validation is not None` | **ОПРОВЕРГНУТО** — починено в `97b2776` | `core/pipeline/evaluate.py:3331-3332` теперь `if … raise RuntimeError`; ассертов в `evaluate/validate/prompt/retrieve` нет | — |
 | 7 | Adversarial — 9 кейсов | **ПОДТВЕРЖДЕНО** и задокументировано | `fixtures/adversarial_prompts.json` (9), `adversarial.py:3-5` «регрессионный gate, а не заявление о безопасности» | — |
-| 8 | `extra_instructions` мёртв в проде | **ПОДТВЕРЖДЕНО** → **удалён 08.11.2026** | принимают `evaluate_cell` (`core/pipeline/evaluate.py:2788`) и `evaluate_batch` (`:3451`), но `evaluate_phase` (`:3717-3737`) параметра не имеет и вызов `:4149` его не передаёт; тест пинит влияние на ключ кэша | S |
+| 8 | `extra_instructions` мёртв в проде | **ПОДТВЕРЖДЕНО** → **удалён 08.11.2026** | принимали `evaluate_cell` и `evaluate_batch`, но `evaluate_phase` параметра не имела и вызов его не передавал; тест пинит влияние на ключ кэша | S |
 
 **Статус на 2026-10-28, уточнён 08.11.2026.** ✅ 1–8.
 

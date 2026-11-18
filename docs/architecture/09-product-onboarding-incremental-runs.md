@@ -184,7 +184,7 @@
 | §8 | ✅ сделано | `pb_`/`cb_`, композиции (`core/pipeline/composition.py`), GC (`gc_index_compositions`, `core/store/backup.py:687`; вызов — `core/cli/package/commands.py:2394`) |
 | §9 | ✅ сделано | строка «Cell/evidence» описывает as-built перенос (§10): `measurement_origin`/`carried_from_run_id`, копии evidence с per-run `evidence_id` |
 | §10 | ✅ сделано | `cell_reuse_key` (`cell-reuse-2`, 21 слагаемое), `carry_forward_cell`, `measurement_origin`, писатель `cell_measurement` (Ш6), счётчики `cells_carried` в снимке и отчёте; **§10.5 (ключ eval cache) — ✅ сделано** ранее. Per-cell (решение 29.10.2026): ключ после retrieval, `retrieved_doc_set_digest` вместо doc-set продукта. Приёмка — `tests/pipeline/test_carry_forward.py` |
-| §11 | ✅ сделано | колонки покрытия (включая `resolved_manually` и `roots_json`); `scope_acceptance` — канал проложен (§11.5); **I2d: `❌` требует датированного носителя** (`_enforce_dated_absence`, `core/pipeline/evaluate.py:2236`; `check_absence_dated`, `core/domain/invariants.py:386`), и то же правило применяется к перенесённой ячейке (`_carried_rules_hold`); `reuse_kind` — провенанс строки корпуса, а не условие публикации; **§11.4** — `cells_carried`/`cells_measured` в снимке (`state_sync._cell_stats`) и `outputs/cell_origin.csv` + `--json: cell_origin` (`report.collect_cell_origins`) |
+| §11 | ✅ сделано | колонки покрытия (включая `resolved_manually` и `roots_json`); `scope_acceptance` — канал проложен (§11.5); **I2d: `❌` требует датированного носителя** (`_enforce_dated_absence`, `core/pipeline/evaluate.py:2406`; `check_absence_dated`, `core/domain/invariants.py:386`), и то же правило применяется к перенесённой ячейке (`_carried_rules_hold`); `reuse_kind` — провенанс строки корпуса, а не условие публикации; **§11.4** — `cells_carried`/`cells_measured` в снимке (`state_sync._cell_stats`) и `outputs/cell_origin.csv` + `--json: cell_origin` (`report.collect_cell_origins`) |
 | §12.1–§12.2, §12.5 | ✅ сделано | `execution_contract_digest`, `content_change`; дефект `runs.cohort_ref` (хранила имя файла вместо ревизии) закрыт границей A |
 | §12.3 | ✅ сделано | lineage пишется в `state.db.run_lineage` и читается в манифест: `cycle_id`/`previous_run_id`/`change_class` (правило — один резолвер `previous_run_of`); те же три поля есть и в `runs` (`core/store/sqlite.py:191-193`) |
 | §13 | ✅ сделано | §13.3 (carry-forward) исполняется; смена класса изменения по-прежнему переоценивает ячейки — перенос не переживает смену условий (§10.3) |
@@ -3600,7 +3600,7 @@ CREATE TABLE corpus_coverage (
 же границу**, что `corpus_docs.reuse_kind`, и подняло класс всей границы до
 `methodology_version`; один прогон golden-full на обе правки.
 ✅ **Реализовано вместо снятого правила:** `_enforce_dated_absence`
-(`core/pipeline/evaluate.py:2236`) + `check_absence_dated`
+(`core/pipeline/evaluate.py:2406`) + `check_absence_dated`
 (`core/domain/invariants.py:386`); токен нарушения — `absence_undated`, `absence_as_of =
 min(дат носителей)` пишется в `cells.absence_as_of`. `_enforce_reuse_confirmed`,
 `CorpusReuseObservation` и токен `reuse_unconfirmed` **удалены** (токен читается в старых
@@ -4705,7 +4705,7 @@ sitemap `lastmod` непригоден как дата наблюдения (I2d
 > П. 2 (условие публикации `❌`) закрыт
 > 29.10.2026 и **пересмотрен** F3 плана 20: правило `live|revalidated`
 > (`_enforce_reuse_confirmed`) снято, действует **I2d** — `_enforce_dated_absence`
-> (`core/pipeline/evaluate.py:2236`) + `check_absence_dated`
+> (`core/pipeline/evaluate.py:2406`) + `check_absence_dated`
 > (`core/domain/invariants.py:386`). П. 6 (per-cell) закрыт решением 29.10.2026; п. 10 —
 > целиком 29.10.2026; п. 5 и 9 — решениями владельца; п. 7 — механизмом waiver + линт.
 > Открытых вопросов в этом разделе нет: всё ниже — принятые решения.

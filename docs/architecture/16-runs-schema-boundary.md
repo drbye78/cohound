@@ -952,7 +952,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    функцией, что и код (`_chunk_id`), иначе он пинует прошлое.
    ➖ **Снято 05.11.2026** (F3 плана 20): правило «`❌` требует `live|revalidated` в этом
    цикле» отменено — `❌` держится датированным носителем (I2d,
-   `core/pipeline/evaluate.py:2236` `_enforce_dated_absence`). Отображение
+   `core/pipeline/evaluate.py:2406` `_enforce_dated_absence`). Отображение
    `corpus_doc_version`
    осталось носителем адреса, по которому I2d находит `corpus_artifact`.
 10. **`RunManifest` объявлял три lineage-поля, которых никто не заполнял.** `cycle_id`,

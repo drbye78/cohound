@@ -175,7 +175,7 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 
 **I2d — у `❌` есть датированный носитель** (`check_absence_dated`,
 `core/domain/invariants.py:386`; исполняется в Ш6 `_enforce_dated_absence`,
-`core/pipeline/evaluate.py:2236-2346`, применяется к ячейке на `core/pipeline/evaluate.py:3310`).
+`core/pipeline/evaluate.py:2406-2516`, применяется к ячейке на `core/pipeline/evaluate.py:3500`).
 `❌` — утверждение не о сегодняшнем дне, а о **событии с датой**: носитель зависит от класса
 отрицания — `explicit`/`authoritative` требуют записи наблюдения (`observed_at`) **каждого**
 цитируемого документа, `bounded` — снятия **каждого** объявленного корня с `complete=1` и датой
