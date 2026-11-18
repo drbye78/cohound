@@ -586,3 +586,29 @@ def test_explicit_depth_zero_is_declared_but_marks_incomplete(tmp_path: Path) ->
     assert "truncated:max_depth" in result.manifest.incomplete_reasons
     # Счётчик отвечает на свой вопрос: сколько корней упёрлось в границу.
     assert result.skipped["depth"] == 1
+
+
+def test_chunk_address_follows_the_source_id_grammar(tmp_path: Path) -> None:
+    """Адрес чанка в reference-БД разбирается тем же парсером, что адрес прогона.
+
+    Чанкер возвращает внутреннюю форму ``{doc}#{no}``; у корпуса когорты её переписывает
+    ``corpus_index._chunk_id``, и сборка reference-корпуса обязана делать то же. Иначе
+    цитата карты ссылается на адрес, который ``parse_source_id`` не берёт, и I2d не может
+    найти дату документа: замер 18.11.2026 на PG 18 дал ``absence_undated`` у ячейки с
+    датированным документом — адрес был не тот, а не дата.
+    """
+    from core.util.ids import parse_source_id
+
+    layout = _layout(tmp_path)
+    result = _build(layout, {ROOT: _page(body="Страница с текстом.")})
+    conn = sqlite3.connect(result.db_path)
+    try:
+        rows = list(conn.execute("SELECT chunk_id, doc_id, chunk_no FROM corpus_chunks"))
+    finally:
+        conn.close()
+    assert rows, "сборка обязана записать хотя бы один чанк"
+    for chunk_id, doc_id, chunk_no in rows:
+        ref = parse_source_id(chunk_id)
+        assert ref.product_id == layout.product_id
+        assert ref.doc_id == doc_id.split(":", 1)[1]
+        assert ref.chunk_no == chunk_no

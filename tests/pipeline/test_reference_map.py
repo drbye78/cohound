@@ -11,7 +11,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from core.adapters.lexical_bm25 import Bm25Index
 from core.domain.enums import FactReview, FactStatus, Importance, ParamType, Status
@@ -21,10 +25,13 @@ from core.domain.models import (
     LLMCellOutput,
     LLMEvidence,
 )
+from core.pipeline import reference_map as reference_map_module
+from core.pipeline.evaluate import CorpusArtifactDates
 from core.pipeline.reference_map import (
     MAP_SCHEMA,
     MAP_SUBJECT,
     MapChunk,
+    ReferenceMapIncomplete,
     ReferenceMapLayout,
     build_reference_map,
     cell_row,
@@ -217,6 +224,9 @@ def test_cells_jsonl_carries_verdict_evidence_and_notes(tmp_path: Path) -> None:
     assert row["status"] == Status.OK.value
     assert [item["source_id"] for item in row["evidence"]] == ["c1"]
     assert "validation_notes" in row
+    # Дата отсутствия — часть публикации, а не внутренняя деталь (I2d): у карты нет
+    # таблицы `cells`, поэтому единственный носитель даты — эта строка.
+    assert "absence_as_of" in row
 
 
 def test_map_never_writes_into_runs(tmp_path: Path, monkeypatch) -> None:
@@ -325,3 +335,293 @@ def test_agreement_reads_written_cells(tmp_path: Path) -> None:
     assert agreement["n"] == 1
     assert agreement["disagreements"] == []
     assert cell_row(result.cells[0])["param_id"] == "p_jsonb"
+
+
+# ---------------------------------------------------------------------------
+# Параллельный путь (llm_concurrency)
+# ---------------------------------------------------------------------------
+
+
+class _SlowEvaluator(_Evaluator):
+    """Оценщик с задержкой: без неё параллельный путь неотличим от последовательного."""
+
+    def __init__(self, delay: float = 0.05) -> None:
+        super().__init__()
+        self.delay = delay
+        # Счётчик ведёт базовый класс: дублировать его здесь значило бы считать вызовы
+        # дважды (первая версия этого теста так и сделала — 10 вызовов на 5 параметров).
+        self.lock = threading.Lock()
+
+    def complete(self, req):  # noqa: ANN001 — шов порта
+        time.sleep(self.delay)
+        with self.lock:
+            return super().complete(req)
+
+
+def test_parallel_cells_keep_catalog_order(tmp_path: Path) -> None:
+    """Порядок ячеек — порядок каталога, а не порядок ответов модели.
+
+    ``cells.jsonl`` не имеет права зависеть от того, кто ответил первым: иначе два прогона
+    с одним ``map_id`` давали бы разные файлы, и сравнение карт мерило бы планировщик.
+    """
+    params = [_param(f"p{i}") for i in range(6)]
+    result = _build(
+        ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+        params=params,
+        evaluator=_SlowEvaluator(delay=0.01),
+        llm_concurrency=4,
+    )
+    assert [cell.param_id for cell in result.cells] == [f"p{i}" for i in range(6)]
+
+
+def test_parallel_path_calls_every_param_once(tmp_path: Path) -> None:
+    """Параллельность не дублирует и не теряет вызовы: ровно по одному на параметр."""
+    params = [_param(f"p{i}") for i in range(5)]
+    evaluator = _SlowEvaluator(delay=0.01)
+    result = _build(
+        ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+        params=params,
+        evaluator=evaluator,
+        llm_concurrency=3,
+    )
+    assert len(result.cells) == 5
+    assert evaluator.calls == 5
+
+
+def test_parallel_failure_is_named_and_no_partial_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Упавшая ячейка не превращается в частичную карту: ошибка названа, ячейки нет.
+
+    Сбой внедряется в ретривал, а не в оценщик: исключение оценщика `evaluate_cell`
+    превращает в ячейку с `failure_kind` (это его контракт), а проверяется здесь изоляция
+    **сбоя ячейки**, которую фаза обязана пережить. Живой случай этого класса — `sleep=None`,
+    уронивший карту на 181-й ячейке 18.11.2026.
+    """
+    real = reference_map_module._retrieve
+
+    def failing(param, **kwargs):  # noqa: ANN001, ANN003 — шов
+        if str(param.param_id) == "p_bad":
+            raise RuntimeError("индекс недоступен")
+        return real(param, **kwargs)
+
+    monkeypatch.setattr(reference_map_module, "_retrieve", failing)
+    params = [_param("p_ok"), _param("p_bad")]
+    with pytest.raises(ReferenceMapIncomplete) as excinfo:
+        _build(
+            ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+            params=params,
+            evaluator=_SlowEvaluator(delay=0.0),
+            llm_concurrency=2,
+        )
+    assert any("p_bad" in item for item in excinfo.value.failed)
+    assert not any("p_ok" in item for item in excinfo.value.failed)
+
+
+def test_sequential_path_also_isolates_and_names_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Последовательный путь не «падает целиком»: изоляция одна на оба пути."""
+    real = reference_map_module._retrieve
+
+    def failing(param, **kwargs):  # noqa: ANN001, ANN003 — шов
+        if str(param.param_id) == "p_bad":
+            raise RuntimeError("индекс недоступен")
+        return real(param, **kwargs)
+
+    monkeypatch.setattr(reference_map_module, "_retrieve", failing)
+    with pytest.raises(ReferenceMapIncomplete) as excinfo:
+        _build(
+            ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+            params=[_param("p_ok"), _param("p_bad")],
+        )
+    assert any("p_bad" in item for item in excinfo.value.failed)
+
+
+def test_progress_reports_every_cell_in_order(tmp_path: Path) -> None:
+    """Прогресс сообщает каждую ячейку: молчащий прибор на длинном прогоне неотличим от зависшего."""
+    seen: list[tuple[int, int, str]] = []
+    params = [_param(f"p{i}") for i in range(3)]
+    _build(
+        ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+        params=params,
+        evaluator=_SlowEvaluator(delay=0.0),
+        llm_concurrency=2,
+        progress=lambda done, total, param_id: seen.append((done, total, param_id)),
+    )
+    assert sorted(item[2] for item in seen) == ["p0", "p1", "p2"]
+    assert {item[1] for item in seen} == {3}
+    assert sorted(item[0] for item in seen) == [1, 2, 3]
+
+
+def test_concurrency_axis_is_not_part_of_map_id() -> None:
+    """Число вызовов в полёте — условие исполнения, а не измерения (§7.3, как у Ш6)."""
+    base = {
+        "reference_build_id": "ref_pg_18_a",
+        "baseline_facts_digest": "facts-1",
+        "catalog_version": "cat-1",
+        "llm_scenarios": {"model_id": "fake-evaluator@rev1"},
+        "prompt_template": "v9@abc",
+        "evaluation_policy": None,
+    }
+    assert reference_map_id(**base) == reference_map_id(**base)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_concurrency_below_one_is_rejected(tmp_path: Path, value: int) -> None:
+    """«Ноль вызовов в полёте» — не исполнение: отказ, а не тихая единица."""
+    with pytest.raises(ValueError):
+        _build(
+            ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+            llm_concurrency=value,
+        )
+
+
+def test_retry_pause_is_a_callable_when_sleep_is_not_injected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sleep=None` означает «не внедрён», а не «не спать»: иначе первая же попытка падает.
+
+    Замер 18.11.2026: карта на 181 параметр упала на последней ячейке с
+    `TypeError: 'NoneType' object is not callable` — `evaluate_cell` ждал паузу повтора
+    через `None`. Дефект латентный: он виден только на ячейке, которой нужен повтор.
+    """
+    captured: dict[str, object] = {}
+    real = reference_map_module.evaluate_cell
+
+    def spy(**kwargs):  # noqa: ANN003 — шов
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(reference_map_module, "evaluate_cell", spy)
+    _build(ReferenceMapLayout(root=tmp_path / "map", map_id="m1"))
+    assert callable(captured["sleep"]), "пауза повтора обязана быть вызываемой"
+
+
+def test_injected_sleep_is_used_as_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Внедрённая пауза не подменяется: тесты не спят, и это их выбор, а не дефолт."""
+    calls: list[float] = []
+    captured: dict[str, object] = {}
+    real = reference_map_module.evaluate_cell
+
+    def spy(**kwargs):  # noqa: ANN003 — шов
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(reference_map_module, "evaluate_cell", spy)
+    _build(
+        ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+        sleep=lambda seconds: calls.append(seconds),
+    )
+    assert captured["sleep"] is not None
+    assert captured["sleep"] is not time.sleep
+
+
+# ---------------------------------------------------------------------------
+# Отсутствие: I2c/I2d действуют на карте так же, как в Ш6 (§9)
+# ---------------------------------------------------------------------------
+
+
+_ABSENT_DOC = "a" * 64
+_ABSENT_CHUNK_ID = f"postgresql:{_ABSENT_DOC}:1"
+
+
+class _AbsentEvaluator(_Evaluator):
+    """Заявляет `explicit`-отрицание: проверяется носитель даты, а не мнение модели."""
+
+    def complete(self, req):  # noqa: ANN001 — шов порта
+        out = LLMCellOutput(
+            status=Status.ABSENT,
+            justification="вендор прямо отрицает",
+            denial_strength="explicit",
+            denial_reason="прямое отрицание в документации",
+            evidence=[
+                LLMEvidence(
+                    source_id=_ABSENT_CHUNK_ID,
+                    quote="The database does not support jsonb storage.",
+                )
+            ],
+        )
+        return LLMResponse(
+            output=out, raw="{}", prompt_hash="ph", decoder="none", usage=TokenUsage()
+        )
+
+
+def _absent_chunks() -> list[MapChunk]:
+    """Чанк, в тексте которого цитата отрицания действительно есть (I22 — подстрочность)."""
+    return [
+        MapChunk(
+            chunk_id=_ABSENT_CHUNK_ID,
+            doc_id=_ABSENT_DOC,
+            url="https://www.postgresql.org/docs/18/datatype-json.html",
+            text="The database does not support jsonb storage.",
+            content_hash=_ABSENT_DOC,
+        )
+    ]
+
+
+def _coverage(complete: bool = True):
+    from core.domain.models import CorpusCoverage, CorpusRootCoverage
+
+    return CorpusCoverage(
+        product_id="postgresql",
+        complete=complete,
+        roots=[
+            CorpusRootCoverage(
+                root_url="https://www.postgresql.org/docs/18/",
+                capture_id="ref_postgresql_18_deadbeef",
+                complete=complete,
+                observed_how="live",
+                observed_at="2026-11-17T22:06:31+00:00",
+                policy_digest=None,
+            )
+        ],
+        expected_sources=0,
+        observed_sources=0,
+        computed_at="2026-11-17T22:06:31+00:00",
+    )
+
+
+def test_absent_without_dated_carrier_is_not_published(tmp_path: Path) -> None:
+    """`❌` без записи наблюдения — `❓` с токеном `absence_undated`, а не утверждение.
+
+    Живой случай 18.11.2026: карта PG 18 опубликовала `❌` класса `explicit`, хотя в
+    reference-БД `corpus_artifact` пуста (0 строк) — то есть «этого нет» без даты.
+    """
+    result = _build(
+        ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+        evaluator=_AbsentEvaluator(),
+        chunks=_absent_chunks(),
+        artifact_dates=CorpusArtifactDates(
+            product_id="postgresql", by_doc_version={}, by_doc={}
+        ),
+        coverage=_coverage(complete=True),
+    )
+    cell = result.cells[0]
+    assert cell.status is not Status.ABSENT, "отсутствие без датированного носителя не публикуется"
+    assert any("absence_undated" in note for note in cell.validation_notes)
+    assert cell.absence_evidence == []
+
+
+def test_absent_with_dated_carrier_is_published(tmp_path: Path) -> None:
+    """С датой носителя `❌` публикуется: инвариант не «запретить», а «не выдумывать»."""
+    # Цитата адресует документ как `product:content_hash` (legacy-форма адреса).
+    dates = CorpusArtifactDates(
+        product_id="postgresql",
+        by_doc_version={},
+        by_doc={f"postgresql:{_ABSENT_DOC}": "2026-11-17T22:06:31+00:00"},
+    )
+    result = _build(
+        ReferenceMapLayout(root=tmp_path / "map", map_id="m1"),
+        evaluator=_AbsentEvaluator(),
+        chunks=_absent_chunks(),
+        artifact_dates=dates,
+        coverage=_coverage(complete=True),
+    )
+    cell = result.cells[0]
+    assert cell.status is Status.ABSENT
+    assert cell.absence_as_of == "2026-11-17T22:06:31+00:00"
+    # И дата доезжает до артефакта, а не остаётся в объекте ячейки.
+    write_map(ReferenceMapLayout(root=tmp_path / "map", map_id="m1"), result)
+    row = read_map_cells(tmp_path / "map" / "cells.jsonl")[0]
+    assert row["absence_as_of"] == "2026-11-17T22:06:31+00:00"

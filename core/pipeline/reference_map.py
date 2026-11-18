@@ -25,7 +25,9 @@ reference-корпусе одного продукта одной версии.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,7 @@ from core.util.hashing import short_hash
 
 __all__ = [
     "MAP_SCHEMA",
+    "ReferenceMapIncomplete",
     "ReferenceMapLayout",
     "ReferenceMapManifest",
     "ReferenceMapResult",
@@ -63,6 +66,24 @@ MAP_RETRIEVAL_PROFILE = "R0"
 #: другой. Поле стоит рядом с ``capability``/``coverage``, чтобы читатель не спутал карту
 #: предка с картой продукта (один формат на два предмета — §9.4).
 MAP_SUBJECT = "reference"
+
+
+class ReferenceMapIncomplete(RuntimeError):
+    """Карта не собрана: часть ячеек упала, и частичный артефакт не пишется.
+
+    Частичная карта опаснее отсутствующей: ``params`` в манифесте описывал бы каталог, а
+    ``cells.jsonl`` — его подмножество, и Capability считалась бы по неполному набору без
+    всякого признака неполноты. Поэтому сбой ячейки не «пропускается», а называется:
+    ``failed`` несёт ``param_id: тип: сообщение`` по каждой упавшей ячейке.
+    """
+
+    def __init__(self, failed: Sequence[str]) -> None:
+        self.failed: tuple[str, ...] = tuple(failed)
+        super().__init__(
+            f"карта не собрана: упало ячеек {len(self.failed)}; "
+            + "; ".join(self.failed[:5])
+            + (" …" if len(self.failed) > 5 else "")
+        )
 
 
 def reference_map_id(
@@ -376,7 +397,11 @@ def build_reference_map(
     cutoff_k: int = 10,
     model_id: str | None = None,
     observed_at: str | None = None,
-    sleep: Any = None,
+    artifact_dates: Any = None,
+    coverage: Any = None,
+    sleep: Callable[[float], Any] | None = None,
+    llm_concurrency: int = 1,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> ReferenceMapResult:
     """Собирает карту: ретривал по reference-корпусу → оценка → бандл (§9.1).
 
@@ -387,6 +412,38 @@ def build_reference_map(
     ``run_id`` ячейки — ``map_id``: у карты нет прогона, и подставлять чужой идентификатор
     значило бы выдать её ячейки за ячейки когорты.
 
+    **Число вызовов оценщика в полёте (``llm_concurrency``).** Карта упирается в
+    латентность модели, а не в локальную работу: замер живого прогона — p50 17.6 с на
+    вызов, локальная часть (ретривал, валидация, сборка ячейки) — доли секунды. При
+    ``> 1`` ячейки считаются пулом потоков тем же :func:`evaluate_cell`, что и в Ш6, где
+    параллельный путь уже исполняется (``core/pipeline/evaluate.py``,
+    ``llm_concurrency``). Ось **не** входит в ``map_id``: число вызовов в полёте —
+    условие исполнения, а не измерения, ровно как у ``--llm-concurrency`` прогона (он
+    тоже не в ``EXECUTION_CONTRACT_FIELDS``). Порядок ячеек — порядок ``params`` при
+    любом значении: ``cells.jsonl`` не должен зависеть от того, кто ответил первым.
+
+    **Отсутствие доказывается датированным носителем и здесь.** ``artifact_dates`` и
+    ``coverage`` передаются в :func:`evaluate_cell`, поэтому I2c/I2d действуют на карте
+    так же, как в Ш6. Замер 18.11.2026: без них карта опубликовала ``❌`` класса
+    ``explicit`` по цитате, у которой нет записи наблюдения (``corpus_artifact`` в
+    reference-БД пуста, 0 строк), — то есть утверждение «этого нет» без даты. Теперь
+    такой ``❌`` понижается до ``❓`` с токеном ``absence_undated``, а даты берутся из самой
+    сборки (:func:`core.pipeline.reference_corpus.read_artifact_dates`,
+    :func:`core.pipeline.reference_corpus.coverage_from_manifest`).
+
+    **``sleep`` по умолчанию — настоящий.** ``evaluate_cell`` ждёт между попытками
+    (``_retry_pause``, ``Retry-After`` провайдера), и ``None`` здесь означал бы «внедрённой
+    паузы нет», а не «не спать»: первая же повторная попытка падала бы
+    ``TypeError: 'NoneType' object is not callable`` и убивала карту на 181-й ячейке из 181
+    (замер 18.11.2026 — так и вышло). Поэтому ``None`` нормализуется в ``time.sleep``, а
+    тесты внедряют свою функцию явно.
+
+    **Изоляция сбоя.** Исключение на одной ячейке не теряет остальные: ошибки
+    собираются и называются в конце, а карта при их наличии **не** возвращается —
+    частичная карта выдала бы себя за полную (``params`` в манифесте разошёлся бы с
+    числом ячеек). ``progress(index, total, param_id)`` вызывается после каждой готовой
+    ячейки: прогон длится десятки минут, и «молчащий» прибор неотличим от зависшего.
+
     :param lexical_index: собранный лексический индекс (``LexicalSearcherPort``); движок
         выбирает composition root — карта спрашивает лексику через контракт, а не через
         адаптер.
@@ -394,6 +451,11 @@ def build_reference_map(
     :param module_weights: объявленные веса модулей пакета; ``None`` — все по 0.0, и тогда
         Capability не определена (честнее, чем выдумать равные веса).
     """
+    pause = sleep if sleep is not None else time.sleep
+    if isinstance(llm_concurrency, bool) or not isinstance(llm_concurrency, int):
+        raise ValueError(f"llm_concurrency обязан быть целым, получено {llm_concurrency!r}")
+    if llm_concurrency < 1:
+        raise ValueError(f"llm_concurrency обязан быть ≥ 1, получено {llm_concurrency!r}")
     material = list(chunks)
     catalog_map: dict[str, CatalogRow] = dict(catalog or {})
     for param in params:
@@ -417,8 +479,10 @@ def build_reference_map(
         evaluation_policy=evaluation_policy,
     )
 
-    cells: list[Cell] = []
-    for param in params:
+    cells: list[Cell | None] = [None] * len(params)
+
+    def _cell_for(param: CatalogRow) -> Cell:
+        """Одна ячейка карты: ретривал по ссылочному индексу и оценка тем же оценщиком."""
         retrieval = _retrieve(
             param,
             index=lexical_index,
@@ -436,13 +500,56 @@ def build_reference_map(
             retrievals=retrieval,
             strict=True,
             model_id=model_id,
-            sleep=sleep,
+            artifact_dates=artifact_dates,
+            coverage=coverage,
+            sleep=pause,
         )
-        cells.append(outcome.cell)
+        return outcome.cell
 
+    failed: list[str] = []
+
+    def _record(index: int, param: CatalogRow, cell: Cell) -> None:
+        cells[index] = cell
+        if progress is not None:
+            progress(index + 1, len(params), str(param.param_id))
+
+    if llm_concurrency == 1:
+        # Последовательный путь — прежний байт-в-байт: тот же порядок вызовов и тот же
+        # порядок исключений, что до появления оси.
+        for index, param in enumerate(params):
+            try:
+                _record(index, param, _cell_for(param))
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                failed.append(f"{param.param_id}: {type(exc).__name__}: {exc}")
+    else:
+        with ThreadPoolExecutor(
+            max_workers=llm_concurrency, thread_name_prefix="map-llm"
+        ) as pool:
+            futures = {
+                pool.submit(_cell_for, param): (index, param)
+                for index, param in enumerate(params)
+            }
+            for future in as_completed(futures):
+                index, param = futures[future]
+                try:
+                    _record(index, param, future.result())
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    failed.append(f"{param.param_id}: {type(exc).__name__}: {exc}")
+
+    if failed:
+        # Частичная карта НЕ собирается: ``params`` в манифесте разошёлся бы с числом
+        # ячеек, и артефакт выдал бы себя за полный. Ошибки названы все сразу — повтор
+        # после починки не требует угадывать, что именно упало.
+        raise ReferenceMapIncomplete(tuple(failed))
+
+    material_cells: list[Cell] = []
+    for cell in cells:
+        if cell is None:  # pragma: no cover — исключено проверкой ``failed`` выше
+            raise ReferenceMapIncomplete(("неизвестно",))
+        material_cells.append(cell)
     weights = dict(module_weights or {})
     bundle = _compute_from_cells(
-        cells,
+        material_cells,
         catalog=catalog_map,
         module_weights=weights,
         cohort=_single_product_cohort(product_id),
@@ -458,7 +565,7 @@ def build_reference_map(
         product_id=product_id,
         version=version,
         params=len(params),
-        counts=_count_verdicts(cells),
+        counts=_count_verdicts(material_cells),
         baseline_facts_digest=baseline_facts_digest,
         catalog_version=catalog_version,
         llm_scenarios=_canonical(llm_scenarios),
@@ -468,7 +575,7 @@ def build_reference_map(
         retrieval_profile=MAP_RETRIEVAL_PROFILE,
         observed_at=observed_at,
     )
-    return ReferenceMapResult(manifest=manifest, cells=cells, bundle=bundle)
+    return ReferenceMapResult(manifest=manifest, cells=material_cells, bundle=bundle)
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +604,10 @@ def cell_row(cell: Cell) -> dict[str, Any]:
         "validation_notes": list(cell.validation_notes),
         "retrieval_profile": cell.retrieval_profile,
         "index_build_id": cell.index_build_id,
+        # Дата отсутствия (I2d) публикуется вместе с вердиктом: `❌` — утверждение о
+        # событии, и без даты носителя оно недоказуемо. У карты нет таблицы `cells`,
+        # поэтому `cells.jsonl` — единственное место, где эта дата может жить.
+        "absence_as_of": cell.absence_as_of,
     }
 
 

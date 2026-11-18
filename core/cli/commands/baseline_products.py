@@ -48,7 +48,7 @@ from core.cli.context import (
     _positive_int,
     _print_json,
 )
-from core.cli.errors import EXIT_OK, EXIT_USAGE, CliError
+from core.cli.errors import EXIT_ERROR, EXIT_OK, EXIT_USAGE, CliError
 from core.config.run_config import (
     load_baselines,
     load_catalog,
@@ -1601,8 +1601,13 @@ def run_map(args: argparse.Namespace) -> int:
     формулы оценки нет.
     """
     from core.pipeline.digests import baseline_facts_digest, catalog_digest
-    from core.pipeline.reference_corpus import iter_reference_chunks
+    from core.pipeline.reference_corpus import (
+        coverage_from_manifest,
+        iter_reference_chunks,
+        read_artifact_dates,
+    )
     from core.pipeline.reference_map import (
+        ReferenceMapIncomplete,
         ReferenceMapLayout,
         build_reference_map,
         cell_row,
@@ -1700,24 +1705,55 @@ def run_map(args: argparse.Namespace) -> int:
     map_layout = ReferenceMapLayout(
         root=corpus_layout.map_dir(build_id, map_id), map_id=map_id
     )
-    result = build_reference_map(
-        layout=map_layout,
-        product_id=product.product_id,
-        version=version,
-        reference_build_id=build_id,
-        chunks=chunks,
-        params=catalog,
-        evaluator=evaluator,
-        lexical_index=lexical_index,
-        module_weights=_module_weights(package),
-        baseline_facts_digest=baseline_facts_digest(facts),
-        catalog_version=catalog_digest(catalog),
-        llm_scenarios={"model_id": getattr(evaluator, "model_id", None)},
-        prompt_template=getattr(args, "prompt_template", None),
-        cutoff_k=int(getattr(args, "cutoff_k", 10) or 10),
-        model_id=getattr(evaluator, "model_id", None),
-        observed_at=_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
-    )
+    concurrency = int(getattr(args, "llm_concurrency", 1) or 1)
+    total_params = len(catalog)
+    started = _dt.datetime.now(_dt.UTC)
+
+    def _progress(done: int, total: int, param_id: str) -> None:
+        """Прогресс в stderr: stdout занят результатом (``--json``), а прогон длинный."""
+        elapsed = (_dt.datetime.now(_dt.UTC) - started).total_seconds()
+        rate = done / elapsed if elapsed > 0 else 0.0
+        left = (total - done) / rate if rate > 0 else 0.0
+        sys.stderr.write(
+            f"[map {done}/{total}] {param_id[:40]:40} "
+            f"{elapsed:6.0f} с, осталось ≈{left / 60:.1f} мин\n"
+        )
+        sys.stderr.flush()
+
+    try:
+        result = build_reference_map(
+            layout=map_layout,
+            product_id=product.product_id,
+            version=version,
+            reference_build_id=build_id,
+            chunks=chunks,
+            params=catalog,
+            evaluator=evaluator,
+            lexical_index=lexical_index,
+            module_weights=_module_weights(package),
+            baseline_facts_digest=baseline_facts_digest(facts),
+            catalog_version=catalog_digest(catalog),
+            llm_scenarios={"model_id": getattr(evaluator, "model_id", None)},
+            prompt_template=getattr(args, "prompt_template", None),
+            cutoff_k=int(getattr(args, "cutoff_k", 10) or 10),
+            model_id=getattr(evaluator, "model_id", None),
+            observed_at=_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
+            llm_concurrency=concurrency,
+            progress=_progress,
+            # I2c/I2d на карте: даты наблюдений — из самой сборки, покрытие — из её
+            # манифеста. Без них `❌` публиковался бы без датированного носителя.
+            artifact_dates=read_artifact_dates(db_path, product.product_id),
+            coverage=coverage_from_manifest(manifest, product.product_id),
+        )
+    except ReferenceMapIncomplete as exc:
+        # Частичная карта не пишется (см. ``ReferenceMapIncomplete``): артефакт обязан
+        # описывать каталог целиком либо не существовать. Ошибки уже названы.
+        raise CliError(
+            f"карта {map_id} не собрана: упало ячеек {len(exc.failed)} "
+            f"(всего {total_params}); первая: {exc.failed[0]}",
+            code="baseline",
+            exit_code=EXIT_ERROR,
+        ) from exc
     agreement = fact_map_agreement(facts, [cell_row(cell) for cell in result.cells])
     dry_run = bool(getattr(args, "dry_run", False))
     paths: dict[str, str] = {}
@@ -2032,6 +2068,14 @@ def configure(sub: Any) -> None:
         type=int,
         default=10,
         help="глубина ретривала карты (top-K фрагментов на параметр)",
+    )
+    p_map.add_argument(
+        "--llm-concurrency",
+        dest="llm_concurrency",
+        type=_positive_int,
+        default=1,
+        help="сколько вызовов оценщика держать в полёте (1 — последовательно; ось "
+        "исполнения, в map_id не входит)",
     )
     p_map.add_argument(
         "--dry-run", dest="dry_run", action="store_true", help="ничего не писать"

@@ -52,13 +52,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from core.domain.enums import FactReview, FactStatus
-from core.domain.models import BaselineFact, CatalogRow
+from core.domain.models import (
+    BaselineFact,
+    CatalogRow,
+    CorpusCoverage,
+    CorpusRootCoverage,
+)
+from core.pipeline.evaluate import CorpusArtifactDates
 from core.util.hashing import content_hash, short_hash
 
 __all__ = [
@@ -68,10 +75,12 @@ __all__ = [
     "ReferenceBuildMissing",
     "ReferenceCorpusLayout",
     "ReferenceManifest",
+    "coverage_from_manifest",
     "derive_facts",
     "list_builds",
     "parameter_phrases",
     "parameter_terms",
+    "read_artifact_dates",
     "read_current_build",
     "reference_build_id",
     "reference_content_digest",
@@ -598,6 +607,134 @@ class ChunkText:
     text: str
     content_hash: str | None = None
     heading_path: str | None = None
+
+
+def read_artifact_dates(
+    db_path: str | Path, product_id: str
+) -> CorpusArtifactDates:
+    """Даты наблюдения артефактов **reference-сборки** — носитель I2d для карты (§9).
+
+    Зачем отдельный читатель. У прогона когорты даты приходят через ``StorePort``
+    (:func:`core.pipeline.evaluate.observe_corpus_artifact_dates`), но у карты стора нет:
+    она читает файл сборки. Правило при этом одно и то же, поэтому и форма ответа та же —
+    :class:`CorpusArtifactDates`, а не второй вид дат.
+
+    **Две формы адреса — два источника даты.** ``corpus_artifact`` +
+    ``corpus_doc_version`` дают основную форму (``dv_...``): так адресует прогон когорты.
+    Reference-сборка адресует документ legacy-формой ``{product}:{content_hash}``, поэтому
+    вторая половина индекса строится по ``corpus_docs`` (``doc_id`` + ``fetched_at``).
+
+    **Пустой индекс — законный и значимый ответ.** Сборка без датированных документов
+    даёт пустой индекс, и ``❌`` класса ``explicit``/``authoritative`` понижается до
+    ``❓`` с токеном ``absence_undated`` (I2d). Замер 18.11.2026: карта PG 18
+    опубликовала ``❌`` без датированного носителя именно потому, что читатель смотрел
+    только в пустую ``corpus_artifact``. Поэтому читатель возвращает индекс, а не
+    ``None``: ``None`` означал бы «читать нечем» и оставил бы ``❌`` в силе.
+    """
+    by_doc_version: dict[str, str | None] = {}
+    by_doc: dict[str, str | None] = {}
+    conn = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
+    try:
+        for version, observed_at in conn.execute(
+            "SELECT doc_version_id, observed_at FROM corpus_artifact WHERE product_id = ?",
+            (product_id,),
+        ):
+            key = str(version or "").strip()
+            if not key:
+                continue
+            by_doc_version[key] = _earliest(by_doc_version.get(key), observed_at)
+        try:
+            versions = list(
+                conn.execute(
+                    "SELECT doc_version_id, doc_id FROM corpus_doc_version WHERE product_id = ?",
+                    (product_id,),
+                )
+            )
+        except sqlite3.OperationalError:  # pragma: no cover — таблицы нет в старых файлах
+            versions = []
+        for version, doc_id in versions:
+            key = str(version or "").strip()
+            if key not in by_doc_version:
+                # Версия без строки артефакта даты не имеет: «не найдено» — честный
+                # ответ, а ``None`` здесь означал бы наблюдение, которого нет.
+                continue
+            by_doc[str(doc_id)] = _earliest(by_doc.get(str(doc_id)), by_doc_version[key])
+        # Legacy-адрес ссылки — ``{product}:{content_hash}``, и у reference-сборки это
+        # **единственная** форма: ``corpus_docs.doc_id`` уже имеет её вид, а
+        # ``fetched_at`` — дата наблюдения документа (замер 18.11.2026: 1 136 из 1 136
+        # документов PG 18 датированы, ``corpus_artifact`` при этом пуста — она пишется
+        # прогоном когорты, а не сборкой reference-корпуса). ``reused`` дату не отменяет:
+        # I2d прямо допускает, что дата наблюдения не из этого цикла.
+        try:
+            docs = list(
+                conn.execute(
+                    "SELECT doc_id, fetched_at FROM corpus_docs"
+                    " WHERE product_id = ? AND fetched_at IS NOT NULL",
+                    (product_id,),
+                )
+            )
+        except sqlite3.OperationalError:  # pragma: no cover — таблицы нет в чужом файле
+            docs = []
+        for doc_id, fetched_at in docs:
+            key = str(doc_id or "").strip()
+            if not key:
+                continue
+            by_doc[key] = _earliest(by_doc.get(key), fetched_at)
+    finally:
+        conn.close()
+    return CorpusArtifactDates(
+        product_id=product_id, by_doc_version=by_doc_version, by_doc=by_doc
+    )
+
+
+def _earliest(current: str | None, candidate: str | None) -> str | None:
+    """Самая ранняя из двух дат ISO (слабая опора: документ наблюдался не позже)."""
+    if current is None:
+        return candidate
+    if candidate is None:
+        return current
+    return min(current, candidate)
+
+
+def coverage_from_manifest(
+    manifest: ReferenceManifest | None, product_id: str
+) -> CorpusCoverage:
+    """Покрытие reference-сборки по её манифесту — вход I2c/I2d для карты (§9).
+
+    Сборка объявляет ``complete`` и корни, которые обошла, с датой снятия. Это и есть
+    «пространство, исчерпанное снятием C от даты D»: ``bounded`` опирается на корни,
+    ``explicit``/``authoritative`` — на даты документов (см. :func:`read_artifact_dates`).
+
+    Манифеста нет (чужая сборка, ``--corpus-db``) — покрытие **не заявлено**:
+    ``complete=False`` и пустые корни. Это не «неполно», а «полнота не объявлена», и
+    следствие то же, что у I2c: ``bounded`` не публикуется.
+    """
+    roots: list[CorpusRootCoverage] = []
+    complete = bool(manifest.complete) if manifest is not None else False
+    if manifest is not None:
+        for root in manifest.roots:
+            roots.append(
+                CorpusRootCoverage(
+                    root_url=root,
+                    capture_id=manifest.build_id,
+                    complete=bool(manifest.complete),
+                    observed_how="live",
+                    observed_at=manifest.observed_at,
+                    policy_digest=None,
+                )
+            )
+    return CorpusCoverage(
+        product_id=product_id,
+        complete=complete and bool(roots),
+        roots=roots,
+        expected_sources=0,
+        observed_sources=0,
+        # Момент вычисления — не дата наблюдения: дата носителя живёт в ``roots`` и в
+        # ``artifact_dates``, а это поле только помечает, когда считали покрытие.
+        computed_at=(
+            manifest.observed_at if manifest is not None and manifest.observed_at else ""
+        ),
+    )
 
 
 def iter_reference_chunks(db_path: str | Path, *, build_id: str | None = None) -> Iterator[ChunkText]:

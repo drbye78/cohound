@@ -1509,3 +1509,22 @@ def test_persist_writes_absence_evidence_with_acceptance() -> None:
     assert record["run_id"] == data["run_id"]
     assert record["product_id"] == data["product_id"]
     assert record["param_id"] == data["param"]["param_id"]
+
+
+def test_does_not_provide_is_a_denial_marker() -> None:
+    """«does not provide» — та же форма отрицания, что «not supported».
+
+    Живой случай 18.11.2026 (карта PG 18): `explicit` с цитатой `PostgreSQL does not
+    provide the system software required to identify a failure…` получал заметку
+    `denial_quote_without_markers` — шаблон узнавал «unsupported», но не «does not
+    provide». Пропуск не меняет вердикт, но выбирает неверную цитату отрицания, когда
+    подтверждённых цитат несколько.
+    """
+    from core.pipeline.evaluate import _denial_marker_count
+
+    assert _denial_marker_count(
+        "PostgreSQL does not provide the system software required to identify a failure."
+    ) == 1
+    assert _denial_marker_count("Вендор не предоставляет собственных средств управления.") == 1
+    # Утверждение маркером не становится: иначе выбор цитаты отрицания теряет смысл.
+    assert _denial_marker_count("Свойство доступно без дополнительной настройки.") == 0

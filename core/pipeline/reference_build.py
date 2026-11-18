@@ -674,10 +674,19 @@ def _corpus_chunks(
     doc: CorpusDoc,
     chunks: Sequence[Any],
 ) -> list[CorpusChunk]:
-    """Строки ``corpus_chunks`` из кусков чанкера (``build_id`` проставит публикатор)."""
+    """Строки ``corpus_chunks`` из кусков чанкера (``build_id`` проставит публикатор).
+
+    ``chunk_id`` **приводится к грамматике адреса** (``product:doc:chunk_no``,
+    :func:`core.util.ids.parse_source_id`), а не берётся у чанкера как есть: чанкер
+    возвращает внутреннюю форму ``{document_id}#{no}``, и у корпуса когорты её переписывает
+    ``corpus_index._chunk_id``. Сборка reference-корпуса этого не делала, поэтому адрес
+    чанка в её БД не разбирался: карта PG 18 (18.11.2026) получила
+    ``evidence_doc_version_unresolved`` и, как следствие, ``absence_undated`` — датировать
+    документ было нечем не потому, что даты нет, а потому, что адрес не парсился.
+    """
     return [
         CorpusChunk(
-            chunk_id=chunk.chunk_id,
+            chunk_id=f"{doc_id}:{chunk.chunk_no}",
             doc_id=doc_id,
             product_id=layout.product_id,
             url=url,

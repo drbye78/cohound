@@ -2047,10 +2047,18 @@ def _present_status_denial(out: LLMCellOutput) -> tuple[list[str], str | None]:
 #: требуется настройка» — это утверждение наличия, а не отрицание.
 _DENIAL_MARKER_RE = re.compile(
     r"(?iu)(?<!\w)(?:"
-    r"не\s+(?:поддерж|реализ|предусмотр|допуска|может|работа|имеет|входит|включа|совместим)\w*"
+    r"не\s+(?:поддерж|реализ|предусмотр|допуска|может|работа|имеет|входит|включа|совместим"
+    r"|предоставл|обеспечива)\w*"
     r"|недоступ\w*|невозможн\w*|отсутств\w*|запрещ\w*|исключ\w*|ограничен\w*"
     r"|not\s+supported|unsupported|doesn['’]?t\s+support|do\s+not\s+support"
     r"|no\s+support|not\s+available|cannot|can['’]?t\s+be\s+used|without\s+support"
+    # «не предоставляет» / «does not provide» — та же форма отрицания, что «не поддерживает»,
+    # и в документации она встречается чаще, чем «unsupported»: живой `explicit` на
+    # reference-корпусе (18.11.2026) цитировал «…does not provide the system software
+    # required to …», шаблон её не узнавал и оставлял заметку
+    # `denial_quote_without_markers`. Цена пропуска — выбор неверной цитаты отрицания,
+    # когда подтверждённых цитат несколько.
+    r"|does\s+not\s+provide|do\s+not\s+provide|doesn['’]?t\s+provide|not\s+provided"
     r"|disabled|restricted\s+to|only\s+(?:when|if|for)"
     r")"
 )

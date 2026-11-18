@@ -16,9 +16,11 @@ from core.pipeline.reference_corpus import (
     ChunkText,
     ReferenceCorpusLayout,
     ReferenceManifest,
+    coverage_from_manifest,
     derive_facts,
     parameter_phrases,
     parameter_terms,
+    read_artifact_dates,
     read_manifest,
     reference_build_id,
     select_quote,
@@ -374,3 +376,90 @@ def test_derive_facts_scores_phrase_not_single_word() -> None:
     )
     # Слова есть, фразы нет — это не находка.
     assert _fact("The backup was incremental.") is FactStatus.UNCLEAR
+
+
+# ---------------------------------------------------------------------------
+# Даты наблюдений и покрытие reference-сборки (I2c/I2d для карты, §9)
+# ---------------------------------------------------------------------------
+
+
+def _reference_db_with_artifacts(tmp_path: Path, rows: list[tuple[str, str, str | None]]) -> Path:
+    """Минимальная reference-БД: ``corpus_artifact`` + ``corpus_doc_version``."""
+    import sqlite3
+
+    db = tmp_path / "reference.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE corpus_artifact (run_id TEXT, product_id TEXT, url_key TEXT,"
+        " doc_version_id TEXT, observed_at TEXT, observed_how TEXT, capture_id TEXT,"
+        " root_url TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE corpus_doc_version (doc_version_id TEXT PRIMARY KEY,"
+        " product_id TEXT, doc_id TEXT)"
+    )
+    for version, doc_id, observed_at in rows:
+        conn.execute(
+            "INSERT INTO corpus_artifact VALUES ('b','postgresql',?,?,?,'live','c','r')",
+            (version, version, observed_at),
+        )
+        conn.execute(
+            "INSERT INTO corpus_doc_version VALUES (?, 'postgresql', ?)", (version, doc_id)
+        )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_artifact_dates_empty_table_is_an_index_not_none(tmp_path: Path) -> None:
+    """Пустая таблица — «наблюдений не записано», а не «читать нечем» (I2d понижает `❌`).
+
+    Замер 18.11.2026: карта PG 18 опубликовала `❌` по цитате без записи наблюдения —
+    ровно потому, что пустой ответ было легко принять за «проверка неприменима».
+    """
+    db = _reference_db_with_artifacts(tmp_path, [])
+    dates = read_artifact_dates(db, "postgresql")
+    assert dates is not None
+    assert dates.by_doc_version == {}
+    assert dates.by_doc == {}
+
+
+def test_artifact_dates_map_version_and_doc_to_observation(tmp_path: Path) -> None:
+    db = _reference_db_with_artifacts(
+        tmp_path,
+        [
+            ("dv_1", "postgresql:aaa", "2026-11-17T22:06:31+00:00"),
+            ("dv_2", "postgresql:aaa", "2026-11-18T10:00:00+00:00"),
+        ],
+    )
+    dates = read_artifact_dates(db, "postgresql")
+    assert dates.by_doc_version["dv_1"] == "2026-11-17T22:06:31+00:00"
+    # Один документ в двух версиях — самая ранняя дата (слабая опора, не «последняя»).
+    assert dates.by_doc["postgresql:aaa"] == "2026-11-17T22:06:31+00:00"
+
+
+def test_coverage_from_manifest_marks_roots_complete_with_date() -> None:
+    manifest = ReferenceManifest.from_dict(
+        {
+            "build_id": "ref_postgresql_18_x",
+            "product_id": "postgresql",
+            "version": "18",
+            "roots": ["https://www.postgresql.org/docs/18/"],
+            "complete": True,
+            "observed_at": "2026-11-17T22:06:31+00:00",
+            "docs": 1136,
+            "chunks": 9763,
+        }
+    )
+    coverage = coverage_from_manifest(manifest, "postgresql")
+    assert coverage.complete is True
+    assert [root.root_url for root in coverage.roots] == ["https://www.postgresql.org/docs/18/"]
+    assert coverage.roots[0].observed_at == "2026-11-17T22:06:31+00:00"
+    assert coverage.roots[0].complete is True
+
+
+def test_coverage_from_absent_manifest_is_not_claimed() -> None:
+    """Манифеста нет — полнота не заявлена, а не «полно»: `bounded` не публикуется."""
+    coverage = coverage_from_manifest(None, "postgresql")
+    assert coverage.complete is False
+    assert coverage.roots == []

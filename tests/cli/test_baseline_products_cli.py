@@ -1050,3 +1050,53 @@ def test_group_help_names_the_chain() -> None:
     args = parser.parse_args(["baseline"])
     with pytest.raises(CliError, match="build → recon → review → report → map"):
         args.handler(args)
+
+
+def test_map_llm_concurrency_flag_exists_and_keeps_map_id(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """`--llm-concurrency` ускоряет исполнение, но не меняет `map_id`.
+
+    Ось числа вызовов в полёте — условие исполнения (как `--llm-concurrency` прогона, его
+    нет в `EXECUTION_CONTRACT_FIELDS`): если бы она входила в `map_id`, две карты одного
+    каталога на одной сборке стали бы несравнимы из-за планировщика.
+    """
+    monkeypatch.chdir(tmp_path)
+    package = _package_with_manifest(tmp_path)
+    build_id = _reference_db(tmp_path)
+    parser = build_parser()
+    ids = []
+    for concurrency in ("1", "4"):
+        args = parser.parse_args(
+            [
+                "baseline", "map", "--package", str(package), "--baseline", "upstream-pg",
+                "--build", build_id, "--json", "--llm-concurrency", concurrency,
+                "--dry-run",
+            ]
+        )
+        args.evaluator = _MapEvaluator()
+        assert args.handler(args) == 0
+        payload = json.loads(capsys.readouterr().out)
+        ids.append(payload["map_id"])
+    assert ids[0] == ids[1], "число вызовов в полёте не является условием измерения"
+
+
+def test_map_progress_goes_to_stderr_not_stdout(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Прогресс не ломает `--json`: длинный прогон обязан быть видимым, а stdout — чистым."""
+    monkeypatch.chdir(tmp_path)
+    package = _package_with_manifest(tmp_path)
+    build_id = _reference_db(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "baseline", "map", "--package", str(package), "--baseline", "upstream-pg",
+            "--build", build_id, "--json", "--dry-run", "--llm-concurrency", "2",
+        ]
+    )
+    args.evaluator = _MapEvaluator()
+    assert args.handler(args) == 0
+    captured = capsys.readouterr()
+    json.loads(captured.out)  # stdout — только результат
+    assert "[map 1/" in captured.err
