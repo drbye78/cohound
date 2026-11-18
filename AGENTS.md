@@ -130,7 +130,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `core/domain/` | Enums, models, invariants, scoring, R-2, anchors, dictionary. Pure Python, no I/O. |
 | `core/ports/` | `Protocol` contracts only (LLM, crawler, extractor, chunker, store, gateway, state, …). |
 | `core/pipeline/` | Scenarios Ш1–Ш9 (numbered as in the spec): orchestrator + 15 phases, gates, crawl, corpus, retrieve/evaluate, review/compute/report, incremental, experiments, package authoring. |
-| `core/store/` | SQLite DDL + triggers, `StorePort` implementations, row converters, run backup. |
+| `core/store/` | SQLite DDL + triggers, `StorePort` implementations, row converters, run backup, `corpus_reader.py` (read-only corpus of a run whose `schema_version` differs — explicit opt-in, no verdicts, no writes). |
 | `core/adapters/` | Concrete engines behind ports: extractors (html/text/epub/docling/pdfium), container readers, lexical+vector indexes, embedders, LLMs, search, crawlers, remote-* (seam). |
 | `core/util/` | Text, security/SSRF, sanitize, retrieval eval, agreement (κ), feed, format probing, container policy, memory, robots/sitemap/rate limit, cache, ids/hashing/logging, `embed_input` (состав входа эмбеддера — объявление, а не аргумент, O19). |
 | `core/config/` | `run.yaml`/package loading, `deploy.yaml` (zone profile), path layout, domain profiles, crawl sources, passports. |
@@ -780,6 +780,15 @@ entry point.
 ./hound.py report --runs-dir runs --run-id {run_id}
 ./hound.py review --runs-dir runs --run-id {run_id}
 
+# 4b. Reconnaissance over a finished run's corpus — material, NOT evidence (no cell, no
+#     report, no run_id change). --param uses render_queries, i.e. the very queries Ш6
+#     would run, which is how a false `present` is diagnosed in a minute.
+./hound.py search "pluggable TOAST" --run-id {run_id} --top-k 5 [--product P] [--explain]
+./hound.py search --param {param_id} --run-id {run_id} --explain
+./hound.py search "…" --run-id {run_id} --retrieval-profile R2 --answer   # LLM = recon
+#     A run-DB of another schema_version is refused; reading its corpus only is explicit:
+./hound.py search "…" --run-id {run_id} --allow-legacy-schema
+
 # 5. Evaluator model selection is a measurement task (A3), not a predetermination.
 ./hound.py experiment evaluator-benchmark --runs-dir runs --run-id {run_id} \
   --golden packages/{case_id}/golden.csv --model {model_id}
@@ -802,6 +811,16 @@ Resume/force: `--until {phase}` stops after a phase; `--reset` repeats the phase
 the phase journal but **keeps** the durable crawl session (`corpus` reopens it and does not
 re-fetch URLs that have retained bytes); only `--from-scratch` wipes the crawl session and
 adds a live re-fetch bypassing the R7 cache.
+
+**Corpus search is reconnaissance, never evidence.** `./hound.py search "…"` reads the corpus
+of a finished run through `retrieve()` on the recorded build (R0 default — no weights; R1/R2
+need a declared embed model), and `--param PARAM_ID` uses `render_queries`, i.e. the very
+queries Ш6 would run. It writes nothing: no cell, no report, no `run_id` change. `--answer`
+goes through the **discovery** port, so the text cannot land in `cell_evidence`. A run-DB of
+another `schema_version` is refused; reading only its corpus is explicit
+(`--allow-legacy-schema`, owner decision 18.11.2026 — `runs`+`corpus_chunks` only, no
+verdicts). Measured cost on 253 306 chunks: **29.6 s** R0 / **40.0 s** R2 per call, almost all
+of it the tantivy seed (the index is not persisted, C8) — the search itself is milliseconds.
 
 Crawl sessions: `./hound.py crawl run|status|list|resume|restart|cancel` (`resume` is
 idempotent: same `session_id`, already-`FETCHED` items are not re-fetched). Refresh policy
