@@ -88,6 +88,9 @@ COLUMNS: tuple[tuple[str, str, int], ...] = (
 #: Классы параметра: что именно оценивается.
 PARAM_CLASSES = ("value", "capability", "offer", "gui_feature")
 CONFIDENCE = ("high", "medium", "low")
+
+#: Порядок проверки: сомнительное — первым (`review_order`).
+REVIEW_PRIORITY = ("low", "medium")
 ABSENCE_RULES = ("explicit", "parameter_reference", "distribution_absence", "registry_absence")
 
 FILL_LOW = "FFC7CE"
@@ -131,6 +134,8 @@ LEGEND: tuple[str, ...] = (
     "чего не измеряла.",
     "",
     "ПОРЯДОК ПРОВЕРКИ",
+    "Лист review_order — только неуверенные строки (low сверху, затем medium): это и есть",
+    "очередь. Лист semantics — все 181 в порядке сравнительной таблицы, с фильтром и заливкой.",
     "1. Строки с низкой уверенностью — первыми: ответ на question либо правка semantics/rule.",
     "2. Затем жёлтые: решить границу ⚠️/❌ (часто это «частично» против «нет»).",
     "3. Заполнить review: accept — как есть; fix — исправлено (правка видна в колонках);",
@@ -331,6 +336,36 @@ def build(records: list[dict[str, Any]], package: Path, out: Path) -> None:
             ])
     raw.freeze_panes = "A2"
     raw.auto_filter.ref = f"A1:G{raw.max_row}"
+
+    # Лист проверки: только неуверенные строки, `low` первыми. Основной лист идёт в
+    # порядке сравнительной таблицы (разделы значимы), но человек, у которого есть
+    # полчаса, не должен добывать порядок фильтром — он открывает этот лист и идёт сверху.
+    review = wb.create_sheet("review_order")
+    review.append([label for _key, label, _width in COLUMNS[:3]] + ["Уверенность", "Вопрос", "Семантика", "Правило"])
+    review_order = sorted(
+        (record for record in records if record["confidence"] != "high"),
+        key=lambda record: (REVIEW_PRIORITY.index(record["confidence"]), record["n"]),
+    )
+    for record in review_order:
+        review.append([
+            record["n"],
+            record["param_id"],
+            catalog[record["n"]]["title"],
+            record["confidence"],
+            record.get("question") or "",
+            record["semantics"],
+            record["rule"],
+        ])
+        line = review.max_row
+        fill = fills[record["confidence"]]
+        for column in range(1, 8):
+            target = review.cell(row=line, column=column)
+            target.alignment = wrap
+            target.fill = fill
+    for letter, width in zip("ABCDEFG", (5, 34, 46, 12, 60, 60, 70), strict=True):
+        review.column_dimensions[letter].width = width
+    review.freeze_panes = "A2"
+    review.auto_filter.ref = f"A1:G{review.max_row}"
 
     legend = wb.create_sheet("legend")
     legend.column_dimensions["A"].width = 118

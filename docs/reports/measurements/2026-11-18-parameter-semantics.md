@@ -114,8 +114,10 @@
 
 ## 6. Что дальше
 
-1. Человек открывает `sources/parameter_semantics.candidate.xlsx`: строки `low` (красные)
-   и `medium` (жёлтые) — первыми, в колонке `review` ставит `accept` / `fix` / `reject`.
+1. Человек открывает `sources/parameter_semantics.candidate.xlsx`, лист `review_order` —
+   64 неуверенные строки, `low` сверху; в колонке `review` ставит `accept` / `fix` / `reject`.
+   Лист `semantics` — все 181 в порядке сравнительной таблицы (фильтр, заливка),
+   лист `golden_00` — исходные 905 ячеек с дословными значениями, комментариями и ссылками.
 2. `compile` → `apply` → новый `catalog.csv`; это `execution_change`, `run_id` меняется.
 3. Пересобрать `baseline_facts.csv` (`hound baseline recon`) с новыми терминами: 45
    `present` из 181 были получены на терминах-словах заголовка, и ожидаемое падение —
