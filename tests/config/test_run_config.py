@@ -134,6 +134,41 @@ def test_load_baselines_happy() -> None:
     assert rows[1].min_version is None
 
 
+def test_load_baselines_rejects_duplicate_key(tmp_path: Path) -> None:
+    # Две строки на один ``(baseline_id, param_id)`` объявляют два режима одного
+    # параметра: файл испорчен, и выбор «первой строки»/алфавита режима был бы решением,
+    # которого никто не принимал (тот же класс, что дубль ``param_id`` в каталоге).
+    path = _write(
+        tmp_path,
+        "baselines.csv",
+        "baseline_id,param_id,min_version,inheritance_mode,note\n"
+        "baseline_a,param_a,,direct,\n"
+        "baseline_a,param_a,,blocked,\n",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        load_baselines(path)
+    message = str(excinfo.value)
+    assert "строка 3" in message  # адрес — вторая строка ключа, а не первая
+    assert "baseline_a" in message and "param_a" in message
+    assert "direct" in message and "blocked" in message
+
+
+def test_load_baselines_allows_same_param_on_different_lines(tmp_path: Path) -> None:
+    # Один параметр у разных предков — не дубль: линии разные, ключ разный.
+    path = _write(
+        tmp_path,
+        "baselines.csv",
+        "baseline_id,param_id,min_version,inheritance_mode,note\n"
+        "baseline_a,param_a,,direct,\n"
+        "baseline_b,param_a,,conditional,\n",
+    )
+    rows = load_baselines(path)
+    assert [(r.baseline_id, r.param_id) for r in rows] == [
+        ("baseline_a", "param_a"),
+        ("baseline_b", "param_a"),
+    ]
+
+
 def test_load_cohort_happy() -> None:
     cohort = load_cohort(FIXTURES / "cohort.yaml")
     assert cohort.case_id == "case_x"

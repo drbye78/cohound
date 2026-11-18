@@ -305,8 +305,12 @@ def test_no_upstreams_means_cross_linear_parameter() -> None:
 
 
 def test_conditional_goes_to_pending_not_resolved() -> None:
+    # ``conditional`` с **принятым** фактом: кандидат на ревью, а не статус. Без факта
+    # линия не наследует вовсе (см. ``test_conditional_without_fact_does_not_cancel_far_ancestor``).
     baseline = _baselines()["param_b"]  # conditional
-    result = inheritance_wave(_plan(["param_b"]), [baseline], {"p1": _passport("p1")})
+    result = inheritance_wave(
+        _plan(["param_b"]), [baseline], {"p1": _passport("p1")}, facts=[_fact(param_id="param_b")]
+    )
 
     [cell] = result.cells
     assert cell.state is CellState.PENDING
@@ -361,6 +365,24 @@ def _direct_row(baseline_id: str, param_id: str = "param_a") -> BaselineRow:
         param_id=param_id,
         min_version=None,
         inheritance_mode=InheritanceMode.DIRECT,
+    )
+
+
+def _conditional_row(baseline_id: str, param_id: str = "param_a") -> BaselineRow:
+    return BaselineRow(
+        baseline_id=baseline_id,
+        param_id=param_id,
+        min_version=None,
+        inheritance_mode=InheritanceMode.CONDITIONAL,
+    )
+
+
+def _blocked_row(baseline_id: str, param_id: str = "param_a") -> BaselineRow:
+    return BaselineRow(
+        baseline_id=baseline_id,
+        param_id=param_id,
+        min_version=None,
+        inheritance_mode=InheritanceMode.BLOCKED,
     )
 
 
@@ -589,11 +611,97 @@ def test_min_version_blocks_direct_when_upstream_too_old() -> None:
     assert [item["reason"] for item in decision.reasons] == ["below_min_version"]
 
 
+def test_conditional_without_fact_does_not_cancel_far_ancestor() -> None:
+    # Ближний предок объявил параметр как ``conditional``, но факта у этой линии нет;
+    # дальний объявил ``direct`` и факт есть. Условная строка «без доказательства» — это
+    # «доказательства нет», и она не вправе отменить наследование от дальнего предка.
+    passport = _passport("p1", upstreams=_two_upstreams())
+    baselines = [_conditional_row("base_1"), _direct_row("base_2")]
+    facts = [_fact(baseline_id="base_2", quote="fork documents it")]
+
+    result = inheritance_wave(
+        _plan(["param_a"]), baselines, {"p1": passport}, facts=facts
+    )
+    [cell] = result.cells
+    assert cell.status is Status.OK
+    assert cell.evidence[0].source_id == "upstream://base_2#param_a@16"
+
+    decision = _decide(passport, baselines, facts)
+    assert decision.inherited_from == "base_2"
+    # Ближняя линия названа причиной отказа, а не тишиной.
+    assert [item["baseline_id"] for item in decision.reasons] == ["base_1"]
+    assert [item["reason"] for item in decision.reasons] == ["baseline_fact_missing"]
+
+
+def test_conditional_with_accepted_fact_stops_the_cycle() -> None:
+    # Условная строка с принятым фактом — кандидат на ревью: решает человек, и дальний
+    # предок уже не рассматривается (иначе решение человека подменялось бы автоматикой).
+    passport = _passport("p1", upstreams=_two_upstreams())
+    baselines = [_conditional_row("base_1"), _direct_row("base_2")]
+    facts = [
+        _fact(baseline_id="base_1"),
+        _fact(baseline_id="base_2", quote="fork documents it"),
+    ]
+
+    result = inheritance_wave(
+        _plan(["param_a"]), baselines, {"p1": passport}, facts=facts
+    )
+    [cell] = result.cells
+    assert cell.state is CellState.PENDING and cell.status is None
+
+    decision = _decide(passport, baselines, facts)
+    assert decision.inherited_from == "base_1"
+    assert [item["reason"] for item in decision.reasons] == ["mode_conditional"]
+    assert [item["baseline_id"] for item in decision.reasons] == ["base_1"]
+
+
+def test_conditional_below_min_version_does_not_produce_a_candidate() -> None:
+    # Порог версии проверяется раньше режима: строка ``conditional`` с ``min_version``
+    # выше объявленной версии предка не даёт даже кандидата — доказательства нет.
+    baseline = _baselines()["param_b"].model_copy(update={"min_version": "20.0"})
+    passport = _passport("p1", version="16.0")
+    fact = _fact(param_id="param_b", version="16")
+
+    decision = _decide(passport, [baseline], [fact], param_id="param_b")
+    assert decision.cell is None
+    assert [item["reason"] for item in decision.reasons] == ["below_min_version"]
+
+
+def test_two_ancestors_one_row_count_as_one_planned_param() -> None:
+    # Два объявленных предка, у каждого одна строка на ОДИН параметр: ближний ``blocked``,
+    # дальний ``direct``, факт только у дальнего. Объявленный параметр — один, выпущена
+    # одна ячейка, поэтому «blocked 1 skipped» рядом с выпущенным ✅ — ложь о работе волны.
+    passport = _passport("p1", upstreams=_two_upstreams())
+    baselines = [_blocked_row("base_1"), _direct_row("base_2")]
+    facts = [_fact(baseline_id="base_2", quote="fork documents it")]
+
+    result = inheritance_wave(
+        _plan(["param_a"]), baselines, {"p1": passport}, facts=facts
+    )
+    [cell] = result.cells
+    assert cell.status is Status.OK
+
+    decision = _decide(passport, baselines, facts)
+    product = inheritance_basis(
+        baselines,
+        products=["p1"],
+        passports={"p1": passport},
+        params=_plan(["param_a"]).params,
+        cells=result.cells,
+        decisions=[decision],
+    )["products"]["p1"]
+
+    assert product["planned"] == {"direct": 1, "conditional": 0, "blocked": 0}
+    assert product["released"]["direct"]["evaluated"] == 1
+    # Режим выпущенной ячейки — режим **выигравшего** предка, а не строки файла.
+    assert "blocked 0 skipped" in product["summary"]
+    assert "blocked 1" not in product["summary"]
+    assert "direct 1/1 evaluated" in product["summary"]
+
+
 # --------------------------------------------------------------------------- #
 # П>В
 # --------------------------------------------------------------------------- #
-
-
 def _inherited_cell() -> Cell:
     # model_construct: проверяется только П>В-переход, а не I1 наследуемой ячейки.
     return Cell.model_construct(
@@ -652,6 +760,145 @@ def test_precedence_unresolved_direct_keeps_inherited() -> None:
     assert apply_precedence(inherited, direct) is inherited
 
 
+class _RegistryStore(_RecordingStore):
+    """Store-дублёр, в котором реестр уже дал ячейку (высокий источник, Fork D)."""
+
+    def __init__(self, registry: list[Cell]) -> None:
+        super().__init__()
+        self._registry = registry
+
+    def iter_registry_cells(self, run_id: str) -> list[Cell]:
+        return list(self._registry)
+
+
+def _registry_cell(
+    param_id: str = "param_a", status: Status = Status.OK
+) -> Cell:
+    return Cell.model_construct(
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id=param_id,
+        state=CellState.EVALUATED,
+        status=status,
+        source_kind=SourceKind.REGISTRY,
+        evidence=[],
+        absence_evidence=[],
+        reviewed_by=None,
+    )
+
+
+def test_cell_absorbed_by_registry_is_not_an_ancestor_fallback() -> None:
+    # Реестр дал согласный статус ⇒ наследованной ячейке писать нечего, волна её не
+    # выпускает. Параметр при этом **не наследован**: в «проседание к предку» он попасть
+    # не должен (проседания не было), иначе базис завышает унаследованное.
+    store = _RegistryStore([_registry_cell()])
+    result = inheritance_wave(
+        _plan(["param_a"]),
+        [_baselines()["param_a"]],
+        {"p1": _passport("p1")},
+        store=store,
+        facts=[_fact(param_id="param_a")],
+    )
+
+    assert result.cells == []
+    assert store.cells == []
+    # Evidence без ячейки не пишется: иначе прогон публикует доказательство, которого в
+    # его карте нет, и цитата «подтверждает» ячейку, отсутствующую у продукта.
+    assert store.evidence == []
+    [note] = result.log_entries
+    assert "not_inherited 1 (superseded_by_registry: 1)" in note
+    assert "fallback" not in note
+
+
 def test_baselines_must_be_list() -> None:
     with pytest.raises(ValueError):
         inheritance_wave(_plan(["param_a"]), {"param_a": _baselines()["param_a"]}, {})  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Провенанс исчерпания: контур ``inheritance`` в I3-протоколе
+# --------------------------------------------------------------------------- #
+
+
+class _PhaseStateStore:
+    """Store-дублёр только для чтения: журнал фаз и пустые выборки."""
+
+    def __init__(self, states: dict[str, str]) -> None:
+        self._states = states
+
+    def get_phase_state(self, run_id: str) -> dict[str, str]:
+        return dict(self._states)
+
+    def iter_corpus_docs(self, run_id: str) -> list[Any]:
+        return []
+
+    def iter_corpus_coverage(self, run_id: str) -> list[Any]:
+        return []
+
+    def iter_registry_cells(self, run_id: str) -> list[Any]:
+        return []
+
+    def get_crawl_session(self, session_id: str) -> None:
+        return None
+
+
+def _exhaustion_facts(
+    *,
+    products: tuple[str, ...] = ("p1",),
+    passports: dict[str, Passport] | None = None,
+    baselines: list[BaselineRow] | None = None,
+    inheritance_done: bool = True,
+) -> dict[str, frozenset[str]]:
+    """``contours_run`` из наблюдённых фактов фазы Ш4."""
+    from types import SimpleNamespace
+
+    from core.pipeline.phases import _observed_exhaustion_facts
+
+    ctx = SimpleNamespace(
+        store=_PhaseStateStore({"inheritance": "ok"} if inheritance_done else {}),
+        ports=SimpleNamespace(),
+        clock=None,
+    )
+    inputs = SimpleNamespace(
+        baselines=baselines if baselines is not None else [_baselines()["param_a"]]
+    )
+    facts = _observed_exhaustion_facts(
+        ctx,
+        _plan(["param_a"], products=products),
+        inputs,
+        passports if passports is not None else {"p1": _passport("p1")},
+    )
+    return dict(facts.contours_run)
+
+
+def test_inheritance_contour_counts_product_with_declared_upstream_line() -> None:
+    # Контур исполнен, если у продукта есть upstream-линия с совпадающей строкой
+    # ``baselines.csv``. Поля ``Passport.upstream`` не существует — чтение по нему молча
+    # давало пустой контур у всех продуктов, и I3-протокол терял ``inheritance``.
+    contours = _exhaustion_facts()
+    assert contours["p1"] == frozenset({"inheritance"})
+
+
+def test_inheritance_contour_skips_product_without_passport() -> None:
+    contours = _exhaustion_facts(products=("p1", "p2"))
+    assert contours["p1"] == frozenset({"inheritance"})
+    assert contours["p2"] == frozenset()
+
+
+def test_inheritance_contour_skips_passport_without_upstreams() -> None:
+    # Пустой список линий — наследовать не от кого: контур для продукта не исполнился.
+    contours = _exhaustion_facts(passports={"p1": _passport("p1", upstreams=[])})
+    assert contours["p1"] == frozenset()
+
+
+def test_inheritance_contour_skips_unmatched_baseline_id() -> None:
+    # Линия объявлена, но строки базлайна на неё нет — волна продукт не рассматривает.
+    contours = _exhaustion_facts(
+        passports={"p1": _passport("p1", baseline_id="base_9")}
+    )
+    assert contours["p1"] == frozenset()
+
+
+def test_inheritance_contour_requires_the_phase_to_have_run() -> None:
+    contours = _exhaustion_facts(inheritance_done=False)
+    assert contours["p1"] == frozenset()

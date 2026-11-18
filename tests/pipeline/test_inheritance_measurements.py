@@ -466,11 +466,16 @@ def test_inheritance_basis_counts_precedence_candidate_as_wave_work() -> None:
 
 def test_wave_publishes_basis_in_log_entries() -> None:
     # Второй источник операторской видимости: заметка фазы (``results[].notes`` вывода).
+    #
+    # ``conditional``-строка получает факт намеренно: с 19.11.2026 условное наследование
+    # выпускает кандидата только для линии, у которой доказательство **есть** и оно
+    # принято (``inheritance.py``, порядок проверок). Без факта строка даёт
+    # ``baseline_fact_missing``, и «conditional 1/1 pending» было бы ложью.
     result = inheritance_wave(
         _plan(["param_a", "param_b", "param_c"]),
         [_baselines()[key] for key in ("param_a", "param_b", "param_c")],
         {"p1": _passport()},
-        facts=[_fact("param_a")],
+        facts=[_fact("param_a"), _fact("param_b")],
     )
 
     [note] = result.log_entries

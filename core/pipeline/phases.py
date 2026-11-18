@@ -858,12 +858,13 @@ def _observed_exhaustion_facts(
     inheritance_products: set[str] = set()
     if _phase_done(ctx, run_id, "inheritance"):
         baselines = list(getattr(inputs, "baselines", None) or [])
+        declared = {str(row.baseline_id) for row in baselines if row is not None}
         for product in products:
             passport = (passports or {}).get(product)
-            upstream = getattr(passport, "upstream", None)
-            if upstream is None:
-                continue
-            if any(row.baseline_id == upstream.baseline_id for row in baselines):
+            # ``Passport.upstreams`` — список линий (план 27 §3.2); поля ``upstream``
+            # не существует, и ``getattr`` по нему молча давал пустой контур у всех.
+            upstreams = list(getattr(passport, "upstreams", None) or [])
+            if any(str(upstream.baseline_id) in declared for upstream in upstreams):
                 inheritance_products.add(product)
 
     protected = collect_protected_cells(ctx.store, run_id)

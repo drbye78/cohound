@@ -294,25 +294,45 @@ def _catalog_row(row: dict[str, str | None]) -> CatalogRow:
 
 
 def load_baselines(path: str | Path) -> list[BaselineRow]:
-    """Загружает ``baselines.csv`` (§4.2) в ``list[BaselineRow]``."""
+    """Загружает ``baselines.csv`` (§4.2) в ``list[BaselineRow]``.
+
+    Дубль ключа ``(baseline_id, param_id)`` отвергается: две строки на один ключ объявляют
+    два режима наследования одного параметра, и «победил тот, что раньше в файле» (или
+    алфавит режима) было бы решением, которого никто не принимал. Это тот же класс, что
+    дубль ``param_id`` в каталоге, — испорченный файл, а не выбор.
+
+    :raises ValueError: строка не валидна либо ключ повторён; сообщение называет номер
+        второй строки, сам ключ и оба режима.
+    """
     rows: list[BaselineRow] = []
+    seen: dict[tuple[str, str], tuple[int, InheritanceMode]] = {}
     for lineno, row in _iter_csv(path, _BASELINE_COLUMNS, "baselines.csv"):
         try:
-            rows.append(
-                BaselineRow(
-                    baseline_id=_req(row, "baseline_id"),
-                    param_id=_req(row, "param_id"),
-                    min_version=_opt(row, "min_version"),
-                    inheritance_mode=InheritanceMode(
-                        _req(row, "inheritance_mode")
-                        if row.get("inheritance_mode")
-                        else InheritanceMode.DIRECT
-                    ),
-                    note=_opt(row, "note"),
-                )
+            parsed = BaselineRow(
+                baseline_id=_req(row, "baseline_id"),
+                param_id=_req(row, "param_id"),
+                min_version=_opt(row, "min_version"),
+                inheritance_mode=InheritanceMode(
+                    _req(row, "inheritance_mode")
+                    if row.get("inheritance_mode")
+                    else InheritanceMode.DIRECT
+                ),
+                note=_opt(row, "note"),
             )
         except (ValidationError, ValueError) as exc:
             raise ValueError(f"baselines.csv строка {lineno}: {exc}") from exc
+        key = (parsed.baseline_id, parsed.param_id)
+        first = seen.get(key)
+        if first is not None:
+            raise ValueError(
+                f"baselines.csv строка {lineno}: ключ "
+                f"({parsed.baseline_id}, {parsed.param_id}) уже объявлен строкой "
+                f"{first[0]} с режимом {first[1].value}, а здесь — "
+                f"{parsed.inheritance_mode.value}; две строки на один параметр "
+                "неоднозначны и не разрешаются выбором одной из них"
+            )
+        seen[key] = (lineno, parsed.inheritance_mode)
+        rows.append(parsed)
     return rows
 
 

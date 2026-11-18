@@ -15,7 +15,9 @@ direct  upstream-факт переносится как статус (✅) — *
         ячейка не выпускается, ошибка собирается в ``errors``.
 conditional
         уходит в ревью/кандидат: ``state=pending``, ``status=None`` (НЕ
-        разрешённый статус).
+        разрешённый статус) — но **только** если у линии есть принятый факт
+        ``present``: строка «без доказательства» не отменяет наследование от
+        дальнего предка, где доказательство есть.
 blocked upstream-факт не используется — пропуск (ячейка не производится).
 ======  ===================================================================
 
@@ -41,7 +43,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from core.domain import (
@@ -100,6 +102,11 @@ REASON_FACT_MISSING = "baseline_fact_missing"
 #: Причина «факт есть, но не принят» — ``baseline_fact_pending``/``..._rejected``.
 REASON_FACT_REVIEW = "baseline_fact_{review}"
 
+#: Причина «ячейка наследования не выпущена: реестр (высокий источник) уже дал статус».
+#: Параметр не наследован, хотя факт был и линия его описывает — и это не проседание к
+#: следующему предку, а поглощение более высоким источником (Fork D).
+REASON_SUPERSEDED_BY_REGISTRY = "superseded_by_registry"
+
 #: Причина «факт принят, но статус не ``present``» — ``baseline_fact_absent``/``..._unclear``.
 REASON_FACT_STATUS = "baseline_fact_{status}"
 
@@ -120,19 +127,19 @@ def _passport_index(passports: Any) -> dict[str, Passport]:
 
 
 def _baseline_index(baselines: Iterable[BaselineRow]) -> dict[tuple[str, str], BaselineRow]:
-    """Индексирует строки baseline по ``(baseline_id, param_id)`` (детерминированно).
+    """Индексирует строки baseline по ``(baseline_id, param_id)``.
 
-    При дублях остаётся первая по сортировке ``(baseline_id, param_id, mode)``; повторные
-    не создают неоднозначности.
+    Дублей ключа здесь не бывает: ``load_baselines`` отвергает повтор
+    ``(baseline_id, param_id)`` как испорченный файл (две строки объявляли бы два режима
+    одного параметра). Поэтому индекс — обычный словарь: тай-брейка по режиму нет и не
+    должно быть, иначе «победил алфавит режима» стал бы решением, которого никто не
+    принимал.
     """
-    ordered = sorted(
-        (row for row in baselines if row is not None),
-        key=lambda row: (row.baseline_id, row.param_id, row.inheritance_mode.value),
-    )
-    index: dict[tuple[str, str], BaselineRow] = {}
-    for row in ordered:
-        index.setdefault((row.baseline_id, row.param_id), row)
-    return index
+    return {
+        (row.baseline_id, row.param_id): row
+        for row in baselines
+        if row is not None
+    }
 
 
 def _fact_index(
@@ -385,6 +392,13 @@ class InheritanceDecision:
     cell: Cell | None = None
     evidence: CellEvidence | None = None
     reasons: tuple[dict[str, str], ...] = ()
+    #: ``baseline_id`` линии, от которой пришла ячейка (``None`` — наследования нет).
+    inherited_from: str | None = None
+    #: ``baseline_id`` линии, чья ячейка **не выпущена** из-за более высокого источника:
+    #: реестр уже дал согласный статус, и волне писать нечего. Параметр не наследован —
+    #: он виден в ``not_inherited`` с токеном ``superseded_by_registry``, а не в
+    #: ``ancestor_fallbacks`` (проседания к другому предку не было).
+    superseded_by: str | None = None
 
 
 def decide_inheritance(
@@ -404,6 +418,13 @@ def decide_inheritance(
     ``baselines.csv`` **и** принятый факт ``present`` на его версии. Проседание к
     следующему предку разрешено и правильно: если ближний предок параметр не описывает, а
     дальний описывает, возможность пришла из дальнего — продукт объявил обе линии.
+
+    Порядок проверок строки один для всех режимов: ``нет строки → blocked →
+    min_version → версия не парсится → нет факта → review не accepted → status не
+    present → conditional → direct``. ``conditional`` стоит **после** проверки
+    доказательства: условная строка без факта — это «доказательства нет», и она не вправе
+    отменить наследование от дальнего предка, где доказательство есть. Принятый факт у
+    ``conditional`` даёт ``pending``-кандидата (решает человек), у ``direct`` — ячейку.
 
     Факт ищется **ровно на мажорной версии** предка (§7.2): «где-нибудь ≤ V» скрыло бы
     регрессию upstream, при которой параметр исчез в новой версии.
@@ -429,15 +450,6 @@ def decide_inheritance(
         if policy.inheritance_mode is InheritanceMode.BLOCKED:
             reasons.append({**line, "reason": REASON_MODE_BLOCKED})
             continue
-        if policy.inheritance_mode is InheritanceMode.CONDITIONAL:
-            # Кандидат на ревью: строка объявляет условное наследование, и решает человек.
-            reasons.append({**line, "reason": REASON_MODE_CONDITIONAL})
-            return InheritanceDecision(
-                product_id=product_id,
-                param_id=param_id,
-                cell=_conditional_cell(run_id, product_id, param_id),
-                reasons=tuple(reasons),
-            )
         if not _satisfies_min_version(version, policy.min_version):
             reasons.append({**line, "reason": REASON_BELOW_MIN_VERSION})
             continue
@@ -461,6 +473,18 @@ def decide_inheritance(
             )
             continue
 
+        if policy.inheritance_mode is InheritanceMode.CONDITIONAL:
+            # Условное наследование с **принятым** доказательством: кандидат на ревью,
+            # решает человек. Без факта линия выше уже дала причину и пропущена.
+            reasons.append({**line, "reason": REASON_MODE_CONDITIONAL})
+            return InheritanceDecision(
+                product_id=product_id,
+                param_id=param_id,
+                cell=_conditional_cell(run_id, product_id, param_id),
+                reasons=tuple(reasons),
+                inherited_from=baseline_id,
+            )
+
         cell, evidence = _direct_cell(run_id, product_id, param, policy, fact, sink)
         if cell is None:
             # Инвариант K5 не пропустил ячейку: причина уже в ``errors``, но линия
@@ -473,6 +497,7 @@ def decide_inheritance(
             cell=cell,
             evidence=evidence,
             reasons=tuple(reasons),
+            inherited_from=baseline_id,
         )
 
     return InheritanceDecision(
@@ -490,6 +515,10 @@ def _apply_higher_source(
 
     Возвращает унаследованную ячейку, ``pending``-кандидата (расхождение) либо ``None``
     (согласие/inconclusive: высокий источник уже в store, писать нечего).
+
+    ``None`` — не «наследования не было»: ячейка была, но её поглотил реестр. Вызывающий
+    обязан это назвать (:attr:`InheritanceDecision.superseded_by`), иначе параметр
+    попадёт в базис как унаследованный, хотя не выпущено ничего.
     """
     high = protected.get((product_id, param_id))
     if high is None or high.source_kind is not SourceKind.REGISTRY:
@@ -581,8 +610,10 @@ def inheritance_basis(
 
     Откуда берутся числа (второй раз ничего не считается):
 
-    * **объявлено** (``planned``) — строки ``baselines.csv`` для ``upstream.baseline_id``
-      продукта; при заданном ``params`` — только по объявленным параметрам плана;
+    * **объявлено** (``planned``) — **различные параметры** строк ``baselines.csv``
+      объявленных линий продукта, режим каждого — режим линии, которую выбрал резолвер
+      (без решений — режим первой объявленной строки); при заданном ``params`` — только
+      по объявленным параметрам плана;
     * **выпущено** (``released``) — ``cells`` **результата волны** (``PhaseResult.cells``
       Ш4), а не повторное чтение стора: базис описывает работу этой волны. Режим ячейки
       берётся из той же строки ``baselines.csv`` по ``param_id``. Ячейка **другого**
@@ -600,7 +631,10 @@ def inheritance_basis(
     :param cells: ячейки результата волны.
     :param decisions: решения волны (:class:`InheritanceDecision`) — источник причин
         «не наследовали». Пусто — причины не публикуются (вызов без волны: базис
-        считает только объявленное/выпущенное).
+        считает только объявленное/выпущенное). Параметр, чья унаследованная ячейка
+        поглощена более высоким источником (:attr:`InheritanceDecision.superseded_by`),
+        попадает в ``not_inherited`` с токеном ``superseded_by_registry``, а не в
+        ``ancestor_fallbacks``: ячейки нет, значит наследования нет.
     :returns: JSON-совместимый словарь по продуктам (``planned``/``released``/
         ``cells_emitted``/``unattributed_cells``/``not_inherited``/``reason_counts``/
         ``summary``), итоги и список строк ``summary``. В БД и в файлы функция ничего
@@ -622,8 +656,18 @@ def inheritance_basis(
     }
     summaries: list[str] = []
     reasons_by_product: dict[str, list[dict[str, Any]]] = {}
+    #: ``product_id → param_id → baseline_id`` линии, которую выбрал резолвер волны.
+    #: Нужен, чтобы режим выпущенной ячейки был режимом **выигравшего** предка, а не
+    #: первой строки файла (иначе «blocked 1 skipped» печатается рядом с ✅ от ``direct``).
+    winners_by_product: dict[str, dict[str, str]] = {}
     for decision in decisions:
-        if not decision.reasons:
+        if decision.inherited_from is not None:
+            winners_by_product.setdefault(str(decision.product_id), {})[
+                decision.param_id
+            ] = decision.inherited_from
+        # Поглощение высоким источником — тоже факт решения, даже когда проигравших
+        # линий нет: параметр не наследован, и это обязано быть видно.
+        if not decision.reasons and decision.superseded_by is None:
             continue
         # Публикуются причины **всех рассмотренных линий**, в том числе когда ячейка
         # выпущена: проигравшие предки у решения уже перечислены, и это ровно ответ на
@@ -631,12 +675,26 @@ def inheritance_basis(
         # показать наследование «от второго», не назвав, чем плох первый; читатель
         # прочтёт это как произвол порядка, а не как измерение.
         # ``inherited`` отличает «не наследовали вовсе» от «наследовали, но не сразу».
-        inherited = decision.cell is not None and decision.cell.state is CellState.EVALUATED
+        # Ячейка, поглощённая реестром, не выпущена — значит параметр не наследован, и в
+        # ``ancestor_fallbacks`` ему не место: проседания к другому предку не было.
+        inherited = (
+            decision.superseded_by is None
+            and decision.cell is not None
+            and decision.cell.state is CellState.EVALUATED
+        )
+        entries = [dict(item) for item in decision.reasons]
+        if decision.superseded_by is not None:
+            entries.append(
+                {
+                    "baseline_id": decision.superseded_by,
+                    "reason": REASON_SUPERSEDED_BY_REGISTRY,
+                }
+            )
         reasons_by_product.setdefault(str(decision.product_id), []).append(
             {
                 "param_id": decision.param_id,
                 "inherited": inherited,
-                "reasons": [dict(item) for item in decision.reasons],
+                "reasons": entries,
             }
         )
 
@@ -645,18 +703,41 @@ def inheritance_basis(
         upstreams = list(passport.upstreams) if passport is not None else []
         baseline_ids = [str(upstream.baseline_id) for upstream in upstreams]
 
-        # Объявлено: строки базлайна **всех** объявленных линий продукта (режим —
-        # свойство строки). При нескольких предках «объявлено» — объединение, иначе
-        # базис занижал бы план ровно на число дополнительных линий.
-        planned = {mode.value: 0 for mode in InheritanceMode}
-        mode_by_param: dict[str, InheritanceMode] = {}
+        # Объявлено: **различные параметры** объявленных линий продукта, режим каждого —
+        # режим линии, которую выбрал резолвер (``upstreams`` в объявленном порядке:
+        # первый, у кого есть принятый факт). Без решения (базис считают без волны) —
+        # режим первой объявленной строки, т.е. того же первого предка.
+        #
+        # Второй проход по строкам файла завышал бы план на число дополнительных линий
+        # («direct 1/2 evaluated» при единственной выпущенной ячейке) и брал режим по
+        # порядку файла, а не по выигравшему предку (§3.2, §6.2).
+        rows_by_baseline: dict[str, dict[str, BaselineRow]] = {}
         for row in baselines:
             if row is None or row.baseline_id not in baseline_ids:
                 continue
             if wanted is not None and row.param_id not in wanted:
                 continue
-            planned[row.inheritance_mode.value] += 1
-            mode_by_param.setdefault(row.param_id, row.inheritance_mode)
+            rows_by_baseline.setdefault(row.baseline_id, {})[row.param_id] = row
+        winners = winners_by_product.get(product_id, {})
+        declared_params = {
+            param_id for rows in rows_by_baseline.values() for param_id in rows
+        }
+        mode_by_param: dict[str, InheritanceMode] = {}
+        for param_id in sorted(declared_params):
+            winner = winners.get(param_id)
+            if winner is not None:
+                won_row = rows_by_baseline.get(winner, {}).get(param_id)
+                if won_row is not None:
+                    mode_by_param[param_id] = won_row.inheritance_mode
+                    continue
+            for baseline_id in baseline_ids:
+                fallback_row = rows_by_baseline.get(baseline_id, {}).get(param_id)
+                if fallback_row is not None:
+                    mode_by_param[param_id] = fallback_row.inheritance_mode
+                    break
+        planned = {mode.value: 0 for mode in InheritanceMode}
+        for declared_mode in mode_by_param.values():
+            planned[declared_mode.value] += 1
 
         # Выпущено: ровно то, что вернула волна (никакого второго чтения стора). Ячейка
         # другого источника — не работа Ш4, даже если у параметра есть строка базлайна
@@ -819,13 +900,22 @@ def inheritance_wave(
                 facts=fact_by_key,
                 errors=errors,
             )
-            decisions.append(decision)
             cell = decision.cell
             if cell is not None and cell.state is CellState.EVALUATED:
                 cell = _apply_higher_source(cell, protected, product_id, row.param_id)
+                if cell is None and decision.inherited_from is not None:
+                    # Реестр уже дал согласный статус: писать нечего, ячейки нет. Решение
+                    # обязано это назвать, иначе параметр попадёт в «проседание к предку»
+                    # как унаследованный, хотя не выпущено ничего.
+                    decision = replace(decision, superseded_by=decision.inherited_from)
+            decisions.append(decision)
             if cell is not None:
                 cells.append(cell)
-            if decision.evidence is not None:
+            # Evidence пишется только вместе с ячейкой. Поглощённое реестром решение
+            # (``superseded_by``) ячейки не имеет, и его derived-evidence «подтверждал» бы
+            # цитату, которой в этом прогоне не видно ни одной ячейки, — ровно тот класс,
+            # от которого защищает ``_carried_rules_hold`` у переноса.
+            if decision.evidence is not None and decision.superseded_by is None:
                 evidence_items.append(decision.evidence)
 
     cells.sort(key=lambda cell: (cell.product_id, cell.param_id))
