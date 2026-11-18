@@ -203,7 +203,7 @@ evaluate, review, g3, compute, g4, report`.
 (`build_store(read_only=True)` → `StoreNotInitialized`). Второй путь — файл есть, а прогона в
 нём нет — по-прежнему `EXIT_USAGE`: `read_manifest` бросает `ValueError("прогон не найден…")`
 (`core/store/sqlite_store.py:3035`, def `core/store/sqlite_store.py:3013`), а `ValueError`
-перехватывается общим обработчиком и отдаётся кодом 2 (`core/cli/main.py:266`), поэтому CLI печатает
+перехватывается общим обработчиком и отдаётся кодом 2 (`core/cli/main.py:272`), поэтому CLI печатает
 `E: прогон не найден: 'ghost'` кодом **2**. Для скрипта это одно и то же событие с двумя
 кодами — в зависимости от того, кто создал файл.
 

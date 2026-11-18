@@ -109,6 +109,8 @@ languages: [ru, en]
 
 Сумма весов модулей должна быть ровно 100. Роль без `definition` (или иного обязательного авторского содержания) отмечается как incomplete, а не маскируется текстом-заглушкой. `query_patterns` и маркеры помогают описать роль, но не являются доказательством. В архетипе B набор baseline обычно пуст; архетип C несовместим с непустым `baselines.csv`. Идентификаторы модулей/ролей — lowercase slug; использованные идентификаторы иммутабельны: отмена через `deprecated`/`replaced_by`, а не переименование с повторным использованием.
 
+`baselines` и `baseline_participants` — списки **`baseline_id`** (линий), а не `product_id`: `product_id` есть только у reference-продукта в `sources/reference_products.yaml`. Если декларация заведена, каждый элемент обоих списков обязан быть объявленной линией — иначе блок `manifest-baseline-undeclared`. Объявленная линия без единой строки `baselines.csv` — предупреждение `baseline-policy-empty` («механизм выключен», а не «наследовать нечего»).
+
 ### `catalog.csv`
 
 CSV с ровно 11 колонками в указанном порядке. Заголовок нельзя менять:
@@ -295,9 +297,13 @@ declined_at: '2026-10-28'  # необязательно
 
 Проверки готовности включают уникальные slug и разрешимость ссылок; валидные enum; веса модулей ровно 100; showcase с величиной в `rule`; `products` равные множеству когорты и включение anchor; ровно один anchor; условия absence и процедуры scope; для архетипа C пустые baselines; заполненность авторских полей. `concept_terms` без содержимого обычно warning.
 
+Отдельно проверяется связь «паспорт → декларация предков» (план 27): строка `baselines.csv` без объявленного reference-продукта (`baseline-without-reference-product`), reference-продукт в когорте (`reference-product-in-cohort`), нечисловая версия объявленного предка или `min_version` (`baseline-version-numeric`), реестр манифеста против объявленных линий (`manifest-baseline-undeclared`), объявленная линия без строк политики (`baseline-policy-empty`). Паспортные правила — `passport-upstreams` (необъявленная линия в `passport.upstreams`, необъявленный мажор версии, число предков против архетипа) и `upstream-presence` (продукт без предка — предупреждение) — исполняются в `plan`/`run`, а в `package validate` только с `--passports-dir`; без флага паспорта не загружаются, и это не «нарушений нет».
+
 | Симптом | Что проверить |
 |---|---|
 | `incomplete` | В `package.yaml` заполнены определения ролей; в `cohort.yaml` — обоснования выбора. Не заменяйте `null` текстом `TODO`. |
+| `manifest-baseline-undeclared` | `baselines`/`baseline_participants` в манифесте — это `baseline_id`; сверьте имена с `sources/reference_products.yaml` (поле `product_id` там — другое). |
+| `baseline-policy-empty` | Линия объявлена, но строк наследования нет: механизм выключен. Либо заполните `baselines.csv`, либо уберите линию из реестра. |
 | веса не равны 100 | Пересчитайте все веса; при изменении модулей проверьте распределение параметров и `focus`. |
 | несоответствие products | Сравните `run.yaml:products` с полным множеством когорты; порядок значения не имеет. |
 | неизвестный ключ профиля | Удалите ключ либо сверьте точное имя в `core/config/domain_profiles.py`; схема строгая. |
@@ -307,7 +313,7 @@ declined_at: '2026-10-28'  # необязательно
 | gate снова блокирует | Проверьте run_id, gate, `subject_digest` и решение именно в БД этого прогона; решение прошлого запуска не переносится. |
 | golden не применяется | Проверьте `golden_status.yaml` и формат; обычный run без golden допустим, но это не означает, что проверка прошла. |
 
-Полезные read-only команды: `package show`, `package artifact list`, `package artifact get`, `package run show`; `package validate --json` даёт машинный отчёт. Полная справка: `./hound.py package --help`, `./hound.py package scope --help`, а также `plan/run/gate/report/review --help`.
+Полезные read-only команды: `package show`, `package artifact list`, `package artifact get`, `package run show`; `package validate --json` даёт машинный отчёт, а `package validate --passports-dir DIR` дополнительно исполняет паспортные правила. Полная справка: `./hound.py package --help`, `./hound.py package scope --help`, а также `plan/run/gate/report/review --help`.
 
 ## Источники и ссылки
 

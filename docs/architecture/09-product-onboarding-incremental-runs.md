@@ -160,7 +160,7 @@
 | Секция | Статус | Чего нет / что важно |
 |---|---|---|
 | §1 | ✅ сделано | исторический контекст: все четыре дефекта закрыты MVP-1/2; секция читается в прошедшем времени |
-| §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1472`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1586`; формула — `core/pipeline/package_admin.py:1566`). Повтор с тем же составом — no-op. Колонка `runs.cohort_ref` пишет `cfg.cohort_ref` (ревизию), а не имя файла (§12.2) |
+| §2.1, §2.2 | ✅ сделано | `add-product` пишет `sources/seeds.yaml` + `pending_seeds` (`core/pipeline/package_add_product.py:1472`) и **ревизию когорты**: фактическая смена состава двигает `cohort.yaml: frozen_at` и `run.yaml: cohort_ref` (`update_cohort`, `core/pipeline/package_admin.py:1602`; формула — `core/pipeline/package_admin.py:1582`). Повтор с тем же составом — no-op. Колонка `runs.cohort_ref` пишет `cfg.cohort_ref` (ревизию), а не имя файла (§12.2) |
 | §2.3 | ✅ сделано | подкоманды `hound package seeds list/add/disable/enable/export` (`core/cli/package/parser.py:482`, слой — `core/pipeline/package_seeds.py`); `sources/seeds.yaml` в `ARTIFACT_FILES`; ложные подсказки в `context.py`/`corpus.py` стали правдой |
 | §2.4 | ✅ сделано | `--only-failed` — **межпрогонный**: `_only_failed_work_set` (`core/cli/context.py`), источник 1 — сеанс `crawl:{run_id}`, источник 2 — `url_state` с `consecutive_failures > 0`; ремонт идёт depth-0 известными URL (`plan_repair_items`, `core/pipeline/corpus_ingest.py:3363`), авторские корни не дренятся, покрытие `only_failed_repair`. `offline` — `offline_reuse_product` (`core/pipeline/corpus_ingest.py:4092`), ноль сетевых вызовов; chunk-set чужой версии при наличных байтах пересобирается текущим конвейером (`rebuild_from_stored_bytes`), без байтов — `no_bytes` (`tests/pipeline/test_corpus_offline.py`, `tests/pipeline/test_corpus_reuse_rebuild.py`). `--update`+`--only-failed` по-прежнему запрещены (`check_update_scope`) — методологический запрет, не пробел |
 | §3.1 | ✅ сделано | `RunProductStatus` — ✅ есть (`core/domain/enums.py`) и сверен со словарём (`run_product_status`). `CoverageFreshness` — **➖ снято**: её роль исполняет `corpus_docs.reuse_kind`, вторая ось свежести была бы вторым носителем одной величины. `MeasurementOrigin` — ✅ волна 2: `observed\|carried`, сверен со словарём (`docs/status-dictionary.yaml:measurement_origin`, `core/domain/dictionary.py`) и несётся ячейкой (`Cell.measurement_origin`) |
@@ -484,8 +484,8 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
    новая ревизия когорты: `frozen_at = snapshot` (дата онбординга) и новый `cohort_ref`
    (`cohort-{case}-{snapshot}-r{n}`) в `run.yaml`.
 
-   > **Реализовано 29.10.2026** (`update_cohort`, `core/pipeline/package_admin.py:1586`;
-   > формула — `core/pipeline/package_admin.py:1566`). Ревизия двигается **только** при фактической смене
+   > **Реализовано 29.10.2026** (`update_cohort`, `core/pipeline/package_admin.py:1602`;
+   > формула — `core/pipeline/package_admin.py:1582`). Ревизия двигается **только** при фактической смене
    > состава (`entries` сравниваются после валидации): повторный `--apply` того же продукта
    > и смена одного `frozen_at` — no-op, иначе каждый `--apply` давал бы новый `run_id`.
    > `run.yaml` патчится построчно (`core/pipeline/package_admin.py:284`) — комментарии живы.
@@ -526,8 +526,8 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
 она стирала бы авторские комментарии `run.yaml`, а они несут объяснение версионных границ.
 
 **Ревизия состава — реализовано (29.10.2026).** Фактическая смена `entries` в
-`update_cohort` (`core/pipeline/package_admin.py:1586`) двигает ревизию: `frozen_at` ← дата
-онбординга, `run.yaml: cohort_ref` ← `next_cohort_ref` (`core/pipeline/package_admin.py:1566`, чистая функция:
+`update_cohort` (`core/pipeline/package_admin.py:1602`) двигает ревизию: `frozen_at` ← дата
+онбординга, `run.yaml: cohort_ref` ← `next_cohort_ref` (`core/pipeline/package_admin.py:1582`, чистая функция:
 `cohort-{case_id}-{frozen_at}-r{n}`, суффикс `-r{k}` → `k+1`, его отсутствие → `r2`).
 Повтор с тем же составом — no-op, смена только `frozen_at` ревизию не двигает. Тот же путь
 использует ручной `hound package cohort update|set` — ручная смена состава тоже новая

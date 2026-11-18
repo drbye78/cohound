@@ -9,7 +9,7 @@
 | `package.yaml` | Обязательный манифест категории: модули, роли и методологические метаданные. |
 | `catalog.csv` | Обязательный каталог измеряемых параметров; один параметр на строку. |
 | `baselines.csv` | Обязательный заголовок и, когда применимо, правила наследования baseline. Может быть без строк данных. |
-| `sources/reference_products.yaml` | Необязательная **декларация reference-продуктов профиля**: какие линии профиль считает предками и какие версии объявлены (schema `reference_products/1`). Без неё строки `baselines.csv` и `passport.upstreams` не проходят линт. Архетип B — кросс-линейное сравнение, поэтому пакет B без единой объявленной линии блокируется (`upstreams-by-archetype`); продукт без предка даёт предупреждение `upstream-presence`, а не блок. |
+| `sources/reference_products.yaml` | Необязательная **декларация reference-продуктов профиля**: какие линии профиль считает предками и какие версии объявлены (schema `reference_products/1`). Если файл есть, `package.yaml:baselines` и `baseline_participants` обязаны ссылаться на объявленные `baseline_id` (блок `manifest-baseline-undeclared`), а `passport.upstreams` — на объявленную линию и объявленный мажор её версии (блоки `passport-upstream-undeclared` / `upstream-version-undeclared`). Продукт без предка даёт предупреждение `upstream-presence`, а не блок; архетип B **без единой** объявленной линии — штатная форма, а не блок (блокируется только необъявленный `baseline_id`). |
 | `sources/baseline_facts.csv` | Необязательные **наблюдения** о документации предка: «параметр P в версии V описан здесь», с дословной цитатой, хешем текста и датой. Наследует только `status=present` **и** `review=accepted`. |
 | `cohort.yaml` | Обязательный замороженный состав продуктов и единственный anchor. |
 | `run.yaml` | Обязательный мандат конкретного прогона; products проецируют когорту. |
@@ -55,7 +55,7 @@ languages: [ru, en]
 * `archetype` — `A`, `B` или `C`; ограничения baseline зависят от архетипа.
 * `modules[]`: `module_id` — стабильный lowercase slug, `weight` — вес модуля; сумма весов ровно 100.
 * `roles[]`: `role_id` — стабильный slug; `definition` — содержательное определение; `markers` — публичные ориентиры роли; `query_patterns` — поисковые шаблоны по языковым ключам; `core_coverage_allowed` и `multi_instance` — булевы правила роли. Пустые авторские поля — incomplete, а не повод сочинять значения.
-* `baselines` — объявленные baseline-идентификаторы; `baseline_participants` — **список** линий, на которых стоит пакет (в архетипе B их несколько: форк и линия, на которой он стоит; `[]` — линий нет). Архетип C не допускает непустой `baselines.csv`.
+* `baselines` — объявленные `baseline_id` линий (не `product_id`!); `baseline_participants` — **список** тех же `baseline_id`, на которых стоит пакет (в архетипе B их несколько: форк и линия, на которой он стоит; `[]` — линий нет). Оба списка проверяются против `sources/reference_products.yaml` (блок `manifest-baseline-undeclared`). Архетип C не допускает непустой `baselines.csv`.
 * `jurisdictions` — коды юрисдикций, относящиеся к профилю категории.
 * `registries` — идентификаторы файлов `registries/{id}.yaml`.
 * `languages` — языки пакета.
@@ -86,6 +86,14 @@ feature_alpha,Функция Alpha,core,capabilities,Кр,fact,"Засчитыв
 
 Строка — это **политика**, а не наблюдение: она говорит, что наследовать и с какого пола. Само наблюдение («в документации версии V параметр описан») живёт в `sources/baseline_facts.csv` и несёт цитату, хеш текста и дату. Наследует **первый** предок из `passport.upstreams` (порядок = приоритет), у которого есть строка и принятый факт `present` на объявленной мажорной версии; проигравшие линии публикуются причинами в базисе наследования (`hound baseline report`).
 
+Строки не пишутся из наблюдений автоматически: их производит `hound baseline propose` — **черновик** `sources/baselines.{baseline_id}.candidate.csv` (файл на линию — в архетипе B предков несколько), который человек размечает (`decision`), после чего `--apply --actor` добавляет принятые строки тем же писателем, что `hound package baseline add`. Правило вывода: `direct` — факт `present` и `accepted`, порог `min_version` = первый объявленный мажор с таким фактом; `conditional` — то же, но карта версии говорит `support_not_about_subject`; факт `pending` строкой не становится (нужна подпись). Прибор не подписывает за человека: `--apply` отказывает на неразмеченном.
+
+Связь с реестром манифеста (проверяется линтом, когда есть `sources/reference_products.yaml`):
+
+* `baseline_id` строки обязан быть объявленной линией — иначе блок `baseline-without-reference-product`;
+* `package.yaml:baselines` и `baseline_participants` — тоже **`baseline_id`**, и каждый обязан быть объявлен в декларации: иначе блок `manifest-baseline-undeclared` (опечатка в имени линии неотличима от осознанного объявления);
+* линия объявлена в манифесте, а строк с ней в `baselines.csv` нет — предупреждение `baseline-policy-empty`: **строк наследования нет, механизм выключен**, а не «наследовать нечего».
+
 Для архетипа B допустим только заголовок без строк.
 
 ## `sources/reference_products.yaml`
@@ -108,6 +116,16 @@ products:
 * `current_version` — версия, по которой строятся карта и наследование.
 
 Роль reference-продукта **вычисляется**, а не объявляется: если продукт когорты назвал линию предком в паспорте — это `ancestor`, иначе `parallel` (`hound baseline list`).
+
+### Паспортные правила в `package validate`
+
+`hound package validate` по умолчанию паспорта **не загружает**: каталог паспортов — часть раскладки (`paths.passports`), а не пакета, и без флага правила `passport-upstreams`/`upstream-presence` не применяются. Чтобы проверить пакет вместе с паспортами продуктов когорты, передайте каталог явно:
+
+```bash
+./hound.py package validate --package packages/{case_id} --passports-dir ~/.cohound/passports
+```
+
+С флагом исполняются те же правила, что в `plan`/`run`: необъявленный `baseline_id` в `passport.upstreams` (блок `passport-upstream-undeclared`), необъявленный мажор версии предка (блок `upstream-version-undeclared`), число предков против архетипа (`upstreams-by-archetype`) и продукт без предка (предупреждение `upstream-presence`). Без флага поведение прежнее.
 
 ## `sources/baseline_facts.csv`
 

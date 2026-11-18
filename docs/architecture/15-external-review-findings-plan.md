@@ -156,7 +156,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   всегда по https. `RobotsGate` вычисляет origin `scheme://host` и ключует им наблюдение
   (`core/util/robots.py:359` `_origin`, `:406` `_observe`, `:432` `state`); три фетчера строят
   `f"{origin}/robots.txt"` (`core/edge/crawler_factory.py:58`, `core/cli/wiring.py:1544`,
-  `core/cli/package/commands.py:1847`). Пины: `tests/test_util_robots.py:183`
+  `core/cli/package/commands.py:1848`). Пины: `tests/test_util_robots.py:183`
   (https- и http-URL одного хоста — два разных наблюдения, кэш не смешивает), `:208`
   (URL без схемы → https, прежнее поведение), `tests/adapters/test_crawl_robots.py:204`
   (edge-фетчер читает ленту по схеме страницы). `_target(url)` и 404/410-семантика не
