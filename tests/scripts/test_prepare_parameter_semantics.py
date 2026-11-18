@@ -205,6 +205,69 @@ def test_build_highlights_confidence_and_carries_the_source_cells(
     assert "5 требуют scope_acceptance" in printed
 
 
+def test_build_legend_states_what_was_actually_reviewed(tmp_path: Path) -> None:
+    """Легенда выводится из `review`, а не из имени файла.
+
+    `candidate` в имени XLSX переживает подпись: без этого строка «человек её не
+    подтверждал» стоит рядом с 181 подтверждённой строкой — та же ошибка, что документ
+    старше артефакта (§1.2 AGENTS).
+    """
+    from openpyxl import load_workbook
+
+    package = _write_package(tmp_path)
+    records = _good_records()
+
+    def legend_first(rows: list[dict[str, Any]], name: str) -> str:
+        out = tmp_path / name
+        assert SEMANTICS.main([
+            "build", "--data", str(_write_jsonl(tmp_path, rows)),
+            "--package", str(package), "--out", str(out),
+        ]) == 0
+        return str(load_workbook(out)["legend"]["A1"].value)
+
+    assert legend_first(records, "candidate.xlsx") == SEMANTICS.STATE_CANDIDATE
+
+    for record in records:
+        record["review"] = "accept"
+    reviewed = legend_first(records, "reviewed.xlsx")
+    assert "reviewed" in reviewed and "все 3" in reviewed
+
+    records[0]["review"] = "fix"
+    records[2]["review"] = ""
+    partial = legend_first(records, "partial.xlsx")
+    assert "частично reviewed" in partial and "2 из 3" in partial
+
+
+def test_build_carries_the_review_back_into_the_sheet(tmp_path: Path) -> None:
+    """Пересборка XLSX после `compile` не стирает решение человека.
+
+    `compile` — единственный вход в JSONL, а `build` — единственный выход в XLSX. Если
+    build пишет пустой `review`, то пересборка артефакта выглядит как «никто не читал»,
+    и следующая подпись начинается с нуля.
+    """
+    from openpyxl import load_workbook
+
+    package = _write_package(tmp_path)
+    records = _good_records()
+    records[0]["review"] = "fix"
+    records[0]["review_note"] = "поправлена семантика: термин вендора"
+    records[1]["review"] = "accept"
+    out = tmp_path / "out.xlsx"
+    assert SEMANTICS.main([
+        "build", "--data", str(_write_jsonl(tmp_path, records)),
+        "--package", str(package), "--out", str(out),
+    ]) == 0
+
+    sheet = load_workbook(out)["semantics"]
+    header = [cell.value for cell in sheet[1]]
+    review_at = header.index("review") + 1
+    note_at = header.index("review_note") + 1
+    assert sheet.cell(row=2, column=review_at).value == "fix"
+    assert sheet.cell(row=2, column=note_at).value == "поправлена семантика: термин вендора"
+    assert sheet.cell(row=3, column=review_at).value == "accept"
+    assert sheet.cell(row=4, column=review_at).value in (None, "")
+
+
 def test_build_counts_the_price_of_the_absence_class_from_the_golden(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

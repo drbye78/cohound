@@ -97,8 +97,14 @@ FILL_LOW = "FFC7CE"
 FILL_MEDIUM = "FFEB9C"
 STATUS_MARKS = {"✅": "✅", "⚠️": "⚠️", "❌": "❌"}
 
+#: Первая строка легенды — состояние артефакта. Выводится из `review`, а не из имени
+#: файла: `candidate` в имени переживает подпись, и легенда «человек не подтверждал»
+#: осталась бы рядом с 181 подтверждённой строкой — та же ошибка, что «документ старше
+#: артефакта» (§1.2 AGENTS).
+STATE_CANDIDATE = "СОСТОЯНИЕ: candidate — разметка машинная, человек её не подтверждал."
+
 LEGEND: tuple[str, ...] = (
-    "СОСТОЯНИЕ: candidate — разметка машинная, человек её не подтверждал.",
+    STATE_CANDIDATE,
     "",
     "КАК ЧИТАТЬ КОЛОНКИ",
     "semantics — что параметр спрашивает на языке предметной области (СУБД на PostgreSQL),",
@@ -249,6 +255,27 @@ def _absence_consequence(
     return counts
 
 
+def _state_line(records: list[dict[str, Any]]) -> str:
+    """Строка состояния: что человек **уже** подтвердил, а что нет.
+
+    Печатается в легенду вместо константы ``candidate``: имя файла не меняется, когда
+    разметку подписывают, а легенда — единственное место, где читатель узнаёт состояние.
+    """
+    reviewed = [record for record in records if record.get("review") in {"accept", "fix"}]
+    fixed = sum(1 for record in reviewed if record["review"] == "fix")
+    if not reviewed:
+        return STATE_CANDIDATE
+    if len(reviewed) == len(records):
+        return (
+            f"СОСТОЯНИЕ: reviewed — человек подтвердил все {len(records)} строк"
+            f" ({fixed} с review=fix, исправлено в колонках)."
+        )
+    return (
+        f"СОСТОЯНИЕ: частично reviewed — подтверждено {len(reviewed)} из {len(records)}"
+        f" ({fixed} исправлено), остальные не читались."
+    )
+
+
 def build(records: list[dict[str, Any]], package: Path, out: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -304,7 +331,7 @@ def build(records: list[dict[str, Any]], package: Path, out: Path) -> None:
         for product, _label in PRODUCTS:
             cell = (cells.get(n) or {}).get(product, {})
             values.append(STATUS_MARKS.get(cell.get("normalized_status", ""), ""))
-        values += ["", ""]
+        values += [record.get("review") or "", record.get("review_note") or ""]
         sheet.append(values)
         line = sheet.max_row
         fill = fills.get(str(record["confidence"]))
@@ -369,7 +396,7 @@ def build(records: list[dict[str, Any]], package: Path, out: Path) -> None:
 
     legend = wb.create_sheet("legend")
     legend.column_dimensions["A"].width = 118
-    for text in LEGEND:
+    for text in (_state_line(records), *LEGEND[1:]):
         legend.append([text])
     legend["A1"].font = Font(bold=True)
 
