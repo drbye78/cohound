@@ -13,6 +13,11 @@
 кандидатов. Факт ``present`` появляется ровно тогда, когда цитата нашлась, поэтому совпадение
 исхода и есть то, что видит читатель фактов.
 
+**Правило зачёта — то же, что в коде**: кандидатов даёт запрос по ``parameter_terms``
+(BM25 токенизирует всё равно), а цитату засчитывает ``parameter_phrases`` — авторский термин
+целиком. Прибор, меряющий зачёт по слову, мерил бы правило, которого в коде больше нет
+(замер 18.11.2026: 165 ``present`` по слову против 37 по фразе).
+
 **Почему K=0 — это линейный проход.** Базовая линия считается тем же ``select_quote`` по тем
 же чанкам в порядке корпуса: разница между строками отчёта — цена замены, а не цена правил.
 
@@ -41,7 +46,12 @@ from typing import Any
 
 from core.adapters.lexical_bm25 import Bm25Index, LexicalDoc
 from core.config.run_config import load_catalog
-from core.pipeline.reference_corpus import ChunkText, parameter_terms, select_quote
+from core.pipeline.reference_corpus import (
+    ChunkText,
+    parameter_phrases,
+    parameter_terms,
+    select_quote,
+)
 
 #: Значения ``K``, которые печатаются по умолчанию: от «самого дешёвого» до «с запасом».
 DEFAULT_KS = (1, 2, 3, 5, 10, 20, 50)
@@ -90,10 +100,11 @@ def measure(
         terms = parameter_terms(param)
         if not terms:
             continue
+        phrases = parameter_phrases(param)
         params += 1
         linear: str | None = None
         for chunk in chunks:
-            if select_quote(chunk.text, terms) is not None:
+            if select_quote(chunk.text, phrases) is not None:
                 linear = chunk.chunk_id
                 break
         if linear is not None:
@@ -104,7 +115,7 @@ def measure(
         for k in ks:
             picked: str | None = None
             for chunk_id, _score in hits[:k]:
-                if select_quote(by_id[chunk_id].text, terms) is not None:
+                if select_quote(by_id[chunk_id].text, phrases) is not None:
                     picked = chunk_id
                     break
             if picked is not None:
