@@ -21,7 +21,7 @@
 
 | факт | адрес |
 |---|---|
-| тело лексического документа — **только** `chunk.text`; `context_prefix`/`heading_path` в индексируемое поле не входят, весов нет | `core/adapters/lexical_tantivy.py:589-597`, `:672-674`; `core/cli/wiring.py:579-591` |
+| тело лексического документа — **только** `chunk.text`; `context_prefix`/`heading_path` в индексируемое поле не входят, весов нет | `core/adapters/lexical_tantivy.py:589-597`, `:672-674`; `core/cli/wiring.py:581-593` |
 | вход эмбеддера объявлен и исполняется: `EMBED_INPUT_FIELDS = ("text",)` | `core/util/embed_input.py:32`; `core/pipeline/corpus_index.py:734` |
 | ключ `embed_cache` — хеш **строки входа** + `embed_model_id` + `embed_device` + `embed_precision`; `chunker_version` в него **не входит** | `core/pipeline/embed_cache.py:197-215` |
 | run-level `chunk_id` = `product:doc_version:chunk_no` — **без** `chunker_version` | `core/pipeline/corpus_index.py:180-205` |

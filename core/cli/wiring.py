@@ -28,11 +28,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from core.adapters import index_format
 from core.adapters.chunker_family import FamilyChunker, declared_token_limiter
@@ -223,6 +223,7 @@ __all__ = [
     "SUPPORTED_SEARCH_ADAPTERS",
     "EmbedderBuildMismatch",
     "ExperimentTarget",
+    "RetrievalPorts",
     "SearchResolutionError",
     "WiringError",
     "assert_embedder_matches_build",
@@ -232,6 +233,7 @@ __all__ = [
     "build_extraction_pool",
     "build_gateway",
     "build_lite_embedder",
+    "build_retrieval_ports",
     "build_runner",
     "build_scout_crawler",
     "build_scout_crawlers",
@@ -494,7 +496,7 @@ def seed_lexical_index(
     *,
     index_root: str | Path,
     package: str | None,
-    store: StorePort | None,
+    store: _ChunkSource | None,
     build_id: str | None = None,
     profile: str = "stemmed",
 ) -> LexicalIndexPort | None:
@@ -591,6 +593,111 @@ def _lexical_record(chunk: Chunk, product_id: str, build_id: str) -> LexicalChun
         heading_path=chunk.heading_path,
         content_hash=chunk.content_hash,
         build_id=build_id,
+    )
+
+
+class _ChunkSource(Protocol):
+    """Минимум хранилища, нужный плечам ретривала: чанки сборки и их чтение по id.
+
+    Объявлен явно, потому что плечи не читают из хранилища ничего другого: ``store`` в
+    ``seed_lexical_index`` и ``chunk_lookup`` в ``build_vector_index`` — это ровно
+    ``iter_chunks``/``get_chunk``/``get_chunks``. Раньше параметр был ``StorePort``, и
+    читатель корпуса чужой схемы (:class:`core.store.corpus_reader.CorpusReader`), который
+    даёт только эти три метода, формально не подходил, хотя по смыслу был тем же входом.
+    """
+
+    def iter_chunks(
+        self, build_id: str, *, product_id: str | None = None
+    ) -> Iterator[Chunk]: ...
+
+    def get_chunk(self, chunk_id: str) -> Chunk | None: ...
+
+    def get_chunks(self, chunk_ids: Sequence[str]) -> dict[str, Chunk]: ...
+
+
+@dataclass(frozen=True)
+class RetrievalPorts:
+    """Плечи ретривала для чтения корпуса: оба порта + эмбеддер запроса.
+
+    ``embedder is None`` — модель весов не объявлена, и dense-плечо не собирается
+    (план 26 O6). Это видимое отсутствие: вызывающий обязан назвать его, а не подменить
+    профиль молча.
+    """
+
+    lexical_index: LexicalIndexPort | None
+    vector_index: VectorIndexPort | None
+    embedder: EmbedderPort | None
+    #: Заметки сборки (кэш партиций, отсутствие модели) — для вывода команды, не для
+    #: решения: решение принимает вызывающий, объявив профиль.
+    notices: tuple[str, ...] = ()
+
+
+def build_retrieval_ports(
+    *,
+    index_root: str | Path,
+    package: str | None,
+    store: _ChunkSource,
+    build_id: str | None = None,
+    deploy: DeployConfig | None = None,
+    dense: bool = True,
+) -> RetrievalPorts:
+    """Собирает **только** плечи ретривала, без краулера/экстрактора/реестров.
+
+    Зачем отдельно от :func:`build_adapters`: команда чтения корпуса (``hound search``)
+    — разведка, а не прогон. ``build_adapters`` строит композит экстрактора (docling),
+    чанкер, краулеры и реестровые фетчеры — всё это чтению корпуса не нужно и стоит
+    секунд и памяти. Здесь ровно три вещи, которые нужны ``retrieve()``.
+
+    Оси берутся из того же места, что у прогона: ``embed.model_id``+``revision``
+    (:func:`resolve_embed_spec`), ``embed.device``/``precision``, ``lexical.profile``.
+    Поэтому «какой моделью посчитан вектор запроса» — объявленный вход, а не догадка
+    о том, какой extra установлен (O6). Недоступное устройство — отказ
+    (:func:`require_embed_device`), а не тихий CPU.
+
+    ``store`` — любой источник чанков (:class:`_ChunkSource`): хранилище прогона либо
+    читатель корпуса чужой схемы. Сборка индекса — та же, что записана в прогоне
+    (``build_id``), иначе хит нёс бы провенанс другой сборки.
+
+    ``dense=False`` — лексический профиль: ни веса, ни dense-индекс не собираются,
+    потому что вектор запроса не нужен. Это не «оптимизация по вкусу»: загрузка
+    ``bge-m3`` — секунды и гигабайты RSS, и включать её в цену лексического поиска
+    значило бы назвать цену R0 неправдой.
+    """
+    embed_cfg = deploy.embed if deploy is not None else EmbedConfig()
+    notices: list[str] = []
+    embedder: EmbedderPort | None = None
+    vector_index: VectorIndexPort | None = None
+    if dense:
+        embed_device = resolve_embed_device(embed_cfg, None)
+        require_embed_device(embed_device)
+        embed_spec = resolve_embed_spec(embed_cfg, None)
+        embedder = _resolve_embedder(
+            embed_device,
+            precision=resolve_embed_precision(embed_cfg, None),
+            model_id=embed_spec.model_id,
+            revision=embed_spec.revision,
+            notices=notices,
+        )
+        vector_index = build_vector_index(
+            index_root=index_root,
+            package=package,
+            chunk_lookup=store.get_chunk,
+            build_id=build_id,
+        )
+    lexical_index = seed_lexical_index(
+        index_root=index_root,
+        package=package,
+        store=store,
+        build_id=build_id,
+        profile=(
+            deploy.lexical.profile if deploy is not None else LexicalDeployConfig().profile
+        ),
+    )
+    return RetrievalPorts(
+        lexical_index=lexical_index,
+        vector_index=vector_index,
+        embedder=embedder,
+        notices=tuple(notices),
     )
 
 

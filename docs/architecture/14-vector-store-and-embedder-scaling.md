@@ -398,7 +398,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:305-359`).
+(`core/cli/wiring.py:307-360`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 

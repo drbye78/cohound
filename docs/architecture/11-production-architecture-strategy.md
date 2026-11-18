@@ -346,7 +346,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   дренажа (`core/pipeline/corpus.py:2258`); `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1553` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:148`), значение из
->   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1202`).
+>   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1351`).
 >   Оговорка: контур исполняется только при объявленных `rounds > 0` **и** бюджете; на живых
 >   прогонах 06–07.11 (`c2e7b860ac17`, `2a5b51af5778`) объявлено `rounds: 1`/`budget: 362`, но
 >   он не исполнялся — политика краула запретила сеть (`search_calls_by_phase = {}`).

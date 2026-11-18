@@ -32,6 +32,7 @@ from core.cli.commands import (
     review,
     run,
     runs,
+    search,
     sensitivity,
     status,
 )
@@ -69,6 +70,9 @@ COMMANDS = (
     promote,
     revalidate,
     retry,
+    # ``search`` стоит рядом с ``review``: обе читают готовый прогон и ничего не пишут,
+    # но ``review`` — очередь решений человека, а ``search`` — материал для них.
+    search,
     gate,
     deploy,
     experiment,
