@@ -90,7 +90,7 @@ class ReferenceMapIncomplete(RuntimeError):
 def reference_map_id(
     *,
     reference_build_id: str,
-    baseline_facts_digest: str | None,
+    baseline_facts_digest: str | None = None,
     catalog_version: str | None,
     llm_scenarios: Any,
     prompt_template: str | None,
@@ -99,20 +99,32 @@ def reference_map_id(
 ) -> str:
     """``map_id`` — content-addressed идентичность карты (§7.3).
 
-    Материал — ровно объявленные условия: какие чанки прочитаны, какие факты были на
-    столе, какой каталог, какая модель и политика. ``observed_at``/пути/имена файлов в
-    материал не входят: дата снятия и раскладка хоста — провенанс, а не измерение.
+    Материал — ровно объявленные условия: какие чанки прочитаны, какой каталог, какая
+    модель и политика. ``observed_at``/пути/имена файлов в материал не входят: дата
+    снятия и раскладка хоста — провенанс, а не измерение.
 
     ``query_lang`` входит в материал, потому что язык запросов решает, какие термины
     каталога уйдут в ретривал, значит и какие чанки прочитаны: две карты на разных языках
     — два разных измерения, даже если корпус, каталог и модель те же (замер 19.11.2026 на
     английском reference-корпусе: ``present`` 13 при ``ru`` против 42 при ``en``).
 
+    **``baseline_facts_digest`` в материал НЕ входит** (с 19.11.2026), и это не упущение.
+    Карта читает чанки корпуса, а не файл фактов: набор фактов на столе — её **провенанс**
+    (кто и с чем снимал), а не условие измерения. Пока факты строились независимым
+    фразовым прибором, это было безобидно; но факт и карта отвечают на один вопрос, и
+    когда факты стали строиться тем же оценщиком (``core/pipeline/fact_projection.py``),
+    дайджест в материале замкнул бы круг: ``map_id`` ← дайджест фактов ← вердикты ←
+    ``map_id``. Параметр остаётся в подписи, потому что вызывающий передаёт его в манифест
+    как провенанс, но идентичность от него не зависит — закреплено тестом
+    ``test_map_id_ignores_facts_digest``.
+
     :returns: ``map_{16 hex}`` — короткий, но content-addressed (как ``partition_build_id``).
     """
+    # ``baseline_facts_digest`` намеренно не в payload: см. докстринг. Аргумент оставлен,
+    # чтобы вызывающий не собирал две разные подписи для одного вопроса.
+    del baseline_facts_digest
     payload = {
         "reference_build_id": str(reference_build_id),
-        "baseline_facts_digest": baseline_facts_digest,
         "catalog_version": catalog_version,
         "llm_scenarios": _canonical(llm_scenarios),
         "prompt_template": prompt_template,
@@ -190,6 +202,10 @@ class ReferenceMapManifest:
     version: str
     params: int
     counts: dict[str, int] = field(default_factory=dict)
+    #: Дайджест набора фактов, который был на столе при снятии карты — **провенанс**, а
+    #: не условие измерения: в ``map_id`` он не входит (иначе круг «карта ↔ факты», см.
+    #: :func:`reference_map_id`). Публикуется, чтобы читатель видел, с какими фактами
+    #: карта снята, но две карты с разными фактами — одна и та же карта.
     baseline_facts_digest: str | None = None
     catalog_version: str | None = None
     llm_scenarios: Any = None
@@ -496,6 +512,11 @@ def build_reference_map(
         llm_scenarios=llm_scenarios,
         prompt_template=prompt_template,
         evaluation_policy=evaluation_policy,
+        # Без этого ``map_id`` внутри сборки считался бы с дефолтным ``all``, тогда как
+        # каталог ``maps/`` построен по объявленному языку: манифест объявлял бы один
+        # адрес, а лежал бы в другом. Дефект был невидим, пока ``query_lang`` не выходил
+        # за дефолт; при ``--query-lang en`` он разделил бы адрес и идентичность.
+        query_lang=query_lang,
     )
 
     cells: list[Cell | None] = [None] * len(params)

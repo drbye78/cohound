@@ -143,13 +143,57 @@ def test_map_id_is_a_function_of_declared_inputs() -> None:
     # Каждый объявленный вход двигает идентичность: карта без модели — не измерение.
     for field, other in (
         ("reference_build_id", "ref_pg_18_b"),
-        ("baseline_facts_digest", "facts-2"),
         ("catalog_version", "cat-2"),
         ("llm_scenarios", {"model_id": "m2"}),
         ("prompt_template", "v10@def"),
         ("evaluation_policy", {"max_retries": 0}),
+        ("query_lang", "en"),
     ):
         assert reference_map_id(**{**base, field: other}) != first, field
+
+
+def test_map_id_ignores_facts_digest() -> None:
+    """Набор фактов на столе — провенанс карты, а не её условие (19.11.2026).
+
+    Карта читает чанки корпуса, а не файл фактов. Пока факты строились отдельным фразовым
+    прибором, дайджест входил в ``map_id``; после перехода на проекцию «карта → факт» это
+    дало бы круг: ``map_id`` ← дайджест фактов ← ``map_id``. Тест фиксирует, что круг не
+    вернётся: две карты с разными наборами фактов — одна и та же карта.
+    """
+    base = {
+        "reference_build_id": "ref_pg_18_a",
+        "catalog_version": "cat-1",
+        "llm_scenarios": {"model_id": "m1"},
+        "prompt_template": "v9@abc",
+        "evaluation_policy": {"max_retries": 2},
+    }
+    first = reference_map_id(**{**base, "baseline_facts_digest": "facts-1"})
+    second = reference_map_id(**{**base, "baseline_facts_digest": "facts-2"})
+    assert first == second
+    assert first == reference_map_id(**base), "отсутствие аргумента — то же значение"
+
+
+def test_built_map_manifest_id_matches_layout_id(tmp_path: Path) -> None:
+    """Манифест карты и каталог ``maps/`` называют **один** адрес.
+
+    ``run_map`` строит каталог по ``reference_map_id(query_lang=...)``, а
+    ``build_reference_map`` пересчитывает идентичность внутри. Пока внутренний вызов не
+    передавал ``query_lang``, при ``--query-lang en`` манифест объявлял бы адрес
+    дефолтного ``all``, лежащий в другой папке: два адреса у одного артефакта.
+    """
+    layout = ReferenceMapLayout(root=tmp_path / "maps" / "x", map_id="map_x")
+    expected = reference_map_id(
+        reference_build_id="ref_postgresql_18_deadbeef",
+        baseline_facts_digest="facts-1",
+        catalog_version="cat-1",
+        llm_scenarios={"model_id": "fake-evaluator@rev1"},
+        prompt_template="v9@abc",
+        evaluation_policy={"max_retries": 2},
+        query_lang="en",
+    )
+    result = _build(layout, query_lang="en")
+    assert result.manifest.map_id == expected
+    assert result.manifest.query_lang == "en"
 
 
 def test_map_id_ignores_observation_time_and_order(tmp_path: Path) -> None:
