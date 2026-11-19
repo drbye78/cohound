@@ -335,12 +335,12 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W3 — Store — ✅ done
 
-✅ сделано (проверено) — `core/store/sqlite.py:143` (`SCHEMA_VERSION = "3.26.0"`; **24** `CREATE TABLE`,
+✅ сделано (проверено) — `core/store/sqlite.py:143` (`SCHEMA_VERSION = "3.27.0"`; **24** `CREATE TABLE`,
 включая `schema_meta`, + `sqlite_sequence` = 25 таблиц в БД),
 `core/store/state_sqlite.py:90` (`STATE_SCHEMA_VERSION = "13"`),
 `core/store/state_store.py:1617` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.26.0"`;
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.27.0"`;
   гейт версии схемы — файл другой версии отвергается, `11` §2.6; свидетельство живости сеанса
   краула — F1.
 - `core/pipeline/liveness.py` — `owner`/`heartbeat_at`, recovery-on-open (`running` → `interrupted`),
@@ -359,8 +359,8 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
 `core/cli/context.py:1702` (`make_profile_gate` подключён в CLI).
 ✅ механизм durable-аттестации профиля есть, **подписей 0**: `save_profile_attestation` вызывается
-из CLI (`core/cli/package/commands.py:3083` → `core/store/state_store.py:1617`), команда —
-`hound package profile attest` (`core/cli/package/commands.py:2994`); строк в `profile_attestation`
+из CLI (`core/cli/package/commands.py:3001` → `core/store/state_store.py:1617`), команда —
+`hound package profile attest` (`core/cli/package/commands.py:2912`); строк в `profile_attestation`
 в `state.db` — **0**.
 
 - `core/pipeline/runner.py` — фазы, `PhaseResult`, resume; `core/pipeline/phases.py` — сборка фаз
@@ -391,7 +391,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W5 — Конфиг и CLI — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/lint.py:113` (`LintReport.ready`); сборка парсера даёт
+✅ сделано (проверено) — `core/pipeline/lint.py:108` (`LintReport.ready`); сборка парсера даёт
 **24** верхнеуровневые команды на `9b3c84d` (**25** в дереве на `2af6d1e` — +`retry`) и **28**
 подкоманд `hound package` на `2af6d1e` (было 27; +`profile`).
 
@@ -544,7 +544,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:2072` (`render_battle_card`), `:1827:1930`
+✅ сделано (проверено) — `core/pipeline/report.py:2060` (`render_battle_card`), `:1827:1930`
 (`render_nda_questions`), `:2414` (`render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, 26.10) и
 `runs/ru-pg-dbms-c2e7b860ac17/outputs/` (**12** файлов, 06.11, включая `battle_card.xlsx`,
@@ -579,7 +579,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173`/`:274`/`:465` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3253`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3261`),
 но приёмочный контур не пройден: golden-full дал 6.8 % на наборе из 236 строк
 (`2026-10-27-golden-reference-set-unusable.md`), на переразмеченных 905 строках прогнан только
 срез 50 ячеек (07.11, κ 0.024/0.056); §11.5-baseline и кейсы 2–5 не делались.
@@ -724,8 +724,8 @@ P5), но строка помечена здесь как неактуальна
   (`core/pipeline/crawl_frontier.py:213-216`): иначе число, выведенное из бюджета хоста, делало бы
   `run_id` функцией машины. Число выводится из бюджета (`preflight_extraction_budget`) и
   публикуется в манифесте; в `packages/ru-pg-dbms/run.yaml` ось **намеренно не объявлена**
-  (`packages/ru-pg-dbms/run.yaml:88`), объявлен только `extract_max_tasks_per_child: 25`
-  (`packages/ru-pg-dbms/run.yaml:110`); `metrics.json:resources.scheduling` прогона
+  (`packages/ru-pg-dbms/run.yaml:90`), объявлен только `extract_max_tasks_per_child: 25`
+  (`packages/ru-pg-dbms/run.yaml:112`); `metrics.json:resources.scheduling` прогона
   `ru-pg-dbms-c2e7b860ac17` даёт `extract_workers: null`, `source: "declared"`.
   **Память (замер, не оценка).** «Пол» docling-воркера ≈ **1.1 GB** резидентных после
   `malloc_trim` (`core/util/memory.py`: 1679 → 1084 MB, 1480 → 1122 MB), плюс веса и страница
@@ -958,24 +958,19 @@ uv sync --frozen --extra dev
    Адресация в отдельный `reports/` — не введена (не требуется).
 7. **Детерминизм инференса** (T9.2) — ✅ `core/adapters/llm_local.py` (seed/greedy; constrained
    decoding — забота [OI]-серверa).
-8. **Процедура/владелец `scope_attested_by`** для `exhaustive`-absence (W9) — ✅ реализовано:
-   `scope_attestation.yaml` + линт-правило `absence-attestation`, плюс **канал до Ш6**.
-   Подписи лежат в артефакте пакета (`attestations`: `product_id`/`attested_by`/`attested_at`/
-   `snapshot_date`/`notes`), ставятся `hound package scope attest --package … --product … --actor …`,
-   читаются прогоном и передаются в `evaluate_phase(scope_attested_by=…)` **per product**
-   (покрытие per product, поэтому и подпись per product). Использованные подписи видны в
-   манифесте (`scope_attestations`), то есть опубликованный ❌ прослеживается к человеку.
-   Подпись **не** входит в `EXECUTION_CONTRACT_FIELDS` — это авторизация, не измерение
-   (тот же класс, что `reviewed_by`), иначе смена подписанта рвала бы межцикловый diff.
-   Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
-   *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
-   ✅ проверено на `2af6d1e`: правило — `core/pipeline/lint.py:646` (`absence-attestation`),
-   канал в Ш6 — `core/pipeline/phases.py:1482`. Имя параметра сменилось: `scope_acceptance`
-   (принятие риска) — `core/pipeline/evaluate.py:2844` (`evaluate_cell`), `:551` (`_carry_one`),
-   `:1881` (`_resolve_denial`). Прежнее `scope_attested_by` живёт
-   **только как чтение** старого ключа в evidence-записях (`core/domain/invariants.py:327`)
-   и как миграция колонки (`core/store/sqlite.py:466`); в сигнатуре оценщика алиаса нет —
-   прежняя редакция выдавала желаемое за сделанное.
+8. **Процедура/владелец `scope_attested_by`** для `exhaustive`-absence (W9) — **СНЯТО
+   19.11.2026** (методология 0.4.0, решение владельца «вариант D»). Механизм был
+   реализован целиком (артефакт пакета `scope_attestation.yaml`, линт-правило
+   `absence-attestation`, канал до Ш6, провенанс в манифесте) и снят вместе с носителем:
+   класс `bounded` даётся правилом каталога, условие пространства выражает I2d
+   (датированное снятие каждого объявленного корня), публикацию авторизует гейт G4 —
+   его предмет несёт `absence.by_strength`/`as_of_min`/`undated`/`products_without_carrier`.
+   Причины снятия: подпись не несла отпечатка каталога и объявленного пространства (то есть
+   действовала на параметры, которых подписывающий не видел) и дублировала машинное условие
+   I2d. Удалены: модель `ScopeAttestation`, `load_scope_attestation(s)`, поле
+   `EvidenceScope.scope_acceptance`, колонка `cell_evidence.scope_acceptance` (схема 3.27.0),
+   команда `hound package scope set|attest|clear|show`, `attestation_digest` в ключе переноса
+   (`cell-reuse-3`). Историческая запись — `09` §11.5.
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой
 DLP, набор IDS-правил) — design-требования зафиксированы в `07` §8, но проверка соответствия
@@ -1027,7 +1022,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
   Открыто **пять** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
-  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2369-2375`),
+  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2357-2363`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
   не входит в `extractor_version`, `core/adapters/extract_document.py:349-385`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`

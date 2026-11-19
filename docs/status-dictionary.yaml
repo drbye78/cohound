@@ -92,12 +92,13 @@ absence_rule_type:
   default: explicit
   values:
     explicit: "Прямое отрицание/ограничение вендора с цитатой → denial_strength=explicit → ❌; без цитаты → not_stated → ❓."
-    parameter_reference: "Конечный справочник: без прямого отрицания требует принятия риска (scope_acceptance) → bounded → ❌; иначе ❓."
-    distribution_absence: "Конечный справочник: без прямого отрицания требует принятия риска (scope_acceptance) → bounded → ❌; иначе ❓."
-    registry_absence: "Авторитетная энумерация → denial_strength=authoritative → ❌; принятие риска не требуется."
+    parameter_reference: "Конечный справочник: без прямого отрицания → bounded (правило каталога), публикация требует датированного снятия каждого объявленного корня (I2d) → ❌; без носителя → ❓ (absence_undated)."
+    distribution_absence: "Конечный справочник: без прямого отрицания → bounded (правило каталога), публикация требует датированного снятия каждого объявленного корня (I2d) → ❌; без носителя → ❓ (absence_undated)."
+    registry_absence: "Авторитетная энумерация → denial_strength=authoritative → ❌; носитель и подпись не требуются."
   # Вариант 2 §2.3: тип правила больше не задаёт отдельную блокировку (I2b). Он лишь
   # подсказывает, какой класс отрицания вообще достижим: explicit — всегда,
-  # parameter_reference/distribution_absence — bounded (с принятием риска),
+  # parameter_reference/distribution_absence — bounded (правилом каталога; исчерпанность
+  # пространства доказывает I2d, подпись человека с 0.4.0 не требуется),
   # registry_absence — authoritative.
   denial_strength_reachable:
     explicit: [explicit]

@@ -42,7 +42,7 @@ repo/
     crawl_sources.yaml       # ОПЦ.: source routing feed/channel/engine (§D.2.1) —
                              # сейчас нет ни в одном пакете, включая _template
     run.yaml                 # мандат прогона (§D.1); копия кладётся в runs/{run_id}/
-    scope_attestation.yaml   # процедура аттестации полноты источника (I2b)
+    scope_attestation.yaml   # УСТАРЕЛО: код не читает (per-cell подпись снята в 0.4.0)
     registries/{registry_id}.yaml   # ОПЦ.: package-scoped конфиг фетчеров (§D.4);
                              # сейчас нет ни в одном пакете (шаблоны — docs/templates/registries/)
     sources/                 # авторские входы и операторские артефакты
@@ -201,7 +201,7 @@ runs/{run_id}/
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py` (**24** `CREATE TABLE` + `sqlite_sequence` (`AUTOINCREMENT` у `search_log.log_id`) = **25 таблиц** в `sqlite_master`, включая `schema_meta`; 15 объявленных `CREATE INDEX` (в `sqlite_master` их 38 — остальные автоиндексы PK/UNIQUE), 5 триггеров — I4/I6/I7/I13/I18 и `trg_evidence_source_id` (I10/I15); сверено 08.11.2026). Константа `SCHEMA_VERSION`
-= **`3.26.0`** (`core/store/sqlite.py:143`), `STATE_SCHEMA_VERSION` = **`"13"`**
+= **`3.27.0`** (`core/store/sqlite.py:143`), `STATE_SCHEMA_VERSION` = **`"13"`**
 (`core/store/state_sqlite.py:90`). **Полная история версий и причина каждого bump'а — канонически
 в `16-runs-schema-boundary.md`** (баннер: 3.13.0 → 3.14.0 гейт вместо аддитивных шимов → … →
 3.26.0), здесь не дублируется: две копии истории расходятся, и тогда неизвестно, какая верна.
@@ -229,7 +229,7 @@ runs/{run_id}/
 а не чтением старой БД: аддитивные дельты сделали бы «старую» строку неотличимой от «новой».
 Поэтому шимов `_ensure_columns` (`ALTER TABLE … ADD COLUMN` при открытии) **нет ни одного**:
 колонки и индексы объявлены в `CREATE TABLE`, а колонка, которой там нет, — дефект DDL, а не повод
-досоздать её на открытии (решение владельца 01.11.2026; удаление — `core/store/sqlite.py:819-827`).
+досоздать её на открытии (решение владельца 01.11.2026; удаление — `core/store/sqlite.py:818-826`).
 Тихий догон объявил бы файл текущим, не будучи им.
 
 **Свидетельство живости (v3.12.0).** `crawl_sessions.owner` (`host/pid/старт-процесса`)
@@ -330,11 +330,11 @@ class SqliteStore:
 
 | Версия | Носитель | Значение |
 |---|---|---|
-| `SCHEMA_VERSION` | `runs/{run_id}/cohound.db` | `"3.26.0"` (`core/store/sqlite.py:143`) |
+| `SCHEMA_VERSION` | `runs/{run_id}/cohound.db` | `"3.27.0"` (`core/store/sqlite.py:143`) |
 | `STATE_SCHEMA_VERSION` | `state/{package_id}/state.db` (durable-состояние оператора) | `"13"` (`core/store/state_sqlite.py:90`) |
 | `EDGE_JOBS_SCHEMA_VERSION` | `edge_jobs.db` (очередь DMZ) | `"1"` (`core/edge/scheduler.py:198`) |
 | `SEAM_SCHEMA_VERSION` | контракт `/v1/*` (`contracts/seam/*.json`); в манифесте — `edge_schema_version` (`DEFAULT_SCHEMA_VERSION`, `core/adapters/remote_gateway.py:54`) | `"1"` (`core/edge/seam_schema.py:68`) |
-| `METHODOLOGY_VERSION` | код (`core/domain/models.py:166`), ярлык пакета обязан ему **равняться** | `"0.3.0"` |
+| `METHODOLOGY_VERSION` | код (`core/domain/models.py:176`), ярлык пакета обязан ему **равняться** | `"0.4.0"` |
 
 #### C.1.1. Что входит в `run_id` (форкает ли прогон идентичность)
 
@@ -480,7 +480,7 @@ cohort: cohort-pg-2026q2
 cohort_ref: cohort-pg-2026q2-r2    # опц.: авторская ссылка на состав когорты → входит в cohort_digest
 products: [pangolin, alt1, alt2, ...]
 package: pg-core
-methodology_version: 0.3.0        # опц. (дефолт — пин проекта); входит в контракт, НЕ в run_id-материал напрямую
+methodology_version: 0.4.0        # опц. (дефолт — пин проекта); входит в контракт, НЕ в run_id-материал напрямую
 cycle_id: 2026-Q2                 # опц.: ISO-дата/ISO-неделя; None → snapshot_date. ВХОДИТ в run_id
 refresh_policy: auto              # опц.: auto|revalidate|refresh|offline|frozen; None → auto. ВХОДИТ в run_id
 llm_slot: cheap                   # опц.: cheap|flagship; активный слот оценщика → в llm_scenarios (контракт)
@@ -1046,7 +1046,8 @@ product_axes:
 
 ### D.3. Линтер (`pipeline/lint.py`, блокирует прогон)
 
-Всё из §4.2 + новые: `absence_rule` с аттестацией без процедуры `scope_attested_by` → ошибка;
+Всё из §4.2 + новые: (0.4.0: правила `absence-attestation` больше нет — `absence_rule` без
+артефакта подписи проходит линт);
 непустой baselines для архетипа C → **ошибка**; пустые `concept_terms` → warning; golden-full без
 страты ❌ → ошибка; незаполненные авторские поля (`definition` роли, `selection_reason` когорты) →
 **`incomplete`** (A3; выражается как `None`, а не текст-заглушка). `LintReport(blocking, warnings,
@@ -1759,8 +1760,8 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   отсутствующий прогон («прогон ещё не создан» отличимо от опечатки); чужой
   `schema_version` по-прежнему `EXIT_USAGE` (гейт `11` §2.6).
 - **Машинночитаемый вывод:** `--json` для CI и интеграций.
-- **Понятные ошибки с кодом инварианта:** например `I2b: parameter_reference требует exhaustive
-  и scope_attested_by (param=..., product=...)` — ссылка на регламент.
+- **Понятные ошибки с кодом инварианта:** например `I2d: bounded без датированного снятия
+  корня (param=..., product=...)` — ссылка на регламент.
 
 ### E.3. Композиция (wiring)
 
@@ -1776,10 +1777,10 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 
 | Шаг | Действие | Проверка | Статус |
 |---|---|---|---|
-| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1216` (`_shims_removed`) |
-| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:145`, `SCHEMA_VERSION` — `core/store/sqlite.py:143`; тот же гейт `tests/selfcheck.py:1216` |
-| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:1040` (`_import_graph`), вызов `tests/selfcheck.py:378` |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1449` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:208` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
+| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1213` (`_shims_removed`) |
+| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:155`, `SCHEMA_VERSION` — `core/store/sqlite.py:143`; тот же гейт `tests/selfcheck.py:1213` |
+| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:1037` (`_import_graph`), вызов `tests/selfcheck.py:375` |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1398` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:203` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется
@@ -1800,7 +1801,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | Развёртывание/DMZ (07) | A.1 (`edge/`, `config/deploy.yaml`), D.5, E.3 |
 
 **Открытые вопросы к итерации 4** (сверено 08.11.2026): формат импорт-графа CI — ✅ сделано
-(`tests/selfcheck.py:1040` `_import_graph`, вызов `tests/selfcheck.py:378`; AST по `core.*`);
+(`tests/selfcheck.py:1037` `_import_graph`, вызов `tests/selfcheck.py:375`; AST по `core.*`);
 структура логирования — ✅ сделано
 (`core/util/logging.py:1` — JSON-lines `runs/{run_id}/logs/{phase}.jsonl`, поля 04 §B.1;
 W12/T12.1, 2026-10-08); бэкап/

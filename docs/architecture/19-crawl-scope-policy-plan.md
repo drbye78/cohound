@@ -2,8 +2,8 @@
 
 **Тип:** справочник (as-built) + **одно решение владельца** (E.8). **Владелец:** Roger. **Начало:** 04.11.2026, срез `1c76e6e`.
 **Сверено с кодом:** 2026-11-16. Действующие версии —
-`SCHEMA 3.26.0` (`core/store/sqlite.py:143`), `STATE "13"` (`core/store/state_sqlite.py:90`),
-`METHODOLOGY 0.3.0` (`core/domain/models.py:166`); встречающиеся ниже «`7` → `8`»,
+`SCHEMA 3.27.0` (`core/store/sqlite.py:143`), `STATE "13"` (`core/store/state_sqlite.py:90`),
+`METHODOLOGY 0.4.0` (`core/domain/models.py:176`); встречающиеся ниже «`7` → `8`»,
 «`8` → `9`», «`9` → `10`» — история плана, а не текущее состояние.
 **Ревью:** @oracle 04.11.2026 (14 обязательных правок внесены, см. §11).
 **Как читать:** статус пункта — по факту кода, а не по обещанию (правило маркеров — как в
@@ -62,7 +62,7 @@ per-host статуса и без различения дискавери и о�
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
 | per-host[+path] оси и их digest в `run_id` | `core/config/domain_profiles.py:49`, `core/pipeline/report.py:802` | **не знает продукта** |
 | `product → host+path` слои | `core/config/crawl_sources.py:51`, `core/config/crawl_sources.py:77`, `core/config/crawl_sources.py:89` | digest информационный (`core/pipeline/crawl_session.py:133`) |
-| операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`core/cli/package/commands.py:2994`) | — образец для CLI политики |
+| операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`core/cli/package/commands.py:2912`) | — образец для CLI политики |
 | видимые отказы корня/продукта | `out_of_scope_subdomains` (`core/pipeline/crawl_frontier.py:1236`), `product_skipped` (`core/pipeline/corpus.py:5246`), `incomplete_reasons` (`core/pipeline/corpus_coverage.py:541`) | нет токена «запрещено политикой» |
 | готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`core/pipeline/corpus.py:2740`, `core/pipeline/corpus.py:2747`; `core/pipeline/corpus_coverage.py:405`) | переиспользуется политическими пропусками |
 
@@ -449,8 +449,8 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 
 | № | вопрос | почему это не деталь | статус |
 |---|---|---|---|
-| E.1 | **Публикация `❌` при различающихся датах** | правило «`❌` требует ответа сервера в этом цикле» (на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`; снято фазой F3, носитель — `core/domain/invariants.py:386`, `check_absence_dated`) и условие `observed_sources>0` (`core/pipeline/corpus_coverage.py:209`) закрепляли допущение «цикл = одна дата»; владелец требует архитектуру с **разными** датами | ✅ закрыто F3 плана 20 (05.11.2026, `methodology_change` 0.3.0): I2d — `❌` требует датированного носителя, `absence_as_of` публикуется; приёмка — `2026-11-05-absence-dated-acceptance.md` |
-| E.2 | право менять правило `live\|revalidated` | решение владельца 29.10.2026 (`09…:3403`), не следствие плана | ➖ **снят** методологией 0.3.0 (05.11.2026): правила `live\|revalidated` в коде нет (`_enforce_reuse_confirmed` удалён `3699ed9`), публикацию `❌` решает `check_absence_dated` (`core/domain/invariants.py:386`) |
+| E.1 | **Публикация `❌` при различающихся датах** | правило «`❌` требует ответа сервера в этом цикле» (на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`; снято фазой F3, носитель — `core/domain/invariants.py:365`, `check_absence_dated`) и условие `observed_sources>0` (`core/pipeline/corpus_coverage.py:209`) закрепляли допущение «цикл = одна дата»; владелец требует архитектуру с **разными** датами | ✅ закрыто F3 плана 20 (05.11.2026, `methodology_change` 0.3.0): I2d — `❌` требует датированного носителя, `absence_as_of` публикуется; приёмка — `2026-11-05-absence-dated-acceptance.md` |
+| E.2 | право менять правило `live\|revalidated` | решение владельца 29.10.2026 (`09…:3403`), не следствие плана | ➖ **снят** методологией 0.3.0 (05.11.2026): правила `live\|revalidated` в коде нет (`_enforce_reuse_confirmed` удалён `3699ed9`), публикацию `❌` решает `check_absence_dated` (`core/domain/invariants.py:365`) |
 | E.3 | носитель записи снятия (в плане — `STATE 8`, по факту — `STATE 9`: `STATE 8` занят `crawl_policy`) | необратимая схема-граница | ✅ реализовано и в работе (`corpus_capture`/`corpus_capture_doc`, STATE 9); подтверждение владельца — в §P5-прогоне |
 | E.4 | продукт без сохранённых байтов при `network_denied` | мерить нечем: `❓`/`no_sources` или продукт выпадает из отчёта | ✅ решено владельцем 04.11.2026: продукт **остаётся на карте**, причина видна (`stored_bytes_missing`/`unknown_roots`), покрытие неполно, ни одна ячейка не публикуется как `❌` |
 | E.7 | члены контейнеров в проходе без сети | `frozen`/`network_denied` пере-извлекает верхнеуровневые байты; члены контейнера приходят только из обхода (`ArchiveDescentWalker`), которого в этом проходе нет. Замер: 2 документа и 271 чанк из 597 на `jatoba` | ✅ решено владельцем 05.11.2026 («спуск контейнера в проходе без сети») и сделано: `container_state` (STATE 9 → 10 — история; действующая — `12`) пишется write-through живым спуском; `frozen` читает её **до** ветки `no_version` и спускает сохранённые байты inline (без пула, без `crawl_session_items`), называя невоспроизведённое (`stored_bytes_missing`, `frozen_container_unreadable`, `frozen_container_empty`, `frozen_container_replayed:{n}`). Замер: 9 / 876 против 9 / 876, чанки 9 из 9 |

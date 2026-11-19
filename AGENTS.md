@@ -138,7 +138,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `core/edge/` | Composition root Z1/DMZ: seam server, auth, audit, seam schema, crawl scheduler, poller, crawler factory, runtime config, launcher. |
 | `scripts/ci.sh` | Single CI entry point (spec §11.6). `scripts/check_doc_anchors.py` gates `path:line` anchors in `docs/`, `README.md`, `AGENTS.md`; `--check-drift BASE` reports anchors whose target line **moved** since `BASE` (a non-empty line at the old address proves nothing — measured 16.11.2026: 55 anchors drifted silently past the non-emptiness check). `scripts/check_runbook.py` gates the user-facing guide the same way anchors gate prose: a command the reader copies must exist. |
 | `tests/selfcheck.py` | Autonomous foundation check (no pytest): dictionary, DDL, invariants, import graph §1, neutrality §1.3. |
-| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `scope_attestation.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`; `reference_products.yaml` — which upstream lines the profile measures and at which versions; `baseline_facts.csv` — observations about the ancestor's documentation, each with a verbatim quote, text hash and date); optional `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
+| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`; `reference_products.yaml` — which upstream lines the profile measures and at which versions; `baseline_facts.csv` — observations about the ancestor's documentation, each with a verbatim quote, text hash and date); optional `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
 | `passports/{product_id}/` | Product passports. |
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
@@ -228,7 +228,7 @@ declared but **not wired**: the extractor always runs in the core (D-9). See
 | | Rule |
 |---|---|
 | **I1** | evaluated ✅/⚠️ → at least one evidence item. |
-| **I2/I2b** | evaluated ❌ → absence-evidence. `parameter_reference`/`distribution_absence` are provable only as `bounded`, which requires `scope_acceptance` (a human accepting the risk, `scope_attestation.yaml` per product) **and** a declared package procedure (`check_absence_attestation`); without either the cell is `❓` (`not_stated`), not `❌`. `registry_absence` derives its class from the declared rule (`EvidenceScope.for_registry_absence` → `denial_strength=authoritative`, `enumerated=True`) and needs no attestation — a registry is an authoritative enumeration. `explicit` needs no scope (but see I2c). The pre-`9ec346e` scalar `source_scope: exhaustive` and the checker `_has_exhaustive_scope` no longer exist (legacy rows are still readable). |
+| **I2/I2b** | evaluated ❌ → absence-evidence. `parameter_reference`/`distribution_absence` are provable only as `bounded`, which is derived from the declared rule (`EvidenceScope`, `basis="rule:bounded"`) and published only with a **dated carrier** (I2d: every declared root captured `complete=1` with a matching space `policy_digest` and a date); without it the cell is `❓` (`not_stated`, token `absence_undated`), not `❌`. A per-cell human signature (`scope_acceptance`, `scope_attestation.yaml`) **no longer exists** (methodology 0.4.0): authorization to publish is G4's, once per report, and its subject publishes the strength and date of every `❌`. `registry_absence` derives its class from the declared rule (`EvidenceScope.for_registry_absence` → `denial_strength=authoritative`, `enumerated=True`) and needs no carrier — a registry is an authoritative enumeration. `explicit` needs no scope (but see I2c). The pre-`9ec346e` scalar `source_scope: exhaustive` and the checker `_has_exhaustive_scope` no longer exist (legacy rows are still readable). |
 | **I2d** | `❌` → **датированный носитель**, и дата публикуется: `explicit`/`authoritative` — запись наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`; `adopted` допускается, дата не обязана быть в этом цикле); `bounded` — снятие **каждого** объявленного корня `complete=1` с датой и совпадающим `policy_digest` (отпечаток **пространства**: объявленные режимы + `crawl_config_digest`, без решения по часам; `adopted` исчерпание **не** удостоверяет); `registry_absence` — как I2b. `absence_as_of = min(дат носителей)` → `cells.absence_as_of` + `cell_freshness.csv`. Носителя нет → `❓` + токен `absence_undated` (`evidence_scope.reason` и `validation_notes`), протокол отсутствия не публикуется. Перенесённый `❌` проходит то же правило. |
 | **I3** | strict `❓` → **full** exhaustion protocol (`corpus` + `serp` + `registry` + `inheritance`) **or** `reviewed_by ≠ null`. An incomplete protocol is a report anomaly, not a status change. The protocol is written from **observed** facts and names only circuits that actually ran — a run without the SERP circuit keeps `❓` as an anomaly; that is a correct signal, not a defect to silence. |
 | **I4** | `failed` → `status = null`, never a status. |
@@ -247,22 +247,22 @@ alone (`check_absence_coverage`, mirrored in the report; executed in Ш6 via
 - `explicit` (verbatim vendor quote) and `authoritative` (authoritative enumeration) are
   **not** cancelled by incomplete coverage — they are testimony, not an inference from
   corpus completeness;
-- `bounded` depends on the space, so it requires `scope_acceptance` (a human accepting the
-  risk); without it the `❌` is not published;
+- `bounded` depends on the space, so the space condition is expressed by I2d (a dated
+  `complete=1` capture of every declared root); incomplete coverage alone does **not**
+  cancel it (0.4.0: before it did unless a human had signed);
 - `unobserved`/`not_stated` never yield `❌` at all (I2).
 
-A violation turns the cell into **`❓`** (`not_stated`, I12), not `failed`: an absent risk
-acceptance is a procedural condition, not instrument failure (I4), and the cell must stay on
+A violation turns the cell into **`❓`** (`not_stated`, I12), not `failed`: a missing carrier
+is a procedural condition, not instrument failure (I4), and the cell must stay on
 the map. The withdrawn `❌` publishes no absence protocol either (`absence_evidence=[]`) —
 "we looked and did not find" is a claim that is not proven here. The reason goes out as the
 machine token `absence_coverage_unsatisfied` in `evidence_scope.reason` **and**
 `cells.validation_notes`, naming the missing component and the culprit
 (`{product_id}/{param_id}`). `coverage=None` (no coverage record) → the check does not apply.
-The signature lives in `packages/{case_id}/scope_attestation.yaml:attestations` (**per
-product**), written by `hound package scope attest --package … --product … --actor …`; the
-run reads it and passes it into Ш6, and used signatures are visible in the manifest
-(`scope_attestations`). It is **not** in `EXECUTION_CONTRACT_FIELDS`: authorization, not
-measurement.
+The per-cell signature and its artifact were removed in 0.4.0; publication is authorized by
+G4, whose subject (`publication_subject`) carries `absence.by_strength`, `as_of_min`,
+`undated` and `products_without_carrier`. It is **not** in `EXECUTION_CONTRACT_FIELDS`:
+authorization, not measurement.
 
 **I2d (methodology 0.3.0) — dated absence, and `complete` is a fact of the corpus.**
 `❌` is no longer an assertion about *today*: it is an assertion about a **dated event**
@@ -288,9 +288,9 @@ Two consequences that are easy to miss:
   none, and «unknown» is not «failed». `observed_sources == 0` no longer decides anything
   (measured 05.11.2026: `frozen` lost all four `❌` as `failed`/`status=null` on the very same
   bytes, composition and `complete=1` capture — `2026-11-05-absence-dated-demo.md`).
-- **`scope_acceptance` stops rescuing `bounded`**: a risk signature does not replace a dated
-  carrier, so `bounded` + incomplete capture ⇒ `❓` even with a signed acceptance. That is a
-  tightening of I2c's branch, not a new gate: I2c itself is untouched.
+- **No per-cell signature rescues `bounded`** (0.4.0: there is none): only the dated carrier
+  does, so `bounded` + a root without a `complete=1` capture ⇒ `❓`, regardless of any human
+  signature. I2c's branch for `bounded` is thus expressed entirely by I2d.
 
 `policy_digest` of the capture is the **fingerprint of the space the walk exhausted**
 (declared policy modes + `crawl_config_digest`), not of the decision surface: the clock-derived

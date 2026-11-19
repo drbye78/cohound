@@ -202,7 +202,7 @@ evaluate, review, g3, compute, g4, report`.
 То есть `35e4373` закрыл **один** путь: отсутствующий файл БД → `EXIT_NOT_FOUND`
 (`build_store(read_only=True)` → `StoreNotInitialized`). Второй путь — файл есть, а прогона в
 нём нет — по-прежнему `EXIT_USAGE`: `read_manifest` бросает `ValueError("прогон не найден…")`
-(`core/store/sqlite_store.py:3035`, def `core/store/sqlite_store.py:3013`), а `ValueError`
+(`core/store/sqlite_store.py:3032`, def `core/store/sqlite_store.py:3010`), а `ValueError`
 перехватывается общим обработчиком и отдаётся кодом 2 (`core/cli/main.py:272`), поэтому CLI печатает
 `E: прогон не найден: 'ghost'` кодом **2**. Для скрипта это одно и то же событие с двумя
 кодами — в зависимости от того, кто создал файл.
@@ -234,8 +234,8 @@ evaluate, review, g3, compute, g4, report`.
 `crawl-probe` остались в пакете. Подпункт «READ/WRITE выражен единообразно» не закрыт, а
 ухудшился: `--dry-run` у **35** листьев, `--apply` у 3 (`package add-product`, `package
 index-gc`, `package builds-gc`), `--write` у 2 — и он по-прежнему значит разное: «записать
-JSON-план в файл» (`package candidates`, `core/cli/package/parser.py:597`) против «внести измеренные оси в
-`domain_profiles.yaml`» (`package crawl-probe`, `core/cli/package/parser.py:737-740`).
+JSON-план в файл» (`package candidates`, `core/cli/package/parser.py:558`) против «внести измеренные оси в
+`domain_profiles.yaml`» (`package crawl-probe`, `core/cli/package/parser.py:698-701`).
 
 28 подкоманд, из них:
 
@@ -439,7 +439,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 
 ### Команды «только для чтения» создают БД
 
-✅ сделано (`core/store/sqlite.py:898-916` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
+✅ сделано (`core/store/sqlite.py:897-915` — `connect_read_only`, `core/cli/wiring.py` — `build_store(read_only=True)`, `35e4373`).
 Перемер на тех же трёх командах и несуществующем пути: `review --db /tmp/…/x.db`,
 `sensitivity --db …`, `golden --golden … --db …` → **`exit 4`**, каталог не создаётся
 (`ls: cannot access …`: файла нет). Сообщение называет причину: «read-only команда файл не
@@ -475,7 +475,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:1060`, `core/store/sqlite_store.py:2100`,
+✅ сделано (`core/cli/commands/crawl.py:1060`, `core/store/sqlite_store.py:2097`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
 текстовом выводе (`core/cli/commands/crawl.py:1074-1075`), и в JSON
 (`core/cli/commands/crawl.py:1067`). Докстринг `iter_crawl_sessions` прямо
@@ -511,10 +511,10 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 ### Документация описывает не то, что делает код
 
 ✅ сделано (`35e4373`) — все три расхождения закрыты; сейчас
-`docs/architecture/03-data-config-cli.md:1565` (`resolve` — «резолв
-`source_id` → URL по БД прогона, без сети»), `docs/architecture/03-data-config-cli.md:1575`
+`docs/architecture/03-data-config-cli.md:1566` (`resolve` — «резолв
+`source_id` → URL по БД прогона, без сети»), `docs/architecture/03-data-config-cli.md:1576`
 (`review` — «**только печать**, ячейки не
-меняет») и `docs/architecture/03-data-config-cli.md:1588` (benchmark — «Пишет **только
+меняет») и `docs/architecture/03-data-config-cli.md:1589` (benchmark — «Пишет **только
 JSON-артефакт** (БД не меняет:
 `persist_manifest` есть лишь в ветке `retrieval`)»). Таблица ниже — запись дефекта в
 нумерации до правки.
@@ -535,7 +535,7 @@ JSON-артефакт** (БД не меняет:
 ⬜ не сделано — `registry`, `inheritance`, `compute` отдельными командами не появились
 (перемер по собранному парсеру: листьев с такими именами нет), отдельного «исполнить одну
 фазу» тоже нет — только `run --until PHASE`, который пишет БД. `package compose-baselines`
-по-прежнему черновик «без записи» (`core/cli/package/parser.py:350`), `sensitivity` — пост-хок.
+по-прежнему черновик «без записи» (`core/cli/package/parser.py:346`), `sensitivity` — пост-хок.
 Что осталось: либо команда на фазу (с явным read/write), либо `hound status`/`run --until` как
 единственный названный способ.
 
@@ -588,7 +588,7 @@ JSON-артефакт** (БД не меняет:
 
 **Ссылочный счёт (сверено 07.11.2026).** Этот документ цитируется как обоснование из **12**
 файлов кода и тестов (в `README.md` до этой сверки стояло «9»): `core/pipeline/golden_status.py:34`,
-`core/store/sqlite.py:914`, `core/store/sqlite_store.py:2089`, `core/cli/commands/status.py:3`,
+`core/store/sqlite.py:913`, `core/store/sqlite_store.py:2086`, `core/cli/commands/status.py:3`,
 `core/cli/commands/runs.py:4`, `core/cli/run_overview.py:4`, `core/cli/wiring.py:654`,
 `tests/cli/test_gate.py:347`, `tests/cli/test_runs_status.py:3`,
 `tests/store/test_read_only_connect.py:6`, `tests/cli/test_read_only_commands.py:3`,

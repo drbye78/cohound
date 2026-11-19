@@ -119,9 +119,9 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
    аттестованным (дайджест сверяется, расхождение называет изменившийся компонент).
 
 **У аттестации есть производитель** — `hound package profile attest`
-(`cmd_package_profile_attest`, `core/cli/package/commands.py:2994`; запись —
-`core/cli/package/commands.py:3083` → `save_profile_attestation`,
-`core/store/state_store.py:1617`; парсер — `core/cli/package/parser.py:1007`, `--gate`
+(`cmd_package_profile_attest`, `core/cli/package/commands.py:2912`; запись —
+`core/cli/package/commands.py:3001` → `save_profile_attestation`,
+`core/store/state_store.py:1617`; парсер — `core/cli/package/parser.py:968`, `--gate`
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
@@ -659,14 +659,14 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 (I2/I2b/I2d) живут в доменных инвариантах, а не здесь.
 Регламент (§7.1) разрешает «частично механически» и требует следствия-*аномалии*, поэтому
 шаг присутствует в норме, но не в коде. Что существует вместо него: замер
-`support_subject_overlap` (`core/pipeline/evaluate.py:1626-1666`) — пересечение стемов параметра и цитаты
+`support_subject_overlap` (`core/pipeline/evaluate.py:1616-1656`) — пересечение стемов параметра и цитаты
 для ✅/⚠️; он **не меняет вердиктов**, пишет `cells.validation_notes`/`review_reason` и
 агрегируется в `outputs/support_quality.yaml`. Измеренный масштаб — в
 `docs/reports/measurements/2026-10-27-support-not-about-subject.md`: v2 публиковал 45 `✅`
 из 70 без доказательства о предмете.
 **Следствие-аномалия теперь публикуется** (V1 закрыт 08.11.2026): записи замера идут в
 операторский `nda_questions.csv` строками `anomaly_kind=unrelated_support`
-(`core/pipeline/report.py:2222`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
+(`core/pipeline/report.py:2210`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
 не меняется. Маркерная проверка класса утверждения (отрицание/условность в цитате против
 заявленного ✅) остаётся **названным ограничением**, а не работой: она требует замера шума
 на корпусе, иначе превращается в порог из головы (A3).
@@ -675,7 +675,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (status=null, I4). В preliminary невалидная цитата → кандидат + `validation_notes`.
 
 **Evidence-объект.** По итогу валидации создаётся `CellEvidence` (`source_id`, `source_url` из
-резолва, `citation_quote`, `content_hash` чанка, `source_scope`/`scope_attested_by` для absence).
+резолва, `citation_quote`, `content_hash` чанка; для absence — класс силы отрицания в `cells.evidence_scope`).
 Валидация цитат — **по чистому `text`**, `context_prefix` не участвует (§4.4).
 
 ### C.3. Search-адаптер (Ш5, §7.2)
@@ -687,7 +687,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:918-957`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:882-921`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
   сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1416-1421`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
@@ -828,7 +828,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3829`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3817`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
@@ -837,7 +837,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 (`13 §4`), `baseline_delta.csv` + `baseline_delta.yaml` (Δ к объявленной точке отсчёта
 когорты — `cohort.yaml: comparison_base`; матрица переходов `base_status → product_status`,
 ординальности статусов не вводится). Таблица выше называет публикационные (`PUBLISHED_ARTIFACTS`,
-`core/pipeline/gate_subject.py:59-64`) и манифест. Полный перечень — поля датакласса
+`core/pipeline/gate_subject.py:64-69`) и манифест. Полный перечень — поля датакласса
 `Artifacts` (`core/pipeline/report.py:307`), а не число: список рос на каждом O-пункте, и
 пересчитанное «сколько всего файлов» устаревало быстрее, чем его читали. Раньше здесь
 стояло «16» (измерено 2026-11-08) — к 17.11.2026 это число неверно.
@@ -951,8 +951,8 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3829` → `{out_dir}/{run_id}/outputs/`,
-request-файлы гейтов — `core/pipeline/gate_subject.py:427`); версионирование
+`write_reports` `core/pipeline/report.py:3817` → `{out_dir}/{run_id}/outputs/`,
+request-файлы гейтов — `core/pipeline/gate_subject.py:532`); версионирование
 `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:128`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
 `core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
@@ -966,7 +966,7 @@ request-файлы гейтов — `core/pipeline/gate_subject.py:427`); вер
 гранулярность транзакций SQLite при массовой записи — ✅ сделано
 (`core/store/sqlite.py:125` `PRAGMA journal_mode = WAL` +
 `core/store/sqlite_store.py:97` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch`
-`core/store/sqlite_store.py:665` — одна транзакция на пачку).
+`core/store/sqlite_store.py:662` — одна транзакция на пачку).
 
 **Что остаётся открытым, хотя в §H не значится:** шаг (3) эшелона — проверка следствия
 статуса из цитаты (§C.2, V1) и append-only раунды K2 (§G.2). Оба названы в тексте и оба

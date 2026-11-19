@@ -211,11 +211,11 @@ pdfium) GPU **не ускоряет** — отсюда обе механизмы
 плечо (BM25, косинус или RRF). Прежняя редакция этого абзаца утверждала «порт `reranker` есть,
 по умолчанию выключен»; проверено 15.11.2026 — в `core/ports/` его нет (19 модулей + `__init__.py`, `__all__` без
 `rerank`), а пять попаданий на слово `rerank` в `core/` описывают **место под число**, не
-механизм: `SearchLogEntry.rerank_score` (`core/domain/models.py:1602`), колонка
-`rerank_score REAL` (`core/store/sqlite.py:508`), её сериализация (`core/store/sqlite_store.py:233,918`)
+механизм: `SearchLogEntry.rerank_score` (`core/domain/models.py:1551`), колонка
+`rerank_score REAL` (`core/store/sqlite.py:507`), её сериализация (`core/store/sqlite_store.py:231,918`)
 и докстринг `core/pipeline/search_log.py:267` о переносе именованных скоров. Поле всегда `None`:
 производителя нет. Это O23 плана 26 — **измерение, а не решение** (триггер возврата в
-`cohound-spec-v2.md:940`: измеренный прирост precision на retrieval-golden).
+`cohound-spec-v2.md:949`: измеренный прирост precision на retrieval-golden).
 
 Начальный вариант для модельного профиля — `bge-reranker-v2-m3` (Apache-2.0 ✅ — объявлена
 метаданными карточки, файла `LICENSE` в репо нет; мультиязычный, работает через
@@ -629,7 +629,7 @@ copyright, перечень изменений. Такой реестр нель
 ## 5. Версионные границы (связь с §13)
 
 Класс границы определяется **не типом зависимости**, а тем, входит ли величина в
-`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 0.3.0 — `core/domain/models.py:166`). Таблица — зеркало
+`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 0.4.0 — `core/domain/models.py:176`). Таблица — зеркало
 `03` §C.1/§C.2 и `core/pipeline/digests.py`:
 
 | Что меняется | Класс | Следствие |

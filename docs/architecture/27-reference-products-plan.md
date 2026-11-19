@@ -52,18 +52,18 @@ upstream-факте в **измерение** с датой, цитатой и �
 
 | деталь | состояние |
 |---|---|
-| `PackageManifest.baselines: list[str]` (`core/domain/models.py:239`) | ✅ список — под B уже годится |
-| `BaselineRow` (`core/domain/models.py:396`), `load_baselines` (`core/config/run_config.py:296`) | ✅ ключ `(baseline_id, param_id)` — это и есть «матрица параметр × базлайн» |
-| режимы `direct/conditional/blocked` + I8 (`invariants.py:527`) | ✅ |
+| `PackageManifest.baselines: list[str]` (`core/domain/models.py:246`) | ✅ список — под B уже годится |
+| `BaselineRow` (`core/domain/models.py:360`), `load_baselines` (`core/config/run_config.py:296`) | ✅ ключ `(baseline_id, param_id)` — это и есть «матрица параметр × базлайн» |
+| режимы `direct/conditional/blocked` + I8 (`invariants.py:506`) | ✅ |
 | порог `min_version` (`inheritance.py:173`) | ✅ (нераспознанная версия → пропуск) |
 | базис «объявлено/выпущено» (`inheritance.py:595`) | ✅ |
-| CRUD строк с линтом (`package_admin.py:1394,1440`) | ✅ `hound package baseline …` |
+| CRUD строк с линтом (`package_admin.py:1361,1440`) | ✅ `hound package baseline …` |
 | кандидаты `kind="baseline"` → `package apply` (`package_candidates.py:274`) | ✅ |
 | черновик из эвристик профиля (`package_discovery.py:241`) | ✅ (ничего не пишет) |
 | **`baselines.csv` в `run_id`** | ❌ нет `baselines_digest` в контракте (33 поля) |
 | **per-параметр evidence** | ❌ `_derived_evidence` (`inheritance.py:152`) берёт **одну** цитату из `passport.upstream.evidence` |
 | **reference-продукт как сущность** | ❌ `baseline_id` — строка; за ней нет продукта, версии, корпуса |
-| **несколько предков у продукта** | ❌ `Passport.upstream` — одно поле (`models.py:461`), 3 места использования в `inheritance.py` |
+| **несколько предков у продукта** | ❌ `Passport.upstream` — одно поле (`models.py:425`), 3 места использования в `inheritance.py` |
 | **история версий** | ❌ `upstream.version` — одна строка |
 | **карта reference-продукта** | ❌ нет: `_compute_from_cells` (`compute.py:268`) работает по ячейкам, а ячеек reference-продукта никто не производит |
 
@@ -71,7 +71,7 @@ upstream-факте в **измерение** с датой, цитатой и �
 `inheritance.jsonl` → `cells: 0`, `cells.source_kind` = `documentation: 905`,
 `cell_evidence(source_kind=inheritance)` = **0**. Механизм построен и не используется.
 
-Спека это предусмотрела, код — нет (`cohound-spec-v2.md:338`):
+Спека это предусмотрела, код — нет (`cohound-spec-v2.md:346`):
 
 > носитель — запись `cell_evidence` со ссылкой на upstream-паспорт/строку baselines и,
 > **где возможно, на корпусный чанк upstream-продукта** (`source_id`); если чанк
@@ -155,7 +155,7 @@ upstreams:
 
 **Архетип A** — частный случай: список из одного элемента. Линтер требует ровно один
 `upstreams` для A и ≥1 для B; архетип C не заполняет `baselines.csv` (существующее правило
-`lint.py:158`).
+`lint.py:153`).
 
 `PackageManifest.baseline_participant: str | None` → **`baseline_participants: list[str]`**:
 в B базлайн-участников несколько (по одному на линию), и одно поле их не выражает.
@@ -708,7 +708,7 @@ Reference-продукт **не попадает** в `cohort.yaml`, `run.yaml:p
 * архетип A: `upstreams` **не больше одного** (второй — заявка формы B в A-пакете);
   отсутствие предка у продукта не блокирует, а публикуется предупреждением
   `upstreams-by-archetype` — «вендор не называет версию» честное состояние, и требовать
-  предка значило бы заставить автора его выдумать (A3, `core/pipeline/lint.py:307`);
+  предка значило бы заставить автора его выдумать (A3, `core/pipeline/lint.py:302`);
   блокирует лишь пакет A, где предка нет **ни у одного** продукта когорты.
   B: ≥1 не требуется (регламент §1.5 — «если он существует»); C: `baselines.csv` пуст
   и `upstreams` пуст.
@@ -1030,9 +1030,12 @@ upstream, (б) переездом документации, (в) дефекто�
    параметра (было 177 константой), `parameter_reference` 19 (объявленные перечни:
    архитектуры, ОС, типы секционирования, пакеты, форматы), `distribution_absence` 158,
    `registry_absence` 4 (ФСТЭК, каталог 1С, Гостех). Цена честного класса считается из
-   `golden.csv` самим прибором: **275 из 282 `❌`** требуют `scope_acceptance` (245 + 30) и
-   до подписания публикуются как `❓` (`not_stated`, I2c/I2d); 7 `registry_absence` подписи
-   не требуют. Это не регресс карты, а снятие утверждения, которого не было. Триггер
+   `golden.csv` самим прибором: **275 из 282 `❌`** относятся к классу `bounded` (245 + 30) и
+   до появления датированного снятия каждого объявленного корня публикуются как `❓`
+   (`not_stated`, I2d); 7 `registry_absence` носителя не требуют. **19.11.2026 подпись
+   `scope_acceptance` снята (методология 0.4.0)** — эти 275 ждут не человека с подписью, а
+   полного снятия корней; публикацию авторизует G4. Это не регресс карты, а снятие
+   утверждения, которого не было. Триггер
    пересмотра recon — прогон на размеченных терминах (или второй профиль, где каталог
    пишется понятиями).
 

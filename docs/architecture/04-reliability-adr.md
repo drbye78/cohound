@@ -36,7 +36,7 @@
 
 **`unexpected` (S7).** `UNEXPECTED` — **run-level** ошибка **без ячейки** (системное исключение);
 в `failure_kind` она **не входит**. `FailureKind` — **17** значений (5 конвейерных + 12
-наблюдаемых исходов, вкл. `partial_extraction`), `core/domain/enums.py:134`:
+наблюдаемых исходов, вкл. `partial_extraction`), `core/domain/enums.py:135`:
 
 | класс | значения |
 |---|---|
@@ -349,7 +349,7 @@ tests/
 | объём индекса | ➖ снято замером | 133 119 чанков на **3** партиции (срез 07.11.2026 до перезапуска корпуса, `14` §1; воспроизводится только из `cohound.db.before-corpus-rerun`); закрытый цикл 08.11.2026 — **154 664** чанка / **8 115** док на 5 партиций, максимум партиции 108 614 против порога 3–5 млн (запас ≥ 27×). Мера (`.npy`-шарды) есть: `core/adapters/vector_npy.py:247` |
 | ANN-альтернатива | ➖ снято решением | решение — `14` §4: Qdrant отклонён (поиск продукт-скупед, I17, ANN по миллионам векторов не выполняется никогда), порт `VectorIndex` готов, ANN-адаптера нет; возврат — по условию строки выше, не по «на вырост» |
 | эмбеддинги на CPU | ✅ сделано | батчевый путь `core/adapters/embed_local.py:193` (нарезка входа `batch_size`); цена — 2.8–5.7 чанк/с продакшн-путь, fp16 — 15.40 чанк/с (06.11.2026, `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`) |
-| массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:125`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:97`, `save_cells_batch` — `core/store/sqlite_store.py:648`) |
+| массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:125`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:97`, `save_cells_batch` — `core/store/sqlite_store.py:645`) |
 | search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1387`, безлимит запрещён — `core/pipeline/corpus.py:1411`), кэш — `core/util/cache.py:133` |
 
 ### D.1. Память и OOM
@@ -453,7 +453,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
   они и есть цена: из 79 MB, которые берёт `extract` на 6.51 M символов, **67 MB** — список
   страниц (54) и склейка (13).
 - **Пик воркера — максимум по документам, а не цена одного.** При
-  `extract_max_tasks_per_child: 25` (`packages/ru-pg-dbms/run.yaml:110`) и `malloc_trim` после
+  `extract_max_tasks_per_child: 25` (`packages/ru-pg-dbms/run.yaml:112`) и `malloc_trim` после
   каждого документа: 94-страничный документ — **+309 MB** к пику за 4 документа (насыщение не
   наступило), 12-страничный — **+93 MB** за 8 (насыщение на 5-м, база 1.53 GB). Без trim второй
   документ стоил **+462 MB** против **+135 MB** с ним.
@@ -491,7 +491,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 | 0009 | Кэш внешних вызовов для R7 | R7 | accepted |
 | 0010 | `failed` — состояние ячейки, не исключение | I4/I5 | accepted |
 | 0011 | Гейты G1–G4 — только человеческие решения | I6/I7 | **ЗАМЕНЕНО** решением владельца 26.10.2026: G1/G2/G3 **не блокируют** прогон — фаза идёт `skipped` и пишет waiver с `actor="policy"` (`core/pipeline/gates.py:79` `NON_BLOCKING_GATES`, `core/pipeline/runner.py:534`); блокируют только G4 и явный `rejected` — см. 0023 |
-| 0012 | Расщепление бывших `core/schemas.py`/`core/db.py` на слои | чистота слоёв | accepted · **реализовано** (M0/W1, шимы удалены; слой гейтится `tests/selfcheck.py:378` `_import_graph`) |
+| 0012 | Расщепление бывших `core/schemas.py`/`core/db.py` на слои | чистота слоёв | accepted · **реализовано** (M0/W1, шимы удалены; слой гейтится `tests/selfcheck.py:375` `_import_graph`) |
 | 0013 | Гранулярность индексной сборки и provenance ячеек | R7/R15, §13 | accepted · уточнён 0021 |
 | 0014 | SERP-петля vs иммутабельность: append-only раунды сборок | I19, §13, K2 | accepted · **частично**: код append-only раундов есть, живой SERP-раунд в прогоне кейса не выполнялся (`docs/architecture/06-implementation-strategy.md:190`, W11: код ✅, живой раунд ⏳) |
 | 0015 | Политика ранжирования/демотирования: requested vs computed | A3, K6 | accepted |
@@ -502,7 +502,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 | 0020 | Coverage по **вселенной scope** (§6/B-3a: `scope_universe`, `universe`/`completed`/`defined`, UNDEFINED) + разделение `methodology_version`/`EXECUTION_FIELDS` (§13/B-7) | A2/A3, I5/I11/I13 | accepted · **v2.1**; модель отсутствия с тех пор сменилась — методология **0.3.0** (I2d, план 20), ADR на это не было, добавлен **0024** |
 | 0021 | Двухуровневая идентичность индексной сборки: `partition_build_id` (`pb_`) на партицию + `index_build_id` (`cb_`) как композиция `(product_id, partition_build_id, content_digest)`; `params`/`snapshot_date` вне `pb_` | I17, §13, R7: переиспользование партиции при смене фокуса/каталога без коллизии same-id/different-content (уточняет 0013) | accepted · **реализовано** |
 | 0022 | Память экстракции — **операционный рычаг, вне** `EXECUTION_CONTRACT_FIELDS`: `PDF_QUEUE_MAX_SIZE`, `malloc_trim(0)` после документа, ленивый импорт docling, рециклинг воркеров | A1/A2: не меняет наблюдаемых значений, значит не вправе ветвить `run_id` (§D.1) | accepted · **реализовано** |
-| 0023 | Гейты как **точки интеграции**: G1/G2 — внутренняя аттестация профиля, G3/G4 — приём внешнего вердикта; решение привязано к `subject_digest`; waiver видим | I6/I7, §13: устаревшее одобрение не действует, молчание внешней системы не выдаётся за отказ или одобрение (уточняет 0011) | accepted · **реализовано**: гейтовая половина (привязка к `subject_digest`, вердикт, waiver, request-файл) и производитель durable-аттестации — `hound package profile attest` пишет `profile_attestation` в `state.db` (`core/cli/package/commands.py:2994`, запись — `core/cli/package/commands.py:3083`; `core/cli/package/parser.py:1007`). **0 строк** в реальных `state.db` (07.11.2026) — операционный факт: механизмом не пользовались, а не дефект дизайна. Писатель покрыт тестами: `tests/pipeline/test_profile_attestation.py:322`, `tests/selfcheck.py:2195` |
+| 0023 | Гейты как **точки интеграции**: G1/G2 — внутренняя аттестация профиля, G3/G4 — приём внешнего вердикта; решение привязано к `subject_digest`; waiver видим | I6/I7, §13: устаревшее одобрение не действует, молчание внешней системы не выдаётся за отказ или одобрение (уточняет 0011) | accepted · **реализовано**: гейтовая половина (привязка к `subject_digest`, вердикт, waiver, request-файл) и производитель durable-аттестации — `hound package profile attest` пишет `profile_attestation` в `state.db` (`core/cli/package/commands.py:2912`, запись — `core/cli/package/commands.py:3001`; `core/cli/package/parser.py:968`). **0 строк** в реальных `state.db` (07.11.2026) — операционный факт: механизмом не пользовались, а не дефект дизайна. Писатель покрыт тестами: `tests/pipeline/test_profile_attestation.py:322`, `tests/selfcheck.py:2192` |
 | 0024 | **Датированное отсутствие** (I2d, методология 0.3.0): `❌` — утверждение о **датированном событии**, а не о «сегодня». Носитель зависит от класса отрицания: `explicit`/`authoritative` — дата наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`), `bounded` — снятие `complete=1` **каждого** объявленного корня с датой и совпадающим `policy_digest`; `absence_as_of = min(дат)` публикуется в `cells.absence_as_of`. Носителя нет → `❓` + токен `absence_undated`, протокол отсутствия не публикуется | A3: «не смотрели» и «смотрели в марте» — разные факты; план 20 §F1/F3 | accepted · **реализовано** (`core/domain/models.py:166` `METHODOLOGY_VERSION = "0.3.0"`, SCHEMA `3.20.0`) |
 
 **«Принято» ≠ «реализовано» — аудит реестра (2026-11-08, HEAD `2af6d1e`).** Реестр сверен
@@ -510,7 +510,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 долг: 0011 **заменён** решением владельца 26.10.2026 (G1/G2/G3 не блокируют, waiver
 `actor="policy"`), 0020 уточнён методологией **0.3.0** (I2d), на которую ADR не было —
 добавлен **0024**. 0012 реализован (якорь переставлен по содержанию:
-`tests/selfcheck.py:378`). 0014 и 0023 исполнены по коду, но у обоих открыта **операционная**
+`tests/selfcheck.py:375`). 0014 и 0023 исполнены по коду, но у обоих открыта **операционная**
 половина: живой SERP-раунд (`docs/architecture/06-implementation-strategy.md:190`) и подписанная аттестация
 профиля (0 строк в реальных `state.db`, 07.11.2026 — наблюдение о прогонах, не о дизайне).
 Остальные строки (0001–0010, 0013, 0015–0019, 0021–0022) совпадают с кодом.
@@ -613,10 +613,10 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 
 **Открытые вопросы (закрыть до/в ходе M0):**
 - формат импорт-графа CI (статический анализ импортов `core.*`) — ✅ сделано
-  (`tests/selfcheck.py:1040` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:378`;
+  (`tests/selfcheck.py:1037` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:375`;
   тот же шаг в CI — `scripts/ci.sh:59`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
-  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1362` и `core/domain/models.py:1740`; производитель
+  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1311` и `core/domain/models.py:1690`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);
 - версионирование prompt-шаблонов (по файлам? по hash?) — ✅ сделано **по файлам**:
   `core/pipeline/prompt.py:128` (`TEMPLATE_VERSION = "evaluator_v5"`), `templates/{version}.txt`,
@@ -630,7 +630,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
   (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:310`; маркер
   `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:218`; профиль публикуемости
-  `outputs/publishability.yaml` — `core/pipeline/report.py:3987`);
+  `outputs/publishability.yaml` — `core/pipeline/report.py:3975`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через
   `read_prior_llm_usage`/`merge_llm_usage`, а не «последняя инвокация»; запись —

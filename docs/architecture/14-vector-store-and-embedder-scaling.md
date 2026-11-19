@@ -80,14 +80,14 @@ production-масштабе, — это четыре дефекта **нашег
 
 ## 2. Ключевой факт: поиск никогда не идёт по всему корпусу
 
-✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:1144`) объявляет
+✅ сделано/проверено — `retrieve_for_cell` (`core/pipeline/evaluate.py:1135`) объявляет
 `product_ids: Sequence[str] | None = None` с докстрингом «по умолчанию `[product_id]`;
 сателлиты добавляет вызывающий (I17)», а `NpyVectorIndex.search_many`
 (`core/adapters/vector_npy.py:272-341`) обходит `for product_id in products` и читает
 партицию продукта. Номера строк в абзаце ниже сверены с кодом (2026-10-28):
-`core/pipeline/evaluate.py:1144`, `vector_npy.py:312-341`; смысл не изменился.
+`core/pipeline/evaluate.py:1135`, `vector_npy.py:312-341`; смысл не изменился.
 
-`core/pipeline/evaluate.py:1144` + `retrieve_for_cell` (`:1139`): `product_ids` — по
+`core/pipeline/evaluate.py:1135` + `retrieve_for_cell` (`:1139`): `product_ids` — по
 умолчанию `[product_id]`, сателлиты добавляет вызывающий (I17). В
 `core/adapters/vector_npy.py:312-341` цикл `for product_id in dict.fromkeys(q.product_ids)`
 читает **партицию продукта**, а не общий индекс.
@@ -181,7 +181,7 @@ top-10 из 600** у близких соседей. Замер при едино
 600 запросов (30 %). Рычаг реализован, но не подключён: батч-чтение уже есть в порту
 (`StorePort.get_chunks(ids)`, `core/ports/store.py:705` — заведено ровно под гидратацию
 ретривала, A1/Д-3) и в хранилище (`SqliteStore.get_chunks`,
-`core/store/sqlite_store.py:3376`; `IN (...)` пачками по `_CHUNK_ID_BATCH = 500`, `:3206`).
+`core/store/sqlite_store.py:3373`; `IN (...)` пачками по `_CHUNK_ID_BATCH = 500`, `:3206`).
 `_resolve_top` по-прежнему зовёт `self._lookup(chunk_id)` на каждого кандидата
 (`core/adapters/vector_npy.py:374` и `:383`; тип резолвера — `:73`), а композиционный корень
 передаёт поштучный `store.get_chunk` (`core/cli/commands/run.py:416`,
@@ -355,7 +355,7 @@ embed:
 `local`) держится **побочно** — дефолт и есть единственная реализация. Действует уже сейчас
 только кэш векторов по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash,
 embed_model_id, embed_device, embed_precision)`): подключён в
-`core/cli/context.py:2948-2950` и в раскладку `core/config/paths.py:79`.
+`core/cli/context.py:2949-2951` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -403,14 +403,14 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
 ✅ сделано (`precompute_query_vectors`, `DEFAULT_QUERY_EMBED_BATCH = 32`,
-`core/pipeline/evaluate.py:702`, `:1033-1041`; вызовы — `:3978` и `:4987`) — уникальные тексты
+`core/pipeline/evaluate.py:693`, `:1033-1041`; вызовы — `:3978` и `:4987`) — уникальные тексты
 запросов пакета эмбеддятся батчами **до** цикла продуктов, карта `text → vector` передаётся
 в ячейки; `_query_vector` (`:988-1005`) берёт вектор из карты и только вне фазы падает на
 одиночный `embed`. ⬜ durable text→vector кэш между пакетами не сделан: `embed_cache`
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`core/pipeline/evaluate.py:1008-1025`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`core/pipeline/evaluate.py:999-1016`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 
@@ -548,7 +548,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 `core/pipeline/extract_consume.py:552`) и в Pass B не переписывался — колонка без писателя, и
 «не эмбеддилось» по ней не читалось. С 07.11.2026 её заполняет `_embed_and_build`
 (`core/pipeline/corpus_index.py:816`): одно ISO-8601 (UTC) время эмбеддинга на продукт-цикл,
-часы читает оркестратор, а не чистый `_embed_batched`; запись — `core/store/sqlite_store.py:1788`.
+часы читает оркестратор, а не чистый `_embed_batched`; запись — `core/store/sqlite_store.py:1785`.
 `NULL` остаётся при полном переиспользовании партиции (эмбеддинга в цикле не было) —
 это «в этом цикле вектора не считали», а не мёртвая колонка. Фактический признак сборки
 по-прежнему `vectors.fp16.npy` в партиции.
@@ -585,11 +585,11 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    (дефолт через цикл `search`, поэтому существующие реализации не сломаны).
    Проверено: `core/ports/vector_index.py:102` (`search_many` в порту), `:103-112`
    (`batched_search` с `getattr`-фолбэком), `core/adapters/vector_npy.py:272` (реализация),
-   вызывается из `core/pipeline/evaluate.py:1227`.
+   вызывается из `core/pipeline/evaluate.py:1218`.
 4. ✅ **Мемоизация векторов запроса** + пре-компьют `query_vectors` до `evaluate`
    (`precompute_query_vectors`, батчи по 32; это же закрывает оговорку 2 — оценщик
    больше не ходит за векторами вовсе).
-   Проверено: `core/pipeline/evaluate.py:702` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:1033`
+   Проверено: `core/pipeline/evaluate.py:693` (`DEFAULT_QUERY_EMBED_BATCH = 32`), `:1033`
    (`precompute_query_vectors`), вызовы `:3868`, `:4746`; `_query_vector` (`:961`) читает
    карту первой.
 

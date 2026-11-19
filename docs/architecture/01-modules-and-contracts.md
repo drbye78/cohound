@@ -1,7 +1,7 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
 > **Статус на 2026-11-08** (HEAD `f14f866`): сверены все якоря `путь:строка` по содержимому,
-> матрица §1 — построчно с `tests/selfcheck.py:1040` `_import_graph` (сходится), перечни
+> матрица §1 — построчно с `tests/selfcheck.py:1037` `_import_graph` (сходится), перечни
 > enum-значений и версии схем — с `core/`. §10 закрыт (5 из 5, сигнатуры перепроверены);
 > §9 закрыт — миграция `tests/selfcheck.py` сверена 29.10 (94 двойника / 8 дописанных тестов /
 > 9 структурных гейтов), на 08.11 в selfcheck **113** утверждений (99 `check` + 14
@@ -45,13 +45,13 @@
 (`core/edge/extract_service.py:59`, `core/edge/seam_schema.py:41`); дублировать словарь значило бы
 дать ему разойтись с доменом.
 
-**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:1040` `_import_graph`
+**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:1037` `_import_graph`
 разбирает импорты **статически** (`ast`, без исполнения), включая резолв relative-импортов
-(`tests/selfcheck.py:1084` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
-(`tests/selfcheck.py:1101` `_check_edge`), то есть проверка по принципу allow-list, отдельных
-«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1108`
-`_neutrality` (§1.3), `tests/selfcheck.py:1216` `_shims_removed` (нет `core.schemas`/`core.db`),
-`tests/selfcheck.py:3341` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
+(`tests/selfcheck.py:1081` `_resolve_relative_import`); нарушение — пара вне `matrix[layer]`
+(`tests/selfcheck.py:1098` `_check_edge`), то есть проверка по принципу allow-list, отдельных
+«запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1105`
+`_neutrality` (§1.3), `tests/selfcheck.py:1213` `_shims_removed` (нет `core.schemas`/`core.db`),
+`tests/selfcheck.py:3349` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
 по **всему** слою, а не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет
 сформулирован по запрещённым слоям, а не по файлам).
 
@@ -162,24 +162,25 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 остаётся `❓` (I12).
 
 **I2c — класс отрицания против наблюдённого охвата** (`check_absence_coverage`,
-`core/domain/invariants.py:298`; исполняется в Ш6: `core/pipeline/evaluate.py:2149-2233`
-`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2199`,
-применяется к ячейке на `core/pipeline/evaluate.py:3292`, токен причины
-`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:234`). Условие `❌` зависит от **класса**, а не от
+`core/domain/invariants.py:293`; исполняется в Ш6: `core/pipeline/evaluate.py:2140-2221`
+`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2190`,
+применяется к ячейке на `core/pipeline/evaluate.py:3262`, токен причины
+`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:227`). Условие `❌` зависит от **класса**, а не от
 одной полноты краула: `explicit` (цитата вендора) и `authoritative` (энумерация) неполнотой не
-отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` требует
-`scope_acceptance` (принятия риска человеком); `unobserved`/`not_stated` дают `❓`. Нарушение →
-ячейка **`❓`** (`not_stated`, I12), а не `failed`: отсутствие принятия риска — процедурное
+отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` зависит от
+пространства, и его условие выражает I2d (0.4.0: per-cell подписи `scope_acceptance` нет);
+`unobserved`/`not_stated` дают `❓`. Нарушение →
+ячейка **`❓`** (`not_stated`, I12), а не `failed`: отсутствие носителя — процедурное
 условие, а не отказ прибора (I4), и ячейка обязана остаться в карте. Снятый `❌` не публикует и
 протокол отсутствия (`absence_evidence=[]`).
 
 **I2d — у `❌` есть датированный носитель** (`check_absence_dated`,
-`core/domain/invariants.py:386`; исполняется в Ш6 `_enforce_dated_absence`,
-`core/pipeline/evaluate.py:2406-2516`, применяется к ячейке на `core/pipeline/evaluate.py:3500`).
+`core/domain/invariants.py:365`; исполняется в Ш6 `_enforce_dated_absence`,
+`core/pipeline/evaluate.py:2392-2502`, применяется к ячейке на `core/pipeline/evaluate.py:3465`).
 `❌` — утверждение не о сегодняшнем дне, а о **событии с датой**: носитель зависит от класса
 отрицания — `explicit`/`authoritative` требуют записи наблюдения (`observed_at`) **каждого**
 цитируемого документа, `bounded` — снятия **каждого** объявленного корня с `complete=1` и датой
-(подпись `scope_acceptance` датированного носителя не заменяет), `registry_absence` — как I2b.
+другого носителя нет: per-cell подпись снята в 0.4.0, `registry_absence` — как I2b.
 Носителя нет → **`❓`** с токеном `absence_undated` (`core/domain/invariants.py:64`), протокол
 отсутствия не публикуется; дата `absence_as_of` у публикуемого `❌` — минимум дат носителей.
 
@@ -743,7 +744,7 @@ class DiscoveryLLMPort(Protocol):
   per-run строка `gate_decisions` (аудит-след и override). Второй путь — durable
   `profile_attestation` в `state/{package}/state.db` (`core/pipeline/profile_attestation.py:313`,
   `make_profile_gate` подключён в CLI, `core/cli/context.py:1676`): производитель у него есть —
-  **человек** (`hound package profile attest`, `core/cli/package/commands.py:2997`), прогон строку
+  **человек** (`hound package profile attest`, `core/cli/package/commands.py:2915`), прогон строку
   только читает. Замер 30.10.2026: в реальных `state.db` — 0 строк, поэтому рабочим остаётся
   per-run путь; выдавать подпись за существующую нельзя, но и «производителя нет» уже неверно.
 * G3/G4 — **точки интеграции**: coHound не решает ревью/публикацию, а экспортирует предмет в
@@ -856,7 +857,7 @@ pytest-тестами **предмета** — `_crawl_taxonomy_from_port` (`tes
 добавлены после сверки (на 08.11 — 113).
 
 **I10/I15 (K7):** SQL обеспечивает `source_id NOT NULL` **кроме** `evidence_type='absence'`
-(триггер `trg_evidence_source_id`, `core/store/sqlite.py:834`): у протокола отсутствия источника нет
+(триггер `trg_evidence_source_id`, `core/store/sqlite.py:833`): у протокола отсутствия источника нет
 по построению, и `NULL` честнее выдуманного нерезолвимого id. Детерминированный резолв
 `source_id → source_url` — **код** (`domain/anchors.py` + `SourceResolver`), не триггер.
 
@@ -879,7 +880,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 **Состояние as-built (08.11.2026):** механизм есть, **ни один пакет реестровых спецификаций не имеет**
 (`packages/*/registries/` отсутствует, включая `_template`). Пустой `Ports.registry_fetchers` →
-волна пуста, фаза `registry` завершается `ok` с нулём ячеек (`core/pipeline/registry.py:313`) — это
+волна пуста, фаза `registry` завершается `ok` с нулём ячеек (`core/pipeline/registry.py:314`) — это
 не ошибка и не «нет данных»: реестры просто не сконфигурированы. `SkipReason.NO_REGISTRY_SPEC`
 объявлен, но конвейером **не производится** (`grep` по `core/pipeline/` пуст) — значение ждёт
 своего производителя, и выдавать его за работающий механизм нельзя.
@@ -907,8 +908,8 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 | Было | Стало | Статус |
 |---|---|---|
-| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1216` (`_shims_removed`) |
-| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:124` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1208` |
+| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1213` (`_shims_removed`) |
+| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:124` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1205` |
 | `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ✅ **закрыто** (29.10) — построчная сверка 111 утверждений (97 `check` + 14 `expect_raises`) с pytest-пирамидой: **94** имеют двойника (указан `путь:строка`), **8** держали покрытие в одиночку и дописаны тестами, **9** — структурные гейты над деревом, которым pytest-двойник противопоказан: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation`, `_domain_all_complete`, `_ports_contracts`, `_ports_i18`, `_ports_type_reuse`, полнота CLI-поверхности. Дописанные: конструктор `CellEvidence` (I19/R1/I10 — прежний тест проверял `check_evidence` на `model_construct`, то есть в обход валидатора), `core/util/text_utils` (язык, ё→е, нарезка, RU-токены), `core/util/security` (SSRF/allowlist/traversal/slug), `core/adapters/lexical_bm25` (**единственный адаптер без тестов**), `DoclingDocumentExtractor.supports`, `MarkdownChunkerPort`↔`ChunkerPort`. Пиксель-в-пиксель дублировать оставшиеся 94 не нужно и вредно: гейт над деревом и юнит-тест отвечают на разные вопросы. На 08.11 в selfcheck **113** утверждений (99 + 14) — два добавлены после сверки. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:59`), обёртка — `tests/test_selfcheck.py`; `tests/domain` — 13 файлов / 172 функции / 183 кейса, `tests/store` — 20 файлов / 286 функций / 315 кейсов |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
@@ -940,9 +941,9 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:272` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1772`; структура `ProtocolExhaustion` — `core/domain/models.py:1609`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2851` (`max_retries`), цикл
-`core/pipeline/evaluate.py:3163`;
+`core/domain/models.py:1722`; структура `ProtocolExhaustion` — `core/domain/models.py:1558`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2826` (`max_retries`), цикл
+`core/pipeline/evaluate.py:3133`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
-строит вызывающий (`core/pipeline/evaluate.py:3043`).
+строит вызывающий (`core/pipeline/evaluate.py:3017`).

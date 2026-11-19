@@ -252,7 +252,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `core/pipeline/extract_consume.py:1279-1280`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:873-889` (`SKIP_BUDGET`, константа `core/pipeline/archive_descent.py:127`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
->   `core/store/sqlite.py:730-749`.
+>   `core/store/sqlite.py:729-748`.
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
