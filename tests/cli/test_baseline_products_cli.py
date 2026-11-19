@@ -170,6 +170,125 @@ def test_recon_writes_pending_facts_from_corpus_db(tmp_path: Path, capsys) -> No
     assert stored[0].quote and stored[0].quote in "The database supports jsonb storage with expression indexing."
 
 
+def _corpus_db(tmp_path: Path, text: str) -> Path:
+    """Reference-БД с одним чанком: минимальный носитель для разведки."""
+    from core.store.sqlite import connect
+
+    db_path = tmp_path / "reference.db"
+    conn = connect(db_path)
+    conn.execute(
+        "INSERT INTO corpus_docs (doc_id, product_id, url, content_hash, fetched_at, "
+        "extractor_version) VALUES ('d1','postgresql','https://x','h','2026-11-17',"
+        "'trafilatura-html-7')"
+    )
+    conn.execute(
+        "INSERT INTO corpus_chunks (chunk_id, doc_id, product_id, url, chunk_no, text, "
+        "content_hash, build_id) VALUES ('c1','d1','postgresql','https://x',0,?, 'a', "
+        "'ref_postgresql_18_deadbeef')",
+        (text,),
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _facts_with_accepted(package: Path, *, quote: str, version: str = "18") -> None:
+    """Факт, подписанный человеком: проверяем, что пере-разведка его не съедает."""
+    (package / "sources" / "baseline_facts.csv").write_text(
+        "baseline_id,param_id,version,status,url,quote,content_hash,observed_at,"
+        "corpus_build_id,review,reviewed_by,note\n"
+        f"upstream-pg,p1,{version},present,https://www.postgresql.org/docs/18/a.html,"
+        f'"{quote}",{"a" * 64},2026-11-17T00:00:00+00:00,'
+        "ref_postgresql_18_deadbeef,accepted,roger,проверено вручную\n",
+        encoding="utf-8",
+    )
+
+
+def test_recon_carries_signature_when_its_quote_is_still_in_corpus(
+    tmp_path: Path, capsys
+) -> None:
+    """Подпись переживает пере-разведку, если её доказательство на месте (19.11.2026).
+
+    Прибор выберет другую цитату — это не повод стирать решение человека: доказательство
+    то же и оно проверяемо. Прежняя редакция отбрасывала все строки версии и молча
+    обнуляла подписи.
+    """
+    package = _package(tmp_path)
+    _facts_with_accepted(package, quote="The database supports")
+    db_path = _corpus_db(
+        tmp_path, "The database supports jsonb storage with expression indexing."
+    )
+    payload = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--corpus-db", str(db_path), "--json"],
+        capsys,
+    )
+    assert payload["review_carried"] == [
+        {"param_id": "p1", "version": "18", "review": "accepted", "reviewed_by": "roger"}
+    ]
+    assert payload["review_dropped"] == []
+    stored = load_package_facts(package)[0]
+    assert stored.review.value == "accepted"
+    assert stored.reviewed_by == "roger"
+    assert stored.quote == "The database supports"
+
+
+def test_recon_drops_signature_whose_quote_is_gone(tmp_path: Path, capsys) -> None:
+    """Цитаты в корпусе больше нет — подпись не переносится и потеря называется.
+
+    Публиковать решение, чьё доказательство исчезло, нельзя; но и молчать об этом —
+    дефект. Потеря попадает в ``review_dropped`` и печатается в текстовом выводе.
+    """
+    package = _package(tmp_path)
+    _facts_with_accepted(package, quote="цитата, которой в корпусе нет")
+    db_path = _corpus_db(
+        tmp_path, "The database supports jsonb storage with expression indexing."
+    )
+    payload = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--corpus-db", str(db_path), "--json"],
+        capsys,
+    )
+    assert payload["review_carried"] == []
+    assert payload["review_dropped"] == [
+        {
+            "param_id": "p1",
+            "version": "18",
+            "review": "accepted",
+            "reviewed_by": "roger",
+            "reason": "quote_gone",
+        }
+    ]
+    stored = load_package_facts(package)[0]
+    assert stored.review.value == "pending"
+    assert stored.reviewed_by is None
+
+
+def test_recon_carries_signature_across_detailed_version(tmp_path: Path, capsys) -> None:
+    """Факт записан подробной версией (``18.4.1``), сборка адресована мажором (``18``).
+
+    Сравнение строками пропустило бы такую подпись, и она потерялась бы молча — ровно
+    тот дефект, который закрывается. Сравнение идёт по мажору, как и в наследовании.
+    """
+    package = _package(tmp_path)
+    _facts_with_accepted(package, quote="The database supports", version="18.4.1")
+    db_path = _corpus_db(
+        tmp_path, "The database supports jsonb storage with expression indexing."
+    )
+    payload = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--corpus-db", str(db_path), "--json"],
+        capsys,
+    )
+    assert len(payload["review_carried"]) == 1
+    assert payload["review_dropped"] == []
+    # Строка одна, а не две: подробная версия факта и мажор сборки — один и тот же ключ.
+    stored = load_package_facts(package)
+    assert len(stored) == 1
+    assert stored[0].review.value == "accepted"
+    assert stored[0].version == "18.4.1"
+
+
 def test_refresh_reports_diff_and_writes_nothing(tmp_path: Path, capsys) -> None:
     package = _package(tmp_path)
     before = (package / "sources" / "baseline_facts.csv").read_text(encoding="utf-8")

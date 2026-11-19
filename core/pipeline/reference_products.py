@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import csv
 import io
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,7 @@ __all__ = [
     "REFERENCE_PRODUCTS_RELPATH",
     "apply_refresh",
     "baseline_roles",
+    "carry_signed_facts",
     "fact_rows",
     "load_facts",
     "load_package_facts",
@@ -504,6 +505,75 @@ def apply_refresh(
         # §13: `min_version` — предложение, а не запись. Печатается отдельным списком.
         "proposed_min_version": [item["param_id"] for item in diff[DIFF_ADDED]],
     }
+
+
+# ---------------------------------------------------------------------------
+# Пере-разведка и человеческие подписи
+# ---------------------------------------------------------------------------
+
+
+def _fact_key(fact: BaselineFact) -> tuple[str, str, str]:
+    """Ключ факта — тот же, по которому ``recon`` решает, что строку надо перемерить.
+
+    Версия нормализуется по **мажору**: факт может быть записан подробной версией
+    (``18.4.1``), а сборка адресуется объявленным мажором (``18``); сравнение строками
+    пропустило бы такую подпись и потеряло её молча (§7.2 плана 27).
+    """
+    return (fact.baseline_id, major_version(fact.version) or fact.version, fact.param_id)
+
+
+def carry_signed_facts(
+    previous: Sequence[BaselineFact],
+    fresh: Sequence[BaselineFact],
+    *,
+    quote_resolves: Callable[[BaselineFact], bool],
+) -> dict[str, Any]:
+    """Переносит человеческие подписи через пере-разведку, не теряя их молча.
+
+    Зачем. ``recon`` перемеряет строки и пишет их заново с ``review=pending``; прежняя
+    редакция отбрасывала **все** старые строки версии, поэтому повторный прогон молча
+    стирал подписи (замер 19.11.2026: правило зачёта сменилось через 18 ч после записи
+    фактов, и пере-разведка обнулила бы обе подписанные строки, не назвав потерю).
+
+    Правило — по **доказательству**, а не по доверию к прибору:
+
+    * подписи нет (``pending``) — берётся свежий факт;
+    * подпись есть и её цитата **по-прежнему дословно** есть в корпусе — остаётся
+      человеческая строка целиком. Наблюдение человека не устаревает от того, что прибор
+      выбрал другую цитату: доказательство то же, и оно проверяемо;
+    * подпись есть, а цитаты в корпусе больше нет — подпись **не** переносится (нельзя
+      публиковать решение, чьё доказательство исчезло), факт становится свежим
+      (``pending``), а потеря попадает в ``dropped`` и печатается.
+
+    :param quote_resolves: проверка «цитата факта встречается дословно в корпусе этой
+        версии». Передаётся вызывающим, потому что корпус живёт вне ``pipeline``-слоя.
+    :returns: ``{"facts": [...], "carried": [...], "dropped": [...]}``; ``facts`` — в
+        порядке ``fresh`` (порядок каталога), ``carried``/``dropped`` — списки записей
+        ``param_id``/``version``/``review``/``reviewed_by`` (+ ``reason`` у потерянных).
+    """
+    index = {_fact_key(fact): fact for fact in previous}
+    out: list[BaselineFact] = []
+    carried: list[dict[str, str]] = []
+    dropped: list[dict[str, str]] = []
+    for fact in fresh:
+        old = index.get(_fact_key(fact))
+        if old is None or old.review is FactReview.PENDING:
+            out.append(fact)
+            continue
+        entry = {
+            "param_id": fact.param_id,
+            "version": fact.version,
+            "review": old.review.value,
+            "reviewed_by": old.reviewed_by or "",
+        }
+        if quote_resolves(old):
+            # Человеческая строка целиком: её цитата, хеш, url и провенанс наблюдения.
+            out.append(old)
+            carried.append(entry)
+        else:
+            out.append(fact)
+            dropped.append({**entry, "reason": "quote_gone"})
+    return {"facts": out, "carried": carried, "dropped": dropped}
 
 
 # ---------------------------------------------------------------------------

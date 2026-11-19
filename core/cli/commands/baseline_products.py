@@ -57,6 +57,7 @@ from core.config.run_config import (
 )
 from core.domain.enums import FactReview, FactStatus
 from core.domain.models import BaselineFact, CatalogRow
+from core.pipeline.inheritance import major_version
 from core.pipeline.package_admin import PackageAdminError
 from core.pipeline.reference_corpus import (
     ChunkText,
@@ -82,6 +83,7 @@ from core.pipeline.reference_map import (
 from core.pipeline.reference_products import (
     apply_refresh,
     baseline_roles,
+    carry_signed_facts,
     fact_rows,
     inheritance_report,
     load_package_facts,
@@ -1595,12 +1597,27 @@ def _quote_stats(facts: Sequence[BaselineFact]) -> dict[str, Any]:
     }
 
 
+def _same_fact_version(left: str, right: str) -> bool:
+    """Совпадают ли версии факта и сборки — по **мажору**, как и везде в наследовании.
+
+    Факт записан версией как в документации (``18.4.1``), а сборка адресуется объявленным
+    мажором (``18``); сравнение строками пропустило бы подпись, записанную подробной
+    версией, и она потерялась бы молча — ровно тот дефект, который здесь и закрывается.
+    """
+    left_major = major_version(left)
+    right_major = major_version(right)
+    if left_major is None or right_major is None:
+        return left == right
+    return left_major == right_major
+
+
 def _recon_version(
     args: argparse.Namespace,
     product: Any,
     *,
     version: str,
     catalog: Sequence[CatalogRow],
+    previous: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     """Разведка **одной** версии: сборка → чанки → индекс → факты (без записи).
 
@@ -1689,6 +1706,27 @@ def _recon_version(
         observed_at=_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
         coverage_complete=coverage_complete,
     )
+    # Подписи переживают пере-разведку, если их доказательство на месте: прибор не вправе
+    # стирать решение человека молча (§3.3), а человек не вправе держать подпись под
+    # цитатой, которой в корпусе больше нет.
+    carried: list[dict[str, str]] = []
+    dropped: list[dict[str, str]] = []
+    if previous is not None:
+        texts = [chunk.text for chunk in chunks]
+
+        def _quote_resolves(fact: Any) -> bool:
+            """Цитата факта дословно встречается в корпусе **этой** версии."""
+            quote = fact.quote
+            return bool(quote) and any(quote in text for text in texts)
+
+        kept = carry_signed_facts(
+            [fact for fact in previous if _same_fact_version(fact.version, version)],
+            facts,
+            quote_resolves=_quote_resolves,
+        )
+        facts = kept["facts"]
+        carried = kept["carried"]
+        dropped = kept["dropped"]
     return {
         "version": version,
         "build_id": build_id,
@@ -1697,6 +1735,8 @@ def _recon_version(
         "engine": index.engine_version,
         "coverage_complete": coverage_complete,
         "facts": facts,
+        "review_carried": carried,
+        "review_dropped": dropped,
     }
 
 
@@ -1712,6 +1752,10 @@ def _recon_version_line(item: Mapping[str, Any]) -> dict[str, Any]:
         "present": sum(1 for fact in facts if fact.status is FactStatus.PRESENT),
         "unclear": sum(1 for fact in facts if fact.status is FactStatus.UNCLEAR),
         "absent": sum(1 for fact in facts if fact.status is FactStatus.ABSENT),
+        # Подписи, пережившие пере-разведку, и подписи, чьё доказательство исчезло:
+        # и то и другое — видимое число, а не тишина.
+        "review_carried": len(item.get("review_carried") or []),
+        "review_dropped": len(item.get("review_dropped") or []),
     }
 
 
@@ -1774,10 +1818,15 @@ def run_recon(args: argparse.Namespace) -> int:
 
     observed: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
+    # Прежние факты читаются **до** обхода: по ним решается, какие подписи переживают
+    # пере-разведку, и это решение принимается на версию, а не после записи.
+    previous_facts = load_package_facts(package)
     for version in versions:
         try:
             observed.append(
-                _recon_version(args, product, version=version, catalog=catalog)
+                _recon_version(
+                    args, product, version=version, catalog=catalog, previous=previous_facts
+                )
             )
         except CliError as exc:
             if not all_versions:
@@ -1788,13 +1837,19 @@ def run_recon(args: argparse.Namespace) -> int:
 
     facts = [fact for item in observed for fact in item["facts"]]
     dry_run = bool(getattr(args, "dry_run", False))
-    # Слияние по ключу ``(baseline, version, param)``: обновляются только перемеренные
-    # строки, всё остальное (другие версии, другие параметры) остаётся как было.
-    fresh_keys = {(fact.baseline_id, fact.version, fact.param_id) for fact in facts}
+    # Слияние по ключу ``(baseline, мажор версии, param)``: обновляются только перемеренные
+    # строки, всё остальное (другие версии, другие параметры) остаётся как было. Мажор, а не
+    # строка: факт мог быть записан подробной версией (``18.4.1``), и сравнение строками
+    # оставило бы рядом две строки одного параметра.
+    fresh_keys = {
+        (fact.baseline_id, major_version(fact.version) or fact.version, fact.param_id)
+        for fact in facts
+    }
     merged = [
         fact
-        for fact in load_package_facts(package)
-        if (fact.baseline_id, fact.version, fact.param_id) not in fresh_keys
+        for fact in previous_facts
+        if (fact.baseline_id, major_version(fact.version) or fact.version, fact.param_id)
+        not in fresh_keys
     ]
     written = False
     if facts and not dry_run:
@@ -1802,6 +1857,8 @@ def run_recon(args: argparse.Namespace) -> int:
         written = True
     primary = observed[0] if observed else None
     current_version = str(product.current_version)
+    payload_carried = [entry for item in observed for entry in item["review_carried"]]
+    payload_dropped = [entry for item in observed for entry in item["review_dropped"]]
     payload: dict[str, Any] = {
         "package": str(package),
         "baseline_id": product.baseline_id,
@@ -1832,6 +1889,10 @@ def run_recon(args: argparse.Namespace) -> int:
         "all_versions": all_versions,
         "versions": [_recon_version_line(item) for item in observed],
         "skipped_versions": skipped,
+        # Подписи, пережившие пере-разведку и потерянные (цитаты в корпусе больше нет).
+        # Без этих двух списков повторный recon молча стирал бы решение человека.
+        "review_carried": payload_carried,
+        "review_dropped": payload_dropped,
         "next_command": (
             f"hound baseline review --package {package} "
             f"--baseline {product.baseline_id} --version {current_version} "
@@ -1840,8 +1901,28 @@ def run_recon(args: argparse.Namespace) -> int:
         "note": (
             "факты записаны с review=pending: наследует только accepted, подпись — "
             "`hound baseline review --accept --actor …`"
+            + (
+                f"; подписей сохранено {len(payload_carried)}, потеряно {len(payload_dropped)}"
+                if (payload_carried or payload_dropped)
+                else ""
+            )
         ),
     }
+    # Подписи — видимым числом: «сохранено» и «снято» печатаются всегда, когда есть что
+    # сказать, а не только в JSON. Молчаливая потеря подписи — тот самый дефект.
+    signature_lines: list[str] = []
+    if payload_carried:
+        signature_lines.append(
+            f"подписи сохранены (доказательство на месте): {len(payload_carried)} — "
+            + ", ".join(entry["param_id"] for entry in payload_carried[:3])
+            + (" …" if len(payload_carried) > 3 else "")
+        )
+    if payload_dropped:
+        signature_lines.append(
+            f"подписи сняты (цитаты в корпусе нет): {len(payload_dropped)} — "
+            + ", ".join(entry["param_id"] for entry in payload_dropped[:3])
+            + (" …" if len(payload_dropped) > 3 else "")
+        )
     if args.json:
         _print_json(payload)
     elif all_versions:
@@ -1863,6 +1944,7 @@ def run_recon(args: argparse.Namespace) -> int:
             f"итого: present {payload['present']}, unclear {payload['unclear']}, "
             f"absent {payload['absent']}; цитат {payload['quotes']}, "
             f"уникальных {payload['unique_quotes']}",
+            *signature_lines,
             (
                 "dry-run: ничего не записано"
                 if dry_run
@@ -1905,6 +1987,7 @@ def run_recon(args: argparse.Namespace) -> int:
                 + (" …" if len(without) > 5 else "")
             )
         lines += [
+            *signature_lines,
             (
                 "dry-run: ничего не записано"
                 if dry_run
