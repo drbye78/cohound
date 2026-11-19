@@ -63,6 +63,7 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     identity_flag_values,
     resolve_declared_axes,
+    resolve_query_lang,
     resolve_retrieval_profile,
 )
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
@@ -269,6 +270,8 @@ def test_contract_flag_values_names_contract_arguments() -> None:
             "R1",
             "--cutoff-k",
             "7",
+            "--query-lang",
+            "en",
             "--urls",
             "u.yaml",
             "--update",
@@ -277,10 +280,20 @@ def test_contract_flag_values_names_contract_arguments() -> None:
             "refresh",
         ]
     )
-    assert contract_flag_values(args) == {"retrieval_profile": "R1", "cutoff_K": 7}
+    assert contract_flag_values(args) == {
+        "retrieval_profile": "R1",
+        "cutoff_K": 7,
+        # Ось языка запросов читается из того же инвентаря: без этой проверки флаг можно
+        # было бы зарегистрировать и не прочитать (``run_id`` не увидел бы условия).
+        "query_lang": "en",
+    }
 
     empty = parser.parse_args(["plan", "--run-yaml", "run.yaml", "--package", "pkg"])
-    assert contract_flag_values(empty) == {"retrieval_profile": None, "cutoff_K": None}
+    assert contract_flag_values(empty) == {
+        "retrieval_profile": None,
+        "cutoff_K": None,
+        "query_lang": None,
+    }
     assert set(contract_flag_values(empty)) == contract_args
 
 
@@ -503,6 +516,9 @@ def test_plan_prints_executed_retrieval_params(
         "pool_multiplier": 1,
         "max_queries": 3,
         "cross_query_fusion": "max",
+        # Язык запросов — та же категория: флага не было ⇒ объявленный дефолт ``all``
+        # (прежний порядок ru→en), а не ``null`` «язык не назван».
+        "query_lang": "all",
     }
 
     text_common = [arg for arg in common if arg != "--json"]
@@ -517,6 +533,7 @@ def test_plan_prints_executed_retrieval_params(
         "pool_multiplier=1",
         "max_queries=3",
         "cross_query_fusion=max",
+        "query_lang=all",
     ):
         assert token in line
 
@@ -563,6 +580,9 @@ def test_plan_absent_flags_do_not_change_contract(
         status_dict_version=declared_status_dict_version(),
         retrieval_profile=expected_profile,
         cutoff_K=None,
+        # Язык запросов резолвится тем же правилом, что профиль (флаг > deploy > ``all``):
+        # «флаг не задан» — это объявленный дефолт развёртывания, а не ``null`` в контракте.
+        query_lang=resolve_query_lang(None, DeployConfig(profile="local")),
         retrieval_params_json=retrieval_params_json(
             profile=expected_profile,
             cutoff_k=None,

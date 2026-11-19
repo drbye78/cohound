@@ -44,7 +44,7 @@
 | `core/db.py` (был) | ✅ переехал в W1/T1.3 → `core/store/sqlite.py`; монолит **удалён** | DDL §4.4 + триггеры |
 | `core/util/text_utils.py` | готово (W1/W2/W8) | RU/EN-нормализация |
 | `core/util/security.py` | готово (W2/W7) | SSRF-защита URL, `sanitize_slug` |
-| `core/util/fusion.py` (был) | ✅ **удалён** (`aa4185b`): мёртвый дубль, не подключённый ни одним прод-путём; живое RRF — `core/pipeline/retrieve.py:272` (`rrf_fuse_chunks`) | RRF-слияние (реализация — в `retrieve.py`) |
+| `core/util/fusion.py` (был) | ✅ **удалён** (`aa4185b`): мёртвый дубль, не подключённый ни одним прод-путём; живое RRF — `core/pipeline/retrieve.py:295` (`rrf_fuse_chunks`) | RRF-слияние (реализация — в `retrieve.py`) |
 | `core/util/retrieval_eval.py` | готово; основа W8/T8.6 | retrieval-метрики |
 | `core/adapters/chunker_markdown.py` | готово; за портом W7/T7.3 | чанкер с `heading_path` |
 | `core/adapters/extract_document.py` | готово (PDF+Office); за портом W7/T7.2 | docling-экстрактор |
@@ -478,7 +478,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W8 — Ретривал и индекс — ✅ код done; ⚠️ фиксация не воспроизведена (KS-sweep нет)
 
-✅ сделано (код, проверено) — `core/pipeline/retrieve.py:272` (`rrf_fuse_chunks`),
+✅ сделано (код, проверено) — `core/pipeline/retrieve.py:295` (`rrf_fuse_chunks`),
 `core/cli/commands/experiment.py:101-170` (персист `retrieval_profile`/`K`/`rrf_k` + `settings_provenance`,
 и только при полном сравнении).
 ⚠️ не сделано — замер R0/R1/R2 + K-свип: KS-sweep в дереве отсутствует (`grep -rln "KS-sweep"
@@ -579,7 +579,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173`/`:274`/`:465` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3261`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3274`),
 но приёмочный контур не пройден: golden-full дал 6.8 % на наборе из 236 строк
 (`2026-10-27-golden-reference-set-unusable.md`), на переразмеченных 905 строках прогнан только
 срез 50 ячеек (07.11, κ 0.024/0.056); §11.5-baseline и кейсы 2–5 не делались.
@@ -1026,7 +1026,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
   не входит в `extractor_version`, `core/adapters/extract_document.py:349-385`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`
-  (`core/cli/context.py:1821` против `core/edge/server.py:1105`) **сводится в один замер** с
+  (`core/cli/context.py:1822` против `core/edge/server.py:1105`) **сводится в один замер** с
   паритетом `pb` `local`/`split` (§2): одна процедура — «один вход, два профиля, сравнить
   `index_build_id` и `registry_spec_digest`», — а не две.
   ➖ **A1 follow-up закрыт 07.11.2026:** мультиплексирование root/product — F4a/F4b
@@ -1069,7 +1069,7 @@ DLP, набор IDS-правил) — design-требования зафикси
    раньше, чем помогает «больше железа».
 4. **Паритет `split` — одним замером, до флота.** Открытыми висят два вопроса об одном и том же:
    совпадает ли `index_build_id` для одного входа под `local` и `split` (§2) и совпадает ли
-   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1821`, edge
+   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1822`, edge
    выбирает фетчер по своей карте — `core/edge/server.py:1105`). Это **одна** процедура: один
    вход, два профиля, сравнить сборку и дайджест. Пока она не проведена, `split`-прогон нельзя
    публиковать наравне с `local`, и это дешевле любой строки из `24` §3.2: измерение, не разработка.

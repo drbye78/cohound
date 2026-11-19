@@ -81,6 +81,7 @@ from core.cli.errors import (
 from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
+    resolve_query_lang,
     resolve_retrieval_profile,
 )
 from core.cli.wiring import (
@@ -475,17 +476,21 @@ def _execute_crawl_locked(
     # у ``plan``/``run``: иначе при тех же входах ``crawl run`` адресовал бы другой
     # ``run_id`` (``null`` вместо названного профиля).
     resolved_profile = resolve_retrieval_profile(None, deploy_config)
+    resolved_query_lang = resolve_query_lang(None, deploy_config)
     contract_d = build_execution_contract(
         inputs,
         cohort_digest=cohort_d,
         seeds_digest=seeds_d,
         declared=declared,
         retrieval_profile=resolved_profile,
+        query_lang=resolved_query_lang,
         # План 26 O2: ``crawl`` не объявляет профиль/K ретривала флагами, но поле контракта
         # обязано быть тем же, что у ``plan``/``run`` при тех же входах, — иначе
         # ``crawl run`` адресовал бы другой ``run_id``, чем ``run``.
         retrieval_params_json=retrieval_params_json(
-            profile=resolved_profile, cutoff_k=None
+            profile=resolved_profile,
+            cutoff_k=None,
+            query_lang=resolved_query_lang,
         ),
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,

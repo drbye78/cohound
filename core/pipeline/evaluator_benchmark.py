@@ -294,6 +294,32 @@ def _manifest_rrf_k(manifest: Any) -> tuple[int, bool]:
         return value, True
     return DEFAULT_RRF_K, False
 
+def _manifest_query_lang(manifest: Any) -> tuple[str, bool]:
+    """``query_lang`` из ``retrieval_params_json`` прогона; иначе ``all`` с пометкой.
+
+    Прибор обязан повторить **условия прогона**, а не свои дефолты: язык запросов решает,
+    какие термины каталога уйдут в ретривал (замер 19.11.2026 на английском
+    reference-корпусе: ``present`` 13 при ``ru`` против 42 при ``en``). Прогон, объявивший
+    ``en``, а прибор спросивший ``all``, мерил бы другую выдачу — и κ описывал бы не тот
+    вход, который исполнялся.
+
+    Читается из того же поля, что ``rrf_k`` (:func:`_manifest_rrf_k`): ``None``/битый JSON/
+    отсутствующее значение — ``all`` с ``False``, то есть «в прогоне не зафиксировано», а
+    не «взяли дефолт молча».
+    """
+    raw = getattr(manifest, "retrieval_params_json", None)
+    if not raw:
+        return "all", False
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return "all", False
+    value = data.get("query_lang") if isinstance(data, Mapping) else None
+    if isinstance(value, str) and value in ("ru", "en", "all"):
+        return value, True
+    return "all", False
+
+
 def _product_has_chunks(
     store: StorePort, partition_build_id: str, product_id: str
 ) -> tuple[bool, str | None]:
@@ -450,6 +476,12 @@ def prepare_cases(
     if not rrf_fixed:
         notes.append(f"rrf_k не зафиксирован в прогоне — взят {rrf_k} (дефолт)")
 
+    query_lang, lang_fixed = _manifest_query_lang(manifest)
+    if not lang_fixed:
+        notes.append(
+            f"query_lang не зафиксирован в прогоне — взят {query_lang} (дефолт)"
+        )
+
     # Отображение «продукт → продукт-партиция» — из ``index_manifest`` (K1/I17); это
     # единственный авторитетный источник: ``corpus_chunks.build_id`` несёт ``pb_…``, а
     # композиция прогона (``runs.index_build_id``, ``cb_…``) в этой колонке не встречается
@@ -536,6 +568,8 @@ def prepare_cases(
                 query_vectors=query_vectors,
                 rrf_k=rrf_k,
                 max_queries=max_queries,
+                # Язык — условие прогона, а не дефолт прибора (см. _manifest_query_lang).
+                query_lang=query_lang,
             )
         except Exception as exc:  # noqa: BLE001 — ячейка изолирована, пропуск назван
             skipped[cell_id] = f"retrieval_failed: {type(exc).__name__}: {exc}"

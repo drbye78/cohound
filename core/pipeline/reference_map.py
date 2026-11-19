@@ -95,12 +95,19 @@ def reference_map_id(
     llm_scenarios: Any,
     prompt_template: str | None,
     evaluation_policy: Any,
+    query_lang: str = "all",
 ) -> str:
     """``map_id`` — content-addressed идентичность карты (§7.3).
 
     Материал — ровно объявленные условия: какие чанки прочитаны, какие факты были на
     столе, какой каталог, какая модель и политика. ``observed_at``/пути/имена файлов в
     материал не входят: дата снятия и раскладка хоста — провенанс, а не измерение.
+
+    ``query_lang`` входит в материал, потому что язык запросов решает, какие термины
+    каталога уйдут в ретривал, значит и какие чанки прочитаны: две карты на разных языках
+    — два разных измерения, даже если корпус, каталог и модель те же (замер 19.11.2026 на
+    английском корпусе: релевантный чанк в top-10 у 8 из 10 параметров на EN против 1 из
+    10 на RU).
 
     :returns: ``map_{16 hex}`` — короткий, но content-addressed (как ``partition_build_id``).
     """
@@ -111,6 +118,7 @@ def reference_map_id(
         "llm_scenarios": _canonical(llm_scenarios),
         "prompt_template": prompt_template,
         "evaluation_policy": _canonical(evaluation_policy),
+        "query_lang": query_lang,
     }
     material = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return f"map_{short_hash(material, 16)}"
@@ -190,6 +198,9 @@ class ReferenceMapManifest:
     evaluation_policy: Any = None
     cutoff_k: int | None = None
     retrieval_profile: str = MAP_RETRIEVAL_PROFILE
+    #: Язык запросов ретривала (``ru``|``en``|``all``) — условие карты: от него зависит,
+    #: какие термины каталога попадут в запрос. Входит в ``map_id``.
+    query_lang: str = "all"
     observed_at: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -208,6 +219,7 @@ class ReferenceMapManifest:
             "evaluation_policy": _canonical(self.evaluation_policy),
             "cutoff_k": self.cutoff_k,
             "retrieval_profile": self.retrieval_profile,
+            "query_lang": self.query_lang,
             "observed_at": self.observed_at,
         }
 
@@ -228,6 +240,9 @@ class ReferenceMapManifest:
             evaluation_policy=data.get("evaluation_policy"),
             cutoff_k=data.get("cutoff_k"),
             retrieval_profile=str(data.get("retrieval_profile", MAP_RETRIEVAL_PROFILE)),
+            # Манифест без поля — карта, собранная до оси языка: её запросы шли в порядке
+            # ``ru``→``en``, то есть ``all``. Дефолт здесь — прочтение истории, не подмена.
+            query_lang=str(data.get("query_lang", "all")),
             observed_at=data.get("observed_at"),
         )
 
@@ -280,6 +295,7 @@ def _retrieve(
     product_id: str,
     build_id: str,
     cutoff_k: int,
+    query_lang: str = "all",
 ) -> RetrievalResult:
     """Top-K чанков параметра: запросы Ш6, объединение по лучшему счёту (R7).
 
@@ -288,7 +304,7 @@ def _retrieve(
     разницу формулировок, а не разницу путей.
     """
     best: dict[str, float] = {}
-    for query in run_queries_for_cell(param):
+    for query in run_queries_for_cell(param, query_lang=query_lang):
         for chunk_id, score in index.search_scores(
             query, product_ids=[product_id], top_k=cutoff_k
         ):
@@ -396,6 +412,9 @@ def build_reference_map(
     prompt_template: str | None = None,
     evaluation_policy: Any = None,
     cutoff_k: int = 10,
+    #: Язык запросов ретривала карты (``ru``|``en``|``all``). Для reference-линии это
+    #: ``en``: корпус английский, и объявленный язык — условие, а не догадка о корпусе.
+    query_lang: str = "all",
     model_id: str | None = None,
     observed_at: str | None = None,
     artifact_dates: Any = None,
@@ -491,6 +510,7 @@ def build_reference_map(
             product_id=product_id,
             build_id=reference_build_id,
             cutoff_k=cutoff_k,
+            query_lang=query_lang,
         )
         outcome = evaluate_cell(
             param=param,
@@ -574,6 +594,7 @@ def build_reference_map(
         evaluation_policy=_canonical(evaluation_policy),
         cutoff_k=cutoff_k,
         retrieval_profile=MAP_RETRIEVAL_PROFILE,
+        query_lang=query_lang,
         observed_at=observed_at,
     )
     return ReferenceMapResult(manifest=manifest, cells=material_cells, bundle=bundle)

@@ -1,7 +1,8 @@
 """coHound — механическая компиляция промпта оценщика Ш6 (T9.1, §7.1).
 
 Промпт собирается **механически**: версия шаблона + правило параметра + правило
-отсутствия + сателлиты релевантных ролей + фрагменты со **структурной шапкой**
+отсутствия + группа и модуль параметра + сателлиты релевантных ролей + фрагменты со
+**структурной шапкой**
 (``[фрагмент N]`` / ``source_id`` / ``document`` / ``heading`` / ``context`` /
 ``текст:`` + дословный текст, см. :func:`_render_chunk`).
 Никакой генерации/перефразирования: одна и та же ячейка (при том же входе) даёт
@@ -25,15 +26,15 @@
 retrieval-пути строка отсутствует (это видимая граница порта, а не тихий пропуск).
 
 **Схема плейсхолдеров шаблона.** ``{{NAME}}``, где ``NAME`` — один из слотов
-(``PRODUCT_ID``, ``TITLE``, ``RULE``, ``ABSENCE_RULE``, ``ABSENCE_GUIDANCE``,
-``SATELLITES``, ``EXTRA_INSTRUCTIONS``, ``CHUNKS``). Подстановка — **однопроходная**
-(``re.sub`` по токенам исходного шаблона), поэтому значения не пересканируются:
-``{{...}}`` внутри текста чанка остаётся литеральным. Неизвестный слот в шаблоне —
-``ValueError`` (шаблон и код рассинхронизированы — это ошибка сборки, не данных).
+(``PRODUCT_ID``, ``TITLE``, ``GROUP``, ``MODULE``, ``RULE``, ``ABSENCE_RULE``,
+``ABSENCE_GUIDANCE``, ``SATELLITES``, ``EXTRA_INSTRUCTIONS``, ``CHUNKS``). Подстановка —
+**однопроходная** (``re.sub`` по токенам исходного шаблона), поэтому значения не
+пересканируются: ``{{...}}`` внутри текста чанка остаётся литеральным. Неизвестный слот в
+шаблоне — ``ValueError`` (шаблон и код рассинхронизированы — это ошибка сборки, не данных).
 
 **``prompt_hash``.** Ровно контракт :func:`core.util.hashing.prompt_hash`:
-``H(template_version, rule, absence_rule, sorted(chunk_ids))``. Сателлиты, заголовок
-параметра и отрендеренный текст в hash **не входят** — такова
+``H(template_version, rule, absence_rule, group, module, sorted(chunk_ids))``. Сателлиты,
+заголовок параметра и отрендеренный текст в hash **не входят** — такова
 фиксированная формула §5/01 §5. Полный текст сохраняется в каталоге аудита
 (``prompts/{sha256(text)}.json``), чтобы аудит мог сверить содержимое.
 
@@ -59,7 +60,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from collections.abc import Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -75,14 +76,23 @@ __all__ = [
     "ABSENCE_GUIDANCE",
     "PROMPT_HASH_CONFLICT",
     "PROMPT_SAVE_FAILED",
+    "SATELLITE_OUT_OF_VOCABULARY_TOKEN",
     "TEMPLATES_DIR",
     "TEMPLATE_VERSION",
     "CompiledPrompt",
     "PromptArchive",
     "compile_prompt",
     "render_queries",
+    "role_vocabulary_of",
+    "satellite_role_note",
     "save_prompt",
 ]
+
+#: Машинный токен: сателлиты переданы как контекст, потому что их роли **вне** словаря
+#: ролей каталога (см. :func:`_relevant_satellites`). Строка с этим префиксом попадает в
+#: ``PhaseResult.log_entries`` → ``results[].notes`` прогона: расхождение двух словарей —
+#: факт о данных, и он обязан быть видимым, а не выводимым из «сателлиты не пришли».
+SATELLITE_OUT_OF_VOCABULARY_TOKEN = "satellite_roles_out_of_vocabulary"  # noqa: S105 - машинный токен, не секрет
 
 #: Машинный токен: исполненный промпт не удалось записать в каталог аудита (I/O).
 PROMPT_SAVE_FAILED = "prompt_save_failed"
@@ -125,7 +135,15 @@ PROMPT_HASH_CONFLICT = "prompt_hash_conflict"
 #:   пустого раздела ДАННЫЕ (``no_fragments`` → ``❓``, ``❌`` запрещён); (4) явное
 #:   правило выбора цитаты отрицания, когда отрицающих фрагментов несколько.
 #:   Плюс снятие бэкслешей в guidance ``distribution_absence`` (см. :data:`ABSENCE_GUIDANCE`).
-TEMPLATE_VERSION = "evaluator_v5"
+#: * ``evaluator_v6`` (19.11.2026) — правила v5 дословно плюс слоты ``{{GROUP}}`` и
+#:   ``{{MODULE}}`` (группа параметра и модуль) и абзац о том, что это **ориентир**, а не
+#:   доказательство: цитата по-прежнему обязана быть подстрокой ТЕКСТА фрагмента. Причина:
+#:   строка каталога несёт ``group`` (8 значений) и ``module``, но до модели они не
+#:   доходили — правило параметра читалось без указания, о какой части продукта речь.
+#:   Это ``execution_change`` (``prompt_template`` входит в контракт), поэтому ``run_id``
+#:   меняется у всех пакетов; ``prompt_hash`` покрывает ``group``/``module`` тем же
+#:   аргументом (см. :func:`core.util.hashing.prompt_hash`).
+TEMPLATE_VERSION = "evaluator_v6"
 
 #: Каталог версионированных шаблонов (данные модуля, не пакет Python).
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -185,11 +203,11 @@ _CHUNK_NO_SUFFIX_RE = re.compile(r"(?:#|:)\d+$")
 class CompiledPrompt:
     """Скомпилированный промпт ячейки: текст + провенанс для аудита (§3 A.2, §5).
 
-    ``prompt_hash`` — канонический ключ §5 (шаблон + правило + absence_rule + набор
-    ``chunk_id``); он сохраняется **полем** артефакта и в ячейке (воспроизводимость и
-    инвалидация при смене шаблона). Адресует файл аудита не он, а ``sha256`` текста:
-    формула §5 не покрывает product/title/текст чанков, поэтому один ``prompt_hash``
-    законно описывает несколько разных промптов (см. докстринг модуля).
+    ``prompt_hash`` — канонический ключ §5 (шаблон + правило + absence_rule + группа +
+    модуль + набор ``chunk_id``); он сохраняется **полем** артефакта и в ячейке
+    (воспроизводимость и инвалидация при смене шаблона). Адресует файл аудита не он, а
+    ``sha256`` текста: формула §5 не покрывает product/title/текст чанков, поэтому один
+    ``prompt_hash`` законно описывает несколько разных промптов (см. докстринг модуля).
     ``cell_key`` — ``(product_id, param_id)`` целевой ячейки.
     """
 
@@ -243,21 +261,94 @@ def _enum_value(value: object) -> str:
     return str(raw)
 
 
+def role_vocabulary_of(params: Iterable[CatalogRow]) -> frozenset[str]:
+    """Словарь ролей каталога: все непустые ``role_binding`` его строк.
+
+    Один резолв на прогон (как ``query_lang``): значение считает фаза и передаёт вниз, а
+    не каждый уровень вычисляет своё — иначе «словарь» у промпта и у замечания о
+    расхождении словарей мог бы оказаться разным.
+    """
+    return frozenset(
+        str(param.role_binding)
+        for param in params
+        if getattr(param, "role_binding", None)
+    )
+
+
 def _relevant_satellites(
-    param: CatalogRow, satellites: Sequence[Satellite]
+    param: CatalogRow,
+    satellites: Sequence[Satellite],
+    role_vocabulary: Collection[str] | None = None,
 ) -> list[Satellite]:
     """Отбирает сателлиты релевантных ролей и упорядочивает детерминированно.
 
-    При заданном ``param.role_binding`` остаются сателлиты с совпадающей ролью; иначе
-    берутся все переданные. Порядок — ``(role, component, state)``: стабилен между
-    прогонами независимо от порядка входа.
+    Правило трёхзначное (``role_vocabulary`` — словарь ролей каталога):
+
+    * роль сателлита **входит** в словарь и равна ``param.role_binding`` → включить;
+    * роль **входит** в словарь, но это не роль данного параметра → отбросить;
+    * роль **вне** словаря каталога → включить: это факт о расхождении двух словарей
+      (паспортного и каталожного), а не о нерелевантности сателлита.
+
+    Почему вне-словарная роль не отбрасывается: фильтрация по роли — оптимизация, и её
+    посылка («у паспорта и каталога общий словарь ролей») в данных ложна — замер
+    19.11.2026 на ``ru-pg-dbms``: ``role_binding`` = {core_engine, backup_recovery,
+    management_platform, migration}, роли сателлитов в паспортах = {security_crypto,
+    backup, query_optimizer, unknown, management_console, streaming, database_appliance,
+    ha_orchestrator, in_memory_cache}, пересечение **пусто**. Сателлит — контекст
+    промпта, а не доказательство (I17 не про него), поэтому потерять контекст хуже, чем
+    передать его: на пилоте это 0–4 сателлита на продукт. Цена ошибки видна в замечании
+    фазы (:func:`satellite_role_note`), а не выводится читателем.
+
+    ``role_vocabulary is None`` — прежнее строгое поведение (только совпадение роли):
+    так чистые вызовы и существующие тесты не меняют результат молча. Фаза Ш6 словарь
+    передаёт всегда — она знает каталог.
+
+    Порядок — ``(role, component, state)``: стабилен между прогонами независимо от
+    порядка входа.
     """
     if param.role_binding is None:
         selected = list(satellites)
-    else:
+    elif role_vocabulary is None:
         selected = [sat for sat in satellites if sat.role == param.role_binding]
+    else:
+        selected = [
+            sat
+            for sat in satellites
+            if sat.role == param.role_binding or sat.role not in role_vocabulary
+        ]
     return sorted(
         selected, key=lambda sat: (sat.role, sat.component or "", str(sat.state))
+    )
+
+
+def satellite_role_note(
+    role_vocabulary: Collection[str] | None,
+    satellites_by_product: Mapping[str, Sequence[Satellite]],
+) -> str | None:
+    """Замечание фазы о том, сколько сателлитов доходит до промпта и почему.
+
+    Считается **до** цикла оценки из двух чистых множеств (паспорта × словарь ролей
+    каталога), поэтому LLM и ретривал для неё не нужны, а число не зависит от того,
+    сколько ячеек успело отработать.
+
+    Возвращает ``None``, когда сателлитов нет вовсе: строка «0 сателлитов» на каждом
+    прогоне пакета без паспортов была бы шумом. Иначе — одна строка с тремя фактами:
+    сколько сателлитов передаётся как контекст **вне** словаря ролей, сколько
+    отбирается по роли, и пересекаются ли словари вообще.
+    """
+    groups = [tuple(group or ()) for group in (satellites_by_product or {}).values()]
+    total = sum(len(group) for group in groups)
+    if not total:
+        return None
+    vocabulary = frozenset(str(role) for role in (role_vocabulary or ()))
+    roles = [str(sat.role) for group in groups for sat in group]
+    out_of_vocabulary = sum(1 for role in roles if role not in vocabulary)
+    by_role = total - out_of_vocabulary
+    overlap = "пересекаются" if vocabulary & set(roles) else "не пересекаются"
+    return (
+        f"{SATELLITE_OUT_OF_VOCABULARY_TOKEN}: {out_of_vocabulary} из {total} "
+        f"сателлитов переданы как контекст (роль вне словаря ролей каталога), "
+        f"по роли отбираются {by_role}; словари ролей {overlap}"
     )
 
 
@@ -344,22 +435,31 @@ def compile_prompt(
     chunks: Sequence[ChunkLike],
     satellites: Sequence[Satellite] = (),
     absence_rule: AbsenceRuleType | None = None,
+    role_vocabulary: Collection[str] | None = None,
 ) -> CompiledPrompt:
     """Механически компилирует промпт оценщика и его ``prompt_hash`` (§7.1/§5).
 
-    :param param: строка каталога (``rule``, ``absence_rule``, ``role_binding``, …).
+    :param param: строка каталога (``rule``, ``absence_rule``, ``role_binding``,
+        ``group``, ``module``, …).
     :param product_id: продукт-скоуп ячейки (I17 — evidence только из его чанков).
     :param chunks: переданные оценщику фрагменты (``Chunk``|``RetrievedChunk``).
-    :param satellites: сателлиты; фильтруются по ``param.role_binding`` (если задан).
+    :param satellites: сателлиты **этого** продукта (смешивать продукты нельзя: сателлит —
+        контекст промпта, но привязка к продукту у него та же, что у evidence); фильтруются
+        по ``param.role_binding`` и ``role_vocabulary`` (см. :func:`_relevant_satellites`).
     :param absence_rule: переопределяет ``param.absence_rule`` (по умолчанию — из каталога).
+    :param role_vocabulary: словарь ролей каталога (:func:`role_vocabulary_of`) — им
+        отличается «роль чужого параметра» от «роли, которой в каталоге нет». ``None`` —
+        прежнее строгое поведение (только точное совпадение роли).
 
     Слот ``{{EXTRA_INSTRUCTIONS}}`` шаблона подставляется **пустой строкой** и параметром
-    не является: значения у него нет ни в одном объявленном входе, а текст шаблонов
-    ``templates/evaluator_v{1..5}.txt`` менять нельзя — иначе поедет ``prompt_template``
-    и ``run_id``. Отрендеренный промпт обязан остаться байт-в-байт прежним.
+    не является: значения у него нет ни в одном объявленном входе, а текст выпущенных
+    шаблонов ``templates/evaluator_v*.txt`` менять нельзя — иначе поедет ``prompt_template``
+    и ``run_id``.
 
     Чанки упорядочиваются по ``chunk_id`` (детерминизм R7); ``chunk_ids`` уходят в
     ``prompt_hash`` уже отсортированными, поэтому hash не зависит от порядка входа.
+    ``group``/``module`` входят в материал hash (шаблон v6 печатает их): hash обязан
+    описывать текст, иначе два разных промпта несли бы один hash.
     """
     resolved_absence = absence_rule if absence_rule is not None else param.absence_rule
     if not isinstance(resolved_absence, AbsenceRuleType):
@@ -373,15 +473,23 @@ def compile_prompt(
         param.rule,
         resolved_absence.value,
         chunk_ids,
+        group=param.group,
+        module=param.module,
     )
 
     mapping: dict[str, str] = {
         "PRODUCT_ID": product_id,
         "TITLE": param.title,
+        # Группа и модуль — ориентир, а не доказательство (см. evaluator_v6.txt): они
+        # уточняют, о какой части продукта правило, и не подменяют цитату.
+        "GROUP": param.group,
+        "MODULE": param.module,
         "RULE": param.rule,
         "ABSENCE_RULE": resolved_absence.value,
         "ABSENCE_GUIDANCE": ABSENCE_GUIDANCE[resolved_absence],
-        "SATELLITES": _render_satellites(_relevant_satellites(param, satellites)),
+        "SATELLITES": _render_satellites(
+            _relevant_satellites(param, satellites, role_vocabulary)
+        ),
         # Слот шаблона существует (``{{EXTRA_INSTRUCTIONS}}`` в evaluator_v*.txt), но
         # значения у него нет: параметра нет ни у одного вызывающего. Подстановка пустой
         # строки сохраняет отрендеренный промпт байт-в-байт и не трогает текст шаблона.
@@ -399,12 +507,25 @@ def compile_prompt(
     )
 
 
-def render_queries(param: CatalogRow, max_queries: int = 3) -> list[str]:
-    """Собирает запросы Ш6 (S13): ``[title]`` + концепт-термины ru → en, ≤ ``max_queries``.
+def render_queries(
+    param: CatalogRow,
+    max_queries: int = 3,
+    query_lang: str = "all",
+) -> list[str]:
+    """Собирает запросы Ш6 (S13): ``[title]`` + концепт-термины, ≤ ``max_queries``.
 
     Порядок детерминирован и не зависит от реализации/LLM (сохраняет симметрию I16):
-    заголовок, затем термины языка ``ru``, затем ``en``, затем прочие языки в
-    лексикографическом порядке; внутри языка — порядок пакета (порядок списка).
+    заголовок, затем термины объявленного языка, затем остальные в порядке
+    :data:`_QUERY_LANG_ORDER`, затем прочие языки лексикографически; внутри языка —
+    порядок пакета.
+
+    :param query_lang: объявленная ось ``ru`` | ``en`` | ``all`` (``retrieval.query_lang``
+        / ``--query-lang``). ``all`` — прежнее поведение (все языки), и оно остаётся
+        значением по умолчанию, чтобы чистые вызовы и тесты не меняли результат молча.
+        ``ru``/``en`` оставляют **только** термины этого языка (плюс ``title``, который
+        на языке каталога): на английском корпусе это и есть разница между «нашли» и
+        «пусто» — замер 19.11.2026: релевантный чанк в top-10 у 8 из 10 параметров
+        (EN) против 1 из 10 (RU).
 
     **Дубликаты схлопываются (замер).** Автор каталога кладёт в ``concept_terms[lang][0]``
     полный заголовок параметра — иначе говоря, повторяет ``title``. Без схлопывания
@@ -417,12 +538,23 @@ def render_queries(param: CatalogRow, max_queries: int = 3) -> list[str]:
     """
     if max_queries < 0:
         raise ValueError("max_queries не может быть отрицательным")
+    lang = str(query_lang).strip().lower()
+    if lang not in ("ru", "en", "all"):
+        raise ValueError(
+            f"query_lang: недопустимый язык «{query_lang}»; ожидается ru|en|all"
+        )
     terms = param.concept_terms or {}
-    ordered_langs = [lang for lang in _QUERY_LANG_ORDER if lang in terms]
-    ordered_langs += sorted(lang for lang in terms if lang not in _QUERY_LANG_ORDER)
+    if lang == "all":
+        ordered_langs = [item for item in _QUERY_LANG_ORDER if item in terms]
+        ordered_langs += sorted(item for item in terms if item not in _QUERY_LANG_ORDER)
+    else:
+        # Объявленный язык идёт первым и остаётся единственным: смешивать его с прочими
+        # значило бы вернуть тот же дефект, от которого ось избавляет (бюджет 3 запроса
+        # съедали термины не того языка).
+        ordered_langs = [lang] if lang in terms else []
     queries: list[str] = []
     seen: set[str] = set()
-    for candidate in [param.title, *(t for lang in ordered_langs for t in terms[lang])]:
+    for candidate in [param.title, *(t for item in ordered_langs for t in terms[item])]:
         key = candidate.strip().casefold()
         if not key or key in seen:
             continue

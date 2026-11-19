@@ -248,6 +248,7 @@ __all__ = [
     "_snapshot_run_yaml",
     "_validate_capabilities_payload",
     "_validate_health_payload",
+    "passport_satellites",
 ]
 
 def _resolve_paths(args: argparse.Namespace) -> Any:
@@ -2070,6 +2071,36 @@ def _load_passports_dir(passports_dir: str | Path) -> dict[str, Any]:
         raise CliError(_concise(exc), code="passports", exit_code=EXIT_USAGE) from exc
 
 
+def passport_satellites(
+    args: argparse.Namespace,
+) -> dict[str, tuple[Any, ...]]:
+    """Сателлиты по продуктам из паспортов — единственный источник для всех путей Ш6.
+
+    Зачем общая функция. Сателлит — **контекст промпта**, поэтому любой путь, который
+    исполняет тот же промпт (фаза, ``retry``, ``revalidate``, ``evaluator-benchmark``),
+    обязан взять его из того же места. Три копии «загрузим паспорта» разошлись бы молча —
+    и разошлись: до 19.11.2026 ни один из этих путей паспорта не грузил, а
+    ``build_phases`` принимал мёртвый kwarg, который composition root не передавал
+    (замер: **493 из 493** промптов канонического прогона содержали «(нет сателлитов)»).
+    Вторая формула резолва каталога была бы тем же дефектом в новой одежде, поэтому
+    каталог резолвится здесь **той же** функцией, что composition root
+    (``--passports-dir`` > resolved ``paths.passports`` > ``passports``).
+
+    Отсутствующий каталог даёт ``{}`` — документированный безопасный дефолт
+    (:func:`core.config.passports.load_passports` уже так устроен). Существующий, но
+    некорректный паспорт поднимается :class:`CliError` (``EXIT_USAGE``) и не глотается:
+    тихий ``{}`` вместо паспорта дал бы промпт, отличный от фазового, и это было бы
+    невидимо.
+    """
+    passports = _load_passports_dir(
+        _resolve_passports_dir(args, getattr(args, "paths", None))
+    )
+    return {
+        str(pid): tuple(getattr(passport, "satellites", ()) or ())
+        for pid, passport in passports.items()
+    }
+
+
 def _load_corpus_urls(path: str | Path | None) -> dict[str, list[str]]:
     """Читает опциональный JSON/YAML-файл ``{product_id: [url, ...]}`` (Ш5).
 
@@ -2700,7 +2731,7 @@ def _resolve_phases(
     passports_dir = _resolve_passports_dir(args, paths)
     # Импорт локальный: ``execution_axes`` сам импортирует из этого модуля (парсеры и
     # хелперы осей), поэтому на уровне модуля получился бы цикл. Функция — чистая.
-    from core.cli.execution_axes import resolve_retrieval_profile
+    from core.cli.execution_axes import resolve_query_lang, resolve_retrieval_profile
 
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
     # 09 §8.1–§8.5: тот же корень, что у ``IndexBuilderPort`` (composition root), —
@@ -2797,6 +2828,13 @@ def _resolve_phases(
             getattr(args, "retrieval_profile", None), deploy_config
         ),
         "cutoff_k": getattr(args, "cutoff_k", None),
+        # Язык запросов ретривала — объявленная ось, резолвится тем же правилом, что
+        # профиль: ``--query-lang`` > ``deploy.retrieval.query_lang`` > ``all``. Без
+        # резолва контракт получал бы ``None`` («язык не назван»), а фаза исполняла бы
+        # порядок из кода — тот же дефект D2, из-за которого профиль резолвится здесь.
+        "query_lang": resolve_query_lang(
+            getattr(args, "query_lang", None), deploy_config
+        ),
         # D2: доменные профили (из domain_profiles.yaml) + явное переопределение
         # оси fetch (--render-modes); резолв FetchPlan — в pipeline Ш5.
         "domain_profiles": inputs.domain_profiles,

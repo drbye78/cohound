@@ -1166,6 +1166,8 @@ embed:                         # O6: объявленные оси эмбедд�
 retrieval:                     # I16/D2: объявленный дефолт профиля ретривала
   profile: R0                  # R0 (лексика) | R1 (dense) | R2 (RRF-гибрид)
                                # приоритет: --retrieval-profile > этот ключ > R0
+  query_lang: all              # ru | en | all — язык терминов запроса (условие отбора)
+                               # приоритет: --query-lang > этот ключ > all
   partition_cache_mb: null     # O43: бюджет кэша партиций dense-индекса, МиБ (null = 256)
 lexical:                       # O16: профиль анализатора лексического индекса
   profile: stemmed             # stemmed | identifier | ngram (raw → identifier)
@@ -1183,6 +1185,18 @@ extract:                       # D8: операционный бюджет ме�
   описывались разными `run_id`. Теперь `resolve_retrieval_profile` (`--retrieval-profile` >
   `deploy.retrieval.profile` > `R0`) вызывается **до** контракта, и тем же значением питаются
   фазы (`plan`/`run`/`crawl run`/DI-контекст) — «объявлено» и «исполнено» не могут разойтись.
+- `retrieval.query_lang` (**ось 19.11.2026**, закрывает дефект отбора). Язык терминов —
+  условие измерения, а не порядок в коде: до правки `_QUERY_LANG_ORDER = ("ru", "en")` при
+  `MAX_QUERIES = 3` отправлял `title` и два **русских** термина, а английские не доходили
+  никогда, — на английском reference-корпусе это запрос без слов документа. Замер
+  `2026-11-19-query-lang-axis.md` (reference PG 18, 9 763 чанка, зачёт по фразам):
+  `present` = 13 (`ru`) / 37 (`all`) / **42** (`en`), то есть **3.23×**; `all` хуже `en`,
+  потому что бюджет `MAX_TERMS = 12` занимают термины не того языка. Резолв
+  `resolve_query_lang` (`--query-lang` > `deploy.retrieval.query_lang` > `all`) вызывается
+  **до** контракта — тем же значением питаются Ш6, `baseline map` (входит в `map_id`),
+  `baseline recon` и `search --param`. `auto` отсутствует (A3/R5): язык корпуса — свойство
+  профиля, а не догадка исполнения. Повтор (`hound retry`) берёт язык из провенанса **самой
+  ячейки** (`retrieval_params_json.query_lang`), иначе он мерил бы другое условие.
 - `lexical.profile` (**O16**). Профиль входит в `lexical_spec` (⇒ `run_id`) **и** в сборку
   индекса (`seed_lexical_index(profile=…)`), поэтому объявленный профиль — это профиль,
   которым засеян индекс. Дефолт `stemmed` — объявленное состояние, а не вкус: замер
@@ -1720,7 +1734,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   профиля пакета-якоря (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь —
   durable-аттестация профиля (`profile_attestation` в `state/{package_id}/state.db`) —
   объявлена, проверяется гейтом (`make_profile_gate`, `core/pipeline/profile_attestation.py:313`;
-  проводка — `_profile_gate_resolver`, `core/cli/context.py:1676`)
+  проводка — `_profile_gate_resolver`, `core/cli/context.py:1677`)
   и **имеет производителя — человека**: `hound package profile attest --gate G1|G2
   --actor …` (`--dry-run` ничего не пишет и говорит об этом). Прогон её **только читает** и
   никогда не пишет. Механизм рабочий, но замер 2026-10-30 — **ноль строк** во всех реальных
@@ -1809,7 +1823,7 @@ W12/T12.1, 2026-10-08); бэкап/
 `core/store/backup.py:274` `restore_run` —
 zip-бандл + `sqlite3.Connection.backup`, не копирование файла; W12/T12.2, 2026-10-08);
 как считать `prompt`-шаблоны версиями — ✅ сделано
-(`core/pipeline/prompt.py:128` — `TEMPLATE_VERSION = "evaluator_v5"`, имя файла
+(`core/pipeline/prompt.py:146` — `TEMPLATE_VERSION = "evaluator_v6"`, имя файла
 `templates/{version}.txt`, версия входит в `prompt_hash`; W9/T9.1, 2026-10-08).
 Отдельная корпусная БД — ➖ снято (S6, B.2; единая БД сохраняет FK).
 

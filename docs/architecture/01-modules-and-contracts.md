@@ -51,7 +51,7 @@
 (`tests/selfcheck.py:1098` `_check_edge`), то есть проверка по принципу allow-list, отдельных
 «запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1105`
 `_neutrality` (§1.3), `tests/selfcheck.py:1213` `_shims_removed` (нет `core.schemas`/`core.db`),
-`tests/selfcheck.py:3349` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
+`tests/selfcheck.py:3362` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
 по **всему** слою, а не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет
 сформулирован по запрещённым слоям, а не по файлам).
 
@@ -92,7 +92,7 @@
 (`core/cli/context.py:2354`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
-(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1218,1220`, `gate_delegated_external`/
+(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1230,1220`, `gate_delegated_external`/
 `gate_not_blocking` — `core/pipeline/runner.py:625,568`, `no_embedder` — на уровне CLI,
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
@@ -162,10 +162,10 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 остаётся `❓` (I12).
 
 **I2c — класс отрицания против наблюдённого охвата** (`check_absence_coverage`,
-`core/domain/invariants.py:293`; исполняется в Ш6: `core/pipeline/evaluate.py:2140-2221`
-`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2190`,
-применяется к ячейке на `core/pipeline/evaluate.py:3262`, токен причины
-`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:227`). Условие `❌` зависит от **класса**, а не от
+`core/domain/invariants.py:293`; исполняется в Ш6: `core/pipeline/evaluate.py:2161-2221`
+`_enforce_absence_coverage` → `check_absence_coverage` на `core/pipeline/evaluate.py:2211`,
+применяется к ячейке на `core/pipeline/evaluate.py:3292`, токен причины
+`absence_coverage_unsatisfied` — `core/pipeline/evaluate.py:229`). Условие `❌` зависит от **класса**, а не от
 одной полноты краула: `explicit` (цитата вендора) и `authoritative` (энумерация) неполнотой не
 отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` зависит от
 пространства, и его условие выражает I2d (0.4.0: per-cell подписи `scope_acceptance` нет);
@@ -176,7 +176,7 @@ def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None =
 
 **I2d — у `❌` есть датированный носитель** (`check_absence_dated`,
 `core/domain/invariants.py:365`; исполняется в Ш6 `_enforce_dated_absence`,
-`core/pipeline/evaluate.py:2392-2502`, применяется к ячейке на `core/pipeline/evaluate.py:3465`).
+`core/pipeline/evaluate.py:2413-2502`, применяется к ячейке на `core/pipeline/evaluate.py:3495`).
 `❌` — утверждение не о сегодняшнем дне, а о **событии с датой**: носитель зависит от класса
 отрицания — `explicit`/`authoritative` требуют записи наблюдения (`observed_at`) **каждого**
 цитируемого документа, `bounded` — снятия **каждого** объявленного корня с `complete=1` и датой
@@ -743,7 +743,7 @@ class DiscoveryLLMPort(Protocol):
 * G1/G2 — **внутренняя аттестация** содержимого профиля пакета-якоря. Рабочий путь —
   per-run строка `gate_decisions` (аудит-след и override). Второй путь — durable
   `profile_attestation` в `state/{package}/state.db` (`core/pipeline/profile_attestation.py:313`,
-  `make_profile_gate` подключён в CLI, `core/cli/context.py:1676`): производитель у него есть —
+  `make_profile_gate` подключён в CLI, `core/cli/context.py:1677`): производитель у него есть —
   **человек** (`hound package profile attest`, `core/cli/package/commands.py:2915`), прогон строку
   только читает. Замер 30.10.2026: в реальных `state.db` — 0 строк, поэтому рабочим остаётся
   per-run путь; выдавать подпись за существующую нельзя, но и «производителя нет» уже неверно.
@@ -802,7 +802,7 @@ class DiscoveryLLMPort(Protocol):
 | `xml_safe.py` | ленивый доступ к `defusedxml` (единственное место, знающее про extra) |
 | `text_utils.py` | многоязычные текстовые утилиты (RU/EN) |
 | `cjk_lexical.py` | сегментация CJK для лексического контура: биграммы внутри прогонов (без зависимостей) |
-| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:272` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
+| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `core/pipeline/retrieve.py:295` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
 | `agreement.py` | согласие аннотаторов: Cohen's κ (§11.5) |
 | `cache.py` | глобальный content-addressed кэш внешних вызовов (R7, ADR 0016) |
 | `retry.py` | bounded retry/backoff с уважением `Retry-After` (S6) — вынесен из поискового адаптера: политика повторов общая, а провайдер — commodity |
@@ -940,10 +940,10 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 | `09` онбординг/инкремент | §3.10 (`ProductStatePort`), §3.9 (контейнеры), §4 (`run_isolated`, resume/N4) |
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
-`core/pipeline/retrieve.py:272` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
+`core/pipeline/retrieve.py:295` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
 `core/domain/models.py:1722`; структура `ProtocolExhaustion` — `core/domain/models.py:1558`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2826` (`max_retries`), цикл
-`core/pipeline/evaluate.py:3133`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2847` (`max_retries`), цикл
+`core/pipeline/evaluate.py:3163`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
-строит вызывающий (`core/pipeline/evaluate.py:3017`).
+строит вызывающий (`core/pipeline/evaluate.py:3038`).

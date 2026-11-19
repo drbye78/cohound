@@ -600,11 +600,14 @@ def test_retrieval_params_serializer_declares_exactly_executed_values() -> None:
         "pool_multiplier",
         "max_queries",
         "cross_query_fusion",
+        "query_lang",
     }
     assert params["rrf_k"] == DEFAULT_RRF_K == 60
     assert params["pool_multiplier"] == DEFAULT_POOL_MULTIPLIER == 1
     assert params["max_queries"] == MAX_QUERIES == 3
     assert params["cross_query_fusion"] == DEFAULT_CROSS_QUERY_FUSION == "max"
+    # Язык запросов — условие измерения: дефолт ``all`` (прежний порядок ru→en).
+    assert params["query_lang"] == "all"
     # Необъявленный K остаётся ``None`` — это отличимо от подставленного дефолта.
     assert params["cutoff_K"] == 10
     assert retrieval_params(profile=None, cutoff_k=None)["cutoff_K"] is None
@@ -619,6 +622,25 @@ def test_retrieval_rrf_k_changes_contract_digest() -> None:
         profile="R2", cutoff_k=10, rrf_k=77
     )
     assert execution_contract_digest(base) != execution_contract_digest(other)
+
+
+def test_query_lang_is_a_declared_condition_not_a_constant() -> None:
+    """Смена языка запросов меняет ``run_id``: это условие измерения (замер 19.11.2026).
+
+    На английском reference-корпусе релевантный чанк в top-10 находили RU-запросы у 1 из
+    10 параметров, EN — у 8 из 10 (по каталогу непустой top-10: 88 из 181 против 181).
+    Поэтому язык обязан быть слагаемым контракта: иначе два разных набора доказательств
+    носили бы один ``run_id``.
+    """
+    ru = _contract_values()
+    ru["query_lang"] = "ru"
+    en = _contract_values()
+    en["query_lang"] = "en"
+    assert execution_contract_digest(ru) != execution_contract_digest(en)
+    # ``null`` («ось не передана») отличим от объявленного ``all``.
+    absent = _contract_values()
+    absent["query_lang"] = None
+    assert execution_contract_digest(absent) != execution_contract_digest(_contract_values())
 
 
 def test_null_retrieval_params_is_not_the_defaults() -> None:

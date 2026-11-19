@@ -163,10 +163,15 @@ def _retrieval_params_json(holder: Mapping[str, Any]) -> str | None:
 
     profile = holder.get("retrieval_profile")
     cutoff = holder.get("retrieval_cutoff_K")
-    if profile is None and cutoff is None:
+    lang = holder.get("query_lang")
+    if profile is None and cutoff is None and lang is None:
         return None
+    # ``query_lang`` — то же условие ячейки, что профиль/K: ``hound retry`` повторяет
+    # условия из этого JSON, и без поля повтор мерил бы другой язык, чем прогон.
     return _json.dumps(
-        {"profile": profile, "cutoff_K": cutoff}, ensure_ascii=False, sort_keys=True
+        {"profile": profile, "cutoff_K": cutoff, "query_lang": lang},
+        ensure_ascii=False,
+        sort_keys=True,
     )
 
 
@@ -1012,6 +1017,10 @@ def build_phases(
     snapshot_date: Any = None,
     retrieval_profile: RetrievalProfile | str | None = None,
     cutoff_k: int | None = None,
+    #: Язык запросов ретривала (``ru``|``en``|``all``) — объявленная ось. Прокидывается в
+    #: Ш6: без него фаза исполняла бы порядок языков из кода, а контракт объявлял бы
+    #: другое значение (дефект D2 в терминах ``query_lang``).
+    query_lang: str = "all",
     domain_profiles: Mapping[str, DomainProfile] | None = None,
     explicit_fetch: Mapping[str, FetchMode] | None = None,
     crawl_sources: CrawlSourcesConfig | None = None,
@@ -1021,7 +1030,6 @@ def build_phases(
     extract_cache: ExtractionCache | None = None,
     embed_cache: EmbedCache | None = None,
     eval_cache: EvalVerdictCache | None = None,
-    satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
     deploy_profile: str | None = None,
@@ -1076,7 +1084,11 @@ def build_phases(
         (``sources/manual_artifacts.yaml``) и реестровых конфигураций. ``None`` (модульный
         вызов) ⇒ объявленных артефактов нет.
     :param urls: ``product_id → [url]`` для Ш5 (план URL не несёт — тонкий вход).
-    :param passports: ``product_id → Passport`` для Ш4 (наследование).
+    :param passports: ``product_id → Passport`` для Ш4 (наследование) и **единственный
+        источник сателлитов** для Ш6: отображение «продукт → сателлиты» строится внутри
+        фазы из этого же объекта (отдельного входа у ``build_phases`` нет — второй путь
+        рядом с паспортом завёл бы две формы истины; именно так объявленный, но никем не
+        передававшийся kwarg и оставлял промпт без сателлитов).
     :param out_dir: базовый каталог отчётов (Ш9); composition root передаёт resolved
         ``paths.runs`` (``03`` §A.1). Дефолт ``"runs"`` совпадает с :class:`PathsConfig`.
     :param raw_root: корень retention сырых байтов (Ш5); composition root передаёт resolved
@@ -1097,7 +1109,6 @@ def build_phases(
         в фазе корпуса (Ш5).
     :param explicit_fetch: явные переопределения оси ``fetch`` по URL (``--render-modes``);
         побеждают профиль домена, но только по оси ``fetch`` (D2). ``None``/пусто → профиль.
-    :param satellites: сателлиты как контекст промпта (I17, не доказательство).
     :param resolver: резолвер ``source_id`` → URL (I10/I15).
     :param strict: strict vs preliminary для Ш6 (I13).
     :param deploy_profile: профиль доверенных зон (``local``/``split``/…) для деплой-провенанса
@@ -1507,15 +1518,30 @@ def build_phases(
         holder["retrieval_cutoff_K"] = (
             int(cutoff_k) if cutoff_k is not None else DEFAULT_RETRIEVAL_CUTOFF_K
         )
+        # Язык запросов — условие измерения ячейки, а не деталь исполнения: он попадает
+        # в провенанс манифеста и в ``retrieval_params_json`` ячейки, откуда его читает
+        # повтор (``_cell_condition``).
+        holder["query_lang"] = query_lang
+        # Сателлиты — **по продукту** и только из паспортов (единственный источник: тот
+        # же объект, из которого строятся ``product_names`` и профиль G1/G2). Плоский
+        # список на когорту отправил бы сателлиты продукта A в промпт продукта B; а
+        # отдельный kwarg ``build_phases`` был мёртвым входом — composition root его не
+        # передавал, поэтому в промпте всегда стояло «(нет сателлитов)» (замер 19.11.2026:
+        # 493 из 493 промптов).
+        satellites_by_product: dict[str, tuple[Satellite, ...]] = {
+            str(pid): tuple(getattr(passport, "satellites", ()) or ())
+            for pid, passport in (passports or {}).items()
+        }
         return evaluate_phase(
             plan=plan,
             ports=ctx.ports,
             store=ctx.store,
             run_id=plan.run_id,
-            satellites=satellites,
+            satellites=satellites_by_product,
             resolver=resolver,
             profile=retrieval_profile,
             cutoff_k=cutoff_k,
+            query_lang=query_lang,
             strict=strict,
             eval_cache=eval_cache,
             # 09 §10.5: условия, по которым посчитан вердикт, — часть ключа кэша. Строятся

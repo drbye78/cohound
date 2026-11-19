@@ -101,28 +101,42 @@ def test_content_hash_known_vector() -> None:
 
 
 def test_prompt_hash_order_independent() -> None:
-    a = prompt_hash("v1", "rule", "explicit", ["c5", "c1", "c3"])
-    b = prompt_hash("v1", "rule", "explicit", ["c3", "c5", "c1"])
-    c = prompt_hash("v1", "rule", "explicit", ["c1", "c3", "c5"])
+    a = prompt_hash("v1", "rule", "explicit", ["c5", "c1", "c3"], group="g", module="m")
+    b = prompt_hash("v1", "rule", "explicit", ["c3", "c5", "c1"], group="g", module="m")
+    c = prompt_hash("v1", "rule", "explicit", ["c1", "c3", "c5"], group="g", module="m")
     assert a == b == c
 
 
 def test_prompt_hash_deterministic_across_calls() -> None:
-    assert prompt_hash("v1", "rule", "explicit", ["c1", "c2"]) == prompt_hash(
-        "v1", "rule", "explicit", ["c2", "c1"]
-    )
+    assert prompt_hash(
+        "v1", "rule", "explicit", ["c1", "c2"], group="g", module="m"
+    ) == prompt_hash("v1", "rule", "explicit", ["c2", "c1"], group="g", module="m")
 
 
 def test_prompt_hash_sensitive_to_fields() -> None:
-    base = prompt_hash("v1", "rule", "explicit", ["c1"])
-    assert prompt_hash("v2", "rule", "explicit", ["c1"]) != base
-    assert prompt_hash("v1", "other", "explicit", ["c1"]) != base
-    assert prompt_hash("v1", "rule", "parameter_reference", ["c1"]) != base
-    assert prompt_hash("v1", "rule", "explicit", ["c2"]) != base
+    base = prompt_hash("v1", "rule", "explicit", ["c1"], group="g", module="m")
+    assert prompt_hash("v2", "rule", "explicit", ["c1"], group="g", module="m") != base
+    assert prompt_hash("v1", "other", "explicit", ["c1"], group="g", module="m") != base
+    assert (
+        prompt_hash("v1", "rule", "parameter_reference", ["c1"], group="g", module="m")
+        != base
+    )
+    assert prompt_hash("v1", "rule", "explicit", ["c2"], group="g", module="m") != base
+
+
+def test_prompt_hash_sensitive_to_group_and_module() -> None:
+    """19.11.2026: ``group``/``module`` печатаются в промпте (``evaluator_v6``) ⇒ в hash.
+
+    Без этого два разных текста несли бы один ``prompt_hash`` — ровно та ложь, от которой
+    hash и существует.
+    """
+    base = prompt_hash("v1", "rule", "explicit", ["c1"], group="g", module="m")
+    assert prompt_hash("v1", "rule", "explicit", ["c1"], group="g2", module="m") != base
+    assert prompt_hash("v1", "rule", "explicit", ["c1"], group="g", module="m2") != base
 
 
 def test_prompt_hash_full_hex() -> None:
-    assert len(prompt_hash("v1", "rule", "explicit", [])) == 64
+    assert len(prompt_hash("v1", "rule", "explicit", [], group="g", module="m")) == 64
 
 
 # --- short_hash --------------------------------------------------------------

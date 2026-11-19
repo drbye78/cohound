@@ -42,14 +42,33 @@ def short_hash(data: bytes | str, n: int = 24) -> str:
 
 
 def prompt_hash(
-    template_version: str, rule: str, absence_rule: str, chunk_ids: list[str]
+    template_version: str,
+    rule: str,
+    absence_rule: str,
+    chunk_ids: list[str],
+    *,
+    group: str,
+    module: str,
 ) -> str:
-    """Детерминированный хэш промпта (§5): версия шаблона + правило + чанки.
+    """Детерминированный хэш промпта (§5): версия шаблона, правило, группа, модуль, чанки.
 
     ``chunk_ids`` сортируются, поэтому порядок входа не влияет на результат
     (prompt_hash инвариантен к перестановке чанков). Склейка — фиксированным
     разделителем. SHA-256 в полном hex.
+
+    ``group``/``module`` входят в материал **обязательными** аргументами (с 19.11.2026,
+    шаблон ``evaluator_v6``): они печатаются в тексте промпта (слоты ``{{GROUP}}``/
+    ``{{MODULE}}``), и hash, не покрывающий их, описывал бы не тот текст — два разных
+    промпта несли бы один hash. Дефолта нет намеренно: пропущенный аргумент у нового
+    вызывающего — ошибка сборки, а не тихий hash «без группы».
     """
-    parts = [template_version, rule, absence_rule, *sorted(chunk_ids)]
+    parts = [
+        template_version,
+        rule,
+        absence_rule,
+        group,
+        module,
+        *sorted(chunk_ids),
+    ]
     raw = _FIELD_SEP.join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

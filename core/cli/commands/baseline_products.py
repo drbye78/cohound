@@ -1506,6 +1506,7 @@ def _recon_facts(
     corpus_build_id: str,
     observed_at: str,
     coverage_complete: bool = False,
+    query_lang: str = "all",
 ) -> list[BaselineFact]:
     """Факты по каталогу: кандидатов отбирает индекс, статус ставит ``derive_facts``.
 
@@ -1538,7 +1539,7 @@ def _recon_facts(
     by_id = {doc.chunk_id: doc for doc in docs}
     facts: list[BaselineFact] = []
     for param in params:
-        terms = parameter_terms(param)
+        terms = parameter_terms(param, query_lang=query_lang)
         phrases = parameter_phrases(param)
         candidates = index.search_scores(" ".join(terms), top_k=RECON_TOP_K) if terms else []
         fact: BaselineFact | None = None
@@ -1702,6 +1703,11 @@ def _recon_version(
     # объявленного пространства, и только тогда «не нашли» становится ``absent``.
     # Манифеста нет (``--corpus-db``) — полнота неизвестна, значит ``unclear``.
     coverage_complete = bool(manifest.complete) if manifest is not None else False
+    # Резолв языка — до вызова: тот же резолвер, что у прогона и карты
+    # (``--query-lang`` > ``deploy.retrieval.query_lang`` > ``all``).
+    from core.cli.execution_axes import resolve_query_lang
+    from core.config.deploy import load_deploy_config
+
     facts = _recon_facts(
         baseline_id=product.baseline_id,
         version=version,
@@ -1711,6 +1717,12 @@ def _recon_version(
         corpus_build_id=build_id,
         observed_at=_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
         coverage_complete=coverage_complete,
+        # Язык терминов — объявленное условие (``--query-lang`` > deploy > ``all``):
+        # на английском reference-корпусе русские термины вытесняли английские из
+        # бюджета ``MAX_TERMS``, и непустой top-10 давали 88 параметров из 181.
+        query_lang=resolve_query_lang(
+            getattr(args, "query_lang", None), load_deploy_config(None)
+        ),
     )
     # Подписи переживают пере-разведку, если их доказательство на месте: прибор не вправе
     # стирать решение человека молча (§3.3), а человек не вправе держать подпись под
@@ -2150,6 +2162,15 @@ def run_map(args: argparse.Namespace) -> int:
     from core.adapters.lexical_bm25 import Bm25Index
 
     lexical_index = Bm25Index()
+    # Язык запросов карты — объявленное условие (``--query-lang`` > deploy > ``all``),
+    # а не порядок в коде: reference-корпус английский, и замер 19.11.2026 показал, что
+    # RU-запросы находили релевантный чанк у 1 из 10 параметров против 8 из 10 на EN.
+    from core.cli.execution_axes import resolve_query_lang
+    from core.config.deploy import load_deploy_config
+
+    query_lang = resolve_query_lang(
+        getattr(args, "query_lang", None), load_deploy_config(None)
+    )
     map_id = reference_map_id(
         reference_build_id=build_id,
         baseline_facts_digest=baseline_facts_digest(facts),
@@ -2157,6 +2178,7 @@ def run_map(args: argparse.Namespace) -> int:
         llm_scenarios={"model_id": getattr(evaluator, "model_id", None)},
         prompt_template=getattr(args, "prompt_template", None),
         evaluation_policy=None,
+        query_lang=query_lang,
     )
     map_layout = ReferenceMapLayout(
         root=corpus_layout.map_dir(build_id, map_id), map_id=map_id
@@ -2192,6 +2214,7 @@ def run_map(args: argparse.Namespace) -> int:
             llm_scenarios={"model_id": getattr(evaluator, "model_id", None)},
             prompt_template=getattr(args, "prompt_template", None),
             cutoff_k=int(getattr(args, "cutoff_k", 10) or 10),
+            query_lang=query_lang,
             model_id=getattr(evaluator, "model_id", None),
             observed_at=_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
             llm_concurrency=concurrency,
@@ -2497,6 +2520,15 @@ def configure(sub: Any) -> None:
         action="store_true",
         help="обойти все объявленные версии линии (у каждой своя сборка; запись одна)",
     )
+    p_recon.add_argument(
+        "--query-lang",
+        dest="query_lang",
+        choices=["ru", "en", "all"],
+        default=None,
+        metavar="LANG",
+        help="язык терминов запроса ru|en|all (условие измерения: при `all` бюджет "
+        "MAX_TERMS тратится на все языки сразу; для английского reference-корпуса — en)",
+    )
     p_recon.set_defaults(handler=run_recon)
 
     p_propose = inner.add_parser(
@@ -2582,6 +2614,15 @@ def configure(sub: Any) -> None:
         type=int,
         default=10,
         help="глубина ретривала карты (top-K фрагментов на параметр)",
+    )
+    p_map.add_argument(
+        "--query-lang",
+        dest="query_lang",
+        choices=["ru", "en", "all"],
+        default=None,
+        metavar="LANG",
+        help="язык запросов ретривала карты ru|en|all (условие измерения, входит в "
+        "map_id; для английского reference-корпуса — en)",
     )
     p_map.add_argument(
         "--llm-concurrency",

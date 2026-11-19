@@ -499,7 +499,7 @@ Three facts that are cheap to state and expensive to rediscover:
 
 ## 9. Run identity, declared axes, versioning
 
-- `run_id` is a function of **declared inputs only**: 35 fields in
+- `run_id` is a function of **declared inputs only**: 36 fields in
   `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:105`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
@@ -529,13 +529,21 @@ Three facts that are cheap to state and expensive to rediscover:
   (`core/cli/execution_axes.py:195`) so `plan` and `run` pick it up together — flag parity is
   tested. Changing an axis gives a **new `run_id`** (`execution_change`), not an edit of the
   current run; otherwise two different corpora become one measurement.
-- **Declared defaults live in `deploy.yaml`, not in code.** `retrieval.profile` (I16) and
-  `lexical.profile` are measurement conditions: they are resolved **before** the contract and
-  the same value feeds the phases (`--retrieval-profile` > `deploy.retrieval.profile` > `R0`;
+- **Declared defaults live in `deploy.yaml`, not in code.** `retrieval.profile` (I16),
+  `retrieval.query_lang` and `lexical.profile` are measurement conditions: they are resolved
+  **before** the contract and the same value feeds the phases (`--retrieval-profile` >
+  `deploy.retrieval.profile` > `R0`; `--query-lang` > `deploy.retrieval.query_lang` > `all`;
   `lexical.profile` → `lexical_spec` → `run_id` **and** the index seed), so "declared" and
-  "executed" cannot diverge. `extract.cache_max_bytes` is the opposite case on purpose: an
-  operational budget, deliberately **not** in `EXECUTION_CONTRACT_FIELDS` — it changes the
-  price of re-extraction, not the corpus or the verdicts.
+  "executed" cannot diverge. `query_lang` is an axis and not a constant because the language
+  order was hard-coded while `max_queries = 3` spent the budget on `title` + two Russian
+  terms — measured 19.11.2026 on the English reference corpus, the relevant chunk was in
+  top-10 for **1 of 10** parameters with RU queries and **8 of 10** with EN; across the whole
+  catalog a non-empty top-10 came from RU queries for 88 of 181, from EN for all 181. The
+  corpus language is a property of the **profile** (cohort corpus is Russian, reference line
+  is English), so it is declared, never inferred — there is no `auto` (A3/R5).
+  `extract.cache_max_bytes` is the opposite case on purpose: an operational budget,
+  deliberately **not** in `EXECUTION_CONTRACT_FIELDS` — it changes the price of
+  re-extraction, not the corpus or the verdicts.
 - **Crawl policy is identity, its execution is provenance.** `crawl_policy_digest`
   (plan 19 §6.1) is in `EXECUTION_CONTRACT_FIELDS`; `refresh_policy` is a separate `run_id`
   term and `frozen_source` enters canonicalised. Only those three describe the measurement

@@ -21,9 +21,9 @@
 нужны четыре таблицы.
 
 **Запрос — построитель фазы Ш6, а не свой шаблон.** Вызывается
-`core.pipeline.evaluate.run_queries_for_cell` (`evaluate.py:1055`) — тот самый, что зовёт
+`core.pipeline.evaluate.run_queries_for_cell` (`evaluate.py:1057`) — тот самый, что зовёт
 `retrieve_for_cell` (`evaluate.py:1299`), который делегирует
-`core.pipeline.prompt.render_queries` (`prompt.py:402`). Параметр `CatalogRow` берётся из
+`core.pipeline.prompt.render_queries` (`prompt.py:510`). Параметр `CatalogRow` берётся из
 снимка входов прогона (`runs/{run_id}/plan_inputs.json`, 181 запись) — ровно тот каталог,
 что рендерила фаза; `catalog.csv` в рабочем дереве мог измениться после прогона, и запрос
 по нему был бы про другой предмет. `run_id` снимка сверяется с каталогом БД, `corpus_run_id`

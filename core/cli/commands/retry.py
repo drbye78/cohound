@@ -44,6 +44,7 @@ from core.cli.context import (
     _print_json,
     _resolve_db_path,
     _restore_plan_inputs,
+    passport_satellites,
 )
 from core.cli.errors import EXIT_ERROR, EXIT_OK
 from core.cli.wiring import build_adapters, build_evaluator_llm, build_store
@@ -318,6 +319,9 @@ def run(args: argparse.Namespace) -> int:
                 run_id=run_id,
                 params=catalog,
                 ports=ports,
+                # Сателлиты — из паспортов, по продукту: повтор исполняет **тот же**
+                # промпт, что и Ш6 (иначе ключ ``eval_cache`` не совпадает).
+                satellites=passport_satellites(args),
                 # Режим прогона — объявленный вход: preliminary-ячейка не становится
                 # ``failed`` только потому, что её чинят (I13).
                 strict=getattr(manifest, "mode", None) is RunMode.STRICT,

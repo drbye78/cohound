@@ -123,6 +123,89 @@ def test_no_role_binding_includes_all_satellites() -> None:
     assert "role=role_y" in compiled.text
 
 
+def test_out_of_vocabulary_role_is_kept_and_foreign_role_dropped() -> None:
+    """Три правила отбора ролей (19.11.2026): совпала / чужая из словаря / вне словаря.
+
+    Замер: словари паспортов и каталога на пилоте **не пересекаются**, поэтому точное
+    равенство ролей отбрасывало все сателлиты (493 из 493 промптов без сателлитов). Роль
+    вне словаря — факт о расхождении двух словарей, а не о нерелевантности: она
+    передаётся контекстом (промпт объявляет сателлиты контекстом, а не доказательством).
+    """
+    param = _param(role_binding="role_x")
+    sats = [_sat("role_x"), _sat("role_y"), _sat("role_unknown")]
+    vocabulary = frozenset({"role_x", "role_y"})
+
+    with_vocabulary = compile_prompt(
+        param=param,
+        product_id="p1",
+        chunks=[_chunk("c1")],
+        satellites=sats,
+        role_vocabulary=vocabulary,
+    )
+    assert "role=role_x" in with_vocabulary.text  # роль параметра
+    assert "role=role_unknown" in with_vocabulary.text  # вне словаря — контекст
+    assert "role=role_y" not in with_vocabulary.text  # роль чужого параметра — отброшена
+
+    # ``None`` — прежнее строгое поведение: только точное совпадение роли.
+    strict = compile_prompt(
+        param=param,
+        product_id="p1",
+        chunks=[_chunk("c1")],
+        satellites=sats,
+    )
+    assert "role=role_x" in strict.text
+    assert "role=role_unknown" not in strict.text
+    assert "role=role_y" not in strict.text
+
+
+def test_satellite_role_note_reports_out_of_vocabulary_counts() -> None:
+    """Замечание фазы: сколько сателлитов передано контекстом и пересекаются ли словари."""
+    from core.pipeline.prompt import (
+        SATELLITE_OUT_OF_VOCABULARY_TOKEN,
+        role_vocabulary_of,
+        satellite_role_note,
+    )
+
+    vocabulary = role_vocabulary_of([_param(role_binding="role_x")])
+    note = satellite_role_note(
+        vocabulary, {"p1": (_sat("role_x"), _sat("role_unknown"))}
+    )
+    assert note is not None
+    assert note.startswith(SATELLITE_OUT_OF_VOCABULARY_TOKEN)
+    assert "1 из 2" in note
+    assert "словари ролей пересекаются" in note
+
+    # Словари не пересекаются — это и есть пилотный случай: все сателлиты идут контекстом.
+    disjoint = satellite_role_note(vocabulary, {"p1": (_sat("role_unknown"),)})
+    assert disjoint is not None and "не пересекаются" in disjoint
+    # Сателлитов нет — строки нет: «0 сателлитов» на каждом прогоне было бы шумом.
+    assert satellite_role_note(vocabulary, {"p1": ()}) is None
+
+
+def test_group_and_module_reach_the_prompt_and_the_hash() -> None:
+    """19.11.2026: ``group``/``module`` строки каталога доходят до промпта и до hash.
+
+    До правки они не печатались вовсе: правило параметра читалось без указания, о какой
+    части продукта речь. Hash обязан покрывать их — иначе два разных текста несли бы один
+    ``prompt_hash``.
+    """
+    param = _param()
+    compiled = compile_prompt(param=param, product_id="p1", chunks=[_chunk("c1")])
+    assert f"ГРУППА ПАРАМЕТРА: {param.group}" in compiled.text
+    assert f"МОДУЛЬ: {param.module}" in compiled.text
+
+    other = param.model_copy(update={"group": "g_other"})
+    changed = compile_prompt(param=other, product_id="p1", chunks=[_chunk("c1")])
+    assert changed.text != compiled.text
+    assert changed.prompt_hash != compiled.prompt_hash
+
+    other_module = param.model_copy(update={"module": "m_other"})
+    changed_module = compile_prompt(
+        param=other_module, product_id="p1", chunks=[_chunk("c1")]
+    )
+    assert changed_module.prompt_hash != compiled.prompt_hash
+
+
 def test_established_satellite_via_model_construct() -> None:
     # Полноценный approved-сателлит требует relationship_evidence и полей связи;
     # model_construct обходит валидатор, а компиляция обязана устоять (рендер контекста).
@@ -161,7 +244,12 @@ def test_absence_rule_override_changes_text_and_hash() -> None:
     # Скаляр охвата модели больше не предъявляется: вердикт по реестру ставит не она.
     assert "exhaustive" not in compiled.text
     assert compiled.prompt_hash == prompt_hash(
-        TEMPLATE_VERSION, param.rule, "registry_absence", ["c1"]
+        TEMPLATE_VERSION,
+        param.rule,
+        "registry_absence",
+        ["c1"],
+        group=param.group,
+        module=param.module,
     )
 
 
@@ -320,7 +408,12 @@ def test_prompt_hash_matches_util_contract() -> None:
         param=param, product_id="p1", chunks=[_chunk("c2"), _chunk("c1")]
     )
     expected = prompt_hash(
-        TEMPLATE_VERSION, param.rule, AbsenceRuleType.EXPLICIT.value, ["c1", "c2"]
+        TEMPLATE_VERSION,
+        param.rule,
+        AbsenceRuleType.EXPLICIT.value,
+        ["c1", "c2"],
+        group=param.group,
+        module=param.module,
     )
     assert compiled.prompt_hash == expected
 
@@ -330,7 +423,12 @@ def test_empty_chunks_still_compiles() -> None:
     compiled = compile_prompt(param=param, product_id="p1", chunks=[])
     assert "(нет фрагментов)" in compiled.text
     assert compiled.prompt_hash == prompt_hash(
-        TEMPLATE_VERSION, param.rule, AbsenceRuleType.EXPLICIT.value, []
+        TEMPLATE_VERSION,
+        param.rule,
+        AbsenceRuleType.EXPLICIT.value,
+        [],
+        group=param.group,
+        module=param.module,
     )
 
 
@@ -542,27 +640,42 @@ def test_absence_guidance_is_addressed_to_the_model_not_to_a_human(
     assert guidance in compiled.text
 
 
-def test_template_version_is_v5_and_older_ones_are_preserved() -> None:
-    """Смена текста шаблона — новая версия; старые файлы остаются провенансом прогонов."""
+def test_template_version_is_v6_and_older_ones_are_preserved() -> None:
+    """Смена текста шаблона — новая версия; старые файлы остаются провенансом прогонов.
+
+    19.11.2026: ``evaluator_v6`` = v5 дословно + слоты ``{{GROUP}}``/``{{MODULE}}`` и абзац
+    о том, что группа/модуль — ориентир, а не доказательство. Значение пересчитано по
+    файлу шаблона, а не подогнано: v5 остаётся на месте как провенанс прошлых прогонов.
+    """
     from core.pipeline.prompt import TEMPLATES_DIR, _load_template
 
-    assert TEMPLATE_VERSION == "evaluator_v5"
+    assert TEMPLATE_VERSION == "evaluator_v6"
     v1 = TEMPLATES_DIR / "evaluator_v1.txt"
     v2 = TEMPLATES_DIR / "evaluator_v2.txt"
     v3 = TEMPLATES_DIR / "evaluator_v3.txt"
     v4 = TEMPLATES_DIR / "evaluator_v4.txt"
     v5 = TEMPLATES_DIR / "evaluator_v5.txt"
+    v6 = TEMPLATES_DIR / "evaluator_v6.txt"
     assert v1.is_file(), "старый шаблон удалять нельзя: он провенанс прошлых прогонов"
     assert v2.is_file()
     assert v3.is_file()
     assert v4.is_file()
     assert v5.is_file()
+    assert v6.is_file()
     assert _load_template("evaluator_v1") != _load_template(TEMPLATE_VERSION)
     # v1/v2 остаются байт-в-байт тем, чем были: hash прошлых прогонов не должен «поехать».
     assert "❌ → absence-evidence" in _load_template("evaluator_v1")
     assert "❌ — законный ответ" in _load_template("evaluator_v2")
     # v4 не переписан: версии шаблонов — провенанс, а не рабочая площадка.
     assert "КАК ВЫБИРАТЬ МЕЖДУ ⚠️ И ❓" in _load_template("evaluator_v4")
+    # v6 отличается от v5 **только** добавленным блоком: слоты группы/модуля и абзац о них.
+    v5_text = _load_template("evaluator_v5")
+    v6_text = _load_template("evaluator_v6")
+    assert "{{GROUP}}" not in v5_text and "{{MODULE}}" not in v5_text
+    assert "ГРУППА ПАРАМЕТРА: {{GROUP}}" in v6_text
+    assert "МОДУЛЬ: {{MODULE}}" in v6_text
+    for line in v5_text.splitlines():
+        assert line in v6_text, f"строка v5 потеряна в v6: {line!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -637,21 +750,23 @@ def test_rendered_guidance_has_no_escaped_quotes(rule: AbsenceRuleType) -> None:
     assert 'denial_strength=\\"explicit\\"' not in ascii(compiled.text)
 
 
-def test_prompt_template_identity_changes_with_v5(
+def test_prompt_template_identity_changes_with_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``prompt_template`` = имя@hash условий → v5 даёт новую идентичность прогона.
+    """``prompt_template`` = имя@hash условий → смена версии даёт новую идентичность.
 
     Это версионная граница ``execution_versions``: шаблон — условие измерения (§7.1/§7.4),
     поэтому его смена обязана дать новый ``run_id``, а не правку текущего прогона.
-    Проверяется вызовом: та же формула под ``v4`` даёт другое значение.
+    Проверяется вызовом: та же формула под другой версией даёт другое значение.
+    19.11.2026: текущая версия — ``evaluator_v6`` (группа/модуль в промпте); значение
+    пересчитано по файлу шаблона, а не подогнано.
     """
     from core.pipeline import prompt as prompt_module
     from core.pipeline.run_identity import _prompt_template_identity
 
     identity = _prompt_template_identity()
-    assert identity.startswith("evaluator_v5@")
-    monkeypatch.setattr(prompt_module, "TEMPLATE_VERSION", "evaluator_v4")
+    assert identity.startswith("evaluator_v6@")
+    monkeypatch.setattr(prompt_module, "TEMPLATE_VERSION", "evaluator_v5")
     assert _prompt_template_identity() != identity
-    assert _prompt_template_identity().startswith("evaluator_v4@")
+    assert _prompt_template_identity().startswith("evaluator_v5@")
 

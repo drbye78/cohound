@@ -1825,10 +1825,23 @@ def _util_hashing() -> None:
 
     if content_hash("x") != content_hash(b"x"):
         raise AssertionError("content_hash: str/bytes должны совпадать")
-    if prompt_hash("v", "r", "e", ["b", "a"]) != prompt_hash("v", "r", "e", ["a", "b"]):
+    if prompt_hash(
+        "v", "r", "e", ["b", "a"], group="g", module="m"
+    ) != prompt_hash("v", "r", "e", ["a", "b"], group="g", module="m"):
         raise AssertionError("prompt_hash обязан быть порядко-независимым")
-    if prompt_hash("v", "r", "e", ["a"]) == prompt_hash("v", "r", "e", ["b"]):
+    if prompt_hash(
+        "v", "r", "e", ["a"], group="g", module="m"
+    ) == prompt_hash("v", "r", "e", ["b"], group="g", module="m"):
         raise AssertionError("prompt_hash обязан зависеть от состава чанков")
+    # 19.11.2026: group/module печатаются в промпте (evaluator_v6) ⇒ обязаны входить в hash.
+    if prompt_hash(
+        "v", "r", "e", ["a"], group="g", module="m"
+    ) == prompt_hash("v", "r", "e", ["a"], group="g2", module="m"):
+        raise AssertionError("prompt_hash обязан зависеть от группы параметра")
+    if prompt_hash(
+        "v", "r", "e", ["a"], group="g", module="m"
+    ) == prompt_hash("v", "r", "e", ["a"], group="g", module="m2"):
+        raise AssertionError("prompt_hash обязан зависеть от модуля параметра")
 
 
 def _domain_scoring() -> None:

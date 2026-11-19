@@ -125,6 +125,7 @@ from core.cli.wiring import (
 )
 from core.config.deploy import (
     ENV_SERP,
+    QUERY_LANGS,
     DeployConfig,
     resolve_llm_slot,
     resolve_serp_rounds,
@@ -176,6 +177,7 @@ __all__ = [
     "extractor_stack_version",
     "identity_flag_values",
     "resolve_declared_axes",
+    "resolve_query_lang",
     "resolve_retrieval_profile",
 ]
 
@@ -511,6 +513,19 @@ CONTRACT_FLAGS: tuple[ContractFlag, ...] = (
         "DEFAULT_RETRIEVAL_CUTOFF_K (10)",
     ),
     ContractFlag(
+        # Язык запросов ретривала — объявленная ось, а не порядок в коде. Замер
+        # 19.11.2026: на английском корпусе релевантный чанк в top-10 находили RU-запросы
+        # у 1 из 10 параметров, EN — у 8 из 10 (по каталогу непустой top-10: 88 из 181
+        # против 181). Значение входит в контракт ⇒ смена — новый ``run_id``.
+        dest="query_lang",
+        flag="--query-lang",
+        contract_arg="query_lang",
+        choices=QUERY_LANGS,
+        metavar="LANG",
+        help="язык запросов ретривала ru|en|all (по умолчанию all — прежний порядок "
+        "ru→en); язык корпуса — свойство профиля, поэтому объявляется",
+    ),
+    ContractFlag(
         # ``--urls`` — полная замена пакетного seed-набора, то есть ``seeds_digest`` —
         # поле контракта. Полагать его «операционным» значило бы дать корпусу измениться
         # под прежним ``run_id``.
@@ -660,6 +675,34 @@ def resolve_retrieval_profile(
     # ``retrieval.profile`` уже провалидирован загрузчиком конфига; приведение через
     # ``RetrievalProfile`` держит каноническую форму (``r0`` → ``R0``) в одном месте.
     return RetrievalProfile(config.retrieval.profile).value
+
+
+def resolve_query_lang(
+    cli_value: str | None,
+    deploy: DeployConfig | None = None,
+) -> str:
+    """Резолвит язык запросов: ``--query-lang`` > ``deploy.retrieval.query_lang`` > ``all``.
+
+    Тот же резолв обслуживает **контракт и исполнение**, по той же причине, что у
+    :func:`resolve_retrieval_profile` (D2): если флаг не задан, а контракт получает
+    ``None``, то ``run_id`` описывает «язык не назван», тогда как фаза оценки спрашивает
+    по объявленному дефолту. Два одинаковых измерения получали бы разную идентичность.
+
+    :param cli_value: значение ``--query-lang`` (``None`` — флаг не задан).
+    :param deploy: resolved ``DeployConfig``; ``None`` — значение поля секции (``all``).
+    :returns: ``"ru"``/``"en"``/``"all"`` — **никогда** ``None``: поле контракта
+        ``query_lang`` обязано называть условие.
+    """
+    if cli_value is not None:
+        lang = str(cli_value).strip().lower()
+        if lang not in QUERY_LANGS:
+            raise ValueError(
+                f"--query-lang: недопустимый язык «{cli_value}»; ожидается один из "
+                f"{list(QUERY_LANGS)}"
+            )
+        return lang
+    config = deploy if deploy is not None else DeployConfig(profile="local")
+    return str(config.retrieval.query_lang).strip().lower()
 
 
 @dataclass(frozen=True)

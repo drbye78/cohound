@@ -59,7 +59,7 @@ import datetime as _dt
 import json
 import re
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -123,6 +123,8 @@ from core.pipeline.prompt import (
     PromptArchive,
     compile_prompt,
     render_queries,
+    role_vocabulary_of,
+    satellite_role_note,
 )
 from core.pipeline.retrieve import (
     CROSS_QUERY_FUSION_POLICIES,
@@ -1052,13 +1054,22 @@ class LLMCallJournal:
 # ---------------------------------------------------------------------------
 
 
-def run_queries_for_cell(param: CatalogRow, max_queries: int = MAX_QUERIES) -> list[str]:
+def run_queries_for_cell(
+    param: CatalogRow,
+    max_queries: int = MAX_QUERIES,
+    query_lang: str = "all",
+) -> list[str]:
     """Возвращает ≤ ``max_queries`` запросов Ш6 для параметра (S13/I16).
 
     Делегирует :func:`core.pipeline.prompt.render_queries`: порядок детерминирован
-    (``title`` + термины ru → en → прочие), состав не зависит от LLM/реализации.
+    (``title`` + термины объявленного языка), состав не зависит от LLM/реализации.
+
+    :param query_lang: объявленная ось ``ru``|``en``|``all``. ``all`` (дефолт) сохраняет
+        прежнее поведение байт-в-байт; ``en`` на английском корпусе — условие, при котором
+        релевантный чанк попадал в top-10 у 8 из 10 параметров против 1 из 10 (замер
+        19.11.2026).
     """
-    return render_queries(param, max_queries=max_queries)
+    return render_queries(param, max_queries=max_queries, query_lang=query_lang)
 
 
 # ---------------------------------------------------------------------------
@@ -1097,7 +1108,10 @@ def _query_vector(
 
 
 def unique_queries(
-    params: Sequence[CatalogRow], *, max_queries: int = MAX_QUERIES
+    params: Sequence[CatalogRow],
+    *,
+    max_queries: int = MAX_QUERIES,
+    query_lang: str = "all",
 ) -> list[str]:
     """Уникальные тексты запросов пакета в детерминированном порядке первого появления.
 
@@ -1108,7 +1122,9 @@ def unique_queries(
     """
     ordered: dict[str, None] = {}
     for param in params:
-        for query in run_queries_for_cell(param, max_queries=max_queries):
+        for query in run_queries_for_cell(
+            param, max_queries=max_queries, query_lang=query_lang
+        ):
             ordered.setdefault(query, None)
     return list(ordered)
 
@@ -1121,6 +1137,7 @@ def precompute_query_vectors(
     memo: dict[str, list[float]] | None = None,
     batch_size: int = DEFAULT_QUERY_EMBED_BATCH,
     max_queries: int = MAX_QUERIES,
+    query_lang: str = "all",
 ) -> dict[str, list[float]] | None:
     """Векторы всех уникальных запросов пакета — **до** цикла оценки, батчами.
 
@@ -1146,7 +1163,7 @@ def precompute_query_vectors(
     if _as_profile(profile) is RetrievalProfile.R0 or embedder is None:
         return None
     store = memo if memo is not None else {}
-    texts = unique_queries(params, max_queries=max_queries)
+    texts = unique_queries(params, max_queries=max_queries, query_lang=query_lang)
     missing = [text for text in texts if text not in store]
     if batch_size < 1:
         raise ValueError(f"batch_size обязан быть ≥ 1, получено {batch_size!r}")
@@ -1171,6 +1188,7 @@ def precompute_dense_hits(
     vector_index: VectorIndexPort | None,
     query_vectors: Mapping[str, Sequence[float]] | None,
     max_queries: int = MAX_QUERIES,
+    query_lang: str = "all",
     pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
     query_depth: int | None = None,
 ) -> dict[str, list[RetrievedChunk]] | None:
@@ -1218,7 +1236,7 @@ def precompute_dense_hits(
         window = max(window, query_depth)
     queries: list[str] = []
     requests: list[VectorQuery] = []
-    for text in unique_queries(params, max_queries=max_queries):
+    for text in unique_queries(params, max_queries=max_queries, query_lang=query_lang):
         vector = query_vectors.get(text)
         if vector is None:
             continue
@@ -1306,6 +1324,7 @@ def retrieve_for_cell(
     cross_query_fusion: str = DEFAULT_CROSS_QUERY_FUSION,
     lang: str | None = None,
     max_queries: int = MAX_QUERIES,
+    query_lang: str = "all",
     query_depth: int | None = None,
 ) -> RetrievalResult:
     """Конкретный путь I16/I17/I20: ``render_queries`` → ``retrieve`` по каждому запросу.
@@ -1351,7 +1370,9 @@ def retrieve_for_cell(
         )
     resolved_profile = _as_profile(profile)
     products = list(product_ids) if product_ids is not None else [product_id]
-    queries = run_queries_for_cell(param, max_queries=max_queries)
+    queries = run_queries_for_cell(
+        param, max_queries=max_queries, query_lang=query_lang
+    )
 
     results: list[RetrievalResult] = []
     build_id = ""
@@ -3038,6 +3059,7 @@ def evaluate_cell(
     evaluator: EvaluatorPort,
     chunks: Sequence[ChunkLike],
     satellites: Sequence[Satellite] = (),
+    role_vocabulary: Collection[str] | None = None,
     resolver: SourceResolver | None = None,
     strict: bool = True,
     retrievals: RetrievalResult | Sequence[RetrievalResult] | None = None,
@@ -3060,7 +3082,14 @@ def evaluate_cell(
     :param product_id / run_id: ключ ячейки (I17: evidence только продукт-скоупа).
     :param evaluator: порт оценщика (self-host, без веб-тула — I18).
     :param chunks: переданный оценщику продукт-скоупед top-K (I17/I20; ретривал — выше).
-    :param satellites: сателлиты как контекст промпта (не доказательство).
+    :param satellites: сателлиты как контекст промпта (не доказательство). Это сателлиты
+        **этого** продукта: ``evaluate_phase`` разрешает их из отображения «продукт →
+        сателлиты», потому что контекст чужого продукта — та же ошибка привязки, что
+        чужое evidence (I17).
+    :param role_vocabulary: словарь ролей каталога
+        (:func:`~core.pipeline.prompt.role_vocabulary_of`); отличает «роль чужого
+        параметра» от «роли, которой в каталоге нет» (вне-словарная роль передаётся
+        контекстом). ``None`` — прежнее строгое поведение (только точное совпадение роли).
     :param resolver: резолвер ``source_id`` → URL (I10/I15); опционален.
     :param strict: strict (failed при исчерпании) vs preliminary (кандидат при провале).
     :param retrievals: провенанс сборки/профиля/K для ячейки (R7/I16/I20).
@@ -3130,6 +3159,7 @@ def evaluate_cell(
         product_id=product_id,
         chunks=chunks,
         satellites=satellites,
+        role_vocabulary=role_vocabulary,
     )
 
     # Пустой срез — факт о ретривале, а не вопрос к модели: вызова нет, ячейка ``❓`` с
@@ -3777,6 +3807,7 @@ def evaluate_batch(
     evaluator: EvaluatorPort,
     chunks_by_param: Mapping[str, Sequence[ChunkLike]],
     satellites: Sequence[Satellite] = (),
+    role_vocabulary: Collection[str] | None = None,
     resolver: SourceResolver | None = None,
     strict: bool = True,
     max_retries: int = EVALUATION_MAX_RETRIES,
@@ -3856,6 +3887,11 @@ def evaluate_batch(
     (:func:`evaluate_phase`), читая одну объявленную константу
     (:data:`~core.pipeline.evaluation_policy.EVALUATION_MIN_RETRIEVAL_SCORE`), а не
     выдумывая своё.
+
+    ``satellites`` — сателлиты **одного** продукта (батч всегда продукт-скоупед): фаза
+    разрешает их из отображения «продукт → сателлиты» до вызова. ``role_vocabulary`` —
+    словарь ролей каталога (один резолв на прогон): без него вне-словарная роль
+    отбрасывалась бы как «чужая», и сателлит не доходил бы до промпта вовсе.
 
     :raises ValueError: ``llm_concurrency < 1`` — «ноль вызовов в полёте» не исполнение.
     """
@@ -3941,6 +3977,7 @@ def evaluate_batch(
             evaluator=evaluator,
             chunks=chunks,
             satellites=satellites,
+            role_vocabulary=role_vocabulary,
             resolver=resolver,
             strict=strict,
             retrievals=retrieval,
@@ -4086,10 +4123,15 @@ def evaluate_phase(
     ports: Ports,
     store: StorePort,
     run_id: str,
-    satellites: Sequence[Satellite] = (),
+    satellites: Mapping[str, Sequence[Satellite]] | None = None,
+    role_vocabulary: Collection[str] | None = None,
     resolver: SourceResolver | None = None,
     profile: RetrievalProfile | str | None = None,
     cutoff_k: int | None = None,
+    #: Язык запросов ретривала (``ru``|``en``|``all``) — объявленная ось. Прокидывается в
+    #: оба пути (батч dense и поштучный): рассинхрон здесь дал бы разный набор запросов
+    #: у R1/R2 и у R0, то есть батч мерил бы не объявленное условие.
+    query_lang: str = "all",
     strict: bool = True,
     min_retrieval_score: float | None = EVALUATION_MIN_RETRIEVAL_SCORE,
     eval_cache: EvalVerdictCache | None = None,
@@ -4129,7 +4171,17 @@ def evaluate_phase(
     :param ports: ``Ports`` с ``evaluator``/``lexical_index``/``vector_index``/``embedder``.
     :param store: ``StorePort`` — персистенция ячеек/evidence.
     :param run_id: идентификатор прогона.
-    :param satellites: сателлиты как контекст промпта (не доказательство).
+    :param satellites: сателлиты как контекст промпта (не доказательство), **по продукту**:
+        ``{product_id: (satellite, …)}``. Один список на когорту недопустим — сателлиты
+        продукта A попали бы в промпт продукта B, а это ошибка привязки того же класса,
+        что чужое evidence (I17): «контекст, не доказательство» освобождает от статуса
+        ячейки, но не от принадлежности продукту. Источник — паспорта
+        (``phases.build_phases`` строит отображение из уже загруженных паспортов);
+        ``None``/отсутствие ключа ⇒ у продукта сателлитов нет.
+    :param role_vocabulary: словарь ролей каталога; ``None`` ⇒ считается из ``plan.params``
+        (:func:`~core.pipeline.prompt.role_vocabulary_of`). Отдельным аргументом — чтобы
+        повтор (``hound retry``) считал его по **своему** каталогу тем же правилом, а не
+        догадывался.
     :param resolver: резолвер ``source_id`` → URL (I10/I15); опционален.
     :param profile: зафиксированный профиль R0/R1/R2; ``None`` → :data:`DEFAULT_RETRIEVAL_PROFILE`.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K``; ``None`` → :data:`DEFAULT_RETRIEVAL_CUTOFF_K`.
@@ -4285,6 +4337,7 @@ def evaluate_phase(
             profile=resolved_profile,
             embedder=getattr(ports, "embedder", None),
             memo=query_memo,
+            query_lang=query_lang,
         )
     except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
         errors.append(
@@ -4303,7 +4356,29 @@ def evaluate_phase(
     #: значило бы записать 905 ``failed``-ячеек и назвать это ``status="ok"``.
     auth_rejection: str | None = None
 
+    # Роли сателлитов: словарь каталога — **один** резолв на прогон (тот же приём, что с
+    # ``query_lang``). Вне-словарная роль передаётся контекстом (см.
+    # :func:`~core.pipeline.prompt._relevant_satellites`), и это видно строкой в
+    # ``PhaseResult.log_entries`` → ``results[].notes``: расхождение двух словарей —
+    # факт о данных, а не невидимая оптимизация фильтра. Строка считается из двух чистых
+    # множеств (паспорта × каталог) **до** цикла, поэтому не зависит от того, сколько
+    # ячеек успело отработать, и не требует ни LLM, ни ретривала.
+    resolved_vocabulary: frozenset[str] = (
+        frozenset(str(role) for role in role_vocabulary)
+        if role_vocabulary is not None
+        else role_vocabulary_of(plan.params)
+    )
+    satellites_by_product: Mapping[str, Sequence[Satellite]] = satellites or {}
+    satellite_note = satellite_role_note(resolved_vocabulary, satellites_by_product)
+    if satellite_note is not None:
+        log_entries.append(satellite_note)
+
     for product_id in plan.products:
+        # Сателлиты — контекст **этого** продукта: чужой контекст в промпте — та же
+        # ошибка привязки, что чужое evidence (I17).
+        product_satellites: tuple[Satellite, ...] = tuple(
+            satellites_by_product.get(product_id, ())
+        )
         protected_by_param = {
             param_id: cell
             for (owner_id, param_id), cell in protected_cells.items()
@@ -4451,6 +4526,7 @@ def evaluate_phase(
                 cutoff_k=resolved_cutoff,
                 vector_index=getattr(ports, "vector_index", None),
                 query_vectors=query_vectors,
+                query_lang=query_lang,
             )
         except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
             errors.append(
@@ -4470,6 +4546,7 @@ def evaluate_phase(
                     embedder=getattr(ports, "embedder", None),
                     query_vectors=query_vectors,
                     dense_by_query=dense_by_query,
+                    query_lang=query_lang,
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(
@@ -4535,7 +4612,8 @@ def evaluate_phase(
             run_id=run_id,
             evaluator=evaluator,
             chunks_by_param=chunks_by_param,
-            satellites=satellites,
+            satellites=product_satellites,
+            role_vocabulary=resolved_vocabulary,
             resolver=resolver,
             strict=strict,
             store=store,
@@ -4928,20 +5006,22 @@ def _revalidation_summary(report: RevalidationReport) -> str:
     return "; ".join(parts)
 
 
-def _cell_condition(cell: Cell) -> tuple[str, str, int, int]:
-    """Условия измерения **самой ячейки**: ``(product_id, профиль, cutoff_K, rrf_k)``.
+def _cell_condition(cell: Cell) -> tuple[str, str, int, int, str]:
+    """Условия измерения **самой ячейки**: ``(product_id, профиль, cutoff_K, rrf_k, язык)``.
 
     Пере-оценка не вводит новых условий: она повторяет условия, под которыми ячейка была
     получена (``retrieval_profile``/``retrieval_params_json``, R7/I16/I20). Профиль из
     манифеста — лишь fallback для исторических строк без полей.
 
-    ``rrf_k`` читается из ``retrieval_params_json`` (план 26 O2): без этого повтор всегда
-    исполнял бы константу модуля и описывал бы в JSON одно, а исполнял другое. Ячейка без
-    поля (старый прогон) получает :data:`DEFAULT_RRF_K` — то, что исполнялось тогда.
+    ``rrf_k`` и ``query_lang`` читаются из ``retrieval_params_json`` (план 26 O2): без
+    этого повтор всегда исполнял бы константы модуля и описывал бы в JSON одно, а исполнял
+    другое. Ячейка без поля (старый прогон) получает :data:`DEFAULT_RRF_K` и ``all`` —
+    ровно то, что исполнялось тогда (порядок языков из кода).
     """
     profile = str(cell.retrieval_profile or DEFAULT_RETRIEVAL_PROFILE.value)
     cutoff = DEFAULT_RETRIEVAL_CUTOFF_K
     rrf_k = DEFAULT_RRF_K
+    query_lang = "all"
     raw = cell.retrieval_params_json
     if raw:
         try:
@@ -4955,7 +5035,10 @@ def _cell_condition(cell: Cell) -> tuple[str, str, int, int]:
             value = parsed.get("rrf_k")
             if isinstance(value, int) and value > 0:
                 rrf_k = int(value)
-    return str(cell.product_id), profile, cutoff, rrf_k
+            lang = parsed.get("query_lang")
+            if isinstance(lang, str) and lang in ("ru", "en", "all"):
+                query_lang = lang
+    return str(cell.product_id), profile, cutoff, rrf_k, query_lang
 
 
 def _current_build_id(store: StorePort, run_id: str) -> str | None:
@@ -5182,7 +5265,8 @@ def _evaluate_cells_by_condition(
     targets: Sequence[Cell],
     catalog: Mapping[str, CatalogRow],
     ports: Ports,
-    satellites: Sequence[Satellite] = (),
+    satellites: Mapping[str, Sequence[Satellite]] | None = None,
+    role_vocabulary: Collection[str] | None = None,
     resolver: SourceResolver | None = None,
     strict: bool = True,
     eval_cache: EvalVerdictCache | None = None,
@@ -5212,6 +5296,14 @@ def _evaluate_cells_by_condition(
 
     :param llm_concurrency: вызовов оценщика в полёте (≥1); порядок ``yield`` —
     порядок ``(продукт, параметр)``, а не порядок ответов модели.
+    :param satellites: сателлиты **по продукту** (``{product_id: (…)}``) — та же форма, что
+        у фазы Ш6. Повтор обязан слать тот же промпт, что и фаза: иначе ячейка получает
+        другой вход, а ключ ``eval_cache`` (он ключуется текстом промпта) не совпадает с
+        исполненным. Плоский список здесь был бы ошибкой привязки: продукты в наборе
+        разные.
+    :param role_vocabulary: словарь ролей каталога (:func:`~core.pipeline.prompt.
+        role_vocabulary_of`), считается вызывающим по его каталогу; ``None`` — прежнее
+        строгое поведение (только точное совпадение роли).
     """
     if errors is None:
         errors = []
@@ -5220,7 +5312,7 @@ def _evaluate_cells_by_condition(
         # Вызывающие проверяют это до входа (``refused``), но шаг не имеет права
         # молча оценивать «без прибора»: отсутствие оценщика — отказ, а не пустой исход.
         raise ValueError("оценщик не сконфигурирован: ретривал без оценки невозможен")
-    groups: dict[tuple[str, str, int, int], list[Cell]] = {}
+    groups: dict[tuple[str, str, int, int, str], list[Cell]] = {}
     for cell in targets:
         groups.setdefault(_cell_condition(cell), []).append(cell)
 
@@ -5249,7 +5341,12 @@ def _evaluate_cells_by_condition(
                 run_id=str(run_id),
                 evaluator=evaluator,
                 chunks=retrieval.chunks,
-                satellites=satellites,
+                # Сателлиты — того продукта, чья ячейка повторяется: набор может нести
+                # несколько продуктов, и чужой контекст в промпте — ошибка привязки.
+                satellites=tuple(
+                    (satellites or {}).get(str(cell.product_id), ())
+                ),
+                role_vocabulary=role_vocabulary,
                 resolver=resolver,
                 strict=strict,
                 retrievals=retrieval,
@@ -5280,9 +5377,10 @@ def _evaluate_cells_by_condition(
             evaluation_s=time.monotonic() - started,
         )
 
-    for product_id, profile, cutoff, rrf_k in sorted(groups):
+    for product_id, profile, cutoff, rrf_k, query_lang in sorted(groups):
         group = sorted(
-            groups[(product_id, profile, cutoff, rrf_k)], key=lambda c: str(c.param_id)
+            groups[(product_id, profile, cutoff, rrf_k, query_lang)],
+            key=lambda c: str(c.param_id),
         )
         if profile not in embed_notes:
             embed_notes[profile] = assert_embedder_matches_partition(
@@ -5300,6 +5398,7 @@ def _evaluate_cells_by_condition(
                 profile=profile,
                 embedder=getattr(ports, "embedder", None),
                 memo={},
+                query_lang=query_lang,
             )
         except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
             errors.append(
@@ -5326,6 +5425,7 @@ def _evaluate_cells_by_condition(
                 cutoff_k=cutoff,
                 vector_index=getattr(ports, "vector_index", None),
                 query_vectors=query_vectors,
+                query_lang=query_lang,
             )
         except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
             errors.append(
@@ -5350,6 +5450,7 @@ def _evaluate_cells_by_condition(
                     query_vectors=query_vectors,
                     dense_by_query=dense_by_query,
                     rrf_k=rrf_k,
+                    query_lang=query_lang,
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(
@@ -5411,7 +5512,8 @@ def reevaluate_stale(
     run_id: str,
     params: Mapping[str, CatalogRow],
     ports: Ports,
-    satellites: Sequence[Satellite] = (),
+    satellites: Mapping[str, Sequence[Satellite]] | None = None,
+    role_vocabulary: Collection[str] | None = None,
     resolver: SourceResolver | None = None,
     strict: bool = True,
     eval_cache: EvalVerdictCache | None = None,
@@ -5459,6 +5561,8 @@ def reevaluate_stale(
     :param llm_journal: файл журнала вызовов (``runs/{run_id}/logs/llm_calls.jsonl``);
         ``None`` ⇒ журнал не пишется. Пере-оценка исполняет те же вызовы, что Ш6, поэтому
         пишет в **тот же** файл прогона: иначе путь отказа повторной оценки был бы неразбираем.
+    :param satellites: сателлиты **по продукту** (``{product_id: (…)}``) — тот же источник,
+        что у фазы Ш6 (паспорта), чтобы пере-оценённая ячейка получила тот же промпт.
     """
     selection = select_stale_cells(
         store, run_id, product_ids=product_ids, param_ids=param_ids
@@ -5520,6 +5624,15 @@ def reevaluate_stale(
     # Журнал вызовов пере-оценки — тот же файл прогона: путь ``None`` выключает запись.
     call_journal = LLMCallJournal(Path(llm_journal), str(run_id)) if llm_journal is not None else None
 
+    # Словарь ролей — по каталогу прогона, тем же правилом, что у фазы: иначе
+    # пере-оценка слала бы промпт, отличный от фазового (вне-словарные роли отброшены), и
+    # ключ ``eval_cache`` не совпал бы с исполненным.
+    resolved_vocabulary: frozenset[str] = (
+        frozenset(str(role) for role in role_vocabulary)
+        if role_vocabulary is not None
+        else role_vocabulary_of(catalog.values())
+    )
+
     for attempt in _evaluate_cells_by_condition(
         store=store,
         run_id=str(run_id),
@@ -5527,6 +5640,7 @@ def reevaluate_stale(
         catalog=catalog,
         ports=ports,
         satellites=satellites,
+        role_vocabulary=resolved_vocabulary,
         resolver=resolver,
         strict=strict,
         eval_cache=eval_cache,
@@ -6039,7 +6153,8 @@ def retry_failed_cells(
     run_id: str,
     params: Mapping[str, CatalogRow],
     ports: Ports,
-    satellites: Sequence[Satellite] = (),
+    satellites: Mapping[str, Sequence[Satellite]] | None = None,
+    role_vocabulary: Collection[str] | None = None,
     resolver: SourceResolver | None = None,
     strict: bool = True,
     eval_cache: EvalVerdictCache | None = None,
@@ -6080,6 +6195,10 @@ def retry_failed_cells(
     :param llm_concurrency: вызовов оценщика в полёте (≥1, ось исполнения — в
         ``run_id`` не входит). Порядок записи — порядок ``(продукт, параметр)``.
     :param retry_journal: файл ``logs/retry.jsonl``; ``None`` — журнал не пишется.
+    :param satellites: сателлиты **по продукту** (``{product_id: (…)}``) — тот же источник,
+        что у фазы Ш6 (паспорта). Повтор обязан слать тот же промпт, что и фаза: без
+        сателлитов ячейка получала другой вход, и ключ ``eval_cache`` (текст промпта) не
+        совпадал с исполненным в прогоне.
     :param max_retries: фактическое число повторов вызова внутри попытки (recovery-кнут
         ``hound retry --max-retries``). Это **не** объявленная политика: ``run_id`` им не
         переписывается, поэтому число публикуется в ``retry.jsonl`` и сводке отчёта;
@@ -6154,6 +6273,16 @@ def retry_failed_cells(
     # «что было» пришлось бы угадывать.
     previous_kinds = _read_cell_failure_kinds(store, str(run_id)) or {}
 
+    # Словарь ролей — по каталогу **этого** прогона, тем же правилом, что у фазы
+    # (:func:`role_vocabulary_of`). Без него повторённая ячейка получила бы промпт,
+    # отличный от фазового: вне-словарные роли были бы отброшены, и ключ ``eval_cache``
+    # (он ключуется текстом промпта) не совпал бы с исполненным.
+    resolved_vocabulary: frozenset[str] = (
+        frozenset(str(role) for role in role_vocabulary)
+        if role_vocabulary is not None
+        else role_vocabulary_of(catalog.values())
+    )
+
     for attempt in _evaluate_cells_by_condition(
         store=store,
         run_id=str(run_id),
@@ -6161,6 +6290,7 @@ def retry_failed_cells(
         catalog=catalog,
         ports=ports,
         satellites=satellites,
+        role_vocabulary=resolved_vocabulary,
         resolver=resolver,
         strict=strict,
         eval_cache=eval_cache,

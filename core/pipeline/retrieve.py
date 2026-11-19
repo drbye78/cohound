@@ -177,6 +177,7 @@ def retrieval_params(
     pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
     max_queries: int = MAX_QUERIES,
     cross_query_fusion: str = DEFAULT_CROSS_QUERY_FUSION,
+    query_lang: str = "all",
 ) -> dict[str, Any]:
     """Параметры ретривала, которые **реально исполнены** (условие измерения).
 
@@ -196,6 +197,12 @@ def retrieval_params(
         "pool_multiplier": pool_multiplier,
         "max_queries": max_queries,
         "cross_query_fusion": cross_query_fusion,
+        # Язык запросов — условие, а не удобство: он решает, какие термины каталога
+        # уйдут в ретривал. Здесь он нужен не для ``run_id`` (там одноимённое поле
+        # контракта), а как **провенанс ячейки**: ``hound retry``/``revalidate``
+        # повторяют условия самой ячейки, и без этого поля повтор мерил бы другой язык,
+        # чем исходный прогон.
+        "query_lang": query_lang,
     }
 
 
@@ -207,6 +214,7 @@ def retrieval_params_json(
     pool_multiplier: int = DEFAULT_POOL_MULTIPLIER,
     max_queries: int = MAX_QUERIES,
     cross_query_fusion: str = DEFAULT_CROSS_QUERY_FUSION,
+    query_lang: str = "all",
 ) -> str:
     """``retrieval_params`` как строка — тот же формат, что у провенанса ячейки.
 
@@ -222,6 +230,7 @@ def retrieval_params_json(
             pool_multiplier=pool_multiplier,
             max_queries=max_queries,
             cross_query_fusion=cross_query_fusion,
+            query_lang=query_lang,
         ),
         ensure_ascii=False,
         sort_keys=True,

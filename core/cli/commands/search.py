@@ -652,10 +652,23 @@ def _query_row(args: argparse.Namespace, package_dir: Path) -> CatalogRow | None
 
 
 def _cohort_queries(args: argparse.Namespace, row: CatalogRow | None) -> list[str]:
-    """Запросы стороны когорты: ``render_queries`` — те же, что уйдёт в Ш6."""
+    """Запросы стороны когорты: ``render_queries`` — те же, что уйдёт в Ш6.
+
+    Язык берётся из того же резолвера, что у прогона (``--query-lang`` > ``deploy.retrieval.query_lang``
+    > ``all``): разведка обязана спрашивать те же запросы, что Ш6, иначе она отвечает на
+    другой вопрос, чем измерение. Флаг здесь — **разведка, а не ось**: он не входит в
+    ``run_id`` и нужен ровно для того, чтобы увидеть разницу языков на одном корпусе.
+    """
     if row is None:
         return [args.query]
-    queries = render_queries(row)
+    from core.cli.execution_axes import resolve_query_lang
+
+    queries = render_queries(
+        row,
+        query_lang=resolve_query_lang(
+            getattr(args, "query_lang", None), load_deploy_config(None)
+        ),
+    )
     if not queries:
         raise CliError(
             f"у параметра {row.param_id!r} пусты title и concept_terms — искать не по чему",
@@ -1073,6 +1086,18 @@ def configure(sub: Any) -> None:
         help=(
             "профиль ретривала когорты: R0 — лексический (дефолт: без загрузки весов), "
             "R1 — dense, R2 — гибрид. Reference-сторона всегда R0 (векторов там нет)"
+        ),
+    )
+    p_search.add_argument(
+        "--query-lang",
+        dest="query_lang",
+        choices=["ru", "en", "all"],
+        default=None,
+        metavar="LANG",
+        help=(
+            "язык терминов при --param (ru|en|all; по умолчанию — "
+            "deploy.retrieval.query_lang): разведка спрашивает те же запросы, что Ш6, "
+            "поэтому язык можно переключить и сравнить выдачу"
         ),
     )
     p_search.add_argument(

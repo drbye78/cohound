@@ -765,6 +765,73 @@ class _PartitionStore:
         yield from self.chunks.get((build_id, product_id or ""), [])
 
 
+def test_manifest_query_lang_falls_back_visibly() -> None:
+    """Незафиксированный язык — ``all`` **с пометкой**, а не тихий дефолт.
+
+    Пометка — часть условия: читатель κ обязан видеть, что прогон язык не объявлял,
+    иначе «взяли ``all``» неотличимо от «прогон исполнял ``all``».
+    """
+    from core.pipeline.evaluator_benchmark import _manifest_query_lang
+
+    def manifest(raw: str | None) -> Any:
+        return SimpleNamespace(retrieval_params_json=raw)
+
+    assert _manifest_query_lang(manifest('{"query_lang": "en"}')) == ("en", True)
+    # ``all`` объявлен явно — это тоже зафиксированное условие.
+    assert _manifest_query_lang(manifest('{"query_lang": "all"}')) == ("all", True)
+    # Нет поля / нет JSON / мусор — дефолт, но с ``False`` (пометка в notes).
+    assert _manifest_query_lang(manifest('{"rrf_k": 60}')) == ("all", False)
+    assert _manifest_query_lang(manifest("не json")) == ("all", False)
+    assert _manifest_query_lang(manifest(None)) == ("all", False)
+    # Чужое значение не становится осью молча.
+    assert _manifest_query_lang(manifest('{"query_lang": "de"}')) == ("all", False)
+
+
+def test_prepare_cases_uses_query_lang_from_run_provenance() -> None:
+    """Прибор мерит **язык прогона**, а не свой дефолт (замер 19.11.2026).
+
+    ``query_lang`` решает, какие термины каталога уйдут в ретривал: на английском
+    reference-корпусе ``present`` 13 при ``ru`` против 42 при ``en``. Прогон, объявивший
+    ``en``, а прибор спросивший ``all``, мерил бы другую выдачу — и κ описывал бы не тот
+    вход, который исполнялся. Язык читается из ``retrieval_params_json`` прогона, тем же
+    приёмом, что ``rrf_k``.
+    """
+    chunk = RetrievedChunk(
+        chunk_id="c1",
+        product_id=PRODUCT,
+        text=TEXT_OK,
+        content_hash="hash-c1",
+        heading_path="H",
+        build_id=_PARTITION,
+        score=1.0,
+    )
+    store = _PartitionStore(chunks={(_PARTITION, PRODUCT): [chunk]})
+    store.read_manifest = lambda run_id: SimpleNamespace(  # type: ignore[method-assign]
+        retrieval_profile="R0",
+        retrieval_cutoff_K=10,
+        retrieval_params_json='{"rrf_k": 60, "query_lang": "en"}',
+        index_build_id=store.composition,
+    )
+    param = _param("param_ok", "CELL_OK")
+    # ``build_id`` индекса = композиция прогона, иначе ретривал вернул бы чужую сборку и
+    # ячейка ушла бы в ``build_mismatch`` (I17) — проверка языка до неё бы не дошла.
+    lexical = _FakeLexicalIndex({PRODUCT: [chunk]}, build_id=store.composition)
+    prepare_cases(
+        store=store,
+        run_id=RUN_ID,
+        golden=[_golden("param_ok", Status.OK)],
+        catalog={"param_ok": param},
+        lexical_index=lexical,
+        build_id=store.composition,
+    )
+    # Запросы строятся объявленным языком: у ``_param`` термины ``{"ru": ["функция"],
+    # "en": ["feature"]}``, поэтому при ``en`` в запросах есть ``feature`` и нет
+    # ``функция`` (заголовок ``CELL_OK`` языка не несёт).
+    assert lexical.queries, "ретривал обязан был спросить хотя бы раз"
+    assert any("feature" in query for query in lexical.queries)
+    assert not any("функция" in query for query in lexical.queries)
+
+
 def test_prepare_cases_probes_partition_not_composition() -> None:
     """Регрессия измеренного дефекта: проба чанков идёт по ``pb_*``, а не по ``cb_*``.
 

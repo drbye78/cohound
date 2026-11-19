@@ -81,6 +81,7 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     identity_flag_values,
     resolve_declared_axes,
+    resolve_query_lang,
     resolve_retrieval_profile,
 )
 from core.cli.wiring import llm_env_notices, serp_env_notices
@@ -155,6 +156,10 @@ def _declared_payload(
         "retrieval_params": retrieval_params(
             profile=contract_flags.get("retrieval_profile"),
             cutoff_k=contract_flags.get("cutoff_K"),
+            # Резолвер идемпотентен: значение уже разрешено вызывающим, но здесь оно
+            # приводится к объявленному типу ``str`` — иначе «язык не назван» уехало бы
+            # в провенанс как ``null`` при исполненном ``all``.
+            query_lang=resolve_query_lang(contract_flags.get("query_lang"), None),
         ),
         "cycle_id": cycle_id,
         "run_scope": run_scope,
@@ -215,7 +220,10 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
         f"rrf_k={retrieval.get('rrf_k')} "
         f"pool_multiplier={retrieval.get('pool_multiplier')} "
         f"max_queries={retrieval.get('max_queries')} "
-        f"cross_query_fusion={retrieval.get('cross_query_fusion')}",
+        f"cross_query_fusion={retrieval.get('cross_query_fusion')} "
+        # Язык запросов — условие измерения (поле контракта), поэтому печатается рядом с
+        # остальными исполненными параметрами: оператор видит его до прогона.
+        f"query_lang={retrieval.get('query_lang')}",
         f"identity: cycle={payload.get('cycle_id')} scope={payload.get('run_scope')} "
         f"refresh={payload.get('refresh_policy')}",
     ]
@@ -296,6 +304,11 @@ def run(args: argparse.Namespace) -> int:
     # печатал бы ``run_id`` с ``null``, а прогон исполнял бы дефолт Ш6.
     contract_flags["retrieval_profile"] = resolve_retrieval_profile(
         contract_flags.get("retrieval_profile"), deploy_config
+    )
+    # Тот же резолв для языка запросов: иначе план печатал бы ``query_lang: null``
+    # («не объявлено»), а прогон исполнял бы объявленный дефолт развёртывания.
+    contract_flags["query_lang"] = resolve_query_lang(
+        contract_flags.get("query_lang"), deploy_config
     )
     # 09 §6.2: остальной материал ``run_id`` — seed-набор (``--urls``), цикл
     # (``--cycle-id``/``--update``), объём (``--only-failed``/``--only-product``) и политика
@@ -423,6 +436,7 @@ def run(args: argparse.Namespace) -> int:
             retrieval_params_json=retrieval_params_json(
                 profile=contract_flags.get("retrieval_profile"),
                 cutoff_k=contract_flags.get("cutoff_K"),
+                query_lang=resolve_query_lang(contract_flags.get("query_lang"), None),
             ),
         )
         result = build_plan(

@@ -8,7 +8,7 @@
 
 ## 1. Вопрос и ответ
 
-`render_queries` (`core/pipeline/prompt.py:402`) собирает запрос Ш6 из `title` + терминов
+`render_queries` (`core/pipeline/prompt.py:510`) собирает запрос Ш6 из `title` + терминов
 **ru → en**. ZH-документ с русским запросом в лексическом плече R0 не находится — это
 структурный ноль, а не «хуже». Прежде чем чинить поиск, нужно отделить «оценщик не читает
 по-китайски» от «поиск не находит по-китайски».
@@ -50,8 +50,8 @@
 | читатель | `trafilatura-html-7` на момент замера (`core/adapters/extract_html.py:363` — текущая `trafilatura-html-8`, снятие пролога XHTML) | тот же, что в пайплайне |
 | чанкер | `md-ast-1:commonmark-0.31.2+gfm+pandoc/mdit-4.2.0/plugins-0.6.1/policy-6`, `chunk_size=**1500**` | `MarkdownChunkerPort()`; ключа `chunk_size` в `config/deploy.yaml` **нет** — это дефолт кода (`core/adapters/chunker_markdown.py:336`) |
 | оценщик | `deepseek-v4.1-flash-1017:yellow`, `decoder=json_object`, endpoint `deploy.llm.cheap` | `--llm-model` > слот; `COHOUND_LLM_MODEL` не читается |
-| путь оценки | `core.pipeline.evaluate.evaluate_cell` (`core/pipeline/evaluate.py:3002`) | не своя копия промпта |
-| поиск (режим `retrieval`) | `TantivyLexicalIndex`, профиль **`stemmed`** (`core/adapters/lexical_tantivy.py:482`), `cutoff_K=10`, запросы `run_queries_for_cell` (`core/pipeline/evaluate.py:1055`) | тот же путь R0, что в прогоне |
+| путь оценки | `core.pipeline.evaluate.evaluate_cell` (`core/pipeline/evaluate.py:3023`) | не своя копия промпта |
+| поиск (режим `retrieval`) | `TantivyLexicalIndex`, профиль **`stemmed`** (`core/adapters/lexical_tantivy.py:482`), `cutoff_K=10`, запросы `run_queries_for_cell` (`core/pipeline/evaluate.py:1057`) | тот же путь R0, что в прогоне |
 | вежливость | пауза **1.0 с** между сетевыми запросами, кэш страниц `/tmp/opencode/xling/cache/` | повторный прогон качает **0** страниц (проверено: прогон-артефакт — 0 запросов, 65 из кэша) |
 | логин/обход барьеров | нет | — |
 

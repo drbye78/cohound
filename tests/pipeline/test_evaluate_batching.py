@@ -36,6 +36,8 @@ from core.domain import (
     RankingPolicy,
     RunConfig,
     RunMode,
+    Satellite,
+    SatelliteState,
     Status,
 )
 from core.pipeline.evaluate import (
@@ -317,6 +319,59 @@ def test_evaluate_phase_dense_path_keeps_product_scope() -> None:
     assert result.status == "ok"
     # В каждом батч-вызове — ровно один продукт, и это продукт прохода.
     assert {tuple(scope) for scope in seen} == {("p1",), ("p2",)}
+
+
+def test_satellites_are_product_scoped_in_prompts() -> None:
+    """Сателлиты продукта A не попадают в промпт продукта B (19.11.2026).
+
+    До правки фаза принимала **один** список на когорту: в когорте из 5 продуктов
+    сателлиты одного продукта уходили в промпт другого. Сателлит — контекст промпта, а не
+    доказательство, но принадлежность продукту у него та же, что у evidence (I17):
+    «не доказательство» освобождает от статуса ячейки, а не от привязки.
+    """
+    store = _store()
+    plan = _plan()
+    evaluator = FakeEvaluator(default=_ok_output("chunk-p1"))
+    ports = Ports(
+        evaluator=evaluator,
+        embedder=_CountingEmbedder(),
+        vector_index=_RecordingVectorIndex(),
+    )
+    satellites = {
+        "p1": (
+            Satellite(role="role_a", state=SatelliteState.DRAFT, component="sat-p1"),
+        ),
+        "p2": (
+            Satellite(role="role_a", state=SatelliteState.DRAFT, component="sat-p2"),
+        ),
+    }
+    try:
+        result = evaluate_phase(
+            plan=plan,
+            ports=ports,
+            store=store,
+            run_id=RUN_ID,
+            profile="R1",
+            cutoff_k=3,
+            satellites=satellites,
+        )
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    prompts = [req.prompt for req in evaluator.calls]
+    p1_prompts = [prompt for prompt in prompts if "ПРОДУКТ: p1" in prompt]
+    p2_prompts = [prompt for prompt in prompts if "ПРОДУКТ: p2" in prompt]
+    assert p1_prompts and p2_prompts
+    assert all("component=sat-p1" in prompt for prompt in p1_prompts)
+    assert all("component=sat-p2" not in prompt for prompt in p1_prompts)
+    assert all("component=sat-p2" in prompt for prompt in p2_prompts)
+    assert all("component=sat-p1" not in prompt for prompt in p2_prompts)
+    # Видимость: строка о ролях сателлитов в заметках фазы (``results[].notes``).
+    assert any(
+        str(entry).startswith("satellite_roles_out_of_vocabulary:")
+        for entry in result.log_entries
+    )
 
 
 def test_batched_dense_hits_equal_per_query_path() -> None:

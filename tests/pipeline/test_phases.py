@@ -1428,6 +1428,9 @@ def test_build_phases_records_default_retrieval_provenance(tmp_path: Path) -> No
     assert json.loads(manifest["retrieval_params_json"]) == {
         "profile": DEFAULT_RETRIEVAL_PROFILE.value,
         "cutoff_K": DEFAULT_RETRIEVAL_CUTOFF_K,
+        # Язык запросов — условие ячейки: без него ``hound retry`` повторил бы ячейку
+        # другим языком, чем она измерена.
+        "query_lang": "all",
     }
 
 
@@ -1439,6 +1442,7 @@ def test_build_phases_forwards_explicit_retrieval_provenance(tmp_path: Path) -> 
     assert json.loads(manifest["retrieval_params_json"]) == {
         "profile": "R1",
         "cutoff_K": 25,
+        "query_lang": "all",
     }
 
 
@@ -1498,10 +1502,18 @@ def test_holder_wins_over_cells_for_retrieval_provenance() -> None:
     from core.pipeline.phases import _observed_retrieval
 
     profile, cutoff, params_json = _observed_retrieval(
-        {"retrieval_profile": "R2", "retrieval_cutoff_K": 25}, _CellStore(), RUN_ID
+        {"retrieval_profile": "R2", "retrieval_cutoff_K": 25, "query_lang": "en"},
+        _CellStore(),
+        RUN_ID,
     )
     assert (profile, cutoff) == ("R2", 25)
-    assert json.loads(params_json) == {"profile": "R2", "cutoff_K": 25}
+    # Язык берётся из держателя, а не подставляется: манифест называет то условие,
+    # которым считали сейчас, включая язык запросов.
+    assert json.loads(params_json) == {
+        "profile": "R2",
+        "cutoff_K": 25,
+        "query_lang": "en",
+    }
 
 
 def test_mixed_retrieval_profiles_are_not_declared() -> None:

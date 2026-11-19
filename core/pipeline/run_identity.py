@@ -321,6 +321,7 @@ def build_execution_contract(
     retrieval_profile: str | None = None,
     cutoff_K: int | None = None,
     retrieval_params_json: str | None = None,
+    query_lang: str | None = None,
     status_dict_version: str | None = None,
     scoring_policy_version: str | None = None,
     catalog_version: str | None = None,
@@ -386,6 +387,10 @@ def build_execution_contract(
         # ⇒ это условие измерения. ``None`` — ось не передана (чистые вызовы): «не
         # объявлено» отличимо от «объявлены дефолты».
         "retrieval_params_json": retrieval_params_json,
+        # Язык запросов — тем же правом, что профиль и K: он решает, какие термины
+        # каталога уйдут в ретривал, значит и набор доказательств. ``None`` — ось не
+        # передана (чистые вызовы): «не объявлено» отличимо от объявленного ``all``.
+        "query_lang": query_lang,
         "chunker_version": _declared(declared, "chunker_version"),
         # C3/V3: геометрия нарезки и политика повтора. ``None`` (ось не передана) —
         # честное «не объявлено» для чистых вызовов; живой прогон передаёт обе.

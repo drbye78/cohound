@@ -212,6 +212,40 @@ def test_parameter_terms_ignore_rule_text() -> None:
     assert "jsonb" in terms
 
 
+def test_parameter_terms_honour_declared_query_lang() -> None:
+    """Язык терминов — объявленное условие, а не «все языки подряд» (замер 19.11.2026).
+
+    При ``all`` термины всех языков склеиваются и режутся по ``MAX_TERMS``; на английском
+    reference-корпусе русские термины занимали бюджет, и ``present`` было 37 против 42 при
+    ``en`` (``ru`` — 13). Здесь проверяется механика: объявленный язык остаётся
+    единственным, ``all`` сохраняет прежнее поведение.
+    """
+    param = _param().model_copy(
+        update={
+            "title": "Точка восстановления",
+            "concept_terms": {
+                "ru": ["точка восстановления", "резервная копия"],
+                "en": ["point-in-time recovery", "backup"],
+            },
+        }
+    )
+    english = parameter_terms(param, query_lang="en")
+    russian = parameter_terms(param, query_lang="ru")
+    everything = parameter_terms(param, query_lang="all")
+    # Заголовок — всегда первый термин: он на языке каталога и называет параметр.
+    assert english[0] == russian[0] == everything[0]
+    assert "recovery" in english and "backup" in english
+    assert "резервная" in russian
+    # Слова заголовка входят всегда (он называет параметр), поэтому чужой язык проверяется
+    # по терминам ``concept_terms``, а не по всему списку: «восстановления» даёт заголовок.
+    assert "recovery" not in russian, "объявленный язык остаётся единственным"
+    assert "резервная" not in english
+    # ``all`` — прежнее поведение: термины обоих языков в одном списке.
+    assert "recovery" in everything and "резервная" in everything
+    # Неизвестный язык — пустой набор терминов языка, а не тихий откат к ``all``.
+    assert "recovery" not in parameter_terms(param, query_lang="de")
+
+
 def test_parameter_terms_empty_when_only_rule_matches() -> None:
     """Нет терминов — пустой список, а не «поищем по процедуре»."""
     param = _param().model_copy(

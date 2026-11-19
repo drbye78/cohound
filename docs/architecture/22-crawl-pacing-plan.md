@@ -30,7 +30,7 @@
 - Ширина пула полосы — `max_workers` (`core/pipeline/corpus_drain.py`), число
   полос — `host_concurrency` (`core/pipeline/corpus_driver.py`). Полоса — право на **host**;
   внутри хоста резервы сериализуются лимитером.
-- `crawl_rate_limit` — одно из 35 полей `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:136`)
+- `crawl_rate_limit` — одно из 36 полей `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:162`)
   и берётся **только из `run.yaml`** (`core/cli/execution_axes.py:1061`). Отдельно от него
   **разрешённый** темп (site > run) входит в `crawl_config_digest` через
   `CrawlLimits.as_dict()` (с 07.11.2026, решение владельца): per-site значение перекрывает

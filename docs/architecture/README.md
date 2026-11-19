@@ -17,7 +17,7 @@
 | `EDGE_JOBS_SCHEMA_VERSION` | `"1"` | `core/edge/scheduler.py:198` |
 | `METHODOLOGY_VERSION` | `"0.5.0"` | `core/domain/models.py:185` |
 | `SEAM_SCHEMA_VERSION` | `"1"` | `core/edge/seam_schema.py:68` |
-| `EXECUTION_CONTRACT_FIELDS` | 35 полей | `core/pipeline/digests.py:96` |
+| `EXECUTION_CONTRACT_FIELDS` | 36 полей | `core/pipeline/digests.py:105` |
 | `PHASES` | 15 фаз | `core/pipeline/runner.py:133` |
 
 Источник — код, не документы. **Это таблица текущих значений, а не история:** причина каждого

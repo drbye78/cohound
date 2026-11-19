@@ -466,7 +466,7 @@ def _terms(text: str) -> list[str]:
     return out[:MAX_TERMS]
 
 
-def parameter_terms(param: CatalogRow) -> list[str]:
+def parameter_terms(param: CatalogRow, *, query_lang: str = "all") -> list[str]:
     """Термины параметра для поиска места в документации (§8.1 шаг 6).
 
     Источник — ``title`` + ``concept_terms``: этого достаточно, чтобы найти страницу,
@@ -486,9 +486,24 @@ def parameter_terms(param: CatalogRow) -> list[str]:
     Покрытие от этого не падает: ``title`` + ``concept_terms`` дают термины у всех 181
     параметра пакета (замер 18.11.2026). Параметр без терминов не «угадывается» по
     правилу — он остаётся ``unclear``, и :func:`run_recon` называет его числом.
+
+    **Язык терминов — объявленное условие, а не «все подряд».** ``MAX_TERMS = 12``
+    режет список, и при склейке всех языков русские термины каталога вытесняли английские
+    ещё до того, как запрос уходил в индекс: на английском reference-корпусе это давало
+    непустой top-10 у 88 из 181 параметра против 181 при английских терминах (замер
+    19.11.2026; на десяти параметрах релевантный чанк в top-10 — 1 из 10 против 8 из 10).
+    Поэтому ``query_lang`` объявляется (``--query-lang`` / ``deploy.retrieval.query_lang``),
+    а не выводится из языка корпуса: ``all`` сохраняет прежнее поведение байт-в-байт.
     """
+    terms = param.concept_terms or {}
+    if query_lang == "all":
+        ordered = list(terms.values())
+    else:
+        # Объявленный язык идёт первым и остаётся единственным: подмешать прочие значило
+        # бы вернуть тот же дефект — бюджет терминов тратится не на тот язык.
+        ordered = [terms[query_lang]] if query_lang in terms else []
     parts = [str(param.title or "")]
-    for values in (param.concept_terms or {}).values():
+    for values in ordered:
         parts.extend(str(value) for value in values)
     return _terms(" ".join(parts))
 

@@ -78,6 +78,7 @@ from core.cli.context import (
     _print_json,
     _resolve_db_path,
     _restore_plan_inputs,
+    passport_satellites,
 )
 from core.cli.errors import EXIT_ERROR, EXIT_OK, EXIT_USAGE, CliError
 from core.cli.wiring import (
@@ -724,6 +725,11 @@ def run_evaluator_benchmark(args: argparse.Namespace) -> int:
                 lexical_index=getattr(ports, "lexical_index", None),
                 vector_index=getattr(ports, "vector_index", None),
                 embedder=getattr(ports, "embedder", None),
+                # Сателлиты — из паспортов, по продукту: прибор обязан мерить **тот же**
+                # промпт, что исполняет фаза. До 19.11.2026 их не грузил никто, поэтому
+                # опубликованный κ (0.024) описывал промпт без сателлитов, а карта
+                # строилась с ними — расхождение входа, а не в модели.
+                satellites=passport_satellites(args),
                 limit=args.limit,
                 golden_status=golden_status,
             )

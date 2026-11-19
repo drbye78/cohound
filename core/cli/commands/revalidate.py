@@ -45,6 +45,7 @@ from core.cli.context import (
     _print_json,
     _resolve_db_path,
     _restore_plan_inputs,
+    passport_satellites,
 )
 from core.cli.errors import EXIT_ERROR, EXIT_OK
 from core.cli.wiring import build_adapters, build_evaluator_llm, build_store
@@ -260,6 +261,9 @@ def run(args: argparse.Namespace) -> int:
                 run_id=run_id,
                 params=catalog,
                 ports=ports,
+                # Сателлиты — из паспортов, по продукту: пере-оценка обязана слать тот же
+                # промпт, что и Ш6 (ключ ``eval_cache`` — текст промпта).
+                satellites=passport_satellites(args),
                 product_ids=product_ids or None,
                 param_ids=param_ids or None,
                 current_build_id=current_build,

@@ -125,10 +125,10 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
-(`_profile_material_for_run`, `core/cli/context.py:1587`), иначе проверялось бы не то, что
+(`_profile_material_for_run`, `core/cli/context.py:1588`), иначе проверялось бы не то, что
 аттестовано. Проверка подключена: `make_profile_gate`
 (`core/pipeline/profile_attestation.py:313`) → `_profile_gate_resolver`
-(`core/cli/context.py:1676`).
+(`core/cli/context.py:1677`).
 
 **Статус подписи — операционный факт, не дефект дизайна.** Измерено 2026-11-08: **0 строк**
 `profile_attestation` в `state.db` стенда (`~/.cohound/stands/ru-pg-dbms`) — механизмом не
@@ -573,7 +573,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
 ```
 
 Порядок запросов детерминирован и не зависит от реализации (симметрия I16):
-`render_queries` (`core/pipeline/prompt.py:396-425`). Схлопывание дубликатов — не
+`render_queries` (`core/pipeline/prompt.py:510-539`). Схлопывание дубликатов — не
 косметика: замер по каталогу `ru-pg-dbms` — **119 из 119** параметров имели `title`
 повторённым в `concept_terms[lang][0]`, то есть один из трёх слотов бюджета уходил на
 повтор уже выполненного запроса.
@@ -659,7 +659,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 (I2/I2b/I2d) живут в доменных инвариантах, а не здесь.
 Регламент (§7.1) разрешает «частично механически» и требует следствия-*аномалии*, поэтому
 шаг присутствует в норме, но не в коде. Что существует вместо него: замер
-`support_subject_overlap` (`core/pipeline/evaluate.py:1616-1656`) — пересечение стемов параметра и цитаты
+`support_subject_overlap` (`core/pipeline/evaluate.py:1637-1656`) — пересечение стемов параметра и цитаты
 для ✅/⚠️; он **не меняет вердиктов**, пишет `cells.validation_notes`/`review_reason` и
 агрегируется в `outputs/support_quality.yaml`. Измеренный масштаб — в
 `docs/reports/measurements/2026-10-27-support-not-about-subject.md`: v2 публиковал 45 `✅`
@@ -954,9 +954,9 @@ flowchart LR
 `write_reports` `core/pipeline/report.py:3817` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:532`); версионирование
 `prompt`-шаблонов — ✅ сделано
-(`core/pipeline/prompt.py:128`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
-`core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
-`core/util/hashing.py:44-55`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
+(`core/pipeline/prompt.py:146`, `TEMPLATE_VERSION = "evaluator_v6"`, файлы
+`core/pipeline/templates/evaluator_v{1..6}.txt`; версия входит в `prompt_hash` —
+`core/util/hashing.py:44-74`; с 19.11.2026 в материал hash входят и `group`/`module`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
 (`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1867-1878`,
 потребитель — `HttpCrawler` и поисковые адаптеры); политика ретраев и backoff —
 ✅ сделано (общая политика HTTP-адаптеров `core/util/retry.py:1-27`,

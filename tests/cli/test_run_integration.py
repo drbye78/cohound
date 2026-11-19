@@ -1112,6 +1112,7 @@ def test_cmd_run_rerun_contract_carries_adopted_retrieval(tmp_path: Path) -> Non
     from core.cli.execution_axes import (
         declared_status_dict_version,
         resolve_declared_axes,
+        resolve_query_lang,
     )
     from core.config.deploy import load_deploy_config
     from core.pipeline.digests import cohort_digest, seeds_digest
@@ -1159,18 +1160,29 @@ def test_cmd_run_rerun_contract_carries_adopted_retrieval(tmp_path: Path) -> Non
         "status_dict_version": declared_status_dict_version(),
         "crawl_policy_digest": policy_digest,
     }
+    # Язык запросов резолвится тем же правилом, что профиль (``--query-lang`` >
+    # ``deploy.retrieval.query_lang`` > ``all``); здесь флага нет ⇒ объявленный дефолт.
+    # Значение одно и то же в обоих вариантах: тест различает усыновление профиля, а не
+    # смену языка.
+    lang = resolve_query_lang(None, load_deploy_config(None))
     adopted = build_execution_contract(
         inputs,
         retrieval_profile="R2",
         cutoff_K=7,
-        retrieval_params_json=retrieval_params_json(profile="R2", cutoff_k=7),
+        query_lang=lang,
+        retrieval_params_json=retrieval_params_json(
+            profile="R2", cutoff_k=7, query_lang=lang
+        ),
         **common,
     )
     unadopted = build_execution_contract(
         inputs,
         retrieval_profile=None,
         cutoff_K=None,
-        retrieval_params_json=retrieval_params_json(profile=None, cutoff_k=None),
+        query_lang=lang,
+        retrieval_params_json=retrieval_params_json(
+            profile=None, cutoff_k=None, query_lang=lang
+        ),
         **common,
     )
     assert manifest.retrieval_profile == "R2"

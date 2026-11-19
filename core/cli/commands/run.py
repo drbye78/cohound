@@ -68,6 +68,7 @@ from core.cli.errors import (
 from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
+    resolve_query_lang,
     resolve_retrieval_profile,
 )
 from core.cli.wiring import (
@@ -892,6 +893,11 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
     resolved_profile = resolve_retrieval_profile(
         getattr(args, "retrieval_profile", None), deploy_config
     )
+    # Тот же резолв для языка запросов (``--query-lang`` > deploy > ``all``): контракт и
+    # Ш6 обязаны получить одно значение, иначе ``run_id`` описывает не то условие.
+    resolved_query_lang = resolve_query_lang(
+        getattr(args, "query_lang", None), deploy_config
+    )
     contract_d = build_execution_contract(
         inputs,
         cohort_digest=cohort_d,
@@ -899,12 +905,14 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         declared=declared,
         retrieval_profile=resolved_profile,
         cutoff_K=getattr(args, "cutoff_k", None),
+        query_lang=resolved_query_lang,
         # План 26 O2: параметры, которые **реально исполнены** (rrf_k/пул/запросы/
         # слияние), а не только объявленные профиль/K. Это условие измерения: смена
         # любого меняет доказательства, поэтому поле входит в ``run_id``.
         retrieval_params_json=retrieval_params_json(
             profile=resolved_profile,
             cutoff_k=getattr(args, "cutoff_k", None),
+            query_lang=resolved_query_lang,
         ),
         status_dict_version=status_dict_version,
         crawl_policy_digest=policy_resolution.digest,
@@ -956,11 +964,13 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 declared=declared,
                 retrieval_profile=args.retrieval_profile,
                 cutoff_K=args.cutoff_k,
+                query_lang=resolved_query_lang,
                 # План 26 O2: та же формула, что у первого вызова, — иначе усыновлённый
                 # профиль/K описал бы контракт, но не исполненные параметры.
                 retrieval_params_json=retrieval_params_json(
                     profile=args.retrieval_profile,
                     cutoff_k=args.cutoff_k,
+                    query_lang=resolved_query_lang,
                 ),
                 status_dict_version=status_dict_version,
                 crawl_policy_digest=policy_resolution.digest,
@@ -1988,6 +1998,15 @@ def configure(sub: Any) -> None:
         metavar="K",
         help="retrieval_cutoff_K (I20) выреза ретривала для фазы оценки; дефолт — "
         "DEFAULT_RETRIEVAL_CUTOFF_K (10)",
+    )
+    p_run.add_argument(
+        "--query-lang",
+        dest="query_lang",
+        choices=["ru", "en", "all"],
+        default=None,
+        metavar="LANG",
+        help="язык запросов ретривала ru|en|all (по умолчанию all — прежний порядок "
+        "ru→en); язык корпуса — свойство профиля, поэтому объявляется",
     )
     p_run.add_argument(
         "--llm-slot",

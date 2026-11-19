@@ -240,7 +240,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
 | S1 | SERP-кэш не реализован → R7 на поисковом контуре недостижим | ПОДТВЕРЖДЕНО → **закрыто** (`39d2023`: кэш собирается `resolve_content_cache`, ключ несёт язык) | `serp_key` только `cache.py:84`,`:113`; `get_json`/`put_json` не вызываются; адаптеры собираются без `cache` (сборка `build_search_adapter` — `core/cli/wiring.py:722-753`) при готовом объекте в
-`core/cli/context.py:1729-1742` | кэш-примитивы покрыты, прод-путь нет | М | **P1** |
+`core/cli/context.py:1867-1880` | кэш-примитивы покрыты, прод-путь нет | М | **P1** |
 | S2 | `run_serp_round`/`run_serp_loop` без производителя; спека устарела | ЧАСТИЧНО | мертвы только эти две; `invalidate_affected` вызывается (`core/pipeline/corpus.py:1061`), `SearchPhase.SERP` излучается (`core/pipeline/corpus.py:850`) | — | Г | P0 |
 | S3 | набор запросов фиксирован между раундами: `rounds>1` жжёт бюджет | ПОДТВЕРЖДЕНО → **закрыто** (`no_query_variation`: раунды 2..n не исполняются, причина в наблюдении — «измерять и называть», не потолок) | `core/pipeline/serp_loop.py:126-131`, `:1313` | `test_serp_discover.py::test_rounds_above_one_without_query_variation_are_not_executed` | Д | P5 |
 | S4 | контур последовательный, poll 30 с, async-режим: ~10 ч/продукт/раунд | ПОДТВЕРЖДЕНО → **измеряемо** (`SearchTiming`: `wait_seconds`/`request_seconds`/`polls`/`measured`, инъектируемые часы и `sleep`); параллелизм не вводился — «медленно» стало числом, а не диагнозом | `search_yandex.py:108-128`, `:418` | тайминги инъекцией `sleep` | Д | P5 |
@@ -349,7 +349,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 ### P1 — R7 на поисковом контуре (S1 + S5 + ось языка)
 
 - `wiring.build_search_adapter`/`resolve_and_build_search_adapter` — принимать `cache`
-  (объект уже есть в `core/cli/context.py:1881` и уже доходит до краулеров).
+  (объект уже есть в `core/cli/context.py:1880` и уже доходит до краулеров).
 - Одна точка чтения/записи — `external_search` (`search_log.py:293+`): miss → вызов
   адаптера + `put_json`, hit → список без вызова. **При hit бюджет не списывается** (иначе
   меняется `search_log` и через него наблюдение).
@@ -463,7 +463,8 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   `core/pipeline/digests.py:88-213`).
 - ✅ P6b — `golden_declined` (`core/pipeline/evaluator_benchmark.py:121`).
 - ✅ P6c — полоса неопределённости (`core/pipeline/measurement_uncertainty.py:196`).
-- ✅ P7 — `evaluator_v5` действует (`core/pipeline/prompt.py:117`).
+- ✅ P7 — `evaluator_v5` введён; с 19.11.2026 действует `evaluator_v6` (группа и модуль
+  параметра в промпте) — `core/pipeline/prompt.py:146`.
 
 **Что осталось по всему плану (сверено 08.11.2026): открытых пунктов нет.** Закрыты: R8
 (robots по схеме страницы), V1-аномалия (`anomaly_kind=unrelated_support` — теперь **шесть**
@@ -586,10 +587,13 @@ absence-модель, scoring и определения Coverage/Comparability �
 **Статус на 2026-10-28, уточнён 08.11.2026.** ✅ 1–8.
 
 - ✅ 1 — бэкслеши сняты: в `ABSENCE_GUIDANCE` текст объявлен прямо, без экранирования
-  (`core/pipeline/prompt.py:141,151`), шаблон `evaluator_v5` (`:117`).
+  (`core/pipeline/prompt.py:167-185`), шаблон `evaluator_v6` (`:146`; v5 сохранён как
+  провенанс прошлых прогонов).
 - ✅ 2 — пустой срез не тратит вызов модели и не выдаётся за вердикт: `core/pipeline/evaluate.py:2014`
   (`no_fragments`), причина зафиксирована комментарием `:1938-1940`.
-- ✅ 3 — правило языка цитаты есть в `evaluator_v5` (`core/pipeline/prompt.py:108-115`, `:117`).
+- ✅ 3 — правило языка цитаты есть в шаблоне `evaluator_v6`
+  (`core/pipeline/templates/evaluator_v6.txt:31`); в v5 оно появилось первым
+  (`core/pipeline/prompt.py:146`).
 - ✅ 4 — **закрыто 08.11.2026 как объявленный вход**: порог стал константой
   `EVALUATION_MIN_RETRIEVAL_SCORE: float | None = None`
   (`core/pipeline/evaluation_policy.py:48`), проведён через `evaluate_batch`
