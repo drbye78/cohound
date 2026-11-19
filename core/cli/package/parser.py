@@ -51,10 +51,6 @@ from core.cli.package.commands import (
     cmd_package_role_remove,
     cmd_package_role_update,
     cmd_package_run_show,
-    cmd_package_scope_attest,
-    cmd_package_scope_clear,
-    cmd_package_scope_set,
-    cmd_package_scope_show,
     cmd_package_scout,
     cmd_package_seeds_add,
     cmd_package_seeds_disable,
@@ -437,41 +433,6 @@ def add_package_parser(subparsers: Any) -> None:
     p_coh_show = cohort.add_parser("show", help="состав когорты (read-only)")
     _add_read_common(p_coh_show)
     p_coh_show.set_defaults(handler=cmd_package_cohort_show)
-
-    # scope ---------------------------------------------------------------- #
-    p_scope = pkg.add_parser("scope", help="процедура аттестации полноты источника (I2b)")
-    scope = p_scope.add_subparsers(dest="scope_command", metavar="ДЕЙСТВИЕ")
-
-    p_scope_set = scope.add_parser("set", help="настроить процедуру (scope_attestation.yaml)")
-    _add_op_common(p_scope_set)
-    p_scope_set.add_argument("--procedure", required=True, help="описание процедуры аттестации")
-    p_scope_set.set_defaults(handler=cmd_package_scope_set)
-
-    p_scope_att = scope.add_parser(
-        "attest", help="подписать аттестацию охвата продукта (I2b/I2c)"
-    )
-    _add_op_common(p_scope_att)
-    p_scope_att.add_argument(
-        "--product", required=True, help="product_id, за который ставится подпись"
-    )
-    p_scope_att.add_argument("--notes", default=None, help="заметка к подписи")
-    p_scope_att.add_argument(
-        "--snapshot-date", default=None, help="дата снимка подписи (YYYY-MM-DD)"
-    )
-    p_scope_att.add_argument(
-        "--attested-at",
-        default=None,
-        help="явная метка времени подписи (ISO); по умолчанию — текущая UTC",
-    )
-    p_scope_att.set_defaults(handler=cmd_package_scope_attest)
-
-    p_scope_clr = scope.add_parser("clear", help="удалить scope_attestation.yaml")
-    _add_op_common(p_scope_clr)
-    p_scope_clr.set_defaults(handler=cmd_package_scope_clear)
-
-    p_scope_show = scope.add_parser("show", help="показать процедуру аттестации (read-only)")
-    _add_read_common(p_scope_show)
-    p_scope_show.set_defaults(handler=cmd_package_scope_show)
 
     # golden --------------------------------------------------------------- #
     p_golden = pkg.add_parser("golden", help="golden-кейсы golden.csv (§4.2/§11.6)")

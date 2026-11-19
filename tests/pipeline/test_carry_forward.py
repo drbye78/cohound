@@ -353,13 +353,12 @@ def test_cell_reuse_key_is_stable_for_identical_conditions() -> None:
         capability_policy="resolved-only-v1",
         unknown_policy="excluded",
         partial_score=0.5,
-        attestation_digest="att-1",
         partition_build_id="pb-1",
     )
 
     assert cell_reuse_key(**kwargs) == cell_reuse_key(**kwargs)
-    # Смена схемы ключа обязана менять ключ: иначе «2» не отличить от «1».
-    assert CELL_REUSE_SCHEMA == "cell-reuse-2"
+    # Смена схемы ключа обязана менять ключ: иначе «3» не отличить от «2».
+    assert CELL_REUSE_SCHEMA == "cell-reuse-3"
 
 
 def test_cell_reuse_key_changes_with_any_condition() -> None:
@@ -383,7 +382,6 @@ def test_cell_reuse_key_changes_with_any_condition() -> None:
         capability_policy="cap",
         unknown_policy="unknown",
         partial_score=0.5,
-        attestation_digest="att",
         partition_build_id="pb",
     )
     reference = cell_reuse_key(**base)
@@ -404,7 +402,6 @@ def test_cell_reuse_key_changes_with_any_condition() -> None:
         ("capability_policy", "cap2"),
         ("unknown_policy", "included"),
         ("partial_score", 0.25),
-        ("attestation_digest", "att2"),
         ("partition_build_id", "pb2"),
     ):
         assert cell_reuse_key(**{**base, field: value}) != reference, field
@@ -809,7 +806,6 @@ def test_carry_forward_cell_refuses_without_previous_run() -> None:
         scoring_policy_version="policy",
         # Ответ оценщика здесь не используется: проверяется отказ переноса по входу.
         evaluator=_ScriptedEvaluator(_absent([])),
-        scope_acceptance=None,
     )
     assert (
         carry_forward_cell(

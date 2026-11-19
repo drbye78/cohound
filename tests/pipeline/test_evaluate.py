@@ -39,7 +39,6 @@ from core.domain import (
 )
 from core.pipeline.eval_cache import EvalConditions
 from core.pipeline.evaluate import (
-    ABSENCE_UNATTESTED_REVIEW_REASON,
     DENIAL_QUOTE_WITHOUT_MARKERS,
     EVALUATOR_UNAVAILABLE_NOTE,
     NO_FRAGMENTS_REASON,
@@ -174,7 +173,6 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
     retrievals=None,
     min_retrieval_score: float | None = None,
     coverage=None,
-    scope_acceptance: str | None = None,
     param=None,
 ):
     return evaluate_cell(
@@ -189,7 +187,6 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
         retrievals=retrievals,
         min_retrieval_score=min_retrieval_score,
         coverage=coverage,
-        scope_acceptance=scope_acceptance,
         # Пауза между попытками здесь **не** предмет проверки: она записывается и
         # сверяется в ``tests/pipeline/test_evaluate_concurrency.py``. Без подстановки
         # тесты отказа адаптера (3 попытки) спали бы секундами впустую.
@@ -718,50 +715,33 @@ def test_complete_corpus_unknown_is_not_stated() -> None:
     assert outcome.cell.evidence_scope.denial_strength is DenialStrength.NOT_STATED
 
 
-def test_bounded_requires_scope_acceptance_and_publishes_absent() -> None:
-    """Конечный справочник + принятие риска ⇒ ``bounded`` ⇒ ``❌``."""
+def test_bounded_publishes_absent_without_any_signature() -> None:
+    """Конечный справочник ⇒ ``bounded`` ⇒ ``❌`` без подписи человека (0.4.0).
+
+    Класс выставляет **правило каталога**; публикацию авторизует гейт G4. Запись покрытия
+    здесь не передана, поэтому I2d неприменим (``coverage=None``) — это отдельный предмет
+    ``test_absence_dated.py``.
+    """
     data = _data()
     outcome = _evaluate(
         data,
         _ScriptedEvaluator([_absent_output()]),
         param=_distribution_param(data),
-        scope_acceptance="Roger",
     )
 
     assert outcome.cell.status is Status.ABSENT
     scope = outcome.cell.evidence_scope
     assert scope is not None
     assert scope.denial_strength is DenialStrength.BOUNDED
-    assert scope.scope_acceptance == "Roger"
     assert scope.enumerated is True
+    assert scope.basis == "rule:bounded"
     assert check_cell(outcome.cell) == []
     protocol = [
         entry
         for entry in outcome.cell.absence_evidence
         if entry.get("evidence_type") == "absence"
     ]
-    assert protocol and protocol[0]["scope_acceptance"] == "Roger"
-    assert protocol[0]["denial_strength"] == "bounded"
-
-
-@pytest.mark.parametrize("acceptance", [None, ""], ids=["no_acceptance", "empty"])
-def test_bounded_without_acceptance_becomes_unknown(acceptance) -> None:  # noqa: ANN001
-    """Без принятия риска ``bounded`` недостижим: ``❓`` с причиной, а не ``❌`` и не ``failed``."""
-    data = _data()
-    outcome = _evaluate(
-        data,
-        _ScriptedEvaluator([_absent_output()]),
-        param=_distribution_param(data),
-        scope_acceptance=acceptance,
-    )
-
-    assert outcome.cell.state is CellState.EVALUATED
-    assert outcome.cell.status is Status.UNKNOWN
-    assert outcome.failure_kind is None
-    scope = outcome.cell.evidence_scope
-    assert scope is not None
-    assert scope.denial_strength is DenialStrength.NOT_STATED
-    assert ABSENCE_UNATTESTED_REVIEW_REASON in (scope.reason or "")
+    assert protocol and protocol[0]["denial_strength"] == "bounded"
 
 
 def test_incomplete_corpus_does_not_cancel_explicit_denial() -> None:
@@ -1391,15 +1371,14 @@ def _distribution_param(data: dict) -> CatalogRow:
 def test_explicit_denial_wins_over_rule_class() -> None:
     """Прямое отрицание с цитатой даёт ``explicit`` даже на правиле конечного справочника.
 
-    Принятие риска остаётся в силе, но сильнейший класс — свидетельство вендора, а не вывод
-    из полноты: подпись человека не должна повышать слабый класс до сильного.
+    Сильнейший класс — свидетельство вендора, а не вывод из полноты справочника: правило
+    каталога не повышает слабый класс до сильного.
     """
     data = _data()
     outcome = _evaluate(
         data,
         _ScriptedEvaluator([_absent_explicit()]),
         param=_distribution_param(data),
-        scope_acceptance="Roger",
     )
 
     assert outcome.cell.state is CellState.EVALUATED
@@ -1411,8 +1390,13 @@ def test_explicit_denial_wins_over_rule_class() -> None:
     assert check_cell(outcome.cell) == []
 
 
-def test_quote_without_denial_is_not_stated_even_for_distribution_rule() -> None:
-    """Цитата неотрицающего фрагмента + конечный справочник без подписи ⇒ ``❓``."""
+def test_quote_without_denial_still_yields_bounded_for_distribution_rule() -> None:
+    """Цитата неотрицающего фрагмента + конечный справочник ⇒ ``bounded``, не ``explicit``.
+
+    Модель объявила ``absent``, но дословного отрицания в цитате нет: класс даёт правило
+    каталога (``rule:bounded``), а не свидетельство вендора. Подписи для этого не нужно —
+    условие пространства проверяет I2d.
+    """
     data = _data()
     outcome = _evaluate(
         data,
@@ -1421,43 +1405,11 @@ def test_quote_without_denial_is_not_stated_even_for_distribution_rule() -> None
     )
 
     assert outcome.cell.state is CellState.EVALUATED
-    assert outcome.cell.status is Status.UNKNOWN
+    assert outcome.cell.status is Status.ABSENT
     scope = outcome.cell.evidence_scope
     assert scope is not None
-    assert scope.denial_strength is DenialStrength.NOT_STATED
-    assert ABSENCE_UNATTESTED_REVIEW_REASON in (scope.reason or "")
-
-
-def test_scope_acceptance_is_the_only_name() -> None:
-    """Принятие риска принимается **только** под именем ``scope_acceptance``.
-
-    Прежний алиас ``scope_attested_by`` удалён осознанно: имя «аттестация» описывало не
-    то, что происходит (подпись принимает риск неполноты, а не удостоверяет полноту), и
-    два имени одного поля разводили смысл в двух местах. Обратная совместимость не
-    требуется (`AGENTS.md`: формат можно менять), поэтому проверяется именно отказ.
-    """
-    data = _data()
-    with pytest.raises(TypeError):
-        evaluate_cell(  # type: ignore[call-arg]
-            param=_distribution_param(data),
-            product_id=data["product_id"],
-            run_id=data["run_id"],
-            evaluator=_ScriptedEvaluator([_absent_output()]),
-            chunks=_chunks(data),
-            scope_attested_by="Roger",
-        )
-
-    outcome = evaluate_cell(
-        param=_distribution_param(data),
-        product_id=data["product_id"],
-        run_id=data["run_id"],
-        evaluator=_ScriptedEvaluator([_absent_output()]),
-        chunks=_chunks(data),
-        scope_acceptance="Roger",
-    )
-    assert outcome.cell.status is Status.ABSENT
-    assert outcome.cell.evidence_scope is not None
-    assert outcome.cell.evidence_scope.scope_acceptance == "Roger"
+    assert scope.denial_strength is DenialStrength.BOUNDED
+    assert scope.basis == "rule:bounded"
 
 
 def test_i2b_absent_without_scope_cannot_be_constructed() -> None:
@@ -1480,8 +1432,8 @@ def test_i2b_absent_without_scope_cannot_be_constructed() -> None:
         )
 
 
-def test_persist_writes_absence_evidence_with_acceptance() -> None:
-    """``_persist`` пишет протокол отсутствия (R4) с классом и подписью, а не только цитаты.
+def test_persist_writes_absence_evidence() -> None:
+    """``_persist`` пишет протокол отсутствия (R4) с классом, а не только цитаты.
 
     До правки ``_persist`` писал исключительно ``validation.resolved_evidence``, поэтому
     absence-запись не попадала в store никогда — ``❌`` существовал лишь в памяти процесса.
@@ -1493,15 +1445,13 @@ def test_persist_writes_absence_evidence_with_acceptance() -> None:
         _ScriptedEvaluator([_absent_output()]),
         param=_distribution_param(data),
         store=store,
-        scope_acceptance="Roger",
     )
 
     assert outcome.cell.status is Status.ABSENT
     assert store.absence, "absence-evidence не записан в store"
     record = store.absence[0]
     assert record["evidence_type"] == "absence"
-    assert record["scope_acceptance"] == "Roger"
-    # Класс отрицания — в объекте ячейки; протокол несёт подпись и вид доказательства.
+    # Класс отрицания — в объекте ячейки; протокол несёт вид доказательства.
     assert outcome.cell.evidence_scope is not None
     assert outcome.cell.evidence_scope.denial_strength is DenialStrength.BOUNDED
     # PK не NULL и не пуст: синтетическая запись получает детерминированный id.

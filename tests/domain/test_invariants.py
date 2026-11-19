@@ -170,12 +170,14 @@ def test_i2_not_stated_scope_cannot_carry_absent() -> None:
         )
 
 
-def test_i2b_bounded_requires_scope_acceptance() -> None:
-    """bounded — измерение не покрывает пространство, поэтому риск принимает человек."""
-    with pytest.raises(ValueError, match="scope_acceptance"):
-        EvidenceScope(
-            denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
-        )
+def test_i2b_bounded_needs_reason_but_no_signature() -> None:
+    """``bounded`` обязан назвать основание полноты; подписи человека не требует (0.4.0).
+
+    Класс выставляет правило каталога, а не человек: условие пространства выражает I2d
+    (датированное снятие каждого корня), публикацию авторизует G4.
+    """
+    with pytest.raises(ValueError, match="reason"):
+        EvidenceScope(denial_strength=DenialStrength.BOUNDED)
     c = _cell(
         state=CellState.EVALUATED,
         status=Status.ABSENT,
@@ -183,10 +185,11 @@ def test_i2b_bounded_requires_scope_acceptance() -> None:
             denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
         ),
     )
-    assert "I2b" in _codes(check_cell(c))
+    assert "I2b" not in _codes(check_cell(c))
 
 
-def test_i2b_parameter_reference_bounded_with_acceptance_passes() -> None:
+def test_i2b_parameter_reference_bounded_without_signature_passes() -> None:
+    """Правило каталога даёт ``bounded`` без подписи: ``❌`` публикуется по I2d + G4."""
     c = Cell(
         run_id=_RUN,
         product_id=_PRODUCT,
@@ -197,14 +200,13 @@ def test_i2b_parameter_reference_bounded_with_acceptance_passes() -> None:
         evidence_scope=EvidenceScope(
             denial_strength=DenialStrength.BOUNDED,
             reason="справочник полон, записи нет",
-            scope_acceptance="reviewer",
         ),
     )
     assert check_cell(c) == []
 
 
-def test_i2_authoritative_registry_absence_needs_no_acceptance() -> None:
-    """authoritative без подписи — ``❌``: авторитетная энумерация не требует риска."""
+def test_i2_authoritative_registry_absence_needs_no_signature() -> None:
+    """authoritative — ``❌`` без подписи: авторитетная энумерация не требует риска."""
     c = Cell(
         run_id=_RUN,
         product_id=_PRODUCT,
@@ -216,7 +218,6 @@ def test_i2_authoritative_registry_absence_needs_no_acceptance() -> None:
     )
     assert c.evidence_scope is not None
     assert c.evidence_scope.denial_strength is DenialStrength.AUTHORITATIVE
-    assert c.evidence_scope.scope_acceptance is None
     assert check_cell(c) == []
 
 

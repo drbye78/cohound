@@ -128,7 +128,7 @@ _CELL_COLUMNS = (
     #: Пишется **слиянием** с уже записанным (``_merge_validation_notes``), поэтому
     #: повторная оценка при resume не теряет прежнюю причину.
     "validation_notes",
-    #: 09 §10 (схема ``cell-reuse-2``): происхождение ячейки. ``observed`` — измерена в
+    #: 09 §10 (схема ``cell-reuse-3``): происхождение ячейки. ``observed`` — измерена в
     #: этом прогоне, ``carried`` — перенесена из ``carried_from_run_id``. ``cell_reuse_key``
     #: — ключ, которым помечена ячейка (``NULL`` — не вычислялся: ячейка высокого
     #: источника, ``failed`` или модульный вызов без условий переноса).
@@ -194,8 +194,6 @@ _EVIDENCE_COLUMNS = (
     "content_hash",
     # Устаревший скаляр прежних прогонов: читается, новым писателем не выставляется.
     "source_scope",
-    # Принятие риска человеком (прежде ``scope_attested_by``).
-    "scope_acceptance",
     "index_build_id",
     "partition_build_id",
     # O5: адрес версии документа (``dv_...``), из которой взята цитата. Колонки нет в БД
@@ -298,7 +296,6 @@ def _row_to_typed_evidence(row: sqlite3.Row) -> CellEvidence | None:
                 if _row_optional(row, "source_scope")
                 else None
             ),
-            scope_acceptance=_row_optional(row, "scope_acceptance"),
             index_build_id=_row_optional(row, "index_build_id"),
             partition_build_id=_row_optional(row, "partition_build_id"),
             # O5: ``NULL`` (историческая строка/неразбираемый адрес) — «версия не

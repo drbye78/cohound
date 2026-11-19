@@ -140,7 +140,17 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: ``chunker_version`` при этом растёт (``policy-6``), потому что иначе переиспользованный
 #: chunk-set из ``state.db`` пришёл бы без адреса — тот же класс, что ``pdfium-text-5``.
 #: Шимов нет: файлы ≤ 3.25.0 отвергаются гейтом версии, прогон переносится пересозданием.
-SCHEMA_VERSION = "3.26.0"
+#:
+#: 3.27.0 (методология 0.4.0, решение владельца 19.11.2026): ``cell_evidence.scope_acceptance``
+#: **удалена**. Per-cell человеческой подписи риска больше нет: класс ``bounded`` выставляется
+#: правилом каталога, условие пространства выражает I2d (датированное снятие каждого
+#: объявленного корня), а публикацию авторизует гейт G4 — его предмет
+#: (:func:`core.pipeline.gate_subject.publication_subject`) несёт ``absence.by_strength``/
+#: ``as_of_min``/``undated``/``products_without_carrier``. Причина снятия: подпись не несла
+#: отпечатка каталога и объявленного пространства (продолжала действовать на параметры,
+#: которых подписывающий не видел) и дублировала машинное условие I2d. Шимов нет: файлы
+#: ≤ 3.26.0 отвергаются гейтом версии, прогон переносится пересозданием.
+SCHEMA_VERSION = "3.27.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -467,13 +477,13 @@ CREATE TABLE IF NOT EXISTS cells (
     absence_as_of     TEXT,
     primary_evidence_id TEXT,
     reviewed_by       TEXT,
-    -- 09 §10 (схема cell-reuse-2): происхождение ячейки. ``observed`` — вердикт получен
+    -- 09 §10 (схема cell-reuse-3): происхождение ячейки. ``observed`` — вердикт получен
     -- в этом прогоне, ``carried`` — перенесён из ``carried_from_run_id`` по совпадению
     -- ``cell_reuse_key``. Дефолт ``observed`` семантически верен и для строк, записанных
     -- до появления колонки: они действительно были измерены, поэтому backfill не нужен.
     measurement_origin TEXT NOT NULL DEFAULT 'observed',  -- observed|carried
     carried_from_run_id TEXT,                           -- NULL ⟺ measurement_origin=observed
-    cell_reuse_key    TEXT,                             -- ключ переноса (cell-reuse-2); NULL = не вычислялся
+    cell_reuse_key    TEXT,                             -- ключ переноса (cell-reuse-3); NULL = не вычислялся
     updated_at        TEXT,
     PRIMARY KEY (run_id, product_id, param_id),
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
@@ -491,7 +501,6 @@ CREATE TABLE IF NOT EXISTS cell_evidence (
     citation_quote    TEXT,
     content_hash      TEXT,
     source_scope      TEXT,                             -- УСТАРЕЛО: скаляр прежних прогонов
-    scope_acceptance  TEXT,                             -- принятие риска человеком (было scope_attested_by)
     index_build_id    TEXT,                             -- привязка evidence к сборке (R7)
     partition_build_id TEXT,                            -- партиция чанка-evidence (09 §8.1)
     doc_version_id    TEXT,                             -- O5: адрес версии документа (dv_...); NULL = не записано
@@ -874,9 +883,9 @@ END;
 # объявлены в ``DDL`` выше, а файл другой версии отвергается гейтом (:func:`connect`)
 # **до** любых миграций (``11`` §2.6). Держать второй, никем не проверяемый путь записи
 # схемы — значит иметь способ тихо «догнать» старую БД и объявить её новой; владелец
-# запретил именно это. Историческая подпись ``scope_attested_by`` → ``scope_acceptance``
-# больше не копируется: копировать её некуда и не для кого — БД, где она лежит, отвергается
-# целиком по версии, а не открывается частично читаемой.
+# запретил именно это. Колонка ``cell_evidence.scope_acceptance`` удалена в 3.27.0 вместе
+# с per-cell подписью (методология 0.4.0): файл прошлой версии отвергается целиком по
+# версии, а не открывается частично читаемым.
 
 
 # ``SchemaVersionMismatch``/``schema_mismatch_message``/``SCHEMA_VERSION_CODE`` объявлены

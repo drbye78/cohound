@@ -41,11 +41,8 @@ def _inputs() -> RunInputs:
 
 
 def _clean() -> RunInputs:
-    """Входы с настроенной процедурой аттестации (линт-чистые, §4.2/I2b)."""
-    return replace(
-        _inputs(),
-        scope_attestation_procedure="ручная аттестация полноты источника (тест)",
-    )
+    """Входы, линт-чистые по отсутствию-правилам (0.4.0: процедуры аттестации нет)."""
+    return _inputs()
 
 
 def _with_focus(modules: list[str], params: list[str]) -> RunInputs:
@@ -70,7 +67,6 @@ def test_load_inputs_happy() -> None:
     assert len(inputs.golden) == 2
     assert inputs.domain_profiles["case_x"].fetch is FetchMode.HTTP
     assert inputs.crawl_sources == CrawlSourcesConfig()
-    assert inputs.scope_attestation_procedure is None
 
 
 def test_load_inputs_reads_optional_crawl_sources(tmp_path: Path) -> None:
@@ -92,14 +88,19 @@ def test_load_inputs_reads_optional_crawl_sources(tmp_path: Path) -> None:
     assert inputs.crawl_sources.sites["p1"]["example.com"].kind == "feed"
 
 
-def test_load_inputs_reads_optional_attestation(tmp_path: Path) -> None:
+def test_load_inputs_does_not_read_scope_attestation(tmp_path: Path) -> None:
+    """``scope_attestation.yaml`` больше не вход прогона (0.4.0).
+
+    Файл намеренно невалиден: если бы код его читал, загрузка упала бы. Данные пакета
+    при этом остаются на месте — решение по ним отдельное.
+    """
     for name in _PACKAGE_FILES:
         (tmp_path / name).symlink_to(FIXTURES / name)
     (tmp_path / "scope_attestation.yaml").write_text(
-        "procedure: ручная аттестация полноты источника\n", encoding="utf-8"
+        "procedure: [не словарь\n", encoding="utf-8"
     )
     inputs = load_inputs(RUN_YAML, tmp_path)
-    assert inputs.scope_attestation_procedure == "ручная аттестация полноты источника"
+    assert not hasattr(inputs, "scope_attestation_procedure")
 
 
 def test_cross_check_ok() -> None:
@@ -225,17 +226,20 @@ def test_plan_is_deterministic() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_load_plan_blocks_without_attestation() -> None:
-    with pytest.raises(ValueError, match="I2b"):
-        load_plan(str(RUN_YAML), str(FIXTURES), run_id="load-plan")
+def test_load_plan_does_not_require_scope_attestation() -> None:
+    """Каталог с ``distribution_absence`` без ``scope_attestation.yaml`` даёт план.
+
+    До 0.4.0 здесь блокировало правило ``absence-attestation`` (I2b); теперь условие
+    публикации ``❌`` — датированное снятие корня (I2d), а не подпись на ячейке.
+    """
+    result = load_plan(str(RUN_YAML), str(FIXTURES), run_id="load-plan")
+    assert result.run_id == "load-plan"
+    assert [row.param_id for row in result.params] == ["param_a"]
 
 
-def test_load_plan_succeeds_with_attestation(tmp_path: Path) -> None:
+def test_load_plan_run_id_is_derived_from_inputs(tmp_path: Path) -> None:
     for name in _PACKAGE_FILES:
         (tmp_path / name).symlink_to(FIXTURES / name)
-    (tmp_path / "scope_attestation.yaml").write_text(
-        "procedure: ручная аттестация полноты источника\n", encoding="utf-8"
-    )
     # run_id — производная входов (та же формула, что у plan); проверяем префикс.
     derived = _plan(_clean()).run_id
     result = load_plan(str(RUN_YAML), str(tmp_path), run_id=derived)

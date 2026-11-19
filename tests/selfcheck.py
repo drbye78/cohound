@@ -246,14 +246,12 @@ def main() -> int:
         ),
     )
     expect_raises(
-        "I2b: bounded без принятия риска отклоняется",
+        "I2b: bounded без reason отклоняется",
         ValueError,
-        lambda: EvidenceScope(
-            denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
-        ),
+        lambda: EvidenceScope(denial_strength=DenialStrength.BOUNDED),
     )
     check(
-        "I2b: parameter_reference bounded с принятием риска проходит",
+        "I2b: parameter_reference bounded проходит без подписи (0.4.0)",
         lambda: Cell(
             run_id="r1", product_id="p", param_id="param",
             state=CellState.EVALUATED, status=Status.ABSENT,
@@ -261,7 +259,6 @@ def main() -> int:
             evidence_scope=EvidenceScope(
                 denial_strength=DenialStrength.BOUNDED,
                 reason="конечный справочник",
-                scope_acceptance="analyst",
             ),
         ),
     )
@@ -1288,18 +1285,18 @@ def _domain_invariants() -> None:
         raise AssertionError("I7 не пойман")
     if "I2" not in _codes(_cell(status=Status.ABSENT)):
         raise AssertionError("I2 не пойман")
-    # Вариант 2: ``bounded`` без принятия риска — нарушение, даже если запись протокола
-    # выглядит «исчерпывающей»: полноту принимает человек, а не текст записи.
+    # ``bounded`` без причины — нарушение: класс обязан называть основание полноты.
+    # Подписи он с 0.4.0 не требует (публикацию авторизует G4, условие пространства — I2d).
     if "I2b" not in _codes(
         _cell(
             status=Status.ABSENT,
             absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
             evidence_scope=EvidenceScope.model_construct(
-                denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
+                denial_strength=DenialStrength.BOUNDED
             ),
         )
     ):
-        raise AssertionError("I2b не пойман (bounded без принятия риска)")
+        raise AssertionError("I2b не пойман (bounded без reason)")
     clean = _cell(
         status=Status.ABSENT,
         absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
@@ -1474,12 +1471,13 @@ def _corpus_chunk_span() -> None:
 
 
 def _corpus_coverage_invariant() -> None:
-    """Ф0/I2c: ``❌`` при неполном покрытии корпуса без аттестации — нарушение.
+    """Ф0/I2c: класс отрицания согласован с наблюдённым охватом.
 
     «Инварианты — это код»: проверка живёт в ``core.domain.invariants``, а selfcheck
-    прогоняет её на обеих ветках (машинный ❌ vs человечески аттестованный ❌) и на
-    полном покрытии. Плюс модель ``CorpusCoverage`` не даёт объявить усечённый корпус
-    полным.
+    прогоняет её на ветках, которые различает I2c: класс, не дающий ``❌``, — нарушение;
+    ``bounded`` и ``explicit`` — нет (условие пространства ``bounded`` выражает I2d, а не
+    подпись человека, снятая в 0.4.0). Плюс модель ``CorpusCoverage`` не даёт объявить
+    усечённый корпус полным.
     """
     from core.domain.enums import (
         AbsenceRuleType,
@@ -1518,24 +1516,23 @@ def _corpus_coverage_invariant() -> None:
     violations = check_absence_coverage(machine_absent, incomplete)
     codes = {v.code for v in violations}
     if "I2c" not in codes:
-        raise AssertionError("I2c: ❌ при неполном корпусе без аттестации не пойман")
+        raise AssertionError("I2c: ❌ при неполном корпусе со слабым классом не пойман")
     if not any("closed.example" in v.message for v in violations):
         raise AssertionError("I2c: сообщение обязано называть нечитаемый origin")
 
-    # Подпись не превращает слабый класс в сильный: ``not_stated`` остаётся ``❓``.
-    attested = machine_absent.model_copy(
+    # ``bounded`` при неполном охвате — не нарушение: условие пространства выражает I2d
+    # (датированное снятие каждого корня), а не per-cell подпись (снята в 0.4.0).
+    bounded = machine_absent.model_copy(
         update={
             "evidence_scope": EvidenceScope(
-                denial_strength=DenialStrength.NOT_STATED,
-                reason="нет дословного",
-                scope_acceptance="human",
+                denial_strength=DenialStrength.BOUNDED,
+                reason="конечный справочник объявлен каталогом",
+                enumerated=True,
             )
         }
     )
-    if not check_absence_coverage(attested, incomplete):
-        raise AssertionError(
-            "I2c: подпись не делает not_stated доказанным отсутствием"
-        )
+    if check_absence_coverage(bounded, incomplete):
+        raise AssertionError("I2c: bounded не зависит от подписи — проверяет I2d")
 
     # Прямое отрицание вендора — свидетельство, а не вывод из полноты корпуса.
     explicit = machine_absent.model_copy(
@@ -2257,7 +2254,7 @@ def _pipeline_gates_resume() -> None:
 
 
 def _cli_plan_lint() -> None:
-    """CLI-фасад plan/dry-run: валидный пакет → 0; битый (I2b) → блок с кодом."""
+    """CLI-фасад plan/dry-run: валидный пакет → 0; нарушенное правило линта → блок."""
     import contextlib
     import io
     import shutil
@@ -2287,8 +2284,13 @@ def _cli_plan_lint() -> None:
             "--json",
         ]
     )
-    if raw_code != EXIT_USAGE:
-        raise AssertionError(f"битый пакет (I2b) обязан блокироваться, код={raw_code}")
+    # Пакет без `scope_attestation.yaml` (фикстуры его не содержат) планируется: с 0.4.0
+    # процедура аттестации больше не требуется — публикацию `❌` авторизует G4, а условие
+    # пространства проверяет I2d.
+    if raw_code != EXIT_OK:
+        raise AssertionError(
+            f"пакет без scope_attestation.yaml обязан планироваться, код={raw_code}"
+        )
     with tempfile.TemporaryDirectory() as tmp:
         pkg = Path(tmp) / "package"
         pkg.mkdir()
@@ -2299,10 +2301,14 @@ def _cli_plan_lint() -> None:
         # объявляет reference-продуктов, без которых непустой `baselines.csv` блокируется
         # правилом `baseline-without-reference-product` (план 27 §10).
         shutil.copytree(fixtures / "sources", pkg / "sources")
-        (pkg / "scope_attestation.yaml").write_text(
-            'procedure: "аттестация (selfcheck)"\n', encoding="utf-8"
+        # Нарушенное правило линта (`weights-sum-100`) обязано блокировать план: проверка
+        # «валидный → 0» без парного «битый → EXIT_USAGE» ничего не доказывает.
+        package_yaml = pkg / "package.yaml"
+        package_yaml.write_text(
+            package_yaml.read_text(encoding="utf-8").replace("weight: 60", "weight: 59"),
+            encoding="utf-8",
         )
-        good_code = _silent(
+        broken_code = _silent(
             [
                 "plan",
                 "--run-yaml",
@@ -2312,8 +2318,10 @@ def _cli_plan_lint() -> None:
                 "--json",
             ]
         )
-        if good_code != EXIT_OK:
-            raise AssertionError(f"валидный пакет обязан планироваться, код={good_code}")
+        if broken_code != EXIT_USAGE:
+            raise AssertionError(
+                f"нарушенное правило линта обязано блокировать план, код={broken_code}"
+            )
     # Профиль split честно недоступен до W13 (шов 07), local — ок.
     if build_adapters(profile=LOCAL_PROFILE) is None:
         raise AssertionError("local-профиль обязан собирать Ports")

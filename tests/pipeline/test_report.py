@@ -1241,7 +1241,6 @@ def test_write_reports_surfaces_truncation_anomaly_in_artifacts_and_csv(
                 denial_strength=DenialStrength.BOUNDED,
                 reason="конечный справочник",
                 enumerated=True,
-                scope_acceptance="human",
             ),
         )
     ]
@@ -2139,7 +2138,6 @@ def test_write_cell_diagnostics_lists_each_reason(tmp_path: Path) -> None:
                 observed=3,
                 expected=4,
                 relevant_evidence_coverage=2 / 3,
-                scope_acceptance="reviewer",
             ),
         }
     )
@@ -2278,7 +2276,6 @@ def test_registry_denial_is_not_a_truncation_anomaly() -> None:
         evidence_scope=EvidenceScope(
             denial_strength=DenialStrength.BOUNDED,
             reason="конечный справочник",
-            scope_acceptance="Roger",
         ),
     )
     anomalies = collect_crawl_truncation_anomalies([bounded_cell], truncated_products={"prod"})

@@ -259,7 +259,6 @@ def _evaluate(
     coverage: CorpusCoverage | None = None,
     param: CatalogRow | None = None,
     output: LLMCellOutput | None = None,
-    scope_acceptance: str | None = None,
 ):
     """Прогоняет ячейку через Ш6 с датами из ``corpus_artifact`` этого прогона."""
     chunks = [_chunk(doc_hash, 0, text) for doc_hash, text in docs]
@@ -270,7 +269,6 @@ def _evaluate(
         evaluator=_ScriptedEvaluator(output or _absent(docs)),
         chunks=chunks,
         coverage=coverage if coverage is not None else _coverage(),
-        scope_acceptance=scope_acceptance,
         artifact_dates=observe_corpus_artifact_dates(store, RUN_ID, PRODUCT),
         store=store,
     )
@@ -396,8 +394,13 @@ def test_explicit_cited_observation_resolves_both_address_forms() -> None:
 BOUNDED_QUOTE = "Свойство Альфа отсутствует в справочнике."
 
 
-def test_bounded_with_complete_captures_publishes_absent_and_min_date() -> None:
-    """Корни с ``complete=1`` и датами держат ``❌``; дата — ``min`` по корням."""
+def test_bounded_publishes_absent_without_signature_and_publishes_min_date() -> None:
+    """Корни с ``complete=1`` и датами держат ``❌`` **без всякой подписи**; дата — ``min``.
+
+    Решение владельца 19.11.2026 (вариант D): ответственность за публикацию несёт G4,
+    per-cell подписи нет. Условие пространства целиком выражает I2d — снятие каждого
+    объявленного корня, совпадающий ``policy_digest`` и дата.
+    """
     store = _store()
     coverage = _coverage(
         complete=True,
@@ -411,7 +414,6 @@ def test_bounded_with_complete_captures_publishes_absent_and_min_date() -> None:
         output=_absent_uncited(),
         param=_param(AbsenceRuleType.DISTRIBUTION_ABSENCE),
         coverage=coverage,
-        scope_acceptance="analyst",
         store=store,
     )
 
@@ -419,14 +421,21 @@ def test_bounded_with_complete_captures_publishes_absent_and_min_date() -> None:
     assert cell.status is Status.ABSENT
     assert cell.evidence_scope is not None
     assert cell.evidence_scope.denial_strength is DenialStrength.BOUNDED
+    assert cell.evidence_scope.basis == "rule:bounded"
+    assert cell.evidence_scope.enumerated is True
     assert cell.absence_as_of == D2
+    # Протокол отсутствия публикуется: утверждение доказано, а не отложено.
+    assert any(
+        entry.get("evidence_type") == "absence" for entry in cell.absence_evidence
+    )
 
 
-def test_bounded_with_root_without_capture_stays_unknown_despite_acceptance() -> None:
-    """``adopted``-снятие (``complete=False``) не удостоверяет исчерпание — даже с подписью.
+def test_bounded_with_root_without_capture_stays_unknown() -> None:
+    """``adopted``-снятие (``complete=False``) не удостоверяет исчерпание.
 
-    Это ужесточение §11.4 п.2: ``scope_acceptance`` закрывает I2c (риск принят), но не
-    заменяет датированный носитель — у ``bounded`` без ``complete``-снятия его нет.
+    Условие то же, что и раньше, но подписи в нём больше нет: у ``bounded`` без
+    ``complete``-снятия датированного носителя нет, поэтому ``❌`` не публикуется —
+    ``❓`` с ``absence_undated`` и без протокола отсутствия.
     """
     store = _store()
     coverage = _coverage(
@@ -445,7 +454,6 @@ def test_bounded_with_root_without_capture_stays_unknown_despite_acceptance() ->
         output=_absent_uncited(),
         param=_param(AbsenceRuleType.DISTRIBUTION_ABSENCE),
         coverage=coverage,
-        scope_acceptance="analyst",
         store=store,
     )
 
@@ -454,7 +462,7 @@ def test_bounded_with_root_without_capture_stays_unknown_despite_acceptance() ->
     scope = cell.evidence_scope
     assert scope is not None and scope.denial_strength is DenialStrength.NOT_STATED
     reason = scope.reason or ""
-    # I2c пропустил (риск принят), снял именно I2d — и назвал, чего не хватило.
+    # I2c класс bounded пропускает (0.4.0: подписи не требуется), снял именно I2d.
     assert ABSENCE_COVERAGE_UNSATISFIED_REASON not in reason
     assert reason.startswith(ABSENCE_UNDATED_REASON)
     assert "complete=1" in reason
@@ -470,7 +478,6 @@ def test_bounded_without_declared_roots_demotes() -> None:
         output=_absent_uncited(),
         param=_param(AbsenceRuleType.DISTRIBUTION_ABSENCE),
         coverage=_coverage(complete=True),
-        scope_acceptance="analyst",
         store=store,
     )
 
@@ -542,15 +549,9 @@ def test_i2c_demotion_leaves_no_second_reason(monkeypatch: pytest.MonkeyPatch) -
     """I2c сработал раньше ⇒ ячейка уже ``❓``, ``absence_undated`` не пишется."""
     import core.pipeline.evaluate as evaluate_module
 
-    conflicting = EvidenceScope.model_construct(
-        denial_strength=DenialStrength.BOUNDED,
-        reason="конечный справочник объявлен каталогом",
-        enumerated=True,
-        scope_acceptance=None,
-    )
-    monkeypatch.setattr(
-        evaluate_module, "_resolve_denial", lambda **_: (conflicting, [])
-    )
+    # Класс не записан (``scope is None``) — ровно та строка, которую I2c отвергает:
+    # согласованность с наблюдённым охватом проверить нечем.
+    monkeypatch.setattr(evaluate_module, "_resolve_denial", lambda **_: (None, []))
     store = _store()
     outcome = _evaluate(
         docs=[("hash_a", DOC_A)],
@@ -672,7 +673,6 @@ def _reuse_conditions():
         ),
         scoring_policy_version="policy",
         evaluator=_ScriptedEvaluator(_absent([])),
-        scope_acceptance=None,
     )
 
 

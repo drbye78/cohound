@@ -109,11 +109,11 @@ def test_schema_version_is_additive_bump() -> None:
     (``corpus_docs.blocks``, ``runs.blocks_json``); таблица ``corpus_members`` не менялась,
     файлы ≤ 3.24.0 отвергаются гейтом версии.
 
-    3.26.0 — O39 фаза 2 плана ``26``: адрес куска в таблице
-    (``corpus_chunks.table_ref``); таблица ``corpus_members`` не менялась, файлы ≤ 3.25.0
-    отвергаются гейтом версии.
+    3.27.0 — методология 0.4.0: колонка ``cell_evidence.scope_acceptance`` **удалена**
+    вместе с per-cell подписью (публикацию ``❌`` авторизует гейт G4); таблица не менялась,
+    файлы ≤ 3.26.0 отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.26.0"
+    assert SCHEMA_VERSION == "3.27.0"
     conn = connect(":memory:")
     try:
         tables = {

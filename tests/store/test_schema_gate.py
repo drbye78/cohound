@@ -184,7 +184,9 @@ FORMER_SHIM_COLUMNS: dict[str, tuple[str, ...]] = {
         "cell_reuse_key",
     ),
     "llm_scenarios": ("endpoint_host", "max_tokens"),
-    "cell_evidence": ("scope_acceptance", "partition_build_id", "doc_version_id"),
+    # ``scope_acceptance`` из этого списка ушла вместе с колонкой (3.27.0): колонок,
+    # которые досоздавались шимом, здесь остаются только те, что обязаны быть в ``DDL``.
+    "cell_evidence": ("partition_build_id", "doc_version_id"),
     "corpus_chunks": ("extractor_version",),
     "index_manifest": ("extractor_version", "content_digest", "partition_build_id"),
     "crawl_session_items": ("depth", "doc_hash"),
@@ -344,8 +346,12 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     чанкер — в момент нарезки. ``text``/``content_hash`` не меняются: кусок остаётся точным
     срезом, и цитата по-прежнему сверяется с ним (I22). Шимов нет: прогоны ≤ 3.25.0
     отвергаются гейтом версии.
+
+    3.27.0 (методология 0.4.0, решение владельца 19.11.2026) — колонка
+    ``cell_evidence.scope_acceptance`` **удалена**: per-cell подписи человека больше нет,
+    публикацию ``❌`` авторизует гейт G4. Шимов нет: прогоны ≤ 3.26.0 отвергаются гейтом.
     """
-    assert SCHEMA_VERSION == "3.26.0"
+    assert SCHEMA_VERSION == "3.27.0"
 
     conn = connect(":memory:")
     try:

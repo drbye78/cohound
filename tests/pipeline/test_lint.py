@@ -26,7 +26,6 @@ from core.pipeline.golden_status import GoldenStatus
 from core.pipeline.lint import (
     RULES,
     LintReport,
-    check_absence_attestation,
     check_anchor_in_products,
     check_archetype_c_baselines,
     check_baseline_policy_present,
@@ -52,16 +51,13 @@ RUN_YAML = FIXTURES / "run.yaml"
 
 
 def _inputs() -> RunInputs:
-    """Нормализованные входы на фикстурах (без настроенной процедуры аттестации)."""
+    """Нормализованные входы на фикстурах."""
     return load_inputs(RUN_YAML, FIXTURES)
 
 
 def _clean() -> RunInputs:
-    """Входы с настроенной процедурой аттестации → линт-чистые (§4.2/I2b)."""
-    return replace(
-        _inputs(),
-        scope_attestation_procedure="ручная аттестация полноты источника (тест)",
-    )
+    """Входы, линт-чистые по отсутствию-правилам (0.4.0: процедуры аттестации нет)."""
+    return _inputs()
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +82,6 @@ def test_rules_registry_is_complete() -> None:
     expected = {
         "weights-sum-100",
         "archetype-c-baselines",
-        "absence-attestation",
         "golden-full-absent-stratum",
         "showcase-metric",
         "slug-lowercase",
@@ -178,20 +173,25 @@ def test_archetype_b_with_baselines_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# absence-attestation
+# absence-правила: процедуры аттестации больше не требуется (0.4.0)
 # ---------------------------------------------------------------------------
 
 
-def test_absence_without_procedure_blocks() -> None:
-    # param_b в фикстуре использует distribution_absence, процедура не настроена.
+def test_absence_rule_without_scope_attestation_file_passes_lint() -> None:
+    """``distribution_absence`` в каталоге без ``scope_attestation.yaml`` не блокирует.
+
+    Раньше правило ``absence-attestation`` требовало пакетной процедуры аттестации и
+    блокировало такой пакет. С 0.4.0 per-cell подписи нет: публикацию ``❌`` авторизует
+    гейт G4, а условие пространства проверяет I2d — линт о классе отрицания молчит.
+    """
     inputs = _inputs()
-    messages = check_absence_attestation(inputs)
-    assert messages and "I2b" in messages[0] and "param_b" in messages[0]
-    assert any("I2b" in msg for msg in lint_run_inputs(inputs).blocking)
-
-
-def test_absence_with_procedure_passes() -> None:
-    assert check_absence_attestation(_clean()) == []
+    assert any(
+        row.absence_rule.value in {"parameter_reference", "distribution_absence"}
+        for row in inputs.catalog
+    )
+    report = lint_run_inputs(inputs)
+    assert not any("attestation" in message for message in report.blocking)
+    assert "absence-attestation" not in {rule.code for rule in RULES}
 
 
 # ---------------------------------------------------------------------------

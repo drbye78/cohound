@@ -166,7 +166,14 @@ _FROZEN = ConfigDict(
 #: требует ``live|revalidated`` в этом цикле»; полнота покрытия (I2c) считается по
 #: снятиям, а не по элементам сеанса. Это absence/evidence-модель, поэтому класс границы
 #: — ``methodology_change`` с ``golden-full`` и пере-аннотацией golden (§13).
-METHODOLOGY_VERSION = "0.3.0"
+#: 0.4.0 — решение владельца 19.11.2026 (вариант D): **снято требование per-cell
+#: человеческой подписи** (``scope_acceptance``) для публикации ``❌``. Ответственность
+#: за публикацию несёт гейт G4 (одна подпись публикации), а не подпись на каждой ячейке:
+#: класс ``bounded`` выставляется правилом каталога, а условие пространства целиком
+#: выражается I2d (датированное снятие каждого объявленного корня). Это absence-модель,
+#: поэтому класс границы — ``methodology_change`` с ``golden-full`` и пере-аннотацией
+#: golden (§13).
+METHODOLOGY_VERSION = "0.4.0"
 
 #: P0/OOM: дефолтный потолок одного HTTP-ответа/retained-файла — 20 MiB. Операционная
 #: ось исполнения (``crawl.max_response_bytes``), не методология; адаптеры используют
@@ -263,49 +270,6 @@ class PackageManifest(BaseModel):
         # §1.5/план 27 §3.2: архетип C — эталона нет; baseline_participants обязан быть пустым.
         if self.archetype is Archetype.C and self.baseline_participants:
             raise ValueError("архетип C: baseline_participants обязан быть пустым")
-        return self
-
-
-class ScopeAttestation(BaseModel):
-    """Подпись человека под аттестацией охвата источника для одного продукта (I2b/I2c).
-
-    Артефакт пакета ``scope_attestation.yaml`` держит **процедуру** (строка ``procedure``)
-    и опциональный список ``attestations`` таких подписей. Аттестация **per product**,
-    потому что покрытие корпуса per product: подпись «справочник полон» для одного
-    продукта не делает полным покрытие другого.
-
-    Это тот же класс, что ``reviewed_by``: подпись авторизует заявление из тех же
-    измерений, но не меняет само измерение. Поэтому в ``EXECUTION_CONTRACT_FIELDS``
-    она не входит (как и политика гейтов) — смена подписанта не создаёт новый ``run_id``.
-
-    ``attested_at``/``snapshot_date`` — строки ISO: значение записывается как пришло
-    (дата снимка, к которому относится подпись), а не выводится из прогона.
-    """
-
-    model_config = _BASE
-
-    product_id: str
-    attested_by: str
-    attested_at: str | None = None
-    snapshot_date: str | None = None
-    notes: str | None = None
-
-    @field_validator("attested_at", "snapshot_date", mode="before")
-    @classmethod
-    def _iso_text(cls, value: Any) -> Any:
-        """Принимает YAML-``date``/``datetime`` как ISO-строку (детерминизм байтов)."""
-        if isinstance(value, (_dt.datetime, _dt.date)):
-            return value.isoformat()
-        return value
-
-    @model_validator(mode="after")
-    def _check(self) -> ScopeAttestation:
-        if not self.product_id:
-            raise ValueError("ScopeAttestation: product_id не может быть пустым")
-        if not self.attested_by:
-            raise ValueError(
-                "ScopeAttestation: attested_by обязателен (аттестация — человеческая)"
-            )
         return self
 
 
@@ -1160,10 +1124,6 @@ class EvidenceScope(BaseModel):
         а не «упомянут». ``None`` — **не измерено**: знаменателя нет (оценщику не передали
         ни одного фрагмента) либо замер не производился (``instrument_failed``,
         реестровое отсутствие). Ноль и «не измерено» — разные вещи и не подменяются.
-    :param scope_acceptance: человек, **принявший риск** ненаблюдённой части
-        (``scope_acceptance``; прежде ``scope_attested_by``). Это принятие риска, а не
-        улучшение измерения: подпись не делает охват полным и не участвует в провенансе
-        контракта (в ``EXECUTION_CONTRACT_FIELDS`` не входит).
     :param basis: откуда взялся класс (``registry``/``evaluator:explicit``/…) — аудит.
     """
 
@@ -1179,7 +1139,6 @@ class EvidenceScope(BaseModel):
     enumerated: bool | None = None
     termination: str | None = None
     relevant_evidence_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
-    scope_acceptance: str | None = None
     basis: str | None = None
 
     @property
@@ -1229,16 +1188,10 @@ class EvidenceScope(BaseModel):
                 f"denial_strength={strength.value} требует непустую reason: "
                 "незнание обязано называть причину"
             )
-        if strength is DenialStrength.BOUNDED:
-            if not (self.reason or "").strip():
-                raise ValueError(
-                    "denial_strength=bounded требует reason (процедура полноты/основание)"
-                )
-            if not (self.scope_acceptance or "").strip():
-                raise ValueError(
-                    "denial_strength=bounded требует scope_acceptance: измерение не "
-                    "покрывает пространство, поэтому риск принимает человек"
-                )
+        if strength is DenialStrength.BOUNDED and not (self.reason or "").strip():
+            raise ValueError(
+                "denial_strength=bounded требует reason (основание полноты перечня)"
+            )
         if strength is DenialStrength.AUTHORITATIVE and self.enumerated is False:
             raise ValueError(
                 "denial_strength=authoritative несовместим с enumerated=False: "
@@ -1301,10 +1254,6 @@ class CellEvidence(BaseModel):
     citation_quote: str | None = None
     content_hash: str | None = None
     source_scope: SourceScope | None = None
-    #: Принятие риска человеком (прежде ``scope_attested_by``). **Не** улучшает измерение:
-    #: подпись говорит «знаю, чего не видел», а не «всё видел». Носитель вердикта — не она,
-    #: а :class:`EvidenceScope` ячейки.
-    scope_acceptance: str | None = None
     index_build_id: str | None = None
     #: 09 §8.1: партиция, из которой пришёл чанк-цитата. ``None`` — неизвестно
     #: (исторические строки/не корпусный источник); аддитивно, без backfill.
@@ -1441,7 +1390,7 @@ class Cell(BaseModel):
     #: Это провенанс, а не украшение: читатель карты обязан уметь дойти до измерения,
     #: которое действительно состоялось.
     carried_from_run_id: str | None = None
-    #: Ключ переноса (``cell-reuse-2``), которым помечена ячейка; ``None`` — не вычислялся
+    #: Ключ переноса (``cell-reuse-3``), которым помечена ячейка; ``None`` — не вычислялся
     #: (ячейка высокого источника, ``failed``, модульный вызов без условий переноса).
     cell_reuse_key: str | None = None
 
@@ -1717,8 +1666,9 @@ class ProfileAttestationRow(BaseModel):
     вычисляется, что именно изменилось, когда текущий профиль перестал совпадать с
     аттестованным. ``superseded_at`` — отзыв аттестации (не удаление строки: аудит).
 
-    Имя таблицы намеренно не ``attestation``: та — cell-level принятие риска
-    (``scope_acceptance``, Вариант 2), другая сущность.
+    Имя таблицы намеренно не ``attestation``: та — cell-level аттестация охвата
+    (снята методологией 0.4.0: публикацию ``❌`` авторизует гейт G4, а не подпись на
+    каждой ячейке), другая сущность.
     """
 
     model_config = _BASE
@@ -2176,18 +2126,6 @@ class RunManifest(BaseModel):
     #: допускать). Имя ключа сохранено ради обратной совместимости артефактов: у прогонов
     #: до 0.1.0 там лежали только делегирования.
     gate_waivers: list[dict[str, Any]] = Field(default_factory=list)
-    #: I2b/I2c → Вариант 2: **принятия риска** человеком, использованные прогоном
-    #: (``product_id → actor``). Тот же класс, что ``reviewed_by``: принятие расширяет
-    #: достижимость ``❌`` только для класса ``bounded`` (там, где измерение не покрывает
-    #: пространство), но не меняет измерение. Поэтому в ``EXECUTION_CONTRACT_FIELDS``
-    #: поле **не входит** (как и ``gate_policies``): смена подписанта не создаёт новый
-    #: ``run_id`` и не рвёт межцикловый diff. Видно в манифесте, чтобы опубликованный
-    #: ``❌`` был прослеживаем к человеку, принявшему риск.
-    #:
-    #: Имя сменилось с ``scope_attestations``: подпись — **принятие риска**
-    #: (``scope_acceptance``), а не аттестация полноты. Старые манифесты читаются:
-    #: ``_migrate_legacy_keys`` перекладывает исторический ключ.
-    scope_acceptance: dict[str, str] = Field(default_factory=dict)
     #: 13-manual-artifacts §3.4: доля ручного — **публикуется числом, потолка нет**.
     #: ``{count, share_of_corpus, bytes, by_reason, by_product}``: ``count`` — предъявленные
     #: артефакты, дошедшие до корпуса; ``share_of_corpus`` — их доля в документах корпуса;
@@ -2209,22 +2147,6 @@ class RunManifest(BaseModel):
     #: это результат измерения, а не его условие; смена класса не создаёт новый
     #: ``run_id``. Пустой словарь — legacy-манифест (профиль не вычислялся).
     publishability: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_legacy_keys(cls, data: Any) -> Any:
-        """Читает манифесты/вызовы со старым ключом ``scope_attestations``.
-
-        Переименование поля — часть варианта 2 (подпись = принятие риска). Строки
-        манифеста и вызовы, записанные до переименования, обязаны оставаться читаемыми:
-        ключ перекладывается, значение не пересчитывается.
-        """
-        if isinstance(data, dict) and "scope_attestations" in data:
-            payload = dict(data)
-            legacy = payload.pop("scope_attestations")
-            payload.setdefault("scope_acceptance", legacy or {})
-            return payload
-        return data
 
 
 class Violation(BaseModel):

@@ -202,7 +202,9 @@ def test_build_highlights_confidence_and_carries_the_source_cells(
     printed = capsys.readouterr().out
     # 5 ❌ у параметра 2 — это и есть цена честного класса отсутствия.
     assert "❌ всего 5" in printed
-    assert "5 требуют scope_acceptance" in printed
+    # С 0.4.0 подписи человека нет: класс bounded держится датированным носителем (I2d).
+    assert "5 класса bounded" in printed
+    assert "per-cell подписи нет" in printed
 
 
 def test_build_legend_states_what_was_actually_reviewed(tmp_path: Path) -> None:

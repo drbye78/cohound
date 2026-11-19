@@ -124,7 +124,10 @@ def test_load_artifacts_reads_template(tmp_path: Path) -> None:
     assert artifacts.cohort is not None
     assert artifacts.run is not None
     assert artifacts.catalog
-    assert artifacts.scope_attestation
+    # ``scope_attestation.yaml`` шаблона — **данные**, а не артефакт прогона: с 0.4.0
+    # per-cell подписи нет, и реестр артефактов файла не знает.
+    assert (TEMPLATE / "scope_attestation.yaml").exists()
+    assert "scope_attestation" not in {item["name"] for item in list_artifacts(TEMPLATE)}
 
 
 def test_load_artifacts_missing_dir_returns_empty(tmp_path: Path) -> None:
@@ -289,13 +292,17 @@ def test_save_artifact_wrong_type(tmp_path: Path) -> None:
         save_artifact(tmp_path, "package", {"not": "a manifest"})
 
 
-def test_save_artifact_scope_and_profiles(tmp_path: Path) -> None:
-    save_artifact(tmp_path, "scope_attestation", "полная проверка")
+def test_save_artifact_profiles(tmp_path: Path) -> None:
     save_artifact(tmp_path, "domain_profiles", {"dom": {"fetch": "http", "extract": "html"}})
     reloaded = load_artifacts(tmp_path)
-    assert reloaded.scope_attestation == "полная проверка"
     assert reloaded.domain_profiles["dom"].fetch is FetchMode.HTTP
     assert reloaded.domain_profiles["dom"].extract is ExtractionRoute.HTML
+
+
+def test_scope_attestation_is_no_longer_an_artifact(tmp_path: Path) -> None:
+    """Запись артефакта ``scope_attestation`` отвергается: носителя подписи больше нет."""
+    with pytest.raises(ValueError, match="неизвестный артефакт"):
+        save_artifact(tmp_path, "scope_attestation", "полная проверка")
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +431,7 @@ def test_list_artifacts_reports_presence_size_and_count() -> None:
     assert by_name["package"]["count"] == 2  # два модуля шаблона
     assert by_name["catalog"]["count"] == len(template.catalog)
     assert by_name["catalog"]["size"] > 0
-    assert by_name["scope_attestation"]["count"] == 1
+    assert "scope_attestation" not in by_name
     assert by_name["run"]["count"] == len(template.run.products)
 
 
@@ -459,8 +466,8 @@ def test_get_artifact_structured_views() -> None:
     profiles, _ = get_artifact(TEMPLATE, "domain_profiles")
     assert isinstance(profiles, dict)
 
-    procedure, _ = get_artifact(TEMPLATE, "scope_attestation")
-    assert isinstance(procedure, str) and procedure
+    baselines, _ = get_artifact(TEMPLATE, "baselines")
+    assert isinstance(baselines, list)
 
 
 def test_get_artifact_raw_returns_text() -> None:
@@ -471,10 +478,10 @@ def test_get_artifact_raw_returns_text() -> None:
 
 
 def test_get_artifact_absent_and_unknown(tmp_path: Path) -> None:
-    data, path = get_artifact(tmp_path / "nope", "scope_attestation")
+    data, path = get_artifact(tmp_path / "nope", "cohort")
     assert data is None
-    assert path == tmp_path / "nope" / "scope_attestation.yaml"
-    raw, _ = get_artifact(tmp_path / "nope", "scope_attestation", raw=True)
+    assert path == tmp_path / "nope" / "cohort.yaml"
+    raw, _ = get_artifact(tmp_path / "nope", "cohort", raw=True)
     assert raw is None
     with pytest.raises(ValueError):
         get_artifact(TEMPLATE, "nope")

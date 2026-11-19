@@ -96,9 +96,14 @@ def test_cli_show_and_validate(capsys, tmp_path: Path) -> None:
     assert payload["incomplete"]
 
 
-def test_cli_validate_ok_when_authoring_filled(capsys, tmp_path: Path) -> None:
-    """Заполненные авторские поля (definition/selection_reason) → validate EXIT_OK."""
-    package = _new(capsys, tmp_path)
+def _fill_authoring(
+    capsys: pytest.CaptureFixture[str], package: Path, tmp_path: Path
+) -> None:
+    """Заполняет авторские поля пакета (роли и обоснования когорты).
+
+    Без них ``validate`` возвращает ``EXIT_BLOCKED`` по неполноте (A3), и проверка
+    «пакет проходит валидацию» доказывала бы не то, что заявлено.
+    """
     for role_id in ("role_primary", "role_secondary"):
         code, _, _ = _run(
             capsys,
@@ -114,9 +119,16 @@ def test_cli_validate_ok_when_authoring_filled(capsys, tmp_path: Path) -> None:
     )
     code, _, _ = _run(
         capsys,
-        ["package", "cohort", "set", "--package", str(package), "--entries", str(entries), "--actor", "t", "--json"],
+        ["package", "cohort", "set", "--package", str(package), "--entries", str(entries),
+         "--actor", "t", "--json"],
     )
     assert code == EXIT_OK
+
+
+def test_cli_validate_ok_when_authoring_filled(capsys, tmp_path: Path) -> None:
+    """Заполненные авторские поля (definition/selection_reason) → validate EXIT_OK."""
+    package = _new(capsys, tmp_path)
+    _fill_authoring(capsys, package, tmp_path)
     code, out, _ = _run(capsys, ["package", "validate", "--package", str(package), "--json"])
     assert code == EXIT_OK
     assert json.loads(out)["ok"] is True
@@ -124,12 +136,12 @@ def test_cli_validate_ok_when_authoring_filled(capsys, tmp_path: Path) -> None:
 
 def test_cli_validate_blocked_exit_code(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
-    (package / "scope_attestation.yaml").unlink()
     # Пишем блокирующее состояние в обход CRUD (save_artifact не линтует) — так проверяем
-    # именно CLI-путь validate, а не отказ мутации.
+    # именно CLI-путь validate, а не отказ мутации. ``slug-lowercase`` блокирует:
+    # ``param_id`` обязан быть slug'ом в нижнем регистре.
     artifacts = load_artifacts(package)
     rows = [
-        row.model_copy(update={"absence_rule": AbsenceRuleType.PARAMETER_REFERENCE})
+        row.model_copy(update={"param_id": row.param_id.upper()})
         if row.param_id == "param.alpha_capability"
         else row
         for row in artifacts.catalog
@@ -138,6 +150,32 @@ def test_cli_validate_blocked_exit_code(capsys, tmp_path: Path) -> None:
     code, out, _ = _run(capsys, ["package", "validate", "--package", str(package), "--json"])
     assert code == EXIT_BLOCKED
     assert json.loads(out)["ok"] is False
+
+
+def test_validate_accepts_distribution_absence_without_attestation(
+    capsys, tmp_path: Path
+) -> None:
+    """``distribution_absence`` без ``scope_attestation.yaml`` проходит ``validate``.
+
+    Прежде такой пакет блокировался правилом ``absence-attestation``: подпись человека
+    считалась условием публикации ``❌``. С 0.4.0 подписи нет — класс ``bounded``
+    выставляет правило каталога, условие пространства проверяет I2d, а публикацию
+    авторизует гейт G4, поэтому валидация пакета о подписи молчит.
+    """
+    package = _new(capsys, tmp_path)
+    _fill_authoring(capsys, package, tmp_path)
+    (package / "scope_attestation.yaml").unlink()
+    artifacts = load_artifacts(package)
+    rows = [
+        row.model_copy(update={"absence_rule": AbsenceRuleType.DISTRIBUTION_ABSENCE})
+        if row.param_id == "param.alpha_capability"
+        else row
+        for row in artifacts.catalog
+    ]
+    save_artifact(package, "catalog", rows)
+    code, out, _ = _run(capsys, ["package", "validate", "--package", str(package), "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["ok"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +302,7 @@ def test_cli_compose_bad_profile_file(capsys, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# I2: baselines / cohort / scope
+# I2: baselines / cohort
 # ---------------------------------------------------------------------------
 
 
@@ -345,35 +383,6 @@ def test_cli_cohort_set(capsys, tmp_path: Path) -> None:
     assert len(load_artifacts(package).cohort.entries) == 1
 
 
-def test_cli_scope_set_clear(capsys, tmp_path: Path) -> None:
-    package = _new(capsys, tmp_path)
-    code, _, _ = _run(
-        capsys,
-        ["package", "scope", "set", "--package", str(package), "--procedure", "полная проверка",
-         "--actor", "t", "--json"],
-    )
-    assert code == EXIT_OK
-    assert load_artifacts(package).scope_attestation == "полная проверка"
-    code, _, _ = _run(capsys, ["package", "scope", "clear", "--package", str(package), "--actor", "t", "--json"])
-    assert code == EXIT_OK
-    assert not (package / "scope_attestation.yaml").exists()
-
-
-def test_cli_scope_clear_blocked(capsys, tmp_path: Path) -> None:
-    package = _new(capsys, tmp_path)
-    artifacts = load_artifacts(package)
-    rows = [
-        row.model_copy(update={"absence_rule": AbsenceRuleType.PARAMETER_REFERENCE})
-        if row.param_id == "param.alpha_capability"
-        else row
-        for row in artifacts.catalog
-    ]
-    save_artifact(package, "catalog", rows)
-    code, _, _ = _run(capsys, ["package", "scope", "clear", "--package", str(package), "--json"])
-    assert code == EXIT_BLOCKED
-    assert (package / "scope_attestation.yaml").is_file()
-
-
 # ---------------------------------------------------------------------------
 # I2: suggest / candidates / apply
 # ---------------------------------------------------------------------------
@@ -438,21 +447,20 @@ def test_cli_apply_requires_actor(capsys, tmp_path: Path) -> None:
 
 def test_cli_apply_blocked_candidate(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
-    (package / "scope_attestation.yaml").unlink()
     before = (package / "catalog.csv").read_bytes()
     candidates = _write(
         tmp_path / "blocked.json",
         json.dumps(
             [
                 {
-                    "kind": "param",
+                    # Линия не объявлена в ``sources/reference_products.yaml`` — блокирующее
+                    # правило ``baseline-without-reference-product``; кандидат обязан быть
+                    # отвергнут без записи.
+                    "kind": "baseline",
                     "payload": {
-                        "title": "Blocked",
-                        "rule": "r",
-                        "module": "module_core",
-                        "group": "g",
-                        "importance": "Баз",
-                        "absence_rule": "parameter_reference",
+                        "baseline_id": "baseline_ghost",
+                        "param_id": "param.alpha_capability",
+                        "inheritance_mode": "direct",
                     },
                 }
             ]
@@ -621,7 +629,7 @@ def test_cli_param_list_filters_and_search(capsys, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# I4: read-плоскость — get/list по модулям/ролям/параметрам/baselines/scope/golden/run/artifact
+# I4: read-плоскость — get/list по модулям/ролям/параметрам/baselines/golden/run/artifact
 # ---------------------------------------------------------------------------
 
 
@@ -732,17 +740,6 @@ def test_cli_baseline_get_exact_and_ambiguous(capsys, tmp_path: Path) -> None:
     assert payload["count"] == 2
 
 
-def test_cli_scope_show_present_and_missing(capsys, tmp_path: Path) -> None:
-    package = _new(capsys, tmp_path)
-    code, out, _ = _run(capsys, ["package", "scope", "show", "--package", str(package), "--json"])
-    assert code == EXIT_OK
-    assert json.loads(out)["procedure"]
-    (package / "scope_attestation.yaml").unlink()
-    code, out, _ = _run(capsys, ["package", "scope", "show", "--package", str(package), "--json"])
-    assert code == EXIT_NOT_FOUND
-    assert json.loads(out)["found"] is False
-
-
 def test_cli_golden_list_search_and_filters(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
     code, out, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--json"])
@@ -781,11 +778,13 @@ def test_cli_artifact_list(capsys, tmp_path: Path) -> None:
     code, out, _ = _run(capsys, ["package", "artifact", "list", "--package", str(package), "--json"])
     assert code == EXIT_OK
     payload = json.loads(out)
-    assert payload["count"] == 10
+    assert payload["count"] == 9
     names = {item["name"] for item in payload["artifacts"]}
+    # ``scope_attestation`` в реестре артефактов больше нет (0.4.0): файл, если он есть
+    # в пакете, — данные, а не артефакт прогона.
     assert names == {
         "package", "catalog", "baselines", "cohort",
-        "golden", "domain_profiles", "scope_attestation", "run", "crawl_sources",
+        "golden", "domain_profiles", "run", "crawl_sources",
         "seeds",
     }
 
@@ -807,10 +806,6 @@ def test_cli_artifact_get_structured_and_raw(capsys, tmp_path: Path) -> None:
     code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "domain_profiles", "--json"])
     assert code == EXIT_OK and isinstance(json.loads(out)["data"], dict)
 
-    # scope_attestation --raw — сырой текст YAML.
-    code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "scope_attestation", "--raw"])
-    assert code == EXIT_OK
-    assert "procedure:" in out
 
 
 def test_cli_artifact_get_absent_and_raw_json_conflict(capsys, tmp_path: Path) -> None:

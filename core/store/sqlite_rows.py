@@ -276,7 +276,6 @@ def _evidence_row(ev: CellEvidence) -> tuple[Any, ...]:
         ev.citation_quote,
         ev.content_hash,
         _as_text(ev.source_scope),
-        ev.scope_acceptance,
         ev.index_build_id,
         ev.partition_build_id,
         # O5: адрес версии документа (``dv_...``) — из ``chunk_id`` чанка-цитаты, не из
@@ -308,7 +307,6 @@ def _absence_evidence_row(entry: Mapping[str, Any]) -> tuple[Any, ...]:
         entry.get("citation_quote"),
         entry.get("content_hash"),
         _as_text(entry.get("source_scope")),
-        entry.get("scope_acceptance"),
         entry.get("index_build_id"),
         None,
         entry.get("doc_version_id"),
@@ -336,7 +334,6 @@ def _row_to_absence(row: sqlite3.Row) -> dict[str, Any]:
         "source_kind": row["source_kind"],
         "evidence_type": EvidenceType.ABSENCE.value,
         "source_scope": row["source_scope"],
-        "scope_acceptance": row["scope_acceptance"],
         "index_build_id": row["index_build_id"],
         "doc_version_id": _row_optional(row, "doc_version_id"),
     }

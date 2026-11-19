@@ -114,10 +114,10 @@ def _absent(product_id: str, param_id: str, strength: DenialStrength) -> Cell:
             denial_strength=strength, citation_quote="функция не поддерживается"
         )
     elif strength is DenialStrength.BOUNDED:
+        # Подписи нет: ``bounded`` выставляет правило каталога, а публикацию авторизует G4.
         scope = EvidenceScope(
             denial_strength=strength,
             reason="конечный справочник, процедура полноты объявлена",
-            scope_acceptance="reviewer",
         )
     else:
         scope = EvidenceScope(

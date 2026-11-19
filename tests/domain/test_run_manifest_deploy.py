@@ -170,28 +170,21 @@ def test_crawl_provenance_heterogeneous_survives_dump_validate() -> None:
     assert from_json.heterogeneous is True
 
 
-# --- Вариант 2: переименование подписи в манифесте -------------------------
+# --- 0.4.0: per-cell подписи в манифесте больше нет ------------------------
 
 
-def test_manifest_scope_acceptance_is_the_published_name() -> None:
-    """Подпись опубликована как ``scope_acceptance`` — имя видно в манифесте и артефактах.
+def test_manifest_carries_no_scope_acceptance_field() -> None:
+    """Per-cell подписи в манифесте нет: ``extra="forbid"`` отвергает и старое имя.
 
-    Смысл поля — принятие риска человеком, а не аттестация полноты охвата, поэтому и имя
-    обязано это называть: published-контракт читают отчёт и внешние потребители.
+    Манифест публикует **условия** прогона, а не подписи ячеек: публикацию ``❌``
+    авторизует гейт G4 (решение владельца 19.11.2026), условие пространства выражает I2d.
+    Ни нового имени, ни прежнего ``scope_attestations`` манифест не принимает — иначе
+    читатель принял бы наличие ключа за действующую подпись.
     """
-    manifest = _manifest(scope_acceptance={"p1": "expert-1"})
-    dumped = manifest.model_dump(mode="json")
-    assert dumped["scope_acceptance"] == {"p1": "expert-1"}
-    assert "scope_attestations" not in dumped
+    import pytest as _pytest
+
+    for name in ("scope_acceptance", "scope_attestations"):
+        with _pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            _manifest(**{name: {"p1": "expert-1"}})
 
 
-def test_manifest_reads_legacy_scope_attestations_key() -> None:
-    """Старый ключ ``scope_attestations`` читается: манифесты прошлых прогонов живы.
-
-    Иначе объявленный ❌ исторического прогона потерял бы подписанта — аудит-след исчез бы
-    при переименовании, а не при удалении данных.
-    """
-    legacy = _manifest(scope_attestations={"p1": "expert-1"})
-    assert legacy.scope_acceptance == {"p1": "expert-1"}
-    # Пустое историческое значение не превращается в «подписано кем-то».
-    assert _manifest(scope_attestations={}).scope_acceptance == {}

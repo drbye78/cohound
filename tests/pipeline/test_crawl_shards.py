@@ -52,7 +52,11 @@ from core.domain import (
 from core.domain.models import CrawlRunConfig
 from core.pipeline.corpus_coverage import HOST_OUT_OF_SHARD_REASON
 from core.pipeline.crawl_frontier import CrawlLimits, Frontier
-from core.pipeline.evaluate import _enforce_absence_coverage
+from core.pipeline.evaluate import (
+    CorpusArtifactDates,
+    _enforce_absence_coverage,
+    _enforce_dated_absence,
+)
 from core.pipeline.extract_queue import ExtractQueue
 from core.pipeline.liveness import recover_interrupted_sessions
 from core.pipeline.report import crawl_control_digest
@@ -362,11 +366,12 @@ def test_sharded_node_reports_partial_session_and_incomplete_coverage(
 
 
 def test_absence_is_not_published_on_a_sharded_corpus(tmp_path: Path) -> None:
-    """``❌`` на неполном (шардированном) корпусе понижается до ``❓`` — I2c исполняется.
+    """``❌`` на шардированном корпусе понижается до ``❓`` — но по I2d, а не по I2c.
 
-    Класс ``bounded`` без принятия риска человеком не даёт права на ``❌``: часть материала
-    принадлежит другому узлу, и «искали и не нашли» здесь недоказуемо. Понижение — ``❓``
-    (I12), а не ``failed`` (I4): прибор отработал, охват не тот.
+    Шард — это неполное снятие пространства: часть материала принадлежит другому узлу,
+    поэтому «искали и не нашли» недоказуемо. С 0.4.0 этот вывод несут **датированные
+    снятия корней** (I2d), а не подпись человека: I2c класс ``bounded`` пропускает, и
+    ячейка держится только на носителе. Понижение — ``❓`` (I12), а не ``failed`` (I4).
     """
     store = SqliteStore(":memory:")
     try:
@@ -379,19 +384,38 @@ def test_absence_is_not_published_on_a_sharded_corpus(tmp_path: Path) -> None:
         coverage = store.read_corpus_coverage(harness.RUN_ID, "p1")
         assert coverage is not None
 
-        scope = EvidenceScope.model_construct(
+        scope = EvidenceScope(
             denial_strength=DenialStrength.BOUNDED,
             reason="объявленный конечный справочник",
             enumerated=True,
-            scope_acceptance=None,
         )
-        status, demoted_scope, demoted, notes = _enforce_absence_coverage(
+        # I2c молчит: класс bounded неполнотой охвата не отменяется (и не подтверждается).
+        passed_status, passed_scope, passed_demoted, passed_notes = (
+            _enforce_absence_coverage(
+                out_status=Status.ABSENT,
+                scope=scope,
+                absence_evidence=[],
+                param=harness._plan().params[0],
+                product_id="p1",
+                coverage=coverage,
+            )
+        )
+        assert (passed_status, passed_scope, passed_demoted, passed_notes) == (
+            Status.ABSENT,
+            scope,
+            False,
+            [],
+        )
+
+        # Публикацию снимает I2d: у bounded нет снятия каждого корня с complete=1.
+        status, demoted_scope, demoted, notes, _absence_as_of = _enforce_dated_absence(
             out_status=Status.ABSENT,
             scope=scope,
             absence_evidence=[],
             param=harness._plan().params[0],
             product_id="p1",
             coverage=coverage,
+            artifact_dates=CorpusArtifactDates(product_id="p1", by_doc_version={}),
         )
 
         assert status is Status.UNKNOWN

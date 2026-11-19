@@ -2,8 +2,9 @@
 
 Модуль отвечает за **детерминированное** чтение и запись артефактов раскладки пакета
 (``03`` §A.1): ``package.yaml``, ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``,
-``golden.csv``, ``domain_profiles.yaml``, ``crawl_sources.yaml``, ``scope_attestation.yaml``,
-``run.yaml``, ``sources/seeds.yaml``. Дополнительно **читается** объявление состояния
+``golden.csv``, ``domain_profiles.yaml``, ``crawl_sources.yaml``, ``run.yaml``,
+``sources/seeds.yaml``. ``scope_attestation.yaml`` в реестре **не** числится: с 0.4.0 он не
+читается прогоном (per-cell подпись снята), и пакетный CRUD его не трогает. Дополнительно **читается** объявление состояния
 эталона (``sources/golden_status.yaml``, :mod:`core.pipeline.golden_status`) — оно не
 таблица, а авторский вход, поэтому в :data:`ARTIFACT_FILES` (CRUD-реестр) не входит.
 Seed-набор, наоборот, в реестре есть: у него собственный сценарный слой
@@ -70,17 +71,11 @@ from core.domain.models import (
     Passport,
     ReferenceProducts,
     RunConfig,
-    ScopeAttestation,
     SeedsConfig,
 )
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.lint import LintReport, lint_run_inputs
-from core.pipeline.normalize import (
-    RunInputs,
-    cross_check,
-    load_scope_attestation,
-    load_scope_attestations,
-)
+from core.pipeline.normalize import RunInputs, cross_check
 from core.util.atomic_write import atomic_write_text as _atomic_write_text
 from core.util.text_utils import normalize_cyrillic
 
@@ -125,7 +120,6 @@ ARTIFACT_FILES: dict[str, str] = {
     "golden": "golden.csv",
     "domain_profiles": "domain_profiles.yaml",
     "crawl_sources": "crawl_sources.yaml",
-    "scope_attestation": "scope_attestation.yaml",
     "run": "run.yaml",
     "seeds": SEEDS_RELPATH,
 }
@@ -161,10 +155,6 @@ class PackageArtifacts:
     golden: list[GoldenRow] = field(default_factory=list)
     domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
     crawl_sources: CrawlSourcesConfig = field(default_factory=CrawlSourcesConfig)
-    scope_attestation: str | None = None
-    #: Подписи аттестации охвата по продуктам (``scope_attestation.yaml:attestations``).
-    #: Пусто — механизм не использован (опционален, I2b/I2c).
-    scope_attestations: list[ScopeAttestation] = field(default_factory=list)
     #: Объявленное состояние эталона (``sources/golden_status.yaml``); ``None`` — артефакты
     #: собраны вызывающим напрямую (``PackageArtifacts()``), объявление не читалось.
     golden_status: GoldenStatus | None = None
@@ -602,14 +592,6 @@ def load_artifacts(package_dir: str | Path) -> PackageArtifacts:
     if crawl_file.is_file():
         artifacts.crawl_sources = load_crawl_sources(crawl_file)
 
-    artifacts.scope_attestation = load_scope_attestation(base)
-    artifacts.scope_attestations = [
-        attestation
-        for _, attestation in sorted(
-            load_scope_attestations(base).items(), key=lambda item: item[0]
-        )
-    ]
-
     run_file = base / "run.yaml"
     if run_file.is_file():
         artifacts.run = load_run_config(run_file)
@@ -631,7 +613,6 @@ def _artifact_value(artifacts: PackageArtifacts, name: str) -> Any:
         "golden": artifacts.golden,
         "domain_profiles": artifacts.domain_profiles,
         "crawl_sources": artifacts.crawl_sources,
-        "scope_attestation": artifacts.scope_attestation,
         "run": artifacts.run,
         "seeds": artifacts.seeds,
     }[name]
@@ -673,8 +654,6 @@ def _artifact_count(artifacts: PackageArtifacts, name: str) -> int | None:
         return len(crawl.products) + sum(
             len(hosts) for hosts in crawl.sites.values()
         )
-    if name == "scope_attestation":
-        return 1 if artifacts.scope_attestation is not None else 0
     if name == "run":
         return len(artifacts.run.products) if artifacts.run is not None else None
     if name == "seeds":
@@ -689,8 +668,7 @@ def list_artifacts(package_dir: str | Path) -> list[dict[str, Any]]:
     Порядок совпадает с :data:`ARTIFACT_FILES` (детерминирован). ``count`` — число
     строк/записей артефакта (для ``package`` — число модулей; ``cohort`` — число записей;
     ``run`` — число продуктов; ``domain_profiles`` — число профилей; ``crawl_sources`` —
-    число явных источников (продукты + site-записи); ``scope_attestation`` — ``1``/``0``;
-    ``seeds`` — суммарное число seed'ов),
+    число явных источников (продукты + site-записи); ``seeds`` — суммарное число seed'ов),
     либо ``None``, если файл отсутствует или пакет не разбирается. Ничего не пишет; ошибки
     разбора не поднимаются — обзор остаётся доступным по файловой системе.
     """
@@ -730,7 +708,7 @@ def get_artifact(
     :param name: одно из :data:`ARTIFACT_FILES`.
     :param raw: ``True`` — сырой текст файла (``str``); ``False`` — структурированный
         JSON-совместимый вид (``model_dump(mode="json")`` для доменных моделей, ``dict``
-        для ``domain_profiles``, ``str`` для ``scope_attestation``).
+        для ``domain_profiles``).
     :returns: ``(None, path)``, если файл отсутствует (значение не выдумывается).
     :raises ValueError: неизвестное имя артефакта или ошибка чтения файла.
     """
@@ -752,7 +730,7 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
     """Детерминированно сериализует артефакт ``name`` в каталог пакета.
 
     YAML-артефакты (``package``/``cohort``/``run``/``domain_profiles``/``crawl_sources``/
-    ``scope_attestation``/``seeds``) пишутся через :func:`_dump_yaml` (``seeds`` — через
+    ``seeds``) пишутся через :func:`_dump_yaml` (``seeds`` — через
     канонический :func:`core.config.seeds.render_seeds`); табличные
     (``catalog``/``baselines``/``golden``) — CSV строго по каноническим колонкам.
 
@@ -799,16 +777,6 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
         return atomic_write_text(
             path, _dump_yaml(data.model_dump(mode="json", exclude_none=True))
         )
-    if name == "scope_attestation":
-        # Обратная совместимость: строка — «только процедура» (байты как раньше).
-        if isinstance(data, str):
-            return atomic_write_text(path, _dump_yaml({"procedure": data}))
-        if isinstance(data, dict):
-            return atomic_write_text(path, _dump_yaml(data))
-        raise ValueError(
-            "scope_attestation: ожидалась строка процедуры или словарь "
-            "{procedure, attestations}"
-        )
     if name == "seeds":
         # Канонический рендер (стабильный порядок продуктов) — тот же, что пишет
         # ``core.config.seeds.save_seeds``: две записи одного состояния не расходятся.
@@ -833,8 +801,8 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
 def delete_artifact(package_dir: str | Path, name: str) -> bool:
     """Удаляет файл артефакта ``name`` (path-конфайнмент). ``True``, если он был.
 
-    Нужен для операций «отмены» (например, ``clear_scope_attestation``): отсутствие
-    файла — не ошибка (возвращается ``False``).
+    Нужен для операций «отмены»: отсутствие файла — не ошибка (возвращается
+    ``False``).
     """
     if name not in ARTIFACT_FILES:
         raise ValueError(f"неизвестный артефакт: {name}")
@@ -932,7 +900,6 @@ def build_run_inputs(artifacts: PackageArtifacts) -> RunInputs:
         golden=golden,
         domain_profiles=dict(artifacts.domain_profiles),
         crawl_sources=artifacts.crawl_sources,
-        scope_attestation_procedure=artifacts.scope_attestation,
         golden_status=status,
         reference_products=artifacts.reference_products,
         passports=dict(artifacts.passports),

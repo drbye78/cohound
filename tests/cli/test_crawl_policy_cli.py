@@ -30,7 +30,7 @@ RUN_YAML = FIXTURES / "run.yaml"
 
 
 def _package(tmp_path: Path, name: str = "policy_pkg") -> Path:
-    """Минимальный пакет из фикстур + чистая процедура аттестации охвата."""
+    """Минимальный пакет из фикстур (процедура аттестации охвата не нужна — 0.4.0)."""
     package = tmp_path / name
     package.mkdir()
     for filename in ("package.yaml", "catalog.csv", "baselines.csv", "cohort.yaml"):
@@ -38,9 +38,6 @@ def _package(tmp_path: Path, name: str = "policy_pkg") -> Path:
     # Каталог целиком: `sources/reference_products.yaml` объявляет reference-продуктов,
     # без которых непустой `baselines.csv` блокируется (план 27 §10).
     shutil.copytree(FIXTURES / "sources", package / "sources")
-    (package / "scope_attestation.yaml").write_text(
-        "procedure: ручная аттестация полноты источника (тест)\n", encoding="utf-8"
-    )
     return package
 
 

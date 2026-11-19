@@ -113,7 +113,6 @@ def _inputs() -> RunInputs:
     """Нормализованные входы на фикстурах (эталон покрывает всю когорту)."""
     return replace(
         load_inputs(RUN_YAML, FIXTURES),
-        scope_attestation_procedure="ручная аттестация полноты источника (тест)",
     )
 
 

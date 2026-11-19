@@ -209,7 +209,7 @@ def test_golden_with_package_catalog_has_no_gap_note(
         [f"{PRODUCT_A},{PARAM_A},✅,documentation,class_a,full",
          f"{PRODUCT_B},{PARAM_B},❌,registry,class_b,full"],
     )
-    package = valid_package(tmp_path, scope_attestation=False)
+    package = valid_package(tmp_path)
 
     code = main(
         [
@@ -253,7 +253,7 @@ def test_report_writes_artifacts(
         "run.r",
         cells=[(PRODUCT_A, PARAM_A, Status.OK), (PRODUCT_B, PARAM_B, Status.ABSENT)],
     )
-    package = valid_package(tmp_path, scope_attestation=False)
+    package = valid_package(tmp_path)
     out = tmp_path / "runs"
 
     code = main(
@@ -434,7 +434,7 @@ def test_report_lists_urls_blocked_by_robots(tmp_path: Path, capsys: pytest.Capt
             )
         )
 
-    package = valid_package(tmp_path, scope_attestation=False)
+    package = valid_package(tmp_path)
     out = tmp_path / "runs"
     code = main(
         [

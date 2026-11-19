@@ -46,9 +46,6 @@ def _package(tmp_path: Path, name: str = "scope_pkg") -> Path:
     # Каталог целиком: `sources/reference_products.yaml` объявляет reference-продуктов,
     # без которых непустой `baselines.csv` блокируется (план 27 §10).
     shutil.copytree(FIXTURES / "sources", package / "sources")
-    (package / "scope_attestation.yaml").write_text(
-        "procedure: ручная аттестация полноты источника (тест)\n", encoding="utf-8"
-    )
     (package / "crawl_policy.yaml").write_text(
         "sites:\n  p1:\n    p1.test: {mode: scheduled, interval_hours: 100}\n",
         encoding="utf-8",

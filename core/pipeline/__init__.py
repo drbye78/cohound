@@ -141,12 +141,7 @@ if TYPE_CHECKING:
         collect_phase_durations,
         compute_metrics,
     )
-    from core.pipeline.normalize import (
-        RunInputs,
-        cross_check,
-        load_inputs,
-        load_scope_attestation,
-    )
+    from core.pipeline.normalize import RunInputs, cross_check, load_inputs
     from core.pipeline.package_add_product import (
         AddProductError,
         AddProductPlan,
@@ -163,7 +158,6 @@ if TYPE_CHECKING:
         add_param,
         add_role,
         bump_version,
-        clear_scope_attestation,
         create_package,
         find_baselines,
         get_baseline,
@@ -172,7 +166,6 @@ if TYPE_CHECKING:
         get_param,
         get_role,
         get_run_config,
-        get_scope_attestation,
         list_baselines,
         list_golden,
         list_modules,
@@ -186,7 +179,6 @@ if TYPE_CHECKING:
         renormalize_modules,
         set_archetype,
         set_cohort,
-        set_scope_attestation,
         show_package,
         update_baseline,
         update_cohort,
@@ -406,7 +398,6 @@ __all__ = [  # noqa: RUF022
     # normalize (T5.4)
     "RunInputs",
     "load_inputs",
-    "load_scope_attestation",
     "cross_check",
     # lint (T5.2)
     "LintReport",
@@ -611,12 +602,9 @@ __all__ = [  # noqa: RUF022
     "remove_baseline",
     "list_golden",
     "get_run_config",
-    "get_scope_attestation",
     "set_cohort",
     "update_cohort",
     "next_cohort_ref",
-    "set_scope_attestation",
-    "clear_scope_attestation",
     "get_cohort",
     "get_module",
     "list_modules",
@@ -781,7 +769,6 @@ _LAZY: dict[str, str] = {
     "RunInputs": "core.pipeline.normalize",
     "cross_check": "core.pipeline.normalize",
     "load_inputs": "core.pipeline.normalize",
-    "load_scope_attestation": "core.pipeline.normalize",
     # package_add_product
     "AddProductError": "core.pipeline.package_add_product",
     "AddProductPlan": "core.pipeline.package_add_product",
@@ -797,7 +784,6 @@ _LAZY: dict[str, str] = {
     "add_param": "core.pipeline.package_admin",
     "add_role": "core.pipeline.package_admin",
     "bump_version": "core.pipeline.package_admin",
-    "clear_scope_attestation": "core.pipeline.package_admin",
     "create_package": "core.pipeline.package_admin",
     "find_baselines": "core.pipeline.package_admin",
     "get_baseline": "core.pipeline.package_admin",
@@ -806,7 +792,6 @@ _LAZY: dict[str, str] = {
     "get_param": "core.pipeline.package_admin",
     "get_role": "core.pipeline.package_admin",
     "get_run_config": "core.pipeline.package_admin",
-    "get_scope_attestation": "core.pipeline.package_admin",
     "list_baselines": "core.pipeline.package_admin",
     "list_golden": "core.pipeline.package_admin",
     "list_modules": "core.pipeline.package_admin",
@@ -820,7 +805,6 @@ _LAZY: dict[str, str] = {
     "renormalize_modules": "core.pipeline.package_admin",
     "set_archetype": "core.pipeline.package_admin",
     "set_cohort": "core.pipeline.package_admin",
-    "set_scope_attestation": "core.pipeline.package_admin",
     "show_package": "core.pipeline.package_admin",
     "update_baseline": "core.pipeline.package_admin",
     "update_cohort": "core.pipeline.package_admin",

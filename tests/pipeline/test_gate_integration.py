@@ -25,12 +25,15 @@ import datetime as _dt
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from core.domain import (
     CatalogRow,
     CellState,
+    DenialStrength,
+    EvidenceScope,
     Focus,
     Gate,
     GatePolicy,
@@ -144,6 +147,39 @@ def _g3_subject(items: list[ReviewItem] | None = None) -> GateSubject:
     return review_subject(items if items is not None else [_item()], run_id=RUN_ID)
 
 
+def _pub_cell(
+    product_id: str,
+    param_id: str,
+    *,
+    strength: DenialStrength | None = DenialStrength.EXPLICIT,
+    as_of: str | None = None,
+    status: Status = Status.ABSENT,
+) -> SimpleNamespace:
+    """Ячейка для предмета G4: только те поля, которые читает публикация.
+
+    Настоящий ``Cell`` не выражает дефект «``❌`` без ``evidence_scope``» — его отвергает
+    I2, — а именно этот дефект предмет обязан **показать** подписанту (так выглядит
+    legacy-строка из стора). Поэтому здесь лёгкий носитель тех же полей.
+    """
+    scope = (
+        # ``model_construct`` намеренно: предмет читает **только** ``denial_strength``, а
+        # правила конструктора (I2b/I2c: цитата, ``reason``, принятие риска) проверяются
+        # там, где ячейка создаётся. Тест предмета не должен зависеть от них — иначе
+        # смена правил подписи риска ломала бы проверку того, что подписант видит.
+        EvidenceScope.model_construct(denial_strength=strength)
+        if strength is not None
+        else None
+    )
+    return SimpleNamespace(
+        product_id=product_id,
+        param_id=param_id,
+        state=CellState.EVALUATED,
+        status=status,
+        evidence_scope=scope,
+        absence_as_of=as_of,
+    )
+
+
 def _runtime(
     subject: GateSubject | None,
     *,
@@ -194,6 +230,7 @@ def test_g4_subject_covers_publication_content(store: SqliteStore) -> None:
         "comparability",
         "ranking",
         "failure_rate",
+        "absence",
         "publish",
     }
     assert subject.material["coverage"]["defined"] in (True, False)
@@ -212,6 +249,127 @@ def test_g4_subject_digest_changes_with_ranking(store: SqliteStore) -> None:
     )
     assert first.digest != second.digest
     assert first.material["ranking"] != second.material["ranking"]
+
+
+# ---------------------------------------------------------------------------
+# G4: отсутствие в предмете — сила и датированность того, что публикуется
+# ---------------------------------------------------------------------------
+
+
+def _absence_cells() -> list[SimpleNamespace]:
+    """Два ``explicit`` с разными датами, ``bounded`` и ``❌`` без ``evidence_scope``."""
+    return [
+        _pub_cell("p1", "param_a", as_of="2026-11-07"),
+        _pub_cell("p1", "param_b", as_of="2026-11-05"),
+        _pub_cell(
+            "p2", "param_a", strength=DenialStrength.BOUNDED, as_of="2026-11-06"
+        ),
+        # Дефект: ❌ без evidence_scope — ни силы, ни проверяемого носителя.
+        _pub_cell("p2", "param_b", strength=None, as_of="2026-11-08"),
+    ]
+
+
+def test_g4_subject_shows_strength_and_date_of_published_absence(
+    store: SqliteStore,
+) -> None:
+    """Подписант видит силу каждого ``❌`` и дату носителя — иначе «нет» не взвесить."""
+    subject = publication_subject(
+        _bundle(store), run_id=RUN_ID, cells=_absence_cells()
+    )
+
+    absence = subject.material["absence"]
+    assert absence["by_strength"] == {
+        "explicit": 2,
+        "authoritative": 0,
+        "bounded": 1,
+    }
+    assert absence["as_of_min"] == "2026-11-05"
+    # Ячейка без evidence_scope названа дефектом, а её дата не притворяется носителем.
+    assert absence["undated"] == 1
+    assert absence["products_without_carrier"] == ["p2"]
+    # Экспорт — то, что внешняя система видит до решения.
+    assert subject.export["absence"] == absence
+
+
+def test_g4_subject_absence_does_not_depend_on_cell_order(
+    store: SqliteStore,
+) -> None:
+    """Перестановка входа не меняет ни секцию ``absence``, ни отпечаток предмета."""
+    cells = _absence_cells()
+    first = publication_subject(_bundle(store), run_id=RUN_ID, cells=cells)
+    second = publication_subject(
+        _bundle(store), run_id=RUN_ID, cells=list(reversed(cells))
+    )
+
+    assert first.material["absence"] == second.material["absence"]
+    assert first.digest == second.digest
+
+
+def test_g4_subject_absence_fully_dated_has_no_gap(store: SqliteStore) -> None:
+    """Все ``❌`` датированы ⇒ ``undated`` = 0 и пустой список продуктов без носителя."""
+    subject = publication_subject(
+        _bundle(store),
+        run_id=RUN_ID,
+        cells=[
+            _pub_cell("p1", "param_a", as_of="2026-11-05"),
+            _pub_cell(
+                "p2", "param_a", strength=DenialStrength.BOUNDED, as_of="2026-11-06"
+            ),
+            _pub_cell(
+                "p2",
+                "param_b",
+                strength=DenialStrength.AUTHORITATIVE,
+                as_of="2026-11-07",
+            ),
+        ],
+    )
+
+    absence = subject.material["absence"]
+    assert absence["undated"] == 0
+    assert absence["products_without_carrier"] == []
+    assert absence["by_strength"]["authoritative"] == 1
+    assert absence["as_of_min"] == "2026-11-05"
+
+
+def test_g4_subject_absence_section_present_without_denials(
+    store: SqliteStore,
+) -> None:
+    """Нет ``❌`` вовсе — секция остаётся (нули, ``as_of_min=None``), а не исчезает."""
+    subject = publication_subject(_bundle(store), run_id=RUN_ID)
+
+    assert subject.material["absence"] == {
+        "by_strength": {"explicit": 0, "authoritative": 0, "bounded": 0},
+        "as_of_min": None,
+        "undated": 0,
+        "products_without_carrier": [],
+    }
+
+
+def test_g4_subject_digest_changes_with_denial_strength(store: SqliteStore) -> None:
+    """Та же карта, но другая сила отрицания, — другой предмет публикации."""
+    bounded = publication_subject(
+        _bundle(store),
+        run_id=RUN_ID,
+        cells=[
+            _pub_cell(
+                "p1", "param_a", strength=DenialStrength.BOUNDED, as_of="2026-11-05"
+            )
+        ],
+    )
+    explicit = publication_subject(
+        _bundle(store),
+        run_id=RUN_ID,
+        cells=[
+            _pub_cell(
+                "p1", "param_a", strength=DenialStrength.EXPLICIT, as_of="2026-11-05"
+            )
+        ],
+    )
+
+    assert bounded.digest != explicit.digest
+    assert bounded.material["absence"]["by_strength"] != (
+        explicit.material["absence"]["by_strength"]
+    )
 
 
 # ---------------------------------------------------------------------------

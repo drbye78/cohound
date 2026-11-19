@@ -649,7 +649,7 @@ def execution_contract_digest(values: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Перенос ячеек (09 §10.1, схема ``cell-reuse-2``): ключ и его слагаемые
+# Перенос ячеек (09 §10.1, схема ``cell-reuse-3``): ключ и его слагаемые
 # ---------------------------------------------------------------------------
 
 #: Версия пространства ключей переноса ячейки (09 §10.1).
@@ -661,7 +661,11 @@ def execution_contract_digest(values: Mapping[str, Any]) -> str:
 #: измерялась. Значение входит в материал ключа, поэтому смена схемы — несовместимость
 #: по построению: старые ключи не совпадут, и ячейка переоценится (безопасное
 #: направление — лишняя переоценка, а не чужой вердикт).
-CELL_REUSE_SCHEMA = "cell-reuse-2"
+#:
+#: ``cell-reuse-3`` — из материала убрано слагаемое ``attestation_digest`` (отпечаток
+#: per-cell человеческой подписи): с 0.4.0 публикацию ``❌`` авторизует гейт G4, а
+#: per-cell подписи в модели нет. Состав материала изменился — значит и схема.
+CELL_REUSE_SCHEMA = "cell-reuse-3"
 
 #: Длина ключа переноса ячейки (24 hex-символа — как у прочих дайджестов §12.2).
 _CELL_REUSE_LEN = 24
@@ -890,7 +894,6 @@ def cell_reuse_key(
     capability_policy: str,
     unknown_policy: str,
     partial_score: float,
-    attestation_digest: str,
     partition_build_id: str | None,
 ) -> str:
     """Ключ переноса ячейки (09 §10.1, схема :data:`CELL_REUSE_SCHEMA`), 24 hex-символа.
@@ -904,7 +907,7 @@ def cell_reuse_key(
 
     Состав (порядок фиксирован — это материал ключа, а не документация):
 
-    * схема ключа (``cell-reuse-2``);
+    * схема ключа (``cell-reuse-3``);
     * адрес ячейки: ``product_id`` + ``param_id``;
     * строка каталога (:func:`core.pipeline.eval_cache.catalog_row_digest`) — ``rule``/
       ``absence_rule``/``param_type``/``role_binding``/… задают, что считается заявленным;
@@ -918,8 +921,6 @@ def cell_reuse_key(
     * ``methodology_version``/``status_dict_version``/``scoring_policy_version``/
       ``capability_policy``/``unknown_policy``/``partial_score`` — правила ответа (§10.5,
       §13): смена семантики — переоценка **всех** ячеек;
-    * ``attestation_digest`` — действующие человеческие подписи (O13): решение человека
-      не переносится неявно;
     * ``partition_build_id`` — продукт-партиция retrieved-набора. Именно **партиция**, а не
       ``composition_id``: пересборка чужой партиции не должна инвалидировать ячейку.
 
@@ -947,7 +948,6 @@ def cell_reuse_key(
             str(capability_policy),
             str(unknown_policy),
             repr(float(partial_score)),
-            str(attestation_digest),
             _key_part(partition_build_id),
         )
     )

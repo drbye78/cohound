@@ -12,9 +12,13 @@
   очереди ревью (Ш7) + сводка оценки. Изменение очереди (новая ``⚠️``-ячейка, смена
   статуса) меняет отпечаток: внешний ревьюер утверждал другое состояние.
 * G4 — Coverage (знаменатель, завершённые), значения Capability, аннотация
-  Comparability, ранжирование и отпечаток **содержимого** публикуемых артефактов
+  Comparability, ранжирование, отпечаток **содержимого** публикуемых артефактов
   (``publish.content_digest`` — детерминированный дамп бандла и ячеек; хэши файлов
-  добавляются, когда файлы уже существуют, — до Ш9 их физически нет).
+  добавляются, когда файлы уже существуют, — до Ш9 их физически нет) и секция
+  ``absence`` — что именно публикуется как отсутствие: сила ``❌`` и дата носителя.
+  Решение владельца 19.11.2026 (вариант D): ответственность за публикацию ``❌``
+  переходит к G4, поэтому подписант обязан видеть то, что раньше видел автор
+  per-cell подписи риска.
 
 Метки времени, пути и порядок обхода в материал **не** входят: один и тот же прогон даёт
 один и тот же отпечаток и один и тот же файл запроса (побайтно).
@@ -24,6 +28,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -31,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.domain import Gate
+from core.domain import ABSENT_DENIAL_STRENGTHS, DenialStrength, Gate, Status
 from core.pipeline.compute import ScoreBundle
 from core.util.hashing import short_hash
 
@@ -221,6 +226,101 @@ def _comparability_material(bundle: ScoreBundle) -> dict[str, Any]:
     }
 
 
+#: Классы силы отрицания, которые публикуются как ``❌``. Порядок — объявление в домене;
+#: набор берётся из единственного источника (:data:`ABSENT_DENIAL_STRENGTHS`), чтобы новый
+#: класс не появился в предмете решения «сам собой» и не пропал молча.
+_ABSENCE_STRENGTHS: tuple[str, ...] = tuple(
+    strength.value for strength in DenialStrength if strength in ABSENT_DENIAL_STRENGTHS
+)
+
+
+def _min_as_of(values: Sequence[str]) -> str | None:
+    """Самая ранняя дата носителя (``absence_as_of``) среди непустых значений.
+
+    Значения пишет :func:`core.domain.invariants.check_absence_dated` как
+    ``min(дат).isoformat()`` — ISO-8601 в UTC, то есть с **одним и тем же** смещением
+    ``+00:00``. Поэтому сравниваются разобранные даты, а не строки: лексикографический
+    порядок ломается на разной точности (``…:56.5+00:00`` строкой «меньше»
+    ``…:56+00:00``, хотя по времени позже). Для значений, которые не разбираются
+    (legacy-строка) или смешивают aware/naive, остаётся строковое сравнение — тогда
+    публикуется минимум как строка, как есть: подменять его на «даты нет» нельзя.
+    """
+    cleaned = [value for value in values if value]
+    if not cleaned:
+        return None
+    parsed: list[tuple[_dt.datetime, str]] = []
+    for value in cleaned:
+        try:
+            parsed.append((_dt.datetime.fromisoformat(value), value))
+        except (TypeError, ValueError):
+            return min(cleaned)
+    try:
+        return min(parsed, key=lambda item: item[0])[1]
+    except TypeError:  # смешение aware/naive — сравниваем как строки
+        return min(cleaned)
+
+
+def _absence_material(cells: Sequence[Any]) -> dict[str, Any]:
+    """Что именно публикуется как отсутствие: сила каждого ``❌`` и дата его носителя.
+
+    Считается по **тем же** ячейкам, что уже переданы в :func:`publication_subject`:
+    второго чтения стора нет — предмет решения описывает ровно то состояние, о котором
+    спрашивают внешнюю систему.
+
+    * ``by_strength`` — счётчики по классам, дающим ``❌`` (``explicit``/
+      ``authoritative``/``bounded``). Класс берётся из
+      ``cell.evidence_scope.denial_strength``. Класс вне этих трёх не схлопывается в
+      чужой счётчик, а появляется отдельным ключом: это дефект данных (I2), и подписант
+      обязан его видеть, а не получить аккуратную сумму.
+    * ``as_of_min`` — самая ранняя дата носителя среди ``❌`` (``min``, как в I2d: она
+      честная нижняя граница утверждения), ``None`` — публиковать нечего. Даты берутся
+      только у ячеек с классом: у ``❌`` без ``evidence_scope`` нет ни силы, ни
+      проверяемого носителя — такая ячейка учтена в ``undated``.
+    * ``undated`` — ``❌``, у которых подписанту нечего проверить: нет даты носителя
+      (``absence_as_of``) либо нет ``evidence_scope`` (нет и силы). Обязано быть 0;
+      ненулевое значение — сигнал дефекта, а не норма.
+    * ``products_without_carrier`` — продукты, у которых такой ``❌`` есть (отсортировано,
+      чтобы отпечаток не зависел от порядка входа).
+
+    Секция присутствует всегда, в том числе когда ``❌`` нет вовсе (нули и
+    ``as_of_min=None``): «отсутствие не публикуется» — факт предмета, а не пустота,
+    и подписант не должен отличать его от «секцию забыли посчитать».
+    """
+    by_strength: dict[str, int] = {strength: 0 for strength in _ABSENCE_STRENGTHS}
+    dates: list[str] = []
+    undated = 0
+    without_carrier: set[str] = set()
+    for cell in cells:
+        if _enum_value(getattr(cell, "status", None)) != Status.ABSENT.value:
+            continue
+        product_id = str(getattr(cell, "product_id", None))
+        scope = getattr(cell, "evidence_scope", None)
+        strength = (
+            _enum_value(getattr(scope, "denial_strength", None))
+            if scope is not None
+            else None
+        )
+        if strength is None:
+            # Нет класса — значит нет и силы, которую подписант мог бы взвесить.
+            undated += 1
+            without_carrier.add(product_id)
+            continue
+        key = str(strength)
+        by_strength[key] = by_strength.get(key, 0) + 1
+        as_of = getattr(cell, "absence_as_of", None)
+        if as_of:
+            dates.append(str(as_of))
+        else:
+            undated += 1
+            without_carrier.add(product_id)
+    return {
+        "by_strength": by_strength,
+        "as_of_min": _min_as_of(dates),
+        "undated": undated,
+        "products_without_carrier": sorted(without_carrier),
+    }
+
+
 def _artifact_material(
     outputs_dir: str | Path | None,
     publish_digest: str,
@@ -254,14 +354,17 @@ def publication_subject(
 
     :param bundle: ``ScoreBundle`` прогона (Coverage/Capability/Comparability/ранжирование).
     :param run_id: идентификатор прогона (входит в материал: решение относится к прогону).
-    :param cells: ячейки прогона — входят в ``content_digest`` публикуемого содержимого.
+    :param cells: ячейки прогона — входят в ``content_digest`` публикуемого содержимого и
+        в секцию ``absence`` (сила и датированность каждого ``❌``).
     :param outputs_dir: ``runs/{run_id}/outputs`` — если артефакты уже записаны, их хэши
         попадают в материал; до Ш9 их нет и поле остаётся ``null``.
 
     Материал: Coverage, Capability, модульные баллы, Comparability, ранжирование
-    (запрошенное/вычисленное), доля сбоев и состав артефактов. Изменение любого из них —
-    другое состояние публикации, то есть другое решение.
+    (запрошенное/вычисленное), доля сбоев, состав артефактов и ``absence`` — что именно
+    публикуется как отсутствие. Изменение любого из них — другое состояние публикации,
+    то есть другое решение.
     """
+    cell_list = list(cells)
     cell_rows = sorted(
         (
             {
@@ -270,7 +373,7 @@ def publication_subject(
                 "state": _enum_value(getattr(cell, "state", None)),
                 "status": _enum_value(getattr(cell, "status", None)),
             }
-            for cell in cells
+            for cell in cell_list
         ),
         key=lambda row: (str(row["product_id"]), str(row["param_id"])),
     )
@@ -293,6 +396,7 @@ def publication_subject(
             "epsilon": bundle.ranking_epsilon,
         },
         "failure_rate": bundle.failure_rate,
+        "absence": _absence_material(cell_list),
         "publish": _artifact_material(outputs_dir, publish_digest),
     }
     export: dict[str, Any] = {
@@ -301,6 +405,7 @@ def publication_subject(
         "capability": material["capability"],
         "comparability": material["comparability"],
         "ranking": material["ranking"],
+        "absence": material["absence"],
         "artifacts": material["publish"]["artifacts"],
         "content_digest": publish_digest,
     }

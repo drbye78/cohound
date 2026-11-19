@@ -2768,7 +2768,8 @@ def _resolve_phases(
         "inputs": inputs,
         "plan": plan,
         "ports": ports,
-        # I2b/I2c: каталог пакета — источник per-product подписей scope_attestation.yaml.
+        # Каталог пакета — источник объявленных артефактов (sources/manual_artifacts.yaml)
+        # и реестровых конфигураций. ``scope_attestation.yaml`` прогоном не читается.
         "package_dir": getattr(args, "package", None),
         "deploy_profile": deploy_profile,
         "edge_schema_version": edge_schema_version,

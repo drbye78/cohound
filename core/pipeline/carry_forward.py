@@ -1,4 +1,4 @@
-"""Перенос ячеек между прогонами (carry-forward), 09 §10 — схема ``cell-reuse-2``.
+"""Перенос ячеек между прогонами (carry-forward), 09 §10 — схема ``cell-reuse-3``.
 
 Модуль отвечает на **один** вопрос: можно ли вердикт ячейки прошлого прогона перенести в
 текущий, не спрашивая оценщика. Он **не** пишет в хранилища и не решает за вызывающего:
@@ -70,7 +70,6 @@ __all__ = [
     "CARRYABLE_STATES",
     "CarriedCell",
     "CellReuseConditions",
-    "attestation_digest",
     "carry_forward_cell",
     "cell_reuse_conditions",
     "evidence_digest",
@@ -100,17 +99,16 @@ class CellReuseConditions:
     """Объявленные условия ячейки, не зависящие от ретривала (09 §10.1).
 
     Строится **один раз на прогон** (:func:`cell_reuse_conditions`): половина слагаемых
-    ключа — свойства прогона (правила, модель, подписи), а не ячейки. Пересчитывать их на
-    каждую пару «продукт × параметр» значило бы читать политику расчёта сотни раз.
+    ключа — свойства прогона (правила, модель), а не ячейки. Пересчитывать их на каждую
+    пару «продукт × параметр» значило бы читать политику расчёта сотни раз.
 
-    :param product_id: продукт-партиция (подпись ``scope_acceptance`` — per product).
+    :param product_id: продукт-партиция (ячейка и её evidence продукт-скоупед, I17).
     :param conditions: объявленные методологические условия прогона
         (:class:`~core.pipeline.eval_cache.EvalConditions`).
     :param scoring_policy_version: версия политики расчёта
         (:func:`core.pipeline.digests.scoring_policy_version`).
     :param model_id / llm_scenario / model_config_digest: маршрутизация и конфигурация
         оценщика (I21).
-    :param attestation_digest: отпечаток действующих человеческих подписей (O13).
     """
 
     product_id: str
@@ -119,7 +117,6 @@ class CellReuseConditions:
     model_id: str
     llm_scenario: str
     model_config_digest: str
-    attestation_digest: str
 
 
 @dataclass(frozen=True)
@@ -204,21 +201,6 @@ def prompt_template_digest(param: CatalogRow) -> str:
     return short_hash(material, 24)
 
 
-def attestation_digest(product_id: str, scope_acceptance: str | None) -> str:
-    """Отпечаток человеческих подписей продукта (O13), 24 hex-символа.
-
-    Перенос не должен переносить **решение человека** неявно: ``scope_acceptance``
-    авторизует публикацию ``❌`` при неполном пространстве (I2c), и её смена обязана
-    инвалидировать перенос. Сегодня это единственный производитель человеческой подписи,
-    доступный конвейеру: таблица ``state.db.attestation`` объявлена, но писателя в прогоне
-    не имеет (§4.2), поэтому строить отпечаток из неё значило бы описывать несуществующий
-    канал. ``reviewed_by``/``N/A`` едут вместе с ячейкой и видны в отчёте как
-    ``measurement_origin=carried`` — это провенанс, а не скрытое решение.
-    """
-    material = f"{product_id}\x1f{'∅' if scope_acceptance is None else scope_acceptance}"
-    return short_hash(material, 24)
-
-
 def evidence_digest(evidence: Iterable[CellEvidence]) -> str:
     """Отпечаток набора evidence ячейки, 24 hex-символа.
 
@@ -251,7 +233,6 @@ def cell_reuse_conditions(
     conditions: EvalConditions,
     scoring_policy_version: str,
     evaluator: Any,
-    scope_acceptance: str | None,
     model_id: str | None = None,
 ) -> CellReuseConditions:
     """Собирает условия переноса продукта (09 §10.1) — **без** I/O.
@@ -270,7 +251,6 @@ def cell_reuse_conditions(
         model_id=str(resolved_model),
         llm_scenario=_EVALUATOR_SCENARIO,
         model_config_digest=model_config_digest(evaluator),
-        attestation_digest=attestation_digest(product_id, scope_acceptance),
     )
 
 
@@ -537,7 +517,6 @@ def carry_forward_cell(
         capability_policy=conditions.conditions.capability_policy,
         unknown_policy=conditions.conditions.unknown_policy,
         partial_score=conditions.conditions.partial_score,
-        attestation_digest=conditions.attestation_digest,
         partition_build_id=partition_build_id,
     )
     if key != previous.cell_reuse_key:
@@ -634,7 +613,7 @@ def measurement_row(
     стала бы источником для третьего прогона).
 
     ``doc_set_digest`` в per-cell таблице — набор документов **этой** ячейки
-    (``retrieved_doc_set_digest``, схема ``cell-reuse-2``), а не doc-set продукта: таблица
+    (``retrieved_doc_set_digest``, схема ``cell-reuse-3``), а не doc-set продукта: таблица
     per-cell, и второй смысл в ней означал бы, что «набор документов» в строке и в ключе
     разный. Product-level digest сюда не пишется.
 
@@ -670,7 +649,6 @@ def measurement_row(
         capability_policy=conditions.conditions.capability_policy,
         unknown_policy=conditions.conditions.unknown_policy,
         partial_score=conditions.conditions.partial_score,
-        attestation_digest=conditions.attestation_digest,
         partition_build_id=partition_build_id,
     )
     return CellMeasurementRow(

@@ -5,8 +5,8 @@
 гейте), ``--help`` и шов профилей ``local``/``split``. Используют ``capsys``/``tmp_path``.
 
 Данные категорийно-нейтральны (§1.3): ``p1``/``p2``, ``case_x``, ``param_a``. Валидный
-пакет — копия ``tests/config/fixtures/`` с добавленным ``scope_attestation.yaml`` (иначе
-сырые фикстуры справедливо блокируются правилом I2b).
+пакет — копия ``tests/config/fixtures/``; ``scope_attestation.yaml`` прогону больше не
+нужен (0.4.0: публикацию ``❌`` авторизует G4, условие пространства проверяет I2d).
 """
 
 from __future__ import annotations
@@ -280,32 +280,59 @@ def test_plan_plain_split_has_no_profile_warning(
     assert SPLIT_HARDENED_WARNING not in json_out(capsys).get("warnings", [])
 
 
+def _broken_package(tmp_path: Path) -> Path:
+    """Копия фикстур с нарушенным блокирующим правилом.
+
+    Пакет без ``scope_attestation.yaml`` планируется штатно (0.4.0), поэтому «битый»
+    пакет строится явной порчей артефакта: строка ``baselines.csv`` наследует от линии,
+    которой нет среди объявленных reference-продуктов (``baseline-without-reference-product``).
+    """
+    import shutil
+
+    package = tmp_path / "package"
+    package.mkdir()
+    for item in CONFIG_FIXTURES.iterdir():
+        if item.is_file():
+            shutil.copy(item, package / item.name)
+        elif item.is_dir() and not item.name.startswith("__"):
+            shutil.copytree(item, package / item.name)
+    baselines = package / "baselines.csv"
+    baselines.write_text(
+        baselines.read_text(encoding="utf-8") + "baseline_ghost,param_a,direct,,\n",
+        encoding="utf-8",
+    )
+    return package
+
+
 def test_plan_blocking_lint_prints_rule_code(
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Сырые фикстуры: distribution_absence без процедуры аттестации → блок I2b.
+    package = _broken_package(tmp_path)
     code = main(
         [
             "plan",
             "--run-yaml",
-            str(CONFIG_FIXTURES / RUN_YAML_NAME),
+            str(package / RUN_YAML_NAME),
             "--package",
-            str(CONFIG_FIXTURES),
+            str(package),
         ]
     )
     assert code == EXIT_USAGE
     captured = capsys.readouterr()
-    assert "I2b" in captured.err
+    assert "baseline-without-reference-product" in captured.err
 
 
-def test_plan_blocking_lint_json(capsys: pytest.CaptureFixture[str]) -> None:
+def test_plan_blocking_lint_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    package = _broken_package(tmp_path)
     code = main(
         [
             "plan",
             "--run-yaml",
-            str(CONFIG_FIXTURES / RUN_YAML_NAME),
+            str(package / RUN_YAML_NAME),
             "--package",
-            str(CONFIG_FIXTURES),
+            str(package),
             "--json",
         ]
     )
@@ -313,7 +340,9 @@ def test_plan_blocking_lint_json(capsys: pytest.CaptureFixture[str]) -> None:
     payload = json_out(capsys)
     assert payload["ok"] is False
     assert payload["error"] == "lint"
-    assert any("I2b" in message for message in payload["blocking"])
+    assert any(
+        "baseline-without-reference-product" in message for message in payload["blocking"]
+    )
 
 
 # ---------------------------------------------------------------------------

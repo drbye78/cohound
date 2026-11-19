@@ -90,7 +90,6 @@ from core.pipeline.manual_artifacts import (
     load_manual_artifacts,
     manual_artifacts_summary,
 )
-from core.pipeline.normalize import load_scope_attestations
 from core.pipeline.ocr_provenance import run_ocr_probe
 from core.pipeline.page_publication import evidence_pages_summary
 from core.pipeline.page_publication import human_line as evidence_pages_human_line
@@ -1073,9 +1072,9 @@ def build_phases(
     :param inputs: нормализованные входы (``RunInputs``): ``run``/``package``/``baselines``.
     :param plan: детерминированный план прогона (``RunPlan``): ``run_id``/``params``/веса.
     :param ports: внедрённые порты (оценщик, индексы, краулер/экстрактор/чанкер, реестр).
-    :param package_dir: каталог пакета категории — источник per-product подписей
-        ``scope_attestation.yaml:attestations`` (I2b/I2c). ``None`` (модульный вызов) ⇒
-        подписей нет: канал остаётся недостижимым ровно как до этого параметра.
+    :param package_dir: каталог пакета категории — источник объявленных байтов
+        (``sources/manual_artifacts.yaml``) и реестровых конфигураций. ``None`` (модульный
+        вызов) ⇒ объявленных артефактов нет.
     :param urls: ``product_id → [url]`` для Ш5 (план URL не несёт — тонкий вход).
     :param passports: ``product_id → Passport`` для Ш4 (наследование).
     :param out_dir: базовый каталог отчётов (Ш9); composition root передаёт resolved
@@ -1210,13 +1209,6 @@ def build_phases(
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
     """
     holder: dict[str, Any] = {}
-
-    # I2b/I2c: подписи аттестации охвата **per product**. Отсутствие файла → {} (механизм
-    # опционален); невалидный присутствующий файл — ``ValueError`` (не глушим: подпись
-    # авторизует публикацию ❌, молчаливая подмена сделала бы её недоказуемой).
-    scope_attestations = (
-        load_scope_attestations(package_dir) if package_dir else {}
-    )
 
     # -- Ш1–Ш2: предполёт уже выполнен composition root (CLI) ---------------- #
     def normalize_phase(ctx: RunContext) -> PhaseResult:
@@ -1525,12 +1517,6 @@ def build_phases(
             profile=retrieval_profile,
             cutoff_k=cutoff_k,
             strict=strict,
-            # I2b/I2c: подпись per product (покрытие per product). Продукт без подписи
-            # остаётся недостижимым для ❌ — канал не «упрощает» отрицание.
-            scope_acceptance={
-                product_id: attestation.attested_by
-                for product_id, attestation in scope_attestations.items()
-            },
             eval_cache=eval_cache,
             # 09 §10.5: условия, по которым посчитан вердикт, — часть ключа кэша. Строятся
             # из **объявленных** входов прогона (run.yaml:methodology_version, версия
@@ -1842,14 +1828,6 @@ def build_phases(
             refresh_policy=refresh_policy,
             frozen_source=frozen_source,
             policy_provenance=policy_facts,
-            # Вариант 2: принятия риска, которыми прогон достиг ❌ класса bounded
-            # (product → actor). Только продукты плана: подпись продукта вне плана
-            # прогоном не использовалась.
-            scope_attestations={
-                product_id: attestation.attested_by
-                for product_id, attestation in scope_attestations.items()
-                if product_id in set(plan.products)
-            },
             # I23/§5: состояние SERP-контура (раунды, израсходованный и объявленный бюджет,
             # терминация) — в ``runs.search_effort_budget_json``. Колонка существовала и
             # читалась отчётом, но никем не писалась (всегда ``null``); источник — durable

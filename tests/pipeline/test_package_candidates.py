@@ -27,7 +27,7 @@ from core.pipeline.package_discovery import (
     suggest_modules,
     suggest_roles,
 )
-from core.pipeline.package_io import load_artifacts, save_artifact
+from core.pipeline.package_io import load_artifacts
 
 
 def _make(tmp_path: Path, case: str = "case_x", archetype: str = "B") -> Path:
@@ -338,17 +338,14 @@ def test_apply_cohort_member_syncs_run_products(tmp_path: Path) -> None:
 
 def test_apply_blocked_candidate_leaves_files(tmp_path: Path) -> None:
     package = _make(tmp_path)
-    (package / "scope_attestation.yaml").unlink()
     before = _snapshot(package)
+    # Блокирующее правило: строка наследования без объявленного reference-продукта.
     blocked = Candidate(
-        kind="param",
+        kind="baseline",
         payload={
-            "title": "Blocked",
-            "rule": "r",
-            "module": "module_core",
-            "group": "g",
-            "importance": "Баз",
-            "absence_rule": "parameter_reference",
+            "baseline_id": "baseline_ghost",
+            "param_id": "param.alpha_capability",
+            "inheritance_mode": "direct",
         },
     )
     with pytest.raises(pa.PackageAdminError) as exc:
@@ -370,10 +367,17 @@ def test_apply_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert _snapshot(package) == before
 
 
-def test_scope_set_unblocks_parameter_reference(tmp_path: Path) -> None:
+def test_parameter_reference_needs_no_signature(tmp_path: Path) -> None:
+    """Правило ``parameter_reference`` не требует процедуры аттестации (0.4.0).
+
+    Прежде такой кандидат блокировался, пока человек не подпишет риск; теперь класс
+    ``bounded`` выставляет само правило каталога, а публикацию авторизует G4 — пакету
+    без ``scope_attestation.yaml`` ничего не мешает.
+    """
     package = _make(tmp_path)
+    # Файл шаблона — инертные данные; убираем его, чтобы проверка не опиралась на него.
     (package / "scope_attestation.yaml").unlink()
-    blocked = Candidate(
+    candidate = Candidate(
         kind="param",
         payload={
             "title": "Ref",
@@ -385,10 +389,7 @@ def test_scope_set_unblocks_parameter_reference(tmp_path: Path) -> None:
             "param_id": "param.ref",
         },
     )
-    with pytest.raises(pa.PackageAdminError):
-        apply_candidate(package, blocked, actor="tester")
-    pa.set_scope_attestation(package, "ручная полная проверка", actor="tester")
-    result = apply_candidate(package, blocked, actor="tester")
+    result = apply_candidate(package, candidate, actor="tester")
     assert result.created_id == "param.ref"
 
 
@@ -409,13 +410,20 @@ def test_apply_candidates_returns_results(tmp_path: Path) -> None:
 
 def test_apply_candidates_fail_fast_keeps_applied(tmp_path: Path) -> None:
     package = _make(tmp_path)
-    (package / "scope_attestation.yaml").unlink()
     candidates = [
         Candidate(kind="module", payload={"module_id": "module_ok", "weight": 5}),
         Candidate(
+            kind="baseline",
+            payload={
+                "baseline_id": "baseline_ghost",
+                "param_id": "param.alpha_capability",
+                "inheritance_mode": "direct",
+            },
+        ),
+        Candidate(
             kind="param",
             payload={
-                "title": "Blocked",
+                "title": "Never applied",
                 "rule": "r",
                 "module": "module_core",
                 "group": "g",
@@ -564,35 +572,20 @@ def test_set_cohort_replaces_entries(tmp_path: Path) -> None:
     assert str(cohort.frozen_at) == "2030-01-01"
 
 
-def test_scope_set_and_clear(tmp_path: Path) -> None:
-    package = _make(tmp_path)
-    pa.set_scope_attestation(package, "процедура", actor="t")
-    assert load_artifacts(package).scope_attestation == "процедура"
-    pa.clear_scope_attestation(package, actor="t")
-    assert load_artifacts(package).scope_attestation is None
-    assert not (package / "scope_attestation.yaml").exists()
+def test_scope_attestation_api_is_gone(tmp_path: Path) -> None:
+    """API per-cell подписи удалён целиком (0.4.0), а не спрятан.
+
+    Проверяется поверхность администрирования: носителя подписи больше нет, поэтому
+    ``set``/``clear``/``get`` не должны существовать — иначе читатель решил бы, что
+    подпись всё ещё что-то разрешает.
+    """
+    for name in (
+        "get_scope_attestation",
+        "get_scope_attestations",
+        "set_scope_attestation",
+        "clear_scope_attestation",
+        "attest_scope",
+    ):
+        assert not hasattr(pa, name), name
 
 
-def test_scope_set_empty_refuses(tmp_path: Path) -> None:
-    package = _make(tmp_path)
-    with pytest.raises(pa.PackageAdminError):
-        pa.set_scope_attestation(package, "   ")
-
-
-def test_scope_clear_blocked_when_required(tmp_path: Path) -> None:
-    package = _make(tmp_path)
-    save_artifact(
-        package,
-        "catalog",
-        [
-            row.model_copy(update={"absence_rule": pa.AbsenceRuleType.PARAMETER_REFERENCE})
-            if row.param_id == "param.alpha_capability"
-            else row
-            for row in load_artifacts(package).catalog
-        ],
-    )
-    before = (package / "scope_attestation.yaml").read_bytes()
-    with pytest.raises(pa.PackageAdminError) as exc:
-        pa.clear_scope_attestation(package)
-    assert exc.value.kind == "blocked"
-    assert (package / "scope_attestation.yaml").read_bytes() == before

@@ -157,9 +157,13 @@ def _scope_violations(scope: EvidenceScope, field: str = "evidence_scope") -> li
     а не исключение.
 
     * ``explicit`` → непустая цитата (отрицание без цитаты — мнение);
-    * ``bounded`` → причина **и** принятие риска человеком;
+    * ``bounded`` → непустая причина (процедура/основание полноты);
     * ``unobserved``/``not_stated``/``instrument_failed`` → непустая причина;
     * ``authoritative`` несовместим с заведомо неполной энумерацией.
+
+    Человеческой подписи класс ``bounded`` больше не требует (методология 0.4.0):
+    ответственность за публикацию несёт гейт G4, а условие пространства выражается
+    датированным носителем (I2d, :func:`check_absence_dated`).
     """
     violations: list[Violation] = []
     strength = scope.denial_strength
@@ -182,15 +186,6 @@ def _scope_violations(scope: EvidenceScope, field: str = "evidence_scope") -> li
             _violation(
                 "I2b",
                 f"I2b: denial_strength={strength.value} требует непустую reason",
-                field,
-            )
-        )
-    if strength is DenialStrength.BOUNDED and not (scope.scope_acceptance or "").strip():
-        violations.append(
-            _violation(
-                "I2b",
-                "I2b: bounded-отрицание требует scope_acceptance (принятия риска): "
-                "измерение не покрывает пространство",
                 field,
             )
         )
@@ -307,9 +302,10 @@ def check_absence_coverage(
     * ``explicit`` — это свидетельство вендора (цитата), а не вывод из полноты корпуса:
       неполнота охвата его не отменяет;
     * ``authoritative`` — авторитетная энумерация по построению: тоже не зависит;
-    * ``bounded`` — зависит от пространства, поэтому требует ``scope_acceptance``
-      (проверяется в :func:`_scope_violations`); при неполном охвате без принятия риска
-      публиковать ``❌`` нельзя;
+    * ``bounded`` — условие пространства выражается **датированным носителем** (I2d,
+      :func:`check_absence_dated`), а не подписью человека: с 0.4.0 per-cell подписи нет,
+      ответственность за публикацию несёт гейт G4. Здесь класс ``bounded`` поэтому
+      проходит: неполнота охвата сама по себе его не отменяет и не подтверждает;
     * ``unobserved``/``not_stated`` — не дают ``❌`` вообще.
 
     ``coverage=None`` — записи покрытия нет (legacy/без краула): проверка неприменима.
@@ -320,19 +316,14 @@ def check_absence_coverage(
         return []
     scope = cell.evidence_scope
     if scope is None:
-        # Историческая строка: прежнее правило — принятие риска в absence-записи.
-        # Читаются оба имени: колонка БД мигрируется при открытии, а in-memory словари
-        # прошлых прогонов (и фикстур) несут прежний ключ ``scope_attested_by``.
-        if any(
-            entry.get("scope_acceptance") or entry.get("scope_attested_by")
-            for entry in cell.absence_evidence
-        ):
-            return []
+        # Строка без объекта силы отрицания: класс не записан, поэтому согласованность
+        # с наблюдённым охватом проверить нечем. Прежняя редакция закрывала эту ветку
+        # принятием риска в absence-записи; с 0.4.0 такого носителя нет.
         return [
             _violation(
                 "I2c",
                 "I2c: ❌ без evidence_scope при неполном покрытии корпуса недоказуем "
-                "(историческая строка без принятия риска); блокирующие сбои: "
+                "(класс отрицания не записан); блокирующие сбои: "
                 f"{dict(coverage.blocking_failures) or '{}'}, нечитаемые origin'ы: "
                 f"{list(coverage.unreadable_origins) or '[]'}",
                 "absence_evidence",
@@ -347,18 +338,6 @@ def check_absence_coverage(
                 "ячейка обязана быть ❓ с этой причиной; блокирующие сбои: "
                 f"{dict(coverage.blocking_failures) or '{}'}, нечитаемые origin'ы: "
                 f"{list(coverage.unreadable_origins) or '[]'}",
-                "evidence_scope",
-            )
-        ]
-    if scope.denial_strength is DenialStrength.BOUNDED and not (
-        scope.scope_acceptance or ""
-    ).strip():
-        return [
-            _violation(
-                "I2c",
-                "I2c: bounded при неполном покрытии требует scope_acceptance "
-                "(принятия риска человеком); блокирующие сбои: "
-                f"{dict(coverage.blocking_failures) or '{}'}",
                 "evidence_scope",
             )
         ]

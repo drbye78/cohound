@@ -217,7 +217,6 @@ def _inputs() -> RunInputs:
         cohort=_cohort(),
         golden=[],
         domain_profiles={},
-        scope_attestation_procedure=None,
     )
 
 

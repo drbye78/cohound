@@ -502,7 +502,7 @@ def test_sensitivity_with_package_has_no_gap_note(
 ) -> None:
     db = tmp_path / "cohound.db"
     _seed_sensitivity_run(db)
-    package = valid_package(tmp_path, scope_attestation=False)
+    package = valid_package(tmp_path)
 
     code = main(
         [

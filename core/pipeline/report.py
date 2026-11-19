@@ -1113,7 +1113,6 @@ def build_manifest(
     blocks: Mapping[str, Any] | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
-    scope_attestations: Mapping[str, str] | None = None,
     observed_versions: Mapping[str, Any] | None = None,
     search_effort: Mapping[str, Any] | None = None,
     run_scope: str | None = None,
@@ -1188,11 +1187,6 @@ def build_manifest(
     значения уходят в ``edge_capabilities``), что сохраняет совместимость при разносе
     правок между лейнами.
 
-    * I2b/I2c — ``scope_attestations`` (``product_id → attested_by``): подписи, которыми
-      прогон авторизовал ``❌``. Информационный провенанс того же класса, что
-      ``reviewed_by``: в ``EXECUTION_CONTRACT_FIELDS`` **не входит** (авторизация, не
-      измерение), поэтому смена подписанта не даёт новый ``run_id``. На манифест уходят
-      под актуальным именем поля — ``scope_acceptance``.
     * План 20 §5 — ``corpus_snapshot``: снимок корпуса (``corpus_snapshot_id``, снятия
       прогона, ``corpus_as_of``). Провенанс, а не объявленный вход: в ``run_id`` не входит
       (снимок известен только после краула). Приходит готовым из durable-носителя фазы
@@ -1745,12 +1739,6 @@ def build_manifest(
         # входит: нарезка чанков от этого не зависит. ``None`` — документов нет вовсе.
         blocks=None if blocks is None else dict(blocks),
         snapshot_date=snapshot_date,
-        # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
-        # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
-        # Пишется **актуальное** имя поля (``scope_acceptance``): ``scope_attestations``
-        # читается только легаси-валидатором ``RunManifest`` ради старых манифестов,
-        # и новый код не вправе писать исторический ключ.
-        scope_acceptance=dict(scope_attestations or {}),
         **extra,
     )
 
@@ -2525,7 +2513,7 @@ def collect_crawl_truncation_anomalies(
                     "reason": (
                         "I2b/G: класс bounded при усечённом крауле продукта "
                         "(max_documents/max_depth) — объявленная полнота справочника "
-                        "недоказуема, требуется принятие риска человеком (scope_acceptance)"
+                        "недоказуема: датированного снятия корня (I2d) у такой ячейки нет"
                     ),
                 }
             )

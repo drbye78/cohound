@@ -156,7 +156,6 @@ from core.util.retry import backoff_delay, parse_retry_after
 
 __all__ = [
     "ABSENCE_COVERAGE_UNSATISFIED_REASON",
-    "ABSENCE_UNATTESTED_REVIEW_REASON",
     "CORPUS_INCOMPLETE_REVIEW_REASON",
     "DEFAULT_QUERY_EMBED_BATCH",
     "DEFAULT_RETRIEVAL_CUTOFF_K",
@@ -223,12 +222,6 @@ __all__ = [
 #: Ф0 → Вариант 2: машинный токен причины, по которой класс отрицания **понижен** до
 #: ``not_stated``/``unobserved``: неполное покрытие корпуса (охват не наблюдался целиком).
 CORPUS_INCOMPLETE_REVIEW_REASON = "corpus_incomplete_absence"
-
-#: Токен причины, по которой ``bounded``-отрицание не достигнуто: нет принятия риска
-#: (``scope_acceptance``). Отсутствие принятия — процедурное условие, а не сбой прибора
-#: (I4), поэтому исход — ``❓`` с этой причиной, а не ``failed``: ``❓`` остаётся в карте,
-#: ``failed`` выпадает из неё целиком.
-ABSENCE_UNATTESTED_REVIEW_REASON = "absence_unattested"
 
 #: Машинный токен I2c: ``❌`` **не публикуется**, потому что класс отрицания несовместим с
 #: наблюдённым охватом корпуса (нет принятия риска, класс не даёт «нет» либо у строки нет
@@ -429,9 +422,8 @@ def _cited_observations(
 class CarryForwardContext:
     """Входы переноса ячеек (09 §10.2) для **одного** продукта одного прогона.
 
-    Условия переноса — свойства прогона (правила, модель, шаблон), но отпечаток
-    человеческой подписи **per product** (``scope_acceptance`` подписывается по продукту),
-    поэтому контекст собирается на продукт. БД предшественника одна на прогон — её
+    Условия переноса — свойства прогона (правила, модель, шаблон), но собираются на
+    продукт: продукт — партиция ячейки и её evidence. БД предшественника одна на прогон — её
     открывает composition root, а не фаза: путь ``runs/{run_id}/cohound.db`` знает
     раскладка, а ``pipeline`` раскладку не читает.
 
@@ -562,7 +554,6 @@ def _carry_one(
     retrieval: RetrievalResult | None,
     protected: Cell | None,
     artifact_dates: CorpusArtifactDates | None,
-    scope_acceptance: str | None,
     store: StorePort | None,
 ) -> EvaluationOutcome | None:
     """Пытается перенести ячейку; ``None`` — мерить (09 §10.2).
@@ -1496,7 +1487,6 @@ def _absence_dict(ev) -> dict:  # noqa: ANN001 - CellEvidence, без импор
         # ``source_scope`` — устаревший скаляр: новый писатель его не выставляет, вопрос
         # решает ``EvidenceScope`` ячейки. Поле остаётся ради чтения исторических строк.
         "source_scope": ev.source_scope.value if ev.source_scope else None,
-        "scope_acceptance": ev.scope_acceptance,
         # R7/09 §8.1: та же привязка, что у ``cell_evidence`` — композиция прогона.
         "index_build_id": ev.index_build_id,
         # O5: адрес версии документа едет с записью так же, как ``content_hash``: запись
@@ -2113,7 +2103,6 @@ def _resolve_denial(
     out: LLMCellOutput,
     validation: ValidationResult,
     coverage: CorpusCoverage | None,
-    scope_acceptance: str | None,
     composition_id: str | None,
     candidates: int = 0,
 ) -> tuple[EvidenceScope | None, list[str]]:
@@ -2126,8 +2115,10 @@ def _resolve_denial(
       причина остаётся видимой. Это и лечит живой дефект: модель говорила «отсутствует»
       там, где вендор заявил свойство, но не дословно.
     * ``bounded`` — только для параметров, чей ``absence_rule`` объявляет конечный
-      справочник (``parameter_reference``/``distribution_absence``), и только при
-      принятии риска человеком (``scope_acceptance``). Иначе — ``not_stated``.
+      справочник (``parameter_reference``/``distribution_absence``): класс выставляется
+      **правилом каталога**, без подписи человека (0.4.0). Публикацию авторизует гейт G4,
+      а условие пространства проверяет I2d (:func:`_enforce_dated_absence`). Иначе —
+      ``not_stated``.
     * ``unobserved``/``not_stated`` — ``❓`` с причиной; класс выбирается по
       наблюдённому охвату, а не по самоотчёту модели.
     * ``authoritative`` здесь **не** выставляется никогда: он приходит от реестра.
@@ -2190,22 +2181,21 @@ def _resolve_denial(
                     "(недоказанное «нет» не публикуется)"
                 ],
             )
-        # Нет цитаты: класс зависит от объявленного правила и принятия риска.
+        # Нет цитаты: класс зависит от объявленного правила каталога.
         finite_reference = param.absence_rule in {
             AbsenceRuleType.PARAMETER_REFERENCE,
             AbsenceRuleType.DISTRIBUTION_ABSENCE,
         }
-        if finite_reference and (scope_acceptance or "").strip():
+        if finite_reference:
             return (
                 EvidenceScope(
                     denial_strength=DenialStrength.BOUNDED,
                     reason=(
                         claim_text
-                        or "конечный справочник объявлен каталогом; процедура полноты "
-                        "действует, риск принят"
+                        or "конечный справочник объявлен каталогом; условие пространства "
+                        "проверяет I2d"
                     ),
                     enumerated=True,
-                    scope_acceptance=scope_acceptance,
                     basis="rule:bounded",
                     **vector,
                 ),
@@ -2213,11 +2203,7 @@ def _resolve_denial(
             )
         strength = _denial_basis(vector, coverage)
         reason = claim_text or ABSENT_CLAIM_WITHOUT_DENIAL_REASON
-        if finite_reference:
-            # Конечный справочник без принятия риска — процедурное незнание.
-            reason = f"{ABSENCE_UNATTESTED_REVIEW_REASON}: {reason}"
-        else:
-            reason = f"{ABSENT_CLAIM_WITHOUT_DENIAL_REASON}: {reason}"
+        reason = f"{ABSENT_CLAIM_WITHOUT_DENIAL_REASON}: {reason}"
         if strength == DenialStrength.UNOBSERVED.value:
             # Причина, которую читатель видит первой: пространство не наблюдалось.
             reason = f"{CORPUS_INCOMPLETE_REVIEW_REASON}: {reason}"
@@ -2271,9 +2257,8 @@ def _build_absence_evidence(
     остаются обычным ``evidence`` (``evidence_type=direct``), поэтому в ``absence_evidence``
     дублируется только протокол.
 
-    Принятие риска (``scope_acceptance``) пишется и на протокол: опубликованный ``❌``
-    класса ``bounded`` обязан быть прослеживаем к человеку. Вердикт при этом определяется
-    **объектом** (:class:`EvidenceScope`), а не наличием подписи в записи.
+    Вердикт определяется **объектом** (:class:`EvidenceScope`), а не записью протокола:
+    с 0.4.0 per-cell подписи человека нет, а ответственность за публикацию несёт G4.
 
     Класс отрицания живёт **в объекте ячейки** (``cells.evidence_scope``) — единственный
     источник истины, который переживает персистенцию. Ключи ``denial_strength``/
@@ -2297,7 +2282,6 @@ def _build_absence_evidence(
             "content_hash": None,
             "source_kind": None,
             "evidence_type": EvidenceType.ABSENCE.value,
-            "scope_acceptance": scope.scope_acceptance,
             "index_build_id": composition_id,
             # O5: у синтетического протокола нет чанка, значит нет и версии документа —
             # ``NULL`` честнее выдуманного адреса (это утверждение о корпусе, не о чанке).
@@ -2371,7 +2355,7 @@ def _enforce_absence_coverage(
         return out_status, scope, False, []
 
     # Сообщение домена уже называет инвариант (``I2c:``) и недостающий компонент
-    # (``scope_acceptance``/``evidence_scope``); приписываем только поле строки.
+    # (``evidence_scope``); приписываем только поле строки.
     detail = "; ".join(
         f"[{violation.field or '—'}] {violation.message}" for violation in violations
     )
@@ -2447,8 +2431,8 @@ def _enforce_dated_absence(
     Порядок с I2c. Проверка вызывается **после** неё и только для уцелевшего ``❌``: если
     I2c уже снял ``❌``, ячейка ``❓`` и второй причины не появляется (``out_status`` на
     входе — результат I2c). Ужесточение §11.4 п.2 получается само: ``adopted``-снятие даёт
-    ``coverage.complete=False``, поэтому ``bounded``-ячейка уходит в ``❓`` даже с подписанным
-    ``scope_acceptance`` — подпись о риске не заменяет датированный носитель.
+    ``coverage.complete=False``, поэтому ``bounded``-ячейка уходит в ``❓`` — датированный
+    носитель нечем заменить (per-cell подписи с 0.4.0 нет).
 
     :returns: ``(status, scope, demoted, notes, absence_as_of)``. ``demoted`` запрещает
         публиковать протокол отсутствия, ``notes`` — машинные записи для
@@ -2555,8 +2539,6 @@ def _coverage_for(
 def _record_corpus_coverage(
     absence_evidence: list[dict],
     coverage: CorpusCoverage,
-    *,
-    accepted_by: str | None = None,
 ) -> None:
     """Дописывает в absence-evidence аудит блокировок корпуса (Ф0 → Вариант 2).
 
@@ -2566,19 +2548,10 @@ def _record_corpus_coverage(
     :class:`EvidenceScope`, а не запретом публиковать ``❌``. Аудит сохраняется ради отчёта
     и аудита, а не как условие гейта.
     """
-    accepted_by = accepted_by or next(
-        (
-            entry.get("scope_acceptance")
-            for entry in absence_evidence
-            if entry.get("scope_acceptance")
-        ),
-        None,
-    )
     absence_evidence.append(
         {
             "evidence_id": None,
             "source_id": None,
-            "scope_acceptance": accepted_by,
             "note": (
                 "Ф0: неполное покрытие корпуса — блокирующие сбои: "
                 f"{coverage.blocking_failures or '{}'}; "
@@ -2820,8 +2793,8 @@ def _persist(
     затирала чужой факт.
 
     **Absence-evidence (R4, §4.2).** Протокол отсутствия пишется тем же батч-механизмом, что
-    и прочие evidence (``add_absence_evidence``), с ``evidence_type='absence'`` и
-    ``scope_acceptance`` из записи. Без этого ``❌`` существовал только в
+    и прочие evidence (``add_absence_evidence``), с ``evidence_type='absence'``. Без этого
+    ``❌`` существовал только в
     памяти процесса оценки: отчёт и ревью читают ячейки из store, где отсутствие не лежало
     никогда. Store-двойники без метода пропускаются — как у прочих аддитивных писателей.
     """
@@ -3024,7 +2997,6 @@ def evaluate_cell(
     min_retrieval_score: float | None = None,
     protected: Cell | None = None,
     coverage: CorpusCoverage | None = None,
-    scope_acceptance: str | None = None,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
     prompt_archive: PromptArchive | None = None,
@@ -3057,10 +3029,6 @@ def evaluate_cell(
         через I2c (:func:`_enforce_absence_coverage`) — проверяет, согласован ли ``❌``
         с наблюдённым охватом. ``coverage=None`` (записи нет) делает I2c неприменимым:
         вердикт не меняется.
-    :param scope_acceptance: **принятие риска** человеком (прежде ``scope_attested_by``).
-        Не подставляется автоматически: это решение человека, переданное вызывающим.
-        Нужно только там, где измерение не покрывает пространство (``bounded``);
-        ``explicit`` с цитатой в нём не нуждается.
     :param eval_cache: межпрогонный кэш сырых вердиктов (:class:`EvalVerdictCache`).
         ``None`` ⇒ кэш выключен (поведение байт-в-байт прежнее). Хит отдаёт
         ``LLMCellOutput`` и проходит **весь** существующий эшелон заново; кэшируется
@@ -3438,7 +3406,6 @@ def evaluate_cell(
             out=out,
             validation=last_validation,
             coverage=effective_coverage,
-            scope_acceptance=scope_acceptance,
             composition_id=provenance[0],
             candidates=len(chunks_by_id),
         )
@@ -3470,11 +3437,7 @@ def evaluate_cell(
             # Аудит блокировок корпуса остаётся машинно-читаемым (отчёт/аудит), но
             # вердикт от него не зависит: неполнота уже выражена классом.
             if effective_coverage is not None and not effective_coverage.complete:
-                _record_corpus_coverage(
-                    absence_evidence,
-                    effective_coverage,
-                    accepted_by=evidence_scope.scope_acceptance,
-                )
+                _record_corpus_coverage(absence_evidence, effective_coverage)
         # I2c: объявленный инвариант исполняется здесь и только здесь. Если класс
         # отрицания не согласован с наблюдённым охватом, ``❌`` не публикуется: ячейка
         # становится ``❓`` с причиной, а протокол отсутствия снимается (см.
@@ -3773,7 +3736,6 @@ def evaluate_batch(
     ] | None = None,
     protected_by_param: Mapping[str, Cell] | None = None,
     coverage: CorpusCoverage | None = None,
-    scope_acceptance: str | None = None,
     min_retrieval_score: float | None = None,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
@@ -3908,7 +3870,6 @@ def evaluate_batch(
                 retrieval=primary_retrieval,
                 protected=protected,
                 artifact_dates=artifact_dates,
-                scope_acceptance=scope_acceptance,
                 store=store,
             )
             if carried_outcome is not None:
@@ -3937,7 +3898,6 @@ def evaluate_batch(
             store=write_target,
             protected=protected,
             coverage=coverage,
-            scope_acceptance=scope_acceptance,
             min_retrieval_score=min_retrieval_score,
             eval_cache=eval_cache,
             eval_conditions=eval_conditions,
@@ -4081,7 +4041,6 @@ def evaluate_phase(
     profile: RetrievalProfile | str | None = None,
     cutoff_k: int | None = None,
     strict: bool = True,
-    scope_acceptance: str | Mapping[str, str] | None = None,
     min_retrieval_score: float | None = EVALUATION_MIN_RETRIEVAL_SCORE,
     eval_cache: EvalVerdictCache | None = None,
     eval_conditions: EvalConditions | None = None,
@@ -4125,12 +4084,6 @@ def evaluate_phase(
     :param profile: зафиксированный профиль R0/R1/R2; ``None`` → :data:`DEFAULT_RETRIEVAL_PROFILE`.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K``; ``None`` → :data:`DEFAULT_RETRIEVAL_CUTOFF_K`.
     :param strict: strict (failed при исчерпании) vs preliminary (кандидат).
-    :param scope_acceptance: **принятие риска** человеком (прежде ``scope_attested_by``);
-        передаётся вызывающим из решения гейта/ревью и никогда не выводится
-        автоматически. Строка — прогон-широкое принятие; mapping ``product_id → actor`` —
-        per-product (покрытие per product). Оно нужно только классу ``bounded`` (измерение
-        не покрывает пространство), поэтому продукт без подписи получает ``❓`` с причиной
-        ``absence_unattested``, а не выпадает из карты.
     :param min_retrieval_score: порог аномалии §7.1 п. 4 (заметка, не сбой). Дефолт —
         объявленная константа :data:`~core.pipeline.evaluation_policy.EVALUATION_MIN_RETRIEVAL_SCORE`:
         исполнение и провенанс читают одно число, а не два. ``None`` — проверка выключена
@@ -4301,22 +4254,14 @@ def evaluate_phase(
     auth_rejection: str | None = None
 
     for product_id in plan.products:
-        # I2b/I2c: подпись аттестации per product (покрытие per product). Строка —
-        # прежняя прогон-широкая семантика; продукт без подписи — как раньше.
-        accepted = (
-            scope_acceptance.get(product_id)
-            if isinstance(scope_acceptance, Mapping)
-            else scope_acceptance
-        )
         protected_by_param = {
             param_id: cell
             for (owner_id, param_id), cell in protected_cells.items()
             if owner_id == product_id
         }
-        # 09 §10.1: условия переноса/индекса — свойства прогона, но подпись аттестации
-        # **per product** (``scope_acceptance`` подписывается по продукту). Собираются один
-        # раз на продукт: половина слагаемых ключа не зависит от ячейки, и пересчитывать
-        # политику расчёта на каждую пару «продукт × параметр» незачем.
+        # 09 §10.1: условия переноса/индекса — свойства прогона. Собираются один раз на
+        # продукт: половина слагаемых ключа не зависит от ячейки, и пересчитывать политику
+        # расчёта на каждую пару «продукт × параметр» незачем.
         reuse_conditions: CellReuseConditions | None = None
         if eval_conditions is not None:
             reuse_conditions = cell_reuse_conditions(
@@ -4324,7 +4269,6 @@ def evaluate_phase(
                 conditions=eval_conditions,
                 scoring_policy_version=scoring_policy_version(),
                 evaluator=evaluator,
-                scope_acceptance=accepted,
             )
         # Перенос дополнительно требует предшественника и обе БД; индекс — только
         # ``state`` (он обязан писаться и на первом прогоне, иначе второму нечего
@@ -4548,7 +4492,6 @@ def evaluate_phase(
             retrievals_by_param=retrievals_by_param,
             protected_by_param=protected_by_param,
             coverage=coverage,
-            scope_acceptance=accepted,
             min_retrieval_score=min_retrieval_score,
             eval_cache=eval_cache,
             eval_conditions=eval_conditions,
@@ -4965,18 +4908,6 @@ def _cell_condition(cell: Cell) -> tuple[str, str, int, int]:
     return str(cell.product_id), profile, cutoff, rrf_k
 
 
-def _accepted_risk(cell: Cell) -> str | None:
-    """Принятие риска, уже данное человеком ранее для этой ячейки (``scope_acceptance``).
-
-    Пере-оценка **не переспрашивает** и не выдумывает подпись: она повторяет ту, что
-    лежит в ``cell.evidence_scope``. Иначе ячейка, получившая ``❌`` класса ``bounded``,
-    после пере-оценки молча понизилась бы до ``❓`` — то есть пере-оценка корпуса
-    отменила бы человеческое решение о принятии риска.
-    """
-    scope = cell.evidence_scope
-    return scope.scope_acceptance if scope is not None else None
-
-
 def _current_build_id(store: StorePort, run_id: str) -> str | None:
     """Текущая сборка прогона (``runs.index_build_id``), если store это умеет читать."""
     reader = getattr(store, "read_run_index_ref", None)
@@ -5275,7 +5206,6 @@ def _evaluate_cells_by_condition(
                 max_retries=max_retries,
                 store=None,
                 coverage=coverage,
-                scope_acceptance=_accepted_risk(cell),
                 # План 15 §6.2 п.4: повтор идёт тем же порогом аномалии, что и фаза, —
                 # иначе повторная ячейка потеряла бы заметку о низком retrieval-скоре.
                 min_retrieval_score=EVALUATION_MIN_RETRIEVAL_SCORE,

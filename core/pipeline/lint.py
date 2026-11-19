@@ -10,8 +10,9 @@ pydantic-валидаторами домена (нужно сопоставле�
   ``baseline_id``, объявленные в ``sources/reference_products.yaml`` → **блок**
   (план 27 §3.1); объявленная линия без единой строки ``baselines.csv`` → warning:
   механизм выключен, и это видно до прогона, а не по ``no_policy_row``;
-- ``absence_rule ∈ {parameter_reference, distribution_absence}`` без настроенной
-  процедуры аттестации полноты источника ``scope_attested_by`` → **блок** (§4.2/I2b);
+- ``absence_rule ∈ {parameter_reference, distribution_absence}`` правила аттестации **не**
+  требует (методология 0.4.0): класс ``bounded`` выставляет каталог, условие пространства
+  проверяет I2d, публикацию авторизует G4 — линт о классе отрицания молчит;
 - пустые ``concept_terms`` у параметра → warning (§4.2; S13);
 - ``golden-full`` без страты ожидаемых ❌ → **блок** (§4.2/§11.6); наличие тиров
   ``fast``/``full`` в golden-наборе → warning; **объявленное** отсутствие эталона
@@ -44,7 +45,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from core.config.run_config import cross_check_products
-from core.domain.enums import AbsenceRuleType, Archetype, GoldenTier, ParamType, Status
+from core.domain.enums import Archetype, GoldenTier, ParamType, Status
 from core.pipeline.golden_status import STATE_ABSENT, STATE_DECLINED
 from core.pipeline.normalize import RunInputs
 
@@ -60,7 +61,6 @@ __all__ = [  # noqa: RUF022
     # правила (по одному предикату; тестируются изолированно)
     "check_weights_sum_to_100",
     "check_archetype_c_baselines",
-    "check_absence_attestation",
     "check_empty_concept_terms",
     "check_golden_full_absent_stratum",
     "check_golden_presence",
@@ -84,11 +84,6 @@ __all__ = [  # noqa: RUF022
 #: ``incomplete`` — авторские поля ещё не заполнены человеком: не блокирует создание и
 #: правку пакета, но запрещает прогон (см. :attr:`LintReport.ready`).
 Severity = Literal["blocking", "warning", "incomplete"]
-
-#: absence-правила, требующие действующей процедуры аттестации ``source_scope`` (I2b).
-_ATTESTED_ABSENCE_RULES: frozenset[AbsenceRuleType] = frozenset(
-    {AbsenceRuleType.PARAMETER_REFERENCE, AbsenceRuleType.DISTRIBUTION_ABSENCE}
-)
 
 #: Токены публичной величины/метрики — зеркало ``CatalogRow._check`` (домен §4.2).
 #: Дублируется намеренно: линтер обязан re-check'нуть правило даже для объекта,
@@ -494,31 +489,6 @@ def check_upstream_presence(inputs: RunInputs) -> list[str]:
     return messages
 
 
-def check_absence_attestation(inputs: RunInputs) -> list[str]:
-    """§4.2/I2b: ``parameter_reference``/``distribution_absence`` требуют процедуры.
-
-    Процедура аттестации полноты источника — пакетная настройка
-    ``RunInputs.scope_attestation_procedure`` (загружается из опционального
-    ``scope_attestation.yaml`` в каталоге пакета, см. ``normalize``). Если она не
-    задана, а каталог содержит такие absence-правила — прогон блокируется: без
-    механизма ``scope_attested_by`` ❌ по этим правилам недоказуем (I2b).
-    """
-    if (inputs.scope_attestation_procedure or "").strip():
-        return []
-    offenders = sorted(
-        row.param_id
-        for row in inputs.catalog
-        if row.absence_rule in _ATTESTED_ABSENCE_RULES
-    )
-    if not offenders:
-        return []
-    return [
-        "§4.2/I2b: absence_rule parameter_reference/distribution_absence требует "
-        "действующей процедуры аттестации source_scope "
-        f"(scope_attestation_procedure не настроена); затронуты: {', '.join(offenders)}"
-    ]
-
-
 def check_empty_concept_terms(inputs: RunInputs) -> list[str]:
     """§4.2/S13: пустые ``concept_terms`` → warning (немой поиск по синонимам)."""
     missing = sorted(
@@ -764,7 +734,6 @@ RULES: tuple[LintRule, ...] = (
     LintRule("baseline-policy-empty", "warning", check_baseline_policy_present),
     LintRule("passport-upstreams", "blocking", check_passport_upstreams),
     LintRule("upstream-presence", "warning", check_upstream_presence),
-    LintRule("absence-attestation", "blocking", check_absence_attestation),
     LintRule("golden-full-absent-stratum", "blocking", check_golden_full_absent_stratum),
     LintRule("showcase-metric", "blocking", check_showcase_metric),
     LintRule("slug-lowercase", "blocking", check_slug_lowercase),

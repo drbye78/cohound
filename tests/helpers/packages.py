@@ -22,8 +22,6 @@ CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
 REGISTRY_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures_registry"
 #: Имя run-манифеста в пакете.
 RUN_YAML_NAME = "run.yaml"
-#: Тело процедуры аттестации полноты источника (снимает блок I2b).
-_SCOPE_ATTESTATION = 'procedure: "ручная аттестация полноты источника (тест)"\n'
 
 __all__ = [
     "CONFIG_FIXTURES",
@@ -72,13 +70,13 @@ def valid_package(
     tmp_path: Path,
     *,
     fixtures: Path = CONFIG_FIXTURES,
-    scope_attestation: bool = True,
     registries: Mapping[str, str] | None = None,
 ) -> Path:
-    """Копия ``fixtures`` → ``tmp_path/package`` (линт-чистый пакет при аттестации).
+    """Копия ``fixtures`` → ``tmp_path/package`` (линт-чистый пакет).
 
-    ``scope_attestation=False`` повторяет вариант без ``scope_attestation.yaml`` —
-    каталог/веса/когорта восстанавливаются из пакета без процедуры аттестации.
+    Процедуры аттестации охвата пакету не нужно (0.4.0): публикацию ``❌`` авторизует
+    гейт G4, условие пространства проверяет I2d, поэтому ``scope_attestation.yaml``
+    в копию не пишется.
 
     ``registries`` — опциональная карта ``{registry_id: spec_yaml}`` (E2): пишет
     package-scoped спецификации в ``package/registries/`` и объявляет их в
@@ -103,8 +101,6 @@ def valid_package(
         package_yaml.write_text(
             yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
         )
-    if scope_attestation:
-        (package / "scope_attestation.yaml").write_text(_SCOPE_ATTESTATION, encoding="utf-8")
     return package
 
 

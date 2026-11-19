@@ -5,13 +5,14 @@
 * **I3** — ``ProtocolExhaustion``/таблица/``save_exhaustion`` существовали, но ни одна фаза
   не писала строку, поэтому каждый strict-``❓`` отчёта попадал в аномалии как «нет
   протокола» (``collect_i3_anomalies(cells, None)``);
-* **I2b/I2c** — ``evaluate_phase`` принимал ``scope_attested_by``, но ни один вызывающий его
-  не передавал, и ``❌`` при неполном корпусе был недостижим в принципе.
+* **I2b/I2c** — ``evaluate_phase`` принимал подпись аттестации, но ни один вызывающий её
+  не передавал, и ``❌`` при неполном корпусе был недостижим в принципе. С 0.4.0 подписи
+  нет: класс ``bounded`` выставляет правило каталога, а условие пространства проверяет
+  I2d (датированное снятие каждого корня).
 
-Проверяется главное свойство обоих: **протокол называет только тот контур, который реально
-исполнился**, а подпись аттестации — per product, потому что покрытие per product. Неполный
-протокол остаётся аномалией (``❓`` не меняет статус, I12) — это наблюдение, а не дефект,
-который следует заглушить.
+Проверяется главное свойство: **протокол называет только тот контур, который реально
+исполнился**. Неполный протокол остаётся аномалией (``❓`` не меняет статус, I12) — это
+наблюдение, а не дефект, который следует заглушить.
 
 Фикстуры категорийно нейтральны (§1.3); сеть не используется.
 """
@@ -19,10 +20,8 @@
 from __future__ import annotations
 
 import dataclasses
-from pathlib import Path
 
 import pytest
-import yaml
 
 from core.domain import (
     REQUIRED_EXHAUSTION_CONTOURS,
@@ -32,7 +31,6 @@ from core.domain import (
     DenialStrength,
     EvidenceScope,
     LLMCellOutput,
-    ScopeAttestation,
     Status,
     TerminationReason,
 )
@@ -45,17 +43,10 @@ from core.pipeline.exhaustion import (
     contours_run,
     protocol_map,
 )
-from core.pipeline.normalize import load_scope_attestations
-from core.pipeline.package_admin import (
-    PackageAdminError,
-    attest_scope,
-    get_scope_attestations,
-)
 from core.pipeline.phases import _observed_exhaustion_facts
 from core.pipeline.report import collect_i3_anomalies
 from core.pipeline.runner import Ports, RunContext
 from tests.fakes.ports import FakeEvaluator
-from tests.helpers.packages import valid_package
 from tests.pipeline.test_phases import (
     RUN_ID,
     _chunks_index,
@@ -332,127 +323,15 @@ def test_observed_coverage_row_is_a_ran_corpus_contour() -> None:
 
 
 # ---------------------------------------------------------------------------
-# I2b/I2c: аттестация охвата per product
+# I2b/I2c: подписи на ячейку больше нет — класс даёт правило каталога
 # ---------------------------------------------------------------------------
 
 
-def _write_attestations(package: Path, entries: list[dict]) -> None:
-    path = package / "scope_attestation.yaml"
-    path.write_text(
-        yaml.safe_dump({"attestations": entries}, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
+def test_scope_attestation_is_not_a_measurement_condition() -> None:
+    """Ни подпись, ни аттестация не входят в контракт исполнения (§13).
 
-
-def test_load_scope_attestations_missing_file_is_empty(tmp_path: Path) -> None:
-    """Отсутствие файла — не ошибка: механизм опционален."""
-    assert load_scope_attestations(valid_package(tmp_path, scope_attestation=False)) == {}
-
-
-def test_load_scope_attestations_procedure_only_is_empty(tmp_path: Path) -> None:
-    """Файл с одной процедурой (исторический формат) читается как «подписей нет»."""
-    assert load_scope_attestations(valid_package(tmp_path)) == {}
-
-
-def test_load_scope_attestations_reads_entries(tmp_path: Path) -> None:
-    package = valid_package(tmp_path)
-    _write_attestations(
-        package,
-        [{"product_id": "p1", "attested_by": "expert-1", "snapshot_date": "2026-01-01"}],
-    )
-    loaded = load_scope_attestations(package)
-    assert set(loaded) == {"p1"}
-    assert isinstance(loaded["p1"], ScopeAttestation)
-    assert loaded["p1"].attested_by == "expert-1"
-
-
-def test_load_scope_attestations_rejects_duplicate_product(tmp_path: Path) -> None:
-    package = valid_package(tmp_path)
-    _write_attestations(
-        package,
-        [
-            {"product_id": "p1", "attested_by": "expert-1"},
-            {"product_id": "p1", "attested_by": "expert-2"},
-        ],
-    )
-    with pytest.raises(ValueError, match="дубликат"):
-        load_scope_attestations(package)
-
-
-def test_load_scope_attestations_rejects_unknown_product(tmp_path: Path) -> None:
-    """Подпись продукта вне когорты — ошибка: аттестация не может быть «ни про кого»."""
-    package = valid_package(tmp_path)
-    _write_attestations(package, [{"product_id": "ghost", "attested_by": "expert-1"}])
-    with pytest.raises(ValueError, match="неизвестный product_id"):
-        load_scope_attestations(package)
-
-
-def test_load_scope_attestations_rejects_empty_attested_by(tmp_path: Path) -> None:
-    """Аттестация человеческая: пустой подписант запрещён."""
-    package = valid_package(tmp_path)
-    _write_attestations(package, [{"product_id": "p1", "attested_by": ""}])
-    with pytest.raises(ValueError, match="attested_by"):
-        load_scope_attestations(package)
-
-
-def test_load_scope_attestations_rejects_non_list(tmp_path: Path) -> None:
-    package = valid_package(tmp_path)
-    (package / "scope_attestation.yaml").write_text(
-        "attestations: {product_id: p1}\n", encoding="utf-8"
-    )
-    with pytest.raises(ValueError, match="списком"):
-        load_scope_attestations(package)
-
-
-def test_attest_scope_writes_entry_idempotently(tmp_path: Path) -> None:
-    """Подпись пишется детерминированно; повтор с теми же полями не меняет файл."""
-    package = valid_package(tmp_path)
-    attest_scope(
-        package,
-        "p1",
-        actor="expert-1",
-        notes="сверено",
-        snapshot_date="2026-01-01",
-        attested_at=FIXED_TS,
-    )
-    first = (package / "scope_attestation.yaml").read_bytes()
-    loaded = get_scope_attestations(package)
-    assert loaded["p1"].attested_by == "expert-1"
-    assert loaded["p1"].attested_at == FIXED_TS
-
-    attest_scope(
-        package,
-        "p1",
-        actor="expert-1",
-        notes="сверено",
-        snapshot_date="2026-01-01",
-    )
-    assert (package / "scope_attestation.yaml").read_bytes() == first
-
-
-def test_attest_scope_preserves_procedure(tmp_path: Path) -> None:
-    """Добавление подписи не теряет процедуру аттестации (исторический ключ)."""
-    package = valid_package(tmp_path)
-    before = yaml.safe_load((package / "scope_attestation.yaml").read_text(encoding="utf-8"))
-    attest_scope(package, "p1", actor="expert-1", attested_at=FIXED_TS)
-    after = yaml.safe_load((package / "scope_attestation.yaml").read_text(encoding="utf-8"))
-    assert after["procedure"] == before["procedure"]
-    assert [item["product_id"] for item in after["attestations"]] == ["p1"]
-
-
-def test_attest_scope_rejects_unknown_product_and_empty_actor(tmp_path: Path) -> None:
-    package = valid_package(tmp_path)
-    with pytest.raises(PackageAdminError):
-        attest_scope(package, "ghost", actor="expert-1")
-    with pytest.raises(PackageAdminError):
-        attest_scope(package, "p1", actor="   ")
-
-
-def test_scope_attestations_do_not_change_run_identity() -> None:
-    """Подпись авторизует ``❌`` из тех же измерений — это не условие измерения (§13).
-
-    Тот же класс, что ``reviewed_by`` и политика гейтов: смена подписанта не должна
-    давать новый ``run_id`` и рвать межцикловый diff.
+    ``run_id`` — функция объявленных условий измерения; авторизация публикации (G4)
+    процесс, а не условие.
     """
     assert not [field for field in EXECUTION_CONTRACT_FIELDS if "scope" in field]
     assert not [field for field in EXECUTION_CONTRACT_FIELDS if "attest" in field]
@@ -500,36 +379,12 @@ def test_undeduced_absence_becomes_unknown_not_published() -> None:
     assert cell.absence_evidence == []  # протокол отсутствия — только для ❌
 
 
-def test_scope_acceptance_mapping_is_looked_up_per_product() -> None:
-    """Принятие риска для p2 не публикует ``❌`` p1: покрытие per product."""
-    store = _store()
-    store.save_corpus_coverage(RUN_ID, _coverage("p1", complete=False))
-    other = evaluate_phase(
-        plan=_distribution_plan(),
-        ports=Ports(evaluator=_absent_evaluator(), lexical_index=_chunks_index()),
-        store=store,
-        run_id=RUN_ID,
-        profile="R0",
-        cutoff_k=3,
-        scope_acceptance={"p2": "expert-2"},
-    )
-    cell = next(c for c in other.cells if c.product_id == "p1")
-    assert cell.state is CellState.EVALUATED
-    assert cell.status is Status.UNKNOWN
-    assert cell.evidence_scope is not None
-    # Подпись чужого продукта не применилась: риска за p1 никто не принимал.
-    assert cell.evidence_scope.scope_acceptance is None
-    assert "absence_unattested" in (cell.evidence_scope.reason or "")
-    assert cell.evidence_scope.denial_strength is DenialStrength.UNOBSERVED
+def test_bounded_absence_publishes_without_any_signature() -> None:
+    """Конечный справочник ⇒ ``bounded`` ⇒ ``❌`` без подписи: носитель — снятие корня.
 
-
-def test_scope_acceptance_mapping_publishes_bounded_absent_for_accepted_product() -> None:
-    """Принятый риск делает конечный справочник ``bounded`` ⇒ ``❌``, подпись видна.
-
-    Полнота — по снятию корня (I2d, план 20 §11.2): у ``bounded`` без ``complete``-снятия
-    датированного носителя нет, поэтому подпись риска **одна** ``❌`` больше не держит
-    (ужесточение §11.4 п.2 закреплено в ``test_absence_dated.py``). Здесь проверяется
-    **отображение** подписи в вердикт и протокол, поэтому носитель задан явно.
+    Условие пространства выражается целиком I2d: каждый объявленный корень снят с
+    ``complete=1``, отпечаток политики совпадает с объявленным, дата записана. Подписи
+    человека на ячейке нет — ответственность за публикацию несёт G4.
     """
     store = _store()
     store.save_corpus_coverage(
@@ -544,6 +399,8 @@ def test_scope_acceptance_mapping_publishes_bounded_absent_for_accepted_product(
                     complete=True,
                     observed_how="live",
                     observed_at=FIXED_TS,
+                    policy_digest="policy-1",
+                    policy_matched=True,
                 )
             ],
             expected_sources=0,
@@ -558,15 +415,14 @@ def test_scope_acceptance_mapping_publishes_bounded_absent_for_accepted_product(
         run_id=RUN_ID,
         profile="R0",
         cutoff_k=3,
-        scope_acceptance={"p1": "expert-1"},
     )
     cell = next(c for c in result.cells if c.product_id == "p1")
     assert cell.state is CellState.EVALUATED
     assert cell.status is Status.ABSENT
     assert cell.evidence_scope is not None
     assert cell.evidence_scope.denial_strength is DenialStrength.BOUNDED
-    assert cell.evidence_scope.scope_acceptance == "expert-1"
+    assert cell.evidence_scope.basis == "rule:bounded"
+    assert cell.absence_as_of == FIXED_TS
     assert any(
-        entry.get("scope_acceptance") == "expert-1"
-        for entry in cell.absence_evidence
+        entry.get("evidence_type") == "absence" for entry in cell.absence_evidence
     )

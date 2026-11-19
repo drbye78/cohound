@@ -301,13 +301,13 @@ def test_add_showcase_requires_metric(tmp_path: Path) -> None:
 
 def test_new_blocking_refuses_without_writing(tmp_path: Path) -> None:
     package = _make(tmp_path)
-    (package / "scope_attestation.yaml").unlink()
-    before = (package / "catalog.csv").read_bytes()
+    before = (package / "baselines.csv").read_bytes()
     with pytest.raises(pa.PackageAdminError) as exc:
-        pa.update_param(package, "param.alpha_capability", absence_rule="parameter_reference")
+        # Блокирующее правило ``baseline-without-reference-product``: линия не объявлена.
+        pa.add_baseline(package, "baseline_ghost", "param.alpha_capability")
     assert exc.value.kind == "blocked"
     assert exc.value.blocking
-    assert (package / "catalog.csv").read_bytes() == before
+    assert (package / "baselines.csv").read_bytes() == before
 
 
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:
@@ -484,12 +484,22 @@ def test_find_baselines_by_param_and_query(tmp_path: Path) -> None:
     assert pa.find_baselines(package, query="нет") == []
 
 
-def test_get_scope_attestation_present_and_absent(tmp_path: Path) -> None:
+def test_scope_attestation_file_does_not_affect_the_plan(tmp_path: Path) -> None:
+    """``scope_attestation.yaml`` — инертные данные: ``run_id`` от него не зависит.
+
+    Per-cell подпись снята (0.4.0), поэтому файл не является входом прогона: его наличие
+    или отсутствие не меняет ни плана, ни идентичности. Это проверяется на пакете, где
+    каталог содержит ``distribution_absence`` — то, ради чего процедура когда-то писалась.
+    """
+    from core.pipeline.normalize import load_inputs
+
     package = _make(tmp_path)
-    procedure = pa.get_scope_attestation(package)
-    assert isinstance(procedure, str) and procedure
+    before = load_inputs(package / "run.yaml", package)
     (package / "scope_attestation.yaml").unlink()
-    assert pa.get_scope_attestation(package) is None
+    after = load_inputs(package / "run.yaml", package)
+    assert not hasattr(after, "scope_attestation_procedure")
+    assert after.run == before.run
+    assert after.catalog == before.catalog
 
 
 def test_get_run_config_present_and_absent(tmp_path: Path) -> None:

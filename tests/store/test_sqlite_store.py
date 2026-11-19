@@ -396,7 +396,6 @@ def test_add_evidence_round_trip(store: SqliteStore) -> None:
         source_url="https://example.test/doc",
         citation_quote="quote",
         source_scope=SourceScope.PARTIAL,
-        scope_acceptance="human-1",
         index_build_id="build-1",
         retrieved_at="2026-01-01T00:00:00Z",
     )
@@ -408,7 +407,6 @@ def test_add_evidence_round_trip(store: SqliteStore) -> None:
     assert row["evidence_type"] == "direct"
     assert row["source_scope"] == "partial"
     assert row["source_url"] == "https://example.test/doc"
-    assert row["scope_acceptance"] == "human-1"
 
 
 def test_add_evidence_batch(store: SqliteStore) -> None:
@@ -1540,7 +1538,6 @@ def _absence_record(**overrides: object) -> dict:
         "source_kind": None,
         "evidence_type": "absence",
         "source_scope": SourceScope.EXHAUSTIVE.value,
-        "scope_acceptance": "human-1",
         "index_build_id": "cb_run",
     }
     record.update(overrides)
@@ -1548,7 +1545,7 @@ def _absence_record(**overrides: object) -> dict:
 
 
 def test_absence_evidence_round_trip(store: SqliteStore) -> None:
-    """R4+R5: absence-evidence переживает запись и чтение, включая scope и подпись.
+    """R4+R5: absence-evidence переживает запись и чтение, включая ``source_scope``.
 
     До правки записи отсутствия не писались вовсе, а ``iter_cells`` возвращал
     ``absence_evidence=[]`` жёстко — отчёт и ревью не видели ``❌`` даже в одном процессе.
@@ -1573,7 +1570,6 @@ def test_absence_evidence_round_trip(store: SqliteStore) -> None:
     entry = cell.absence_evidence[0]
     assert entry["evidence_id"] == "ev-absence-1"
     assert entry["source_scope"] == SourceScope.EXHAUSTIVE.value
-    assert entry["scope_acceptance"] == "human-1"
     assert entry["index_build_id"] == "cb_run"
     assert entry["source_id"] is None
     # Чтение не подменяет вид доказательства: это протокол отсутствия.
@@ -1668,20 +1664,17 @@ def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> 
     assert stored.evidence_scope.denial_strength is DenialStrength.EXPLICIT
     assert stored.evidence_scope.citation_quote
     # Класс живёт в объекте ячейки (``cells.evidence_scope``) — единственный источник
-    # истины; запись протокола несёт подпись и вид доказательства, а не вердикт.
-    assert entry["scope_acceptance"] is None
+    # истины; запись протокола несёт вид доказательства, а не вердикт. Подписи в записи
+    # нет вовсе: с 0.4.0 её нет и в модели.
+    assert "scope_acceptance" not in entry
 
 
-def test_scope_acceptance_column_replaces_scope_attested_by(tmp_path: Path) -> None:
-    """Вариант 2: носитель подписи — ``scope_acceptance``; старой колонки в схеме нет.
+def test_no_scope_acceptance_column_at_all(tmp_path: Path) -> None:
+    """3.27.0: ни ``scope_acceptance``, ни прежней ``scope_attested_by`` в схеме нет.
 
-    Прежняя проверка («при открытии подпись ``scope_attested_by`` копируется в
-    ``scope_acceptance``») держалась на шиме ``_migrate_scope_acceptance``. Шим удалён
-    (решение владельца 01.11.2026): файл, где лежит старая колонка, отвергается по версии
-    целиком, поэтому копировать подпись некуда и не для кого — исторический аудит-след
-    живёт в том файле, который отвергнут, а не «переезжает» в текущую схему.
-    Эквивалент на новом носителе: в свежей БД ``scope_acceptance`` объявлена, а
-    ``scope_attested_by`` отсутствует.
+    Per-cell подпись снята методологией 0.4.0 (публикацию ``❌`` авторизует G4), поэтому
+    колонки не объявляет ``DDL``. Прежняя колонка не «переезжает» в текущую схему: файл,
+    где она лежит, отвергается по версии целиком (шимов ``ALTER TABLE`` нет).
     """
     from core.store.sqlite import SchemaVersionMismatch, connect
 
@@ -1690,7 +1683,7 @@ def test_scope_acceptance_column_replaces_scope_attested_by(tmp_path: Path) -> N
         cols = {r["name"] for r in fresh.execute("PRAGMA table_info(cell_evidence)")}
     finally:
         fresh.close()
-    assert "scope_acceptance" in cols
+    assert "scope_acceptance" not in cols
     assert "scope_attested_by" not in cols
 
     db = tmp_path / "legacy_scope.db"
@@ -1732,12 +1725,12 @@ def test_optional_column_read_tolerates_legacy_row() -> None:
 
 
 def test_read_only_open_of_run_made_before_new_columns(tmp_path: Path) -> None:
-    """Read-only чтение прогона, сделанного ДО появления ``evidence_scope``/``scope_acceptance``.
+    """Read-only чтение прогона, сделанного ДО появления ``evidence_scope``.
 
     Проверяется не доступ к строке (:func:`_row_optional`), а **сам SQL**: проекция
     ``SELECT`` собиралась из кортежа имён текущего кода, поэтому на старой БД чтение
-    падало ``no such column: scope_acceptance`` — живой дефект: ``hound report`` по
-    прогону ``ru-pg-dbms-3edf2b06097c`` возвращал ошибку вместо отчёта.
+    падало ``no such column`` — живой дефект: ``hound report`` по прогону
+    ``ru-pg-dbms-3edf2b06097c`` возвращал ошибку вместо отчёта.
     """
     from core.domain import (
         CellEvidence,
@@ -1782,7 +1775,6 @@ def test_read_only_open_of_run_made_before_new_columns(tmp_path: Path) -> None:
     # Схема «до»: колонок новой семантики нет (как в БД прошлых прогонов).
     raw = sqlite3.connect(path)
     raw.execute("ALTER TABLE cells DROP COLUMN evidence_scope")
-    raw.execute("ALTER TABLE cell_evidence DROP COLUMN scope_acceptance")
     raw.commit()
     raw.close()
 

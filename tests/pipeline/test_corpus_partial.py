@@ -404,7 +404,7 @@ def _partial_coverage() -> CorpusCoverage:
         partial_docs=[URL],
     )
 
-def _absent_cell(scope: EvidenceScope) -> Cell:
+def _absent_cell(scope: EvidenceScope | None) -> Cell:
     """``❌``-ячейка, собранная в обход валидатора (проверяется чистый инвариант)."""
     return Cell.model_construct(
         run_id=RUN_ID,
@@ -455,36 +455,33 @@ def test_domain_rejects_absent_cell_with_unobserved_denial() -> None:
             ),
         )
 
-def test_i2c_blocks_bounded_absent_on_partially_read_corpus() -> None:
-    """``bounded`` без принятия риска на частичном корпусе — нарушение I2c.
+def test_i2c_passes_bounded_absent_without_any_signature() -> None:
+    """``bounded`` проходит I2c без подписи: условие пространства выражает I2d.
 
-    Объект строится через ``model_construct``: модель ``EvidenceScope`` такую комбинацию
-    не собирает (двойная защита), а проверяется здесь именно чистый инвариант I2c.
+    Неполнота охвата сама по себе класс не отменяет — и не подтверждает: ``❌`` держится
+    датированным снятием каждого корня (I2d), а публикацию авторизует G4 (0.4.0).
     """
-    scope = EvidenceScope.model_construct(
-        denial_strength=DenialStrength.BOUNDED,
-        reason="конечный справочник объявлен каталогом",
-        enumerated=True,
-        scope_acceptance=None,
-    )
-    cell = _absent_cell(scope)
-    violations = check_absence_coverage(cell, _partial_coverage())
-
-    codes = {violation.code for violation in violations}
-    assert "I2c" in codes
-    assert any("partial_extraction" in violation.message for violation in violations)
-
-def test_i2c_accepts_bounded_absent_with_risk_acceptance() -> None:
-    """Человеческое принятие риска (``scope_acceptance``) — единственный путь к ``❌``."""
     cell = _absent_cell(
         EvidenceScope(
             denial_strength=DenialStrength.BOUNDED,
             reason="конечный справочник объявлен каталогом",
             enumerated=True,
-            scope_acceptance="analyst",
         )
     )
     assert check_absence_coverage(cell, _partial_coverage()) == []
+
+def test_i2c_rejects_absent_row_without_denial_class() -> None:
+    """Строка без ``evidence_scope`` при неполном охвате — нарушение, а не «нечем проверить».
+
+    Прежде эту ветку закрывала подпись в absence-записи; с 0.4.0 носителя нет, поэтому
+    незаписанный класс остаётся недоказуемым и называется явно.
+    """
+    cell = _absent_cell(None)
+    violations = check_absence_coverage(cell, _partial_coverage())
+
+    codes = {violation.code for violation in violations}
+    assert "I2c" in codes
+    assert any("partial_extraction" in v.message for v in violations)
 
 def test_i2c_still_rejects_unobserved_denial_on_partial_corpus() -> None:
     """Класс ``unobserved`` (вывод из неполного охвата) ``❌`` не даёт ни при чём."""
