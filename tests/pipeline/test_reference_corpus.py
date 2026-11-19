@@ -12,6 +12,7 @@ from pathlib import Path
 from core.domain.enums import FactReview, FactStatus, Importance, ParamType
 from core.domain.models import CatalogRow
 from core.pipeline.reference_corpus import (
+    CHUNK_ID_SCHEME,
     MAX_QUOTE_CHARS,
     ChunkText,
     ReferenceCorpusLayout,
@@ -23,6 +24,7 @@ from core.pipeline.reference_corpus import (
     read_artifact_dates,
     read_manifest,
     reference_build_id,
+    reference_content_digest,
     select_quote,
     write_manifest,
 )
@@ -53,6 +55,40 @@ def test_build_id_is_content_addressed() -> None:
     assert first != reference_build_id("postgresql", "18", "digest-b")
     assert first.startswith("ref_postgresql_18_")
     assert len(first.rsplit("_", 1)[-1]) == 8
+
+
+def _chunk(hash_value: str) -> ChunkText:
+    """Чанк с заданным хешем текста: отпечатку нужен только он."""
+    return ChunkText(
+        chunk_id="c1", doc_id="d1", url=None, text="x", content_hash=hash_value
+    )
+
+
+def test_content_digest_sees_the_address_scheme() -> None:
+    """Байт-идентичный текст с другим адресом чанка — другая сборка.
+
+    Дефект, ради которого схема входит в отпечаток (19.11.2026): формат адреса сменили
+    (``{doc}#{no}`` → ``product:doc:chunk_no``), текст остался тем же, ``content_digest``
+    совпал, ``build_id`` совпал — и пересборка ответила «уже была, ничего не перезаписано»,
+    оставив в каталоге БД с неразбираемым ``chunk_id``. Разные адреса — разные сборки.
+    """
+    chunks = [_chunk("a" * 64), _chunk("b" * 64)]
+    old = reference_content_digest(chunks, address_scheme="product:doc#chunk_no")
+    new = reference_content_digest(chunks, address_scheme=CHUNK_ID_SCHEME)
+    assert old != new
+    # Без объявленной схемы отпечаток считается по одним текстам — прежнее поведение.
+    assert reference_content_digest(chunks) == reference_content_digest(chunks)
+    assert reference_content_digest(chunks) != new
+
+
+def test_content_digest_ignores_chunk_order() -> None:
+    """Перестановка чанков измерение не меняет — и со схемой тоже."""
+    chunks = [_chunk("a" * 64), _chunk("b" * 64)]
+    forward = reference_content_digest(chunks, address_scheme=CHUNK_ID_SCHEME)
+    backward = reference_content_digest(
+        list(reversed(chunks)), address_scheme=CHUNK_ID_SCHEME
+    )
+    assert forward == backward
 
 
 def test_layout_puts_corpus_outside_runs(tmp_path: Path) -> None:

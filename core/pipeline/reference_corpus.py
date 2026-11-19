@@ -69,6 +69,7 @@ from core.pipeline.evaluate import CorpusArtifactDates
 from core.util.hashing import content_hash, short_hash
 
 __all__ = [
+    "CHUNK_ID_SCHEME",
     "REFERENCE_SCHEMA",
     "ChunkDigestSource",
     "ReferenceBuildAmbiguous",
@@ -100,6 +101,12 @@ __all__ = [
 #: поддерживается: сборок в ``builds/`` нет, и выбор сборки отказывает
 #: (:class:`ReferenceBuildMissing`), а не читает файл «как получится».
 REFERENCE_SCHEMA = "reference-corpus/2"
+
+#: Форма адреса чанка в сборке (``product:doc:chunk_no``, ``core.util.ids.parse_source_id``).
+#: Входит в ``content_digest``: адрес — часть содержимого сборки, и его смена при
+#: байт-идентичном тексте обязана давать новый ``build_id`` (иначе пересборка ответит
+#: «уже была» и оставит неразбираемый адрес).
+CHUNK_ID_SCHEME = "product:doc:chunk_no"
 
 #: Имя файла-указателя текущей сборки в каталоге версии.
 CURRENT_BUILD_FILE = "current.json"
@@ -577,17 +584,32 @@ class ChunkDigestSource(Protocol):
     content_hash: str | None
 
 
-def reference_content_digest(chunks: Iterable[ChunkDigestSource]) -> str:
+def reference_content_digest(
+    chunks: Iterable[ChunkDigestSource], *, address_scheme: str | None = None
+) -> str:
     """Отпечаток **содержимого** reference-корпуса (вход ``build_id``, §4).
 
     Материал — отсортированные хеши текстов чанков. Именно содержимое, а не путь и не
     время: «пересобрали» и «не пересобирали» обязаны различаться по тексту, иначе
     ``build_id`` описывал бы раскладку хоста. Порядок канонизируется сортировкой —
     перестановка чанков в БД измерение не меняет.
+
+    ``address_scheme`` — **форма адреса чанка** (``product:doc:chunk_no``), и она входит в
+    отпечаток, потому что адрес — часть содержимого сборки, а не оформление: он попадает в
+    ``corpus_chunks.chunk_id`` и оттуда в ``source_id`` evidence. Дефект, ради которого
+    параметр введён (19.11.2026): формат адреса сменили, текст остался байт-в-байт, отпечаток
+    совпал, ``build_id`` совпал — и пересборка ответила «уже была, ничего не перезаписано»,
+    оставив в каталоге БД со старым, неразбираемым адресом. Один и тот же текст, адресованный
+    по-разному, — **разные сборки**, ровно как разные тексты.
+
+    ``None`` — вызывающий схему не объявил: отпечаток считается по одним текстам (прежнее
+    поведение, нужно только тестам и чтению старых записей).
     """
     material = sorted(
         chunk.content_hash or content_hash(chunk.text) for chunk in chunks
     )
+    if address_scheme is not None:
+        material.append(f"address:{address_scheme}")
     return short_hash("\n".join(material), 16)
 
 

@@ -97,6 +97,7 @@ from core.pipeline.crawl_frontier import (
 )
 from core.pipeline.fetch_plan import resolve_fetch_plan
 from core.pipeline.reference_corpus import (
+    CHUNK_ID_SCHEME,
     REFERENCE_SCHEMA,
     ReferenceCorpusLayout,
     ReferenceManifest,
@@ -903,7 +904,11 @@ def _build_locked(
                 _count(skipped, SkipReason.DEPTH)
             if frontier.truncated_reason is not None:
                 truncated.add(frontier.truncated_reason)
-        content_digest = reference_content_digest(buffered_chunks)
+        # Схема адреса входит в отпечаток: текст может совпасть байт-в-байт, а адрес
+        # чанка — нет, и тогда это другая сборка (см. ``reference_content_digest``).
+        content_digest = reference_content_digest(
+            buffered_chunks, address_scheme=CHUNK_ID_SCHEME
+        )
         build_id = reference_build_id(layout.product_id, layout.version, content_digest)
         # Чанки пишутся одним заходом: ``build_id`` чанка — идентичность **сборки**, то
         # есть функция всех её текстов, и до последнего документа он неизвестен.
