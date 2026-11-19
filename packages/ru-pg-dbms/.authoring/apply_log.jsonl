@@ -5,3 +5,7 @@
 {"actor": "roger", "changed": ["catalog"], "deleted": [], "op": "param-update", "ts": "2026-11-05T21:40:58.188863+00:00"}
 {"actor": "roger", "baseline_id": "upstream-pg", "changed": [{"from": "pending", "param_id": "xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table", "to": "accepted", "version": "18"}], "op": "baseline-review", "param_id": "xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table", "review": "accepted", "version": "18"}
 {"actor": "roger", "baseline_id": "upstream-pg", "changed": [{"from": "pending", "param_id": "xlsx_132_obshchie_slovari_dlya_full_text_search", "to": "accepted", "version": "18"}], "op": "baseline-review", "param_id": "xlsx_132_obshchie_slovari_dlya_full_text_search", "review": "accepted", "version": "18"}
+{"actor": "roger", "changed": ["baselines"], "deleted": [], "op": "baseline-add", "ts": "2026-11-19T11:42:00.086237+00:00"}
+{"actor": "roger", "changed": ["baselines"], "deleted": [], "op": "baseline-add", "ts": "2026-11-19T11:42:00.992648+00:00"}
+{"actor": "roger", "changed": ["baselines"], "deleted": [], "op": "baseline-update", "ts": "2026-11-19T11:42:08.502832+00:00"}
+{"actor": "roger", "changed": ["baselines"], "deleted": [], "op": "baseline-update", "ts": "2026-11-19T11:42:09.461551+00:00"}

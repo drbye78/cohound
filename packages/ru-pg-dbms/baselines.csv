@@ -1,1 +1,3 @@
 baseline_id,param_id,min_version,inheritance_mode,note
+upstream-pg,xlsx_129_rasshirennye_vozmozhnosti_raboty_s_json_json_table,18,direct,"принятый факт present@18 (roger, 2026-11-17, цитата 'JSON_TABLE #'); карта map_d6238b7795fc1a93: ✅, review_reason пуст"
+upstream-pg,xlsx_132_obshchie_slovari_dlya_full_text_search,18,direct,"принятый факт present@18 (roger, 2026-11-17, цитата 'dict_xsyn — example synonym full-text search dictionary #'); карта map_d6238b7795fc1a93: ⚠️ — её собственная цитата не о предмете, факт опирается на заголовок страницы dict-xsyn"
