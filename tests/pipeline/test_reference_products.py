@@ -51,7 +51,7 @@ from core.pipeline.reference_products import (
 
 FACT_HEADER = (
     "baseline_id,param_id,version,status,url,quote,content_hash,observed_at,"
-    "corpus_build_id,review,reviewed_by,note\n"
+    "corpus_build_id,review,reviewed_by,note,observed_by\n"
 )
 
 
@@ -367,3 +367,42 @@ def test_facts_csv_round_trip_keeps_all_columns(tmp_path: Path) -> None:
     restored = load_package_facts(package)
     assert [fact.param_id for fact in restored] == ["p1", "p2"]
     assert restored[1].status is FactStatus.ABSENT
+
+
+def test_facts_csv_round_trip_keeps_observed_by(tmp_path: Path) -> None:
+    """Провенанс наблюдения переживает запись и чтение (последняя колонка файла)."""
+    package = _package(tmp_path)
+    write_facts(
+        package,
+        [
+            _fact("p1").model_copy(update={"observed_by": "llm:model@rev1:terms+phrases"}),
+            _fact("p2", status=FactStatus.ABSENT).model_copy(
+                update={"observed_by": "phrase-1"}
+            ),
+        ],
+    )
+    restored = load_package_facts(package)
+    assert [fact.observed_by for fact in restored] == [
+        "llm:model@rev1:terms+phrases",
+        "phrase-1",
+    ]
+
+
+def test_facts_csv_without_observed_by_column_still_reads(tmp_path: Path) -> None:
+    """Файл, написанный до появления колонки, читается: провенанс — ``None``, не ошибка.
+
+    Порядок колонок старых файлов не ломается: новая колонка дописана в конец, и её
+    отсутствие — пустая ячейка, а не другой формат.
+    """
+    package = _package(tmp_path)
+    (package / "sources" / "baseline_facts.csv").write_text(
+        "baseline_id,param_id,version,status,url,quote,content_hash,observed_at,"
+        "corpus_build_id,review,reviewed_by,note\n"
+        'upstream-pg,p1,18,present,https://upstream.test/doc,"upstream documents it",'
+        f'{"a" * 64},2026-11-17T00:00:00+00:00,ref_x,accepted,roger,\n',
+        encoding="utf-8",
+    )
+    restored = load_package_facts(package)
+    assert [fact.param_id for fact in restored] == ["p1"]
+    assert restored[0].status is FactStatus.PRESENT
+    assert restored[0].observed_by is None

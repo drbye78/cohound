@@ -596,7 +596,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1304-1335`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1312-1343`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
@@ -687,7 +687,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:882-921`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:890-929`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
   сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1416-1421`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.

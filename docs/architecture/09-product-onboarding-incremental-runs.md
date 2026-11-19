@@ -3185,7 +3185,7 @@ def cell_reuse_key(*, product_id, param_id,
 `prompt_template_digest` — отпечаток **текущего** шаблона/правила (`compiled.template_version`
 + текст rule), а не `prev.prompt_hash`: иначе смена шаблона не инвалидировала бы перенос.
 `model_config_digest` — текущая конфигурация модели, а не `prev.model_id`.
-`coverage_digest(coverage)` — свободная функция (`core/pipeline/digests.py:745`), текущий; предыдущее значение используется только как данные
+`coverage_digest(coverage)` — свободная функция (`core/pipeline/digests.py:749`), текущий; предыдущее значение используется только как данные
 `prev`-строки для сравнения.
 
 **`retrieved_doc_set_digest` — не `doc_set_digest` продукта (решение 29.10.2026: per-cell).**
@@ -3719,7 +3719,7 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 ### 12.2. `cohort_digest` и `seeds_digest`
 
 - `cohort_digest` входит в `run_id`, `execution_contract_digest`, `state.db.run_lineage`
-  **и** в `runs`/`RunManifest` (`core/store/sqlite.py:172`, `core/domain/models.py:1881`) —
+  **и** в `runs`/`RunManifest` (`core/store/sqlite.py:172`, `core/domain/models.py:1889`) —
   последние два закрывают диагностику diff без открытия `state.db` (§12.3).
 - `seeds_digest` — тоже: смена seed-набора меняет корпус и coverage. Он **порядко-чувствителен**
   внутри продукта (§6.2): перестановка корней — другая идентичность, потому что другой
@@ -3728,8 +3728,8 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 
 > **Дефект провенанса (проверено 29.10.2026, ✅ исправлен границей A): колонка
 > `runs.cohort_ref` хранила другое поле.**
-> В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:922`) — имя файла
-> когорты из `run.yaml`, и `cohort_ref: str | None` (`core/domain/models.py:698`) — авторская ревизия, которая
+> В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:930`) — имя файла
+> когорты из `run.yaml`, и `cohort_ref: str | None` (`core/domain/models.py:706`) — авторская ревизия, которая
 > **входит в `cohort_digest`**. `core/store/sqlite_store.py:474-481` кладёт в колонку `cohort_ref` значение
 > `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:696`).
 > Следствие на живом прогоне `ru-pg-dbms-3d3dc7c3c969`: `runs.cohort_ref =
@@ -4426,7 +4426,7 @@ state/state.db                                 # durable-состояние па
     **✅ сделано**: `eval_echo` расширен объявленным методологическим контекстом,
     `EVAL_CACHE_FORMAT` поднят до `2`, конверт формата 1 читается как промах (§10.5).
     Ключ **переноса ячеек** — отдельная величина и тоже существует:
-    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:877`,
+    `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:881`,
     §10.1); прежняя редакция называла его несуществующим.
 11. `_chunk_id` (`core/pipeline/corpus_index.py:182`) — ✅ **сделано**: форма
     `f"{product_id}:{doc_version_id}:{chunk_no}"` (вызовы — `core/pipeline/corpus_ingest.py:1578`,

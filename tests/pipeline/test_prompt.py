@@ -762,11 +762,11 @@ def test_prompt_template_identity_changes_with_version(
     пересчитано по файлу шаблона, а не подогнано.
     """
     from core.pipeline import prompt as prompt_module
-    from core.pipeline.run_identity import _prompt_template_identity
+    from core.pipeline.run_identity import prompt_template_identity
 
-    identity = _prompt_template_identity()
+    identity = prompt_template_identity()
     assert identity.startswith("evaluator_v6@")
     monkeypatch.setattr(prompt_module, "TEMPLATE_VERSION", "evaluator_v5")
-    assert _prompt_template_identity() != identity
-    assert _prompt_template_identity().startswith("evaluator_v5@")
+    assert prompt_template_identity() != identity
+    assert prompt_template_identity().startswith("evaluator_v5@")
 

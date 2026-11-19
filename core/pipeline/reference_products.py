@@ -68,6 +68,8 @@ BASELINE_FACTS_RELPATH = "sources/baseline_facts.csv"
 
 #: Канонический порядок колонок ``baseline_facts.csv`` (порядок — часть формата:
 #: файл читается человеком и диффится в git, случайный порядок давал бы шумные диффы).
+#: Новые колонки дописываются **в конец**: файлы, написанные до их появления, читаются
+#: (отсутствующая колонка — пустая ячейка), и перестановка сломала бы это молча.
 FACT_COLUMNS: tuple[str, ...] = (
     "baseline_id",
     "param_id",
@@ -81,6 +83,9 @@ FACT_COLUMNS: tuple[str, ...] = (
     "review",
     "reviewed_by",
     "note",
+    # Провенанс наблюдения (``map:{map_id}`` | ``phrase-1``): в ``baseline_facts_digest``
+    # не входит — см. ``BaselineFact.observed_by``.
+    "observed_by",
 )
 
 #: Роли reference-продукта относительно когорты (вычисляемые, не объявляемые).
@@ -232,6 +237,7 @@ def write_facts(package_dir: str | Path, facts: Sequence[BaselineFact]) -> Path:
             fact.review.value,
             fact.reviewed_by,
             fact.note,
+            fact.observed_by,
         ]
         for fact in ordered
     ]
@@ -711,6 +717,7 @@ def facts_csv_text(facts: Sequence[BaselineFact]) -> str:
                 fact.review.value,
                 fact.reviewed_by or "",
                 fact.note or "",
+                fact.observed_by or "",
             ]
         )
     return buffer.getvalue()

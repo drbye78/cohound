@@ -13,9 +13,14 @@
   версии; ``min_version`` — **первый объявленный мажор**, где такой факт есть (порядок
   версий берётся из декларации, а не из алфавита: ``"18"`` раньше ``"9"`` не потому, что
   строка короче, а потому что так объявлено);
-* ``conditional`` — то же, но карта **этой** версии несёт на ячейке параметра
-  ``review_reason``, начинающийся с ``support_not_about_subject``: цитата найдена, но она
-  не о предмете, поэтому наследование возможно, а не безусловно;
+* ``conditional`` — то же, но доказательство **слабее безусловного**, и это видно с двух
+  сторон, каждая из которых называет свою причину:
+  карта **этой** версии несёт на ячейке параметра ``review_reason``, начинающийся с
+  ``support_not_about_subject`` (цитата найдена, но не о предмете — ``map_support_unrelated``);
+  либо сам факт помечен ``llm_partial`` (``fact_partial_support``) — оценщик сказал
+  ``⚠️``, то есть фрагмент подтверждает параметр не полностью. Раньше второе основание
+  отсутствовало, потому что факты писал фразовый гейт и частичности у них не было; с
+  ``--classifier llm`` она есть, и терять её значило бы выдать частичную опору за полную;
 * ``needs_signature`` — факт ``present``, но подписи нет: **прибор не подписывает за
   человека** (A3), поэтому строка публикуется отдельным списком, а не предлагается;
 * ``no_evidence`` — только ``unclear``/``absent`` либо факта нет ни на одной версии;
@@ -40,6 +45,7 @@ from typing import Any
 
 from core.domain.enums import FactReview, FactStatus, InheritanceMode
 from core.domain.models import BaselineFact, BaselineRow, CatalogRow
+from core.pipeline.fact_projection import NOTE_PARTIAL
 from core.pipeline.inheritance import major_version
 from core.pipeline.package_io import atomic_write_csv
 
@@ -50,7 +56,9 @@ __all__ = [
     "DECISION_EXISTING",
     "DECISION_REJECT",
     "DECISION_SKIP",
+    "NOTE_PARTIAL",
     "REASON_EXISTING",
+    "REASON_FACT_PARTIAL",
     "REASON_FACT_PRESENT_ACCEPTED",
     "REASON_MAP_SUPPORT_UNRELATED",
     "REASON_NEEDS_SIGNATURE",
@@ -108,6 +116,11 @@ REASON_NEEDS_SIGNATURE = "needs_signature"
 REASON_EXISTING = "existing"
 REASON_NO_EVIDENCE = "no_evidence"
 
+#: Причина ``conditional`` по факту — токен для ``reason`` в файле предложения.
+#: Сама пометка (``NOTE_PARTIAL``) импортируется из проекции: строка — часть формата
+#: факта, и два определения разошлись бы молча.
+REASON_FACT_PARTIAL = "fact_partial_support"
+
 #: Причина на ячейке карты: цитата найдена, но она **не о предмете** параметра.
 #:
 #: Токен пишет оценщик (``core.pipeline.evaluate.SUPPORT_NOT_ABOUT_SUBJECT``); здесь он
@@ -163,6 +176,23 @@ def _versions_with(
                 found.append(version)
                 break
     return found
+
+
+def _partial_support(rows: Sequence[BaselineFact], version: str) -> bool:
+    """Факт ``present``+``accepted`` этой версии помечен как частичный (``llm_partial``).
+
+    Смотрится **версия, которая дала ``min_version``**, а не вся линия: наследование
+    начинается с неё, и полная опора на 17-й версии не делает безусловной опору на 18-й.
+    """
+    major = major_version(version)
+    for fact in rows:
+        if fact.status is not FactStatus.PRESENT or fact.review is not FactReview.ACCEPTED:
+            continue
+        if major is not None and major_version(fact.version) != major:
+            continue
+        if (fact.note or "").strip() == NOTE_PARTIAL:
+            return True
+    return False
 
 
 def _cells_by_param(
@@ -260,16 +290,24 @@ def propose_baselines(
             support = _support_reason(
                 cells, param_id, version=min_version, map_version=map_version
             )
+            # Слабость доказательства называется **своей** причиной: «цитата не о
+            # предмете» (карта) и «цитата подтверждает частично» (сам факт) — разные
+            # наблюдения, и сводить их к одному токену значило бы потерять, чем именно
+            # ограничено наследование. Карта приоритетнее: она говорит о предмете цитаты,
+            # то есть о более грубом дефекте.
+            partial = _partial_support(own, min_version)
             row.update(
                 min_version=min_version,
                 inheritance_mode=(
                     InheritanceMode.CONDITIONAL.value
-                    if support is not None
+                    if support is not None or partial
                     else InheritanceMode.DIRECT.value
                 ),
                 reason=(
                     REASON_MAP_SUPPORT_UNRELATED
                     if support is not None
+                    else REASON_FACT_PARTIAL
+                    if partial
                     else REASON_FACT_PRESENT_ACCEPTED
                 ),
             )
@@ -299,7 +337,11 @@ def propose_baselines(
         "rows": rows,
         "proposed": proposed,
         "direct": _params(REASON_FACT_PRESENT_ACCEPTED),
-        "conditional": _params(REASON_MAP_SUPPORT_UNRELATED),
+        "conditional": [
+            row["param_id"]
+            for row in rows
+            if row["reason"] in {REASON_MAP_SUPPORT_UNRELATED, REASON_FACT_PARTIAL}
+        ],
         "needs_signature": _params(REASON_NEEDS_SIGNATURE),
         "existing": _params(REASON_EXISTING),
         "no_evidence": _params(REASON_NO_EVIDENCE),

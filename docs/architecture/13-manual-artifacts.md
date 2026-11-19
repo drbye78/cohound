@@ -46,7 +46,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:213-222`).
 - Блокирующий отказ делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2702`, `core/pipeline/corpus_coverage.py:216-218`, условие 2) —
+  (`core/domain/models.py:2710`, `core/pipeline/corpus_coverage.py:216-218`, условие 2) —
   **пока URL не закрыт объявленным артефактом**: материал, предъявленный артефактом
   (`corpus_docs.origin=manual`), перестаёт делать сеанс неполным (`resolved_manually`,
   `core/pipeline/corpus_coverage.py:261-270`, сверено 07.11.2026).
@@ -287,7 +287,7 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **На 25.10 его не было.** Провалы фетчей попадали в отчёт только агрегатами
-(`core/domain/models.py:1764` — `CrawlSessionProvenance.failed: int`;
+(`core/domain/models.py:1772` — `CrawlSessionProvenance.failed: int`;
 `core/pipeline/report.py:1352-1406` — движки в шапке; `core/pipeline/report.py:2553-2558` —
 `blocked = {error_kind: count}` и `unreadable_origins` от `derive_corpus_coverage`). Ни URL,
 ни текста ошибки. Per-URL
@@ -422,7 +422,7 @@ gaps:
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
    `core/pipeline/corpus.py:4232`; `origin` — `core/store/sqlite.py:281`;
-   `resolved_manually` — `core/domain/models.py:2890` + `core/pipeline/corpus_coverage.py:281`;
+   `resolved_manually` — `core/domain/models.py:2898` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1723`; дайджест — `core/pipeline/digests.py:197`, материал
    `core/pipeline/digests.py:432`).
    As-built и расхождения — §10.
@@ -432,7 +432,7 @@ gaps:
    per-run (`PRIMARY KEY (run_id, product_id, url)`, `core/store/sqlite.py:327-340`), поэтому
    у артефакта свои `run_id` и `provided_at`, а не чужая история. Между прогонами переносится
    **ячейка** — и она типизирована: `measurement_origin=carried` + обязательный
-   `carried_from_run_id` (`core/domain/models.py:1240-1246`, схема `cell-reuse-2`); документ —
+   `carried_from_run_id` (`core/domain/models.py:1248-1254`, схема `cell-reuse-2`); документ —
    `corpus_docs.reuse_kind` (`live|revalidated|reused|stale`). Связь прогонов при этом видна:
    `run_lineage.previous_run_id` + `change_class`, а `hound diff` называет смену
    `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2820-2833`).

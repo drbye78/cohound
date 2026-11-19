@@ -470,6 +470,13 @@ class BaselineFact(BaseModel):
 
     I22-дисциплина: ``present`` без дословной цитаты и хеша текста недопустим — иначе
     «факт» нечем проверить, а наследование получило бы доказательство без источника.
+
+    ``observed_by`` — **провенанс наблюдения**: каким прибором оно получено и по какому
+    правилу отбора кандидатов (``llm:{model_id}:{candidate_policy}`` — оценщик на
+    кандидатах recon, ``phrase-1`` — фразовый гейт ``derive_facts``). В
+    ``baseline_facts_digest`` он **не входит**, как ``corpus_build_id`` и ``reviewed_by``:
+    две записи с одинаковыми ``(status, quote)`` — одно наблюдение, независимо от того,
+    кто его сделал. Идентичность — содержание, а не инструмент.
     """
 
     model_config = _BASE
@@ -486,6 +493,7 @@ class BaselineFact(BaseModel):
     review: FactReview = FactReview.PENDING
     reviewed_by: str | None = None
     note: str | None = None
+    observed_by: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> BaselineFact:

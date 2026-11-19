@@ -269,21 +269,21 @@ def test_prompt_template_is_a_contract_condition_not_provenance(monkeypatch: pyt
     assert build_execution_contract(inputs, **kwargs) == baseline
 
     # Другой шаблон — другая идентичность, при полностью совпадающих прочих входах.
-    monkeypatch.setattr(module, "_prompt_template_identity", lambda: "evaluator_v4@deadbeef0000")
+    monkeypatch.setattr(module, "prompt_template_identity", lambda: "evaluator_v4@deadbeef0000")
     assert build_execution_contract(inputs, **kwargs) != baseline
 
 def test_prompt_template_identity_carries_content_not_only_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """Имя версии без содержимого позволило бы переписать шаблон, не сменив ``run_id``."""
     from core.pipeline import prompt as prompt_module
-    from core.pipeline.run_identity import _prompt_template_identity
+    from core.pipeline.run_identity import prompt_template_identity
 
     monkeypatch.setattr(prompt_module, "_load_template", lambda version: "текст А")
-    first = _prompt_template_identity()
+    first = prompt_template_identity()
     assert first.startswith(f"{prompt_module.TEMPLATE_VERSION}@")
-    assert first == _prompt_template_identity()
+    assert first == prompt_template_identity()
 
     monkeypatch.setattr(prompt_module, "_load_template", lambda version: "текст Б")
-    assert _prompt_template_identity() != first
+    assert prompt_template_identity() != first
 
     # Шаблона нет на диске (подменён в процессе пробы) — честно называется только имя,
     # а не выдуманный хеш.
@@ -291,7 +291,7 @@ def test_prompt_template_identity_carries_content_not_only_name(monkeypatch: pyt
         raise FileNotFoundError(version)
 
     monkeypatch.setattr(prompt_module, "_load_template", _missing)
-    assert _prompt_template_identity() == prompt_module.TEMPLATE_VERSION
+    assert prompt_template_identity() == prompt_module.TEMPLATE_VERSION
 
 # ---------------------------------------------------------------------------
 # change_class / RunIdentity

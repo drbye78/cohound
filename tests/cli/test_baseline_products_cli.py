@@ -1586,6 +1586,194 @@ def test_refresh_apply_requires_actor(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# recon --classifier: вердикт оценщика на кандидатах recon (один вопрос — один прибор)
+# ---------------------------------------------------------------------------
+
+
+class _ReconEvaluator:
+    """Фейковый оценщик: ``✅`` с цитатой там, где в промпте есть jsonb, иначе ``❓``."""
+
+    model_id = "fake@rev1"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, req):  # noqa: ANN001 — шов порта
+        from core.domain.enums import Status
+        from core.domain.models import LLMCellOutput, LLMEvidence
+        from core.ports.llm import LLMResponse, TokenUsage
+
+        self.calls += 1
+        if "jsonb" in req.prompt.lower():
+            out = LLMCellOutput(
+                status=Status.OK,
+                justification="описано",
+                evidence=[LLMEvidence(source_id="c1", quote="supports jsonb storage")],
+            )
+        else:
+            out = LLMCellOutput(
+                status=Status.UNKNOWN,
+                justification="не установлено",
+                denial_reason="нет дословного утверждения",
+            )
+        return LLMResponse(
+            output=out, raw="{}", prompt_hash="ph", decoder="none", usage=TokenUsage()
+        )
+
+
+def _run_injected(
+    argv: list[str], capsys: pytest.CaptureFixture[str], evaluator: object
+) -> dict:
+    """Как ``_run``, но с внедрённым оценщиком (``args.evaluator`` — шов composition root)."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.evaluator = evaluator
+    handler = args.handler
+    assert handler is not None
+    code = handler(args)
+    out = capsys.readouterr().out
+    assert code == 0, out
+    return json.loads(out)
+
+
+def test_recon_classifier_llm_publishes_the_evaluator_verdict(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``--classifier llm``: ``present`` только там, где оценщик вернул ✅, цитата — его.
+
+    Проверяется предмет разворота: вердикт даёт оценщик (тот же, что у карты), а факт —
+    проекция вердикта. Цитата и хеш обязаны быть проверяемыми: адрес — у чанка корпуса,
+    хеш — у его текста (I15/I22).
+    """
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    build_id = _reference_db(tmp_path)
+    # Второй параметр каталога: оценщик о нём ничего не скажет (в промпте нет jsonb).
+    (package / "catalog.csv").write_text(
+        "param_id,title,module,group,importance,param_type,rule,absence_rule,"
+        "role_binding,concept_terms,search_langs\n"
+        'p1,JSONB indexing,m,g,Кр,fact,"supports jsonb storage with expression indexing",'
+        "explicit,,ru=jsonb|индекс,ru|en\n"
+        'p2,TOAST,m,g,Кр,fact,"toast stores oversized attributes",'
+        "explicit,,ru=toast,ru|en\n",
+        encoding="utf-8",
+    )
+    evaluator = _ReconEvaluator()
+    payload = _run_injected(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--build", build_id, "--classifier", "llm", "--json"],
+        capsys,
+        evaluator,
+    )
+    assert payload["classifier"] == "llm"
+    assert payload["model_id"] == "fake@rev1"
+    assert payload["candidate_policy"] == "terms+phrases"
+    assert payload["present"] == 1
+    assert payload["unclear"] == 1
+    assert payload["absent"] == 0
+    assert payload["llm_missing_cell"] == 0
+    # Оценщик вызывался только там, где кандидаты есть: пустой срез — ``no_fragments``,
+    # и вызов на пустом входе не тратится (это факт о ретривале, а не вопрос к модели).
+    assert evaluator.calls == 1
+    stored = {fact.param_id: fact for fact in load_package_facts(package)}
+    present = stored["p1"]
+    assert present.status.value == "present"
+    assert present.quote == "supports jsonb storage"
+    assert present.url == "https://x"
+    assert present.content_hash == "a"
+    # Провенанс называет модель, набор кандидатов **и** версию шаблона: правка шаблона
+    # меняет вердикты, поэтому две разведки по разным шаблонам — разные наблюдения.
+    from core.pipeline.prompt import TEMPLATE_VERSION
+
+    assert present.observed_by == f"llm:fake@rev1:terms+phrases:{TEMPLATE_VERSION}"
+    assert present.review.value == "pending"
+    assert stored["p2"].status.value == "unclear"
+
+
+def test_recon_classifier_llm_without_evaluator_names_the_way_out(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Без оценщика — ``EXIT_USAGE``, и сообщение называет и флаг, и слот, и legacy-путь."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    build_id = _reference_db(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--build", build_id, "--classifier", "llm", "--json"]
+    )
+    with pytest.raises(CliError, match="оценщик не сконфигурирован") as excinfo:
+        args.handler(args)
+    message = str(excinfo.value)
+    assert "--llm-model" in message
+    assert "deploy.yaml: llm" in message
+    assert "--classifier phrase" in message
+    assert excinfo.value.exit_code == EXIT_USAGE
+
+
+def test_recon_classifier_llm_dry_run_writes_nothing(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``--dry-run`` не пишет фактов даже при готовых вердиктах, но числа публикует."""
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    build_id = _reference_db(tmp_path)
+    payload = _run_injected(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--build", build_id, "--classifier", "llm", "--dry-run", "--json"],
+        capsys,
+        _ReconEvaluator(),
+    )
+    assert payload["dry_run"] is True
+    assert payload["written"] is False
+    assert payload["present"] == 1
+    assert payload["candidates_mean"] == 1.0
+    assert not (package / "sources" / "baseline_facts.csv").exists()
+
+
+def test_recon_classifier_phrase_keeps_the_old_rule(tmp_path: Path, capsys, monkeypatch) -> None:
+    """``--classifier phrase`` — прежний фразовый гейт: тот же набор фактов, что у ``derive_facts``.
+
+    Регрессия перехода: фразовый путь не удалён и не изменён, меняется только провенанс
+    (``observed_by="phrase-1"``), которого прежний код не писал вовсе.
+    """
+    from core.config.run_config import load_catalog
+    from core.pipeline.reference_corpus import derive_facts, iter_reference_chunks
+
+    monkeypatch.chdir(tmp_path)
+    package = _package(tmp_path, facts=False)
+    db_path = _corpus_db(
+        tmp_path, "The database supports jsonb storage with expression indexing."
+    )
+    payload = _run(
+        ["baseline", "recon", "--package", str(package), "--baseline", "upstream-pg",
+         "--corpus-db", str(db_path), "--classifier", "phrase", "--json"],
+        capsys,
+    )
+    assert payload["classifier"] == "phrase"
+    assert payload["model_id"] is None
+    assert payload["present"] == 1
+    stored = load_package_facts(package)
+    expected = derive_facts(
+        baseline_id="upstream-pg",
+        version="18",
+        chunks=list(iter_reference_chunks(db_path)),
+        params=load_catalog(package / "catalog.csv"),
+        corpus_build_id="ignored",
+        observed_at="ignored",
+        coverage_complete=False,
+    )
+    # Сравниваются ровно те поля, которые решает правило зачёта: дата и сборка — провенанс.
+    assert [
+        (fact.param_id, fact.status.value, fact.quote, fact.content_hash, fact.note)
+        for fact in stored
+    ] == [
+        (fact.param_id, fact.status.value, fact.quote, fact.content_hash, fact.note)
+        for fact in expected
+    ]
+
+
+# ---------------------------------------------------------------------------
 # --passports-dir по умолчанию для всей группы (тихий ложный ноль роли)
 # ---------------------------------------------------------------------------
 

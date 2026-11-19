@@ -23,6 +23,7 @@ from core.pipeline.reference_products import load_package_facts, write_facts
 from core.pipeline.reference_propose import (
     CANDIDATE_COLUMNS,
     REASON_EXISTING,
+    REASON_FACT_PARTIAL,
     REASON_FACT_PRESENT_ACCEPTED,
     REASON_MAP_SUPPORT_UNRELATED,
     REASON_NEEDS_SIGNATURE,
@@ -91,6 +92,7 @@ def _fact(
     version: str = "18",
     status: FactStatus = FactStatus.PRESENT,
     review: FactReview = FactReview.ACCEPTED,
+    note: str | None = None,
 ) -> BaselineFact:
     return BaselineFact(
         baseline_id="upstream-pg",
@@ -104,6 +106,7 @@ def _fact(
         corpus_build_id="ref_postgresql_18_deadbeef",
         review=review,
         reviewed_by="roger" if review is not FactReview.PENDING else None,
+        note=note,
     )
 
 
@@ -159,6 +162,50 @@ def test_map_support_not_about_subject_makes_the_row_conditional() -> None:
     assert row["inheritance_mode"] == "conditional"
     assert row["reason"] == REASON_MAP_SUPPORT_UNRELATED
     assert row["map_review_reason"].startswith(SUPPORT_NOT_ABOUT_SUBJECT)
+
+
+def test_partial_fact_makes_the_row_conditional() -> None:
+    """``⚠️`` факта (``note=llm_partial``) — опора частичная, значит ``conditional``.
+
+    Раньше слабость доказательства виделась только через карту; с ``--classifier llm``
+    она есть у самого факта, и терять её значило бы выдать частичную опору за полную.
+    """
+    row = _row(_propose([_fact("p1", note="llm_partial")]), "p1")
+    assert row["inheritance_mode"] == "conditional"
+    assert row["reason"] == REASON_FACT_PARTIAL
+
+
+def test_partial_fact_of_another_version_does_not_downgrade_the_row() -> None:
+    """Частичность судится по версии ``min_version``, а не по всей линии."""
+    facts = [
+        _fact("p1", version="18"),  # полная опора на 18
+        _fact("p1", version="17", note="llm_partial"),
+    ]
+    row = _row(_propose(facts), "p1")
+    assert row["min_version"] == "18"
+    assert row["inheritance_mode"] == "direct"
+    assert row["reason"] == REASON_FACT_PRESENT_ACCEPTED
+
+
+def test_unrelated_quote_outranks_partial_support() -> None:
+    """Два основания ``conditional`` называются по отдельности, и карта приоритетнее.
+
+    «Цитата не о предмете» — более грубый дефект, чем «подтверждает частично»: первый
+    говорит, что доказательство не про этот параметр, второй — что оно неполное.
+    """
+    cells = [{"param_id": "p1", "review_reason": SUPPORT_NOT_ABOUT_SUBJECT}]
+    row = _row(
+        _propose([_fact("p1", note="llm_partial")], map_cells=cells, map_version="18"), "p1"
+    )
+    assert row["inheritance_mode"] == "conditional"
+    assert row["reason"] == REASON_MAP_SUPPORT_UNRELATED
+
+
+def test_conditional_summary_counts_both_bases() -> None:
+    """Сводка ``conditional`` не теряет строки, пришедшие по факту, а не по карте."""
+    proposal = _propose([_fact("p1", note="llm_partial")])
+    assert proposal["conditional"] == ["p1"]
+    assert proposal["counts"]["conditional"] == 1
 
 
 def test_map_of_another_version_does_not_downgrade_the_row() -> None:

@@ -1851,7 +1851,7 @@ CJK-бюджет (O21 — нужен ZH-корпус). Отдельно: **`unre
 | P3 | Порядок чтения не гарантирован | **замерено 16.11.2026, дефект на этом корпусе не воспроизводится**: перепись 149 PDF / 19 331 страницы — двухколоночной прозы **0**, все 13 страниц с настоящей канавкой оказались таблицами (заполнение 0.007–0.60, совпадение высот строк 0.48–1.00). Ограничение остаётся **названным**: корпуса с двухколоночной прозой нет, прибор готов и проверен положительным контролем | `core/adapters/extract_pdf_text.py:10-11`, `docs/reports/measurements/2026-11-16-reading-order.md` | O37 |
 | P4 | Нет resource limits для PDF | **частично**: есть `max_response_bytes` 20 MiB, `max_artifact_bytes` 250 MiB, `archive_*`, `document_timeout_s` 1800; **нет** потолка страниц, объёма извлечённого текста и числа объектов PDF | `core/domain/models.py:178-201`, `core/pipeline/crawl_frontier.py:341` | O31 |
 | P6 | `full` без внутреннего таймаута | **замерено 16.11.2026, и это правильное состояние**: распределение 20 документов / 1 501 страницы — p50 120.3 с, p95 280.7 с, max 460.3, но **R² = 0.006** от числа страниц (документ на 65 стр. — 460 с, на 337 стр. — 117 с): `full` платит за OCR, а не за страницу, поэтому таймаут по страницам был бы выдуманным. Внешний guard 1800 с покрывает наблюдённое ×3.9 | `core/adapters/extract_document.py:1112-1120`, `docs/reports/measurements/2026-11-16-extract-duration-full.md` | O30 |
-| P7 | Проверка наличия OCR ≠ проверка качества | **подтверждено**: полей про исходы OCR нет ни в `ExtractedDoc`, ни в `CorpusDoc`; `rg -i ocr` вне `extract_document.py` — только комментарии | `core/ports/types.py:240-295`, `core/domain/models.py:2171` | O25, O38 |
+| P7 | Проверка наличия OCR ≠ проверка качества | **подтверждено**: полей про исходы OCR нет ни в `ExtractedDoc`, ни в `CorpusDoc`; `rg -i ocr` вне `extract_document.py` — только комментарии | `core/ports/types.py:240-295`, `core/domain/models.py:2179` | O25, O38 |
 | P8 | Контекст продолжения не участвует в эмбеддинге | **подтверждено ранее** (`EMBED_INPUT_FIELDS=("text",)`) — дубль уже запланированного | `core/adapters/chunker_family.py:101` | O19 |
 | P9 | Таблицы не первоклассные объекты | **подтверждено**: модели таблицы нет; шапка и подпись идут в `context_prefix`, привязки «строка → таблица/столбец» нет | `core/adapters/chunker_markdown.py:654-670,532-555`, `core/adapters/md_ast.py:94-97` | O39 |
 | P10 | `heading_path` до 3 668 символов; чанкер не диагностирует | **подтверждено**: 3 668 симв. / 912 ток. (замер 03.11), причина — консольный `pre`, прочитанный как setext-заголовок (112 чанков одной страницы); в отчёт прогона аномалия не попадает — видна только измерительным харнессом | `docs/reports/measurements/2026-11-03-md-chunk-geometry-tokens.md:151-152,266-268,307`, `scripts/measure_md_chunking.py:549` | O28 |
@@ -1919,7 +1919,7 @@ CJK-бюджет (O21 — нужен ZH-корпус). Отдельно: **`unre
 
 **Адрес «манифеста» (проверено 09.11.2026).** `extractor_stack` на манифесте **не
 публикуется** — он только хешируется в `run_id`; публикуются `RunManifest.extractor_version`
-(`core/domain/models.py:1985`), `runs.extractor_version` (`core/store/sqlite.py:276`) и
+(`core/domain/models.py:1993`), `runs.extractor_version` (`core/store/sqlite.py:276`) и
 `index_manifest.extractor_version` (`sqlite.py:363`). Писать `ocr_probe` надо туда, а не «в
 стек». Конверт `extract_cache` (`ENVELOPE_FORMAT = 1`) неизвестные ключи игнорирует и
 отсутствующее поле трактует дефолтом ⇒ новый ключ переживёт старый конверт **без** бампа
@@ -2444,7 +2444,7 @@ Markdown остаётся проекцией для чанкера.
 | что | где |
 |---|---|
 | доменный носитель: `ExtractedBlock` (`block_id`/`kind`/`char_start`/`char_end`/`order`/`text_source`/`page_no`/`bbox`/`parent_id`), `check_blocks`, `block_id_for`, `blocks_to_json`/`blocks_from_json` | `core/domain/doc_blocks.py` |
-| поля: `ExtractedDoc.blocks`, `CorpusDoc.blocks`, `RunManifest.blocks` | `core/ports/types.py:330`, `core/domain/models.py:2128`, `:1912` |
+| поля: `ExtractedDoc.blocks`, `CorpusDoc.blocks`, `RunManifest.blocks` | `core/ports/types.py:330`, `core/domain/models.py:2136`, `:1912` |
 | читатель `text_layer`: блок на страницу, `text_source="read"`, `page_no` из карты | `core/adapters/extract_pdf_text.py:604` |
 | штамп читателя | `pdfium-text-4` → **`pdfium-text-5`** (`:130`) |
 | схема | **3.25.0**: `corpus_docs.blocks`, `runs.blocks_json` |

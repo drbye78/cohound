@@ -104,7 +104,6 @@ __all__ = ["configure", "run"]
 
 
 #: Сколько кандидатов лексический индекс отдаёт на **один** параметр разведки.
-#:
 #: Разведка ищет не «самый похожий» чанк, а **любой**, из которого берётся дословная
 #: цитата: кандидат, где терминов правила нет (стемминг лексики и разбор ``parameter_terms``
 #: режут текст по-разному), цитаты не даёт, и цикл идёт к следующему. Замер 17.11.2026
@@ -118,6 +117,39 @@ __all__ = ["configure", "run"]
 #: замера:** мерился корпус пилота, а не reference-корпус версии; при промахах первым делом
 #: мерить ``K``, а не поднимать его на глаз.
 RECON_TOP_K = 20
+
+#: Классификатор разведки: чем решается вопрос «описан ли параметр в документации версии».
+#:
+#: ``phrase`` — фразовый гейт (``derive_facts``/``select_quote``): BM25 отбирает
+#: кандидатов, цитата засчитывается по дословной фразе. Оставлен как **явный legacy-режим**
+#: и по умолчанию: он ничего не стоит (нет LLM) и остаётся контрольной линией.
+#:
+#: ``llm`` — тот же оценщик, что у карты (``evaluate_cell``, промпт ``evaluator_v6``), но
+#: на **кандидатах recon** — объединении словесного и фразового наборов
+#: (``core/pipeline/recon_candidates.py``). Замер 19.11.2026: ни один набор не является
+#: надмножеством другого (49/53 словесный, 28/53 фразовый, 53/53 объединение), поэтому
+#: recall даёт объединение, а precision — оценщик. Факт — проекция его вердикта
+#: (``core/pipeline/fact_projection.py``).
+CLASSIFIER_PHRASE = "phrase"
+CLASSIFIER_LLM = "llm"
+CLASSIFIERS: tuple[str, ...] = (CLASSIFIER_PHRASE, CLASSIFIER_LLM)
+
+#: Провенанс фактов фразового гейта (``BaselineFact.observed_by``): правило зачёта по
+#: фразе, версия 1. Смена правила зачёта — новая метка, иначе две проекции одного прибора
+#: по разным правилам выглядели бы одним наблюдением.
+PHRASE_OBSERVER = "phrase-1"
+
+
+def _classifier(args: argparse.Namespace) -> str:
+    """Классификатор разведки из ``--classifier`` (по умолчанию — фразовый гейт)."""
+    value = str(getattr(args, "classifier", None) or CLASSIFIER_PHRASE)
+    if value not in CLASSIFIERS:
+        raise CliError(
+            f"неизвестный классификатор {value!r} (есть: {', '.join(CLASSIFIERS)})",
+            code="baseline",
+            exit_code=EXIT_USAGE,
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -1011,11 +1043,15 @@ def _map_dir(
     return layout.maps_dir(build_id)
 
 
-def _pick_map(args: argparse.Namespace, maps_dir: Path | None) -> Path | None:
+def _pick_map(
+    args: argparse.Namespace, maps_dir: Path | None, *, flag: str = "--map"
+) -> Path | None:
     """Выбирает карту: явный ``--map`` либо **единственную** имеющуюся.
 
-    Несколько карт и нет ``--map`` — отказ с их списком, а не «последняя по mtime»:
+    Несколько карт и нет флага — отказ с их списком, а не «последняя по mtime»:
     выбор измерения по времени файла выдал бы одну карту за другую (A3 — не угадывать).
+    ``flag`` — имя флага у вызывающей подкоманды: подсказка обязана называть тот флаг,
+    который у неё есть, иначе читатель ищет несуществующую опцию.
     """
     if maps_dir is None:
         return None
@@ -1039,7 +1075,7 @@ def _pick_map(args: argparse.Namespace, maps_dir: Path | None) -> Path | None:
     if len(candidates) > 1:
         names = ", ".join(path.name for path in candidates)
         raise CliError(
-            f"карт несколько ({names}): укажите --map, чтобы не угадывать измерение",
+            f"карт несколько ({names}): укажите {flag}, чтобы не угадывать измерение",
             code="baseline",
             exit_code=EXIT_USAGE,
         )
@@ -1618,6 +1654,215 @@ def _same_fact_version(left: str, right: str) -> bool:
     return left_major == right_major
 
 
+def _llm_model_id(evaluator: Any) -> str:
+    """Объявленная модель оценщика: ``--llm-model`` > слот ``deploy.yaml: llm`` > отказ.
+
+    Та же дисциплина, что у карты и прогона (I21): модель — объявленный вход, а не
+    окружение. Разведка без модели не «попробует дефолт», а называет, чего не хватает.
+    """
+    model_id = getattr(evaluator, "model_id", None)
+    if not model_id:
+        raise CliError(
+            "оценщик без объявленной модели (model_id пуст): укажите --llm-model либо "
+            "слот deploy.yaml: llm — иначе провенанс факта не назвал бы модель",
+            code="baseline",
+            exit_code=EXIT_USAGE,
+        )
+    return str(model_id)
+
+
+def _llm_facts(
+    args: argparse.Namespace,
+    *,
+    db_path: Path,
+    manifest: Any,
+    build_id: str,
+    chunks: Sequence[ChunkText],
+    catalog: Sequence[CatalogRow],
+    product: Any,
+    version: str,
+    observed_at: str,
+    query_lang: str,
+) -> tuple[list[BaselineFact], dict[str, Any]]:
+    """Факты версии — оценщик на **кандидатах recon** (``--classifier llm``).
+
+    Кандидатов даёт :func:`core.pipeline.recon_candidates.recon_candidates` (объединение
+    словесного и фразового наборов: замер 19.11.2026 — 49/53 и 28/53 по отдельности против
+    53/53 вместе), а решение о наличии принимает **тот же** :func:`evaluate_cell`, что у
+    карты и Ш6: промпт ``evaluator_v6``, ``strict=True``, тот же эшелон валидации (I22).
+    Второй формулы оценки нет — иначе расхождение двух приборов мерило бы разницу
+    реализаций, а не разницу путей.
+
+    Даты наблюдений и покрытие передаются из **самой сборки**
+    (``read_artifact_dates``/``coverage_from_manifest``): без них ``❌`` публиковался бы
+    без датированного носителя (I2c/I2d).
+
+    :returns: ``(facts, meta)`` — факты в порядке каталога и провенанс прогона
+        (``model_id``, ``candidate_policy``, число кандидатов), который печатает команда.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from core.adapters.lexical_bm25 import Bm25Index
+    from core.pipeline.evaluate import evaluate_cell
+    from core.pipeline.fact_projection import facts_from_cells
+    from core.pipeline.prompt import TEMPLATE_VERSION
+    from core.pipeline.recon_candidates import CANDIDATE_POLICY, recon_candidates
+    from core.pipeline.reference_corpus import (
+        coverage_from_manifest,
+        read_artifact_dates,
+    )
+    from core.ports.vector_index import RetrievalResult, RetrievedChunk
+    from core.util.hashing import content_hash
+
+    evaluator = _evaluator(args)
+    model_id = _llm_model_id(evaluator)
+    index = Bm25Index()
+    docs = [
+        _ReconDoc(
+            chunk_id=chunk.chunk_id,
+            product_id=product.product_id,
+            text=chunk.text,
+            chunk=chunk,
+        )
+        for chunk in chunks
+    ]
+    index.index(docs)
+    by_id = {doc.chunk_id: doc for doc in docs}
+    # Адрес и хеш — у чанка корпуса: проекция привязывает цитату к **тексту**, и хеш
+    # чанка — единственное, что делает её проверяемой. Фолбэк хеша — как у ``derive_facts``.
+    lookup: dict[str, tuple[str | None, str | None]] = {
+        chunk.chunk_id: (chunk.url, chunk.content_hash or content_hash(chunk.text))
+        for chunk in chunks
+    }
+    run_id = f"recon:{product.baseline_id}:{version}"
+    artifact_dates = read_artifact_dates(db_path, product.product_id)
+    coverage = coverage_from_manifest(manifest, product.product_id)
+    candidates_per_param: dict[str, int] = {}
+
+    def _cell_for(param: CatalogRow) -> Any:
+        """Одна ячейка: кандидаты recon → оценка тем же ``evaluate_cell``, что у карты."""
+        pairs = recon_candidates(
+            param,
+            index=index,
+            product_id=product.product_id,
+            query_lang=query_lang,
+        )
+        candidates_per_param[str(param.param_id)] = len(pairs)
+        retrieved = [
+            RetrievedChunk(
+                chunk_id=chunk_id,
+                product_id=product.product_id,
+                text=by_id[chunk_id].text,
+                content_hash=lookup[chunk_id][1] or "",
+                heading_path="",
+                build_id=build_id,
+                score=score,
+            )
+            for chunk_id, score in pairs
+            if chunk_id in by_id
+        ]
+        retrieval = RetrievalResult(
+            chunks=retrieved,
+            profile="R0",
+            cutoff_K=len(retrieved),
+            build_id=build_id,
+        )
+        outcome = evaluate_cell(
+            param=param,
+            product_id=product.product_id,
+            run_id=run_id,
+            evaluator=evaluator,
+            chunks=retrieved,
+            retrievals=retrieval,
+            strict=True,
+            model_id=model_id,
+            artifact_dates=artifact_dates,
+            coverage=coverage,
+        )
+        return outcome.cell
+
+    cells: dict[str, Any] = {}
+    failed: list[str] = []
+    concurrency = int(getattr(args, "llm_concurrency", 1) or 1)
+    total = len(catalog)
+    started = _dt.datetime.now(_dt.UTC)
+
+    def _record(param_id: str, cell: Any, done: int) -> None:
+        cells[param_id] = cell
+        elapsed = (_dt.datetime.now(_dt.UTC) - started).total_seconds()
+        rate = done / elapsed if elapsed > 0 else 0.0
+        left = (total - done) / rate if rate > 0 else 0.0
+        sys.stderr.write(
+            f"[recon {done}/{total}] {param_id[:40]:40} "
+            f"{elapsed:6.0f} с, осталось ≈{left / 60:.1f} мин\n"
+        )
+        sys.stderr.flush()
+
+    done = 0
+    if concurrency == 1:
+        for param in catalog:
+            try:
+                cell = _cell_for(param)
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                failed.append(f"{param.param_id}: {type(exc).__name__}: {exc}")
+                continue
+            done += 1
+            _record(str(param.param_id), cell, done)
+    else:
+        with ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="recon-llm"
+        ) as pool:
+            futures = {pool.submit(_cell_for, param): param for param in catalog}
+            for future in as_completed(futures):
+                param = futures[future]
+                try:
+                    cell = future.result()
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    failed.append(f"{param.param_id}: {type(exc).__name__}: {exc}")
+                    continue
+                done += 1
+                _record(str(param.param_id), cell, done)
+
+    if failed:
+        # Частичный набор фактов выдал бы себя за полный: недостающая ячейка дала бы
+        # ``unclear``, неотличимый от «оценщик не нашёл». Ошибки названы все сразу.
+        raise CliError(
+            f"разведка не завершена: упало ячеек {len(failed)} (всего {total}); "
+            f"первая: {failed[0]}. Факты не записаны",
+            code="baseline",
+            exit_code=EXIT_ERROR,
+        )
+
+    # Провенанс наблюдения: модель, набор кандидатов и **версия шаблона промпта**. Версия
+    # входит потому, что правка шаблона меняет вердикты (``v3`` перестал выдумывать
+    # ``❌``, ``v4`` вернул различение частичного утверждения, ``v6`` добавил группу и
+    # модуль): без неё два разных правила оценки выглядели бы одним наблюдением, а
+    # ``baseline_facts_digest`` намеренно не видит провенанс и не различил бы их.
+    observed_by = f"llm:{model_id}:{CANDIDATE_POLICY}:{TEMPLATE_VERSION}"
+    facts = facts_from_cells(
+        cells=cells,
+        params=catalog,
+        baseline_id=product.baseline_id,
+        version=version,
+        corpus_build_id=build_id,
+        observed_at=observed_at,
+        observed_by=observed_by,
+        chunk_lookup=lambda chunk_id: lookup.get(chunk_id, (None, None)),
+    )
+    counts = sorted(candidates_per_param.values())
+    meta = {
+        "model_id": model_id,
+        "candidate_policy": CANDIDATE_POLICY,
+        "observed_by": observed_by,
+        # Цена вызова: сколько кандидатов в среднем уходило в промпт на параметр. Число
+        # печатается, а не подразумевается: от него зависит и цена, и что видит модель.
+        "candidates_mean": (sum(counts) / len(counts)) if counts else None,
+        "candidates_max": counts[-1] if counts else None,
+        "candidates_min": counts[0] if counts else None,
+    }
+    return facts, meta
+
+
 def _recon_version(
     args: argparse.Namespace,
     product: Any,
@@ -1626,14 +1871,23 @@ def _recon_version(
     catalog: Sequence[CatalogRow],
     previous: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
-    """Разведка **одной** версии: сборка → чанки → индекс → факты (без записи).
+    """Разведка **одной** версии: сборка → чанки → факты (без записи).
 
     Отдельная функция, потому что ``--all-versions`` обходит все объявленные версии, а
     запись у него одна: наблюдение версии возвращается вызывающему, и он решает, что и
-    когда писать. Отказ версии (нет сборки, пустой корпус) поднимается как ``CliError`` —
-    вызывающий либо пробрасывает его, либо публикует строкой «пропущено».
+    когда писать. Отказ версии (нет сборки, пустой корпус, нет оценщика) поднимается как
+    ``CliError`` — вызывающий либо пробрасывает его, либо публикует строкой «пропущено».
+
+    Два классификатора (``--classifier``) и один корпус:
+
+    * ``phrase`` — кандидатов отбирает лексический индекс, цитату засчитывает
+      ``derive_facts`` (прежний путь, байт-в-байт по набору фактов);
+    * ``llm`` — кандидатов даёт объединение словесного и фразового наборов
+      (``recon_candidates``), вердикт — тот же ``evaluate_cell``, что у карты, факт —
+      проекция вердикта (``fact_projection``).
     """
     layout = _layout(args, product, version)
+    classifier = _classifier(args)
     explicit_db = getattr(args, "corpus_db", None)
     if explicit_db and getattr(args, "build", None):
         # Два адреса одной сборки: молча выиграть один значило бы измерить не то, что
@@ -1684,46 +1938,71 @@ def _recon_version(
             product.product_id, version, reference_content_digest(chunks)
         )
     )
-    # Движок лексики — адаптер, и выбирает его composition root: `pipeline` не импортирует
-    # `adapters` (матрица 01 §1). Индекс строится один раз на прогон, а не на параметр.
-    from core.adapters.lexical_bm25 import Bm25Index
-
-    index = Bm25Index()
-    docs = [
-        _ReconDoc(
-            chunk_id=chunk.chunk_id,
-            product_id=product.product_id,
-            text=chunk.text,
-            chunk=chunk,
-        )
-        for chunk in chunks
-    ]
-    index.index(docs)
     # Охват — **наблюдение сборки**: ``complete`` манифеста аттестует исчерпание
     # объявленного пространства, и только тогда «не нашли» становится ``absent``.
     # Манифеста нет (``--corpus-db``) — полнота неизвестна, значит ``unclear``.
     coverage_complete = bool(manifest.complete) if manifest is not None else False
+    observed_at = _dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat()
     # Резолв языка — до вызова: тот же резолвер, что у прогона и карты
     # (``--query-lang`` > ``deploy.retrieval.query_lang`` > ``all``).
     from core.cli.execution_axes import resolve_query_lang
     from core.config.deploy import load_deploy_config
 
-    facts = _recon_facts(
-        baseline_id=product.baseline_id,
-        version=version,
-        params=catalog,
-        docs=docs,
-        index=index,
-        corpus_build_id=build_id,
-        observed_at=_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
-        coverage_complete=coverage_complete,
-        # Язык терминов — объявленное условие (``--query-lang`` > deploy > ``all``):
-        # на английском reference-корпусе русские термины вытесняли английские из
-        # бюджета ``MAX_TERMS``, и непустой top-10 давали 88 параметров из 181.
-        query_lang=resolve_query_lang(
-            getattr(args, "query_lang", None), load_deploy_config(None)
-        ),
+    query_lang = resolve_query_lang(
+        getattr(args, "query_lang", None), load_deploy_config(None)
     )
+    engine: str | None = None
+    meta: dict[str, Any] = {}
+    if classifier == CLASSIFIER_LLM:
+        facts, meta = _llm_facts(
+            args,
+            db_path=db_path,
+            manifest=manifest,
+            build_id=build_id,
+            chunks=chunks,
+            catalog=catalog,
+            product=product,
+            version=version,
+            observed_at=observed_at,
+            query_lang=query_lang,
+        )
+    else:
+        # Движок лексики — адаптер, и выбирает его composition root: `pipeline` не
+        # импортирует `adapters` (матрица 01 §1). Индекс строится один раз на прогон, а не
+        # на параметр.
+        from core.adapters.lexical_bm25 import Bm25Index
+
+        index = Bm25Index()
+        docs = [
+            _ReconDoc(
+                chunk_id=chunk.chunk_id,
+                product_id=product.product_id,
+                text=chunk.text,
+                chunk=chunk,
+            )
+            for chunk in chunks
+        ]
+        index.index(docs)
+        engine = index.engine_version
+        facts = _recon_facts(
+            baseline_id=product.baseline_id,
+            version=version,
+            params=catalog,
+            docs=docs,
+            index=index,
+            corpus_build_id=build_id,
+            observed_at=observed_at,
+            coverage_complete=coverage_complete,
+            # Язык терминов — объявленное условие (``--query-lang`` > deploy > ``all``):
+            # на английском reference-корпусе русские термины вытесняли английские из
+            # бюджета ``MAX_TERMS``, и непустой top-10 давали 88 параметров из 181.
+            query_lang=query_lang,
+        )
+        # Провенанс наблюдения: каким прибором получен факт. ``derive_facts`` о приборе не
+        # знает (он — правило зачёта), поэтому метку ставит вызывающий.
+        facts = [
+            fact.model_copy(update={"observed_by": PHRASE_OBSERVER}) for fact in facts
+        ]
     # Подписи переживают пере-разведку, если их доказательство на месте: прибор не вправе
     # стирать решение человека молча (§3.3), а человек не вправе держать подпись под
     # цитатой, которой в корпусе больше нет.
@@ -1748,9 +2027,11 @@ def _recon_version(
     return {
         "version": version,
         "build_id": build_id,
+        "classifier": classifier,
+        **meta,
         "chunks": len(chunks),
         "docs": len({chunk.doc_id for chunk in chunks}),
-        "engine": index.engine_version,
+        "engine": engine,
         "coverage_complete": coverage_complete,
         "facts": facts,
         "review_carried": carried,
@@ -1764,12 +2045,20 @@ def _recon_version_line(item: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "version": item["version"],
         "build_id": item["build_id"],
+        "classifier": item.get("classifier"),
+        "model_id": item.get("model_id"),
+        "candidate_policy": item.get("candidate_policy"),
         "chunks": item["chunks"],
         "docs": item["docs"],
         "coverage_complete": item["coverage_complete"],
         "present": sum(1 for fact in facts if fact.status is FactStatus.PRESENT),
         "unclear": sum(1 for fact in facts if fact.status is FactStatus.UNCLEAR),
         "absent": sum(1 for fact in facts if fact.status is FactStatus.ABSENT),
+        # Параметров, которых оценщик не оценивал: не отказ, но видимое число — иначе
+        # «unclear» смешал бы «ячейки нет» и «оценщик смотрел и не признал».
+        "llm_missing_cell": sum(
+            1 for fact in facts if (fact.note or "").startswith("llm_missing_cell")
+        ),
         # Подписи, пережившие пере-разведку, и подписи, чьё доказательство исчезло:
         # и то и другое — видимое число, а не тишина.
         "review_carried": len(item.get("review_carried") or []),
@@ -1795,10 +2084,19 @@ def run_recon(args: argparse.Namespace) -> int:
     прочие версии и параметры. Версия без сборки печатается строкой «сборки нет,
     пропущено» и считается в итоге: одна из восьми может быть не собрана, и это не повод
     отказывать всей разведке, но и не повод молчать.
+
+    ``--classifier llm`` меняет **источник** наблюдения, а не его форму: кандидатов даёт
+    объединение словесного и фразового наборов (``core/pipeline/recon_candidates.py``),
+    вердикт — тот же ``evaluate_cell``, что у карты и Ш6, а факт — проекция вердикта
+    (``core/pipeline/fact_projection.py``). В выводе публикуются ``classifier``,
+    ``model_id`` и ``candidate_policy`` — читатель обязан видеть, чем и на каком наборе
+    кандидатов снято наблюдение. ``--classifier phrase`` (по умолчанию) — прежний
+    фразовый гейт.
     """
     package = _package_dir(args)
     declaration = _declaration(args)
     product = _resolve_baseline(args, declaration)
+    classifier = _classifier(args)
     all_versions = bool(getattr(args, "all_versions", False))
     if all_versions:
         if getattr(args, "version", None):
@@ -1886,6 +2184,34 @@ def run_recon(args: argparse.Namespace) -> int:
         ),
         "build": primary["build_id"] if (primary is not None and not all_versions) else None,
         "engine": primary["engine"] if primary is not None else None,
+        # Чем снято наблюдение: фразовый гейт или оценщик на кандидатах recon. Вместе с
+        # ``model_id``/``candidate_policy`` это провенанс набора фактов — без него
+        # читатель не отличит два правила по имени.
+        "classifier": classifier,
+        "model_id": (
+            primary.get("model_id") if (primary is not None and not all_versions) else None
+        ),
+        "candidate_policy": (
+            primary.get("candidate_policy")
+            if (primary is not None and not all_versions)
+            else None
+        ),
+        # Параметров, которых оценщик не оценивал: не отказ — они дали
+        # ``unclear``/``llm_missing_cell``, — но число печатается.
+        "llm_missing_cell": sum(
+            1 for fact in facts if (fact.note or "").startswith("llm_missing_cell")
+        ),
+        # Цена вызова: сколько кандидатов в среднем уходило в промпт на параметр. Число
+        # печатается, а не подразумевается: от него зависит и цена, и то, что видит модель.
+        "candidates_mean": (
+            primary.get("candidates_mean") if (primary is not None and not all_versions) else None
+        ),
+        "candidates_min": (
+            primary.get("candidates_min") if (primary is not None and not all_versions) else None
+        ),
+        "candidates_max": (
+            primary.get("candidates_max") if (primary is not None and not all_versions) else None
+        ),
         "top_k": RECON_TOP_K,
         "chunks": sum(item["chunks"] for item in observed),
         "docs": sum(item["docs"] for item in observed),
@@ -1947,13 +2273,19 @@ def run_recon(args: argparse.Namespace) -> int:
         lines = [
             f"recon {product.baseline_id}: объявлено версий {len(versions)}, "
             f"разведано {len(observed)}, пропущено {len(skipped)}; "
-            f"индекс {payload['engine'] or '—'} (top_k={RECON_TOP_K})",
+            f"classifier {classifier}"
+            + (
+                f" (top_k={RECON_TOP_K}, индекс {payload['engine'] or '—'})"
+                if classifier == CLASSIFIER_PHRASE
+                else f" (модель {payload['model_id']}, кандидаты {payload['candidate_policy']})"
+            ),
         ]
         for item in payload["versions"]:
             lines.append(
                 f"  @{item['version']}: сборка {item['build_id']}, {item['chunks']} чанков, "
                 f"{item['docs']} документов — present {item['present']}, "
                 f"unclear {item['unclear']}, absent {item['absent']}"
+                + (f", модель {item['model_id']}" if item.get("model_id") else "")
                 + ("" if item["coverage_complete"] else " (охват неполный)")
             )
         for item in skipped:
@@ -1962,6 +2294,14 @@ def run_recon(args: argparse.Namespace) -> int:
             f"итого: present {payload['present']}, unclear {payload['unclear']}, "
             f"absent {payload['absent']}; цитат {payload['quotes']}, "
             f"уникальных {payload['unique_quotes']}",
+            *(
+                [
+                    f"без ячейки оценщика (unclear/llm_missing_cell): "
+                    f"{payload['llm_missing_cell']}"
+                ]
+                if payload["llm_missing_cell"]
+                else []
+            ),
             *signature_lines,
             (
                 "dry-run: ничего не записано"
@@ -1979,15 +2319,31 @@ def run_recon(args: argparse.Namespace) -> int:
         ratio = payload["unique_quote_ratio"]
         # «—» при нуле present: доли нет, потому что делить нечего (а не потому что 0.0).
         ratio_text = "—" if ratio is None else f"{ratio:.2f}"
+        source_text = (
+            f"модель {payload['model_id']}, кандидаты {payload['candidate_policy']}"
+            if classifier == CLASSIFIER_LLM
+            else f"индекс {payload['engine']} (top_k={RECON_TOP_K})"
+        )
         lines = [
             f"recon {product.baseline_id} @{payload['version']}: {payload['chunks']} чанков, "
             f"{payload['docs']} документов, сборка {payload['build']}, "
-            f"индекс {payload['engine']} (top_k={RECON_TOP_K})",
+            f"classifier {classifier} ({source_text})",
             f"параметров: {payload['params']}; present {payload['present']}, "
             f"unclear {payload['unclear']}, absent {payload['absent']}",
             f"цитат: {payload['quotes']}, уникальных {payload['unique_quotes']} "
             f"(доля {ratio_text})",
         ]
+        if classifier == CLASSIFIER_LLM and primary is not None:
+            lines.append(
+                f"кандидатов на параметр: "
+                f"среднее {primary.get('candidates_mean') or 0:.1f}, "
+                f"мин {primary.get('candidates_min')}, макс {primary.get('candidates_max')}"
+            )
+        if payload["llm_missing_cell"]:
+            lines.append(
+                f"без ячейки оценщика (unclear/llm_missing_cell): "
+                f"{payload['llm_missing_cell']}"
+            )
         shared = payload["shared_quotes"]
         if shared:
             shown = "; ".join(
@@ -1998,7 +2354,7 @@ def run_recon(args: argparse.Namespace) -> int:
                 + (f" … и ещё {len(shared) - 3}" if len(shared) > 3 else "")
             )
         without = payload["params_without_terms"]
-        if without:
+        if without and classifier == CLASSIFIER_PHRASE:
             lines.append(
                 f"без терминов (не искались, дефект каталога): {len(without)} — "
                 + ", ".join(without[:5])
@@ -2052,8 +2408,10 @@ def _evaluator(args: argparse.Namespace) -> Any:
     )
     if evaluator is None:
         raise CliError(
-            "оценщик не сконфигурирован: карта требует LLM-слот (deploy.yaml: llm) "
-            "либо --llm-model; детерминированные факты строит `hound baseline recon`",
+            "оценщик не сконфигурирован: `hound baseline map` и "
+            "`hound baseline recon --classifier llm` требуют LLM-слот (deploy.yaml: llm) "
+            "либо --llm-model; детерминированные факты строит "
+            "`hound baseline recon --classifier phrase`",
             code="baseline",
             exit_code=EXIT_USAGE,
         )
@@ -2081,6 +2439,7 @@ def run_map(args: argparse.Namespace) -> int:
         cell_row,
         write_map,
     )
+    from core.pipeline.run_identity import prompt_template_identity
 
     package = _package_dir(args)
     declaration = _declaration(args)
@@ -2171,12 +2530,19 @@ def run_map(args: argparse.Namespace) -> int:
     query_lang = resolve_query_lang(
         getattr(args, "query_lang", None), load_deploy_config(None)
     )
+    # Шаблон промпта — **условие измерения**, и он вычисляется из того шаблона, которым
+    # карта действительно будет оценивать (``имя@хеш`` содержимого), а не берётся из
+    # флага. Свободный ``--prompt-template`` позволял объявить одно, а исполнить другое:
+    # манифесты всех восьми карт 19.11.2026 несли ``prompt_template: null`` при реально
+    # исполненном ``evaluator_v6``, то есть терм ``map_id`` был пуст, и правка шаблона
+    # прошла бы под прежним адресом. Это тот же класс, что модель оценщика из окружения.
+    prompt_template = prompt_template_identity()
     map_id = reference_map_id(
         reference_build_id=build_id,
         baseline_facts_digest=baseline_facts_digest(facts),
         catalog_version=catalog_digest(catalog),
         llm_scenarios={"model_id": getattr(evaluator, "model_id", None)},
-        prompt_template=getattr(args, "prompt_template", None),
+        prompt_template=prompt_template,
         evaluation_policy=None,
         query_lang=query_lang,
     )
@@ -2212,7 +2578,7 @@ def run_map(args: argparse.Namespace) -> int:
             baseline_facts_digest=baseline_facts_digest(facts),
             catalog_version=catalog_digest(catalog),
             llm_scenarios={"model_id": getattr(evaluator, "model_id", None)},
-            prompt_template=getattr(args, "prompt_template", None),
+            prompt_template=prompt_template,
             cutoff_k=int(getattr(args, "cutoff_k", 10) or 10),
             query_lang=query_lang,
             model_id=getattr(evaluator, "model_id", None),
@@ -2529,6 +2895,32 @@ def configure(sub: Any) -> None:
         help="язык терминов запроса ru|en|all (условие измерения: при `all` бюджет "
         "MAX_TERMS тратится на все языки сразу; для английского reference-корпуса — en)",
     )
+    p_recon.add_argument(
+        "--classifier",
+        dest="classifier",
+        choices=list(CLASSIFIERS),
+        default=CLASSIFIER_PHRASE,
+        metavar="{phrase,llm}",
+        help="чем решается «описан ли параметр»: phrase — фразовый гейт (по умолчанию, "
+        "без LLM), llm — оценщик (тот же, что у карты) на объединении словесных и "
+        "фразовых кандидатов",
+    )
+    p_recon.add_argument(
+        "--llm-model",
+        dest="llm_model",
+        default=None,
+        help="объявленная модель оценщика для --classifier llm "
+        "(иначе — слот deploy.yaml: llm)",
+    )
+    p_recon.add_argument(
+        "--llm-concurrency",
+        dest="llm_concurrency",
+        type=_positive_int,
+        default=1,
+        metavar="N",
+        help="сколько вызовов оценщика в полёте (по умолчанию 1; ось исполнения, "
+        "не входит в идентичность)",
+    )
     p_recon.set_defaults(handler=run_recon)
 
     p_propose = inner.add_parser(
@@ -2601,12 +2993,6 @@ def configure(sub: Any) -> None:
         dest="llm_model",
         default=None,
         help="объявленная модель оценщика (иначе — слот deploy.yaml: llm)",
-    )
-    p_map.add_argument(
-        "--prompt-template",
-        dest="prompt_template",
-        default=None,
-        help="имя@хеш шаблона промпта (условие измерения, входит в map_id)",
     )
     p_map.add_argument(
         "--cutoff-k",

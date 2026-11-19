@@ -379,6 +379,11 @@ def load_baseline_facts(path: str | Path) -> list[BaselineFact]:
                     review=FactReview(_opt(row, "review") or FactReview.PENDING.value),
                     reviewed_by=_opt(row, "reviewed_by"),
                     note=_opt(row, "note"),
+                    # Провенанс наблюдения (``llm:{model_id}:{candidate_policy}`` |
+                    # ``phrase-1``). Колонки может не быть — файл, написанный до её
+                    # появления, читается как прежде: ``_opt`` возвращает ``None`` на
+                    # отсутствующую колонку, а не падает.
+                    observed_by=_opt(row, "observed_by"),
                 )
             )
         except (ValidationError, ValueError) as exc:

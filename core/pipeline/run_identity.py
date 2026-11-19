@@ -281,7 +281,7 @@ def resolve_refresh_policy(
     return RefreshPolicy(configured) if configured is not None else RefreshPolicy.AUTO
 
 
-def _prompt_template_identity() -> str:
+def prompt_template_identity() -> str:
     """``имя_шаблона@хеш_содержимого`` — условие измерения, а не провенанс (§7.1).
 
     Зачем хеш: один ``TEMPLATE_VERSION`` не описывает текст. Правка шаблона меняет
@@ -454,7 +454,7 @@ def build_execution_contract(
         # §7.1/§7.4: шаблон промпта оценщика. Имя версии без содержимого позволило бы
         # переписать текст шаблона, не сменив идентичность, поэтому в контракт идёт пара
         # «имя + хеш файла»: шаблон задаёт, что считается заявленным, а что отсутствием.
-        "prompt_template": _prompt_template_identity(),
+        "prompt_template": prompt_template_identity(),
     }
     return execution_contract_digest(values)
 

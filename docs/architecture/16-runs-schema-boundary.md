@@ -340,8 +340,8 @@ per-site (`core/pipeline/crawl_frontier.py:826`) — два уровня одн�
   конфига, отсутствие `model_id` — dense-ветвь не собирается (`embed_spec: null`, видимая
   заметка wiring), недоступность объявленной модели — `EXIT_USAGE`, а не другой адаптер.
 - run-слой: `run.yaml:embed.device` (`EmbedRunConfig` рядом с `CrawlRunConfig`,
-  `core/domain/models.py:673`), дефолт `None` — по той же причине, что у `pdf_device`
-  (`core/domain/models.py:837`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
+  `core/domain/models.py:681`), дефолт `None` — по той же причине, что у `pdf_device`
+  (`core/domain/models.py:845`): дефолт run-слоя перекрыл бы app-слой в `_pick`.
 - **per-site слоя нет**: устройство — свойство хоста исполнения, а не сайта (тот же довод,
   что в `resolve_pdf_device`, `core/pipeline/crawl_frontier.py:488-509`).
 - Резолвер: `resolve_embed_device(app, run)` (`core/pipeline/crawl_frontier.py:511-538`) —
@@ -371,7 +371,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (`core/cli/execution_axes.py:693-700`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
-(`core/pipeline/digests.py:626-648`) требует точного набора ключей, но вызывается ровно из
+(`core/pipeline/digests.py:630-652`) требует точного набора ключей, но вызывается ровно из
 одного места — `core/pipeline/run_identity.py:383`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
@@ -383,7 +383,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (§3), поэтому `hound diff` против прогона прошлой схемы невозможен не из-за поля, а из-за
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
-`RunManifest` (`core/domain/models.py:1881`) получает поле `embed_device`, и этого
+`RunManifest` (`core/domain/models.py:1889`) получает поле `embed_device`, и этого
 достаточно: `_contract_field_attr` (`core/pipeline/report.py:2896`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
 (`core/pipeline/report.py:2866`)
@@ -785,7 +785,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    `core/pipeline/state_adopt.py:120` — **текст там с 08.11.2026 сам устарел**:
    `runs.run_scope` объявлен (`core/store/sqlite.py:206`) и пишется `persist_manifest`
    (`core/store/sqlite_store.py:1284`); правка в `core/` — вне этой полосы), а `ProductPlanSet`
-   существует (`core/domain/models.py:2951`) и **до границы** не персистился ни разу —
+   существует (`core/domain/models.py:2959`) и **до границы** не персистился ни разу —
    единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей. ✅ После границы оба
@@ -901,7 +901,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 **Чего не было вовсе:**
 
 1. **`EmbedConfig`/`EmbedRunConfig` не существовали** — имена были только в этом документе
-   (§4.1). ✅ Созданы границей: `core/domain/models.py:673` (`EmbedRunConfig`).
+   (§4.1). ✅ Созданы границей: `core/domain/models.py:681` (`EmbedRunConfig`).
 2. **Порт эмбеддера без `device`** — и это правильно; устройство идёт явным параметром
    (§4.1). Иначе граница повторила бы дефект: спрашивать у адаптера, на чём он считает.
    ✅ Сверено 08.11.2026: порт по-прежнему без `device` (`core/ports/embedder.py:15-21`).
