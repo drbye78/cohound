@@ -362,6 +362,19 @@ report → map`. Каждая читает то, что собрала пред�
 ./hound.py baseline recon --package packages/{case_id} --baseline {baseline_id} --all-versions
 
 # 3. Подпись человека под фактами (без неё наследовать нельзя)
+#    255 цитат в CSV читать неудобно — разметка идёт через XLSX, а не через 255 флагов:
+python3 scripts/prepare_baseline_signatures.py build \
+  --package packages/{case_id} --baseline {baseline_id} \
+  --reference-root {COHOUND_HOME}/reference \
+  --out-xlsx packages/{case_id}/sources/baseline_signatures.candidate.xlsx \
+  --out-data packages/{case_id}/sources/baseline_signatures.candidate.jsonl
+#    → в XLSX поставить accept/reject (по строке или по параметру целиком), затем:
+python3 scripts/prepare_baseline_signatures.py compile \
+  --xlsx …candidate.xlsx --data …candidate.jsonl --out /tmp/signatures.reviewed.jsonl
+python3 scripts/prepare_baseline_signatures.py apply \
+  --data /tmp/signatures.reviewed.jsonl --package packages/{case_id} \
+  --baseline {baseline_id} --actor {кто}
+#    Одиночная подпись без XLSX — по-прежнему одной командой:
 ./hound.py baseline review --package packages/{case_id} --baseline {baseline_id} \
   --accept --actor {кто}
 

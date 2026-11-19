@@ -248,6 +248,7 @@ def review_facts(
     accept: bool | None = None,
     note: str | None = None,
     dry_run: bool = False,
+    keys: Sequence[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Человеческая подпись под фактом: ``accepted``/``rejected`` (§5 плана).
 
@@ -258,6 +259,11 @@ def review_facts(
 
     :param accept: ``True`` — принять, ``False`` — отклонить, ``None`` — снять подпись
         обратно в ``pending`` (полезно, когда факт пере-разведан).
+    :param keys: подписать набор строк ``(param_id, version)`` за **один** вызов и одну
+        запись файла. Прибор разметки подписывает десятки строк сразу; 255 вызовов
+        ``--param/--version`` означали бы 255 перезаписей ``baseline_facts.csv`` и 255
+        записей журнала вместо одной, где видно, что это одно решение. ``None`` —
+        прежний отбор по ``param_id``/``version``.
     :returns: ``{"changed": [...], "skipped": n, "path": ..., "dry_run": bool}``.
     """
     if not (actor or "").strip():
@@ -265,6 +271,7 @@ def review_facts(
     target = FactReview.ACCEPTED if accept is True else (
         FactReview.REJECTED if accept is False else FactReview.PENDING
     )
+    wanted = set(keys) if keys is not None else None
     facts = load_package_facts(package_dir)
     changed: list[dict[str, str]] = []
     skipped = 0
@@ -273,6 +280,8 @@ def review_facts(
         matches = fact.baseline_id == baseline_id and (
             param_id is None or fact.param_id == param_id
         ) and (version is None or fact.version == version)
+        if wanted is not None:
+            matches = matches and (fact.param_id, fact.version) in wanted
         if not matches:
             updated.append(fact)
             continue
@@ -309,6 +318,9 @@ def review_facts(
                 "param_id": param_id,
                 "version": version,
                 "review": target.value,
+                # Ключи подписанных строк: при подписи набором `param_id`/`version` пусты,
+                # и без этого поля журнал не сказал бы, что именно подписано.
+                "keys": sorted(wanted) if wanted is not None else None,
                 "changed": changed,
             },
         )
