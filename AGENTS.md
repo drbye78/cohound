@@ -872,6 +872,17 @@ documentation (verbatim quote + text hash + date + `review`). `./hound.py baseli
 whose predecessor is missing refuses and names it (`list` prints the same next command).
 Only `status=present` **and** `review=accepted` is inherited — anything else means "no
 acceleration", and the parameter is evaluated normally (neither `❓` nor `❌` follows from it).
+`recon` has **two classifiers**, and they are two instruments, not a setting: `--classifier
+phrase` (default) is a deterministic BM25+phrase gate, `--classifier llm` is the same judge as
+the map (`evaluate_cell`, `evaluator_v6`) on the **union** of term- and phrase-candidates
+(`core/pipeline/recon_candidates.py`), with the fact projected from its verdict
+(`core/pipeline/fact_projection.py`). Measured 20.11.2026 on the version-18 reference corpus
+(9 763 chunks, 181 params): the phrase set alone delivers a known quote for 28 of 53 params,
+the term set 49, the union 53; `present` 76 (llm) vs 37 (phrase); two identical llm runs differ on **4 of 181 cells**
+(2.2 %, and both `absent` cells of the first run flipped to `present`), so **`absent` is
+never published without a human signature**.
+`observed_by` (`llm:{model}:{candidates}:{template}` | `phrase-1`) names the instrument and is
+**provenance**, not identity — it stays out of `baseline_facts_digest`.
 A fact is looked up on the **major** version of the declared line (`18.4.1` → `18`), never
 "≤ V": otherwise an upstream regression is papered over. The reference corpus lives under
 `COHOUND_HOME/reference/{package}/{product}/{version}/` and is **per-build**:

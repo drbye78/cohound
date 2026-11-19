@@ -61,7 +61,7 @@ products:
 def _facts_csv(rows: list[dict[str, str]]) -> str:
     head = (
         "baseline_id,param_id,version,status,url,quote,content_hash,observed_at,"
-        "corpus_build_id,review,reviewed_by,note\n"
+        "corpus_build_id,review,reviewed_by,note,observed_by\n"
     )
     lines = [head]
     for row in rows:
@@ -80,6 +80,7 @@ def _facts_csv(rows: list[dict[str, str]]) -> str:
                     row.get("review", "pending"),
                     row.get("reviewed_by", ""),
                     "",
+                    row.get("observed_by", ""),
                 ]
             )
             + "\n"
@@ -208,6 +209,53 @@ def test_build_marks_short_quote_as_low(tmp_path: Path) -> None:
     )
     assert records[0]["confidence"] == "low"
     assert "короче" in records[0]["reason"]
+
+
+def test_quote_without_parameter_term_is_low_only_for_the_phrase_gate(tmp_path: Path) -> None:
+    """Отсутствие фразы — противоречие у фразового гейта и законный смысл у оценщика.
+
+    Замер 20.11.2026: 16 из 76 `present`-цитат оценщика не содержат ни одного термина
+    параметра. Красить их в красный значило бы, что инструмент разметки спорит с
+    прибором, снявшим наблюдение, — и очередь теряла бы смысл.
+    """
+    quote = "The pgcrypto module allows certain fields to be stored encrypted."
+    gate = _package(
+        tmp_path / "gate",
+        [{"param_id": "p_ok", "quote": quote, "observed_by": "phrase-1"}],
+    )
+    gate_records = SIGNATURES.build(
+        gate,
+        baseline_id="upstream-pg",
+        reference_root=None,
+        versions=None,
+        out_xlsx=tmp_path / "gate.xlsx",
+        out_data=tmp_path / "gate.jsonl",
+    )
+    assert gate_records[0]["confidence"] == "low"
+    assert "нет фразы параметра" in gate_records[0]["reason"]
+
+    llm = _package(
+        tmp_path / "llm",
+        [
+            {
+                "param_id": "p_ok",
+                "quote": quote,
+                "observed_by": "llm:m@rev1:terms+phrases:evaluator_v6",
+            }
+        ],
+    )
+    llm_records = SIGNATURES.build(
+        llm,
+        baseline_id="upstream-pg",
+        reference_root=None,
+        versions=None,
+        out_xlsx=tmp_path / "llm.xlsx",
+        out_data=tmp_path / "llm.jsonl",
+    )
+    assert llm_records[0]["confidence"] == "medium"
+    assert "оценщик зачёл смыслом" in llm_records[0]["reason"]
+    # Провенанс доезжает до листа: человек видит, чем снято наблюдение.
+    assert llm_records[0]["observed_by"].startswith("llm:")
 
 
 def test_build_marks_single_generic_word_phrase_as_medium(tmp_path: Path) -> None:

@@ -364,13 +364,20 @@ report → map`. Каждая читает то, что собрала пред�
 # 1. Собрать документацию объявленной версии (корни — sources/reference_products.yaml)
 ./hound.py baseline build --package packages/{case_id} --baseline {baseline_id} --version 18
 
-# 2. Разведка: цитата на параметр, детерминированно (без LLM), гейт качества цитат
-./hound.py baseline recon --package packages/{case_id} --baseline {baseline_id} --version 18
+# 2. Разведка: цитата на параметр. Два классификатора, выбор — выбор прибора:
+#    --classifier phrase (по умолчанию) — фразовый гейт, детерминированно, без LLM;
+#    --classifier llm — тот же оценщик, что у карты, на объединённых кандидатах.
+./hound.py baseline recon --package packages/{case_id} --baseline {baseline_id} --version 18 \
+  --query-lang en
+./hound.py baseline recon --package packages/{case_id} --baseline {baseline_id} --version 18 \
+  --classifier llm --query-lang en --llm-model {model_id} --llm-concurrency 4
 #    То же по всем объявленным версиям линии — одна запись фактов в конце:
 ./hound.py baseline recon --package packages/{case_id} --baseline {baseline_id} --all-versions
 
 # 3. Подпись человека под фактами (без неё наследовать нельзя)
-#    255 цитат в CSV читать неудобно — разметка идёт через XLSX, а не через 255 флагов:
+#    Цитат сотни, и в CSV их читать неудобно — разметка идёт через XLSX, а не через
+#    столько же флагов (число зависит от версии и классификатора: замер 20.11.2026 —
+#    present 76 на версии 18 при --classifier llm против 37 при phrase):
 python3 scripts/prepare_baseline_signatures.py build \
   --package packages/{case_id} --baseline {baseline_id} \
   --reference-root {COHOUND_HOME}/reference \

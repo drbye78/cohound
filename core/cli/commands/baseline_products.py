@@ -918,6 +918,10 @@ def run_facts(args: argparse.Namespace) -> int:
                 "observed_at": fact.observed_at,
                 "reviewed_by": fact.reviewed_by,
                 "note": fact.note,
+                # Провенанс наблюдения: каким прибором оно снято (``llm:модель:набор
+                # кандидатов:шаблон`` либо ``phrase-1``). Без него читатель не отличит
+                # фразовый гейт от оценщика, а факты обоих лежат в одном файле.
+                "observed_by": fact.observed_by,
             }
             for fact in rows
         ],
@@ -930,6 +934,7 @@ def run_facts(args: argparse.Namespace) -> int:
             lines.append(
                 f"  {fact.baseline_id} {fact.param_id} @{fact.version}: "
                 f"{fact.status.value}/{fact.review.value}"
+                + (f"  [{fact.observed_by}]" if fact.observed_by else "")
                 + (f"  {fact.url}" if fact.url else "")
                 + (f"  — {_shorten(fact.quote)}" if fact.quote else "")
             )
@@ -982,6 +987,13 @@ def run_report(args: argparse.Namespace) -> int:
             "present": sum(1 for f in facts if f.status is FactStatus.PRESENT),
             "absent": sum(1 for f in facts if f.status is FactStatus.ABSENT),
             "unclear": sum(1 for f in facts if f.status is FactStatus.UNCLEAR),
+            # Чем сняты наблюдения. Один файл может держать факты разных приборов
+            # (фразовый гейт и оценщик): без этой разбивки сводка выглядела бы как
+            # результат одного правила, а «сколько нашли» зависело бы от того, что
+            # лежит в файле, — читатель обязан видеть, чем именно.
+            "observed_by": dict(
+                sorted(Counter(f.observed_by or "unknown" for f in facts).items())
+            ),
         },
         "inheritance": report,
     }
@@ -2069,11 +2081,20 @@ def _recon_version_line(item: Mapping[str, Any]) -> dict[str, Any]:
 def run_recon(args: argparse.Namespace) -> int:
     """``hound baseline recon``: факты по каталогу из reference-корпуса (шаг 7a плана).
 
-    Разведка **детерминированная**: кандидат — чанк, найденный лексическим индексом по
-    терминам правила; цитата обязана быть дословной подстрокой текста чанка. LLM здесь не
-    участвует, и это осознанно: факт — провенанс, а провенанс не должен зависеть от
-    модели. Движок индекса выбирает composition root, и его версия печатается: «чем
-    искали» — часть наблюдения.
+    Два классификатора, и выбор между ними — выбор прибора, а не настройка вкуса:
+
+    * ``--classifier phrase`` (по умолчанию) — **детерминированный** гейт: кандидат —
+      чанк, найденный лексическим индексом по терминам, зачёт — по вхождению фразы
+      параметра; цитата обязана быть дословной подстрокой текста чанка. LLM не участвует.
+    * ``--classifier llm`` — тот же оценщик, что у карты (``evaluate_cell``, шаблон
+      ``evaluator_v6``), на объединённых кандидатах (см. ниже).
+
+    Раньше первый был единственным, и это стоило наблюдений: замер 19.11.2026 на
+    reference-корпусе версии 18 показал, что фразовый гейт и оценщик расходятся не шумом,
+    а правилом (κ 0.0515), и что причина — набор кандидатов, а не качество оценки.
+
+    Движок индекса выбирает composition root, и его версия печатается: «чем искали» —
+    часть наблюдения.
 
     ``absent`` публикуется **только** при аттестованном охвате (``manifest.complete``):
     проход по неполному корпусу не даёт утверждения об отсутствии (I2/I2c), поэтому «не
