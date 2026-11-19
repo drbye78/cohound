@@ -331,11 +331,15 @@ def test_designated_denial_quote_is_deterministic_across_runs() -> None:
     assert first.cell.evidence_scope.citation_quote == second.cell.evidence_scope.citation_quote
 
 
-def test_denial_quote_without_markers_falls_back_visibly() -> None:
-    """Маркеров нет ни в одной цитате — прежнее правило остаётся, но основание видно.
+def test_denial_quote_without_markers_demotes_to_unknown() -> None:
+    """Маркеров нет ни в одной цитате — `explicit` не доказан, вердикт понижается до ❓.
 
-    Статус и класс не меняются: выбор цитаты — не политика валидации (§2.2), а
-    публикуемое основание. Молчаливый выбор «первой» и был бы дефектом.
+    До 19.11.2026 статус оставался `❌`: «предмет ревью» (§2.2). Замер на живом прогоне
+    (`ru-pg-dbms-145ad66ca3f9`) показал цену: 16 из 21 `❌` несли эту заметку, и среди них
+    «| Максимальный размер поля | 1 GB |» и «Все большие объекты хранятся в одной системной
+    таблице» — цитаты, которые ничего не отрицают. `❌` — утверждение об отсутствии (I2),
+    и цитата, не содержащая отрицания, его не подтверждает; I12 требует понижения до `❓`,
+    а не публикации.
     """
     data = _data()
     output = LLMCellOutput(
@@ -349,11 +353,41 @@ def test_denial_quote_without_markers_falls_back_visibly() -> None:
     )
     outcome = _evaluate(data, _ScriptedEvaluator([output]))
 
+    assert outcome.cell.status is Status.UNKNOWN
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.NOT_STATED
+    assert DENIAL_QUOTE_WITHOUT_MARKERS in (scope.reason or "")
+    assert any(DENIAL_QUOTE_WITHOUT_MARKERS in n for n in outcome.cell.validation_notes)
+    # Недоказанное «нет» не публикует протокол отсутствия: искать нечего.
+    assert outcome.cell.absence_evidence == []
+
+
+def test_denial_quote_with_limiter_marker_stays_absent() -> None:
+    """Русский ограничитель («только») — такое же отрицание, как «не поддерживается».
+
+    Замер 19.11.2026: из 16 `❌` с заметкой пять были законными и терялись только потому,
+    что «только» не входило в набор маркеров — «Одновременно может быть выполнено только
+    одно резервное копирование», «Только `INSERT` (без поддержки `UPDATE`/`DELETE`)».
+    Понижать их значило бы обменять один дефект на другой.
+    """
+    data = _data()
+    quote = "Одновременно может быть выполнено только одно резервное копирование."
+    data["chunks"][2]["text"] = quote
+    output = LLMCellOutput(
+        status=Status.ABSENT,
+        justification="Вендор ограничивает механизм одним потоком.",
+        denial_strength="explicit",
+        denial_reason="прямое ограничение",
+        evidence=[LLMEvidence(source_id="chunk_a3", quote=quote)],
+    )
+    outcome = _evaluate(data, _ScriptedEvaluator([output]))
+
     assert outcome.cell.status is Status.ABSENT
     scope = outcome.cell.evidence_scope
     assert scope is not None
-    assert scope.citation_quote == "Документ описывает экспорт данных в формате CSV."
-    assert any(DENIAL_QUOTE_WITHOUT_MARKERS in n for n in outcome.cell.validation_notes)
+    assert scope.denial_strength is DenialStrength.EXPLICIT
+    assert scope.citation_quote == quote
 
 
 # ---------------------------------------------------------------------------
@@ -1478,3 +1512,30 @@ def test_does_not_provide_is_a_denial_marker() -> None:
     assert _denial_marker_count("Вендор не предоставляет собственных средств управления.") == 1
     # Утверждение маркером не становится: иначе выбор цитаты отрицания теряет смысл.
     assert _denial_marker_count("Свойство доступно без дополнительной настройки.") == 0
+
+
+def test_russian_limiters_and_plural_modals_are_denial_markers() -> None:
+    """Русское «только» и «не могут» — отрицание; без них понижение теряет верные `❌`.
+
+    Замер 19.11.2026 по живому прогону `ru-pg-dbms-145ad66ca3f9`: из 16 `❌` с заметкой
+    `denial_quote_without_markers` пять были **законными** и терялись только из-за
+    неполного набора маркеров — «Одновременно может быть выполнено **только** одно
+    резервное копирование», «**Только** `INSERT` (без поддержки `UPDATE`/`DELETE`)»,
+    «средства … **не позволяют** реализовать такую двунаправленную репликацию»,
+    «Пакеты **не могут** быть созданы в Tantor SE». Отдельный случай — «могут» через
+    «г», а не «может»: шаблон с `мож` не узнавал множественное число.
+    """
+    from core.pipeline.evaluate import _denial_marker_count
+
+    assert _denial_marker_count(
+        "Одновременно может быть выполнено только одно резервное копирование."
+    ) >= 1
+    assert _denial_marker_count("Только `INSERT` (без поддержки `UPDATE` / `DELETE`).") >= 1
+    assert _denial_marker_count(
+        "средства, доступные в PostgreSQL 10, не позволяют реализовать такую репликацию"
+    ) >= 1
+    assert _denial_marker_count("Пакеты не могут быть созданы в Tantor SE") >= 1
+    # Описание без ограничения маркером не становится — иначе понижение не сработает там,
+    # где оно нужно: 10 из тех же 16 цитат были именно такими.
+    assert _denial_marker_count("Все большие объекты хранятся в одной системной таблице") == 0
+    assert _denial_marker_count("| Максимальный размер поля | 1 GB |") == 0

@@ -14,7 +14,7 @@ cohort: cohort-demo-absence-2026-11-05
 # Версия методологии объявлена входом (§13); 0.4.0 — текущая семантика кода, а не
 # историческая: ярлык обязан совпадать с `METHODOLOGY_VERSION` (I2d, датированное
 # отсутствие; per-cell подписи больше нет).
-methodology_version: '0.4.0'
+methodology_version: '0.5.0'
 focus:
   modules:
   - core

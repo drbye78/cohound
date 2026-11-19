@@ -857,7 +857,7 @@ R0 — парно это **не значимо** (МакНемар p = 0.238), �
 (`citation_quote` + `doc_version_id`) → текст документа из его чанков по `chunk_no` →
 нормализация (пробельные серии → пробел; `\_` → `_`, замер O16) → все вхождения цитаты,
 пересечённые с отрезками чанков. **Запрос берётся тем же построителем, что фаза Ш6**
-(`core.pipeline.evaluate.run_queries_for_cell` → `prompt.render_queries`, `evaluate.py:1053`),
+(`core.pipeline.evaluate.run_queries_for_cell` → `prompt.render_queries`, `evaluate.py:1055`),
 `CatalogRow` — из снимка входов прогона (`runs/{run_id}/plan_inputs.json`), иначе запрос был
 бы про изменённый после прогона каталог.
 
@@ -1919,7 +1919,7 @@ CJK-бюджет (O21 — нужен ZH-корпус). Отдельно: **`unre
 
 **Адрес «манифеста» (проверено 09.11.2026).** `extractor_stack` на манифесте **не
 публикуется** — он только хешируется в `run_id`; публикуются `RunManifest.extractor_version`
-(`core/domain/models.py:1729`), `runs.extractor_version` (`core/store/sqlite.py:276`) и
+(`core/domain/models.py:1985`), `runs.extractor_version` (`core/store/sqlite.py:276`) и
 `index_manifest.extractor_version` (`sqlite.py:363`). Писать `ocr_probe` надо туда, а не «в
 стек». Конверт `extract_cache` (`ENVELOPE_FORMAT = 1`) неизвестные ключи игнорирует и
 отсутствующее поле трактует дефолтом ⇒ новый ключ переживёт старый конверт **без** бампа

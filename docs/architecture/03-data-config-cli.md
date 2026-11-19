@@ -334,7 +334,7 @@ class SqliteStore:
 | `STATE_SCHEMA_VERSION` | `state/{package_id}/state.db` (durable-состояние оператора) | `"13"` (`core/store/state_sqlite.py:90`) |
 | `EDGE_JOBS_SCHEMA_VERSION` | `edge_jobs.db` (очередь DMZ) | `"1"` (`core/edge/scheduler.py:198`) |
 | `SEAM_SCHEMA_VERSION` | контракт `/v1/*` (`contracts/seam/*.json`); в манифесте — `edge_schema_version` (`DEFAULT_SCHEMA_VERSION`, `core/adapters/remote_gateway.py:54`) | `"1"` (`core/edge/seam_schema.py:68`) |
-| `METHODOLOGY_VERSION` | код (`core/domain/models.py:176`), ярлык пакета обязан ему **равняться** | `"0.4.0"` |
+| `METHODOLOGY_VERSION` | код (`core/domain/models.py:185`), ярлык пакета обязан ему **равняться** | `"0.5.0"` |
 
 #### C.1.1. Что входит в `run_id` (форкает ли прогон идентичность)
 

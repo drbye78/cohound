@@ -229,7 +229,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
   В `md-heading-5` порог больше **не выбрасывает** текст: он приклеивает хвост разреза к
   предыдущему куску, а объявленная единица документа остаётся чанком (P1 плана 18).
 - ✅ C7 — структурная шапка фрагмента в промпте (`source_id`/`document`/`heading`/`context`):
-  `core/pipeline/prompt.py:298,306`; регламент — `cohound-spec-v2.md:657`.
+  `core/pipeline/prompt.py:298,306`; регламент — `cohound-spec-v2.md:659`.
 - ✅ C8 — одно лексическое поле + `lexical_spec` в контракте (`1e7fad9`).
 - ✅ C9 — поля и группы склеиваются разными разделителями: `core/adapters/index_npy.py:75-77`.
 - ✅ C10 — сборка через `os.replace` без окна `rmtree`→`replace`: `core/adapters/index_format.py:171-172`.
@@ -517,7 +517,7 @@ absence-модель, scoring и определения Coverage/Comparability �
    которая и была измеренным дефектом.
 2. **Его абсолютные формулировки надо читать как «в узком смысле».** «Греп по
    `over-claim|entail` пуст» — верно; но замер «о предмете ли цитата» (`support_subject_overlap`,
-   `core/pipeline/evaluate.py:1184-1238`, артефакт `outputs/support_quality.yaml`) существует, подключён в отчёт и
+   `core/pipeline/evaluate.py:1186-1240`, артефакт `outputs/support_quality.yaml`) существует, подключён в отчёт и
    уже дал число 45 из 70. А «docstring'и продают байт-в-байт» относится к промпту и к
    поведению при выключенном кэше, а не к вердиктам.
 
@@ -531,7 +531,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 | V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:84` `DEFAULT_DECODER="none"` достижим в проде (`core/cli/wiring.py:1136`); `llm_local.py:482-495` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:825` `Decoder | None`, в `status-dictionary.yaml` ключа не было); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
 | V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:94`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:38-45`), в payload нет (`llm_local.py:617-638`), `build_evaluator_llm` не читает (`core/cli/wiring.py:1329-1471`), читает `build_discovery_llm` (`:1116-1208`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
 | V6 | Внешний LLM-хост в закоммиченном конфиге | **ПОДТВЕРЖДЕНО, и хуже аудита** | `config/deploy.yaml:89` `https://plusvibeapi.ru` при шапке того же файла `:13-14` «внутреннего периметра, внешние хосты не используются»; `core/cli/commands/run.py:534` `load_deploy_config(None)` безусловно на каждом прогоне, флага `--deploy` у `run` нет; `base_url` **не входит ни в `llm_scenarios`, ни в контракт** (`ScenarioBinding` — 11 полей, endpoint только как `endpoint_kind: api`); поведение запинено тестом `test_deploy.py:812-831`; ссылка «Д-36» в `deploy.yaml:77` не имеет адресата в `docs/` | Б/М | **P0 + P2** |
-| V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО** → **закрыто** (`4ee192f`: `PromptArchive` пишет `runs/{run_id}/prompts/{prompt_hash}.json` для исполненных промптов; замер — 117 файлов, 2.93 MiB на 119 параметров); «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** На момент находки: `save_prompt` не импортировался в `evaluate.py`; в `runs/ru-pg-dbms-3edf2b06097c/` каталога `prompts/` не было; три документа обещали артефакт. Сейчас: `PromptArchive` пишет каталог из фазы (замер на 119 параметрах jatoba — 117 различных промптов, 2.93 MiB), документы исправлены. Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`core/pipeline/evaluate.py:1184-1238`), коллизий в прогоне нет (104/104 различных). **06.11.2026:** на прогоне `ru-pg-dbms-c2e7b860ac17` узость дала 3 реальных коллизии (`jatoba` `xlsx_056`/`xlsx_057` и др.), и файл с адресом по `prompt_hash` терял второй промпт (`prompt_hash_conflict`); адрес артефакта заменён на `sha256(text)` — формула §5 при этом не менялась | М | P6 |
+| V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО** → **закрыто** (`4ee192f`: `PromptArchive` пишет `runs/{run_id}/prompts/{prompt_hash}.json` для исполненных промптов; замер — 117 файлов, 2.93 MiB на 119 параметров); «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** На момент находки: `save_prompt` не импортировался в `evaluate.py`; в `runs/ru-pg-dbms-3edf2b06097c/` каталога `prompts/` не было; три документа обещали артефакт. Сейчас: `PromptArchive` пишет каталог из фазы (замер на 119 параметрах jatoba — 117 различных промптов, 2.93 MiB), документы исправлены. Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`core/pipeline/evaluate.py:1186-1240`), коллизий в прогоне нет (104/104 различных). **06.11.2026:** на прогоне `ru-pg-dbms-c2e7b860ac17` узость дала 3 реальных коллизии (`jatoba` `xlsx_056`/`xlsx_057` и др.), и файл с адресом по `prompt_hash` терял второй промпт (`prompt_hash_conflict`); адрес артефакта заменён на `sha256(text)` — формула §5 при этом не менялась | М | P6 |
 
 **Статус на 2026-11-07, уточнён 08.11.2026.** ✅ V1, V3–V7 · 🟡 V2 (невыполненный **замер**, не остаток кода).
 

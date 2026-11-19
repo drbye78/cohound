@@ -71,7 +71,13 @@ CHUNK_ID = _chunk_id("p1", DOC_VERSION, 0)
 #: доказательство, не упоминающее предмет, помечается ``support_not_about_subject``
 #: (``validation_notes``/``review_reason``). Фикстура прецедента описывает **настоящую**
 #: поддержку, поэтому её предмет («Param A/B/C») в цитате присутствует.
-CHUNK_TEXT = "Param item: neutral corpus evidence text"
+CHUNK_TEXT = (
+    "Param item: neutral corpus evidence text. "
+    # Второе предложение — настоящее отрицание: с 19.11.2026 `explicit` без цитаты,
+    # содержащей маркер отрицания, понижается до `❓` (`denial_quote_without_markers`),
+    # и нейтральная цитата больше не даёт публикуемого `❌`.
+    "This build does not support it."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -230,12 +236,14 @@ def _absent_output() -> LLMCellOutput:
 
     Вариант 2: ответ «не подтверждает» без класса силы отрицания даёт ``❓``, поэтому для
     проверки механизма прецедента нужен настоящий ``❌`` (иначе конфликта нет вовсе).
+    Цитата обязана **содержать** отрицание: с 19.11.2026 `explicit` с нейтральной цитатой
+    понижается до `❓` (I2/I12), и такой `❌` не публикуется.
     """
     return LLMCellOutput(
         status=Status.ABSENT,
         justification="документация прямо отрицает поддержку",
         evidence=[
-            LLMEvidence(source_id=CHUNK_ID, quote="Param item: neutral corpus evidence")
+            LLMEvidence(source_id=CHUNK_ID, quote="This build does not support it.")
         ],
         denial_strength=DenialClaim.EXPLICIT,
         denial_reason="прямое отрицание в документации",

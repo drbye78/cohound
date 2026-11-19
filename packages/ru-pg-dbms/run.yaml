@@ -9,7 +9,7 @@ cohort: cohort-ru-pg-dbms-2026-10-28-golden00
 # больше нет, `bounded` даётся правилом каталога, публикацию авторизует G4).
 # Расхождение `plan` печатает предупреждением: иначе манифест записал бы одну
 # методологию, а исполнялась другая.
-methodology_version: '0.4.0'
+methodology_version: '0.5.0'
 focus:
   modules:
   - core

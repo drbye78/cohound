@@ -71,7 +71,7 @@ upstream-факте в **измерение** с датой, цитатой и �
 `inheritance.jsonl` → `cells: 0`, `cells.source_kind` = `documentation: 905`,
 `cell_evidence(source_kind=inheritance)` = **0**. Механизм построен и не используется.
 
-Спека это предусмотрела, код — нет (`cohound-spec-v2.md:346`):
+Спека это предусмотрела, код — нет (`cohound-spec-v2.md:348`):
 
 > носитель — запись `cell_evidence` со ссылкой на upstream-паспорт/строку baselines и,
 > **где возможно, на корпусный чанк upstream-продукта** (`source_id`); если чанк

@@ -629,7 +629,7 @@ copyright, перечень изменений. Такой реестр нель
 ## 5. Версионные границы (связь с §13)
 
 Класс границы определяется **не типом зависимости**, а тем, входит ли величина в
-`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 0.4.0 — `core/domain/models.py:176`). Таблица — зеркало
+`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 0.5.0 — `core/domain/models.py:185`). Таблица — зеркало
 `03` §C.1/§C.2 и `core/pipeline/digests.py`:
 
 | Что меняется | Класс | Следствие |
