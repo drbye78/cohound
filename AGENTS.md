@@ -877,10 +877,13 @@ phrase` (default) is a deterministic BM25+phrase gate, `--classifier llm` is the
 the map (`evaluate_cell`, `evaluator_v6`) on the **union** of term- and phrase-candidates
 (`core/pipeline/recon_candidates.py`), with the fact projected from its verdict
 (`core/pipeline/fact_projection.py`). Measured 20.11.2026 on the version-18 reference corpus
-(9 763 chunks, 181 params): the phrase set alone delivers a known quote for 28 of 53 params,
-the term set 49, the union 53; `present` 76 (llm) vs 37 (phrase); two identical llm runs differ on **4 of 181 cells**
-(2.2 %, and both `absent` cells of the first run flipped to `present`), so **`absent` is
-never published without a human signature**.
+(9 763 chunks, 181 params, `scripts/measure_recon_instruments.py`): on the 82 params where any
+instrument found a quote, the **declared language dominates** the candidate set — the phrase
+set delivers 22/82 with `query_lang=all` but 73/82 with `en` (term set 64 → 73, union 66 →
+**82/82**); the same axis lifted the map itself from 26 to 64 `present`. `present` 76 (llm) vs
+37 (phrase); two identical llm runs differ on **4 of 181 cells** (2.2 %, and both `absent`
+cells of the first run flipped to `present`), so **`absent` is never published without a human
+signature**.
 `observed_by` (`llm:{model}:{candidates}:{template}` | `phrase-1`) names the instrument and is
 **provenance**, not identity — it stays out of `baseline_facts_digest`.
 A fact is looked up on the **major** version of the declared line (`18.4.1` → `18`), never
