@@ -323,6 +323,37 @@ def test_agreement_filters_by_baseline_line() -> None:
     assert fact_map_agreement(facts, cells, baseline_id="other")["n"] == 0
 
 
+def test_agreement_does_not_mix_versions() -> None:
+    """Факт @11 и карта @18 — разные корпуса: пара в κ не входит (замер 19.11.2026).
+
+    До пере-разведки слоя фактов все наблюдения были @18, и смешение версий было
+    незаметно; на 8 версиях × 181 оно размыло κ до 0.0451 при n=216 вместо 181.
+    """
+    facts = [
+        _fact("p1", FactStatus.PRESENT),  # version="18"
+        BaselineFact(
+            baseline_id="upstream-pg",
+            param_id="p2",
+            version="11",
+            status=FactStatus.PRESENT,
+            url="https://upstream.test/old",
+            quote="upstream documents the mechanism in v11",
+            content_hash="b" * 64,
+            review=FactReview.PENDING,
+        ),
+    ]
+    cells = [
+        {"param_id": "p1", "state": "evaluated", "status": Status.OK.value},
+        {"param_id": "p2", "state": "evaluated", "status": Status.ABSENT.value},
+    ]
+    agreement = fact_map_agreement(facts, cells, version="18")
+    assert agreement["n"] == 1
+    assert agreement["skipped_other_versions"] == 1
+    assert [item["param_id"] for item in agreement["disagreements"]] == []
+    # Без версии — прежнее поведение (все линии в одном κ), чтобы старые вызовы не менялись.
+    assert fact_map_agreement(facts, cells)["n"] == 2
+
+
 def test_agreement_reads_written_cells(tmp_path: Path) -> None:
     """Согласие считается по тому, что записано: писатель и читатель — один носитель."""
     layout = ReferenceMapLayout(root=tmp_path / "maps" / "x", map_id="map_x")

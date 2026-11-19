@@ -1093,6 +1093,7 @@ def _map_section(
         agreement = fact_map_agreement(
             [fact for fact in facts if fact.baseline_id == product.baseline_id],
             rows,
+            version=version,
         )
         out.append(
             {
@@ -1128,15 +1129,20 @@ def _format_map_section(section: Any) -> list[str]:
             f"({counts or 'пусто'})"
         )
         agreement = item["fact_map_agreement"]
+        # Факты других версий в κ не входят: наблюдение @11 — не наблюдение @18.
+        other = agreement.get("skipped_other_versions") or 0
+        version_note = f", фактов других версий отброшено {other}" if other else ""
         if agreement["kappa"] is not None:
             lines.append(
-                f"  согласие факт↔карта: κ = {agreement['kappa']:.4f} "
-                f"(n={agreement['n']}), расхождений {len(agreement['disagreements'])}"
+                f"  согласие факт↔карта @{item['version']}: κ = {agreement['kappa']:.4f} "
+                f"(n={agreement['n']}{version_note}), "
+                f"расхождений {len(agreement['disagreements'])}"
                 f" (факт present, карта ❌: {agreement['fact_present_map_absent']})"
             )
         else:
             lines.append(
-                f"  согласие факт↔карта: undefined ({agreement['undefined_reason']})"
+                f"  согласие факт↔карта @{item['version']}: undefined "
+                f"({agreement['undefined_reason']}{version_note})"
             )
     return lines
 
@@ -2204,7 +2210,9 @@ def run_map(args: argparse.Namespace) -> int:
             code="baseline",
             exit_code=EXIT_ERROR,
         ) from exc
-    agreement = fact_map_agreement(facts, [cell_row(cell) for cell in result.cells])
+    agreement = fact_map_agreement(
+        facts, [cell_row(cell) for cell in result.cells], version=version
+    )
     dry_run = bool(getattr(args, "dry_run", False))
     paths: dict[str, str] = {}
     if not dry_run:

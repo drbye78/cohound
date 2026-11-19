@@ -36,6 +36,7 @@ from core.domain.enums import AnchorRelation, FactStatus, Status
 from core.domain.models import CatalogRow, Cell, Cohort, CohortEntry
 from core.pipeline.compute import ScoreBundle, _compute_from_cells
 from core.pipeline.evaluate import evaluate_cell, run_queries_for_cell
+from core.pipeline.inheritance import major_version
 from core.ports.lexical_index import LexicalDocLike, LexicalSearcherPort
 from core.ports.vector_index import RetrievalResult, RetrievedChunk
 from core.util.agreement import KappaResult, _cohen_kappa
@@ -701,6 +702,7 @@ def fact_map_agreement(
     cells: Sequence[Mapping[str, Any]],
     *,
     baseline_id: str | None = None,
+    version: str | None = None,
 ) -> dict[str, Any]:
     """Согласие «факт ↔ карта» по одним и тем же параметрам (§9.5).
 
@@ -713,16 +715,28 @@ def fact_map_agreement(
     отсутствующего (A3).
 
     :param baseline_id: ограничить факты одной линией (по умолчанию — все).
+    :param version: версия **карты**. Факты живут по версиям (наблюдение @11 — не
+        наблюдение @18), и смешивать их значило бы сравнивать разные корпуса: на
+        пере-разведённом слое (8 версий × 181) пара «факт @11 × карта @18» попадала в
+        ``n`` и размывала κ (замер 19.11.2026: n=216 вместо 181). ``None`` — не
+        фильтровать (совместимо с вызовом без версии), сравнение идёт по мажору.
     """
     map_by_param: dict[str, Mapping[str, Any]] = {
         str(row.get("param_id")): row for row in cells
     }
+    wanted_version = major_version(version) if version is not None else None
     pairs: list[tuple[str, str]] = []
     disagreements: list[dict[str, Any]] = []
     compared: list[str] = []
+    skipped_other_versions = 0
     for fact in facts:
         if baseline_id is not None and fact.baseline_id != baseline_id:
             continue
+        if wanted_version is not None:
+            fact_major = major_version(getattr(fact, "version", None))
+            if fact_major is not None and fact_major != wanted_version:
+                skipped_other_versions += 1
+                continue
         row = map_by_param.get(str(fact.param_id))
         if row is None:
             continue
@@ -755,4 +769,8 @@ def fact_map_agreement(
         "fact_absent_map_present": sum(
             1 for item in disagreements if item["fact"] == "absent"
         ),
+        # Сколько фактов других версий отброшено: смешение версий размывает κ, и его
+        # нельзя прятать — «сравнили не то» должно быть видно числом.
+        "skipped_other_versions": skipped_other_versions,
+        "version": version,
     }
