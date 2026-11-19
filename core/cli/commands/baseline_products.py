@@ -2163,8 +2163,8 @@ def run_map(args: argparse.Namespace) -> int:
 
     lexical_index = Bm25Index()
     # Язык запросов карты — объявленное условие (``--query-lang`` > deploy > ``all``),
-    # а не порядок в коде: reference-корпус английский, и замер 19.11.2026 показал, что
-    # RU-запросы находили релевантный чанк у 1 из 10 параметров против 8 из 10 на EN.
+    # а не порядок в коде: reference-корпус английский, и замер 19.11.2026 показал
+    # ``present`` 13 при RU-запросах против 42 при EN.
     from core.cli.execution_axes import resolve_query_lang
     from core.config.deploy import load_deploy_config
 

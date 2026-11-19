@@ -143,7 +143,7 @@ provide:
 
 Материал — по образцу `seeds_digest` (`core/pipeline/digests.py:318-353`): отсортированные
 `(product_id, url, sha256)` (`manual_artifacts_digest` — `core/pipeline/digests.py:423`, материал
-`core/pipeline/digests.py:426`). **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
+`core/pipeline/digests.py:432`). **Не** входят: `path`, `provided_by`, `provided_at`, `reason` —
 это провенанс записи, а не измерение (прецедент: `seeds_digest` исключает `source`/`added_*`;
 решения гейтов не входят в контракт вовсе). Пустой набор даёт стабильный дайджест
 пустого множества, а не пустую строку — как у seeds.
@@ -424,7 +424,7 @@ gaps:
    `core/pipeline/corpus.py:4232`; `origin` — `core/store/sqlite.py:281`;
    `resolved_manually` — `core/domain/models.py:2890` + `core/pipeline/corpus_coverage.py:281`;
    доля — `core/pipeline/phases.py:1723`; дайджест — `core/pipeline/digests.py:197`, материал
-   `core/pipeline/digests.py:426`).
+   `core/pipeline/digests.py:432`).
    As-built и расхождения — §10.
 3. ➖ **неактуально (сверено 08.11.2026)** — типизированной пометки «этот артефакт перенесён
    из прогона X» не будет: такого состояния нет. Объявленный файл перечитывается и
@@ -526,7 +526,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:133`); подача
   живёт внутри `corpus` (`core/pipeline/corpus.py:4232`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:179`,
-  материал `(product_id, url, sha256)` — `core/pipeline/digests.py:426`), считается даже
+  материал `(product_id, url, sha256)` — `core/pipeline/digests.py:432`), считается даже
   при пустом наборе.
 - ➖ **Типизированная пометка переноса** — не нужна: состояния «артефакт перенесён из
   прогона X» нет, перенос типизирован на уровне ячейки (`measurement_origin=carried` +

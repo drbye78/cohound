@@ -536,9 +536,18 @@ Three facts that are cheap to state and expensive to rediscover:
   `lexical.profile` → `lexical_spec` → `run_id` **and** the index seed), so "declared" and
   "executed" cannot diverge. `query_lang` is an axis and not a constant because the language
   order was hard-coded while `max_queries = 3` spent the budget on `title` + two Russian
-  terms — measured 19.11.2026 on the English reference corpus, the relevant chunk was in
-  top-10 for **1 of 10** parameters with RU queries and **8 of 10** with EN; across the whole
-  catalog a non-empty top-10 came from RU queries for 88 of 181, from EN for all 181. The
+  terms. Measured 19.11.2026 on both sides, because one side does not answer for the other:
+  on the **English** reference corpus `present` = 13 (`ru`) / 37 (`all`) / 42 (`en`), i.e.
+  3.23×; on the cohort's **Russian** corpus (`scripts/measure_query_lang.py`, golden chunk
+  address in top-10 over 114 cells) hit@10 = 0.9211 (`ru`) / 0.8947 (`all`) / 0.8509 (`en`),
+  paired `ru`−`en` 12/4 p=0.077, `ru`−`all` 3/0 p=0.25 — the direction follows the corpus
+  language and the cohort's price of a wrong guess is ≤3 cells. The same axis measured with a
+  weaker metric (phrase of the parameter anywhere in top-10, all 181 params) shows **nothing**
+  (113/112/114, p=1.0) because the catalog's English terms are Latin identifiers (`JSONB`,
+  `TOAST`, `pg_cron`) that Russian docs keep verbatim — a metric answers only its own
+  question, so the golden one decides and the proxy is published beside it. `all` stays the
+  declared default not because it wins but because it wins **among the safe** options: no
+  corpus guess, ≤3 cells on the cohort, 5 `present` short of `en` on the reference line. The
   corpus language is a property of the **profile** (cohort corpus is Russian, reference line
   is English), so it is declared, never inferred — there is no `auto` (A3/R5).
   `extract.cache_max_bytes` is the opposite case on purpose: an operational budget,
