@@ -260,6 +260,84 @@ def test_build_keeps_specific_single_word_as_high(tmp_path: Path) -> None:
     assert records[0]["reason"] == ""
 
 
+def test_build_marks_map_suspect_as_medium(tmp_path: Path) -> None:
+    """Замечание карты («цитата не о предмете») обязано быть видно подписывающему.
+
+    Карта — второй прибор на том же корпусе; её замечание не вердикт, но подписывать
+    цитату, не увидев, что другой прибор её забраковал, значило бы спорить с измерением
+    по незнанию (замер 19.11.2026: 5 принятых параметров из 13 подозреваемых).
+    """
+    package = _package(
+        tmp_path,
+        [
+            {
+                "param_id": "p_json",
+                "quote": "JSON_TABLE is an SQL/JSON function which queries JSON data",
+            }
+        ],
+    )
+    map_dir = tmp_path / "map"
+    map_dir.mkdir()
+    (map_dir / "cells.jsonl").write_text(
+        json.dumps(
+            {
+                "param_id": "p_json",
+                "validation_notes": ["support_not_about_subject: 1/1 цитат не упоминают предмет"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    records = SIGNATURES.build(
+        package,
+        baseline_id="upstream-pg",
+        reference_root=None,
+        versions=None,
+        out_xlsx=tmp_path / "x.xlsx",
+        out_data=tmp_path / "x.jsonl",
+        map_dir=map_dir,
+    )
+    assert records[0]["map_note"]
+    assert records[0]["confidence"] == "medium"
+    assert "карта" in records[0]["reason"]
+
+
+def test_build_ignores_map_of_another_version(tmp_path: Path) -> None:
+    """Карта @18 не судит о цитате @11: версия сравнивается по мажору."""
+    package = _package(
+        tmp_path,
+        [
+            {
+                "param_id": "p_json",
+                "version": "11",
+                "quote": "JSON_TABLE is an SQL/JSON function which queries JSON data",
+            }
+        ],
+    )
+    map_dir = tmp_path / "map"
+    map_dir.mkdir()
+    (map_dir / "cells.jsonl").write_text(
+        json.dumps(
+            {"param_id": "p_json", "validation_notes": ["support_not_about_subject: 1/1"]},
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    records = SIGNATURES.build(
+        package,
+        baseline_id="upstream-pg",
+        reference_root=None,
+        versions=None,
+        out_xlsx=tmp_path / "x.xlsx",
+        out_data=tmp_path / "x.jsonl",
+        map_dir=map_dir,
+    )
+    assert records[0]["map_note"] == ""
+    assert records[0]["confidence"] == "high"
+
+
 # ---------------------------------------------------------------------------
 # compile: подпись нельзя подменить
 # ---------------------------------------------------------------------------

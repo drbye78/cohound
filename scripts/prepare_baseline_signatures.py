@@ -58,6 +58,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from core.pipeline.inheritance import major_version
+
 #: Колонки листа `signatures`: ключ, заголовок, ширина.
 COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("n", "№", 5),
@@ -72,6 +74,7 @@ COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("phrase", "Фраза параметра, по которой зачтено", 40),
     ("confidence", "Уверенность", 11),
     ("reason", "Почему подсвечено", 34),
+    ("map_note", "Карта @18: цитата не о предмете", 26),
     ("decision", "Решение: accept / reject", 16),
     ("note", "Заметка", 34),
 )
@@ -88,6 +91,9 @@ MIN_QUOTE_CHARS = 25
 
 #: Сколько первых символов страницы показывать как контекст.
 PAGE_PREVIEW_CHARS = 160
+
+#: Версия, к которой относится карта (``--map-dir``): карта @18 не судит о цитате @11.
+MAP_VERSION = "18"
 
 STATE_CANDIDATE = (
     "СОСТОЯНИЕ: candidate — решения не заполнены, человек факты не подписывал."
@@ -115,6 +121,9 @@ LEGEND: tuple[str, ...] = (
     "  18 (шум отбора, а не регрессия), либо цитата делится с другим параметром версии.",
     "high (без заливки) — цитата содержит утверждение. Читать не обязательно, но",
     "  подпись всё равно ваша: прибор не подставляет accept за человека.",
+    "Колонка «Карта: цитата не о предмете» — замечание второго прибора (карта @18 читает те",
+    "  же чанки и решает, доказан ли параметр). Это не вердикт для подписи, но подписывать",
+    "  забракованную цитату, не увидев этого, значило бы спорить с измерением по незнанию.",
     "зелёная строка — факт уже подписан ранее; решение можно не ставить (или поставить",
     "  reject, если видите, что цитата не о предмете — подпись будет снята).",
     "",
@@ -133,6 +142,9 @@ LEGEND: tuple[str, ...] = (
     "и оно применится ко всем его версиям, у которых нет собственного решения. Собственное",
     "решение строки сильнее: смешанный параметр (цитата @11 не о предмете, @18 о предмете)",
     "решается построчно. Прибор печатает, сколько строк подписано оптом.",
+    "9 из 42 параметров пилота смешаны — колонка «Версии, которые решать построчно»",
+    "перечисляет именно те версии, где цитата подсвечена: агрегат по параметру протащил бы",
+    "их шум в min_version (например `xlsx_129`: @17 и @18 — из предметного указателя).",
 )
 
 
@@ -197,14 +209,14 @@ def _page_index(
 
 
 def _package_id(package: Path) -> str:
-    """`case_id` пакета: имя каталога раскладки reference (`…/reference/{case_id}/…`).
+    """`package_id` раскладки reference — **имя каталога пакета**, как в CLI.
 
-    Читается из `package.yaml`, а не из имени каталога: пакет можно положить под другим
-    именем, и тогда раскладка искала бы корпус не там.
+    Не `case_id` из `package.yaml`: `_layout` в `baseline_products.py` собирает раскладку
+    из `package.name`, и прибор, взявший другое правило, искал бы корпус не там, где его
+    собрал `hound baseline build` (расхождение проявилось бы только на пакете, каталог
+    которого назван не по `case_id`).
     """
-    from core.config.run_config import load_package_manifest
-
-    return str(load_package_manifest(package / "package.yaml").case_id)
+    return Path(package).resolve().name
 
 
 def _confidence(
@@ -216,6 +228,7 @@ def _confidence(
     version: str,
     versions_with_present: set[str],
     shared_with_other_param: bool,
+    map_note: str = "",
 ) -> tuple[str, str]:
     """Уверенность строки и причина подсветки (пустая причина — `high`)."""
     reasons: list[str] = []
@@ -240,6 +253,10 @@ def _confidence(
         reasons.append("голый заголовок")
     if version != "11" and "11" in versions_with_present and "18" not in versions_with_present:
         reasons.append("present@11 без present@18 (шум отбора)")
+    if map_note:
+        # Второй прибор на том же корпусе уже забраковал цитату: подписывать её, не
+        # увидев этого, значило бы спорить с измерением по незнанию.
+        reasons.append("карта: цитата не о предмете")
     if reasons:
         return "medium", "; ".join(reasons)
     return "high", ""
@@ -266,6 +283,32 @@ def _first_phrase(quote: str, phrases: list[str]) -> str:
     return ""
 
 
+def _map_suspects(map_dir: Path | None) -> dict[str, str]:
+    """Параметры, про которые карта говорит «цитата не о предмете» (§9.5).
+
+    Второй прибор на том же корпусе: карта читает те же чанки и решает, доказан ли
+    параметр. Её замечание — не вердикт для подписи (у карты свой порог и свой промпт), но
+    человек, подписывающий цитату, обязан видеть, что другой прибор её уже забраковал.
+    """
+    if map_dir is None:
+        return {}
+    cells_path = Path(map_dir) / "cells.jsonl"
+    if not cells_path.is_file():
+        raise SystemExit(f"карта не найдена: {cells_path}")
+    out: dict[str, str] = {}
+    for line in cells_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        cell = json.loads(line)
+        notes = [
+            note for note in cell.get("validation_notes") or []
+            if str(note).startswith("support_not_about_subject")
+        ]
+        if notes:
+            out[str(cell["param_id"])] = str(notes[0])
+    return out
+
+
 def build(
     package: Path,
     *,
@@ -274,6 +317,7 @@ def build(
     versions: list[str] | None,
     out_xlsx: Path,
     out_data: Path,
+    map_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     from core.pipeline.reference_corpus import parameter_phrases
     from core.pipeline.reference_products import load_package_facts
@@ -309,6 +353,7 @@ def build(
         for version in sorted({fact.version for fact in facts}):
             pages[version] = _page_index(reference_root, package_id, product_id, version)
 
+    suspects = _map_suspects(map_dir)
     records: list[dict[str, Any]] = []
     for number, fact in enumerate(
         sorted(facts, key=lambda item: (item.param_id, _version_key(item.version))), 1
@@ -324,6 +369,12 @@ def build(
                 break
         shared = len(quote_owners[(fact.version, fact.quote or "")]) > 1
         phrase = _first_phrase(fact.quote or "", phrases)
+        # Замечание карты — только для её версии: карта @18 не судит о цитате @11.
+        map_note = (
+            suspects.get(fact.param_id, "")
+            if major_version(fact.version) == major_version(MAP_VERSION)
+            else ""
+        )
         confidence, reason = _confidence(
             quote=fact.quote or "",
             url=fact.url,
@@ -332,6 +383,7 @@ def build(
             version=fact.version,
             versions_with_present=by_param_versions[fact.param_id],
             shared_with_other_param=shared,
+            map_note=map_note,
         )
         records.append(
             {
@@ -346,6 +398,7 @@ def build(
                 "phrase": phrase,
                 "confidence": confidence,
                 "reason": reason,
+                "map_note": map_note,
                 "review": fact.review.value,
                 "reviewed_by": fact.reviewed_by or "",
                 "note": "",
@@ -514,6 +567,7 @@ def _by_param_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 ),
                 "quote": current["quote"],
                 "url": current["url"],
+                "map_note": any(item.get("map_note") for item in ordered),
                 "decision": "",
                 "note": "",
             }
@@ -529,8 +583,9 @@ def _write_by_param_sheet(wb: Any, records: list[dict[str, Any]]) -> None:
     sheet = wb.create_sheet("by_param")
     head = [
         "param_id", "Название", "Версии с present", "Строк", "Худшая уверенность",
-        "low", "medium", "Версии, которые решать построчно", "Цитата @18 (или последняя)",
-        "Документ", "Решение по параметру (все версии)", "Заметка",
+        "low", "medium", "Версии, которые решать построчно", "Карта: цитата не о предмете",
+        "Цитата @18 (или последняя)", "Документ",
+        "Решение по параметру (все версии)", "Заметка",
     ]
     sheet.append(head)
     fills = {
@@ -538,13 +593,14 @@ def _write_by_param_sheet(wb: Any, records: list[dict[str, Any]]) -> None:
         "medium": PatternFill("solid", fgColor=FILL_MEDIUM),
     }
     wrap = Alignment(wrap_text=True, vertical="top")
-    for index, width in enumerate((34, 42, 22, 7, 12, 6, 8, 30, 62, 44, 22, 30), 1):
+    for index, width in enumerate((34, 42, 22, 7, 12, 6, 8, 30, 14, 62, 44, 22, 30), 1):
         sheet.column_dimensions[get_column_letter(index)].width = width
         sheet.cell(row=1, column=index).font = Font(bold=True)
     for row in _by_param_rows(records):
         sheet.append([
             row["param_id"], row["title"], row["versions"], row["count"], row["worst"],
-            row["low"], row["medium"], row["doubtful"], row["quote"], row["url"],
+            row["low"], row["medium"], row["doubtful"],
+            "да" if row["map_note"] else "", row["quote"], row["url"],
             row["decision"], row["note"],
         ])
         line = sheet.max_row
@@ -729,6 +785,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-data", type=Path, help="JSONL источника разметки (build)")
     parser.add_argument("--out", type=Path, help="JSONL решений (compile)")
     parser.add_argument(
+        "--map-dir",
+        type=Path,
+        help="каталог карты версии (cells.jsonl): её замечание «цитата не о предмете» "
+        "попадает в подсветку",
+    )
+    parser.add_argument(
         "--reference-root",
         type=Path,
         help="корень reference-корпуса: …/reference/{package_id} (нужен для раздела страницы)",
@@ -750,6 +812,7 @@ def main(argv: list[str] | None = None) -> int:
             versions=args.versions,
             out_xlsx=args.out_xlsx,
             out_data=args.out_data,
+            map_dir=args.map_dir,
         )
         counts = Counter(record["confidence"] for record in records)
         already = sum(1 for record in records if record["review"] == "accepted")
