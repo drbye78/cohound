@@ -200,13 +200,13 @@ def test_ranker_uses_each_cell_own_ranking() -> None:
 
 def test_mcnemar_uses_discordant_pairs_only() -> None:
     """Согласованные пары в критерий не входят: они не различают настройки."""
-    assert measure._mcnemar_exact_p(0, 0) == 1.0
+    assert measure.mcnemar_exact_p(0, 0) == 1.0
     # Пять пар «только A» и ни одной «только B» — это уже не монетка.
-    assert measure._mcnemar_exact_p(5, 0) == pytest.approx(2 / 32)
+    assert measure.mcnemar_exact_p(5, 0) == pytest.approx(2 / 32)
     # Симметрия: критерий двусторонний.
-    assert measure._mcnemar_exact_p(5, 0) == pytest.approx(measure._mcnemar_exact_p(0, 5))
+    assert measure.mcnemar_exact_p(5, 0) == pytest.approx(measure.mcnemar_exact_p(0, 5))
     # 12/4 из живого замера: значимости нет, и это не ноль.
-    assert measure._mcnemar_exact_p(12, 4) == pytest.approx(0.0768, abs=1e-4)
+    assert measure.mcnemar_exact_p(12, 4) == pytest.approx(0.0768, abs=1e-4)
 
 
 def test_bootstrap_is_paired_and_reproducible() -> None:

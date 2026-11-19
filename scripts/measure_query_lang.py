@@ -54,7 +54,6 @@ import random
 import sys
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
-from math import comb
 from pathlib import Path
 
 from core.cli.commands.search import build_retrieval_ports
@@ -67,6 +66,7 @@ from core.pipeline.prompt import render_queries
 from core.pipeline.retrieve import RetrievalProfile, retrieve
 from core.store.corpus_reader import CorpusReader
 from core.util.retrieval_eval import GoldenQuery, RetrievalReport, evaluate_retrieval
+from core.util.stats import mcnemar_exact_p
 
 #: Настройки языка, между которыми идёт сравнение. Порядок — как в оси.
 LANGS: tuple[str, ...] = ("ru", "en", "all")
@@ -140,20 +140,6 @@ def _top_chunks(
         for chunk in found:
             texts.setdefault(chunk.chunk_id, chunk.text)
     return queries, len(texts), [text.casefold() for text in texts.values()]
-
-
-def _mcnemar_exact_p(better: int, worse: int) -> float:
-    """Точный двусторонний критерий МакНемара на дискордантных парах.
-
-    Согласованные пары (оба попали / оба промахнулись) в критерий не входят: они не
-    различают настройки, и включение их раздуло бы «значимость» числом лёгких ячеек.
-    ``better + worse == 0`` → ``1.0``: настройки неразличимы на этих данных, и это не ноль.
-    """
-    total = better + worse
-    if total <= 0:
-        return 1.0
-    tail = sum(comb(total, i) for i in range(0, min(better, worse) + 1))
-    return min(1.0, 2 * tail / (2**total))
 
 
 def _bootstrap_delta(
@@ -325,7 +311,7 @@ def _report_golden(
         delta, lo, hi = _bootstrap_delta(hits[a], hits[b])
         better = sum(1 for x, y in zip(hits[a], hits[b], strict=True) if x and not y)
         worse = sum(1 for x, y in zip(hits[a], hits[b], strict=True) if y and not x)
-        p = _mcnemar_exact_p(better, worse)
+        p = mcnemar_exact_p(better, worse)
         lines.append(
             f"| `{a}` − `{b}` | {_fmt(delta)} | [{_fmt(lo)}; {_fmt(hi)}] | "
             f"{better}/{worse} | {p:.4g} |"
@@ -369,7 +355,7 @@ def _report(
         delta, lo, hi = _bootstrap_delta(hits[a], hits[b])
         better = sum(1 for x, y in zip(hits[a], hits[b], strict=True) if x and not y)
         worse = sum(1 for x, y in zip(hits[a], hits[b], strict=True) if y and not x)
-        p = _mcnemar_exact_p(better, worse)
+        p = mcnemar_exact_p(better, worse)
         lines.append(
             f"| `{a}` − `{b}` | {_fmt(delta)} | [{_fmt(lo)}; {_fmt(hi)}] | "
             f"{better}/{worse} | {p:.4g} |"
