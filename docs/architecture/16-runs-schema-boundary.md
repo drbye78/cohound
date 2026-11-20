@@ -13,7 +13,7 @@
 > | `STATE_SCHEMA_VERSION` (`state/{package_id}/state.db`) | **`"13"`** | `core/store/state_sqlite.py:90` |
 > | `SEAM_SCHEMA_VERSION` (контракт `/v1/*`) | **`"1"`** | `core/edge/seam_schema.py:68` |
 > | `EDGE_JOBS_SCHEMA_VERSION` (`edge_jobs.db`) | **`"1"`** | `core/edge/scheduler.py:198` |
-> | `EXECUTION_CONTRACT_FIELDS` | **33** поля | `core/pipeline/digests.py:96` |
+> | `EXECUTION_CONTRACT_FIELDS` | **36** полей | `core/pipeline/digests.py:105` |
 >
 > **Решение владельца 29.10.2026:** всё, что меняет материал `run_id` или состав прогонной
 > БД, делается **одной** границей. Две отдельные границы (`embed_device` отдельно, схема

@@ -8,7 +8,7 @@
 > `16` §10 п. 15; реестр секций ниже остаётся **исторической записью сверки** (ссылки ведут
 > в текст секций, а не в план работ).
 > Текущие значения: `SCHEMA_VERSION` **3.27.0**, `STATE_SCHEMA_VERSION` **"13"**,
-> `METHODOLOGY_VERSION` **0.5.0**, контракт — **35** полей, `SEAM_VERSION` "1".
+> `METHODOLOGY_VERSION` **0.6.0**, контракт — **36** полей, `SEAM_VERSION` "1".
 > Правило «`❌` требует `live|revalidated`» **снято** (F3 плана 20): действует **I2d** —
 > `❌` требует датированного носителя (`corpus_artifact.observed_at` для
 > `explicit`/`authoritative`; снятие каждого корня `complete=1` для `bounded`),
