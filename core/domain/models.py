@@ -2849,6 +2849,12 @@ class CorpusRootCoverage(BaseModel):
         ``None`` — сверять не с чем (хотя бы одна сторона неизвестна). ``None`` —
         законное значение: по отсутствию данных неполнота не объявляется (A3), решает
         только наблюдённое несовпадение.
+    :param resolved_manually: сколько **блокирующих** отказов этого корня закрыто
+        объявленной ручной подачей (13-manual-artifacts §3.3). Разрез продукта по корню:
+        ``CorpusCoverage.resolved_manually`` считает то же по продукту. Поле существует
+        ради видимости: подача снимает неполноту корня (``complete=True`` при закрытых
+        отказах), и без числа читатель не отличил бы «обход прошёл целиком» от «обход
+        отказал, а материал предъявлен артефактом».
     """
 
     model_config = _BASE
@@ -2860,6 +2866,7 @@ class CorpusRootCoverage(BaseModel):
     observed_at: str | None = None
     policy_digest: str | None = None
     policy_matched: bool | None = None
+    resolved_manually: int = 0
 
     @field_validator("root_url")
     @classmethod
@@ -2882,6 +2889,17 @@ class CorpusRootCoverage(BaseModel):
                 f"{', '.join(sorted(_CAPTURE_OBSERVED_HOW))}, получено {value!r}"
             )
         return value
+
+    @field_validator("resolved_manually")
+    @classmethod
+    def _check_resolved_manually(cls, value: int) -> int:
+        """Закрытых подачей отказов не может быть меньше нуля."""
+        if int(value) < 0:
+            raise ValueError(
+                "corpus_root_coverage.resolved_manually: ожидалось неотрицательное "
+                f"число закрытых отказов, получено {value}"
+            )
+        return int(value)
 
 
 class CorpusCoverage(BaseModel):

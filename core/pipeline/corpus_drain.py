@@ -1823,7 +1823,7 @@ def root_lifecycle(
                 item is not None
                 and item.error_kind == FailureKind.ROBOTS_DISALLOW.value
             ):
-                frontier.note_robots_refusal()
+                frontier.note_robots_refusal(work_url)
             return
         page, _raw_path, fetch_plan, freshly_fetched = outcome
         # 09 §6.3: ревалидация известного URL — depth-0 лист и **вне** бюджета

@@ -342,7 +342,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   означает «оценщик не поднимается», а не «endpoint берётся из env». Место исполнения
 >   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:172`, стенд RnD).
 > - **SERP-контур:** ✅ реализован, но **не** через `run_serp_loop`. Производитель запросов —
->   `_run_serp_contour` (`core/pipeline/corpus.py:1345-1454`), вызов внутри фазы корпуса **до**
+>   `_run_serp_contour` (`core/pipeline/corpus.py:1346-1454`), вызов внутри фазы корпуса **до**
 >   дренажа (`core/pipeline/corpus.py:2258`); `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1553` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:148`), значение из

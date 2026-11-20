@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS run_product (
 
 Пишется на границе продукта (там же, где `corpus_docs`, `09` §4.7) и переписывается в конце
 фазы — так же, как `corpus_coverage`. Прецедент записи — `store.save_corpus_coverage(run_id,
-coverage)` (`core/pipeline/corpus_coverage.py:654`): одна функция на продукт, вызывается на границе,
+coverage)` (`core/pipeline/corpus_coverage.py:677`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: на момент
 границы переноса ячеек не было (`09` §10), а сегодня их считает отчёт из durable-ячеек
 (`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3413`).

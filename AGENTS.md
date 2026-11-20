@@ -367,6 +367,20 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
   `accepted_foreign_hosts` (how much of a root's budget went to a declared foreign host).
 - A terminal artifact (document/container) is exempt from **path-prefix only**: it does not
   continue navigation, but SSRF/host-scope/blacklist still apply.
+- **`robots_disallow` blocks a root, and a declared manual artifact can lift it — by URL.**
+  A root capture is `complete = not (truncated or skipped_documents or robots_refused)`, so a
+  forbidden address keeps the root unexhausted and `bounded` absence (I2d) unprovable — even
+  when the very bytes were provided by `hound artifacts fetch`. Since 20.11.2026 the product-level
+  rule of plan 13 §3.3 also holds at the root: `_root_capture_complete`
+  (`core/pipeline/corpus.py:1697`) is called twice — at the root boundary (no provision yet, value
+  identical to the old formula) and after provision (`_recompute_root_captures`,
+  `core/pipeline/corpus.py:1726`), rewriting the **same** capture row, with the frontier keeping
+  the refused **addresses** (`core/pipeline/crawl_frontier.py:1459`). Provision lifts incompleteness
+  only when **every** refusal of the root is covered; truncation and `document_level=off` skips are
+  not liftable. Measured 20.11.2026: of all `robots_disallow` refusals across the stand's runs only
+  files are coverable — `jatoba` 17/17 (already provided, +81 golden cells, ceiling 0.6961 → 0.7856
+  with no new crawl), `pangolin` 50/58, `digital_q` 0/60 (all `?PAGEN_1=2`), `postgrespro` 0/16
+  (`/order/*`, `/useragreement`), `tantor` 0/2.
 
 Measured cost of getting this wrong: `edu.postgrespro.ru` produced 563 of 682 items on a root
 that declared only the parent host, while the product documentation root got zero of its own

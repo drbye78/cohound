@@ -64,6 +64,7 @@ from core.ports.types import (
     RawPage,
 )
 from core.store.sqlite_store import SqliteStore
+from core.store.state_store import SqliteStateStore
 from core.util.hashing import content_hash
 
 RUN_ID = "run-manual"
@@ -216,6 +217,7 @@ def _build(
     extractor_factory: Any = None,
     domain_profiles: dict[str, Any] | None = None,
     crawl_defaults: Any = None,
+    state: Any = None,
 ):
     return build_corpus(
         _plan(),
@@ -230,6 +232,7 @@ def _build(
         extractor_factory=extractor_factory,
         domain_profiles=domain_profiles,
         crawl_defaults=crawl_defaults,
+        state=state,
     )
 
 
@@ -412,9 +415,11 @@ def test_coverage_counts_gap_as_closed_but_is_not_a_walk(tmp_path: Path) -> None
 
     F3 (план 20 §11.2, I2d): ``adopted``-материал наблюдён, поэтому ``resolved_manually``
     назван, ``blocked`` остаётся аудитом, а ``observed_sources`` — счётчиком **краула**
-    (0). ``complete`` при этом ``False``: предоставление не является обходом корня, и
-    «корень исчерпан» оно не утверждает. ``bounded``-ячейка на таком корпусе останется
-    ``❓`` — это ужесточение §11.4 п.2, а не регресс аудита.
+    (0). ``complete`` здесь ``False`` потому, что снятия корня нет вовсе (``state`` не
+    передан): ``adopted``-снятие исчерпания не удостоверяет. Когда снятие **есть** и все
+    отказанные ``robots.txt`` адреса закрыты подачей, ``complete`` корня становится ``1``
+    — это другое правило (13 §3.3 на границе корня), и оно проверено отдельно
+    (``test_root_capture_complete_when_all_refusals_provided``).
     """
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -460,6 +465,231 @@ def test_unresolved_refusal_keeps_coverage_incomplete(tmp_path: Path) -> None:
         assert coverage.resolved_manually == 0
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 3. Снятие корня: объявленная подача закрывает отказ robots.txt (13 §3.3)
+# --------------------------------------------------------------------------- #
+
+
+def _root_capture(state: Any, product_id: str, root_url: str) -> Any:
+    """Снятие корня этого прогона: ровно одно (``capture_id`` детерминирован)."""
+    rows = [row for row in state.iter_captures(product_id) if row.root_url == root_url]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def _root_of(coverage: Any, root_url: str) -> Any:
+    """Блок корня в покрытии продукта (ровно один на объявленный корень)."""
+    rows = [root for root in coverage.roots if root.root_url == root_url]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_root_capture_incomplete_without_provision(tmp_path: Path) -> None:
+    """(а) Отказ ``robots.txt`` без подачи: корень не исчерпан — ``complete=0``.
+
+    Носитель ``bounded``-отсутствия (I2d) — снятие корня с ``complete=1``. Отказ без
+    подачи его не даёт, и это видно в обоих представлениях: в снятии и в блоке корня
+    покрытия.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                crawler=_Crawler({}, raising={URL_P1_A}),
+                state=state,
+            )
+            assert result.status == "ok", result.errors
+            assert _root_capture(state, "p1", URL_P1_A).complete is False
+            coverage = store.read_corpus_coverage(RUN_ID, "p1")
+            assert coverage is not None
+            root = _root_of(coverage, URL_P1_A)
+            assert root.complete is False
+            assert root.resolved_manually == 0
+            assert coverage.complete is False
+    finally:
+        store.close()
+
+
+def test_root_capture_complete_when_all_refusals_provided(tmp_path: Path) -> None:
+    """(б) Все отказанные URL поданы: корень исчерпан — ``complete=1`` и разрез по корню.
+
+    Подача закрывает пробел **по адресу**, поэтому корень, которому сайт отказал, но чей
+    материал предъявлен объявленным артефактом, удостоверяет исчерпание — иначе
+    ``bounded``-отсутствие не публиковалось бы на фактически наблюдённом корне.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path, url=URL_P1_A)
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                crawler=_Crawler({}, raising={URL_P1_A}),
+                manual_artifacts=ManualArtifacts(entries=(entry,)),
+                state=state,
+            )
+            assert result.status == "ok", result.errors
+            assert _root_capture(state, "p1", URL_P1_A).complete is True
+            coverage = store.read_corpus_coverage(RUN_ID, "p1")
+            assert coverage is not None
+            root = _root_of(coverage, URL_P1_A)
+            assert root.complete is True
+            assert root.resolved_manually == 1
+            # Аудит отказа не стёрт подачей: он остаётся в счётчиках сеанса.
+            assert coverage.blocked == {"robots_disallow": 1}
+            assert coverage.resolved_manually == 1
+            assert coverage.complete is True
+    finally:
+        store.close()
+
+
+def test_root_capture_incomplete_when_only_part_of_refusals_provided(
+    tmp_path: Path,
+) -> None:
+    """(в) Два отказа, подан один: частичное закрытие неполноту не снимает."""
+    refused_a = "https://docs.test/p1/a.pdf"
+    refused_b = "https://docs.test/p1/b.pdf"
+    root_page = f'<a href="{refused_a}">a</a><a href="{refused_b}">b</a>'.encode()
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path, url=refused_a)
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={URL_P1_A: root_page},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                crawler=_Crawler(
+                    {URL_P1_A: root_page}, raising={refused_a, refused_b}
+                ),
+                manual_artifacts=ManualArtifacts(entries=(entry,)),
+                state=state,
+                crawl_defaults=CrawlRunConfig(max_depth=1),
+            )
+            assert result.status == "ok", result.errors
+            assert _root_capture(state, "p1", URL_P1_A).complete is False
+            coverage = store.read_corpus_coverage(RUN_ID, "p1")
+            assert coverage is not None
+            root = _root_of(coverage, URL_P1_A)
+            assert root.complete is False
+            assert root.resolved_manually == 1
+            assert coverage.complete is False
+    finally:
+        store.close()
+
+
+def test_root_capture_truncation_not_lifted_by_provision(tmp_path: Path) -> None:
+    """(г) ``truncated`` (``max_documents``) подачей не снимается — даже при полной подаче.
+
+    Усечение бюджета — непосещённое пространство, а подача закрывает только запрещённые
+    адреса: ``complete`` остаётся ``0``, и ``bounded`` на таком корне не удостоверяется.
+    """
+    root = "https://docs.test/p1/docs/"
+    refused = "https://docs.test/p1/docs/a"
+    root_page = (
+        f'<a href="{refused}">a</a>'
+        '<a href="https://docs.test/p1/docs/b">b</a>'
+        '<a href="https://docs.test/p1/docs/c">c</a>'
+    ).encode()
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path, url=refused)
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={root: root_page},
+                urls={"p1": [root]},
+                store=store,
+                crawler=_Crawler(
+                    {root: root_page, "https://docs.test/p1/docs/b": b"leaf b"},
+                    raising={refused},
+                ),
+                manual_artifacts=ManualArtifacts(entries=(entry,)),
+                state=state,
+                crawl_defaults=CrawlRunConfig(max_depth=1, max_documents=2),
+            )
+            assert result.status == "ok", result.errors
+            assert _root_capture(state, "p1", root).complete is False
+            coverage = store.read_corpus_coverage(RUN_ID, "p1")
+            assert coverage is not None
+            assert coverage.truncated is True
+            root_block = _root_of(coverage, root)
+            assert root_block.complete is False
+            # Отказ при этом закрыт: видно, что именно усечение держит ``complete=0``.
+            assert root_block.resolved_manually == 1
+    finally:
+        store.close()
+
+
+def test_root_capture_document_skip_not_lifted_by_provision(tmp_path: Path) -> None:
+    """(д) ``skipped_documents`` (``document_level=off``) подачей не снимается."""
+    root = "https://docs.test/p1/docs/"
+    skipped_doc = "https://docs.test/p1/docs/manual.pdf"
+    refused = "https://docs.test/p1/docs/blocked"
+    root_page = (
+        f'<a href="{skipped_doc}">doc</a><a href="{refused}">blocked</a>'
+    ).encode()
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path, url=refused)
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={root: root_page},
+                urls={"p1": [root]},
+                store=store,
+                crawler=_Crawler({root: root_page}, raising={refused}),
+                manual_artifacts=ManualArtifacts(entries=(entry,)),
+                state=state,
+                crawl_defaults=CrawlRunConfig(
+                    max_depth=1, document_level=DocumentLevel.OFF
+                ),
+            )
+            assert result.status == "ok", result.errors
+            assert _root_capture(state, "p1", root).complete is False
+            coverage = store.read_corpus_coverage(RUN_ID, "p1")
+            assert coverage is not None
+            assert coverage.truncated is True
+            root_block = _root_of(coverage, root)
+            assert root_block.complete is False
+            assert root_block.resolved_manually == 1
+    finally:
+        store.close()
+
+
+def test_root_capture_predicate_matches_the_old_expression() -> None:
+    """Правило одно: с пустой подачей предикат **тождественен** прежней формуле.
+
+    Прежняя запись была ``complete = not (truncated or skipped_documents or
+    robots_refused)``. Пересчёт после подачи не должен менять ни одного исхода там, где
+    подачи нет (у прогона без ``manual_artifacts`` регресс был бы молчаливым: снятия
+    прошлых прогонов переписались бы задним числом).
+    """
+    from core.pipeline.corpus import _root_capture_complete
+
+    for truncated in (False, True):
+        for skipped in (False, True):
+            for refused in ((), ("https://h/a.pdf",)):
+                old = not (truncated or skipped or bool(refused))
+                new = _root_capture_complete(
+                    incomplete=truncated or skipped,
+                    refused=refused,
+                    manual_urls=(),
+                )
+                assert new is old, (truncated, skipped, refused)
 
 
 def test_derive_coverage_resolution_is_bound_to_url_and_kind() -> None:

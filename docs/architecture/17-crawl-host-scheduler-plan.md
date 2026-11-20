@@ -379,7 +379,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:628`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:629`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:167`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,
@@ -682,7 +682,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   объявлена на корень (`app < run < site`), поэтому продукт со строгим объявлением не получает
   полос «за компанию» с соседом; потолок когорты — максимум объявленных продуктовых значений.
   Продуктовые значения (накопитель, дедуп-множества, счётчик seed'ов, бакеты стадий, группы
-  ревалидации) живут в `ProductContext` (`core/pipeline/corpus.py:1099`): хвост исполняется
+  ревалидации) живут в `ProductContext` (`core/pipeline/corpus.py:1101`): хвост исполняется
   позже планирования, и переменная цикла была бы читателем чужого продукта.
   Проверки: `test_cohort_waves_of_two_products_overlap_on_distinct_hosts` (два продукта на
   разных host'ах реально в полёте вместе; `product_start` второго раньше `product_end`

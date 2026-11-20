@@ -516,14 +516,14 @@ def _drain_root(
                 allowed = _robots_allows(robots, url)
             except Exception as exc:  # noqa: BLE001 — негодная политика не роняет сборку
                 _count(skipped, SkipReason.ROBOTS)
-                frontier.note_robots_refusal()
+                frontier.note_robots_refusal(url)
                 errors.append(
                     f"{layout.product_id}/{url}: robots: {type(exc).__name__}: {exc}"
                 )
                 continue
             if not allowed:
                 _count(skipped, SkipReason.ROBOTS)
-                frontier.note_robots_refusal()
+                frontier.note_robots_refusal(url)
                 continue
 
         plan = resolve_fetch_plan(url, profiles, default_rate_limit=rate_spec)

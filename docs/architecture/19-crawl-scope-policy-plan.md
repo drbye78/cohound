@@ -56,7 +56,7 @@ per-host статуса и без различения дискавери и о�
 
 | механизм | где | чего не хватает |
 |---|---|---|
-| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:927`, `core/pipeline/run_identity.py:274`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:438`) |
+| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:962`, `core/pipeline/run_identity.py:274`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:439`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`core/store/state_sqlite.py:143`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3784` | переиспользует **чанки**; при смене версии чанкера/пустом наборе/I19-расхождении и **наличных байтах** документ пересобирается текущим конвейером (`rebuild_from_stored_bytes`), байтов нет — `no_bytes`; не пишет `url_state`/`document_version` как «последнюю версию» — эту дисциплину наследует и `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
@@ -177,7 +177,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:462`): иначе
    `run` и `crawl run` адресуют разные сеансы при одном объявленном входе.
 5. **Неизвестное значение политики — `EXIT_USAGE`, не `auto`.** Тихий fallback — это сеть по опечатке (AGENTS §2);
-   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:438`).
+   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:439`).
 6. Время снятия (`captured_at`) — **провенанс**, не идентичность (как `extractor_version`).
 7. Честная граница: резолв ветки «discovery vs update» читает `url_state`, поэтому **те же
    объявленные входы при сдвинутом `state.db` дают другой корпус** — так уже живёт `auto`
@@ -208,7 +208,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 ### P2 — исполнение: `on_request` и `network_denied` — ✅ сделано
 
-- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`core/pipeline/corpus.py:3428`) — **до**
+- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`core/pipeline/corpus.py:3576`) — **до**
   `crawl_target` (`core/pipeline/corpus.py:3465`) и `expand_directory`
   (`core/pipeline/corpus.py:3471`), — и до сборки синтетических корней
   (`_synthetic_root_plans`, `core/pipeline/corpus.py:3315`). Гейт на постановке в очередь
@@ -227,7 +227,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
   `incomplete_reasons` + `truncated_products` (`core/pipeline/corpus_commit.py:105`) — тем же каналом, что
-  `HOST_OUT_OF_SHARD_REASON` (`core/pipeline/corpus.py:3650`, `core/pipeline/corpus.py:3654`). `expected_sources` не уменьшается молча.
+  `HOST_OUT_OF_SHARD_REASON` (`core/pipeline/corpus.py:2258`, `core/pipeline/corpus.py:3837`). `expected_sources` не уменьшается молча.
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `core/pipeline/corpus.py:5350` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
@@ -449,7 +449,7 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 
 | № | вопрос | почему это не деталь | статус |
 |---|---|---|---|
-| E.1 | **Публикация `❌` при различающихся датах** | правило «`❌` требует ответа сервера в этом цикле» (на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`; снято фазой F3, носитель — `core/domain/invariants.py:365`, `check_absence_dated`) и условие `observed_sources>0` (`core/pipeline/corpus_coverage.py:209`) закрепляли допущение «цикл = одна дата»; владелец требует архитектуру с **разными** датами | ✅ закрыто F3 плана 20 (05.11.2026, `methodology_change` 0.3.0): I2d — `❌` требует датированного носителя, `absence_as_of` публикуется; приёмка — `2026-11-05-absence-dated-acceptance.md` |
+| E.1 | **Публикация `❌` при различающихся датах** | правило «`❌` требует ответа сервера в этом цикле» (на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`; снято фазой F3, носитель — `core/domain/invariants.py:365`, `check_absence_dated`) и условие `observed_sources>0` (`core/pipeline/corpus_coverage.py:222`) закрепляли допущение «цикл = одна дата»; владелец требует архитектуру с **разными** датами | ✅ закрыто F3 плана 20 (05.11.2026, `methodology_change` 0.3.0): I2d — `❌` требует датированного носителя, `absence_as_of` публикуется; приёмка — `2026-11-05-absence-dated-acceptance.md` |
 | E.2 | право менять правило `live\|revalidated` | решение владельца 29.10.2026 (`09…:3403`), не следствие плана | ➖ **снят** методологией 0.3.0 (05.11.2026): правила `live\|revalidated` в коде нет (`_enforce_reuse_confirmed` удалён `3699ed9`), публикацию `❌` решает `check_absence_dated` (`core/domain/invariants.py:365`) |
 | E.3 | носитель записи снятия (в плане — `STATE 8`, по факту — `STATE 9`: `STATE 8` занят `crawl_policy`) | необратимая схема-граница | ✅ реализовано и в работе (`corpus_capture`/`corpus_capture_doc`, STATE 9); подтверждение владельца — в §P5-прогоне |
 | E.4 | продукт без сохранённых байтов при `network_denied` | мерить нечем: `❓`/`no_sources` или продукт выпадает из отчёта | ✅ решено владельцем 04.11.2026: продукт **остаётся на карте**, причина видна (`stored_bytes_missing`/`unknown_roots`), покрытие неполно, ни одна ячейка не публикуется как `❌` |

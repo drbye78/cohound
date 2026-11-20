@@ -35,6 +35,7 @@ def _root_coverages(
     declared_roots: Iterable[str],
     captures: Iterable[CaptureRow],
     declared_space_digest: str | None = None,
+    resolved_manually_by_root: Mapping[str, int] | None = None,
 ) -> list[CorpusRootCoverage]:
     """Снятия объявленных корней продукта: по одному блоку на корень (план 20 §11.2).
 
@@ -80,6 +81,13 @@ def _root_coverages(
 
     Нет снятия ⇒ ``complete=False, capture_id=None`` — «корень не удостоверён», а не
     «покрытие неизвестно»: отсутствие носителя и есть неполнота.
+
+    ``resolved_manually_by_root`` — ``{root_url: сколько блокирующих отказов корня закрыто
+    объявленной подачей}`` (13-manual-artifacts §3.3). Это **видимость**, а не второе
+    решение: ``complete`` приходит из снятия (его пересчитывает производитель снятия,
+    зная набор отказов и поданных URL), а здесь число публикуется разрезом продукта по
+    корню. Ключ корня канонизируется (``snapshot_url_key``), как и при выборе снятия:
+    форма записи адреса не решает, чей это корень.
     """
     newest: dict[str, CaptureRow] = {}
     for capture in captures:
@@ -94,6 +102,9 @@ def _root_coverages(
     declared: dict[str, str] = {}
     for raw in declared_roots:
         declared.setdefault(snapshot_url_key(raw), str(raw))
+    resolved_by_key: dict[str, int] = {}
+    for raw_root, count in (resolved_manually_by_root or {}).items():
+        resolved_by_key[snapshot_url_key(raw_root)] = int(count)
     roots: list[CorpusRootCoverage] = []
     for key in sorted(declared):
         chosen = newest.get(key)
@@ -115,6 +126,7 @@ def _root_coverages(
                 observed_at=None if chosen is None else chosen.finished_at,
                 policy_digest=capture_policy,
                 policy_matched=policy_matched,
+                resolved_manually=resolved_by_key.get(key, 0),
             )
         )
     return roots
@@ -189,6 +201,7 @@ def derive_corpus_coverage(
     declared_space_digest: str | None = None,
     manual_urls: Iterable[str] = (),
     partial_docs: Iterable[str] = (),
+    resolved_manually_by_root: Mapping[str, int] | None = None,
 ) -> CorpusCoverage:
     """Строит :class:`CorpusCoverage` продукта: полнота по **снятиям**, диагностика — по сеансу.
 
@@ -264,8 +277,12 @@ def derive_corpus_coverage(
     **предъявлен** объявленным артефактом (``corpus_docs.origin=manual``). Такой
     блокирующий ``FAILED`` остаётся в ``blocked``/``partial_blocks`` (аудит: краулу
     отказано), но больше не делает origin «нечитаемым» и не делает сеанс неполным.
-    Полноту корня это не удостоверяет: ``adopted``-снятие — не обход, и ``bounded`` им
-    не удостоверяется (I2d).
+    Полноту корня это **само по себе** не удостоверяет: ``adopted``-снятие — не обход, и
+    ``bounded`` им не удостоверяется (I2d). Удостоверяет её живое снятие корня, в котором
+    отказанные ``robots.txt`` адреса **все** закрыты объявленной подачей: снятие пишет
+    производитель (``corpus``) после подачи, потому что только он знает набор отказов
+    (``Frontier.robots_refused_urls``) и набор поданных URL. ``resolved_manually_by_root``
+    публикует этот разрез по корню, не решая ``complete`` второй раз.
 
     **Человеческий escape hatch.** ``scope_attested_by`` остаётся единственным способом
     опубликовать ``❌`` на неполном корпусе: человек осознанно принимает риск, что
@@ -350,7 +367,7 @@ def derive_corpus_coverage(
     # Снятие выбирается здесь же: один расчёт на два представления (``roots`` и
     # ``complete``) — второго предиката нет.
     roots = _root_coverages(
-        declared_roots, captures, declared_space_digest
+        declared_roots, captures, declared_space_digest, resolved_manually_by_root
     )
     roots_ok = bool(roots) and all(root.complete for root in roots)
     # Сеансовые условия действуют, только когда сеанс **есть** (есть элементы): у прохода
@@ -565,6 +582,7 @@ def _persist_corpus_coverage(
     reasons: Mapping[str, str | None] | None = None,
     resolved_manually: Mapping[str, Iterable[str]] | None = None,
     partial_docs: Mapping[str, Iterable[str]] | None = None,
+    resolved_manually_by_root: Mapping[str, Mapping[str, int]] | None = None,
     incomplete_reasons: Mapping[str, str] | None = None,
     declared_roots: Mapping[str, Iterable[str]] | None = None,
     captures: Mapping[str, Iterable[CaptureRow]] | None = None,
@@ -591,9 +609,15 @@ def _persist_corpus_coverage(
 
     ``resolved_manually`` — ``product_id → [url]``, чей материал предъявлен объявленным
     ручным артефактом (13-manual-artifacts §3.3): отказ остаётся аудитом (``blocked``) и
-    перестаёт делать **сеанс** неполным; полноту корня ручная подача не удостоверяет —
-    ``adopted``-снятие не является обходом (I2d). Значение по умолчанию — пусто
-    (поведение прежнее).
+    перестаёт делать **сеанс** неполным. Полноту корня ручная подача не удостоверяет
+    сама по себе — ``adopted``-снятие не является обходом (I2d); её удостоверяет живое
+    снятие корня, в котором все отказанные ``robots.txt`` адреса закрыты подачей (пишет
+    производитель снятия, ``corpus``). Значение по умолчанию — пусто (поведение прежнее).
+
+    ``resolved_manually_by_root`` — ``product_id → {root_url: сколько блокирующих отказов
+    корня закрыто подачей}``: разрез той же величины по корню, публикуется в
+    ``CorpusRootCoverage.resolved_manually``. Это видимость, а не второе решение:
+    ``complete`` корня приходит из снятия.
 
     ``partial_docs`` — ``product_id → [url]`` документов, прочитанных **не целиком**
     (:attr:`~core.domain.models.CorpusDoc.partial`). Каждый такой документ делает
@@ -674,6 +698,8 @@ def _persist_corpus_coverage(
             declared_space_digest=declared_space_digest,
             # 13-manual-artifacts §3.3: URL, чей материал предъявлен артефактом.
             manual_urls=(resolved_manually or {}).get(product_id, ()),
+            # Тот же факт разрезом по корню — видимость подачи в блоке ``roots``.
+            resolved_manually_by_root=(resolved_manually_by_root or {}).get(product_id),
             # I2/I2c: документы, прочитанные не целиком (причина
             # ``partial_extraction`` в ``blocked``).
             partial_docs=(partial_docs or {}).get(product_id, ()),

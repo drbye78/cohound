@@ -164,6 +164,7 @@ from collections.abc import (
     Iterable,
     Iterator,
     Mapping,
+    MutableMapping,
     Sequence,
 )
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -1671,6 +1672,126 @@ def _invalidate_previous_build_cells(
     return notes
 
 
+@dataclass
+class _RootCaptureState:
+    """Снятие корня и то, что решило его ``complete`` на момент записи (13 §3.3).
+
+    Снятие пишется на границе **корня**, а объявленная подача артефактов идёт на границе
+    **продукта** — после дренажа (иначе аннотировать отказы нечем). Поэтому первая запись
+    снятия знать про подачу не может, и решение пересчитывается, когда набор поданных URL
+    известен. Здесь остаётся ровно вход этого пересчёта: сама строка снятия (переписать
+    её можно той же строкой — ``record_capture`` обновляет ``complete``, не трогая
+    ``started_at``), отказанные ``robots.txt`` адреса и признак неполноты **другой**
+    природы (усечение/пропуск уровнем ``off``), которую подача не снимает.
+    """
+
+    capture: CaptureRow
+    #: ``Frontier.robots_refused_urls`` корня — адреса, а не число: подача закрывает
+    #: пробел по URL.
+    refused: list[str]
+    #: Обход неполон по причине, которую объявленная подача **не** закрывает
+    #: (``truncated`` либо ``skipped_documents``).
+    incomplete: bool
+
+
+def _root_capture_complete(
+    *,
+    incomplete: bool,
+    refused: Iterable[str],
+    manual_urls: Iterable[str],
+) -> bool:
+    """Исчерпан ли корень: обход не усечён **и** все отказы закрыты подачей.
+
+    Одно правило на две записи снятия — первую (на границе корня, ``manual_urls`` пуст) и
+    пересчёт после подачи: второй предикат разошёлся бы с первым, а это ровно тот дефект,
+    из-за которого ``bounded``-отсутствие не удостоверялось на корне, чей запрещённый
+    материал фактически наблюдён (13-manual-artifacts §3.3).
+
+    ``incomplete`` — неполнота, которую подача снять не может: усечение ``max_*`` и
+    пропуск документа уровнем ``off`` означают, что часть пространства **не посещалась**,
+    а артефакт закрывает лишь те адреса, которые сайт запретил. Частичное закрытие
+    отказов неполноту тоже не снимает: незакрытый адрес — по-прежнему ненаблюдённый
+    материал.
+
+    Сверка адресов — та же, что у продуктового правила (``derive_corpus_coverage``,
+    ``manual_urls``): точное совпадение строки. Одна пара «отказ ↔ подача» не должна
+    решаться двумя разными сравнениями.
+    """
+    if incomplete:
+        return False
+    resolved = {str(url) for url in manual_urls}
+    return all(str(url) in resolved for url in refused)
+
+
+def _recompute_root_captures(
+    *,
+    product_id: str,
+    product_roots: Sequence[str],
+    manual_urls: Sequence[str],
+    root_captures: MutableMapping[tuple[str, str], _RootCaptureState],
+    state: ProductStatePort | None,
+    run_id: str | None,
+    errors: list[str],
+) -> dict[str, int]:
+    """Пересчитать ``complete`` снятий корней после объявленной подачи (13 §3.3).
+
+    Зовётся на границе продукта **после** подачи артефактов и **до** расчёта покрытия:
+    к этому моменту набор поданных URL известен, а строка покрытия ещё не написана —
+    поэтому переписанное снятие попадает и в ``roots``, и в решение ``complete`` без
+    второго расчёта.
+
+    Переписывается **только своя** строка: снятие, записанное другим производителем
+    (``adopted``/``frozen``/другой прогон) или уже отозванное, не трогается — иначе
+    пересчёт затёр бы чужое наблюдение. Порядок «дренаж → подача → Pass B» не меняется:
+    пересчёт снятия — не работа с корпусом.
+
+    :returns: ``{root_url: сколько отказов корня закрыто подачей}`` — разрез продуктового
+        ``resolved_manually`` по корню (публикуется в ``CorpusRootCoverage``).
+    """
+    resolved_by_root: dict[str, int] = {}
+    if state is None or run_id is None:
+        return resolved_by_root
+    resolved_urls = {str(url) for url in manual_urls}
+    for root_url in product_roots:
+        entry = root_captures.get((product_id, snapshot_url_key(root_url)))
+        if entry is None:
+            # Корень не дренировался в этом прогоне (политика/синтетика/нулевой бюджет):
+            # снятия этого прохода у него нет, и пересчитывать нечего.
+            continue
+        closed = sum(1 for url in entry.refused if url in resolved_urls)
+        if closed:
+            # Ноль не записывается: поле модели и так ``0``, а карта называет только
+            # корни, где подача что-то закрыла.
+            resolved_by_root[root_url] = closed
+        complete = _root_capture_complete(
+            incomplete=entry.incomplete,
+            refused=entry.refused,
+            manual_urls=manual_urls,
+        )
+        if complete == entry.capture.complete:
+            continue
+        current = state.get_capture(entry.capture.capture_id)
+        if (
+            current is None
+            or current.observed_how != CAPTURE_OBSERVED_LIVE
+            or current.run_id != run_id
+            or current.superseded_by
+        ):
+            # Чужое снятие не переписываем: ``adopted``/``frozen`` — не наш обход.
+            continue
+        updated = replace(entry.capture, complete=complete)
+        try:
+            state.record_capture(updated)
+        except Exception as exc:  # noqa: BLE001 — снятие вторично к корпусу
+            errors.append(
+                f"{product_id}/{root_url}: capture recompute: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+        entry.capture = updated
+    return resolved_by_root
+
+
 def _build_corpus(
     plan: Any,
     crawler: CrawlerPort,
@@ -2980,6 +3101,17 @@ def _build_corpus(
     #: обязана быть на месте. Накопитель, а не чтение БД: документы продукта уже в
     #: памяти, а ``corpus_docs`` не несёт ``run_id`` (общая БД — объединение корпусов).
     partial_urls_by_product: dict[str, list[str]] = {}
+    #: 13-manual-artifacts §3.3 на границе корня: ``(product_id, ключ корня) → снятие`` и
+    #: вход его пересчёта. Снятие пишется на границе корня, подача идёт на границе
+    #: продукта (после дренажа), поэтому первая запись про подачу знать не может —
+    #: ``complete`` пересчитывается той же строкой, когда набор поданных URL известен.
+    #: Ключ — каноническая форма адреса (``snapshot_url_key``): форма записи не решает,
+    #: чей это корень (та же дисциплина, что у выбора снятия).
+    root_captures: dict[tuple[str, str], _RootCaptureState] = {}
+    #: ``product_id → {root_url: закрытых подачей отказов}`` — разрез продуктового
+    #: ``resolved_manually`` по корню. Публикуется в ``CorpusRootCoverage`` (видимость
+    #: подачи: без числа «обход прошёл» и «материал предъявлен» неразличимы).
+    resolved_manually_by_root: dict[str, dict[str, int]] = {}
     #: Наблюдённые бакеты стадий по продуктам: ``(product_id, elapsed всего, бакеты)``.
     #: Копятся до конца фазы — агрегат публикуется рядом с наблюдением ресурсов
     #: (``metrics.json.resources.stage_timings``), а не только строками продуктов.
@@ -3224,6 +3356,14 @@ def _build_corpus(
         не отказано ``robots.txt``). Пропущенный политикой корень сюда не доходит вовсе
         (гейт стоит до дренажа), synthetic-бакет — тоже (это не авторский корень).
 
+        **Подача артефактов на этой границе ещё не известна.** Она идёт на границе
+        продукта — после дренажа (13-manual-artifacts §3.3): здесь ``manual_urls`` пуст,
+        поэтому отказанный ``robots.txt`` URL делает корень неполным. Вход пересчёта
+        (отказанные адреса + неполнота другой природы) остаётся в ``root_captures``, и
+        ``_recompute_root_captures`` перепишет **ту же строку**, когда набор поданных URL
+        станет известен. Правило одно — :func:`_root_capture_complete`; второй предикат
+        для «после подачи» не заводится.
+
         Дайджесты здесь **не считаются**: на границе корня их ещё нет, а на границе
         продукта они уже посчитаны (``coverage_digest(product_coverage)`` и
         ``corpus_doc_set_digest(ingest.docs)``). Снятие сначала пишется без них и
@@ -3237,11 +3377,10 @@ def _build_corpus(
         """
         if state is None or run_id is None:
             return
-        complete = not (
-            frontier.truncated
-            or frontier.skipped_documents
-            or frontier.robots_refused
-        )
+        refused = list(frontier.robots_refused_urls)
+        # Неполнота, которую подача снять не может: усечение бюджета и пропуск документа
+        # уровнем ``off`` — это непосещённое пространство, а не запрещённый адрес.
+        incomplete = bool(frontier.truncated or frontier.skipped_documents)
         capture = CaptureRow(
             capture_id=_capture_id_for(product_id, plan.root_url, run_id),
             product_id=product_id,
@@ -3249,7 +3388,9 @@ def _build_corpus(
             root_url=plan.root_url,
             started_at=frontier.started_at or _now_iso(),
             finished_at=_now_iso(),
-            complete=complete,
+            complete=_root_capture_complete(
+                incomplete=incomplete, refused=refused, manual_urls=()
+            ),
             observed_how=CAPTURE_OBSERVED_LIVE,
             policy_digest=None if crawl_policy is None else crawl_policy.space_digest,
         )
@@ -3259,6 +3400,13 @@ def _build_corpus(
             errors.append(
                 f"{product_id}/{plan.root_url}: capture: "
                 f"{type(exc).__name__}: {exc}"
+            )
+        else:
+            # Пересчёт возможен только для записанной строки: вход его — сама строка.
+            root_captures[(product_id, snapshot_url_key(plan.root_url))] = (
+                _RootCaptureState(
+                    capture=capture, refused=refused, incomplete=incomplete
+                )
             )
 
     def _policy_skip(
@@ -4315,6 +4463,26 @@ def _build_corpus(
         if manual_resolved:
             manual_urls_by_product[product_id] = manual_resolved
 
+        # -- 13-manual-artifacts §3.3 на границе корня ---------------------------- #
+        # Снятие корня записано на границе корня, когда поданных URL ещё не было, и
+        # отказанный ``robots.txt`` адрес делал его ``complete=0``. Здесь набор поданных
+        # URL известен — пересчитываем **той же строкой** (``record_capture`` обновляет
+        # ``complete``, не трогая ``started_at``) и **до** расчёта покрытия ниже: иначе
+        # ``bounded``-отсутствие (I2d) не удостоверялось бы на корне, чей запрещённый
+        # материал фактически наблюдён объявленной подачей. Порядок хвоста не меняется:
+        # пересчёт снятия — не работа с корпусом.
+        resolved_by_root = _recompute_root_captures(
+            product_id=product_id,
+            product_roots=product_roots,
+            manual_urls=manual_resolved,
+            root_captures=root_captures,
+            state=state,
+            run_id=run_id,
+            errors=errors,
+        )
+        if resolved_by_root:
+            resolved_manually_by_root[product_id] = resolved_by_root
+
         # --- E.6 плана 19: переиспользование корней, запрещённых политикой -------- #
         # Здесь, а не в планировании (где стоит гейт политики): живое наблюдение этого
         # прогона обязано победить переиспользованную копию **по построению**, потому
@@ -4993,6 +5161,9 @@ def _build_corpus(
                     },
                     resolved_manually=manual_urls_by_product,
                     partial_docs=partial_urls_by_product,
+                    # 13-manual-artifacts §3.3: тот же факт разрезом по корню —
+                    # видимость подачи в блоке ``roots`` (``complete`` уже пересчитан).
+                    resolved_manually_by_root=resolved_manually_by_root,
                     # ``--only-failed``: ремонт не наблюдал продукт целиком.
                     incomplete_reasons=coverage_incomplete,
                     # F3: объявленные корни продукта + их снятия (``complete`` по снятиям).
@@ -5386,6 +5557,9 @@ def _build_corpus(
                 # I2/I2c: та же карта, что на границе продукта — конец фазы
                 # перезаписывает строки покрытия и обязан сохранить причину.
                 partial_docs=partial_urls_by_product,
+                # 13-manual-artifacts §3.3: разрез по корню — та же карта, что на
+                # границе продукта (перезапись обязана сохранить и её).
+                resolved_manually_by_root=resolved_manually_by_root,
                 # Тот же набор продуктов-ремонтов: перезапись не должна вернуть им
                 # ``complete``, которого они не заслужили.
                 incomplete_reasons=coverage_incomplete,

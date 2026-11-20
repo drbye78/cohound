@@ -171,7 +171,7 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:529`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:530`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277`, `core/pipeline/onboarding.py:310`), вызов — `preflight` из `core/cli/commands/run.py:917`, `core/cli/commands/run.py:1052` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
@@ -1531,7 +1531,7 @@ PK. Запись в конце фазы (`core/pipeline/corpus.py:5581-5600`) о
 стадиям, а не по продуктам-целиком: события `product_end` / `product_index_end` несут
 `fetch_wait_s`, `extract_wait_s`, `chunk_s`, `embed_s`, `build_s`, `overhead_s`
 (`_CorpusStageTimings`, `core/pipeline/corpus_index.py:259`; агрегат —
-`core/pipeline/corpus.py:1223`), и то же попадает в `metrics.json` как
+`core/pipeline/corpus.py:1224`), и то же попадает в `metrics.json` как
 `resources.stage_timings` (`ResourcesObservation.stage_timings`,
 `build_resources_block`). Это **наблюдаемость, а не контракт**: значения не входят ни в
 `execution_contract_digest`, ни в `pb`, ни в `content_digest` (доказано пинами в

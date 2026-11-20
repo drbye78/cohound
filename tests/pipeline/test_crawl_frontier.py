@@ -1110,6 +1110,47 @@ def test_duplicate_form_survives_with_limits_clone() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 13-manual-artifacts §3.3: отказ robots.txt — адреса, а не только счётчик
+# --------------------------------------------------------------------------- #
+
+
+def test_note_robots_refusal_accumulates_urls_and_keeps_counter_equal() -> None:
+    """Отказ запоминает **адрес**: подача закрывает пробел по URL, а не по числу.
+
+    Счётчик обязан остаться равным длине списка — это один факт в двух формах, и
+    расхождение между ними читалось бы как «часть отказов потеряна».
+    """
+    frontier = Frontier("https://h/", CrawlLimits(max_depth=3))
+    frontier.note_robots_refusal("https://h/a.pdf")
+    frontier.note_robots_refusal("https://h/b.pdf")
+    assert frontier.robots_refused_urls == ["https://h/a.pdf", "https://h/b.pdf"]
+    assert frontier.robots_refused == len(frontier.robots_refused_urls) == 2
+
+
+def test_note_robots_refusal_counts_urls_not_attempts() -> None:
+    """Повтор того же адреса счётчик не увеличивает: считаются URL, а не попытки."""
+    frontier = Frontier("https://h/", CrawlLimits(max_depth=3))
+    frontier.note_robots_refusal("https://h/a.pdf")
+    frontier.note_robots_refusal("https://h/a.pdf")
+    assert frontier.robots_refused_urls == ["https://h/a.pdf"]
+    assert frontier.robots_refused == 1
+
+
+def test_robots_refusals_survive_with_limits_clone() -> None:
+    """Клон — та же граница корня: отказанные адреса и счётчик наследуются вместе."""
+    frontier = Frontier("https://h/", CrawlLimits(max_depth=3))
+    frontier.note_robots_refusal("https://h/a.pdf")
+    clone = frontier.with_limits(CrawlLimits(max_depth=1))
+    assert clone.robots_refused_urls == ["https://h/a.pdf"]
+    assert clone.robots_refused == len(clone.robots_refused_urls) == 1
+    # Список клона — копия: запись в клон не меняет исходный корень.
+    clone.note_robots_refusal("https://h/b.pdf")
+    assert frontier.robots_refused_urls == ["https://h/a.pdf"]
+    assert clone.robots_refused_urls == ["https://h/a.pdf", "https://h/b.pdf"]
+
+
+
+# --------------------------------------------------------------------------- #
 # D9 (план 26): лимиты PDF — ось «не ограничивать, а измерять»
 # --------------------------------------------------------------------------- #
 

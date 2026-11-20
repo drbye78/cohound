@@ -264,10 +264,17 @@ robots-запрет на `repo.postgrespro.ru` (104 URL) закрыл целое
   1 и 3, **из бюджета первого корня**.
 
 Что не установлено: механизм. Кандидаты по коду — ранние возвраты `_drain_root`
-(`seed_blacklisted`/`seed_truncated`, `core/pipeline/corpus.py:1742-1746`) и `note_consumed`
-(`:4560-4592`), но статически ни одно условие не воспроизводится: блэклист ложен, а
+(`seed_blacklisted`, `core/pipeline/corpus_drain.py:1553`) и `note_consumed`
+(`core/pipeline/crawl_frontier.py:1736`), но статически ни одно условие не
+воспроизводится: блэклист ложен, а
 `seed_truncated` требует `frontier.fetched >= 800` на момент `add_seed`. Лог прогона
 утрачен при перезагрузке хоста, `errors` фазы не персистится.
+
+> **Уточнение 20.11.2026.** Статуса `seed_truncated` в коде больше нет: `Frontier.add_seed`
+> возвращает `queued`/`blacklisted`/`dup`/`host_out_of_shard`, а усечение ставит `next`/
+> дренаж (`core/pipeline/crawl_frontier.py:1767`). Второй кандидат этого расследования
+> поэтому снят механикой, а не замером; первый (`seed_blacklisted`) остаётся и по-прежнему
+> не воспроизводится — блэклист на тех seed'ах ложен.
 
 Проверено на живом конфиге пакета: все 14 seed-URL прогона прогнаны через реальную
 цепочку `resolve_crawl_limits` + `Frontier.add_seed` — **каждый вернул `queued`**

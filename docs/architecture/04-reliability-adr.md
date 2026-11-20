@@ -350,7 +350,7 @@ tests/
 | ANN-альтернатива | ➖ снято решением | решение — `14` §4: Qdrant отклонён (поиск продукт-скупед, I17, ANN по миллионам векторов не выполняется никогда), порт `VectorIndex` готов, ANN-адаптера нет; возврат — по условию строки выше, не по «на вырост» |
 | эмбеддинги на CPU | ✅ сделано | батчевый путь `core/adapters/embed_local.py:193` (нарезка входа `batch_size`); цена — 2.8–5.7 чанк/с продакшн-путь, fp16 — 15.40 чанк/с (06.11.2026, `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`) |
 | массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:125`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:97`, `save_cells_batch` — `core/store/sqlite_store.py:645`) |
-| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1387`, безлимит запрещён — `core/pipeline/corpus.py:1411`), кэш — `core/util/cache.py:133` |
+| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1388`, безлимит запрещён — `core/pipeline/corpus.py:1411`), кэш — `core/util/cache.py:133` |
 
 ### D.1. Память и OOM
 

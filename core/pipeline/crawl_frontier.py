@@ -1451,6 +1451,12 @@ class Frontier:
         #: неполным «по усечению», но часть материала сайт запретил — снятие не вправе
         #: назвать корень исчерпанным. Счётчик ведёт дренаж (``_commit_outcome``).
         self.robots_refused = 0
+        #: 13-manual-artifacts §3.3 на границе корня: **какие** URL отказаны robots.txt.
+        #: Счётчик отвечает «сколько», а объявленная подача закрывает пробел **по адресу**
+        #: (``manual_artifacts.yaml`` называет URL, не число), поэтому снятию корня нужен
+        #: набор. Держится равным ``len(robots_refused_urls)``: источник один, второй не
+        #: заводится (``robots_refused`` пересчитывается из списка при каждой записи).
+        self.robots_refused_urls: list[str] = []
         #: Seeds/ссылки, отброшенные блэклистом (наблюдаемость: «не молчаливый дроп»).
         self.skipped_blacklisted: list[str] = []
         #: P6b: терминальные артефакты, допущенные **вне** path-prefix корня (точный счётчик
@@ -1675,9 +1681,20 @@ class Frontier:
         """Учесть успешно добытую (retained) страницу этого корня."""
         self.fetched += 1
 
-    def note_robots_refusal(self) -> None:
-        """План 20 §3: учесть отказ ``robots.txt`` в этом корне (видимость неполноты)."""
-        self.robots_refused += 1
+    def note_robots_refusal(self, url: str) -> None:
+        """План 20 §3: учесть отказ ``robots.txt`` в этом корне (видимость неполноты).
+
+        ``url`` — адрес, по которому сайт отказал. Хранится **адрес**, а не только число:
+        снятие корня сверяет отказы с объявленной ручной подачей (13 §3.3), а подача
+        закрывает пробел по URL. Повтор того же адреса счётчик не увеличивает —
+        ``robots_refused`` считает **URL**, а не попытки, и обязан оставаться равным
+        длине :attr:`robots_refused_urls`.
+        """
+        text = str(url)
+        if text in self.robots_refused_urls:
+            return
+        self.robots_refused_urls.append(text)
+        self.robots_refused = len(self.robots_refused_urls)
 
     def note_document_skip(self, url: str, reason: str) -> None:
         """P5: отметить пропуск документа уровнем ``off`` (видимость решения).
@@ -1996,6 +2013,11 @@ class Frontier:
         clone.fetched = self.fetched
         clone.skipped_blacklisted = list(self.skipped_blacklisted)
         clone.skipped_documents = [dict(rec) for rec in self.skipped_documents]
+        # Отказы robots.txt наследуются вместе с адресами: клон — та же граница корня с
+        # урезанными лимитами, а не новый корень. Счётчик копируется из списка, чтобы
+        # инвариант «счётчик = длина списка» держался и в клоне.
+        clone.robots_refused_urls = list(self.robots_refused_urls)
+        clone.robots_refused = len(clone.robots_refused_urls)
         clone.artifacts_outside_prefix_count = self.artifacts_outside_prefix_count
         clone.artifacts_outside_prefix = list(self.artifacts_outside_prefix)
         clone._bypass_seen = set(self._bypass_seen)
