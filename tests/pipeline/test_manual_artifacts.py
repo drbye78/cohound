@@ -218,6 +218,9 @@ def _build(
     domain_profiles: dict[str, Any] | None = None,
     crawl_defaults: Any = None,
     state: Any = None,
+    refresh_policy: str = "auto",
+    frozen_source: str | None = None,
+    crawl_policy: Any = None,
 ):
     return build_corpus(
         _plan(),
@@ -233,6 +236,9 @@ def _build(
         domain_profiles=domain_profiles,
         crawl_defaults=crawl_defaults,
         state=state,
+        refresh_policy=refresh_policy,
+        frozen_source=frozen_source,
+        crawl_policy=crawl_policy,
     )
 
 
@@ -416,10 +422,10 @@ def test_coverage_counts_gap_as_closed_but_is_not_a_walk(tmp_path: Path) -> None
     F3 (план 20 §11.2, I2d): ``adopted``-материал наблюдён, поэтому ``resolved_manually``
     назван, ``blocked`` остаётся аудитом, а ``observed_sources`` — счётчиком **краула**
     (0). ``complete`` здесь ``False`` потому, что снятия корня нет вовсе (``state`` не
-    передан): ``adopted``-снятие исчерпания не удостоверяет. Когда снятие **есть** и все
-    отказанные ``robots.txt`` адреса закрыты подачей, ``complete`` корня становится ``1``
-    — это другое правило (13 §3.3 на границе корня), и оно проверено отдельно
-    (``test_root_capture_complete_when_all_refusals_provided``).
+    передан): ``adopted``-снятие исчерпания не удостоверяет. Когда снятие **есть**,
+    корень исчерпан независимо от подачи: отказ ``robots`` — объявленная граница сайта,
+    а не неполнота (0.6.0), и подача остаётся провенансом
+    (``test_root_capture_complete_with_robots_refusal_without_provision``).
     """
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -448,7 +454,7 @@ def test_coverage_counts_gap_as_closed_but_is_not_a_walk(tmp_path: Path) -> None
 
 
 def test_unresolved_refusal_keeps_coverage_incomplete(tmp_path: Path) -> None:
-    """Без подачи тот же отказ по-прежнему делает покрытие неполным (регресс-пин)."""
+    """Без снятия корня покрытие неполно, и поданных пробелов не названо (пин)."""
     store = SqliteStore(":memory:")
     _make_run(store)
     try:
@@ -461,6 +467,9 @@ def test_unresolved_refusal_keeps_coverage_incomplete(tmp_path: Path) -> None:
         )
         coverage = store.read_corpus_coverage(RUN_ID, "p1")
         assert coverage is not None
+        # Причина неполноты — отсутствие снятия (``state`` не передан), а не отказ
+        # ``robots``: отказ остаётся аудитом и сам по себе покрытие не ломает.
+        assert coverage.blocked == {"robots_disallow": 1}
         assert coverage.complete is False
         assert coverage.resolved_manually == 0
     finally:
@@ -468,7 +477,7 @@ def test_unresolved_refusal_keeps_coverage_incomplete(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 3. Снятие корня: объявленная подача закрывает отказ robots.txt (13 §3.3)
+# 3. Снятие корня: robots — граница сайта, подача — провенанс (13 §3.3, 0.6.0)
 # --------------------------------------------------------------------------- #
 
 
@@ -486,12 +495,14 @@ def _root_of(coverage: Any, root_url: str) -> Any:
     return rows[0]
 
 
-def test_root_capture_incomplete_without_provision(tmp_path: Path) -> None:
-    """(а) Отказ ``robots.txt`` без подачи: корень не исчерпан — ``complete=0``.
+def test_root_capture_complete_with_robots_refusal_without_provision(
+    tmp_path: Path,
+) -> None:
+    """(а) Отказ ``robots.txt`` без подачи: корень всё равно исчерпан — ``complete=1``.
 
-    Носитель ``bounded``-отсутствия (I2d) — снятие корня с ``complete=1``. Отказ без
-    подачи его не даёт, и это видно в обоих представлениях: в снятии и в блоке корня
-    покрытия.
+    0.6.0: файл ``robots`` объявляет естественную границу сайта, а не техническую потерю,
+    поэтому отказ **не** делает корень неисчерпанным независимо от подачи. Аудит отказа
+    остаётся в ``blocked``, ``resolved_manually`` — ноль (закрывать подачей нечего).
     """
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -506,23 +517,24 @@ def test_root_capture_incomplete_without_provision(tmp_path: Path) -> None:
                 state=state,
             )
             assert result.status == "ok", result.errors
-            assert _root_capture(state, "p1", URL_P1_A).complete is False
+            assert _root_capture(state, "p1", URL_P1_A).complete is True
             coverage = store.read_corpus_coverage(RUN_ID, "p1")
             assert coverage is not None
             root = _root_of(coverage, URL_P1_A)
-            assert root.complete is False
+            assert root.complete is True
             assert root.resolved_manually == 0
-            assert coverage.complete is False
+            assert coverage.blocked == {"robots_disallow": 1}
+            assert coverage.complete is True
     finally:
         store.close()
 
 
 def test_root_capture_complete_when_all_refusals_provided(tmp_path: Path) -> None:
-    """(б) Все отказанные URL поданы: корень исчерпан — ``complete=1`` и разрез по корню.
+    """(б) Все отказанные URL поданы: корень исчерпан, а разрез подачи назван.
 
-    Подача закрывает пробел **по адресу**, поэтому корень, которому сайт отказал, но чей
-    материал предъявлен объявленным артефактом, удостоверяет исчерпание — иначе
-    ``bounded``-отсутствие не публиковалось бы на фактически наблюдённом корне.
+    Подача закрывает пробел **по адресу** и остаётся провенансом: ``resolved_manually``
+    показывает, что материал из запрещённой секции оператор добрал руками. На ``complete``
+    это больше не влияет (0.6.0), но факт подачи читателю нужен.
     """
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -553,10 +565,10 @@ def test_root_capture_complete_when_all_refusals_provided(tmp_path: Path) -> Non
         store.close()
 
 
-def test_root_capture_incomplete_when_only_part_of_refusals_provided(
+def test_root_capture_complete_when_only_part_of_refusals_provided(
     tmp_path: Path,
 ) -> None:
-    """(в) Два отказа, подан один: частичное закрытие неполноту не снимает."""
+    """(в) Два отказа, подан один: корень исчерпан, закрытым назван один адрес."""
     refused_a = "https://docs.test/p1/a.pdf"
     refused_b = "https://docs.test/p1/b.pdf"
     root_page = f'<a href="{refused_a}">a</a><a href="{refused_b}">b</a>'.encode()
@@ -578,22 +590,22 @@ def test_root_capture_incomplete_when_only_part_of_refusals_provided(
                 crawl_defaults=CrawlRunConfig(max_depth=1),
             )
             assert result.status == "ok", result.errors
-            assert _root_capture(state, "p1", URL_P1_A).complete is False
+            assert _root_capture(state, "p1", URL_P1_A).complete is True
             coverage = store.read_corpus_coverage(RUN_ID, "p1")
             assert coverage is not None
             root = _root_of(coverage, URL_P1_A)
-            assert root.complete is False
+            assert root.complete is True
             assert root.resolved_manually == 1
-            assert coverage.complete is False
+            assert coverage.complete is True
     finally:
         store.close()
 
 
 def test_root_capture_truncation_not_lifted_by_provision(tmp_path: Path) -> None:
-    """(г) ``truncated`` (``max_documents``) подачей не снимается — даже при полной подаче.
+    """(г) ``truncated`` (``max_documents``) — техническая неполнота, ``complete=0``.
 
-    Усечение бюджета — непосещённое пространство, а подача закрывает только запрещённые
-    адреса: ``complete`` остаётся ``0``, и ``bounded`` на таком корне не удостоверяется.
+    Усечение бюджета — непосещённое пространство; подача его не снимает (она закрывает
+    отказы по адресу), поэтому ``bounded`` на таком корне не удостоверяется.
     """
     root = "https://docs.test/p1/docs/"
     refused = "https://docs.test/p1/docs/a"
@@ -634,7 +646,7 @@ def test_root_capture_truncation_not_lifted_by_provision(tmp_path: Path) -> None
 
 
 def test_root_capture_document_skip_not_lifted_by_provision(tmp_path: Path) -> None:
-    """(д) ``skipped_documents`` (``document_level=off``) подачей не снимается."""
+    """(д) ``skipped_documents`` (``document_level=off``) — техническая неполнота."""
     root = "https://docs.test/p1/docs/"
     skipped_doc = "https://docs.test/p1/docs/manual.pdf"
     refused = "https://docs.test/p1/docs/blocked"
@@ -670,26 +682,144 @@ def test_root_capture_document_skip_not_lifted_by_provision(tmp_path: Path) -> N
         store.close()
 
 
-def test_root_capture_predicate_matches_the_old_expression() -> None:
-    """Правило одно: с пустой подачей предикат **тождественен** прежней формуле.
+def test_root_capture_predicate_is_not_truncated_and_not_skipped() -> None:
+    """(е) Предикат ``complete`` — ``not (truncated or skipped_documents)``.
 
-    Прежняя запись была ``complete = not (truncated or skipped_documents or
-    robots_refused)``. Пересчёт после подачи не должен менять ни одного исхода там, где
-    подачи нет (у прогона без ``manual_artifacts`` регресс был бы молчаливым: снятия
-    прошлых прогонов переписались бы задним числом).
+    0.6.0: отказ ``robots`` в решение не входит, поэтому набор отказов и набор поданных
+    URL на предикат не влияют. Неполноту даёт только техническая потеря — усечение
+    бюджета и пропуск документа уровнем ``off``.
     """
     from core.pipeline.corpus import _root_capture_complete
 
     for truncated in (False, True):
         for skipped in (False, True):
-            for refused in ((), ("https://h/a.pdf",)):
-                old = not (truncated or skipped or bool(refused))
-                new = _root_capture_complete(
-                    incomplete=truncated or skipped,
-                    refused=refused,
-                    manual_urls=(),
-                )
-                assert new is old, (truncated, skipped, refused)
+            expected = not (truncated or skipped)
+            assert (
+                _root_capture_complete(incomplete=truncated or skipped) is expected
+            ), (truncated, skipped)
+    # Отказ ``robots`` не делает корень неполным: предикат о нём ничего не знает.
+    assert _root_capture_complete(incomplete=False) is True
+
+
+# --------------------------------------------------------------------------- #
+# 3b. Подача не подчиняется расписанию и режиму обновления (решение 21.11.2026)
+# --------------------------------------------------------------------------- #
+#
+# Правило владельца: «добавление / обновление ручных артефактов должно иметь эффект на
+# следующий прогон безотносительно расписания / режима обновления при крауле». Подача —
+# не сеть, поэтому её исполнение не зависит ни от ``refresh_policy`` прогона, ни от
+# решения ``crawl_policy``: байты оператора входят в корпус следующего прогона всегда.
+# Прошлый прогон это не переписывает (неретроактивность обеспечена ``run_id``: набор
+# ``(product_id, url, sha256)`` — поле контракта ``manual_artifacts_digest``).
+
+
+def _denied_policy(urls: list[str]) -> Any:
+    """Резолв политики: объявленные корни под ``network_denied`` (сеть не трогается)."""
+    from urllib.parse import urlsplit
+
+    from core.config.crawl_policy import CrawlPolicyConfig
+    from core.pipeline.crawl_policy import DeclaredRoot, resolve_crawl_policy
+
+    declared = []
+    for url in urls:
+        parsed = urlsplit(url)
+        declared.append(
+            DeclaredRoot("p1", parsed.hostname or "", parsed.path or "", root_url=url)
+        )
+    return resolve_crawl_policy(
+        package_policy=CrawlPolicyConfig.model_validate(
+            {"products": {"p1": {"mode": "network_denied"}}}
+        ),
+        operator_rows=[],
+        roots=declared,
+        now=_dt.datetime(2026, 1, 10, 12, 0, tzinfo=_dt.UTC),
+    )
+
+
+def test_provision_applies_under_network_denied_policy(tmp_path: Path) -> None:
+    """``crawl_policy=network_denied``: корень не обходится, а поданный файл входит.
+
+    Политика запрещает **сеть**, а не подачу: объявленный артефакт — вход следующего
+    прогона, и он входит в корпус независимо от решения политики.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path)
+    crawler = _Crawler({})
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                crawler=crawler,
+                manual_artifacts=ManualArtifacts(entries=(entry,)),
+                state=state,
+                crawl_policy=_denied_policy([URL_P1_A]),
+            )
+            assert result.status == "ok", result.errors
+            assert crawler.calls == [], "network_denied обязан не трогать сеть"
+            docs = _docs(store)
+            assert URL_MANUAL in docs, "подача обязана войти в корпус"
+            assert _origin(store, docs[URL_MANUAL].doc_id) == ORIGIN_MANUAL
+    finally:
+        store.close()
+
+
+def test_provision_applies_under_offline_refresh(tmp_path: Path) -> None:
+    """``--refresh offline``: сеть запрещена прогоном, поданный файл всё равно входит."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path)
+    crawler = _Crawler({})
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                crawler=crawler,
+                manual_artifacts=ManualArtifacts(entries=(entry,)),
+                state=state,
+                refresh_policy="offline",
+            )
+            assert result.status == "ok", result.errors
+            assert crawler.calls == [], "offline обязан не трогать сеть"
+            docs = _docs(store)
+            assert URL_MANUAL in docs, "подача обязана войти в корпус"
+            assert _origin(store, docs[URL_MANUAL].doc_id) == ORIGIN_MANUAL
+    finally:
+        store.close()
+
+
+def test_provision_applies_under_frozen_refresh(tmp_path: Path) -> None:
+    """``--refresh frozen``: байты берутся из хранилища, а поданный файл входит в корпус."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    entry = _entry(tmp_path)
+    crawler = _Crawler({})
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                crawler=crawler,
+                manual_artifacts=ManualArtifacts(entries=(entry,)),
+                state=state,
+                refresh_policy="frozen",
+                frozen_source="bytes",
+            )
+            assert result.status == "ok", result.errors
+            assert crawler.calls == [], "frozen обязан не трогать сеть"
+            docs = _docs(store)
+            assert URL_MANUAL in docs, "подача обязана войти в корпус"
+            assert _origin(store, docs[URL_MANUAL].doc_id) == ORIGIN_MANUAL
+    finally:
+        store.close()
 
 
 def test_derive_coverage_resolution_is_bound_to_url_and_kind() -> None:

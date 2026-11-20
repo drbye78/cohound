@@ -2560,8 +2560,10 @@ def _coverage_anomaly(
 
     Главные действенные факты — **блокирующие сбои** (``blocking_failures``: класс →
     счётчик) и **нечитаемые origin'ы** (``unreadable_origins``): именно они не позволяют
-    публиковать ``❌``. Читатель видит ``robots_disallow=50``, а не только
-    ``complete=False``. Частичные блокировки перечисляются отдельно (``partial_blocks``).
+    публиковать ``❌``. Читатель видит ``parser_failed=50``, а не только
+    ``complete=False``. Отказ ``robots`` в блокирующие не входит (0.6.0: объявленная
+    граница сайта), но остаётся в ``blocked`` как аудит и в рабочем списке подачи.
+    Частичные блокировки перечисляются отдельно (``partial_blocks``).
     """
     blocked = dict(sorted(coverage.blocked.items()))
     blocking = dict(coverage.blocking_failures)

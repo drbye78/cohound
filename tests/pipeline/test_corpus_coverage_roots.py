@@ -131,13 +131,13 @@ def test_root_without_capture_is_not_complete() -> None:
     ]
 
 
-def test_blocking_failure_beats_complete_capture() -> None:
-    """Живой сеанс с блокирующим ``FAILED`` — неполон даже при ``complete=1`` (I2c)."""
+def test_technical_blocking_failure_beats_complete_capture() -> None:
+    """Живой сеанс с техническим блокирующим ``FAILED`` — неполон даже при ``complete=1``."""
     coverage = derive_corpus_coverage(
         product_id=PRODUCT,
         items=[
             _item(ROOT, CrawlItemStatus.FETCHED),
-            _item(ROOT + "closed", CrawlItemStatus.FAILED, "robots_disallow"),
+            _item(ROOT + "broken", CrawlItemStatus.FAILED, "parser_failed"),
         ],
         truncated=False,
         computed_at=TS,
@@ -146,7 +146,55 @@ def test_blocking_failure_beats_complete_capture() -> None:
     )
 
     assert coverage.complete is False
-    assert coverage.blocking_failures == {"robots_disallow": 1}
+    assert coverage.blocking_failures == {"parser_failed": 1}
+
+
+def test_robots_refusal_does_not_break_completeness() -> None:
+    """0.6.0 (а,б,в): отказ ``robots`` — аудит, а не неполнота покрытия.
+
+    Файл ``robots`` объявляет естественную границу сайта (решение владельца 21.11.2026):
+    корень с отказами и без усечения остаётся исчерпанным, origin, закрытый целиком, не
+    становится «нечитаемым», а отказ остаётся видимым в ``blocked``/``partial_blocks``.
+    """
+    closed = "https://closed.test/"
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[
+            _item(ROOT, CrawlItemStatus.FETCHED),
+            _item(ROOT + "closed", CrawlItemStatus.FAILED, "robots_disallow"),
+            _item(closed + "a", CrawlItemStatus.FAILED, "robots_disallow"),
+        ],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[_capture()],
+    )
+
+    assert coverage.complete is True
+    assert coverage.unreadable_origins == []
+    assert coverage.blocked == {"robots_disallow": 2}
+    assert coverage.blocking_failures == {}
+    assert coverage.partial_blocks == {
+        "docs.test": {"robots_disallow": 1},
+        "closed.test": {"robots_disallow": 1},
+    }
+
+
+def test_partial_extraction_still_breaks_completeness() -> None:
+    """0.6.0 (д): техническая частичная потеря страниц по-прежнему делает корпус неполным."""
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[_item(ROOT, CrawlItemStatus.FETCHED)],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[_capture()],
+        partial_docs=[ROOT + "book"],
+    )
+
+    assert coverage.complete is False
+    assert coverage.blocked == {"partial_extraction": 1}
+    assert coverage.blocking_failures == {"partial_extraction": 1}
 
 
 def test_superseded_capture_is_not_chosen() -> None:

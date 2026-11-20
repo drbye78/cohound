@@ -44,10 +44,14 @@
 | **наблюдаемые исходы краула** (пишутся в `crawl_session_items.error_kind`) | `not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`, `partial_extraction` |
 
 Разделение не косметическое: `not_found` — **разрешённое наблюдение отсутствия** (origin
-ответил определённо), а в `BLOCKING_FAILURE_KINDS` входят 7: `robots_disallow`, `parser_failed`,
-`extraction_timeout`, `attempts_exhausted`, `dlp_blocked`, `quarantined`, `partial_extraction`
-(`core/domain/enums.py:213`) — они делают корпус продукта неполным по построению (I2c), и `❌`
-без аттестации охвата не публикуется. `robots_unavailable` — reason политики
+ответил определённо), а в `BLOCKING_FAILURE_KINDS` входят 7: `parser_failed`,
+`extraction_timeout`, `attempts_exhausted`, `dlp_blocked`, `quarantined`, `partial_extraction`,
+`empty_document` (`core/domain/enums.py:232`) — они делают корпус продукта неполным по
+построению (I2c), и `❌` без аттестации охвата не публикуется. `robots_disallow` в этот набор
+**не** входит (0.6.0, решение владельца 21.11.2026): файл `robots` объявляет естественную
+границу сайта, а не техническую потерю, поэтому запрещённая секция не делает корень
+неисчерпанным; отказ остаётся аудитом (`blocked`) и рабочим списком подачи
+(`PROVIDABLE_FAILURE_KINDS`). `robots_unavailable` — reason политики
 (`core/util/robots.py:72`), не класс сбоя: «сайт запретил» и «ленту не удалось прочитать» —
 разные наблюдения с одним следствием (обход не выполняется), но с разной причиной, и в охвате
 они должны быть различимы (RFC 9309 §2.3.1.4). `partial_extraction` — прочитанная часть
@@ -350,7 +354,7 @@ tests/
 | ANN-альтернатива | ➖ снято решением | решение — `14` §4: Qdrant отклонён (поиск продукт-скупед, I17, ANN по миллионам векторов не выполняется никогда), порт `VectorIndex` готов, ANN-адаптера нет; возврат — по условию строки выше, не по «на вырост» |
 | эмбеддинги на CPU | ✅ сделано | батчевый путь `core/adapters/embed_local.py:193` (нарезка входа `batch_size`); цена — 2.8–5.7 чанк/с продакшн-путь, fp16 — 15.40 чанк/с (06.11.2026, `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`) |
 | массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:125`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:97`, `save_cells_batch` — `core/store/sqlite_store.py:645`) |
-| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1388`, безлимит запрещён — `core/pipeline/corpus.py:1411`), кэш — `core/util/cache.py:133` |
+| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1387`, безлимит запрещён — `core/pipeline/corpus.py:1410`), кэш — `core/util/cache.py:133` |
 
 ### D.1. Память и OOM
 
@@ -502,7 +506,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
 | 0020 | Coverage по **вселенной scope** (§6/B-3a: `scope_universe`, `universe`/`completed`/`defined`, UNDEFINED) + разделение `methodology_version`/`EXECUTION_FIELDS` (§13/B-7) | A2/A3, I5/I11/I13 | accepted · **v2.1**; модель отсутствия с тех пор сменилась — методология **0.3.0** (I2d, план 20), ADR на это не было, добавлен **0024** |
 | 0021 | Двухуровневая идентичность индексной сборки: `partition_build_id` (`pb_`) на партицию + `index_build_id` (`cb_`) как композиция `(product_id, partition_build_id, content_digest)`; `params`/`snapshot_date` вне `pb_` | I17, §13, R7: переиспользование партиции при смене фокуса/каталога без коллизии same-id/different-content (уточняет 0013) | accepted · **реализовано** |
 | 0022 | Память экстракции — **операционный рычаг, вне** `EXECUTION_CONTRACT_FIELDS`: `PDF_QUEUE_MAX_SIZE`, `malloc_trim(0)` после документа, ленивый импорт docling, рециклинг воркеров | A1/A2: не меняет наблюдаемых значений, значит не вправе ветвить `run_id` (§D.1) | accepted · **реализовано** |
-| 0023 | Гейты как **точки интеграции**: G1/G2 — внутренняя аттестация профиля, G3/G4 — приём внешнего вердикта; решение привязано к `subject_digest`; waiver видим | I6/I7, §13: устаревшее одобрение не действует, молчание внешней системы не выдаётся за отказ или одобрение (уточняет 0011) | accepted · **реализовано**: гейтовая половина (привязка к `subject_digest`, вердикт, waiver, request-файл) и производитель durable-аттестации — `hound package profile attest` пишет `profile_attestation` в `state.db` (`core/cli/package/commands.py:2912`, запись — `core/cli/package/commands.py:3001`; `core/cli/package/parser.py:968`). **0 строк** в реальных `state.db` (07.11.2026) — операционный факт: механизмом не пользовались, а не дефект дизайна. Писатель покрыт тестами: `tests/pipeline/test_profile_attestation.py:322`, `tests/selfcheck.py:2205` |
+| 0023 | Гейты как **точки интеграции**: G1/G2 — внутренняя аттестация профиля, G3/G4 — приём внешнего вердикта; решение привязано к `subject_digest`; waiver видим | I6/I7, §13: устаревшее одобрение не действует, молчание внешней системы не выдаётся за отказ или одобрение (уточняет 0011) | accepted · **реализовано**: гейтовая половина (привязка к `subject_digest`, вердикт, waiver, request-файл) и производитель durable-аттестации — `hound package profile attest` пишет `profile_attestation` в `state.db` (`core/cli/package/commands.py:2912`, запись — `core/cli/package/commands.py:3001`; `core/cli/package/parser.py:968`). **0 строк** в реальных `state.db` (07.11.2026) — операционный факт: механизмом не пользовались, а не дефект дизайна. Писатель покрыт тестами: `tests/pipeline/test_profile_attestation.py:322`, `tests/selfcheck.py:2238` |
 | 0024 | **Датированное отсутствие** (I2d, методология 0.3.0): `❌` — утверждение о **датированном событии**, а не о «сегодня». Носитель зависит от класса отрицания: `explicit`/`authoritative` — дата наблюдения **каждого** цитируемого документа (`corpus_artifact.observed_at`), `bounded` — снятие `complete=1` **каждого** объявленного корня с датой и совпадающим `policy_digest`; `absence_as_of = min(дат)` публикуется в `cells.absence_as_of`. Носителя нет → `❓` + токен `absence_undated`, протокол отсутствия не публикуется | A3: «не смотрели» и «смотрели в марте» — разные факты; план 20 §F1/F3 | accepted · **реализовано** (`core/domain/models.py:166` `METHODOLOGY_VERSION = "0.3.0"`, SCHEMA `3.20.0`) |
 
 **«Принято» ≠ «реализовано» — аудит реестра (2026-11-08, HEAD `2af6d1e`).** Реестр сверен
@@ -616,7 +620,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   (`tests/selfcheck.py:1037` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:375`;
   тот же шаг в CI — `scripts/ci.sh:59`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
-  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1319` и `core/domain/models.py:1698`; производитель
+  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1333` и `core/domain/models.py:1712`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);
 - версионирование prompt-шаблонов (по файлам? по hash?) — ✅ сделано **по файлам**:
   `core/pipeline/prompt.py:146` (`TEMPLATE_VERSION = "evaluator_v6"`), `templates/{version}.txt`,
@@ -631,7 +635,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
   (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:310`; маркер
   `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:218`; профиль публикуемости
-  `outputs/publishability.yaml` — `core/pipeline/report.py:3975`);
+  `outputs/publishability.yaml` — `core/pipeline/report.py:3977`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через
   `read_prior_llm_usage`/`merge_llm_usage`, а не «последняя инвокация»; запись —

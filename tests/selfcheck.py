@@ -1573,7 +1573,7 @@ def _corpus_coverage_invariant() -> None:
     else:
         raise AssertionError("CorpusCoverage: truncated=True несовместим с complete=True")
 
-    # Ф0/2.2.0: блокирующий in-scope сбой делает покрытие неполным даже на читаемом
+    # Ф0: технический блокирующий in-scope сбой делает покрытие неполным даже на читаемом
     # origin'е; ``blocking_failures`` — производное представление для отчёта.
     # F3: полнота — по снятиям, поэтому удостоверяющее снятие корня подаётся явно:
     # проверяется именно блокирующий факт сеанса, а не отсутствие носителя.
@@ -1604,7 +1604,7 @@ def _corpus_coverage_invariant() -> None:
                 product_id="p",
                 url="https://a.example/2",
                 status=CrawlItemStatus.FAILED,
-                error_kind="robots_disallow",
+                error_kind="parser_failed",
             ),
         ],
         truncated=False,
@@ -1613,11 +1613,44 @@ def _corpus_coverage_invariant() -> None:
         captures=[capture],
     )
     if incomplete_blocking.complete is not False:
-        raise AssertionError("Ф0: robots_disallow на читаемом origin'е обязан давать complete=False")
-    if incomplete_blocking.blocking_failures != {"robots_disallow": 1}:
+        raise AssertionError("Ф0: parser_failed на читаемом origin'е обязан давать complete=False")
+    if incomplete_blocking.blocking_failures != {"parser_failed": 1}:
         raise AssertionError("Ф0: blocking_failures обязан называть класс и счётчик")
     if incomplete_blocking.unreadable_origins:
         raise AssertionError("Ф0: читаемый origin не должен попадать в unreadable_origins")
+
+    # 0.6.0: отказ ``robots`` — объявленная граница сайта, а не техническая потеря:
+    # корень исчерпан, origin не «нечитаем», а отказ остаётся аудитом в ``blocked``.
+    robots_closed = derive_corpus_coverage(
+        product_id="p",
+        items=[
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.example/1",
+                status=CrawlItemStatus.FETCHED,
+            ),
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.example/2",
+                status=CrawlItemStatus.FAILED,
+                error_kind="robots_disallow",
+            ),
+        ],
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=["https://a.example/"],
+        captures=[capture],
+    )
+    if robots_closed.complete is not True:
+        raise AssertionError("0.6.0: robots_disallow не должен делать покрытие неполным")
+    if robots_closed.blocked != {"robots_disallow": 1}:
+        raise AssertionError("0.6.0: отказ robots обязан остаться аудитом в blocked")
+    if robots_closed.blocking_failures:
+        raise AssertionError("0.6.0: robots_disallow не входит в blocking_failures")
+    if robots_closed.unreadable_origins:
+        raise AssertionError("0.6.0: origin, отказавший robots, не должен быть нечитаемым")
 
     nonblocking = derive_corpus_coverage(
         product_id="p",

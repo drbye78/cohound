@@ -2,8 +2,9 @@
 
 Покрывают:
 
-* в ``gaps`` попадают **только** терминальные ``failed`` блокирующих классов
-  (:data:`~core.domain.enums.BLOCKING_FAILURE_KINDS`);
+* в ``gaps`` попадают **только** терминальные ``failed`` подаваемых классов
+  (:data:`~core.domain.enums.PROVIDABLE_FAILURE_KINDS` — технические блокирующие плюс
+  ``robots_disallow``);
 * ``not_found``/``source_unavailable``/``redirect_out_of_scope`` в ``gaps`` не идут, но
   видны в ``summary.excluded_by_kind`` (короткий список ≠ «всё скачалось»);
 * детерминированный порядок ``(product_id, error_kind, url)`` при перемешанном входе;
@@ -273,12 +274,17 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# (а) только блокирующие классы
+# (а) только подаваемые классы
 # ---------------------------------------------------------------------------
 
 
 def test_only_blocking_failure_kinds_become_gaps() -> None:
-    """В ``gaps`` — только ``failed`` с ``error_kind`` из ``BLOCKING_FAILURE_KINDS``."""
+    """В ``gaps`` — только ``failed`` с ``error_kind`` из ``PROVIDABLE_FAILURE_KINDS``.
+
+    ``robots_disallow`` здесь **остаётся**, хотя больше не делает покрытие неполным: из
+    запрещённой секции материал добывается только объявленной подачей, поэтому рабочий
+    список оператора не сужается вместе с блокирующим набором.
+    """
     items = [
         _item(URL_A, FailureKind.ROBOTS_DISALLOW, http_status=None),
         _item(URL_B, FailureKind.PARSER_FAILED),
@@ -422,7 +428,7 @@ def test_empty_gap_list_still_writes_valid_file(tmp_path: Path) -> None:
             "excluded_by_kind": {},
         },
     }
-    assert report.human_line() == "0 документов недоступно: блокирующих отказов нет"
+    assert report.human_line() == "0 документов недоступно: подаваемых отказов нет"
 
 
 def test_file_is_written_without_any_store(tmp_path: Path) -> None:

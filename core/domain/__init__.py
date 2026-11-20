@@ -44,6 +44,7 @@ from core.domain.doc_tables import (
 from core.domain.enums import (
     ABSENT_DENIAL_STRENGTHS,
     BLOCKING_FAILURE_KINDS,
+    PROVIDABLE_FAILURE_KINDS,
     UNKNOWN_DENIAL_STRENGTHS,
     AbsenceRuleType,
     AdapterKind,
@@ -258,6 +259,7 @@ __all__ = [  # noqa: RUF022
     "ArchiveDescentStatus",
     "ABSENT_DENIAL_STRENGTHS",
     "BLOCKING_FAILURE_KINDS",
+    "PROVIDABLE_FAILURE_KINDS",
     "UNKNOWN_DENIAL_STRENGTHS",
     "Cap",
     "CapabilityPolicy",

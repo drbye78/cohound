@@ -3,9 +3,9 @@
 **Зачем файл.** Провалы фетчей видны в отчёте только агрегатами
 (``CrawlSessionProvenance.failed``, ``blocked = {error_kind: count}``,
 ``unreadable_origins``): ни URL, ни per-URL статуса. Оператору нужен не ответ «сколько
-отказано», а ответ «какие документы взять руками и куда их положить» — иначе пробел от
-robots/таймаутов закрывается подписью риска (``scope_attested_by``, I2c), а не
-предъявлением содержимого (``13-manual-artifacts.md`` §4).
+отказано», а ответ «какие документы взять руками и куда их положить»: материал, который
+сайт запретил ``robots`` или который не добрался из-за технической потери, попадает в
+корпус только объявленной подачей (``13-manual-artifacts.md`` §4).
 
 **Что это.** Готовый (заполняемый) вход, а не справка: каждый элемент ``gaps`` несёт
 заготовку ``provide`` с ``path: null``/``provided_by: null`` — оператор заполняет два
@@ -15,9 +15,12 @@ robots/таймаутов закрывается подписью риска (``
 wall-clock. Единственная метка времени — ``last_attempt`` из БД (он там персистентный).
 
 **Состав.** В ``gaps`` идут **терминальные** ``failed`` с ``error_kind`` из
-:data:`~core.domain.enums.BLOCKING_FAILURE_KINDS` — ровно те, что делают покрытие
-неполным по построению (Ф0/I2c). Прочие ``failed`` (``not_found``,
-``source_unavailable``, ``redirect_out_of_scope`` и т.п.) в список не идут, но видны в
+:data:`~core.domain.enums.PROVIDABLE_FAILURE_KINDS` — ровно те, чей материал оператор
+может добрать руками и подать объявленным артефактом. Это шире блокирующего набора:
+``robots_disallow`` больше не делает покрытие неполным (объявленная граница сайта), но
+именно там подача — единственный путь получить материал, поэтому отказ остаётся в
+списке. Прочие ``failed`` (``not_found``, ``source_unavailable``,
+``redirect_out_of_scope`` и т.п.) в список не идут, но видны в
 ``summary.excluded_by_kind``: короткий список не должен читаться как «всё скачалось».
 
 **Форма стабильна.** Пустой список — валидный результат: файл пишется всегда
@@ -44,7 +47,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from core.domain.enums import BLOCKING_FAILURE_KINDS, CrawlItemStatus, FailureKind
+from core.domain.enums import PROVIDABLE_FAILURE_KINDS, CrawlItemStatus, FailureKind
 from core.domain.models import CrawlSessionItem
 from core.util.atomic_write import atomic_write_text
 
@@ -66,8 +69,15 @@ ARTIFACTS_GAP_SCHEMA = "artifacts_gap/1"
 #: Имя файла в ``runs/{run_id}/outputs/`` (03 §A.2).
 ARTIFACTS_GAP_FILENAME = "artifacts_gap.yaml"
 
-#: Блокирующие классы как строки — сравнение с persisted ``error_kind``.
-_BLOCKING_VALUES: frozenset[str] = frozenset(kind.value for kind in BLOCKING_FAILURE_KINDS)
+#: Классы, чей материал оператор может добрать руками, как строки — сравнение с persisted
+#: ``error_kind``. Источник — :data:`~core.domain.enums.PROVIDABLE_FAILURE_KINDS`, а не
+#: блокирующий набор: ``robots_disallow`` больше не делает покрытие неполным, но остаётся
+#: здесь, потому что объявленная подача — единственный способ получить материал из
+#: запрещённой секции. Сужение списка вместе с блокирующим набором **уменьшило** бы
+#: рабочий список оператора ровно там, где подача незаменима.
+_PROVIDABLE_VALUES: frozenset[str] = frozenset(
+    kind.value for kind in PROVIDABLE_FAILURE_KINDS
+)
 
 
 def _origin(url: str) -> str:
@@ -158,10 +168,10 @@ class ArtifactGap:
 class ArtifactsGapReport:
     """Отчёт ``artifacts_gap.yaml``: список пробелов + сводка по классам/продуктам/origin'ам.
 
-    ``excluded_by_kind`` — терминальные ``failed`` **не** блокирующих классов: они не
-    закрывают ``❌`` и потому не просят ручного артефакта, но их число публикуется,
-    чтобы пустой ``gaps`` не означал «всё прочитано». ``path`` заполняет писатель
-    (:func:`write_artifacts_gap`); ``None`` — отчёт собран, но файл не писался.
+    ``excluded_by_kind`` — терминальные ``failed`` классов, чей материал подачей не
+    добирается: они не закрывают ``❌`` и потому не просят ручного артефакта, но их число
+    публикуется, чтобы пустой ``gaps`` не означал «всё прочитано». ``path`` заполняет
+    писатель (:func:`write_artifacts_gap`); ``None`` — отчёт собран, но файл не писался.
     """
 
     run_id: str
@@ -205,12 +215,14 @@ class ArtifactsGapReport:
 
         Разбивка — классы отказа (``robots_disallow=17``) и origin'ы в скобках: оператор
         видит и **почему**, и **где**. При нуле пробелов инструкция «заполните ``path``»
-        не печатается — заполнять нечего.
+        не печатается — заполнять нечего. «Подаваемых» — потому что список шире
+        блокирующего набора: отказ ``robots`` не делает покрытие неполным, но его материал
+        добывается только объявленной подачей.
         """
         if not self.gaps:
             excluded = sum(int(value) for value in self.excluded_by_kind.values())
-            tail = f" (неблокирующих отказов: {excluded})" if excluded else ""
-            return f"0 документов недоступно: блокирующих отказов нет{tail}"
+            tail = f" (прочих отказов: {excluded})" if excluded else ""
+            return f"0 документов недоступно: подаваемых отказов нет{tail}"
         summary = self.summary()
         kinds = ", ".join(
             f"{kind}={count}" for kind, count in summary["by_error_kind"].items()
@@ -255,7 +267,7 @@ def latest_failures(
 def collect_artifact_gaps(
     items: Iterable[CrawlSessionItem], *, run_id: str
 ) -> ArtifactsGapReport:
-    """Делит терминальные ``failed`` на пробелы (блокирующие) и исключённые классы.
+    """Делит терминальные ``failed`` на пробелы (подаваемые) и исключённые классы.
 
     Дубли ``(product_id, url)`` из разных сеансов одного прогона схлопываются по
     **последней** попытке (:func:`latest_failures`) — файл описывает URL, а не строку
@@ -272,7 +284,7 @@ def collect_artifact_gaps(
         kind = _failure_kind(item.error_kind)
         if kind is None:  # pragma: no cover - отфильтровано выше
             continue
-        if kind.value in _BLOCKING_VALUES:
+        if kind.value in _PROVIDABLE_VALUES:
             gaps.append(
                 ArtifactGap(
                     product_id=str(item.product_id),

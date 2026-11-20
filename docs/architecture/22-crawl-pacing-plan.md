@@ -17,7 +17,7 @@
 
 ## 1. Как задан темп сейчас
 
-- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:625`).
+- Ось — `crawl.rate_limit: {min_s, max_s}` (`RateLimitSpec`, `core/domain/models.py:639`).
   Резолвится цепочкой `defaults < run < profile < product < site`
   (`core/pipeline/crawl_sources.py:145-151`), едет в `FetchPlan` **на каждый URL**.
 - Примитив — не token bucket, а **резерв слота по origin**: `target = max(now, last[origin])
@@ -157,7 +157,7 @@
 - `429` в HTTP-пути — **повторяется** (`core/util/fetch_retry.py`, `FETCH_RETRY_TIMES = 2`,
   то есть до трёх попыток, каждая берёт свой слот лимитера; `429` — транзиентный статус,
   `core/ports/crawl_errors.py:75`); после исчерпания — `failed/source_unavailable`
-  (`crawl_http.py`). Класс по-прежнему не блокирующий (`core/domain/enums.py:203-212`),
+  (`crawl_http.py`). Класс по-прежнему не блокирующий (`core/domain/enums.py:210-231`),
   поэтому пачка отказов формально не портит покрытие — но теперь она **видна**: число
   повторов публикует `crawl status --per-host` (`pacing.retries`,
   `core/pipeline/crawl_pacing.py:49`). До `9a8440a`/`c3e5b8d` это была тихая деградация в

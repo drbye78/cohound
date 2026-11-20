@@ -171,7 +171,7 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:530`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:529`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277`, `core/pipeline/onboarding.py:310`), вызов — `preflight` из `core/cli/commands/run.py:917`, `core/cli/commands/run.py:1052` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
@@ -367,7 +367,7 @@
 > doc-delta (§12.5); `CorpusCoverage.complete` решается **снятиями объявленных корней**
 > (`CorpusCoverage.roots`), а не `observed_sources` (§3.3/O2, план 20 F1). Оба — `methodology_change`: на момент решения это был
 > `METHODOLOGY_VERSION` 2.2.0 → 2.3.0, `golden-full` + одна пере-аннотация golden.
-> **Текущий пин — `0.5.0`** (`core/domain/models.py:185`; сброс нумерации 26.10.2026, затем
+> **Текущий пин — `0.6.0`** (`core/domain/models.py:199`; сброс нумерации 26.10.2026, затем
 > `0.2.0` → `0.3.0` на F3 плана 20, §12.5, затем `0.4.0` — снятие per-cell подписи,
 > 19.11.2026, затем `0.5.0` — `explicit` без цитаты отрицания не публикует `❌`,
 > 19.11.2026); номер версии выше — датировка решения, а не действующее значение.
@@ -494,7 +494,7 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
    > **Уточнение к прежней редакции: прогон от этого не отказывал и не отказывает.**
    > `classify_change` (`core/pipeline/run_identity.py:386`) при росте состава даёт
    > `cohort_expansion` + `golden_required=full` + новый `run_id`; отказ живёт только в
-   > `hound diff` (`core/pipeline/report.py:3163`). Настоящий дефект был в **провенансе**: по
+   > `hound diff` (`core/pipeline/report.py:3165`). Настоящий дефект был в **провенансе**: по
    > `run_id`/манифесту нельзя было отличить «когорту расширили, объявив ревизию» от
    > «в `cohort.yaml` дописали строку».
    >
@@ -661,7 +661,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
     `http_status IS NULL`, `fetched_at IS NULL`, экстрактор и чанкер **не вызываются**, пока
     chunk-set годится. Исполнение — отдельный проход `offline_reuse_product`
     (`core/pipeline/corpus_ingest.py:4092`), вызываемый **до** дренажа и вместо него
-    (`core/pipeline/corpus.py:3926`): в код, единственное назначение которого сеть, политика
+    (`core/pipeline/corpus.py:3870`): в код, единственное назначение которого сеть, политика
     не заходит вовсе. Поэтому группировка ревалидации и дренаж корней под `offline` не
     исполняются, а SERP-контур не запускается (`rounds.not_executed_reason =
     offline_refresh_policy`). Авторский корень, известный состоянию, тоже переиспользуется;
@@ -1264,7 +1264,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > `cycle_id`/`previous_run_id`/`change_class` (`core/store/sqlite.py:201-203`),
 > `run_scope`/`product_plan_json` (`core/store/sqlite.py:206-207`), `embed_device` (`core/store/sqlite.py:186`) и таблица `run_product`
 > (`core/store/sqlite.py:699`; писатель — корпус, `save_run_product` —
-> `core/pipeline/corpus.py:3891`, обёртка `core/pipeline/corpus_persist.py:699`;
+> `core/pipeline/corpus.py:3835`, обёртка `core/pipeline/corpus_persist.py:699`;
 > читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2406`).
 > `runs.cohort_digest` и `runs.seeds_digest` **есть** (колонки `core/store/sqlite.py:172-173`)
 > и заполняются из манифеста; они дублируют слагаемые `run_id` для диагностики diff, а
@@ -1512,7 +1512,7 @@ Durable-субстрат чанков в `state.db` (`chunk_store`/`chunk_meta`)
 (`core/pipeline/corpus_drain.py`, синки `persist_observation`/`persist_member`), поэтому SIGKILL/OOM теряет
 максимум контейнер (наблюдение) или член (строку) «в полёте». Идемпотентность —
 `observation_id` детерминирован (`run|product|root|hash|depth`), `corpus_members` — UPSERT по
-PK. Запись в конце фазы (`core/pipeline/corpus.py:5581-5600`) осталась, но это **reconciliation-pass**: она добирает
+PK. Запись в конце фазы (`core/pipeline/corpus.py:5764-5783`) осталась, но это **reconciliation-pass**: она добирает
 то, что не дошло из-за отказа стора на горячем пути (такой отказ виден в `errors`), а не
 единственная запись. Прежняя редакция этого документа называла конец фазы единственной
 записью и считала это незакрытым остатком — это было неверно.
@@ -1531,7 +1531,7 @@ PK. Запись в конце фазы (`core/pipeline/corpus.py:5581-5600`) о
 стадиям, а не по продуктам-целиком: события `product_end` / `product_index_end` несут
 `fetch_wait_s`, `extract_wait_s`, `chunk_s`, `embed_s`, `build_s`, `overhead_s`
 (`_CorpusStageTimings`, `core/pipeline/corpus_index.py:259`; агрегат —
-`core/pipeline/corpus.py:1224`), и то же попадает в `metrics.json` как
+`core/pipeline/corpus.py:1223`), и то же попадает в `metrics.json` как
 `resources.stage_timings` (`ResourcesObservation.stage_timings`,
 `build_resources_block`). Это **наблюдаемость, а не контракт**: значения не входят ни в
 `execution_contract_digest`, ни в `pb`, ни в `content_digest` (доказано пинами в
@@ -1754,7 +1754,7 @@ root (`core/cli/commands/run.py`), выполняемый между постр�
 **Куда префлайт пишет.** `run_product` (граница A) и `runs.product_plan_json` **есть и
 пишутся**: префлайт кладёт план продуктов в `--json`/`--dry-run` payload, снимок входов v2
 (`_snapshot_run_inputs`) и `runs.product_plan_json` (`core/store/sqlite_store.py:1284`, `core/store/sqlite_store.py:1374`);
-строка `run_product` пишется корпусом на границе продукта (`core/pipeline/corpus.py:3891`,
+строка `run_product` пишется корпусом на границе продукта (`core/pipeline/corpus.py:3835`,
 §4.3/§6.5). Durable-след измерения — снимки и рубежи в `state.db` (`record_run_outcome`, §4.4).
 
 **Гейт по `--until`.** Префлайт попадает в диапазон, если `--until` не раньше `g1`
@@ -2159,7 +2159,7 @@ def evaluate_phase(ctx):
 
 > **Статус: ✅ сделано (граница A).** Per-product статус **в прогоне** пишется строкой
 > `run_product` (`RunProductStatus`, DDL — `core/store/sqlite.py:699`; писатель — корпус,
-> `core/pipeline/corpus.py:3891`; обёртка — `core/pipeline/corpus_persist.py:699`; читатель — отчёт), а итоговый статус измерения —
+> `core/pipeline/corpus.py:3835`; обёртка — `core/pipeline/corpus_persist.py:699`; читатель — отчёт), а итоговый статус измерения —
 > снимком `state.db.product_snapshot` (`record_run_outcome`). Это две разные величины, а не
 > дубль: строка `run_product` несёт статус на границе `corpus`, снимок — результат
 > измерения продукта. Имена статусов ниже — из `product_snapshot.status`
@@ -2845,7 +2845,7 @@ products:
 **`extractor_version` — не константа: в неё входит устройство (P9).** Строка имеет вид
 `docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`
 (`core/adapters/extract_document.py:349-385`), где
-`<device>` — объявленная ось `crawl.pdf_device` (`cpu|cuda`, `core/domain/enums.py:531`,
+`<device>` — объявленная ось `crawl.pdf_device` (`cpu|cuda`, `core/domain/enums.py:562`,
 резолв — `resolve_pdf_device` в `core/pipeline/crawl_frontier.py`). Поэтому `pb` различает
 `cpu` и `cuda` **явно**, а не через «повезло/не повезло с железом»; сама ось входит в
 `run_id` через `extractor_stack` (§12.5), то есть `cpu↔cuda` — `execution_change`, а не
@@ -2973,7 +2973,7 @@ class CompositionView:
   новый текст. **Кэш реализован и подключён** (`core/pipeline/embed_cache.py`;
   инстанцируется в composition root — `EmbedCache(str(paths.embed_cache))`,
   `core/cli/context.py:2928`, путь — `core/config/paths.py:155-156`; в фазе корпуса —
-  параметр `embed_cache` у `_build_corpus`, `core/pipeline/corpus.py:1708`).
+  параметр `embed_cache` у `_build_corpus`, `core/pipeline/corpus.py:1779`).
   Прежняя редакция называла его «опционально, later» и «не входит в MVP» — это описание
   до реализации. Хиты **видны**: `embed_cached` и `embed_hit_ratio_pct` в прогрессе и в
   итоговой строке продукта (`core/pipeline/corpus_index.py:453-491`) — «кэш включён» не
@@ -3711,7 +3711,7 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 > seed'ов/ретривала (`fast`), поэтому берётся более строгое требование. Прежняя редакция
 > таблицы обещала «иначе `golden-fast`» — такой ветки в коде нет.
 > Тир `fast` при этом существует **как данные**, а не как требование: `GoldenTier.FAST/FULL`
-> (`core/domain/enums.py:456`), `hound package golden` с `choices=["fast","full"]`, и линт
+> (`core/domain/enums.py:536`), `hound package golden` с `choices=["fast","full"]`, и линт
 > пакета требует наличия **обоих** тиров (`core/pipeline/lint.py:241-243`). То есть
 > `golden.csv` содержит 905 ячеек = 750 `full` + 155 `fast`; какой тир **прогонять** —
 > решает требование класса, а не наличие строк.
@@ -3719,7 +3719,7 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 ### 12.2. `cohort_digest` и `seeds_digest`
 
 - `cohort_digest` входит в `run_id`, `execution_contract_digest`, `state.db.run_lineage`
-  **и** в `runs`/`RunManifest` (`core/store/sqlite.py:172`, `core/domain/models.py:1889`) —
+  **и** в `runs`/`RunManifest` (`core/store/sqlite.py:172`, `core/domain/models.py:1903`) —
   последние два закрывают диагностику diff без открытия `state.db` (§12.3).
 - `seeds_digest` — тоже: смена seed-набора меняет корпус и coverage. Он **порядко-чувствителен**
   внутри продукта (§6.2): перестановка корней — другая идентичность, потому что другой
@@ -3728,8 +3728,8 @@ min(дат носителей)` пишется в `cells.absence_as_of`. `_enfor
 
 > **Дефект провенанса (проверено 29.10.2026, ✅ исправлен границей A): колонка
 > `runs.cohort_ref` хранила другое поле.**
-> В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:930`) — имя файла
-> когорты из `run.yaml`, и `cohort_ref: str | None` (`core/domain/models.py:706`) — авторская ревизия, которая
+> В `RunConfig` два разных поля: `cohort: str` (`core/domain/models.py:944`) — имя файла
+> когорты из `run.yaml`, и `cohort_ref: str | None` (`core/domain/models.py:720`) — авторская ревизия, которая
 > **входит в `cohort_digest`**. `core/store/sqlite_store.py:474-481` кладёт в колонку `cohort_ref` значение
 > `cfg.cohort`, а `cohort_digest` считает по `cfg.cohort_ref` (`core/cli/commands/run.py:696`).
 > Следствие на живом прогоне `ru-pg-dbms-3d3dc7c3c969`: `runs.cohort_ref =
@@ -3962,7 +3962,7 @@ golden**.
 
 Статус продукта материализуется в двух носителях: `product_snapshot.status` (`state.db`) —
 итог измерения продукта, и `run_product.status` (run DB) — статус на границе `corpus`
-(`running` → финальный, писатель — `core/pipeline/corpus.py:3891`). Имена ниже —
+(`running` → финальный, писатель — `core/pipeline/corpus.py:3835`). Имена ниже —
 из снимка:
 - `complete` — coverage complete; `pending`-ячейки допустимы (очередь ревью, не провал);
   `baseline_complete = (scope=full and evaluate_ok and cells_pending == 0)` управляет

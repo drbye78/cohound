@@ -558,8 +558,8 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2258` вызывает `_run_serp_contour`
-(def — `core/pipeline/corpus.py:1346`; поиск → допуск → расширение seed-набора **до** дренажа,
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2207` вызывает `_run_serp_contour`
+(def — `core/pipeline/corpus.py:1345`; поиск → допуск → расширение seed-набора **до** дренажа,
 одна сборка), `core/pipeline/search_log.py` (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1553`)
 **не вызывается ни из одного прод-пути**: ссылки только в `core/pipeline/__init__.py` и
@@ -579,7 +579,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
 ⬜ не сделано — код есть (`core/store/backup.py:173`/`:274`/`:465` — `backup_run`/`restore_run`/
-`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3274`),
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:3307`),
 но приёмочный контур не пройден: golden-full дал 6.8 % на наборе из 236 строк
 (`2026-10-27-golden-reference-set-unusable.md`), на переразмеченных 905 строках прогнан только
 срез 50 ячеек (07.11, κ 0.024/0.056); §11.5-baseline и кейсы 2–5 не делались.

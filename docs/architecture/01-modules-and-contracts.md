@@ -51,7 +51,7 @@
 (`tests/selfcheck.py:1098` `_check_edge`), то есть проверка по принципу allow-list, отдельных
 «запретов» нет. Три гейта стоят рядом и не выражаются матрицей: `tests/selfcheck.py:1105`
 `_neutrality` (§1.3), `tests/selfcheck.py:1213` `_shims_removed` (нет `core.schemas`/`core.db`),
-`tests/selfcheck.py:3362` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
+`tests/selfcheck.py:3395` `_edge_isolation` (`core/edge/` не импортирует `store`/`pipeline`/`cli` —
 по **всему** слою, а не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет
 сформулирован по запрещённым слоям, а не по файлам).
 
@@ -97,7 +97,7 @@
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
 URL сейчас выражается не пропуском фазы, а zero-source причиной продукта (`ZERO_SOURCE_NO_URLS_ENTRY`,
-`core/pipeline/corpus_coverage.py:398`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
+`core/pipeline/corpus_coverage.py:421`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
 оставлены в словаре как объявленные, но выдавать их за работающие механизмы нельзя.
 
 **Оси, которые входят в `run_id` (и почему).** `DocumentLevel`, `PdfPipeline`, `PdfDevice`,
@@ -941,7 +941,7 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:295` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1730`; структура `ProtocolExhaustion` — `core/domain/models.py:1566`;
+`core/domain/models.py:1744`; структура `ProtocolExhaustion` — `core/domain/models.py:1580`;
 политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2847` (`max_retries`), цикл
 `core/pipeline/evaluate.py:3163`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:

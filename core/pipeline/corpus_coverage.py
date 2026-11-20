@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from core.domain import (
     BLOCKING_FAILURE_KINDS,
+    PROVIDABLE_FAILURE_KINDS,
     CorpusCoverage,
     CorpusRootCoverage,
     CrawlItemStatus,
@@ -82,11 +83,11 @@ def _root_coverages(
     Нет снятия ⇒ ``complete=False, capture_id=None`` — «корень не удостоверён», а не
     «покрытие неизвестно»: отсутствие носителя и есть неполнота.
 
-    ``resolved_manually_by_root`` — ``{root_url: сколько блокирующих отказов корня закрыто
+    ``resolved_manually_by_root`` — ``{root_url: сколько подаваемых отказов корня закрыто
     объявленной подачей}`` (13-manual-artifacts §3.3). Это **видимость**, а не второе
-    решение: ``complete`` приходит из снятия (его пересчитывает производитель снятия,
-    зная набор отказов и поданных URL), а здесь число публикуется разрезом продукта по
-    корню. Ключ корня канонизируется (``snapshot_url_key``), как и при выборе снятия:
+    решение: ``complete`` приходит из снятия (его пишет производитель на границе корня —
+    ``not (truncated or skipped_documents)``), а здесь число публикуется разрезом продукта
+    по корню. Ключ корня канонизируется (``snapshot_url_key``), как и при выборе снятия:
     форма записи адреса не решает, чей это корень.
     """
     newest: dict[str, CaptureRow] = {}
@@ -243,17 +244,26 @@ def derive_corpus_coverage(
 
     **Нечитаемый origin** (для диагностики) — origin (``netloc`` URL), из которого не
     получено ни одного ``FETCHED`` элемента и был хотя бы один недочёт (любой
-    не-``FETCHED`` исход, кроме ``not_found``). Полностью тёмный сайт не может доказать
-    отсутствие никогда.
+    не-``FETCHED`` исход, кроме ``not_found`` и ``robots_disallow``). Полностью тёмный
+    сайт не может доказать отсутствие никогда. Отказ ``robots`` в недочёты не входит:
+    сайт, целиком закрытый объявлением, мы **видели** — он отказал по собственной
+    границе, а не пропал.
 
     **Блокирующий сбой** — любой ``FAILED`` элемент с ``error_kind`` из
-    :data:`core.domain.enums.BLOCKING_FAILURE_KINDS` (``robots_disallow``,
-    ``parser_failed``, ``extraction_timeout``, ``attempts_exhausted``,
-    ``dlp_blocked``, ``quarantined``, ``empty_document``): часть материала продукта
+    :data:`core.domain.enums.BLOCKING_FAILURE_KINDS` (``parser_failed``,
+    ``extraction_timeout``, ``attempts_exhausted``, ``dlp_blocked``, ``quarantined``,
+    ``empty_document``): техническая потеря, из-за которой часть материала продукта
     осталась ненаблюдённой, и ``❌`` на таком корпусе не является доказательством
     отсутствия. Причина видна в ``blocked``/``partial_blocks`` и в производном
     :attr:`CorpusCoverage.blocking_failures`. ``empty_document`` — документ добыт, но
     текста в нём нет: класс остаётся видимым (``blocked``), а не исчезает из покрытия.
+
+    ``robots_disallow`` **не** блокирует (решение владельца 21.11.2026): файл ``robots``
+    объявляет естественную границу сайта, а не техническую потерю. Гипотезу о содержимом
+    запрещённой секции никто не строит, поэтому исчерпание объявленного пространства
+    доказуемо и без неё — ``bounded`` на таком корпусе **является** доказательством
+    отсутствия. Отказ остаётся аудитом (``blocked``/``partial_blocks``) и рабочим списком
+    подачи (:data:`core.domain.enums.PROVIDABLE_FAILURE_KINDS`).
 
     Явно **не** блокируют ``complete``:
 
@@ -275,14 +285,12 @@ def derive_corpus_coverage(
 
     **Ручной артефакт (13-manual-artifacts §3.3).** ``manual_urls`` — URL, чей материал
     **предъявлен** объявленным артефактом (``corpus_docs.origin=manual``). Такой
-    блокирующий ``FAILED`` остаётся в ``blocked``/``partial_blocks`` (аудит: краулу
-    отказано), но больше не делает origin «нечитаемым» и не делает сеанс неполным.
-    Полноту корня это **само по себе** не удостоверяет: ``adopted``-снятие — не обход, и
-    ``bounded`` им не удостоверяется (I2d). Удостоверяет её живое снятие корня, в котором
-    отказанные ``robots.txt`` адреса **все** закрыты объявленной подачей: снятие пишет
-    производитель (``corpus``) после подачи, потому что только он знает набор отказов
-    (``Frontier.robots_refused_urls``) и набор поданных URL. ``resolved_manually_by_root``
-    публикует этот разрез по корню, не решая ``complete`` второй раз.
+    ``FAILED`` остаётся в ``blocked``/``partial_blocks`` (аудит: краулу отказано), но
+    больше не делает origin «нечитаемым» и не делает сеанс неполным; ``resolved_manually``
+    называет, сколько отказов закрыто подачей (провенанс, а не условие полноты).
+    Полноту корня подача **не решает**: отказ ``robots`` её больше не отнимает (граница
+    сайта), а техническую потерю она снимает тем, что материал наблюдён. ``resolved_manually_by_root``
+    публикует разрез по корню, не решая ``complete`` второй раз.
 
     **Человеческий escape hatch.** ``scope_attested_by`` остаётся единственным способом
     опубликовать ``❌`` на неполном корпусе: человек осознанно принимает риск, что
@@ -293,12 +301,17 @@ def derive_corpus_coverage(
     observed = 0
     blocked: dict[str, int] = {}
     fetched_by_origin: dict[str, int] = {}
-    #: origin → число «недостач» (не-FETCHED исходов, кроме ``not_found``).
+    #: origin → число «недостач» (не-FETCHED исходов, кроме ``not_found`` и
+    #: ``robots_disallow``: последний — граница сайта, а не потеря).
     losses_by_origin: dict[str, int] = {}
     partial_blocks: dict[str, dict[str, int]] = {}
     resolved_urls = {str(url) for url in manual_urls}
     resolved_manually = 0
     blocking_values = {kind.value for kind in BLOCKING_FAILURE_KINDS}
+    #: Классы, чей материал оператор может добрать руками: счётчик ``resolved_manually``
+    #: называет **закрытые подачей пробелы**, а пробел открывает и ``robots_disallow``
+    #: (он больше не делает покрытие неполным, но остаётся рабочим списком подачи).
+    providable_values = {kind.value for kind in PROVIDABLE_FAILURE_KINDS}
     blocking_failures = False
     for item in items:
         expected += 1
@@ -324,12 +337,22 @@ def derive_corpus_coverage(
             if kind:
                 counts = partial_blocks.setdefault(origin, {})
                 counts[kind] = counts.get(kind, 0) + 1
-                # Счётчик называет **закрытые пробелы**, поэтому считает блокирующие
-                # классы: неблокирующий отказ (``source_unavailable``/``not_found``/
+                # Счётчик называет **закрытые пробелы**, поэтому считает классы, чей
+                # материал оператор мог добрать (``PROVIDABLE_FAILURE_KINDS``):
+                # неблокирующий отказ (``source_unavailable``/``not_found``/
                 # ``redirect_out_of_scope``) пробела не открывал, и приписывать его
                 # подаче значило бы завышать её вклад.
-                if kind in blocking_values:
+                if kind in providable_values:
                     resolved_manually += 1
+            continue
+        if kind == FailureKind.ROBOTS_DISALLOW.value:
+            # Граница сайта, а не техническая потеря (решение владельца 21.11.2026):
+            # origin видели, он отказал по собственному объявленному правилу. Отказ не
+            # попадает в ``losses_by_origin`` — иначе целиком запрещённый robots сайт
+            # стал бы «нечитаемым», хотя мы его прочитали и получили отказ. Аудит
+            # остаётся: счётчик ``blocked`` посчитан выше, разрез по origin — здесь.
+            counts = partial_blocks.setdefault(origin, {})
+            counts[kind] = counts.get(kind, 0) + 1
             continue
         losses_by_origin[origin] = losses_by_origin.get(origin, 0) + 1
         if kind:
@@ -609,12 +632,12 @@ def _persist_corpus_coverage(
 
     ``resolved_manually`` — ``product_id → [url]``, чей материал предъявлен объявленным
     ручным артефактом (13-manual-artifacts §3.3): отказ остаётся аудитом (``blocked``) и
-    перестаёт делать **сеанс** неполным. Полноту корня ручная подача не удостоверяет
-    сама по себе — ``adopted``-снятие не является обходом (I2d); её удостоверяет живое
-    снятие корня, в котором все отказанные ``robots.txt`` адреса закрыты подачей (пишет
-    производитель снятия, ``corpus``). Значение по умолчанию — пусто (поведение прежнее).
+    перестаёт делать **сеанс** неполным. Полноту корня подача **не решает**: отказ
+    ``robots`` её больше не отнимает (граница сайта, решение владельца 21.11.2026), а
+    техническую потерю снимает тем, что материал наблюдён. Значение по умолчанию — пусто
+    (поведение прежнее).
 
-    ``resolved_manually_by_root`` — ``product_id → {root_url: сколько блокирующих отказов
+    ``resolved_manually_by_root`` — ``product_id → {root_url: сколько подаваемых отказов
     корня закрыто подачей}``: разрез той же величины по корню, публикуется в
     ``CorpusRootCoverage.resolved_manually``. Это видимость, а не второе решение:
     ``complete`` корня приходит из снятия.

@@ -24,7 +24,7 @@
 | где | что зашито |
 |---|---|
 | `core/domain/invariants.py:365` (`check_absence_dated`; на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`, снято фазой F3) | `❌` публикуется только если сервер ответил **в этом цикле** (сегодня — только если есть **датированный** носитель, I2d) |
-| `core/pipeline/corpus_coverage.py:218-227`, `core/pipeline/corpus_coverage.py:370` (на момент плана — по элементам сеанса; снято F1/F3) | полнота считалась по элементам **этого** сеанса, `observed_sources > 0` |
+| `core/pipeline/corpus_coverage.py:210-233`, `core/pipeline/corpus_coverage.py:695` (на момент плана — по элементам сеанса; снято F1/F3) | полнота считалась по элементам **этого** сеанса, `observed_sources > 0` |
 | `docs/status-dictionary.yaml`, `ReuseKind` | `reused`/`stale` — «сеть не трогалась», а не «наблюдалось тогда-то» |
 
 Поэтому «прогон по старым данным» сейчас неизбежно превращает `❌` в `❓`: не потому что данные
@@ -376,7 +376,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 
 **Чего в носителях нет** (проверено разведкой, `файл:строка`):
 
-* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`core/domain/models.py:1825-1827`: «политика названа
+* `CorpusCaptureRef.policy_digest` — выпилен намеренно (`core/domain/models.py:1839-1855`: «политика названа
   один раз на прогон»). Для I2d это дефект: сверять надо **снятие** с объявленным, а не прогон с
   прогоном, иначе `scheduled`-снятие другого прогона нечем проверить. В `state.db` колонка есть,
   но её **никто не сравнивает** (0 попаданий `policy_digest ==` в `core/`).
@@ -393,7 +393,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 (`core/pipeline/evaluate.py:3280`) и **перенос ячейки из прошлого прогона**
 (`_carried_rules_hold`, `core/pipeline/evaluate.py:439`: перенесённый `❌` проходит то же
 правило, иначе carry-forward обходил бы F3);
-`core/pipeline/corpus_coverage.py:181` + источник `core/pipeline/corpus_coverage.py:611`
+`core/pipeline/corpus_coverage.py:194` + источник `core/pipeline/corpus_coverage.py:695`
 (`iter_crawl_session_items` — сеанс, не снятия);
 `core/domain/invariants.py:293` (`check_absence_coverage` + новый `check_absence_dated`);
 зеркало в `core/pipeline/report.py:2469` (`collect_crawl_truncation_anomalies`)/
@@ -424,7 +424,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 То есть сегодняшнее поведение жёстче, чем предполагал текст плана: `frozen` не понижает `❌`
 до `❓`, а **теряет ячейки целиком**. Отказ идёт раньше правила `reuse_unconfirmed` —
 `no_sources` срабатывает на `observed_sources = 0`, потому что покрытие считается по
-элементам **сеанса** (`core/pipeline/corpus_coverage.py:181`), а у прохода без сети элементов нет. Снимок
+элементам **сеанса** (`core/pipeline/corpus_coverage.py:194`), а у прохода без сети элементов нет. Снимок
 при этом унаследовал то же удостоверяющее снятие (`complete=true`), и `corpus_as_of`
 совпал до микросекунды — провенанс был прав, а вердикт потерян. Перенос ячеек тоже
 отказывает (`cells_carried=0`), потому что `carry_forward` запинен на `coverage.complete`
@@ -635,18 +635,22 @@ run-DB утверждала «партиция на диске», хотя `comm
   `chunk_store` следующий прогон не посчитает оценки на снятии (`offline_reuse_product`) —
   «снятие сделано» без корпуса не выполняет приёмку;
 - *узкий writer «append строк»* — не знает `complete` (это факт фронтьера: `not (truncated
-  or skipped_documents or robots_refused)`) и не обновляет `last_checked_at`, поэтому
+  or skipped_documents)` после 0.6.0) и не обновляет `last_checked_at`, поэтому
   следующий прогон не получит `reuse` и полезет в сеть вторым снятием;
 - *DMZ только префетчит, снятия пишет следующий прогон* — приёмка F4 («снятие между
   прогонами») не выполняется вовсе; это отказ от F4, а не его минимум.
 
-**Уточнение 20.11.2026.** Формула `complete` выше — та, что действовала на момент плана.
-С 20.11.2026 отказ `robots.txt` закрывается объявленной подачей артефакта, поэтому решение
-стало предикатом `_root_capture_complete` (`core/pipeline/corpus.py:1697`): неполнота
-делится на ту, которую подача снимает (запрещённые адреса, сверка по URL), и ту, которую не
-снимает (`truncated`, `skipped_documents`). Писатель снятия обязан знать это правило, иначе
-он воспроизведёт прежнюю формулу и объявит корень неисчерпанным там, где материал уже
-предъявлен (`13-manual-artifacts.md` §3.3).
+**Уточнение 20.11.2026, переписано 21.11.2026.** Формула `complete`, названная в тексте
+плана, — та, что действовала на момент написания. 20.11.2026 отказ `robots.txt` был
+разделён на «подача закрывает по адресу» / «усечение не закрывает», а 21.11.2026 решение
+владельца сняло вопрос совсем: **`robots` — объявленная граница сайта, а не потеря**, и
+корень исчерпан без неё: `_root_capture_complete` (`core/pipeline/corpus.py:1691`) — это
+`not (truncated or skipped_documents)`. Поэтому писатель
+снятия обязан знать **только** техническую неполноту (`truncated`, `skipped_documents`) и
+не должен ни вычитать отказы `robots`, ни переписывать `complete` после подачи
+(`_recompute_root_captures`, `core/pipeline/corpus.py:1705`, публикует лишь разрез
+`resolved_manually`). Подача остаётся входом **следующего** прогона и не подчиняется ни
+расписанию, ни `refresh_policy` (`13-manual-artifacts.md` §3.3).
 
 **`capture_id` не меняется.** У такта нет `run_id` только если он не прогон; в форме
 «такт = прогон» `run_id` есть, и новая формула не нужна. Идемпотентность — через
@@ -714,17 +718,18 @@ run-DB утверждала «партиция на диске», хотя `comm
   именно она уходит в `absence_as_of` у `bounded ❌`;
 - **схема не меняется**: поля `roots_json` те же, новых нет.
 
-**Почему усечение остаётся видимым.** Приоритет `complete` не прячет неполноту: три
+**Почему усечение остаётся видимым.** Приоритет `complete` не прячет неполноту: две
 причины `capture.complete=False` (`_record_root_capture`: `frontier.truncated`,
-`frontier.skipped_documents`, `frontier.robots_refused`) зеркалятся фактами прогона,
-которые решают `complete` **независимо** от выбора снятия:
-`truncated`/`skipped_documents` ⇒ `truncated_products` ⇒ `coverage.truncated=True` ⇒
-`complete=False`; `robots_refused` ⇒ `FAILED`/`robots_disallow` в сеансе ⇒
-`session_blocked` ⇒ `complete=False`. Плюс `incomplete_reasons` (`only_failed_repair`,
-`host_out_of_shard`, политический пропуск) обнуляет `complete` напрямую. Проверено
-матрицей в `/tmp` (не артефакт репозитория): усечение, блокирующий `FAILED`, нечитаемый
-origin и `incomplete_reasons` дают `complete=False` даже при удостоверяющем снятии от
-01.11; без них — `complete=True` с датой 01.11.
+`frontier.skipped_documents`) зеркалятся фактами прогона, которые решают `complete`
+**независимо** от выбора снятия: `truncated`/`skipped_documents` ⇒
+`truncated_products` ⇒ `coverage.truncated=True` ⇒ `complete=False`. Отказ `robots` в
+этот список больше не входит (0.6.0: объявленная граница сайта, а не потеря) — он
+остаётся аудитом в `blocked` и рабочим списком подачи. Плюс `incomplete_reasons`
+(`only_failed_repair`, `host_out_of_shard`, политический пропуск) обнуляет `complete`
+напрямую. Проверено матрицей в `/tmp` (не артефакт репозитория): усечение, блокирующий
+`FAILED` технического класса, нечитаемый origin и `incomplete_reasons` дают
+`complete=False` даже при удостоверяющем снятии от 01.11; без них — `complete=True` с
+датой 01.11.
 
 **Тесты** (`tests/pipeline/test_corpus_coverage_roots.py`), красные до правки
 (`assert 'cap-adopted' == 'cap-live'`; `bounded` терял носитель: «нет снятия с

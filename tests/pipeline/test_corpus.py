@@ -24,6 +24,7 @@ from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     BLOCKING_FAILURE_KINDS,
+    PROVIDABLE_FAILURE_KINDS,
     AnchorRelation,
     CatalogRow,
     Cohort,
@@ -4976,8 +4977,8 @@ def _certified_root(root_url: str = "https://a.example/") -> tuple[list[str], li
 def test_derive_corpus_coverage_counts_blocked_sources() -> None:
     """Ф0: failed-исходы считаются по каноническому ``error_kind``, fetched — observed.
 
-    С версии методологии 2.2.0 частичный ``robots_disallow`` на читаемом origin'е —
-    **блокирующий** in-scope сбой: корпус неполон, хотя ``unreadable_origins`` пуст.
+    Технический блокирующий сбой на читаемом origin'е делает корпус неполным, хотя
+    ``unreadable_origins`` пуст.
     """
     items = [
         _session_item("https://a.test/1", CrawlItemStatus.FETCHED),
@@ -4986,12 +4987,12 @@ def test_derive_corpus_coverage_counts_blocked_sources() -> None:
         _session_item(
             "https://a.test/4",
             CrawlItemStatus.FAILED,
-            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+            error_kind=FailureKind.PARSER_FAILED.value,
         ),
         _session_item(
             "https://a.test/5",
             CrawlItemStatus.FAILED,
-            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+            error_kind=FailureKind.PARSER_FAILED.value,
         ),
         _session_item("https://a.test/6", CrawlItemStatus.CANCELLED),
     ]
@@ -5006,9 +5007,9 @@ def test_derive_corpus_coverage_counts_blocked_sources() -> None:
     assert coverage.unreadable_origins == []
     assert coverage.expected_sources == 6
     assert coverage.observed_sources == 3
-    assert coverage.blocked == {"robots_disallow": 2}
-    assert coverage.blocking_failures == {"robots_disallow": 2}
-    assert coverage.partial_blocks == {"a.test": {"robots_disallow": 2}}
+    assert coverage.blocked == {"parser_failed": 2}
+    assert coverage.blocking_failures == {"parser_failed": 2}
+    assert coverage.partial_blocks == {"a.test": {"parser_failed": 2}}
     assert coverage.truncated is False
 
 
@@ -5031,16 +5032,15 @@ def test_truncation_forces_incomplete_even_without_failures() -> None:
     assert coverage.complete is False
 
 
-def test_partially_blocked_origin_is_incomplete() -> None:
-    """Ф0: блокирующий сбой на читаемом origin'е делает корпус неполным (2.2.0).
+def test_robots_refusal_is_audit_not_incompleteness() -> None:
+    """0.6.0: отказ ``robots`` — объявленная граница сайта, а не техническая потеря.
 
     Измеренный случай (pangolin): origin отдал 60 документов, 50 URL отказаны
-    ``robots_disallow``; второй origin прочитан целиком. Под новой методологией
-    ненаблюдённые 50 in-scope URL — причина неполноты, а не «тихий» аудит.
-    ``source_unavailable`` при этом остаётся неблокирующим.
-
-    Под правилом 2.2.0 неполны все три измеренных продукта ru-pg-dbms: jatoba —
-    2 ``parser_failed``, pangolin — 50 ``robots_disallow``, postgrespro — тёмный origin.
+    ``robots_disallow``; второй origin прочитан целиком. Запрещённая секция не делает
+    корпус неполным: ``blocked`` остаётся аудитом, ``blocking_failures`` пуст, ``complete``
+    решают снятия корней. Origin, целиком закрытый ``robots``, тоже **не** становится
+    «нечитаемым»: сайт видели, он отказал по собственной границе. ``source_unavailable``
+    остаётся неблокирующим, как и прежде.
     """
     items = [
         _session_item(f"https://docs.example/{i}", CrawlItemStatus.FETCHED)
@@ -5065,29 +5065,41 @@ def test_partially_blocked_origin_is_incomplete() -> None:
         _session_item("https://portal.example/a", CrawlItemStatus.FETCHED),
         _session_item("https://portal.example/b", CrawlItemStatus.FETCHED),
     ]
+    # Origin, целиком закрытый robots: ни одного FETCHED — и всё равно не «нечитаем».
+    items += [
+        _session_item(
+            f"https://closed.example/{i}",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        )
+        for i in range(3)
+    ]
 
+    roots, captures = _certified_root()
     coverage = derive_corpus_coverage(
         product_id="p1",
         items=items,
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=roots,
+        captures=captures,
     )
 
-    assert coverage.complete is False
+    assert coverage.complete is True
     assert coverage.unreadable_origins == []
-    assert coverage.expected_sources == 113
+    assert coverage.expected_sources == 116
     assert coverage.observed_sources == 62
-    assert coverage.blocked == {"robots_disallow": 50, "source_unavailable": 1}
-    assert coverage.blocking_failures == {"robots_disallow": 50}
+    assert coverage.blocked == {"robots_disallow": 53, "source_unavailable": 1}
+    assert coverage.blocking_failures == {}
     assert coverage.partial_blocks == {
-        "docs.example": {"robots_disallow": 50, "source_unavailable": 1}
+        "docs.example": {"robots_disallow": 50, "source_unavailable": 1},
+        "closed.example": {"robots_disallow": 3},
     }
 
 
 def test_blocking_failure_kinds_are_canonical() -> None:
     """Ф0: набор блокирующих классов фиксирован и не включает разрешённые наблюдения."""
     assert {kind.value for kind in BLOCKING_FAILURE_KINDS} == {
-        "robots_disallow",
         "parser_failed",
         "extraction_timeout",
         "attempts_exhausted",
@@ -5107,6 +5119,22 @@ def test_blocking_failure_kinds_are_canonical() -> None:
     assert FailureKind.EVALUATION_FAILED not in BLOCKING_FAILURE_KINDS
     assert FailureKind.VALIDATION_FAILED not in BLOCKING_FAILURE_KINDS
     assert FailureKind.SEARCH_FAILED not in BLOCKING_FAILURE_KINDS
+    # 0.6.0: отказ ``robots`` — объявленная граница сайта, а не техническая потеря.
+    assert FailureKind.ROBOTS_DISALLOW not in BLOCKING_FAILURE_KINDS
+
+
+def test_providable_failure_kinds_add_robots_to_blocking_set() -> None:
+    """Подаваемые классы = технические блокирующие **плюс** ``robots_disallow``.
+
+    Список подачи (``artifacts_gap``) не сужается вместе с блокирующим набором: из
+    запрещённой секции материал добывается только объявленным артефактом, поэтому
+    ``robots`` обязан остаться в рабочем списке оператора.
+    """
+    assert FailureKind.ROBOTS_DISALLOW in PROVIDABLE_FAILURE_KINDS
+    assert PROVIDABLE_FAILURE_KINDS == BLOCKING_FAILURE_KINDS | {
+        FailureKind.ROBOTS_DISALLOW
+    }
+    assert BLOCKING_FAILURE_KINDS <= PROVIDABLE_FAILURE_KINDS
 
 
 def test_parser_failure_makes_corpus_incomplete() -> None:
@@ -5190,11 +5218,12 @@ def test_wholly_dark_origin_from_source_unavailable_is_incomplete() -> None:
     assert coverage.blocking_failures == {}
 
 
-def test_fully_closed_origin_makes_corpus_incomplete() -> None:
+def test_fully_unreadable_origin_makes_corpus_incomplete() -> None:
     """Ф0: origin с нулём ``FETCHED`` нечитаем; отказы других origin'ов сюда не входят.
 
     Измеренный случай: основной origin частично отказал (404/robots), но читаем;
-    отдельный origin отказал целиком — именно он блокирует ``❌``.
+    отдельный origin недоступен целиком — именно он блокирует ``❌``. Отказ ``robots``
+    на читаемом origin'е — аудит, а не нечитаемость (0.6.0).
     """
     items = [
         _session_item(f"https://docs.example/{i}", CrawlItemStatus.FETCHED)
@@ -5224,7 +5253,7 @@ def test_fully_closed_origin_makes_corpus_incomplete() -> None:
         _session_item(
             "https://closed.example/",
             CrawlItemStatus.FAILED,
-            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
         )
     )
 
@@ -5240,9 +5269,43 @@ def test_fully_closed_origin_makes_corpus_incomplete() -> None:
     assert coverage.expected_sources == 210
     assert coverage.observed_sources == 179
     assert coverage.partial_blocks == {
-        "closed.example": {"robots_disallow": 1},
+        "closed.example": {"source_unavailable": 1},
         "docs.example": {"robots_disallow": 9, "source_unavailable": 21},
     }
+
+
+def test_fully_robots_closed_origin_is_not_unreadable() -> None:
+    """0.6.0 (б): origin, целиком закрытый ``robots``, — видели, а не «нечитаем».
+
+    Файл ``robots`` объявляет границу сайта: отказ не делает origin нечитаемым, а корпус
+    неполным. Аудит отказа остаётся в ``blocked``/``partial_blocks``.
+    """
+    items = [
+        _session_item(f"https://docs.example/{i}", CrawlItemStatus.FETCHED)
+        for i in range(5)
+    ]
+    items += [
+        _session_item(
+            "https://closed.example/",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        )
+    ]
+    roots, captures = _certified_root()
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+        declared_roots=roots,
+        captures=captures,
+    )
+
+    assert coverage.complete is True
+    assert coverage.unreadable_origins == []
+    assert coverage.blocked == {"robots_disallow": 1}
+    assert coverage.partial_blocks == {"closed.example": {"robots_disallow": 1}}
 
 
 def test_not_found_only_origin_is_readable() -> None:

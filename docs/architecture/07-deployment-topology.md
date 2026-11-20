@@ -419,7 +419,7 @@ LLM-endpoint корп. облака — только в Z0.
    действует»). Поэтому `deploy_profile` и остаётся полем контракта.
 4. ⚠️ **Per-root слой осей `document_level`/`pdf_device` под `split` не виден** (расхождение,
    которого в прежней редакции этого блока не было). Под `local` оси разрешаются на каждом
-   корне цепочкой app < run < site (`core/pipeline/corpus.py:1432`,
+   корне цепочкой app < run < site (`core/pipeline/corpus.py:1431`,
    `profiles=domain_profiles`), поэтому `domain_profiles.yaml` переопределяет уровень для
    конкретного хоста. Под `split` порты собираются **до** per-root резолва:
    `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3497`) отдаёт

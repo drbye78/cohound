@@ -271,7 +271,7 @@ products × doc_domains
   (окно = 1).
 - **Браузерный фетч в пул фетча не идёт никогда** — у не-poolable маршрута **свой
   однопоточный** пул (`phase.browser_pool`, поле — `core/pipeline/corpus_drain.py:1262`,
-  потребитель — `core/pipeline/corpus_drain.py:1863`):
+  потребитель — `core/pipeline/corpus_drain.py:1864`):
   `BrowserCrawler` водит единственную страницу без лока, поэтому маршрут остаётся одним
   потоком и `max_workers` его не параллелит.
 - **`document_level`** применяется только к документным форматам (PDF/Office); HTML не
@@ -352,7 +352,7 @@ index`. Это делает DMZ-шов физической границей **I
 `CrawlItemStatus`): `pending` → `running` → `fetched` (байты сохранены, retention) / `cancelled`;
 сбой краула → `failed`/`source_unavailable`, сбой извлечения → `failed`/`parser_failed` с
 сохранённым `raw_path`.
-**Статус сеанса `CrawlSessionStatus`** (`core/domain/enums.py:754-781`) — `created`, `running`,
+**Статус сеанса `CrawlSessionStatus`** (`core/domain/enums.py:785-843`) — `created`, `running`,
 `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальные —
 `completed|partial|cancelled|failed|interrupted`. `interrupted` — исполнение прервано **без**
 размотки (SIGKILL/OOM/снятие оператором): тело краула не финализировано, поэтому это не
@@ -399,7 +399,7 @@ retained-байтами не фетчится заново
 
 **Когда именно идёт развёртка.** Каталог разворачивается **на постановке seed'ов, до
 краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2318-2357`) вызывается в
-цикле продукта (`core/pipeline/corpus.py:3471`), и каждая запись становится **отдельным
+цикле продукта (`core/pipeline/corpus.py:3415`), и каждая запись становится **отдельным
 seed-корнем глубины 0** — это и есть «один уровень развёртки». Под `split` сетевую часть
 (опрос каталога) исполняет DMZ через `RemoteFeedPoller`, логика развёртки остаётся в ядре.
 Волн «top-level URL → опрос каталогов → записи» нет: `split` подаёт исполнителю **волны
@@ -587,7 +587,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
 - **Вход:** компилированный промпт + `chunks_by_id` (для последующей валидации).
 - **Выход:** `LLMCellOutput` (status, justification, evidence[{source_id, quote}]).
 - **Схема:** constrained decoding как **объявленная ось**, а не догадка. Метка `Decoder`
-  (`core/domain/enums.py:400-415`) — `none` | `json_object` | `json_schema`; дефолт модуля
+  (`core/domain/enums.py:431-477`) — `none` | `json_object` | `json_schema`; дефолт модуля
   `none` (`DEFAULT_DECODER`, `core/adapters/llm_local.py:101`), в живом слоте объявлено
   `json_object` (`config/deploy.yaml`, `llm.cheap.decoder`). Провенанс пишет **фактический** механизм
   провода (`decoder_wire_type`, `core/adapters/llm_local.py:373-387`), а не запрошенную
@@ -596,7 +596,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1312-1343`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1326-1357`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
@@ -687,9 +687,9 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:890-929`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:904-943`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
-  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1416-1421`);
+  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1415-1420`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
   Раунды входят в
   `EXECUTION_CONTRACT_FIELDS` (`serp_rounds`): поиск добавляет документы в корпус, то есть
@@ -828,7 +828,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3817`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3819`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
@@ -951,7 +951,7 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3817` → `{out_dir}/{run_id}/outputs/`,
+`write_reports` `core/pipeline/report.py:3819` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:532`); версионирование
 `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:146`, `TEMPLATE_VERSION = "evaluator_v6"`, файлы

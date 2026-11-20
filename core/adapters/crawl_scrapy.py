@@ -346,11 +346,12 @@ def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
         spec.error = f"Scrapy-краул {spec.url!r}: {_failure_value(failure)}"
         return
     if _is_robots_refusal(failure):
-        # ``robots_disallow`` входит в ``BLOCKING_FAILURE_KINDS``, а
-        # ``source_unavailable`` — нет. Записанный как недоступность robots-запрет
-        # понижает блокировку: ``corpus_coverage.complete`` может стать True, пока
-        # целый origin закрыт robots.txt (измерено на живом прогоне: 134 URL, из них
-        # 104 на одном хосте). Отказ — соблюдение политики, а не сбой источника.
+        # ``robots_disallow`` — собственный класс отказа, а не ``source_unavailable``:
+        # отказ — соблюдение объявленной политики сайта, а не сбой источника. Класс
+        # остаётся аудитом и рабочим списком подачи (``PROVIDABLE_FAILURE_KINDS``), но
+        # полноту покрытия больше не отнимает (решение владельца 21.11.2026): граница
+        # сайта — не техническая потеря. Записанный как ``source_unavailable``, отказ
+        # потерял бы и адрес, и вид отказа в провенансе.
         spec.error_kind = FailureKind.ROBOTS_DISALLOW.value
         spec.error = f"Scrapy-краул {spec.url!r}: robots.txt запрещает обход"
         return

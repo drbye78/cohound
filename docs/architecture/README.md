@@ -15,7 +15,7 @@
 | `SCHEMA_VERSION` (run-DB) | `"3.27.0"` | `core/store/sqlite.py:143` |
 | `STATE_SCHEMA_VERSION` (state.db) | `"13"` | `core/store/state_sqlite.py:90` |
 | `EDGE_JOBS_SCHEMA_VERSION` | `"1"` | `core/edge/scheduler.py:198` |
-| `METHODOLOGY_VERSION` | `"0.5.0"` | `core/domain/models.py:185` |
+| `METHODOLOGY_VERSION` | `"0.6.0"` | `core/domain/models.py:199` |
 | `SEAM_SCHEMA_VERSION` | `"1"` | `core/edge/seam_schema.py:68` |
 | `EXECUTION_CONTRACT_FIELDS` | 36 полей | `core/pipeline/digests.py:105` |
 | `PHASES` | 15 фаз | `core/pipeline/runner.py:133` |

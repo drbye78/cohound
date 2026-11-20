@@ -1302,9 +1302,11 @@ def test_corpus_coverage_anomaly_is_visible_in_csv_and_artifacts(
         complete=False,
         expected_sources=10,
         observed_sources=6,
-        blocked={"robots_disallow": 4},
+        blocked={"parser_failed": 4, "robots_disallow": 1},
         unreadable_origins=["closed.example"],
-        partial_blocks={"closed.example": {"robots_disallow": 4}},
+        partial_blocks={
+            "closed.example": {"parser_failed": 4, "robots_disallow": 1}
+        },
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
     )
@@ -1313,14 +1315,18 @@ def test_corpus_coverage_anomaly_is_visible_in_csv_and_artifacts(
     anomalies = collect_corpus_coverage_anomalies([], {PRODUCT_A: coverage})
     assert anomalies[0]["product_id"] == PRODUCT_A
     assert anomalies[0]["complete"] is False
-    assert anomalies[0]["blocked"] == {"robots_disallow": 4}
-    assert anomalies[0]["blocking_failures"] == {"robots_disallow": 4}
+    assert anomalies[0]["blocked"] == {
+        "parser_failed": 4,
+        "robots_disallow": 1,
+    }
+    # 0.6.0: ``robots`` остаётся аудитом, блокирующим считается только технический класс.
+    assert anomalies[0]["blocking_failures"] == {"parser_failed": 4}
     assert anomalies[0]["unreadable_origins"] == ["closed.example"]
     assert anomalies[0]["partial_blocks"] == {
-        "closed.example": {"robots_disallow": 4}
+        "closed.example": {"parser_failed": 4, "robots_disallow": 1}
     }
     assert "closed.example" in anomalies[0]["reason"]
-    assert "robots_disallow=4" in anomalies[0]["reason"]
+    assert "parser_failed=4" in anomalies[0]["reason"]
 
     artifacts = write_reports(
         bundle=bundle,
@@ -1359,15 +1365,19 @@ def test_corpus_coverage_anomaly_derived_from_pending_cell_without_store(
                 "corpus_complete": False,
                 "corpus_expected_sources": 5,
                 "corpus_observed_sources": 2,
-                "corpus_blocked": {"robots_disallow": 3},
+                "corpus_blocked": {"parser_failed": 3, "robots_disallow": 1},
                 "corpus_truncated": False,
             }
         ],
     )
     anomalies = collect_corpus_coverage_anomalies([pending])
     assert len(anomalies) == 1
-    assert anomalies[0]["blocked"] == {"robots_disallow": 3}
-    assert anomalies[0]["blocking_failures"] == {"robots_disallow": 3}
+    assert anomalies[0]["blocked"] == {
+        "parser_failed": 3,
+        "robots_disallow": 1,
+    }
+    # 0.6.0: ``robots`` — аудит, блокирующим остаётся только технический класс.
+    assert anomalies[0]["blocking_failures"] == {"parser_failed": 3}
     assert anomalies[0]["expected_sources"] == 5
     assert anomalies[0]["observed_sources"] == 2
 

@@ -359,7 +359,7 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
 - The root host is always in scope. A subdomain is in scope **only if declared** (product
   seed root, or a `domain_profiles.yaml` key). `www.` is equivalent to the bare host on both
   sides.
-- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1491`). This is
+- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1499`). This is
   **different** semantics from `fetch_plan._host_matches`: there a subdomain **inherits
   profile axes** (`fetch`/`extract`/limits), which is correct and needed. Inheriting axes ≠
   the right to spend another seed root's budget.
@@ -367,20 +367,40 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
   `accepted_foreign_hosts` (how much of a root's budget went to a declared foreign host).
 - A terminal artifact (document/container) is exempt from **path-prefix only**: it does not
   continue navigation, but SSRF/host-scope/blacklist still apply.
-- **`robots_disallow` blocks a root, and a declared manual artifact can lift it — by URL.**
-  A root capture is `complete = not (truncated or skipped_documents or robots_refused)`, so a
-  forbidden address keeps the root unexhausted and `bounded` absence (I2d) unprovable — even
-  when the very bytes were provided by `hound artifacts fetch`. Since 20.11.2026 the product-level
-  rule of plan 13 §3.3 also holds at the root: `_root_capture_complete`
-  (`core/pipeline/corpus.py:1697`) is called twice — at the root boundary (no provision yet, value
-  identical to the old formula) and after provision (`_recompute_root_captures`,
-  `core/pipeline/corpus.py:1726`), rewriting the **same** capture row, with the frontier keeping
-  the refused **addresses** (`core/pipeline/crawl_frontier.py:1459`). Provision lifts incompleteness
-  only when **every** refusal of the root is covered; truncation and `document_level=off` skips are
-  not liftable. Measured 20.11.2026: of all `robots_disallow` refusals across the stand's runs only
-  files are coverable — `jatoba` 17/17 (already provided, +81 golden cells, ceiling 0.6961 → 0.7856
-  with no new crawl), `pangolin` 50/58, `digital_q` 0/60 (all `?PAGEN_1=2`), `postgrespro` 0/16
-  (`/order/*`, `/useragreement`), `tantor` 0/2.
+- **`robots_disallow` is the site's declared boundary, not an incomplete crawl** (owner rule
+  21.11.2026, methodology 0.6.0). `robots.txt` announces what the site does not want walked; a
+  forbidden section is therefore **not** "product material we failed to download", and no
+  hypothesis is built about what is inside it. A root capture is
+  `complete = not (truncated or skipped_documents)` — `_root_capture_complete`
+  (`core/pipeline/corpus.py:1691`) is the single predicate — so a `robots` refusal does not keep
+  the root unexhausted, does not make the session incomplete, and does not make an origin
+  unreadable. `bounded` absence (I2d) on such a corpus **is** provable, because the space was
+  declared by the site itself. Incompleteness of what we know about a product is a consequence of
+  **technical failures fetching non-forbidden artifacts** and of nothing else.
+- **A `robots` refusal stays visible, and a declared manual artifact is the only way past it.**
+  The refusal remains in the audit (`blocked`/`partial_blocks`) and in the operator's provision
+  worklist (`artifacts_gap`, sourced from `PROVIDABLE_FAILURE_KINDS`,
+  `core/domain/enums.py:266` — wider than the blocking set on purpose: narrowing it would shrink
+  the worklist exactly where provision is irreplaceable). The frontier keeps the refused
+  **addresses** (`core/pipeline/crawl_frontier.py:1461`), and
+  `_recompute_root_captures` (`core/pipeline/corpus.py:1705`) publishes only how many refusals a
+  provision closed — it no longer rewrites `complete`. If material really is behind the boundary
+  (as with `jatoba`), **the user adds the artifacts themselves**, widening what later runs know
+  about the product.
+- **Provision is not retroactive and does not obey the schedule.** Adding or replacing a file in
+  `sources/manual_artifacts.yaml` affects the **next** run, exactly as if a server failure had been
+  fixed before that run — it never rewrites a past run. And it lands regardless of crawl
+  schedule/refresh mode: `scheduled` with an unexpired interval, `network_denied`,
+  `--refresh offline`, `--refresh frozen` — provisioned bytes still enter the corpus (provision is
+  not network). Non-retroactivity is guaranteed by identity, not by intent: `manual_artifacts_digest`
+  over `(product_id, url, sha256)` is a contract field, so adding or replacing a file is a **new
+  `run_id`**. Measured 21.11.2026 (instrument `scripts/measure_golden_ceiling.py`, run
+  `ru-pg-dbms-145ad66ca3f9`): with `robots` no longer blocking, reachable golden `❌` go 7 → **77**
+  and the agreement ceiling 0.6961 → **0.7735**, making `digital_q_database` the first pilot product
+  whose `bounded` absence is attested. What remains unreachable is **not** `robots`: 149
+  `policy_skipped` (the root was not walked by policy — "we were told not to look" is not "the
+  server refused") and 56 `carrier_missing` (`max_documents` truncation: `postgrespro/docs` 20000,
+  `docs.tantorlabs.ru/tdb` 1500).
 
 Measured cost of getting this wrong: `edu.postgrespro.ru` produced 563 of 682 items on a root
 that declared only the parent host, while the product documentation root got zero of its own
@@ -675,7 +695,7 @@ Three facts that are cheap to state and expensive to rediscover:
   (`<my:a>` inside `SELECT xpath(…)` became an element and split the sample across two code
   fences) and now come out whole (32 215 → 32 843 characters).
 - PDF has **one axis and two executable mechanisms**: `crawl.pdf_pipeline` names the
-  **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:519`).
+  **mechanism**, not the library (`PdfPipeline`, `core/domain/enums.py:585`).
   - `structured` (default) — layout models, table reconstruction, OCR (today: docling). The
     only mechanism where `crawl.document_level` (`off|text|layout|layout_tables|full`)
     applies.

@@ -295,7 +295,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 Уточнение против записи 28.10: поле `embed` в `DeployConfig` **появилось**
 (`core/config/deploy.py:1009`) и объявляет **две** оси — `device` и `precision` (`EmbedConfig`,
 `core/config/deploy.py:684`; обе входят в контракт, `EmbedDevice`/`EmbedPrecision` —
-`core/domain/enums.py:610` и `:634`);
+`core/domain/enums.py:641` и `:665`);
 `backend`/`base_url`/`model_version` по-прежнему отвергаются (`extra="forbid"`), а
 `RemoteEmbedder` не существует и маршрута `embed` в контурах шва нет (`contracts/seam/`:
 `capabilities`, `crawl`, `envelope`, `extract`, `fetch`, `health`, `openapi`, `registry`,
