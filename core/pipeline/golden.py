@@ -119,6 +119,12 @@ class GoldenReport:
     :param error_counts: счётчик по :data:`ERROR_CLASSES` (отсутствующие классы не хранятся).
     :param case_class_counts: счётчик по ``case_class`` golden-строк.
     :param expected_counts: счётчик по ожидаемым статусам (``.value``).
+    :param reachability: **наблюдение** рядом с метрикой (не порог и не решение):
+        сколько эталонных ``❌`` недостижимо при текущем каталоге и носителе, каков из-за
+        них потолок согласия и как прогон отвечал на недостижимых ячейках
+        (:func:`core.pipeline.absence_reach.agreement_with_ceiling`). ``None`` — не
+        считалось (нет носителей/покрытия): это отсутствие наблюдения, а не ``0``.
+        :meth:`passes` и :func:`check_thresholds` его **не читают**.
     """
 
     results: list[GoldenCaseResult]
@@ -130,6 +136,7 @@ class GoldenReport:
     error_counts: dict[str, int] = field(default_factory=dict)
     case_class_counts: dict[str, int] = field(default_factory=dict)
     expected_counts: dict[str, int] = field(default_factory=dict)
+    reachability: dict[str, Any] | None = None
 
     @property
     def total(self) -> int:
@@ -186,22 +193,56 @@ class GoldenReport:
             ],
             "thresholds": self.thresholds.as_dict(),
             "total": self.total,
+            "reachability": self.reachability,
         }
 
     def to_manifest_json(self) -> str:
         """Детерминированный JSON отчёта (``sort_keys``) для манифеста/отчёта."""
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
 
+    def reachability_line(self) -> str | None:
+        """Строка наблюдения о достижимости ``❌`` (``None`` — наблюдения нет).
+
+        Формулировки разделяют два исхода на недостижимой ячейке: ``❓`` — исход
+        методологии, ``✅``/``⚠️`` — остаётся ошибкой. Потолок публикуется числом, но
+        **не** сравнивается с порогом: это наблюдение, а решение — за читателем.
+        """
+        reach = self.reachability
+        if reach is None:
+            return None
+        reasons = ", ".join(
+            f"{reason} {count}"
+            for reason, count in sorted((reach.get("by_reason") or {}).items())
+        )
+        head = (
+            f"reachability: {reach.get('absent_unreachable', 0)} из "
+            f"{reach.get('absent_total', 0)} эталонных ❌ недостижимы"
+        )
+        if reasons:
+            head += f" ({reasons})"
+        ceiling = reach.get("ceiling")
+        share = reach.get("share_of_ceiling")
+        ceiling_text = "не определён" if ceiling is None else f"{ceiling:.4f}"
+        share_text = "не определена" if share is None else f"{share:.4f}"
+        return (
+            f"{head}; потолок согласия {ceiling_text}, доля от потолка {share_text}; "
+            f"❓ на недостижимых {reach.get('not_attributable', 0)} (исход методологии), "
+            f"✅/⚠️ на недостижимых {reach.get('claims_presence_where_golden_absent', 0)} "
+            "(остаётся ошибкой)"
+        )
+
     def summary(self) -> str:
         """Человекочитаемая сводка (стабильная строка для логов/CLI)."""
         verdict = "PASS" if self.passes() else "FAIL"
-        return (
+        base = (
             f"golden: agreement={self.agreement:.1%} ({self.matches}/{self.total}), "
             f"false_ok={self.false_ok}, "
             f"critical_false_absence={self.critical_false_absence}, "
             f"missing={self.missing}, "
             f"absent_stratum={self.has_absent_stratum} -> {verdict}"
         )
+        line = self.reachability_line()
+        return base if line is None else f"{base}\n{line}"
 
 
 # ---------------------------------------------------------------------------

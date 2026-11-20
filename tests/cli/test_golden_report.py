@@ -23,7 +23,7 @@ import pytest
 
 from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
 from core.domain.enums import RankingPolicy, RunMode, Status
-from core.domain.models import Focus, RunConfig
+from core.domain.models import CorpusCoverage, CorpusRootCoverage, Focus, RunConfig
 from core.store.sqlite_store import SqliteStore
 from tests.helpers.domain import cell
 from tests.helpers.output import json_out
@@ -224,6 +224,126 @@ def test_golden_with_package_catalog_has_no_gap_note(
     assert code == EXIT_OK
     payload = json_out(capsys)
     assert payload["notes"] == []
+
+
+# ---------------------------------------------------------------------------
+# golden: достижимость ❌ рядом с метрикой (не в решении)
+# ---------------------------------------------------------------------------
+
+
+def _package_with_bounded_param(tmp_path: Path) -> Path:
+    """Пакет, чей каталог содержит ``param_b`` (правило ``distribution_absence``).
+
+    Штатный фикстур ограничивает ``focus`` модулем ``mod_a``, а ``param_b`` живёт в
+    ``mod_b`` — без расширения фокуса каталог до команды не доедет, и правило отсутствия
+    останется неизвестным (``explicit``).
+    """
+    import yaml
+
+    package = valid_package(tmp_path)
+    run_yaml = package / "run.yaml"
+    data = yaml.safe_load(run_yaml.read_text(encoding="utf-8"))
+    data["focus"] = {"modules": ["mod_a", "mod_b"], "params": ["param_a", "param_b"]}
+    run_yaml.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return package
+
+
+def _save_coverage(db: Path, run_id: str, *, root_complete: bool) -> None:
+    with SqliteStore(db) as store:
+        store.save_corpus_coverage(
+            run_id,
+            CorpusCoverage(
+                product_id=PRODUCT_B,
+                complete=root_complete,
+                roots=[
+                    CorpusRootCoverage(
+                        root_url="https://b.example/docs/",
+                        capture_id="cap.1",
+                        complete=root_complete,
+                        observed_how="live",
+                        observed_at="2026-06-01T00:00:00+00:00",
+                        policy_digest="d",
+                        policy_matched=True,
+                    )
+                ],
+                computed_at="2026-06-01T00:00:00+00:00",
+            ),
+        )
+
+
+def test_golden_publishes_reachability_beside_metric(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Корень без ``complete=1`` → ``❌`` недостижим; потолок печатается и едет в JSON."""
+    db = tmp_path / "cohound.db"
+    _seed_run(db, "run.g", cells=[(PRODUCT_B, PARAM_B, Status.UNKNOWN)])
+    _save_coverage(db, "run.g", root_complete=False)
+    golden = _write_golden(
+        tmp_path / "golden.csv",
+        [f"{PRODUCT_B},{PARAM_B},❌,documentation,class_b,full"],
+    )
+    package = _package_with_bounded_param(tmp_path)
+
+    code = main(
+        [
+            *_golden_argv(db, golden),
+            "--run-yaml",
+            str(package / "run.yaml"),
+            "--package",
+            str(package),
+            "--json",
+        ]
+    )
+    payload = json_out(capsys)
+    reach = payload["reachability"]
+    assert reach["absent_unreachable"] == 1
+    assert reach["by_reason"] == {"carrier_missing": 1}
+    assert reach["ceiling"] == pytest.approx(0.0)
+    # Наблюдение не спасает порог: ❓ на недостижимом — не совпадение.
+    assert payload["agreement"] == pytest.approx(0.0)
+    assert code == EXIT_ERROR
+
+    main([*_golden_argv(db, golden), "--run-yaml", str(package / "run.yaml"),
+          "--package", str(package)])
+    text = capsys.readouterr().out
+    assert "reachability: 1 из 1 эталонных ❌ недостижимы (carrier_missing 1)" in text
+    assert "потолок согласия 0.0000" in text
+    assert "ok: no" in text
+
+
+def test_golden_reachability_ceiling_one_when_all_roots_captured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Все корни исчерпаны снятием → потолок 1.0 (формула: недостижимых нет)."""
+    db = tmp_path / "cohound.db"
+    _seed_run(db, "run.g", cells=[(PRODUCT_B, PARAM_B, Status.ABSENT)])
+    _save_coverage(db, "run.g", root_complete=True)
+    golden = _write_golden(
+        tmp_path / "golden.csv",
+        [f"{PRODUCT_B},{PARAM_B},❌,documentation,class_b,full"],
+    )
+    package = _package_with_bounded_param(tmp_path)
+
+    code = main(
+        [
+            *_golden_argv(db, golden),
+            "--run-yaml",
+            str(package / "run.yaml"),
+            "--package",
+            str(package),
+            "--json",
+        ]
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["ok"] is True
+    reach = payload["reachability"]
+    assert reach["absent_reachable"] == 1
+    assert reach["absent_unreachable"] == 0
+    assert reach["ceiling"] == pytest.approx(1.0)
+    assert reach["share_of_ceiling"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------

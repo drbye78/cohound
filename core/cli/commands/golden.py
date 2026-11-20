@@ -38,6 +38,12 @@ from core.cli.context import (
 from core.cli.errors import EXIT_ERROR, EXIT_OK, EXIT_USAGE, CliError
 from core.cli.wiring import build_store
 from core.pipeline import check_thresholds, evaluate_golden
+from core.pipeline.absence_reach import (
+    CellVerdict,
+    agreement_with_ceiling,
+    carriers_from_coverage,
+    classify_reachability,
+)
 from core.pipeline.golden_status import GOLDEN_FILE, GoldenStatus, read_golden_status
 
 
@@ -97,6 +103,13 @@ def run(args: argparse.Namespace) -> int:
 
     ``--tier fast|full`` фильтрует строки :class:`~core.domain.models.GoldenRow` по
     ``tier`` **до** оценки (PR-гейт vs полный набор, §11.6).
+
+    **Достижимость ``❌`` публикуется рядом с метрикой.** При доступном покрытии прогона
+    (``iter_corpus_coverage``) команда считает, сколько эталонных ``❌`` методология не
+    позволяет вынести при текущем носителе, и каков из-за них потолок согласия
+    (:mod:`core.pipeline.absence_reach`). Это **наблюдение**: ``passes()`` и
+    ``check_thresholds()`` его не читают, код возврата не меняется. Без носителей поле
+    остаётся ``None`` — отсутствие наблюдения, а не ``0``.
 
     **Контракт кода возврата.** :data:`EXIT_OK` — только если одновременно
     ``report.passes()`` (R6: agreement + критические классы) **и**
@@ -181,6 +194,26 @@ def run(args: argparse.Namespace) -> int:
         report = evaluate_golden(
             golden=golden, store=store, run_id=run_id, catalog=catalog
         )
+        # Наблюдение о достижимости эталонных ❌ — **рядом** с метрикой, не в решении:
+        # порог остаётся методологией, а ``passes``/``check_thresholds`` этот блок не
+        # читают. Носитель берётся из покрытия прогона (I2d), правило — из каталога.
+        coverage_reader = getattr(store, "iter_corpus_coverage", None)
+        if coverage_reader is not None:
+            carriers = carriers_from_coverage(coverage_reader(run_id))
+            reach = classify_reachability(golden, dict(catalog), carriers)
+            verdicts = {
+                (item.product_id, item.param_id): CellVerdict(status=item.status)
+                for item in store.iter_cells(run_id)
+            }
+            report.reachability = {
+                "cells": reach.cells,
+                "absent_total": reach.absent_total,
+                "absent_reachable": reach.absent_reachable,
+                "absent_unknown": reach.absent_unknown,
+                "absent_unreachable": reach.absent_unreachable,
+                "by_reason": dict(reach.absent_unreachable_by_reason),
+                **agreement_with_ceiling(golden, verdicts, reach, dict(catalog)),
+            }
 
     # Сужение типа для mypy: ``report`` присваивается безусловно (ветка выше возвращает
     # EXIT_USAGE, когда золотой набор не исполним), поэтому ``None`` здесь недостижим.
