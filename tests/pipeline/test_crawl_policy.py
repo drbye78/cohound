@@ -17,6 +17,8 @@ from core.domain.enums import CrawlNetworkMode, CrawlPolicyMode, CrawlPolicyScop
 from core.pipeline.crawl_policy import (
     CrawlPolicyConflict,
     DeclaredRoot,
+    RootSpace,
+    capture_spaces_by_root,
     declared_roots,
     observations_by_root,
     parse_requested_scopes,
@@ -68,6 +70,7 @@ def _resolve(
     now: dt.datetime = NOW,
     requested: tuple[str, ...] = (),
     crawl_config_digest: str | None = None,
+    spaces: dict[tuple[str, str, str], RootSpace] | None = None,
 ):
     return resolve_crawl_policy(
         package_policy=config,
@@ -79,6 +82,7 @@ def _resolve(
             requested, product_ids={root.product_id for root in roots}
         ),
         crawl_config_digest=crawl_config_digest,
+        capture_spaces=spaces,
     )
 
 
@@ -412,3 +416,175 @@ def test_www_host_is_equivalent_to_bare_host() -> None:
     decision = _resolve(config, [ROOT]).decisions[0]
     assert decision.mode is CrawlPolicyMode.NETWORK_DENIED
     assert decision.host == "docs.test"
+
+# ---------------------------------------------------------------------------
+# Пространство обхода — второй якорь решения (0.7.0+)
+# ---------------------------------------------------------------------------
+
+
+def _scheduled_config() -> CrawlPolicyConfig:
+    return _config(
+        sites={"p1": {"docs.test/docs": {"mode": "scheduled", "interval_hours": 168}}}
+    )
+
+
+def test_space_mismatch_forces_refresh_before_the_interval_expires() -> None:
+    """Корпус собран в другом пространстве ⇒ обход, хотя сутки не истекли.
+
+    Расписание отвечает «когда обновлять», но не «в каком пространстве собран корпус».
+    Переиспользование снятия, сделанного при других лимитах, измерило бы старое
+    пространство под новым объявлением (решение владельца 21.11.2026).
+    """
+    observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+    spaces = {
+        ("p1", "docs.test", "/docs"): RootSpace(
+            policy_digest="old", space_json=None
+        )
+    }
+    decision = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed=observed,
+        crawl_config_digest="limits-new",
+        spaces=spaces,
+    ).decisions[0]
+    assert decision.space_matches is False
+    assert decision.decision == "refresh"
+    assert decision.network_mode is CrawlNetworkMode.FETCH
+
+
+def test_space_match_keeps_clock_decision() -> None:
+    """Пространство совпало — решение по часам: ``reuse`` до срока, ``refresh`` после.
+
+    Отпечаток снятия — **тот же** ``space_digest``, который считает резолв (так его пишет
+    ``capture.policy_digest``), поэтому берём его у первого разрешения, а не сочиняем.
+    """
+    observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+    declared = _resolve(
+        _scheduled_config(), [ROOT], observed=observed, crawl_config_digest="limits-same"
+    )
+    spaces = {
+        ("p1", "docs.test", "/docs"): RootSpace(policy_digest=declared.space_digest)
+    }
+    fresh = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed=observed,
+        crawl_config_digest="limits-same",
+        spaces=spaces,
+    ).decisions[0]
+    assert fresh.space_matches is True
+    assert fresh.decision == "reuse"
+    stale = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=200)},
+        crawl_config_digest="limits-same",
+        spaces=spaces,
+    ).decisions[0]
+    assert stale.decision == "refresh"
+
+
+def test_unknown_space_decides_by_clock() -> None:
+    """Снятия нет или отпечатка нет ⇒ ``None``: отсутствие факта не есть расхождение (A3)."""
+    observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+    no_capture = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed=observed,
+        crawl_config_digest="limits-new",
+    ).decisions[0]
+    assert no_capture.space_matches is None
+    assert no_capture.decision == "reuse"
+    # Снятие есть, но ни материала, ни отпечатка (самая старая строка): сравнивать не с чем.
+    unknown = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed=observed,
+        crawl_config_digest="limits-new",
+        spaces={("p1", "docs.test", "/docs"): RootSpace()},
+    ).decisions[0]
+    assert unknown.space_matches is None
+    assert unknown.decision == "reuse"
+
+
+def test_legacy_capture_with_diverged_digest_forces_refresh() -> None:
+    """Строка прежней схемы (материала нет) с другим отпечатком ⇒ ``refresh``.
+
+    Это правило **до** появления материала и оно остаётся: оба отпечатка известны и
+    различны — наблюдённое расхождение. Миграция 13 → 14 поэтому не меняет вердиктов;
+    цена — разовый обход, а не «поверили, что пространство то же» (A3 работает в обе
+    стороны: неизвестное не выдаётся за совпадение).
+    """
+    decision = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)},
+        crawl_config_digest="limits-new",
+        spaces={("p1", "docs.test", "/docs"): RootSpace(policy_digest="other")},
+    ).decisions[0]
+    assert decision.space_matches is False
+    assert decision.decision == "refresh"
+
+
+def test_space_check_requires_declared_limits() -> None:
+    """Без объявленного ``crawl_config_digest`` стороны сравнения нет — решение по часам.
+
+    ``crawl policy list`` лимитов не резолвит; сравнение с ``None`` дало бы ложное
+    «разошлось» и объявило бы обход всем корням сразу.
+    """
+    decision = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)},
+        spaces={("p1", "docs.test", "/docs"): RootSpace(policy_digest="d")},
+    ).decisions[0]
+    assert decision.space_matches is None
+    assert decision.decision == "reuse"
+
+
+def test_requested_scope_still_wins_over_space_match() -> None:
+    """Ручной запрос — сильнее сверки: он и так даёт ``refresh``."""
+    decision = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)},
+        requested=("p1",),
+        crawl_config_digest="limits-same",
+        spaces={("p1", "docs.test", "/docs"): RootSpace(policy_digest="limits-same")},
+    ).decisions[0]
+    assert decision.decision == "refresh"
+    assert decision.requested is True
+
+
+def test_non_scheduled_modes_ignore_space() -> None:
+    """``auto``/``network_denied`` от сверки не зависят: они не решают по часам."""
+    for mode, expected in (("auto", "auto"), ("network_denied", "network_denied")):
+        decision = _resolve(
+            _config(defaults={"mode": mode}),
+            [ROOT],
+            observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)},
+            crawl_config_digest="limits-new",
+            spaces={("p1", "docs.test", "/docs"): RootSpace(policy_digest="old")},
+        ).decisions[0]
+        assert decision.decision == expected
+        assert decision.space_matches is False
+
+
+def test_capture_spaces_by_root_maps_urls_to_declared_roots() -> None:
+    """URL снятия → ключ корня; чужой URL и повтор отбрасываются (новейшее — первым)."""
+    roots = [ROOT, ROOT_OTHER]
+    spaces = capture_spaces_by_root(
+        [
+            ("p1", "https://docs.test/docs/", "new", '{"a":1}'),
+            ("p1", "https://docs.test/docs/", "older", None),
+            ("p1", "https://docs.test/retired/", "gone", None),
+            ("p2", "https://docs.test/docs/", "other-product", None),
+            ("p1", "https://docs.test/other/", "other-root", None),
+        ],
+        roots,
+    )
+    assert spaces == {
+        ("p1", "docs.test", "/docs"): RootSpace(policy_digest="new", space_json='{"a":1}'),
+        ("p1", "docs.test", "/other"): RootSpace(policy_digest="other-root"),
+    }

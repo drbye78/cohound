@@ -319,6 +319,7 @@ def test_no_pacing_field_enters_the_execution_contract() -> None:
         "fetch_ms",
         "window_s",
         "retries",
+        "backoff_ms",
     ):
         assert name not in EXECUTION_CONTRACT_FIELDS
 
@@ -436,3 +437,34 @@ def test_http_audit_does_not_leak_between_worker_threads() -> None:
     assert hosts["b.test"]["http_requests"] == 3
     assert hosts["a.test"]["foreign_hosts"] == {}
     assert hosts["b.test"]["foreign_hosts"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# (8) Бэкофф между попытками — цена вежливости, отдельная от окна
+# --------------------------------------------------------------------------- #
+
+
+def test_backoff_is_published_per_host_and_in_total_but_not_in_the_window() -> None:
+    """Проспанное в бэкоффе видно числом, но не удлиняет окно и не завышает темп.
+
+    Пауза складывается со слотом лимитера, а не заменяет его: если бы она попадала в
+    ``request`` (окно и ``fetch_ms``), наблюдённая конкурентность и темп завысились бы на
+    время сна, которого к хосту не было. Поэтому она публикуется отдельным полем.
+    """
+    pacing = CrawlPacing()
+    with pacing.request("p1", HOST):
+        pass
+    pacing.backoff("p1", HOST, 750)
+    pacing.backoff("p1", HOST, 1500)
+    snapshot = pacing.snapshot()
+    assert snapshot["hosts"][HOST]["backoff_ms"] == 2250
+    assert snapshot["total"]["backoff_ms"] == 2250
+    # Окно — только время запроса: паузы в нём нет.
+    assert snapshot["hosts"][HOST]["requests"] == 1
+
+
+def test_zero_backoff_creates_no_observation() -> None:
+    """Ноль пауз — ноль миллисекунд; отдельного origin'а запись не заводит."""
+    pacing = CrawlPacing()
+    pacing.backoff("p1", "never-seen.test", 0)
+    assert pacing.snapshot()["hosts"] == {}
