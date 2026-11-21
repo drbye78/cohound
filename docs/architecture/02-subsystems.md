@@ -121,7 +121,7 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
 **У аттестации есть производитель** — `hound package profile attest`
 (`cmd_package_profile_attest`, `core/cli/package/commands.py:2912`; запись —
 `core/cli/package/commands.py:3001` → `save_profile_attestation`,
-`core/store/state_store.py:1621`; парсер — `core/cli/package/parser.py:968`, `--gate`
+`core/store/state_store.py:1669`; парсер — `core/cli/package/parser.py:968`, `--gate`
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
@@ -251,7 +251,7 @@ products × doc_domains
 
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
-| `max_workers` | **сетевой** fetch-пул (`httpx`) | в `_open` — открытии полосы корня (`core/pipeline/corpus_driver.py:351-372`); ширину даёт `lane_width` (`core/pipeline/corpus_drain.py:1111-1126`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
+| `max_workers` | **сетевой** fetch-пул (`httpx`) | в `_open` — открытии полосы корня (`core/pipeline/corpus_driver.py:495-522`); ширину даёт `lane_width` (`core/pipeline/corpus_drain.py:1125-1140`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
 | `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5250-5277`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул (`recycle_tasks` в `new_extract_pool`) | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
@@ -689,7 +689,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
   на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:936-943`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
-  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1416-1420`);
+  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/serp_loop.py:951-955`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
   Раунды входят в
   `EXECUTION_CONTRACT_FIELDS` (`serp_rounds`): поиск добавляет документы в корпус, то есть
@@ -828,7 +828,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3819`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3884`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
@@ -951,11 +951,11 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3819` → `{out_dir}/{run_id}/outputs/`,
+`write_reports` `core/pipeline/report.py:3884` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:532`); версионирование
 `prompt`-шаблонов — ✅ сделано
-(`core/pipeline/prompt.py:146`, `TEMPLATE_VERSION = "evaluator_v6"`, файлы
-`core/pipeline/templates/evaluator_v{1..6}.txt`; версия входит в `prompt_hash` —
+(`core/pipeline/prompt.py:175`, `TEMPLATE_VERSION = "evaluator_v7"`, файлы
+`core/pipeline/templates/evaluator_v{1..7}.txt`; версия входит в `prompt_hash` —
 `core/util/hashing.py:44-74`; с 19.11.2026 в материал hash входят и `group`/`module`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
 (`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1867-1878`,
 потребитель — `HttpCrawler` и поисковые адаптеры); политика ретраев и backoff —

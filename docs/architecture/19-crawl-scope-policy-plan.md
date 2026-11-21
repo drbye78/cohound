@@ -56,7 +56,7 @@ per-host статуса и без различения дискавери и о�
 
 | механизм | где | чего не хватает |
 |---|---|---|
-| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:993`, `core/pipeline/run_identity.py:274`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:439`) |
+| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:993`, `core/pipeline/run_identity.py:274`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:440`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`core/store/state_sqlite.py:143`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3784` | переиспользует **чанки**; при смене версии чанкера/пустом наборе/I19-расхождении и **наличных байтах** документ пересобирается текущим конвейером (`rebuild_from_stored_bytes`), байтов нет — `no_bytes`; не пишет `url_state`/`document_version` как «последнюю версию» — эту дисциплину наследует и `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
@@ -83,6 +83,24 @@ per-host статуса и без различения дискавери и о�
 работает MVP без фонового процесса; серверный планировщик (`core/edge/`) позже читает тот же
 store. Решение «обновлять/не обновлять», принятое по часам, входит в поверхность решений
 (§6.1) — иначе два прогона в разные дни дадут разные корпуса под одним `run_id`.
+
+**Часы — не единственный якорь `reuse`: пространство обхода тоже.** Переиспользовать корпус
+можно, только если он собран в **объявленном** пространстве (те же режимы политики и тот же
+`crawl_config_digest`: лимиты, стратегия, режимы рендера). Поэтому решение читает вторым
+якорем снятие корня (`capture.policy_digest` + `capture.space_json`) и сравнивает его с
+объявленным материалом (`space_attests`, `core/pipeline/corpus_coverage.py:174`):
+
+* `False` (пространство разошлось) ⇒ `refresh` **даже при неистёкшем интервале** — иначе
+  прогон измерил бы старое пространство под новым объявлением (решение владельца 21.11.2026:
+  «если меняется сама схема краула, нормальный прогон приравнивается к онлайн-прогону»);
+* `None` (снятия нет, материал не записан, или различие объясняется сменой **формулы**
+  обхода — `CRAWL_SEMANTICS`) ⇒ решение по часам: отсутствие факта не выдаётся за
+  расхождение (A3);
+* `True` ⇒ по часам, как раньше.
+
+Провенанс: `PolicyDecision.space_matches` публикуется в `crawl policy list`/`plan --json`, но
+**в дайджест отдельным полем не входит** — следствие уже видно в `decision`, а второй ключ на
+тот же факт дал бы два способа изменить `run_id`.
 
 **Области и приоритет.** `product` | `host` | `root` (host + префикс пути) | `path` (host +
 маска внутри корня). Разрешение — **самое специфичное побеждает**: `path` > `root` > `host` >
@@ -133,7 +151,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 |---|---|---|
 | `auto` | `network` + `fetch` | `network` + `fetch` (условный GET по политике прогона) |
 | `on_request` | `network` + `fetch` (первичный дискавери автоматический) | `chunks` (или `bytes` в `frozen`), `network_mode=deny` — **пока корень не назван `--refresh-scope`** |
-| `scheduled` | `network` + `fetch` (первое снятие — как дискавери) | `fetch`, если `now - observed_at >= interval_hours`; иначе как `on_request` без запроса |
+| `scheduled` | `network` + `fetch` (первое снятие — как дискавери) | `fetch`, если `now - observed_at >= interval_hours` **или** пространство снятия разошлось с объявленным; иначе как `on_request` без запроса |
 | `network_denied` | `deny` | `deny`; корпус — `chunks`/`bytes`, если есть сохранённое, иначе `no_sources` (видимая причина) |
 
 **Ручной запрос — флаг прогона, не отметка в БД.** `--refresh-scope <product|host|url|mask>`
@@ -177,7 +195,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:462`): иначе
    `run` и `crawl run` адресуют разные сеансы при одном объявленном входе.
 5. **Неизвестное значение политики — `EXIT_USAGE`, не `auto`.** Тихий fallback — это сеть по опечатке (AGENTS §2);
-   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:439`).
+   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:440`).
 6. Время снятия (`captured_at`) — **провенанс**, не идентичность (как `extractor_version`).
 7. Честная граница: резолв ветки «discovery vs update» читает `url_state`, поэтому **те же
    объявленные входы при сдвинутом `state.db` дают другой корпус** — так уже живёт `auto`
@@ -208,17 +226,17 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 
 ### P2 — исполнение: `on_request` и `network_denied` — ✅ сделано
 
-- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`core/pipeline/corpus.py:3520`) — **до**
-  `crawl_target` (`core/pipeline/corpus.py:3409`) и `expand_directory`
-  (`core/pipeline/corpus.py:3415`), — и до сборки синтетических корней
-  (`_synthetic_root_plans`, `core/pipeline/corpus.py:3264`). Гейт на постановке в очередь
-  фронтьера (`core/pipeline/crawl_frontier.py:1624`, `add_seed`;
-  `core/pipeline/crawl_frontier.py:1597`, `add_revalidate_seed`) недостаточен: он ниже
+- ✅ **Гейт выше первого сетевого вызова**: в `_author_root_plans` (`core/pipeline/corpus.py:3564`) — **до**
+  `crawl_target` (`core/pipeline/corpus.py:3640`) и `expand_directory`
+  (`core/pipeline/corpus.py:3646`), — и до сборки синтетических корней
+  (`_synthetic_root_plans`, `core/pipeline/corpus.py:3490`). Гейт на постановке в очередь
+  фронтьера (`core/pipeline/crawl_frontier.py:1758`, `add_seed`;
+  `core/pipeline/crawl_frontier.py:1789`, `add_revalidate_seed`) недостаточен: он ниже
   feed/sitemap-разворота. Порядок закреплён **AST-тестом**
   (`test_gate_is_above_crawl_target_and_expand_directory`), который сравнивает номера строк
   вызовов в теле генератора: генератор — это порядок исполнения, текст комментария — нет.
 - ✅ **SERP-контур** глушится политикой с `not_executed_reason=crawl_policy_skipped`
-  (`core/pipeline/corpus.py:2204`), находки фильтруются по корню.
+  (`core/pipeline/corpus.py:2356`), находки фильтруются по корню.
 - ✅ `RootPlan.network_mode ∈ fetch|deny` и `RootPlan.corpus_source ∈ network|chunks`
   (`core/pipeline/corpus_drain.py:169`, `core/pipeline/corpus_drain.py:172`), а не один enum. `bytes` исполняется осью прогона
   (`--refresh frozen --frozen-source bytes`, P3), а не значением `RootPlan`: объявленное
@@ -463,4 +481,4 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 | E.7 | члены контейнеров в проходе без сети | `frozen`/`network_denied` пере-извлекает верхнеуровневые байты; члены контейнера приходят только из обхода (`ArchiveDescentWalker`), которого в этом проходе нет. Замер: 2 документа и 271 чанк из 597 на `jatoba` | ✅ решено владельцем 05.11.2026 («спуск контейнера в проходе без сети») и сделано: `container_state` (STATE 9 → 10 — история; действующая — `12`) пишется write-through живым спуском; `frozen` читает её **до** ветки `no_version` и спускает сохранённые байты inline (без пула, без `crawl_session_items`), называя невоспроизведённое (`stored_bytes_missing`, `frozen_container_unreadable`, `frozen_container_empty`, `frozen_container_replayed:{n}`). Замер: 9 / 876 против 9 / 876, чанки 9 из 9 |
 | E.5 | `--refresh-scope` как условие измерения | если владелец считает это «операционным запросом», это противоречит `run_id = f(объявленных входов)` | ✅ решено: входит в дайджест |
 | E.6 | смешанный продукт (часть корней `fetch`, часть `chunks`) | дедуп и порядок дренажа — новая семантика исполнения | ✅ решено 05.11.2026 — оркестратор, по объявленным правилам (I19, AGENTS §6.1), не решение владельца (три правила: строка корпуса — на **URL**; провенанс выжившей строки — наблюдение; состав запрещённого корня — **все** его durable-документы, владелец — самый специфичный `root_path_prefix`). Сделано: `_policy_skip` больше не переиспользует во время планирования, а только откладывает набор (`ProductContext.deferred_reuse`), хвост `_close_product` переиспользует его после живых документов с пропуском по URL (`skipped_present`, третий факт рядом с `reused`/`no_version`), состав корня считает `durable_urls_by_owner` (`state.db: url_state` — и есть work-set под `full`). Пропуск учитывает и **наблюдения прогона** (`ProductIngest.observed_urls`, пополняется в `finish_one` до дедупа): URL, наблюдённый живым путём, но схлопнутый по `doc_hash` в алиас близнеца, не получает `reused`-строку со старым носителем, хотя строки у него нет. Гейт политики остался до `crawl_target`/`expand_directory`; набор URL в сеть не изменился; пины — `tests/pipeline/test_corpus_crawl_policy.py` |
-| E.8 | **`url_state.next_check_at` — второй уровень расписания или мёртвый носитель** (перенесено из `09` §6.3 при его чистке 08.11.2026) | колонка объявлена в DDL (`STATE 12`, `core/store/state_sqlite.py:153`), поле есть в порту (`core/ports/state.py:149`), но до 09.11.2026 значение только переносилось и никем не читалось — колонка объявляла возможность, которой не было (A3). Расписание при этом уже есть — но **другой гранулярности**: `crawl_policy.mode=scheduled` с `interval_hours` решает «идти в сеть или переиспользовать» на scope (продукт/хост/корень/путь) и входит в `run_id` через `crawl_policy_digest`. Per-URL дата — это уже другой смысл: «этот документ смотреть не раньше N». Решение: либо объявить, зачем нужно per-URL расписание (и тогда получить писателя и читателя), либо **удалить носитель** — колонка без читателя объявляет возможность, которой нет (A3) | ✅ **решено владельцем 09.11.2026: объявить per-URL смысл и получить писателя с читателем**, но **не** фильтровать. Смысл: `next_check_at` — опубликованное обязательство «не проверять URL раньше T». Писатель: при наблюдении версии в этом цикле и объявленном такте покрывающей политики `next_check_at = observed_at + interval_hours`, у режимов без такта — `NULL` (стирание, не перенос), у отказа/переиспользования — прежнее значение (`core/pipeline/corpus_ingest.py:868` хелпер, `:1003-1018` вычисление, `:1030` запись; проводка `crawl_policy=crawl_policy` — `core/pipeline/corpus.py:2495`). Читатель: `read_url_next_checks` (`core/store/state_store.py:190`, `mode=ro`) → `hound crawl policy list --per-url` (`core/cli/commands/crawl.py:1323` агрегат `total/due/not_due/undated`, `:1759` в payload). Почему не фильтр — замер 09.11.2026: 8 052 URL, при 168 ч «не раньше» отсёкло бы 8 052 из 8 052, дубль root-level `scheduled`; `run_id` и состав корпуса от поля не зависят. Названный остаток (не «в работе»): адаптивный интервал по наблюдаемой частоте изменений — нужна история ≥2 циклов и своя колонка (свой бамп схемы), строится только после чисел |
+| E.8 | **`url_state.next_check_at` — второй уровень расписания или мёртвый носитель** (перенесено из `09` §6.3 при его чистке 08.11.2026) | колонка объявлена в DDL (`STATE 12`, `core/store/state_sqlite.py:162`), поле есть в порту (`core/ports/state.py:149`), но до 09.11.2026 значение только переносилось и никем не читалось — колонка объявляла возможность, которой не было (A3). Расписание при этом уже есть — но **другой гранулярности**: `crawl_policy.mode=scheduled` с `interval_hours` решает «идти в сеть или переиспользовать» на scope (продукт/хост/корень/путь) и входит в `run_id` через `crawl_policy_digest`. Per-URL дата — это уже другой смысл: «этот документ смотреть не раньше N». Решение: либо объявить, зачем нужно per-URL расписание (и тогда получить писателя и читателя), либо **удалить носитель** — колонка без читателя объявляет возможность, которой нет (A3) | ✅ **решено владельцем 09.11.2026: объявить per-URL смысл и получить писателя с читателем**, но **не** фильтровать. Смысл: `next_check_at` — опубликованное обязательство «не проверять URL раньше T». Писатель: при наблюдении версии в этом цикле и объявленном такте покрывающей политики `next_check_at = observed_at + interval_hours`, у режимов без такта — `NULL` (стирание, не перенос), у отказа/переиспользования — прежнее значение (`core/pipeline/corpus_ingest.py:914` хелпер, `:1052-1066` вычисление, `:1078` запись; проводка `crawl_policy=crawl_policy` — `core/pipeline/corpus.py:2664`). Читатель: `read_url_next_checks` (`core/store/state_store.py:238`, `mode=ro`) → `hound crawl policy list --per-url` (`core/cli/commands/crawl.py:1342` агрегат `total/due/not_due/undated`, `:1781` в payload). Почему не фильтр — замер 09.11.2026: 8 052 URL, при 168 ч «не раньше» отсёкло бы 8 052 из 8 052, дубль root-level `scheduled`; `run_id` и состав корпуса от поля не зависят. Названный остаток (не «в работе»): адаптивный интервал по наблюдаемой частоте изменений — нужна история ≥2 циклов и своя колонка (свой бамп схемы), строится только после чисел |

@@ -149,10 +149,10 @@ absence/evidence-модель, а значит по `AGENTS.md` §9 (класс�
 > **➖ снято 01.11.2026.** Решение ниже отменено владельцем вместе с волной S плана 17:
 > `_ensure_columns` и `_migrate_scope_acceptance` **удалены** из `core/store/sqlite.py`
 > (след — докстринг `SCHEMA_VERSION`, `core/store/sqlite.py:28-34`), версия стала **гейтом**:
-> `_reject_foreign_schema` (`core/store/sqlite.py:858-875`) читает `schema_meta.schema_version`
+> `_reject_foreign_schema` (`core/store/sqlite.py:951-970`) читает `schema_meta.schema_version`
 > **до** DDL и поднимает `SchemaVersionMismatch` (`core/util/schema_gate.py:40`); вызовы —
-> писательский `connect` (`core/store/sqlite.py:960`) и read-only `connect_read_only`
-> (`core/store/sqlite.py:937`), оба до `executescript`. Содержимое файла при отказе не
+> писательский `connect` (`core/store/sqlite.py:1052`) и read-only `connect_read_only`
+> (`core/store/sqlite.py:1029`), оба до `executescript`. Содержимое файла при отказе не
 > меняется — это проверено тестом (`tests/store/test_schema_gate.py:58`
 > `test_previous_schema_is_rejected_and_file_is_unchanged`).
 > Тот же класс и тот же формат сообщения — на **все три** БД
@@ -165,13 +165,13 @@ absence/evidence-модель, а значит по `AGENTS.md` §9 (класс�
 > неотличимой от текущей, то есть объявляла файл новым, не будучи им.
 
 **Решение 29.10.2026: `SCHEMA_VERSION` остаётся `3.13.0`** (константа жила тогда на 15-й
-строке того же файла; сегодня — `core/store/sqlite.py:153`, значение `3.27.0`). Все
+строке того же файла; сегодня — `core/store/sqlite.py:169`, значение `3.28.0`). Все
 изменения
 ниже — аддитивные: колонки добавлял идемпотентный `_ensure_columns`
 (удалён в 3.14.0: шимов `ALTER TABLE` больше нет, `core/store/sqlite.py`), таблицу —
 `CREATE TABLE IF NOT EXISTS` в `DDL`. Гейт
-`_reject_foreign_schema` (`core/store/sqlite.py:858-875`, вызовы `core/store/sqlite.py:937` и
-`core/store/sqlite.py:960`) существует ради
+`_reject_foreign_schema` (`core/store/sqlite.py:951-970`, вызовы `core/store/sqlite.py:1029` и
+`core/store/sqlite.py:1052`) существует ради
 **несовместимого** чтения, а не ради счётчика ревизий: поднимать версию на аддитивном
 изменении значило бы запретить чтение уже завершённых прогонов без причины.
 
@@ -229,7 +229,7 @@ CREATE TABLE IF NOT EXISTS run_product (
 coverage)` (`core/pipeline/corpus_coverage.py:700`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: на момент
 границы переноса ячеек не было (`09` §10), а сегодня их считает отчёт из durable-ячеек
-(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3415`).
+(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3532`).
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — величины того же класса, что `product_end` пишет в `results[].notes` прогона
@@ -794,7 +794,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    пишет `persist_manifest` (`core/store/sqlite_store.py:1373-1374`).
 4. **Правило `❌` (часть той же полосы, `09` §11.2) — СНЯТО 05.11.2026 (F3 плана 20).**
    Проверка рядом с
-   `_enforce_absence_coverage` (`core/pipeline/evaluate.py:2140`): у `explicit`/
+   `_enforce_absence_coverage` (`core/pipeline/evaluate.py:2410`): у `explicit`/
    `authoritative` — каждый документ, на который опирается `❌`, обязан иметь
    `reuse_kind ∈ {live, revalidated}`; у корпусных классов — ни один документ корпуса
    продукта не `reused`/`stale`. Нарушение ⇒ ячейка `❓` (`not_stated`, I12) с причиной
@@ -892,7 +892,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2805` (первая редакция ссылалась на строку 1970 того же файла);
+`core/pipeline/report.py:2935` (первая редакция ссылалась на строку 1970 того же файла);
 `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:156` (первая редакция ссылалась на строку 93 — там комментарий);
 `_PARTITION_SCHEMA` —

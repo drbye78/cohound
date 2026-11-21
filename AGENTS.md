@@ -138,7 +138,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `core/edge/` | Composition root Z1/DMZ: seam server, auth, audit, seam schema, crawl scheduler, poller, crawler factory, runtime config, launcher. |
 | `scripts/ci.sh` | Single CI entry point (spec §11.6). `scripts/check_doc_anchors.py` gates `path:line` anchors in `docs/`, `README.md`, `AGENTS.md`; `--check-drift BASE` reports anchors whose target line **moved** since `BASE` (a non-empty line at the old address proves nothing — measured 16.11.2026: 55 anchors drifted silently past the non-emptiness check). `scripts/check_runbook.py` gates the user-facing guide the same way anchors gate prose: a command the reader copies must exist. |
 | `tests/selfcheck.py` | Autonomous foundation check (no pytest): dictionary, DDL, invariants, import graph §1, neutrality §1.3. |
-| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`; `reference_products.yaml` — which upstream lines the profile measures and at which versions; `baseline_facts.csv` — observations about the ancestor's documentation, each with a verbatim quote, text hash and date); optional `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
+| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`(+`.lock`), `baselines.csv`, `cohort.yaml`, `golden.csv`, `derived_fields.csv`, `domain_profiles.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`; `reference_products.yaml` — which upstream lines the profile measures and at which versions; `baseline_facts.csv` — observations about the ancestor's documentation, each with a verbatim quote, text hash and date); optional `crawl_policy.yaml` (crawl cadence: `defaults`/`products`/`sites` modes + `product_axes` limits — its digest is in `EXECUTION_CONTRACT_FIELDS`, so editing it is a new `run_id`; `ru-pg-dbms` declares `scheduled/24`), `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
 | `passports/{product_id}/` | Product passports. |
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
@@ -301,7 +301,7 @@ mismatch forces `complete=False`; an unknown digest (either side) does not — a
 is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
 term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
 `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.27.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
+`SCHEMA_VERSION` 3.28.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
 `corpus_docs.page_map` at 3.21.0 — the page map, from which a chunk's page number is a
 **function**, not a column: a copy would have to be maintained on every chunk-write path and
 one missed path would give a silently wrong page; `corpus_docs.ocr_probe`/`pages_ocr`/
@@ -336,7 +336,12 @@ than argued: the whole corpus re-chunked to 253 306 of 253 306 identical chunks,
 re-embedding changed the ranking on **0** of 15 golden cells (McNemar p=1.0)
 (`2026-11-17-policy6-retrieval.md`; `postgrespro`/`pangolin`, 117 of 132 cells, not re-embedded
 — ≈5 h GPU); `cell_evidence.scope_acceptance` **removed** at 3.27.0 (methodology 0.4.0: the
-per-cell signature is gone, G4 authorizes publication once per report). STATE `14` —
+per-cell signature is gone, G4 authorizes publication once per report); `cell_tool_calls` +
+`idx_chunks_doc` at 3.28.0 (plan 28: the trace of local tool calls is **provenance** — PK
+`(run_id, product_id, param_id, seq)`, re-writing a cell deletes its rows and inserts again so a
+re-run with fewer calls cannot leave a `seq` tail; and the index on `corpus_chunks(doc_id)`,
+without which one document read is 153 ms on the stand's 253 306 chunks — measured 21.11.2026,
+against 0.15 s for the same set as one `GROUP BY … IN (…)`). STATE `14` —
 `chunk_meta.table_ref` (13) plus `capture.space_json` (14): the durable chunk-set carries the
 table address, and the capture carries the **material** of the space it exhausted (policy
 modes + `crawl_config_digest` + crawl semantics version), so a digest drift caused by a changed
@@ -378,7 +383,7 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
   what the site does not want walked; a forbidden section is therefore **not** "product material
   we failed to download", and no hypothesis is built about what is inside it. A root capture is
   `complete = not incomplete and observed` — `_root_capture_complete`
-  (`core/pipeline/corpus.py:1692`) is the single predicate — where `incomplete = truncated or
+  (`core/pipeline/corpus.py:1693`) is the single predicate — where `incomplete = truncated or
   skipped_documents` and `observed` means at least one page was read (discovery or
   revalidation) or the site refused by its own `robots`. So a `robots` refusal does not keep
   the root unexhausted, does not make the session incomplete, and does not make an origin
@@ -455,12 +460,24 @@ enter the digest: a no-op edit must not give every product an `execution_change`
 
 Modes: `auto` (as before), `on_request` (first discovery automatic, update only when the
 root is named by `--refresh-scope`), `scheduled` (update when `now - observed_at >=
-interval_hours`, resolved to `refresh`/`reuse` — the decision, not the intent, enters the
-digest), `network_denied` (**no** requests for that root). `refresh_policy` (run level:
+interval_hours` **or** the declared crawl space differs from the space of the root's last
+capture, resolved to `refresh`/`reuse` — the decision, not the intent, enters the digest),
+`network_denied` (**no** requests for that root). `refresh_policy` (run level:
 `auto|revalidate|refresh|offline|frozen`) composes **inside** the resolved policy:
 `offline` reuses chunks (no requests), `frozen` reuses `corpus_raw` bytes with current
 extraction/chunking and `frozen_source ∈ bytes|chunks` (canonicalised to `n/a` outside
 `frozen`).
+
+**The clock is not the only anchor for `reuse` — the space is the second.** A `scheduled`
+reuse is legitimate only if the stored corpus was gathered in the **declared** space (same
+policy modes, same `crawl_config_digest`), so the decision reads the root's last capture
+(`capture.policy_digest` + `capture.space_json`) and compares it with the declared material
+(`space_attests`). `False` ⇒ `refresh` even before the interval expires: reusing a corpus
+built under other limits would measure the old space under a new declaration. `None` (no
+capture, no material, or the difference is explained by a changed **crawl formula** —
+`CRAWL_SEMANTICS`) ⇒ decide by the clock, because absence of a fact is not a fact of
+absence (A3). The comparison is published as `PolicyDecision.space_matches` and is **not** a
+separate digest field — its consequence is already the `decision`.
 
 A no-network pass replays **durable known documents**, not just author roots: under `full`
 mode there is no BFS to discover them, so `url_state` *is* the work set (measured
@@ -474,9 +491,11 @@ no `crawl_session_items`) and names what it could not replay (`frozen_container_
 `frozen_container_empty`, or `stored_bytes_missing`).
 
 `network_denied` is a **network policy, not product exclusion**: the product stays on the
-map, the corpus comes from what is already stored (`chunks`/`bytes`), coverage is incomplete
-and is named (`crawl_policy_skipped` + `crawl_network_denied`), never `failed` and never
-"no seeds".
+map, the corpus comes from what is already stored (`chunks`/`bytes`), and the skip is named
+(`crawl_policy_skipped` + `crawl_network_denied`) as **provenance**, never `failed` and never
+"no seeds". Since 0.7.0 a denied root is **reuse, not incompleteness**: like a schedule skip
+it does not enter `truncated_products`/`incomplete_reasons`, because completeness is decided
+by the root captures (I2d), not by whether the network was touched in this run.
 
 ### 6.2 Crawl width, retries and what `fetch_ms` measures
 
@@ -557,6 +576,26 @@ Three facts that are cheap to state and expensive to rediscover:
   `COHOUND_LLM_BASE_URL` in env produces a **visible** warning: the evaluator was lifted
   outside the contract and `run_id` does not describe the model.
 - **search adapter** (Ш5): external search as a content source, normalized into the corpus.
+- **Local tools are not a web tool, and I18 survives structurally.** The evaluator may ask the
+  core to read **more of the already-collected corpus** (`expand_to_section`, `section_role`,
+  `table_row`, `subject_mention`); the core executes them and returns text. Nothing leaves the
+  machine, nothing is retrieved anew, and the adapter's `complete` still accepts no `tools`
+  parameter — tool calling lives in a **separate** method (`LocalToolCallerPort.turn`) and a
+  separate port. In tool mode `response_format` is **not** sent (grammar and tool calling
+  conflict on OI-compatible servers), so the provenance of such a turn says `decoder="none"`
+  with a reason rather than staying silent.
+  The **set** of tools and the per-cell budget are a declared measurement condition
+  (`tool_profile`, the 37th field of `EXECUTION_CONTRACT_FIELDS`: flag `--tool-profile` >
+  `deploy.tools.profile` > `none`, and `--tool-max-calls` > `deploy.tools.max_calls`; no
+  `auto`), because they change which material the model sees. The **trace** of calls
+  (`cell_tool_calls`) is provenance, not identity: it is known only after execution, while
+  `run_id` must be computable before it. It is published as `outputs/tool_calls.csv` (a row
+  per call: address, tool, `ok`, characters, reason) — without it "the tool was never called"
+  and "it was called and failed" are indistinguishable in the report. A tool's output is
+  **not** evidence: a citation still
+  has to be a substring of the fragment's `text` (I22), and no tool may mint a `source_id`.
+  A tool failure (`ok=False`) is passed to the model as a reason, never raised: otherwise the
+  cell's behaviour would be a function of what the model asked for.
 - **discovery / concept scout**: search is allowed; the output is candidates/hypotheses (G2).
   Here `COHOUND_LLM_*` env **is** read (args > env > slot) — a **deliberate asymmetry**:
   reconnaissance output is not evidence, so the model is an operational setting rather than a
@@ -569,7 +608,7 @@ Three facts that are cheap to state and expensive to rediscover:
 
 ## 9. Run identity, declared axes, versioning
 
-- `run_id` is a function of **declared inputs only**: 36 fields in
+- `run_id` is a function of **declared inputs only**: 37 fields in
   `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:105`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
@@ -581,6 +620,13 @@ Three facts that are cheap to state and expensive to rediscover:
 - **Anything that changes the corpus or the verdicts must be a declared input.** Precedents
   that were once silently outside the contract: `--max-depth`/`--max-documents`,
   `chunk_size`, `prompt_template`, `evaluation_policy`, `render_modes`, `passports`.
+  The same defect was found on 21.11.2026 in `catalog_digest`: it hashed the 11 mandatory
+  catalog columns, so `semantics`/`evidence`/`param_class` — the three optional ones that now
+  reach the prompt (`evaluator_v7`) and the retrieval queries — changed the measurement while
+  leaving `catalog_version` and `run_id` untouched. Measured: recompiling `ru-pg-dbms`'s
+  catalog from `parameter_semantics.jsonl` gave the **same** `60782db144a7d39df0b8f595` before
+  the fix and `e9711e8979d866ec7381e1c5` after. A digest that lists fields by hand must list
+  **all** of them, or it answers a narrower question than the one it is asked.
 - **The token limiter is a declared condition, not a tuning knob.** `TOKEN_LIMIT` in
   `core/adapters/chunker_family.py:80` is `(limit, "model_id@revision")` or `None`; at `None`
   it is not applied and neither `chunker_version` nor `chunking_spec` changes (so switching it
@@ -886,6 +932,15 @@ entry point.
 ./hound.py experiment extraction --runs-dir runs --run-id {run_id} \
   --golden packages/{case_id}/sources/extraction_golden.json \
   --mechanism-a structured --mechanism-b text_layer --level layout_tables --device cpu
+
+# 5c. Local tool profiles A/B: two runs differing ONLY in --tool-profile, compared per cell
+#     (the profile is the 37th contract field, so run_id differs by construction). Reports
+#     agreement on both arms, discordant cells, exact McNemar, bootstrap CI, and the price
+#     in calls. It also names what it cannot check: 12 of the 37 contract fields are not on
+#     the manifest at all, so pairing over them is assumed, not proven (plan 28 §10.5).
+python scripts/measure_tool_profile.py --runs-dir runs \
+  --run-a {run_id_without_tools} --run-b {run_id_with_tools} \
+  --golden packages/{case_id}/golden.csv
 
 # 6. Finish an interrupted Ш6 on the SAME run_id: retry only cells without a verdict.
 #    --dry-run = selector only (no ports built). run_id does not change; per-attempt log

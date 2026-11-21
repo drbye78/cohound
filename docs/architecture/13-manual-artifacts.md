@@ -192,7 +192,7 @@ provide:
 границы знания о продукте для **следующих** прогонов. Отсюда три следствия:
 
 * снятие корня считается как `complete = not incomplete and observed`
-  (`_root_capture_complete`, `core/pipeline/corpus.py:1692`), где `incomplete = truncated or
+  (`_root_capture_complete`, `core/pipeline/corpus.py:1693`), где `incomplete = truncated or
   skipped_documents`, а `observed` — прочитана хоть одна страница (discovery или
   ревалидация) либо был отказ по собственной границе сайта. Отказ `robots` в `incomplete`
   не входит, поэтому `bounded`-отсутствие на таком корпусе **доказуемо**: пространство
@@ -216,7 +216,7 @@ provide:
 артефактом, оставался `complete=0`. Одно правило было реализовано в двух местах по-разному.
 20.11 сверка была сведена (фронтьер держит адреса, `Frontier.robots_refused_urls`,
 `core/pipeline/crawl_frontier.py:1461`), а 21.11 сам вопрос снят: `robots` больше не
-отнимает полноту, поэтому `_recompute_root_captures` (`core/pipeline/corpus.py:1723`)
+отнимает полноту, поэтому `_recompute_root_captures` (`core/pipeline/corpus.py:1724`)
 переписывать снятие не должен — он публикует только разрез «сколько отказов корня закрыто
 предъявленным материалом» (`CorpusRootCoverage.resolved_manually`). Усечение `max_*` и
 пропуск уровнем `off` подача не снимает — это техническая потеря, а не граница.
@@ -356,11 +356,12 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 Сделано — §8 п. 1: файл пишется (`core/pipeline/artifacts_gap.py:354`).
 
-Ближайший образец формы — `core/pipeline/report.py:2128` `render_nda_questions`: единый
+Ближайший образец формы — `core/pipeline/report.py:2182` `render_nda_questions`: единый
 CSV, строка =
 аномалия, `anomaly_kind` из набора `i3_protocol`/`crawl_truncation`/`corpus_incomplete`/
-`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2181-2247`,
-сверено 08.11.2026 — видов **шесть**). Тот же приём,
+`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2248-2314`,
+сверено 08.11.2026 — видов **шесть**; диапазон пере-указан 21.11.2026 после правки шапки
+battle card). Тот же приём,
 другая таблица.
 
 Выход фазы `corpus` (и `report`): `runs/{run_id}/outputs/artifacts_gap.yaml` —
@@ -475,25 +476,25 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:354` — единственный writer, зовут
-   `core/pipeline/corpus.py:5574` и `core/pipeline/report.py:4200`; человеческая строка —
+   `core/pipeline/corpus.py:5641` и `core/pipeline/report.py:4282`; человеческая строка —
    `core/pipeline/artifacts_gap.py:213`, сбор — `core/pipeline/artifacts_gap.py:267`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
-   (загрузчик — `core/pipeline/manual_artifacts.py:215`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
-   `core/pipeline/corpus.py:4176`; `origin` — `core/store/sqlite.py:281`;
-   `resolved_manually` — `core/domain/models.py:2883` + `core/pipeline/corpus_coverage.py:309`;
-   доля — `core/pipeline/phases.py:1723`; дайджест — `core/pipeline/digests.py:197`, материал
-   `core/pipeline/digests.py:432`).
+   (загрузчик — `core/pipeline/manual_artifacts.py:225`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
+   `core/pipeline/corpus.py:5641`; `origin` — `core/store/sqlite.py:323`;
+   `resolved_manually` — `core/domain/models.py:3049` + `core/pipeline/corpus_coverage.py:301`;
+   доля — `core/pipeline/phases.py:1826`; дайджест — `core/pipeline/digests.py:206`, материал
+   `core/pipeline/digests.py:458`).
    As-built и расхождения — §10.
 3. ➖ **неактуально (сверено 08.11.2026)** — типизированной пометки «этот артефакт перенесён
    из прогона X» не будет: такого состояния нет. Объявленный файл перечитывается и
    пере-наблюдается **каждый** прогон (`load_manual_artifacts`), аудит `manual_artifacts` —
-   per-run (`PRIMARY KEY (run_id, product_id, url)`, `core/store/sqlite.py:355-369`), поэтому
+   per-run (`PRIMARY KEY (run_id, product_id, url)`, `core/store/sqlite.py:378-393`), поэтому
    у артефакта свои `run_id` и `provided_at`, а не чужая история. Между прогонами переносится
    **ячейка** — и она типизирована: `measurement_origin=carried` + обязательный
-   `carried_from_run_id` (`core/domain/models.py:1423`, схема `cell-reuse-3`); документ —
+   `carried_from_run_id` (`core/domain/models.py:1487`, схема `cell-reuse-3`); документ —
    `corpus_docs.reuse_kind` (`live|revalidated|reused|stale`). Связь прогонов при этом видна:
    `run_lineage.previous_run_id` + `change_class`, а `hound diff` называет смену
    `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2903-2957`).

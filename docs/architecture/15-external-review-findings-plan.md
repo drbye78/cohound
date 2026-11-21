@@ -95,8 +95,8 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
    ключ несёт язык и поставщика (`core/util/cache.py:23-28`), единственная точка чтения и
    записи — `core/pipeline/search_log.py`.
 2. ~~**Оценщик не видит заголовков (C7).**~~ **ЗАКРЫТО** (L1b-2a плана 18): заголовок,
-   документ и контекст продолжения печатаются шапкой фрагмента (`prompt.py:299-317`), а
-   `RetrievedChunk` несёт `context_prefix` (`core/ports/vector_index.py:34`), который до
+   документ и контекст продолжения печатаются шапкой фрагмента (`prompt.py:508-543`), а
+   `RetrievedChunk` несёт `context_prefix` (`core/ports/vector_index.py:36`), который до
    этого терялся на обоих плечах ретривала — и markdown-, и абзацный чанкер генерировали
    его впустую. Состав входа **эмбеддера** по-прежнему `text` и объявлен
    (`chunking_spec.embed_input`), а не подразумевается.
@@ -174,7 +174,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | F1 | «потолка глубины нет, конечность — цикл+бюджет» — обоснование ложно; цепочка различных архивов упирается в рекурсию | ПОДТВЕРЖДЕНО (замером) | `archive_descent.py:813-818` (`_walk` рекурсивен, вне `try`), `:314-317` (RecursionError гасится в «не распознан»), `container_policy.py:195` | нет: максимум 3 уровня (`tests/pipeline/test_corpus_descent.py:374`) | М/Б | **P4** |
 | F2 | тест зависит от числа CPU хоста | ПОДТВЕРЖДЕНО (замер: `cpu_count=2` → `assert 2 == 3`) | `tests/pipeline/test_corpus_extract_pool.py:1958` — ныне `monkeypatch` `cpu_parallelism_cap` (на момент аудита вызова не было); режет `resources.py:441` | тест сам дефект | Г | **P4** |
 | F3 | 6 тестов проверяют **реальное** отсутствие `py7zr`/`rarfile`; с extra `extract-archives` они падают | ПОДТВЕРЖДЕНО (замер: 6 failed / 19 passed при подмене бэкенда) | `test_container_7z.py:36-38` (`_no_backend`), тесты `:46`,`:55`,`:68`, `test_container_rar.py:55,63,74` | — | Г | **P4** |
-| F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3293`), синхронно в фазе | только корректность (`tests/selfcheck.py:4143-4183`) | Д/Г | P4 |
+| F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`core/pipeline/corpus.py:3293`), синхронно в фазе | только корректность (`tests/selfcheck.py:4318`) | Д/Г | P4 |
 | F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:693-694`, `:621`; сравнить `container_policy.py:311` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
 | F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `core/adapters/extract_document.py:1080` (`FULL: None`), `core/cli/wiring.py:2421` (`initargs` воркера — без `document_timeout`), `core/edge/__main__.py:139` — `DoclingDocumentExtractor()` без `document_timeout`; guard только родительский (`core/pipeline/corpus.py:2980`: `extract_timeout=_extract_timeout`); `core/cli/wiring.py:2476` recycle | частично, только родительская сторона (`tests/pipeline/test_corpus_extract_pool.py:865-932`) | Д/М | P4 |
@@ -200,13 +200,13 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
-| C1 | ничья в RRF без `chunk_id` | ПОДТВЕРЖДЕНО для мёртвого модуля; **живой путь корректен** | мёртвый: `util/fusion.py` — **удалён `aa4185b`**, поэтому адрес строки не проверяется и не должен (запись описывает состояние до удаления; `_fuse_template` не выносил `chunk_id`); живой: `retrieve.py:312`,`:415` | живой покрыт (`test_retrieve.py:194-224`, `tests/selfcheck.py:413`) | Г | P5 |
+| C1 | ничья в RRF без `chunk_id` | ПОДТВЕРЖДЕНО для мёртвого модуля; **живой путь корректен** | мёртвый: `util/fusion.py` — **удалён `aa4185b`**, поэтому адрес строки не проверяется и не должен (запись описывает состояние до удаления; `_fuse_template` не выносил `chunk_id`); живой: `retrieve.py:312`,`:415` | живой покрыт (`test_retrieve.py:195-224`, `tests/selfcheck.py:413`) | Г | P5 |
 | C2 | `core/util/fusion.py` — мёртвый дубль, докстринг и `06` врут о подключении | ПОДТВЕРЖДЕНО (покрытие 52 %) | импортов в `core/` нет; `06-implementation-strategy.md:47` — «✅ удалён (`aa4185b`): мёртвый дубль» | единственный тест — `tests/selfcheck.py:356` | Г | P5 |
 | C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:165` | нет | М | **P2** |
 | C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ЗАКРЫТО `md-heading-5` (план 18): разрез по AST, перекрытия нет | `chunker_markdown.py:388` (`_pieces`), `:290` (`_absorb_tail`) | `test_split_does_not_break_words`, `test_adjacent_chunks_do_not_overlap`, `test_cut_prefers_line_boundary` (`test_chunker_markdown.py`) | Г | P4 |
 | C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | **ЗАКРЫТО `text-para-4`**: кусок — точный срез, `citation_quote` — подстрока документа | `chunker_text.py:248` (`TextChunker.chunk`), `:268` (`char_start`/`char_end`); P1/P4 = 0 на 194 документах (`2026-11-04-text-chunker-exact-slices.md`) | `test_chunker_text.py` (P1/P4), `test_corpus_chunk_offsets.py` | Г | — |
 | C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:90`,`:176`, `chunker_text.py:98` | нет | М | P4 |
-| C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | **ЗАКРЫТО** (L1b-2a плана 18): шапка фрагмента + `RetrievedChunk.context_prefix` | `prompt.py:299-317`, `core/ports/vector_index.py:34`, `retrieve.py:324` | `test_prompt.py` пинит **наличие** `heading:`/`context:`, `test_vector_npy.py`/`test_lexical_tantivy.py` — доезд контекста | М | **P2** |
+| C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | **ЗАКРЫТО** (L1b-2a плана 18): шапка фрагмента + `RetrievedChunk.context_prefix` | `prompt.py:508-543`, `core/ports/vector_index.py:36`, `retrieve.py:324` | `test_prompt.py` пинит **наличие** `heading:`/`context:`, `test_vector_npy.py`/`test_lexical_tantivy.py` — доезд контекста | М | **P2** |
 | C8 | лексический индекс: 4 поля с одним текстом, пересборка каждый прогон в temp, запрашивается только `stemmed` | ПОДТВЕРЖДЕНО → **закрыто** (`1e7fad9`: одно поле + `lexical_spec` в контракте) | `lexical_tantivy.py`, `core/pipeline/digests.py` (`lexical_spec`) | `test_lexical_tantivy.py`, `test_digests.py` | Д | P5 |
 | C9 | `index_npy` склеивает поля тем же разделителем, что и группы (латентно) | ПОДТВЕРЖДЕНО формально; сейчас не эксплуатируемо | `index_npy.py:123-132` vs `_GROUP_SEP` `:77` | нет | Г | P5 |
 | C10 | `index_format` не атомарен: окно между `rmtree` и `replace` | ПОДТВЕРЖДЕНО | `index_format.py:168-172` (докстринг `:102` обещает атомарность) | нет | Г | P5 |
@@ -349,7 +349,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 ### P1 — R7 на поисковом контуре (S1 + S5 + ось языка)
 
 - `wiring.build_search_adapter`/`resolve_and_build_search_adapter` — принимать `cache`
-  (объект уже есть в `core/cli/context.py:1880` и уже доходит до краулеров).
+  (объект уже есть в `core/cli/context.py:1881` — `resolve_content_cache` — и уже доходит до краулеров).
 - Одна точка чтения/записи — `external_search` (`search_log.py:293+`): miss → вызов
   адаптера + `put_json`, hit → список без вызова. **При hit бюджет не списывается** (иначе
   меняется `search_log` и через него наблюдение).
@@ -368,7 +368,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 `context_prefix`, состав входа эмбеддера станет таким же необъявленным входом, как сейчас
 `chunk_size`.
 
-- ✅ `core/pipeline/prompt.py:299-317` — в блок чанка печатаются путь заголовков, документ и
+- ✅ `core/pipeline/prompt.py:508-543` — в блок чанка печатаются путь заголовков, документ и
   контекст продолжения (C7 закрыт в L1b-2a плана 18).
 - ✅ Вопрос «эмбеддить `context_prefix + text` или нет» решён явно: состав входа —
   `EMBED_INPUT_FIELDS = ("text",)` (`core/adapters/chunker_family.py:101`), и он **объявлен**
@@ -443,8 +443,8 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ P0 — все перечисленные обещания приведены к коду: `core/util/cache.py:1-12` (SERP-кэш
   теперь правда), `06-implementation-strategy.md:47` (`fusion` удалён), `AGENTS.md`
   (спуск: итеративный обход, цепочка 5000), `core/util/document_probe.py:11-14` (окна вместо
-  «по шапке»), `02-subsystems.md:611-623` (шапка фрагмента), `core/adapters/llm_local.py:18-29`.
-  **Остаток P0 закрыт 08.11.2026:** `core/adapters/llm_local.py:22` больше не приписывает
+  «по шапке»), `02-subsystems.md:611-623` (шапка фрагмента), `core/adapters/llm_local.py:12-29`.
+  **Остаток P0 закрыт 08.11.2026:** `core/adapters/llm_local.py:31-40` больше не приписывает
   «достаточность» `validate.py` — там названы форма ответа, `source_id` и цитата-подстрока,
   а достаточность отделена явно (V1).
 - ✅ P1 — S1+S5+ось языка: `core/cli/wiring.py:761,764,765`, `core/util/cache.py:23-28`,
@@ -529,8 +529,8 @@ absence-модель, scoring и определения Coverage/Comparability �
 | V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно; аномалии класса утверждения нет | `cohound-spec-v2.md:669` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `core/pipeline/validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `support_subject_overlap` + артефакт `outputs/support_quality.yaml` есть (`core/pipeline/report.py:4078`). Лжёт один документ — `core/adapters/llm_local.py:22` приписывает шаг 3 `validate.py`; `02-subsystems.md:640` говорит правду («НЕ реализовано как шаг эшелона») | М | P0 + P6 |
 | V2 | Точность оценщика неизмерима | **ПОСЫЛКА СНЯТА 28.10, замер не выполнен**: эталон пересобран и объявлен пригодным, поэтому «неизмерима» больше не верно — но и «измерена» не верно | `packages/ru-pg-dbms/sources/golden_status.yaml:1-2` `state: present`; loader — `core/pipeline/golden_status.py:523` `read_golden_status` → `state=present, declared=True, comparison_available=True` (проверено вызовом). `golden.csv` = **905 строк = 181 параметр × 5 продуктов** (tier: 750 `full` / 155 `fast`; ожидание ✅500 / ⚠️123 / ❌282), в т.ч. **181 `jatoba`** (было 0) и новый 5-й продукт `digital_q_database`. Ветка отказа жива и читается (`core/pipeline/evaluator_benchmark.py:116,412,517`), но больше не срабатывает. **Сделано 07.11.2026:** первый прогон на срезе нового набора — 50 ячеек × 3 продукта с корпусом (`2026-11-07-reasoning-effort-matrix.md`): κ **0.008–0.056** (все CI накрывают ноль), `fabricated_support` 0, `abstention.absent_rate` 0.0 — модель ни разу не выдала `❌` при 9 golden-`❌`. **Не сделано:** полный набор (905 строк / 5 продуктов) не прогнан — κ, confusion, abstention по `postgrespro`/`tantor` невозможны без прогона с краулом, а до 07.11.2026 команда на реальном прогоне не измеряла ничего (сверка чанков шла по композиции `cb_…` вместо партиции `pb_…`, `cf28a89`) — то есть κ по этому эталону посчитана впервые | М | P6 |
 | V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет; на 07.11.2026 замерено заново | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `max_retries` — объявленный вход (`evaluation_policy`), цикл публикует **первый валидный** сэмпл (`core/pipeline/evaluate.py:3063`). **Замер 07.11.2026** (`2026-11-07-llm-concurrency-scaling.md`): шумовой пол — **2 из 24 (8.3 %)** при `--repeats 2` на тех же входах, то есть согласие **91.7 %** против порога R7 ≥95 % (`cohound-spec-v2.md:831`, определение §11.7 — `:862`). Это **факт замера, а не вердикт**: порог R7 определён для двойного прогона без живого ре-фетча, здесь — повтор на 24 ячейках одной сборки; 4.2 % (25.10) и 8.3 % (07.11) — два разных среза, оба названы. **Решение владельца 08.11.2026:** считать порогом и пересмотреть **измерением** (полный benchmark на 905 ячейках), а не менять правило | М | P2 |
-| V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:84` `DEFAULT_DECODER="none"` достижим в проде (`core/cli/wiring.py:1136`); `llm_local.py:482-495` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:825` `Decoder | None`, в `status-dictionary.yaml` ключа не было); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
-| V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:94`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:38-45`), в payload нет (`llm_local.py:617-638`), `build_evaluator_llm` не читает (`core/cli/wiring.py:1329-1471`), читает `build_discovery_llm` (`:1116-1208`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
+| V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:132` `DEFAULT_DECODER="none"` достижим в проде (`core/cli/wiring.py:1136`); `llm_local.py:1206-1219` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:843` `Decoder | None`, в `status-dictionary.yaml` ключа не было); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
+| V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:94`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:56-65`), в payload нет (`llm_local.py:617-638`), `build_evaluator_llm` не читает (`core/cli/wiring.py:1329-1471`), читает `build_discovery_llm` (`:1116-1208`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
 | V6 | Внешний LLM-хост в закоммиченном конфиге | **ПОДТВЕРЖДЕНО, и хуже аудита** | `config/deploy.yaml:89` `https://plusvibeapi.ru` при шапке того же файла `:13-14` «внутреннего периметра, внешние хосты не используются»; `core/cli/commands/run.py:534` `load_deploy_config(None)` безусловно на каждом прогоне, флага `--deploy` у `run` нет; `base_url` **не входит ни в `llm_scenarios`, ни в контракт** (`ScenarioBinding` — 11 полей, endpoint только как `endpoint_kind: api`); поведение запинено тестом `test_deploy.py:812-831`; ссылка «Д-36» в `deploy.yaml:77` не имеет адресата в `docs/` | Б/М | **P0 + P2** |
 | V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО** → **закрыто** (`4ee192f`: `PromptArchive` пишет `runs/{run_id}/prompts/{prompt_hash}.json` для исполненных промптов; замер — 117 файлов, 2.93 MiB на 119 параметров); «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** На момент находки: `save_prompt` не импортировался в `evaluate.py`; в `runs/ru-pg-dbms-3edf2b06097c/` каталога `prompts/` не было; три документа обещали артефакт. Сейчас: `PromptArchive` пишет каталог из фазы (замер на 119 параметрах jatoba — 117 различных промптов, 2.93 MiB), документы исправлены. Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`core/pipeline/evaluate.py:1186-1240`), коллизий в прогоне нет (104/104 различных). **06.11.2026:** на прогоне `ru-pg-dbms-c2e7b860ac17` узость дала 3 реальных коллизии (`jatoba` `xlsx_056`/`xlsx_057` и др.), и файл с адресом по `prompt_hash` терял второй промпт (`prompt_hash_conflict`); адрес артефакта заменён на `sha256(text)` — формула §5 при этом не менялась | М | P6 |
 
@@ -560,10 +560,10 @@ absence-модель, scoring и определения Coverage/Comparability �
   (`core/pipeline/evaluate.py:893`), поэтому «сколько раз переиздавали» восстанавливается из
   `logs/llm_calls.jsonl` (07.11.2026: 1 187 строк), а не из ячейки.
 - ✅ V4 — `Decoder` как `StrEnum` (`core/domain/enums.py:431`), валидация слота
-  (`core/config/deploy.py:825`), ключ в словаре (`docs/status-dictionary.yaml:268`), а в
+  (`core/config/deploy.py:843`), ключ в словаре (`docs/status-dictionary.yaml:268`), а в
   провенанс уходит **фактический механизм провода**: `decoder_wire_type`
   (`core/adapters/llm_local.py:373`) → `llm_scenarios.constrained_decoding`
-  (`core/cli/execution_axes.py:876`), не запрошенная метка.
+  (`core/cli/execution_axes.py:1135`), не запрошенная метка.
 - ✅ V5 — `max_tokens` доезжает до провода (`core/adapters/llm_local.py:687-689`), `finish_reason`
   читается и едет в `LLMResponse` (`:605`), поэтому обрезание отличимо от невалидного JSON.
 - ✅ V6 — `rnd_endpoint` объявлен и виден: `core/cli/wiring.py:1142,1161`, `core/cli/commands/run.py:1380`,
@@ -597,8 +597,8 @@ absence-модель, scoring и определения Coverage/Comparability �
 - ✅ 4 — **закрыто 08.11.2026 как объявленный вход**: порог стал константой
   `EVALUATION_MIN_RETRIEVAL_SCORE: float | None = None`
   (`core/pipeline/evaluation_policy.py:48`), проведён через `evaluate_batch`
-  (`core/pipeline/evaluate.py:3547`) и `evaluate_phase` (`:3827`, дефолт — та же константа),
-  включая путь повтора (`:4824`); проверка порога осталась в `validate.py:374-381`.
+  (`core/pipeline/evaluate.py:4224`) и `evaluate_phase` (`:4542`, дефолт — та же константа),
+  включая путь повтора (`:6572`); проверка порога осталась в `validate.py:374-381`.
   Значение **не выдумано**: при `None` аномалия недостижима, а `evaluation_policy_spec()`
   остаётся байт-в-байт `{"max_retries": 2}` — ключ появляется **только** когда порог задан
   (`:50-51`), иначе `run_id` поехал бы у всех. Включение порога — `execution_change`
@@ -781,8 +781,8 @@ absence-модель, scoring и определения Coverage/Comparability �
 - 7 ✅ названо — регламент отнёс `prompt_template` к `execution_versions`
   (`cohound-spec-v2.md:907,902`). ❔ отчёт замера (`2026-10-27-support-not-about-subject.md:84`)
   не обновлён.
-- 8 ✅ разведены и оба сделаны: P6 — `core/pipeline/digests.py:206` (`evaluation_policy`),
-  P7 — `core/pipeline/prompt.py:117`.
+- 8 ✅ разведены и оба сделаны: P6 — `core/pipeline/digests.py:233` (`evaluation_policy`),
+  P7 — `core/pipeline/prompt.py:175`.
 - 9 ✅ **исполнено 08.11.2026**: решение «аномалия, а не понижение статуса» доведено до кода —
   `anomaly_kind=unrelated_support` в `nda_questions.csv` (`core/pipeline/report.py:2210`),
   видов стало **шесть**; замер предмета остаётся в `outputs/support_quality.yaml`, а маркерная
@@ -866,7 +866,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 - ➖ **A1-профиль публикуемости — реализован**, строка выше устарела: класс и разложение
   неизвестности считаются (`core/domain/scoring.py:1114`), классы
   `PUBLISHABLE`/`PUBLISHABLE_WITH_CAVEAT`/`ANALYTICAL_ONLY`/`NOT_COMPARABLE` объявлены
-  (`core/domain/enums.py:1172-1231`), причины `UnknownCause` — `core/domain/enums.py:1176-1234`,
+  (`core/domain/enums.py:1162-1196`), причины `UnknownCause` — `core/domain/enums.py:1255-1290`,
   артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:3977`, запись — `:3225`), в Ш8 :3328`), в Ш8 —
   `core/pipeline/compute.py:337`.
 - ✅ **числа CI сверены 07.11.2026**: полный прогон — **6830 passed / 6 skipped**, `selfcheck`
@@ -945,8 +945,8 @@ retrieval/RRF; валидация и отрицания; сборка индек
 | P2 | партиция собирается целиком в памяти: `build(chunks, vectors, meta)` требует все векторы сразу | ПОДТВЕРЖДЕНО; **цена пересчитана**: накопитель — `list[list[float]]` (`embed_local.py:254` `matrix.tolist()`, `corpus_index.py:594`), ≈32 КиБ на 1024-мерный вектор, а не 4 КиБ. Крупнейшая партиция 108 614 чанков ⇒ ≈3.4 ГиБ накопителя при матрице 212 MiB fp16 | `ports/index_builder.py:59-64`, вызов `corpus_index.py:859`, признание ограничения `corpus_index.py:73-75` | **НЕ СДЕЛАНО, и правильно**: сначала замер пика RSS Pass B на 10k/50k/100k/200k (план 24 ставит это в очередь). Потоковый `build` — после числа |
 | P3 | R2 не сверяет сборки двух плеч; RRF молча отдаёт провенанс dense | ПОДТВЕРЖДЕНО | `retrieve.py:477` (`build_id` только с dense), `:258-278` (перезапись без сверки) — до правки; штатный прогон смешать не мог (`wiring.py:387,436` — один `build_id`), но контракт допускал | **ИСПРАВЛЕНО**: `RetrievalBuildMismatch` (`retrieve.py:94-116`), сверка сборок до поиска (`:421-429`), сверка `content_hash`/`product_id` при слиянии (`:258-278`); тесты `test_retrieve.py:249-313`. Неизвестная сборка отказом не считается (A3) |
 | P4 | слияние нескольких запросов — `max(score)`, согласованность формулировок не используется | ПОДТВЕРЖДЕНО | `retrieve.py:138` (`MAX_QUERIES=3`), `:1205-1210`; атрибуция теряется: `RetrievedChunk` без поля, `retrieval_params_json` = `{profile, cutoff_K}` | **НЕ СДЕЛАНО**: сравнение `max` против RRF-между-запросами требует retrieval-golden с набором формулировок и `R3`-разметки. Код метрик переиспользуем (`util/retrieval_eval.py:31-80`), golden 18 пар — по одному запросу |
-| P5 | проверяется подлинность цитаты, но не её доказательная сила (entailment) | **ЧАСТИЧНО**: шаг (3) объявлен регламентом (§7.1: «достаточность… over-claim → аномалия»), лексическая половина исполняется | `evaluate.py:1646-1649` (`unrelated_support`: пересечение стемов, включён для `✅`/`⚠️`, `:3238-3242`), публикуется `support_quality.yaml`; неисполнение названо в `02-subsystems.md:652-666` | **НЕ СДЕЛАНО как эшелон**: `EvidenceClaim` + проверка следования — смена модели данных и `methodology_version`; до замера шума на 30–50 параметрах неотличима от «ещё одного вызова LLM». Порядок: замер → решение |
-| P6 | `❌` заявленное `explicit` без маркера отрицания публикуется, случай не агрегируется | ПОДТВЕРЖДЕНО | `evaluate.py:1926-1931` (маркеров нет → берётся первая цитата + заметка), `:1972-1985` (класс всё равно `EXPLICIT`); заметка видна в `cells.validation_notes`, но агрегата не было | **СДЕЛАНО как наблюдение, не гейт**: `support_quality.yaml:denial_without_markers` (`support_quality.py:87-152`, строка оператора `:262-269`), тест `test_support_quality_artifact.py:241-313`. Гейт не вводился — шум не измерен |
+| P5 | проверяется подлинность цитаты, но не её доказательная сила (entailment) | **ЧАСТИЧНО**: шаг (3) объявлен регламентом (§7.1: «достаточность… over-claim → аномалия»), лексическая половина исполняется | `evaluate.py:1694` (`_subject_stems`) + `:1758` (`support_subject_overlap`), включён для `✅`/`⚠️` — `:3919`, публикуется `support_quality.yaml`; неисполнение названо в `02-subsystems.md:652-666` | **НЕ СДЕЛАНО как эшелон**: `EvidenceClaim` + проверка следования — смена модели данных и `methodology_version`; до замера шума на 30–50 параметрах неотличима от «ещё одного вызова LLM». Порядок: замер → решение |
+| P6 | `❌` заявленное `explicit` без маркера отрицания публикуется, случай не агрегируется | ПОДТВЕРЖДЕНО | `evaluate.py:2131-2140` (маркеров нет → берётся первая цитата + заметка), `:1972-1985` (класс всё равно `EXPLICIT`); заметка видна в `cells.validation_notes`, но агрегата не было | **СДЕЛАНО как наблюдение, не гейт**: `support_quality.yaml:denial_without_markers` (`support_quality.py:87-152`, строка оператора `:262-269`), тест `test_support_quality_artifact.py:241-313`. Гейт не вводился — шум не измерен |
 | P7 | `revision` весов необязателен ⇒ `model_id` может не описывать байты, а `pb` считать их одинаковыми | ПОДТВЕРЖДЕНО | `embed_local.py:143-144,155`, `wiring.py:315` (ревизия только из env и только для lite), `EmbedConfig` без поля (`config/deploy.py:653-682`) | **ОТКРЫТО**: `revision` в `deploy.yaml` + `EmbedConfig` — правка вашего конфига, ждёт решения |
 | P8 | «quality gates G1–G7» (extraction → aggregate) | **НЕ ПРИНЯТО как предложение**: имена `G1–G4` заняты approval-гейтами (G4 = публикация) | `AGENTS` §7, `07-deployment-topology.md` | Если вводить — `Q1…Q7`; и до evidence-level golden это набор метрик без материала |
 

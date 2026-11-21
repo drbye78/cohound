@@ -396,8 +396,8 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 `core/pipeline/corpus_coverage.py:194` + источник `core/pipeline/corpus_coverage.py:695`
 (`iter_crawl_session_items` — сеанс, не снятия);
 `core/domain/invariants.py:293` (`check_absence_coverage` + новый `check_absence_dated`);
-зеркало в `core/pipeline/report.py:2469` (`collect_crawl_truncation_anomalies`)/
-`core/pipeline/report.py:2356` (`collect_absence_undated_anomalies`);
+зеркало в `core/pipeline/report.py:2523` (`collect_crawl_truncation_anomalies`)/
+`core/pipeline/report.py:2410` (`collect_absence_undated_anomalies`);
 `docs/status-dictionary.yaml` (токен `absence_undated`;
 `reuse_unconfirmed` больше не объявлен в коде (словаря он не касался — жил константой
 `core/pipeline/evaluate.py`), но строки старых прогонов читаются как есть);
@@ -646,13 +646,13 @@ run-DB утверждала «партиция на диске», хотя `comm
 плана, — та, что действовала на момент написания. 20.11.2026 отказ `robots.txt` был
 разделён на «подача закрывает по адресу» / «усечение не закрывает», а 21.11.2026 решение
 владельца сняло вопрос совсем: **`robots` — объявленная граница сайта, а не потеря**, и
-корень исчерпан без неё: `_root_capture_complete` (`core/pipeline/corpus.py:1692`) — это
+корень исчерпан без неё: `_root_capture_complete` (`core/pipeline/corpus.py:1693`) — это
 `not incomplete and observed` (0.7.0: `incomplete = truncated or skipped_documents`,
 `observed` — прочитана страница либо был отказ `robots`). Поэтому писатель
 снятия обязан знать техническую неполноту (`truncated`, `skipped_documents`) и
 наблюдённость корня, а не должен ни вычитать отказы `robots`, ни переписывать `complete`
 после подачи
-(`_recompute_root_captures`, `core/pipeline/corpus.py:1705`, публикует лишь разрез
+(`_recompute_root_captures`, `core/pipeline/corpus.py:1724`, публикует лишь разрез
 `resolved_manually`). Подача остаётся входом **следующего** прогона и не подчиняется ни
 расписанию, ни `refresh_policy` (`13-manual-artifacts.md` §3.3).
 

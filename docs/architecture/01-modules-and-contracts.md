@@ -366,7 +366,7 @@ def batched_search(index: VectorIndexPort,
 
 **`search_many` и `batched_search` — батч-путь, а не второй контракт.** Порт объявляет
 `search_many`, но реализации без своего батч-пути его не пишут: `batched_search` берёт метод
-через `getattr` и откатывается на цикл `search` (`core/ports/vector_index.py:117`). Смысл батча —
+через `getattr` и откатывается на цикл `search` (`core/ports/vector_index.py:121`). Смысл батча —
 прочитать партицию **один раз на набор запросов**; там, где реализация этого не умеет, вызовы
 эквивалентны поштучным, поэтому расширение контракта не ломает ни одну существующую реализацию
 (структурная типизация). `pipeline` вызывает только `batched_search` — одна точка вызова.
@@ -942,8 +942,8 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:295` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
 `core/domain/models.py:1776`; структура `ProtocolExhaustion` — `core/domain/models.py:1612`;
-политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2847` (`max_retries`), цикл
-`core/pipeline/evaluate.py:3163`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:3377` (`max_retries` в
+`evaluate_cell`), цикл `core/pipeline/evaluate.py:3771`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
 `validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
 строит вызывающий (`core/pipeline/evaluate.py:3038`).

@@ -456,8 +456,9 @@ M0 должен давать **сквозной вертикальный сре�
   ✅ закрыто — батч-запись: `save_cells_batch` / `add_evidence_batch` через `executemany`
   (`core/store/sqlite_store.py:542`, `:779`).
 - Формат и версионирование `prompt_hash` при смене шаблона (итерация 2).
-  ✅ закрыто — контракт `H(template_version, rule, absence_rule, sorted(chunk_ids))`
-  (`core/pipeline/prompt.py:35`); машинный токен «тот же hash — другой текст» — `:79`.
+  ✅ закрыто — контракт `H(template_version, rule, absence_rule, group, module,
+  semantics, param_class, tool_instructions, table_material, sorted(chunk_ids))`
+  (`core/pipeline/prompt.py:50`); машинный токен «тот же hash — другой текст» — `:122`.
 - Механизм кэша SERP/корпуса для R7 — решён как глобальный content-addressed (ADR 0016, итерация 3 A.2).
   ✅ сделано — `core/util/cache.py:133` (`ContentAddressedCache`, ключи `http_key`/`serp_key`, `:83`/`:98`).
 - Где живёт реестр экспериментов R0/R1/R2 и как связывается с `index_build_id` (итерация 2).

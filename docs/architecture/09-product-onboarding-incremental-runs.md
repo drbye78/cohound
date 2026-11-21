@@ -171,7 +171,7 @@
 | §4.4 | ✅ сделано | файловый lock пакета: `core/util/package_lock.py` (`flock`, держатель в JSON, перехват только мёртвого локального pid), проводка — `run`, `crawl run\|resume\|restart`, `package state adopt` |
 | §4.5 | ➖ снято решением | оси `crawl.retention_days` и статуса `evicted` **не будет**: бессрочное хранение — субстрат evidence, размер публикуется замером |
 | §4.6 | ✅ сделано | `hound package state adopt\|show` (`core/pipeline/state_adopt.py`), запись только через `ProductStatePort`; `state_not_adopted` в `run --update`. **Ограничение:** adoption наполняет субстрат, но не включает `incremental` — нужен complete-baseline, которого у пакета нет |
-| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:530`), провенанс спуска — write-through (§4.7) |
+| §4.7 | ✅ сделано | чанки durable в run DB на границе **продукта** (`_persist_chunks`, `core/pipeline/corpus.py:531`), провенанс спуска — write-through (§4.7) |
 | §5 | ✅ сделано | `resolve_product_modes`/`_mode_for` (`core/pipeline/onboarding.py:277`, `core/pipeline/onboarding.py:310`), вызов — `preflight` из `core/cli/commands/run.py:917`, `core/cli/commands/run.py:1052` |
 | §6.1 | ✅ сделано | onboarding — CLI-префлайт, **не** фаза |
 | §6.2 | ✅ сделано | `derive_run_id` без состава продуктов (`core/pipeline/plan.py:265`) |
@@ -844,7 +844,7 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 | **O2** | Продукт с `mode in (new, full)` не может завершить corpus с `expected_sources = 0`; это `failed`, не пустой `ok`. `complete` решается **снятиями объявленных корней** (`CorpusCoverage.roots`), а не `observed_sources`: проход без сети удостоверен датированным обходом, а `observed_sources` — диагностика (план 20 F1) | `build_corpus` (`derive_corpus_coverage`) | as-built |
 | **O3** | Для каждого продукта плана в прогоне существует строка `corpus_coverage`; отсутствие — аномалия, не «неизвестно» | `corpus` (`_persist_corpus_coverage`) + `evaluate` (`_coverage_for`) | as-built |
 | **O4** | `doc_version_id` детерминирован от `(product_id, content_hash, extractor_version, level)`; durable `chunk_id` — от `(doc_version_id, chunker_version, chunk_no)`; run-level `chunk_id` — от `(product_id, doc_version_id, chunk_no)` | `corpus` | **as-built**: `doc_version_id` — да (`core/pipeline/incremental.py:280`); durable-строка чанка — да (`core/pipeline/incremental.py:294`); run-level `chunk_id` — да, `f"{product_id}:{doc_version_id}:{chunk_no}"` (`core/pipeline/corpus_index.py:182`, вызовы — `core/pipeline/corpus_ingest.py:1578`, `core/pipeline/extract_consume.py:508`). Пространств идентификаторов **три**, и run-level намеренно не несёт `chunker_version`: грамматика `source_id` отдаёт 4-й сегмент под `build_id` (`core/util/ids.py:57`), а в одной прогонной БД `chunker_version` — константа контракта (§14.6 п. 11) |
-| **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate` (`_with_doc_versions`) / `carry_forward` | **as-built**: колонка `cell_evidence.doc_version_id` есть (объявлена в `CREATE TABLE`, `core/store/sqlite.py:479`; шим `_ensure_columns` удалён), адрес выводится из `chunk_id` ретривнутого чанка (`core/pipeline/evaluate.py:2938`, вызов — `core/pipeline/evaluate.py:3204`, единый эшелон для живого ответа и хита `eval_cache`; разбор — `core/util/ids.py:98`), перенос проверяет адрес **дополнительно** к `content_hash` (`_evidence_chain_valid`, `core/pipeline/carry_forward.py:357`). Остаток назван точно: `registry`- и `inheritance`-evidence идут с `doc_version_id = NULL` (у них нет чанка-версии — `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` = «не записано», а не «любая версия» |
+| **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate` (`_with_doc_versions`) / `carry_forward` | **as-built**: колонка `cell_evidence.doc_version_id` есть (объявлена в `CREATE TABLE`, `core/store/sqlite.py:479`; шим `_ensure_columns` удалён), адрес выводится из `chunk_id` ретривнутого чанка (`core/pipeline/evaluate.py:3030`, вызов — `core/pipeline/evaluate.py:3633`, единый эшелон для живого ответа и хита `eval_cache`; разбор — `core/util/ids.py:98`), перенос проверяет адрес **дополнительно** к `content_hash` (`_evidence_chain_valid`, `core/pipeline/carry_forward.py:357`). Остаток назван точно: `registry`- и `inheritance`-evidence идут с `doc_version_id = NULL` (у них нет чанка-версии — `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` = «не записано», а не «любая версия» |
 | **O6** | `carried`-ячейка допустима только при совпадении `cell_reuse_key`, полном покрытии и неизменном **retrieved-наборе этой ячейки** (per-cell, 29.10.2026; не doc-set продукта) | `carry_forward_cell` (§10.2) | **as-built** (`core/pipeline/carry_forward.py`) |
 | **O7** | `❌` публикуется только при `coverage.complete` (или человеческой аттестации); `freshness != stale` — ➖ снято решением (поля нет) | `evaluate` (`_enforce_absence_coverage` → `check_absence_coverage`); класс отрицания решает, а не одна полнота (§11.2) | частично: `coverage.complete` + классы — as-built; `freshness` **не существует** (§11.1) |
 | **O8** | `index_build_id` прогона = `composition_id`; каждая партиция иммутабельна и адресуется `partition_build_id` | `composition` / `index_npy` | as-built |
@@ -864,7 +864,7 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 
 > **Статус раздела: ✅ сделано во всех пунктах (§4.1–§4.7); открыт только писатель двух
 > таблиц `state.db`.** `state.db` v12 с 20 таблицами; `cell_measurement` пишет Ш6
-> (`state.record_cell_measurements`, `core/pipeline/evaluate.py:4343`; adoption —
+> (`state.record_cell_measurements`, `core/pipeline/evaluate.py:5086`; adoption —
 > `core/pipeline/state_adopt.py:1690`), `profile_attestation` пишет **человек**
 > (`hound package profile attest`, §6.9). Писателя **по-прежнему нет** у `attestation`
 > (cell-level, I2b) и `cycle` — `grep -rn "INSERT INTO cycle" core/` пусто, adoption
@@ -1272,12 +1272,12 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 
 > **Статус: ✅ сделано; схема версионируется (`SCHEMA_VERSION = "3.21.0"`), аддитивных
 > `ALTER TABLE` нет ни одного (волна S плана 17).** В `runs` есть
-> `cycle_id`/`previous_run_id`/`change_class` (`core/store/sqlite.py:201-203`),
-> `run_scope`/`product_plan_json` (`core/store/sqlite.py:206-207`), `embed_device` (`core/store/sqlite.py:186`) и таблица `run_product`
-> (`core/store/sqlite.py:699`; писатель — корпус, `save_run_product` —
+> `cycle_id`/`previous_run_id`/`change_class` (`core/store/sqlite.py:234-236`),
+> `run_scope`/`product_plan_json` (`core/store/sqlite.py:239-240`), `embed_device` (`core/store/sqlite.py:212`) и таблица `run_product`
+> (`core/store/sqlite.py:787`; писатель — корпус, `save_run_product` —
 > `core/pipeline/corpus.py:3878`, обёртка `core/pipeline/corpus_persist.py:699`;
-> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2406`).
-> `runs.cohort_digest` и `runs.seeds_digest` **есть** (колонки `core/store/sqlite.py:172-173`)
+> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2460`).
+> `runs.cohort_digest` и `runs.seeds_digest` **есть** (колонки `core/store/sqlite.py:198-199`)
 > и заполняются из манифеста; они дублируют слагаемые `run_id` для диагностики diff, а
 > цепочка циклов живёт в `state.db.run_lineage` (§12.3). `RunManifest` несёт
 > `cycle_id`/`previous_run_id`/`change_class` и `run_scope`/`product_plan`.
@@ -1542,7 +1542,7 @@ PK. Запись в конце фазы (`core/pipeline/corpus.py:5821-5840`) о
 стадиям, а не по продуктам-целиком: события `product_end` / `product_index_end` несут
 `fetch_wait_s`, `extract_wait_s`, `chunk_s`, `embed_s`, `build_s`, `overhead_s`
 (`_CorpusStageTimings`, `core/pipeline/corpus_index.py:259`; агрегат —
-`core/pipeline/corpus.py:1224`), и то же попадает в `metrics.json` как
+`core/pipeline/corpus.py:1225`), и то же попадает в `metrics.json` как
 `resources.stage_timings` (`ResourcesObservation.stage_timings`,
 `build_resources_block`). Это **наблюдаемость, а не контракт**: значения не входят ни в
 `execution_contract_digest`, ни в `pb`, ни в `content_digest` (доказано пинами в
@@ -2169,7 +2169,7 @@ def evaluate_phase(ctx):
 ### 6.5. Статус прогона и продукта (as-built)
 
 > **Статус: ✅ сделано (граница A).** Per-product статус **в прогоне** пишется строкой
-> `run_product` (`RunProductStatus`, DDL — `core/store/sqlite.py:699`; писатель — корпус,
+> `run_product` (`RunProductStatus`, DDL — `core/store/sqlite.py:787`; писатель — корпус,
 > `core/pipeline/corpus.py:3878`; обёртка — `core/pipeline/corpus_persist.py:699`; читатель — отчёт), а итоговый статус измерения —
 > снимком `state.db.product_snapshot` (`record_run_outcome`). Это две разные величины, а не
 > дубль: строка `run_product` несёт статус на границе `corpus`, снимок — результат
@@ -2856,7 +2856,7 @@ products:
 **`extractor_version` — не константа: в неё входит устройство (P9).** Строка имеет вид
 `docling-doc-4:<level>/<device>/docling-<build>/<policy>/<finalize>`
 (`core/adapters/extract_document.py:349-385`), где
-`<device>` — объявленная ось `crawl.pdf_device` (`cpu|cuda`, `core/domain/enums.py:562`,
+`<device>` — объявленная ось `crawl.pdf_device` (`cpu|cuda`, `core/domain/enums.py:628`,
 резолв — `resolve_pdf_device` в `core/pipeline/crawl_frontier.py`). Поэтому `pb` различает
 `cpu` и `cuda` **явно**, а не через «повезло/не повезло с железом»; сама ось входит в
 `run_id` через `extractor_stack` (§12.5), то есть `cpu↔cuda` — `execution_change`, а не
@@ -3387,7 +3387,7 @@ for param in plan.params:
 
 **Кэш без объявленных условий не включается.** Если `eval_cache` передан, а
 `eval_conditions` — нет, `evaluate_cell` поднимает `ValueError`
-(`core/pipeline/evaluate.py:3193-3202`): молчаливый откат к «кэш без правил» вернул бы ровно ту
+(`core/pipeline/evaluate.py:3571-3580`): молчаливый откат к «кэш без правил» вернул бы ровно ту
 ошибку, которую правка закрывает.
 
 **Формат 1 читается как промах**, и это **желаемое** поведение: конверт лежит под другим
@@ -3813,7 +3813,7 @@ diff — инкрементальность была полезна только
 **Реализовано (методология 2.3.0).**
 
 - `execution_contract_digest` — отпечаток **условий измерения**, без контента. Ровно
-  **36 полей** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
+  **37 полей** (`EXECUTION_CONTRACT_FIELDS`, `core/pipeline/digests.py`) — состав проверяется
   механически (`len(EXECUTION_CONTRACT_FIELDS)`), а не по памяти:
 
   | Группа | Поля |
@@ -4089,17 +4089,37 @@ golden**.
 аддитивных `ALTER TABLE` нет, все колонки объявлены в `CREATE TABLE`, а файл прежней
 версии отвергается гейтом (`_reject_foreign_schema`) и пересоздаётся оператором:
 
-- `run_product` (граница A, `core/store/sqlite.py:699`);
+- `run_product` (граница A, `core/store/sqlite.py:787`);
 - `runs.{cycle_id, previous_run_id, change_class, run_scope, product_plan_json, embed_device}`;
 - `corpus_docs.{http_status, reuse_kind}`;
 - `corpus_doc_version` (таблица `doc_version_id → doc_id`);
 - `cells.{measurement_origin, carried_from_run_id, cell_reuse_key}` (волна 2);
 - `cell_evidence.doc_version_id` (O5, §3.3);
 - `runs.{cohort_digest, seeds_digest}` — 30.10.2026, закрывает названный предел диагностики
-  межциклового diff (§12.5): это были **единственные два** поля
+  межциклового diff (§12.5): на ту дату это были **единственные два** поля
   `EXECUTION_CONTRACT_FIELDS`, которых не было ни в таблице, ни на `RunManifest`, поэтому
   `report` при `execution_change` не мог назвать изменившийся компонент и честно писал
-  «предел диагностики: причина не выдумывается (A3)».
+  «предел диагностики: причина не выдумывается (A3)». Колонки заведены — **этот** пробел
+  закрыт; пробел **класса** — нет.
+
+**Тот же предел диагностики сегодня — 12 из 37 полей** (замер 22.11.2026:
+`set(RunManifest.model_fields)` против `EXECUTION_CONTRACT_FIELDS` — `core/domain/models.py`
+и `core/pipeline/digests.py`). Манифест не несёт `query_lang`, `extractor_stack`,
+`embed_precision`, `embed_spec`, `prompt_template`, `chunking_spec`, `evaluation_policy`,
+`lexical_spec`, `render_modes_digest`, `passports_digest`, `baselines_digest`,
+`baseline_facts_digest`. Из 15 полей, отсутствующих по имени, три восстановимы и потому в
+счёт не входят: `cutoff_K` живёт на манифесте как атрибут `retrieval_cutoff_K`, а
+`serp_rounds`/`serp_mode` читаются из провенанса контура (`_CONTRACT_FIELD_GETTERS`,
+`core/pipeline/report.py:2935`).
+
+Следствие — **граница диагностики, а не «поля совпали»**: `hound diff` видит, что условия
+измерения разошлись (`execution_contract_digest`), но какое именно из этих 12 полей
+изменилось — не называет и печатает «предел диагностики». Свести это к нулю правкой
+документа нельзя: это решение о схеме (колонки в `runs` + поля `RunManifest`), и оно
+принимается отдельно. Со стороны прибора тот же факт назван в
+`docs/architecture/28-evaluator-semantics-and-tools.md` §10.5:
+`scripts/measure_tool_profile.py` публикует эти 12 полей **отдельной строкой**, чтобы
+«не сверено» не читалось как «совпало».
 
 **Снято как неактуальное** (решение 30.10.2026, обоснование — по каждому полю):
 
@@ -4407,7 +4427,7 @@ state/state.db                                 # durable-состояние па
    в коде отсутствуют; остаётся только `_product_content_token` для отпечатка содержимого.
 3. `_persist_corpus_coverage` (`core/pipeline/corpus.py`) — ✅ **реализовано**: строка пишется
    для **каждого** продукта плана, включая zero-source (см. §11.1/§11.3).
-4. `_coverage_for` (`core/pipeline/evaluate.py:2435`) — ✅ **реализовано**: `None` для
+4. `_coverage_for` (`core/pipeline/evaluate.py:2610`) — ✅ **реализовано**: `None` для
    продукта плана даёт synthetic zero-source строку (`reason=coverage_missing`,
    `core/pipeline/evaluate.py:2445`), которая запрещает `❌` и даёт failed-ячейки, а не «покрытие неизвестно».
 5. `load_effective_seeds` (`core/pipeline/onboarding.py:146`) — ✅ **реализовано**:
@@ -4578,7 +4598,7 @@ state/state.db                                 # durable-состояние па
 | Этап | Что | Риск | Ценность | Статус |
 |---|---|---|---|---|
 | **0. Контракты** | `seeds.yaml` schema, `ProductStatePort`, enum'ы, `state.db` DDL, `composition` формулы | низкий | фиксирует границы | ✅ сделано; enum'ы `MeasurementOrigin`/`RunProductStatus` — ✅ есть, `CoverageFreshness` — ➖ снят (§3.1) |
-| **1. Seeds + preflight (MVP-1)** | `add-product` пишет seeds; `run` читает seeds; preflight блокирует `pending_seeds`; coverage zero-source; `_coverage_for` anomaly | низкий | закрывает «тихий пустой продукт» | ✅ сделано, включая аномалию `coverage_missing` (`core/pipeline/evaluate.py:2435`) |
+| **1. Seeds + preflight (MVP-1)** | `add-product` пишет seeds; `run` читает seeds; preflight блокирует `pending_seeds`; coverage zero-source; `_coverage_for` anomaly | низкий | закрывает «тихий пустой продукт» | ✅ сделано, включая аномалию `coverage_missing` (`core/pipeline/evaluate.py:2610`) |
 | **2. Run identity + state (MVP-2)** | `derive_run_id` без products; `cycle_id`/`--update`; `state.db` (product/seed/snapshot/lineage); new/full/incremental | средний | продукт не теряется между прогонами | ✅ сделано; `run_product` — ✅ есть (граница A, §4.3) |
 | **3. Incremental corpus (MVP-3)** | `url_state`/`document_version`; conditional GET; reuse doc/chunks; per-product doc-set | средний | экономия сети/экстракции | ✅ сделано; чанки durable в run DB на границе продукта (§4.7) |
 | **4. Partitions + composition (MVP-4)** | `partition_build_id`; `composition_id`; `CompositionView`; retrieval/lexical | высокий (индексный контур) | добавление продукта не пересобирает старые | ✅ сделано (шаг 1 и шаг 2) |
@@ -4834,7 +4854,7 @@ state_store.reconcile_seed_set(product_id, rows)               # seeds.yaml → 
 onboarding = preflight(args.package, products, state=state_store)   # режимы продуктов
 sync_product_state(state_store, ...)                           # рубежи last_*_run_id
 cycle_id = resolve_cycle_id(...)                               # без неявного today()
-contract_digest = build_execution_contract(...)                # 36 полей, §12.5
+contract_digest = build_execution_contract(...)                # 37 полей, §12.5
 run_id = derive_run_id(..., cycle_id, contract_digest, run_scope, refresh_policy)
 previous = previous_run_of(state_store, package_id, run_id=run_id, explicit=args.since_run)
 previous_run_id = previous.run_id if previous else None        # resume ⇒ None

@@ -338,7 +338,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 ✅ сделано (проверено) — `core/store/sqlite.py:153` (`SCHEMA_VERSION = "3.27.0"`; **24** `CREATE TABLE`,
 включая `schema_meta`, + `sqlite_sequence` = 25 таблиц в БД),
 `core/store/state_sqlite.py:99` (`STATE_SCHEMA_VERSION = "14"`),
-`core/store/state_store.py:1621` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
+`core/store/state_store.py:1669` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
 
 - `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.27.0"`;
   гейт версии схемы — файл другой версии отвергается, `11` §2.6; свидетельство живости сеанса
@@ -359,7 +359,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
 `core/cli/context.py:1702` (`make_profile_gate` подключён в CLI).
 ✅ механизм durable-аттестации профиля есть, **подписей 0**: `save_profile_attestation` вызывается
-из CLI (`core/cli/package/commands.py:3001` → `core/store/state_store.py:1621`), команда —
+из CLI (`core/cli/package/commands.py:3001` → `core/store/state_store.py:1669`), команда —
 `hound package profile attest` (`core/cli/package/commands.py:2912`); строк в `profile_attestation`
 в `state.db` — **0**.
 
@@ -558,8 +558,8 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2225` вызывает `_run_serp_contour`
-(def — `core/pipeline/corpus.py:1346`; поиск → допуск → расширение seed-набора **до** дренажа,
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2359` вызывает `_run_serp_contour`
+(def — `core/pipeline/corpus.py:1347`; поиск → допуск → расширение seed-набора **до** дренажа,
 одна сборка), `core/pipeline/search_log.py` (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1553`)
 **не вызывается ни из одного прод-пути**: ссылки только в `core/pipeline/__init__.py` и
@@ -954,7 +954,7 @@ uv sync --frozen --extra dev
 6. **Публикация отчётов** (T10.3) — ✅ артефакты пишутся в `runs/{run_id}/outputs/`; `battle_card`
    эмитится и при низком Coverage — с баннером `ANALYTICAL_ONLY` (06.11: coverage 0.2666,
    12 артефактов), а блокируется только при `denominator == 0`
-   (`core/pipeline/report.py:680` — `_coverage_absent`).
+   (`core/pipeline/report.py:693` — `_coverage_absent`).
    Адресация в отдельный `reports/` — не введена (не требуется).
 7. **Детерминизм инференса** (T9.2) — ✅ `core/adapters/llm_local.py` (seed/greedy; constrained
    decoding — забота [OI]-серверa).
@@ -1022,7 +1022,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
   Открыто **пять** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
-  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2357-2363`),
+  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2486-2492`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
   не входит в `extractor_version`, `core/adapters/extract_document.py:349-385`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`

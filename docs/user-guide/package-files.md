@@ -64,11 +64,11 @@ languages: [ru, en]
 
 ## `catalog.csv`
 
-Заголовок и порядок колонок фиксированы:
+Заголовок и порядок первых 11 колонок фиксированы:
 
 ```csv
-param_id,title,module,group,importance,param_type,rule,absence_rule,role_binding,concept_terms,search_langs
-feature_alpha,Функция Alpha,core,capabilities,Кр,fact,"Засчитывается только подтверждённое наличие.",explicit,primary,"{""ru"":[""функция alpha""],""en"":[""alpha feature""]}",ru|en
+param_id,title,module,group,importance,param_type,rule,absence_rule,role_binding,concept_terms,search_langs,semantics,evidence,param_class
+feature_alpha,Функция Alpha,core,capabilities,Кр,fact,"Засчитывается только подтверждённое наличие.",explicit,primary,"{""ru"":[""функция alpha""],""en"":[""alpha feature""]}",ru|en,"Что спрашивается: наличие функции; не смежная возможность.","release notes дистрибутива",capability
 ```
 
 * `param_id` — иммутабельный lowercase slug; `title` — отображаемое имя.
@@ -79,6 +79,25 @@ feature_alpha,Функция Alpha,core,capabilities,Кр,fact,"Засчитыв
 * `role_binding` ссылается на роль из манифеста.
 * `concept_terms` — JSON-объект с массивами терминов по языковым кодам; кавычки JSON удваиваются внутри CSV.
 * `search_langs` — языки через вертикальную черту.
+
+Три последние колонки **необязательны** (план 28, 21.11.2026) и добавляются в конец, чтобы
+первые 11 остались в объявленном порядке; пакет без них грузится как раньше.
+
+* `semantics` — авторская семантика параметра: что параметр спрашивает и что ответом **не**
+  является. Уходит в промпт оценщика отдельным слотом (`СЕМАНТИКА:`), но доказательством не
+  служит: цитата по-прежнему обязана быть подстрокой текста фрагмента. Пустая ячейка — «не
+  заполнено»; строка-подпись тогда не печатается.
+* `evidence` — подсказка автора «где искать» (адрес, а не доказательство). В промпт **не**
+  идёт; используется как последний запрос ретривала (`render_queries`) и только когда
+  объявленный `query_lang` не `en`: подсказка написана на языке пакета.
+* `param_class` — природа вопроса: `capability`, `gui_feature`, `offer`, `value`; пустая
+  ячейка — «не размечено». Для `value` в промпте объявлено поле ответа `value` (величина).
+  Неизвестное значение — ошибка загрузки с именем файла, номером строки и значением, а не
+  тихий дефолт.
+
+Семантику/класс/подсказку пишет не рука, а прибор `scripts/prepare_parameter_semantics.py`
+(`apply` собирает каталог из размеченного `sources/parameter_semantics.jsonl`); остальные
+колонки он берёт из текущего каталога как есть.
 
 ## `baselines.csv`
 
@@ -300,6 +319,35 @@ Legacy `sources/corpus_urls.yaml` — простой mapping `{product_id: ["htt
 | `sitemap` | Необязательный непустой HTTP(S) URL sitemap; `<loc>` становятся дополнительными depth-0 seeds, sitemap не индексируется как страница. |
 
 Устройство (`pdf_device`) не входит в профиль домена. Полный источник валидации — [`DomainProfile`](../../core/config/domain_profiles.py).
+
+### `crawl_policy.yaml`: когда обновлять корпус
+
+Корневые поля — `defaults` (режим пакета для всех продуктов), `products` (`product_id` →
+запись) и `sites` (`product_id` → `host[/path]` → запись); приоритет — `sites` > `products` >
+`defaults`, внутри слоя побеждает самый специфичный ключ, при равной специфичности
+операторская запись `state.db` переопределяет пакетную. Запись — `mode` (`auto` |
+`on_request` | `scheduled` | `network_denied`), `interval_hours` (обязателен и только при
+`scheduled`) и `note`. Неизвестные ключи отвергаются.
+
+`scheduled` — это «когда обновлять», и у решения **два** якоря: срок
+(`now − observed_at ≥ interval_hours`) и **пространство обхода** — если объявленные режимы
+или `crawl_config_digest` (лимиты, стратегия, режимы рендера) разошлись с пространством
+последнего снятия корня, корень обходится независимо от срока. Это защита от того, чтобы
+переиспользованный корпус выдавался за измерение нового объявления.
+
+Вторая секция того же файла — `product_axes` (лимиты PDF на продукт; см. ниже). Файл
+необязателен: без него действует `auto`, то есть обход каждый прогон.
+
+```yaml
+# packages/{case_id}/crawl_policy.yaml
+defaults:
+  mode: scheduled
+  interval_hours: 24
+  note: суточная свежесть корпуса; смена пространства обхода возвращает корень в обход
+```
+
+Смена файла меняет `crawl_policy_digest` ⇒ новый `run_id` (`execution_change`): режим
+обновления — условие измерения, а не настройка удобства.
 
 ### `crawl_sources.yaml`: routing-схема
 

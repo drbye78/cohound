@@ -340,12 +340,12 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`config/deploy.yaml:152` — `embed.model_id`, `config/deploy.yaml:253` — `llm.cheap.model_id`) — модель объявлена, а не измерена (A3).
 > - **`base_url` в слот:** ✅ — `config/deploy.yaml:180` (`https://plusvibeapi.ru`); пустой слот
 >   означает «оценщик не поднимается», а не «endpoint берётся из env». Место исполнения
->   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:172`, стенд RnD).
+>   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:257`, стенд RnD).
 > - **SERP-контур:** ✅ реализован, но **не** через `run_serp_loop`. Производитель запросов —
->   `_run_serp_contour` (`core/pipeline/corpus.py:1346-1453`), вызов внутри фазы корпуса **до**
->   дренажа (`core/pipeline/corpus.py:2225`); `run_serp_loop` сам остаётся невызываемым
+>   `_run_serp_contour` (`core/pipeline/corpus.py:1347-1483`), вызов внутри фазы корпуса **до**
+>   дренажа (`core/pipeline/corpus.py:2359`); `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1553` и реэкспорт).
->   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:148`), значение из
+>   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:175`), значение из
 >   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1351`).
 >   Оговорка: контур исполняется только при объявленных `rounds > 0` **и** бюджете; на живых
 >   прогонах 06–07.11 (`c2e7b860ac17`, `2a5b51af5778`) объявлено `rounds: 1`/`budget: 362`, но

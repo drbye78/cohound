@@ -424,7 +424,7 @@ hound store gc [--builds|--compositions]    # index-gc/builds-gc — это хр
 «это меняет run_id».
 **Уточнение 2026-10-28:** `--extract-workers` и `--crawl-strategy` флагами **не** являются и
 не были — обе оси живут в `run.yaml`/`deploy.yaml` (`crawl.extract_workers`,
-`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:800` через
+`crawl.crawl_strategy`; читаются в `core/cli/execution_axes.py:1059` через
 `_crawl_strategy(run_crawl)`). Флаговые контрактные оси сейчас: `--document-level`,
 `--pdf-pipeline`, `--document-timeout`, `--llm-model`, `--llm-slot`, `--retrieval-profile`,
 `--cutoff-k`, `--max-depth`, `--max-documents`, `--serp-rounds`. Пример в тексте был неточен
@@ -475,10 +475,10 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 
 ### `crawl list` принимает `--run-id` и не фильтрует
 
-✅ сделано (`core/cli/commands/crawl.py:1060`, `core/store/sqlite_store.py:2097`,
+✅ сделано (`core/cli/commands/crawl.py:1058`, `core/store/sqlite_store.py:2137`,
 `35e4373`) — фильтр вынесен в SQL (`clauses.append("run_id = ?")`), `run_id` печатается и в
-текстовом выводе (`core/cli/commands/crawl.py:1074-1075`), и в JSON
-(`core/cli/commands/crawl.py:1067`). Докстринг `iter_crawl_sessions` прямо
+текстовом выводе (`core/cli/commands/crawl.py:1101-1102`), и в JSON
+(`core/cli/commands/crawl.py:1094`). Докстринг `iter_crawl_sessions` прямо
 называет
 этот дефект причиной фильтра.
 
