@@ -1,0 +1,1 @@
+{"lane1": {"S1": "A", "S2": "B", "S3": "C", "S4": "D", "S5": "E"}, "lane2": {"S1": "E", "S2": "D", "S3": "C", "S4": "B", "S5": "A"}, "seats": {"A": "gpt-6-luna:purple", "B": "z-ai/glm-5.3-flash:cxb", "C": "minimax/minimax-m3.1-flash:network", "D": "qwen/qwen3.8-max:yellow", "E": "deepseek-v4.1-flash-1017:cxb"}}
