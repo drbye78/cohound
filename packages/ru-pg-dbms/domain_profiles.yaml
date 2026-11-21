@@ -113,6 +113,17 @@ gaz-is.ru:
   # Цена ограничена хостом: остальной корпус остаётся на оси прогона (`layout_tables`).
   document_level: full
   extract: auto
+  # Окно извлечения объявлено явно (P4) — не «побольше», а ровно то, что дала бы формула
+  # при достаточном бюджете: `floor((budget − 500) / peak(full))` = 1 при любом бюджете
+  # до 5 333 MB. Причина объявления — не желание обойти гейт, а его ложное срабатывание
+  # на пике ПОПУЛЯЦИИ: `PEAK_MB[full]` = 4 833 измерен на 2 763-страничном документе
+  # (`2026-10-24-docling-peaks-real-corpus.md`), а на этом хосте документов такого класса
+  # нет — 17 поданных сканов ≤ 20 страниц (582–2058 символов текста, 18 страниц ≈ 74 с).
+  # 21.11.2026 preflight отказал в старте: MemAvailable 5 156 MB − 512 = 4 644 < 4 833 ⇒
+  # `workers=0`, хотя выведенное окно всё равно 1. Ось не входит в `CrawlLimits.as_dict()`
+  # (расписание, а не условие измерения) ⇒ `run_id` не меняется; расхождение с бюджетом
+  # печатается предупреждением с числами, а не молчит.
+  extract_workers: 1
   fetch: http
   max_depth: 0
   max_documents: 10
@@ -366,3 +377,29 @@ wiki.astralinux.ru/tandocs:
   fetch: http
   max_depth: 8
   max_documents: 150
+www.postgresql.org/docs/18:
+  # Предок линии (`cohort.yaml: comparison_base`) объявлен 17.11.2026 (`c665162`), но ключ
+  # профиля домена не был добавлен ⇒ живой прогон падал на onboarding
+  # (`product_not_ready: postgresql (profile_unbound:https://www.postgresql.org/docs/18/)`).
+  # Профиль домена — конфигурация краула (данные пакета), а не правило методологии.
+  #
+  # Path-scope, а не host: `/docs/` держит ВСЕ версии сразу (9.6…18 + devel), и host-ключ
+  # затянул бы в партицию postgresql чужие мажоры (I17) — ровно ради этого версия объявлена
+  # префиксом (`corpus_urls.yaml`: `/docs/18/`, не `/docs/current/`).
+  #
+  # Размер ИЗМЕРЕН 21.11.2026: sitemap `https://www.postgresql.org/sitemap.xml` — 29 698
+  # `<loc>` (4.6 MB; потолки `MAX_SITEMAP_ENTRIES` 50 000 / `MAX_DECOMPRESSED_BYTES` 64 MB
+  # не задеты), из них **1 153** под `/docs/18/` (1 149 `.html` + 4 статических ресурса);
+  # остальные отсекает path-фильтр корня, а не sitemap. Независимая сверка: reference-сборка
+  # `ref_postgresql_18_3b7052ee` — **1 136** документов, `complete=true` (14 дублей по
+  # тексту). Бюджет 2 000 — выше измерения, как у остальных ключей.
+  #
+  # Глубина 2: sitemap отдаёт документы depth-0 seeds, страницы `/docs/18/` плоские
+  # (глубина пути 1). `rate_limit` НЕ объявляется: темп этого хоста не измерялся, действует
+  # ось прогона (`run.yaml: crawl.rate_limit`). `robots.txt` закрывает `/docs/devel/`,
+  # `/list/`, `/search/` — корня не касается.
+  extract: auto
+  fetch: http
+  max_depth: 2
+  max_documents: 2000
+  sitemap: https://www.postgresql.org/sitemap.xml

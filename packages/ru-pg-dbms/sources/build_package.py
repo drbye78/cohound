@@ -152,7 +152,7 @@ _TECH_LATIN: frozenset[str] = frozenset(
         # часто встречающиеся идентификаторы ядра/расширений
         "pg_hint_plan", "pg_stat_statements", "pgvector", "hypopg", "autovacuum",
         "jsonb", "lwlock", "slru", "walmethods", "wal_level", "pg_upgrade",
-        "shared_buffers", "work_mem", "on_premise", "postgresql", "postgres",
+        "work_mem", "on_premise", "postgresql", "postgres",
     }
 )
 
@@ -953,6 +953,17 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             # страниц ≈ 74 с CPU. Цена ограничена хостом: остальной корпус остаётся на
             # оси прогона (`layout_tables`).
             "document_level": "full",
+            # Окно извлечения объявлено явно (P4) — ровно то, что дала бы формула при
+            # достаточном бюджете: `floor((budget − 500) / peak(full))` = 1 при любом
+            # бюджете до 5 333 MB. Причина — не обход гейта, а его ложное срабатывание на
+            # пике ПОПУЛЯЦИИ: `PEAK_MB[full]` = 4 833 измерен на 2 763-страничном
+            # документе (`2026-10-24-docling-peaks-real-corpus.md`), а документов такого
+            # класса на этом хосте нет — 17 поданных сканов ≤ 20 страниц (18 страниц ≈ 74 с
+            # CPU). 21.11.2026 preflight отказал в старте: MemAvailable 5 156 MB − 512 =
+            # 4 644 < 4 833 ⇒ `workers=0`, хотя выведенное окно всё равно 1. Ось не входит
+            # в `CrawlLimits.as_dict()` (расписание, а не условие измерения) ⇒ `run_id` не
+            # меняется; расхождение с бюджетом печатается предупреждением с числами.
+            "extract_workers": 1,
         },
         # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...: robots.txt
         # перечисляет /produkty/inform-sistemy/subd-jotoba, он 302 → .../subd-jatoba).
@@ -1157,6 +1168,33 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             # а не закрытый корень; `rate_limit` не объявляется — темп ни при чём.
             # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §2, §5.1.
             "max_documents": 150,
+        },
+        # Предок линии (`cohort.yaml: comparison_base`) объявлен 17.11.2026 (`c665162`), но
+        # ключ профиля не был добавлен ⇒ живой прогон падал на onboarding
+        # (`product_not_ready: postgresql (profile_unbound:…)`). Профиль домена —
+        # конфигурация краула (данные пакета), а не правило методологии.
+        #
+        # Path-scope, а не host: `/docs/` держит ВСЕ версии сразу (9.6…18 + devel), и
+        # host-ключ затянул бы в партицию postgresql чужие мажоры (I17) — ровно ради этого
+        # версия объявлена префиксом (`corpus_urls.yaml`: `/docs/18/`, не `/docs/current/`).
+        #
+        # Размер ИЗМЕРЕН 21.11.2026: sitemap `https://www.postgresql.org/sitemap.xml` —
+        # 29 698 `<loc>` (4.6 MB; потолки `MAX_SITEMAP_ENTRIES` 50 000 /
+        # `MAX_DECOMPRESSED_BYTES` 64 MB не задеты), из них **1 153** под `/docs/18/`
+        # (1 149 `.html` + 4 статических ресурса); остальные отсекает path-фильтр корня, а
+        # не sitemap. Независимая сверка: reference-сборка `ref_postgresql_18_3b7052ee` —
+        # **1 136** документов, `complete=true` (14 дублей по тексту). 2 000 — выше измерения.
+        #
+        # Глубина 2: sitemap отдаёт документы depth-0 seeds, страницы `/docs/18/` плоские
+        # (глубина пути 1). `rate_limit` НЕ объявляется: темп хоста не измерялся, действует
+        # ось прогона. `robots.txt` закрывает `/docs/devel/`, `/list/`, `/search/` — корня
+        # не касается.
+        "www.postgresql.org/docs/18": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 2,
+            "max_documents": 2000,
+            "sitemap": "https://www.postgresql.org/sitemap.xml",
         },
     }
 

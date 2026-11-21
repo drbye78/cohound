@@ -77,9 +77,11 @@ NODE_CRAWL_HOST_CONCURRENCY = 5
 #: Пул экстракции пересмотрен после замера `queue_max_size=1` (−49 % RSS: 4174 → 2126 MB
 #: на 665-стр. документе при идентичном markdown) ⇒ 2 воркера помещаются в бюджет хоста.
 #: Пин держит значение синхронным с `run.yaml` и генератором (иначе дрейф, P7).
-#: Ось ``crawl.extract_workers`` в пакете **не объявлена**: число выводит формула из
-#: бюджета памяти (F0/Д-7, ``workers_from_budget``). Иначе объявленная ось сильнее
-#: бюджета и превращает preflight-отказ в предупреждение.
+#: На **run-слое** ось ``crawl.extract_workers`` не объявлена: число выводит формула из
+#: бюджета памяти (F0/Д-7, ``workers_from_budget``). Единственное исключение — профиль
+#: `gaz-is.ru` (``extract_workers: 1``): там пик уровня `full` — пик **популяции**
+#: (4 833 MB на 2 763-стр. документе), а документы хоста ≤ 20 страниц, поэтому гейт
+#: отказывал в старте, хотя выведенное окно всё равно 1 (см. пин ниже).
 RUN_CRAWL_EXTRACT_WORKERS = None
 RUN_CRAWL_EXTRACT_MAX_TASKS_PER_CHILD = 25
 RUN_CRAWL_EXCLUDE_PATHS = [
@@ -218,54 +220,67 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
 
 
 @pytest.mark.parametrize(
-    ("url", "max_depth", "max_documents", "document_level"),
+    ("url", "max_depth", "max_documents", "document_level", "extract_workers"),
     [
         # Дерево документации: sitemap 404. Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд,
         # `--crawl-only --run-id recon-pg_docs`): 18 939 документов, `truncated: false`;
         # 800 усекало корень в 23 раза (прогон `2a5b51af5778`: 949 + `max_documents`).
-        ("https://postgrespro.ru/docs/16/", 8, 20000, DocumentLevel.LAYOUT_TABLES),
+        ("https://postgrespro.ru/docs/16/", 8, 20000, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Host-ключ портала (и страницы продукта) сохраняет прежний бюджет: path-ключ
         # `/docs` не должен протекать на соседние корни того же хоста. Проба 10.11.2026
         # взяла 3 996 документов и была остановлена хостом (980 × `429` на `/list/*`):
         # 800 — выбор приоритета, не измеренный размер.
-        ("https://postgrespro.ru/", 8, 800, DocumentLevel.LAYOUT_TABLES),
+        ("https://postgrespro.ru/", 8, 800, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Статическая нижняя граница корня 3 025 (`/center/docs/7` 2 307 + kintsugi 227 +
         # copywala 491); живой краул 12.11.2026 не завершён (572 за 40 мин, browser
         # сериализован) ⇒ 3 500 — выше нижней границы, `truncated: false` не подтверждён.
-        ("https://pangolin.sbertech.ru/", 8, 3500, DocumentLevel.LAYOUT_TABLES),
+        ("https://pangolin.sbertech.ru/", 8, 3500, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.
-        ("https://www.gaz-is.ru/", 0, 10, DocumentLevel.FULL),
+        # Окно извлечения объявлено (1) — единственный ключ, где ось стоит на профиле:
+        # `full` и его пик 4 833 MB (замер на 2 763-стр. документе) не влезают в бюджет
+        # хоста, хотя выведенное окно всё равно 1, а документы этого хоста ≤ 20 страниц.
+        ("https://www.gaz-is.ru/", 0, 10, DocumentLevel.FULL, 1),
         # Продуктовый путь jatoba: измерено 1 HTML в scope + 17 отказов `robots_disallow`
         # (`Disallow: *.pdf$` закрывает документы продукта) ⇒ 50 выше измерения.
         # Уровень — прогонный: site-слой резолвится **одним** наиболее специфичным
-        # ключом, а не слиянием с host-ключом, поэтому `full` хоста сюда не протекает.
-        ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 50, DocumentLevel.LAYOUT_TABLES),
+        # ключом, а не слиянием с host-ключом, поэтому `full` и `extract_workers` хоста
+        # сюда не протекают.
+        ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 50, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # path-ключ приоритетнее host-ключа (sitemap только здесь); в scope seed'а 27 URL
         # pangolin (замер 09.11.2026 по `sbertech.ru/sitemap.xml`), 100 — запас.
-        ("https://sbertech.ru/documents/platform-v-pangolin-se", 4, 100, DocumentLevel.LAYOUT_TABLES),
+        ("https://sbertech.ru/documents/platform-v-pangolin-se", 4, 100, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # host-ключ: без sitemap и без discovery (иначе BFS тянет 89 продуктов, I17).
-        ("https://sbertech.ru/", 0, 10, DocumentLevel.LAYOUT_TABLES),
+        ("https://sbertech.ru/", 0, 10, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # seed — глубокий путь, 8 уровней запаса.
-        ("https://platformv.sbertech.ru/products/pangolin", 8, 300, DocumentLevel.LAYOUT_TABLES),
+        ("https://platformv.sbertech.ru/products/pangolin", 8, 300, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # path-ключ внутри sitemap-хоста; измерено 3 документа, `truncated: false`.
-        ("https://tantorlabs.ru/products/dbms/", 8, 50, DocumentLevel.LAYOUT_TABLES),
+        ("https://tantorlabs.ru/products/dbms/", 8, 50, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # host-ключ: проба 10.11.2026 взяла 9 162 документа (прервана таймаутом); 300 —
         # граница I17 (host-корень затягивает чужие продукты), а не размер сайта.
-        ("https://tantorlabs.ru/", 3, 300, DocumentLevel.LAYOUT_TABLES),
+        ("https://tantorlabs.ru/", 3, 300, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Измерено 7 документов, `truncated: false` ⇒ 50 покрывает сайт.
-        ("https://jatoba.ru/", 2, 50, DocumentLevel.LAYOUT_TABLES),
+        ("https://jatoba.ru/", 2, 50, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # sitemap 404. Размер ИЗМЕРЕН 12.11.2026: 1 207 документов, `truncated: false`
         # (одна редакция `ru/18_6/se`; плоские `/tdb/*.html` — 301-алиасы).
-        ("https://docs.tantorlabs.ru/", 8, 1500, DocumentLevel.LAYOUT_TABLES),
+        ("https://docs.tantorlabs.ru/", 8, 1500, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Host-root общего справочного центра Astra — не продуктовый корень (I17).
-        ("https://wiki.astralinux.ru/", 0, 10, DocumentLevel.LAYOUT_TABLES),
+        ("https://wiki.astralinux.ru/", 0, 10, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Тантор-контент — Confluence-пространство TANDOCS. Измерено статически 73 страницы
         # (13.11.2026); 403 прогона 07.11 — свойство Scrapy User-Agent, не закрытый корень.
-        ("https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", 8, 150, DocumentLevel.LAYOUT_TABLES),
+        ("https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", 8, 150, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
+        # Предок линии: sitemap отдаёт 1 153 `<loc>` под `/docs/18/` (замер 21.11.2026),
+        # reference-сборка — 1 136 документов; 2 000 — выше измерения. Глубина 2: документы
+        # приходят depth-0 seeds, страницы `/docs/18/` плоские. Другой мажор (`/docs/11/`)
+        # ключом не покрыт намеренно (I17).
+        ("https://www.postgresql.org/docs/18/", 2, 2000, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
     ],
 )
 def test_resolve_crawl_limits_per_site(
-    url: str, max_depth: int, max_documents: int, document_level: DocumentLevel
+    url: str,
+    max_depth: int,
+    max_documents: int,
+    document_level: DocumentLevel,
+    extract_workers: int | None,
 ) -> None:
     """Резолв лимитов (app < run < site) даёт значения gate §3 для репрезентативных URL.
 
@@ -273,6 +288,11 @@ def test_resolve_crawl_limits_per_site(
     потому что документы продукта — сканы, закрытые robots, и попадают в корпус ручной
     подачей). Остальные ключи остаются на оси прогона: пин держит оба конца, иначе
     «профиль сильнее» молча стало бы «профиль равен прогону».
+
+    ``extract_workers`` — пятый пин, и он держит **оба** состояния оси: ``None`` (окно
+    выводится из бюджета памяти) везде, кроме `gaz-is.ru`, где окно объявлено явно и
+    поэтому перестаёт быть выведенным. Проверяется и значение, и флаг
+    ``extract_workers_derived`` — иначе «объявили» и «вывели» снова стали бы неразличимы.
     """
     cfg = load_run_config(ON_DISK_RUN)
     profiles = load_domain_profiles(ON_DISK_PROFILES)
@@ -287,10 +307,45 @@ def test_resolve_crawl_limits_per_site(
     # (``config/deploy.yaml:crawl``). Пустой app-слой ⇒ оси не заданы ни на одном слое.
     assert limits.max_workers is None
     assert limits.host_concurrency is None
-    assert limits.extract_workers is RUN_CRAWL_EXTRACT_WORKERS
+    assert limits.extract_workers == extract_workers
     assert limits.document_level is document_level
     assert list(limits.exclude_paths) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
+
+
+def test_declared_extract_workers_wins_over_derivation() -> None:
+    """Объявленная на профиле ось `extract_workers` сильнее формулы из бюджета памяти.
+
+    Пин держит **различие двух состояний**, а не число: там, где ось объявлена
+    (`gaz-is.ru`, уровень `full` с пиком популяции 4 833 MB), окно не выводится
+    (`extract_workers_derived is False`) и равно объявленному; на соседнем path-ключе
+    того же хоста ось не объявлена и окно выводится. Без этого пина «профиль объявил»
+    и «формула вывела» снова стали бы неразличимы, а preflight перестал бы быть гейтом.
+    """
+    cfg = load_run_config(ON_DISK_RUN)
+    profiles = load_domain_profiles(ON_DISK_PROFILES)
+
+    declared = resolve_crawl_limits(
+        "https://www.gaz-is.ru/",
+        app=CrawlConfig(),
+        run=cfg.crawl,
+        profiles=profiles,
+        derive_extract_workers=True,
+        mem_budget_mb=16000,
+    )
+    derived = resolve_crawl_limits(
+        "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/",
+        app=CrawlConfig(),
+        run=cfg.crawl,
+        profiles=profiles,
+        derive_extract_workers=True,
+        mem_budget_mb=16000,
+    )
+
+    assert declared.extract_workers == 1
+    assert declared.extract_workers_derived is False
+    assert derived.extract_workers_derived is True
+    assert derived.extract_workers is not None and derived.extract_workers >= 1
 
 
 def test_node_layer_declares_crawl_width() -> None:
